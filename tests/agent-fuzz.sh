@@ -37,6 +37,8 @@ for f in "$fixtures"/lint/override/*.yml; do
 done
 
 cd "$crate"
+# cargo fuzz has no --locked: fail here if fuzz/Cargo.lock would have to change.
+cargo "+$toolchain" metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 >/dev/null
 for target in manifest statement bundle set; do
   echo "fuzz: $target for ${seconds}s"
   cargo "+$toolchain" fuzz run "$target" "fuzz/corpus/$target" -- \

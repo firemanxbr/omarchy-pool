@@ -70,7 +70,8 @@ impl Envelope {
     }
 
     /// The parts of `agent.toml` the lint needs. Unknown keys are left to the run loop
-    /// (P1); a missing permission is `false`.
+    /// (P1); a missing permission is `false`. The secrets directory must be outside the
+    /// work root and the set directory (design v2 §4.2), since the template binds both.
     pub fn from_agent_toml(text: &str) -> Result<Self, String> {
         #[derive(Deserialize, Default)]
         struct File {
@@ -82,6 +83,7 @@ impl Envelope {
         #[derive(Deserialize, Default)]
         struct SetPart {
             dir: Option<PathBuf>,
+            work_root: Option<PathBuf>,
             secrets_dir: Option<PathBuf>,
         }
         #[derive(Deserialize, Default)]
@@ -104,6 +106,7 @@ impl Envelope {
             .paths
             .iter()
             .chain(&f.set.dir)
+            .chain(&f.set.work_root)
             .chain(&f.set.secrets_dir)
         {
             if !is_plain_absolute(p) {
@@ -111,6 +114,20 @@ impl Envelope {
                     "agent.toml: {} is not a plain absolute path",
                     p.display()
                 ));
+            }
+        }
+        if let Some(secrets) = &f.set.secrets_dir {
+            for (key, dir) in [("work_root", &f.set.work_root), ("dir", &f.set.dir)] {
+                if let Some(d) = dir
+                    .as_ref()
+                    .filter(|d| d.starts_with(secrets) || secrets.starts_with(d))
+                {
+                    return Err(format!(
+                        "agent.toml: set.secrets_dir {} overlaps set.{key} {}; it must be outside both",
+                        secrets.display(),
+                        d.display()
+                    ));
+                }
             }
         }
         Ok(Envelope {
@@ -133,23 +150,9 @@ pub enum Engine {
     Rootless,
 }
 
-/// Lints `<dir>/compose.yml`, with `override_file` merged onto it when given.
-pub fn lint_set(
-    dir: &Path,
-    override_file: Option<&Path>,
-    envelope: &Envelope,
-    engine: Engine,
-) -> Result<(), Vec<Violation>> {
-    let read = |p: &Path| {
-        std::fs::read_to_string(p)
-            .map_err(|e| vec![violation("file", format!("{}: {e}", p.display()))])
-    };
-    let template = read(&dir.join("compose.yml"))?;
-    let over = override_file.map(read).transpose()?;
-    lint_compose(&template, over.as_deref(), envelope, engine)
-}
-
-/// Lints a template, and the override merged onto it, with the same rules.
+/// Lints a set's `compose.yml` as written, and the override merged onto it, with the same
+/// rules. The caller reads the files, so a file that cannot be read is its error, not a
+/// violation.
 pub fn lint_compose(
     template: &str,
     override_yaml: Option<&str>,
@@ -422,27 +425,19 @@ fn check_labels(name: &str, value: &Node, out: &mut Vec<Violation>) {
     }
 }
 
-/// The worker image, as the template writes it (`@RELEASE@`) or as the release renders it
-/// (`@sha256:<index>`), or one of the manifest's build images.
+/// The worker image or one of the manifest's build images, only as placeholders: the lint
+/// runs before the placeholders are rendered to the verified manifest's digests, so a
+/// literal digest (an older or revoked image, say) is refused, in the template and in an
+/// override alike.
 fn check_image(name: &str, value: &Node, out: &mut Vec<Violation>) {
-    let ok = value.as_str().is_some_and(|image| {
-        let digest = |d: &str| {
-            d.len() == 71
-                && d.starts_with("sha256:")
-                && d[7..]
-                    .bytes()
-                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        };
-        match image.strip_prefix(WORKER_REPO) {
-            Some("@RELEASE@") => true,
-            Some(rest) => rest.strip_prefix('@').is_some_and(digest),
-            None => matches!(image, "@BUILD_AARCH64@" | "@BUILD_X86_64@"),
-        }
-    });
+    let release = format!("{WORKER_REPO}@RELEASE@");
+    let ok = value
+        .as_str()
+        .is_some_and(|i| i == release || matches!(i, "@BUILD_AARCH64@" | "@BUILD_X86_64@"));
     if !ok {
         out.push(violation(
             "image",
-            format!("{name}: image must be {WORKER_REPO}@RELEASE@ (or its rendered digest) or a manifest build image, found {value:?}"),
+            format!("{name}: image must be {release} or a manifest build image placeholder, found {value:?}"),
         ));
     }
 }

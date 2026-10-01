@@ -102,6 +102,16 @@ fn usage_errors_exit_2() {
     ] {
         assert_eq!(run(args).status.code(), Some(2), "{args:?}");
     }
+    // A file that cannot be read is not a refused template.
+    let host = fx("lint/host");
+    for args in [
+        &["lint-set", "/nonexistent"][..],
+        &["lint-set", &host, "--override", "/nonexistent.yml"],
+        &["lint-set", &host, "--envelope", "/nonexistent.toml"],
+    ] {
+        let o = run(args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", text(&o));
+    }
     let o = run(&["--version"]);
     assert_eq!(
         String::from_utf8_lossy(&o.stdout).trim(),

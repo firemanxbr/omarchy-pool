@@ -62,30 +62,11 @@ impl Pins {
 pub enum Mismatch {
     /// A claim the pins need is absent, repeated or unreadable.
     Unreadable(String),
-    Issuer {
-        found: String,
-    },
-    /// The SAN names another repository.
-    Repository {
-        found: String,
-    },
-    /// The SAN names another workflow file (or is not a workflow SAN at all).
-    Workflow {
-        found: String,
-    },
-    /// The workflow ran from another ref (a branch other than main, a tag, a pull request).
-    Ref {
-        found: String,
-    },
-    EventName {
-        found: String,
-    },
-    RepositoryId {
-        found: String,
-    },
-    RepositoryOwnerId {
-        found: String,
-    },
+    /// A claim differs from its pin: `issuer`, `repository` (the SAN names another
+    /// repository), `workflow` (another workflow file, or not a workflow SAN at all), `ref`
+    /// (another branch, a tag, a pull request), `event_name`, `repository_id` or
+    /// `repository_owner_id`.
+    Pin { pin: &'static str, found: String },
 }
 
 impl Mismatch {
@@ -93,13 +74,7 @@ impl Mismatch {
     pub fn pin(&self) -> &'static str {
         match self {
             Mismatch::Unreadable(_) => "certificate",
-            Mismatch::Issuer { .. } => "issuer",
-            Mismatch::Repository { .. } => "repository",
-            Mismatch::Workflow { .. } => "workflow",
-            Mismatch::Ref { .. } => "ref",
-            Mismatch::EventName { .. } => "event_name",
-            Mismatch::RepositoryId { .. } => "repository_id",
-            Mismatch::RepositoryOwnerId { .. } => "repository_owner_id",
+            Mismatch::Pin { pin, .. } => pin,
         }
     }
 }
@@ -108,20 +83,17 @@ impl fmt::Display for Mismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Mismatch::Unreadable(why) => write!(f, "signing certificate: {why}"),
-            Mismatch::Issuer { found }
-            | Mismatch::Repository { found }
-            | Mismatch::Workflow { found }
-            | Mismatch::Ref { found }
-            | Mismatch::EventName { found }
-            | Mismatch::RepositoryId { found }
-            | Mismatch::RepositoryOwnerId { found } => {
-                write!(
-                    f,
-                    "signer {} is not the pinned one (found {found:?})",
-                    self.pin()
-                )
+            Mismatch::Pin { pin, found } => {
+                write!(f, "signer {pin} is not the pinned one (found {found:?})")
             }
         }
+    }
+}
+
+fn differs(pin: &'static str, found: &str) -> Mismatch {
+    Mismatch::Pin {
+        pin,
+        found: found.to_owned(),
     }
 }
 
@@ -169,9 +141,10 @@ impl Identity {
             [GeneralName::UniformResourceIdentifier(uri)] => uri.as_str().to_owned(),
             [other] => {
                 let der = other.to_der().unwrap_or_default();
-                return Err(Mismatch::Workflow {
-                    found: format!("a non-URI SAN ({} bytes)", der.len()),
-                });
+                return Err(differs(
+                    "workflow",
+                    &format!("a non-URI SAN ({} bytes)", der.len()),
+                ));
             }
             _ => {
                 return Err(bad(format!(
@@ -192,39 +165,28 @@ impl Identity {
     /// Every pinned value, exactly; the first that differs is the reason.
     pub(crate) fn check(&self, pins: &Pins) -> Result<(), Mismatch> {
         if self.issuer != pins.issuer {
-            return Err(Mismatch::Issuer {
-                found: self.issuer.clone(),
-            });
+            return Err(differs("issuer", &self.issuer));
         }
         if self.san != pins.san() {
-            let found = self.san.clone();
-            let Some((repo, workflow, git_ref)) = split_workflow_san(&self.san) else {
-                return Err(Mismatch::Workflow { found });
+            let pin = match split_workflow_san(&self.san) {
+                Some((repo, _, _)) if repo != pins.repository => "repository",
+                Some((_, workflow, git_ref))
+                    if workflow == pins.workflow && git_ref != pins.git_ref =>
+                {
+                    "ref"
+                }
+                _ => "workflow",
             };
-            return Err(if repo != pins.repository {
-                Mismatch::Repository { found }
-            } else if workflow != pins.workflow {
-                Mismatch::Workflow { found }
-            } else if git_ref != pins.git_ref {
-                Mismatch::Ref { found }
-            } else {
-                Mismatch::Workflow { found }
-            });
+            return Err(differs(pin, &self.san));
         }
         if self.event_name != pins.event_name {
-            return Err(Mismatch::EventName {
-                found: self.event_name.clone(),
-            });
+            return Err(differs("event_name", &self.event_name));
         }
         if self.repository_id != pins.repository_id {
-            return Err(Mismatch::RepositoryId {
-                found: self.repository_id.clone(),
-            });
+            return Err(differs("repository_id", &self.repository_id));
         }
         if self.repository_owner_id != pins.repository_owner_id {
-            return Err(Mismatch::RepositoryOwnerId {
-                found: self.repository_owner_id.clone(),
-            });
+            return Err(differs("repository_owner_id", &self.repository_owner_id));
         }
         Ok(())
     }
@@ -404,7 +366,10 @@ pub(crate) mod tests {
             .to_vec();
         assert!(matches!(
             Identity::from_der(&der),
-            Err(Mismatch::Workflow { .. } | Mismatch::Unreadable(_))
+            Err(Mismatch::Pin {
+                pin: "workflow",
+                ..
+            } | Mismatch::Unreadable(_))
         ));
         assert!(matches!(
             Identity::from_der(b"junk"),

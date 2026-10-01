@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::{lint_compose, lint_set, references, Engine, Envelope, Reference, Violation};
+use super::{lint_compose, references, Engine, Envelope, Reference, Violation};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lint")
@@ -12,6 +12,23 @@ fn read(rel: &str) -> String {
 
 fn envelope(name: &str) -> Envelope {
     Envelope::from_agent_toml(&read(&format!("envelope/{name}.toml"))).unwrap()
+}
+
+/// `<dir>/compose.yml` with `over` merged onto it, as `lint-set <dir> --override` reads them.
+fn lint_set(
+    dir: &Path,
+    over: Option<&Path>,
+    envelope: &Envelope,
+    engine: Engine,
+) -> Result<(), Vec<Violation>> {
+    let read = |p: &Path| std::fs::read_to_string(p).unwrap();
+    let over = over.map(read);
+    lint_compose(
+        &read(&dir.join("compose.yml")),
+        over.as_deref(),
+        envelope,
+        engine,
+    )
 }
 
 const HOST: &str = include_str!("../../tests/fixtures/lint/host/compose.yml");
@@ -46,9 +63,27 @@ fn the_host_set_template_passes_under_the_reference_and_the_studio_envelopes() {
         Engine::Rootful,
     )
     .unwrap();
-    // The same, as the release renders it: @RELEASE@ to a digest.
-    let rendered = HOST.replace("@RELEASE@", &format!("@sha256:{}", "a".repeat(64)));
-    lint_compose(&rendered, None, &Envelope::reference(), Engine::Rootful).unwrap();
+}
+
+#[test]
+fn an_image_digest_is_refused_the_lint_runs_before_rendering() {
+    // The template rendered, and an override pinning an older (or revoked) worker image.
+    let digest = format!(
+        "ghcr.io/firemanxbr/omarchy-worker@sha256:{}",
+        "0".repeat(64)
+    );
+    let rendered = HOST.replace("ghcr.io/firemanxbr/omarchy-worker@RELEASE@", &digest);
+    refused_for(
+        lint_compose(&rendered, None, &Envelope::reference(), Engine::Rootful),
+        "image",
+        "rendered template",
+    );
+    let over = format!("services:\n  dispatcher:\n    image: {digest}\n");
+    refused_for(
+        lint_compose(HOST, Some(&over), &Envelope::reference(), Engine::Rootful),
+        "image",
+        "override digest",
+    );
 }
 
 #[test]
@@ -248,4 +283,20 @@ fn an_envelope_with_a_relative_path_is_refused() {
     assert!(Envelope::from_agent_toml("[envelope]\npaths = [\"srv\"]\n").is_err());
     let e = Envelope::from_agent_toml("").unwrap();
     assert!(!e.allow_socket && e.paths.is_empty());
+}
+
+#[test]
+fn an_envelope_with_the_secrets_directory_inside_a_bound_directory_is_refused() {
+    // The template binds the work root and the set directory; neither may hold the secrets.
+    for (work_root, dir) in [
+        ("/srv/omarchy-pool", "/srv/set"),
+        ("/srv/omarchy-pool/host/secrets", "/srv/set"),
+        ("/srv/omarchy-pool/host", "/srv/omarchy-pool/host"),
+        ("/srv/work", "/srv/omarchy-pool"),
+    ] {
+        let toml = format!("[set]\ndir = \"{dir}\"\nwork_root = \"{work_root}\"\nsecrets_dir = \"/srv/omarchy-pool/host\"\n");
+        assert!(Envelope::from_agent_toml(&toml).is_err(), "{toml}");
+    }
+    let toml = "[set]\ndir = \"/srv/set\"\nwork_root = \"/srv/omarchy-pool/host\"\nsecrets_dir = \"/srv/omarchy-pool/host-secrets\"\n";
+    Envelope::from_agent_toml(toml).unwrap();
 }

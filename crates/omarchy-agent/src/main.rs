@@ -9,7 +9,7 @@
 //! Exit status: 0 verified or clean, 1 refused, 2 usage or a file that cannot be read,
 //! 3 signed and pinned but "needs a newer agent".
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use omarchy_agent::lint::{self, Engine, Envelope};
@@ -152,26 +152,17 @@ fn lint_cmd(args: &[String]) -> Result<u8, String> {
     let [dir] = rest.as_slice() else {
         return Err(USAGE.to_owned());
     };
-    let get = |name| {
-        f.iter()
-            .find(|(k, _)| *k == name)
-            .map(|(_, v)| PathBuf::from(v))
-    };
+    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let text =
+        |path: &str| String::from_utf8(read(path)?).map_err(|_| format!("{path}: not UTF-8"));
     let envelope = match get("--envelope") {
-        Some(p) => {
-            let text = String::from_utf8(read(&p.to_string_lossy())?)
-                .map_err(|_| format!("{}: not UTF-8", p.display()))?;
-            Envelope::from_agent_toml(&text)?
-        }
+        Some(p) => Envelope::from_agent_toml(&text(p)?)?,
         None => Envelope::reference(),
     };
+    let template = text(&Path::new(dir).join("compose.yml").to_string_lossy())?;
+    let over = get("--override").map(text).transpose()?;
     // The run loop (P1) passes the engine it detected; by hand and in CI, the strict case.
-    match lint::lint_set(
-        Path::new(dir),
-        get("--override").as_deref(),
-        &envelope,
-        Engine::Rootful,
-    ) {
+    match lint::lint_compose(&template, over.as_deref(), &envelope, Engine::Rootful) {
         Ok(()) => {
             println!("lint-set: {dir}: clean");
             Ok(0)
