@@ -211,6 +211,30 @@ describe("the Status page", () => {
     expect(d.nodes["#headline"].textContent).toBe("No ring released yet");
   });
 
+  it("says in red that a pool token can start workflows while its latest daily probe says so, and not once a probe got 403 (#308)", async () => {
+    const d = await drawn();
+    const stats = await json(uncached("/api/v1/stats"));
+    const probe = (source: string, status: string, http: number) => ({ kind: "token", ring: null, source, status, summary: `${source} probe`, payload: { http }, created_at: new Date().toISOString() });
+    // The latest probe of GITHUB_TOKEN got 422: worse than any ring, the hero names the token and what to do.
+    d.setSTATS({ ...stats, latest: [...stats.latest, probe("GITHUB_TOKEN", "error", 422), probe("GITHUB_REPORT_TOKEN", "ok", 403)] });
+    d.drawHero();
+    expect(d.nodes["#headline"].textContent).toBe("A pool token can start workflows");
+    expect(d.nodes["#st-mark"].className).toBe("st-mark fail");
+    expect(d.nodes["#st-lede"].textContent).toBe("GITHUB_TOKEN can start workflows on this repository: the daily probe got HTTP 422 where a read-only token gets 403. Replace it with a read-only token.");
+    // An error kept by a later answer that could not tell (a 502 after the 422): the hero names the 422 that raised it.
+    d.setSTATS({ ...stats, latest: [...stats.latest, { ...probe("GITHUB_TOKEN", "error", 502), payload: { http: 502, error_http: 422 } }] });
+    d.drawHero();
+    expect(d.nodes["#st-lede"].textContent).toBe("GITHUB_TOKEN can start workflows on this repository: the daily probe got HTTP 422 where a read-only token gets 403. Replace it with a read-only token.");
+    // Its latest probe got 403 (the latest line per token is all the stats carry): the hero is the rings' again.
+    d.setSTATS({ ...stats, latest: [...stats.latest, probe("GITHUB_TOKEN", "ok", 403), probe("GITHUB_REPORT_TOKEN", "ok", 403)] });
+    d.drawHero();
+    expect(d.nodes["#headline"].textContent).not.toMatch(/token/i);
+    // A warn (a 401, a 5xx: the probe could not tell) is a journal line, not the hero's.
+    d.setSTATS({ ...stats, latest: [...stats.latest, probe("GITHUB_TOKEN", "warn", 401)] });
+    d.drawHero();
+    expect(d.nodes["#headline"].textContent).not.toMatch(/token/i);
+  });
+
   it("says the pool's numbers did not answer where each section drawn from them would be, never 'Checking the rings…' for good", async () => {
     // The stats poll fails; the service check and everything else answer.
     const fetch = (path: string, init?: RequestInit) => (path.startsWith("/api/v1/stats") ? Promise.resolve(new Response(JSON.stringify({ error: "internal error" }), { status: 500, headers: { "content-type": "application/json" } })) : real(path === "/auth/me" ? path : uncached(path), init));

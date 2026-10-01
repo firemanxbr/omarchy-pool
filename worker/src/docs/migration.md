@@ -59,7 +59,13 @@ gh variable set OMARCHY_API  -b "https://pkgs.example.org" -R NEWORG/omarchy-poo
 gh variable set OMARCHY_POOL -b "https://pool.example.org" -R NEWORG/omarchy-pool
 gh secret set CLOUDFLARE_API_TOKEN   < cloudflare-token -R NEWORG/omarchy-pool   # B6
 gh api -X PUT "repos/NEWORG/omarchy-pool/environments/pool" >/dev/null           # the release's deploy environment
+gh api -X PUT "repos/NEWORG/omarchy-pool/environments/release" >/dev/null        # the release's signing environment
 ```
+
+Then give both environments a `main`-only branch policy and a required
+reviewer, put `CLOUDFLARE_API_TOKEN` in `pool` rather than the repository,
+and turn on immutable releases (RUNBOOK, *The GitHub settings the signature
+relies on*, with `NEWORG` for `firemanxbr` and the new maintainers' user ids).
 
 GitHub keeps only that token and, once the factory's hosted fallback is set
 up (F2), the two worker tokens. Nothing on GitHub can write to the pool.
@@ -70,10 +76,13 @@ The ruleset is versioned in the repository:
 
 ```bash
 gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/main.json
+gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/tags.json          # v* tags: created by GitHub Actions only
+gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/tags-locked.json   # v* tags: never moved or deleted, by anyone
 ```
 
 From here on every change is a pull request with the six required checks and,
-for the files `CODEOWNERS` names (the governance file, the recipes), a review
+for the files `CODEOWNERS` names (the governance file, the recipes, the
+workflows, the host agent, the dispatcher, the host sets), a review
 by a maintainer other than the author (CONTRIBUTING.md, GOVERNANCE.md). Do the
 remaining edits of this guide on a branch. Put the new maintainers in
 `factory/MAINTAINERS.toml` and run `factory/bin/check-governance --write`.
@@ -162,8 +171,8 @@ curl -s https://pkgs.example.org/api/v1/status      # {"ok":true,...} once D1 an
 
 ## C. The GitHub token
 
-Nothing starts on GitHub by dispatch any more (RUNBOOK, *The pool's own
-scheduler*): since 2026-09-17 the pool's operation does not go through GitHub
+Nothing starts on GitHub by dispatch, and the code that could is gone
+(RUNBOOK, *The pool's own scheduler*, #308): since 2026-09-17 the pool's operation does not go through GitHub
 Actions, and the worker secret `GITHUB_TOKEN` only raises the rate limit of
 the reads the pool still makes — the governance file, upstream releases for
 the bumps, provenance. Create a **fine-grained personal access token** (or a

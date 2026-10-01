@@ -3,8 +3,10 @@
 
 The file lists the maintainers (see docs/GOVERNANCE.md) — one list, no
 areas: every maintainer reviews everything. CODEOWNERS is what makes
-GitHub ask a maintainer for review: the file itself, CODEOWNERS and the
-sizing recipes are owned by every maintainer. (The project's own recipes
+GitHub ask a maintainer for review: the file itself, CODEOWNERS, the
+sizing recipes and what the hosts' trust relies on (#308: the workflows
+that sign, the host agent, the dispatcher that starts task containers and
+the host sets) are owned by every maintainer. (The project's own recipes
 left the repository on 2026-09-17: packages are requested on the dashboard
 and bumped by the pool, never through pull requests.) CI runs this without --write and fails when the two
 disagree; a maintainer runs it with --write in the pull request that
@@ -36,11 +38,17 @@ def expected(maintainers):
     lines = [
         "# Generated from factory/MAINTAINERS.toml by factory/bin/check-governance --write;",
         "# CI fails when the two disagree. Every maintainer owns the governance file,",
-        "# this one and the sizing recipes. With main requiring a code-owner review,",
+        "# this one, the sizing recipes and what the hosts' trust relies on (#308):",
+        "# the workflows that sign, the host agent, the dispatcher that starts task",
+        "# containers and the host sets. With main requiring a code-owner review,",
         "# a change here is a decision another maintainer approves.",
-        f"factory/MAINTAINERS.toml  {owners}",
-        f".github/CODEOWNERS        {owners}",
-        f"factory/sizing/           {owners}",
+        f"factory/MAINTAINERS.toml          {owners}",
+        f".github/CODEOWNERS                {owners}",
+        f"factory/sizing/                   {owners}",
+        f".github/workflows/                {owners}",
+        f"crates/omarchy-agent/             {owners}",
+        f"crates/pkg-repo/src/dispatch*     {owners}",
+        f"factory/sets/                     {owners}",
     ]
     return "\n".join(lines) + "\n"
 
