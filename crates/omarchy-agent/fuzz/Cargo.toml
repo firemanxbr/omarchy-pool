@@ -42,6 +42,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "state"
+path = "fuzz_targets/state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "set"
 path = "fuzz_targets/set.rs"
 test = false
