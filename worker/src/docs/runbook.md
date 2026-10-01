@@ -147,6 +147,12 @@ A release is `main` at the moment a maintainer dispatches one
 5. Every set follows: its updater sees the new release within two minutes
    (the Studio's too, since its one-time step, *The Studio host*).
 
+A run that stopped after the GitHub release was created resumes with **Re-run
+failed jobs** on that run. A new dispatch on the same commit stops at the
+publish step, because the release exists already, and so does a tag of that
+version pushed at another commit (#351). A draft release left by a failed
+upload has no tag: delete it (`gh release delete vX.Y.Z`) before re-running.
+
 The deploy step needs the `CLOUDFLARE_API_TOKEN` repository secret (Account →
 Workers Scripts: Edit, D1: Edit, Account Settings: Read; Zone → Workers Routes:
 Edit, Zone: Read, on **both** zones, `omarchy-pool.org` and `firemanxbr.org` —
