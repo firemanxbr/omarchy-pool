@@ -13,6 +13,7 @@ import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
+import { HOST_CLAIM_SQL, hostClaimRefusal, type HostClaimRow } from "../hosts";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
   capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
@@ -528,6 +529,14 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // A worker is its registration: id, owner, trust and what it may build.
   const workerId = actor.w.id;
   if (actor.w.arch !== b.arch) return json({ error: `this worker is registered for ${actor.w.arch}` }, 400);
+  // A host's registration (#322, design v2 §6.2, §6.4): its host suspended or retired, or its owner no longer a maintainer — the owner's id
+  // joined with the list at this very claim, between two syncs too — claims nothing, and is told why. Its running leases are not this
+  // door's: a suspension fenced them; a removal lets them finish and upload. One read by the primary key, for host registrations only.
+  if (actor.w.host_id) {
+    const h = await env.DB.prepare(HOST_CLAIM_SQL).bind(actor.w.host_id).first<HostClaimRow>();
+    const no = h ? hostClaimRefusal(h) : { code: "host_status", error: "its host is gone" };
+    if (no) return json(no, 403);
+  }
   const trust = actor.w.trust === "project" ? "project" : "community";
   // What this worker may claim. Project trust takes any kind it declares,
   // but never a contributor's build: project workers do the work a

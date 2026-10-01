@@ -376,8 +376,12 @@ export async function handleWorkerCan(c: Contributor | null, id: string, env: En
   return json({ id: w.id, can, why, details, shared_agent_with: shared, update_with: sameSet, update_note: updateNote(w), note: deliveryNote(w), stop }, 200, NO_STORE);
 }
 
-/** The workers a follow names, by the primary key (EXPLAIN QUERY PLAN pins it): their release and their open orders' list, which names an open Update. Revoked ones are left out. */
-export const FOLLOW_SQL = "SELECT id, version, open_orders FROM build_workers WHERE revoked_at IS NULL AND id IN (SELECT value FROM json_each(?1))";
+/**
+ * The workers a follow names, by the primary key (EXPLAIN QUERY PLAN pins it): their release and their open orders' list, which names an
+ * open Update. Revoked ones are left out — after the read, since a host's registration (#322) is read with its host's status: the follow is
+ * the call a host's agent makes in P1 (#315; the host state of #344 replaces it), and a suspended or retired host's is refused.
+ */
+export const FOLLOW_SQL = "SELECT id, version, open_orders, revoked_at, (SELECT status FROM hosts WHERE hosts.id = build_workers.host_id) AS host_status FROM build_workers WHERE id IN (SELECT value FROM json_each(?1))";
 /** A worker id as registrations make them (routes/contributors.ts): the updater keeps only what matches it. */
 const WORKER_ID = /^[A-Za-z0-9_.-]{1,128}$/;
 
@@ -411,7 +415,12 @@ export async function handleFollow(url: URL, env: Env): Promise<Response> {
   const key = new Request(`${machineOrigin(url)}${url.pathname}${url.search}&release=${encodeURIComponent(`${pool.version}@${pool.deployed_at ?? ""}`)}`, { method: "GET" });
   const hit = await edgeHit(key);
   if (hit) return hit;
-  const rows = (await env.DB.prepare(FOLLOW_SQL).bind(JSON.stringify(ids)).all<{ id: string; version: string | null; open_orders: string | null }>()).results;
+  const read = (await env.DB.prepare(FOLLOW_SQL).bind(JSON.stringify(ids)).all<{ id: string; version: string | null; open_orders: string | null; revoked_at: string | null; host_status: string | null }>()).results;
+  // A suspended or retired host's agent is told 403, never kept at the edge (#322, design v2 §16.4): it changes nothing, keeps its bundle
+  // running and polls hourly until a credential works again — a Resume — so it rolls out no release while its host is stopped.
+  const stopped = read.find((r) => r.host_status === "suspended" || r.host_status === "retired");
+  if (stopped) return json({ error: `${stopped.id}: its host is ${stopped.host_status}`, code: "host_status", status: stopped.host_status }, 403, { "cache-control": "no-store" });
+  const rows = read.filter((r) => r.revoked_at === null);
   const byId = new Map(rows.map((r) => [r.id, r]));
   const res = json({
     latest: pool.version,

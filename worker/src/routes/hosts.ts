@@ -28,11 +28,14 @@ import { findLeak } from "../leak";
 import { machineOrigin, version, API_HOST } from "../meta";
 import { putRecord } from "../record";
 import { writeGate } from "./orders";
-import { sha256Hex, viaOf, workspace, type Contributor } from "./contributors";
+import { sha256Hex, viaOf, workspace, SIGN_IN, type Contributor } from "./contributors";
 import { dashboardOrigin } from "./agents";
+import { justNowWords, webGate, SELF_CAUSE } from "./passkeys";
+import { cancelOrdersOf } from "../orders";
 import {
   belowMinimum, enrollMessage, fingerprint, hostLine, installCommand, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf, shortId, signedMessage,
   unitsOf, verifySignature, ENROLL_TTL_MIN, MIN_HOST, HOST_NAME, HOST_REPORT_FRESH_MIN, ISOLATIONS, NONCE_KEEP_MIN, OLD_TOKEN_GRACE_MIN, REPORT_MAX_BYTES, SIGNED_SKEW_S, TOKEN_ROTATE_DAYS,
+  hostReason, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
   type Capacity, type Isolation,
 } from "../hosts";
 
@@ -49,6 +52,8 @@ export interface HostRow {
   capacity: string | null; lanes: string | null; units: number | null; agent_slots: number | null; disk_free: string | null; pool_cap_units: number | null;
   provider: string | null; model: string | null; agent_version: string | null; release_applied: string | null; release_target: string | null; rolled_back_from: string | null;
   report: string | null; reported_at: string | null; last_seen: string | null; enrolled_at: string; confirmed_at: string | null; worker_id: string | null; token_issued_at: string | null;
+  /** #322: who suspended, resumed or retired it last, when and why; when the sync found its owner gone from the list. */
+  status_by: string | null; status_at: string | null; status_reason: string | null; owner_removed_at: string | null;
 }
 
 function newToken(prefix: string): string {
@@ -127,6 +132,8 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
   const out: Record<string, unknown> = {
     id: h.id, name: h.name, owner: h.owner_login, status: h.status, arches: lanes.map((l) => l.arch), release_applied: h.release_applied, alive,
     worker: h.worker_id, enrolled_at: h.enrolled_at, confirmed_at: h.confirmed_at,
+    // Who stopped it and why (#322) — the journal's words, public as the journal is — and whether the list stopped its claims.
+    status_by: h.status_by, status_at: h.status_at, status_reason: h.status_reason, claims_stopped_at: h.owner_removed_at,
   };
   if (!detailed) return out;
   const raw = publicKeyBytes(h.pubkey)!;
@@ -181,7 +188,8 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
   const leases = h.worker_id
     ? (await env.DB.prepare("SELECT id, kind, name, arch, started_at, lease_expires_at FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id").bind(h.worker_id).all()).results
     : [];
-  return json({ host: await hostView(h, mayDetail(c, h), Date.now()), leases, pool: { version: version(env).version } }, 200, NO_STORE);
+  const viewer = c ? await viewerOf(env, c) : null;
+  return json({ host: await hostView(h, mayDetail(c, h), Date.now()), leases, pool: { version: version(env).version }, can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h) } }, 200, NO_STORE);
 }
 
 /**
@@ -227,6 +235,263 @@ export async function handleConfirmHost(c: Contributor, id: string, request: Req
     schema: "omarchy-pool/worker-trust/1", worker, owner: h.owner_login, trust: "project", host: id, fingerprint: await fingerprint(publicKeyBytes(h.pubkey)!), confirmed_by: c.login, basis: "factory/MAINTAINERS.toml", at,
   }).catch(() => null);
   return json({ host: id, status: "active", worker, line, note: "The agent fetches the host's worker token with its next signed request, writes it for the dispatcher, and the host claims from then on." }, 200, NO_STORE);
+}
+
+// ---------- suspend, resume, retire; removed for cause; the owner's resume (#322, design v2 §6.2, §6.4, D20, D39) ----------
+
+/** A person as the host doors read them: their login, the maintainer list read now (not the last sign-in's role), and their GitHub user id — what owns a host. */
+export interface HostViewer { login: string; maintainer: boolean; github_id: number | null }
+async function viewerOf(env: Env, c: Contributor): Promise<HostViewer> {
+  return { login: c.login, maintainer: (await roleFor(env, c.login)) === "maintainer", github_id: await githubIdOf(env, c.login) };
+}
+/** The owner is a GitHub user id, not a login: a renamed owner is still the owner, and a login someone else took is not. */
+const isOwner = (v: HostViewer, h: Pick<HostRow, "owner_github_id">) => v.github_id !== null && v.github_id === h.owner_github_id;
+
+export type HostRight = "suspend" | "resume" | "retire";
+type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
+
+/**
+ * Who may suspend, resume and retire a host, decided in one place — the
+ * doors refuse with it and GET /hosts/:id carries it for the page's buttons:
+ * - Suspend: its owner or any maintainer, on an active host;
+ * - Resume: its owner only, with their passkey — so they are a maintainer;
+ * - Retire: its owner, or any maintainer with their passkey; a host retired
+ *   once stays retired (a new install enrolls a new host).
+ * Every one takes a reason, journaled with who.
+ */
+export function hostVerdicts(v: HostViewer | null, h: Pick<HostRow, "name" | "status" | "owner_login" | "owner_github_id">): Record<HostRight, HostVerdict> {
+  const no = (status: 401 | 403 | 404 | 409, why: string): HostVerdict => ({ ok: false, status, why });
+  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN) };
+  const owner = isOwner(v, h);
+  const theirs = !owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer stops ${h.name}`) : null;
+  const gone = h.status === "retired" ? no(409, `${h.name} is retired: a new install enrolls a new host`) : null;
+  return {
+    suspend: theirs ?? gone ?? (h.status === "suspended" ? no(409, `${h.name} is suspended already — its owner's Resume ends it`) : h.status !== "active" ? no(409, `${h.name} waits for its owner's Confirm: it claims nothing yet`) : { ok: true }),
+    resume: gone ?? (h.status !== "suspended" ? no(409, `${h.name} is not suspended: there is nothing to resume`)
+      : !owner ? no(403, `only ${h.owner_login} resumes ${h.name}, with their passkey`)
+      : !v.maintainer ? no(403, `${OWNER_NOT_MAINTAINER}: ${h.name} stays suspended`) : { ok: true }),
+    retire: theirs ?? gone ?? { ok: true },
+  };
+}
+const canOf = (v: Record<HostRight, HostVerdict>) => {
+  const out: Record<string, unknown> = {}, why: Record<string, string> = {};
+  for (const [k, x] of Object.entries(v)) { out[k] = x.ok; if (!x.ok) why[k] = x.why; }
+  return { ...out, why };
+};
+const refusedBy = (x: HostVerdict) => (x.ok ? null : json({ error: x.why, code: "host_right" }, x.status, NO_STORE));
+
+/**
+ * The bulk fence (design v2 §8.6): every lease the suspended hosts'
+ * registrations hold, fenced in one statement — `UPDATE build_tasks SET
+ * stop_order = … WHERE lease_owner … AND status = 'leased'` — with one order
+ * row per task. The rows are written closed: the order's work is done the
+ * moment the fence is (the host claims nothing to hear it), and a closed row
+ * holds no place in the one-open-per-kind index, so a host holding several
+ * leases is fenced whole. Every heartbeat, report and upload of a fenced
+ * lease is refused from then on; it goes back to the queue when its lease
+ * ends (lease.ts), with the person and the reason on its line. `scope`
+ * names the hosts (`id = ?5`, or `owner_github_id = ?5`), only those this
+ * act suspended at `at` (`status_at = ?3`).
+ */
+export const FENCE_ORDERS_SQL = (scope: string) => `INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, via, task_id, issued_at, expires_at, state, answered_at, answered_by, detail)
+  SELECT 'wo_' || lower(hex(randomblob(16))), t.lease_owner, 'stop-task', ?1, ?2, 'web', t.id, ?3, ?3, 'done', ?3, 'pool', ?4
+    FROM build_tasks t WHERE t.status = 'leased' AND t.lease_owner IN (SELECT worker_id FROM hosts WHERE ${scope} AND status = 'suspended' AND status_at = ?3 AND worker_id IS NOT NULL)`;
+export const BULK_FENCE_SQL = (scope: string) => `UPDATE build_tasks SET stop_order = (SELECT o.id FROM worker_orders o WHERE o.worker_id = build_tasks.lease_owner AND o.issued_at = ?3 AND o.kind = 'stop-task' AND o.task_id = build_tasks.id)
+  WHERE status = 'leased' AND lease_owner IN (SELECT worker_id FROM hosts WHERE ${scope} AND status = 'suspended' AND status_at = ?3 AND worker_id IS NOT NULL)`;
+/** The tasks a fence of this act holds, for its line and its answer. */
+export const FENCED_SQL = "SELECT json_group_array(id) AS fenced FROM build_tasks WHERE status = 'leased' AND stop_order IN (SELECT id FROM worker_orders WHERE issued_at = ?1 AND kind = 'stop-task' AND issued_by = ?2)";
+
+async function fencedBy(env: Env, at: string, by: string): Promise<number[]> {
+  const r = await env.DB.prepare(FENCED_SQL).bind(at, by).first<{ fenced: string | null }>();
+  return JSON.parse(r?.fenced ?? "[]") as number[];
+}
+
+/** Suspension's statements after the host rows moved: open orders cancelled with a line each, the leases fenced. */
+function suspendStatements(env: Env, scope: "id" | "owner_github_id" | "owner_login", key: string | number, by: string, reason: string, at: string): D1PreparedStatement[] {
+  const which = `SELECT worker_id FROM hosts WHERE ${scope} = ? AND status = 'suspended' AND status_at = ? AND worker_id IS NOT NULL`;
+  const where = `${scope} = ?5`;
+  const detail = `fenced: its host was suspended by ${by} — the task goes back to the queue when its lease ends`;
+  return [
+    ...cancelOrdersOf(env, { sql: which, binds: [key, at] }, by, at, `its host was suspended by ${by}`),
+    env.DB.prepare(FENCE_ORDERS_SQL(where)).bind(reason, by, at, detail, key),
+    env.DB.prepare(BULK_FENCE_SQL(where)).bind(null, null, at, null, key),
+  ];
+}
+
+/** A person's reason, as the doors take it: one printable line, no secret. */
+function reasonOf(v: unknown): string | Response {
+  const r = hostReason(v);
+  if (r === null || findLeak(r)) return json({ error: `reason: why, in ${HOST_REASON.min} to ${HOST_REASON.max} printable characters and no secret — it goes on the public journal`, code: "reason" }, 400, NO_STORE);
+  return r;
+}
+
+/** The doors' common head: the browser's session, from the pool's own page, a JSON body. */
+async function personAct(c: Contributor, request: Request, env: Env, url: URL): Promise<{ v: HostViewer; b: Record<string, unknown> } | Response> {
+  if (viaOf(request) !== "web") return json({ error: "a host is suspended, resumed and retired on the site, signed in in the browser: a token does not", code: "web_only" }, 403, NO_STORE);
+  const gate = writeGate(request, url, true);
+  if (gate) return gate;
+  const b = await readJson<Record<string, unknown>>(request);
+  if (b instanceof Response) return b;
+  return { v: await viewerOf(env, c), b };
+}
+
+const hostLine_ = (h: Pick<HostRow, "name" | "owner_login">) => `${h.name} of ${h.owner_login}`;
+const HOST_EVENT_SQL = "INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', ?, ?, json_set(?, '$.fenced', json((" + FENCED_SQL.replace("?1", "?4").replace("?2", "?5") + "))) WHERE EXISTS (SELECT 1 FROM hosts WHERE status_at = ?4 AND status_by = ?5)";
+
+/**
+ * POST /hosts/:id/suspend — {reason}: its owner or any maintainer. In one
+ * batch: the host suspended (its key refused, its registration's claims
+ * refused), its registration's open orders cancelled, its running leases
+ * fenced (the bulk fence), one journal line with who, why and the fenced
+ * tasks. Reversible: Resume, by the owner.
+ */
+export async function handleSuspendHost(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url);
+  if (p instanceof Response) return p;
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  const no = refusedBy(hostVerdicts(p.v, h).suspend);
+  if (no) return no;
+  const reason = reasonOf(p.b.reason);
+  if (reason instanceof Response) return reason;
+  const at = iso(Date.now());
+  const line = `${hostLine_(h)} suspended by ${c.login}: ${reason}`;
+  const [res] = await env.DB.batch([
+    env.DB.prepare("UPDATE hosts SET status = 'suspended', status_by = ?, status_at = ?, status_reason = ? WHERE id = ? AND status = 'active'").bind(c.login, at, reason, id),
+    ...suspendStatements(env, "id", id, c.login, reason, at),
+    env.DB.prepare(HOST_EVENT_SQL).bind("warn", line, JSON.stringify({ host: id, worker: h.worker_id, owner: h.owner_login, by: c.login, via: "web", action: "suspend", reason }), at, c.login),
+  ]);
+  if (!res.meta.changes) return json({ error: `${h.name} was not suspended: it changed a moment ago`, code: "host_right" }, 409, NO_STORE);
+  const fenced = await fencedBy(env, at, c.login);
+  return json({ host: id, status: "suspended", by: c.login, at, reason, fenced, line }, 200, NO_STORE);
+}
+
+/**
+ * POST /hosts/:id/resume — {assertion}: its owner only, with their passkey
+ * (`host:resume:<id>`). The host is active again: its key works, its
+ * registration claims, its agent recovers at its next poll. Leases fenced by
+ * the suspension stay fenced until their end.
+ */
+export async function handleResumeHost(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url);
+  if (p instanceof Response) return p;
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  const no = refusedBy(hostVerdicts(p.v, h).resume);
+  if (no) return no;
+  const ok = await webGate(request, url, env, c.login, `host:resume:${id}`)(p.b.assertion);
+  if (ok instanceof Response) return ok;
+  const at = iso(Date.now());
+  const line = `${hostLine_(h)} resumed by ${c.login}${justNowWords(ok)} (suspended by ${h.status_by ?? "?"}${h.status_reason ? `: ${h.status_reason}` : ""})`;
+  const [res] = await env.DB.batch([
+    env.DB.prepare("UPDATE hosts SET status = 'active', status_by = ?, status_at = ?, status_reason = NULL WHERE id = ? AND status = 'suspended'").bind(c.login, at, id),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'ok', ?, ? WHERE EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)")
+      .bind(line, JSON.stringify({ host: id, worker: h.worker_id, owner: h.owner_login, by: c.login, via: "web", action: "resume", confirmed_with: ok.passkey }), id, at),
+  ]);
+  if (!res.meta.changes) return json({ error: `${h.name} was not resumed: it changed a moment ago`, code: "host_right" }, 409, NO_STORE);
+  return json({ host: id, status: "active", by: c.login, at, confirmed_with: ok.passkey, line, note: "its registration claims from its next claim; its agent recovers at its next poll" }, 200, NO_STORE);
+}
+
+/**
+ * POST /hosts/:id/retire — {reason, assertion?}: its owner, or any
+ * maintainer with their passkey (`host:retire:<id>`). In one batch the host
+ * is retired — its key refused for good, and since the pool keeps it, never
+ * enrolled again — its registration revoked with its worker token, its open
+ * orders cancelled, builds asked for it unpinned, one journal line. Running
+ * leases are not fenced: they end with their lease, as a revoked worker's.
+ * A new install on the machine enrolls a new host, with a new key.
+ */
+export async function handleRetireHost(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url);
+  if (p instanceof Response) return p;
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  const no = refusedBy(hostVerdicts(p.v, h).retire);
+  if (no) return no;
+  const reason = reasonOf(p.b.reason);
+  if (reason instanceof Response) return reason;
+  const ok = isOwner(p.v, h) ? null : await webGate(request, url, env, c.login, `host:retire:${id}`)(p.b.assertion);
+  if (ok instanceof Response) return ok;
+  const at = iso(Date.now());
+  const line = `${hostLine_(h)} retired by ${c.login}${ok ? justNowWords(ok) : ""}: ${reason}`;
+  const worker = h.worker_id ?? "";
+  const [res] = await env.DB.batch([
+    env.DB.prepare("UPDATE hosts SET status = 'retired', status_by = ?, status_at = ?, status_reason = ?, prev_token_hash = NULL, prev_token_until = NULL WHERE id = ? AND status != 'retired'").bind(c.login, at, reason, id),
+    env.DB.prepare("UPDATE build_workers SET revoked_at = ? WHERE id = ? AND host_id = ? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)").bind(at, worker, id, id, at),
+    ...cancelOrdersOf(env, { sql: "SELECT id FROM build_workers WHERE id = ? AND revoked_at = ?", binds: [worker, at] }, c.login, at, `its host was retired by ${c.login}`),
+    env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL WHERE pinned_to = ? AND status = 'queued' AND EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)").bind(worker, id, at),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'warn', ?, ? WHERE EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)")
+      .bind(line, JSON.stringify({ host: id, worker: h.worker_id, owner: h.owner_login, by: c.login, via: "web", action: "retire", reason, ...(ok ? { confirmed_with: ok.passkey } : {}) }), id, at),
+  ]);
+  if (!res.meta.changes) return json({ error: `${h.name} was not retired: it changed a moment ago`, code: "host_right" }, 409, NO_STORE);
+  return json({ host: id, status: "retired", by: c.login, at, reason, line, note: "its key and its worker token are burnt; a new install on the machine enrolls a new host" }, 200, NO_STORE);
+}
+
+/** The hosts of a login: by its GitHub user id when the pool knows it (a renamed owner's hosts are theirs), else by the login. */
+async function ownerKey(env: Env, login: string): Promise<{ col: "owner_github_id" | "owner_login"; key: string | number }> {
+  const g = await githubIdOf(env, login);
+  return g === null ? { col: "owner_login", key: login } : { col: "owner_github_id", key: g };
+}
+
+/**
+ * POST /hosts/owners/:login/cause — {reason, assertion}: "removed for
+ * cause", another maintainer's explicit act with their passkey
+ * (`host:cause:<login>`), never the owner's own. In one batch every host of
+ * that owner that runs or is suspended is suspended for cause, their open
+ * orders cancelled and their running leases fenced in one statement, one
+ * journal line. Removing the person from factory/MAINTAINERS.toml stays a
+ * pull request; this is what stops their machines at once meanwhile.
+ */
+export async function handleRemoveForCause(c: Contributor, login: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url);
+  if (p instanceof Response) return p;
+  if (!p.v.maintainer) return json({ error: `removing a maintainer for cause is another maintainer's act; ${c.login} is not one (factory/MAINTAINERS.toml)`, code: "maintainers_only" }, 403, NO_STORE);
+  const target = await ownerKey(env, login);
+  if (login === c.login || (target.col === "owner_github_id" && target.key === p.v.github_id)) return json({ error: SELF_CAUSE, code: "second_maintainer" }, 403, NO_STORE);
+  const hosts = (await env.DB.prepare(`SELECT id, name, status, worker_id FROM hosts WHERE ${target.col} = ? AND status IN ('active', 'suspended')`).bind(target.key).all<{ id: string; name: string; status: string; worker_id: string | null }>()).results;
+  if (!hosts.length) return json({ error: `${login} has no host that runs or is suspended: there is nothing to stop`, code: "no_host" }, 409, NO_STORE);
+  const reason = reasonOf(p.b.reason);
+  if (reason instanceof Response) return reason;
+  const ok = await webGate(request, url, env, c.login, `host:cause:${login}`)(p.b.assertion);
+  if (ok instanceof Response) return ok;
+  const at = iso(Date.now());
+  const why = `removed for cause: ${reason}`;
+  const line = `${login} removed for cause by ${c.login}${justNowWords(ok)}: ${hosts.length} host${hosts.length === 1 ? "" : "s"} suspended, their running tasks fenced — ${reason}`;
+  const [res] = await env.DB.batch([
+    env.DB.prepare(`UPDATE hosts SET status = 'suspended', status_by = ?, status_at = ?, status_reason = ? WHERE ${target.col} = ? AND status IN ('active', 'suspended')`).bind(c.login, at, why, target.key),
+    ...suspendStatements(env, target.col, target.key, c.login, why, at),
+    env.DB.prepare(HOST_EVENT_SQL).bind("error", line, JSON.stringify({ owner: login, hosts: hosts.map((h) => h.id), by: c.login, via: "web", action: "cause", reason, confirmed_with: ok.passkey }), at, c.login),
+  ]);
+  if (!res.meta.changes) return json({ error: `${login}'s hosts were not suspended: they changed a moment ago`, code: "host_right" }, 409, NO_STORE);
+  const fenced = await fencedBy(env, at, c.login);
+  return json({ owner: login, hosts: hosts.map((h) => h.id), status: "suspended", by: c.login, at, reason, fenced, confirmed_with: ok.passkey, line }, 200, NO_STORE);
+}
+
+/**
+ * POST /hosts/owners/:login/resume — {assertion}: an owner listed again
+ * (D39) resumes claiming on all their hosts the sync stopped, with one
+ * action and their passkey (`host:resume-all:<login>`). Only the stop the
+ * list made is lifted: a suspended host stays suspended.
+ */
+export async function handleResumeOwner(c: Contributor, login: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url);
+  if (p instanceof Response) return p;
+  if (login !== c.login || p.v.github_id === null) return json({ error: `only ${login} resumes their own hosts, with their passkey`, code: "host_right" }, 403, NO_STORE);
+  const listed = await env.DB.prepare(`SELECT ${OWNER_LISTED_SQL("?")} AS yes`).bind(p.v.github_id).first<{ yes: number }>();
+  if (!listed?.yes) return json({ error: `${OWNER_NOT_MAINTAINER} (factory/MAINTAINERS.toml): your hosts claim again once a pull request lists you again and the pool has synced it`, code: "owner_not_maintainer" }, 403, NO_STORE);
+  const stopped = (await env.DB.prepare("SELECT id, name FROM hosts WHERE owner_github_id = ? AND owner_removed_at IS NOT NULL AND status != 'retired'").bind(p.v.github_id).all<{ id: string; name: string }>()).results;
+  if (!stopped.length) return json({ error: "no host of yours was stopped by the maintainer list: there is nothing to resume", code: "no_host" }, 409, NO_STORE);
+  const ok = await webGate(request, url, env, c.login, `host:resume-all:${login}`)(p.b.assertion);
+  if (ok instanceof Response) return ok;
+  const at = iso(Date.now());
+  const line = `${login} resumed claiming on ${stopped.length} host${stopped.length === 1 ? "" : "s"} the maintainer list had stopped${justNowWords(ok)}: ${stopped.map((h) => h.name).join(", ")}`;
+  const [res] = await env.DB.batch([
+    env.DB.prepare(`UPDATE hosts SET owner_removed_at = NULL WHERE owner_github_id = ?1 AND owner_removed_at IS NOT NULL AND status != 'retired' AND ${OWNER_LISTED_SQL("?1")}`).bind(p.v.github_id),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'ok', ?, ? WHERE NOT EXISTS (SELECT 1 FROM hosts WHERE owner_github_id = ? AND owner_removed_at IS NOT NULL AND status != 'retired')")
+      .bind(line, JSON.stringify({ owner: login, hosts: stopped.map((h) => h.id), by: c.login, via: "web", action: "resume_owner", confirmed_with: ok.passkey }), p.v.github_id),
+  ]);
+  if (!res.meta.changes) return json({ error: "your hosts were not resumed: they changed a moment ago", code: "host_right" }, 409, NO_STORE);
+  return json({ owner: login, hosts: stopped.map((h) => h.id), at, confirmed_with: ok.passkey, line }, 200, NO_STORE);
 }
 
 // ---------- the host's side ----------
@@ -328,7 +593,8 @@ export async function signedHost(request: Request, env: Env, url: URL): Promise<
   if (!h || !raw) return json({ error: "no such host", code: "host_signature" }, 401, NO_STORE);
   const message = signedMessage(h.id, request.method, url.pathname, await sha256HexOf(body), hdr.ts, hdr.nonce);
   if (!(await verifySignature(raw, hdr.sig, message))) return json({ error: "the signature is not this host's over this request", code: "host_signature" }, 401, NO_STORE);
-  if (h.status === "suspended" || h.status === "retired") return json({ error: `${h.name} is ${h.status}`, code: "host_status" }, 403, NO_STORE);
+  // Its status rides the refusal (#322): an agent re-installed on a retired host's machine enrolls a new host, and one on a suspended host waits.
+  if (h.status === "suspended" || h.status === "retired") return json({ error: `${h.name} is ${h.status}${h.status_by ? ` (by ${h.status_by}${h.status_reason ? `: ${h.status_reason}` : ""})` : ""}`, code: "host_status", status: h.status }, 403, NO_STORE);
   const fresh = await env.DB.prepare("INSERT INTO host_nonces (host_id, nonce, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING").bind(h.id, hdr.nonce, iso(now)).run();
   if (!fresh.meta.changes) return json({ error: "this request was seen already (its nonce)", code: "replay" }, 401, NO_STORE);
   return { host: h, body };

@@ -225,3 +225,50 @@ export function installUrl(poolVersion: string): string {
 export function installCommand(poolVersion: string, token: string, pool: string | null): string {
   return `curl --proto '=https' --tlsv1.2 -fsSL ${installUrl(poolVersion)} | OMARCHY_ENROLL=${token} sh${pool ? ` -s -- --pool ${pool}` : ""}`;
 }
+
+// ---------- who stops a host, and what a claim checks (#322, design v2 §6.2, §6.4) ----------
+
+/**
+ * Whether a host's owner counts as a maintainer now (D39): some login
+ * factory/MAINTAINERS.toml lists resolves to the owner's GitHub user id
+ * through the contributors' sign-in records. The file lists logins and hosts
+ * are owned by ids, so a login renamed in the file is not a removal. `col`
+ * is the SQL that names the owner's id (`hosts.owner_github_id`, a binding).
+ * The list is walked (a few rows), each login by the contributors' primary
+ * key: CROSS JOIN is SQLite's word for that order — contributors.github_id
+ * has no index of its own.
+ */
+export const OWNER_LISTED_SQL = (col: string) => `EXISTS (SELECT 1 FROM factory_maintainers m CROSS JOIN contributors c ON c.login = m.login WHERE c.github_id = ${col})`;
+
+/** A host as every claim of its registration reads it: one row by the primary key, the owner joined with the maintainer list. */
+export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed FROM hosts WHERE id = ?`;
+export interface HostClaimRow { name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number }
+
+/** The words of a claim refused because of the list (D39), the same at the claim, on the host's page and in the journal. */
+export const OWNER_NOT_MAINTAINER = "the host's owner is no longer a maintainer";
+
+/**
+ * Why a host's registration may not claim now, or null (design v2 §6.2,
+ * §6.4): suspended or retired; its owner no longer resolved from the list —
+ * at the claim itself, between two syncs too —; or stopped by a sync that
+ * found them gone, until their one Resume. Running leases are not this
+ * function's: a removal fences nothing, a suspension fenced them already.
+ */
+export function hostClaimRefusal(h: HostClaimRow): { code: string; error: string } | null {
+  const why = h.status_reason ? `: ${h.status_reason}` : "";
+  if (h.status === "suspended") return { code: "host_suspended", error: `${h.name} is suspended (by ${h.status_by ?? "?"}${why}): it claims nothing until ${h.owner_login} resumes it` };
+  if (h.status === "retired") return { code: "host_retired", error: `${h.name} is retired (by ${h.status_by ?? "?"}${why}): a new install enrolls a new host` };
+  if (h.status !== "active") return { code: "host_status", error: `${h.name} is ${h.status}: it claims nothing` };
+  if (!h.listed) return { code: "owner_not_maintainer", error: `${OWNER_NOT_MAINTAINER} (factory/MAINTAINERS.toml): ${h.name} claims nothing; its running tasks finish and upload` };
+  if (h.owner_removed_at) return { code: "owner_not_maintainer", error: `${OWNER_NOT_MAINTAINER} since ${h.owner_removed_at.slice(0, 16).replace("T", " ")} UTC (factory/MAINTAINERS.toml): ${h.name} claims again once ${h.owner_login} resumes their hosts on their page` };
+  return null;
+}
+
+/** A reason a person gives for stopping a host: one printable line, 4 to 300 characters, as the journal keeps it. */
+export const HOST_REASON = { min: 4, max: 300 };
+export function hostReason(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const s = v.replace(/\s+/g, " ").trim();
+  if (s.length < HOST_REASON.min || s.length > HOST_REASON.max || /[\p{Cc}\p{Cf}\p{Co}\p{Cs}]/u.test(s)) return null;
+  return s;
+}

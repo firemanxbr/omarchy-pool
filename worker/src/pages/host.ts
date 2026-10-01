@@ -11,6 +11,9 @@
  *   isolation level; the release it applied against the pool's, and the last
  *   round's outcome.
  * - Its leases: what its registration holds now.
+ * - Stop it (#322): Suspend, Resume and Retire, each greyed with the door's
+ *   own reason (GET /api/v1/hosts/:id answers `can`), and the way to its
+ *   registration's page, where Drain and Resume are.
  *
  * Anyone sees the name, the owner, the status, the architectures and the
  * release; the capacity, the hostname and the host key's fingerprint are its
@@ -20,7 +23,8 @@
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
-import { HOST_REPORT_FRESH_MIN } from "../hosts";
+import { HOST_REPORT_FRESH_MIN, OWNER_NOT_MAINTAINER } from "../hosts";
+import { lucide } from "./kit";
 
 const CSS = String.raw`
   .hp { max-width: 1056px; margin: 0 auto; padding-top: 12px; display: grid; gap: 24px; }
@@ -40,6 +44,11 @@ const CSS = String.raw`
   .hp-kv .mono { font-family: var(--font-mono); font-size: 12px; }
   .hp-table { overflow-x: auto; }
   .hp-empty { margin: 0; padding: 14px 16px; color: var(--dim); font-size: 13px; }
+  .hp-ops { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .hp-note { margin: 12px 0 0; font-size: 12.5px; color: var(--dim); max-width: 760px; }
+  .hp-stopped { margin: 0; padding: 10px 12px; border: 1px solid var(--red); font-size: 13px; max-width: 760px; overflow-wrap: anywhere; }
+  .hp-stopped:empty { display: none; }
+  @media (max-width: 520px) { .hp-ops .op-btn { flex: 1 1 100%; justify-content: center; } }
   @media (max-width: 520px) { .hp-kv { grid-template-columns: 1fr; gap: 2px 0; } .hp-kv dd { margin-bottom: 8px; } }
 `;
 
@@ -50,6 +59,7 @@ const BODY = String.raw`
       <div class="hp-title"><h1 class="op-hero" id="hp-name"><span class="skl"></span></h1><span id="hp-status"></span></div>
       <p class="hp-id" id="hp-id"></p>
       <p class="hp-lede" id="hp-lede"></p>
+      <p class="hp-stopped" id="hp-stopped" role="status"></p>
     </section>
 
     <div class="op-stats" id="hp-stats"></div>
@@ -57,6 +67,19 @@ const BODY = String.raw`
     <section class="op-card" id="hp-facts" aria-labelledby="hp-facts-h">
       <div class="op-card-h"><b id="hp-facts-h">What it runs</b><small>as its agent last reported it — the units are the pool's own count</small></div>
       <dl class="hp-kv" id="hp-kv"></dl>
+    </section>
+
+    <section class="op-card" id="hp-operate" aria-labelledby="hp-operate-h">
+      <div class="op-card-h"><b id="hp-operate-h">Stop it</b><small>each on the journal with who and why</small></div>
+      <div class="op-card-b">
+        <div class="hp-ops" id="hp-ops">
+          <button type="button" class="op-btn" data-host-act="suspend" disabled>${lucide("ban", 14)}Suspend</button>
+          <button type="button" class="op-btn" data-host-act="resume" disabled>${lucide("circle-check", 14)}Resume</button>
+          <button type="button" class="op-btn danger" data-host-act="retire" disabled>${lucide("octagon-x", 14)}Retire</button>
+        </div>
+        <p class="hp-note">Suspend stops its claims and fences its running tasks; only its owner resumes it, with a passkey. Retire burns its key and its worker token: a new install enrolls a new host. To stop its claims and let its tasks finish, drain its registration.</p>
+      </div>
+      <div class="op-card-f"><a href="/docs/security-model#stopping-a-host">Suspend, retire, drain →</a></div>
     </section>
 
     <section class="op-card" id="hp-leases" aria-labelledby="hp-leases-h">
@@ -73,14 +96,20 @@ const SCRIPT = String.raw`
   var BASE = "/api/v1/hosts/" + encodeURIComponent(ID);
   var FRESH_MIN = ${HOST_REPORT_FRESH_MIN};
   var PILL = { active: ["ok", "active"], "pending-owner": ["warn", "waits for its owner's Confirm"], suspended: ["fail", "suspended"], retired: ["na", "retired"] };
+  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14) })};
+  var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)};
+  var H = null, PK = {}, TIMER = 0;
   function stat(k, n, s) { return '<div class="op-stat"><span class="k">' + esc(k) + '</span><span class="n">' + n + '</span><span class="s">' + (s || "") + '</span></div>'; }
   function kv(k, v) { return '<dt>' + esc(k) + '</dt><dd>' + v + '</dd>'; }
   function when(iso) { return iso ? '<span title="' + esc(iso) + '">' + esc(ago(iso)) + '</span>' : '<span class="muted">—</span>'; }
   function load() {
+    clearTimeout(TIMER);
     api("GET", BASE).then(function (d) {
       if (d.__status === 404) { $("#hp-name").textContent = ID; $("#hp-lede").textContent = "no such host: it was never enrolled"; endSkeleton(); return; }
+      H = d.host; PK = d.passkey || {};
       draw(d.host, d.leases || [], d.pool || {});
-      setTimeout(function () { if (!document.hidden) load(); }, 30000);
+      drawOps(d.host, d.can || { why: {} });
+      TIMER = setTimeout(function () { if (!document.hidden) load(); }, 30000);
     }).catch(function (e) { noAnswer("host", e, "#hp-lede"); });
   }
   function draw(h, leases, pool) {
@@ -90,6 +119,11 @@ const SCRIPT = String.raw`
     $("#hp-status").innerHTML = '<span class="op-pill ' + p[0] + '">' + esc(p[1]) + '</span>';
     $("#hp-id").textContent = h.id + (h.worker ? " · registration " + h.worker : "");
     $("#hp-lede").innerHTML = "A maintainer host of " + personLink(h.owner) + (h.where ? ", " + esc(h.where) : "") + " — " + esc((h.arches || []).join(", ") || "no lane reported") + ". " + (h.status === "pending-owner" ? 'It waits for its owner to compare its fingerprint and press Confirm, on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>; nothing claims before that.' : h.alive ? "Its agent reports." : '<span class="muted">Its agent has not reported in the last ' + esc(String(FRESH_MIN)) + ' minutes.</span>');
+    // Who stopped it and why, for anyone (the journal's words): a suspension or a retirement, and the maintainer list's stop.
+    var stopped = [];
+    if ((h.status === "suspended" || h.status === "retired") && h.status_by) stopped.push(esc(h.status === "suspended" ? "Suspended" : "Retired") + " by " + personLink(h.status_by) + (h.status_at ? " " + when(h.status_at) : "") + (h.status_reason ? ": " + esc(h.status_reason) : "") + (h.status === "suspended" ? ". It claims nothing until " + personLink(h.owner) + " resumes it." : ". A new install enrolls a new host."));
+    if (h.claims_stopped_at && h.status !== "retired") stopped.push("Its claims stopped " + when(h.claims_stopped_at) + ": " + esc(NOT_LISTED) + ' (<a href="/docs/governance">factory/MAINTAINERS.toml</a>). Its running tasks finish; listed again, ' + personLink(h.owner) + ' resumes their hosts on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>.');
+    $("#hp-stopped").innerHTML = stopped.join("<br>");
     var c = h.capacity;
     $("#hp-stats").innerHTML = c ? [
       stat("CPUs", num(c.cpus), "memory " + num(c.mem_gb) + " GB"),
@@ -103,7 +137,7 @@ const SCRIPT = String.raw`
     $("#hp-kv").innerHTML = h.fingerprint === undefined
       ? kv("Status", esc(p[1])) + kv("Release", esc(h.release_applied || "—")) + kv("Details", '<span class="muted">its owner\'s and the maintainers\'</span>')
       : [
-        kv("Status", esc(p[1]) + (h.confirmed_at ? " since " + when(h.confirmed_at) : " — enrolled " + when(h.enrolled_at))),
+        kv("Status", esc(p[1]) + (h.status_at && (h.status === "suspended" || h.status === "retired") ? " since " + when(h.status_at) : h.confirmed_at ? " since " + when(h.confirmed_at) : " — enrolled " + when(h.enrolled_at))),
         kv("Host key", '<span class="mono">' + esc(h.fingerprint) + '</span>'),
         kv("Machine", esc((h.hostname || "?") + " · " + (h.os || "?") + " " + (h.arch || "?") + (h.page_kb ? ", " + h.page_kb + "K pages" : ""))),
         kv("Isolation", esc(h.isolation || "?") + (h.dedicated ? " (dedicated)" : "")),
@@ -117,6 +151,41 @@ const SCRIPT = String.raw`
     $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + '</td><td>' + esc(t.name) + '</td><td>' + esc(t.arch) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="5" class="muted">no lease — nothing runs on it now</td></tr>';
     endSkeleton();
   }
+  // Stop it (#322): the three buttons as the door answers them for this reader, greyed with its reason; Drain is its registration's page's.
+  function drawOps(h, can) {
+    var why = can.why || {};
+    $("#hp-ops").innerHTML = [
+      gate('<button type="button" class="op-btn" data-host-act="suspend">' + ICON.suspend + 'Suspend</button>', can.suspend === true, why.suspend || ""),
+      gate('<button type="button" class="op-btn" data-host-act="resume">' + ICON.resume + 'Resume</button>', can.resume === true, why.resume || ""),
+      gate('<button type="button" class="op-btn danger" data-host-act="retire">' + ICON.retire + 'Retire</button>', can.retire === true, why.retire || ""),
+    ].join("") + (h.worker && h.status !== "retired" ? '<a class="op-btn" href="/worker/' + encodeURIComponent(h.worker) + '#wk-operate">' + ICON.drain + 'Drain or resume its claims</a>' : "");
+  }
+  function done(d) {
+    if (d.error) { toast(esc(d.error), "error"); return; }
+    toast(esc(d.line || "done")); load();
+  }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("button[data-host-act]") : null;
+    if (!b || b.disabled || !H) return;
+    var act = b.getAttribute("data-host-act");
+    if (act === "suspend") {
+      ask({ title: "Suspend " + H.name, text: "Its claims stop at once, its key is refused, its waiting orders are cancelled and its running tasks are fenced: they go back to the queue when their lease ends. Only " + esc(H.owner) + " resumes it, with a passkey.", input: "required", confirm: "Suspend", danger: true }).then(function (r) {
+        if (r === null) return;
+        api("POST", BASE + "/suspend", { reason: r }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+    } else if (act === "resume") {
+      ask({ title: "Resume " + H.name, text: "It claims again from its next claim and its agent recovers at its next poll; nothing is done on the machine. Your passkey confirms it.", confirm: "Resume" }).then(function (go) {
+        if (go === null) return;
+        passkeyed("host:resume:" + ID, function (a) { return api("POST", BASE + "/resume", { assertion: a }); }).then(done);
+      });
+    } else if (act === "retire") {
+      ask({ title: "Retire " + H.name, text: "Its key and its worker token are burnt for good; its running tasks end with their lease. A new install on the machine enrolls a new host." + (PK.retire ? " Your passkey confirms it." : ""), input: "required", confirm: "Retire", danger: true }).then(function (r) {
+        if (r === null) return;
+        var post = function (a) { return api("POST", BASE + "/retire", a ? { reason: r, assertion: a } : { reason: r }); };
+        (PK.retire ? passkeyed("host:retire:" + ID, post) : post(null)).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+    }
+  });
   whoami(function () { load(); });
 `;
 
@@ -146,6 +215,21 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "leases", "pool.version"] },
       { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
       { path: "/api/v1/hosts/h_nobody0000", status: 404 },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    // Stop it (#322): Suspend, Resume and Retire as GET /hosts/:id answers them for the reader — every role sees them, greyed with the door's
+    // reason —; the doors refuse everyone else server-side, and a session's write without the page's own Origin for every role.
+    id: "host.stop",
+    page: `/hosts/${F.host}`,
+    anchor: ['id="hp-operate"', 'id="hp-ops"', 'data-host-act="suspend"', 'data-host-act="resume"', 'data-host-act="retire"', 'id="hp-stopped"', 'href="/docs/security-model#stopping-a-host"'],
+    script: ["function drawOps(h, can)", "can.suspend === true", "can.resume === true", "can.retire === true", 'BASE + "/suspend"', 'BASE + "/resume"', 'BASE + "/retire"', 'passkeyed("host:resume:" + ID', 'passkeyed("host:retire:" + ID', "PK.retire", "h.status_by", "h.status_reason", "h.claims_stopped_at", "NOT_LISTED"],
+    reads: [{ path: `/api/v1/hosts/${F.host}`, fields: ["can.suspend", "can.resume", "can.retire", "can.why", "passkey.retire", "host.status_by", "host.status_at", "host.status_reason", "host.claims_stopped_at"] }],
+    acts: [
+      { method: "POST", path: `/api/v1/hosts/${F.host}/suspend`, body: { reason: "a reason enough" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/resume`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/retire`, body: { reason: "a reason enough" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
     ],
     visible: EVERYONE,
   },

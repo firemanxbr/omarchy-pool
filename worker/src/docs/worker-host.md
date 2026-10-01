@@ -152,3 +152,15 @@ the host to the pool is signed with its key (`Omarchy-Host`); the pool
 refuses a replay, a changed body and a clock more than 120 s off
 ([Security model](/docs/security-model#maintainer-hosts)).
 
+To stop a host, use its page, `/hosts/<id>` (#322). **Suspend** (its
+owner or any maintainer, with a reason) stops its claims at once and
+fences its running tasks; only its owner resumes it, with a passkey, and
+nothing is done on the machine. **Retire** (its owner, or a maintainer
+with a passkey) burns its key and its worker token; paste a new command
+from your page on the machine to enroll it again as a new host. To let
+its tasks finish, drain its registration from the worker's page instead:
+a drain you made is yours alone to lift. If a pull request takes you off
+`factory/MAINTAINERS.toml`, your hosts stop claiming at the next sync and
+their running tasks finish; listed again, **Resume my hosts** on your
+page brings all of them back at once
+([Security model](/docs/security-model#stopping-a-host)).
