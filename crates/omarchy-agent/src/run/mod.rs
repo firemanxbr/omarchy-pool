@@ -40,4 +40,6 @@ pub(crate) fn now() -> i64 {
 }
 
 #[cfg(test)]
+mod engine_tests;
+#[cfg(test)]
 pub(crate) mod fake;
