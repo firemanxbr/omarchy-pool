@@ -18,16 +18,14 @@
 import { json, type Env } from "../index";
 
 /** A release name as the agent reads one (crates/omarchy-agent version.rs): vX.Y.Z, no leading zero. */
-export const RELEASE_RE = /^v(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
+const RELEASE_RE = /^v(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 
 /**
  * Where release-rollback stores a statement in the PACKAGES bucket (omarchy-packages):
- * its statement_key, bundle_key and last_key, which worker/test/rollback-relay.test.ts
- * holds to this. `rollback/` is no source directory (r2.ts): a source holds `<arch>/`.
+ * its statement_key and bundle_key, which worker/test/rollback-relay.test.ts holds to
+ * this. `rollback/` is no source directory (r2.ts): a source holds `<arch>/`.
  */
 export const rollbackKeys = (to: string) => ({ statement: `rollback/${to}.json`, bundle: `rollback/${to}.sigstore.json` });
-/** The last statement stored, whatever its target: where release-rollback reads the next `seq` from. */
-export const LAST_STATEMENT_KEY = "rollback/latest.json";
 
 const CACHE = { "cache-control": "public, max-age=60" };
 

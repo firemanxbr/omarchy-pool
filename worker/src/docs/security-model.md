@@ -289,10 +289,14 @@ runs in the reviewed `pool` environment, writes the statement before
 anything moves and signs it keyless with the pinned cosign (`cosign
 sign-blob --bundle`, a Sigstore bundle v0.3). Once the Worker of the target
 release is deployed it stores the statement and its bundle in R2
-(`omarchy-packages`: `rollback/<to>.json`, `rollback/<to>.sigstore.json`,
-and `rollback/latest.json`, the last one stored, for the next `seq`).
+(`omarchy-packages`: `rollback/latest.json`, the last one stored, for the
+next `seq`, then `rollback/<to>.sigstore.json` and `rollback/<to>.json`).
 `GET /api/v1/factory/rollback/:to` relays the latest one for that target,
-public and cached for a minute, `404` while there is none.
+public and cached for a minute, `404` while there is none. The relay exists
+only in releases from #314 on: a rollback to an older release stores its
+statement, but the Worker it deploys cannot hand it out (a host gets a
+`404` and stays where it is) until a newer release ships, which
+`min_release` covers once hosts run the agent.
 
 ```json
 {"schema":1,"seq":7,"to":"v1.13.4","retracts_through":"v1.14.2","issued":"2026-10-20T14:00:00Z",
@@ -304,9 +308,14 @@ public and cached for a minute, `404` while there is none.
 - `retracts_through` is the release rolled back from, or the last
   statement's when that is higher, so the statement retracts every release
   above `to` that an earlier rollback retracted too: a host that missed that
-  rollback is still covered. When the pool's release cannot be read, it is
-  the highest release tag. A run that would retract nothing (sent forward)
-  writes no statement.
+  rollback is still covered. When the pool's release is not a release tag
+  above `to` (it cannot be read, or a re-run finds the pool already at
+  `to`), it is the highest release tag. Both inputs come from what the pool
+  can write (its `/version`, `rollback/latest.json`), so each is taken only
+  when it is a release tag of this repository, and a last statement that
+  names none moves nothing: `retracts_through` never names more than the
+  highest `v*` tag at signing, which the tag rulesets protect (#308). A run
+  to the highest release (nothing above it) writes no statement.
 - `issued` is the run's own time, for people; the agent goes by the log's.
 - `agent_to` is null: a rollback keeps the agent (D8). A later statement
   that names an agent version is the only thing that moves the agent down.
@@ -348,7 +357,16 @@ holds can dispatch `rollback.yml`. One wrongly approved dispatch can send
 hosts back at most 14 days, to a release that is neither revoked nor below
 `min_release`. A pool that withholds a statement keeps hosts where they are;
 one that serves an older one gains nothing a genuine statement did not
-already allow, and a host that took a newer one refuses it (`seq` must rise).
+already allow (its `retracts_through` was at most the highest release then,
+below a host's floor since), and a host that took a newer one refuses it
+(`seq` must rise). `seq` is read from `rollback/latest.json`, which the pool
+can write: a pool that rewinds it makes the next genuine statement repeat a
+`seq` hosts have passed, so they refuse it, which only withholds a rollback,
+as not relaying does. A run that signs and then fails before the store (the
+images or the deploy fail, and everything is put back) leaves a valid
+signature in Rekor over bytes anyone can rebuild; a pool could serve that
+statement although that rollback never took effect, but a maintainer
+approved that dispatch and every rule above still applies to it.
 
 ## After approval, the gates still hold
 

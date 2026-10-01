@@ -25,7 +25,9 @@
 # the bytes it was given) before anything moves, stored in a stubbed R2
 # once the Worker is deployed; `seq` rises by one per statement stored;
 # `retracts_through` is the release rolled back from (or an earlier
-# statement's, when higher; the highest tag when the pool does not answer);
+# statement's, when higher; the highest tag when the pool does not answer,
+# is already at the target on a re-run, or names no release tag), never past
+# the highest release tag whatever the pool says;
 # the statement has the shape the agent accepts
 # (crates/omarchy-agent/tests/fixtures/statement/release-rollback.json, which
 # `verify --statement` takes from rollback.yml on main only). A last
@@ -124,7 +126,7 @@ grep -q "running v1.0.2: every updater follows it within two minutes" <<<"$out" 
 echo "ok: the images and the Worker go back"
 
 # The rollback statement (#314): read the last one (none yet), written and signed before any tag moves, stored in R2 once
-# the Worker is deployed — the bundle, the statement, then the last one — and exactly the bytes signed.
+# the Worker is deployed — the last one, the bundle, then the statement — and exactly the bytes signed.
 FIXTURE="$root/crates/omarchy-agent/tests/fixtures/statement/release-rollback.json"
 filesha() { (if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi) | cut -c1-64; }
 SIGN_BLOB="^cosign sign-blob --yes --fulcio-url=https://fulcio.sigstore.dev --rekor-url=https://rekor.sigstore.dev --new-bundle-format --bundle [^ ]+/statement.sigstore.json [^ ]+/statement.json$"
@@ -132,9 +134,9 @@ SIGN_BLOB="^cosign sign-blob --yes --fulcio-url=https://fulcio.sigstore.dev --re
 (( $(line '^npx wrangler r2 object get omarchy-packages/rollback/latest.json --remote --pipe$') < $(line '^cosign sign-blob') && $(line '^cosign sign-blob') < first_move )) \
   || fail "the last statement read, then the new one signed, before any tag moves"
 puts="$(grep '^npx wrangler r2 object put' "$STUB_LOG" | sed -E 's/ --file [^ ]+/ --file F/')"
-[[ "$puts" == "npx wrangler r2 object put omarchy-packages/rollback/v1.0.2.sigstore.json --remote --file F --content-type application/json
-npx wrangler r2 object put omarchy-packages/rollback/v1.0.2.json --remote --file F --content-type application/json
-npx wrangler r2 object put omarchy-packages/rollback/latest.json --remote --file F --content-type application/json" ]] || fail "the bundle, the statement, then the last one, to R2: $puts"
+[[ "$puts" == "npx wrangler r2 object put omarchy-packages/rollback/latest.json --remote --file F --content-type application/json
+npx wrangler r2 object put omarchy-packages/rollback/v1.0.2.sigstore.json --remote --file F --content-type application/json
+npx wrangler r2 object put omarchy-packages/rollback/v1.0.2.json --remote --file F --content-type application/json" ]] || fail "the last one (a failure after it only skips a seq), the bundle, then the statement, to R2: $puts"
 (( $(line 'wrangler deploy --var') < $(line '^npx wrangler r2 object put') )) || fail "stored once the Worker of the release is deployed"
 st="$STUB_R2/rollback/v1.0.2.json"
 [[ "$(jq -r .stub_signed "$STUB_R2/rollback/v1.0.2.sigstore.json")" == "$(filesha "$st")" ]] || fail "the statement stored is the bytes signed"
@@ -230,11 +232,13 @@ out="$(cd "$tmp/repo" && "$R" v1.0.1 2>&1)" || fail "release-rollback v1.0.1 fro
   || fail "seq 3, retracting through the earlier statement's v1.0.3: $(cat "$STUB_R2/rollback/v1.0.1.json")"
 echo "ok: seq rises by one per statement, and each retracts everything above its target"
 
-# The last statement cannot be read (anything but "no such key"), or is not one, or the signing fails: nothing moves.
+# The last statement cannot be read (anything but "no such key"), or is not one, or names a release that has no tag (the pool
+# can write R2), or the signing fails: nothing moves.
 last_before="$(cat "$STUB_R2/rollback/latest.json")"
-for case in STUB_R2_GET_FAIL STUB_SIGN_FAIL garbage; do
+for case in STUB_R2_GET_FAIL STUB_SIGN_FAIL garbage untagged; do
   echo v1.0.3 > "$STUB_VERSION"; : > "$STUB_LOG"
   [[ "$case" == garbage ]] && echo '{"seq":"x"}' > "$STUB_R2/rollback/latest.json"
+  [[ "$case" == untagged ]] && echo '{"schema":1,"seq":3,"to":"v1.0.1","retracts_through":"v99.0.0"}' > "$STUB_R2/rollback/latest.json"
   if out="$(cd "$tmp/repo" && env "$case=1" "$R" v1.0.2 2>&1)"; then fail "$case must stop the rollback: $out"; fi
   grep -qE 'imagetools create|wrangler deploy --var|r2 object put|^cosign sign ' "$STUB_LOG" && fail "$case moved something: $(cat "$STUB_LOG")"
   grep -q "nothing moved" <<<"$out" || fail "$case: and says so: $out"
@@ -243,12 +247,17 @@ echo "$last_before" > "$STUB_R2/rollback/latest.json"
 [[ "$(cat "$STUB_VERSION")" == v1.0.3 ]] || fail "the pool still runs its release"
 
 # A statement that cannot be stored: the rest is done (the pool runs the release, the event is recorded), then the run fails
-# and says how hosts under the agent are left; the last statement is unchanged, so re-running signs the next seq.
+# and says how hosts under the agent are left; the last statement is unchanged, so re-running stores a freshly signed one.
 : > "$STUB_LOG"
 if out="$(cd "$tmp/repo" && STUB_R2_PUT_FAIL=1 "$R" v1.0.2 2>&1)"; then fail "a statement that did not reach R2 must fail the run: $out"; fi
 [[ "$(cat "$STUB_VERSION")" == v1.0.2 ]] && grep -q "INSERT INTO events" "$STUB_LOG" || fail "the rollback itself is done: $out"
 grep -q "running v1.0.2, but its rollback statement did not reach R2: hosts under the host agent stay at their floor" <<<"$out" || fail "and says so: $out"
 [[ "$(cat "$STUB_R2/rollback/latest.json")" == "$last_before" ]] || fail "the last statement is unchanged"
+# A pool that says it runs a release with no tag gets nothing past the highest tag: v99.0.0 is not taken.
+echo v99.0.0 > "$STUB_VERSION"; : > "$STUB_LOG"
+out="$(cd "$tmp/repo" && "$R" v1.0.1 2>&1)" || fail "a rollback from a pool naming an untagged release exited $?: $out"
+[[ "$(jq -c '{seq, to, retracts_through}' "$STUB_R2/rollback/v1.0.1.json")" == '{"seq":4,"to":"v1.0.1","retracts_through":"v1.0.3"}' ]] \
+  || fail "retracts_through stays at the highest release tag: $(cat "$STUB_R2/rollback/v1.0.1.json")"
 
 # No statement without signing (ROLLBACK_SIGN=0), nor when nothing above the target is retracted (rollback.yml sent forward).
 echo v1.0.3 > "$STUB_VERSION"; : > "$STUB_LOG"
@@ -256,10 +265,21 @@ out="$(cd "$tmp/repo" && ROLLBACK_SIGN=0 "$R" v1.0.2 2>&1)" || fail "ROLLBACK_SI
 grep -qE 'cosign|r2 object' "$STUB_LOG" && fail "ROLLBACK_SIGN=0 signs and stores nothing: $(grep -E 'cosign|r2 object' "$STUB_LOG")"
 grep -q "ROLLBACK_SIGN=0: no rollback statement" <<<"$out" || fail "and says so: $out"
 mv "$STUB_R2" "$STUB_R2.kept"; mkdir -p "$STUB_R2"
-echo v1.0.1 > "$STUB_VERSION"; : > "$STUB_LOG"
-out="$(cd "$tmp/repo" && "$R" v1.0.2 2>&1)" || fail "rollback.yml sent forward exited $?: $out"
-grep -qE 'sign-blob|r2 object put' "$STUB_LOG" && fail "nothing above v1.0.2 to retract: no statement: $(cat "$STUB_LOG")"
-grep -q "no release above v1.0.2 to retract: no rollback statement" <<<"$out" || fail "and says so: $out"
+# The first statement ever does not reach R2 (a deploy token without R2 Storage: Edit, say): the re-run finds the pool already at
+# v1.0.2 and still stores one, seq 1, retracting through the highest release tag.
+echo v1.0.3 > "$STUB_VERSION"; : > "$STUB_LOG"
+if out="$(cd "$tmp/repo" && STUB_R2_PUT_FAIL=1 "$R" v1.0.2 2>&1)"; then fail "a first statement that did not reach R2 must fail the run: $out"; fi
+[[ -z "$(ls -A "$STUB_R2")" ]] || fail "nothing stored: $(ls -R "$STUB_R2")"
+: > "$STUB_LOG"
+out="$(cd "$tmp/repo" && "$R" v1.0.2 2>&1)" || fail "the re-run exited $?: $out"
+[[ "$(jq -c '{seq, to, retracts_through}' "$STUB_R2/rollback/v1.0.2.json")" == '{"seq":1,"to":"v1.0.2","retracts_through":"v1.0.3"}' ]] \
+  || fail "the re-run stores seq 1, retracting through v1.0.3: $(cat "$STUB_R2/rollback/v1.0.2.json" 2>/dev/null) / $out"
+rm -rf "$STUB_R2"; mkdir -p "$STUB_R2"
+# Sent to the highest release: nothing above it to retract, no statement.
+echo v1.0.2 > "$STUB_VERSION"; : > "$STUB_LOG"
+out="$(cd "$tmp/repo" && "$R" v1.0.3 2>&1)" || fail "rollback.yml sent forward to the highest release exited $?: $out"
+grep -qE 'sign-blob|r2 object put' "$STUB_LOG" && fail "nothing above v1.0.3 to retract: no statement: $(cat "$STUB_LOG")"
+grep -q "no release above v1.0.3 to retract: no rollback statement" <<<"$out" || fail "and says so: $out"
 # The pool does not answer: the statement retracts through the highest release tag, and the first statement is seq 1.
 echo down > "$STUB_VERSION"; : > "$STUB_LOG"
 out="$(cd "$tmp/repo" && "$R" v1.0.2 2>&1)" || fail "a rollback while the pool does not answer exited $?: $out"

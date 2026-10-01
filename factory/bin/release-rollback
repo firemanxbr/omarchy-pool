@@ -19,12 +19,16 @@
 #    `retracts_through` the release rolled back from — or the last
 #    statement's, when that is higher, so a host that missed that rollback
 #    is covered too (the agent takes `to < floor <= retracts_through`); the
-#    highest release tag when the pool's release cannot be read. Signed by
+#    highest release tag when the pool's release is not a release tag above
+#    `to` (it cannot be read, or a re-run finds the pool already at `to`).
+#    Both come from what the pool can write (its /version, R2), so each is
+#    taken only when it is a release tag of this repository: a statement
+#    never retracts past the highest one (the v* tag rulesets, #308). Signed by
 #    `cosign sign-blob --bundle` (a Sigstore bundle v0.3, what
-#    `omarchy-agent verify --statement` reads). No statement when nothing
-#    above `to` is retracted (rollback.yml sent forward), and none with
-#    ROLLBACK_SIGN=0. The last statement is read from R2 first: an answer
-#    other than "there is none yet" moves nothing.
+#    `omarchy-agent verify --statement` reads). No statement when no release
+#    above `to` exists, and none with ROLLBACK_SIGN=0. The last statement is
+#    read from R2 first: an answer other than "there is none yet", or one
+#    that names no release tag, moves nothing.
 # 1. The images: `:x86_64` and `:aarch64` re-pointed at that release's own
 #    (`:<arch>-v1.0.2`, a copy), then `:latest` at its `:v1.0.2` — each new
 #    digest signed, as a release signs its own. What each tag named before
@@ -37,11 +41,11 @@
 #    where they were, so the fleet never follows images the pool refuses;
 #    re-running the rollback is safe. Once that Worker is deployed, the
 #    statement and its bundle go to R2 (omarchy-packages:
-#    rollback/<to>.json, rollback/<to>.sigstore.json, and
-#    rollback/latest.json for the next `seq`), where
+#    rollback/latest.json for the next `seq` first, then
+#    rollback/<to>.sigstore.json and rollback/<to>.json), where
 #    GET /api/v1/factory/rollback/<to> relays them; a store that fails
-#    fails the run once the rest is done, and re-running signs the next
-#    statement. A Worker from before #277 (a tag
+#    fails the run once the rest is done, and re-running stores a freshly
+#    signed statement. A Worker from before #277 (a tag
 #    without worker/src/orders.ts) spreads a worker's whole row in its
 #    listing (GET /factory, GET /users/:login), so every column the Worker
 #    from #277 keeps to itself — a worker's site, its process
@@ -110,6 +114,7 @@ R2_BUCKET=omarchy-packages
 statement_key="rollback/$to.json"; bundle_key="rollback/$to.sigstore.json"; last_key="rollback/latest.json"
 release_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
 newest() { printf '%s\n' "$@" | { grep -E "$release_re" || true; } | sort -V | tail -n1; }  # the highest release named, or nothing
+is_tag() { [[ "$1" =~ $release_re ]] && git rev-parse -q --verify "refs/tags/$1^{commit}" >/dev/null; }
 statement=""
 if [[ "${ROLLBACK_SIGN:-1}" == 1 ]]; then
   # The last statement stored, or none yet — wrangler's own words for a missing key; any other failure moves nothing.
@@ -121,10 +126,12 @@ if [[ "${ROLLBACK_SIGN:-1}" == 1 ]]; then
   if [[ -s "$work/last.json" ]]; then
     last_seq="$(jq -r '.seq' "$work/last.json" 2>/dev/null || true)"
     last_through="$(jq -r '.retracts_through' "$work/last.json" 2>/dev/null || true)"
-    [[ "$last_seq" =~ ^[1-9][0-9]{0,15}$ && "$last_through" =~ $release_re ]] || die "the last rollback statement ($R2_BUCKET/$last_key) is not one: nothing moved"
+    [[ "$last_seq" =~ ^[1-9][0-9]{0,15}$ ]] && is_tag "$last_through" \
+      || die "the last rollback statement ($R2_BUCKET/$last_key) is not one, or names no release tag of this repository: nothing moved"
   fi
-  through="$from"
-  [[ "$through" =~ $release_re ]] || through="$(newest $(git tag -l 'v*'))"
+  # The pool's word (/version, latest.json) only ever picks a release tag: never past the highest one.
+  through="$(newest $(git tag -l 'v*'))"
+  if is_tag "$from" && [[ "$from" != "$to" && "$(newest "$from" "$to")" == "$from" ]]; then through="$from"; fi
   through="$(newest "$through" "$last_through")"
   if [[ -n "$through" && "$(newest "$through" "$to")" == "$through" && "$through" != "$to" ]]; then
     statement="$work/statement.json"
@@ -139,13 +146,14 @@ if [[ "${ROLLBACK_SIGN:-1}" == 1 ]]; then
 else
   say "ROLLBACK_SIGN=0: no rollback statement"
 fi
-# Bundle first, the statement, then the last one: a host that reads between two puts verifies nothing new and asks again.
+# The last one first (a failure after it only skips a seq, which hosts allow; never one seq relayed twice), then the bundle,
+# then the statement: a host that reads between two puts verifies nothing new and asks again.
 store_statement() {
   [[ -n "$statement" ]] || return 0
   (cd "$at/worker" \
+    && npx wrangler r2 object put "$R2_BUCKET/$last_key" --remote --file "$statement" --content-type application/json \
     && npx wrangler r2 object put "$R2_BUCKET/$bundle_key" --remote --file "$work/statement.sigstore.json" --content-type application/json \
-    && npx wrangler r2 object put "$R2_BUCKET/$statement_key" --remote --file "$statement" --content-type application/json \
-    && npx wrangler r2 object put "$R2_BUCKET/$last_key" --remote --file "$statement" --content-type application/json) >/dev/null
+    && npx wrangler r2 object put "$R2_BUCKET/$statement_key" --remote --file "$statement" --content-type application/json) >/dev/null
 }
 
 # 1. The images: what each tag names now, then each architecture's tag, then :latest.
@@ -211,7 +219,7 @@ for _ in $(seq 1 12); do
     if (( pre277 )); then
       (cd "$at/worker" && clear_277) || die "$to runs, but #277's columns were not cleared once it served: run the UPDATE of docs/security-model (A Worker rolled back past #277) by hand"
     fi
-    (( stored )) || die "running $to, but its rollback statement did not reach R2: hosts under the host agent stay at their floor until one does — re-running rollback.yml -f to=$to is safe (it signs the next statement)"
+    (( stored )) || die "running $to, but its rollback statement did not reach R2: hosts under the host agent stay at their floor until one does — re-running rollback.yml -f to=$to is safe (it stores a freshly signed statement)"
     say "running $running: every updater follows it within two minutes"; exit 0
   fi
   sleep 5

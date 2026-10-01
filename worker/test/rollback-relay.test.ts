@@ -12,7 +12,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { LAST_STATEMENT_KEY, rollbackKeys } from "../src/routes/rollback";
+import { rollbackKeys } from "../src/routes/rollback";
 // The repository's own files, as text (Vite's ?raw): the tests run inside workerd, which has no filesystem.
 import rollbackScript from "../../factory/bin/release-rollback?raw";
 import securityModel from "../src/docs/security-model.md?raw";
@@ -24,6 +24,9 @@ async function get(path: string, init: RequestInit = {}): Promise<Response> {
   await waitOnExecutionContext(ctx);
   return res;
 }
+
+// The last statement stored, whatever its target, where release-rollback reads the next `seq` from: the route never serves it.
+const LAST_STATEMENT_KEY = "rollback/latest.json";
 
 // As release-rollback writes them: jq -c, one line, the newline included in the bytes signed.
 const STATEMENT = '{"schema":1,"seq":4,"to":"v1.13.4","retracts_through":"v1.14.2","issued":"2026-10-20T14:00:00Z","agent_to":null,"run":"https://github.com/firemanxbr/omarchy-pool/actions/runs/123"}\n';

@@ -170,8 +170,8 @@ is deployed (`rollback/<to>.json` and its `.sigstore.json` in
 `omarchy-packages`, relayed at `GET /api/v1/factory/rollback/<to>`): a host
 under the host agent goes below its floor only on one, within 14 days of the
 target's release (security-model, *Rollback statements*). A statement that
-did not reach R2 fails the run after the rest is done; running it again signs
-the next one. The updaters follow the
+did not reach R2 fails the run after the rest is done; running it again
+stores a freshly signed one. The updaters follow the
 pool's release down as they follow it up, within two minutes. Back past
 #277's last part, the updater that comes back is the older one: it follows
 at its own fifteen-minute round and takes no Update, until a release brings
