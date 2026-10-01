@@ -671,7 +671,9 @@ nothing.
 architecture's leg pushes its `:<arch>-vX.Y.Z` and starts every role from it,
 and moves, tags or signs nothing else; the job that needs both legs moves
 every tag a host follows — `:vX.Y.Z`, then `:x86_64` and `:aarch64`, then
-`:latest`, each signed — and no other job does; the deploy needs it.
+`:latest`, each signed — and no other job does; the deploy needs it; and
+`publish` fails on a release that already exists (#351), never reusing assets
+this run did not build.
 `bash tests/trust-pins.sh` (CI) reads what the hosts' trust relies on in the
 repository (#308): `release.yml` and `rollback.yml` install one exact cosign
 through the installer pinned by commit, every `cosign sign` (there and in

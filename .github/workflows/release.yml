@@ -152,12 +152,23 @@ jobs:
           path: dist
           pattern: dist-*
           merge-multiple: true
-      - name: Create the release
+      - name: Refuse a release this run did not make
+        # Any collaborator with write access can make a v* tag and a release
+        # (#351: this user-owned repository cannot restrict creation), and the
+        # image is built from the release's tarballs (factory/image/Containerfile,
+        # TOOLS_URL). So a release that already exists, by hand or from an
+        # earlier run, is refused, never reused: what worker-image-manifest
+        # signs carries only bytes this run built (tests/release-workflow.sh).
+        # A run that stopped after this job resumes with "Re-run failed jobs"
+        # on that run, not with a new dispatch.
         run: |
           set -euo pipefail
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "release $VERSION already exists; skipping"; exit 0
+            echo "::error::release $VERSION already exists and this run did not make it: no image is built from its assets"; exit 1
           fi
+      - name: Create the release
+        run: |
+          set -euo pipefail
           args=(--target "$GITHUB_SHA" --title "$VERSION" --generate-notes)
           [[ -n "$PREVIOUS" ]] && args+=(--notes-start-tag "$PREVIOUS")
           gh release create "$VERSION" "${args[@]}" dist/* docs/omarchy-staging.pub.asc
