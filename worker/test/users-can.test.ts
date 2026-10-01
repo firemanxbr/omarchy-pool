@@ -12,8 +12,8 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { RIGHTS, SIGN_IN, type Rights } from "../src/routes/contributors";
-import { seedDashboard, type Fixture } from "./fixture";
+import { POOL_HOSTS, RIGHTS, SIGN_IN, type Rights } from "../src/routes/contributors";
+import { legacyWorker, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 
@@ -100,25 +100,25 @@ describe("what a caller may do on a person's page", () => {
     expect((await canOn("bob", "bob")).token).toBe(true);
   });
 
-  it("alice on her own page: the workspace is hers — build, the queue, a worker, the token; Remove per registration and Revoke per worker as they stand; never Withdraw", async () => {
+  it("alice on her own page: the workspace is hers — build, the queue, her legacy worker, the token; Remove per registration and Revoke per worker as they stand; never Withdraw, and no new worker (#331)", async () => {
     const c = await canOn("alice", "alice");
-    expect(flags(c)).toEqual({ ...allFalse, request: true, register: true, token: true, build: true, dequeue: true, remove: true, revoke: true, own_only: true, share_worker: true });
-    expect(c.why).toEqual({ withdraw: "a maintainer decides" });
+    expect(flags(c)).toEqual({ ...allFalse, request: true, token: true, build: true, dequeue: true, remove: true, revoke: true, own_only: true, share_worker: true });
+    expect(c.why).toEqual({ register: POOL_HOSTS, withdraw: "a maintainer decides" });
     expect(c.workers[F.communityWorker]).toEqual({ revoke: true, own_only: true, share_worker: true, why: {} });
     // Her two registrations are the maintainers' now: mine approved (its publish waits), ours published into edge.
     expect(c.packages[F.factoryPkg]).toEqual({ remove: false, why: `${F.factoryPkg} is approved: a maintainer removes it` });
     expect(c.packages[F.publishedPkg]).toEqual({ remove: false, why: `${F.publishedPkg} is published: a maintainer removes it` });
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}`, "alice"), 403, c.packages[F.factoryPkg].why, "alice removes mine");
     refusedLike(await call("POST", `/factory/tasks/${F.projectTask}/withdraw`, "alice", { note: "her own" }), 403, c.why.withdraw, "alice withdraws");
-    // Each true, at the door: a build queued, then taken out of the queue; a token; a worker registered, shared, then revoked.
+    // Each true, at the door: a build queued, then taken out of the queue; a token; a worker registered before #331 shared, then revoked. A new one is refused with the page's sentence.
     const built = await call("POST", `/factory/packages/${F.factoryPkg}/build`, "alice", { arches: [F.arch] });
     expect(built.status, JSON.stringify(built.json)).toBe(201);
     const queued = built.json.tasks[0] as number;
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}/builds/${queued}`, "bob"), 403, "only alice takes their build out of the queue — yours is on /user/bob", "bob takes the new build out");
     expect((await call("DELETE", `/factory/packages/${F.factoryPkg}/builds/${queued}`, "alice")).json).toMatchObject({ task: queued, status: "cancelled" });
     expect((await call("POST", "/factory/token", "alice")).status).toBe(201);
-    const w = await call("POST", "/factory/workers", "alice", { name: "box", arch: F.arch });
-    expect(w.status, JSON.stringify(w.json)).toBe(201);
+    refusedLike(await call("POST", "/factory/workers", "alice", { name: "box", arch: F.arch }), 403, c.why.register, "alice registers a worker");
+    const w = { json: { worker: await legacyWorker(env, "alice", "box", F.arch) } };
     expect((await call("POST", `/factory/workers/${w.json.worker}/mode`, "alice", { mode: "shared" })).status).toBe(200);
     expect((await call("POST", `/factory/workers/${w.json.worker}/mode`, "alice", { mode: "dedicated" })).status).toBe(200);
     expect((await call("DELETE", `/factory/workers/${w.json.worker}`, "alice")).json).toMatchObject({ revoked: w.json.worker });
@@ -162,13 +162,14 @@ describe("what a caller may do on a person's page", () => {
     expect((await canOn("alice", "m1")).packages).toEqual({});
   });
 
-  it("carol, blocked, on her own page: the page is hers, but a request, a build and a worker are refused with the block — and her registration is hers to remove", async () => {
+  it("carol, blocked, on her own page: the page is hers, but a request and a build are refused with the block, a worker with the pool's hosts — and her registration is hers to remove", async () => {
     const c = await canOn("carol", "carol");
     const blocked = "carol is blocked by a maintainer: requests under a name that is not hers; nothing can be requested or built until another maintainer lifts it";
     expect(flags(c)).toEqual({ ...allFalse, token: true, dequeue: true, remove: true, revoke: true, own_only: true, share_worker: true });
-    expect(c.why).toEqual({ request: blocked, register: blocked, build: blocked, withdraw: "a maintainer decides" });
+    expect(c.why).toEqual({ request: blocked, register: POOL_HOSTS, build: blocked, withdraw: "a maintainer decides" });
     expect(c.packages[F.blockedPkg]).toEqual({ remove: true });
-    refusedLike(await call("POST", "/factory/workers", "carol", { arch: F.arch }), 403, blocked, "carol registers a worker");
+    // A worker is a maintainer's before anything else (#331): every contributor reads the same sentence, blocked or not.
+    refusedLike(await call("POST", "/factory/workers", "carol", { arch: F.arch }), 403, POOL_HOSTS, "carol registers a worker");
     // Her package is blocked too: the package's word comes first at the door, as the page greys the button — with no trailing colon when the block has no reason.
     refusedLike(await call("POST", `/factory/packages/${F.blockedPkg}/build`, "carol", { arches: [F.arch] }), 403, `${F.blockedPkg} is blocked by a maintainer: ${(await call("GET", `/factory/packages/${F.blockedPkg}/story`, "")).json.package.blocked_reason}`, "carol builds hers");
     refusedLike(await call("POST", "/factory/packages", "carol", { url: "https://other.example" }), 403, blocked, "carol requests");

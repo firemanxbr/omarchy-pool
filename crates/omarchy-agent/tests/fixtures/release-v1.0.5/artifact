@@ -1,0 +1,1 @@
+{"critical":{"identity":{"docker-reference":"ghcr.io/firemanxbr/omarchy-worker"},"image":{"docker-manifest-digest":"sha256:fc65f18acb3a26c85c106a28e9d04c37e563ebee2ec9721a549e49cfeaf63665"},"type":"cosign container image signature"},"optional":null}

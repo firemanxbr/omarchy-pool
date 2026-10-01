@@ -519,6 +519,29 @@ docker compose restart pool-aarch64              # a worker stuck in a task: a d
 docker kill <container>                          # one that must end now, or whose engine is stuck
 ```
 
+**On a host the agent manages, nothing needs to be run** (#313). Once
+`omarchy-agent` has retired this set (its `retire-legacy` order, after the
+switch and the 14 days the set stays as the way back), it leaves a marker,
+`/srv/omarchy-pool/.omarchy-agent`, with its version, the host id and the
+time. From then on `./rollout.sh` and `setup.sh` refuse there (exit 4),
+`omarchy-worker start|update|remove` refuse in a directory that holds it,
+each before it changes a file or a container, and the updater stands down:
+its rounds change nothing, and its `--self-test` says `stands-down`. What to
+look at instead: `omarchy-agent status`. Without the marker, all of them
+work as before, the legacy set's updater included.
+
+The updater learns the marker with the release, as it runs the pool's
+image. The host's own copies do not: `setup.sh` installs
+`/srv/omarchy-pool/rollout.sh` only when it runs, and `omarchy-worker` never
+updates itself. So, once, before the first `retire-legacy` on a host set up
+before this release, paste the block in *Once: the updater* again: it takes
+the release's `setup.sh`, which on a host whose updater already runs only
+installs the new host files (keeping the ones it replaces) and wakes the
+updater. `grep -q omarchy-agent /srv/omarchy-pool/rollout.sh` then says the
+copy has the guard. Fetch an `omarchy-worker` downloaded before this release
+again (the `curl` line at its top). An old `rollout.sh` that is missed
+brings back only the updater, which stands down.
+
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,
 Update. A task that hangs is stopped there: Stop its task gives it back to
@@ -821,11 +844,12 @@ the review2 pair with no profile, which would start it unregistered.
 
 ### After a release
 
-Nothing to do on any host. The pool is deployed once the images exist.
-Within two minutes, every updater sees the pool's new release and rolls
-its set out: every contributor's set, and the Studio's since its one-time
-step above. `agent-proxy` and the brokers go first, each answering before
-the workers that call them (#278), then the workers, each stop a drain.
+Nothing to do on any host, and on a host the agent manages, nothing needs
+to be run either. The pool is deployed once the images exist. Within two
+minutes, every updater sees the pool's new release and rolls its set out:
+every contributor's set, and the Studio's since its one-time step above.
+`agent-proxy` and the brokers go first, each answering before the workers
+that call them (#278), then the workers, each stop a drain.
 
 A worker whose agent does not answer re-checks it by itself (#278). The
 pool re-checks it too, and, only if that is not enough, restarts it or

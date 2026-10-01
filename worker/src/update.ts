@@ -65,5 +65,5 @@ export function updateState(workerVersion: string | null | undefined, pool: Pick
 
 /** The refusal a claim gets, and the line the journal keeps. */
 export function updateMessage(u: UpdateState): string {
-  return `this worker runs ${u.yours}; the pool is at ${u.latest}${u.behind ? ` (${u.behind} release${u.behind === 1 ? "" : "s"} behind)` : ""} — every worker follows the latest image: update it (/docs/workers#update) and it works again`;
+  return `this worker runs ${u.yours}; the pool is at ${u.latest}${u.behind ? ` (${u.behind} release${u.behind === 1 ? "" : "s"} behind)` : ""} — every worker follows the latest image: update it (/docs/workers#update) and it works again; on a host the agent manages, nothing needs to be run`;
 }

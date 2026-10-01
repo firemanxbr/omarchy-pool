@@ -66,6 +66,19 @@ describe("the runbook's After a release (AC4 of #277)", () => {
     for (const c of HOST_COMMANDS) expect(text, c).not.toContain(c);
   });
 
+  it("says that on a host the agent manages nothing needs to be run, and names the marker, the refusals and the stand-down (#313)", () => {
+    const text = cut(runbook, "the-studio-host");
+    expect(text).toContain("On a host the agent manages, nothing needs to be run");
+    expect(text).toContain("`/srv/omarchy-pool/.omarchy-agent`");
+    expect(text).toContain("`omarchy-worker start|update|remove`");
+    expect(text).toContain("`stands-down`");
+    expect(text).toContain("`omarchy-agent status`");
+    // The host's installed copies learn the marker only from a new setup.sh run or a new download.
+    expect(text).toContain("`grep -q omarchy-agent /srv/omarchy-pool/rollout.sh`");
+    expect(text).toContain("Fetch an `omarchy-worker` downloaded before this release");
+    expect(cut(runbook, "after-a-release")).toContain("on a host the agent manages, nothing needs\nto be run");
+  });
+
   it("carries none of #278's paragraph, which asked for an install and restarts on the host", () => {
     expect(runbook).not.toContain("until this host has the new `rollout.sh`");
     expect(runbook).not.toContain("install -m 755 factory/host/rollout.sh");

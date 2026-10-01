@@ -22,6 +22,10 @@
 #   stop      drain and stop (a build in hand finishes first, up to three hours)
 #   remove    stop and delete the files here (the registration stays; revoke it on your page)
 #
+# On a maintainer host managed by omarchy-agent, nothing needs to be run: in
+# a set the agent retired (its .omarchy-agent marker), start, update and
+# remove refuse and change nothing.
+#
 # Nothing here needs root; the runtime's socket is the one your user reaches.
 set -euo pipefail
 API="__API__"
@@ -113,7 +117,7 @@ cmd_start() {
   find_runtime
   fetch_compose
   local had; had="$(env_get OMARCHY_WORKER_TOKEN)"
-  [[ -n "$token" || -n "$had" ]] || die "--token omw_… is required the first time: register a worker on your page, the token is shown once"
+  [[ -n "$token" || -n "$had" ]] || die "--token omw_… is required the first time: register a worker on your page (maintainers only), the token is shown once"
   [[ -n "$token" ]] && env_set OMARCHY_WORKER_TOKEN "$token"
   env_set OMARCHY_WORKER_DIR "$DIR"
   env_set OMARCHY_SOCKET "$SOCKET"
@@ -155,10 +159,10 @@ cmd_start() {
   code="${self##*$'\n'}"; self="${self%$'\n'*}"
   if [[ "$code" == 200 ]]; then
     local reg_arch reg_id; reg_arch="$(jq -r .arch <<<"$self" 2>/dev/null || true)"; reg_id="$(jq -r .id <<<"$self" 2>/dev/null || true)"
-    [[ -z "$reg_arch" || "$reg_arch" == "$arch" ]] || die "the token is for a $reg_arch worker; this machine is $arch — register one for $arch on your page"
+    [[ -z "$reg_arch" || "$reg_arch" == "$arch" ]] || die "the token is for a $reg_arch worker; this machine is $arch — register one for $arch on your page (maintainers only)"
     say "worker ${reg_id:-?} ($arch) — $RUNTIME, $DIR"
   elif [[ "$code" == 401 || "$code" == 403 ]]; then
-    die "the pool refuses this token ($code: $(jq -r '.error // empty' <<<"$self" 2>/dev/null || echo "revoked, or mistyped")) — register a worker on your page and start with the new one"
+    die "the pool refuses this token ($code: $(jq -r '.error // empty' <<<"$self" 2>/dev/null || echo "revoked, or mistyped")) — register a worker on your page (maintainers only) and start with the new one"
   else
     say "the pool did not answer (${code:-no connection}) — starting anyway; 'omarchy-worker status' says more once it does"
   fi
@@ -231,14 +235,17 @@ command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v jq >/dev/null 2>&1 || die "jq is required"
 mkdir -p "$DIR" 2>/dev/null || true; DIR="$(cd "$DIR" 2>/dev/null && pwd -P || echo "$DIR")"
 none() { [[ $# -eq 0 ]] || die "$cmd takes no options (see --help)"; }
+# A set the host agent retired carries its marker (#313): start, update and remove refuse there before they touch a file or a
+# container — each would bring the set back, or undo what the agent did.
+retired() { [[ ! -e "$DIR/.omarchy-agent" ]] || die "$cmd: not done, and nothing changed: this machine is a maintainer host managed by omarchy-agent, which retired this set ($DIR/.omarchy-agent) — nothing needs to be run here; see: omarchy-agent status"; }
 case "$cmd" in
-  start) cmd_start "$@" ;;
+  start) retired; cmd_start "$@" ;;
   status) none "$@"; cmd_status ;;
   logs) cmd_logs "$@" ;;
-  update) none "$@"; cmd_update ;;
+  update) none "$@"; retired; cmd_update ;;
   share) cmd_share "$@" ;;
   stop) none "$@"; cmd_stop ;;
-  remove) none "$@"; cmd_remove ;;
+  remove) none "$@"; retired; cmd_remove ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command $cmd (see --help)" ;;
 esac

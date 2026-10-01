@@ -1,0 +1,13 @@
+# An envelope that does not let the dispatcher hold the runtime socket.
+pool    = "https://omarchy-pool.example.org"
+host_id = "h_test"
+
+[set]
+name        = "host"
+dir         = "/home/omarchy/.local/share/omarchy-agent/sets/host"
+work_root   = "/srv/omarchy-pool/host"
+secrets_dir = "/srv/omarchy-pool/host-secrets"
+
+[envelope]
+allow_socket = false
+paths        = ["/srv/omarchy-pool/host"]

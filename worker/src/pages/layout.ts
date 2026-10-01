@@ -2187,7 +2187,7 @@ export type WorkerKind = "project" | "review" | "community";
  * and the panel around it cannot drift apart.
  */
 export function workerPanels(kinds: { kind: WorkerKind; blurb: string; hidden?: boolean }[]): string {
-  const NAME: Record<WorkerKind, string> = { project: "Project", review: "Review", community: "Contributors" };
+  const NAME: Record<WorkerKind, string> = { project: "Project", review: "Review", community: "Community" };
   return kinds.map((k, i) => `<div class="panel"${k.hidden ? ` id="wp-${k.kind}" hidden` : ""}${i ? ' style="margin-top:16px"' : ""}><h3>${NAME[k.kind]} <span class="dim" style="font-size:12px;font-weight:400">${escapeHtml(k.blurb)}</span></h3>
       <div class="table-wrap" style="border:0"><table id="w-${k.kind}" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>`).join("\n    ") + `\n    <div id="wt-legend"></div>`;
 }

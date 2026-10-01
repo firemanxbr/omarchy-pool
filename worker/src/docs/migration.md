@@ -281,8 +281,8 @@ Until then, moving the pool moves them too:
   `wrangler.toml` (`GITHUB_OAUTH_CLIENT_ID`), secret with
   `npx wrangler secret put GITHUB_OAUTH_CLIENT_SECRET`.
 - Workers: register one per architecture for the hosted fallback (`POST
-  /factory/workers` with your contributor token, then trust it as a
-  maintainer) and store their tokens as the GitHub secrets
+  /factory/workers` with your maintainer token — registration is maintainers
+  only, #331 — then trust it as a maintainer) and store their tokens as the GitHub secrets
   `POOL_WORKER_TOKEN_X86_64` / `POOL_WORKER_TOKEN_AARCH64`. Workers you run
   elsewhere are registered the same way; `JOB_TOKEN_SECRET` (any random
   string, `npx wrangler secret put JOB_TOKEN_SECRET`) signs the per-job

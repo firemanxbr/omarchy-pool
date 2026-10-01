@@ -1,0 +1,4 @@
+services:
+  dispatcher:
+    environment:
+      - OMARCHY_WORKER_ROLE=${ANTHROPIC_API_KEY}

@@ -187,7 +187,7 @@ const SCRIPT = String.raw`
     // What rolls its set out, in the pool's words (#277): its updater, a host timer from before #277, both, one that is not running, nothing.
     $("#wk-set").textContent = w.set_line || "—";
     var emu = w.labels && w.labels.emulated ? "emulated" : "native";
-    $("#wk-lede").innerHTML = (kind === "community" ? "A contributor's builder" : kind === "review" ? "The project's review worker" : "The project's pool worker") + " (" + esc(w.arch) + ", " + emu + ")" + (w.owner ? ", kept by " + personLink(w.owner) : "") + (w.labels && w.labels.where ? ", on " + esc(w.labels.where) : "") + ".";
+    $("#wk-lede").innerHTML = (kind === "community" ? "A community builder" : kind === "review" ? "The project's review worker" : "The project's pool worker") + " (" + esc(w.arch) + ", " + emu + ")" + (w.owner ? ", kept by " + personLink(w.owner) : "") + (w.labels && w.labels.where ? ", on " + esc(w.labels.where) : "") + ".";
     var agent = w.agent ? (w.agent_status === "ok" ? "answers" : w.agent_status === "error" ? "does not answer" : "not probed yet") : "no agent";
     var up = w.up_since ? ago(w.up_since).replace(" ago", "") : "—";
     // A builder runs one task per container: its uptime is its container's, with its last task — a new process per task is not a restart.

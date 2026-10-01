@@ -9,6 +9,7 @@ members = [
     "poc/crates/pkg-store",
     "poc/crates/pkg-hooks",
     "crates/omarchy-cli",
+    "crates/omarchy-agent",
 ]
 
 [workspace.package]

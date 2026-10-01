@@ -6,8 +6,10 @@ worker image — eight worker registrations, of which four run by default
 review pair behind `review2`), their
 brokers, `agent-proxy`, and the `updater` that rolls them out (the roles:
 [factory/README.md](../README.md) *Three roles*; how the day goes:
-[docs/RUNBOOK.md](../../docs/RUNBOOK.md) *The Studio host*). Anyone donating
-a machine to the project can use the same four files.
+[docs/RUNBOOK.md](../../docs/RUNBOOK.md) *The Studio host*). The project's
+compute is its maintainers' hosts: only a maintainer provides one (#331), and
+a maintainer adding a host uses the same four files. Contributors do not run
+workers; their packages build here.
 
 | File | What |
 |---|---|

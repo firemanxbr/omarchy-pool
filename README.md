@@ -35,7 +35,7 @@ Then `omarchy update`. `stable` is what passed a real pacman, an ABI check and t
 
 ## Bring a package
 
-Anyone who signs in with GitHub can ask for a package nobody ships yet and build it at home with the same tools maintainers use. Your build is evidence — the project builds it again, a real pacman installs it in the lab, and a maintainer who is not you approves it. [The factory →](https://omarchy-pool.org/factory) · [Run a worker →](https://omarchy-pool.org/docs/workers)
+Anyone who signs in with GitHub can ask for a package nobody ships yet, with nothing to run: it builds on the pool's hosts, which the maintainers provide (contributors do not run workers). That build is evidence — the project builds it again, a real pacman installs it in the lab, and a maintainer who is not you approves it. [The factory →](https://omarchy-pool.org/factory) · [How packaging works →](https://omarchy-pool.org/docs/factory#contribute-a-package) · [Run a worker (maintainers only) →](https://omarchy-pool.org/docs/workers)
 
 ## Contribute to the code
 
