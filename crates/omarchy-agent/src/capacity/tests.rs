@@ -348,12 +348,102 @@ fn the_probe_container_output_reads_into_limits_and_free_disk() {
     );
     let v1 = "cpu.max=\nmemory.max=\npids.max=\nfs 1 1 5 1% /\n";
     assert_eq!(probe::probe_limits(v1), (None, None, None));
+    // The engine kernel's page size, when the image has `getconf`.
+    assert_eq!(
+        probe::probe_page_size("pagesize=16384\nfs 1 1 5 1% /\n"),
+        Some(16384)
+    );
+    assert_eq!(probe::probe_page_size("pagesize=\nfs 1 1 5 1% /\n"), None);
+    assert_eq!(probe::probe_page_size(ok), None);
     assert_eq!(probe::df_free("garbage"), None);
 
     assert_eq!(
         probe::mem_available("MemTotal: 32000000 kB\nMemAvailable:   20971520 kB\n"),
         Some(20 * GB)
     );
+}
+
+/// A docker CLI that answers `info` and the probe container, and fails the next
+/// `limited-fails` runs that carry the limits.
+fn fake_docker(dir: &Path, limited_fails: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    put(dir, "info.json", ROOTFUL);
+    put(dir, "limited-fails", &limited_fails.to_string());
+    let d = dir.display();
+    let docker = dir.join("docker");
+    put(
+        dir,
+        "docker",
+        &format!(
+            r#"#!/bin/sh
+case "$1" in
+info) cat '{d}/info.json' ;;
+run)
+  case " $* " in *" --cpus "*)
+    n=$(cat '{d}/limited-fails')
+    if [ "$n" -gt 0 ]; then echo $((n - 1)) > '{d}/limited-fails'; echo refused >&2; exit 125; fi ;;
+  esac
+  printf 'cpu.max=50000 100000\nmemory.max=67108864\npids.max=32\npagesize=4096\n'
+  printf 'overlay 1 1 52428800 1%% /\n' ;;
+*) exit 2 ;;
+esac
+"#
+        ),
+    );
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    docker
+}
+
+#[test]
+fn a_limited_probe_run_that_fails_once_is_retried_before_the_limits_read_as_refused() {
+    let detect = |name: &str, limited_fails: u32| {
+        let dir = tmp(name);
+        let docker = fake_docker(&dir, limited_fails);
+        let p = probe::Probe {
+            docker: docker.to_str().unwrap(),
+            host: None,
+            work_root: &dir,
+            image: Some("build-image"),
+        };
+        let out = probe::detect(&p);
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    };
+    // A transient failure (a pull, the registry): the retry after the unlimited run
+    // shows the limits landing.
+    let f = detect("probe-blip", 1).unwrap();
+    assert_eq!(f.limits(), ALL_LIMITS);
+    // The engine's kernel and data root, as the probe container measured them, not this
+    // process's page size or a local directory named DockerRootDir.
+    assert_eq!((f.page_kb(), f.disk_free_gb().engine), (4, 50));
+    // Refused again after the unlimited run answered: the runtime refuses the limits.
+    let f = detect("probe-refused", 2).unwrap();
+    assert_eq!(
+        (
+            f.limits().cpus_hard,
+            f.limits().memory_hard,
+            f.limits().pids
+        ),
+        (false, false, false)
+    );
+    // Clean on the first try: one run.
+    assert_eq!(detect("probe-clean", 0).unwrap().limits(), ALL_LIMITS);
+}
+
+#[test]
+fn a_linked_run_directory_or_capacity_json_is_refused() {
+    let dir = tmp("links");
+    let elsewhere = tmp("links-elsewhere");
+    let c = Capacity::new(&facts(ROOTFUL), &Caps::default(), &constants());
+    std::os::unix::fs::symlink(&elsewhere, dir.join("run")).unwrap();
+    assert!(write_if_changed(&dir, &c, "2026-10-01T00:00:00Z").is_err());
+    std::fs::remove_file(dir.join("run")).unwrap();
+    std::fs::create_dir(dir.join("run")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("x.json"), dir.join("run/capacity.json")).unwrap();
+    assert!(write_if_changed(&dir, &c, "2026-10-01T00:00:00Z").is_err());
+    assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&elsewhere);
 }
 
 #[test]
@@ -460,6 +550,18 @@ dedicated = true
     assert_eq!(AgentToml::parse("").unwrap().caps, Caps::default());
     assert!(AgentToml::parse("[envelope]\nmax_units = -1\n").is_err());
     assert!(AgentToml::parse("[envelope]\nmax_units = \"all\"\n").is_err());
+    // A misspelt cap is refused, not silently dropped; every key of §12 reads.
+    assert!(AgentToml::parse("[envelope]\nmax_unit = 5\n").is_err());
+    assert!(AgentToml::parse(
+        "[envelope]\nallow_socket = true\nrootful_ack = true\nuserns_remap = false\n\
+         paths = []\ndrivers = [\"compose\"]\ncache_caps = { build_gb = 120 }\n\
+         agent_budget = { calls_per_task = 200 }\ntask_subnets = \"10.232.0.0/16\"\n\
+         diagnostics = false\nsoak_minutes = 0\n"
+    )
+    .is_ok());
+    // The work root is a plain absolute path, as lint-set reads it.
+    assert!(AgentToml::parse("[set]\nwork_root = \"srv/pool\"\n").is_err());
+    assert!(AgentToml::parse("[set]\nwork_root = \"/srv/../etc\"\n").is_err());
 }
 
 #[test]

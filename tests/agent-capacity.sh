@@ -65,7 +65,10 @@ else
   echo "==> rootless podman, through its Docker-compatible socket"
   podman system service --time=0 "unix://$tmp/podman.sock" & podman_pid=$!
   for _ in $(seq 50); do [[ -S "$tmp/podman.sock" ]] && break; sleep 0.2; done
-  out="$(DOCKER_HOST="unix://$tmp/podman.sock" "$agent" capacity --work-root "$tmp" --probe-image "$image")"
+  # Through agent.toml's socket_cli, as the agent reaches its engine: not DOCKER_HOST,
+  # which the driver (#315) clears.
+  printf '[set]\nwork_root = "%s"\nsocket_cli = "%s"\n' "$tmp" "$tmp/podman.sock" > "$tmp/agent.toml"
+  out="$("$agent" capacity --envelope "$tmp/agent.toml" --probe-image "$image")"
   echo "$out"
   check "$out" "$disks" "both free-disk values on rootless podman"
   check "$out" 'j["isolation"] == "user"' "rootless podman is the user level"

@@ -1,6 +1,11 @@
 //! Reading the host (design v2 §7.1). Every probe either answers or fails the whole
 //! detection with a reason: the run loop then changes nothing (an unanswered probe is
 //! never read as "less capacity").
+//!
+//! Seam for the driver trait (#315, design v2 M6): the docker CLI here inherits the
+//! agent's environment, so without `set.socket_cli` a `DOCKER_HOST` or `DOCKER_CONTEXT`
+//! decides which engine is measured. The driver runs it under `env_clear()` with a short
+//! allowlist and always passes `--host`; until then, give `socket_cli`.
 
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
@@ -64,6 +69,11 @@ impl Facts {
     /// cgroup limits, the smaller of each. The engine's `MemTotal` is the RAM the kernel
     /// manages, a little under the machine's nominal size, so it is rounded to the nearest
     /// GB (an "8 GB" VM reports about 7.7); a cgroup limit is exact, so it is rounded down.
+    ///
+    /// So an "8 GB" host meets the 8 GB minimum only while its `MemTotal` is at least
+    /// 7.5 GiB; one that reserves more (a large crashkernel) reads as 7 and is below it.
+    /// Should real hosts miss that line, the knob is the signed `min.mem_gb` and
+    /// `reserve.mem_gb` in a release, not a tolerance here.
     pub fn totals(&self) -> (u32, u32) {
         let cpus = self
             .cgroup
@@ -185,43 +195,63 @@ pub fn detect(p: &Probe<'_>) -> Result<Facts, String> {
         pids: engine.pids,
         cgroup_v2: engine.cgroup_v2,
     };
-    let root = Path::new(&engine.root_dir);
-    let mut engine_free = (root.is_absolute() && root.is_dir())
-        .then(|| free_bytes(root).ok())
-        .flatten();
+    // The probe container runs on the engine's kernel and its root lives on the engine's
+    // data root: what it measures wins over this process's view, which is another
+    // machine's when the engine is in a VM (Colima's 4K pages under macOS's 16K, a
+    // leftover /var/lib/docker here).
+    let mut engine_free = None;
+    let mut page_size = None;
     if let Some(image) = p.image {
+        // A limited run that fails may have failed for a reason of its own (a pull, the
+        // registry, the deadline). The unlimited run then answers, so the image is here
+        // and the engine is up: a limited run that still fails is the runtime refusing the
+        // limits (rootless podman without delegation). Refused both ways: no answer.
         let out = if let Ok(out) = probe_container(p, image, true) {
-            // What the task's cgroup shows is the answer; `docker info` only where the
-            // file is not there to read (cgroup v1). Podman's API, for one, reports
-            // `CpuCfsQuota: false` while `--cpus` lands.
-            let seen = probe_limits(&out);
-            limits.cpus_hard = seen.0.unwrap_or(limits.cpus_hard);
-            limits.memory_hard = seen.1.unwrap_or(limits.memory_hard);
-            limits.pids = seen.2.unwrap_or(limits.pids);
-            out
+            Ok(out)
         } else {
-            // Refused with the limits (rootless podman without delegation) but started
-            // without them: none of the limits holds. Refused both ways: no answer.
-            let out = probe_container(p, image, false)?;
-            limits.cpus_hard = false;
-            limits.memory_hard = false;
-            limits.pids = false;
-            out
+            let unlimited = probe_container(p, image, false)?;
+            probe_container(p, image, true).map_err(|_| unlimited)
         };
-        engine_free = engine_free.or_else(|| df_free(&out));
+        let out = match out {
+            Ok(out) => {
+                // What the task's cgroup shows is the answer; `docker info` only where the
+                // file is not there to read (cgroup v1). Podman's API, for one, reports
+                // `CpuCfsQuota: false` while `--cpus` lands.
+                let seen = probe_limits(&out);
+                limits.cpus_hard = seen.0.unwrap_or(limits.cpus_hard);
+                limits.memory_hard = seen.1.unwrap_or(limits.memory_hard);
+                limits.pids = seen.2.unwrap_or(limits.pids);
+                out
+            }
+            Err(out) => {
+                limits.cpus_hard = false;
+                limits.memory_hard = false;
+                limits.pids = false;
+                out
+            }
+        };
+        engine_free = df_free(&out);
+        page_size = probe_page_size(&out);
     }
-    let engine_free = engine_free.ok_or_else(|| {
-        format!(
-            "free disk on the engine's data root {:?}: not visible from here, and no probe \
+    let root = Path::new(&engine.root_dir);
+    let engine_free = engine_free
+        .or_else(|| {
+            (root.is_absolute() && root.is_dir())
+                .then(|| free_bytes(root).ok())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            format!(
+                "free disk on the engine's data root {:?}: not visible from here, and no probe \
              container measured it",
-            engine.root_dir
-        )
-    })?;
+                engine.root_dir
+            )
+        })?;
     Ok(Facts {
         engine,
         cgroup,
         mem_available,
-        page_size: rustix::param::page_size() as u64,
+        page_size: page_size.unwrap_or(rustix::param::page_size() as u64),
         disk_free: (work, engine_free),
         limits,
     })
@@ -347,8 +377,8 @@ fn free_bytes(path: &Path) -> Result<u64, String> {
     Ok(s.f_bavail.saturating_mul(s.f_frsize))
 }
 
-/// The probe container: its cgroup's three limits, then `df` of its root (which lives on
-/// the engine's data root).
+/// The probe container: its cgroup's three limits, the engine kernel's page size, then
+/// `df` of its root (which lives on the engine's data root).
 fn probe_container(p: &Probe<'_>, image: &str, limited: bool) -> Result<String, String> {
     let mut c = p.docker();
     c.args(["run", "--rm", "--network", "none"]);
@@ -357,7 +387,8 @@ fn probe_container(p: &Probe<'_>, image: &str, limited: bool) -> Result<String, 
     }
     c.args(["--entrypoint", "sh", image, "-c"]).arg(
         "for f in cpu.max memory.max pids.max; do printf '%s=' $f; \
-         cat /sys/fs/cgroup/$f 2>/dev/null || echo; done; df -Pk / | tail -n 1",
+         cat /sys/fs/cgroup/$f 2>/dev/null || echo; done; \
+         printf 'pagesize='; getconf PAGESIZE 2>/dev/null || echo; df -Pk / | tail -n 1",
     );
     run(c, PROBE_TIMEOUT).map_err(|e| format!("probe container: {e}"))
 }
@@ -365,15 +396,26 @@ fn probe_container(p: &Probe<'_>, image: &str, limited: bool) -> Result<String, 
 /// What the probe container's cgroup showed for each limit: `None` when the file is not
 /// there to read (cgroup v1), so only `docker info`'s answer counts.
 pub(super) fn probe_limits(out: &str) -> (Option<bool>, Option<bool>, Option<bool>) {
-    let get = |name: &str, want: &str| {
-        let v = out.lines().find_map(|l| l.strip_prefix(name))?.trim();
-        (!v.is_empty()).then(|| v == want)
-    };
+    let get = |name: &str, want: &str| probe_value(out, name).map(|v| v == want);
     (
         get("cpu.max=", PROBE_CPU_MAX),
         get("memory.max=", PROBE_MEMORY_MAX),
         get("pids.max=", PROBE_PIDS_MAX),
     )
+}
+
+/// The engine kernel's page size, as the probe container's `getconf` printed it; `None`
+/// when the image has no `getconf`.
+pub(super) fn probe_page_size(out: &str) -> Option<u64> {
+    probe_value(out, "pagesize=")?
+        .parse()
+        .ok()
+        .filter(|&n: &u64| n > 0)
+}
+
+fn probe_value<'a>(out: &'a str, name: &str) -> Option<&'a str> {
+    let v = out.lines().find_map(|l| l.strip_prefix(name))?.trim();
+    (!v.is_empty()).then_some(v)
 }
 
 /// The last line of `df -Pk /`: the fourth column is the space available, in KB.

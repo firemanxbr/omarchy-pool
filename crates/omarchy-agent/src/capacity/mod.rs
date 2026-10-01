@@ -22,7 +22,13 @@
 //! dispatcher reads the file, claims nothing while `below_minimum` or while its leases
 //! exceed `units`, and gives each task `--cpus` and the job counts of its share (#335,
 //! #337); emulated lanes (#338) add to `lanes`; the driver trait (#315) wraps
-//! [`probe::engine`] as its `capacity()`.
+//! [`probe::engine`] as its `capacity()` and runs the engine CLI under a cleared
+//! environment. Also for #315: one `agent.toml` reader in place of [`AgentToml`] and
+//! `lint::Envelope::from_agent_toml`, with one closed `[envelope]` schema (until then
+//! [`AgentToml::parse`] refuses a key design v2 §12 does not name); whether a change of
+//! free disk alone (in `DISK_STEP_GB` steps, at most hourly) is worth a whole round; and
+//! the set directory's files opened with `openat` and `O_NOFOLLOW` (until then
+//! [`write_if_changed`] refuses a linked `run/` or `capacity.json`).
 
 pub mod probe;
 
@@ -98,7 +104,9 @@ impl Default for Caps {
 }
 
 /// What the capacity code reads from `agent.toml`: the caps, and where the work root and
-/// the engine's socket are. Unknown keys are left to their readers.
+/// the engine's socket are. Other tables are left to their readers, but a key in
+/// `[envelope]` that design v2 §12 does not name is refused: a misspelt cap that is
+/// silently lost would leave the envelope wider than the owner wrote it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentToml {
     pub caps: Caps,
@@ -129,7 +137,20 @@ impl AgentToml {
             #[serde(default)]
             dedicated: bool,
         }
-        let f: File = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
+        let raw: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
+        if let Some(env) = raw.get("envelope").and_then(toml::Value::as_table) {
+            if let Some(k) = env.keys().find(|k| !ENVELOPE_KEYS.contains(&k.as_str())) {
+                return Err(format!("agent.toml: [envelope] has no key {k:?}"));
+            }
+        }
+        let f: File = raw.try_into().map_err(|e| format!("agent.toml: {e}"))?;
+        if let Some(w) = f.set.work_root.as_deref() {
+            if !crate::lint::is_plain_absolute(Path::new(w)) {
+                return Err(format!(
+                    "agent.toml: set.work_root {w} is not a plain absolute path"
+                ));
+            }
+        }
         let e = f.envelope;
         Ok(AgentToml {
             caps: Caps {
@@ -144,6 +165,26 @@ impl AgentToml {
         })
     }
 }
+
+/// Every key of `agent.toml`'s `[envelope]` (design v2 §12).
+const ENVELOPE_KEYS: &[&str] = &[
+    "max_units",
+    "max_cpus",
+    "max_mem_gb",
+    "emulate",
+    "agent_slots",
+    "agent_budget",
+    "cache_caps",
+    "task_subnets",
+    "allow_socket",
+    "rootful_ack",
+    "dedicated",
+    "userns_remap",
+    "drivers",
+    "paths",
+    "diagnostics",
+    "soak_minutes",
+];
 
 /// One way the host is below the signed minimum, with the numbers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,10 +427,19 @@ pub enum Written {
 }
 
 /// Writes `<set dir>/run/capacity.json` only when something other than `at` changed,
-/// atomically (a new file renamed over the old one, never followed through a link).
+/// atomically (a new file renamed over the old one). A `run/` or a `capacity.json` that is
+/// a symbolic link is refused, never followed.
 pub fn write_if_changed(set_dir: &Path, c: &Capacity, at: &str) -> std::io::Result<Written> {
     let run = set_dir.join("run");
     let path = run.join("capacity.json");
+    for p in [&run, &path] {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(std::io::Error::other(format!(
+                "{} is a symbolic link; not followed",
+                p.display()
+            )));
+        }
+    }
     let new = c.file(at);
     if let Ok(old) = std::fs::read(&path) {
         let mut same = serde_json::from_slice::<serde_json::Value>(&old).ok();
