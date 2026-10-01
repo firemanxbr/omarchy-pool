@@ -675,7 +675,8 @@ verified, the host set linted in memory; `ok` within 30 s). Then it writes
 manager starts `current`. The dispatcher and the task containers keep running
 throughout. A download, a hash or a self-test that fails changes nothing: the
 running agent applies the release itself when its `min_agent` admits it, and
-the update is tried again an hour later.
+the update is tried again an hour later (at once after a restart), while the
+pool still names that release too.
 
 The new agent counts its start in `pending` before it reads anything else, and
 touches no container until its health gate passed: a cached bundle verifies,

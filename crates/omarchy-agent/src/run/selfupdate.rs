@@ -23,6 +23,11 @@
 //!
 //! Seams: soak and `agent.urgent` (P4); the unit file and launchd plist are written by
 //! `install` (#317) — `omarchy-agent.service` beside this file is the unit it writes.
+//! The host report (#321) carries `agent-rollback` from the journal (or a sticky field),
+//! not from `state.round`, which the next poll overwrites. The deadline is the old
+//! agent's wall clock (as the issue says): a host suspended through the window rolls a
+//! healthy agent back; a monotonic deadline, and a report when that undoes a signed
+//! `agent_to`, are P4's.
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -42,6 +47,7 @@ use super::rollout::{self, Outcome};
 use super::state::{self, write_atomic};
 use super::target::Target;
 use super::tools;
+use super::trust;
 
 /// How long a new agent has to pass its health gate.
 pub(crate) const DEADLINE_S: i64 = 600;
@@ -430,8 +436,34 @@ impl Agent {
         self.move_agent(release, ships, now).map(|()| true)
     }
 
+    /// The applied release's higher agent, when its update failed before the swap (a
+    /// download, a hash, a self-test) and the old agent applied the release meanwhile:
+    /// tried again while the pool names that release, after [`RETRY_S`] or at once after
+    /// a restart. `true`: the swap is done and the agent exits after this tick.
+    pub(crate) fn agent_again(&mut self, applied: Release, now: i64) -> bool {
+        if self.upward_checked == Some(applied)
+            || self.retry.is_some_and(|(_, at)| now < at + RETRY_S)
+            || trust::admit(&self.state, applied).is_err()
+        {
+            return false;
+        }
+        let Some(b) = self.cached(applied) else {
+            return false;
+        };
+        let ships = b.manifest().outer().agent().clone();
+        match self.upgrade(applied, &ships, now) {
+            Ok(true) => true,
+            Ok(false) => {
+                self.upward_checked = Some(applied);
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
     /// The agent moved to what `ships` names, from `release`'s assets (steps 2 and 3).
-    /// A failure is tried again after [`RETRY_S`], or at once after a restart.
+    /// A failure is tried again after [`RETRY_S`], or at once after a restart: from the
+    /// next release's [`Agent::upgrade`], or from [`Agent::agent_again`] for this one.
     pub(crate) fn move_agent(
         &mut self,
         release: Release,
@@ -515,9 +547,10 @@ impl Agent {
             let dir = self.paths.versions().join(want.to_string());
             fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             write_atomic(&bin, &data)?;
-            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))
-                .map_err(|e| format!("{}: {e}", bin.display()))?;
         }
+        // Every time: a crash before it left the right bytes with the wrong mode.
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("{}: {e}", bin.display()))?;
         let mut c = Command::new(&bin);
         c.arg("self-test")
             .arg("--data")

@@ -92,6 +92,8 @@ pub(crate) struct Agent {
     pub(super) gate_next: i64,
     /// The agent version whose update failed before the swap, and when.
     pub(super) retry: Option<(Version, i64)>,
+    /// The applied release whose agent was checked and needs no update (once per start).
+    pub(super) upward_checked: Option<Release>,
 }
 
 enum Fetched {
@@ -140,6 +142,7 @@ impl Agent {
             gate: None,
             gate_next: 0,
             retry: None,
+            upward_checked: None,
         }
     }
 
@@ -417,6 +420,14 @@ impl Agent {
         {
             return;
         }
+        // A higher agent the release that runs ships, whose update failed before the
+        // swap, is tried again while the pool names that release (#316).
+        if in_flight.is_none()
+            && self.state.applied == Some(target)
+            && self.agent_again(target, now)
+        {
+            return;
+        }
         if in_flight.is_none() && self.state.applied == Some(target) && force.is_none() {
             return;
         }
@@ -530,10 +541,14 @@ impl Agent {
         }
         let detail = match self.upgrade(target, outer.agent(), now) {
             Ok(true) => return,
-            Ok(false) => format!(
-                "{target}: {why}; agent {} was rolled back here and is skipped until a higher one",
-                outer.agent().version()
-            ),
+            Ok(false) => {
+                let v = outer.agent().version();
+                if self.state.agent_skip.is_some_and(|s| v <= s) {
+                    format!("{target}: {why}; agent {v} was rolled back here and is skipped until a higher one")
+                } else {
+                    format!("{target}: {why}; it ships agent {v}, not above this one")
+                }
+            }
             Err(e) => format!(
                 "{target}: {why}; the update to agent {}: {e}",
                 outer.agent().version()

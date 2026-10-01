@@ -53,9 +53,18 @@ fn fault(at: &str) {
 /// swapped `current`: exit 0 and the service manager starts the new agent).
 pub fn run(data: Option<&str>) -> u8 {
     let me = version::agent();
-    // A self-update's start is counted before agent.toml or state.json are read (#316).
-    if let Ok(dir) = data_dir(data) {
-        if let Start::RolledBack(why) = selfupdate::count_start(&dir, me, super::now()) {
+    // A self-update's start is counted before agent.toml or state.json are read (#316);
+    // a second `run` beside the running agent is no start of it: neither counted nor
+    // flipped back.
+    if let Ok(p) = paths(data) {
+        if let Some(pid) = running_agent(&p) {
+            eprintln!(
+                "omarchy-agent run: another agent runs on {} as pid {pid}",
+                p.data.display()
+            );
+            return CONFIG_ERROR;
+        }
+        if let Start::RolledBack(why) = selfupdate::count_start(&p.data, me, super::now()) {
             eprintln!("omarchy-agent run: {why}");
             return 0;
         }
@@ -67,6 +76,9 @@ pub fn run(data: Option<&str>) -> u8 {
             fault("hang-before-ready");
             notify("READY=1");
             fault("hang-after-ready");
+            // After READY=1: the pinned tools may be downloaded again, longer than
+            // TimeoutStartSec allows.
+            agent.open_tools();
             loop_forever(&mut agent, &usr1, &progress)
         }
         Err(e) => {
@@ -154,7 +166,6 @@ fn setup(
     let mut agent = Agent::new(cfg, paths, state, pool, Box::new(Sigstore), Drivers::Pinned);
     agent.progress = Some(Arc::clone(progress));
     agent.exe = std::env::current_exe().ok();
-    agent.open_tools();
     agent.resume(super::now());
     agent.journal.write(
         super::now(),

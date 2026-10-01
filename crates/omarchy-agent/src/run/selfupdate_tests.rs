@@ -291,6 +291,63 @@ fn a_wrong_hash_or_a_failing_self_test_changes_nothing_and_this_agent_applies_th
 }
 
 #[test]
+fn a_failed_update_is_tried_again_for_the_same_release_after_an_hour_or_a_restart() {
+    for after_restart in [false, true] {
+        let new = above(1);
+        let mut w = host_with(new, "0.1.0", &binary(true));
+        let asset = w
+            .remote
+            .borrow()
+            .assets
+            .keys()
+            .find(|k| k.starts_with("v1.1.0/omarchy-agent-"))
+            .unwrap()
+            .clone();
+        // One download fails: this agent applies v1.1.0 meanwhile.
+        let good = w.remote.borrow_mut().assets.remove(&asset).unwrap();
+        w.round();
+        assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
+        assert_eq!(w.agent.exit, None);
+        assert_eq!(w.journal().matches("not updated").count(), 1);
+        // The asset is there again; the pool still names v1.1.0.
+        w.remote.borrow_mut().assets.insert(asset, good);
+        w.tick(120);
+        w.tick(120);
+        assert_eq!(w.agent.exit, None, "not at every poll");
+        assert_eq!(w.journal().matches("not updated").count(), 1);
+        if after_restart {
+            w.restart();
+            w.agent.exe = Some(w.agent.paths.binary(me()));
+            // The next poll (120 s with its jitter), well within the hour.
+            w.tick(150);
+        } else {
+            w.tick(3600);
+        }
+        assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
+        assert_eq!(link(&w.agent.paths.current()), format!("versions/{new}"));
+        assert!(w.agent.paths.pending().exists());
+    }
+}
+
+#[test]
+fn a_binary_with_the_right_hash_and_the_wrong_mode_is_made_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let new = above(1);
+    let mut w = host_with(new, "0.1.0", &binary(true));
+    // A crash between the write and the chmod left this behind.
+    let bin = w.agent.paths.binary(new);
+    fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    fs::write(&bin, binary(true)).unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o644)).unwrap();
+    w.tick(200);
+    assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
+    assert_eq!(
+        fs::metadata(&bin).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
+#[test]
 fn a_self_update_needs_the_layout_install_sh_makes() {
     let new = above(1);
     let mut w = host_with(new, "0.1.0", &binary(true));
