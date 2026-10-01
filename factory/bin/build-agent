@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# build-agent <target-triple> <out-file>: one reproducible build of
+# omarchy-agent from the tree this script is in (design v2 D17, §4.4), as
+# release.yml ships it and tests/agent-reproducible.sh checks it.
+#
+# Same bytes from the same agent, whatever else changed: --locked, the
+# toolchain rust-toolchain.toml pins, the build directories remapped
+# (--remap-path-prefix for Rust, -ffile-prefix-map for the C that aws-lc
+# compiles and, on macOS, -oso_prefix so the linker's UUID does not hash the
+# object paths) and no release tag in the binary (the agent carries its own
+# version only), so a release with no agent change ships the binary the
+# previous one did. Nothing in the agent embeds a time; SOURCE_DATE_EPOCH is
+# a constant all the same, should a C build ever read it. On macOS the
+# binary is signed ad hoc (`codesign -s -`), which carries no time, with a
+# fixed identifier: codesign would otherwise take it from the file name, and
+# a rebuild under any other name than the release asset's would differ.
+#
+# Linux musl targets need musl's C compiler (CC_<target>=musl-gcc).
+set -euo pipefail
+target="${1:?usage: build-agent <target-triple> <out-file>}"
+out="${2:?usage: build-agent <target-triple> <out-file>}"
+src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+
+export SOURCE_DATE_EPOCH=0 CARGO_INCREMENTAL=0
+map="-ffile-prefix-map=$src=/build -ffile-prefix-map=$cargo_home=/cargo"
+rustflags="--remap-path-prefix=$src=/build --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$rustup_home=/rustup"
+[[ "$target" == *-apple-darwin ]] && rustflags="$rustflags -C link-arg=-Wl,-oso_prefix,$src/"
+
+(
+  cd "$src"
+  RUSTFLAGS="$rustflags" CFLAGS="$map" CXXFLAGS="$map" \
+    cargo build --quiet --release --locked -p omarchy-agent --target "$target"
+)
+bin="$src/target/$target/release/omarchy-agent"
+mkdir -p "$(dirname "$out")"
+cp "$bin" "$out"
+[[ "$target" == *-apple-darwin ]] && codesign --force -s - --identifier omarchy-agent "$out"
+chmod 755 "$out"
+echo "build-agent: $target -> $out" >&2

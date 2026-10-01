@@ -1,0 +1,85 @@
+# What every host bundle carries besides the sets, the images and the agent
+# (design v2 §4.4; #311). factory/bin/host-bundle writes it into the signed
+# manifest's `inner` as is, so changing a value here changes what every
+# maintainer host may do at the next release, without an agent release.
+# The P0 `verify` parser (crates/omarchy-agent/src/manifest.rs) refuses a
+# missing or unknown field and any value that would unbound parallelism;
+# tests/host-bundle.py runs it on what the writer makes of this file.
+
+# The oldest agent that may apply a bundle of this layout; an older agent
+# updates itself first (outer layer, frozen).
+min_agent = "0.1.0"
+# The anti-downgrade floor every host merges in (design v2 §5.2): a target
+# below it is refused even with a rollback statement. Raise it to retire
+# releases for good; never above the release being cut (the writer refuses).
+min_release = "v1.0.0"
+# Releases no host may run, whatever a rollback statement says.
+revoked = []
+# The pool origins a host's agent and dispatcher talk to: the Worker that
+# serves the API (worker/wrangler.toml routes; OMARCHY_API in the image).
+pools = ["https://pkgs.omarchy-pool.org"]
+
+# The capacity constants (design v2 §4.4, §7.3), signed with the release so
+# a compromised pool cannot inflate a host's parallelism.
+[capacity]
+max_size = 4
+community_max_size = 2
+
+[capacity.min]          # the minimum to join (D30)
+cpus = 4
+mem_gb = 8
+work_disk_gb = 60
+engine_disk_gb = 40
+
+[capacity.reserve]      # kept back for the host and the agent
+cpus = 1
+mem_gb = 2
+
+[capacity.unit]         # one capacity unit
+cpus = 1
+mem_gb = 2
+
+[capacity.units]        # units per task kind
+build_per_size = 2
+trial = 2
+audit = 1
+job = 1
+job_reserved = 1
+
+[capacity.disk]
+build_gb_per_size = 20
+floor_gb = 10
+
+[capacity.sidecars.egress]
+cpus = 0.1
+mem_mb = 64
+
+[capacity.sidecars.agent]
+cpus = 0.25
+mem_mb = 256
+
+[capacity.emulated]
+share_when_native_waits = 0.5
+
+# The container tools the agent installs under its data directory and uses
+# instead of the host's (D21): the docker CLI and the compose plugin, per
+# platform, by URL and SHA-256. The same versions and sums the worker image
+# pins (factory/image/Containerfile, DOCKER_CLI and COMPOSE; the writer's
+# test holds them equal), and release.yml downloads each one and checks its
+# sum before it signs. aarch64-darwin joins with macOS hosts (design v2 §22,
+# P3): no host runs the agent there before then.
+[tools.x86_64-linux.docker]
+url = "https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz"
+sha256 = "4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640"
+
+[tools.x86_64-linux.docker-compose]
+url = "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-linux-x86_64"
+sha256 = "db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576"
+
+[tools.aarch64-linux.docker]
+url = "https://download.docker.com/linux/static/stable/aarch64/docker-27.5.1.tgz"
+sha256 = "e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817"
+
+[tools.aarch64-linux.docker-compose]
+url = "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-linux-aarch64"
+sha256 = "732e3a84c1a0f67256ce80bc2598a24546b10ca05f9faa97efceb1171ece2ef7"

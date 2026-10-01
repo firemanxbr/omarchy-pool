@@ -40,7 +40,8 @@ def expected(maintainers):
         "# CI fails when the two disagree. Every maintainer owns the governance file,",
         "# this one, the sizing recipes and what the hosts' trust relies on (#308):",
         "# the workflows that sign, the host agent, the dispatcher that starts task",
-        "# containers and the host sets. With main requiring a code-owner review,",
+        "# containers, the host sets, and the host bundle's capacity constants, pins,",
+        "# install.sh and writer. With main requiring a code-owner review,",
         "# a change here is a decision another maintainer approves.",
         f"factory/MAINTAINERS.toml          {owners}",
         f".github/CODEOWNERS                {owners}",
@@ -49,6 +50,8 @@ def expected(maintainers):
         f"crates/omarchy-agent/             {owners}",
         f"crates/pkg-repo/src/dispatch*     {owners}",
         f"factory/sets/                     {owners}",
+        f"factory/bundle/                   {owners}",
+        f"factory/bin/host-bundle           {owners}",
     ]
     return "\n".join(lines) + "\n"
 

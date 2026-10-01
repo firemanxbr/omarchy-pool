@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""agent-version-check [--base REF] [--repo DIR]: the agent's version moves with
+its code (design v2 D17; #311).
+
+The agent carries its own semver, never the release tag, so an unchanged agent
+keeps its hash from release to release (factory/bin/build-agent) and a changed
+one says so. This fails when what goes into the binary changed since the
+previous release and crates/omarchy-agent/Cargo.toml's version was not raised:
+
+  - crates/omarchy-agent/Cargo.toml and src/ (its tests/ and fuzz/ are not in
+    the binary), a build.rs if one appears;
+  - rust-toolchain.toml and the workspace's [profile.*] tables;
+  - Cargo.lock's entries for every crate the agent builds with: its
+    [dependencies] and [build-dependencies] and theirs, not its
+    dev-dependencies.
+
+The previous release is the highest v* tag HEAD contains, other than one on
+HEAD itself (--base names another ref). A release whose tree has no agent
+yet leaves nothing to compare. CI runs it on every pull request and before a
+release (ci.yml); it reads committed trees only.
+"""
+
+import argparse
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+CRATE = "crates/omarchy-agent"
+INPUTS = [f"{CRATE}/Cargo.toml", f"{CRATE}/src", f"{CRATE}/build.rs", "rust-toolchain.toml"]
+
+
+def git(repo, *args, check=True):
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        sys.exit(f"agent-version-check: git {' '.join(args)}: {r.stderr.strip()}")
+    return r
+
+
+def show(repo, rev, path):
+    r = git(repo, "show", f"{rev}:{path}", check=False)
+    return r.stdout if r.returncode == 0 else None
+
+
+def previous_release(repo):
+    here = set(git(repo, "tag", "--points-at", "HEAD", "--list", "v*").stdout.split())
+    tags = git(repo, "tag", "--merged", "HEAD", "--sort=-v:refname", "--list", "v*").stdout.split()
+    return next((t for t in tags if t not in here and re.fullmatch(r"v\d+\.\d+\.\d+", t)), None)
+
+
+def version(crate_toml):
+    v = tomllib.loads(crate_toml)["package"]["version"]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", v):
+        sys.exit(f"agent-version-check: the agent's version {v!r} is not X.Y.Z")
+    return tuple(int(p) for p in v.split("."))
+
+
+def dep_names(crate_toml):
+    """The package names the agent's binary builds with: [dependencies] and
+    [build-dependencies], target-specific ones included; never dev-dependencies."""
+    doc = tomllib.loads(crate_toml)
+    tables = [doc.get("dependencies", {}), doc.get("build-dependencies", {})]
+    for t in doc.get("target", {}).values():
+        tables += [t.get("dependencies", {}), t.get("build-dependencies", {})]
+    names = set()
+    for table in tables:
+        for key, spec in table.items():
+            names.add(spec.get("package", key) if isinstance(spec, dict) else key)
+    return names
+
+
+def closure(lock_text, crate_toml):
+    """Cargo.lock's entries ("name version source") the agent builds with."""
+    packages = tomllib.loads(lock_text).get("package", [])
+    by_name = {}
+    for p in packages:
+        by_name.setdefault(p["name"], []).append(p)
+
+    def resolve(dep):
+        parts = dep.split(" ")
+        found = [p for p in by_name.get(parts[0], []) if len(parts) == 1 or p["version"] == parts[1]]
+        if len(found) != 1:
+            sys.exit(f"agent-version-check: Cargo.lock: cannot resolve {dep!r}")
+        return found[0]
+
+    agent = resolve("omarchy-agent")
+    wanted = dep_names(crate_toml)
+    todo = [resolve(d) for d in agent.get("dependencies", []) if d.split(" ")[0] in wanted]
+    seen = {}
+    while todo:
+        p = todo.pop()
+        key = f"{p['name']} {p['version']} {p.get('source', 'path')}"
+        if key in seen:
+            continue
+        seen[key] = p.get("checksum", "")
+        todo += [resolve(d) for d in p.get("dependencies", [])]
+    return seen
+
+
+def profiles(workspace_toml):
+    return tomllib.loads(workspace_toml or "").get("profile", {})
+
+
+def changes(repo, base):
+    out = []
+    diff = git(repo, "diff", "--name-only", base, "HEAD", "--", *INPUTS).stdout.split()
+    out += [f"{p} changed" for p in diff]
+    if profiles(show(repo, base, "Cargo.toml")) != profiles(show(repo, "HEAD", "Cargo.toml")):
+        out.append("the workspace's [profile.*] changed")
+    old = closure(show(repo, base, "Cargo.lock"), show(repo, base, f"{CRATE}/Cargo.toml"))
+    new = closure(show(repo, "HEAD", "Cargo.lock"), show(repo, "HEAD", f"{CRATE}/Cargo.toml"))
+    out += [f"Cargo.lock: {k} added" for k in sorted(set(new) - set(old))]
+    out += [f"Cargo.lock: {k} removed" for k in sorted(set(old) - set(new))]
+    out += [f"Cargo.lock: {k} changed checksum" for k in sorted(set(old) & set(new)) if old[k] != new[k]]
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="agent-version-check")
+    ap.add_argument("--base")
+    ap.add_argument("--repo", default=Path(__file__).resolve().parents[2])
+    a = ap.parse_args()
+    base = a.base or previous_release(a.repo)
+    if base is None:
+        print("agent-version-check: no previous release: nothing to compare")
+        return
+    old_toml = show(a.repo, base, f"{CRATE}/Cargo.toml")
+    if old_toml is None:
+        print(f"agent-version-check: {base} has no agent: nothing to compare")
+        return
+    old, new = version(old_toml), version(show(a.repo, "HEAD", f"{CRATE}/Cargo.toml"))
+    fmt = lambda v: ".".join(map(str, v))  # noqa: E731
+    what = changes(a.repo, base)
+    if not what:
+        # A version moved by hand is a change of Cargo.toml, so it never lands here.
+        print(f"agent-version-check: the agent is unchanged since {base} ({fmt(new)})")
+        return
+    if new <= old:
+        sys.exit(
+            f"agent-version-check: the agent changed since {base} but its version is still {fmt(new)}"
+            f" (raise it above {fmt(old)} in {CRATE}/Cargo.toml):\n  " + "\n  ".join(what)
+        )
+    print(f"agent-version-check: the agent changed since {base} and its version rose {fmt(old)} -> {fmt(new)}")
+
+
+if __name__ == "__main__":
+    main()

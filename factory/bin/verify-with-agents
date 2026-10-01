@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# verify-with-agents <bundle> <probe> <new-agent>: release.yml's host-bundle
+# job proves, before anything is published, that the agents the fleet runs
+# can take this release (#311, design v2 §4.4, §5.1). A release that the new
+# agent accepts but older agents reject would strand every host.
+#
+# Each agent runs `omarchy-agent verify --bundle` with the production pins on
+# the signed bundle and on the signed probe (the same bundle whose manifest
+# carries one more outer field: the outer layer is frozen and lenient, so
+# every agent must still read it):
+#
+# - the new agent must verify both (exit 0);
+# - every agent version released in the last 30 days, downloaded from its
+#   immutable GitHub release, must verify both or answer "needs a newer agent"
+#   (exit 3: it reads the outer layer and updates itself first); a refusal
+#   (exit 1) or an error (exit 2) fails the release. Releases from before the
+#   agent existed carry none and are skipped, read from the release's asset
+#   list: an agent the list names but that cannot be downloaded fails the
+#   release (a network error is not "no agent"). One binary is run once
+#   however many releases ship it.
+#
+# An earlier agent is a file anyone with write access could have put on a
+# release (by hand, or from a branch's copy of release.yml), so it runs only
+# once `gh attestation verify` proved it was built and attested by
+# release.yml on refs/heads/main; any other agent fails the release (a
+# person must look), it is never skipped. And it never runs next to a
+# signing token: release.yml runs this in its own job, read-only, with no
+# OIDC token, and the agents run without GH_TOKEN in their environment.
+#
+# The runner is x86_64, so it runs each version's x86_64-linux build: the
+# verifier's code is the same on every platform.
+set -euo pipefail
+bundle="${1:?usage: verify-with-agents <bundle> <probe> <new-agent>}"
+probe="${2:?usage: verify-with-agents <bundle> <probe> <new-agent>}"
+new="${3:?usage: verify-with-agents <bundle> <probe> <new-agent>}"
+asset=omarchy-agent-x86_64-linux-musl
+repo=firemanxbr/omarchy-pool
+days="${OMARCHY_AGENT_WINDOW_DAYS:-30}"
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+
+check() { # agent, label, the exit codes accepted
+  local agent="$1" label="$2" accepted="$3" what file code
+  for what in bundle probe; do
+    if [[ "$what" == bundle ]]; then file="$bundle"; else file="$probe"; fi
+    code=0
+    env -u GH_TOKEN -u GITHUB_TOKEN "$agent" verify --bundle "$file" --sig "$file.sigstore.json" > "$work/out" 2>&1 || code=$?
+    if [[ " $accepted " != *" $code "* ]]; then
+      echo "verify-with-agents: $label refuses the $what (exit $code):" >&2
+      cat "$work/out" >&2
+      return 1
+    fi
+    echo "ok: $label: the $what (exit $code) $(head -c 300 "$work/out")"
+  done
+}
+
+check "$new" "the new agent ($("$new" --version))" 0
+
+cutoff="$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=$days)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+tags="$(gh release list --exclude-drafts --limit 200 --json tagName,publishedAt \
+  --jq ".[] | select(.publishedAt >= \"$cutoff\") | .tagName")"
+seen=" $(sha256 "$new") "
+checked=0
+for tag in $tags; do
+  names="$(gh release view "$tag" --json assets --jq '.assets[].name')" \
+    || { echo "verify-with-agents: cannot list $tag's assets" >&2; exit 1; }
+  if ! grep -qxF -- "$asset" <<<"$names"; then
+    echo "skip: $tag ships no agent"
+    continue
+  fi
+  if ! gh release download "$tag" --pattern "$asset" --dir "$work/$tag" >/dev/null || [[ ! -f "$work/$tag/$asset" ]]; then
+    echo "verify-with-agents: $tag ships $asset but it cannot be downloaded" >&2
+    exit 1
+  fi
+  agent="$work/$tag/$asset"
+  sum="$(sha256 "$agent")"
+  if [[ "$seen" == *" $sum "* ]]; then echo "skip: $tag's agent was already run"; continue; fi
+  seen+="$sum "
+  if ! gh attestation verify "$agent" -R "$repo" --signer-workflow "$repo/.github/workflows/release.yml" \
+      --source-ref refs/heads/main > "$work/attest" 2>&1; then
+    echo "verify-with-agents: $tag's $asset is not attested by release.yml on refs/heads/main; it is not run, and the release stops:" >&2
+    cat "$work/attest" >&2
+    exit 1
+  fi
+  chmod 755 "$agent"
+  check "$agent" "$tag's agent ($("$agent" --version))" "0 3"
+  checked=$((checked + 1))
+done
+echo "verify-with-agents: the new agent and $checked earlier agent(s) of the last $days days take this release"

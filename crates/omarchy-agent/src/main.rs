@@ -5,6 +5,8 @@
 //! omarchy-agent verify --statement <statement.json> --sig <bundle.sigstore.json>
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
 //!     (<dir>/compose.yml and <dir>/set.toml)
+//! omarchy-agent install [options]
+//!     (what install.sh runs once the binary is in place; a stub until P1, #317)
 //! ```
 //!
 //! Exit status: 0 verified or clean, 1 refused, 2 usage or a file that cannot be read,
@@ -20,6 +22,7 @@ const USAGE: &str = "usage:
   omarchy-agent verify --bundle <tar.gz> --sig <sigstore.json>
   omarchy-agent verify --statement <json> --sig <sigstore.json>
   omarchy-agent lint-set <dir> [--override <file>] [--envelope <agent.toml>]
+  omarchy-agent install [options]
   omarchy-agent --version";
 
 const REFUSED: u8 = 1;
@@ -31,6 +34,15 @@ fn main() -> ExitCode {
     let code = match args.first().map(String::as_str) {
         Some("verify") => verify_cmd(&args[1..]),
         Some("lint-set") => lint_cmd(&args[1..]),
+        Some("install") => {
+            // install.sh's last step (#311). The install with its preflight, the run loop
+            // and enrollment (OMARCHY_ENROLL, from the environment only) come in P1 (#317).
+            println!(
+                "omarchy-agent {}: installed; the agent arrives in P1 (#317), nothing else was done",
+                omarchy_agent::AGENT_VERSION
+            );
+            Ok(0)
+        }
         Some("--version" | "version") => {
             println!("omarchy-agent {}", omarchy_agent::AGENT_VERSION);
             Ok(0)

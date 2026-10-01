@@ -347,3 +347,54 @@ fn a_bundle_that_is_not_a_message_signature_or_not_json_is_refused() {
         .unwrap_err();
     assert!(e.contains("message signature"), "{e}");
 }
+
+/// A bundle as `factory/bin/host-bundle` writes it (#311), with the signature stood in for
+/// by the pinned claims: everything after the signature — the archive, the manifest's
+/// outer layer, `inner` with its capacity block, and every set file against its hash —
+/// is what a host reads. `OMARCHY_HOST_BUNDLE` names the bundle and
+/// `OMARCHY_HOST_BUNDLE_PROBE` (optional) the same bundle with one more outer field;
+/// tests/host-bundle.py builds both and runs this.
+#[test]
+#[ignore = "needs OMARCHY_HOST_BUNDLE (a bundle factory/bin/host-bundle wrote); tests/host-bundle.py runs it"]
+fn a_bundle_the_release_writes_reads_whole() {
+    let path = std::env::var("OMARCHY_HOST_BUNDLE").expect("OMARCHY_HOST_BUNDLE names a bundle");
+    let archive = std::fs::read(&path).unwrap();
+    let BundleOutcome::Current(b) = bundle_with(&pinned(), &archive, b"{}").unwrap() else {
+        panic!("{path}: this agent must read the bundle the release writes whole")
+    };
+    let m = b.manifest();
+    let host = m.set_files("host").expect("the host set");
+    assert!(host.contains_key("compose.yml") && host.contains_key("set.toml"));
+    let compose = std::str::from_utf8(b.file("sets/host/compose.yml").unwrap()).unwrap();
+    assert!(compose.contains(&m.worker_image().index().to_string()));
+    for arch in ["aarch64", "x86_64"] {
+        assert!(compose.contains(&m.build_image(arch).unwrap().to_string()));
+    }
+    let c = m.capacity().constants();
+    assert_eq!(
+        (
+            c.min.cpus,
+            c.min.mem_gb,
+            c.min.work_disk_gb,
+            c.min.engine_disk_gb
+        ),
+        (4, 8, 60, 40)
+    );
+    for platform in ["x86_64-linux", "aarch64-linux", "aarch64-darwin"] {
+        assert!(m.outer().agent().asset(platform).is_some(), "{platform}");
+    }
+    println!(
+        "{path}: release v{}, agent {}, {} host file(s)",
+        m.outer().release(),
+        m.outer().agent().version(),
+        host.len()
+    );
+
+    if let Ok(probe) = std::env::var("OMARCHY_HOST_BUNDLE_PROBE") {
+        let archive = std::fs::read(&probe).unwrap();
+        let BundleOutcome::Current(p) = bundle_with(&pinned(), &archive, b"{}").unwrap() else {
+            panic!("{probe}: an extra outer field must not stop this agent")
+        };
+        assert_eq!(p.manifest().outer(), m.outer());
+    }
+}

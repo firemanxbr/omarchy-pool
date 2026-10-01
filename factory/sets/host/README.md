@@ -10,6 +10,10 @@ allows and starts one isolated, credential-less container per task.
 | `set.toml` | schema 3: the compose project name, the rollout guard, the dispatcher's ready check, and what the host needs (`[needs]`) that the agent checks but never does |
 | `files/` | host files copied into the set directory, hash-checked and rolled back with the template (none yet; `.gitkeep` only keeps the directory and is not a host file: the bundler, #311, skips dotfiles here) |
 
+release.yml ships it in the signed host bundle (#311, `factory/bin/host-bundle`):
+`compose.yml` with the placeholders rendered to digests, `set.toml` and
+`files/`, each by its SHA-256 in the manifest; this README stays here.
+
 `omarchy-agent lint-set factory/sets/host` checks the template and
 `set.toml` (design v2 §4.3); CI runs it with `docker compose config` of the
 rendered template (`tests/host-set.sh`). The root-only steps a new host

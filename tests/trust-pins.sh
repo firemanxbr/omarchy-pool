@@ -7,8 +7,8 @@
 #   sign-blob` names the Fulcio and Rekor it signs against (the signing
 #   config), the same in release.yml and factory/bin/release-rollback; a
 #   `sign-blob` writes a Sigstore bundle (v0.3), the one format
-#   `omarchy-agent verify` reads, and release-rollback signs the rollback
-#   statement so (#314);
+#   `omarchy-agent verify` reads: release.yml signs the host bundle so
+#   (#311) and release-rollback the rollback statement (#314);
 # - every release.yml job that can mint an OIDC token (`id-token: write`)
 #   runs in the `release` environment; rollback.yml's one job in `pool`;
 # - the documented identity is exact: release.yml on main, the GitHub
@@ -16,7 +16,8 @@
 # - the worker image's base images are pinned by digest and the docker CLI
 #   download by SHA-256;
 # - every maintainer owns the workflows, the host agent, the dispatcher that
-#   starts task containers and the host sets (CODEOWNERS);
+#   starts task containers, the host sets, and the host bundle's policy,
+#   install.sh and writer (CODEOWNERS; #311);
 # - the one v* tag ruleset the admin applies (.github/rulesets/tags-locked.json)
 #   lets nobody move or delete a tag; no ruleset file restricts creation, which
 #   this user-owned repository cannot apply (#351); the host agent trusts
@@ -64,9 +65,10 @@ for f in "$RELEASE" "$root/factory/bin/release-rollback"; do
   unpinned="$(grep -vF -- "cosign sign --yes $SIGN_FLAGS " <<<"$signs" | grep -vF -- "cosign sign-blob --yes $SIGN_FLAGS --new-bundle-format --bundle " || true)"
   [[ -z "$unpinned" ]] || fail "$(basename "$f"): every cosign sign and sign-blob names its Fulcio and Rekor, and a sign-blob writes a Sigstore bundle: $unpinned"
 done
+grep -v '^ *#' "$RELEASE" | grep -qF -- "cosign sign-blob --yes $SIGN_FLAGS --new-bundle-format --bundle " || fail "release.yml signs the host bundle into a Sigstore bundle (#311)"
 grep -v '^ *#' "$root/factory/bin/release-rollback" | grep -qF -- "cosign sign-blob --yes $SIGN_FLAGS --new-bundle-format --bundle " || fail "release-rollback signs the rollback statement into a Sigstore bundle (#314)"
 grep -qE 'use-signing-config|--signing-config' "$RELEASE" "$root/factory/bin/release-rollback" && fail "no signing config fetched at run time"
-echo "ok: every signature names the public-good Fulcio and Rekor, in release.yml and release-rollback, and the rollback statement is a Sigstore bundle"
+echo "ok: every signature names the public-good Fulcio and Rekor, in release.yml (images and the host bundle) and release-rollback, and the host bundle and the rollback statement are Sigstore bundles"
 
 # --- OIDC tokens only in the reviewed environments -----------------------------
 signers=0
@@ -136,10 +138,10 @@ echo "ok: the base images are pinned by digest and the docker CLI download by SH
 # CODEOWNERS is generated from factory/MAINTAINERS.toml (factory/bin/check-governance,
 # which CI runs too); every maintainer owns each of these paths.
 owners="$(python3 -c 'import tomllib,sys; print(" ".join("@" + m for m in sorted(dict.fromkeys(tomllib.load(open(sys.argv[1], "rb"))["maintainers"]), key=str.lower)))' "$root/factory/MAINTAINERS.toml")"
-for path in .github/workflows/ crates/omarchy-agent/ 'crates/pkg-repo/src/dispatch*' factory/sets/; do
+for path in .github/workflows/ crates/omarchy-agent/ 'crates/pkg-repo/src/dispatch*' factory/sets/ factory/bundle/ factory/bin/host-bundle; do
   grep -qxE "$(sed 's/[.*]/\\&/g' <<<"$path") +$owners" "$root/.github/CODEOWNERS" || fail "CODEOWNERS gives $path to every maintainer ($owners)"
 done
-echo "ok: code owners cover the workflows, the host agent, the dispatcher and the host sets"
+echo "ok: code owners cover the workflows, the host agent, the dispatcher, the host sets and what writes the host bundle"
 # --- the v* tag ruleset the admin applies (runbook, #351) ----------------------
 # Update and deletion, which nobody bypasses (no workflow moves or deletes a git
 # tag). No creation ruleset: GitHub accepts GitHub Actions as a ruleset bypass
