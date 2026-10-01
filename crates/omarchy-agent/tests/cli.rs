@@ -157,6 +157,11 @@ fn usage_errors_exit_2() {
         let o = run(args);
         assert_eq!(o.status.code(), Some(2), "{args:?}: {}", text(&o));
     }
+    // install.sh's last step: a stub until P1 that changes nothing.
+    let o = run(&["install", "--any-option"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("arrives in P1"), "{}", text(&o));
+
     let o = run(&["--version"]);
     assert_eq!(
         String::from_utf8_lossy(&o.stdout).trim(),

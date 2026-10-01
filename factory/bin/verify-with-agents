@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# verify-with-agents <bundle> <probe> <new-agent>: release.yml's host-bundle
+# job proves, before anything is published, that the agents the fleet runs
+# can take this release (#311, design v2 §4.4, §5.1). A release that the new
+# agent accepts but older agents reject would strand every host.
+#
+# Each agent runs `omarchy-agent verify --bundle` with the production pins on
+# the signed bundle and on the signed probe (the same bundle whose manifest
+# carries one more outer field: the outer layer is frozen and lenient, so
+# every agent must still read it):
+#
+# - the new agent must verify both (exit 0);
+# - every agent version released in the last 30 days, downloaded from its
+#   immutable GitHub release, must verify both or answer "needs a newer agent"
+#   (exit 3: it reads the outer layer and updates itself first); a refusal
+#   (exit 1) or an error (exit 2) fails the release. Releases from before the
+#   agent existed carry none and are skipped; one binary is run once however
+#   many releases ship it.
+#
+# The runner is x86_64, so it runs each version's x86_64-linux build: the
+# verifier's code is the same on every platform.
+set -euo pipefail
+bundle="${1:?usage: verify-with-agents <bundle> <probe> <new-agent>}"
+probe="${2:?usage: verify-with-agents <bundle> <probe> <new-agent>}"
+new="${3:?usage: verify-with-agents <bundle> <probe> <new-agent>}"
+asset=omarchy-agent-x86_64-linux-musl
+days="${OMARCHY_AGENT_WINDOW_DAYS:-30}"
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+
+check() { # agent, label, the exit codes accepted
+  local agent="$1" label="$2" accepted="$3" what file code
+  for what in bundle probe; do
+    if [[ "$what" == bundle ]]; then file="$bundle"; else file="$probe"; fi
+    code=0
+    "$agent" verify --bundle "$file" --sig "$file.sigstore.json" > "$work/out" 2>&1 || code=$?
+    if [[ " $accepted " != *" $code "* ]]; then
+      echo "verify-with-agents: $label refuses the $what (exit $code):" >&2
+      cat "$work/out" >&2
+      return 1
+    fi
+    echo "ok: $label: the $what (exit $code) $(head -c 300 "$work/out")"
+  done
+}
+
+check "$new" "the new agent ($("$new" --version))" 0
+
+cutoff="$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=$days)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+tags="$(gh release list --exclude-drafts --limit 200 --json tagName,publishedAt \
+  --jq ".[] | select(.publishedAt >= \"$cutoff\") | .tagName")"
+seen=" $(sha256 "$new") "
+checked=0
+for tag in $tags; do
+  if ! gh release download "$tag" --pattern "$asset" --dir "$work/$tag" >/dev/null 2>&1 || [[ ! -f "$work/$tag/$asset" ]]; then
+    echo "skip: $tag ships no agent"
+    continue
+  fi
+  agent="$work/$tag/$asset"
+  sum="$(sha256 "$agent")"
+  if [[ "$seen" == *" $sum "* ]]; then echo "skip: $tag's agent was already run"; continue; fi
+  seen+="$sum "
+  chmod 755 "$agent"
+  check "$agent" "$tag's agent ($("$agent" --version))" "0 3"
+  checked=$((checked + 1))
+done
+echo "verify-with-agents: the new agent and $checked earlier agent(s) of the last $days days take this release"

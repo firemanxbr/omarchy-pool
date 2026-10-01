@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# publish-release vX.Y.Z: release.yml's last step before the deploy (#311).
+# The release was created as a draft; this publishes it, which is when it
+# becomes immutable (immutable releases are on), and only once every asset a
+# host or the worker image needs is on it: the binaries, the three agent
+# binaries, the signed host bundle and its Sigstore bundle, and install.sh.
+# A release missing one stays a draft, and the pool stays on the previous
+# release (deploy needs this job). Run again on a published release with
+# every asset, it changes nothing.
+set -euo pipefail
+v="${1:?usage: publish-release vX.Y.Z}"
+[[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "publish-release: $v is not vX.Y.Z" >&2; exit 2; }
+want=(
+  "omarchy-pool-$v-x86_64-linux.tar.gz" "omarchy-pool-$v-x86_64-linux.tar.gz.sha256"
+  "omarchy-pool-$v-aarch64-linux.tar.gz" "omarchy-pool-$v-aarch64-linux.tar.gz.sha256"
+  omarchy-staging.pub.asc
+  omarchy-agent-x86_64-linux-musl omarchy-agent-aarch64-linux-musl omarchy-agent-aarch64-darwin
+  "omarchy-host-$v.tar.gz" "omarchy-host-$v.tar.gz.sigstore.json" install.sh
+)
+state="$(gh release view "$v" --json isDraft --jq .isDraft)"
+have="$(gh release view "$v" --json assets --jq '.assets[].name')"
+missing=()
+for a in "${want[@]}"; do grep -qxF -- "$a" <<<"$have" || missing+=("$a"); done
+if (( ${#missing[@]} )); then
+  if [[ "$state" == true ]]; then echo "publish-release: $v lacks ${missing[*]}; it stays a draft" >&2
+  else echo "publish-release: $v is published without ${missing[*]}: a person must look" >&2; fi
+  exit 1
+fi
+if [[ "$state" != true ]]; then
+  echo "publish-release: $v is already published with every asset"
+  exit 0
+fi
+gh release edit "$v" --draft=false
+[[ "$(gh release view "$v" --json isDraft --jq .isDraft)" == false ]] || { echo "publish-release: $v is still a draft" >&2; exit 1; }
+echo "publish-release: $v published with ${#want[@]} assets; it is immutable from here"

@@ -129,8 +129,10 @@ A release is `main` at the moment a maintainer dispatches one
    the same by hand. Crate and `package.json` versions stay at `0.0.0` — the tag is
    the source of truth and is compiled into the binaries as `POOL_VERSION`.
 3. Binaries (`pkg-repo`, `omarchy-cli`, `pkg-extract`) are built on x86_64 and
-   aarch64 runners and attached to a GitHub release with notes generated from the
-   merged pull requests. The worker image is built from them on each
+   aarch64 runners and attached to a GitHub release, created as a **draft**, with
+   notes generated from the merged pull requests; the `omarchy-agent` binaries are
+   built for x86_64 and aarch64 Linux (musl) and Apple silicon macOS
+   (`factory/bin/build-agent`, reproducible). The worker image is built from them on each
    architecture and pushed as `:<arch>-vX.Y.Z` only. Every role is then
    started from it on the runner (`tests/image-smoke.sh`: the project worker
    through its entrypoint, `pkg-repo work --self-test`, then to its first
@@ -140,12 +142,29 @@ A release is `main` at the moment a maintainer dispatches one
    move, in one job: the version's own `:vX.Y.Z`, then `:x86_64` and
    `:aarch64`, then `:latest`. An image whose roles do not start, on either
    architecture, stops the release before any host can pull it.
-4. The worker is migrated (`wrangler d1 migrations apply`) and deployed with
+4. The host bundle (#311, *The host bundle* below) is written, signed and
+   verified with the new agent and every agent released in the last 30 days,
+   then added to the draft with the agent binaries and `install.sh`; only then
+   is the release published, which makes it immutable
+   (`factory/bin/publish-release` checks every asset is there first). A
+   release that stops before then stays a draft, and the pool stays on the
+   previous release.
+5. The worker is migrated (`wrangler d1 migrations apply`) and deployed with
    `POOL_VERSION`, `POOL_COMMIT` and `POOL_DEPLOYED_AT`; the run verifies
    `/api/v1/version` reports the new tag and records a `deploy` event through
    `wrangler d1 execute` (the release holds no credential of the pool's API).
-5. Every set follows: its updater sees the new release within two minutes
+6. Every set follows: its updater sees the new release within two minutes
    (the Studio's too, since its one-time step, *The Studio host*).
+
+A published release is immutable, so a version is never cut twice: a run that
+failed after publishing is finished by re-running its failed jobs, and a
+dispatch on a commit whose release is published stops at the draft step. A
+draft an earlier run left behind is made again by the next run. The agent
+carries its own version (`crates/omarchy-agent/Cargo.toml`, design v2 D17):
+CI fails a pull request that changes what goes into the agent's binary since
+the previous release without raising it (`factory/bin/agent-version-check`),
+and a release with no agent change ships the very binaries the previous one
+did.
 
 The deploy step needs the `CLOUDFLARE_API_TOKEN` repository secret (Account →
 Workers Scripts: Edit, D1: Edit, Account Settings: Read; Zone → Workers Routes:
@@ -305,9 +324,10 @@ What is not covered yet: the gate lives in `release.yml` itself, and a
 dispatch runs the dispatched branch's copy of the file, so a writer could
 dispatch a copy without it from their own branch and publish a release and
 its `v*` tag from that branch (GitHub Actions may create `v*` tags). Nothing
-it made is signed with the `main` identity, so no host would take it. #311
-(the signed host bundle, a draft release published only after it is signed)
-is where publishing moves behind the signature itself.
+it made is signed with the `main` identity, so no host would take it: since
+#311 a host takes a release only through its host bundle, signed by
+`release.yml` on main in the reviewed environment, and a release is published
+only after that bundle is signed and verified.
 
 ## Security data
 
@@ -480,6 +500,55 @@ CGNAT, link-local and the host (IPv4; task networks stay IPv4 only), kept across
 exit 1 lists what needs a person. The task subnets and the work root must be
 the ones the agent's install is given. The Studio does not run it: it keeps
 its legacy set (below) until the switch of design v2 §21.
+
+### The host bundle
+
+Every release carries what a maintainer host takes from it (#311, design v2
+§4.4), all of it on the release before it is published:
+
+| Asset | What it is |
+|---|---|
+| `omarchy-host-vX.Y.Z.tar.gz` | `manifest.json` and every set under `sets/<name>/`: `factory/sets/host` with the worker image and the task build images rendered to digests |
+| `omarchy-host-vX.Y.Z.tar.gz.sigstore.json` | its keyless signature (a Sigstore bundle) by `release.yml` on main |
+| `omarchy-agent-x86_64-linux-musl`, `omarchy-agent-aarch64-linux-musl`, `omarchy-agent-aarch64-darwin` | the agent, the same bytes as long as the agent does not change; their provenance is attested |
+| `install.sh` | the one command, with that release's agent version and the three binaries' SHA-256 embedded |
+
+The manifest's outer layer names the release, the agent and each binary's
+SHA-256; its `inner` carries the floor (`min_release`, `revoked`), the pool
+origins, the images by digest, the container tools by URL and SHA-256 and
+the **capacity constants** that bound how many tasks a host may run. They
+come from [`factory/bundle/manifest.toml`](../factory/bundle/manifest.toml):
+changing one changes every host at the next release, without an agent
+release, and needs another maintainer's review (CODEOWNERS).
+
+`install.sh` is always at its canonical URL, the latest release's:
+
+```bash
+curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh | sh
+# options for `omarchy-agent install` after `sh -s --`; an enrollment token only in the environment:
+curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh | OMARCHY_ENROLL=... sh -s -- --help
+```
+
+It refuses root, checks the binary against the embedded SHA-256 and installs
+it under `~/.local/share/omarchy-agent/versions/<agent version>/`. Until P1
+(#317) the agent's `install` only says so.
+
+Anyone can check a bundle by hand with cosign:
+
+```bash
+v=vX.Y.Z
+gh release download "$v" -R firemanxbr/omarchy-pool -p "omarchy-host-$v.tar.gz*"
+cosign verify-blob "omarchy-host-$v.tar.gz" --bundle "omarchy-host-$v.tar.gz.sigstore.json" \
+  --certificate-identity https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-trigger workflow_dispatch \
+  --certificate-github-workflow-repository firemanxbr/omarchy-pool
+```
+
+The agent does the same check offline, with the identity pinned in its code
+(`omarchy-agent verify --bundle omarchy-host-$v.tar.gz --sig omarchy-host-$v.tar.gz.sigstore.json`),
+and the release runs it with the new agent and every agent of the last 30
+days before it publishes anything.
 
 ## The Studio host
 

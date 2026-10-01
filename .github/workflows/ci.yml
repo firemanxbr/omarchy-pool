@@ -30,6 +30,8 @@ jobs:
       - run: cargo test --workspace
       - name: The host set passes lint-set, its set.toml is schema 3, and docker compose loads it with the placeholders filled
         run: bash tests/host-set.sh
+      - name: The host bundle's writer — the manifest with its capacity block, the set rendered to digests, a reproducible archive, install.sh — and the agent reads what it writes
+        run: python3 tests/host-bundle.py
       - run: cargo build --release -p pkg-extract -p pkg-repo -p omarchy-cli
       - name: The Rust worker sends a build that died of emulation back for a native one, against a stubbed pool and podman
         run: bash tests/worker-needs-native.sh
@@ -85,6 +87,19 @@ jobs:
         run: cargo test --locked -p omarchy-agent --lib -- --ignored conformance
         env:
           OMARCHY_SIGSTORE_CONFORMANCE: ${{ github.workspace }}/sigstore-conformance
+
+  agent-version:
+    name: Host agent version (raised with every change to the agent)
+    # Design v2 D17 (#311): the agent's own semver moves with what goes into
+    # its binary, compared with the previous release (its tags, hence the
+    # full history), so an unchanged agent keeps its hash and a changed one
+    # says so.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: factory/bin/agent-version-check
 
   agent-fuzz:
     name: Host agent fuzzing (${{ matrix.os }})
@@ -201,6 +216,15 @@ jobs:
       - name: What the hosts' trust relies on — one exact cosign, signing only in reviewed environments, the exact identity, pinned images
         working-directory: .
         run: bash tests/trust-pins.sh
+      - name: busybox, for install.sh's run under busybox sh
+        working-directory: .
+        run: sudo apt-get update && sudo apt-get install -y busybox
+      - name: install.sh refuses root and a binary whose SHA-256 differs, downloads under its own mktemp -d, keeps the token out of argv — under sh, dash, bash --posix and busybox sh, and shellcheck
+        working-directory: .
+        run: bash tests/install-sh.sh
+      - name: The agent's version check fails a change to the agent without a version raise
+        working-directory: .
+        run: bash tests/agent-version.sh
       - name: The one command to run a worker, against a stubbed docker and pool
         working-directory: .
         run: bash tests/omarchy-worker-cli.sh

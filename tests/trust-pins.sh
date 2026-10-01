@@ -13,7 +13,8 @@
 # - the worker image's base images are pinned by digest and the docker CLI
 #   download by SHA-256;
 # - every maintainer owns the workflows, the host agent, the dispatcher that
-#   starts task containers and the host sets (CODEOWNERS);
+#   starts task containers, the host sets, and the host bundle's policy,
+#   install.sh and writer (CODEOWNERS; #311);
 # - the v* tag rulesets the admin applies (.github/rulesets/tags.json,
 #   tags-locked.json) leave creating tags to GitHub Actions alone, and moving
 #   or deleting them to nobody;
@@ -60,8 +61,12 @@ for f in "$RELEASE" "$root/factory/bin/release-rollback"; do
   unpinned="$(grep -vF -- "cosign sign --yes $SIGN_FLAGS " <<<"$signs" || true)"
   [[ -z "$unpinned" ]] || fail "$(basename "$f"): every cosign sign names its Fulcio and Rekor: $unpinned"
 done
+blobs="$(grep -E 'cosign sign-blob( |$)' "$RELEASE" | grep -v '^ *#' || true)"
+[[ -n "$blobs" ]] || fail "release.yml signs the host bundle (#311)"
+unpinned="$(grep -vF -- "cosign sign-blob --yes $SIGN_FLAGS " <<<"$blobs" || true)"
+[[ -z "$unpinned" ]] || fail "release.yml: every cosign sign-blob names its Fulcio and Rekor: $unpinned"
 grep -qE 'use-signing-config|--signing-config' "$RELEASE" "$root/factory/bin/release-rollback" && fail "no signing config fetched at run time"
-echo "ok: every signature names the public-good Fulcio and Rekor, in release.yml and release-rollback"
+echo "ok: every signature names the public-good Fulcio and Rekor, in release.yml (images and the host bundle) and release-rollback"
 
 # --- OIDC tokens only in the reviewed environments -----------------------------
 signers=0
@@ -131,10 +136,10 @@ echo "ok: the base images are pinned by digest and the docker CLI download by SH
 # CODEOWNERS is generated from factory/MAINTAINERS.toml (factory/bin/check-governance,
 # which CI runs too); every maintainer owns each of these paths.
 owners="$(python3 -c 'import tomllib,sys; print(" ".join("@" + m for m in sorted(dict.fromkeys(tomllib.load(open(sys.argv[1], "rb"))["maintainers"]), key=str.lower)))' "$root/factory/MAINTAINERS.toml")"
-for path in .github/workflows/ crates/omarchy-agent/ 'crates/pkg-repo/src/dispatch*' factory/sets/; do
+for path in .github/workflows/ crates/omarchy-agent/ 'crates/pkg-repo/src/dispatch*' factory/sets/ factory/bundle/ factory/bin/host-bundle; do
   grep -qxE "$(sed 's/[.*]/\\&/g' <<<"$path") +$owners" "$root/.github/CODEOWNERS" || fail "CODEOWNERS gives $path to every maintainer ($owners)"
 done
-echo "ok: code owners cover the workflows, the host agent, the dispatcher and the host sets"
+echo "ok: code owners cover the workflows, the host agent, the dispatcher, the host sets and what writes the host bundle"
 # --- the v* tag rulesets the admin applies (runbook) -----------------------------
 # Two rulesets: creation, which GitHub Actions alone bypasses (release.yml's
 # publish creates the tag with its release), and update and deletion, which

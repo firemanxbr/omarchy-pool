@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""host-bundle: what release.yml's host-bundle job runs (design v2 §4.4; #311).
+
+    host-bundle worker-image IMAGE vX.Y.Z > worker.json
+        The worker image as the manifest lists it: IMAGE:vX.Y.Z's index digest,
+        and each platform's manifest and config digest, each platform's checked
+        against the image the release pushed for it (IMAGE:<arch>-vX.Y.Z).
+        Reads the registry through `docker buildx imagetools inspect`.
+
+    host-bundle check-tools
+        Downloads every container tool factory/bundle/manifest.toml pins and
+        fails when one does not match its SHA-256.
+
+    host-bundle build --release vX.Y.Z --worker worker.json
+                      --build-images build-images.json --agents DIR --out DIR
+                      [--created TIME] [--probe]
+        Writes into DIR:
+          omarchy-host-vX.Y.Z.tar.gz  manifest.json and sets/<set>/<file> for
+                                      every set under factory/sets, the image
+                                      placeholders rendered to digests
+          manifest.json               the same manifest, for the run's log
+          install.sh                  factory/bundle/install.sh with the
+                                      release, the agent version and the three
+                                      agent binaries' SHA-256
+        and with --probe, probe/omarchy-host-vX.Y.Z.tar.gz: the same bundle
+        whose manifest carries one more outer field, which the job signs and
+        verifies with every agent of the last 30 days (the outer layer is
+        frozen and lenient: an older agent must still read it).
+
+The bundle is reproducible: the same inputs give the same bytes. The manifest's
+layout is crates/omarchy-agent/src/manifest.rs's (outer schema 2, inner
+schema 3); tests/host-bundle.py runs that parser on what this writes.
+"""
+
+import argparse
+import gzip
+import hashlib
+import io
+import json
+import re
+import subprocess
+import sys
+import tarfile
+import tomllib
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+POLICY = ROOT / "factory/bundle/manifest.toml"
+INSTALL = ROOT / "factory/bundle/install.sh"
+SETS = ROOT / "factory/sets"
+AGENT_TOML = ROOT / "crates/omarchy-agent/Cargo.toml"
+
+OUTER_SCHEMA = 2
+INNER_SCHEMA = 3
+# Manifest platform → the release asset of the agent built for it.
+AGENTS = {
+    "x86_64-linux": "omarchy-agent-x86_64-linux-musl",
+    "aarch64-linux": "omarchy-agent-aarch64-linux-musl",
+    "aarch64-darwin": "omarchy-agent-aarch64-darwin",
+}
+# The worker image's platforms: OCI architecture → the manifest's name.
+ARCHES = {"arm64": "aarch64", "amd64": "x86_64"}
+POLICY_KEYS = {"min_agent", "min_release", "revoked", "pools", "capacity", "tools"}
+# The files of a set that a host receives; anything else (README.md) stays in the repository.
+SET_FILES = ("compose.yml", "set.toml")
+
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+PINNED = re.compile(r"[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}")
+VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+PLACEHOLDER = re.compile(r"@[A-Z][A-Z0-9_]*@")
+CREATED = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+
+
+class BundleError(Exception):
+    pass
+
+
+def fail(msg):
+    raise BundleError(msg)
+
+
+def version(s, what):
+    m = VERSION.fullmatch(s or "")
+    if not m:
+        fail(f"{what} {s!r} is not X.Y.Z")
+    return tuple(int(p) for p in m.groups())
+
+
+def release(s, what="release"):
+    if not isinstance(s, str) or not s.startswith("v"):
+        fail(f"{what} {s!r} is not vX.Y.Z")
+    return version(s[1:], what)
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def agent_version(path=AGENT_TOML):
+    v = tomllib.loads(Path(path).read_text())["package"]["version"]
+    version(v, "crates/omarchy-agent version")
+    return v
+
+
+# --- the worker image ------------------------------------------------------------------
+
+
+def inspect(ref, raw=False):
+    """`docker buildx imagetools inspect`: the manifest's digest, or its raw JSON."""
+    cmd = ["docker", "buildx", "imagetools", "inspect", ref]
+    cmd += ["--raw"] if raw else ["--format", "{{json .Manifest.Digest}}"]
+    out = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if out.returncode != 0:
+        fail(f"{ref}: the registry did not answer: {out.stderr.strip()}")
+    if raw:
+        return json.loads(out.stdout)
+    digest = out.stdout.strip().strip('"')
+    if not DIGEST.fullmatch(digest):
+        fail(f"{ref}: not a digest: {digest!r}")
+    return digest
+
+
+def worker_image(image, tag, inspect=inspect):
+    release(tag)
+    repo = image.split("@")[0]
+    if ":" in repo.rsplit("/", 1)[-1]:
+        fail(f"{image}: give the repository without a tag")
+    index = inspect(f"{repo}:{tag}")
+    platforms = {}
+    for m in inspect(f"{repo}@{index}", raw=True).get("manifests", []):
+        p = m.get("platform", {})
+        arch = ARCHES.get(p.get("architecture")) if p.get("os") == "linux" else None
+        if arch is None:
+            continue  # attestations ("unknown/unknown") and anything a host does not run
+        if arch in platforms:
+            fail(f"{repo}:{tag} lists {arch} twice")
+        digest = m.get("digest", "")
+        if not DIGEST.fullmatch(digest):
+            fail(f"{repo}:{tag}: {arch}'s manifest is not a digest: {digest!r}")
+        pushed = inspect(f"{repo}:{arch}-{tag}")
+        if pushed != digest:
+            fail(f"{repo}:{tag}'s {arch} manifest {digest} is not the image pushed as {repo}:{arch}-{tag} ({pushed})")
+        config = inspect(f"{repo}@{digest}", raw=True).get("config", {}).get("digest", "")
+        if not DIGEST.fullmatch(config):
+            fail(f"{repo}@{digest}: its config is not a digest: {config!r}")
+        platforms[arch] = {"manifest": digest, "config": config}
+    if set(platforms) != set(ARCHES.values()):
+        fail(f"{repo}:{tag} must carry linux/arm64 and linux/amd64, found {sorted(platforms)}")
+    return {"repo": repo, "index": index, "platforms": {a: platforms[a] for a in ("aarch64", "x86_64")}}
+
+
+def check_worker(w):
+    if set(w) != {"repo", "index", "platforms"} or set(w["platforms"]) != {"aarch64", "x86_64"}:
+        fail(f"worker image: unexpected shape {sorted(w)}")
+    if not DIGEST.fullmatch(w["index"]) or not PINNED.fullmatch(f"{w['repo']}@{w['index']}"):
+        fail(f"worker image: {w['repo']}@{w['index']} is not a repository by digest")
+    for arch, p in w["platforms"].items():
+        if set(p) != {"manifest", "config"} or not all(DIGEST.fullmatch(p[k]) for k in p):
+            fail(f"worker image: {arch} needs a manifest and a config digest")
+    return w
+
+
+def check_build_images(b):
+    if set(b) != {"aarch64", "x86_64"}:
+        fail(f"build images: one per architecture, aarch64 and x86_64 (found {sorted(b)})")
+    for arch, ref in b.items():
+        if not PINNED.fullmatch(ref):
+            fail(f"build images: {arch} {ref!r} is not <repo>@sha256:<64 hex>")
+    return {"aarch64": b["aarch64"], "x86_64": b["x86_64"]}
+
+
+# --- the sets --------------------------------------------------------------------------
+
+
+def set_files(setdir):
+    """The files a host receives, by path inside the set: compose.yml, set.toml, files/**
+    (dotfiles skipped: .gitkeep only keeps a directory)."""
+    files = {}
+    for name in SET_FILES:
+        if not (setdir / name).is_file():
+            fail(f"{setdir.name}: no {name}")
+        files[name] = (setdir / name).read_bytes()
+    extra = setdir / "files"
+    if extra.is_dir():
+        for p in sorted(extra.rglob("*")):
+            rel = p.relative_to(setdir)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            if p.is_symlink():
+                fail(f"{setdir.name}/{rel}: a link, not a host file")
+            if p.is_file():
+                files[rel.as_posix()] = p.read_bytes()
+    return files
+
+
+def render(text, worker, build):
+    values = {
+        "@RELEASE@": f"@{worker['index']}",
+        "@RELEASE_IMAGE@": f"{worker['repo']}@{worker['index']}",
+        "@BUILD_AARCH64@": build["aarch64"],
+        "@BUILD_X86_64@": build["x86_64"],
+    }
+
+    def one(m):
+        if m.group(0) not in values:
+            fail(f"unknown placeholder {m.group(0)}")
+        return values[m.group(0)]
+
+    return PLACEHOLDER.sub(one, text)
+
+
+def sets(worker, build, root=SETS):
+    out = {}
+    for setdir in sorted(p for p in Path(root).iterdir() if p.is_dir()):
+        files = set_files(setdir)
+        compose = files["compose.yml"].decode()
+        if setdir.name == "host" and "@RELEASE@" not in compose:
+            fail("host/compose.yml does not name the worker image as @RELEASE@")
+        files["compose.yml"] = render(compose, worker, build).encode()
+        for path, data in files.items():
+            left = PLACEHOLDER.findall(data.decode(errors="replace"))
+            if left:
+                fail(f"{setdir.name}/{path}: placeholders left after rendering: {left}")
+        out[setdir.name] = files
+    if "host" not in out:
+        fail(f"{root} has no host set")
+    return out
+
+
+# --- the manifest and the archive ------------------------------------------------------
+
+
+def load_policy(path=POLICY):
+    policy = tomllib.loads(Path(path).read_text())
+    if set(policy) != POLICY_KEYS:
+        fail(f"{Path(path).name}: keys must be exactly {sorted(POLICY_KEYS)}, found {sorted(policy)}")
+    return policy
+
+
+def manifest(rel, created, agent, agent_sums, worker, build, rendered, policy):
+    rv = release(rel)
+    if not CREATED.fullmatch(created):
+        fail(f"created {created!r} is not YYYY-MM-DDTHH:MM:SSZ")
+    if version(policy["min_agent"], "min_agent") > version(agent, "agent version"):
+        fail(f"min_agent {policy['min_agent']} is above the agent this release ships ({agent})")
+    if release(policy["min_release"], "min_release") > rv:
+        fail(f"min_release {policy['min_release']} is above the release being cut ({rel})")
+    for r in policy["revoked"]:
+        if release(r, "revoked") == rv:
+            fail(f"{rel} revokes itself")
+    if set(agent_sums) != set(AGENTS):
+        fail(f"the agent binaries: one per platform {sorted(AGENTS)}, found {sorted(agent_sums)}")
+    return {
+        "schema": OUTER_SCHEMA,
+        "release": rel,
+        "created": created,
+        "min_agent": policy["min_agent"],
+        "agent": {
+            "version": agent,
+            "urgent": False,
+            **{p: {"sha256": agent_sums[p], "asset": AGENTS[p]} for p in AGENTS},
+        },
+        "inner": {
+            "schema": INNER_SCHEMA,
+            "min_release": policy["min_release"],
+            "revoked": list(policy["revoked"]),
+            "pools": list(policy["pools"]),
+            "images": {"worker": check_worker(worker), "build": check_build_images(build)},
+            "capacity": policy["capacity"],
+            "tools": policy["tools"],
+            "runtimes": {},
+            "sets": {
+                name: {"files": {path: f"sha256:{sha256(data)}" for path, data in sorted(files.items())}}
+                for name, files in sorted(rendered.items())
+            },
+        },
+    }
+
+
+def dump(m):
+    return (json.dumps(m, indent=2, sort_keys=False) + "\n").encode()
+
+
+def pack(files, mtime):
+    """A .tar.gz of `files` (path → bytes) that depends on nothing else: sorted entries,
+    one mode, owner root, a fixed time, no gzip name or time."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for path in sorted(files):
+            info = tarfile.TarInfo(path)
+            info.size = len(files[path])
+            info.mode = 0o644
+            info.mtime = mtime
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            tar.addfile(info, io.BytesIO(files[path]))
+    out = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=out, mtime=0, compresslevel=9) as gz:
+        gz.write(buf.getvalue())
+    return out.getvalue()
+
+
+def bundle_files(m, rendered):
+    files = {"manifest.json": dump(m)}
+    for name, set_ in rendered.items():
+        for path, data in set_.items():
+            files[f"sets/{name}/{path}"] = data
+    return files
+
+
+def render_install(template, rel, agent, agent_sums):
+    values = {
+        "@RELEASE@": rel,
+        "@AGENT_VERSION@": agent,
+        "@SHA256_X86_64_LINUX@": agent_sums["x86_64-linux"],
+        "@SHA256_AARCH64_LINUX@": agent_sums["aarch64-linux"],
+        "@SHA256_AARCH64_DARWIN@": agent_sums["aarch64-darwin"],
+    }
+    text = PLACEHOLDER.sub(lambda m: values.get(m.group(0), m.group(0)), template)
+    left = PLACEHOLDER.findall(text)
+    if left:
+        fail(f"install.sh: placeholders left after rendering: {left}")
+    return text
+
+
+def build(args):
+    rel = args.release
+    agent = args.agent_version or agent_version()
+    agents_dir = Path(args.agents)
+    sums = {}
+    for platform, asset in AGENTS.items():
+        p = agents_dir / asset
+        if not p.is_file():
+            fail(f"{p}: the agent for {platform} is missing")
+        sums[platform] = sha256(p.read_bytes())
+    worker = json.loads(Path(args.worker).read_text())
+    build_images = json.loads(Path(args.build_images).read_text())
+    policy = load_policy(args.policy)
+    rendered = sets(worker, build_images, args.sets)
+    created = args.created or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    m = manifest(rel, created, agent, sums, worker, build_images, rendered, policy)
+    mtime = int(datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    name = f"omarchy-host-{rel}.tar.gz"
+    (out / name).write_bytes(pack(bundle_files(m, rendered), mtime))
+    (out / "manifest.json").write_bytes(dump(m))
+    (out / "install.sh").write_text(render_install(INSTALL.read_text(), rel, agent, sums))
+    (out / "install.sh").chmod(0o755)
+    print(f"{out / name}: release {rel}, agent {agent}, sets {', '.join(sorted(rendered))}", file=sys.stderr)
+    if args.probe:
+        probe = dict(m)
+        probe["probe"] = "an outer field no agent knows yet: every agent must still read this manifest"
+        (out / "probe").mkdir(exist_ok=True)
+        (out / "probe" / name).write_bytes(pack(bundle_files(probe, rendered), mtime))
+
+
+# --- the tools -------------------------------------------------------------------------
+
+
+def check_tools(tools, fetch=None):
+    fetch = fetch or (lambda url: urllib.request.urlopen(url, timeout=120).read())  # noqa: S310 (https only, checked below)
+    for platform, named in sorted(tools.items()):
+        for name, t in sorted(named.items()):
+            if not t["url"].startswith("https://"):
+                fail(f"tools.{platform}.{name}: {t['url']} is not https")
+            got = sha256(fetch(t["url"]))
+            if got != t["sha256"]:
+                fail(f"tools.{platform}.{name}: {t['url']} has SHA-256 {got}, not the pinned {t['sha256']}")
+            print(f"ok: {platform} {name} {t['url']}", file=sys.stderr)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="host-bundle", description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    w = sub.add_parser("worker-image")
+    w.add_argument("image")
+    w.add_argument("tag")
+    c = sub.add_parser("check-tools")
+    c.add_argument("--policy", default=POLICY)
+    b = sub.add_parser("build")
+    b.add_argument("--release", required=True)
+    b.add_argument("--worker", required=True)
+    b.add_argument("--build-images", required=True)
+    b.add_argument("--agents", required=True)
+    b.add_argument("--out", required=True)
+    b.add_argument("--created")
+    b.add_argument("--agent-version")
+    b.add_argument("--policy", default=POLICY)
+    b.add_argument("--sets", default=SETS)
+    b.add_argument("--probe", action="store_true")
+    args = ap.parse_args(argv)
+    try:
+        if args.cmd == "worker-image":
+            print(json.dumps(worker_image(args.image, args.tag), indent=2))
+        elif args.cmd == "check-tools":
+            check_tools(load_policy(args.policy)["tools"])
+        else:
+            build(args)
+    except BundleError as e:
+        sys.exit(f"host-bundle: {e}")
+
+
+if __name__ == "__main__":
+    main()
