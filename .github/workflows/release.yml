@@ -255,7 +255,11 @@ jobs:
           fi
           # A tag anyone with write access pushed at another commit would be taken
           # over: gh release create ignores --target for an existing tag (#351).
-          at="$(gh api "repos/$GITHUB_REPOSITORY/commits/$VERSION" --jq .sha 2>/dev/null || true)"
+          # git ls-remote prints nothing for a tag that does not exist and fails
+          # the step when it cannot ask, so an error is never read as a commit
+          # (v1.0.6's first run read gh api's 404 body as one). The last line is
+          # the commit, also for an annotated tag (its peeled ^{} line).
+          at="$(git ls-remote --tags origin "refs/tags/$VERSION" "refs/tags/$VERSION^{}" | awk 'END { print $1 }')"
           if [[ -n "$at" && "$at" != "$GITHUB_SHA" ]]; then
             echo "::error::tag $VERSION already points at $at, not at $GITHUB_SHA: this run does not take it over"; exit 1
           fi

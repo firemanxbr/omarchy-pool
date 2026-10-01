@@ -81,7 +81,7 @@ echo "ok: the pool is deployed once the images exist"
 pub="$(job publish)"
 [[ -n "$pub" ]] || fail "release.yml has a publish job"
 refuse="$(line_of "$pub" 'if gh release view "$VERSION" >/dev/null 2>&1 && [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" != true ]]; then')"
-tagged="$(line_of "$pub" 'at="$(gh api "repos/$GITHUB_REPOSITORY/commits/$VERSION" --jq .sha')"
+tagged="$(line_of "$pub" 'at="$(git ls-remote --tags origin "refs/tags/$VERSION" "refs/tags/$VERSION^{}" | awk')"
 remade="$(line_of "$pub" 'gh release delete "$VERSION" --yes')"
 create="$(line_of "$pub" 'gh release create "$VERSION"')"
 [[ -n "$refuse" && -n "$tagged" && -n "$remade" && -n "$create" ]] && (( refuse < tagged && tagged < remade && remade < create )) \
@@ -91,6 +91,35 @@ sed -n "$((tagged + 1)),$((tagged + 2))p" <<<"$pub" | grep -qF '[[ -n "$at" && "
 sed -n "$((tagged + 2)),$((tagged + 3))p" <<<"$pub" | grep -qE '; exit 1$' || fail "a tag at another commit fails the run"
 grep -qF -- '--cleanup-tag' <<<"$pub" && fail "deleting a stale draft removes no tag"
 grep -qE 'exit 0|skipping' <<<"$pub" && fail "publish never skips to reuse a release it did not make: $(grep -nE 'exit 0|skipping' <<<"$pub")"
+grep -qF 'gh api "repos/$GITHUB_REPOSITORY/commits/' <<<"$pub" && fail "the tag guard does not read gh api's answer: on a missing tag it prints its error body, which v1.0.6's first run read as a commit"
+# The refuse step itself, run against a stub gh (no release; gh api prints GitHub's
+# error body and exits 1, as v1.0.6's first run saw) and a stub git (the tag as
+# ls-remote would answer): a new version has no tag and must pass.
+step="$(awk '/- name: Refuse a release this run did not make/{f=1} f && /^        run: \|$/{r=1; next} r && /^      - name: /{exit} r' <<<"$pub" | sed 's/^          //')"
+[[ -n "$step" ]] || fail "the refuse step's script is found"
+gstub="$(mktemp -d)"
+cat >"$gstub/gh" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == api ]] && echo '{"message":"No commit found for SHA: v9.9.9","status":"422"}'
+exit 1
+STUB
+cat >"$gstub/git" <<'STUB'
+#!/usr/bin/env bash
+case "${TAG_AT:-}" in
+  fail) echo "fatal: unable to access the remote" >&2; exit 128 ;;
+  "") exit 0 ;;
+  annotated) printf 'aaaa1111\trefs/tags/v9.9.9\n%s\trefs/tags/v9.9.9^{}\n' "$GITHUB_SHA" ;;
+  *) printf '%s\trefs/tags/v9.9.9\n' "$TAG_AT" ;;
+esac
+STUB
+chmod +x "$gstub/gh" "$gstub/git"
+refuse_step() { env PATH="$gstub:$PATH" VERSION=v9.9.9 GITHUB_SHA=c0ffee GITHUB_REPOSITORY=o/r TAG_AT="$1" bash -c "$step" >/dev/null 2>&1; }
+refuse_step "" || fail "a version with no tag yet passes the guard (v1.0.6's first run was refused here)"
+refuse_step c0ffee || fail "a tag at the run's own commit passes"
+refuse_step annotated || fail "an annotated tag whose commit is the run's passes"
+refuse_step deadbeef && fail "a tag at another commit is refused"
+refuse_step fail && fail "a guard that cannot ask the remote fails the run, never passes"
+rm -rf "$gstub"
 echo "ok: publish refuses a published release or a tag at another commit, and makes a stale draft again, so the release carries only this run's bytes"
 
 # --- the signed host bundle (#311) -------------------------------------------------
