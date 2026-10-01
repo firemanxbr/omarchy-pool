@@ -146,9 +146,13 @@ A release is `main` at the moment a maintainer dispatches one
    verified with the new agent and every agent released in the last 30 days,
    then added to the draft with the agent binaries and `install.sh`; only then
    is the release published, which makes it immutable
-   (`factory/bin/publish-release` checks every asset is there first). A
-   release that stops before then stays a draft, and the pool stays on the
-   previous release.
+   (`factory/bin/publish-release` checks every asset is there, with the bytes
+   the run made, first). A release that stops before then stays a draft, and
+   the pool stays on the previous release. But `:x86_64`, `:aarch64` and
+   `:latest` have already moved to its images (step 3): an updater round that
+   pulls, or a new host, takes them while the pool runs the previous release.
+   Put them back with `gh workflow run rollback.yml -f to=<previous>`, or cut
+   the next release.
 5. The worker is migrated (`wrangler d1 migrations apply`) and deployed with
    `POOL_VERSION`, `POOL_COMMIT` and `POOL_DEPLOYED_AT`; the run verifies
    `/api/v1/version` reports the new tag and records a `deploy` event through
@@ -568,7 +572,10 @@ cosign verify-blob "omarchy-host-$v.tar.gz" --bundle "omarchy-host-$v.tar.gz.sig
 The agent does the same check offline, with the identity pinned in its code
 (`omarchy-agent verify --bundle omarchy-host-$v.tar.gz --sig omarchy-host-$v.tar.gz.sigstore.json`),
 and the release runs it with the new agent and every agent of the last 30
-days before it publishes anything.
+days before it publishes anything. An earlier agent runs only once
+`gh attestation verify` proved it came from `release.yml` on `refs/heads/main`
+(a release that ships any other one stops, for a person to look), and in a
+job of its own that holds no signing identity and no token that writes.
 
 ## The Studio host
 

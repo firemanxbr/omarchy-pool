@@ -19,11 +19,14 @@
 #   worker-image builds from the run's own binaries (a draft serves nothing);
 #   the agent job builds the three agent binaries with factory/bin/build-agent;
 #   host-bundle, in the release environment, lints, writes, signs (the exact
-#   cosign, the new bundle format), verifies with every agent of the last 30
-#   days and only then adds its assets to the draft; publish-release
-#   publishes it once every asset is there, and deploy needs publish-release.
-#   factory/bin/publish-release and factory/bin/verify-with-agents run here
-#   against a stubbed gh and stub agents.
+#   cosign, the new bundle format) and attests; verify-agents, a read-only
+#   job with no OIDC token, verifies with every agent of the last 30 days
+#   (each attested by release.yml on main); only then does
+#   host-bundle-upload add the assets to the draft; publish-release
+#   publishes it once every asset is there with the bytes the run made, and
+#   deploy needs publish-release. factory/bin/publish-release and
+#   factory/bin/verify-with-agents run here against a stubbed gh and stub
+#   agents.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 W="$here/../.github/workflows/release.yml"
@@ -88,7 +91,6 @@ for t in "x86_64-unknown-linux-musl omarchy-agent-x86_64-linux-musl" "aarch64-un
   grep -qF "target: $target" <<<"$agent" && grep -qF "asset: $asset" <<<"$agent" || fail "the agent job builds $target as $asset"
 done
 grep -qF 'bash factory/bin/build-agent ${{ matrix.target }} agent/${{ matrix.asset }}' <<<"$agent" || fail "the agent job builds with factory/bin/build-agent (the build tests/agent-reproducible.sh checks)"
-grep -qF 'fetch-depth: 0' <<<"$agent" || fail "the agent job has the history build-agent takes SOURCE_DATE_EPOCH from"
 grep -q 'rust-cache' <<<"$agent" && fail "the agent job builds from scratch (no cache)"
 echo "ok: the agent job builds the three agent binaries reproducibly"
 
@@ -99,10 +101,14 @@ grep -qE '^    environment: release$' <<<"$hbj" || fail "host-bundle signs in th
 grep -qE '^      attestations: write$' <<<"$hbj" && grep -qE 'uses: actions/attest-build-provenance@[0-9a-f]{40} # v[0-9.]+$' <<<"$hbj" \
   || fail "host-bundle attests the agent binaries' provenance, the action pinned by commit"
 lint="$(line_of "$hbj" 'lint-set "$set"')"; build="$(line_of "$hbj" 'factory/bin/host-bundle build --release "$VERSION"')"
-sign="$(line_of "$hbj" 'cosign sign-blob --yes')"; verify="$(line_of "$hbj" 'bash factory/bin/verify-with-agents')"
-upload="$(line_of "$hbj" 'gh release upload "$VERSION"')"
-[[ -n "$lint" && -n "$build" && -n "$sign" && -n "$verify" && -n "$upload" ]] && (( lint < build && build < sign && sign < verify && verify < upload )) \
-  || fail "host-bundle lints, writes, signs, verifies, then uploads: ${lint:-never} ${build:-never} ${sign:-never} ${verify:-never} ${upload:-never}"
+sign="$(line_of "$hbj" 'cosign sign-blob --yes')"; attest="$(line_of "$hbj" 'uses: actions/attest-build-provenance@')"
+handoff="$(line_of "$hbj" 'name: host-bundle')"
+[[ -n "$lint" && -n "$build" && -n "$sign" && -n "$attest" && -n "$handoff" ]] && (( lint < build && build < sign && sign < attest && attest < handoff )) \
+  || fail "host-bundle lints, writes, signs, attests, then hands the bundle over: ${lint:-never} ${build:-never} ${sign:-never} ${attest:-never} ${handoff:-never}"
+sed -n "${attest},\$p" <<<"$hbj" | grep -qE '^ +out/install.sh$' || fail "host-bundle attests install.sh with the agents"
+# No earlier agent runs where the signing identity is, and nothing reaches the draft from there.
+grep -qF 'verify-with-agents "' <<<"$hbj" && fail "host-bundle runs no earlier agent: verify-agents does, with no signing token"
+grep -qF 'gh release upload' <<<"$hbj" && fail "host-bundle uploads nothing: host-bundle-upload does, once verify-agents passed"
 grep -qF -- '--new-bundle-format --bundle "$b.sigstore.json" "$b"' <<<"$hbj" || fail "the bundle is signed into a Sigstore bundle (v0.3), the format verify reads"
 grep -qF 'factory/bin/host-bundle check-tools' <<<"$hbj" || fail "host-bundle checks the pinned tools against their downloads"
 grep -qF 'factory/bin/host-bundle worker-image "$IMAGE" "$VERSION" --index "$INDEX"' <<<"$hbj" \
@@ -111,24 +117,42 @@ grep -qF 'factory/bin/host-bundle worker-image "$IMAGE" "$VERSION" --index "$IND
   || fail "host-bundle signs the digests the image jobs handed over, not what a tag says after its review"
 grep -qF 'index: ${{ steps.tags.outputs.index }}' <<<"$man" || fail "worker-image-manifest hands host-bundle the index it signed"
 grep -q 'setup-buildx-action' <<<"$hbj" && fail "host-bundle runs no unpinned buildx setup with its signing token"
-attest="$(line_of "$hbj" 'uses: actions/attest-build-provenance@')"
-[[ -n "$attest" ]] && (( verify < attest && attest < upload )) && sed -n "${attest},\$p" <<<"$hbj" | grep -qE '^ +out/install.sh$' \
-  || fail "host-bundle attests install.sh with the agents, after it is written and verified, before the upload"
 grep -qF -- '--probe' <<<"$hbj" || fail "host-bundle writes the probe (an extra outer field) and verifies it too"
-up="$(sed -n "${upload},\$p" <<<"$hbj")"
+
+va="$(job verify-agents)"
+[[ -n "$va" ]] || fail "release.yml has a verify-agents job"
+needs_has "$va" host-bundle || fail "verify-agents needs host-bundle: $(needs_of "$va")"
+grep -qF 'bash factory/bin/verify-with-agents "out/omarchy-host-$VERSION.tar.gz" "out/probe/omarchy-host-$VERSION.tar.gz" agents/omarchy-agent-x86_64-linux-musl' <<<"$va" \
+  || fail "verify-agents runs verify-with-agents on the bundle and the probe"
+grep -qE '^    environment:' <<<"$va" && fail "verify-agents is outside the release environment"
+grep -qE 'id-token|: write$' <<<"$va" && fail "verify-agents holds no OIDC token and no token that writes: $(grep -E 'id-token|: write' <<<"$va")"
+grep -qE '^      contents: read$' <<<"$va" || fail "verify-agents declares its read-only permissions"
+echo "ok: the earlier agents run in a read-only job with no signing token"
+
+hbu="$(job host-bundle-upload)"
+[[ -n "$hbu" ]] || fail "release.yml has a host-bundle-upload job"
+needs_has "$hbu" verify-agents || fail "host-bundle-upload waits for verify-agents: $(needs_of "$hbu")"
+grep -q 'id-token' <<<"$hbu" && fail "host-bundle-upload holds no OIDC token"
+grep -qE '^ +(run: )?(bash )?(\./)?(agents|out)/' <<<"$hbu" && fail "host-bundle-upload runs no binary"
+upload="$(line_of "$hbu" 'gh release upload "$VERSION"')"
+[[ -n "$upload" ]] || fail "host-bundle-upload adds the assets to the draft"
+up="$(sed -n "${upload},\$p" <<<"$hbu")"
 for a in omarchy-agent-x86_64-linux-musl omarchy-agent-aarch64-linux-musl omarchy-agent-aarch64-darwin 'omarchy-host-$VERSION.tar.gz"' 'omarchy-host-$VERSION.tar.gz.sigstore.json' out/install.sh; do
-  grep -qF -- "$a" <<<"$up" || fail "host-bundle uploads $a to the draft"
+  grep -qF -- "$a" <<<"$up" || fail "host-bundle-upload uploads $a to the draft"
 done
 # Every file the upload names is one publish-release waits for (one list drifting from the other keeps the release a draft).
-for a in $(sed -n "${upload},\$p" <<<"$hbj" | tr -d '\\"' | tr ' ' '\n' | grep -E '^(agents|out)/'); do
+for a in $(sed -n "${upload},\$p" <<<"$hbu" | tr -d '\\"' | tr ' ' '\n' | grep -E '^(agents|out)/'); do
   name="$(basename "$a")"; name="${name//\$VERSION/\$v}"
-  grep -qF -- "$name" "$here/../factory/bin/publish-release" || fail "publish-release waits for $name, which host-bundle uploads"
+  grep -qF -- "$name" "$here/../factory/bin/publish-release" || fail "publish-release waits for $name, which host-bundle-upload uploads"
 done
-echo "ok: host-bundle lints, writes, signs, verifies with the fleet's agents, then adds everything to the draft"
+echo "ok: host-bundle lints, writes, signs and attests; the fleet's agents verify; then everything is added to the draft"
 
 pr="$(job publish-release)"
-needs_has "$pr" host-bundle || fail "publish-release needs host-bundle: $(needs_of "$pr")"
-grep -qF 'factory/bin/publish-release "${{ needs.version.outputs.version }}"' <<<"$pr" || fail "publish-release runs factory/bin/publish-release"
+needs_has "$pr" host-bundle-upload || fail "publish-release needs host-bundle-upload: $(needs_of "$pr")"
+grep -qF 'factory/bin/publish-release "${{ needs.version.outputs.version }}" sums' <<<"$pr" || fail "publish-release runs factory/bin/publish-release with the run's own SHA-256"
+for art in 'pattern: dist-*' 'pattern: agent-*' 'name: host-bundle'; do
+  grep -qF -- "$art" <<<"$pr" || fail "publish-release hashes the run's own artifacts ($art)"
+done
 deploy="$(job deploy)"
 needs_has "$deploy" publish-release || fail "deploy needs publish-release: $(needs_of "$deploy")"
 echo "ok: the release is published only after host-bundle, and the pool deployed only after that"
@@ -149,16 +173,28 @@ case "$1 $2" in
   "release list") cat "$GH_RELEASES" ;;
   "release download")
     tag="$3"; dir=""; while [[ $# -gt 0 ]]; do [[ "$1" == --dir ]] && dir="$2"; shift; done
+    mkdir -p "$dir"
+    if [[ "$tag" == "$PUBLISHING" ]]; then cp "$GH_DRAFT"/* "$dir/"; exit 0; fi
     [[ -f "$STUB_AGENTS/$tag" ]] || exit 1
-    mkdir -p "$dir"; cp "$STUB_AGENTS/$tag" "$dir/omarchy-agent-x86_64-linux-musl" ;;
+    cp "$STUB_AGENTS/$tag" "$dir/omarchy-agent-x86_64-linux-musl" ;;
+  "attestation verify")
+    # Attested by release.yml on main: the agents named in $STUB_UNATTESTED are not.
+    [[ "$*" == *"-R firemanxbr/omarchy-pool --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main"* ]] || exit 9
+    for t in $STUB_UNATTESTED; do [[ "$3" == */"$t"/* ]] && { echo "no attestation"; exit 1; }; done
+    exit 0 ;;
   *) echo "unexpected gh $*" >&2; exit 2 ;;
 esac
 STUB
 chmod +x "$tmp/bin/gh"
-export GH_LOG="$tmp/gh.log" GH_STATE="$tmp/state" GH_ASSETS="$tmp/assets" GH_ASSETS_DIR="$tmp/assets.d" GH_RELEASES="$tmp/releases" STUB_AGENTS="$tmp/agents"
 v=v1.2.3
+export GH_LOG="$tmp/gh.log" GH_STATE="$tmp/state" GH_ASSETS="$tmp/assets" GH_ASSETS_DIR="$tmp/assets.d" GH_RELEASES="$tmp/releases" STUB_AGENTS="$tmp/agents" \
+  GH_DRAFT="$tmp/draft" PUBLISHING="$v" STUB_UNATTESTED=""
 all="omarchy-pool-$v-x86_64-linux.tar.gz omarchy-pool-$v-x86_64-linux.tar.gz.sha256 omarchy-pool-$v-aarch64-linux.tar.gz omarchy-pool-$v-aarch64-linux.tar.gz.sha256 omarchy-staging.pub.asc omarchy-agent-x86_64-linux-musl omarchy-agent-aarch64-linux-musl omarchy-agent-aarch64-darwin omarchy-host-$v.tar.gz omarchy-host-$v.tar.gz.sigstore.json install.sh"
-publish() { PATH="$tmp/bin:$PATH" "$here/../factory/bin/publish-release" "$v" > "$tmp/out" 2>&1; }
+# The draft holds the bytes the run made; sums is their SHA-256, as release.yml's publish-release step writes it.
+mkdir -p "$GH_DRAFT"
+for a in $all; do echo "the run's $a" > "$GH_DRAFT/$a"; done
+(cd "$GH_DRAFT" && for f in *; do if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi; done) > "$tmp/sums"
+publish() { PATH="$tmp/bin:$PATH" "$here/../factory/bin/publish-release" "$v" "$tmp/sums" > "$tmp/out" 2>&1; }
 for gone in omarchy-host-$v.tar.gz.sigstore.json omarchy-agent-aarch64-darwin install.sh; do
   echo true > "$GH_STATE"; : > "$GH_LOG"; tr ' ' '\n' <<<"$all" | grep -vxF "$gone" > "$GH_ASSETS"
   publish && fail "a draft without $gone was published"
@@ -172,7 +208,19 @@ grep -qx "release edit $v --draft=false" "$GH_LOG" || fail "publish-release publ
 grep -q 'release edit' "$GH_LOG" && fail "a published release is not edited again"
 tr ' ' '\n' <<<"$all" | grep -vxF install.sh > "$GH_ASSETS"
 publish && fail "a published release without install.sh is reported"
-echo "ok: publish-release publishes a draft only once every asset is on it"
+# A draft's asset replaced after the run uploaded it: the names are all there, the bytes are not the run's.
+tr ' ' '\n' <<<"$all" > "$GH_ASSETS"
+for swapped in install.sh "omarchy-pool-$v-aarch64-linux.tar.gz"; do
+  echo true > "$GH_STATE"; : > "$GH_LOG"; cp "$GH_DRAFT/$swapped" "$tmp/kept"; echo "someone else's" > "$GH_DRAFT/$swapped"
+  publish && fail "a draft whose $swapped was replaced was published"
+  grep -qF "$swapped are not the bytes this run made; it stays a draft" "$tmp/out" || fail "the refusal names $swapped: $(cat "$tmp/out")"
+  grep -q 'release edit' "$GH_LOG" && fail "a draft whose $swapped was replaced was edited"
+  cp "$tmp/kept" "$GH_DRAFT/$swapped"
+done
+grep -vF ' install.sh' "$tmp/sums" > "$tmp/sums.short"; mv "$tmp/sums" "$tmp/sums.full"; mv "$tmp/sums.short" "$tmp/sums"
+echo true > "$GH_STATE"; publish && fail "an asset the run's sums do not name is not published"
+mv "$tmp/sums.full" "$tmp/sums"
+echo "ok: publish-release publishes a draft only once every asset is on it, with the bytes the run made"
 
 # verify-with-agents: stub agents answer as their name says.
 mkdir -p "$STUB_AGENTS"
@@ -204,6 +252,16 @@ withagents && fail "the new agent must verify the bundle itself (exit 0), not as
 agent_stub "$tmp/new" 0 0; cp "$tmp/new" "$STUB_AGENTS/v1.0.2"
 withagents || fail "an earlier release shipping this very agent: $(cat "$tmp/out")"
 grep -qF "skip: v1.0.2's agent was already run" "$tmp/out" || fail "one binary runs once: $(cat "$tmp/out")"
+agent_stub "$STUB_AGENTS/v1.0.2" 0 0; : > "$tmp/ran"
+printf '#!/bin/sh\n[ "$1" = --version ] && { echo "omarchy-agent fake"; exit 0; }\necho ran >> "%s"; exit 0\n' "$tmp/ran" > "$STUB_AGENTS/v1.0.2"
+STUB_UNATTESTED=v1.0.2 withagents && fail "an earlier agent with no attestation by release.yml on main fails the release"
+grep -qF "v1.0.2's omarchy-agent-x86_64-linux-musl is not attested by release.yml on refs/heads/main" "$tmp/out" || fail "the failure names the release: $(cat "$tmp/out")"
+[[ -s "$tmp/ran" ]] && fail "an agent with no attestation is never run"
+withagents || fail "the same agent, attested: $(cat "$tmp/out")"
+[[ -s "$tmp/ran" ]] || fail "an attested agent is run"
+grep -qF 'attestation verify' "$GH_LOG" || fail "verify-with-agents checks each earlier agent's attestation"
+printf '#!/bin/sh\n[ "$1" = --version ] && { echo "omarchy-agent env"; exit 0; }\n[ -z "$GH_TOKEN$GITHUB_TOKEN" ]\n' > "$STUB_AGENTS/v1.0.2"
+GH_TOKEN=secret GITHUB_TOKEN=secret withagents || fail "an agent runs without GH_TOKEN or GITHUB_TOKEN in its environment: $(cat "$tmp/out")"
 rm "$STUB_AGENTS/v1.0.2"
 withagents && fail "a release listing an agent that cannot be downloaded fails the release (a network error is not 'no agent')"
 grep -qF "v1.0.2 ships omarchy-agent-x86_64-linux-musl but it cannot be downloaded" "$tmp/out" || fail "the failure names the release: $(cat "$tmp/out")"

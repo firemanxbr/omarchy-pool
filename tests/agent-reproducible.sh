@@ -9,9 +9,8 @@
 # so a path that leaked into the binary would show. The second copy is a
 # later release with no agent change: another file of the repository differs
 # (README.md), as it would at the next release, and the binary must not.
-# build-agent takes SOURCE_DATE_EPOCH from the agent's own last commit, never
-# the release's; this test gives both copies the value the repository's
-# history yields, as release.yml's checkout (full history) does.
+# Each build is written under another file name, so a binary that depends on
+# its own name (codesign's identifier, on macOS) would show too.
 #
 # CI runs it per platform (ci.yml); by hand, on a committed tree:
 #   bash tests/agent-reproducible.sh [target-triple]
@@ -21,8 +20,6 @@ target="${1:-$(rustc -vV | sed -n 's/^host: //p')}"
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 
-SOURCE_DATE_EPOCH="$(git -C "$root" log -1 --format=%ct -- crates/omarchy-agent)"
-export SOURCE_DATE_EPOCH
 # The physical path: macOS's /var is a link to /private/var, and the compiler sees the latter.
 work="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$work"' EXIT
@@ -33,9 +30,9 @@ for n in first second; do
   mkdir -p "$src"
   git -C "$root" archive HEAD | tar -x -C "$src"
   [[ "$n" == second ]] && echo "A later release: this file changed, the agent did not." >> "$src/README.md"
-  bash "$src/factory/bin/build-agent" "$target" "$work/$n/omarchy-agent"
-  "$work/$n/omarchy-agent" --version >/dev/null
-  sum="$(sha256 "$work/$n/omarchy-agent")"
+  bash "$src/factory/bin/build-agent" "$target" "$work/$n/omarchy-agent-$n"
+  "$work/$n/omarchy-agent-$n" --version >/dev/null
+  sum="$(sha256 "$work/$n/omarchy-agent-$n")"
   sums+=("$sum")
   echo "$n build: $sum"
 done

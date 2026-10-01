@@ -19,6 +19,14 @@
 #   release (a network error is not "no agent"). One binary is run once
 #   however many releases ship it.
 #
+# An earlier agent is a file anyone with write access could have put on a
+# release (by hand, or from a branch's copy of release.yml), so it runs only
+# once `gh attestation verify` proved it was built and attested by
+# release.yml on refs/heads/main; any other agent fails the release (a
+# person must look), it is never skipped. And it never runs next to a
+# signing token: release.yml runs this in its own job, read-only, with no
+# OIDC token, and the agents run without GH_TOKEN in their environment.
+#
 # The runner is x86_64, so it runs each version's x86_64-linux build: the
 # verifier's code is the same on every platform.
 set -euo pipefail
@@ -26,6 +34,7 @@ bundle="${1:?usage: verify-with-agents <bundle> <probe> <new-agent>}"
 probe="${2:?usage: verify-with-agents <bundle> <probe> <new-agent>}"
 new="${3:?usage: verify-with-agents <bundle> <probe> <new-agent>}"
 asset=omarchy-agent-x86_64-linux-musl
+repo=firemanxbr/omarchy-pool
 days="${OMARCHY_AGENT_WINDOW_DAYS:-30}"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
@@ -35,7 +44,7 @@ check() { # agent, label, the exit codes accepted
   for what in bundle probe; do
     if [[ "$what" == bundle ]]; then file="$bundle"; else file="$probe"; fi
     code=0
-    "$agent" verify --bundle "$file" --sig "$file.sigstore.json" > "$work/out" 2>&1 || code=$?
+    env -u GH_TOKEN -u GITHUB_TOKEN "$agent" verify --bundle "$file" --sig "$file.sigstore.json" > "$work/out" 2>&1 || code=$?
     if [[ " $accepted " != *" $code "* ]]; then
       echo "verify-with-agents: $label refuses the $what (exit $code):" >&2
       cat "$work/out" >&2
@@ -67,6 +76,12 @@ for tag in $tags; do
   sum="$(sha256 "$agent")"
   if [[ "$seen" == *" $sum "* ]]; then echo "skip: $tag's agent was already run"; continue; fi
   seen+="$sum "
+  if ! gh attestation verify "$agent" -R "$repo" --signer-workflow "$repo/.github/workflows/release.yml" \
+      --source-ref refs/heads/main > "$work/attest" 2>&1; then
+    echo "verify-with-agents: $tag's $asset is not attested by release.yml on refs/heads/main; it is not run, and the release stops:" >&2
+    cat "$work/attest" >&2
+    exit 1
+  fi
   chmod 755 "$agent"
   check "$agent" "$tag's agent ($("$agent" --version))" "0 3"
   checked=$((checked + 1))

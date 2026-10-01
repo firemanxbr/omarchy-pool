@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# publish-release vX.Y.Z: release.yml's last step before the deploy (#311).
+# publish-release vX.Y.Z <sums>: release.yml's last step before the deploy (#311).
 # The release was created as a draft; this publishes it, which is when it
 # becomes immutable (immutable releases are on), and only once every asset a
 # host or the worker image needs is on it: the binaries, the three agent
@@ -7,10 +7,17 @@
 # A release missing one stays a draft, and the pool stays on the previous
 # release (deploy needs this job). Run again on a published release with
 # every asset, it changes nothing. want=() must name what release.yml's
-# publish and host-bundle jobs upload: tests/release-workflow.sh checks that
-# every asset host-bundle uploads is here.
+# publish and host-bundle-upload jobs upload: tests/release-workflow.sh
+# checks that every asset host-bundle-upload uploads is here.
+#
+# Names are not enough: until it is published, any token that may write
+# contents can replace a draft's asset. <sums> is the SHA-256 of every file
+# the run itself made (`sha256sum` lines, release.yml's host-bundle-upload
+# hands them over); each asset is downloaded from the draft and must match,
+# or the release stays a draft.
 set -euo pipefail
-v="${1:?usage: publish-release vX.Y.Z}"
+v="${1:?usage: publish-release vX.Y.Z <sums>}"
+sums="${2:?usage: publish-release vX.Y.Z <sums>}"
 [[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "publish-release: $v is not vX.Y.Z" >&2; exit 2; }
 want=(
   "omarchy-pool-$v-x86_64-linux.tar.gz" "omarchy-pool-$v-x86_64-linux.tar.gz.sha256"
@@ -26,6 +33,20 @@ for a in "${want[@]}"; do grep -qxF -- "$a" <<<"$have" || missing+=("$a"); done
 if (( ${#missing[@]} )); then
   if [[ "$state" == true ]]; then echo "publish-release: $v lacks ${missing[*]}; it stays a draft" >&2
   else echo "publish-release: $v is published without ${missing[*]}: a person must look" >&2; fi
+  exit 1
+fi
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+patterns=(); for a in "${want[@]}"; do patterns+=(--pattern "$a"); done
+gh release download "$v" --dir "$work" "${patterns[@]}" >/dev/null || { echo "publish-release: cannot download $v's assets" >&2; exit 1; }
+changed=()
+for a in "${want[@]}"; do
+  expected="$(awk -v n="$a" '$2 == n || $2 == "*" n { print $1 }' "$sums")"
+  [[ -n "$expected" && -f "$work/$a" && "$(sha256 "$work/$a")" == "$expected" ]] || changed+=("$a")
+done
+if (( ${#changed[@]} )); then
+  if [[ "$state" == true ]]; then echo "publish-release: $v's ${changed[*]} are not the bytes this run made; it stays a draft" >&2
+  else echo "publish-release: $v is published with ${changed[*]} not the bytes this run made: a person must look" >&2; fi
   exit 1
 fi
 if [[ "$state" != true ]]; then

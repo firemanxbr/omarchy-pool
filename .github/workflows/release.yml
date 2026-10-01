@@ -143,9 +143,8 @@ jobs:
     name: Host agent (${{ matrix.target }})
     # The omarchy-agent binary per platform (#311, design v2 §4.4), built by
     # factory/bin/build-agent, the build tests/agent-reproducible.sh checks:
-    # an unchanged agent keeps its hash from release to release
-    # (SOURCE_DATE_EPOCH is the agent's own last commit, hence the full
-    # history). Nothing signs here: host-bundle puts each binary's SHA-256 in
+    # an unchanged agent keeps its hash from release to release. Nothing
+    # signs here: host-bundle puts each binary's SHA-256 in
     # the signed manifest and install.sh, and attests their provenance, in the
     # release environment.
     needs: version
@@ -164,8 +163,6 @@ jobs:
             asset: omarchy-agent-aarch64-darwin
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       # Keep in sync with rust-toolchain.toml. Pinned by commit: this binary is
       # what every host trusts (the build job's @master is a follow-up).
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
@@ -366,14 +363,13 @@ jobs:
     #     install.sh with the three agent SHA-256;
     #  3. cosign sign-blob --bundle signs it (and a probe: the same bundle
     #     with one more outer field);
-    #  4. factory/bin/verify-with-agents runs omarchy-agent verify with the
-    #     production pins on both, with the new agent and every agent
-    #     released in the last 30 days: any refusal fails the release here,
-    #     before it is published;
-    #  5. the agent binaries' and install.sh's provenance is attested (a
+    #  4. the agent binaries' and install.sh's provenance is attested (a
     #     branch's copy of this file attests @refs/heads/<branch>, which the
-    #     runbook's verifying install refuses), and everything is added to
-    #     the draft.
+    #     runbook's verifying install and verify-with-agents refuse), and
+    #     the signed bundle, the probe and install.sh are handed to
+    #     verify-agents as an artifact.
+    # It runs no binary but this run's own agent: the earlier agents run in
+    # verify-agents, which holds no signing token.
     needs: [version, publish, agent, worker-image-manifest]
     environment: release
     permissions:
@@ -441,13 +437,79 @@ jobs:
           for b in "out/omarchy-host-$VERSION.tar.gz" "out/probe/omarchy-host-$VERSION.tar.gz"; do
             cosign sign-blob --yes --fulcio-url=https://fulcio.sigstore.dev --rekor-url=https://rekor.sigstore.dev --new-bundle-format --bundle "$b.sigstore.json" "$b"
           done
-      - name: Verify with the new agent and every agent of the last 30 days
-        run: bash factory/bin/verify-with-agents "out/omarchy-host-$VERSION.tar.gz" "out/probe/omarchy-host-$VERSION.tar.gz" agents/omarchy-agent-x86_64-linux-musl
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             agents/omarchy-agent-*
             out/install.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: host-bundle
+          path: |
+            out/omarchy-host-${{ env.VERSION }}.tar.gz
+            out/omarchy-host-${{ env.VERSION }}.tar.gz.sigstore.json
+            out/install.sh
+            out/probe/omarchy-host-${{ env.VERSION }}.tar.gz
+            out/probe/omarchy-host-${{ env.VERSION }}.tar.gz.sigstore.json
+          if-no-files-found: error
+
+  verify-agents:
+    name: Host bundle verified with the fleet's agents
+    # factory/bin/verify-with-agents (#311, design v2 §4.4, §5.1) runs
+    # omarchy-agent verify with the production pins on the signed bundle and
+    # the probe, with the new agent and every agent released in the last 30
+    # days: any refusal fails the release here, before anything is added to
+    # the draft. It runs binaries from earlier releases, so only those
+    # attested by this file on refs/heads/main, and in a job of its own:
+    # read-only, outside the release environment, with no OIDC token, so no
+    # agent ever runs next to the signing identity or a token that writes.
+    needs: [version, agent, host-bundle]
+    permissions:
+      contents: read
+      attestations: read
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-omarchy-agent-x86_64-linux-musl
+          path: agents
+      - uses: actions/download-artifact@v4
+        with:
+          name: host-bundle
+          path: out
+      - name: Verify with the new agent and every agent of the last 30 days
+        run: |
+          chmod 755 agents/omarchy-agent-x86_64-linux-musl
+          bash factory/bin/verify-with-agents "out/omarchy-host-$VERSION.tar.gz" "out/probe/omarchy-host-$VERSION.tar.gz" agents/omarchy-agent-x86_64-linux-musl
+
+  host-bundle-upload:
+    name: Host bundle added to the draft
+    # Only once verify-agents passed: the agents, the signed host bundle and
+    # install.sh, from this run's artifacts. It runs no binary, and holds no
+    # OIDC token.
+    needs: [version, host-bundle, verify-agents]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: agents
+          pattern: agent-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: host-bundle
+          path: out
       - name: Add them to the draft
         run: |
           set -euo pipefail
@@ -456,13 +518,16 @@ jobs:
 
   publish-release:
     name: Publish the release (immutable from here)
-    # Only once host-bundle signed, verified and added the host bundle
-    # (#311): factory/bin/publish-release checks that every asset is on the
-    # draft, then publishes it, which makes it immutable. A host-bundle that
-    # fails leaves the release a draft, and the pool on the previous release
-    # (deploy needs this job), so follow.latest never names a release whose
-    # bundle does not exist.
-    needs: [version, host-bundle]
+    # Only once host-bundle signed, verify-agents verified and
+    # host-bundle-upload added the host bundle (#311):
+    # factory/bin/publish-release checks that every asset is on the draft
+    # and is the bytes this run made (hashed here from the run's own
+    # artifacts: a draft's asset can still be replaced by any token that
+    # writes contents), then publishes it, which makes it immutable. A job
+    # that fails before leaves the release a draft, and the pool on the
+    # previous release (deploy needs this job), so follow.latest never names
+    # a release whose bundle does not exist.
+    needs: [version, host-bundle-upload]
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -471,7 +536,27 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
-      - run: factory/bin/publish-release "${{ needs.version.outputs.version }}"
+      - uses: actions/download-artifact@v4
+        with:
+          path: made
+          pattern: dist-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: made
+          pattern: agent-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: host-bundle
+          path: made
+      - name: The SHA-256 of every file this run made
+        run: |
+          set -euo pipefail
+          cp docs/omarchy-staging.pub.asc made/
+          (cd made && for f in *; do if [[ -f "$f" ]]; then sha256sum "$f"; fi; done) > sums
+          cat sums
+      - run: factory/bin/publish-release "${{ needs.version.outputs.version }}" sums
 
   deploy:
     name: Deploy worker

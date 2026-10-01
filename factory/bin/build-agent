@@ -7,11 +7,13 @@
 # toolchain rust-toolchain.toml pins, the build directories remapped
 # (--remap-path-prefix for Rust, -ffile-prefix-map for the C that aws-lc
 # compiles and, on macOS, -oso_prefix so the linker's UUID does not hash the
-# object paths), no release tag in the binary (the agent carries its own
-# version only) and SOURCE_DATE_EPOCH from the last commit that touched the
-# agent's crate, not the release's, so a release with no agent change ships
-# the binary the previous one did. On macOS the binary is signed ad hoc
-# (`codesign -s -`), which carries no time and no identity.
+# object paths) and no release tag in the binary (the agent carries its own
+# version only), so a release with no agent change ships the binary the
+# previous one did. Nothing in the agent embeds a time; SOURCE_DATE_EPOCH is
+# a constant all the same, should a C build ever read it. On macOS the
+# binary is signed ad hoc (`codesign -s -`), which carries no time, with a
+# fixed identifier: codesign would otherwise take it from the file name, and
+# a rebuild under any other name than the release asset's would differ.
 #
 # Linux musl targets need musl's C compiler (CC_<target>=musl-gcc).
 set -euo pipefail
@@ -21,11 +23,7 @@ src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
 
-if [[ -z "${SOURCE_DATE_EPOCH:-}" ]]; then
-  SOURCE_DATE_EPOCH="$(git -C "$src" log -1 --format=%ct -- crates/omarchy-agent 2>/dev/null || true)"
-  [[ -n "$SOURCE_DATE_EPOCH" ]] || { echo "build-agent: no git history of crates/omarchy-agent here: set SOURCE_DATE_EPOCH" >&2; exit 2; }
-fi
-export SOURCE_DATE_EPOCH CARGO_INCREMENTAL=0
+export SOURCE_DATE_EPOCH=0 CARGO_INCREMENTAL=0
 map="-ffile-prefix-map=$src=/build -ffile-prefix-map=$cargo_home=/cargo"
 rustflags="--remap-path-prefix=$src=/build --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$rustup_home=/rustup"
 [[ "$target" == *-apple-darwin ]] && rustflags="$rustflags -C link-arg=-Wl,-oso_prefix,$src/"
@@ -38,6 +36,6 @@ rustflags="--remap-path-prefix=$src=/build --remap-path-prefix=$cargo_home=/carg
 bin="$src/target/$target/release/omarchy-agent"
 mkdir -p "$(dirname "$out")"
 cp "$bin" "$out"
-[[ "$target" == *-apple-darwin ]] && codesign --force -s - "$out"
+[[ "$target" == *-apple-darwin ]] && codesign --force -s - --identifier omarchy-agent "$out"
 chmod 755 "$out"
-echo "build-agent: $target -> $out (SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)" >&2
+echo "build-agent: $target -> $out" >&2
