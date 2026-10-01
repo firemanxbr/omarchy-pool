@@ -6,8 +6,14 @@
 //! isolated, credential-less container per task; those containers and their sidecars are
 //! not in the template (one function signed inside the worker image makes them, checked
 //! by the dispatcher's own CI test), so nothing here describes them.
+//!
+//! `set.toml` beside the template is checked too ([`lint_set_toml`]): schema 3, strict,
+//! naming only the template's services.
 
+mod set_toml;
 mod yaml;
+
+pub use set_toml::{lint_set_toml, parse_set_toml, Needs, Ready, SetToml, SET_SCHEMA};
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};

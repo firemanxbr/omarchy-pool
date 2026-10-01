@@ -1,0 +1,28 @@
+# Maintainer-set task sizes, disk budgets and network exceptions, per package
+# (design v2 §7.3, §7.4, §9.4; epic #307).
+#
+# Empty in P0: nothing reads this file before P2, when the pool and the
+# dispatcher take a package's size and budget from it. It ships in the signed
+# release like every file of the repository, and CODEOWNERS makes every
+# maintainer an owner of factory/sizing/, so an entry is a maintainer's
+# decision another maintainer approves in a pull request: that review and
+# that signature are what "signed per-package exception" means.
+#
+# The recipe directories beside this file (factory/sizing/<name>/PKGBUILD)
+# are the sizing recipes kept for dry runs; this file is about any package.
+#
+# Format, schema 1 (an unknown key is refused when P2 reads it):
+#
+#   [package."<pkgbase>"]
+#   size     = 4             # units the task takes (D31): 1 when not listed;
+#                            # clamped to the largest host alive at claim time
+#   disk_gb  = 120           # the build's disk budget: 20 per size unit when not set
+#   network  = "direct"      # the per-package network exception: a normal bridge
+#                            # network instead of the task's internal one (still
+#                            # no IPv4 LAN, CGNAT or link-local where
+#                            # prep-root.sh's DOCKER-USER rules are in; the
+#                            # rules are IPv4 only, so IPv6 stays off on it)
+#   reason   = "…"           # why, required with `network`; shown on the package page
+schema = 1
+
+[package]
