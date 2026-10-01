@@ -276,6 +276,61 @@ fn statements_are_pinned_to_rollback_yml() {
     assert_eq!(r.reason(), "workflow");
 }
 
+/// What factory/bin/release-rollback writes (tests/rollback-workflow.sh holds the script to
+/// this file's shape, byte for byte but `issued` and `run`).
+const RELEASE_ROLLBACK_STATEMENT: &[u8] =
+    include_bytes!("../../tests/fixtures/statement/release-rollback.json");
+
+#[test]
+fn the_statement_release_rollback_writes_is_accepted_from_rollback_yml_on_main_only() {
+    let signed_by = |san: String| {
+        Vouches(
+            Claims {
+                san,
+                ..Claims::default()
+            }
+            .certificate(),
+        )
+    };
+    let StatementOutcome::Current(s) = statement_with(
+        &signed_by(ROLLBACK.san()),
+        RELEASE_ROLLBACK_STATEMENT,
+        b"{}",
+    )
+    .unwrap() else {
+        panic!("expected a current statement")
+    };
+    let st = s.statement();
+    assert_eq!(
+        (
+            st.seq(),
+            st.to().to_string(),
+            st.retracts_through().to_string(),
+            st.agent_to()
+        ),
+        (1, "1.0.2".into(), "1.0.3".into(), None)
+    );
+    assert!(s
+        .signer()
+        .identity()
+        .ends_with("/.github/workflows/rollback.yml@refs/heads/main"));
+    // The same bytes signed by release.yml, or by rollback.yml from any other ref.
+    let r = statement_with(&pinned(), RELEASE_ROLLBACK_STATEMENT, b"{}").unwrap_err();
+    assert_eq!(r.reason(), "workflow", "{r}");
+    for other in ["refs/heads/other", "refs/tags/v1.0.2", "refs/pull/1/merge"] {
+        let v = signed_by(ROLLBACK.san().replace("refs/heads/main", other));
+        let r = statement_with(&v, RELEASE_ROLLBACK_STATEMENT, b"{}").unwrap_err();
+        assert_eq!(r.reason(), "ref", "{other}: {r}");
+    }
+    // A statement changed after signing is the cryptographic check's to refuse; one whose
+    // signature holds but whose content the agent cannot take is refused as content.
+    let mut v: serde_json::Value = serde_json::from_slice(RELEASE_ROLLBACK_STATEMENT).unwrap();
+    v["retracts_through"] = "v1.0.2".into();
+    let r =
+        statement_with(&signed_by(ROLLBACK.san()), v.to_string().as_bytes(), b"{}").unwrap_err();
+    assert_eq!(r.reason(), "content", "{r}");
+}
+
 #[test]
 fn a_bundle_that_is_not_a_message_signature_or_not_json_is_refused() {
     let v = SigstoreVerifier::production();

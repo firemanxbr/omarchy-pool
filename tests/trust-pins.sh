@@ -3,9 +3,12 @@
 # (#308, design v2 §20), read from the files themselves:
 #
 # - release.yml and rollback.yml install one exact cosign, through the
-#   installer pinned by commit, and every `cosign sign` names the Fulcio
-#   and Rekor it signs against (the signing config), the same in
-#   release.yml and factory/bin/release-rollback;
+#   installer pinned by commit, and every `cosign sign` and `cosign
+#   sign-blob` names the Fulcio and Rekor it signs against (the signing
+#   config), the same in release.yml and factory/bin/release-rollback; a
+#   `sign-blob` writes a Sigstore bundle (v0.3), the one format
+#   `omarchy-agent verify` reads, and release-rollback signs the rollback
+#   statement so (#314);
 # - every release.yml job that can mint an OIDC token (`id-token: write`)
 #   runs in the `release` environment; rollback.yml's one job in `pool`;
 # - the documented identity is exact: release.yml on main, the GitHub
@@ -56,13 +59,14 @@ echo "ok: release.yml and rollback.yml install one exact cosign (${distinct#* })
 # --- the signing config on every signature -------------------------------------
 SIGN_FLAGS='--fulcio-url=https://fulcio.sigstore.dev --rekor-url=https://rekor.sigstore.dev'
 for f in "$RELEASE" "$root/factory/bin/release-rollback"; do
-  signs="$(grep -E 'cosign sign( |$)' "$f" | grep -v '^ *#' || true)"
+  signs="$(grep -E 'cosign sign(-blob)?( |$)' "$f" | grep -v '^ *#' || true)"
   [[ -n "$signs" ]] || fail "$(basename "$f") signs"
-  unpinned="$(grep -vF -- "cosign sign --yes $SIGN_FLAGS " <<<"$signs" || true)"
-  [[ -z "$unpinned" ]] || fail "$(basename "$f"): every cosign sign names its Fulcio and Rekor: $unpinned"
+  unpinned="$(grep -vF -- "cosign sign --yes $SIGN_FLAGS " <<<"$signs" | grep -vF -- "cosign sign-blob --yes $SIGN_FLAGS --new-bundle-format --bundle " || true)"
+  [[ -z "$unpinned" ]] || fail "$(basename "$f"): every cosign sign and sign-blob names its Fulcio and Rekor, and a sign-blob writes a Sigstore bundle: $unpinned"
 done
+grep -v '^ *#' "$root/factory/bin/release-rollback" | grep -qF -- "cosign sign-blob --yes $SIGN_FLAGS --new-bundle-format --bundle " || fail "release-rollback signs the rollback statement into a Sigstore bundle (#314)"
 grep -qE 'use-signing-config|--signing-config' "$RELEASE" "$root/factory/bin/release-rollback" && fail "no signing config fetched at run time"
-echo "ok: every signature names the public-good Fulcio and Rekor, in release.yml and release-rollback"
+echo "ok: every signature names the public-good Fulcio and Rekor, in release.yml and release-rollback, and the rollback statement is a Sigstore bundle"
 
 # --- OIDC tokens only in the reviewed environments -----------------------------
 signers=0
