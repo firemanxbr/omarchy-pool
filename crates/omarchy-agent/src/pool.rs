@@ -72,16 +72,22 @@ pub fn check_origin(origin: &str) -> Result<String, String> {
     Ok(o.to_owned())
 }
 
+/// rustls on aws-lc-rs with the webpki roots: every HTTPS call the agent makes (the pool
+/// here, and the run loop's to the pool and GitHub, #315). ureq is built without a
+/// provider of its own, so none other (`ring`) is ever in the tree.
+pub(crate) fn tls() -> ureq::tls::TlsConfig {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::Rustls)
+        .unversioned_rustls_crypto_provider(provider)
+        .build()
+}
+
 impl Pool {
     pub fn new(origin: &str) -> Result<Self, String> {
         let origin = check_origin(origin)?;
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let tls = ureq::tls::TlsConfig::builder()
-            .provider(ureq::tls::TlsProvider::Rustls)
-            .unversioned_rustls_crypto_provider(provider)
-            .build();
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            .tls_config(tls)
+            .tls_config(tls())
             .timeout_global(Some(CALL_TIMEOUT))
             .http_status_as_error(false)
             // One origin: a 3xx is an answer the caller sees, never a second origin a
