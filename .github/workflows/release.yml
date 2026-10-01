@@ -373,7 +373,7 @@ jobs:
     needs: [version, publish, agent, worker-image-manifest]
     environment: release
     permissions:
-      contents: write
+      contents: read
       packages: read
       id-token: write
       attestations: write
