@@ -350,6 +350,18 @@ fn stage_trial(
     rel: &Path,
     stop: &AtomicBool,
 ) -> Result<Value, Prep> {
+    // A release from before the dispatcher staged trials runs its own `docker run` from this side,
+    // outside the spec function: such a release's trial is refused, never run.
+    let script = rel.join("tests/trial.sh");
+    if !std::fs::read_to_string(&script).is_ok_and(|s| s.contains("TRIAL_STAGE")) {
+        return Err(Prep::Fail(fail_body(
+            &format!(
+                "trial: release {}'s tests/trial.sh predates the dispatcher's staging (TRIAL_STAGE); a trial runs with a release that has it",
+                l.release
+            ),
+            false,
+        )));
+    }
     let t = &l.task;
     let built = param_task(&t.params, "task").ok_or_else(|| {
         Prep::Fail(fail_body(
@@ -425,7 +437,7 @@ fn stage_trial(
     let keyrings = crate::work::keyrings_in(&ctx.work_root.join("keyrings"), rel, &[]).ok();
     let input = dir.join("in");
     let mut cmd = std::process::Command::new("bash");
-    cmd.arg(rel.join("tests/trial.sh"))
+    cmd.arg(&script)
         .arg(&t.arch)
         .arg(built.to_string())
         .args(&names)
@@ -655,11 +667,13 @@ fn upload(ctx: &Ctx, l: &Lease, to: u64, name: &str, file: &Path) -> Result<Uplo
 fn pkginfo_of(pkg: &Path) -> Option<Vec<u8>> {
     let mut a = tar::Archive::new(pkg_extract::open_archive(pkg).ok()?);
     for e in a.entries().ok()? {
-        let mut e = e.ok()?;
+        let e = e.ok()?;
         if e.path().ok()?.to_string_lossy() == ".PKGINFO" {
             let mut b = Vec::new();
-            e.read_to_end(&mut b).ok()?;
-            return Some(b);
+            e.take(pkg_extract::MAX_PKGINFO_BYTES + 1)
+                .read_to_end(&mut b)
+                .ok()?;
+            return (b.len() as u64 <= pkg_extract::MAX_PKGINFO_BYTES).then_some(b);
         }
     }
     None

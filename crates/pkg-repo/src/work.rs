@@ -1960,6 +1960,9 @@ pub(crate) fn keyrings_in(dir: &Path, repo: &Path, required: &[String]) -> Resul
     let status = Command::new("bash")
         .arg(repo.join("tests/fetch-keyrings.sh"))
         .arg(&dir)
+        // It fetches public files: no token of this process reaches it.
+        .env_remove("OMARCHY_TOKEN")
+        .env_remove("OMARCHY_WORKER_TOKEN")
         .status()
         .context("fetch-keyrings.sh")?;
     if !status.success() {

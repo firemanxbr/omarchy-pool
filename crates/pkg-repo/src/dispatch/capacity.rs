@@ -5,8 +5,9 @@
 //!
 //! Seams: the agent's run loop (#315) refreshes the file; its free engine
 //! disk is the agent's last probe, in 10 GB steps, so the disk watcher's
-//! engine value is only as fresh as that (the work root it measures itself,
-//! with statvfs, at every turn of the loop).
+//! engine value is only as fresh as that: it kills on it once per probe (the
+//! file's `at`), never twice on the same value (the work root it measures
+//! itself, with statvfs, at every turn of the loop).
 
 use std::path::Path;
 
@@ -70,6 +71,8 @@ impl Constants {
 /// `run/capacity.json` as far as the dispatcher reads it; the whole file goes with the claim.
 #[derive(Debug, Clone)]
 pub struct File {
+    /// When the agent probed: a new value is a new probe.
+    pub at: String,
     pub units: u32,
     pub job_reserved: u32,
     pub below_minimum: bool,
@@ -105,6 +108,11 @@ pub fn read(path: &Path) -> Option<File> {
         "lanes": lanes,
     });
     Some(File {
+        at: v
+            .get("at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
         units,
         job_reserved,
         below_minimum: v

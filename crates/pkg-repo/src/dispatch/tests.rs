@@ -39,6 +39,8 @@ struct FakeEngine {
     removed: Mutex<Vec<(u64, String)>>,
     /// `inspect` gets no answer (a busy daemon).
     deaf: AtomicBool,
+    /// Kills and removals do not take (a daemon that does not answer them).
+    stuck: AtomicBool,
 }
 
 impl FakeEngine {
@@ -127,6 +129,9 @@ impl Engine for FakeEngine {
             .collect())
     }
     fn remove_lease(&self, task: u64, gen: &str) {
+        if self.stuck.load(Ordering::SeqCst) {
+            return;
+        }
         // By its labels: a container this lease started (a stranger without them is not found this way).
         let name = spec::container_name(task, gen);
         let mut c = self.containers.lock().unwrap();
@@ -136,6 +141,9 @@ impl Engine for FakeEngine {
         self.removed.lock().unwrap().push((task, gen.to_owned()));
     }
     fn remove_name(&self, name: &str) {
+        if self.stuck.load(Ordering::SeqCst) {
+            return;
+        }
         self.containers.lock().unwrap().remove(name);
     }
 }
@@ -174,6 +182,8 @@ struct FakePool {
     down: AtomicBool,
     /// Uploads are refused with this status.
     refuse_uploads: Mutex<Option<u16>>,
+    /// Each heartbeat takes this long (a pool that holds the connection open).
+    slow_beat: Mutex<Duration>,
 }
 
 fn down() -> RepoError {
@@ -244,6 +254,7 @@ impl Pool for FakePool {
         Ok(())
     }
     fn heartbeat(&self, task: u64, token: &str) -> Beat {
+        std::thread::sleep(*self.slow_beat.lock().unwrap());
         self.beat_tokens.lock().unwrap().push((task, token.into()));
         if self.down.load(Ordering::SeqCst) {
             return Beat::Nothing;
@@ -408,11 +419,26 @@ impl H {
     }
 
     fn units(&self, units: u32) {
-        std::fs::write(&self.capacity, json!({"schema":2,"at":"2026-10-01T00:00:00Z","cpus":12,"mem_gb":32,"page_kb":16,"disk_free_gb":{"work":200,"engine":150},"units":units,"job_reserved":1,"agent_slots":1,"lanes":[{"arch":"aarch64","mode":"native"}],"isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}).to_string()).unwrap();
+        self.capacity_file(units, 150, "2026-10-01T00:00:00Z");
+    }
+
+    /// The agent's file: its units, its free engine disk, when it probed.
+    fn capacity_file(&self, units: u32, engine: u64, at: &str) {
+        std::fs::write(&self.capacity, json!({"schema":2,"at":at,"cpus":12,"mem_gb":32,"page_kb":16,"disk_free_gb":{"work":200,"engine":engine},"units":units,"job_reserved":1,"agent_slots":1,"lanes":[{"arch":"aarch64","mode":"native"}],"isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}).to_string()).unwrap();
     }
 
     /// A dispatcher on this host: a new one is a restart (the engine and the lease files stay).
     fn dispatcher(&self) -> Dispatcher {
+        self.dispatcher_with(
+            Timing::default(),
+            Images {
+                aarch64: IMAGE.into(),
+                x86_64: IMAGE.into(),
+            },
+        )
+    }
+
+    fn dispatcher_with(&self, timing: Timing, images: Images) -> Dispatcher {
         let pool: Arc<dyn Pool> = self.pool.clone();
         let ctx = Ctx {
             pool,
@@ -428,13 +454,10 @@ impl H {
                 now: Arc::clone(&self.now),
                 work: Arc::clone(&self.free),
             }),
-            Timing::default(),
+            timing,
             HOST.into(),
             self.capacity.clone(),
-            Images {
-                aarch64: IMAGE.into(),
-                x86_64: IMAGE.into(),
-            },
+            images,
             None,
             true,
         )
@@ -1085,6 +1108,154 @@ fn a_build_starts_only_with_its_budget_plus_the_floor_free() {
     let f = &h.pool.fails_of(7)[0];
     assert_eq!(f["lost"], true);
     assert!(f["error"].as_str().unwrap().contains("not started"));
+    // The pool would hand the same build straight back: no claim takes work until its budget fits.
+    h.give(community(7, GEN2));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert_eq!(h.pool.last_claim()["want"], 0);
+    assert_eq!(
+        h.pool.fails_of(7).len(),
+        2,
+        "the replayed build is given back, not started"
+    );
+    assert!(h.engine.runs.lock().unwrap().is_empty());
+    h.advance(31);
+    h.ticks(&mut d, 1);
+    assert_eq!(h.pool.last_claim()["want"], 0, "still short");
+    *h.free.lock().unwrap() = Some(30);
+    h.advance(31);
+    h.ticks(&mut d, 1);
+    assert_eq!(
+        h.pool.last_claim()["want"],
+        1,
+        "its budget plus the floor is free again"
+    );
+}
+
+#[test]
+fn a_task_above_the_units_the_claim_offered_is_given_back_never_started() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    let mut big = community(7, GEN);
+    big["task"]["units"] = json!(12); // 11 units, one kept for a pool job
+    h.give(big);
+    h.ticks(&mut d, 2);
+    assert!(h.engine.runs.lock().unwrap().is_empty());
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(
+        (f["lost"].clone(), f["final"].clone()),
+        (json!(true), json!(false))
+    );
+    // A full host says `want: 0`; a task the pool hands it anyway is given back too.
+    h.units(1);
+    h.give(community(8, GEN2));
+    h.advance(31);
+    h.ticks(&mut d, 2);
+    assert_eq!(
+        h.pool.claim_bodies.lock().unwrap().last().unwrap()["want"],
+        0
+    );
+    assert_eq!(h.pool.fails_of(8).len(), 1);
+    assert!(h.engine.runs.lock().unwrap().is_empty() && h.leases().is_empty());
+}
+
+#[test]
+fn a_kill_that_does_not_take_keeps_the_lease_and_its_units_until_the_container_is_gone() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    h.engine.stuck.store(true, Ordering::SeqCst);
+    h.pool
+        .beats
+        .lock()
+        .unwrap()
+        .insert(7, BeatMode::Stop("cancelled".into()));
+    h.advance(301);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(7, GEN), "the kill did not take");
+    assert!(h.pool.fails_of(7).is_empty(), "nothing reported yet");
+    assert_eq!(
+        d.holds(),
+        vec![(7, GEN.to_owned())],
+        "the lease and its units stay"
+    );
+    assert_eq!(h.leases().len(), 1, "and its lease file");
+    h.engine.stuck.store(false, Ordering::SeqCst);
+    h.ticks(&mut d, 2);
+    assert!(!h.engine.has(7, GEN));
+    assert_eq!(h.pool.fails_of(7).len(), 1);
+    assert!(d.holds().is_empty() && h.leases().is_empty());
+}
+
+#[test]
+fn a_low_engine_disk_kills_the_youngest_build_once_per_probe() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    h.give(community(8, GEN2));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(7, GEN) && h.engine.has(8, GEN2));
+    h.capacity_file(11, 5, "2026-10-01T01:00:00Z");
+    h.ticks(&mut d, 3);
+    assert!(!h.engine.has(8, GEN2), "the youngest build is killed");
+    assert!(h.engine.has(7, GEN), "and only one for this probe's value");
+    assert!(h.pool.fails_of(8)[0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("disk watcher"));
+    h.capacity_file(11, 5, "2026-10-01T01:05:00Z");
+    h.ticks(&mut d, 1);
+    assert!(
+        !h.engine.has(7, GEN),
+        "a new probe still short kills the next"
+    );
+    h.capacity_file(11, 150, "2026-10-01T01:10:00Z");
+    h.advance(31);
+    h.ticks(&mut d, 2);
+    assert_eq!(h.pool.last_claim()["want"], 1);
+}
+
+#[test]
+fn a_tick_spends_a_bounded_time_on_a_pool_that_holds_its_heartbeats() {
+    let h = H::new();
+    let mut d = h.dispatcher_with(
+        Timing {
+            stall: Duration::from_millis(300),
+            ..Timing::default()
+        },
+        Images {
+            aarch64: IMAGE.into(),
+            x86_64: IMAGE.into(),
+        },
+    );
+    for (id, gen) in [(7, GEN), (8, GEN2), (9, "g_00000000000000c3")] {
+        h.give(community(id, gen));
+        h.ticks(&mut d, 3);
+        h.advance(31);
+    }
+    assert_eq!(d.holds().len(), 3);
+    *h.pool.slow_beat.lock().unwrap() = Duration::from_millis(150);
+    h.pool.down.store(true, Ordering::SeqCst);
+    h.pool.beat_tokens.lock().unwrap().clear();
+    h.advance(301);
+    let t0 = std::time::Instant::now();
+    d.tick();
+    assert!(
+        h.pool.beat_tokens.lock().unwrap().len() < 3,
+        "past a third of the stall, the other heartbeats wait for the next tick"
+    );
+    assert!(t0.elapsed() < Duration::from_millis(300));
+    // Every lease's own watchdog runs whatever the pool does.
+    h.advance(35 * 60);
+    d.tick();
+    h.advance(3);
+    d.tick();
+    assert!(
+        !h.engine.has(7, GEN) && !h.engine.has(8, GEN2) && !h.engine.has(9, "g_00000000000000c3")
+    );
 }
 
 #[test]
@@ -1117,40 +1288,39 @@ fn a_value_outside_the_grammar_fails_the_task_before_docker() {
 #[test]
 fn a_build_image_that_is_not_a_digest_fails_the_task_before_docker() {
     let h = H::new();
-    let pool: Arc<dyn Pool> = h.pool.clone();
-    let ctx = Ctx {
-        pool,
-        work_root: h.work.clone(),
-        pool_url: "https://pool.example".into(),
-        checkout: Some(h.checkout.clone()),
-        constants: Constants::signed(),
-    };
-    let mut d = Dispatcher::new(
-        ctx,
-        h.engine.clone(),
-        Box::new(FakeProbes {
-            now: Arc::clone(&h.now),
-            work: Arc::clone(&h.free),
-        }),
+    let mut d = h.dispatcher_with(
         Timing::default(),
-        HOST.into(),
-        h.capacity.clone(),
         Images {
-            aarch64: "docker.io/library/archlinux:base-devel".into(),
-            x86_64: String::new(),
+            aarch64: IMAGE.into(),
+            x86_64: "docker.io/library/archlinux:base-devel".into(),
         },
-        None,
-        true,
-    )
-    .unwrap();
-    d.readopt().unwrap();
-    h.give(community(7, GEN));
+    );
+    let mut emulated = community(7, GEN);
+    emulated["task"]["arch"] = json!("x86_64");
+    h.give(emulated);
     h.ticks(&mut d, 3);
     assert!(h.engine.runs.lock().unwrap().is_empty());
-    assert!(h.pool.fails_of(7)[0]["error"]
+    let f = &h.pool.fails_of(7)[0];
+    assert!(f["error"]
         .as_str()
         .unwrap()
         .contains("not an image by digest"));
+    assert_eq!(
+        (f["lost"].clone(), f["final"].clone()),
+        (json!(true), json!(false)),
+        "the host's image, not the task: given back"
+    );
+    // A host whose native lane's image is not a digest claims nothing.
+    let mut d = h.dispatcher_with(
+        Timing::default(),
+        Images {
+            aarch64: String::new(),
+            x86_64: IMAGE.into(),
+        },
+    );
+    h.advance(31);
+    h.ticks(&mut d, 1);
+    assert_eq!(h.pool.last_claim()["want"], 0);
 }
 
 #[test]
@@ -1499,6 +1669,34 @@ fn a_trial_publishes_the_lab_then_its_helper_installs_from_it() {
     let done = &h.pool.completes_of(11)[0];
     assert_eq!(done["result"]["verdict"], "ok");
     assert_eq!(h.pool.events.lock().unwrap()[0]["status"], "ok");
+}
+
+#[test]
+fn a_trial_of_a_release_whose_trial_sh_predates_staging_is_refused_before_anything_runs() {
+    let h = H::new();
+    std::fs::create_dir_all(h.checkout.join("tests")).unwrap();
+    std::fs::write(
+        h.checkout.join("tests/trial.sh"),
+        "#!/bin/bash\ndocker run --rm archlinux true\n",
+    )
+    .unwrap();
+    let mut d = h.dispatcher();
+    h.give(task(
+        11,
+        "trial",
+        "felix",
+        "",
+        "project",
+        json!({ "task": 5, "files": ["felix-1.0-1-aarch64.pkg.tar.zst"] }),
+        GEN,
+    ));
+    h.ticks(&mut d, 3);
+    assert!(h.pool.published.lock().unwrap().is_empty());
+    assert!(h.engine.runs.lock().unwrap().is_empty());
+    assert!(h.pool.fails_of(11)[0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("TRIAL_STAGE"));
 }
 
 #[test]

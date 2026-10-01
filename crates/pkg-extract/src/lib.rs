@@ -41,6 +41,10 @@ pub enum ExtractError {
 /// are never the ones whose sonames decide an upgrade.
 const MAX_INSPECT_BYTES: u64 = 512 * 1024 * 1024;
 
+/// A `.PKGINFO` above this is refused, whatever its tar header claims: a real one is a
+/// few KiB, and a compressed run of one byte would otherwise expand into memory.
+pub const MAX_PKGINFO_BYTES: u64 = 1 << 20;
+
 /// Metadata entries makepkg stores at the archive root; never part of `files`.
 const METADATA_ENTRIES: [&str; 5] = [".PKGINFO", ".BUILDINFO", ".MTREE", ".INSTALL", ".CHANGELOG"];
 
@@ -115,7 +119,17 @@ fn scan_archive(path: &Path) -> Result<ArchiveScan, ExtractError> {
 
         if name == ".PKGINFO" {
             let mut text = String::new();
-            entry.read_to_string(&mut text)?;
+            entry
+                .by_ref()
+                .take(MAX_PKGINFO_BYTES + 1)
+                .read_to_string(&mut text)?;
+            if text.len() as u64 > MAX_PKGINFO_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(".PKGINFO is larger than {MAX_PKGINFO_BYTES} bytes"),
+                )
+                .into());
+            }
             scan.pkginfo = Some(PkgInfo::parse(&text)?);
             continue;
         }
@@ -395,6 +409,28 @@ mod tests {
                 "libstdc++.so.6(GLIBCXX_3.4.32)",
             ]
         );
+    }
+
+    #[test]
+    fn a_pkginfo_above_its_bound_is_refused_not_read_into_memory() {
+        let info = format!(
+            "pkgname = x\npkgver = 1-1\narch = any\n{}",
+            "#".repeat(2 << 20)
+        );
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(info.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, ".PKGINFO", info.as_bytes()).unwrap();
+        let tar = b.into_inner().unwrap();
+        let dir = std::env::temp_dir().join(format!("pkg-extract-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x-1-1-any.pkg.tar.zst");
+        std::fs::write(&path, zstd::encode_all(&tar[..], 3).unwrap()).unwrap();
+        let err = extract_manifest(&path).unwrap_err();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(err.to_string().contains("larger than"), "{err}");
     }
 
     #[test]

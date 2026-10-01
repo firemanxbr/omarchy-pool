@@ -17,12 +17,24 @@
 //! lease and a grace: its own containers killed, nothing reported), its
 //! container's state (exited: outputs checked against the kind's closed
 //! list, uploaded with the job token, reported); then the disk watcher
-//! (free space on the work root below the floor kills the youngest build,
-//! `lost`, and stops the claims until it is back); then a claim — `want: 1`
-//! while units, memory and disk allow, every 30 s with `want: 0` otherwise.
-//! A loop that makes no progress for 15 minutes exits 75 without touching a
-//! task container; the next dispatcher re-adopts them. SIGTERM stops the
-//! claims and exits; the lease files are always current, so tasks run on.
+//! (free space on the work root, or the engine's, below the floor kills the
+//! youngest build, `lost`, and stops the claims until it is back; a build
+//! refused at start for its budget holds the claims until that budget plus
+//! the floor is free); then a claim — `want: 1` while units, memory, disk
+//! and the lane's image allow, every 30 s with `want: 0` otherwise. A lease
+//! ends (its report, its lease file, its units) only once the engine says
+//! its container is gone. A tick spends at most a third of the stall on the
+//! pool's heartbeats and reports; the rest wait for the next tick, and every
+//! lease's own watchdog runs whatever the pool does. A loop that makes no
+//! progress for 15 minutes exits 75 without touching a task container; the
+//! next dispatcher re-adopts them. SIGTERM stops the claims and exits; the
+//! lease files are always current, so tasks run on.
+//!
+//! Seams: task containers run on the engine's default bridge until the task
+//! networks child issue gives each its own network; the model kinds'
+//! `http://agent:8790` answers once the agent sidecars child issue starts
+//! that sidecar (until then a review rebuild and an audit fail at their
+//! model call).
 //!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
@@ -50,7 +62,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -251,6 +263,12 @@ pub struct Dispatcher {
     claim_id: Option<String>,
     next_claim: u64,
     disk_low: bool,
+    /// A build refused at start for its budget: no claim until this much is free on both disks.
+    disk_hold: u64,
+    /// The capacity file's `at` when the watcher last killed on the engine's value: once per probe.
+    engine_kill_at: Option<String>,
+    /// This tick's heartbeats and reports wait for the next tick past this.
+    pool_until: Instant,
     instance: String,
     started: u64,
     seen: orders::Seen,
@@ -290,6 +308,9 @@ impl Dispatcher {
             claim_id: None,
             next_claim: 0,
             disk_low: false,
+            disk_hold: 0,
+            engine_kill_at: None,
+            pool_until: Instant::now(),
             instance: orders::new_instance(),
             started,
             seen: orders::Seen::default(),
@@ -402,6 +423,9 @@ impl Dispatcher {
 
     pub fn tick(&mut self) {
         let now = self.probes.now();
+        // A pool that does not answer costs each call about two minutes with its retries: N leases'
+        // heartbeats in a row would outlast the loop watchdog, so a tick stops calling it here.
+        self.pool_until = Instant::now() + self.timing.stall / 3;
         let keys: Vec<(u64, String)> = self.leases.keys().cloned().collect();
         for key in keys {
             if let Some(live) = self.leases.remove(&key) {
@@ -506,15 +530,37 @@ impl Dispatcher {
 
     #[allow(clippy::too_many_lines)]
     fn step(&mut self, mut live: Live, now: u64) -> Option<Live> {
+        let name = spec::container_name(live.lease.task.id, &live.lease.gen);
         if live.lease.ending.is_some() {
             if busy(live.prep.as_ref()) || busy(live.fin.as_ref()) {
                 return Some(live);
             }
-            self.end(&live);
-            return None;
+            // The report and the cleanup only once the engine says its container is gone: a kill
+            // that did not take keeps the lease, and its units, and is tried again.
+            match self.engine.inspect(&name) {
+                Ok(None) if Instant::now() >= self.pool_until => return Some(live),
+                Ok(None) => {
+                    self.end(&live);
+                    return None;
+                }
+                Ok(Some(s)) => say(format!(
+                    "task {}: its container is still {} after the kill; killing it again",
+                    live.lease.task.id, s.status
+                )),
+                Err(e) => say(format!(
+                    "task {}: the engine did not say its container is gone ({}); its lease stays until it does",
+                    live.lease.task.id,
+                    clean_line(&e)
+                )),
+            }
+            self.engine
+                .remove_lease(live.lease.task.id, &live.lease.gen);
+            self.engine.remove_name(&name);
+            return Some(live);
         }
         // The heartbeat: the lease and its job token move together.
-        if now >= live.beat_at + self.timing.heartbeat.as_secs() {
+        if now >= live.beat_at + self.timing.heartbeat.as_secs() && Instant::now() < self.pool_until
+        {
             live.beat_at = now;
             match self.pool().heartbeat(live.lease.task.id, &live.lease.token) {
                 Beat::Accepted(fresh) => {
@@ -536,7 +582,6 @@ impl Dispatcher {
             self.begin_ending(&mut live, Ending::Expired);
             return Some(live);
         }
-        let name = spec::container_name(live.lease.task.id, &live.lease.gen);
         match live.lease.phase {
             Phase::Preparing => {
                 if live.prep.is_none() && now >= live.retry_at {
@@ -548,7 +593,7 @@ impl Dispatcher {
                 match prepared {
                     Ok(notes) => {
                         live.lease.notes = notes;
-                        return self.start(live, now);
+                        return Some(self.start(live, now));
                     }
                     Err(Prep::Retry(why)) => {
                         say(format!(
@@ -650,17 +695,19 @@ impl Dispatcher {
     }
 
     /// Starts a prepared lease's container: a build only with its disk budget plus the floor free (D53).
-    fn start(&mut self, mut live: Live, now: u64) -> Option<Live> {
+    fn start(&mut self, mut live: Live, now: u64) -> Live {
         let Some(kind) = kinds::kind_of(&live.lease) else {
             self.begin_ending(&mut live, Ending::Lost("no container kind".into()));
-            return Some(live);
+            return live;
         };
         if live.lease.task.kind == "build" {
             let need = live.lease.disk_gb + self.floor_gb;
             let work = self.probes.work_free_gb();
             let engine = capacity::read(&self.capacity_file).map(|c| c.engine_free_gb);
             if work.is_some_and(|w| w < need) || engine.is_some_and(|e| e < need) {
+                // No claim until this budget fits again: the pool would hand the same build straight back.
                 self.disk_low = true;
+                self.disk_hold = self.disk_hold.max(need);
                 let why = format!(
                     "not started: {} GB free on the work root and {} on the engine's, below its budget of {} GB plus the floor of {}",
                     work.map_or("?".into(), |w| w.to_string()),
@@ -669,7 +716,7 @@ impl Dispatcher {
                     self.floor_gb
                 );
                 self.begin_ending(&mut live, Ending::Lost(why));
-                return Some(live);
+                return live;
             }
         }
         let (cpus, mem_gb) = self.ctx.constants.share(live.lease.units);
@@ -693,59 +740,68 @@ impl Dispatcher {
         let args = match args {
             Ok(a) => a,
             Err(why) => {
-                say(format!(
-                    "task {}: failed before docker ran — {why}",
-                    live.lease.task.id
-                ));
-                let _ = self.pool().fail(
-                    live.lease.task.id,
-                    &live.lease.token,
-                    &json!({ "error": why, "final": true }),
+                // The task's own values (name, arch, generation, release) passed the grammar in
+                // take(): what fails here is this host's (its image, its id, its paths), never the task's.
+                self.begin_ending(
+                    &mut live,
+                    Ending::Lost(format!("failed before docker ran — {why}")),
                 );
-                self.cleanup(&live.lease);
-                return None;
+                return live;
             }
         };
         live.lease.phase = Phase::Running;
         live.lease.started_at = Some(now);
         self.save(&live.lease);
         if let Err(e) = self.engine.run(&args) {
-            say(format!(
-                "task {}: its container did not start — {}",
-                live.lease.task.id,
-                clean_line(&e)
-            ));
-            let _ = self.pool().fail(live.lease.task.id, &live.lease.token, &json!({ "error": format!("the task container did not start: {}", clean_line(&e)), "final": false }));
-            self.cleanup(&live.lease);
-            return None;
+            // A `run` that did not answer may still have made the container: the ending removes it.
+            self.begin_ending(
+                &mut live,
+                Ending::Lost(format!(
+                    "the task container did not start: {}",
+                    clean_line(&e)
+                )),
+            );
+            return live;
         }
         say(format!(
             "task {}: {} {} started ({cpus} CPUs, {mem_gb} GB)",
             live.lease.task.id, live.lease.task.kind, live.lease.task.name
         ));
-        Some(live)
+        live
     }
 
-    /// The disk watcher (D53): free space on the work root below the floor kills the youngest
-    /// running build, `lost`, one at a time, and stops the claims until it is back. The engine's
-    /// free disk (the agent's last probe) stops the claims too, never a running build.
+    /// The disk watcher (D53): free space below the floor, on the work root (measured now) or the
+    /// engine's (the agent's last probe, acted on once per probe), kills the youngest running
+    /// build, `lost`, one at a time, and stops the claims until it is back. A build refused at
+    /// start holds the claims until its budget plus the floor is free on both.
     fn watch_disk(&mut self) {
-        let Some(work) = self.probes.work_free_gb() else {
-            return;
-        };
-        if work >= self.floor_gb {
+        let work = self.probes.work_free_gb();
+        let cap = capacity::read(&self.capacity_file);
+        let engine = cap.as_ref().map(|c| c.engine_free_gb);
+        let short = |v: Option<u64>, need: u64| v.is_some_and(|v| v < need);
+        let need = self.disk_hold.max(self.floor_gb);
+        let show = |v: Option<u64>| v.map_or("?".into(), |v| v.to_string());
+        if !short(work, need) && !short(engine, need) {
             if self.disk_low {
                 say(format!(
-                    "{work} GB free on the work root again: claiming again"
+                    "{} GB free on the work root and {} on the engine's again: claiming again",
+                    show(work),
+                    show(engine)
                 ));
             }
             self.disk_low = false;
+            self.disk_hold = 0;
             return;
         }
         if !self.disk_low {
-            say(format!("{work} GB free on the work root, below the floor of {} GB: no claim until it is back", self.floor_gb));
+            say(format!("{} GB free on the work root and {} on the engine's, below {need} GB: no claim until it is back", show(work), show(engine)));
         }
         self.disk_low = true;
+        let engine_low = short(engine, self.floor_gb)
+            && cap.as_ref().map(|c| &c.at) != self.engine_kill_at.as_ref();
+        if !short(work, self.floor_gb) && !engine_low {
+            return;
+        }
         if self
             .leases
             .values()
@@ -765,7 +821,10 @@ impl Dispatcher {
             .map(|(k, _)| k.clone());
         if let Some(key) = youngest {
             if let Some(mut live) = self.leases.remove(&key) {
-                let why = format!("the disk watcher killed it: {work} GB free on the work root, below the floor of {} GB", self.floor_gb);
+                if engine_low {
+                    self.engine_kill_at = cap.map(|c| c.at);
+                }
+                let why = format!("the disk watcher killed it: {} GB free on the work root and {} on the engine's, below the floor of {} GB", show(work), show(engine), self.floor_gb);
                 self.begin_ending(&mut live, Ending::Lost(why));
                 self.leases.insert(key, live);
             }
@@ -790,8 +849,13 @@ impl Dispatcher {
                 && c.units > 0
                 && used + 1 + c.job_reserved <= c.units
                 && c.engine_free_gb >= self.floor_gb
+                && spec::digest_ok(self.images.of(&c.arch))
         }) && !self.disk_low
             && mem_ok;
+        // What a task may take: the units this claim offered, none when it said `want: 0`.
+        let room = cap.as_ref().filter(|_| want).map_or(0, |c| {
+            c.units.saturating_sub(c.job_reserved).saturating_sub(used)
+        });
         let claim_id = self
             .claim_id
             .get_or_insert_with(|| format!("c_{}", &orders::new_instance()[..24]))
@@ -832,7 +896,7 @@ impl Dispatcher {
                 match orders::read_claim::<HostTask>(&v) {
                     ClaimAnswer::Task(t, token) => {
                         self.brake.after(false, self.timing.idle_claim);
-                        self.take(t, token, staging_full, now);
+                        self.take(t, token, staging_full, room, now);
                         self.next_claim = now;
                     }
                     ClaimAnswer::Orders(list) => {
@@ -890,7 +954,7 @@ impl Dispatcher {
         }
     }
 
-    fn take(&mut self, t: HostTask, token: String, staging_full: bool, now: u64) {
+    fn take(&mut self, t: HostTask, token: String, staging_full: bool, room: u32, now: u64) {
         let task = t.task;
         let refuse = |this: &Self, why: &str, is_final: bool| {
             say(format!("task {}: refused — {why}", task.id));
@@ -906,6 +970,17 @@ impl Dispatcher {
             );
         };
         if self.leases.contains_key(&(task.id, gen.clone())) {
+            return;
+        }
+        // The pool selects; this host still holds its envelope: a task above the units this claim
+        // offered (none, with `want: 0`) is given back, never started.
+        let units = t.units.unwrap_or(1).max(1);
+        if units > room {
+            say(format!(
+                "task {}: refused — {units} unit(s), and this claim offered {room}",
+                task.id
+            ));
+            let _ = self.pool().fail(task.id, &token, &json!({ "error": format!("this host offered {room} unit(s) and was handed {units}"), "lost": true, "final": false }));
             return;
         }
         if spec::platform_of(&task.arch).is_none() || !spec::name_ok(&task.name) {
@@ -940,7 +1015,7 @@ impl Dispatcher {
             task,
             gen,
             token,
-            units: t.units.unwrap_or(1).max(1),
+            units,
             disk_gb: t.disk_gb.unwrap_or(0),
             release,
             staging_full,
