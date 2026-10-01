@@ -1146,11 +1146,12 @@ dependencies = [
 
 [[package]]
 name = "omarchy-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "hex",
  "rcgen",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

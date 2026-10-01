@@ -5,16 +5,22 @@
 //! omarchy-agent verify --statement <statement.json> --sig <bundle.sigstore.json>
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
 //!     (<dir>/compose.yml and <dir>/set.toml)
+//! omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
+//!     [--probe-image <image>] [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
+//!     (what the host has; with a verified release, its units, the preflight blockers, and
+//!     <set dir>/run/capacity.json rewritten when it changed)
 //! omarchy-agent install [options]
 //!     (what install.sh runs once the binary is in place; a stub until P1, #317)
 //! ```
 //!
-//! Exit status: 0 verified or clean, 1 refused, 2 usage or a file that cannot be read,
-//! 3 signed and pinned but "needs a newer agent".
+//! Exit status: 0 verified or clean, 1 refused (or a capacity blocker, or a probe that did
+//! not answer), 2 usage or a file that cannot be read, 3 signed and pinned but "needs a
+//! newer agent".
 
 use std::path::Path;
 use std::process::ExitCode;
 
+use omarchy_agent::capacity::{self, probe, AgentToml, Capacity, Written};
 use omarchy_agent::lint::{self, Engine, Envelope};
 use omarchy_agent::verify::{self, BundleOutcome, StatementOutcome};
 
@@ -22,6 +28,8 @@ const USAGE: &str = "usage:
   omarchy-agent verify --bundle <tar.gz> --sig <sigstore.json>
   omarchy-agent verify --statement <json> --sig <sigstore.json>
   omarchy-agent lint-set <dir> [--override <file>] [--envelope <agent.toml>]
+  omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
+      [--probe-image <image>] [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
   omarchy-agent install [options]
   omarchy-agent --version";
 
@@ -34,6 +42,7 @@ fn main() -> ExitCode {
     let code = match args.first().map(String::as_str) {
         Some("verify") => verify_cmd(&args[1..]),
         Some("lint-set") => lint_cmd(&args[1..]),
+        Some("capacity") => capacity_cmd(&args[1..]),
         Some("install") => {
             // install.sh's last step (#311). The install with its preflight, the run loop
             // and enrollment (OMARCHY_ENROLL, from the environment only) come in P1 (#317).
@@ -193,4 +202,98 @@ fn lint_cmd(args: &[String]) -> Result<u8, String> {
     }
     eprintln!("lint-set: {dir}: {} violation(s)", violations.len());
     Ok(REFUSED)
+}
+
+fn capacity_cmd(args: &[String]) -> Result<u8, String> {
+    let mut rest = Vec::new();
+    let f = flags(
+        args,
+        &[
+            "--envelope",
+            "--work-root",
+            "--docker",
+            "--probe-image",
+            "--bundle",
+            "--sig",
+            "--write",
+        ],
+        &mut rest,
+    )?;
+    if !rest.is_empty() {
+        return Err(USAGE.to_owned());
+    }
+    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let toml = match get("--envelope") {
+        Some(p) => {
+            AgentToml::parse(&String::from_utf8(read(p)?).map_err(|_| format!("{p}: not UTF-8"))?)?
+        }
+        None => AgentToml::default(),
+    };
+    let work_root = get("--work-root")
+        .map(str::to_owned)
+        .or_else(|| toml.work_root.clone())
+        .ok_or_else(|| format!("give --work-root or an --envelope with set.work_root\n{USAGE}"))?;
+    let host = toml.socket_cli.as_ref().map(|s| format!("unix://{s}"));
+
+    // With a release: its signed constants, and its build image for the probe container.
+    let manifest = match (get("--bundle"), get("--sig")) {
+        (Some(b), Some(s)) => match verify::bundle(&read(b)?, &read(s)?) {
+            Ok(BundleOutcome::Current(v)) => Some(v.manifest().clone()),
+            Ok(BundleOutcome::NeedsNewerAgent { why, .. }) => {
+                eprintln!("needs a newer agent: {why}");
+                return Ok(NEEDS_NEWER_AGENT);
+            }
+            Err(r) => return Ok(refused(&r)),
+        },
+        (None, None) if get("--write").is_none() => None,
+        _ => {
+            return Err(format!(
+                "--bundle and --sig go together, and --write needs them\n{USAGE}"
+            ))
+        }
+    };
+    let build_image = manifest
+        .as_ref()
+        .and_then(|m| m.build_image(std::env::consts::ARCH))
+        .map(ToString::to_string);
+    let how = probe::Probe {
+        docker: get("--docker").unwrap_or("docker"),
+        host: host.as_deref(),
+        work_root: Path::new(&work_root),
+        image: get("--probe-image").or(build_image.as_deref()),
+    };
+    let facts = match probe::detect(&how) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("capacity: {e}; nothing was changed");
+            return Ok(REFUSED);
+        }
+    };
+    let Some(manifest) = manifest else {
+        println!("{}", facts.report());
+        return Ok(0);
+    };
+
+    let c = Capacity::new(&facts, &toml.caps, manifest.capacity());
+    let at = capacity::now();
+    println!(
+        "{}",
+        serde_json::to_string(&c.file(&at)).map_err(|e| e.to_string())?
+    );
+    if let Some(dir) = get("--write") {
+        let w = capacity::write_if_changed(Path::new(dir), &c, &at)
+            .map_err(|e| format!("{dir}/run/capacity.json: {e}"))?;
+        eprintln!(
+            "capacity: {dir}/run/capacity.json {}",
+            match w {
+                Written::Changed => "changed",
+                Written::Unchanged => "unchanged",
+            }
+        );
+    }
+    let blockers = capacity::preflight(&c);
+    for b in &blockers {
+        eprintln!("preflight: {b}");
+    }
+    Ok(if blockers.is_empty() { 0 } else { REFUSED })
 }
