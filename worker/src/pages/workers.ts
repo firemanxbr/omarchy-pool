@@ -72,7 +72,7 @@ __CHARTS__
   // The four tiles, from the shell's counts (workerCounts), the workers building now, the load and the week's minutes — one list, so the tiles over a listing that did not answer carry the same labels.
   function tilesOf(wc, bz, load, wm) {
     return [
-      ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " contributors", wc.alive ? "ok" : "warn"],
+      ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " community", wc.alive ? "ok" : "warn"],
       ["Building now", num(wc.building), wc.building ? bz.map(function (w) { return "#" + w.current_task; }).join(" · ") : "every worker idle"],
       ["Load · 24 h", load + "%", "of the last day with a lease, across the alive ones"],
       // The stats poll's, not the listing's: marked so, it keeps its number when the listing did not answer — the chart below draws the same series.
@@ -153,7 +153,7 @@ export function workersHtml(poolUrl: string, version: RunningVersion): string {
   return page({
     path: "/workers",
     title: "Workers · omarchy-pool",
-    description: "Every worker building for the pool, by kind — the project's, the review ones two maintainers vouched for, the contributors' — alive or gone, how busy, what it built.",
+    description: "Every worker building for the pool, by kind — the project's, the review ones two maintainers vouched for, the legacy community sets — alive or gone, how busy, what it built.",
     // The machines are the Factory's: they build what contributors ask for, and the footer no longer names them (#240).
     active: "factory",
     body: BODY,

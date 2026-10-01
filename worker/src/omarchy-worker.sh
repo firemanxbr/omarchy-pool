@@ -113,7 +113,7 @@ cmd_start() {
   find_runtime
   fetch_compose
   local had; had="$(env_get OMARCHY_WORKER_TOKEN)"
-  [[ -n "$token" || -n "$had" ]] || die "--token omw_… is required the first time: register a worker on your page, the token is shown once"
+  [[ -n "$token" || -n "$had" ]] || die "--token omw_… is required the first time: register a worker on your page (maintainers only), the token is shown once"
   [[ -n "$token" ]] && env_set OMARCHY_WORKER_TOKEN "$token"
   env_set OMARCHY_WORKER_DIR "$DIR"
   env_set OMARCHY_SOCKET "$SOCKET"
@@ -155,10 +155,10 @@ cmd_start() {
   code="${self##*$'\n'}"; self="${self%$'\n'*}"
   if [[ "$code" == 200 ]]; then
     local reg_arch reg_id; reg_arch="$(jq -r .arch <<<"$self" 2>/dev/null || true)"; reg_id="$(jq -r .id <<<"$self" 2>/dev/null || true)"
-    [[ -z "$reg_arch" || "$reg_arch" == "$arch" ]] || die "the token is for a $reg_arch worker; this machine is $arch — register one for $arch on your page"
+    [[ -z "$reg_arch" || "$reg_arch" == "$arch" ]] || die "the token is for a $reg_arch worker; this machine is $arch — register one for $arch on your page (maintainers only)"
     say "worker ${reg_id:-?} ($arch) — $RUNTIME, $DIR"
   elif [[ "$code" == 401 || "$code" == 403 ]]; then
-    die "the pool refuses this token ($code: $(jq -r '.error // empty' <<<"$self" 2>/dev/null || echo "revoked, or mistyped")) — register a worker on your page and start with the new one"
+    die "the pool refuses this token ($code: $(jq -r '.error // empty' <<<"$self" 2>/dev/null || echo "revoked, or mistyped")) — register a worker on your page (maintainers only) and start with the new one"
   else
     say "the pool did not answer (${code:-no connection}) — starting anyway; 'omarchy-worker status' says more once it does"
   fi

@@ -417,8 +417,8 @@ one per architecture, plus the brokers, run on the project's own host
 Contributors do not run workers: they submit packages, and every build —
 a contributor's evidence and the project's own build written from it —
 runs on a host a maintainer provides. The community workers registered
-before #331 are the maintainers' own and retire with the move to the host
-agent (#307). No GitHub runner ever builds a package: the project's compute is
+before #331 are expected to be the maintainers' own (checked on #331) and
+retire with the move to the host agent (#307). No GitHub runner ever builds a package: the project's compute is
 not for building everyone's software, and GitHub Actions runs CI and the
 release only — no worker, not even for the pool's own jobs: when the
 project's host is down they wait, and the Workers page says so.

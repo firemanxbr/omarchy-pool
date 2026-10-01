@@ -49,7 +49,7 @@ const WORKER_FORM = `<label>Name <input type="text" id="w-name" placeholder="lap
  * contributor with the same sentence (POOL_HOSTS).
  */
 const poolHostsLine = () => `<p class="sub" id="w-pool" style="margin:0 0 10px;font-size:12.5px">Nothing to run here: ${POOL_HOSTS}, which the maintainers provide. Request a package and the pool builds it. <a href="/docs/factory#contribute-a-package">How packaging works →</a></p>`;
-const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: the project's compute is its maintainers' hosts. Register one and run the signed image with the token it gives you, shown once. <a href="/docs/workers">Run a worker →</a></p><form id="worker-form" class="form" onsubmit="return false" hidden></form><div id="w-new" hidden><p class="sub">Your worker token, shown once. One command wherever the worker lives (docker or podman):</p><pre id="w-cmd"></pre></div>`;
+const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: the project's compute is its maintainers' hosts. Register one and run the signed image with the token it gives you, shown once; a new registration is listed as a community set until two maintainers trust it for the project. <a href="/docs/workers">Run a worker →</a></p><form id="worker-form" class="form" onsubmit="return false" hidden></form><div id="w-new" hidden><p class="sub">Your worker token, shown once. One command wherever the worker lives (docker or podman):</p><pre id="w-cmd"></pre></div>`;
 /** Add a passkey (#257): a name for it and the button that starts the browser's request — a maintainer's. */
 const PASSKEY_FORM = `<label>Name <input type="text" id="pk-label" maxlength="40" placeholder="this laptop" autocomplete="off"></label> <button type="submit" id="pk-add">Add a passkey</button>`;
 /** …and what stands in its place for someone who is not a maintainer but still holds a passkey (a maintainer once): the reason, visible, and their Remove below. */
@@ -95,13 +95,13 @@ const body = (login: string) => String.raw`
 
   <section>
     <div class="h2row"><h2>Packages</h2>${servedGrey(REQUEST_LINK, `only ${login} requests here`)}</div>
-    <p class="sub">Registered by this contributor: the name is theirs, their worker builds it as evidence, the project builds it again, <b>another</b> maintainer decides — a maintainer who brings a package is its contributor. Open a row: the request as the form checks it, then each architecture on its own — its build, the gate, the audit, the score, whether it is ready for a maintainer.</p>
+    <p class="sub">Registered by this contributor: the name is theirs, the pool builds it as evidence, the project builds it again, <b>another</b> maintainer decides — a maintainer who brings a package is its contributor. Open a row: the request as the form checks it, then each architecture on its own — its build, the gate, the audit, the score, whether it is ready for a maintainer.</p>
     <div class="table-wrap"><table id="packages" class="pk"><thead><tr><th></th><th>Package</th><th>Category</th><th>Project</th><th>Arches</th><th>Stage</th><th>Where it stands</th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section>
     <div class="h2row"><h2>Builds</h2><span class="dim" id="quota" style="font-size:12px"></span></div>
-    <p class="sub">On this contributor's workers — evidence for a maintainer, never what users get directly. The number opens the build, whole; its evidence — the log, the PKGBUILD — is read on that page, which says so when a build left none.</p>
+    <p class="sub">On the pool's hosts — evidence for a maintainer, never what users get directly. The number opens the build, whole; its evidence — the log, the PKGBUILD — is read on that page, which says so when a build left none.</p>
     <div class="table-wrap"><table id="builds"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Status</th><th>Why</th><th>Worker</th><th>Took</th><th>When</th><th>Evidence</th></tr></thead><tbody></tbody></table></div>
   </section>
 
@@ -184,7 +184,7 @@ const SCRIPT = String.raw`
     $("#share-btn").innerHTML = SHARE_BTN + ' ' + gate(TOKEN_BTN, may("token"), reason("token"));
     $("#share-open").onclick = function () { ask({ title: "Share " + (isOwner(login) ? "your" : "this") + " profile", text: "This page is public — what it shows is what the pool recorded: packages, builds, decisions. Post the link wherever you like: a GitHub profile, LinkedIn, a blog.", value: url, copy: "Copy the link", confirm: null, cancel: "Close" }); };
     $("#token-open").onclick = function () {
-      ask({ title: "A token for scripts and CI", text: "Sent as <code>Authorization: Bearer omc_…</code>. Shown once; it replaces the previous one — your workers keep theirs.", confirm: "Generate a token" }).then(function (go) {
+      ask({ title: "A token for scripts and CI", text: "Sent as <code>Authorization: Bearer omc_…</code>. Shown once; it replaces the previous one — a worker's token is its own.", confirm: "Generate a token" }).then(function (go) {
         if (go === null) return;
         api("POST", API + "/token", {}).then(function (d) {
           if (d.error) { toast(esc(d.error), "error"); return; }
@@ -589,7 +589,7 @@ const SCRIPT = String.raw`
     var b = ev.target.closest ? ev.target.closest("button[data-build],button[data-remove],button[data-revoke],button[data-mode]") : null; if (!b) return;
     if (b.hasAttribute("data-build")) {
       var name = b.getAttribute("data-build"), arch = b.getAttribute("data-arch");
-      // Where it runs is the asker's call (one architecture: any of their workers or the project's shared ones; all: the rule, or the shared ones at once); a hint goes to the agent that drafts the recipe.
+      // Where it runs is the asker's call (one architecture: a maintainer's own workers or the project's shared ones; all: the rule, or the shared ones at once); a hint goes to the agent that drafts the recipe.
       var st2 = STORIES[name], det = {}; try { det = JSON.parse((st2 && st2.package && st2.package.detected) || "{}"); } catch (e) {}
       var drafts = !det.has_pkgbuild; // the project's own PKGBUILD is built as it is: no agent, no hint
       var waiting = st2 ? st2.chains.filter(function (c) { return c.contributor && c.contributor.status === "queued" && (!arch || c.contributor.arch === arch); }).map(function (c) { return c.contributor; }) : [];
@@ -603,7 +603,7 @@ const SCRIPT = String.raw`
           // Out of the queue: each waiting build of the architecture(s) asked, one call each.
           Promise.all(waiting.map(function (t) { return api("DELETE", API + "/packages/" + encodeURIComponent(name) + "/builds/" + t.id); })).then(function (rs) {
             var bad = rs.filter(function (r) { return r.error; });
-            if (bad.length) toast(esc(bad[0].error), "error"); else toast("Out of the queue: build #" + waiting.map(function (t) { return t.id; }).join(", #") + ". Press Build to queue it again, on the queue or on a worker of yours.", "warn");
+            if (bad.length) toast(esc(bad[0].error), "error"); else toast("Out of the queue: build #" + waiting.map(function (t) { return t.id; }).join(", #") + ". Press Build to queue it again.", "warn");
             OPEN[name] = true; acted(); load();
           }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
           return;
