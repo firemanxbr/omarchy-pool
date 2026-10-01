@@ -286,9 +286,12 @@ columns back at every claim; the older one never writes them.
   `inner.images.build`), the host set hands them to the dispatcher as
   `OMARCHY_BUILD_IMAGE_AARCH64` and `OMARCHY_BUILD_IMAGE_X86_64`, and
   `omarchy-agent lint-set` refuses a dispatcher without them. A moved tag
-  changes nothing that builds until a reviewed release resolves it again.
-  Only a worker that was not given them (a legacy role container, until it
-  retires) still builds from the tag, and says so once per process.
+  changes nothing that builds until the next release resolves it again. No
+  one reviews that resolution: the release is approved before the digests
+  are taken, so the job summary shows them, to compare with the previous
+  release's `build-images.json`. Only a worker that was not given them (a
+  legacy role container, until it retires) still builds from the tag, and
+  says so once per process for each architecture.
 
 ## After approval, the gates still hold
 

@@ -143,19 +143,15 @@ jobs:
     # factory/bin/build-images): a tag that does not resolve fails the
     # release before anything is published. The release attaches
     # build-images.json (the manifest's inner.images.build), uploaded with
-    # the release itself (immutable releases); the outputs are what the host
-    # bundle renders into the host set's dispatcher as
-    # OMARCHY_BUILD_IMAGE_AARCH64 and OMARCHY_BUILD_IMAGE_X86_64.
+    # the release itself (immutable releases): what the host bundle renders
+    # into the host set's dispatcher as OMARCHY_BUILD_IMAGE_AARCH64 and
+    # OMARCHY_BUILD_IMAGE_X86_64. The job summary shows both digests. The
+    # runner's own buildx answers; no setup action joins this job.
     needs: version
     runs-on: ubuntu-latest
-    outputs:
-      aarch64: ${{ steps.resolve.outputs.aarch64 }}
-      x86_64: ${{ steps.resolve.outputs.x86_64 }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - id: resolve
-        run: mkdir -p dist && factory/bin/build-images dist/build-images.json
+      - run: mkdir -p dist && factory/bin/build-images dist/build-images.json
       - uses: actions/upload-artifact@v4
         with:
           name: dist-build-images

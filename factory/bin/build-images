@@ -7,9 +7,9 @@
 #   {"aarch64": "docker.io/menci/archlinuxarm@sha256:…",
 #    "x86_64":  "docker.io/library/archlinux@sha256:…"}
 #
-# to out.json (default build-images.json), and `aarch64=…` and `x86_64=…` to
-# $GITHUB_OUTPUT when it is set (else to stdout). The release attaches the
-# file; the host bundle renders the two into the host set's dispatcher as
+# to out.json (default build-images.json), and both to $GITHUB_STEP_SUMMARY
+# when it is set. The release attaches the file; the host bundle renders the
+# two into the host set's dispatcher as
 # OMARCHY_BUILD_IMAGE_AARCH64 and OMARCHY_BUILD_IMAGE_X86_64, and pkg-repo
 # starts every build container from them. A tag that does not resolve to a
 # digest fails the release: no release names a build image by tag.
@@ -36,5 +36,7 @@ resolve() { # tag → <repo>@sha256:<64 hex>, or the release fails
 aarch64="$(resolve "$AARCH64_TAG")"
 x86_64="$(resolve "$X86_64_TAG")"
 printf '{"aarch64": "%s", "x86_64": "%s"}\n' "$aarch64" "$x86_64" > "$out"
-printf 'aarch64=%s\nx86_64=%s\n' "$aarch64" "$x86_64" >> "${GITHUB_OUTPUT:-/dev/stdout}"
 echo "build images: $(cat "$out")" >&2
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+  printf '### Task build images (#312)\n\n- aarch64: `%s`\n- x86_64: `%s`\n' "$aarch64" "$x86_64" >> "$GITHUB_STEP_SUMMARY"
+fi

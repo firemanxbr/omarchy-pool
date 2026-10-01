@@ -61,8 +61,6 @@ echo "ok: the pool is deployed once the images exist"
 images="$(job build-images)"
 [[ -n "$images" ]] || fail "release.yml has a build-images job"
 grep -qF 'factory/bin/build-images dist/build-images.json' <<<"$images" || fail "build-images runs factory/bin/build-images"
-grep -qF 'aarch64: ${{ steps.resolve.outputs.aarch64 }}' <<<"$images" && grep -qF 'x86_64: ${{ steps.resolve.outputs.x86_64 }}' <<<"$images" \
-  || fail "build-images hands both digests on as outputs"
 grep -qF 'name: dist-build-images' <<<"$images" || fail "build-images uploads build-images.json beside the binaries (dist-*)"
 pub="$(job publish)"
 grep -qE '^    needs: \[[^]]*\bbuild-images\b[^]]*\]$' <<<"$pub" || fail "publish waits for the build images: $(grep needs: <<<"$pub")"
@@ -86,8 +84,8 @@ esac
 printf '"%s"\n' "$d"
 STUB
 chmod +x "$tmp/bin/docker"
-resolve() { PATH="$tmp/bin:$PATH" GITHUB_OUTPUT="$tmp/out" "$here/../factory/bin/build-images" "$tmp/build-images.json" 2>"$tmp/err"; }
-: > "$tmp/out"
+resolve() { PATH="$tmp/bin:$PATH" GITHUB_STEP_SUMMARY="$tmp/summary" "$here/../factory/bin/build-images" "$tmp/build-images.json" 2>"$tmp/err"; }
+: > "$tmp/summary"
 resolve || { cat "$tmp/err" >&2; fail "both tags resolve"; }
 want_arm="docker.io/menci/archlinuxarm@sha256:$(printf 'a%.0s' {1..64})"
 want_x86="docker.io/library/archlinux@sha256:$(printf 'b%.0s' {1..64})"
@@ -96,7 +94,7 @@ import json, sys
 got = json.load(open(sys.argv[1]))
 assert got == {"aarch64": sys.argv[2], "x86_64": sys.argv[3]}, got
 PY
-[[ "$(cat "$tmp/out")" == "aarch64=$want_arm"$'\n'"x86_64=$want_x86" ]] || fail "the job's outputs: $(cat "$tmp/out")"
+grep -qF "$want_arm" "$tmp/summary" && grep -qF "$want_x86" "$tmp/summary" || fail "the job summary shows both digests: $(cat "$tmp/summary")"
 for tag in docker.io/menci/archlinuxarm:base-devel docker.io/library/archlinux:base-devel; do
   rm -f "$tmp/build-images.json"
   STUB_FAIL="$tag" resolve && fail "$tag not answering fails the release"

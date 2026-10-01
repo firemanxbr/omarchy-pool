@@ -2625,7 +2625,8 @@ fn verify_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
 /// (`build-images.json`, the manifest's `inner.images.build`;
 /// factory/bin/build-images), the host set hands it to the
 /// dispatcher as `var`, and a container the agent does not manage yet,
-/// without `var`, falls back to the tag — and says so once per process.
+/// without `var`, falls back to the tag — and says so once per process for
+/// each lane (a worker that builds both arches says it for each).
 struct BuildLane {
     var: &'static str,
     tag: &'static str,
@@ -2654,7 +2655,9 @@ static BUILD_LANES: [BuildLane; 2] = build_lanes();
 
 /// The image and platform of `arch`'s build container: the variable the
 /// release rendered when it is set and not empty, else the tag. The third
-/// value is the warning to print, only the first time a lane falls back.
+/// value is the warning to print, only the first time a lane falls back or
+/// is handed something that is not a digest (a hand-edited container; the
+/// host set's lint and the agent's manifest refuse one).
 fn build_image(
     lanes: &[BuildLane; 2],
     arch: &str,
@@ -2669,7 +2672,14 @@ fn build_image(
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty())
     {
-        return (image, lane.platform, None);
+        let warning = (!image.contains("@sha256:") && !lane.warned.swap(true, Ordering::Relaxed))
+            .then(|| {
+                format!(
+                    "warning: {} names {image}, not a digest; {arch} builds start from it, which no release pins (#312)",
+                    lane.var
+                )
+            });
+        return (image, lane.platform, warning);
     }
     let warning = (!lane.warned.swap(true, Ordering::Relaxed)).then(|| {
         format!(
@@ -5073,6 +5083,16 @@ mod build_image_tests {
         );
         assert!(warning.unwrap().contains("OMARCHY_BUILD_IMAGE_X86_64"));
         assert!(build_image(&lanes, "x86_64", |_| None).2.is_none());
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_digest_is_used_but_warns_once() {
+        let lanes = build_lanes();
+        let tag = |_: &str| Some("docker.io/library/archlinux:base-devel".to_owned());
+        let (image, _, warning) = build_image(&lanes, "x86_64", tag);
+        assert_eq!(image, "docker.io/library/archlinux:base-devel");
+        assert!(warning.unwrap().contains("not a digest"));
+        assert!(build_image(&lanes, "x86_64", tag).2.is_none());
     }
 
     #[test]
