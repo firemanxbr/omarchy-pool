@@ -489,6 +489,13 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   must(await call(env, "POST", `/factory/workers/self/orders/${restart}`, { instance: w3claim.instance, outcome: "accepted", code: "exiting", detail: "exit 0 in a moment; the restart policy starts the next container" }, "omw_w3"), 200, "w3 accepts the restart");
   must(await call(env, "POST", "/factory/claim", { ...w3claim, instance: "9c07d2e41b3a4f6d8e5c7b1a0f2e3d4c", previous_exit: { why: "restart" } }, "omw_w3"), 204, "w3's next process claims");
 
+  // A maintainer host (#321): m1's "rack", enrolled from rack-1 with the Studio's capacity, waiting for m1's Confirm — what the host page and the person's Hosts table draw.
+  const host = "h_rack000001";
+  await env.DB.prepare(
+    `INSERT INTO hosts (id, owner_login, owner_github_id, name, "where", pubkey, status, hostname, os, arch, page_kb, isolation, dedicated, capacity, lanes, units, agent_slots, disk_free, agent_version)
+     VALUES (?, 'm1', 101, 'rack', 'a rack at home', ?, 'pending-owner', 'rack-1', 'linux', 'aarch64', 16, 'root', 1, ?, ?, 11, 2, '{"work":410,"engine":220}', '0.2.0')`,
+  ).bind(host, "A".repeat(42) + "E", JSON.stringify({ cpus: 12, mem_gb: 32, disk_free_gb: { work: 410, engine: 220 }, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: true }], agent_slots: 2, units: 11, below_minimum: null }), JSON.stringify([{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: true }])).run();
+
   await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('cost_latest', ?)").bind(JSON.stringify({ estimated_at: "2026-09-16T12:00:00Z", status: "ok", month: "2026-09", month_to_date_usd: 8.86, projected_usd: 17.5 })).run();
 
   // One advisory on zlib, matched on the object stable serves.
@@ -508,6 +515,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     blockedContributor: "carol", blockedPkg: "hers",
     outsider: "dave", failedPkg: "lost", pulledPkg: "pulled",
     jobs,
+    host,
     sessions: { contributor: "oms_bob", owner: "oms_alice", maintainer: "oms_m2" },
   };
 }

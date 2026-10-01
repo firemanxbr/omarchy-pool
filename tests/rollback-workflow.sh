@@ -181,7 +181,7 @@ def seed(table, values):
     db.execute(f"INSERT INTO {table} ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", list(row.values()))
     return row
 pid = "0123456789abcdef0123456789abcdef"
-common = {"arch": "aarch64", "mode": "project", "trust": "project", "instance": pid, "instance_finished": pid}
+common = {"arch": "aarch64", "mode": "project", "trust": "project", "kind": "legacy", "instance": pid, "instance_finished": pid}
 worker = seed("build_workers", {**common, "id": "w-1", "revoked_at": None})
 revoked = seed("build_workers", {**common, "id": "w-2"})  # /users/:login lists revoked workers too
 task = seed("build_tasks", {"id": 1, "arch": "aarch64", "status": "leased", "trust": "project", "kind": "build", "lease_owner": "w-1", "stop_order": "o-1"})

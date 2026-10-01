@@ -163,18 +163,22 @@ fn not_found(stderr: &str) -> bool {
     s.contains("no such container") || s.contains("no such object") || s.contains("no such image")
 }
 
+/// The last line `s` has that is not blank.
+fn last_line(s: &str) -> Option<&str> {
+    s.lines().rev().map(str::trim).find(|l| !l.is_empty())
+}
+
+/// Why a pinned binary failed, never empty: its name, its exit, and its last word, from
+/// stderr or else stdout (docker puts an exec that could not start, `OCI runtime exec
+/// failed: …`, on the exec's stdout).
 fn failed(o: &exec::Output) -> String {
-    let last = o
-        .stderr
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("");
-    format!(
-        "exit {}: {}",
-        o.code.map_or_else(|| "by signal".into(), |c| c.to_string()),
-        last
-    )
+    let code = o
+        .code
+        .map_or_else(|| "ended by a signal".into(), |c| format!("exit {c}"));
+    match last_line(&o.stderr).or_else(|| last_line(&o.stdout)) {
+        Some(last) => format!("{}: {code}: {last}", o.program),
+        None => format!("{}: {code}, nothing on stderr or stdout", o.program),
+    }
 }
 
 fn is_container_id(s: &str) -> bool {
@@ -451,8 +455,7 @@ impl Driver for Compose {
             c.args(["exec", id]).args(&probe);
             match exec::run(c, CALL) {
                 Ok(o) if o.ok() => return Answer::Yes(true),
-                // 126/127 and "not found": the probe is not in the image.
-                Ok(o) if matches!(o.code, Some(126 | 127)) && o.stderr.contains("not found") => {}
+                Ok(o) if probe_missing(&o) => {}
                 Ok(o) if not_found(&o.stderr) => return Answer::NotFound,
                 Ok(o) if probe_said_no(&o) => return Answer::Yes(false),
                 // The engine failed, not the probe (the daemon did not answer, an exec
@@ -474,13 +477,24 @@ impl Driver for Compose {
     }
 }
 
+/// Whether the probe is not in the image: 126/127 and "not found in $PATH". Podman says
+/// so on stderr; docker puts an exec that could not start on the exec's stdout
+/// (`OCI runtime exec failed: … exec: "curl": executable file not found in $PATH`).
+/// Only that phrase: an engine's own "not found" (a container gone between the inspect
+/// and the exec) must stay no answer, never read as "not ready".
+fn probe_missing(o: &exec::Output) -> bool {
+    const MISSING: &str = "not found in $PATH";
+    matches!(o.code, Some(126 | 127)) && (o.stderr.contains(MISSING) || o.stdout.contains(MISSING))
+}
+
 /// Whether a failed probe is curl's or wget's own "no" (it ran; the URL did not answer):
 /// their messages start with their name, and GNU wget's `-q` says nothing. Anything else
-/// on stderr is docker's or podman's.
+/// on stderr is docker's or podman's, and the probes write nothing to stdout (`-o`/`-O
+/// /dev/null`), so anything there is the engine's.
 fn probe_said_no(o: &exec::Output) -> bool {
-    let last = o.stderr.lines().rev().find(|l| !l.trim().is_empty());
     !matches!(o.code, Some(125..=127) | None)
-        && last.is_none_or(|l| l.starts_with("curl:") || l.starts_with("wget:"))
+        && o.stdout.trim().is_empty()
+        && last_line(&o.stderr).is_none_or(|l| l.starts_with("curl:") || l.starts_with("wget:"))
 }
 
 /// A `die` event's time and exit code (podman's compatible API names it
@@ -650,17 +664,90 @@ mod tests {
             ),
             Answer::Yes(false)
         );
+        // curl missing from the image as docker says it: exit 127 and the reason on the
+        // exec's stdout, nothing on stderr (#315's docker leg). wget answers.
+        let docker_missing = |wget: &str| {
+            format!(
+                r#"case "$*" in *" curl "*) echo 'OCI runtime exec failed: exec failed: unable to start container process: exec: "curl": executable file not found in $PATH'; exit 127;; *) {wget};; esac"#
+            )
+        };
+        assert_eq!(ready(&docker_missing("exit 0")), Answer::Yes(true));
+        assert_eq!(
+            ready(&docker_missing(
+                "echo 'wget: server returned error: HTTP/1.0 503 Service Unavailable' >&2; exit 1"
+            )),
+            Answer::Yes(false)
+        );
+        // Neither probe in the image: not ready, never an engine failure.
+        assert_eq!(
+            ready(
+                r#"echo "OCI runtime exec failed: exec failed: unable to start container process: exec: \"$3\": executable file not found in \$PATH"; exit 127"#
+            ),
+            Answer::Yes(false)
+        );
         // The engine did not answer, or the exec did not start: change nothing.
         for body in [
             "echo 'Cannot connect to the Docker daemon at unix:///run/user/1000/docker.sock. Is the docker daemon running?' >&2; exit 1",
             "echo 'Error response from daemon: container is restarting' >&2; exit 1",
             "echo 'OCI runtime exec failed: exec failed: cannot allocate memory' >&2; exit 126",
+            "echo 'OCI runtime exec failed: exec failed: cannot allocate memory'; exit 126",
+            "echo 'OCI runtime exec failed: exec failed: unable to start container process'; exit 1",
         ] {
             assert!(matches!(ready(body), Answer::NoAnswer(_)), "{body}");
         }
         assert_eq!(
             ready("echo 'Error: No such container: aaa' >&2; exit 1"),
             Answer::NotFound
+        );
+    }
+
+    #[test]
+    fn a_failure_always_says_which_binary_and_why() {
+        let o = |code, stdout: &str, stderr: &str| exec::Output {
+            program: "docker".into(),
+            code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        };
+        assert_eq!(
+            failed(&o(Some(1), "", "warn\nError: no such network\n\n")),
+            "docker: exit 1: Error: no such network"
+        );
+        // docker's exec that could not start says so on stdout.
+        assert_eq!(
+            failed(&o(
+                Some(127),
+                "OCI runtime exec failed: exec: \"curl\": executable file not found in $PATH\n",
+                ""
+            )),
+            "docker: exit 127: OCI runtime exec failed: exec: \"curl\": executable file not found in $PATH"
+        );
+        assert_eq!(
+            failed(&o(Some(127), "", " \n")),
+            "docker: exit 127, nothing on stderr or stdout"
+        );
+        assert_eq!(
+            failed(&o(None, "", "")),
+            "docker: ended by a signal, nothing on stderr or stdout"
+        );
+
+        // A pinned binary that cannot be started is named, with the reason.
+        let (mut d, _) = recording();
+        let gone = d.tools().docker.clone();
+        fs::remove_file(&gone).unwrap();
+        let Answer::NoAnswer(e) = d.remove_image("busybox:1.37.0") else {
+            panic!("a missing binary answered");
+        };
+        assert!(
+            e.starts_with(&format!("could not start {}: ", gone.display())),
+            "{e}"
+        );
+        // Through the real runner too: what the child said and its name.
+        let (mut d, _) = recording();
+        fs::write(&d.tools().docker, "#!/bin/sh\nexit 127\n").unwrap();
+        assert_eq!(
+            d.remove_image("busybox:1.37.0"),
+            Answer::NoAnswer("docker: exit 127, nothing on stderr or stdout".into())
         );
     }
 

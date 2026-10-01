@@ -60,7 +60,7 @@ async function fullRow(id: string, revoked: boolean): Promise<Record<string, unk
     else if (/(_at|_since|_seen)$/.test(c.name)) row[c.name] = AT;
     else row[c.name] = `${c.name}-${id}`;
   }
-  Object.assign(row, { id, arch: "aarch64", mode: "project", trust: "project", instance: PID, instance_finished: PID, agent_status: "error", agent_via: "direct", current_task: null });
+  Object.assign(row, { id, arch: "aarch64", mode: "project", trust: "project", kind: "legacy", instance: PID, instance_finished: PID, agent_status: "error", agent_via: "direct", current_task: null });
   if (!revoked) row.revoked_at = null;
   const names = Object.keys(row);
   await env.DB.prepare(`INSERT INTO build_workers (${names.join(", ")}) VALUES (${names.map(() => "?").join(", ")})`).bind(...names.map((n) => row[n])).run();

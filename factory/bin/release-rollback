@@ -182,7 +182,7 @@ move_images() {
 }
 undo() { # why — the images back, and the rollback ends: nothing else moved
   if restore; then die "$1: the images are back where they were, and the pool still runs ${from:-its release}; nothing else moved — re-running rollback.yml -f to=$to is safe"
-  else die "$1, and the images could not all be put back: re-run rollback.yml -f to=$to (safe), or re-run the latest release's manifest job"; fi
+  else die "$1, and the images could not all be put back: re-run rollback.yml -f to=$to (safe), or re-run the latest release's worker-image-tags job (worker-image-manifest before #359)"; fi
 }
 move_images || undo "the images did not all move to $to"
 

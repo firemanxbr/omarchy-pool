@@ -1148,9 +1148,13 @@ dependencies = [
 name = "omarchy-agent"
 version = "0.2.0"
 dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
  "flate2",
  "hex",
  "rcgen",
+ "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -1677,6 +1681,7 @@ version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
+ "aws-lc-rs",
  "log",
  "once_cell",
  "ring",

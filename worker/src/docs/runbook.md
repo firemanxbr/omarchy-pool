@@ -138,26 +138,31 @@ A release is `main` at the moment a maintainer dispatches one
    through its entrypoint, `pkg-repo work --self-test`, then to its first
    claim of a stub pool; the broker answering on `:8790`; the builder's and
    the updater's `--self-test`; the updater's `follows` label). Only once
-   both architectures' images have started does any tag a host follows
-   move, in one job: the version's own `:vX.Y.Z`, then `:x86_64` and
-   `:aarch64`, then `:latest`. An image whose roles do not start, on either
-   architecture, stops the release before any host can pull it.
+   both architectures' images have started does the version's own
+   `:vX.Y.Z` move (the index the host bundle signs). An image whose roles do
+   not start, on either architecture, stops the release before any tag
+   moves.
 4. The host bundle (#311, *The host bundle* below) is written, signed and
    verified with the new agent and every agent released in the last 30 days,
    then added to the draft with the agent binaries and `install.sh`; only then
    is the release published, which makes it immutable
    (`factory/bin/publish-release` checks every asset is there, with the bytes
-   the run made, first). A release that stops before then stays a draft, and
-   the pool stays on the previous release. But `:x86_64`, `:aarch64` and
-   `:latest` have already moved to its images (step 3): an updater round that
-   pulls, or a new host, takes them while the pool runs the previous release.
-   Put them back with `gh workflow run rollback.yml -f to=<previous>`, or cut
-   the next release.
-5. The worker is migrated (`wrangler d1 migrations apply`) and deployed with
+   the run made, first). A release that stops before then stays a draft, the
+   pool stays on the previous release, and so does every host.
+5. **This is when hosts move** (#359): once the release is published, one
+   job (`worker-image-tags`) moves `:x86_64` and `:aarch64` to the version's
+   images, then `:latest`, each signed; it runs in the `release`
+   environment, so it waits for a maintainer's approval like the jobs that
+   signed before it. Every set's updater pulls those tags at its next
+   round, whatever release the pool runs, so from here on a host may run
+   the new images before the pool is deployed (step 6); never before the
+   release is published. A run that stops here leaves the release published
+   and the pool on the previous release: **Re-run failed jobs**.
+6. The worker is migrated (`wrangler d1 migrations apply`) and deployed with
    `POOL_VERSION`, `POOL_COMMIT` and `POOL_DEPLOYED_AT`; the run verifies
    `/api/v1/version` reports the new tag and records a `deploy` event through
    `wrangler d1 execute` (the release holds no credential of the pool's API).
-6. Every set follows: its updater sees the new release within two minutes
+7. Every set follows: its updater sees the new release within two minutes
    (the Studio's too, since its one-time step, *The Studio host*).
 
 A run that stopped resumes with **Re-run failed jobs** on that run. Once its
@@ -223,10 +228,10 @@ issuer `https://token.actions.githubusercontent.com`). That signature is only
 as strong as the settings around it (#308, design v2 §20). Part of them is in
 the repository and CI holds it (`tests/trust-pins.sh`): one exact cosign
 (v2.6.5, through `sigstore/cosign-installer` pinned by commit) in both
-workflows, the Fulcio and Rekor named on every `cosign sign`, the one
-release job that signs (`worker-image-manifest`) in the `release`
-environment and the rollback in `pool`, `release.yml`'s `version` job (the
-gate every other job waits behind) in `release` too, so nothing is built,
+workflows, the Fulcio and Rekor named on every `cosign sign`, the
+release jobs that sign (`worker-image-manifest`, `host-bundle` and
+`worker-image-tags`) in the `release` environment and the rollback in
+`pool`, `release.yml`'s `version` job (the gate every other job waits behind) in `release` too, so nothing is built,
 tagged, published or pushed before the environment admits the run, and no
 write permission by default, the base images by digest and the
 docker CLI by SHA-256, and CODEOWNERS giving every maintainer

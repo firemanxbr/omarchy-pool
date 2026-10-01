@@ -14,3 +14,7 @@ declare module "*.svg" {
   const text: string;
   export default text;
 }
+declare module "*.toml" {
+  const text: string;
+  export default text;
+}

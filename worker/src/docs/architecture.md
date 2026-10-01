@@ -390,8 +390,9 @@ page and in Status's lines.
 **A release whose image does not start.** Prevented: the release pushes each
 architecture's image as `:<arch>-vX.Y.Z` only, starts every role from it on
 the runner (`tests/image-smoke.sh`, the project worker up to its first
-claim), and only once both architectures have started moves any tag a host
-follows — `:vX.Y.Z`, `:<arch>`, then `:latest`. Contained: an updater never
+claim), and only once both architectures have started moves `:vX.Y.Z`; the
+tags a host follows, `:<arch>` then `:latest`, move only once the release is
+published (#359). Contained: an updater never
 adopts an image under which what it replaced keeps restarting, and keeps the
 old images. Detected: a process that lives minutes and finishes nothing is
 counted as churn; workers alive before the latest deploy, last heard during

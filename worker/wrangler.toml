@@ -25,10 +25,11 @@ routes = [
 # the documentation's chapters (src/docs/*.md) are bundled the same way and
 # rendered by the dashboard (their diagrams are drawn there, pages/doc-diagrams.ts);
 # so are the icons (src/assets/icons/*/*.svg), which pages/kit.ts serves in one
-# stylesheet.
+# stylesheet, and the host bundle's manifest (factory/bundle/manifest.toml), whose
+# signed capacity minimum the pool checks a host against at enrollment (src/hosts.ts).
 [[rules]]
 type = "Text"
-globs = ["**/*.sh", "**/*.md", "**/*.yml", "**/*.svg"]
+globs = ["**/*.sh", "**/*.md", "**/*.yml", "**/*.svg", "**/*.toml"]
 fallthrough = true
 
 [observability]

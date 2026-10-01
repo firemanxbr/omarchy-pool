@@ -41,6 +41,8 @@ please do not file a public issue for it.
 | Maintainer role | a contributor listed in `factory/MAINTAINERS.toml` on `main` — one list, no groups (applied by the brain every ten minutes) | propose or confirm a worker's project trust (two of them), take it back alone; withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded; approve, and a block, in the browser with their passkey, #271); queue any pool job by hand (`POST /factory/jobs`; a promotion forced past its evidence in the browser with their passkey, #284); queue a dry run by hand, cancel, remove a registration; give any worker orders (the same list), capped at 20 an hour per login and on the journal — none of them needs the passkey (#277); review governance pull requests | write to the pool with their own token (a job does); publish a build queued by hand (#284: a dry run only); write the gate's evidence (#284: a journal note only); roll a ring back to another ring's release; operate as a worker; grant a role | live |
 | Agent token `oma_…` | one agent on one person's machine, granted by that person in their signed-in browser (`omarchy-cli login`: a loopback address and PKCE), kept in `~/.config/omarchy-cli/credentials.toml` (0600) and bound to the origin that granted it | the tools of `omarchy-cli mcp` its scopes hold, as that person: request and follow packages (`contribute`); claim, release, read evidence and draft a verdict (`review`) or a block (`block`) — the two a maintainer's only, read again on every call; twenty calls a minute, five requests, ten claims and thirty drafts a day | decide anything — approve, request changes, reject and block are drafts the person confirms in the browser, approve and block with the person's passkey; every other route (403); give the project's agent a hint; outlive seven days with `review` or `block`, ninety with `contribute` | live; revoked by `omarchy-cli logout`, the person's page, a block of the person, or a reset of their passkeys (#284) |
 | Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered with the browser's session, on their own page or, the first one, in the dialog of the act that needs it (#287); the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
+| Host enrollment token `ome_…` | the maintainer who pressed *Add a host*, for the one command they paste on the machine (in the environment of `sh`, never an argument) | enroll one host, once, within 15 minutes, as that maintainer — while they are still in `factory/MAINTAINERS.toml` and still the same GitHub user id | claim, confirm the host, or enroll a second one | live (#321); stored as its SHA-256; burnt by the enrollment in the same D1 batch that creates the host |
+| Host key (Ed25519) | one maintainer host's agent: `host.ed25519`, mode 0600, made at install, never in a container | sign the host's calls (`Omarchy-Host`: method, path, body hash, time, nonce): read its state, fetch or rotate its worker token, report | claim, change the maintainer list, widen the owner's envelope; be replayed (a nonce table), act from a clock 120 s off; act before its owner confirmed its fingerprint on the site | live (#321); a suspended or retired host's key is refused |
 | Session cookie `oms_…` | one person's browser, after Sign in with GitHub | what that person's contributor token can, from the dashboard's pages | — | live; separate from the CLI token, so signing in never invalidates a worker; *sign out* (in the header of every page) invalidates it on the server, not only in that browser |
 | Signing key (OpenPGP) | the pool's Worker only (`SIGNING_KEY` secret, `worker/src/signing.ts`) | sign the databases it stores and the packages the factory builds (`POST /pool/:sha256/sign`) | — | live; no worker, runner or repository holds it |
 | `CLOUDFLARE_API_TOKEN` | the release workflow on GitHub | deploy the Worker, apply migrations, record the deploy | — | live; all GitHub holds (no hosted worker: Actions runs CI and the release only) |
@@ -76,7 +78,7 @@ secret). Everything travels in the `Authorization` header over TLS only.
 | Who | Gets | How |
 |---|---|---|
 | Contributor | submit packages only: request them, build them and follow them — on the pool's hosts. A contributor runs no worker: `POST /factory/workers` refuses them (403, *your packages build on the pool's hosts*) | GitHub account |
-| Host | the workers: every one is provided by a maintainer — the project's compute is its maintainers' hosts. A maintainer's host is trusted by the same act that makes them a maintainer | registered by a maintainer (`POST /factory/workers`), listed in `factory/MAINTAINERS.toml` at the last sync. A host registered before its maintainer left keeps claiming until host enrollment (P1) ties it to the list, or a maintainer revokes it |
+| Host | the workers: every one is provided by a maintainer — the project's compute is its maintainers' hosts. A maintainer's host is trusted by the same act that makes them a maintainer | enrolled by a maintainer listed in `factory/MAINTAINERS.toml` at the last sync (*Maintainer hosts* below, #321), owned by their GitHub user id, confirmed by fingerprint; a legacy registration (`POST /factory/workers`) keeps claiming until a maintainer revokes it. What a removal from the list does to a host is #322's |
 | Community worker | none: the tier ends (#307). The registrations made before #331 — expected to be the maintainers' own, which a one-time query of the last 90 days checks (recorded on #331) — keep their claims (their owner's packages; anyone's when shared) until they retire | no new one |
 | Project worker | pool jobs (sync, render, promote, health, security, gc) and the rebuild of approved packages — never a build without evidence and review | two maintainers' word (`POST /factory/workers/:id/trust`): one proposes, another confirms, never the worker's owner; the trust is a signed record under `workers/<id>/`; one maintainer takes it back. The Review page names the worker and host behind every build |
 | Maintainer | provide the project's hosts, approve the project's staged builds — never their own package — settle categories, block with a reason, vouch for a worker with a second maintainer, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
@@ -383,6 +385,66 @@ images or the deploy fail, and everything is put back) leaves a valid
 signature in Rekor over bytes anyone can rebuild; a pool could serve that
 statement although that rollback never took effect, but a maintainer
 approved that dispatch and every rule above still applies to it.
+
+## Maintainer hosts
+
+Only a maintainer provides a host, and the host is trusted by the act that
+made them one: a pull request to `factory/MAINTAINERS.toml` another
+maintainer approved (decision S2). There is no per-host trust grant. The
+enrollment (#321, design v2 §6.1) binds a machine to that person:
+
+- **The token** (`ome_…`) is minted on the maintainer's own page — the
+  browser session's only, as Confirm, so a stolen CLI token cannot leave
+  hosts waiting there for a careless Confirm — after the pool reads the
+  synced list again; it is bound to their login **and their
+  GitHub user id** (recorded at every sign-in), lives 15 minutes and works
+  once. A login renamed or taken by someone else is not its owner.
+- **Enrollment** carries the machine's new public key and a signature of
+  the token and the key with it (proof of possession), what the machine is,
+  and its capacity report. In one D1 batch the pool checks the token is live
+  and unused, its login is still listed and still the same GitHub user, burns
+  it and creates the host in `pending-owner`. A host below the release's
+  signed minimum (`factory/bundle/manifest.toml`, the file `release.yml`
+  signs into every host bundle) is refused before anything is written.
+- **Confirm.** The machine prints its key's fingerprint; the owner's page
+  shows the same, and only the owner's Confirm — while still a maintainer —
+  gives the host its worker registration. Confirm is the browser session's
+  only, from the pool's own page: a bearer token (an `omc_` CLI token, or a
+  GitHub token turned into one) is refused, so one stolen token does not
+  make a project-trusted host. A token stolen before use enrolls nothing the
+  owner does not see and confirm. The journal and Status say it, and the
+  other maintainers see a notice; no approval is asked (D40), and the pool
+  writes the signed trust record the per-worker door writes
+  (`workers/<id>/trust-<time>.json`: the host, its fingerprint, who
+  confirmed). The per-worker trust door does not move a host's
+  registration: its trust is `MAINTAINERS.toml`'s. Confirm asks no passkey
+  yet: one stolen browser session of a maintainer could still mint, enroll
+  and confirm a machine of its own. A passkey assertion on Confirm, as
+  Approve's (#271), is the named seam for a later issue.
+- **Signed requests** (D7). Every later call carries `Omarchy-Host: <host>;
+  ts; nonce; sig`, the key's signature over the method, the path, the body's
+  SHA-256, the time and the nonce. The pool checks the key, `|ts − now| ≤
+  120 s` and that the nonce is new (`host_nonces`, pruned by the cron after
+  five minutes), so nothing is replayable. A signed request reads the host's
+  state, fetches or rotates its worker token and reports; it cannot claim,
+  change the maintainer list or widen anything.
+- **The host worker token** (`omw_…`) is the dispatcher's only, written
+  0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
+  id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
+  digits and dashes), so a pool cannot add a variable to the dispatcher's
+  environment; strings the pool sends reach the terminal without control
+  characters. It is a new one at every fetch; the agent
+  rotates it every 30 days. The one it replaces works ten more minutes (kept
+  on the host's row, never on the registration that older Workers list), so
+  only the dispatcher is recreated, and a running task — whose job token does
+  not depend on it — never notices.
+- **The host report** is at most 16 KiB (its `runtime` at most 2 KiB) and
+  refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
+  itself from the reported totals and the signed constants, never more than
+  the host declared.
+
+Suspend, retire, drain and what a removal from the list does to a host are
+#322's.
 
 ## After approval, the gates still hold
 

@@ -20,6 +20,11 @@ import { sha256Hex } from "./contributors";
  * of a GitHub OAuth App whose callback URL is <dashboard>/auth/github/callback.
  */
 
+/** A GitHub user id as GitHub answers it (a positive integer), or null. */
+export function githubId(v: unknown): number | null {
+  return typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null;
+}
+
 function cookie(name: string, value: string, maxAge: number, secure: boolean): string {
   return `${name}=${value}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
 }
@@ -78,7 +83,7 @@ export async function handleAuthCallback(url: URL, request: Request, env: Env): 
   if (!t.access_token) return json({ error: `GitHub did not issue a token (${t.error ?? tok.status})` }, 502);
   const res = await fetch("https://api.github.com/user", { headers: { authorization: `Bearer ${t.access_token}`, accept: "application/vnd.github+json", "user-agent": "omarchy-pool" } });
   if (!res.ok) return json({ error: `GitHub user lookup failed (HTTP ${res.status})` }, 502);
-  const u = (await res.json()) as { login: string; name?: string; avatar_url?: string; type?: string };
+  const u = (await res.json()) as { login: string; id?: number; name?: string; avatar_url?: string; type?: string };
   if (!u.login || u.type === "Bot") return json({ error: "a user account is required" }, 400);
   // The contributor token: a new one per sign-in, hashed at rest; the old
   // one (if any) stops working — the same as POST /factory/register.
@@ -90,11 +95,12 @@ export async function handleAuthCallback(url: URL, request: Request, env: Env): 
   const token = `oms_${[...b].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
   const role = await roleFor(env, u.login);
   await env.DB.prepare(
-    `INSERT INTO contributors (login, name, avatar_url, token_hash, session_hash, role) VALUES (?, ?, ?, ?, ?, ?)
+    // The GitHub user id is recorded with every sign-in (#321): a maintainer's hosts are owned by it, not by the login, which can be renamed or taken.
+    `INSERT INTO contributors (login, name, avatar_url, token_hash, session_hash, role, github_id) VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (login) DO UPDATE SET name = excluded.name, avatar_url = excluded.avatar_url, session_hash = excluded.session_hash,
-       role = excluded.role, last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+       role = excluded.role, github_id = excluded.github_id, last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
   )
-    .bind(u.login, u.name ?? null, u.avatar_url ?? null, await sha256Hex(`unset:${crypto.randomUUID()}`), await sha256Hex(token), role)
+    .bind(u.login, u.name ?? null, u.avatar_url ?? null, await sha256Hex(`unset:${crypto.randomUUID()}`), await sha256Hex(token), role, githubId(u.id))
     .run();
   // `next=/me` lands on the person's own page — the workspace — once the login is known.
   const headers = new Headers({ location: next === "/me" ? `/user/${encodeURIComponent(u.login)}` : next });

@@ -40,6 +40,7 @@ import { findLeak } from "./leak";
 import { parseTag, updateState } from "./update";
 import { WORKER_ALIVE_MINUTES, version as running, type RunningVersion } from "./meta";
 import { FIRST_PICK_MINUTES } from "./queue";
+import { HOST_REPORT_FRESH_MIN } from "./hosts";
 import { afterRequeue, LEASE_MINUTES, requeueStatement, stopError, type LeasedTask } from "./lease";
 
 // ---------- kinds and bounds ----------
@@ -240,8 +241,23 @@ export function claimFacts(b: Record<string, unknown>, headers: Headers, probe: 
  * has no socket; a bare binary; an image from before part 3; a container
  * that could not verify which one it is).
  */
-export type SetRollout = "follows" | "old-updater" | "both" | "timer" | "stopped" | "none" | "unknown";
-export const SET_ROLLOUTS: readonly SetRollout[] = ["follows", "old-updater", "both", "timer", "stopped", "none", "unknown"];
+export type SetRollout = "follows" | "old-updater" | "both" | "timer" | "stopped" | "none" | "unknown" | "host";
+export const SET_ROLLOUTS: readonly SetRollout[] = ["follows", "old-updater", "both", "timer", "stopped", "none", "unknown", "host"];
+
+/**
+ * A host's registration (#321, design v2 §8.6): its set is the host bundle,
+ * and the host's agent rolls it out — the `host` word, from the registration's
+ * kind, never from a claim's report. Update is taken while the agent reports
+ * (within HOST_REPORT_FRESH_MIN): the agent reads it with its next round.
+ */
+export const HOST_ROLLOUT = "host" as const;
+export const HOST_SET_LINE = "rolled out by its host's agent (omarchy-agent), which follows each release";
+export function hostRolloutRefusal(reportedAt: string | null | undefined, now: number): string | null {
+  if (reportedAt && now - Date.parse(reportedAt) < HOST_REPORT_FRESH_MIN * MIN) return null;
+  return reportedAt
+    ? `its host's agent has not reported for ${Math.round((now - Date.parse(reportedAt)) / MIN)} min (since ${utc(reportedAt)}): an Update waits for an agent that reports — its owner looks at the host`
+    : "its host's agent has not reported yet: an Update waits for an agent that reports";
+}
 
 /**
  * What a worker says of its set with its claims (part 3 of #277 on): the
@@ -784,6 +800,8 @@ export const RIGHT_OF: Record<OrderKind, OrderRight> = { "recheck-agent": "reche
 export interface OrderWorker {
   id: string; owner: string | null; revoked_at: string | null; version: string | null; order_kinds: string | null; open_orders: string | null; instance_conflict_at: string | null; restarts_left: number | null; agent_via: string | null;
   trust?: string | null; drained_at?: string | null; drained_by?: string | null; drain_reason?: string | null; current_task?: number | null; rollout?: string | null;
+  /** #321: a host's registration, the host's last report (the pool's time) and the release its agent applied. */
+  kind?: string | null; host_reported_at?: string | null; host_release?: string | null;
 }
 
 /** The task a worker holds, as Stop its task reads it: by the worker row's current_task, the primary key. */
@@ -901,14 +919,20 @@ export function orderVerdicts(c: { login: string; role: string } | null, w: Orde
     if (first) return first;
     const pool = f.pool;
     if (!pool || !parseTag(pool.version)) return no(409, `the pool runs no release (${pool?.version ?? "unknown"}): there is nothing to update to`);
-    if (!parseTag(w.version)) return no(409, `its image reports no release (${w.version ?? "none"}): the pool cannot tell whether it is behind`);
-    const u = updateState(w.version, pool);
+    // A host's registration (#321) runs what its agent applied, as its report says, until its dispatcher claims and says it itself.
+    const host = w.kind === "host";
+    const runs = w.version ?? (host ? w.host_release ?? null : null);
+    if (!parseTag(runs)) return no(409, host ? `its host's agent reports no release applied (${runs ?? "none"}): the pool cannot tell whether it is behind` : `its image reports no release (${w.version ?? "none"}): the pool cannot tell whether it is behind`);
+    const u = updateState(runs, pool);
     if (!u.outdated) {
-      return versionWord(w.version) === versionWord(pool.version)
-        ? no(409, `runs ${versionWord(w.version)}, the latest — its updater follows each release within ${FOLLOW_POLL_S / 60} min`)
-        : no(409, `runs ${versionWord(w.version)}, newer than the pool's ${versionWord(pool.version)} — its updater follows the pool back within ${FOLLOW_POLL_S / 60} min`);
+      return versionWord(runs) === versionWord(pool.version)
+        ? no(409, `runs ${versionWord(runs)}, the latest — its ${host ? "host's agent" : "updater"} follows each release within ${FOLLOW_POLL_S / 60} min`)
+        : no(409, `runs ${versionWord(runs)}, newer than the pool's ${versionWord(pool.version)} — its ${host ? "host's agent" : "updater"} follows the pool back within ${FOLLOW_POLL_S / 60} min`);
     }
-    if (w.trust === "project") {
+    if (host) {
+      const refused = hostRolloutRefusal(w.host_reported_at, f.now);
+      if (refused) return no(409, refused);
+    } else if (w.trust === "project") {
       const refused = rolloutRefusal(rolloutOf(w.rollout), w.version);
       if (refused) return no(409, refused);
     }

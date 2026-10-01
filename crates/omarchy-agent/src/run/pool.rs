@@ -117,7 +117,8 @@ pub(crate) fn classify(status: u16) -> Net<()> {
     }
 }
 
-/// The pool and GitHub over HTTPS (`ureq` with rustls): every call times out.
+/// The pool and GitHub over HTTPS (`ureq` on rustls with aws-lc-rs, the same TLS as
+/// [`crate::pool`]): every call times out.
 pub(crate) struct Https {
     origin: String,
     agent: ureq::Agent,
@@ -132,6 +133,7 @@ impl Https {
     pub fn new(origin: &str) -> Self {
         let agent = |timeout: Duration| -> ureq::Agent {
             ureq::Agent::config_builder()
+                .tls_config(crate::pool::tls())
                 .timeout_global(Some(timeout))
                 .http_status_as_error(false)
                 .https_only(true)
