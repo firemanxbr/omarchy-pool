@@ -621,7 +621,7 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--work-root <dir>`, `--secrets-dir <dir>` | where tasks work (default `<data>/work`) and where `agent.env` goes (default `<data>/secrets`); the secrets directory must be outside the work root and the set directory |
 | `--socket <path>` | the engine's socket; otherwise the first that answers of rootless podman's API socket, rootless docker, `/var/run/docker.sock` |
 | `--task-subnets <cidr>[,<cidr>]` | the task networks' range (default `10.231.0.0/16`, as prep-root.sh's) |
-| `--legacy <compose project>` | a set already running beside the new bundle (the Studio): recorded in `legacy.json`, nothing in it changed; its rootful daemon without userns-remap is the recorded exception until P6 |
+| `--legacy <compose project>` | a set already running beside the new bundle (the Studio): recorded in `legacy.json`, nothing in it changed; its rootful daemon without userns-remap is the recorded exception until P6, meant for the Studio's set only; a re-run without the flag uses the recorded project |
 | `--agent-env-from <file>` | copies the agent keys from an existing file (the Studio's `etc/agent.env`) after showing which keys it holds; without it they are asked for on `/dev/tty`, not shown |
 | `--max-units`, `--max-cpus`, `--max-mem-gb` | the owner's caps, lower than detected only |
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
@@ -645,9 +645,10 @@ GitHub names no scopes for, is refused), and the **egress probe**: a task
 on its own network in the task subnets must fail to reach `169.254.169.254`,
 the default gateway and the host's LAN address and must reach GitHub, which
 on a rootful host is what prep-root.sh's `DOCKER-USER` rules give. Until the
-egress sidecar lands, a rootless host fails it and is refused: rootless
+egress sidecar lands, a rootless host is expected to fail it: rootless
 podman's network carries the host's own address into the task's namespace,
-and the `DOCKER-USER` rules are rootful only. Leftovers of an interrupted
+and the `DOCKER-USER` rules are rootful only. The probe's answers decide;
+there is no separate check for a rootless engine. Leftovers of an interrupted
 probe (labelled `org.omarchy-pool.probe=egress`) are removed before it
 runs. A work root that does not exist under a directory the user cannot
 write is a blocker naming prep-root.sh. A socket
@@ -674,8 +675,9 @@ identity, the agent keys and your edits to `agent.toml`.
 `omarchy-agent uninstall` stops the agent, removes the unit, the bundle's
 containers and networks, task containers and sidecars (labelled
 `org.omarchy-pool.agent.host=<host>`) and the bundle's files; it never
-touches the legacy project, and keeps the identity, `agent.toml` and the
-secrets directory. Run it in a login session of the agent's user: without
+touches the legacy project, and keeps the identity, `agent.toml`, the
+secrets directory and the trust floor in `state.json` (it clears the applied
+release, so installing again starts a round). Run it in a login session of the agent's user: without
 a reachable `systemctl --user` (`sudo -iu`, no `XDG_RUNTIME_DIR`) it stops
 as "needs a person" before removing anything, since the agent would keep
 running under linger.

@@ -10,10 +10,13 @@
 //! the worker image has the sidecar, the probe runs on an internal network behind it, as
 //! every task will, and must reach the public address through it.
 //!
-//! Until then a rootless host is refused here: rootless podman's network (pasta) carries
-//! the host's own address into the task's namespace, so the LAN target answers `refused`
-//! from inside it, and prep-root.sh's DOCKER-USER rules are rootful only. Seam for the
-//! egress sidecar's issue too: a rootless host passes once its tasks egress through it.
+//! Until then a rootless host is expected to fail the probe: rootless podman's network
+//! (pasta) carries the host's own address into the task's namespace, so the LAN target
+//! answers `refused` from inside it, and prep-root.sh's DOCKER-USER rules are rootful
+//! only. The probe's answers decide, not the engine's kind: there is no separate check
+//! for a rootless engine, and a host whose LAN address is not found, with a gateway that
+//! drops TCP 53, is judged on what remains. Seam for the egress sidecar's issue too: a
+//! rootless host passes once its tasks egress through it.
 
 use std::net::Ipv4Addr;
 

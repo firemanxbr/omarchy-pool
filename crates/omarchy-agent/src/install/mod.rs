@@ -364,6 +364,11 @@ pub(crate) fn measure(
     let existing = std::fs::read_to_string(p.agent_toml()).ok();
     let ex = existing.as_deref();
     let enrolled = Identity::read(&p.enroll_paths().state).ok().flatten();
+    if enrolled.is_none() && o.token.is_none() {
+        r.blockers.push(
+            "enrollment: this machine has not enrolled yet, and OMARCHY_ENROLL is not set: add the host on your page and paste the command it prints".into(),
+        );
+    }
 
     // The release, the pool and this binary.
     let manifest = match release(o, sys, verifier) {
@@ -461,7 +466,15 @@ pub(crate) fn measure(
     let dedicated = o.dedicated
         || envelope::envelope_value(ex, "dedicated").and_then(|v| v.as_bool()) == Some(true);
     let project = envelope::set_str(ex, "project").unwrap_or_else(|| envelope::PROJECT.to_owned());
-    if let Some(l) = &o.legacy {
+    // The legacy project: `--legacy`, or the one an earlier install recorded, so running
+    // install again repairs it without the flag (legacy.json's owner is checked below).
+    let legacy_project = o.legacy.clone().or_else(|| {
+        std::fs::read(p.data.join(legacy::FILE))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok())
+            .map(|l| l.project)
+    });
+    if let Some(l) = &legacy_project {
         if !legacy::valid_project(l) {
             r.blockers
                 .push(format!("--legacy {l:?} is not a compose project name"));
@@ -478,6 +491,7 @@ pub(crate) fn measure(
         set_dir.join(".env"),
         p.enroll_paths().dispatcher_env(),
         secrets_dir.join("agent.env"),
+        p.data.join(legacy::FILE),
     ] {
         if let Err(e) = files::check_owner_file(&f) {
             r.blockers.push(e);
@@ -488,7 +502,15 @@ pub(crate) fn measure(
     // Nothing in a data directory that fails it is run (its tools/ above all).
     let tools_dir = p.data.join("tools");
     let mut trusted = true;
-    for d in [&p.data, &tools_dir, &set_dir, &work_root, &secrets_dir] {
+    let unit_dir = p.unit_dir();
+    for d in [
+        &p.data,
+        &tools_dir,
+        &set_dir,
+        &work_root,
+        &secrets_dir,
+        &unit_dir,
+    ] {
         if d.exists() {
             if let Err(e) = files::owned_dir(d) {
                 trusted &= *d != p.data && *d != tools_dir;
@@ -596,7 +618,7 @@ pub(crate) fn measure(
             f.isolation(),
             !f.rootless(),
             dedicated,
-            o.legacy.is_some(),
+            legacy_project.is_some(),
             &mut r,
         );
         checks::emulation(f.arch(), Some(f.page_kb()), &p.binfmt, &mut r);
@@ -612,11 +634,14 @@ pub(crate) fn measure(
         .unwrap_or_default();
     let mut legacy_seen = None;
     if let Some(d) = &docker {
-        match other_networks(d, &project, o.legacy.as_deref()) {
+        match other_networks(d, &project, legacy_project.as_deref()) {
             Ok(n) => checks::subnets(&task, &routes, &n, &mut r),
             Err(e) => r.blockers.push(format!("the engine's networks: {e}")),
         }
-        if let Some(l) = o.legacy.as_deref().filter(|l| legacy::valid_project(l)) {
+        if let Some(l) = legacy_project
+            .as_deref()
+            .filter(|l| legacy::valid_project(l))
+        {
             match legacy::look(d, l) {
                 Ok(seen) => {
                     r.blockers
@@ -725,6 +750,13 @@ pub struct Installed {
 
 /// `omarchy-agent install`.
 pub fn install(o: &Options, sys: &mut dyn Sys, out: &mut dyn Write) -> Result<Installed, Failure> {
+    // install.sh refuses root too; this binary, run by hand as root, would make root the
+    // agent's user.
+    if files::euid() == 0 {
+        return Err(Failure::Refused(
+            "refusing to run as root: the agent never runs as root; run this as the user the agent will run as".into(),
+        ));
+    }
     install_with(o, sys, &crate::run::Sigstore, None, out)
 }
 
@@ -1021,6 +1053,9 @@ pub fn uninstall(
             Err(_) => {}
         }
     }
+    if let Err(e) = forget_bundle(&places.data.join("state.json")) {
+        left.push(format!("needs a person: state.json still names the removed bundle ({e}); a new install's first round may not start until an Update order"));
+    }
     say(
         out,
         &format!(
@@ -1032,6 +1067,20 @@ pub fn uninstall(
         say(out, &format!("the legacy project {l} was not touched"));
     }
     Ok(left)
+}
+
+/// `state.json` without the bundle uninstall removed: no applied release and no round in
+/// flight, so a new install's first round starts one again (a round that stops early on
+/// "the pool names the release that runs" would leave the host with no dispatcher). The
+/// trust floor, `min_release`, the revocations, the statement seq and the pinned tools
+/// stay.
+fn forget_bundle(path: &Path) -> Result<(), String> {
+    let Some(mut state) = crate::run::state::load(path)? else {
+        return Ok(());
+    };
+    state.applied = None;
+    state.rollout = crate::run::state::Rollout::default();
+    crate::run::state::save(path, &state)
 }
 
 /// The containers and networks labelled with the bundle's project or this host, `(id or

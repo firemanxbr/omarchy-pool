@@ -52,8 +52,11 @@ impl Report {
 /// or VM at any level (a rootful daemon of a new host with `userns-remap`), or a
 /// dedicated user on a shared machine at the `subuid` level. A maintainer's daily login —
 /// `user`, or any rootful daemon, without `--dedicated` — is refused. The Studio's
-/// rootful daemon without remapping, installed beside its legacy set, is the recorded
-/// exception until P6.
+/// rootful daemon without remapping, installed beside its legacy set (`--legacy`, or the
+/// `legacy.json` an earlier install recorded), is the recorded exception until P6. Any
+/// existing compose project named with `--legacy` grants it: it is meant for the Studio's
+/// recorded set only, the warning and `rootful_exception` in `legacy.json` record it, and
+/// P6 removes it.
 pub(crate) fn hosting(
     isolation: Isolation,
     rootful: bool,
@@ -61,11 +64,13 @@ pub(crate) fn hosting(
     legacy: bool,
     r: &mut Report,
 ) {
+    // Each requirement on its own, so a fresh rootful VM sees both of its blockers at once.
     if rootful && !dedicated {
         r.blockers.push(
             "hosting: a rootful daemon makes the agent's user root-equivalent; it runs only on a dedicated machine or VM (--dedicated), never on a maintainer's daily login".into(),
         );
-    } else if isolation == Isolation::Root && !legacy {
+    }
+    if isolation == Isolation::Root && !legacy {
         r.blockers.push(
             "hosting: a rootful daemon on a new host needs userns-remap, so a task-container escape lands in an unprivileged subuid (factory/host/prep-root.sh sets it on a new daemon)".into(),
         );

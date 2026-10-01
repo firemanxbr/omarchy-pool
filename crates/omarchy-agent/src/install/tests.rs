@@ -90,6 +90,8 @@ fn a_daily_login_and_a_rootful_daemon_without_remapping_are_refused_with_the_rea
     assert!(b.contains("daily login"), "{b}");
     let (b, _) = blocked(Isolation::Root, true, false, false);
     assert!(b.contains("never on a maintainer's daily login"), "{b}");
+    // A fresh rootful VM sees both of its blockers on the one screen.
+    assert!(b.contains("needs userns-remap"), "{b}");
     // Remapped, but still a root daemon behind the socket: a dedicated machine only.
     let (b, _) = blocked(Isolation::Subuid, true, false, false);
     assert!(b.contains("root-equivalent"), "{b}");
@@ -691,7 +693,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
         max_cpus: None,
         max_mem_gb: None,
         yes: true,
-        token: None,
+        token: Some(format!("ome_{}", "0a".repeat(24))),
         wait: Duration::ZERO,
         poll: Duration::from_millis(10),
         exe: Some(agent),
@@ -1169,12 +1171,31 @@ fn uninstall_removes_the_unit_and_the_bundle_and_keeps_the_identity() {
         .unwrap();
     let p = &h.options.places;
     fs::create_dir_all(p.data.join("bundles")).unwrap();
+    // The run loop applied a release and was mid-round.
+    let v = Release::parse("v1.20.0").unwrap();
+    let mut state = crate::run::state::State {
+        applied: Some(v),
+        floor: Some(v),
+        statement_seq: Some(3),
+        ..crate::run::state::State::default()
+    };
+    state.rollout.step = crate::run::state::Step::Pull;
+    state.rollout.target = Some(v);
+    crate::run::state::save(&p.data.join("state.json"), &state).unwrap();
     let mut sys = Fake::default();
     let mut out = Vec::new();
     let left = uninstall(p, &mut sys, &mut out).unwrap();
     assert!(!p.unit_dir().join(unit::NAME).exists());
     assert!(!p.data.join("bundles").exists() && !p.set_dir().exists());
     assert!(p.data.join("state/host.json").exists() && p.data.join("agent.toml").exists());
+    // No applied release and no round left, so installing again starts a round; the
+    // trust floor stays.
+    let after = crate::run::state::load(&p.data.join("state.json"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.applied, None);
+    assert_eq!(after.rollout, crate::run::state::Rollout::default());
+    assert_eq!((after.floor, after.statement_seq), (Some(v), Some(3)));
     assert_eq!(
         sys.calls[1],
         "systemctl --user disable --now omarchy-agent.service"
@@ -1204,6 +1225,56 @@ fn uninstall_without_the_user_manager_removes_nothing_and_says_where_to_run_it()
     );
     assert!(p.unit_dir().join(unit::NAME).exists());
     assert!(p.data.join("bundles").exists() && p.set_dir().exists());
+}
+
+#[test]
+fn preflight_names_a_missing_enrollment_token_and_a_unit_directory_others_may_write() {
+    let mut h = host(INFO, EGRESS_OK);
+    h.options.token = None;
+    let unit_dir = h.options.places.unit_dir();
+    fs::create_dir_all(&unit_dir).unwrap();
+    fs::set_permissions(&unit_dir, fs::Permissions::from_mode(0o775)).unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    let screen = r.screen();
+    assert!(screen.contains("OMARCHY_ENROLL is not set"), "{screen}");
+    assert!(
+        screen.contains("systemd/user: group- or world-writable"),
+        "{screen}"
+    );
+    assert_eq!(r.blockers.len(), 2, "{screen}");
+}
+
+#[test]
+fn a_rerun_without_legacy_uses_the_recorded_project_and_its_exception() {
+    // The Studio: rootful, no userns-remap, legacy.json recorded by the first install.
+    let rootful = INFO.replace(
+        r#""SecurityOptions":["name=rootless"]"#,
+        r#""SecurityOptions":[]"#,
+    );
+    let h = host(&rootful, EGRESS_OK);
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(r.screen().contains("needs userns-remap"), "{}", r.screen());
+    let record = legacy::Legacy {
+        project: "omarchy-pool".into(),
+        recorded_at: "2027-01-14T08:00:00Z".into(),
+        containers: vec!["c0ffee".into()],
+        networks: Vec::new(),
+        rootful_exception: true,
+    };
+    files::write(
+        &h.options.places.data,
+        legacy::FILE,
+        &serde_json::to_vec(&record).unwrap(),
+        0o600,
+    )
+    .unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    let screen = r.screen();
+    assert!(!screen.contains("needs userns-remap"), "{screen}");
+    assert!(screen.contains("exception until P6"), "{screen}");
+    // The recorded project is looked at again (this stub engine has none of it).
+    assert!(screen.contains("omarchy-pool"), "{screen}");
 }
 
 /// The egress probe and a legacy project on a real engine (`tests/agent-install.sh`; it
