@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# build-images [out.json] — what .github/workflows/release.yml's build-images
+# job runs (#312): resolves the image every task's build container starts
+# from, one per architecture, to the digest its tag names right now, and
+# writes them as the manifest's `inner.images.build`:
+#
+#   {"aarch64": "docker.io/menci/archlinuxarm@sha256:…",
+#    "x86_64":  "docker.io/library/archlinux@sha256:…"}
+#
+# to out.json (default build-images.json), and `aarch64=…` and `x86_64=…` to
+# $GITHUB_OUTPUT when it is set (else to stdout). The release attaches the
+# file; the host bundle renders the two into the host set's dispatcher as
+# OMARCHY_BUILD_IMAGE_AARCH64 and OMARCHY_BUILD_IMAGE_X86_64, and pkg-repo
+# starts every build container from them. A tag that does not resolve to a
+# digest fails the release: no release names a build image by tag.
+#
+# The tags are the ones pkg-repo falls back to when the dispatcher was not
+# given a digest (crates/pkg-repo/src/work.rs, BUILD_LANES);
+# tests/release-workflow.sh holds the two lists equal.
+set -euo pipefail
+out="${1:-build-images.json}"
+fail() { echo "build-images: $*" >&2; exit 1; }
+
+AARCH64_TAG=docker.io/menci/archlinuxarm:base-devel
+X86_64_TAG=docker.io/library/archlinux:base-devel
+
+resolve() { # tag → <repo>@sha256:<64 hex>, or the release fails
+  local tag="$1" digest
+  digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}')" \
+    || fail "$tag: the registry did not answer with a digest"
+  digest="${digest//\"/}"
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "$tag: not a digest: ${digest:-nothing}"
+  printf '%s@%s\n' "${tag%:*}" "$digest"
+}
+
+aarch64="$(resolve "$AARCH64_TAG")"
+x86_64="$(resolve "$X86_64_TAG")"
+printf '{"aarch64": "%s", "x86_64": "%s"}\n' "$aarch64" "$x86_64" > "$out"
+printf 'aarch64=%s\nx86_64=%s\n' "$aarch64" "$x86_64" >> "${GITHUB_OUTPUT:-/dev/stdout}"
+echo "build images: $(cat "$out")" >&2

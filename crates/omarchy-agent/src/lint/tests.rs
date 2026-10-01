@@ -49,7 +49,11 @@ fn refused_for(result: Result<(), Vec<Violation>>, rule: &str, case: &str) {
     if rule == "services" {
         assert_eq!(got.first(), Some(&"services"), "{case}: {got:?}");
     } else {
-        assert_eq!(got, [rule], "{case}");
+        // Only `rule`, once per offending key (both build images missing are two).
+        assert!(
+            !got.is_empty() && got.iter().all(|r| *r == rule),
+            "{case}: {got:?}"
+        );
     }
 }
 
@@ -94,6 +98,7 @@ fn each_acceptance_case_is_refused_in_the_template() {
         ("anthropic-key", "secret_interpolation"),
         ("github-token", "secret_interpolation"),
         ("secrets-mount", "secrets_mount"),
+        ("no-build-images", "build_images"),
     ] {
         let template = read(&format!("template/{file}.yml"));
         refused_for(
@@ -123,6 +128,7 @@ fn each_acceptance_case_is_refused_through_an_override() {
         ("anthropic-key", "secret_interpolation"),
         ("github-token", "secret_interpolation"),
         ("secrets-mount", "secrets_mount"),
+        ("build-image-tag", "build_images"),
     ] {
         let over = fixtures().join(format!("override/{file}.yml"));
         refused_for(
@@ -244,12 +250,44 @@ fn what_the_owner_may_change_passes() {
 
 #[test]
 fn the_build_images_are_required() {
-    let without = HOST.replace("      OMARCHY_BUILD_IMAGE_X86_64: \"@BUILD_X86_64@\"\n", "");
-    refused_for(
-        lint_compose(&without, None, &Envelope::reference(), Engine::Rootful),
-        "build_images",
-        "x86_64",
-    );
+    // #312: a dispatcher without either variable is refused, in the template.
+    for line in [
+        "      OMARCHY_BUILD_IMAGE_AARCH64: \"@BUILD_AARCH64@\"\n",
+        "      OMARCHY_BUILD_IMAGE_X86_64: \"@BUILD_X86_64@\"\n",
+    ] {
+        let without = HOST.replace(line, "");
+        assert_ne!(without, HOST);
+        refused_for(
+            lint_compose(&without, None, &Envelope::reference(), Engine::Rootful),
+            "build_images",
+            line,
+        );
+    }
+    // Emptied, swapped, or pointed at a tag — in an override as in the template: each would
+    // leave pkg-repo on a tag no release pins.
+    let svc = |var: &str, value: &str| {
+        format!("services:\n  dispatcher:\n    environment:\n      {var}: {value}\n")
+    };
+    for over in [
+        svc("OMARCHY_BUILD_IMAGE_X86_64", "\"\""),
+        svc("OMARCHY_BUILD_IMAGE_X86_64", "null"),
+        svc(
+            "OMARCHY_BUILD_IMAGE_X86_64",
+            "docker.io/library/archlinux:base-devel",
+        ),
+        svc("OMARCHY_BUILD_IMAGE_X86_64", "\"@BUILD_AARCH64@\""),
+        svc(
+            "OMARCHY_BUILD_IMAGE_AARCH64",
+            "${OMARCHY_BUILD_IMAGE_AARCH64}",
+        ),
+        "services:\n  dispatcher:\n    environment: [OMARCHY_BUILD_IMAGE_AARCH64]\n".into(),
+    ] {
+        refused_for(
+            lint_compose(HOST, Some(&over), &Envelope::reference(), Engine::Rootful),
+            "build_images",
+            &over,
+        );
+    }
 }
 
 #[test]

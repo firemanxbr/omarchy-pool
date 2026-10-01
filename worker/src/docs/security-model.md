@@ -276,6 +276,19 @@ columns back at every claim; the older one never writes them.
   so a maintainer can verify the worker their host runs is the project's: by
   one exact cosign, only from `release.yml` (or `rollback.yml`) on `main`, and
   checked against that exact identity, never a pattern (#308).
+- **The task build images are pinned by digest** (#312). Every task's build
+  container starts from `docker.io/library/archlinux:base-devel` (x86_64) or
+  `docker.io/menci/archlinuxarm:base-devel` (aarch64, a third-party
+  account): tags, which whoever controls them can move. `release.yml`
+  resolves each tag to the digest it names at release time
+  (`factory/bin/build-images`) and fails when either does not resolve; the
+  release carries both (`build-images.json`, the host bundle's
+  `inner.images.build`), the host set hands them to the dispatcher as
+  `OMARCHY_BUILD_IMAGE_AARCH64` and `OMARCHY_BUILD_IMAGE_X86_64`, and
+  `omarchy-agent lint-set` refuses a dispatcher without them. A moved tag
+  changes nothing that builds until a reviewed release resolves it again.
+  Only a worker that was not given them (a legacy role container, until it
+  retires) still builds from the tag, and says so once per process.
 
 ## After approval, the gates still hold
 
