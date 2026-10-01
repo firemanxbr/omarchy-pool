@@ -461,14 +461,19 @@ refused), is refused server-side to anyone without the right, and writes a
   closed so a host holding several leases is fenced whole. A fenced lease's
   heartbeats, reports and uploads are refused from then on; it goes back to
   the queue when its lease ends, with the person and the reason on its
-  line. **Resume** is the owner's only, with a passkey (`host:resume:<id>`):
+  line. A claim already in flight when the suspension commits leases
+  nothing: the claim's lease `UPDATE` checks the host in the same statement
+  (D1 serialises writes), the earlier read only gives the refusal its words.
+  **Resume** is the owner's only, with a passkey (`host:resume:<id>`):
   the same registration claims again, nothing is done on the machine.
 - **Retire** — its owner, or any maintainer with a passkey
   (`host:retire:<id>`), with a reason. The host key is refused for good —
   the pool keeps it, so it never enrolls again — and the registration is
   revoked with its worker token; its open orders are cancelled and builds
   asked for it go back to the rule. Running leases end with their lease, as
-  a revoked worker's. A new install on the machine enrolls a new host with a
+  a revoked worker's: they are not fenced, so the job token each one holds
+  (that task's routes only, until its lease ends) may still heartbeat,
+  upload and complete it. To stop them at once, suspend first. A new install on the machine enrolls a new host with a
   new key (the agent sees `retired` on its signed request and enrolls again
   with the new token).
 - **Drain** — a worker order on the host's registration (stop claiming, let
@@ -495,7 +500,9 @@ refused), is refused server-side to anyone without the right, and writes a
   this stops their machines meanwhile. A host suspended for cause is still
   resumed by its owner only — who needs a passkey, which only a listed
   maintainer is asked for — so once the pull request lands, nobody resumes
-  it.
+  it. Until then the owner, with their own passkey, can resume it (design
+  v2 §6.4: Resume by the owner), and their hosts still waiting for Confirm
+  are not touched: the pull request is what closes both.
 - **The agent on a suspended or retired host** sees `403` on its calls
   (its signed requests, and in P1 the release `follow` it polls, refused
   for a suspended or retired host's registration and never cached): it

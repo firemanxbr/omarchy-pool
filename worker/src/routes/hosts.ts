@@ -186,7 +186,7 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
   const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
   if (!h) return json({ error: "no such host" }, 404, NO_STORE);
   const leases = h.worker_id
-    ? (await env.DB.prepare("SELECT id, kind, name, arch, started_at, lease_expires_at FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id").bind(h.worker_id).all()).results
+    ? (await env.DB.prepare("SELECT id, kind, name, arch, started_at, lease_expires_at, stop_order IS NOT NULL AS fenced FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id").bind(h.worker_id).all()).results
     : [];
   const viewer = c ? await viewerOf(env, c) : null;
   return json({ host: await hostView(h, mayDetail(c, h), Date.now()), leases, pool: { version: version(env).version }, can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h) } }, 200, NO_STORE);

@@ -148,7 +148,7 @@ const SCRIPT = String.raw`
         kv("Agent", esc(h.agent_version || "?") + (h.provider ? " · " + esc(h.provider) + (h.model ? " " + esc(h.model) : "") : "")),
         kv("Reported", when(h.reported_at)),
       ].join("");
-    $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + '</td><td>' + esc(t.name) + '</td><td>' + esc(t.arch) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="5" class="muted">no lease — nothing runs on it now</td></tr>';
+    $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + '</td><td>' + esc(t.name) + (t.fenced ? ' ' + pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : '') + '</td><td>' + esc(t.arch) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="5" class="muted">no lease — nothing runs on it now</td></tr>';
     endSkeleton();
   }
   // Stop it (#322): the three buttons as the door answers them for this reader, greyed with its reason; Drain is its registration's page's.
@@ -174,12 +174,12 @@ const SCRIPT = String.raw`
         api("POST", BASE + "/suspend", { reason: r }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     } else if (act === "resume") {
-      ask({ title: "Resume " + H.name, text: "It claims again from its next claim and its agent recovers at its next poll; nothing is done on the machine. Your passkey confirms it.", confirm: "Resume" }).then(function (go) {
+      ask({ title: "Resume " + H.name, text: "It claims again from its next claim and its agent recovers at its next poll; nothing is done on the machine.", held: "Your passkey confirms it.", confirm: "Resume", first: "Register a passkey and resume", nothing: "Nothing was resumed." }).then(function (go) {
         if (go === null) return;
-        passkeyed("host:resume:" + ID, function (a) { return api("POST", BASE + "/resume", { assertion: a }); }).then(done);
+        passkeyed("host:resume:" + ID, function (a) { return api("POST", BASE + "/resume", { assertion: a }); }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     } else if (act === "retire") {
-      ask({ title: "Retire " + H.name, text: "Its key and its worker token are burnt for good; its running tasks end with their lease. A new install on the machine enrolls a new host." + (PK.retire ? " Your passkey confirms it." : ""), input: "required", confirm: "Retire", danger: true }).then(function (r) {
+      ask({ title: "Retire " + H.name, text: "Its key and its worker token are burnt for good; its running tasks end with their lease. A new install on the machine enrolls a new host.", held: PK.retire ? "Your passkey confirms it." : "", input: "required", confirm: "Retire", first: PK.retire ? "Register a passkey and retire" : "", nothing: "Nothing was retired.", danger: true }).then(function (r) {
         if (r === null) return;
         var post = function (a) { return api("POST", BASE + "/retire", a ? { reason: r, assertion: a } : { reason: r }); };
         (PK.retire ? passkeyed("host:retire:" + ID, post) : post(null)).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });

@@ -256,6 +256,8 @@ const SCRIPT = String.raw`
       if (h.status === "pending-owner") pending = true;
       var confirm = h.status === "pending-owner" ? gate('<button type="button" class="small-btn" data-host-confirm="' + esc(h.id) + '" data-name="' + esc(h.name) + '" title="the fingerprint matches what the machine printed: make it a pool host">Confirm</button>', isOwner(h.owner), "only " + h.owner + " confirms their host") : "";
       var detail = h.fingerprint ? '<div class="muted h-detail" style="font-size:12px">' + esc((h.hostname || "") + (h.where ? " · " + h.where : "")) + (h.capacity ? " · " + esc(hostCaps(h)) : "") + '<br><span class="mono">' + esc(h.fingerprint) + '</span>' + (h.below_minimum ? '<br>' + esc(h.below_minimum) : '') + '</div>' : '';
+      // Who stopped it and why, readable on a phone too (the pill's title is a hover).
+      if ((h.status === "suspended" || h.status === "retired") && h.status_by) detail += '<div class="muted" style="font-size:12px">' + esc(h.status + " by " + h.status_by + (h.status_reason ? ": " + h.status_reason : "")) + '</div>';
       return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1], h.status_reason ? h.status + " by " + (h.status_by || "?") + ": " + h.status_reason : "") + (h.claims_stopped_at && h.status !== "retired" ? " " + pillHtml("error", "claims stopped", NOT_LISTED) : "") + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + confirm + '</td></tr>';
     });
     $("#hosts-table tbody").innerHTML = rows.join("");
@@ -274,26 +276,27 @@ const SCRIPT = String.raw`
     var running = hs.filter(function (h) { return h.status === "active" || h.status === "suspended"; });
     var listStopped = hs.filter(function (h) { return h.claims_stopped_at && h.status !== "retired"; });
     var out = [];
-    if (listStopped.length) out.push('<p class="sub" style="margin:0;font-size:12.5px">' + pillHtml("error", "claims stopped") + " " + esc(NOT_LISTED) + " at a sync of factory/MAINTAINERS.toml: " + listStopped.map(function (h) { return '<a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>'; }).join(", ") + ". Their running tasks finish; listed again, one press brings them all back.</p>" + gate('<button type="button" class="small-btn" id="h-resume-all">Resume my hosts</button>', isOwner(login), !WHO.me ? "sign in with GitHub" : "only " + login + " resumes their hosts, with their passkey"));
+    if (listStopped.length) out.push('<p class="sub" style="margin:0;font-size:12.5px">' + pillHtml("error", "claims stopped") + " " + esc(NOT_LISTED) + " at a sync of factory/MAINTAINERS.toml: " + listStopped.map(function (h) { return '<a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>'; }).join(", ") + ". Their running tasks finish; listed again, one press brings them all back.</p>" + gate('<button type="button" class="small-btn" id="h-resume-all">Resume my hosts</button>', isOwner(login) && isMaintainer(), !WHO.me ? "sign in with GitHub" : !isOwner(login) ? "only " + login + " resumes their hosts, with their passkey" : NOT_LISTED_YOU));
     if (running.length) out.push(gate('<button type="button" class="small-btn danger" id="h-cause" title="suspend every host of ' + esc(login) + ' and fence their running tasks: another maintainer\'s act, with a passkey and a reason">Remove for cause…</button>', isMaintainer() && !isOwner(login), !WHO.me ? "sign in with GitHub" : isOwner(login) ? SELF_CAUSE : "removing a maintainer for cause is another maintainer's act"));
     $("#h-stop").hidden = !out.length;
     $("#h-stop").innerHTML = out.join("");
   }
-  var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)}, SELF_CAUSE = ${JSON.stringify(SELF_CAUSE)};
+  var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)}, SELF_CAUSE = ${JSON.stringify(SELF_CAUSE)}, NOT_LISTED_YOU = "you are not on factory/MAINTAINERS.toml now: once a pull request lists you again, this resumes them";
+  function failed(e) { toast("failed: " + esc(errorText(e)), "error"); }
   function hostsDone(d) { if (d.error) { toast(esc(d.error), "error"); return; } toast(esc(d.line || "done")); loadHosts(); }
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("#h-resume-all, #h-cause") : null;
     if (!b || b.disabled) return;
     var base = "/api/v1/hosts/owners/" + encodeURIComponent(login);
     if (b.id === "h-resume-all") {
-      ask({ title: "Resume my hosts", text: "Every host of yours the maintainer list stopped claims again from its next claim. A suspended host stays suspended. Your passkey confirms it.", confirm: "Resume" }).then(function (go) {
+      ask({ title: "Resume my hosts", text: "Every host of yours the maintainer list stopped claims again from its next claim. A suspended host stays suspended.", held: "Your passkey confirms it.", confirm: "Resume", first: "Register a passkey and resume", nothing: "Nothing was resumed." }).then(function (go) {
         if (go === null) return;
-        passkeyed("host:resume-all:" + login, function (a) { return api("POST", base + "/resume", { assertion: a }); }).then(hostsDone);
+        passkeyed("host:resume-all:" + login, function (a) { return api("POST", base + "/resume", { assertion: a }); }).then(hostsDone).catch(failed);
       });
     } else {
-      ask({ title: "Remove " + login + " for cause", text: "Every host of " + esc(login) + " that runs or is suspended is suspended now, and their running tasks are fenced. Taking them off factory/MAINTAINERS.toml stays a pull request. Your passkey confirms it; the reason goes on the public journal.", input: "required", confirm: "Remove for cause", danger: true }).then(function (r) {
+      ask({ title: "Remove " + login + " for cause", text: "Every host of " + esc(login) + " that runs or is suspended is suspended now, and their running tasks are fenced. Taking them off factory/MAINTAINERS.toml stays a pull request. The reason goes on the public journal.", held: "Your passkey confirms it.", input: "required", confirm: "Remove for cause", first: "Register a passkey and remove for cause", nothing: "Nothing was removed.", danger: true }).then(function (r) {
         if (r === null) return;
-        passkeyed("host:cause:" + login, function (a) { return api("POST", base + "/cause", { reason: r, assertion: a }); }).then(hostsDone);
+        passkeyed("host:cause:" + login, function (a) { return api("POST", base + "/cause", { reason: r, assertion: a }); }).then(hostsDone).catch(failed);
       });
     }
   });

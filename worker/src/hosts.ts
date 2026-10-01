@@ -244,6 +244,14 @@ export const OWNER_LISTED_SQL = (col: string) => `EXISTS (SELECT 1 FROM factory_
 export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed FROM hosts WHERE id = ?`;
 export interface HostClaimRow { name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number }
 
+/**
+ * The lease's own check of a host registration (#322): the claim's UPDATE takes a task only while its host is active and its owner
+ * listed and not stopped by the list, in the same statement — D1 serialises writes, so a claim that passed the early read
+ * (HOST_CLAIM_SQL, which only gives a refusal its words) and commits after a suspension, a retirement or a removal leases nothing.
+ * One binding: the host's id.
+ */
+export const HOST_MAY_LEASE_SQL = `EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status = 'active' AND owner_removed_at IS NULL AND ${OWNER_LISTED_SQL("hosts.owner_github_id")})`;
+
 /** The words of a claim refused because of the list (D39), the same at the claim, on the host's page and in the journal. */
 export const OWNER_NOT_MAINTAINER = "the host's owner is no longer a maintainer";
 

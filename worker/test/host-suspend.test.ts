@@ -186,6 +186,35 @@ describe("Suspend and Resume", () => {
     expect((await hostLines("resume")).find((l) => l.payload.host === host)).toMatchObject({ status: "ok", summary: expect.stringMatching(new RegExp(`^susp of m1 resumed by m1${JUST_NOW} \\(suspended by m2: fans failing, looking at it\\)$`)) });
   });
 
+  it("a claim already past the host's read when a suspension commits leases nothing: the lease's own statement checks the host", async () => {
+    const { host, token } = await activeHost("m1", "race");
+    const enqueue = await issueJobToken(env, { t: 1, k: "enqueue", s: scopesFor("enqueue", 1, "project", {}), e: Math.floor(Date.now() / 1000) + 3600, w: "w-pool" });
+    const name = `hostrace${++n}`;
+    expect((await call("POST", "/factory/enqueue", { token: enqueue, body: { name, pkgbuild_ref: "abc123", reason: "test", arches: ["aarch64"], version: "1.0-1" } })).status).toBe(201);
+    // The suspension lands between the claim's read of its host and its lease UPDATE: the read said active, the UPDATE runs after.
+    const db = env.DB, prepare = db.prepare.bind(db);
+    let raced = false;
+    (db as { prepare: typeof db.prepare }).prepare = (sql: string) => {
+      const stmt = prepare(sql);
+      if (!sql.includes("UPDATE build_tasks SET status = 'leased'")) return stmt;
+      return { bind: (...args: unknown[]) => ({ first: async () => {
+        await prepare("UPDATE hosts SET status = 'suspended', status_by = 'm2', status_reason = 'raced the claim' WHERE id = ?").bind(host).run();
+        raced = true;
+        return stmt.bind(...args).first();
+      } }) } as unknown as D1PreparedStatement;
+    };
+    try {
+      expect((await claim(token)).status).toBe(204);
+    } finally {
+      (db as { prepare: typeof db.prepare }).prepare = prepare;
+    }
+    expect(raced).toBe(true);
+    expect(await env.DB.prepare("SELECT status, lease_owner FROM build_tasks WHERE name = ?").bind(name).first()).toEqual({ status: "queued", lease_owner: null });
+    expect((await claim(token)).json).toMatchObject({ code: "host_suspended" });
+    // The queued task is the race's own: the tests after it start with an empty queue.
+    await env.DB.prepare("DELETE FROM build_tasks WHERE name = ?").bind(name).run();
+  });
+
   it("is its owner's or a maintainer's, with a reason, from the browser: everyone else is refused server-side and nothing changes", async () => {
     const { host } = await activeHost("m1", "who");
     const reason = { reason: "a reason enough" };
