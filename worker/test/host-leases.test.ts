@@ -97,7 +97,7 @@ afterEach(async () => {
   await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE status IN ('queued', 'leased')").run();
 });
 
-describe("the D1 migration (0044)", () => {
+describe("the D1 migration (0045)", () => {
   it("adds a lease's generation, lane, units, size, disk, release, claim and losses, a package's size and disk; one open stop per task, one open order of every other kind per worker", async () => {
     const cols = async (t: string) => (await env.DB.prepare(`SELECT name FROM pragma_table_info('${t}')`).all<{ name: string }>()).results.map((r) => r.name);
     expect(await cols("build_tasks")).toEqual(expect.arrayContaining(["lease_gen", "lane", "units", "size", "disk_gb", "release", "claim_id", "host_losses", "lease_missed"]));

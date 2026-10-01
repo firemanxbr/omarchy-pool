@@ -10,9 +10,6 @@
 //! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
 //!   owner's caps and the release's verified constants, into units (P1, #333).
 //!
-//! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
-//!   owner's caps and the release's verified constants, into units (P1, #333).
-//!
 //! And the host's identity (#321): [`host`] (its Ed25519 key and the signed request),
 //! [`pool`] (HTTPS to the pool) and [`enroll`] (the one-time token, the owner's Confirm,
 //! the host worker token).

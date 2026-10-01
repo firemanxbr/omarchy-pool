@@ -58,7 +58,6 @@ fn main() -> ExitCode {
         Some("install") => install_cmd(&args[1..]),
         Some("enroll") => enroll_cmd(&args[1..]),
         Some("token") => token_cmd(&args[1..]),
-        Some("capacity") => capacity_cmd(&args[1..]),
         Some("--version" | "version") => {
             println!("omarchy-agent {}", omarchy_agent::AGENT_VERSION);
             Ok(0)
@@ -209,100 +208,6 @@ fn lint_cmd(args: &[String]) -> Result<u8, String> {
     }
     eprintln!("lint-set: {dir}: {} violation(s)", violations.len());
     Ok(REFUSED)
-}
-
-fn capacity_cmd(args: &[String]) -> Result<u8, String> {
-    let mut rest = Vec::new();
-    let f = flags(
-        args,
-        &[
-            "--envelope",
-            "--work-root",
-            "--docker",
-            "--probe-image",
-            "--bundle",
-            "--sig",
-            "--write",
-        ],
-        &mut rest,
-    )?;
-    if !rest.is_empty() {
-        return Err(USAGE.to_owned());
-    }
-    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
-    let toml = match get("--envelope") {
-        Some(p) => {
-            AgentToml::parse(&String::from_utf8(read(p)?).map_err(|_| format!("{p}: not UTF-8"))?)?
-        }
-        None => AgentToml::default(),
-    };
-    let work_root = get("--work-root")
-        .map(str::to_owned)
-        .or_else(|| toml.work_root.clone())
-        .ok_or_else(|| format!("give --work-root or an --envelope with set.work_root\n{USAGE}"))?;
-    let host = toml.socket_cli.as_ref().map(|s| format!("unix://{s}"));
-
-    // With a release: its signed constants, and its build image for the probe container.
-    let manifest = match (get("--bundle"), get("--sig")) {
-        (Some(b), Some(s)) => match verify::bundle(&read(b)?, &read(s)?) {
-            Ok(BundleOutcome::Current(v)) => Some(v.manifest().clone()),
-            Ok(BundleOutcome::NeedsNewerAgent { why, .. }) => {
-                eprintln!("needs a newer agent: {why}");
-                return Ok(NEEDS_NEWER_AGENT);
-            }
-            Err(r) => return Ok(refused(&r)),
-        },
-        (None, None) if get("--write").is_none() => None,
-        _ => {
-            return Err(format!(
-                "--bundle and --sig go together, and --write needs them\n{USAGE}"
-            ))
-        }
-    };
-    let build_image = manifest
-        .as_ref()
-        .and_then(|m| m.build_image(std::env::consts::ARCH))
-        .map(ToString::to_string);
-    let how = probe::Probe {
-        docker: get("--docker").unwrap_or("docker"),
-        host: host.as_deref(),
-        work_root: Path::new(&work_root),
-        image: get("--probe-image").or(build_image.as_deref()),
-    };
-    let facts = match probe::detect(&how) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("capacity: {e}; nothing was changed");
-            return Ok(REFUSED);
-        }
-    };
-    let Some(manifest) = manifest else {
-        println!("{}", facts.report());
-        return Ok(0);
-    };
-
-    let c = Capacity::new(&facts, &toml.caps, manifest.capacity());
-    let at = capacity::now();
-    println!(
-        "{}",
-        serde_json::to_string(&c.file(&at)).map_err(|e| e.to_string())?
-    );
-    if let Some(dir) = get("--write") {
-        let w = capacity::write_if_changed(Path::new(dir), &c, &at)
-            .map_err(|e| format!("{dir}/run/capacity.json: {e}"))?;
-        eprintln!(
-            "capacity: {dir}/run/capacity.json {}",
-            match w {
-                Written::Changed => "changed",
-                Written::Unchanged => "unchanged",
-            }
-        );
-    }
-    let blockers = capacity::preflight(&c);
-    for b in &blockers {
-        eprintln!("preflight: {b}");
-    }
-    Ok(if blockers.is_empty() { 0 } else { REFUSED })
 }
 
 /// The agent's data directory: `--data-dir`, or install.sh's
