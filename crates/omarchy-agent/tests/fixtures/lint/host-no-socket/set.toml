@@ -1,0 +1,14 @@
+# The host set's rollout description (design v2 §4.2), read by the agent beside
+# compose.yml; `omarchy-agent lint-set` checks it against the template.
+schema = 3
+project_default = "omarchy-host"
+order   = []
+guard_s = 90
+
+[ready."dispatcher"]
+http = "127.0.0.1:8791/ready"          # answers once leases are re-adopted
+wait_s = 120
+
+[needs]
+env_files = { dispatcher = ["etc/dispatcher.env"] }
+host      = { emulated = ["binfmt"] }  # checked per foreign arch, never done (factory/host/prep-root.sh does it)

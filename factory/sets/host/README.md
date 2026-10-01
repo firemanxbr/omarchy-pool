@@ -1,0 +1,28 @@
+# The `host` set
+
+What every maintainer host runs (design v2 §4.1, §4.2; epic #307): one
+service, the `dispatcher`, which claims as many tasks as the host's capacity
+allows and starts one isolated, credential-less container per task.
+
+| File | What it is |
+|---|---|
+| `compose.yml` | the template: the dispatcher, its image as `@RELEASE@`, the build and worker images as placeholders release.yml renders to the manifest's digests |
+| `set.toml` | schema 3: the compose project name, the rollout guard, the dispatcher's ready check, and what the host needs (`[needs]`) that the agent checks but never does |
+| `files/` | host files copied into the set directory, hash-checked and rolled back with the template (none yet; `.gitkeep` only keeps the directory and is not a host file: the bundler, #311, skips dotfiles here) |
+
+`omarchy-agent lint-set factory/sets/host` checks the template and
+`set.toml` (design v2 §4.3); CI runs it with `docker compose config` of the
+rendered template (`tests/host-set.sh`). The root-only steps a new host
+needs once are `factory/host/prep-root.sh`, run by a person, never by the
+agent.
+
+On a rootful daemon with `userns-remap` on (what prep-root.sh turns on for a
+new daemon, design v2 §19.1), the dispatcher alone needs `userns_mode: host`
+to use the socket and the work root. The template leaves it out (design v2
+§4.2) and lint allows it only through the envelope (`userns_remap = true`):
+whatever renders the set for such a host (the agent's overlay, #311 / #335)
+adds it.
+
+The legacy files (`factory/host/{compose.yml,setup.sh,rollout.sh,register.sh}`,
+`factory/image/compose.yml`) stay unchanged until the switches of design v2
+§21; this set is a new template, not a copy of them.

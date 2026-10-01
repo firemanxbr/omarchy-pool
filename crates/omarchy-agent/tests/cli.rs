@@ -76,6 +76,51 @@ fn lint_set_is_clean_on_the_host_set_and_names_each_violation() {
 }
 
 #[test]
+fn lint_set_is_clean_on_the_real_host_set_and_reads_its_set_toml() {
+    let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../factory/sets/host");
+    let real = real.to_string_lossy();
+    let o = run(&["lint-set", &real]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains(": clean"), "{}", text(&o));
+    let o = run(&[
+        "lint-set",
+        &real,
+        "--override",
+        &fx("lint/override/second-service.yml"),
+    ]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("services:"), "{}", text(&o));
+
+    // A set directory without set.toml cannot be read as a set: a usage error, not a lint.
+    let tmp = std::env::temp_dir().join(format!("omarchy-agent-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::copy(
+        fixtures().join("lint/host/compose.yml"),
+        tmp.join("compose.yml"),
+    )
+    .unwrap();
+    let o = run(&["lint-set", &tmp.to_string_lossy()]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert!(text(&o).contains("set.toml"), "{}", text(&o));
+    // One that disagrees with its template is refused under set_toml.
+    std::fs::write(
+        tmp.join("set.toml"),
+        std::fs::read_to_string(fixtures().join("lint/host/set.toml"))
+            .unwrap()
+            .replace("schema = 3", "schema = 2"),
+    )
+    .unwrap();
+    let o = run(&["lint-set", &tmp.to_string_lossy()]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("set_toml: set.toml: schema must be 3"),
+        "{}",
+        text(&o)
+    );
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+#[test]
 fn verify_checks_the_signature_before_it_reads_anything() {
     let artifact = fx("release-v1.0.5/artifact");
     let sig = fx("release-v1.0.5/bundle.sigstore.json");

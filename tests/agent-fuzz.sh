@@ -35,6 +35,8 @@ done
 for f in "$fixtures"/lint/override/*.yml; do
   n=$((n + 1)); { cat "$fixtures/lint/host/compose.yml"; printf '\0'; cat "$f"; } >"$corpus/set/with-override-$n.yml"
 done
+# The template with its set.toml after the NUL: the target reads the second part as both.
+{ cat "$fixtures/lint/host/compose.yml"; printf '\0'; cat "$fixtures/lint/host/set.toml"; } >"$corpus/set/with-set-toml.yml"
 
 cd "$crate"
 # cargo fuzz has no --locked: fail here if fuzz/Cargo.lock would have to change.
