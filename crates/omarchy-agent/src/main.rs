@@ -5,16 +5,25 @@
 //! omarchy-agent verify --statement <statement.json> --sig <bundle.sigstore.json>
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
 //!     (<dir>/compose.yml and <dir>/set.toml)
-//! omarchy-agent install [options]
-//!     (what install.sh runs once the binary is in place; a stub until P1, #317)
+//! omarchy-agent install [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
+//!     (what install.sh runs once the binary is in place: in P1 so far, the enrollment
+//!     below when OMARCHY_ENROLL is set or the machine enrolled; the rest is #317)
+//! omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
+//!     (#321: the one-time token from OMARCHY_ENROLL — never an argument — the host key,
+//!     the owner's Confirm, the host worker token in sets/host/etc/dispatcher.env)
+//! omarchy-agent token [--data-dir <dir>]
+//!     (a new host worker token: the rotation every 30 days, #321)
 //! ```
 //!
-//! Exit status: 0 verified or clean, 1 refused, 2 usage or a file that cannot be read,
-//! 3 signed and pinned but "needs a newer agent".
+//! Exit status: 0 verified, clean or enrolled, 1 refused, 2 usage or a file that cannot be
+//! read, 3 signed and pinned but "needs a newer agent", 4 nobody confirmed the host in
+//! time (running it again continues).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
+use omarchy_agent::enroll::{self, Failure, Options, Paths};
 use omarchy_agent::lint::{self, Engine, Envelope};
 use omarchy_agent::verify::{self, BundleOutcome, StatementOutcome};
 
@@ -22,27 +31,25 @@ const USAGE: &str = "usage:
   omarchy-agent verify --bundle <tar.gz> --sig <sigstore.json>
   omarchy-agent verify --statement <json> --sig <sigstore.json>
   omarchy-agent lint-set <dir> [--override <file>] [--envelope <agent.toml>]
-  omarchy-agent install [options]
-  omarchy-agent --version";
+  omarchy-agent install [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
+  omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
+  omarchy-agent token [--data-dir <dir>]
+  omarchy-agent --version
+The enrollment token is read from OMARCHY_ENROLL, never from an argument.";
 
 const REFUSED: u8 = 1;
 const USAGE_ERROR: u8 = 2;
 const NEEDS_NEWER_AGENT: u8 = 3;
+const NOT_CONFIRMED: u8 = 4;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("verify") => verify_cmd(&args[1..]),
         Some("lint-set") => lint_cmd(&args[1..]),
-        Some("install") => {
-            // install.sh's last step (#311). The install with its preflight, the run loop
-            // and enrollment (OMARCHY_ENROLL, from the environment only) come in P1 (#317).
-            println!(
-                "omarchy-agent {}: installed; the agent arrives in P1 (#317), nothing else was done",
-                omarchy_agent::AGENT_VERSION
-            );
-            Ok(0)
-        }
+        Some("install") => install_cmd(&args[1..]),
+        Some("enroll") => enroll_cmd(&args[1..]),
+        Some("token") => token_cmd(&args[1..]),
         Some("--version" | "version") => {
             println!("omarchy-agent {}", omarchy_agent::AGENT_VERSION);
             Ok(0)
@@ -193,4 +200,103 @@ fn lint_cmd(args: &[String]) -> Result<u8, String> {
     }
     eprintln!("lint-set: {dir}: {} violation(s)", violations.len());
     Ok(REFUSED)
+}
+
+/// The agent's data directory: `--data-dir`, or install.sh's
+/// `${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-agent`.
+fn data_dir(given: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(d) = given {
+        return Ok(PathBuf::from(d));
+    }
+    let base = match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        Some(x) => PathBuf::from(x),
+        None => {
+            PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?).join(".local/share")
+        }
+    };
+    Ok(base.join("omarchy-agent"))
+}
+
+fn enroll_options(args: &[String]) -> Result<Options, String> {
+    let mut rest = Vec::new();
+    let f = flags(args, &["--pool", "--data-dir", "--wait-minutes"], &mut rest)?;
+    if !rest.is_empty() {
+        return Err(USAGE.to_owned());
+    }
+    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let wait = match get("--wait-minutes") {
+        Some(m) => m
+            .parse::<u64>()
+            .map_err(|_| format!("--wait-minutes: {m} is not a number\n{USAGE}"))?,
+        None => 30,
+    };
+    Ok(Options {
+        pool: get("--pool").map(str::to_owned),
+        paths: Paths::under(&data_dir(get("--data-dir"))?),
+        // From the environment only: an argument would show in `ps` (design v2 §13.1).
+        token: std::env::var("OMARCHY_ENROLL")
+            .ok()
+            .filter(|t| !t.is_empty()),
+        wait: Duration::from_secs(wait * 60),
+        poll: Duration::from_secs(5),
+    })
+}
+
+fn enroll_cmd(args: &[String]) -> Result<u8, String> {
+    let o = enroll_options(args)?;
+    let mut out = std::io::stdout();
+    match enroll::run(&o, &mut out) {
+        Ok(()) => Ok(0),
+        Err(Failure::Refused(why)) => {
+            eprintln!("omarchy-agent: {why}");
+            Ok(REFUSED)
+        }
+        Err(Failure::TimedOut(why)) => {
+            eprintln!("omarchy-agent: {why}");
+            Ok(NOT_CONFIRMED)
+        }
+    }
+}
+
+/// install.sh's last step (#311). In P1 so far it enrolls the machine (#321) when it has a
+/// token or an identity; the install with its preflight, the runtime, the envelope and the
+/// first rollout is #317's.
+fn install_cmd(args: &[String]) -> Result<u8, String> {
+    let o = enroll_options(args)?;
+    let enrolled = o
+        .paths
+        .state
+        .join(omarchy_agent::host::IDENTITY_FILE)
+        .exists();
+    if o.token.is_none() && !enrolled {
+        println!(
+            "omarchy-agent {}: installed; the install itself arrives in P1 (#317), nothing else was done",
+            omarchy_agent::AGENT_VERSION
+        );
+        return Ok(0);
+    }
+    enroll_cmd(args)
+}
+
+fn token_cmd(args: &[String]) -> Result<u8, String> {
+    let mut rest = Vec::new();
+    let f = flags(args, &["--data-dir"], &mut rest)?;
+    if !rest.is_empty() {
+        return Err(USAGE.to_owned());
+    }
+    let dir = data_dir(f.iter().find(|(k, _)| *k == "--data-dir").map(|(_, v)| *v))?;
+    let o = Options {
+        pool: None,
+        paths: Paths::under(&dir),
+        token: None,
+        wait: Duration::ZERO,
+        poll: Duration::ZERO,
+    };
+    match enroll::rotate(&o, &mut std::io::stdout()) {
+        Ok(()) => Ok(0),
+        Err(e) => {
+            eprintln!("omarchy-agent: {e}");
+            Ok(REFUSED)
+        }
+    }
 }

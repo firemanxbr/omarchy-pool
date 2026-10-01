@@ -8,11 +8,18 @@
 //! - [`lint`]: check the host set template (and the owner's override) against its
 //!   invariants, on variable references, before any interpolation.
 //!
+//! And the host's identity (#321): [`host`] (its Ed25519 key and the signed request),
+//! [`pool`] (HTTPS to the pool) and [`enroll`] (the one-time token, the owner's Confirm,
+//! the host worker token).
+//!
 //! The run loop, drivers, install, capacity detection and self-update come in P1 and build
 //! on the types defined here.
 
+pub mod enroll;
+pub mod host;
 pub mod lint;
 pub mod manifest;
+pub mod pool;
 pub mod statement;
 pub mod verify;
 
