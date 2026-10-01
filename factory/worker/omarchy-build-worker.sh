@@ -237,16 +237,18 @@ prepare_container() {
   # (install_deps) — no sudo anywhere: a setuid sudo does not start under
   # user-mode emulation (an x86_64 build on an aarch64 host).
   id builder >/dev/null 2>&1 || useradd -m -s /bin/bash builder
-  # Every core the container sees, for make, ninja and cargo alike — the
+  # The task's share of the host for make, ninja and cargo alike — the
   # image's makepkg.conf leaves MAKEFLAGS unset, which is one job; ccache
   # on, so a rebuild of the same sources compiles only what changed.
+  # build_jobs: what the dispatcher set to match the task's --cpus (D32),
+  # every core the container sees otherwise.
   mkdir -p /etc/makepkg.conf.d
   # No -debug split: the pool serves no debug packages, and namcap fails every -debug split it meets here —
   # its build-id symlinks point into the main package, which namcap resolves against the installed one, and
   # the gate runs before the install (omarchy-cli #505, second attempt, 2026-09-18). Arch's x86_64 makepkg.conf
   # has `debug` on and Arch Linux ARM's has it off; with it off on both, one recipe builds the same set of
   # packages on both. `lto` stays Arch's default, a recipe opts out where the link cannot take it.
-  printf 'MAKEFLAGS="-j%s"\nNINJAFLAGS="-j%s"\nBUILDENV=(!distcc color ccache check !sign)\nOPTIONS+=(!debug)\n' "$(nproc)" "$(nproc)" > /etc/makepkg.conf.d/omarchy-pool.conf
+  printf 'MAKEFLAGS="-j%s"\nNINJAFLAGS="-j%s"\nBUILDENV=(!distcc color ccache check !sign)\nOPTIONS+=(!debug)\n' "$(build_jobs MAKEFLAGS)" "$(build_jobs NINJAFLAGS)" > /etc/makepkg.conf.d/omarchy-pool.conf
   # Caches that outlive the container when the operator mounts /build/cache
   # (one directory per trust and architecture on the host; a fresh directory
   # otherwise). Inside it, one directory per package (run_makepkg): what a
@@ -254,6 +256,12 @@ prepare_container() {
   # ccache's objects is read by a later build of the same package only.
   install -d -o builder -g builder /build/cache
   factory_lib
+}
+
+build_jobs() { # MAKEFLAGS | NINJAFLAGS | CARGO_BUILD_JOBS → the job count: what the dispatcher set (`-jN`, or N for cargo), every core the container sees otherwise
+  local v="${!1:-}"
+  v="${v#-j}"
+  if [[ "$v" =~ ^[1-9][0-9]{0,3}$ ]]; then echo "$v"; else nproc; fi
 }
 
 # The pool's tooling — the drafter, the auditor, agent.py, the prompts, the
@@ -540,7 +548,7 @@ run_makepkg() { # name → /build/out/*.pkg.tar.zst
   toolchains_start || return 96
   # zst whatever the image's makepkg.conf says (Arch Linux ARM defaults to xz).
   (cd /build/pkg && as_builder env PKGDEST=/build/out PKGEXT=.pkg.tar.zst PACKAGER="omarchy-pool factory <https://github.com/firemanxbr/omarchy-pool>" \
-    CARGO_HOME="$cache/cargo" CARGO_BUILD_JOBS="$(nproc)" GOMODCACHE="$cache/go/mod" GOCACHE="$cache/go/build" GOFLAGS=-modcacherw CCACHE_DIR="$cache/ccache" \
+    CARGO_HOME="$cache/cargo" CARGO_BUILD_JOBS="$(build_jobs CARGO_BUILD_JOBS)" GOMODCACHE="$cache/go/mod" GOCACHE="$cache/go/build" GOFLAGS=-modcacherw CCACHE_DIR="$cache/ccache" \
     makepkg --noconfirm --clean --cleanbuild --nosign)
 }
 

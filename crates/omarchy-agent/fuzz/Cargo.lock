@@ -516,6 +516,7 @@ dependencies = [
  "base64 0.22.1",
  "flate2",
  "hex",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",
