@@ -12,6 +12,8 @@
 //! omarchy-agent status [--data <dir>]    state.json and capacity.json; works with the pool down
 //! omarchy-agent round [--data <dir>]     a round now (SIGUSR1 to the running agent)
 //! omarchy-agent logs [--data <dir>] [-n <lines>]
+//! omarchy-agent self-test --release <vX.Y.Z> [--data <dir>]
+//!     (what a self-update asks of the new agent before it hands over: prints `ok`)
 //! ```
 //!
 //! Exit status: 0 verified or clean, 1 refused, 2 usage or a file that cannot be read,
@@ -34,6 +36,7 @@ const USAGE: &str = "usage:
   omarchy-agent status [--data <dir>]
   omarchy-agent round [--data <dir>]
   omarchy-agent logs [--data <dir>] [-n <lines>]
+  omarchy-agent self-test --release <vX.Y.Z> [--data <dir>]
   omarchy-agent --version";
 
 const REFUSED: u8 = 1;
@@ -45,7 +48,7 @@ fn main() -> ExitCode {
     let code = match args.first().map(String::as_str) {
         Some("verify") => verify_cmd(&args[1..]),
         Some("lint-set") => lint_cmd(&args[1..]),
-        Some(cmd @ ("run" | "status" | "round" | "logs")) => run_cmd(cmd, &args[1..]),
+        Some(cmd @ ("run" | "status" | "round" | "logs" | "self-test")) => run_cmd(cmd, &args[1..]),
         Some("install") => {
             // install.sh's last step (#311). The install with its preflight and enrollment
             // (OMARCHY_ENROLL, from the environment only) come in P1 (#317); the loop it
@@ -169,10 +172,10 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
 
 fn run_cmd(cmd: &str, args: &[String]) -> Result<u8, String> {
     let mut rest = Vec::new();
-    let known: &[&'static str] = if cmd == "logs" {
-        &["--data", "-n"]
-    } else {
-        &["--data"]
+    let known: &[&'static str] = match cmd {
+        "logs" => &["--data", "-n"],
+        "self-test" => &["--data", "--release"],
+        _ => &["--data"],
     };
     let f = flags(args, known, &mut rest)?;
     if !rest.is_empty() {
@@ -184,6 +187,10 @@ fn run_cmd(cmd: &str, args: &[String]) -> Result<u8, String> {
         "run" => run::run(data),
         "status" => run::status(data),
         "round" => run::round(data),
+        "self-test" => {
+            let release = get("--release").ok_or_else(|| USAGE.to_owned())?;
+            run::self_test(data, release)
+        }
         _ => {
             let n = get("-n").map_or(Ok(50), |n| {
                 n.parse::<usize>()

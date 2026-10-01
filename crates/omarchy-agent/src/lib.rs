@@ -11,8 +11,8 @@
 //! - [`run`]: the run loop (P1, #315): the host bundle rolled out by a state machine with
 //!   a guard, revert, quarantine and preemption, on the pinned compose driver.
 //!
-//! Install, capacity detection and self-update come in their own P1 issues and build on
-//! the types defined here.
+//! Self-update (#316) is part of [`run`]; install and capacity detection come in their
+//! own P1 issues and build on the types defined here.
 
 pub mod lint;
 pub mod manifest;
@@ -69,4 +69,9 @@ pub mod fuzz {
 
 /// This agent's own version (design v2 D17); a manifest whose `min_agent` is above it, or
 /// whose schema is newer than this agent knows, means "update myself first".
-pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// `tests/agent-self-update.sh` builds test agents with other versions
+/// (`OMARCHY_AGENT_TEST_VERSION`, at build time); every other build is the crate's.
+pub const AGENT_VERSION: &str = match option_env!("OMARCHY_AGENT_TEST_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};

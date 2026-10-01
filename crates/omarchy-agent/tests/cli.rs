@@ -313,3 +313,112 @@ fn run_keeps_running_with_no_pool_and_round_asks_it_again() {
     child.kill().unwrap();
     child.wait().unwrap();
 }
+
+/// A data directory laid out as install.sh and a self-update leave it (#316): this binary
+/// as `versions/<its version>/`, a stand-in older agent, `current` at this one and
+/// `pending` from the older one with `tries` starts counted.
+fn swapped(name: &str, tries: u32) -> (PathBuf, String) {
+    let data = scratch(name);
+    let me = env!("CARGO_PKG_VERSION");
+    for v in [me, "0.0.1"] {
+        std::fs::create_dir_all(data.join("versions").join(v)).unwrap();
+    }
+    std::fs::copy(
+        env!("CARGO_BIN_EXE_omarchy-agent"),
+        data.join("versions").join(me).join("omarchy-agent"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(format!("versions/{me}"), data.join("current")).unwrap();
+    std::fs::write(
+        data.join("pending"),
+        format!("from=0.0.1 to={me} tries={tries} deadline=99999999999\n"),
+    )
+    .unwrap();
+    let d = data.to_string_lossy().into_owned();
+    (data, d)
+}
+
+fn current(data: &Path) -> String {
+    std::fs::read_link(data.join("current"))
+        .unwrap()
+        .display()
+        .to_string()
+}
+
+#[test]
+fn a_new_agent_counts_its_start_before_its_configuration_and_its_third_rolls_back() {
+    // Its third start: counted first, then current points back, with nothing else read.
+    let (data, d) = swapped("third", 2);
+    let o = Command::new(data.join("current/omarchy-agent"))
+        .args(["run", "--data", &d])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("3 starts"), "{}", text(&o));
+    assert_eq!(current(&data), "versions/0.0.1");
+    assert!(std::fs::read_to_string(data.join("pending"))
+        .unwrap()
+        .contains("tries=3"));
+
+    // A configuration the new agent refuses is a failed start, not exit 78 (which the
+    // service manager would leave stopped): counted, and current points back at once.
+    let (data, d) = swapped("config", 0);
+    let o = run(&["run", "--data", &d]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(
+        text(&o).contains("refused its configuration"),
+        "{}",
+        text(&o)
+    );
+    assert_eq!(current(&data), "versions/0.0.1");
+    assert!(std::fs::read_to_string(data.join("pending"))
+        .unwrap()
+        .contains("tries=1"));
+
+    // `status` shows the update in flight.
+    let (_, d) = swapped("status-pending", 1);
+    let o = run(&["status", "--data", &d]);
+    assert!(
+        text(&o).contains("update:    agent 0.0.1 to"),
+        "{}",
+        text(&o)
+    );
+}
+
+#[test]
+fn self_test_says_ok_only_when_it_verified_the_release() {
+    let data = scratch("self-test");
+    let d = data.to_string_lossy().into_owned();
+    let toml = data.join("agent.toml");
+    std::fs::write(
+        &toml,
+        "pool = \"https://pkgs.omarchy-pool.org\"\nhost_id = \"h_1\"\nworker_id = \"w_1\"\n[set]\ndir = \"/srv/set\"\nwork_root = \"/srv/work\"\nsecrets_dir = \"/srv/secrets\"\nsocket_cli = \"/var/run/docker.sock\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // No bundle of that release here.
+    let o = run(&["self-test", "--data", &d, "--release", "v1.2.3"]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("omarchy-host-v1.2.3.tar.gz"),
+        "{}",
+        text(&o)
+    );
+    assert!(!String::from_utf8_lossy(&o.stdout).contains("ok"));
+    // One that does not verify (a signature by nobody).
+    let bundles = data.join("bundles");
+    std::fs::create_dir_all(&bundles).unwrap();
+    std::fs::write(bundles.join("omarchy-host-v1.2.3.tar.gz"), b"archive").unwrap();
+    std::fs::write(
+        bundles.join("omarchy-host-v1.2.3.tar.gz.sigstore.json"),
+        b"{}",
+    )
+    .unwrap();
+    let o = run(&["self-test", "--data", &d, "--release", "v1.2.3"]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("refused"), "{}", text(&o));
+    // Usage.
+    assert_eq!(run(&["self-test", "--data", &d]).status.code(), Some(2));
+    let o = run(&["self-test", "--data", &d, "--release", "latest"]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+}

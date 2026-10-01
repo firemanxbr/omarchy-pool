@@ -110,6 +110,30 @@ jobs:
       - name: The run loop on ${{ matrix.engine }}, with only the pinned tools and a task that survives every rollout
         run: bash tests/agent-run-loop.sh ${{ matrix.engine }}
 
+  agent-self-update:
+    name: Host agent self-update under systemd --user
+    # #316: deliberately broken builds of a higher agent — a panic while it
+    # loads its configuration, a hang before READY=1, a hang after it — are
+    # started by the agent's own unit after a swap and rolled back to the
+    # running agent, which skips them; a good one passes its health gate; a
+    # container runs untouched throughout. The runner's user manager is
+    # started by lingering, as the installer does on a host.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Start the runner user's systemd manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          for _ in $(seq 1 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      - name: A good build passes its health gate, broken ones are rolled back after three starts
+        run: bash tests/agent-self-update.sh
+
   agent-version:
     name: Host agent version (raised with every change to the agent)
     # Design v2 D17 (#311): the agent's own semver moves with what goes into

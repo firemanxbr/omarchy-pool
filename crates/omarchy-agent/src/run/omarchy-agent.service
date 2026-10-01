@@ -1,0 +1,26 @@
+# The agent's systemd --user unit (design v2 §14.1; #316): `omarchy-agent install`
+# (#317) writes it to ~/.config/systemd/user/omarchy-agent.service.
+#
+# Type=notify: the agent says READY=1 once agent.toml and state.json are read, so a
+# start that hangs before it fails after TimeoutStartSec; it pings WATCHDOG=1 while its
+# loop makes progress, so a hang after it is killed after WatchdogSec. Either way
+# Restart=always starts it again, and a self-update's new agent has counted that start
+# (three without passing its health gate roll it back). Exit 78 is a local
+# configuration error, left for a person.
+[Unit]
+Description=omarchy-pool host agent
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+ExecStart=%h/.local/share/omarchy-agent/current/omarchy-agent run
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+WatchdogSec=300
+RestartPreventExitStatus=78
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

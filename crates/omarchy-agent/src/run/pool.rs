@@ -4,6 +4,9 @@
 //! the agent: no answer, a 5xx or a malformed body changes nothing; a 401/403 changes
 //! nothing and slows the polls to hourly.
 
+use std::io::Read;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -119,6 +122,9 @@ pub(crate) struct Https {
     origin: String,
     agent: ureq::Agent,
     downloads: ureq::Agent,
+    /// The watchdog's clock, moved on as a body's bytes arrive: a long download is
+    /// progress, a stalled one is not.
+    progress: Option<Arc<AtomicI64>>,
 }
 
 impl Https {
@@ -138,10 +144,16 @@ impl Https {
             agent: agent(Duration::from_secs(60)),
             // The pinned tools are tens of MiB: a longer deadline, still a deadline.
             downloads: agent(Duration::from_secs(600)),
+            progress: None,
         }
     }
 
-    fn get(agent: &ureq::Agent, url: &str, max: u64) -> Net<(u16, Vec<u8>)> {
+    pub fn with_progress(mut self, progress: Arc<AtomicI64>) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    fn get(&self, agent: &ureq::Agent, url: &str, max: u64) -> Net<(u16, Vec<u8>)> {
         let mut res = match agent.get(url).call() {
             Ok(r) => r,
             Err(e) => return Net::NoAnswer(e.to_string()),
@@ -150,14 +162,23 @@ impl Https {
         if let Net::Unauthorized(s) = classify(status) {
             return Net::Unauthorized(s);
         }
-        match res.body_mut().with_config().limit(max).read_to_vec() {
-            Ok(body) => Net::Ok((status, body)),
-            Err(e) => Net::NoAnswer(format!("HTTP {status}: {e}")),
+        let mut reader = res.body_mut().with_config().limit(max).reader();
+        let mut body = Vec::new();
+        let mut chunk = vec![0u8; 64 << 10];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => return Net::Ok((status, body)),
+                Ok(n) => body.extend_from_slice(&chunk[..n]),
+                Err(e) => return Net::NoAnswer(format!("HTTP {status}: {e}")),
+            }
+            if let Some(p) = &self.progress {
+                p.store(super::now(), Ordering::Relaxed);
+            }
         }
     }
 
-    fn get_ok(agent: &ureq::Agent, url: &str, max: u64) -> Net<Vec<u8>> {
-        match Self::get(agent, url, max) {
+    fn get_ok(&self, agent: &ureq::Agent, url: &str, max: u64) -> Net<Vec<u8>> {
+        match self.get(agent, url, max) {
             Net::Ok((s, body)) => match classify(s) {
                 Net::Ok(()) => Net::Ok(body),
                 Net::Unauthorized(s) => Net::Unauthorized(s),
@@ -172,7 +193,7 @@ impl Https {
 impl Pool for Https {
     fn follow(&mut self, worker_id: &str) -> Net<Follow> {
         let url = format!("{}/api/v1/factory/follow?ids={worker_id}", self.origin);
-        match Self::get_ok(&self.agent, &url, FOLLOW_MAX) {
+        match self.get_ok(&self.agent, &url, FOLLOW_MAX) {
             Net::Ok(body) => match parse_follow(&body, worker_id) {
                 Ok(f) => Net::Ok(f),
                 Err(e) => Net::NoAnswer(e),
@@ -184,7 +205,7 @@ impl Pool for Https {
 
     fn rollback(&mut self, to: Release) -> Net<Option<Relayed>> {
         let url = format!("{}/api/v1/factory/rollback/{to}", self.origin);
-        match Self::get(&self.agent, &url, STATEMENT_MAX) {
+        match self.get(&self.agent, &url, STATEMENT_MAX) {
             Net::Ok((404, _)) => Net::Ok(None),
             Net::Ok((s, body)) => match classify(s) {
                 Net::Ok(()) => match parse_relayed(&body, to) {
@@ -200,11 +221,11 @@ impl Pool for Https {
     }
 
     fn release_asset(&mut self, r: Release, name: &str) -> Net<Vec<u8>> {
-        Self::get_ok(&self.agent, &format!("{RELEASES}/{r}/{name}"), BUNDLE_MAX)
+        self.get_ok(&self.agent, &format!("{RELEASES}/{r}/{name}"), BUNDLE_MAX)
     }
 
     fn download(&mut self, url: &str) -> Net<Vec<u8>> {
-        Self::get_ok(&self.downloads, url, super::tools::MAX_TOOL)
+        self.get_ok(&self.downloads, url, super::tools::MAX_TOOL)
     }
 }
 

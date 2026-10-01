@@ -34,6 +34,20 @@ impl fmt::Display for Version {
     }
 }
 
+/// An agent version, written `X.Y.Z` wherever the agent stores it (`state.json`).
+impl serde::Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Version::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("{s:?} is not X.Y.Z")))
+    }
+}
+
 /// A release, written `vX.Y.Z` wherever the agent stores or shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Release(pub Version);

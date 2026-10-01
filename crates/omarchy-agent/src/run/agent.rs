@@ -5,12 +5,14 @@
 //! hourly; both recover by themselves at the next answer.
 
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, Outer};
+use crate::statement::Statement;
 use crate::verify::{self, BundleOutcome, Rejection, StatementOutcome, VerifiedBundle};
-use crate::version::{self, Release};
+use crate::version::{self, Release, Version};
 
 use super::compose::Compose;
 use super::config::{Config, Paths};
@@ -18,6 +20,7 @@ use super::driver::{Answer, Driver};
 use super::journal::{env_secrets, Journal};
 use super::pool::{Follow, Net, Pool};
 use super::rollout::{self, Ctx, Outcome};
+use super::selfupdate::Pending;
 use super::state::{self, Files, Phase, State, Step};
 use super::target::Target;
 use super::tools;
@@ -72,15 +75,37 @@ pub(crate) struct Agent {
     /// The inputs hash a round was last started for, so a held round is not restarted
     /// every tick: the next change of an input starts the next one.
     last_inputs: Option<String>,
-    announced: Option<version::Version>,
+    /// The last agent version said to be skipped, so it is said once.
+    pub(super) announced: Option<Version>,
     /// The watchdog's clock of the loop's last progress, moved on before each pinned
     /// tool's download too: one tick may hold two of them.
     pub progress: Option<Arc<AtomicI64>>,
+    /// This agent's own version (a test plays another).
+    pub version: Version,
+    /// The binary that runs (`current_exe`): a self-update starts only from the one
+    /// install.sh installed, so the way back is there.
+    pub exe: Option<PathBuf>,
+    /// Set when the agent should exit after this tick (a self-update swapped `current`).
+    pub exit: Option<u8>,
+    /// This agent is a self-update's candidate: its health gate is still shut.
+    pub gate: Option<Pending>,
+    pub(super) gate_next: i64,
+    /// The agent version whose update failed before the swap, and when.
+    pub(super) retry: Option<(Version, i64)>,
 }
 
 enum Fetched {
     Bundle(Box<VerifiedBundle>),
+    /// Signed for this host, but only an agent above this one reads it: its outer layer.
+    NewerAgent(Box<Outer>, String),
     Stop,
+}
+
+/// The cached names of release `r`'s bundle and its signature.
+pub(crate) fn bundle_names(r: Release) -> (String, String) {
+    let name = format!("omarchy-host-{r}.tar.gz");
+    let sig = format!("{name}.sigstore.json");
+    (name, sig)
 }
 
 impl Agent {
@@ -109,6 +134,12 @@ impl Agent {
             last_inputs: None,
             announced: None,
             progress: None,
+            version: version::agent(),
+            exe: None,
+            exit: None,
+            gate: None,
+            gate_next: 0,
+            retry: None,
         }
     }
 
@@ -212,13 +243,22 @@ impl Agent {
     /// One tick. `Err` only for a local error (the disk): nothing is saved and the loop
     /// retries at its next tick.
     pub fn tick(&mut self, now: i64, round_now: bool) -> Result<(), String> {
-        if round_now || now >= self.state.poll.next_at {
-            self.poll(now, round_now);
+        // A new agent touches nothing until its health gate passed; once a self-update
+        // swapped `current`, the state is saved and the agent exits before anything
+        // else (#316).
+        if self.gate.is_some() {
+            self.gate_step(now);
+        } else if self.exit.is_none() {
+            if round_now || now >= self.state.poll.next_at {
+                self.poll(now, round_now);
+            }
+            if self.state.rollout.step == Step::Idle && self.exit.is_none() {
+                self.drift(now);
+            }
+            if self.exit.is_none() {
+                self.step(now)?;
+            }
         }
-        if self.state.rollout.step == Step::Idle {
-            self.drift(now);
-        }
-        self.step(now)?;
         if self.saved.as_ref() != Some(&self.state) {
             state::save(&self.paths.state(), &self.state)?;
             self.saved = Some(self.state.clone());
@@ -258,24 +298,26 @@ impl Agent {
         }
     }
 
-    fn bundle_names(r: Release) -> (String, String) {
-        let name = format!("omarchy-host-{r}.tar.gz");
-        let sig = format!("{name}.sigstore.json");
-        (name, sig)
-    }
-
-    fn cached(&self, r: Release) -> Option<Box<VerifiedBundle>> {
-        let (name, sig) = Self::bundle_names(r);
+    /// Release `r`'s bundle from the cache, verified again.
+    fn cached_outcome(&self, r: Release) -> Option<BundleOutcome> {
+        let (name, sig) = bundle_names(r);
         let dir = self.paths.bundles();
         let (a, s) = (
             fs::read(dir.join(&name)).ok()?,
             fs::read(dir.join(&sig)).ok()?,
         );
-        match self.verifier.bundle(&a, &s) {
-            Ok(BundleOutcome::Current(b)) if Release(b.manifest().outer().release()) == r => {
-                Some(b)
-            }
-            _ => None,
+        let outcome = self.verifier.bundle(&a, &s).ok()?;
+        let release = match &outcome {
+            BundleOutcome::Current(b) => b.manifest().outer().release(),
+            BundleOutcome::NeedsNewerAgent { outer, .. } => outer.release(),
+        };
+        (Release(release) == r).then_some(outcome)
+    }
+
+    pub(super) fn cached(&self, r: Release) -> Option<Box<VerifiedBundle>> {
+        match self.cached_outcome(r)? {
+            BundleOutcome::Current(b) => Some(b),
+            BundleOutcome::NeedsNewerAgent { .. } => None,
         }
     }
 
@@ -405,10 +447,14 @@ impl Agent {
         self.go_to(target, now, &why);
     }
 
-    /// A new target: its bundle verified, the trust rules, the tools, then a round.
+    /// A new target: its bundle verified, the trust rules, the agent (#316), the tools,
+    /// then a round.
     fn go_to(&mut self, target: Release, now: i64, why: &str) {
         let b = match self.fetch(target, now) {
             Fetched::Bundle(b) => b,
+            Fetched::NewerAgent(outer, why) => {
+                return self.needs_newer_agent(target, &outer, &why, now)
+            }
             Fetched::Stop => return,
         };
         trust::merge(&mut self.state, b.manifest());
@@ -424,24 +470,48 @@ impl Agent {
         let rollback = match trust::admit(&self.state, target) {
             Ok(()) => false,
             Err(Refusal::BelowFloor { .. }) => match self.statement(target, &b, now) {
-                Some(Ok(())) => true,
+                Some(Ok(st)) => {
+                    // A statement with `agent_to` moves the agent down first, through the
+                    // same steps; the statement is accepted only once the swap is done
+                    // (the agent below then applies the release), or with no move.
+                    if let Some(down) = st.agent_to().filter(|v| *v < self.version) {
+                        let ships = b.manifest().outer().agent();
+                        let moved = if ships.version() == down {
+                            self.move_agent(target, ships, now)
+                        } else {
+                            Err(format!(
+                                "agent_to {down}, but {target} ships agent {}",
+                                ships.version()
+                            ))
+                        };
+                        if let Err(e) = moved {
+                            let detail = format!(
+                                "the rollback statement to {target} moves the agent down to {down}: {e}; the statement waits"
+                            );
+                            return self.say(now, Outcome::Held, &detail);
+                        }
+                    }
+                    self.accept(target, &st, now);
+                    if self.exit.is_some() {
+                        return;
+                    }
+                    true
+                }
                 Some(Err(r)) => return self.refuse(now, &r),
                 None => return,
             },
             Err(r) => return self.refuse(now, &r),
         };
+        // Only upward (D8): a higher agent first, before the round touches anything. One
+        // that cannot be had now leaves this agent to apply the release (its min_agent
+        // admits it) and is tried again later.
+        let ships = b.manifest().outer().agent().clone();
+        if let Ok(true) = self.upgrade(target, &ships, now) {
+            return;
+        }
         if let Err(e) = self.ensure_tools(b.manifest(), now) {
             let detail = format!("the pinned tools: {e}");
             return self.say(now, Outcome::EngineUnreachable, &detail);
-        }
-        let agent = b.manifest().outer().agent().version();
-        if agent > version::agent() && self.announced != Some(agent) {
-            self.announced = Some(agent);
-            self.journal.write(
-                now,
-                "agent-available",
-                serde_json::json!({"version": agent.to_string(), "detail": "self-update arrives with #316; this agent rolls the release out meanwhile"}),
-            );
         }
         match Target::from_bundle(&b, &self.cfg.set_name) {
             Ok(t) => {
@@ -450,6 +520,26 @@ impl Agent {
             }
             Err(e) => self.say(now, Outcome::Refused, &format!("{target}: {e}")),
         }
+    }
+
+    /// A bundle only a higher agent reads: the agent updates itself from its (signed)
+    /// outer layer, or says why it cannot.
+    fn needs_newer_agent(&mut self, target: Release, outer: &Outer, why: &str, now: i64) {
+        if let Err(r) = trust::admit(&self.state, target) {
+            return self.refuse(now, &r);
+        }
+        let detail = match self.upgrade(target, outer.agent(), now) {
+            Ok(true) => return,
+            Ok(false) => format!(
+                "{target}: {why}; agent {} was rolled back here and is skipped until a higher one",
+                outer.agent().version()
+            ),
+            Err(e) => format!(
+                "{target}: {why}; the update to agent {}: {e}",
+                outer.agent().version()
+            ),
+        };
+        self.say(now, Outcome::NeedsNewerAgent, &detail);
     }
 
     fn refuse(&mut self, now: i64, r: &Refusal) {
@@ -462,10 +552,14 @@ impl Agent {
 
     /// The target's bundle: from the cache, or GitHub, verified either way.
     fn fetch(&mut self, target: Release, now: i64) -> Fetched {
-        if let Some(b) = self.cached(target) {
-            return Fetched::Bundle(b);
+        match self.cached_outcome(target) {
+            Some(BundleOutcome::Current(b)) => return Fetched::Bundle(b),
+            Some(BundleOutcome::NeedsNewerAgent { outer, why, .. }) => {
+                return Fetched::NewerAgent(Box::new(outer), why)
+            }
+            None => {}
         }
-        let (name, sig) = Self::bundle_names(target);
+        let (name, sig) = bundle_names(target);
         let get = |pool: &mut Box<dyn Pool>, n: &str| pool.release_asset(target, n);
         let (archive, signature) = match (get(&mut self.pool, &name), get(&mut self.pool, &sig)) {
             (Net::Ok(a), Net::Ok(s)) => (a, s),
@@ -486,38 +580,10 @@ impl Agent {
                 return Fetched::Stop;
             }
         };
-        match self.verifier.bundle(&archive, &signature) {
-            Ok(BundleOutcome::Current(b)) => {
-                let r = Release(b.manifest().outer().release());
-                if r != target {
-                    self.refuse(
-                        now,
-                        &Refusal::Verify {
-                            reason: "content",
-                            detail: format!("asked for {target}, the bundle is {r}"),
-                        },
-                    );
-                    return Fetched::Stop;
-                }
-                let dir = self.paths.bundles();
-                let stored = fs::create_dir_all(&dir)
-                    .map_err(|e| e.to_string())
-                    .and_then(|()| state::write_atomic(&dir.join(&name), &archive))
-                    .and_then(|()| state::write_atomic(&dir.join(&sig), &signature));
-                if let Err(e) = stored {
-                    self.journal
-                        .write(now, "cache", serde_json::json!({"detail": e}));
-                }
-                Fetched::Bundle(b)
-            }
-            Ok(BundleOutcome::NeedsNewerAgent { why, .. }) => {
-                self.say(
-                    now,
-                    Outcome::NeedsNewerAgent,
-                    &format!("{target}: {why} (self-update is #316)"),
-                );
-                Fetched::Stop
-            }
+        let outcome = self.verifier.bundle(&archive, &signature);
+        let release = match &outcome {
+            Ok(BundleOutcome::Current(b)) => Release(b.manifest().outer().release()),
+            Ok(BundleOutcome::NeedsNewerAgent { outer, .. }) => Release(outer.release()),
             Err(r) => {
                 self.refuse(
                     now,
@@ -526,8 +592,35 @@ impl Agent {
                         detail: r.to_string(),
                     },
                 );
-                Fetched::Stop
+                return Fetched::Stop;
             }
+        };
+        if release != target {
+            self.refuse(
+                now,
+                &Refusal::Verify {
+                    reason: "content",
+                    detail: format!("asked for {target}, the bundle is {release}"),
+                },
+            );
+            return Fetched::Stop;
+        }
+        // Kept for the next poll, and for the new agent's self-test and health gate.
+        let dir = self.paths.bundles();
+        let stored = fs::create_dir_all(&dir)
+            .map_err(|e| e.to_string())
+            .and_then(|()| state::write_atomic(&dir.join(&name), &archive))
+            .and_then(|()| state::write_atomic(&dir.join(&sig), &signature));
+        if let Err(e) = stored {
+            self.journal
+                .write(now, "cache", serde_json::json!({"detail": e}));
+        }
+        match outcome {
+            Ok(BundleOutcome::Current(b)) => Fetched::Bundle(b),
+            Ok(BundleOutcome::NeedsNewerAgent { outer, why, .. }) => {
+                Fetched::NewerAgent(Box::new(outer), why)
+            }
+            Err(_) => Fetched::Stop,
         }
     }
 
@@ -538,7 +631,7 @@ impl Agent {
         target: Release,
         b: &VerifiedBundle,
         now: i64,
-    ) -> Option<Result<(), Refusal>> {
+    ) -> Option<Result<Statement, Refusal>> {
         let floor = self.state.floor.unwrap_or(target);
         let relayed = match self.pool.rollback(target) {
             Net::Ok(Some(r)) => r,
@@ -586,15 +679,19 @@ impl Agent {
         let st = vs.statement();
         let created = b.manifest().outer().created();
         Some(
-            trust::admit_rollback(&self.state, target, st, vs.signer().signed_at(), created).map(|()| {
-                self.journal.write(
-                    now,
-                    "rollback-accepted",
-                    serde_json::json!({"seq": st.seq(), "to": target.to_string(), "retracts_through": format!("v{}", st.retracts_through()), "run": st.run()}),
-                );
-                trust::accept_rollback(&mut self.state, st);
-            }),
+            trust::admit_rollback(&self.state, target, st, vs.signer().signed_at(), created)
+                .map(|()| st.clone()),
         )
+    }
+
+    /// Records an admitted rollback statement: the floor goes to its `to`.
+    fn accept(&mut self, target: Release, st: &Statement, now: i64) {
+        self.journal.write(
+            now,
+            "rollback-accepted",
+            serde_json::json!({"seq": st.seq(), "to": target.to_string(), "retracts_through": format!("v{}", st.retracts_through()), "run": st.run(), "agent_to": st.agent_to().map(|v| v.to_string())}),
+        );
+        trust::accept_rollback(&mut self.state, st);
     }
 
     /// Starts (or preempts) a round, with the env files' values read again so the journal
@@ -634,24 +731,16 @@ impl Agent {
         }
     }
 
-    /// Whether a service of `last-good/` is missing, stopped or differently configured.
-    fn drifted(&mut self) -> bool {
-        let Some(d) = self.driver.as_deref_mut() else {
-            return false;
-        };
+    /// The compose project of `last-good/` and its services, when there is one.
+    pub(super) fn last_good_project(&self) -> Option<(super::driver::Project, Vec<String>)> {
         let good = self.paths.last_good(&self.cfg.set_name);
-        let Ok(set) = fs::read_to_string(good.join("set.toml"))
+        let set = fs::read_to_string(good.join("set.toml"))
             .map_err(|e| e.to_string())
             .and_then(|t| crate::lint::parse_set_toml(&t))
-        else {
-            return false;
-        };
-        let Some(services) = fs::read_to_string(good.join("compose.yml"))
+            .ok()?;
+        let services = fs::read_to_string(good.join("compose.yml"))
             .ok()
-            .and_then(|t| crate::lint::service_names(&t))
-        else {
-            return false;
-        };
+            .and_then(|t| crate::lint::service_names(&t))?;
         let mut files = vec![good.join("compose.yml"), good.join("agent.yml")];
         let over = self.cfg.set_dir.join("compose.override.yml");
         if over.exists() {
@@ -662,6 +751,17 @@ impl Agent {
             dir: self.cfg.set_dir.clone(),
             files,
             env: self.cfg.interpolation(),
+        };
+        Some((p, services))
+    }
+
+    /// Whether a service of `last-good/` is missing, stopped or differently configured.
+    fn drifted(&mut self) -> bool {
+        let Some((p, services)) = self.last_good_project() else {
+            return false;
+        };
+        let Some(d) = self.driver.as_deref_mut() else {
+            return false;
         };
         let Answer::Yes(units) = d.observe(&p, &services) else {
             return false;
