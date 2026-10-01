@@ -477,12 +477,14 @@ impl Driver for Compose {
     }
 }
 
-/// Whether the probe is not in the image: 126/127 and "not found". Podman says so on
-/// stderr; docker puts an exec that could not start on the exec's stdout
+/// Whether the probe is not in the image: 126/127 and "not found in $PATH". Podman says
+/// so on stderr; docker puts an exec that could not start on the exec's stdout
 /// (`OCI runtime exec failed: … exec: "curl": executable file not found in $PATH`).
+/// Only that phrase: an engine's own "not found" (a container gone between the inspect
+/// and the exec) must stay no answer, never read as "not ready".
 fn probe_missing(o: &exec::Output) -> bool {
-    matches!(o.code, Some(126 | 127))
-        && (o.stderr.contains("not found") || o.stdout.contains("not found"))
+    const MISSING: &str = "not found in $PATH";
+    matches!(o.code, Some(126 | 127)) && (o.stderr.contains(MISSING) || o.stdout.contains(MISSING))
 }
 
 /// Whether a failed probe is curl's or wget's own "no" (it ran; the URL did not answer):
