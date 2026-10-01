@@ -1,0 +1,30 @@
+# The host set (design v2 §4.2): every maintainer host runs this one service,
+# the dispatcher. It claims as many tasks as the host's capacity allows and
+# starts one isolated, credential-less container per task; those containers
+# and their sidecars are not here (one function signed inside the worker
+# image makes them, design v2 §9.3).
+#
+# A template, as written: release.yml renders the @...@ placeholders to the
+# verified manifest's digests, and the agent fills ${...} from agent.toml.
+# `omarchy-agent lint-set factory/sets/host` checks it before either
+# (design v2 §4.3); CI runs it (tests/host-set.sh).
+services:
+  dispatcher:
+    image: ghcr.io/firemanxbr/omarchy-worker@RELEASE@
+    labels: { org.omarchy-pool.role: dispatcher }
+    environment:
+      OMARCHY_WORKER_ROLE: dispatcher
+      OMARCHY_WORK_ROOT: ${OMARCHY_WORK_ROOT}
+      OMARCHY_SECRETS_DIR: ${OMARCHY_SECRETS_DIR}      # a path only: never mounted here
+      OMARCHY_CAPACITY_FILE: /run/omarchy/capacity.json
+      OMARCHY_BUILD_IMAGE_AARCH64: "@BUILD_AARCH64@"
+      OMARCHY_BUILD_IMAGE_X86_64: "@BUILD_X86_64@"
+      OMARCHY_WORKER_IMAGE: "@RELEASE_IMAGE@"          # sidecars run the same signed image
+      OMARCHY_TASK_SUBNETS: ${OMARCHY_TASK_SUBNETS:-10.231.0.0/16}
+    env_file: [etc/dispatcher.env]       # the host worker token, written by the agent
+    volumes:
+      - ${OMARCHY_SOCKET}:/var/run/docker.sock
+      - ${OMARCHY_WORK_ROOT}:${OMARCHY_WORK_ROOT}      # same path inside and outside
+      - ./run/capacity.json:/run/omarchy/capacity.json:ro
+    restart: unless-stopped
+    stop_grace_period: 60s               # stop claiming, save leases, exit; tasks keep running

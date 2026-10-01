@@ -499,6 +499,9 @@ factory/
   bin/omarchy-rollout             the updater: the compose set follows the pool's latest image, what changed replaced together, itself last
   bin/pkgbuild-meta               PKGBUILD → arches and version, without executing it as you
   sizing/<name>/                  recipes kept for dry runs only (never queued) — the only recipes in the repository
+  sizing/tasks.toml               maintainer-set task sizes, disk budgets and network exceptions per package (empty until P2 of #307)
+  sets/host/                      the host agent's set (#307): compose.yml with the one dispatcher service, set.toml, files/
+  host/prep-root.sh               the root-only steps a new maintainer host needs once (never run by the agent)
   bin/agent.py                    the owner's agent, whichever provider: Anthropic, OpenAI, Gemini, xAI (by the key set)
   bin/draft-pkgbuild              project URL → PKGBUILD (the agent, or a template), checksums left to updpkgsums
   prompts/pkgbuild.md             the packaging rules the drafter follows

@@ -459,6 +459,36 @@ log and the Workers page say so, and *The Studio host* (below) is where
 to look. Worker secret: `JOB_TOKEN_SECRET` (any random string) signs the
 job tokens.
 
+## A new maintainer host
+
+A new host for the host agent (design v2, epic #307) runs one set,
+`factory/sets/host`: one service, the dispatcher, which starts one isolated,
+credential-less container per task, as many as the host's capacity allows.
+What it needs from root, once, is
+[`factory/host/prep-root.sh`](../factory/host/prep-root.sh); the agent
+never runs it and never asks for root, and reports what is still missing
+("needs a person"). On Arch Linux (or Arch Linux ARM) or Ubuntu LTS, from a
+checkout, for the Unix user the agent will run as:
+
+```bash
+sudo factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-pool/host --dry-run   # what it would change
+sudo factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-pool/host             # rootful docker on a dedicated machine
+sudo factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-pool/host --runtime rootless   # podman, a shared machine
+```
+
+It installs the runtime, qemu's binfmt handlers (with the `F` flag, for the
+emulated lane), btrfs-progs and jq; puts the user in the docker group
+(rootful); sets docker's default address pools and, on a daemon with no
+container or image yet, `userns-remap`; makes the work root (a btrfs
+subvolume where it can); turns on linger; delegates cgroup v2 controllers to
+the user's systemd (rootless); and installs `DOCKER-USER` drop rules from
+the task subnets (`--task-subnets`, default `10.231.0.0/16`) to RFC 1918,
+CGNAT, link-local and the host (IPv4; task networks stay IPv4 only), kept across reboots by
+`omarchy-task-firewall.service` (rootful). A second run changes nothing;
+exit 1 lists what needs a person. The task subnets and the work root must be
+the ones the agent's install is given. The Studio does not run it: it keeps
+its legacy set (below) until the switch of design v2 §21.
+
 ## The Studio host
 
 The project's workers run on one machine — `omarchy-studio`, a Mac Studio

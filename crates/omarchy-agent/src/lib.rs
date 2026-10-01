@@ -41,13 +41,17 @@ pub mod fuzz {
         }
     }
 
-    /// A set template, and an override after the first NUL byte.
+    /// A set template, and an override after the first NUL byte; the same second part read
+    /// as the template's `set.toml`.
     pub fn set(data: &[u8]) {
         let Ok(text) = std::str::from_utf8(data) else {
             return;
         };
         match text.split_once('\0') {
-            Some((template, over)) => crate::lint::fuzz(template, Some(over)),
+            Some((template, over)) => {
+                crate::lint::fuzz(template, Some(over));
+                let _ = crate::lint::lint_set_toml(over, template);
+            }
             None => crate::lint::fuzz(text, None),
         }
     }
