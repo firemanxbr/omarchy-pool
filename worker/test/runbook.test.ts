@@ -121,10 +121,10 @@ describe("the runbook's GitHub settings the signature relies on (#308)", () => {
     // …and checked with these.
     for (const check of ['gh api "$R/environments"', '/deployment-branch-policies" --jq', 'gh api "$R/rulesets"', 'gh api "$R/immutable-releases"', 'gh api "$R/keys"']) expect(section, check).toContain(check);
     // Only the tag ruleset this user-owned repository can apply (#351): moves and deletions refused, creation open, the signature what hosts trust.
-    expect(section).not.toContain(".github/rulesets/tags.json");
     expect(section).toContain("Creation is not restricted");
     expect(section).toContain("hosts trust the signature, whatever tags exist");
     // Honest about what the repository cannot do alone.
     expect(section).toContain("Until the admin applies them");
+    expect(section).toContain("is replaced by #351");
   });
 });

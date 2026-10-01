@@ -79,6 +79,11 @@ gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/main.
 gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/tags-locked.json   # v* tags: never moved or deleted, by anyone
 ```
 
+In an organization, a creation ruleset on `refs/tags/v*` with GitHub Actions
+(integration 15368) as its only bypass actor can be added too, so that no `v*`
+tag is created by hand (#351, option 2); a user-owned repository refuses that
+bypass.
+
 From here on every change is a pull request with the six required checks and,
 for the files `CODEOWNERS` names (the governance file, the recipes, the
 workflows, the host agent, the dispatcher, the host sets), a review

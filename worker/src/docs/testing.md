@@ -683,8 +683,8 @@ exact identity and no regexp, the base images are pinned by digest and the
 docker CLI by SHA-256, CODEOWNERS gives every maintainer the workflows, the
 host agent, the dispatcher and the host sets, the one `v*` tag ruleset
 lets nobody move or delete a tag (no ruleset file restricts creation, which a
-user-owned repository cannot apply, #351), and the host agent pins `release.yml`
-on `refs/heads/main`, never a tag.
+user-owned repository cannot apply, #351); the host agent's pin on
+`release.yml@refs/heads/main`, never a tag, is its own cargo tests'.
 `bash tests/image-smoke.sh <image>` (the release, on each architecture's
 `:<arch>-vX.Y.Z` before any tag moves; CI, on a local build of the commit)
 starts every role from the image: the updater's `follows` label, the project

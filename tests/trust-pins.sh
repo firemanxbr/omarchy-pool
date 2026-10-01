@@ -16,8 +16,8 @@
 #   starts task containers and the host sets (CODEOWNERS);
 # - the one v* tag ruleset the admin applies (.github/rulesets/tags-locked.json)
 #   lets nobody move or delete a tag; no ruleset file restricts creation, which
-#   this user-owned repository cannot apply (#351), and the host agent trusts
-#   release.yml on refs/heads/main, never a tag;
+#   this user-owned repository cannot apply (#351); the host agent trusts
+#   release.yml on refs/heads/main, never a tag (its cargo tests hold that);
 # - release.yml's jobs that publish wait behind its gate, the `version` job
 #   in the release environment, and nothing writes by default.
 #
@@ -141,8 +141,9 @@ echo "ok: code owners cover the workflows, the host agent, the dispatcher and th
 # tag). No creation ruleset: GitHub accepts GitHub Actions as a ruleset bypass
 # actor only in an organization (HTTP 422 on this user-owned repository), and a
 # creation rule without that bypass would refuse release.yml's own tag. Creating
-# a v* tag stays open to write access (the maintainers); a hand-made tag carries
-# no bundle a host accepts, because the agent pins release.yml on refs/heads/main.
+# a v* tag stays open to every collaborator with write access; a hand-made tag
+# carries no bundle a host accepts, because the agent pins release.yml on
+# refs/heads/main (crates/omarchy-agent/src/verify, its cargo tests).
 python3 - "$root/.github/rulesets" <<'PY' || fail "the v* tag ruleset: tags-locked.json alone, nobody moves or deletes a v* tag, no bypass this repository cannot apply"
 import json, os, sys
 d = sys.argv[1]
@@ -154,13 +155,9 @@ assert locked["enforcement"] == "active", locked
 assert locked["conditions"]["ref_name"]["include"] == ["refs/tags/v*"], locked["conditions"]
 assert sorted(x["type"] for x in locked["rules"]) == ["deletion", "update"], locked["rules"]
 assert locked["bypass_actors"] == [], locked["bypass_actors"]
-for f, r in rulesets.items():
-    assert not any(a["actor_type"] == "Integration" for a in r.get("bypass_actors", [])), f"{f}: an integration bypass, refused on a user-owned repository"
 PY
 if grep -rn -- 'rulesets/tags\.json' "$root/worker/src/docs" "$root/README.md" "$root/SECURITY.md" "$root/CONTRIBUTING.md"; then
   fail "no doc applies the creation ruleset this repository cannot apply (#351)"
 fi
-pinned_ref="$(awk '/^pub const RELEASE: Pins = Pins \{$/ { on = 1; next } on && /^\};$/ { exit } on && /git_ref:/ { print }' "$root/crates/omarchy-agent/src/verify/identity.rs")"
-[[ "$pinned_ref" == '    git_ref: "refs/heads/main",' ]] || fail "the host agent pins release.yml on refs/heads/main, never a tag: $pinned_ref"
-echo "ok: the one v* tag ruleset lets nobody move or delete a v* tag, and hosts trust release.yml on refs/heads/main whatever tags exist"
+echo "ok: the one v* tag ruleset lets nobody move or delete a v* tag"
 echo "TRUST PINS OK"
