@@ -1153,6 +1153,7 @@ dependencies = [
  "flate2",
  "hex",
  "rcgen",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",
