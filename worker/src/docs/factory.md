@@ -485,10 +485,13 @@ POST /factory/claim   {arch, version, hostname, kinds, agent: {provider, model, 
 ```
 
 Each lease has a random generation (`build_tasks.lease_gen`, `g_<16 hex>`), carried in its job token
-(`g`): a heartbeat, a report or an upload is taken only from the token of that very lease, so a
-token of an earlier lease of the same task on the same host is refused (409, `stop: true`). The
-pool compares `leases` with its own: an unfenced lease two consecutive claims did not list goes
-back to the queue once it is 2 minutes old, its attempt given back; a fenced one (a Stop) ends
+(`g`): a heartbeat, a report or an upload is taken only from the token of that very lease (never
+the host's worker token), and so are its pool and ring writes (`pool:write`, `release:<ring>`,
+`artifacts:…`: only while that lease is held and not stopped), so a token of an earlier lease of
+the same task on the same host is refused (409, `stop: true`). The pool compares `leases` with
+its own: an unfenced lease two consecutive claims did not list goes back to the queue once it is
+2 minutes old, its attempt given back while the task's `host_losses` allow (it counts as a
+`lost`; past two the attempt is spent); a fenced one (a Stop) ends
 when a claim no longer lists it, or at the lease's end. It leases only what fits, from its own
 leases: their units plus the task's within min(declared units, units recomputed from the totals
 with the signed constants, the pool's cap), one unit kept for pool jobs, model work within

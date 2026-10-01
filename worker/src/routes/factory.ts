@@ -590,9 +590,24 @@ function hostAgent(b: Record<string, unknown>): void {
 
 /** The leases a host registration holds, by the pool's own rows (the lease index, status = 'leased'). */
 export const HOST_LEASES_SQL = "SELECT id, name, arch, kind, trust, lease_owner, attempts, max_attempts, lease_gen, stop_order, started_at, lease_missed FROM build_tasks WHERE status = 'leased' AND lease_owner = ?";
-/** An unfenced lease its host lost: back in the queue with its attempt, only while it is still that lease. */
-export const LOST_LEASE_SQL = `UPDATE build_tasks SET status = 'queued', attempts = MAX(attempts - 1, 0), lease_owner = NULL, lease_expires_at = NULL, error = ?, lease_missed = 0
-  WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_gen = ? AND stop_order IS NULL RETURNING id`;
+/**
+ * An unfenced lease its host lost, only while it is still that lease: back
+ * in the queue with its attempt, counted in host_losses as a `lost` report
+ * is (D54), so a host that keeps losing its leases cannot hand a task back
+ * for ever. Past HOST_LOSSES_MAX the attempt is spent, as an expired lease's
+ * is: behind its peers, failed when it was the last.
+ */
+const SPENT = `host_losses >= ${HOST_LOSSES_MAX}`;
+const LAST = `${SPENT} AND attempts >= max_attempts`;
+export const LOST_LEASE_SQL = `UPDATE build_tasks SET
+    status = CASE WHEN ${LAST} THEN 'failed' ELSE 'queued' END,
+    finished_at = CASE WHEN ${LAST} THEN ?5 ELSE NULL END,
+    lease_owner = CASE WHEN ${LAST} THEN lease_owner ELSE NULL END,
+    attempts = CASE WHEN ${SPENT} THEN attempts ELSE MAX(attempts - 1, 0) END,
+    priority = CASE WHEN ${SPENT} THEN priority + 10 ELSE priority END,
+    error = CASE WHEN ${SPENT} THEN ?1 || ' — lost too often on its host: the attempt is spent' ELSE ?1 || '; the attempt is given back' END,
+    host_losses = host_losses + 1, lease_expires_at = NULL, lease_missed = 0
+  WHERE id = ?2 AND status = 'leased' AND lease_owner = ?3 AND lease_gen = ?4 AND stop_order IS NULL RETURNING id, status, attempts, error`;
 
 /**
  * Reconciliation (design v2 §8.1): the claim lists every lease the
@@ -618,11 +633,11 @@ export async function reconcileHost(env: Env, worker: string, leases: HostClaim[
     const seen = listed.has(`${t.id}:${t.lease_gen}`);
     const missed = seen ? 0 : t.lease_missed + 1;
     if (!seen && missed >= 2 && Date.parse(t.started_at ?? at) <= old) {
-      const error = `lease by ${worker} lost: two claims of its host did not list it; the attempt is given back`;
-      const back = await env.DB.prepare(LOST_LEASE_SQL).bind(error, t.id, worker, t.lease_gen).first<{ id: number }>();
+      const error = `lease by ${worker} lost: two claims of its host did not list it`;
+      const back = await env.DB.prepare(LOST_LEASE_SQL).bind(error, t.id, worker, t.lease_gen, at).first<{ id: number; status: string; attempts: number; error: string }>();
       if (back) {
         requeued++;
-        await afterRequeue(env, { ...t, attempts: Math.max(t.attempts - 1, 0) }, false, error, false);
+        await afterRequeue(env, { ...t, attempts: back.attempts }, back.status === "failed", back.error, false);
       }
       continue;
     }
@@ -1405,7 +1420,8 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       pool: { version: pool.version, deployed_at: pool.deployed_at },
       workers: workers.results.map((w) => workerView(w, alive, pool)),
       // A task's params and result are JSON here as they are on the task's own page (handleTask): one shape for a task, whoever reads it.
-      tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, params: parseJson(t.params), result: parseJson(t.result) })),
+      // A host lease's claim_id is its replay key and lease_gen its token's generation (#334): the pool's, never a page's.
+      tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, claim_id: undefined, lease_gen: undefined, params: parseJson(t.params), result: parseJson(t.result) })),
     },
     200,
     { "cache-control": "public, max-age=10" },
@@ -1496,7 +1512,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
     : [];
   return json(
     {
-      task: { ...task, params, result: parse(task) },
+      task: { ...task, claim_id: undefined, lease_gen: undefined, params, result: parse(task) },
       // Its lease fenced by a Stop its task (the row's stop_order, spread above): told when, back in the queue by when at the latest — the
       // fenced lease's own end, which nothing renews (the order's issue plus a lease only bounds it): what the worker's page and the stop's dialog say.
       stopping: stop && task.status === "leased" ? { order: stop.id, by: stop.issued_by, since: stop.issued_at, until: task.lease_expires_at ?? new Date(Date.parse(stop.issued_at) + LEASE_MINUTES * 60000).toISOString() } : null,

@@ -140,6 +140,14 @@ describe("a host's claim", () => {
     expect(c.json.task.lease_gen).toMatch(LEASE_GEN);
     expect(await taskOf(t)).toMatchObject({ status: "leased", lane: "native", units: 2, size: 1, disk_gb: 20, release: "v1.0.2", claim_id: "c_gen0000001", lease_missed: 0 });
     expect(claimsOf(c.json.token)).toMatchObject({ t, w: "h-gen", g: c.json.task.lease_gen });
+    // The replay key and the generation are the pool's: neither public view hands them out.
+    const listed = (await call("GET", "/factory?limit=200")).json.tasks.find((x: any) => x.id === t);
+    const page = (await call("GET", `/factory/tasks/${t}`)).json.task;
+    for (const v of [listed, page]) {
+      expect(v).toMatchObject({ id: t, status: "leased" });
+      expect(v).not.toHaveProperty("claim_id");
+      expect(v).not.toHaveProperty("lease_gen");
+    }
     const hb = await call("POST", `/factory/tasks/${t}/heartbeat`, {}, job(c.json.token));
     expect(hb.status).toBe(200);
     expect(claimsOf(hb.json.token).g).toBe(c.json.task.lease_gen);
@@ -190,6 +198,31 @@ describe("a task stopped and re-claimed by the same host before the kill lands",
     // The new lease's own token is taken.
     expect((await call("PUT", `/factory/tasks/${t}/artifacts/build.log`, undefined, job(again.json.token), "==> building again\n")).status).toBe(201);
     expect((await call("POST", `/factory/tasks/${t}/heartbeat`, {}, job(again.json.token))).status).toBe(200);
+  });
+
+  it("a project build's pool and ring writes are refused to the old container too: pool:write and release:<ring> hold only while their lease does", async () => {
+    await seedHost("h-race-p");
+    const t = await seedTask({ name: "felix", pin: "h-race-p", trust: "project" });
+    await env.DB.prepare("UPDATE build_tasks SET publish = 1 WHERE id = ?").bind(t).run();
+    const first = await claim("h-race-p");
+    expect(first.json.task.id, JSON.stringify(first.json)).toBe(t);
+    const old = first.json.token;
+    expect(claimsOf(old)).toMatchObject({ g: first.json.task.lease_gen });
+    const sha = "b".repeat(64);
+    const poolPut = (who: Who) => call("PUT", `/pool/${sha}?filename=felix-1.2-1-aarch64.pkg.tar.zst`, undefined, who, "x");
+    const release = (who: Who) => call("POST", "/releases", { ring: "edge", packages: [] }, who);
+    expect((await poolPut(job(old))).json?.stop).toBeUndefined();
+    // Stopped, the claim stops listing it, the same host takes it back: a new generation.
+    expect((await issue("h-race-p", { kind: "stop-task", task: t }, cli("m1"))).status).toBe(201);
+    expect((await poolPut(job(old)))).toMatchObject({ status: 409, json: { stop: true } });
+    const again = await claim("h-race-p", { leases: [] });
+    expect(again.json.task.id).toBe(t);
+    for (const r of [await poolPut(job(old)), await release(job(old)), await call("POST", `/pool/${sha}/sign`, {}, job(old)), await call("POST", "/packages", {}, job(old))]) {
+      expect(r).toMatchObject({ status: 409, json: { stop: true } });
+    }
+    // The new lease's token passes the door (what the route then says of the body is the route's).
+    expect((await poolPut(job(again.json.token))).json?.stop).toBeUndefined();
+    expect((await release(job(again.json.token))).json?.stop).toBeUndefined();
   });
 });
 
@@ -255,9 +288,26 @@ describe("reconciliation, on a fake clock", () => {
     // A lease of another generation of the same task listed is not this one.
     at(125); await claim("h-rec", { want: 0, leases: [{ task: t, gen: "g_0000000000000000" }] });
     const back = await taskOf(t);
-    expect(back).toMatchObject({ status: "queued", attempts: 0, lease_owner: null, lease_missed: 0 });
-    expect(back.error).toMatch(/lost: two claims of its host did not list it/);
+    expect(back).toMatchObject({ status: "queued", attempts: 0, lease_owner: null, lease_missed: 0, host_losses: 1 });
+    expect(back.error).toMatch(/lost: two claims of its host did not list it; the attempt is given back/);
     expect(Date.now() - t0).toBeLessThanOrEqual(2 * MIN + 5000);
+  });
+
+  it("a host that keeps losing a task's lease spends its attempt once host_losses is spent (D54), and fails it on the last", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    await seedHost("h-loop");
+    const t = await seedTask({ name: "felix", pin: "h-loop", max_attempts: 1 });
+    expect((await claim("h-loop")).json.task.id).toBe(t);
+    // Lost twice already, by `lost` reports or by reconciliation: the counter is the same.
+    await env.DB.prepare("UPDATE build_tasks SET host_losses = 2 WHERE id = ?").bind(t).run();
+    for (const s of [150, 180]) {
+      vi.setSystemTime(t0 + s * 1000);
+      await claim("h-loop", { want: 0 });
+    }
+    const row = await taskOf(t);
+    expect(row).toMatchObject({ status: "failed", attempts: 1, host_losses: 3, lease_owner: "h-loop" });
+    expect(row.error).toMatch(/lost too often on its host: the attempt is spent/);
   });
 
   it("a fenced lease ends only when a claim stops listing it, however long it is listed", async () => {
@@ -419,7 +469,7 @@ describe("what the planner reads", () => {
       ["a host's leases", HOST_LEASES_SQL, ["w"], /SEARCH build_tasks USING INDEX idx_build_tasks_(lease|queue|kind) /],
       ["the held tasks", HELD_TASKS_SQL, ["w"], /SEARCH build_tasks USING INDEX idx_build_tasks_(lease|queue|kind) /],
       ["the replay", REPLAY_SQL, [now, "w", "c_x"], /SEARCH build_tasks USING INDEX idx_build_tasks_(lease|queue|kind) /],
-      ["a lost lease back", LOST_LEASE_SQL, ["e", 1, "w", "g"], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
+      ["a lost lease back", LOST_LEASE_SQL, ["e", 1, "w", "g", "2026-10-01T00:00:00Z"], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
       ["a login's stops", COUNT_LOGIN_STOPS_SQL, ["m1", now], /SEARCH worker_orders USING INDEX idx_worker_orders_issuer/],
     ];
     for (const [what, sql, args, want] of cases) {

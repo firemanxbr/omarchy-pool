@@ -24,7 +24,10 @@ ALTER TABLE factory_packages ADD COLUMN disk_gb INTEGER;
 
 -- Stop is per lease (design v2 §8.6): a host may have one open stop-task per
 -- task, so two Stops for two leases of one host are open at once; every other
--- kind keeps one open per worker (its task_id is NULL, counted as 0). The
+-- kind keeps one open per worker (its task_id is NULL, counted as 0). A legacy
+-- worker's stop-task names a task too, so the index alone no longer holds it
+-- to one open stop: its door does (orders.ts: only the task the worker holds
+-- now, not fenced already), as it did before. The
 -- index keeps its name and its leading (worker_id, kind): the claim's
 -- delivery, the sweep and a resume's close read through it as before. The
 -- table's other indexes are made again after it, in 0042's order, so the

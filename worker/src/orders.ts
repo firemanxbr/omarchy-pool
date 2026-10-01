@@ -1076,7 +1076,10 @@ export const COMMUNITY_RESTARTS_SQL = `SELECT COUNT(*) AS n FROM worker_orders W
  * issues at once cannot both pass a count. And the state the pool's own
  * kinds act on (#277, part 2): a drain only of a worker not drained, a
  * resume only of one that is, a stop only of the task the worker holds now,
- * leased to it and not stopped yet — each read by its primary key.
+ * leased to it and not stopped yet — each read by its primary key. A host's
+ * stop (#334) is checked against the login's thirty stops alone, and still
+ * counts in the login's twenty orders of every other kind: a person's
+ * hour of orders is one budget, the stops a wider one inside it.
  */
 export const ISSUE_SQL = `INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, via, rule, unless_agent_ok, task_id, site, issued_at, expires_at, baseline_at_issue, state, delivered_at, delivered_to, baseline)
 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
