@@ -1,0 +1,5 @@
+# #312: an override pointing a build image back at a tag no release pins.
+services:
+  dispatcher:
+    environment:
+      OMARCHY_BUILD_IMAGE_X86_64: docker.io/library/archlinux:base-devel

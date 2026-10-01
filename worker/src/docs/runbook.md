@@ -171,7 +171,8 @@ and a release with no agent change ships the very binaries the previous one
 did.
 
 The deploy step needs the `CLOUDFLARE_API_TOKEN` repository secret (Account →
-Workers Scripts: Edit, D1: Edit, Account Settings: Read; Zone → Workers Routes:
+Workers Scripts: Edit, D1: Edit, Workers R2 Storage: Edit (the rollback
+statements, below), Account Settings: Read; Zone → Workers Routes:
 Edit, Zone: Read, on **both** zones, `omarchy-pool.org` and `firemanxbr.org` —
 the routes span them). It is an account-owned token: Cloudflare dashboard →
 *Manage account → Account API tokens → omarchy-pool github-actions deploy →
@@ -186,7 +187,14 @@ vX.Y.Z (from …)". It goes back only to a release whose images passed both
 smoke starts (its `:vX.Y.Z` exists: a release that stopped at its smoke start
 still has a tag, and is refused), and it installs and builds that release's
 Worker before any tag moves; a deploy that fails puts the tags back where
-they were, and running the rollback again is safe. The updaters follow the
+they were, and running the rollback again is safe. It also signs a rollback
+statement (#314) before anything moves and stores it in R2 once that Worker
+is deployed (`rollback/<to>.json` and its `.sigstore.json` in
+`omarchy-packages`, relayed at `GET /api/v1/factory/rollback/<to>`): a host
+under the host agent goes below its floor only on one, within 14 days of the
+target's release (security-model, *Rollback statements*). A statement that
+did not reach R2 fails the run after the rest is done; running it again
+stores a freshly signed one. The updaters follow the
 pool's release down as they follow it up, within two minutes. Back past
 #277's last part, the updater that comes back is the older one: it follows
 at its own fifteen-minute round and takes no Update, until a release brings
@@ -523,6 +531,7 @@ Every release carries what a maintainer host takes from it (#311, design v2
 | `omarchy-host-vX.Y.Z.tar.gz.sigstore.json` | its keyless signature (a Sigstore bundle) by `release.yml` on main |
 | `omarchy-agent-x86_64-linux-musl`, `omarchy-agent-aarch64-linux-musl`, `omarchy-agent-aarch64-darwin` | the agent, the same bytes as long as the agent does not change; their provenance is attested |
 | `install.sh` | the one command, with that release's agent version and the three binaries' SHA-256 embedded; its provenance is attested |
+| `build-images.json` | the task build images by digest (#312), attached when the draft is created: the same two the bundle's `inner.images.build` names and its host set's dispatcher is given |
 
 The manifest's outer layer names the release, the agent and each binary's
 SHA-256; its `inner` carries the floor (`min_release`, `revoked`), the pool

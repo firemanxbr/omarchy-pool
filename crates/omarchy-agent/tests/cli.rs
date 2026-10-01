@@ -51,6 +51,20 @@ fn lint_set_is_clean_on_the_host_set_and_names_each_violation() {
         text(&o)
     );
 
+    // #312: a dispatcher whose build image is a tag, not the release's digest.
+    let o = run(&[
+        "lint-set",
+        &fx("lint/host"),
+        "--override",
+        &fx("lint/override/build-image-tag.yml"),
+    ]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        text(&o).contains("build_images:") && text(&o).contains("OMARCHY_BUILD_IMAGE_X86_64"),
+        "{}",
+        text(&o)
+    );
+
     let o = run(&[
         "lint-set",
         &fx("lint/host"),

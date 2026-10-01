@@ -8,9 +8,11 @@ name: Release
 # last tag (patch by default; the head commit's pull request label
 # `release:minor` or `release:major`, or the bump given, moves the other
 # numbers), binaries are built for both architectures, a GitHub release is
-# created as a draft with notes from every pull request since the last tag, the worker
-# image is pushed for both architectures — as `:<arch>-vX.Y.Z` first, every
-# role started from it on the runner (tests/image-smoke.sh), and only once
+# created as a draft with notes from every pull request since the last tag
+# (carrying build-images.json: the task build images, resolved to digests,
+# #312), the worker image is pushed for both architectures — as
+# `:<arch>-vX.Y.Z` first, every role started from it on the runner
+# (tests/image-smoke.sh), and only once
 # both architectures' have started, `:<arch>` and `:latest` (#277: an image
 # that does not start stops here, before any host can pull it, on either
 # architecture) — then the signed host bundle every maintainer host takes
@@ -183,14 +185,46 @@ jobs:
           path: agent/${{ matrix.asset }}
           if-no-files-found: error
 
+  build-images:
+    name: Task build images by digest
+    # The image every task's build container starts from, one per
+    # architecture, resolved to the digest its tag names now (#312,
+    # factory/bin/build-images): a tag that does not resolve fails the
+    # release before anything is published. The release attaches
+    # build-images.json (the manifest's inner.images.build), uploaded with
+    # the release itself (immutable releases): what the host bundle renders
+    # into the host set's dispatcher as OMARCHY_BUILD_IMAGE_AARCH64 and
+    # OMARCHY_BUILD_IMAGE_X86_64. The job summary shows both digests. The
+    # runner's own buildx answers; no setup action joins this job.
+    # Its outputs, the two digests, are what host-bundle renders and writes
+    # into manifest.json (#311): the same digests the release carries.
+    needs: version
+    runs-on: ubuntu-latest
+    outputs:
+      aarch64: ${{ steps.resolve.outputs.aarch64 }}
+      x86_64: ${{ steps.resolve.outputs.x86_64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          set -euo pipefail
+          mkdir -p dist && factory/bin/build-images dist/build-images.json
+          jq -r '"aarch64=\(.aarch64)", "x86_64=\(.x86_64)"' dist/build-images.json >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-build-images
+          path: dist/build-images.json
+          if-no-files-found: error
+
   publish:
     name: GitHub release (a draft)
     # Created as a draft (#311): assets can still be added to it (host-bundle
     # adds the agents, the signed host bundle and install.sh) and nobody
     # downloads from it yet. publish-release publishes it, which makes it
     # immutable, once every asset is on it; a release that stops before then
-    # stays a draft.
-    needs: [version, build]
+    # stays a draft. build-images.json (#312) is attached here, with the
+    # binaries, in the step that creates the draft.
+    needs: [version, build, build-images]
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -370,7 +404,7 @@ jobs:
     #     verify-agents as an artifact.
     # It runs no binary but this run's own agent: the earlier agents run in
     # verify-agents, which holds no signing token.
-    needs: [version, publish, agent, worker-image-manifest]
+    needs: [version, publish, agent, worker-image-manifest, build-images]
     environment: release
     permissions:
       contents: read
@@ -383,13 +417,12 @@ jobs:
       GH_REPO: ${{ github.repository }}
       IMAGE: ghcr.io/${{ github.repository_owner }}/omarchy-worker
       VERSION: ${{ needs.version.outputs.version }}
-      # The task build images by digest, rendered into the dispatcher and
-      # listed in the manifest. #312's build-images job resolves them
-      # (needs.build-images.outputs.aarch64 and .x86_64 replace these two
-      # lines); until then, the bases the worker image is built from, pinned
-      # by digest (#308).
-      BUILD_AARCH64: docker.io/menci/archlinuxarm@sha256:4d3531dbac23dbe21aeae9372aafe474f506ec4fb5d453b3e7c5ce3440041954
-      BUILD_X86_64: docker.io/library/archlinux@sha256:51dd3d24f7fba779e7c471caeee7804c50e8c134ad948e19685a1c83a42facc3
+      # The task build images by digest (#312): what the build-images job
+      # resolved and the release carries as build-images.json, rendered into
+      # the host set's dispatcher (@BUILD_AARCH64@, @BUILD_X86_64@) and
+      # written into manifest.json's inner.images.build.
+      BUILD_AARCH64: ${{ needs.build-images.outputs.aarch64 }}
+      BUILD_X86_64: ${{ needs.build-images.outputs.x86_64 }}
     steps:
       - uses: actions/checkout@v4
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1

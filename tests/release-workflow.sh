@@ -27,6 +27,14 @@
 #   deploy needs publish-release. factory/bin/publish-release and
 #   factory/bin/verify-with-agents run here against a stubbed gh and stub
 #   agents.
+# - build-images (#312) resolves each task build image to a digest with
+#   factory/bin/build-images, which fails when a tag does not resolve —
+#   checked here against a stubbed buildx — and publish needs it and attaches
+#   build-images.json in the step that creates the release. The script's
+#   tags are pkg-repo's fallback tags (crates/pkg-repo/src/work.rs). Its
+#   outputs (the two digests) are what host-bundle renders into the host
+#   set's dispatcher and writes into manifest.json's inner.images.build, so
+#   host-bundle needs it.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 W="$here/../.github/workflows/release.yml"
@@ -189,19 +197,19 @@ chmod +x "$tmp/bin/gh"
 v=v1.2.3
 export GH_LOG="$tmp/gh.log" GH_STATE="$tmp/state" GH_ASSETS="$tmp/assets" GH_ASSETS_DIR="$tmp/assets.d" GH_RELEASES="$tmp/releases" STUB_AGENTS="$tmp/agents" \
   GH_DRAFT="$tmp/draft" PUBLISHING="$v" STUB_UNATTESTED=""
-all="omarchy-pool-$v-x86_64-linux.tar.gz omarchy-pool-$v-x86_64-linux.tar.gz.sha256 omarchy-pool-$v-aarch64-linux.tar.gz omarchy-pool-$v-aarch64-linux.tar.gz.sha256 omarchy-staging.pub.asc omarchy-agent-x86_64-linux-musl omarchy-agent-aarch64-linux-musl omarchy-agent-aarch64-darwin omarchy-host-$v.tar.gz omarchy-host-$v.tar.gz.sigstore.json install.sh"
+all="omarchy-pool-$v-x86_64-linux.tar.gz omarchy-pool-$v-x86_64-linux.tar.gz.sha256 omarchy-pool-$v-aarch64-linux.tar.gz omarchy-pool-$v-aarch64-linux.tar.gz.sha256 omarchy-staging.pub.asc omarchy-agent-x86_64-linux-musl omarchy-agent-aarch64-linux-musl omarchy-agent-aarch64-darwin omarchy-host-$v.tar.gz omarchy-host-$v.tar.gz.sigstore.json install.sh build-images.json"
 # The draft holds the bytes the run made; sums is their SHA-256, as release.yml's publish-release step writes it.
 mkdir -p "$GH_DRAFT"
 for a in $all; do echo "the run's $a" > "$GH_DRAFT/$a"; done
 (cd "$GH_DRAFT" && for f in *; do if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi; done) > "$tmp/sums"
 publish() { PATH="$tmp/bin:$PATH" "$here/../factory/bin/publish-release" "$v" "$tmp/sums" > "$tmp/out" 2>&1; }
-for gone in omarchy-host-$v.tar.gz.sigstore.json omarchy-agent-aarch64-darwin install.sh; do
+for gone in omarchy-host-$v.tar.gz.sigstore.json omarchy-agent-aarch64-darwin install.sh build-images.json; do
   echo true > "$GH_STATE"; : > "$GH_LOG"; tr ' ' '\n' <<<"$all" | grep -vxF "$gone" > "$GH_ASSETS"
   publish && fail "a draft without $gone was published"
   grep -qF "lacks $gone; it stays a draft" "$tmp/out" || fail "the refusal names $gone: $(cat "$tmp/out")"
   grep -q 'release edit' "$GH_LOG" && fail "a draft without $gone was edited"
 done
-echo true > "$GH_STATE"; : > "$GH_LOG"; { tr ' ' '\n' <<<"$all"; echo build-images.json; } > "$GH_ASSETS"
+echo true > "$GH_STATE"; : > "$GH_LOG"; { tr ' ' '\n' <<<"$all"; echo notes.txt; } > "$GH_ASSETS"
 publish || fail "a draft with every asset (and one more) is published: $(cat "$tmp/out")"
 grep -qx "release edit $v --draft=false" "$GH_LOG" || fail "publish-release publishes the draft: $(cat "$GH_LOG")"
 : > "$GH_LOG"; publish || fail "a published release with every asset: nothing to do"
@@ -266,4 +274,69 @@ rm "$STUB_AGENTS/v1.0.2"
 withagents && fail "a release listing an agent that cannot be downloaded fails the release (a network error is not 'no agent')"
 grep -qF "v1.0.2 ships omarchy-agent-x86_64-linux-musl but it cannot be downloaded" "$tmp/out" || fail "the failure names the release: $(cat "$tmp/out")"
 echo "ok: verify-with-agents: the new agent and every earlier one of the last 30 days, the probe included; a refusal fails"
+
+images="$(job build-images)"
+[[ -n "$images" ]] || fail "release.yml has a build-images job"
+grep -qF 'factory/bin/build-images dist/build-images.json' <<<"$images" || fail "build-images runs factory/bin/build-images"
+grep -qF 'name: dist-build-images' <<<"$images" || fail "build-images uploads build-images.json beside the binaries (dist-*)"
+pub="$(job publish)"
+grep -qE '^    needs: \[[^]]*\bbuild-images\b[^]]*\]$' <<<"$pub" || fail "publish waits for the build images: $(grep needs: <<<"$pub")"
+grep -qF 'pattern: dist-*' <<<"$pub" && grep -qF 'gh release create "$VERSION" "${args[@]}" dist/*' <<<"$pub" \
+  || fail "publish attaches build-images.json when it creates the release (immutable releases)"
+echo "ok: the release resolves both task build images to digests before it is published, and carries them"
+
+# The host bundle renders the digests build-images resolved, not a stand-in (#311, #312).
+grep -qF 'aarch64: ${{ steps.resolve.outputs.aarch64 }}' <<<"$images" && grep -qF 'x86_64: ${{ steps.resolve.outputs.x86_64 }}' <<<"$images" \
+  || fail "build-images hands both digests over as its outputs"
+needs_has "$hbj" build-images || fail "host-bundle needs build-images: $(needs_of "$hbj")"
+grep -qF 'BUILD_AARCH64: ${{ needs.build-images.outputs.aarch64 }}' <<<"$hbj" && grep -qF 'BUILD_X86_64: ${{ needs.build-images.outputs.x86_64 }}' <<<"$hbj" \
+  || fail "host-bundle renders the build images build-images resolved"
+grep -qE '^      BUILD_(AARCH64|X86_64): docker\.io/' <<<"$hbj" && fail "host-bundle names no build image of its own"
+grep -qF -- '--build-images build-images.json' <<<"$hbj" || fail "host-bundle writes the build images into manifest.json (inner.images.build)"
+echo "ok: the host bundle carries the build images the release resolved"
+
+mkdir -p "$tmp/bin"
+# A stubbed buildx: the digest STUB_<repo> names for that tag, or what STUB_FAIL says.
+cat > "$tmp/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1 $2 $3" == "buildx imagetools inspect" ]] || { echo "unexpected: $*" >&2; exit 2; }
+case "$4" in
+  docker.io/menci/archlinuxarm:base-devel) d="sha256:$(printf 'a%.0s' {1..64})" ;;
+  docker.io/library/archlinux:base-devel) d="sha256:$(printf 'b%.0s' {1..64})" ;;
+  *) echo "no such tag $4" >&2; exit 1 ;;
+esac
+[[ "${STUB_FAIL:-}" == "$4" ]] && { echo "manifest unknown" >&2; exit 1; }
+[[ "${STUB_GARBAGE:-}" == "$4" ]] && d="${STUB_VALUE-}"
+printf '"%s"\n' "$d"
+STUB
+chmod +x "$tmp/bin/docker"
+resolve() { PATH="$tmp/bin:$PATH" GITHUB_STEP_SUMMARY="$tmp/summary" "$here/../factory/bin/build-images" "$tmp/build-images.json" 2>"$tmp/err"; }
+: > "$tmp/summary"
+resolve || { cat "$tmp/err" >&2; fail "both tags resolve"; }
+want_arm="docker.io/menci/archlinuxarm@sha256:$(printf 'a%.0s' {1..64})"
+want_x86="docker.io/library/archlinux@sha256:$(printf 'b%.0s' {1..64})"
+python3 - "$tmp/build-images.json" "$want_arm" "$want_x86" <<'PY' || fail "build-images.json is the manifest's inner.images.build"
+import json, sys
+got = json.load(open(sys.argv[1]))
+assert got == {"aarch64": sys.argv[2], "x86_64": sys.argv[3]}, got
+PY
+grep -qF "$want_arm" "$tmp/summary" && grep -qF "$want_x86" "$tmp/summary" || fail "the job summary shows both digests: $(cat "$tmp/summary")"
+for tag in docker.io/menci/archlinuxarm:base-devel docker.io/library/archlinux:base-devel; do
+  rm -f "$tmp/build-images.json"
+  STUB_FAIL="$tag" resolve && fail "$tag not answering fails the release"
+  grep -qF "$tag" "$tmp/err" || fail "the failure names $tag: $(cat "$tmp/err")"
+  [[ -e "$tmp/build-images.json" ]] && fail "no build-images.json when $tag does not resolve"
+  for value in "" "<nil>" "sha256:abc" "sha512:$(printf 'c%.0s' {1..128})"; do
+    STUB_GARBAGE="$tag" STUB_VALUE="$value" resolve && fail "$tag answering ${value:-nothing} fails the release"
+    [[ -e "$tmp/build-images.json" ]] && fail "no build-images.json when $tag answers ${value:-nothing}"
+  done
+done
+echo "ok: build-images resolves both tags to digests, and fails when either does not resolve"
+
+# The tags the release resolves are the ones pkg-repo falls back to.
+for tag in $(sed -n 's/^[A-Z0-9_]*_TAG=//p' "$here/../factory/bin/build-images"); do
+  grep -qF "tag: \"$tag\"," "$here/../crates/pkg-repo/src/work.rs" || fail "pkg-repo falls back to $tag"
+done
+[[ "$(grep -c '^[A-Z0-9_]*_TAG=' "$here/../factory/bin/build-images")" == 2 ]] || fail "one tag per architecture"
+echo "ok: the release resolves the tags pkg-repo falls back to"
 echo "RELEASE WORKFLOW OK"

@@ -3,7 +3,8 @@
 # The release was created as a draft; this publishes it, which is when it
 # becomes immutable (immutable releases are on), and only once every asset a
 # host or the worker image needs is on it: the binaries, the three agent
-# binaries, the signed host bundle and its Sigstore bundle, and install.sh.
+# binaries, the signed host bundle and its Sigstore bundle, install.sh, and
+# build-images.json (the task build images by digest, #312).
 # A release missing one stays a draft, and the pool stays on the previous
 # release (deploy needs this job). Run again on a published release with
 # every asset, it changes nothing. want=() must name what release.yml's
@@ -25,6 +26,7 @@ want=(
   omarchy-staging.pub.asc
   omarchy-agent-x86_64-linux-musl omarchy-agent-aarch64-linux-musl omarchy-agent-aarch64-darwin
   "omarchy-host-$v.tar.gz" "omarchy-host-$v.tar.gz.sigstore.json" install.sh
+  build-images.json
 )
 state="$(gh release view "$v" --json isDraft --jq .isDraft)"
 have="$(gh release view "$v" --json assets --jq '.assets[].name')"

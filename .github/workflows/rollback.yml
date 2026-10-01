@@ -24,6 +24,12 @@ name: Rollback
 # maintainer's approval like release (#308): a holder of `actions: write`
 # cannot send every host back alone. Its signing identity is
 # https://github.com/firemanxbr/omarchy-pool/.github/workflows/rollback.yml@refs/heads/main.
+# Besides the images, it signs the rollback statement (#314) with that
+# identity, `cosign sign-blob --bundle` before anything moves, and stores it
+# in R2 once the Worker is deployed: a maintainer's host under the host agent
+# goes below its floor only on such a statement, which the pool relays at
+# GET /api/v1/factory/rollback/<to> and cannot forge (docs/security-model,
+# *Rollback statements*). The deploy token needs R2 Storage: Edit for it.
 on:
   workflow_dispatch:
     inputs:

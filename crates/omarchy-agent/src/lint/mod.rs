@@ -315,7 +315,13 @@ const ENVIRONMENT: &[&str] = &[
     "OMARCHY_WORKER_IMAGE",
     "OMARCHY_TASK_SUBNETS",
 ];
-const BUILD_IMAGES: &[&str] = &["OMARCHY_BUILD_IMAGE_AARCH64", "OMARCHY_BUILD_IMAGE_X86_64"];
+/// The build images every task container starts from (#312), each as its placeholder: the
+/// release renders it to the manifest's digest (`inner.images.build`). Missing, empty, a
+/// tag or any other value would leave pkg-repo on an unpinned tag, so all are refused.
+const BUILD_IMAGES: &[(&str, &str)] = &[
+    ("OMARCHY_BUILD_IMAGE_AARCH64", "@BUILD_AARCH64@"),
+    ("OMARCHY_BUILD_IMAGE_X86_64", "@BUILD_X86_64@"),
+];
 
 /// Agent keys and the GitHub token: never interpolated into the set, anywhere.
 fn is_secret_variable(name: &str) -> bool {
@@ -412,11 +418,14 @@ fn check_service(
         out.push(violation("image", format!("{name}: no image")));
     }
     let env = service.get("environment");
-    for key in BUILD_IMAGES {
-        if env.and_then(|e| e.get(key)).is_none() {
+    for (key, placeholder) in BUILD_IMAGES {
+        let value = env.and_then(|e| e.get(key));
+        if value.and_then(Node::as_str) != Some(*placeholder) {
             out.push(violation(
                 "build_images",
-                format!("{name}: the dispatcher must carry {key}"),
+                format!(
+                    "{name}: the dispatcher must carry {key}: \"{placeholder}\", found {value:?}"
+                ),
             ));
         }
     }
