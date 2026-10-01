@@ -41,6 +41,9 @@ aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sy
 base64 = "0.22"
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+# capacity/ only: statvfs on the work root and the engine's data root, and the page size,
+# without unsafe code.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "param"] }
 
 [dev-dependencies]
 rcgen = "0.14"

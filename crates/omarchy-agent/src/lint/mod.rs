@@ -857,7 +857,7 @@ fn is_relative_inside(path: &Path) -> bool {
     true
 }
 
-fn is_plain_absolute(path: &Path) -> bool {
+pub(crate) fn is_plain_absolute(path: &Path) -> bool {
     path.is_absolute()
         && path
             .components()
