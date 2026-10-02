@@ -42,7 +42,7 @@ pub(crate) struct Tools {
 const DOCKER: &str = "docker";
 const COMPOSE: &str = "docker-compose";
 
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn open(dir: &Path, pins: &ToolPins) -> Result<Tools, String> {
     })
 }
 
-fn file_sha256(path: &Path) -> Result<String, String> {
+pub(crate) fn file_sha256(path: &Path) -> Result<String, String> {
     let mut f = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut h = Sha256::new();
     std::io::copy(&mut (&mut f).take(MAX_TOOL), &mut h)

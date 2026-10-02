@@ -480,7 +480,40 @@ pub(crate) fn publish(
     revoked: &[&str],
     extra: &str,
 ) {
-    let mut m = tests_support::manifest_json(r, min_release, revoked);
+    let m = tests_support::manifest_json(r, min_release, revoked);
+    publish_manifest(remote, r, created, m, extra);
+}
+
+/// The agent a release ships (#316): its version, its `min_agent`, and the binary for
+/// this platform, published as the release asset the manifest names with its SHA-256.
+pub(crate) struct Ships<'a> {
+    pub version: &'a str,
+    pub min_agent: &'a str,
+    pub binary: &'a [u8],
+}
+
+/// Publishes `r` (created a day before T0) shipping `agent`.
+pub(crate) fn publish_agent(remote: &Remote, r: &str, agent: &Ships) {
+    let mut m = tests_support::manifest_json(r, "v1.0.0", &[]);
+    m["agent"]["version"] = agent.version.into();
+    m["min_agent"] = agent.min_agent.into();
+    let platform = super::tools::platform().expect("a platform with an agent build");
+    m["agent"][platform]["sha256"] = super::tools::sha256_hex(agent.binary).into();
+    let asset = m["agent"][platform]["asset"].as_str().unwrap().to_owned();
+    remote
+        .borrow_mut()
+        .assets
+        .insert(format!("{r}/{asset}"), agent.binary.to_vec());
+    publish_manifest(remote, r, "2027-01-14T08:00:00Z", m, "");
+}
+
+fn publish_manifest(
+    remote: &Remote,
+    r: &str,
+    created: &str,
+    mut m: serde_json::Value,
+    extra: &str,
+) {
     m["created"] = created.into();
     m["inner"]["pools"] = serde_json::json!(["https://pkgs.omarchy-pool.org"]);
     let compose = rendered_compose(extra);
@@ -502,8 +535,21 @@ pub(crate) fn publish(
 
 /// A rollback statement rollback.yml "signed", relayed by the pool.
 pub(crate) fn relay_statement(remote: &Remote, seq: u64, to: &str, through: &str, sig: &[u8]) {
+    relay_statement_agent(remote, seq, to, through, sig, None);
+}
+
+/// The same, with an `agent_to` (#316).
+pub(crate) fn relay_statement_agent(
+    remote: &Remote,
+    seq: u64,
+    to: &str,
+    through: &str,
+    sig: &[u8],
+    agent_to: Option<&str>,
+) {
+    let agent_to = agent_to.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""));
     let json = format!(
-        r#"{{"schema":1,"seq":{seq},"to":"{to}","retracts_through":"{through}","issued":"2026-10-20T14:00:00Z","agent_to":null,"run":"https://github.com/firemanxbr/omarchy-pool/actions/runs/{seq}"}}"#
+        r#"{{"schema":1,"seq":{seq},"to":"{to}","retracts_through":"{through}","issued":"2026-10-20T14:00:00Z","agent_to":{agent_to},"run":"https://github.com/firemanxbr/omarchy-pool/actions/runs/{seq}"}}"#
     );
     remote.borrow_mut().statements.insert(
         Release::parse(to).unwrap(),
@@ -610,6 +656,28 @@ impl World {
             &self.signed_at,
         );
         self.agent.resume(self.now);
+    }
+
+    /// The running agent installed as install.sh installs it (#316):
+    /// `versions/<it>/omarchy-agent`, `current` pointing there, and running from there.
+    pub fn install_layout(&mut self) {
+        let me = self.agent.version;
+        let bin = self.agent.paths.binary(me);
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, b"#!/bin/sh\nexit 0\n").unwrap();
+        let current = self.agent.paths.current();
+        let _ = fs::remove_file(&current);
+        std::os::unix::fs::symlink(format!("versions/{me}"), &current).unwrap();
+        self.agent.exe = Some(bin);
+    }
+
+    /// The agent exits and the service manager starts what `current` points at, played
+    /// by an agent of `version` (only what is on disk survives).
+    pub fn restart_as(&mut self, version: crate::version::Version) {
+        self.restart();
+        self.agent.version = version;
+        self.agent.exe = Some(self.agent.paths.binary(version));
+        self.agent.settle(self.now).unwrap();
     }
 
     pub fn set_dir(&self) -> PathBuf {

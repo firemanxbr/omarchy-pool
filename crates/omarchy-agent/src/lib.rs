@@ -16,7 +16,8 @@
 //! [`pool`] (HTTPS to the pool) and [`enroll`] (the one-time token, the owner's Confirm,
 //! the host worker token).
 //!
-//! Install and self-update come in their own P1 issues and build on the types defined here.
+//! Self-update (#316) is part of [`run`]; install comes in its own P1 issue and builds on
+//! the types defined here.
 
 pub mod capacity;
 pub mod enroll;
@@ -77,4 +78,9 @@ pub mod fuzz {
 
 /// This agent's own version (design v2 D17); a manifest whose `min_agent` is above it, or
 /// whose schema is newer than this agent knows, means "update myself first".
-pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// `tests/agent-self-update.sh` builds test agents with other versions
+/// (`OMARCHY_AGENT_TEST_VERSION`, at build time); every other build is the crate's.
+pub const AGENT_VERSION: &str = match option_env!("OMARCHY_AGENT_TEST_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};

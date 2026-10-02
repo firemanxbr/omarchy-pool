@@ -3,9 +3,13 @@
 //! rollout in flight, quarantines, the last round and the poll schedule.
 //!
 //! Written before each step acts, atomically (a temporary file, fsync, rename), so a
-//! restart anywhere resumes where it was. Read leniently: unknown fields are ignored, so a
-//! later agent's fields survive an older reader. A file that is there but unreadable is a
-//! local error (exit 78), never "start from nothing", since that would forget the floor.
+//! restart anywhere resumes where it was. Read leniently (#316): unknown fields are
+//! ignored, and a field this agent cannot read (a step or a quarantine a later agent
+//! wrote) starts from its default, so the agent a self-update rolls back to, or a signed
+//! `agent_to` moves down to, reads the state the newer one wrote. The trust fields are
+//! the exception: a file that is there but whose floor, `min_release`, `revoked`,
+//! `statement_seq` or `applied` cannot be read is a local error (exit 78), never "start
+//! from nothing", since that would forget the floor.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -14,7 +18,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::version::Release;
+use crate::version::{Release, Version};
 
 /// The layout this agent writes; readers accept any (lenient).
 pub const STATE_SCHEMA: u32 = 1;
@@ -50,6 +54,9 @@ pub struct State {
     pub rollout: Rollout,
     pub round: Round,
     pub poll: Poll,
+    /// An agent version a self-update rolled back from: skipped until a higher one
+    /// (design v2 §16.3).
+    pub agent_skip: Option<Version>,
 }
 
 impl Default for State {
@@ -70,6 +77,7 @@ impl Default for State {
             rollout: Rollout::default(),
             round: Round::default(),
             poll: Poll::default(),
+            agent_skip: None,
         }
     }
 }
@@ -228,14 +236,63 @@ pub fn load(path: &Path) -> Result<Option<State>, String> {
         }
         Ok(_) => fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?,
     };
-    parse(&bytes)
-        .map(Some)
-        .map_err(|e| format!("{}: {e}", path.display()))
+    let (state, dropped) = read(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !dropped.is_empty() {
+        eprintln!(
+            "{}: {} written by another agent version cannot be read here and start from their defaults",
+            path.display(),
+            dropped.join(", ")
+        );
+    }
+    Ok(Some(state))
 }
+
+/// The fields a reader may leave at their default when it cannot read them: none of
+/// them holds a trust decision. A dropped `rollout` is a round that starts again.
+const LENIENT: &[&str] = &[
+    "agent",
+    "target",
+    "quarantine",
+    "update_seen",
+    "tools",
+    "pulled",
+    "rollout",
+    "round",
+    "poll",
+    "agent_skip",
+];
 
 /// The lenient parser `load` uses (and the fuzz target).
 pub fn parse(bytes: &[u8]) -> Result<State, String> {
-    serde_json::from_slice(bytes).map_err(|e| e.to_string())
+    read(bytes).map(|(s, _)| s)
+}
+
+/// The state, and the fields left at their default because this agent cannot read them.
+fn read(bytes: &[u8]) -> Result<(State, Vec<String>), String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    // An object only: serde would read `[]` as a state with no floor.
+    if !value.is_object() {
+        return Err("not a JSON object".into());
+    }
+    let first = match serde_json::from_value::<State>(value.clone()) {
+        Ok(s) => return Ok((s, Vec::new())),
+        Err(e) => e.to_string(),
+    };
+    let serde_json::Value::Object(mut fields) = value else {
+        return Err(first);
+    };
+    let mut dropped = Vec::new();
+    fields.retain(|k, v| {
+        let keep = !LENIENT.contains(&k.as_str())
+            || serde_json::from_value::<State>(serde_json::json!({ k.as_str(): v })).is_ok();
+        if !keep {
+            dropped.push(k.clone());
+        }
+        keep
+    });
+    serde_json::from_value(serde_json::Value::Object(fields))
+        .map(|s| (s, dropped))
+        .map_err(|_| first)
 }
 
 /// Writes `state.json` atomically: a sibling temporary file, fsync, rename.
@@ -314,6 +371,91 @@ mod tests {
         assert!(parse(br#"{"floor": "latest"}"#).is_err());
         fs::write(&path, b"{not json").unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn the_previous_agent_reads_a_state_json_a_newer_one_wrote() {
+        // A newer agent's file: a later schema, new fields, a step and a quarantine this
+        // agent has no word for. The trust fields are read; the rest starts from its
+        // default (a round that starts again), and nothing is refused.
+        let newer = br#"{
+            "state_schema": 2, "agent": "0.9.0",
+            "floor": "v1.4.0", "min_release": "v1.2.0", "revoked": ["v1.3.1"],
+            "statement_seq": 3, "applied": "v1.4.0", "target": "v1.5.0",
+            "quarantine": {"v1.5.0": {"until": null, "reverts": 1, "why": {"new": true}}},
+            "rollout": {"step": {"state": "gate", "since": 5}, "target": "v1.5.0"},
+            "round": {"outcome": "ok", "at": 7, "detail": "x", "trace": [1]},
+            "poll": {"next_at": "soon"},
+            "agent_skip": "0.8.0",
+            "settings": {"profiles": ["build"]}
+        }"#;
+        let s = parse(newer).unwrap();
+        assert_eq!(
+            (s.floor, s.min_release, s.applied, s.statement_seq),
+            (
+                Release::parse("v1.4.0"),
+                Release::parse("v1.2.0"),
+                Release::parse("v1.4.0"),
+                Some(3)
+            )
+        );
+        assert!(s.revoked.contains(&Release(Version(1, 3, 1))));
+        assert_eq!(s.rollout.step, Step::Idle);
+        assert_eq!(s.round.outcome, "ok");
+        assert_eq!(s.poll, Poll::default());
+        assert_eq!(s.agent_skip, Version::parse("0.8.0"));
+        assert_eq!(s.target, Release::parse("v1.5.0"));
+        // The quarantine's extra field is ignored, not dropped.
+        assert_eq!(s.quarantine.len(), 1);
+
+        // But a trust field this agent cannot read is never "no floor".
+        for bad in [
+            r#"{"floor": {"v": 2}}"#,
+            r#"{"revoked": "all"}"#,
+            r#"{"applied": 1}"#,
+            r#"{"statement_seq": "3"}"#,
+            r#"{"min_release": "latest"}"#,
+        ] {
+            assert!(parse(bad.as_bytes()).is_err(), "{bad}");
+        }
+        assert!(parse(b"[]").is_err());
+
+        // And the file this agent writes is one the previous agent (#315, schema 1, no
+        // agent_skip) reads: the same names, one field more, which it ignores.
+        let dir = tempdir();
+        let path = dir.join("state.json");
+        let mine = State {
+            agent_skip: Version::parse("0.3.0"),
+            ..State::default()
+        };
+        save(&path, &mine).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["state_schema"], STATE_SCHEMA);
+        assert_eq!(STATE_SCHEMA, 1);
+        let previous = [
+            "state_schema",
+            "agent",
+            "floor",
+            "min_release",
+            "revoked",
+            "statement_seq",
+            "applied",
+            "target",
+            "quarantine",
+            "update_seen",
+            "tools",
+            "pulled",
+            "rollout",
+            "round",
+            "poll",
+        ];
+        let added: Vec<&String> = v
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| !previous.contains(&k.as_str()))
+            .collect();
+        assert_eq!(added, ["agent_skip"]);
     }
 
     #[test]
