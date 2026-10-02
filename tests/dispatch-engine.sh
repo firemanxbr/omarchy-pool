@@ -127,7 +127,8 @@ class H(BaseHTTPRequestHandler):
         return body
     def do_GET(self):
         self.record()
-        if self.path == "/api/v1/factory/workers/self": return self.send(200, {"id": host})
+        # Who the host is answers only to its worker token, as the pool does (a dispatcher that asked without it never got ready).
+        if self.path == "/api/v1/factory/workers/self": return self.send(200, {"id": host}) if self.headers.get("authorization") == "Bearer omw_it" else self.send(401, {"error": "unauthorized"})
         return self.send(404, {"error": "none"})
     def do_PUT(self):
         self.record(); return self.send(200, {})
