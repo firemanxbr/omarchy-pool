@@ -371,7 +371,8 @@ describe("the host worker token", () => {
     const enqueue = await issueJobToken(env, { t: 1, k: "enqueue", s: scopesFor("enqueue", 1, "project", {}), e: Math.floor(Date.now() / 1000) + 3600, w: "w-pool" });
     const q = await call("POST", "/factory/enqueue", { token: enqueue, body: { name: "hosttool", pkgbuild_ref: "abc123", reason: "test", arches: ["aarch64"], version: "1.0-1" } });
     expect(q.status, JSON.stringify(q.json)).toBe(201);
-    const c = await call("POST", "/factory/claim", { token, body: { arch: "aarch64" } });
+    // A host claims as its dispatcher does (#334): a claim_id, want, its leases and its capacity.
+    const c = await call("POST", "/factory/claim", { token, body: { arch: "aarch64", claim_id: "c_rotating01", want: 1, leases: [], capacity: STUDIO } });
     expect(c.status, JSON.stringify(c.json)).toBe(200);
     const job = c.json.token;
     // Rotation: a new token, the old one still good for ten minutes.

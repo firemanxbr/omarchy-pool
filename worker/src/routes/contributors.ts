@@ -330,8 +330,12 @@ export interface WorkerIdentity {
   job_task?: number;
   /** The row as the orders path reads it (#277, orders.ts): read with the token, in the same seek, so a claim pays no read for its orders. */
   orders?: OrdersRow;
+  /** #321: 'host' for a host's registration, which claims with its capacity and leases (#334); 'legacy' for every other. */
+  kind?: string | null;
   /** A host's registration (#321): its host, whose status and owner every claim checks (#322). */
   host_id?: string | null;
+  /** …and the job token's lease generation (#334, D46): a host lease's uploads are taken only from a token of that very lease. */
+  job_gen?: string | null;
 }
 
 /**
@@ -341,16 +345,16 @@ export interface WorkerIdentity {
  * recreated with the new one meanwhile, and nothing it runs notices. That
  * second read happens only when the first finds nothing.
  */
-export const WORKER_BY_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, host_id, ${ORDERS_COLUMNS} FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL`;
-export const WORKER_BY_PREV_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, host_id, ${ORDERS_COLUMNS} FROM build_workers
+export const WORKER_BY_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, kind, host_id, ${ORDERS_COLUMNS} FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL`;
+export const WORKER_BY_PREV_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, kind, host_id, ${ORDERS_COLUMNS} FROM build_workers
   WHERE id = (SELECT worker_id FROM hosts WHERE prev_token_hash = ? AND prev_token_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND status = 'active') AND revoked_at IS NULL`;
 export async function workerOf(request: Request, env: Env): Promise<WorkerIdentity | null> {
   const token = bearer(request);
   if (!token.startsWith("omw_")) return null;
-  type Row = OrdersRow & { mode: string; mode_by: string | null; packages: string | null; arch: string; host_id: string | null };
+  type Row = OrdersRow & { mode: string; mode_by: string | null; packages: string | null; arch: string; kind: string | null; host_id: string | null };
   const hash = await sha256Hex(token);
   const row = (await env.DB.prepare(WORKER_BY_TOKEN_SQL).bind(hash).first<Row>()) ?? (await env.DB.prepare(WORKER_BY_PREV_TOKEN_SQL).bind(hash).first<Row>());
-  return row ? { id: row.id, owner: row.owner, mode: row.mode, mode_by: row.mode_by, packages: row.packages ? JSON.parse(row.packages) : [], arch: row.arch, trust: row.trust, orders: row, host_id: row.host_id } : null;
+  return row ? { id: row.id, owner: row.owner, mode: row.mode, mode_by: row.mode_by, packages: row.packages ? JSON.parse(row.packages) : [], arch: row.arch, trust: row.trust, kind: row.kind, host_id: row.host_id, orders: row } : null;
 }
 
 /**
@@ -1194,11 +1198,17 @@ const AUDIT_FILES = ["audit.json", "audit.md"];
 /** What the trial job adds: the transcript of the real pacman that installed the build from the lab. */
 const TRIAL_FILES = ["trial.log"];
 
+/**
+ * A token of an earlier lease of the task (#334, D46): a host's lease is acted on only with the job token of that very lease — the
+ * same host may hold the task again under a new generation, and the old container's uploads must not land in the new lease's space.
+ */
+const staleLease = (id: number) => json({ error: `this token is of an earlier lease of task ${id}: nothing of it is taken`, stop: true, state: "leased" }, 409);
+
 /** A task stopped from its worker's page (#277): its uploads are refused, as its heartbeats and reports are — the worker stops on it. */
 const STOPPING = { error: "stopped from its worker's page: nothing of this task is taken any more — it goes back to the queue once its worker has stopped it", stop: true, state: "stopping" };
 
 export async function handleStagingPut(taskId: number, filename: string, request: Request, env: Env, w: WorkerIdentity): Promise<Response> {
-  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null }>();
+  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order, lease_gen FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null; lease_gen: string | null }>();
   if (!task) return json({ error: "no such task" }, 404);
   const space = stagingOwner(task);
   if (!space) return json({ error: "project tasks publish to the pool, not to staging" }, 400);
@@ -1211,11 +1221,13 @@ export async function handleStagingPut(taskId: number, filename: string, request
     if (!allowed.includes(filename)) return json({ error: `a ${w.job} uploads ${allowed.join(" and ")}` }, 400);
     // …and only while the job's own task is still this worker's (#277): the path names the staged build, not the job, so a stopped
     // or requeued audit's token — valid until its lease's end — would otherwise overwrite the report its next run attaches.
-    const own = w.job_task ? await env.DB.prepare("SELECT status, lease_owner, stop_order FROM build_tasks WHERE id = ?").bind(w.job_task).first<{ status: string; lease_owner: string | null; stop_order: string | null }>() : null;
+    const own = w.job_task ? await env.DB.prepare("SELECT status, lease_owner, stop_order, lease_gen FROM build_tasks WHERE id = ?").bind(w.job_task).first<{ status: string; lease_owner: string | null; stop_order: string | null; lease_gen: string | null }>() : null;
     if (!own || own.status !== "leased" || own.lease_owner !== w.id) return json({ error: `the ${w.job}'s own task${w.job_task ? ` (${w.job_task})` : ""} is ${own?.status ?? "unknown"}: the lease is not yours`, stop: true, state: own?.status ?? "gone" }, 409);
+    if ((own.lease_gen ?? null) !== (w.job_gen ?? null)) return staleLease(w.job_task!);
     if (own.stop_order) return json(STOPPING, 409);
   } else {
     if (task.status !== "leased" || task.lease_owner !== w.id) return json({ error: "the lease is not yours" }, 409);
+    if ((task.lease_gen ?? null) !== (w.job_gen ?? null)) return staleLease(task.id);
     if (task.stop_order) return json(STOPPING, 409);
     // The builder never writes the report about its own build.
     if (AUDIT_FILES.includes(filename) || TRIAL_FILES.includes(filename)) return json({ error: `${filename} is written by the audit or trial job, not by the build` }, 403);
@@ -1248,10 +1260,11 @@ export async function handleStagingPut(taskId: number, filename: string, request
 }
 
 export async function handleStagingMultipart(taskId: number, filename: string, url: URL, request: Request, env: Env, w: WorkerIdentity): Promise<Response> {
-  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null }>();
+  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order, lease_gen FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null; lease_gen: string | null }>();
   const space = task ? stagingOwner(task) : null;
   if (!task || !space) return json({ error: "no such staging task" }, 404);
   if (task.status !== "leased" || task.lease_owner !== w.id) return json({ error: "the lease is not yours" }, 409);
+  if ((task.lease_gen ?? null) !== (w.job_gen ?? null)) return staleLease(task.id);
   if (task.stop_order) return json(STOPPING, 409);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$/.test(filename) || AUDIT_FILES.includes(filename)) return json({ error: "bad filename" }, 400);
   // Text evidence is checked whole at the single PUT (leak.ts); a multipart upload of it would go around that.

@@ -1,5 +1,5 @@
 import { json, type Env } from "./index";
-import { jobOf } from "./jobtoken";
+import { jobOf, type JobClaims } from "./jobtoken";
 import { contributorOf, isMaintainer, type Contributor } from "./routes/contributors";
 
 /**
@@ -16,7 +16,23 @@ export async function authorize(request: Request, env: Env, scope: string): Prom
   if (!job.s.includes(scope) && !job.s.some((s) => s.endsWith(":*") && scope.startsWith(s.slice(0, -1)))) {
     return json({ error: `job ${job.t} (${job.k}) may not ${scope}`, scopes: job.s }, 403);
   }
-  return null;
+  return leaseGone(env, job);
+}
+
+/**
+ * A host lease's token (`g`, #334, D46) writes only while its lease is
+ * still that lease: leased to its host, of that generation, not fenced by a
+ * Stop. The pool-wide scopes a project build or a trial carries (pool:write,
+ * release:<ring>, artifacts:*:<ring>) are refused to the old container of a
+ * lease stopped and claimed again, as its task routes are (owned()). A
+ * legacy token (no `g`) is unchanged.
+ */
+async function leaseGone(env: Env, job: JobClaims): Promise<Response | null> {
+  if (!job.g) return null;
+  const held = await env.DB.prepare("SELECT 1 AS ok FROM build_tasks WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_gen = ? AND stop_order IS NULL")
+    .bind(job.t, job.w, job.g)
+    .first<{ ok: number }>();
+  return held ? null : json({ error: `task ${job.t}'s lease this token was issued for is over: it writes nothing`, stop: true }, 409);
 }
 
 /** The signed-in maintainer, or the 401/403 to send. */
@@ -51,6 +67,6 @@ export async function authorizeArtifacts(request: Request, env: Env, releaseId: 
   const row = await env.DB.prepare("SELECT ring FROM releases WHERE id = ?").bind(releaseId).first<{ ring: string }>();
   if (!row) return json({ error: "no such release" }, 404);
   const job = await jobOf(request, env);
-  if (job && job.s.includes(`artifacts:${releaseId}`)) return null;
+  if (job && job.s.includes(`artifacts:${releaseId}`)) return leaseGone(env, job);
   return authorize(request, env, `artifacts:*:${row.ring}`);
 }

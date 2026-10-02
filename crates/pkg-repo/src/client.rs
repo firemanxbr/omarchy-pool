@@ -762,6 +762,15 @@ impl Api {
         })
     }
 
+    /// `GET` a JSON endpoint of the pool with a token of the caller's (a worker's own, not this
+    /// client's), retrying on 5xx: `GET /factory/workers/self` answers only to the worker's token.
+    pub fn get_json_as(&self, token: &str, path: &str) -> Result<serde_json::Value, RepoError> {
+        self.retry("get_json_as", || {
+            let resp = self.http.get(self.url(path)).bearer_auth(token).send()?;
+            Ok(Self::check(resp)?.json()?)
+        })
+    }
+
     /// `GET` a JSON document from any URL (a public feed), retrying on 5xx.
     pub fn get_external_json(&self, url: &str) -> Result<serde_json::Value, RepoError> {
         self.get_external_json_as(url, None)

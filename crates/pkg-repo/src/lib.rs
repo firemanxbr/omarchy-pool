@@ -8,6 +8,7 @@
 
 pub mod client;
 pub mod desc;
+pub mod dispatch;
 pub mod gate;
 pub mod ops;
 pub mod orders;

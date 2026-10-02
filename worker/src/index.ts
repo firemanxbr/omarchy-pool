@@ -503,7 +503,7 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (w) return w;
     const job = await jobOf(request, env);
     // The job's own task rides along (#277): an audit's or a trial's report names the staged build, and is taken only while the job's own task is still its worker's.
-    return job && job.s.includes(`staging:${taskId}`) ? { id: job.w, owner: null, mode: "", packages: [], arch: "", trust: "community", job: job.k, job_task: job.t } : null;
+    return job && job.s.includes(`staging:${taskId}`) ? { id: job.w, owner: null, mode: "", packages: [], arch: "", trust: "community", job: job.k, job_task: job.t, job_gen: job.g ?? null } : null;
   };
   if (method === "POST" && path === "/factory/claim") { const a = await workerActor(); return a instanceof Response ? a : handleClaim(request, env, a); }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/heartbeat$/)) && method === "POST") { const a = await workerActor(); return a instanceof Response ? a : handleHeartbeat(Number(m[1]), env, a); }

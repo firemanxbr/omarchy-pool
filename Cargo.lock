@@ -1317,6 +1317,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "zstd",
