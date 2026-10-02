@@ -9,13 +9,14 @@
 //!   invariants, on variable references, before any interpolation.
 //! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
 //!   owner's caps and the release's verified constants, into units (P1, #333).
+//! - [`run`]: the run loop (P1, #315): the host bundle rolled out by a state machine with
+//!   a guard, revert, quarantine and preemption, on the pinned compose driver.
 //!
 //! And the host's identity (#321): [`host`] (its Ed25519 key and the signed request),
 //! [`pool`] (HTTPS to the pool) and [`enroll`] (the one-time token, the owner's Confirm,
 //! the host worker token).
 //!
-//! The run loop, drivers, install and self-update come in P1 and build on the types defined
-//! here.
+//! Install and self-update come in their own P1 issues and build on the types defined here.
 
 pub mod capacity;
 pub mod enroll;
@@ -23,11 +24,12 @@ pub mod host;
 pub mod lint;
 pub mod manifest;
 pub mod pool;
+pub mod run;
 pub mod statement;
 pub mod verify;
+pub mod version;
 
 mod archive;
-mod version;
 
 /// Entry points for the fuzz targets (`fuzz/`): each runs a parser on arbitrary bytes and
 /// drops the result.
@@ -40,6 +42,12 @@ pub mod fuzz {
 
     pub fn statement(data: &[u8]) {
         let _ = crate::statement::parse(data);
+    }
+
+    /// `state.json` as the run loop reads it, and the pool's `follow` answer.
+    pub fn state(data: &[u8]) {
+        let _ = crate::run::state::parse(data);
+        let _ = crate::run::pool::parse_follow(data, "w_fuzz");
     }
 
     /// The bundle archive, then its manifest, as `verify --bundle` reads them once signed.

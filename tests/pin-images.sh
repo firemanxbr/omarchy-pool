@@ -14,12 +14,14 @@ digest() { # repository tag → repo@sha256:…
     "https://registry-1.docker.io/v2/$repo/manifests/$tag" | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}' | tr -d '\r'
 }
 
-x86="$(digest library/archlinux base)"; arm="$(digest menci/archlinuxarm base)"
-[[ -n "$x86" && -n "$arm" ]] || { echo "could not resolve a digest" >&2; exit 1; }
+x86="$(digest library/archlinux base)"; arm="$(digest menci/archlinuxarm base)"; bb="$(digest library/busybox 1.37.0)"
+[[ -n "$x86" && -n "$arm" && -n "$bb" ]] || { echo "could not resolve a digest" >&2; exit 1; }
 {
   echo "# Container images the checks run in, pinned by digest (tests/pin-images.sh, $(date -u +%F))."
   echo "# The tag is kept beside the digest for the reader; the digest is what pulls."
   echo "ARCHLINUX_BASE=\"docker.io/library/archlinux:base@$x86\""
   echo "ARCHLINUXARM_BASE=\"docker.io/menci/archlinuxarm:base@$arm\""
+  echo "# The host agent's stand-in dispatcher (tests/agent-run-loop.sh): sh, httpd and wget."
+  echo "BUSYBOX=\"docker.io/library/busybox:1.37.0@$bb\""
 } > "$OUT"
 cat "$OUT"

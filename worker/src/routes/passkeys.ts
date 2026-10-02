@@ -123,7 +123,7 @@ export async function holdsPasskey(env: Env, login: string): Promise<boolean> {
  * `passkey:reset:<login>`, `promote:force:<from>:<to>[:<arch>]` — so an
  * answer made for one act decides no other.
  */
-export const SUBJECT = new RegExp(String.raw`^(?:approve:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39}|promote:force:(?:${PROMOTED_RINGS.join("|")}):(?:${PROMOTED_RINGS.join("|")})(?::(?:${REPO_ARCHES.join("|")}))?)$`);
+export const SUBJECT = new RegExp(String.raw`^(?:approve:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39}|promote:force:(?:${PROMOTED_RINGS.join("|")}):(?:${PROMOTED_RINGS.join("|")})(?::(?:${REPO_ARCHES.join("|")}))?|host:(?:resume|retire):h_[0-9a-z]{10}|host:(?:cause|resume-all):[A-Za-z0-9-]{1,39})$`);
 
 /** A forced promotion's act (#284): the rings and the architecture it names, as the door and the Status page's button bind it. */
 export const forcedSubject = (from: string, to: string, arch?: string): string => `promote:force:${from}:${to}${arch ? `:${arch}` : ""}`;
@@ -134,6 +134,8 @@ function actOf(subject: string): { act: string; nothing: string } {
   if (kind === "approve") return { act: `approving build #${a}`, nothing: "nothing was decided" };
   if (kind === "block") return { act: `blocking ${b}`, nothing: "nothing was decided" };
   if (kind === "promote") return { act: `forcing ${b} into ${c}${d ? ` on ${d}` : ""}`, nothing: "nothing was queued" };
+  // A host's acts (#322): the host's id, or the owner's login.
+  if (kind === "host") return { act: a === "resume" ? `resuming host ${b}` : a === "retire" ? `retiring host ${b}` : a === "cause" ? `removing ${b} for cause` : `resuming ${b}'s hosts`, nothing: "nothing changed" };
   if (a === "add") return { act: "adding a passkey", nothing: "no passkey was added" };
   if (a === "remove") return { act: "removing a passkey", nothing: "nothing was removed" };
   return { act: `resetting ${b}'s passkeys`, nothing: "nothing was reset" };
@@ -499,12 +501,13 @@ export async function handlePasskeyAssert(url: URL, request: Request, env: Env):
   const { c, rp } = who;
   const b = (await request.json().catch(() => null)) as { for?: unknown } | null;
   const subject = typeof b?.for === "string" && SUBJECT.test(b.for) ? b.for : null;
-  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id>, passkey:reset:<login> or promote:force:<from>:<to>[:<arch>]", code: "for" }, 400, NO_STORE);
+  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id>, passkey:reset:<login>, promote:force:<from>:<to>[:<arch>], host:resume:<host>, host:retire:<host>, host:cause:<login> or host:resume-all:<login>", code: "for" }, 400, NO_STORE);
   if (!subject.startsWith("passkey:remove:")) {
     const no = maintainerRefusal(c);
     if (no) return no;
   }
   if (subject === `passkey:reset:${c.login}`) return json({ error: SELF_RESET, code: "second_maintainer" }, 403, NO_STORE);
+  if (subject === `host:cause:${c.login}`) return json({ error: SELF_CAUSE, code: "second_maintainer" }, 403, NO_STORE);
   // A login that holds no passkey has nothing to reset: said before the resetting maintainer answers their device, not after.
   const target = subject.startsWith("passkey:reset:") ? subject.slice("passkey:reset:".length) : null;
   if (target && !(await env.DB.prepare(HAS_PASSKEY_SQL).bind(target).first())) return nothingToReset(target);
@@ -515,6 +518,8 @@ export async function handlePasskeyAssert(url: URL, request: Request, env: Env):
   return assertionOptions(env, rp, c.login, subject, { none: `${act} is confirmed with your passkey, and ${c.login} has none yet: add one on your page (${registerHref(c.login)}), then press again — ${nothing}`, busy: `${TOO_MANY_CHALLENGES} — ${nothing}` });
 }
 
+/** Why nobody removes themselves for cause (#322): another maintainer's act, like a reset. */
+export const SELF_CAUSE = "nobody removes themselves for cause: another maintainer does, with their passkey and a reason on the record";
 /** Why nobody resets their own passkeys, in their words. */
 const SELF_RESET = "nobody resets their own passkeys: another maintainer does, with a reason on the record — so a session that left with a lost device cannot open its own way back";
 /** A reset of a login that holds no passkey: the options refuse it before the ceremony, and the reset itself when the last one went since. */
@@ -610,7 +615,9 @@ export type PasskeyGate = (assertion: unknown) => Promise<Confirmed | Response>;
  */
 export function webGate(request: Request, url: URL, env: Env, login: string, subject: string): PasskeyGate {
   // The door's words: approve and block, or a promotion forced past its evidence (#284).
-  const [are, nothing] = subject.startsWith("promote:") ? ["a promotion forced past its evidence is", "nothing was queued"] : ["approve and block are", "nothing was decided"];
+  const [are, nothing] = subject.startsWith("promote:") ? ["a promotion forced past its evidence is", "nothing was queued"]
+    : subject.startsWith("host:") ? ["a host's resume and retirement, and a removal for cause, are", "nothing changed"]
+    : ["approve and block are", "nothing was decided"];
   return async (assertion) => {
     if (browserSession(request).bearer) {
       return json({ error: `${are} confirmed in the browser, with its session and your passkey: a request that carries an Authorization header — a contributor's token, a script's — is refused; ${nothing}`, code: "session_only" }, 403, NO_STORE);

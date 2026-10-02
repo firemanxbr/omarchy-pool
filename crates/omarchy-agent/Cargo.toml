@@ -1,6 +1,6 @@
 [package]
 name = "omarchy-agent"
-description = "The host agent's trust core: verify a signed host bundle or rollback statement, lint the host set"
+description = "The host agent: verify a signed host bundle or rollback statement, lint the host set, and roll it out"
 # The agent's own semver (design v2 D17), bumped only when its code changes; never the
 # release tag, so an unchanged agent keeps its hash from release to release.
 version = "0.2.0"
@@ -33,14 +33,17 @@ yaml-rust2 = { version = "0.13", default-features = false }
 # is under cargo deny (deny.toml).
 sigstore-verify = { version = "=0.14.0", default-features = false }
 x509-cert = "0.2"
-# The host's identity and its calls to the pool (#321): the host key is Ed25519 through
-# aws-lc-rs (already the verifier's crypto, through rustls-webpki); HTTPS is ureq on
-# rustls with that same provider and the webpki roots — blocking, no async runtime, no
-# OpenSSL, no ring (tests/agent-deps.sh).
+# The host's identity and its calls to the pool (#321), and the run loop's HTTPS to the
+# pool and GitHub (#315): the host key is Ed25519 through aws-lc-rs (already the
+# verifier's crypto, through rustls-webpki); HTTPS is ureq on rustls with that same
+# provider and the webpki roots — blocking, no async runtime, no OpenSSL, no ring
+# (tests/agent-deps.sh).
 aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }
 base64 = "0.22"
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+# run/ only: SIGUSR1 (`omarchy-agent round`) as a flag the loop reads, without unsafe code here.
+signal-hook = { version = "0.3", default-features = false }
 # capacity/ only: statvfs on the work root and the engine's data root, and the page size,
 # without unsafe code.
 rustix = { version = "1", default-features = false, features = ["std", "fs", "param"] }

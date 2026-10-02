@@ -32,9 +32,9 @@ preflight blockers and, with `--write <set dir>`, the file.
 On a rootful daemon with `userns-remap` on (what prep-root.sh turns on for a
 new daemon, design v2 §19.1), the dispatcher alone needs `userns_mode: host`
 to use the socket and the work root. The template leaves it out (design v2
-§4.2) and lint allows it only through the envelope (`userns_remap = true`):
-whatever renders the set for such a host (the agent's overlay, #311 / #335)
-adds it.
+§4.2) and lint allows it only through the envelope (`userns_remap = true`): the
+agent's overlay (`agent.yml`, beside its labels, #315) adds it for such a
+host.
 
 The legacy files (`factory/host/{compose.yml,setup.sh,rollout.sh,register.sh}`,
 `factory/image/compose.yml`) stay unchanged until the switches of design v2

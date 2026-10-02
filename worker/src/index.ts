@@ -38,6 +38,7 @@
  *   GET  /api/v1/factory/rollback/:to            the latest rollback statement rollback.yml signed for going back to :to, and its bundle, from R2 (#314)
  *   POST /api/v1/hosts/enrollments · POST /hosts/enroll · GET /hosts[/:id] · POST /hosts/:id/confirm   maintainer hosts: a one-time token, the machine's enrollment, the owner's Confirm (#321, routes/hosts.ts)
  *   GET  /api/v1/hosts/self/state · POST /hosts/self/token · POST /hosts/self/report   a host's calls, signed with its key (Omarchy-Host)
+ *   POST /api/v1/hosts/:id/suspend|resume|retire · POST /hosts/owners/:login/cause|resume   stopping a host, removed for cause, an owner listed again (#322)
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
@@ -79,7 +80,7 @@ import {
 import { handleSourceRead } from "./routes/sources";
 import { handleAnswerOrder, handleCancelOrder, handleFollow, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
 import { handleRollbackStatement } from "./routes/rollback";
-import { handleConfirmHost, handleEnroll, handleHostGet, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, signedHost } from "./routes/hosts";
+import { handleConfirmHost, handleEnroll, handleHostGet, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSuspendHost, signedHost } from "./routes/hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
@@ -702,6 +703,17 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/confirm$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     return c ? handleConfirmHost(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
+  }
+  // Suspend, resume and retire a host; removed for cause, and an owner listed again resuming their hosts (#322, routes/hosts.ts): the browser's session only.
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/(suspend|resume|retire)$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return json({ error: SIGN_IN }, 401);
+    return m[2] === "suspend" ? handleSuspendHost(c, m[1], request, env, url) : m[2] === "resume" ? handleResumeHost(c, m[1], request, env, url) : handleRetireHost(c, m[1], request, env, url);
+  }
+  if ((m = path.match(/^\/hosts\/owners\/([A-Za-z0-9-]{1,39})\/(cause|resume)$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return json({ error: SIGN_IN }, 401);
+    return m[2] === "cause" ? handleRemoveForCause(c, m[1], request, env, url) : handleResumeOwner(c, m[1], request, env, url);
   }
   if (path.startsWith("/factory/") && (method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH")) {
     const r = await factoryRoutes(method, path, url, request, env);
