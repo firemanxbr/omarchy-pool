@@ -80,7 +80,8 @@ PATH="$tmp/bin:$PATH" WORKER_LABELS='{"emulated":true}' toolchains_start 2>/dev/
 set -e
 (( rc == 96 )) || { echo "a toolchain that cannot start under emulation is status 96, not $rc"; exit 1; }
 PATH="$tmp/bin:$PATH" WORKER_LABELS='{}' toolchains_start || { echo "a native worker starts no toolchain to check"; exit 1; }
-grep -qE '^\s*if \(\( status == 96 \)\); then final=false native=true; fi' "$script" || { echo "the fail report sends status 96 alone back for a native worker"; exit 1; }
+# failure_facts (the community builder's report and a task container's verdict.json alike, #335).
+grep -qE '^\s*if \(\( status == 96 \)\); then FAIL_FINAL=false FAIL_NATIVE=true; fi' "$script" || { echo "the fail report sends status 96 alone back for a native worker"; exit 1; }
 
 # A library qemu cannot map (sudo through libldap, a libedit user) dies in
 # the loader, past any probe (#281): on an emulated worker, status 96 with

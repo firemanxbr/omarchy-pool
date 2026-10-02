@@ -18,6 +18,12 @@
 #                task's commit (or from staging, after an approval), makepkg
 #                as a plain user, leave the packages for the host, which
 #                publishes them with the task's per-job token; the pool signs.
+#   --task       called by `pkg-repo dispatch` (a maintainer host, design v2
+#                §9.3, #335) in a task container born with nothing: no token,
+#                no key, no socket. It calls no pool: what it needs was
+#                staged in /task/in (meta.sh, the evidence a recipe learns
+#                from), what it makes goes to /task/out with verdict.json,
+#                its log to /task/log; the dispatcher does every pool call.
 #
 # Environment (secrets come from the operator, never from the task — and
 # never reach the build: hold_secrets, below):
@@ -220,7 +226,7 @@ mean() { printf '%s\n' "$@" | awk '{ s += $1 } END { printf "%.1f", (NR ? s / NR
 #                              the PKGBUILD it writes is its own; needs an agent (meta.sh carries the request)
 #   staging:<task>             refused since 2026-09-15: a build never starts from a contributor's staged
 #                              artifact — the project writes its own (review:<task>, docs/GOVERNANCE.md)
-prepare_container() {
+pacman_ready() {
   # pacman's download sandbox (seccomp + landlock) has no place in an
   # already-isolated, sometimes emulated container.
   sed -i -e 's/^#\?DisableSandboxSyscalls/DisableSandboxSyscalls/' -e 's/^#\?DisableSandboxFilesystem/DisableSandboxFilesystem/' /etc/pacman.conf
@@ -228,6 +234,10 @@ prepare_container() {
     grep -q "^$opt" /etc/pacman.conf || sed -i "0,/^\[options\]/s//[options]\n$opt/" /etc/pacman.conf
   done
   pacman-key --init >/dev/null 2>&1 || true
+}
+
+prepare_container() {
+  pacman_ready
   pacman -Syu --noconfirm --needed base-devel git namcap jq python pacman-contrib ccache desktop-file-utils >/dev/null
   # namcap's library map, on every architecture (see namcap_sees_this_arch): without it the gate's ELF scan is blind on aarch64.
   namcap_sees_this_arch || echo "==> namcap's library map is not the one this worker knows how to fix; on aarch64 its ELF scan may be blind (library-no-package-associated on libc itself)" >&2
@@ -312,6 +322,18 @@ add_pool_repos() { # arch pool
   fi
 }
 
+# An artifact of another task — a contributor's evidence, an approved recipe,
+# a lesson: in a task container the copy the dispatcher staged (TASK_IN,
+# `pkg-repo dispatch`, which made the call with the lease's token: no task
+# container calls the pool), elsewhere the pool's public artifact.
+artifact() { # task file dest
+  if [[ -n "${TASK_IN:-}" ]]; then
+    [[ -f "$TASK_IN/artifacts/$1/$2" ]] && cp "$TASK_IN/artifacts/$1/$2" "$3"
+    return
+  fi
+  curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.omarchy-pool.org}/api/v1/factory/tasks/$1/artifacts/$2" -o "$3"
+}
+
 fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
   local name="$1" ref="$2"
   rm -rf /build/pkg /build/src
@@ -329,7 +351,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     rm -rf /build/evidence && mkdir -p /build/evidence /build/pkg
     local f
     for f in PKGBUILD build.log tests.log audit.md; do
-      curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.omarchy-pool.org}/api/v1/factory/tasks/$from/artifacts/$f" -o "/build/evidence/$f" 2>/dev/null || rm -f "/build/evidence/$f"
+      artifact "$from" "$f" "/build/evidence/$f" 2>/dev/null || rm -f "/build/evidence/$f"
     done
     ls -la /build/evidence
     with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence \
@@ -342,7 +364,8 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     spec="${ref#bump:}"; from="${spec%@*}"; tag="${spec#*@}"; ver="${tag#v}"; ver="${ver#V}"
     echo "==> PKGBUILD from approved task $from, bumped to $tag"
     mkdir -p /build/pkg
-    curl -sSf "${OMARCHY_API:-https://pkgs.omarchy-pool.org}/api/v1/factory/tasks/$from/artifacts/PKGBUILD" -o /build/pkg/PKGBUILD
+    artifact "$from" PKGBUILD /build/pkg/PKGBUILD || true
+    [[ -s /build/pkg/PKGBUILD ]] || { echo "no PKGBUILD of approved task $from"; exit 3; }
     sed -i -e "s/^pkgver=.*/pkgver=${ver//\//\\/}/" -e "s/^pkgrel=.*/pkgrel=1/" /build/pkg/PKGBUILD
     chown -R builder:builder /build/pkg && (cd /build/pkg && as_builder updpkgsums) || echo "updpkgsums failed; the build will tell"
   elif [[ "$ref" == draft:* ]]; then
@@ -359,12 +382,16 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     # failing the same way. The contributor's hint goes with it.
     rm -f /build/PKGBUILD.prev /build/lesson.log
     if [[ -n "${LESSON_TASK:-}" ]]; then
-      local api="${OMARCHY_API:-https://pkgs.omarchy-pool.org}" f
-      curl -sSf --max-time 60 "$api/api/v1/factory/tasks/$LESSON_TASK/artifacts/PKGBUILD" -o /build/PKGBUILD.prev 2>/dev/null || rm -f /build/PKGBUILD.prev
+      local f
+      artifact "$LESSON_TASK" PKGBUILD /build/PKGBUILD.prev 2>/dev/null || rm -f /build/PKGBUILD.prev
       # The build's log, then the gate's verdict and the audit's report when they exist: what stopped it, whichever step did.
       for f in build.log tests.log audit.md; do
-        curl -sSf --max-time 60 "$api/api/v1/factory/tasks/$LESSON_TASK/artifacts/$f" 2>/dev/null | { printf '\n==== %s of build %s ====\n' "$f" "$LESSON_TASK"; cat; } >> /build/lesson.log || true
+        rm -f /build/lesson.part
+        if artifact "$LESSON_TASK" "$f" /build/lesson.part 2>/dev/null && [[ -f /build/lesson.part ]]; then
+          { printf '\n==== %s of build %s ====\n' "$f" "$LESSON_TASK"; cat /build/lesson.part; } >> /build/lesson.log
+        fi
       done
+      rm -f /build/lesson.part
     fi
     if [[ -s /build/PKGBUILD.prev ]]; then
       echo "==> The lesson: the PKGBUILD of build $LESSON_TASK$( [[ -s /build/lesson.log ]] && echo " and what stopped it" )${BUILD_HINT:+; the hint from the person who asked: $BUILD_HINT}"
@@ -847,6 +874,112 @@ inside() {
   cp /build/out/*.pkg.tar.zst /task/out/ && cp /build/pkg/PKGBUILD /task/out/PKGBUILD && ls /task/out
 }
 
+# ------------------------------------------------------------------- task ---
+# Runs as root in a task container `pkg-repo dispatch` started (design v2
+# §9.2, §9.3; #335): born with nothing, it calls no pool (D47). /task/in
+# (read-only) holds meta.sh — the kind and its facts — and what the
+# dispatcher staged: the evidence a recipe learns from (artifacts/<task>/),
+# an audit's staged build, a trial's include and check. /task/out takes the
+# outputs and verdict.json, /task/log/task.log the log, cut at 64 MiB with a
+# marker so a recipe cannot fill the disk through it. After the container
+# exits, the dispatcher checks the outputs against the kind's closed list,
+# uploads them with the lease's token and reports — and reads the engine's
+# OOMKilled, which no verdict here can override.
+TASK_LOG_CAP="${TASK_LOG_CAP:-$((64 * 1024 * 1024))}"   # the tests set a smaller one; a task container is never given it (the env allowlist)
+task_mode() {
+  mkdir -p /task/out /task/log
+  # The tooling of the release this task was claimed on: its checkout, mounted read-only.
+  if [[ -x /pool/factory/bin/draft-pkgbuild ]]; then FACTORY_LIB=/pool/factory; fi
+  local status=0
+  # The task under `set -e`, as --inside runs; this shell writes the verdict whatever happened in it.
+  set +e
+  ( set -e; task_run ) 2>&1 | cap_log "$TASK_LOG_CAP" > /task/log/task.log
+  status="${PIPESTATUS[0]}"
+  # Written in place: a file cut short by a kill does not read, and the dispatcher then goes by the exit code alone.
+  task_verdict "$status" > /task/out/verdict.json
+  exit "$status"
+}
+
+cap_log() { # bytes — stdin to stdout, cut at that many bytes with a marker; the rest is read and dropped, so the build never dies of SIGPIPE
+  head -c "$1"
+  if IFS= read -r -n1 _; then
+    printf '\n==> the log was cut here at %s bytes (design v2 §9.3)\n' "$1"
+    cat >/dev/null
+  fi
+}
+
+task_run() {
+  local kind="" name="" ref="" arch="" pool="" staged="" review_url="" review_source="" review_version="" review_desc="" review_license="" lesson="" hint="" staged_task="" built_task="" keyring=""
+  # shellcheck source=/dev/null
+  source /task/in/meta.sh
+  case "$kind" in
+    build)
+      TASK_IN=/task/in LESSON_TASK="${lesson:-}" BUILD_HINT="${hint:-}"; export TASK_IN LESSON_TASK BUILD_HINT
+      prepare_container
+      add_pool_repos "$arch" "$pool"
+      local status=0
+      build_with_retries "$name" "$ref" || status=$?
+      # The gate's verdict, the costs and the recipe travel with the result, pass or fail.
+      [[ -f "$VET_JSON" ]] && cp "$VET_JSON" "$VET_LOG" /task/out/ 2>/dev/null
+      [[ -f "$RES_JSON" ]] && cp "$RES_JSON" /task/out/ 2>/dev/null
+      [[ -f /build/pkg/PKGBUILD ]] && cp /build/pkg/PKGBUILD /task/out/PKGBUILD
+      (( status == 0 )) || exit "$status"
+      cp /build/out/*.pkg.tar.zst /task/out/ && ls /task/out
+      ;;
+    audit)
+      # The second opinion: the staged build read as data, nothing of it run.
+      local from="/task/in/artifacts/$staged_task" args=()
+      pacman_ready
+      command -v python3 >/dev/null || pacman -Sy --noconfirm --needed python >/dev/null
+      [[ -f "$from/PKGINFO" ]] && args+=(--pkginfo "$from/PKGINFO")
+      [[ -f "$from/tests.log" ]] && args+=(--tests "$from/tests.log")
+      python3 "$FACTORY_LIB/bin/audit-pkgbuild" --pkgbuild "$from/PKGBUILD" --log "$from/build.log" --out /task/out "${args[@]}"
+      ;;
+    trial)
+      # The helper: a real pacman installs the lab's build from its public URL (tests/trial.sh staged the check), no token.
+      TRIAL_IN=/task/in KEYRING="$keyring" bash /task/in/check.sh
+      ;;
+    *) echo "==> this release's script does not know the task kind '${kind}'"; exit 2 ;;
+  esac
+}
+
+json_str() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$(printf '%s' "$s" | tr '\000-\037' ' ')"; }
+
+task_verdict() { # status → verdict.json: the script's word on the task, which the dispatcher reads with the engine's
+  local status="$1" err="" final=false native=false log=/task/log/task.log kind=""
+  kind="$(sed -n "s/^kind='\(.*\)'$/\1/p" /task/in/meta.sh 2>/dev/null | head -n1)"
+  if (( status != 0 )); then
+    if [[ "$kind" == build ]]; then
+      failure_facts "$status" "$log"; err="$FAIL_ERR" final="$FAIL_FINAL" native="$FAIL_NATIVE"
+    else
+      err="$(grep -m1 -E '^(==> ERROR|error|Error|fatal|TRIAL=)' "$log" || tail -n1 "$log")"
+    fi
+  fi
+  printf '{"status":%d,"final":%s,"needs_native":%s,"error":%s}\n' "$status" "$final" "$native" "$(json_str "${err:0:500}")"
+}
+
+# Why a build failed, from its status and its log: FAIL_ERR, the reason; FAIL_FINAL, whether a
+# fresh container would fail it the same way (the recipe's failure); FAIL_NATIVE, whether it is
+# this worker's (a toolchain or a library that cannot start under emulation, exit 96).
+failure_facts() { # status log
+  local status="$1" log="$2"
+  if (( status == 96 )); then FAIL_ERR="$(grep -m1 -E 'cannot start on this worker' "$log" | sed 's/^==> //' || echo "a toolchain cannot start on this emulated worker")"
+  elif (( status == 5 )); then FAIL_ERR="the gate: $(jq -r '[.checks[] | select(.status == "fail") | .name + ": " + .detail] | join("; ")' "$VET_JSON" 2>/dev/null | head -c 400)"
+  else FAIL_ERR="$(grep -m1 -E '^(==> ERROR|error|Error|fatal)' "$log" || tail -n1 "$log")"; fi
+  # The pool retries a task for the infrastructure's sake — a download
+  # that broke, a mirror, a container killed under it. A recipe that
+  # fails, fails the same way in the next fresh container: the report
+  # says so (`final`) and the task fails now; the contributor fixes the
+  # PKGBUILD (or sets GITHUB_TOKEN) and queues a new build. A toolchain
+  # or a library that cannot start here (exit 96, toolchains_start's and
+  # libraries_start's alone) is this worker's fault, not the recipe's:
+  # `needs_native` sends the build back to the queue for a native worker,
+  # and the pool does not count the attempt.
+  FAIL_FINAL=true FAIL_NATIVE=false
+  if grep -qE 'Failure while downloading|curl: \([0-9]+\)|failed retrieving file|failed to synchronize|Could not resolve host|Connection (timed out|refused|reset)|Temporary failure in name resolution' "$log"; then FAIL_FINAL=false; fi
+  if (( status == 96 )); then FAIL_FINAL=false FAIL_NATIVE=true; fi
+}
+
 # ---------------------------------------------------------------- orders ---
 # Workers follow the brain for their health (#277): the pool orders this
 # worker only in the answer to its own claim, and only when the claim says
@@ -1042,22 +1175,8 @@ container_worker() {
   local took=$(( (SECONDS - started) * 1000 )) tail; tail="$(tail -n 80 /build/build.log | jq -Rs .)"
   if [[ $status -ne 0 ]]; then
     kill "$BEAT" 2>/dev/null || true
-    local err
-    if (( status == 96 )); then err="$(grep -m1 -E 'cannot start on this worker' /build/build.log | sed 's/^==> //' || echo "a toolchain cannot start on this emulated worker")"
-    elif (( status == 5 )); then err="the gate: $(jq -r '[.checks[] | select(.status == "fail") | .name + ": " + .detail] | join("; ")' "$VET_JSON" 2>/dev/null | head -c 400)"
-    else err="$(grep -m1 -E '^(==> ERROR|error|Error|fatal)' /build/build.log || tail -n1 /build/build.log)"; fi
-    # The pool retries a task for the infrastructure's sake — a download
-    # that broke, a mirror, a container killed under it. A recipe that
-    # fails, fails the same way in the next fresh container: the report
-    # says so (`final`) and the task fails now; the contributor fixes the
-    # PKGBUILD (or sets GITHUB_TOKEN) and queues a new build. A toolchain
-    # or a library that cannot start here (exit 96, toolchains_start's and
-    # libraries_start's alone) is this worker's fault, not the recipe's:
-    # `needs_native` sends the build back to the queue for a native worker,
-    # and the pool does not count the attempt.
-    local final=true native=false
-    if grep -qE 'Failure while downloading|curl: \([0-9]+\)|failed retrieving file|failed to synchronize|Could not resolve host|Connection (timed out|refused|reset)|Temporary failure in name resolution' /build/build.log; then final=false; fi
-    if (( status == 96 )); then final=false native=true; fi
+    failure_facts "$status" /build/build.log
+    local err="$FAIL_ERR" final="$FAIL_FINAL" native="$FAIL_NATIVE"
     log "task $id: failed (exit $status$( [[ "$final" == true ]] && echo ", the recipe's — not retried" )$( [[ "$native" == true ]] && echo ", this worker's — back in the queue for a native one" )) — ${err:0:200}"
     # Upload what there is for the record, then report.
     upload_staging "$id" /build/build.log build.log || true
@@ -1239,7 +1358,8 @@ self_test() {
 hold_secrets
 case "${1:-}" in
   --inside) inside ;;
+  --task) task_mode ;;
   --container) container_worker ;;
   --self-test) self_test ;;
-  *) echo "usage: $0 --inside | --container | --self-test (project workers run 'pkg-repo work', which calls --inside)" >&2; exit 2 ;;
+  *) echo "usage: $0 --inside | --task | --container | --self-test (project workers run 'pkg-repo work', which calls --inside; maintainer hosts 'pkg-repo dispatch', which runs --task)" >&2; exit 2 ;;
 esac

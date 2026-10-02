@@ -12,6 +12,9 @@
 #        OMARCHY_KEYRINGS  directory from tests/fetch-keyrings.sh (every project's keyring)
 #        PKG_REPO          path to the pkg-repo binary (default target/release/pkg-repo)
 #        TRIAL_LOG         where to write the transcript (default $OMARCHY_WORK_DIR/tmp/trial-<task>.log)
+#        TRIAL_STAGE       a directory: write the check's inputs there and stop, before any container — what
+#                          `pkg-repo dispatch` stages in a trial's /task/in (#335); its task container runs the check
+#                          from there (TRIAL_IN) and the dispatcher reports. No token is needed, nor posted with.
 set -uo pipefail
 ARCH="${1:?arch}"; TASK="${2:?task}"; shift 2
 PKGS=("$@"); [[ ${#PKGS[@]} -gt 0 ]] || { echo "trial: no package named" >&2; exit 2; }
@@ -31,6 +34,7 @@ ms() { python3 -c "import time; print(int(time.time()*1000))"; }
 started=$(ms)
 
 post() { # status summary payload
+  [[ -z "${TRIAL_STAGE:-}" ]] || return 0
   "$PKG_REPO" event --kind trial --ring lab --source "$ARCH" --status "$1" --summary "$2" \
     --duration-ms $(( $(ms) - started )) --payload "$3" >/dev/null 2>&1 || true
 }
@@ -56,11 +60,12 @@ fi
 printf '%s\n' "${PKGS[@]}" > "$WORK/packages.txt"
 cat > "$WORK/check.sh" <<'CHECK'
 set -uo pipefail
+R="${TRIAL_IN:-/repo}"   # its inputs: /repo in trial.sh's own container, /task/in in a dispatcher's task container
 pacman-key --init >/dev/null 2>&1
 pacman-key --populate "$KEYRING" >/dev/null 2>&1 || true
-pacman-key --add /repo/omarchy-poc.pub.asc >/dev/null 2>&1
+pacman-key --add "$R/omarchy-poc.pub.asc" >/dev/null 2>&1
 pacman-key --lsign-key staging@firemanxbr.org >/dev/null 2>&1
-for f in /repo/*.gpg; do
+for f in "$R"/*.gpg; do
   [[ -f "$f" ]] || continue
   pacman-key --add "$f" >/dev/null 2>&1
   # The primary fingerprints in the file, read without a keyring (the mount
@@ -68,16 +73,16 @@ for f in /repo/*.gpg; do
   # populate would from a keyring package's trusted list.
   for k in $(gpg --batch --with-colons --import-options show-only --import "$f" 2>/dev/null | awk -F: '$1=="pub"{p=1;next} $1=="sub"{p=0} $1=="fpr" && p {print $10; p=0}'); do pacman-key --lsign-key "$k" >/dev/null 2>&1 || true; done
 done
-mapfile -t pkgs < /repo/packages.txt
+mapfile -t pkgs < "$R/packages.txt"
 echo "== pacman -Sy (the lab above edge)"
-pacman --config /repo/pacman.conf -Sy || { echo "TRIAL=sync-failed"; exit 1; }
+pacman --config "$R/pacman.conf" -Sy || { echo "TRIAL=sync-failed"; exit 1; }
 for p in "${pkgs[@]}"; do
-  from=$(pacman --config /repo/pacman.conf -Sp --print-format '%r' "$p" 2>/dev/null | head -1)
+  from=$(pacman --config "$R/pacman.conf" -Sp --print-format '%r' "$p" 2>/dev/null | head -1)
   echo "== $p comes from [${from:-?}]"
   [[ "$from" == *-lab ]] || { echo "$p would not come from the lab: [$from] wins the include"; echo "TRIAL=not-from-lab"; exit 1; }
 done
 echo "== pacman -S ${pkgs[*]} (a real install: dependencies from edge, hooks run)"
-pacman --config /repo/pacman.conf -S --noconfirm --needed "${pkgs[@]}" || { echo "TRIAL=install-failed"; exit 1; }
+pacman --config "$R/pacman.conf" -S --noconfirm --needed "${pkgs[@]}" || { echo "TRIAL=install-failed"; exit 1; }
 for p in "${pkgs[@]}"; do
   echo "== $p installed: $(pacman -Q "$p")"
   pacman -Qkk "$p" >/dev/null 2>&1 && echo "== $p: every file present and unaltered" || { echo "== $p: pacman -Qkk found altered or missing files"; pacman -Qkk "$p" 2>&1 | tail -5; echo "TRIAL=files-differ"; exit 1; }
@@ -86,6 +91,10 @@ echo "== the system after: $(pacman -Q | wc -l) packages, $(pacman -Qdt 2>/dev/n
 echo "TRIAL=ok"
 CHECK
 [[ -s "$WORK/check.sh" ]] || { echo "check script was not written"; exit 1; }
+if [[ -n "${TRIAL_STAGE:-}" ]]; then
+  cp -a "$WORK"/. "$TRIAL_STAGE"/
+  exit 0
+fi
 
 # Run by a worker for a task (OMARCHY_TASK_ID, #277), the container is named and labelled with it: a stop of the task removes its
 # containers by that label, since a container outlives its killed client. By hand or in CI, without the variable, as before.
