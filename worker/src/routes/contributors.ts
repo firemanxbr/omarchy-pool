@@ -330,6 +330,8 @@ export interface WorkerIdentity {
   job_task?: number;
   /** The row as the orders path reads it (#277, orders.ts): read with the token, in the same seek, so a claim pays no read for its orders. */
   orders?: OrdersRow;
+  /** A host's registration (#321): its host, whose status and owner every claim checks (#322). */
+  host_id?: string | null;
 }
 
 /**
@@ -339,16 +341,16 @@ export interface WorkerIdentity {
  * recreated with the new one meanwhile, and nothing it runs notices. That
  * second read happens only when the first finds nothing.
  */
-export const WORKER_BY_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, ${ORDERS_COLUMNS} FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL`;
-export const WORKER_BY_PREV_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, ${ORDERS_COLUMNS} FROM build_workers
+export const WORKER_BY_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, host_id, ${ORDERS_COLUMNS} FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL`;
+export const WORKER_BY_PREV_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, host_id, ${ORDERS_COLUMNS} FROM build_workers
   WHERE id = (SELECT worker_id FROM hosts WHERE prev_token_hash = ? AND prev_token_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND status = 'active') AND revoked_at IS NULL`;
 export async function workerOf(request: Request, env: Env): Promise<WorkerIdentity | null> {
   const token = bearer(request);
   if (!token.startsWith("omw_")) return null;
-  type Row = OrdersRow & { mode: string; mode_by: string | null; packages: string | null; arch: string };
+  type Row = OrdersRow & { mode: string; mode_by: string | null; packages: string | null; arch: string; host_id: string | null };
   const hash = await sha256Hex(token);
   const row = (await env.DB.prepare(WORKER_BY_TOKEN_SQL).bind(hash).first<Row>()) ?? (await env.DB.prepare(WORKER_BY_PREV_TOKEN_SQL).bind(hash).first<Row>());
-  return row ? { id: row.id, owner: row.owner, mode: row.mode, mode_by: row.mode_by, packages: row.packages ? JSON.parse(row.packages) : [], arch: row.arch, trust: row.trust, orders: row } : null;
+  return row ? { id: row.id, owner: row.owner, mode: row.mode, mode_by: row.mode_by, packages: row.packages ? JSON.parse(row.packages) : [], arch: row.arch, trust: row.trust, orders: row, host_id: row.host_id } : null;
 }
 
 /**

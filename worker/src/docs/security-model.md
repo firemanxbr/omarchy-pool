@@ -78,7 +78,7 @@ secret). Everything travels in the `Authorization` header over TLS only.
 | Who | Gets | How |
 |---|---|---|
 | Contributor | submit packages only: request them, build them and follow them — on the pool's hosts. A contributor runs no worker: `POST /factory/workers` refuses them (403, *your packages build on the pool's hosts*) | GitHub account |
-| Host | the workers: every one is provided by a maintainer — the project's compute is its maintainers' hosts. A maintainer's host is trusted by the same act that makes them a maintainer | enrolled by a maintainer listed in `factory/MAINTAINERS.toml` at the last sync (*Maintainer hosts* below, #321), owned by their GitHub user id, confirmed by fingerprint; a legacy registration (`POST /factory/workers`) keeps claiming until a maintainer revokes it. What a removal from the list does to a host is #322's |
+| Host | the workers: every one is provided by a maintainer — the project's compute is its maintainers' hosts. A maintainer's host is trusted by the same act that makes them a maintainer | enrolled by a maintainer listed in `factory/MAINTAINERS.toml` at the last sync (*Maintainer hosts* below, #321), owned by their GitHub user id, confirmed by fingerprint; a legacy registration (`POST /factory/workers`) keeps claiming until a maintainer revokes it. A removal from the list stops its claims and lets its running tasks finish (*Stopping a host* below, #322) |
 | Community worker | none: the tier ends (#307). The registrations made before #331 — expected to be the maintainers' own, which a one-time query of the last 90 days checks (recorded on #331) — keep their claims (their owner's packages; anyone's when shared) until they retire | no new one |
 | Project worker | pool jobs (sync, render, promote, health, security, gc) and the rebuild of approved packages — never a build without evidence and review | two maintainers' word (`POST /factory/workers/:id/trust`): one proposes, another confirms, never the worker's owner; the trust is a signed record under `workers/<id>/`; one maintainer takes it back. The Review page names the worker and host behind every build |
 | Maintainer | provide the project's hosts, approve the project's staged builds — never their own package — settle categories, block with a reason, vouch for a worker with a second maintainer, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
@@ -443,8 +443,73 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   itself from the reported totals and the signed constants, never more than
   the host declared.
 
-Suspend, retire, drain and what a removal from the list does to a host are
-#322's.
+## Stopping a host
+
+Nothing irreplaceable is bound to a host (#322, design v2 §6.2, §6.4, D20,
+D39): its trust is `MAINTAINERS.toml`'s, and a new install enrolls a new
+host. What remains is to stop one cleanly. Every act below is the browser
+session's only, from the pool's own page (a bearer token of any kind is
+refused), is refused server-side to anyone without the right, and writes a
+`host` line in the journal with who and why.
+
+- **Suspend** — its owner or any maintainer, with a reason. In one D1 batch:
+  the host's key is refused on every signed request, its registration's
+  claims are refused (`403`, `host_suspended`), its open orders are
+  cancelled with a line each, and its running leases are **fenced** in one
+  statement (`UPDATE build_tasks SET stop_order = … WHERE lease_owner = …
+  AND status = 'leased'`), one `stop-task` order row per task, written
+  closed so a host holding several leases is fenced whole. A fenced lease's
+  heartbeats, reports and uploads are refused from then on; it goes back to
+  the queue when its lease ends, with the person and the reason on its
+  line. A claim already in flight when the suspension commits leases
+  nothing: the claim's lease `UPDATE` checks the host in the same statement
+  (D1 serialises writes), the earlier read only gives the refusal its words.
+  **Resume** is the owner's only, with a passkey (`host:resume:<id>`):
+  the same registration claims again, nothing is done on the machine.
+- **Retire** — its owner, or any maintainer with a passkey
+  (`host:retire:<id>`), with a reason. The host key is refused for good —
+  the pool keeps it, so it never enrolls again — and the registration is
+  revoked with its worker token; its open orders are cancelled and builds
+  asked for it go back to the rule. Running leases end with their lease, as
+  a revoked worker's: they are not fenced, so the job token each one holds
+  (that task's routes only, until its lease ends) may still heartbeat,
+  upload and complete it. To stop them at once, suspend first. A new install on the machine enrolls a new host with a
+  new key (the agent sees `retired` on its signed request and enrolls again
+  with the new token).
+- **Drain** — a worker order on the host's registration (stop claiming, let
+  the tasks finish). A drain by the owner is resumed by the owner only (they
+  may need the machine); a drain by another maintainer by either of the two
+  (D57).
+- **Removal from the list** (D39). Hosts are owned by GitHub user ids, and
+  the file lists logins: the pool resolves each listed login to its id
+  through the contributors' sign-in records, so a login renamed in the file
+  is not a removal. Every claim of a host's registration joins its owner's
+  id with the list, so a removal holds from the next claim, between syncs
+  too; the sync (every ten minutes) marks every host whose owner no longer
+  resolves (`owner_removed_at`, one journal line each). Claims answer *the
+  host's owner is no longer a maintainer*; **nothing is fenced**: running
+  leases heartbeat, finish and upload, so a mistaken pull request or a parse
+  slip costs new claims for ten minutes, not builds in flight. Listed again,
+  the owner resumes claiming on all their hosts with one action and a
+  passkey (`host:resume-all:<login>`); a suspended host stays suspended.
+- **Removed for cause** — a separate, explicit act on the owner's page by
+  another maintainer (never the owner), with a passkey (`host:cause:<login>`)
+  and a reason: every host of that owner that runs or is suspended is
+  suspended for cause and their running leases are fenced in one statement,
+  journaled. Taking the person off `MAINTAINERS.toml` stays a pull request;
+  this stops their machines meanwhile. A host suspended for cause is still
+  resumed by its owner only — who needs a passkey, which only a listed
+  maintainer is asked for — so once the pull request lands, nobody resumes
+  it. Until then the owner, with their own passkey, can resume it (design
+  v2 §6.4: Resume by the owner), and their hosts still waiting for Confirm
+  are not touched: the pull request is what closes both.
+- **The agent on a suspended or retired host** sees `403` on its calls
+  (its signed requests, and in P1 the release `follow` it polls, refused
+  for a suspended or retired host's registration and never cached): it
+  changes nothing, keeps its bundle and every task container running, polls
+  hourly with jitter and never exits (§16.4); it recovers by itself at its
+  next poll after a Resume. An owner removed from the list sees `403` on its
+  claims only.
 
 ## After approval, the gates still hold
 

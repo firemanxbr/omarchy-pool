@@ -71,6 +71,94 @@ fn enroll_needs_the_token_in_the_environment_and_a_capacity_report_before_it_sen
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// A pool on loopback whose host calls are refused as a suspended host's (403) for the
+/// first `refusals` requests, then answered as an active host's: the suspension, then
+/// the owner's Resume.
+fn pool_suspended_then_resumed(refusals: usize) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for (n, c) in l.incoming().flatten().enumerate() {
+            let mut r = BufReader::new(c.try_clone().unwrap());
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let _ = r.take(len).read_to_end(&mut Vec::new());
+            let (status, body) = if n < refusals {
+                (403, r#"{"error":"box is suspended (by m2: fans failing)","code":"host_status","status":"suspended"}"#.to_owned())
+            } else {
+                (
+                    200,
+                    format!(
+                        r#"{{"worker":"m1-box-0a9z","token":"omw_{}","rotate_after":"in 30 days"}}"#,
+                        "1e".repeat(24)
+                    ),
+                )
+            };
+            let _ = (&c).write_all(
+                format!("HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes(),
+            );
+        }
+    });
+    origin
+}
+
+#[test]
+fn on_a_suspended_host_the_agent_changes_nothing_and_after_a_resume_it_works_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = std::env::temp_dir().join(format!(
+        "omarchy-agent-suspended-cli-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data);
+    let pool = pool_suspended_then_resumed(3);
+    // An enrolled machine: its identity, and the worker token its dispatcher runs with.
+    let state = data.join("omarchy-agent/state");
+    let etc = data.join("omarchy-agent/sets/host/etc");
+    for dir in [&state, &etc] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(
+        state.join("host.json"),
+        format!(r#"{{"pool":"{pool}","host":"h_0000000001"}}"#),
+    )
+    .unwrap();
+    let env = etc.join("dispatcher.env");
+    let before = format!(
+        "# worker: m1-box-0a9z\nOMARCHY_WORKER_TOKEN=omw_{}\n",
+        "0f".repeat(24)
+    );
+    std::fs::write(&env, &before).unwrap();
+    // Suspended: every call refused with the pool's words; the dispatcher's token, byte for byte, and the identity stay.
+    for _ in 0..3 {
+        let o = run_env(&["token"], &data, None);
+        assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+        assert!(
+            text(&o).contains("box is suspended (by m2: fans failing)"),
+            "{}",
+            text(&o)
+        );
+        assert_eq!(std::fs::read_to_string(&env).unwrap(), before);
+        assert!(state.join("host.json").exists());
+    }
+    // Resumed on the site: the same identity and key work again, nothing done on the machine.
+    let o = run_env(&["token"], &data, None);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(std::fs::read_to_string(&env)
+        .unwrap()
+        .contains(&format!("OMARCHY_WORKER_TOKEN=omw_{}", "1e".repeat(24))));
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 fn text(o: &Output) -> String {
     format!(
         "{}{}",
