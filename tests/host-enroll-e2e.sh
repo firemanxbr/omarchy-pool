@@ -121,9 +121,11 @@ OMW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
 step "The host claims with it (nothing queued: 204)"
 # A host registration claims with its capacity, a claim_id new per attempt, want
 # and every lease it holds (#334); the dispatcher (#335) will send these itself.
+host_claim_body() {
+  printf '%s' "{\"arch\":\"$ARCH\",\"claim_id\":\"c_e2e_${RANDOM}${RANDOM}${RANDOM}\",\"want\":1,\"leases\":[],\"capacity\":{\"cpus\":8,\"mem_gb\":16,\"disk_free_gb\":{\"work\":100,\"engine\":100},\"lanes\":[{\"arch\":\"$ARCH\",\"mode\":\"native\"}]}}"
+}
 host_claim() { # token
-  curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $1" -H 'content-type: application/json' \
-    -d "{\"arch\":\"$ARCH\",\"claim_id\":\"c_e2e_${RANDOM}${RANDOM}${RANDOM}\",\"want\":1,\"leases\":[],\"capacity\":{\"cpus\":8,\"mem_gb\":16,\"disk_free_gb\":{\"work\":100,\"engine\":100},\"lanes\":[{\"arch\":\"$ARCH\",\"mode\":\"native\"}]}}"
+  curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $1" -H 'content-type: application/json' -d "$(host_claim_body)"
 }
 code=$(host_claim "$OMW")
 [[ $code == 204 ]] || fail "the claim: $code"
@@ -153,10 +155,9 @@ pkopts=$(curl -fs -X POST "$POOL/auth/passkeys/challenge" "${WEB[@]}" -d '{}')
 RP_ORIGIN="https://$(jq -r .publicKey.rp.id <<<"$pkopts")"
 node "$ROOT/tests/passkey.mjs" register "$E2E/passkey.json" "$RP_ORIGIN" "E2E key" <<<"$pkopts" | curl -fs -o /dev/null -X POST "$POOL/auth/passkeys" "${WEB[@]}" --data-binary @- || fail "the owner's passkey"
 answer() { curl -fs -X POST "$POOL/auth/passkeys/assert" "${WEB[@]}" -d "{\"for\":\"$1\"}" | node "$ROOT/tests/passkey.mjs" assert "$E2E/passkey.json" "$RP_ORIGIN" json; }
-claim_code() { curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $1" -H 'content-type: application/json' -d "{\"arch\":\"$ARCH\"}"; }
 susp=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/suspend" "${WEB[@]}" -d '{"reason":"e2e: the fans"}')
 [[ $(jq -r .status <<<"$susp") == suspended ]] || fail "suspend: $susp"
-[[ $(curl -s -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $NEW" -H 'content-type: application/json' -d "{\"arch\":\"$ARCH\"}" | jq -r .code) == host_suspended ]] || fail "a suspended host claimed"
+[[ $(curl -s -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $NEW" -H 'content-type: application/json' -d "$(host_claim_body)" | jq -r .code) == host_suspended ]] || fail "a suspended host claimed"
 XDG_DATA_HOME="$DATA" "$AGENT" token > "$E2E/suspended.log" 2>&1 && fail "a suspended host got a worker token"
 grep -q "e2e-vm is suspended (by e2e: e2e: the fans)" "$E2E/suspended.log" || { cat "$E2E/suspended.log"; fail "the agent did not say why"; }
 [[ $(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE") == "$NEW" ]] || fail "the suspension changed the dispatcher's token"
@@ -165,13 +166,13 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/hosts/$HOST/
 [[ $code == 403 ]] || fail "a resume with no passkey: $code"
 res=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/resume" "${WEB[@]}" -d "$(jq -nc --argjson a "$(answer "host:resume:$HOST")" '{assertion: $a}')")
 [[ $(jq -r .status <<<"$res") == active ]] || fail "resume: $res"
-[[ $(claim_code "$NEW") == 204 ]] || fail "the same token after the resume"
+[[ $(host_claim "$NEW") == 204 ]] || fail "the same token after the resume"
 [[ $(curl -s -o /dev/null -w '%{http_code}' "$POOL/api/v1/factory/follow?ids=$WORKER") == 200 ]] || fail "the follow after the resume"
 
 step "Retire (#322): the key and the token burnt; a new install enrolls the machine as a new host, with a new key"
 ret=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/retire" "${WEB[@]}" -d '{"reason":"e2e: moving it"}')
 [[ $(jq -r .status <<<"$ret") == retired ]] || fail "retire: $ret"
-[[ $(claim_code "$NEW") == 401 ]] || fail "a retired host's token claimed"
+[[ $(host_claim "$NEW") == 401 ]] || fail "a retired host's token claimed"
 TOKEN2=$(curl -fs -X POST "$POOL/api/v1/hosts/enrollments" "${WEB[@]}" -d '{"name":"e2e-vm"}' | jq -r .token)
 XDG_DATA_HOME="$DATA" OMARCHY_ENROLL="$TOKEN2" "$AGENT" install --wait-minutes 3 > "$E2E/reinstall.log" 2>&1 &
 AGENT_PID=$!
@@ -184,6 +185,6 @@ FP2=$(sed -n 's/^omarchy-agent: host key fingerprint: //p' "$E2E/reinstall.log" 
 curl -fs -o /dev/null -X POST "$POOL/api/v1/hosts/$HOST2/confirm" "${WEB[@]}" -d '{}' || fail "confirm the new host"
 wait "$AGENT_PID" || { cat "$E2E/reinstall.log"; fail "the re-install did not finish"; }
 AGENT_PID=
-[[ $(claim_code "$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")") == 204 ]] || fail "the new host's token"
+[[ $(host_claim "$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")") == 204 ]] || fail "the new host's token"
 
 printf '\n\033[1;32mhost enrollment: ok\033[0m (%s, %s, %s; suspended, resumed, retired, then %s)\n' "$HOST" "$WORKER" "$FP" "$HOST2"
