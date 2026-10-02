@@ -76,7 +76,7 @@ late() { # wrapper-before-the-script [env…] — a trial, with the agent at 127
   local e=() kv
   for kv in ANTHROPIC_BASE_URL=http://127.0.0.1:8790 "$@"; do e+=(-e "$kv"); done
   status=0
-  "$RT" run --rm --cap-drop ALL --security-opt no-new-privileges "${e[@]}" \
+  "$RT" run --rm --cap-drop ALL "${caps[@]}" --security-opt no-new-privileges "${e[@]}" \
     -v "$t/in:/task/in:ro" -v "$t/out:/task/out" -v "$t/log:/task/log" -v "$root:/pool:ro" \
     "$STUB_IMAGE" bash -c "$pre exec bash /pool/factory/worker/omarchy-build-worker.sh --task" >/dev/null 2>&1 || status=$?
 }
