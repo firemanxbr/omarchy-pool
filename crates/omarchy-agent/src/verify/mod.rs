@@ -263,3 +263,124 @@ mod tests;
 
 #[cfg(test)]
 mod conformance;
+
+/// Signed content for the run loop's tests: the pins and parsing are real, the
+/// cryptographic check vouches ("this certificate signed it at `signed_at`"), and a
+/// signature of `b"forged"` is refused as a bad signature would be.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::identity::tests::Claims;
+    use super::{
+        bundle_with, statement_with, BundleOutcome, BundleVerifier, Rejection, SignedBy,
+        StatementOutcome, ROLLBACK,
+    };
+    use crate::manifest::{self, Manifest, Parsed};
+    use sha2::{Digest as _, Sha256};
+
+    const EXAMPLE: &str = include_str!("../../tests/fixtures/manifest/v2-example.json");
+
+    struct Vouching {
+        certificate: Vec<u8>,
+        signed_at: i64,
+    }
+
+    impl BundleVerifier for Vouching {
+        fn verify(&self, _: &[u8], sig: &[u8]) -> Result<SignedBy, String> {
+            if sig == b"forged" {
+                return Err("signature verification failed".into());
+            }
+            Ok(SignedBy {
+                certificate: self.certificate.clone(),
+                signed_at: self.signed_at,
+            })
+        }
+    }
+
+    /// The example manifest as release `release`, with these floor values.
+    pub(crate) fn manifest_json(
+        release: &str,
+        min_release: &str,
+        revoked: &[&str],
+    ) -> serde_json::Value {
+        let mut v: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        v["release"] = release.into();
+        v["inner"]["min_release"] = min_release.into();
+        v["inner"]["revoked"] = revoked
+            .iter()
+            .map(|r| serde_json::Value::from(*r))
+            .collect();
+        v
+    }
+
+    fn parse(v: &serde_json::Value) -> Manifest {
+        match manifest::parse(v.to_string().as_bytes()).unwrap() {
+            Parsed::Current(m) => *m,
+            Parsed::NeedsNewerAgent { why, .. } => panic!("{why}"),
+        }
+    }
+
+    pub(crate) fn manifest(release: &str, min_release: &str, revoked: &[&str]) -> Manifest {
+        parse(&manifest_json(release, min_release, revoked))
+    }
+
+    /// The example manifest with only these tools for `platform`: (name, url, sha256 hex).
+    pub(crate) fn manifest_with_tools(platform: &str, tools: &[(&str, &str, &str)]) -> Manifest {
+        let mut v = manifest_json("v1.20.0", "v1.0.0", &[]);
+        let named: serde_json::Map<String, serde_json::Value> = tools
+            .iter()
+            .map(|(n, u, s)| ((*n).to_owned(), serde_json::json!({"url": u, "sha256": s})))
+            .collect();
+        v["inner"]["tools"] = serde_json::json!({ platform: named });
+        parse(&v)
+    }
+
+    /// A bundle archive: `manifest` with the host set's `files` listed and packed.
+    pub(crate) fn bundle_archive(
+        mut manifest: serde_json::Value,
+        files: &[(&str, &[u8])],
+    ) -> Vec<u8> {
+        let listed: serde_json::Map<String, serde_json::Value> = files
+            .iter()
+            .map(|(p, d)| {
+                (
+                    (*p).to_owned(),
+                    format!("sha256:{}", hex::encode(Sha256::digest(d))).into(),
+                )
+            })
+            .collect();
+        manifest["inner"]["sets"] = serde_json::json!({"host": {"files": listed}});
+        let text = manifest.to_string();
+        let mut all: Vec<(String, &[u8])> = vec![("manifest.json".into(), text.as_bytes())];
+        all.extend(files.iter().map(|(p, d)| (format!("sets/host/{p}"), *d)));
+        let refs: Vec<(&str, &[u8])> = all.iter().map(|(p, d)| (p.as_str(), *d)).collect();
+        crate::archive::tests::pack(&refs)
+    }
+
+    pub(crate) fn verify_bundle(
+        archive: &[u8],
+        sig: &[u8],
+        signed_at: i64,
+    ) -> Result<BundleOutcome, Rejection> {
+        let v = Vouching {
+            certificate: Claims::default().certificate(),
+            signed_at,
+        };
+        bundle_with(&v, archive, sig)
+    }
+
+    pub(crate) fn verify_statement(
+        json: &[u8],
+        sig: &[u8],
+        signed_at: i64,
+    ) -> Result<StatementOutcome, Rejection> {
+        let v = Vouching {
+            certificate: Claims {
+                san: ROLLBACK.san(),
+                ..Claims::default()
+            }
+            .certificate(),
+            signed_at,
+        };
+        statement_with(&v, json, sig)
+    }
+}

@@ -332,6 +332,7 @@ export interface WorkerIdentity {
   orders?: OrdersRow;
   /** #321: 'host' for a host's registration, which claims with its capacity and leases (#334); 'legacy' for every other. */
   kind?: string | null;
+  /** A host's registration (#321): its host, whose status and owner every claim checks (#322). */
   host_id?: string | null;
   /** …and the job token's lease generation (#334, D46): a host lease's uploads are taken only from a token of that very lease. */
   job_gen?: string | null;

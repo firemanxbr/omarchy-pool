@@ -34,8 +34,37 @@ impl fmt::Display for Version {
     }
 }
 
+/// A release, written `vX.Y.Z` wherever the agent stores or shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Release(pub Version);
+
+impl Release {
+    pub fn parse(s: &str) -> Option<Self> {
+        Version::parse_release(s).map(Release)
+    }
+}
+
+impl fmt::Display for Release {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
+
+impl serde::Serialize for Release {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Release {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Release::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("{s:?} is not vX.Y.Z")))
+    }
+}
+
 /// This agent's own version, parsed once from `Cargo.toml`.
-pub fn agent() -> Version {
+pub(crate) fn agent() -> Version {
     Version::parse(crate::AGENT_VERSION).expect("Cargo.toml carries an X.Y.Z version")
 }
 

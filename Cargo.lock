@@ -1158,6 +1158,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "signal-hook",
  "sigstore-verify",
  "tar",
  "toml",

@@ -146,7 +146,24 @@ fn open(o: &Options) -> Result<(HostKey, Option<Identity>, Pool), Failure> {
 
 /// The whole enrollment: enroll (once), wait for the owner's Confirm, write the token.
 pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
-    let (key, identity, pool) = open(o)?;
+    let (mut key, mut identity, pool) = open(o)?;
+    // A new install on the machine of a retired host (#322): the pool refuses that key for
+    // good, so the new token enrolls the machine as a new host, with a new key. The old
+    // identity is kept beside, renamed; nothing else is asked of the owner.
+    if let (Some(id), Some(_)) = (&identity, &o.token) {
+        if retired(&key, &pool, id) {
+            say(
+                out,
+                &format!(
+                    "host {} was retired: this install enrolls the machine as a new host",
+                    id.host
+                ),
+            );
+            retire_identity(&o.paths.state, &id.host)?;
+            key = HostKey::create_fresh(&o.paths.state.join(host::KEY_FILE))?;
+            identity = None;
+        }
+    }
     let id = if let Some(id) = identity {
         say(
             out,
@@ -172,6 +189,25 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
         return Ok(());
     }
     fetch_token(o, &key, &pool, &id, out)
+}
+
+/// Whether the pool says this host is retired: its signed state refused with `retired`.
+/// Any other answer — a suspension, no answer at all — is not a retirement.
+fn retired(key: &HostKey, pool: &Pool, id: &Identity) -> bool {
+    matches!(
+        pool.signed(key, &id.host, "GET", "/api/v1/hosts/self/state", None),
+        Ok(Answer { status: 403, json }) if json["status"] == "retired"
+    )
+}
+
+/// The retired host's identity, renamed beside: `host.json.retired-<host>`.
+fn retire_identity(state: &Path, host_id: &str) -> Result<(), Failure> {
+    if !valid_host(host_id) {
+        return Err(Failure::Refused(format!("{host_id}: not a host id")));
+    }
+    let from = state.join(host::IDENTITY_FILE);
+    let to = state.join(format!("{}.retired-{host_id}", host::IDENTITY_FILE));
+    std::fs::rename(&from, &to).map_err(|e| Failure::Refused(format!("{}: {e}", from.display())))
 }
 
 /// Whether the dispatcher's env file holds a worker token already.
@@ -463,6 +499,180 @@ mod tests {
             }
         });
         origin
+    }
+
+    /// A pool on loopback that answers each request as `answer` says, from its method,
+    /// its path, its `Omarchy-Host` header and its body.
+    fn pool_scripted(
+        answer: impl Fn(&str, &str, &str, &[u8]) -> (u16, String) + Send + 'static,
+    ) -> String {
+        use std::io::{BufRead, BufReader, Read};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut first = String::new();
+                let _ = r.read_line(&mut first);
+                let mut parts = first.split_whitespace();
+                let (method, path) = (
+                    parts.next().unwrap_or("").to_owned(),
+                    parts.next().unwrap_or("").to_owned(),
+                );
+                let (mut len, mut signer) = (0, String::new());
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(v) = lower.strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                    if let Some(v) = lower.strip_prefix("omarchy-host:") {
+                        signer = v.trim().split(';').next().unwrap_or("").to_owned();
+                    }
+                }
+                let mut body = vec![0; len];
+                let _ = r.read_exact(&mut body);
+                let (status, text) = answer(&method, &path, &signer, &body);
+                let _ = (&c).write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
+                        text.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        origin
+    }
+
+    #[test]
+    fn a_new_install_on_a_retired_host_s_machine_enrolls_a_new_host_with_a_new_key() {
+        use base64::Engine;
+        use sha2::Digest;
+        let d = std::env::temp_dir().join(format!("omarchy-agent-retired-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let omw = format!("omw_{}", "0f".repeat(24));
+        let pool = pool_scripted(move |method, path, signer, body| match (method, path) {
+            // The old host's key is refused for good, with its status; the new one waits, then is active.
+            ("GET", "/api/v1/hosts/self/state") if signer == "h_0000000001" => (
+                403,
+                r#"{"error":"old is retired","code":"host_status","status":"retired"}"#.into(),
+            ),
+            ("GET", "/api/v1/hosts/self/state") => (
+                200,
+                r#"{"status":"active","owner":"m1","token":null}"#.into(),
+            ),
+            ("POST", "/api/v1/hosts/enroll") => {
+                let b: serde_json::Value = serde_json::from_slice(body).unwrap();
+                let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(b["pubkey"].as_str().unwrap())
+                    .unwrap();
+                let fp = format!(
+                    "SHA256:{}",
+                    base64::engine::general_purpose::STANDARD_NO_PAD
+                        .encode(sha2::Sha256::digest(&raw))
+                );
+                (
+                    201,
+                    serde_json::json!({"host": "h_0000000002", "name": "old", "owner": "m1", "units": 3, "fingerprint": fp}).to_string(),
+                )
+            }
+            ("POST", "/api/v1/hosts/self/token") => (
+                200,
+                serde_json::json!({"worker": "m1-old-0a9z", "token": omw, "rotate_after": "later"})
+                    .to_string(),
+            ),
+            _ => (404, "{}".into()),
+        });
+        let o = Options {
+            pool: None,
+            paths: Paths::under(&d),
+            token: Some(format!("ome_{}", "0".repeat(48))),
+            wait: Duration::from_secs(5),
+            poll: Duration::from_millis(10),
+        };
+        // The machine was host h_0000000001 on this pool, with its key and a capacity report.
+        host::private_dir(&o.paths.state).unwrap();
+        let old_key = HostKey::load_or_create(&o.paths.state.join(host::KEY_FILE))
+            .unwrap()
+            .public_b64u();
+        Identity {
+            pool: pool.clone(),
+            host: "h_0000000001".into(),
+        }
+        .write(&o.paths.state)
+        .unwrap();
+        std::fs::create_dir_all(o.paths.capacity().parent().unwrap()).unwrap();
+        std::fs::write(
+            o.paths.capacity(),
+            r#"{"page_kb":4,"isolation":"root","cpus":4,"mem_gb":8,"disk_free_gb":{"work":60,"engine":40},"lanes":[{"arch":"x86_64","mode":"native"}]}"#,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        run(&o, &mut out).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out)));
+        let said = String::from_utf8_lossy(&out);
+        assert!(
+            said.contains(
+                "host h_0000000001 was retired: this install enrolls the machine as a new host"
+            ),
+            "{said}"
+        );
+        // A new host, a new key, the old identity kept beside, the new worker token written.
+        assert_eq!(
+            Identity::read(&o.paths.state).unwrap().unwrap().host,
+            "h_0000000002"
+        );
+        assert!(o
+            .paths
+            .state
+            .join("host.json.retired-h_0000000001")
+            .exists());
+        let (key, _, _) = open(&o).unwrap();
+        assert_ne!(key.public_b64u(), old_key);
+        assert!(holds_token(&o.paths.dispatcher_env()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_suspended_host_keeps_its_identity_and_changes_nothing() {
+        let d =
+            std::env::temp_dir().join(format!("omarchy-agent-suspended-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let pool = pool_scripted(|_, _, _, _| {
+            (
+                403,
+                r#"{"error":"box is suspended","code":"host_status","status":"suspended"}"#.into(),
+            )
+        });
+        let o = Options {
+            pool: None,
+            paths: Paths::under(&d),
+            token: Some(format!("ome_{}", "0".repeat(48))),
+            wait: Duration::from_secs(5),
+            poll: Duration::from_millis(10),
+        };
+        host::private_dir(&o.paths.state).unwrap();
+        let key = HostKey::load_or_create(&o.paths.state.join(host::KEY_FILE))
+            .unwrap()
+            .public_b64u();
+        Identity {
+            pool,
+            host: "h_0000000001".into(),
+        }
+        .write(&o.paths.state)
+        .unwrap();
+        // Even with a token in the environment: a suspension is not a retirement.
+        let e = run(&o, &mut Vec::new()).unwrap_err().to_string();
+        assert!(e.contains("box is suspended"), "{e}");
+        assert_eq!(
+            Identity::read(&o.paths.state).unwrap().unwrap().host,
+            "h_0000000001"
+        );
+        assert_eq!(open(&o).unwrap().0.public_b64u(), key);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -85,7 +85,8 @@ beforeAll(async () => {
   const h = (t: string) => sha256Hex(t);
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3')`),
-    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('m3', ?, ?, 'maintainer'), ('bob', ?, ?, 'contributor')`)
+    // m1 owns every host here, joined with the maintainer list by its GitHub user id at each claim (#322).
+    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role, github_id) VALUES ('m1', ?, ?, 'maintainer', 1001), ('m2', ?, ?, 'maintainer', 1002), ('m3', ?, ?, 'maintainer', 1003), ('bob', ?, ?, 'contributor', 1004)`)
       .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_m3"), await h("oms_m3"), await h("omc_bob"), await h("oms_bob")),
     env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status) VALUES ('felix', 'bob', 'https://github.com/bob/felix', '["aarch64"]', 'waiting'), ('gus', 'bob', 'https://github.com/bob/gus', '["aarch64"]', 'waiting')`),
   ]);
