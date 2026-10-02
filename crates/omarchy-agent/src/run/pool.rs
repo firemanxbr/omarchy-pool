@@ -55,7 +55,7 @@ pub(crate) trait Pool {
 const FOLLOW_MAX: u64 = 64 << 10;
 const STATEMENT_MAX: u64 = 1 << 20;
 const BUNDLE_MAX: u64 = 64 << 20;
-const RELEASES: &str = "https://github.com/firemanxbr/omarchy-pool/releases/download";
+pub(crate) const RELEASES: &str = "https://github.com/firemanxbr/omarchy-pool/releases/download";
 
 /// Reads a `follow` body leniently: unknown fields ignored, a `latest` that is not a
 /// release read as none. `worker_id`'s entry gives the open Update, if any.

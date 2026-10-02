@@ -49,7 +49,7 @@ fn fault(at: &str) {
     }
 }
 
-/// `omarchy-agent run [--data <dir>]`: the loop, until stopped (or until a self-update
+/// `omarchy-agent run [--data-dir <dir>]`: the loop, until stopped (or until a self-update
 /// swapped `current`: exit 0 and the service manager starts the new agent).
 pub fn run(data: Option<&str>) -> u8 {
     let me = version::agent();
@@ -205,7 +205,7 @@ fn loop_forever(agent: &mut Agent, usr1: &AtomicBool, progress: &AtomicI64) -> u
     }
 }
 
-/// `omarchy-agent self-test --release vX.Y.Z [--data <dir>]`: prints `ok`, or why not.
+/// `omarchy-agent self-test --release vX.Y.Z [--data-dir <dir>]`: prints `ok`, or why not.
 pub fn self_test(data: Option<&str>, release: &str) -> u8 {
     let result = Release::parse(release)
         .ok_or_else(|| format!("{release:?} is not vX.Y.Z"))

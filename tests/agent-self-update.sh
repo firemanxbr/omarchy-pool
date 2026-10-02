@@ -97,7 +97,7 @@ EOF
   ln -s "versions/$new" "$data/current"
 
   mkdir -p "$HOME/.config/systemd/user/$unit.service.d"
-  sed "s|^ExecStart=.*|ExecStart=$data/current/omarchy-agent run --data $data|" \
+  sed "s|^ExecStart=.*|ExecStart=$data/current/omarchy-agent run --data-dir $data|" \
     crates/omarchy-agent/src/run/omarchy-agent.service > "$HOME/.config/systemd/user/$unit.service"
   printf '[Service]\nTimeoutStartSec=10\nWatchdogSec=30\nRestartSec=1\n' \
     > "$HOME/.config/systemd/user/$unit.service.d/fast.conf"
@@ -108,7 +108,7 @@ EOF
 
 # (Whole outputs into grep, never `grep -q` in a pipe: the agent's status would
 # meet a closed pipe.)
-status() { "$data/current/omarchy-agent" status --data "$data"; }
+status() { "$data/current/omarchy-agent" status --data-dir "$data"; }
 restarts() { systemctl --user show -p NRestarts --value "$unit.service"; }
 # The running agent's version, from the binary systemd started.
 running() {
@@ -140,7 +140,7 @@ grep -q '"event":"agent-updated"' "$data/journal.ndjson" || fail "good: no agent
 # The previous agent reads the state.json the new one wrote (a signed agent_to,
 # or a rollback, puts it back).
 grep -q "\"agent\": \"$new\"" "$data/state.json" || fail "good: state.json was not written by $new"
-"$data/versions/$me/omarchy-agent" status --data "$data" | grep "state written by $new" >/dev/null \
+"$data/versions/$me/omarchy-agent" status --data-dir "$data" | grep "state written by $new" >/dev/null \
   || fail "good: the previous agent does not read the new one's state.json"
 echo "good: $new passed its health gate and runs; $me reads its state.json"
 systemctl --user stop "$unit.service"

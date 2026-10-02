@@ -131,7 +131,9 @@ to copy.
    host enrolls, or 15 minutes after. A host is added in the browser only: a
    CLI token does not mint one, and a name you already use is refused.
 2. On the machine, as the user the agent runs as: `install.sh` installs the
-   agent, which makes the host key (`host.ed25519`, mode 0600, never in a
+   agent, which runs its preflight first (one screen of everything to fix,
+   nothing written until it passes; the runbook's *Installing a host* has the
+   options, `--dedicated` and `--work-root` above all), then makes the host key (`host.ed25519`, mode 0600, never in a
    container), checks the machine against the release's signed minimum (4
    CPUs, 8 GB, 60 GB free on the work root, 40 GB on the engine's data
    root) and enrolls with the token, its public key, a proof it holds the
@@ -145,6 +147,9 @@ to copy.
    key and writes it to `etc/dispatcher.env` (0600) for the dispatcher. It
    rotates the token every 30 days; the one it replaces works ten more
    minutes, so only the dispatcher is recreated and its tasks run on.
+5. Only then does it write `agent.toml` with the host and its registration,
+   take the agent keys, write the systemd --user unit, enable linger and start
+   the agent, whose first round starts the dispatcher.
 
 **Every task on a host is fenced in (#336).** Each task runs on its own
 internal network: it reaches public addresses only, through its own egress

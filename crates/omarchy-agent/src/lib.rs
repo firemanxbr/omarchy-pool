@@ -16,12 +16,13 @@
 //! [`pool`] (HTTPS to the pool) and [`enroll`] (the one-time token, the owner's Confirm,
 //! the host worker token).
 //!
-//! Self-update (#316) is part of [`run`]; install comes in its own P1 issue and builds on
-//! the types defined here.
+//! Self-update (#316) is part of [`run`]; [`install`] (#317) puts a Linux host together:
+//! preflight, the envelope, enrollment, the agent keys, the unit and linger.
 
 pub mod capacity;
 pub mod enroll;
 pub mod host;
+pub mod install;
 pub mod lint;
 pub mod manifest;
 pub mod pool;
