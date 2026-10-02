@@ -13,7 +13,9 @@
 mod set_toml;
 mod yaml;
 
-pub use set_toml::{lint_set_toml, parse_set_toml, Needs, Ready, SetToml, SET_SCHEMA};
+pub use set_toml::{
+    lint_set_toml, parse_set_toml, service_names, Needs, Ready, SetToml, SET_SCHEMA,
+};
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};

@@ -1,5 +1,6 @@
 //! The binary as release.yml and a person run it: exit status and what it prints.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -251,6 +252,136 @@ fn usage_errors_exit_2() {
         String::from_utf8_lossy(&o.stdout).trim(),
         format!("omarchy-agent {}", env!("CARGO_PKG_VERSION"))
     );
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("omarchy-agent-cli-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+#[test]
+fn run_stops_with_78_on_a_local_configuration_error_only() {
+    let data = scratch("run");
+    let d = data.to_string_lossy().into_owned();
+    // No agent.toml: nothing the network could fix.
+    let o = run(&["run", "--data", &d]);
+    assert_eq!(o.status.code(), Some(78), "{}", text(&o));
+    assert!(text(&o).contains("agent.toml"), "{}", text(&o));
+    // One that others may write is refused the same way.
+    let toml = data.join("agent.toml");
+    std::fs::write(&toml, "pool = \"https://pkgs.omarchy-pool.org\"\n").unwrap();
+    std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let o = run(&["run", "--data", &d]);
+    assert_eq!(o.status.code(), Some(78), "{}", text(&o));
+    assert!(text(&o).contains("writable"), "{}", text(&o));
+    // A state.json that is there but unreadable is not "start from nothing".
+    std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(
+        &toml,
+        "pool = \"https://pkgs.omarchy-pool.org\"\nhost_id = \"h_1\"\nworker_id = \"w_1\"\n[set]\ndir = \"/srv/set\"\nwork_root = \"/srv/work\"\nsecrets_dir = \"/srv/secrets\"\nsocket_cli = \"/var/run/docker.sock\"\n",
+    )
+    .unwrap();
+    std::fs::write(data.join("state.json"), "{\"floor\": \"latest\"}").unwrap();
+    let o = run(&["run", "--data", &d]);
+    assert_eq!(o.status.code(), Some(78), "{}", text(&o));
+    assert!(text(&o).contains("state.json"), "{}", text(&o));
+}
+
+#[test]
+fn status_logs_and_round_read_the_data_directory() {
+    let data = scratch("status");
+    let d = data.to_string_lossy().into_owned();
+    let o = run(&["status", "--data", &d]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("no state yet"), "{}", text(&o));
+
+    std::fs::write(
+        data.join("state.json"),
+        r#"{"floor":"v1.2.0","applied":"v1.2.0","target":"v1.3.0","round":{"at":1,"outcome":"rolled-back","from":"v1.3.0","step":"revert","detail":"guard: the dispatcher exited with 1"},"quarantine":{"v1.3.0":{"until":null,"reverts":2}}}"#,
+    )
+    .unwrap();
+    let o = run(&["status", "--data", &d]);
+    let t = text(&o);
+    assert_eq!(o.status.code(), Some(0), "{t}");
+    assert!(
+        t.contains("applied v1.2.0, target v1.3.0, floor v1.2.0"),
+        "{t}"
+    );
+    assert!(
+        t.contains("rolled-back") && t.contains("from v1.3.0"),
+        "{t}"
+    );
+    assert!(t.contains("v1.3.0 until a newer release"), "{t}");
+
+    std::fs::write(
+        data.join("journal.ndjson"),
+        "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n",
+    )
+    .unwrap();
+    let o = run(&["logs", "--data", &d, "-n", "2"]);
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "{\"n\":2}\n{\"n\":3}\n");
+    assert_eq!(
+        run(&["logs", "--data", &d, "-n", "x"]).status.code(),
+        Some(2)
+    );
+
+    // No agent runs here: `round` says so.
+    let o = run(&["round", "--data", &d]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("is the agent running?"), "{}", text(&o));
+}
+
+#[test]
+fn run_keeps_running_with_no_pool_and_round_asks_it_again() {
+    let data = scratch("loop");
+    let d = data.to_string_lossy().into_owned();
+    let toml = data.join("agent.toml");
+    // A pool that refuses connections: no answer, which never stops the agent.
+    std::fs::write(
+        &toml,
+        format!(
+            "pool = \"https://127.0.0.1:9\"\nhost_id = \"h_1\"\nworker_id = \"w_1\"\n[set]\ndir = \"{0}/set\"\nwork_root = \"{0}/work\"\nsecrets_dir = \"{0}/secrets\"\nsocket_cli = \"{0}/no.sock\"\n",
+            data.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omarchy-agent"))
+        .args(["run", "--data", &d])
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let journal = data.join("journal.ndjson");
+    let polls = || {
+        std::fs::read_to_string(&journal)
+            .unwrap_or_default()
+            .matches("pool-unreachable")
+            .count()
+    };
+    let wait = |n: usize| {
+        for _ in 0..100 {
+            if polls() >= n {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    };
+    assert!(
+        wait(1),
+        "no first poll: {:?}",
+        std::fs::read_to_string(&journal)
+    );
+    let o = run(&["round", "--data", &d]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(wait(2), "SIGUSR1 started no poll");
+    assert!(child.try_wait().unwrap().is_none(), "the agent stopped");
+    let o = run(&["status", "--data", &d]);
+    assert!(text(&o).contains("pool:      no-answer"), "{}", text(&o));
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 /// A docker CLI stand-in: `info` prints `$STUB_INFO`, `run` prints `$STUB_RUN` (and fails

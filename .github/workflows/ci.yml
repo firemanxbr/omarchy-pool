@@ -92,6 +92,28 @@ jobs:
         env:
           OMARCHY_SIGSTORE_CONFORMANCE: ${{ github.workspace }}/sigstore-conformance
 
+  agent-run-loop:
+    name: Host agent run loop on a real engine (${{ matrix.engine }})
+    # #315: the pinned docker CLI and compose plugin roll a stand-in dispatcher
+    # out — two releases, ordered restarts (exit 75) during a guard, broken
+    # releases reverted and quarantined, a rollback statement preempting a
+    # round — while a task container keeps running throughout; on rootful
+    # docker and on rootless podman's API socket.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [docker, podman]
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: The run loop on ${{ matrix.engine }}, with only the pinned tools and a task that survives every rollout
+        run: bash tests/agent-run-loop.sh ${{ matrix.engine }}
+
   agent-version:
     name: Host agent version (raised with every change to the agent)
     # Design v2 D17 (#311): the agent's own semver moves with what goes into
@@ -120,7 +142,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz@0.13.2
-      - name: The manifest, statement, bundle and set parsers, 60 seconds each
+      - name: The manifest, statement, bundle, set and state parsers, 60 seconds each
         run: bash tests/agent-fuzz.sh 60
 
   supply-chain:
@@ -139,7 +161,7 @@ jobs:
         run: cargo deny --locked check
       - name: cargo audit
         run: cargo audit
-      - name: The agent's core carries no async runtime, HTTP stack, Docker client or OpenSSL
+      - name: The agent carries no async runtime, HTTP stack but ureq, Docker client or OpenSSL
         run: bash tests/agent-deps.sh
 
   worker:
