@@ -6,7 +6,12 @@
  * worth one job's writes for thirty minutes.
  *
  *   omj.<base64url(json claims)>.<base64url(hmac-sha256)>
- *   claims = { t: task id, k: kind, s: [scopes], e: unix seconds, w: worker }
+ *   claims = { t: task id, k: kind, s: [scopes], e: unix seconds, w: worker, g?: lease generation }
+ *
+ * `g` (#334, D46) is the generation of a host registration's lease: the
+ * task is acted on only while its lease is still that generation, so a
+ * token of an earlier lease of the same task on the same host — whose
+ * `w` is the same — is refused. A legacy registration's lease has none.
  *
  * Scopes:
  *   task:<id>            heartbeat / complete / fail this task
@@ -26,6 +31,7 @@ export interface JobClaims {
   s: string[];
   e: number;
   w: string;
+  g?: string;
 }
 
 const enc = new TextEncoder();

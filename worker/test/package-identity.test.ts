@@ -67,7 +67,18 @@ async function planOf(x: { sql: string; args: unknown[] }): Promise<string> {
 
 /** What 0036 added, taken off again, and what the migrations after it added (the package's maintainer in the pool, #244; the reviews table takes its changes column, #247, with it): the schema as production has it before the migration. */
 const REWIND = [
-  // What 0043 added (maintainer hosts, #321 — with the columns 0044 added to them, #322) comes off first, then 0042's (orders to workers, #277), then 0041's (a package's ELF class, #275), then 0040's (passkeys for approve and block, #257), then 0039's (the MCP write tools, #252), so the migrations after 0036 run again in their order below.
+  "ALTER TABLE factory_packages DROP COLUMN disk_gb",
+  "ALTER TABLE factory_packages DROP COLUMN size",
+  "ALTER TABLE build_tasks DROP COLUMN lease_missed",
+  "ALTER TABLE build_tasks DROP COLUMN host_losses",
+  "ALTER TABLE build_tasks DROP COLUMN claim_id",
+  "ALTER TABLE build_tasks DROP COLUMN release",
+  "ALTER TABLE build_tasks DROP COLUMN disk_gb",
+  "ALTER TABLE build_tasks DROP COLUMN size",
+  "ALTER TABLE build_tasks DROP COLUMN units",
+  "ALTER TABLE build_tasks DROP COLUMN lane",
+  "ALTER TABLE build_tasks DROP COLUMN lease_gen",
+  // What 0045 added (host leases, #334) comes off first — its open-order indexes go with 0042's table —, then 0043's (maintainer hosts, #321 — with the columns 0044 added to them, #322), then 0042's (orders to workers, #277), then 0041's (a package's ELF class, #275), then 0040's (passkeys for approve and block, #257), then 0039's (the MCP write tools, #252), so the migrations after 0036 run again in their order below.
   "DROP INDEX idx_build_workers_host",
   "ALTER TABLE build_workers DROP COLUMN kind",
   "ALTER TABLE build_workers DROP COLUMN host_id",
@@ -247,16 +258,16 @@ describe("migration 0036: one package per name, with a target per architecture",
     const m = env.TEST_MIGRATIONS.find((x) => x.name.startsWith("0036_"))!;
     expect(m, "migration 0036 is in the list").toBeTruthy();
     await env.DB.batch(m.queries.map((q) => env.DB.prepare(q)));
-    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275; 0042's orders to workers, #277; 0043's maintainer hosts, #321, and 0044's columns on them, #322) comes back as D1 applies it.
+    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275; 0042's orders to workers, #277; 0043's maintainer hosts, #321, and 0044's columns on them, #322; 0045's host leases, #334) comes back as D1 applies it.
     for (const later of env.TEST_MIGRATIONS.filter((x) => x.name > m.name)) await env.DB.batch(later.queries.map((q) => env.DB.prepare(q)));
 
     // The schema is what every other test file runs on, and nothing of the rows it had changed.
     expect(await schema()).toEqual(after0036);
     const now = await read();
-    // 0042 adds a task's stop fence (#277), NULL on every row it finds.
-    expect(now.tasks.map(({ stop_order: so, ...t }) => (expect(so).toBeNull(), t))).toEqual(before.tasks);
+    // 0042 adds a task's stop fence (#277), NULL on every row it finds; 0045 a host lease's columns (#334), NULL or 0 on every row.
+    expect(now.tasks.map(({ stop_order: so, lease_gen: g, lane: l, units: u, size: z, disk_gb: d, release: r, claim_id: c, host_losses: hl, lease_missed: lm, ...t }) => (expect([so, g, l, u, z, d, r, c]).toEqual([null, null, null, null, null, null, null, null]), expect([hl, lm]).toEqual([0, 0]), t))).toEqual(before.tasks);
     expect(now.approvals.map(({ review_id: _, agent: _a, ...a }) => a)).toEqual(before.approvals);
-    expect(now.packages.map(({ targets: _t, closed_through: _c, freed_by_review: _f, ...p }) => p)).toEqual(before.packages);
+    expect(now.packages.map(({ targets: _t, closed_through: _c, freed_by_review: _f, size: _s, disk_gb: _d, ...p }) => p)).toEqual(before.packages);
     // A rejection before #242 freed no name: every name is held as it was.
     expect(now.packages.every((p) => p.freed_by_review === null)).toBe(true);
     // The helper table is gone with the statement that made it.

@@ -41,6 +41,10 @@ jobs:
         run: bash tests/worker-needs-native.sh
         env:
           PKG_REPO: target/release/pkg-repo
+      - name: The dispatcher on a real engine — a task container born with nothing, staged in and out; a failure, the memory limit's kill and an output outside its list; restarts that re-adopt; a lease the pool stops hearing; a stop; the disk watcher
+        run: bash tests/dispatch-engine.sh
+        env:
+          PKG_REPO: target/release/pkg-repo
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.os }}
@@ -254,6 +258,9 @@ jobs:
       - name: A build container runs make, ninja and cargo with the job count the dispatcher set for its share
         working-directory: .
         run: bash tests/worker-build-jobs.sh
+      - name: The build script's task mode — no pool call, the log cut at its cap, verdict.json always JSON — in a container with the task's mounts
+        working-directory: .
+        run: bash tests/worker-task-mode.sh
       - name: The worker checks its agent again until it answers, against a stub agent that comes up late
         working-directory: .
         run: bash tests/worker-agent-recheck.sh

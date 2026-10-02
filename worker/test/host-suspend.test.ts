@@ -94,7 +94,10 @@ async function leased(token: string): Promise<{ task: number; job: string }> {
   expect(c.status, JSON.stringify(c.json)).toBe(200);
   return { task: c.json.task.id, job: c.json.token };
 }
-const claim = (token: string) => call("POST", "/factory/claim", { token, body: { arch: "aarch64" } });
+let claims = 0;
+/** A claim as a host's dispatcher sends it (#334, design v2 §8.1): a claim_id new per attempt, want, the leases it holds and its capacity. */
+const claim = (token: string, leases: { task: number; gen: string }[] = []) =>
+  call("POST", "/factory/claim", { token, body: { arch: "aarch64", claim_id: `c_susp${String(++claims).padStart(8, "0")}`, want: 1, leases, capacity: STUDIO } });
 const heartbeat = (task: number, job: string) => call("POST", `/factory/tasks/${task}/heartbeat`, { token: job, body: {} });
 const hostRow = (id: string) => env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<any>();
 const taskRow = (id: number) => env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<any>();

@@ -12,8 +12,8 @@ import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
-import { LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
-import { HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, type HostClaimRow } from "../hosts";
+import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
+import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, COMMUNITY_MAX_SIZE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
   capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
@@ -75,6 +75,11 @@ interface TaskRow {
   staged_prefix: string | null;
   /** A Stop its task fenced this lease (#277): the open order's id — the task stays leased to its worker, and every heartbeat, report and upload of it is refused until it goes back to the queue. */
   stop_order: string | null;
+  /** #334: a host registration's lease — its generation (NULL for a legacy one's), the units it takes, the claim that took it, and the `lost` reports that gave the attempt back. */
+  lease_gen: string | null;
+  units: number | null;
+  claim_id: string | null;
+  host_losses: number;
 }
 
 /** Who is calling a worker endpoint: a registered worker (own token) or a job (its per-task token). */
@@ -368,13 +373,17 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
  */
 async function workerFinished(env: Env, who: string, task: TaskRow, status: "done" | "staged" | "failed", version?: string | null): Promise<void> {
   const last = JSON.stringify({ id: task.id, kind: task.kind, name: task.name, version: version ?? task.version ?? null, status, at: now() });
-  await env.DB.prepare(`UPDATE build_workers SET last_seen = ?, current_task = NULL, ${status === "failed" ? "builds_failed = builds_failed + 1" : "builds_done = builds_done + 1"}, last_task = ?, instance_finished = instance WHERE id = ?`)
+  // A host's lease (#334) is one of several its registration holds: the result is counted, and nothing of the single-task row moves —
+  // it has no current_task, and which process finished a task is the dispatcher's own report.
+  const single = task.lease_gen === null ? ", current_task = NULL, instance_finished = instance" : "";
+  await env.DB.prepare(`UPDATE build_workers SET last_seen = ?${single}, ${status === "failed" ? "builds_failed = builds_failed + 1" : "builds_done = builds_done + 1"}, last_task = ? WHERE id = ?`)
     .bind(now(), last, who)
     .run();
 }
 
 /** The work that needs an agent that answers: a draft (the PKGBUILD is the agent's), the project's review build (its recipe is), and an audit (the second agent). */
-export const AGENT_SCOPE = "(kind = 'audit' OR (kind = 'build' AND (pkgbuild_ref LIKE 'draft:%' OR pkgbuild_ref LIKE 'review:%')))";
+const agentScope = (t = "") => `(${t}kind = 'audit' OR (${t}kind = 'build' AND (${t}pkgbuild_ref LIKE 'draft:%' OR ${t}pkgbuild_ref LIKE 'review:%')))`;
+export const AGENT_SCOPE = agentScope();
 
 /** A worker is ready for what it declares when it is alive and, if that includes agent work, its agent answered last time. */
 export function workerReady(w: { last_seen: string; kinds: string | null; agent: string | null; agent_status: string | null; trust: string }, aliveSince: number): boolean {
@@ -461,7 +470,7 @@ function afterClaim(row: OrdersRow, facts: ClaimFacts, step: InstanceStep | null
  * rules' state is written with the order, by compare-and-set: a claim that
  * lost the race issues nothing, and the next one decides again.
  */
-async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell: string | null }, o: { agent: string | null; needsAgent: boolean; at: string }): Promise<OrderOut | null> {
+async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell: string | null }, o: { agent: string | null; needsAgent: boolean; at: string; host?: boolean }): Promise<OrderOut | null> {
   const now = Date.parse(o.at);
   const { scale } = rulesScale(env);
   const input = { row: x.row, claim: x.claim, status: x.status, error: x.error, spell: x.spell, instanceSince: x.instanceSince, conflict: x.conflict, needsAgent: o.needsAgent };
@@ -496,13 +505,13 @@ async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell
   }
   const by = poolFor(w.trust);
   const issued = await issueOrder(env, {
-    worker: w.id, owner: w.owner, kind: d.kind, reason: reason.slice(0, 300), by, via: null, rule: d.rule, unless: d.unless, site: w.site,
+    worker: w.id, owner: w.owner, kind: d.kind, reason: reason.slice(0, 300), by, via: null, rule: d.rule, unless: d.unless, site: w.site, host: o.host,
     baselineAtIssue: x.checkedAt, auto: { old: w.auto_orders, next: JSON.stringify(d.next) },
     deliverTo: { instance: x.instance!, baseline: d.kind === "restart" ? x.instance : x.checkedAt }, now,
     line: { status: d.kind === "recheck-agent" ? "ok" : "warn", summary: `${w.id}: ${d.kind} ordered by the pool — ${reason.slice(0, 300)}` },
   });
   if (!issued.ok) {
-    if (issued.why === "cap") await capRefusal(env, { worker: w.id, kind: d.kind, by, now });
+    if (issued.why === "cap") await capRefusal(env, { worker: w.id, kind: d.kind, by, now, host: o.host });
     return null;
   }
   return outOf({ id: issued.id, kind: d.kind, reason: reason.slice(0, 300), issued_by: by, issued_at: issued.issued_at, expires_at: issued.expires_at, unless_agent_ok: d.unless });
@@ -518,11 +527,173 @@ async function giveUp(env: Env, w: OrdersRow, spell: string | null, next: AutoSt
   ]);
 }
 
+// ---------- host registrations (#334) ----------
+
+/** The kinds P1 enables on a host registration (design v2 §8.2, §22): builds of every trust, trials and audits; pool jobs come in P2. */
+export const HOST_KINDS = ["build", "trial", "audit"];
+/** In P1 a host holds at most one of each slot: a build (or a trial, the other build-sized task) and an audit. */
+const slotOf = (t: string) => `(CASE WHEN ${t}kind IN ('build', 'trial') THEN 'build' ELSE ${t}kind END)`;
+/** An unfenced lease that two consecutive claims of its host do not list goes back to the queue once it is this old (§8.1). */
+export const HOST_LEASE_GRACE_MIN = 2;
+/** `lost` gives the attempt back at most this many times per task (D54). */
+export const HOST_LOSSES_MAX = 2;
+const CLAIM_ID = /^c_[A-Za-z0-9_-]{8,64}$/;
+export const LEASE_GEN = /^g_[0-9a-f]{16}$/;
+const MAX_LEASES = 64;
+
+/** A new lease generation: random, never `attempts` (needs_native and lost give an attempt back, so its value repeats — D46). */
+export function leaseGen(): string {
+  const b = new Uint8Array(8);
+  crypto.getRandomValues(b);
+  return `g_${[...b].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** A build's size at lease: the package's, at least 1, clamped to the signed maximum (a contributor's lower). */
+const sizeSql = (t: string) => `MIN(MAX(COALESCE((SELECT f.size FROM factory_packages f WHERE f.name = ${t}.name), 1), 1), CASE WHEN ${t}.trust = 'community' THEN ${COMMUNITY_MAX_SIZE} ELSE ${MAX_SIZE} END)`;
+/** The units a task takes, by the signed constants (D30). */
+const unitsSql = (t: string) => `(CASE ${t}.kind WHEN 'build' THEN ${TASK_UNITS.build_per_size} * ${sizeSql(t)} WHEN 'trial' THEN ${TASK_UNITS.trial} WHEN 'audit' THEN ${TASK_UNITS.audit} ELSE ${TASK_UNITS.job} END)`;
+
+/** What a host registration's claim adds (design v2 §8.1), read whole: nothing of it is guessed. */
+export interface HostClaim { claimId: string; want: 0 | 1; leases: { task: number; gen: string }[]; capacity: Capacity | null }
+
+export function hostClaim(b: { claim_id?: unknown; want?: unknown; leases?: unknown; capacity?: unknown }): HostClaim | string {
+  if (typeof b.claim_id !== "string" || !CLAIM_ID.test(b.claim_id)) return "claim_id: c_ and 8 to 64 letters, digits, '_' or '-', new per attempt (a retry after a lost answer sends the same one)";
+  if (b.want !== 0 && b.want !== 1) return "want: 1 to take a task, 0 to reconcile and take orders only";
+  if (!Array.isArray(b.leases) || b.leases.length > MAX_LEASES) return `leases: every lease the dispatcher holds, [{task, gen}], at most ${MAX_LEASES}`;
+  const leases: { task: number; gen: string }[] = [];
+  for (const l of b.leases as unknown[]) {
+    const x = l as { task?: unknown; gen?: unknown } | null;
+    if (!x || typeof x !== "object" || !Number.isSafeInteger(x.task) || (x.task as number) <= 0 || typeof x.gen !== "string" || !LEASE_GEN.test(x.gen)) return "a lease is {task: its id, gen: g_ and 16 hex}";
+    leases.push({ task: x.task as number, gen: x.gen });
+  }
+  let capacity: Capacity | null = null;
+  if (b.capacity !== undefined || b.want === 1) {
+    const c = parseCapacity(b.capacity);
+    if (typeof c === "string") return c;
+    capacity = c;
+  }
+  return { claimId: b.claim_id, want: b.want, leases, capacity };
+}
+
+/** The probe sidecar's word as a host claims it, `agent: {provider, model, probe, error?, checked_at?}`, in the fields every claim reads. */
+function hostAgent(b: Record<string, unknown>): void {
+  const a = b.agent;
+  if (!a || typeof a !== "object" || Array.isArray(a)) return;
+  const o = a as Record<string, unknown>;
+  b.agent = typeof o.provider === "string" && typeof o.model === "string" ? `${o.provider}/${o.model}` : null;
+  if (b.agent_status === undefined) {
+    b.agent_status = o.probe === "ok" || o.probe === "error" ? o.probe : null;
+    b.agent_error = typeof o.error === "string" ? o.error : "";
+    b.agent_checked_at = typeof o.checked_at === "string" ? o.checked_at : null;
+  }
+}
+
+/** The leases a host registration holds, by the pool's own rows (the lease index, status = 'leased'). */
+export const HOST_LEASES_SQL = "SELECT id, name, arch, kind, trust, lease_owner, attempts, max_attempts, lease_gen, stop_order, started_at, lease_missed FROM build_tasks WHERE status = 'leased' AND lease_owner = ?";
+/**
+ * An unfenced lease its host lost, only while it is still that lease: back
+ * in the queue with its attempt, counted in host_losses as a `lost` report
+ * is (D54), so a host that keeps losing its leases cannot hand a task back
+ * for ever. Past HOST_LOSSES_MAX the attempt is spent, as an expired lease's
+ * is: behind its peers, failed when it was the last.
+ */
+const SPENT = `host_losses >= ${HOST_LOSSES_MAX}`;
+const LAST = `${SPENT} AND attempts >= max_attempts`;
+export const LOST_LEASE_SQL = `UPDATE build_tasks SET
+    status = CASE WHEN ${LAST} THEN 'failed' ELSE 'queued' END,
+    finished_at = CASE WHEN ${LAST} THEN ?5 ELSE NULL END,
+    lease_owner = CASE WHEN ${LAST} THEN lease_owner ELSE NULL END,
+    attempts = CASE WHEN ${SPENT} THEN attempts ELSE MAX(attempts - 1, 0) END,
+    priority = CASE WHEN ${SPENT} THEN priority + 10 ELSE priority END,
+    error = CASE WHEN ${SPENT} THEN ?1 || ' — lost too often on its host: the attempt is spent' ELSE ?1 || '; the attempt is given back' END,
+    host_losses = host_losses + 1, lease_expires_at = NULL, lease_missed = 0
+  WHERE id = ?2 AND status = 'leased' AND lease_owner = ?3 AND lease_gen = ?4 AND stop_order IS NULL RETURNING id, status, attempts, error`;
+
+/**
+ * Reconciliation (design v2 §8.1): the claim lists every lease the
+ * dispatcher holds, and the pool compares it with its own. An unfenced lease
+ * the claim lists is counted as seen; one it does not list is counted as
+ * missed, and once two consecutive claims missed it and it is older than
+ * HOST_LEASE_GRACE_MIN it goes back to the queue at once, its attempt given
+ * back — the dispatcher never saw it, or lost it and killed its container.
+ * A fenced lease (a Stop) is the orders path's (orders.ts takeOrders): it
+ * ends when a claim no longer lists it, the dispatcher's proof its
+ * container is gone, or at the lease's end.
+ */
+export async function reconcileHost(env: Env, worker: string, leases: HostClaim["leases"], at: string): Promise<number> {
+  type Held = { id: number; name: string; arch: string; kind: string; trust: string; lease_owner: string; attempts: number; max_attempts: number; lease_gen: string | null; stop_order: string | null; started_at: string | null; lease_missed: number };
+  const held = (await env.DB.prepare(HOST_LEASES_SQL).bind(worker).all<Held>()).results;
+  if (!held.length) return 0;
+  const listed = new Set(leases.map((l) => `${l.task}:${l.gen}`));
+  const old = Date.parse(at) - HOST_LEASE_GRACE_MIN * 60000;
+  const counts: D1PreparedStatement[] = [];
+  let requeued = 0;
+  for (const t of held) {
+    if (t.stop_order || !t.lease_gen) continue;
+    const seen = listed.has(`${t.id}:${t.lease_gen}`);
+    const missed = seen ? 0 : t.lease_missed + 1;
+    if (!seen && missed >= 2 && Date.parse(t.started_at ?? at) <= old) {
+      const error = `lease by ${worker} lost: two claims of its host did not list it`;
+      const back = await env.DB.prepare(LOST_LEASE_SQL).bind(error, t.id, worker, t.lease_gen, at).first<{ id: number; status: string; attempts: number; error: string }>();
+      if (back) {
+        requeued++;
+        await afterRequeue(env, { ...t, attempts: back.attempts }, back.status === "failed", back.error, false);
+      }
+      continue;
+    }
+    if (missed !== t.lease_missed) counts.push(env.DB.prepare("UPDATE build_tasks SET lease_missed = ? WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_gen = ?").bind(missed, t.id, worker, t.lease_gen));
+  }
+  if (counts.length) await env.DB.batch(counts);
+  return requeued;
+}
+
+/** The claim's answer for a task leased to this worker: the task, its job token for this lease, and where its results go. */
+async function taskAnswer(env: Env, task: TaskRow, workerId: string): Promise<Response> {
+  // The job's own credential: exactly the routes this task needs, until the lease ends — and, for a host's lease, of this lease only (`g`).
+  const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
+  const expires = Math.floor(Date.now() / 1000) + LEASE_MINUTES * 60;
+  // A dry run's (publish 0, #284) writes nothing to the pool nor a ring: scopesFor reads the row's publish.
+  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params, task.publish), e: expires, w: workerId, ...(task.lease_gen ? { g: task.lease_gen } : {}) });
+  // A contributor's build lands in their workspace: how full it is travels
+  // with the claim, so a worker whose owner is at the quota fails the task
+  // at once instead of building for an hour into a 413.
+  const staging = task.trust === "community" && task.kind === "build" && task.owner
+    ? { bytes: (await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = ?").bind(task.owner).first<{ bytes: number }>())?.bytes ?? 0, quota_bytes: STAGING_QUOTA_BYTES }
+    : null;
+  return json({
+    task: { ...task, params },
+    token,
+    token_expires_at: new Date(expires * 1000).toISOString(),
+    lease_minutes: LEASE_MINUTES,
+    repo: "https://github.com/firemanxbr/omarchy-pool",
+    pkgbuild_path: task.kind === "build" && !(task.pkgbuild_ref.includes(":") || task.pkgbuild_ref.startsWith("draft")) ? `${recipesDir(task.created_at)}/${task.name}` : null,
+    // Where a staged result goes — a contributor's build, or the project's review build: PUT these back with the job token.
+    upload: task.trust === "community" || params.review !== undefined ? `/api/v1/factory/tasks/${task.id}/artifacts/<filename>` : null,
+    staging,
+  });
+}
+
+/**
+ * A claim retried after its answer was lost (§8.1): the lease that claim
+ * took, renewed, with a fresh job token of the same lease — never a second
+ * lease. A fenced one is not handed back.
+ */
+export const REPLAY_SQL = `UPDATE build_tasks SET lease_expires_at = ? WHERE status = 'leased' AND lease_owner = ? AND claim_id = ? AND stop_order IS NULL RETURNING *`;
+
 export async function handleClaim(request: Request, env: Env, actor: Actor): Promise<Response> {
   const b = await readJson<{ arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown; orders?: unknown; instance?: unknown; started_at?: unknown; agent_via?: unknown; site?: unknown; restarts_left?: unknown; previous_exit?: unknown; rollout?: unknown }>(request);
   if (b instanceof Response) return b;
   if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
   if (actor.kind === "job") return json({ error: "a job token cannot claim; use the worker token" }, 403);
+  // A host's registration (#334) claims with its capacity, a claim_id, want and every lease it holds: read whole, or refused.
+  const host = actor.w.kind === "host";
+  let hc: HostClaim | null = null;
+  if (host) {
+    const parsed = hostClaim(b as Record<string, unknown>);
+    if (typeof parsed === "string") return json({ error: parsed }, 400);
+    hc = parsed;
+    hostAgent(b as Record<string, unknown>);
+  }
   const probe = agentReport(b);
   const usage = usageReport(b.usage);
   const log = workerLog(b.log);
@@ -547,7 +718,8 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // anyone's, so a contributor never ends up building strangers' packages
   // by accident. Community results never reach the pool either way.
   const wanted = (Array.isArray(b.kinds) ? b.kinds.filter((k): k is string => typeof k === "string" && ALL_KINDS.includes(k)) : trust === "project" ? ALL_KINDS : ["build"]);
-  const kinds = trust === "project" ? wanted : ["build"];
+  // A host takes what the phase enables, of what it declares (§8.2).
+  const kinds = host ? (Array.isArray(b.kinds) ? wanted : HOST_KINDS).filter((k) => HOST_KINDS.includes(k)) : trust === "project" ? wanted : ["build"];
   // A worker started with --shared donates its compute to everyone's
   // requests — any contributor's, since 2026-09-17: the shared workers are
   // the queue a request lands in. Community results never reach the pool
@@ -580,8 +752,19 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   const spellFrom = row?.agent_error_since ?? null;
   const spellTo = row ? spellAfter(spellFrom, probe, at) : spellFrom;
   const said = { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent, kinds, probe, usage, log, agentVia: facts?.agent_via ?? row?.agent_via ?? null, at, spell: spellTo !== spellFrom ? { from: spellFrom, to: spellTo } : null };
-  const touch = (task: number | null) => touchSaying(env, said, task, step);
+  // A host's row holds no current_task: its leases are build_tasks.lease_owner's (§8.6).
+  const touch = (task: number | null) => touchSaying(env, said, host ? null : task, step);
   const after = row && facts ? afterClaim(row, facts, step, probe, at) : null;
+  if (hc) {
+    // Its leases, compared with the pool's own: a fence ends in the orders path when the claim stops listing it; a lease the
+    // dispatcher lost goes back to the queue here, whatever this claim is answered.
+    if (after) after.listed = new Set(hc.leases.map((l) => `${l.task}:${l.gen}`));
+    try {
+      await reconcileHost(env, workerId, hc.leases, at);
+    } catch (e) {
+      console.error("reconcile:", e);
+    }
+  }
   // Every worker follows the latest image (update.ts): one behind past the
   // rollout's grace is touched — alive, and the Workers page says why it
   // idles — told once per release in the journal, and handed nothing.
@@ -600,6 +783,14 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     }
     return json({ error: updateMessage(update), latest: update.latest, yours: update.yours, behind: update.behind, update: "/docs/workers#update", ...(orders.length ? { orders } : {}) }, 426);
   }
+  // A retry of a claim whose answer was lost: the same lease, a fresh token (§8.1).
+  if (hc?.want === 1) {
+    const again = await env.DB.prepare(REPLAY_SQL).bind(plusMinutes(LEASE_MINUTES), workerId, hc.claimId).first<TaskRow>();
+    if (again) {
+      await touch(null);
+      return taskAnswer(env, again, workerId);
+    }
+  }
   // An order waiting for this worker is delivered before any task, and an
   // answer that carries orders carries no task: the task stays queued for
   // the next claim. With nothing waiting, the pool's rules may give one.
@@ -608,7 +799,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     const orders = await ordersSafely(async () => {
       const waiting = await takeOrders(env, after, Date.parse(at));
       if (waiting.length || after.claim.takes === null || !rulesOn(env)) return waiting;
-      const auto = await autoOrder(env, after, { agent: agent ?? row!.agent, needsAgent: kindsNeedAgent, at });
+      const auto = await autoOrder(env, after, { agent: agent ?? row!.agent, needsAgent: kindsNeedAgent, at, host });
       return auto ? [auto] : [];
     });
     if (orders.length) {
@@ -619,6 +810,11 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // Drained (#277): alive, and handed nothing until it is resumed — whatever its image, a column of the row the token was read
   // with, so it holds for a worker from before orders too, and fails closed. Cheaper than a claim: no task statement runs.
   if (row?.drained_at) {
+    await touch(null);
+    return new Response(null, { status: 204 });
+  }
+  // A full host reconciles and takes its orders, and nothing more (§8.1).
+  if (hc?.want === 0) {
     await touch(null);
     return new Response(null, { status: 204 });
   }
@@ -643,7 +839,24 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // same way, and its attempt is never spent (handleFail).
   scope += ` AND (json_extract(c.params, '$.needs_native') IS NOT 1 OR ? = 0)`;
   binds.push(mine.emulated ? 1 : 0);
-  if (trust === "project") {
+  if (host) {
+    // One scope for a host (§8.2): community builds (the result goes to the contributor's staging), the project's builds and its review
+    // rebuilds alike — the project-trust branch below does not apply. The ring lock stays, as below.
+    scope += ` AND NOT (c.kind IN (${RING_MOVERS}) AND EXISTS (
+      SELECT 1 FROM build_tasks l WHERE l.status = 'leased' AND l.trust = 'project' AND l.kind IN (${RING_MOVERS}) AND l.id != c.id
+        AND (l.kind = 'security' OR c.kind = 'security'
+          OR COALESCE(json_extract(l.params, '$.to'), json_extract(l.params, '$.ring')) = COALESCE(json_extract(c.params, '$.to'), json_extract(c.params, '$.ring')))))`;
+    // Capacity, from the pool's own leases, never from a free count the host reports (§8.1): what it holds plus this task fits
+    // min(declared units, units recomputed from the reported totals with the signed constants, the pool's cap), keeping the reserved
+    // job unit for pool jobs; model work fits its agent slots; and in P1 one build and one audit at most.
+    const capRow = actor.w.host_id ? await env.DB.prepare("SELECT pool_cap_units FROM hosts WHERE id = ?").bind(actor.w.host_id).first<{ pool_cap_units: number | null }>() : null;
+    const cap = hc!.capacity!;
+    const limit = Math.min(unitsOf(cap), capRow?.pool_cap_units ?? Number.MAX_SAFE_INTEGER);
+    scope += ` AND (SELECT COALESCE(SUM(l.units), 0) FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ?) + ${unitsSql("c")} <= ? - CASE WHEN c.kind IN ('build', 'trial', 'audit') THEN ${TASK_UNITS.job_reserved} ELSE 0 END`;
+    scope += ` AND NOT EXISTS (SELECT 1 FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ? AND ${slotOf("l.")} = ${slotOf("c.")})`;
+    scope += ` AND (NOT ${agentScope("c.")} OR (SELECT COUNT(*) FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ? AND ${agentScope("l.")}) < ?)`;
+    binds.push(workerId, limit, workerId, workerId, cap.agent_slots ?? 0);
+  } else if (trust === "project") {
     scope += ` AND (kind != 'build' OR trust = 'project')`;
     // One job at a time on a ring. The jobs that move a ring — a promotion
     // into it, a rollback, a render, the security fast-track (any ring) —
@@ -688,15 +901,22 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // belongs to one lease (#277): a queued task never carries one — the
   // requeue clears it — but one a Worker from before the fence requeued
   // would stop the new lease on a worker nobody stopped, so the lease
-  // starts without it. A host's registration leases only while its host may claim, checked by this very statement (#322): the read
-  // above gives a refusal its words, and a suspension that commits between the two leaves this claim with nothing.
+  // starts without it.
+  //
+  // A host's lease (#334) carries a new generation, the native lane (P1), its size, units and disk budget, the release it was claimed on
+  // and the claim that took it; a legacy one carries no generation — the column is cleared, so a host's stale one never outlives its lease.
+  // A host's registration leases only while its host may claim, checked by this very statement (#322): the read above gives a refusal
+  // its words, and a suspension that commits between the two leaves this claim with nothing.
+  const hostSet = host
+    ? `, lane = 'native', size = CASE WHEN kind = 'build' THEN ${sizeSql("build_tasks")} END, units = ${unitsSql("build_tasks")}, disk_gb = CASE WHEN kind = 'build' THEN ${BUILD_GB_PER_SIZE} * ${sizeSql("build_tasks")} END, release = ?, claim_id = ?, lease_missed = 0`
+    : "";
   const hostOk = actor.w.host_id ? ` AND ${HOST_MAY_LEASE_SQL}` : "";
   const task = await env.DB.prepare(
-    `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL, stop_order = NULL
+    `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL, stop_order = NULL, lease_gen = ?${hostSet}
       WHERE id = (SELECT c.id FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope} ORDER BY c.priority, c.id LIMIT 1) AND status = 'queued'${hostOk}
       RETURNING *`,
   )
-    .bind(workerId, plusMinutes(LEASE_MINUTES), now(), b.arch, ...binds, ...(hostOk ? [actor.w.host_id] : []))
+    .bind(workerId, plusMinutes(LEASE_MINUTES), now(), host ? leaseGen() : null, ...(host ? [b.version ?? null, hc!.claimId] : []), b.arch, ...binds, ...(hostOk ? [actor.w.host_id] : []))
     .first<TaskRow>();
   await touch(task?.id ?? null);
   if (!task) return new Response(null, { status: 204 });
@@ -705,28 +925,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   }
   // The package's architecture is being built — by its contributor, or again by the project: its target says so.
   if (task.kind === "build") await settleTargets(env, task.name);
-  // The job's own credential: exactly the routes this task needs, until the lease ends.
-  const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
-  const expires = Math.floor(Date.now() / 1000) + LEASE_MINUTES * 60;
-  // A dry run's (publish 0, #284) writes nothing to the pool nor a ring: scopesFor reads the row's publish.
-  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params, task.publish), e: expires, w: workerId });
-  // A contributor's build lands in their workspace: how full it is travels
-  // with the claim, so a worker whose owner is at the quota fails the task
-  // at once instead of building for an hour into a 413.
-  const staging = task.trust === "community" && task.kind === "build" && task.owner
-    ? { bytes: (await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = ?").bind(task.owner).first<{ bytes: number }>())?.bytes ?? 0, quota_bytes: STAGING_QUOTA_BYTES }
-    : null;
-  return json({
-    task: { ...task, params },
-    token,
-    token_expires_at: new Date(expires * 1000).toISOString(),
-    lease_minutes: LEASE_MINUTES,
-    repo: "https://github.com/firemanxbr/omarchy-pool",
-    pkgbuild_path: task.kind === "build" && !(task.pkgbuild_ref.includes(":") || task.pkgbuild_ref.startsWith("draft")) ? `${recipesDir(task.created_at)}/${task.name}` : null,
-    // Where a staged result goes — a contributor's build, or the project's review build: PUT these back with the job token.
-    upload: task.trust === "community" || params.review !== undefined ? `/api/v1/factory/tasks/${task.id}/artifacts/<filename>` : null,
-    staging,
-  });
+  return taskAnswer(env, task, workerId);
 }
 
 async function owned(env: Env, id: number, actor: Actor): Promise<TaskRow | Response> {
@@ -737,6 +936,10 @@ async function owned(env: Env, id: number, actor: Actor): Promise<TaskRow | Resp
   // A task that is no longer the caller's says so, and says it on every call (#277): `stop` tells the worker to stop the task's
   // processes — a child holding the job token cannot swallow it, it is not a one-time order — and `state` what became of it.
   if (task.status !== "leased" || task.lease_owner !== who) return json({ error: `task ${id} is ${task.status}${task.lease_owner ? " by " + task.lease_owner : ""}; the lease is not yours`, stop: true, state: task.status }, 409);
+  // A host's lease (#334, D46) is acted on with the job token of that very lease: the same host may hold the task again, under the
+  // same lease_owner, after a stop it re-claimed before the kill landed — the old container's token names the older generation.
+  const gen = actor.kind === "job" ? actor.job.g ?? null : null;
+  if ((task.lease_gen ?? null) !== gen) return json({ error: `this token is of another lease of task ${id}: a host's lease is acted on with its own job token only`, stop: true, state: task.status }, 409);
   // Stopped from its worker's page: still leased to this worker, so nobody else takes it, but nothing it sends is taken and nothing renews the lease or its token.
   if (task.stop_order) return json({ error: `task ${id} was stopped from its worker's page: it goes back to the queue once this worker has stopped it`, stop: true, state: "stopping" }, 409);
   return task;
@@ -754,7 +957,7 @@ function workerName(actor: Actor): string {
  * for a task stopped meanwhile —, and the caller hears what became of the
  * task, in owned()'s words.
  */
-const LEASE_HELD = "status = 'leased' AND lease_owner = ? AND stop_order IS NULL";
+const LEASE_HELD = "status = 'leased' AND lease_owner = ? AND lease_gen IS ? AND stop_order IS NULL";
 async function leaseMoved(env: Env, id: number, actor: Actor): Promise<Response> {
   const again = await owned(env, id, actor);
   return again instanceof Response ? again : json({ error: `task ${id}'s lease moved meanwhile; send it again` }, 409);
@@ -771,13 +974,15 @@ export async function handleHeartbeat(id: number, env: Env, actor: Actor): Promi
   if (task instanceof Response) return task;
   const who = workerName(actor);
   const until = plusMinutes(LEASE_MINUTES);
-  const renewed = await env.DB.prepare(`UPDATE build_tasks SET lease_expires_at = ? WHERE id = ? AND ${LEASE_HELD}`).bind(until, id, who).run();
+  const renewed = await env.DB.prepare(`UPDATE build_tasks SET lease_expires_at = ? WHERE id = ? AND ${LEASE_HELD}`).bind(until, id, who, task.lease_gen).run();
   if (!renewed.meta.changes) return leaseMoved(env, id, actor);
-  await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = ? WHERE id = ?").bind(now(), id, who).run();
-  // The lease moved; so does the job's credential.
+  // A host's row has no current_task (#334): its leases are build_tasks.lease_owner's.
+  if (task.lease_gen === null) await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = ? WHERE id = ?").bind(now(), id, who).run();
+  else await env.DB.prepare("UPDATE build_workers SET last_seen = ? WHERE id = ?").bind(now(), who).run();
+  // The lease moved; so does the job's credential — of the same lease.
   const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
   const expires = Math.floor(Date.now() / 1000) + LEASE_MINUTES * 60;
-  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params, task.publish), e: expires, w: who });
+  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params, task.publish), e: expires, w: who, ...(task.lease_gen ? { g: task.lease_gen } : {}) });
   return json({ task: id, lease_expires_at: until, token, token_expires_at: new Date(expires * 1000).toISOString() });
 }
 
@@ -809,7 +1014,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     // The lease ends with the status; who held it stays on the row — the
     // journal, the seal and the load per worker read it later.
     const ended = await env.DB.prepare(`UPDATE build_tasks SET status = 'done', finished_at = ?, duration_ms = ?, log_tail = ?, result = ?, lease_expires_at = NULL WHERE id = ? AND ${LEASE_HELD}`)
-      .bind(now(), b.duration_ms ?? null, tail, b.result ? JSON.stringify(b.result) : null, id, who)
+      .bind(now(), b.duration_ms ?? null, tail, b.result ? JSON.stringify(b.result) : null, id, who, task.lease_gen)
       .run();
     if (!ended.meta.changes) return leaseMoved(env, id, actor);
     await workerFinished(env, who, task, "done");
@@ -892,7 +1097,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     const staged = await env.DB.prepare(
       `UPDATE build_tasks SET status = 'staged', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, version = COALESCE(version, ?), duration_ms = ?, log_tail = ?, staged_prefix = ?, result = ?, lease_expires_at = NULL, params = CASE WHEN ? THEN json_set(COALESCE(params, '{}'), '$.built_with', (SELECT agent FROM build_workers WHERE id = ?)) ELSE params END WHERE id = ? AND ${LEASE_HELD}`,
     )
-      .bind(now(), b.sha256, b.filename, b.version ?? null, b.version ?? null, b.duration_ms ?? null, tail, prefix, vet ? JSON.stringify({ vet }) : null, review !== undefined ? 1 : 0, who, id, who)
+      .bind(now(), b.sha256, b.filename, b.version ?? null, b.version ?? null, b.duration_ms ?? null, tail, prefix, vet ? JSON.stringify({ vet }) : null, review !== undefined ? 1 : 0, who, id, who, task.lease_gen)
       .run();
     if (!staged.meta.changes) return leaseMoved(env, id, actor);
     // The evidence outlives staging: on the record, signed.
@@ -957,7 +1162,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   const done = await env.DB.prepare(
     `UPDATE build_tasks SET status = 'done', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, duration_ms = ?, log_tail = ?, lease_expires_at = NULL WHERE id = ? AND ${LEASE_HELD}`,
   )
-    .bind(now(), indexed.sha256, b.filename, b.version ?? null, b.duration_ms ?? null, tail, id, who)
+    .bind(now(), indexed.sha256, b.filename, b.version ?? null, b.duration_ms ?? null, tail, id, who, task.lease_gen)
     .run();
   if (!done.meta.changes) return leaseMoved(env, id, actor);
   await workerFinished(env, who, task, "done", b.version);
@@ -991,13 +1196,21 @@ export async function handleComplete(id: number, request: Request, env: Env, act
 }
 
 export async function handleFail(id: number, request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = await readJson<{ error?: string; duration_ms?: number; log_tail?: string; final?: boolean; needs_native?: boolean }>(request);
+  const b = await readJson<{ error?: string; duration_ms?: number; log_tail?: string; final?: boolean; needs_native?: boolean; lost?: boolean; oom?: boolean }>(request);
   if (b instanceof Response) return b;
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
   const who = workerName(actor);
   const tail = (await withheld(env, id, "log_tail", b.log_tail)).slice(-4000);
-  const error = (await withheld(env, id, "error", b.error ?? "build failed")).slice(0, 2000);
+  // Two words of a host's lease (#334, D54): `oom`, the engine's out-of-memory kill — a failure like any other, its reason on the row —
+  // and `lost`, a host event (a reboot, an engine restart, the disk watcher's kill), which gives the attempt back like needs_native,
+  // at most HOST_LOSSES_MAX times per task so a crash-looping host cannot requeue it for ever. A legacy lease's report has neither.
+  const hostLease = task.lease_gen !== null;
+  const oom = hostLease && b.oom === true;
+  const lost = hostLease && b.lost === true && task.host_losses < HOST_LOSSES_MAX;
+  const lostSpent = hostLease && b.lost === true && !lost;
+  const said = (await withheld(env, id, "error", b.error ?? "build failed")).slice(0, 2000);
+  const error = (oom ? `out of memory (the engine killed it): ${said}` : lostSpent ? `lost a third time on its host, the attempt spent: ${said}` : said).slice(0, 2000);
   // Retries are for the infrastructure (a download, a mirror, a container
   // killed), not for the recipe: a PKGBUILD that failed to build fails the
   // same way three times, each in a fresh container — the first
@@ -1010,17 +1223,17 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // attempt is given back — a build no worker ran is not an attempt. The
   // word counts from an emulated worker only: a native one that says it
   // would be handed the same build back for ever.
-  const needsNative = b.needs_native === true && (await emulated(env, who));
-  const exhausted = !needsNative && (b.final === true || task.attempts >= task.max_attempts);
+  const needsNative = !lost && b.needs_native === true && (await emulated(env, who));
+  const exhausted = !needsNative && !lost && (b.final === true || task.attempts >= task.max_attempts);
   const review = task.kind === "build" && task.params ? (JSON.parse(task.params) as { review?: number }).review : undefined;
   // A requeued task goes behind its peers (priority + 10) so one broken
   // PKGBUILD does not hold the queue. One sent back for a native worker
   // waits for no other: not the worker it was pinned to, not the owner's
   // fourteen days of a bump — the one that had it is the one that cannot.
   const failed = await env.DB.prepare(
-    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10${needsNative ? ", attempts = attempts - 1, pinned_to = NULL, shared_after = NULL, params = json_set(COALESCE(params, '{}'), '$.needs_native', 1)" : ""} WHERE id = ? AND ${LEASE_HELD}`,
+    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10${needsNative ? ", attempts = attempts - 1, pinned_to = NULL, shared_after = NULL, params = json_set(COALESCE(params, '{}'), '$.needs_native', 1)" : ""}${lost ? ", attempts = attempts - 1, host_losses = host_losses + 1" : ""} WHERE id = ? AND ${LEASE_HELD}`,
   )
-    .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id, who)
+    .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id, who, task.lease_gen)
     .run();
   if (!failed.meta.changes) return leaseMoved(env, id, actor);
   // What the worker uploaded before giving up — the log, the PKGBUILD, the
@@ -1045,9 +1258,9 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
     await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`the project's build (task ${id}) waits for a native ${task.arch} worker`, task.name).run();
   }
   if (task.kind === "build") await settleTargets(env, task.name);
-  const attempts = needsNative ? task.attempts - 1 : task.attempts;
-  const tale = needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
-  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative });
+  const attempts = needsNative || lost ? task.attempts - 1 : task.attempts;
+  const tale = lost ? ` lost on ${who} (a host event, ${task.host_losses + 1} of ${HOST_LOSSES_MAX}) — back in the queue, the attempt given back` : needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
+  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative, ...(hostLease ? { lost: b.lost === true, oom } : {}) });
   return json({ task: id, status: exhausted ? "failed" : "queued", attempts });
 }
 
@@ -1104,10 +1317,15 @@ function poolWaits(w: WorkerRow): string | null {
   return null;
 }
 
-/** The stop that fences a worker's task, from its open orders: which task, since when, and the latest it goes back to the queue. */
+/** The stops that fence a worker's tasks, from its open orders: which task, since when, and the latest it goes back to the queue — one per lease on a host (#334), at most one on a legacy registration. */
+export function stoppingsOf(open: string | null): { task: number; order: string; by: string; since: string; until: string }[] {
+  return openOrdersOf(open)
+    .filter((x) => x.kind === "stop-task" && typeof x.task === "number")
+    .map((o) => ({ task: o.task!, order: o.id, by: o.by, since: o.at, until: new Date(Date.parse(o.at) + LEASE_MINUTES * 60000).toISOString() }));
+}
+/** The stop that fences a legacy registration's one task (its page's word). */
 export function stoppingOf(open: string | null): { task: number; order: string; by: string; since: string; until: string } | null {
-  const o = openOrdersOf(open).find((x) => x.kind === "stop-task" && typeof x.task === "number");
-  return o ? { task: o.task!, order: o.id, by: o.by, since: o.at, until: new Date(Date.parse(o.at) + LEASE_MINUTES * 60000).toISOString() } : null;
+  return stoppingsOf(open)[0] ?? null;
 }
 
 /** The moment a heartbeat must be younger than to count as alive: the one rule (meta.ts's WORKER_ALIVE_MINUTES), as a timestamp. */
@@ -1146,6 +1364,8 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
     // A Stop its task that fences its task now (#277): from the open order the row carries, no read. Its task goes back to the queue
     // once this worker has stopped it, and at the latest when the fenced lease ends — nothing renews it after the order.
     stopping: stoppingOf(w.open_orders ?? null),
+    // A host's (#334): every lease a Stop fences now.
+    ...(w.kind === "host" ? { stoppings: stoppingsOf(w.open_orders ?? null) } : {}),
     not_ready_since: w.agent_status === "error" ? w.agent_error_since ?? null : null,
     pool_gave_up: auto?.gave_up ?? null,
     pool_waits: poolWaits(w),
@@ -1211,7 +1431,8 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       pool: { version: pool.version, deployed_at: pool.deployed_at },
       workers: workers.results.map((w) => workerView(w, alive, pool)),
       // A task's params and result are JSON here as they are on the task's own page (handleTask): one shape for a task, whoever reads it.
-      tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, params: parseJson(t.params), result: parseJson(t.result) })),
+      // A host lease's claim_id is its replay key and lease_gen its token's generation (#334): the pool's, never a page's.
+      tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, claim_id: undefined, lease_gen: undefined, params: parseJson(t.params), result: parseJson(t.result) })),
     },
     200,
     { "cache-control": "public, max-age=10" },
@@ -1302,7 +1523,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
     : [];
   return json(
     {
-      task: { ...task, params, result: parse(task) },
+      task: { ...task, claim_id: undefined, lease_gen: undefined, params, result: parse(task) },
       // Its lease fenced by a Stop its task (the row's stop_order, spread above): told when, back in the queue by when at the latest — the
       // fenced lease's own end, which nothing renews (the order's issue plus a lease only bounds it): what the worker's page and the stop's dialog say.
       stopping: stop && task.status === "leased" ? { order: stop.id, by: stop.issued_by, since: stop.issued_at, until: task.lease_expires_at ?? new Date(Date.parse(stop.issued_at) + LEASE_MINUTES * 60000).toISOString() } : null,
