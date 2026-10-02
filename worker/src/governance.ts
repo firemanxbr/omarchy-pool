@@ -10,6 +10,7 @@
 import { parse } from "smol-toml";
 import type { Env } from "./index";
 import { REPO_URL } from "./meta";
+import { OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER } from "./hosts";
 
 export const GOVERNANCE_FILE = "factory/MAINTAINERS.toml";
 const RAW = `https://raw.githubusercontent.com/firemanxbr/omarchy-pool/main/${GOVERNANCE_FILE}`;
@@ -74,8 +75,36 @@ export async function syncGovernance(env: Env, fetcher: typeof fetch = fetch): P
   const text = await res.text();
   const hash = await sha256Hex(text);
   const known = await env.DB.prepare("SELECT value FROM settings WHERE key = 'governance_sha256'").first<{ value: string }>();
-  if (known?.value === hash) return "governance: unchanged";
+  if (known?.value === hash) {
+    // The list is the same, but who it resolves to may not be (a sign-in moved a login's GitHub user id): the hosts' step runs at every sync.
+    const stopped = await stopHostsOfRemovedOwners(env);
+    return `governance: unchanged${stopped.length ? " — " + stopped.join("; ") : ""}`;
+  }
   return applyGovernance(env, parseGovernance(text), hash);
+}
+
+/**
+ * The maintainer hosts' share of a sync (#322, design v2 §6.2, D39): every
+ * host whose owner no longer resolves from the list stops claiming — the
+ * claim itself refuses it from the next one (hosts.ts, hostClaimRefusal),
+ * and this marks it so it stays stopped until its owner's one Resume once
+ * listed again. Nothing is fenced: running leases finish and upload, so a
+ * mistaken pull request or a parse slip costs new claims for ten minutes,
+ * not builds in flight. One journal line per host.
+ */
+export const STOP_REMOVED_OWNERS_SQL = `UPDATE hosts SET owner_removed_at = ?1
+  WHERE status IN ('active', 'suspended') AND owner_removed_at IS NULL AND NOT ${OWNER_LISTED_SQL("hosts.owner_github_id")}
+  RETURNING id, name, owner_login, worker_id`;
+
+export async function stopHostsOfRemovedOwners(env: Env, at = new Date().toISOString()): Promise<string[]> {
+  const rows = (await env.DB.prepare(STOP_REMOVED_OWNERS_SQL).bind(at).all<{ id: string; name: string; owner_login: string; worker_id: string | null }>()).results;
+  if (!rows.length) return [];
+  const lines = rows.map((h) => `${h.name} of ${h.owner_login} stops claiming: ${OWNER_NOT_MAINTAINER} (${GOVERNANCE_FILE}); its running tasks finish and upload`);
+  await env.DB.batch(rows.map((h, i) =>
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('host', NULL, 'factory', 'warn', ?, ?)")
+      .bind(lines[i], JSON.stringify({ host: h.id, worker: h.worker_id, owner: h.owner_login, action: "owner_removed", source: GOVERNANCE_FILE })),
+  ));
+  return lines;
 }
 
 export async function applyGovernance(env: Env, maintainers: string[], hash: string): Promise<string> {
@@ -99,5 +128,6 @@ export async function applyGovernance(env: Env, maintainers: string[], hash: str
       .run();
     changes.push(line);
   }
+  changes.push(...(await stopHostsOfRemovedOwners(env)));
   return `governance: ${maintainers.length} maintainer(s) applied${changes.length ? " — " + changes.join("; ") : ""}`;
 }

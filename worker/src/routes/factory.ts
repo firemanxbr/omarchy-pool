@@ -13,6 +13,7 @@ import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
+import { HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, type HostClaimRow } from "../hosts";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
   capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
@@ -528,6 +529,14 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // A worker is its registration: id, owner, trust and what it may build.
   const workerId = actor.w.id;
   if (actor.w.arch !== b.arch) return json({ error: `this worker is registered for ${actor.w.arch}` }, 400);
+  // A host's registration (#322, design v2 §6.2, §6.4): its host suspended or retired, or its owner no longer a maintainer — the owner's id
+  // joined with the list at this very claim, between two syncs too — claims nothing, and is told why. Its running leases are not this
+  // door's: a suspension fenced them; a removal lets them finish and upload. One read by the primary key, for host registrations only.
+  if (actor.w.host_id) {
+    const h = await env.DB.prepare(HOST_CLAIM_SQL).bind(actor.w.host_id).first<HostClaimRow>();
+    const no = h ? hostClaimRefusal(h) : { code: "host_status", error: "its host is gone" };
+    if (no) return json(no, 403);
+  }
   const trust = actor.w.trust === "project" ? "project" : "community";
   // What this worker may claim. Project trust takes any kind it declares,
   // but never a contributor's build: project workers do the work a
@@ -679,13 +688,15 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // belongs to one lease (#277): a queued task never carries one — the
   // requeue clears it — but one a Worker from before the fence requeued
   // would stop the new lease on a worker nobody stopped, so the lease
-  // starts without it.
+  // starts without it. A host's registration leases only while its host may claim, checked by this very statement (#322): the read
+  // above gives a refusal its words, and a suspension that commits between the two leaves this claim with nothing.
+  const hostOk = actor.w.host_id ? ` AND ${HOST_MAY_LEASE_SQL}` : "";
   const task = await env.DB.prepare(
     `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL, stop_order = NULL
-      WHERE id = (SELECT c.id FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope} ORDER BY c.priority, c.id LIMIT 1) AND status = 'queued'
+      WHERE id = (SELECT c.id FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope} ORDER BY c.priority, c.id LIMIT 1) AND status = 'queued'${hostOk}
       RETURNING *`,
   )
-    .bind(workerId, plusMinutes(LEASE_MINUTES), now(), b.arch, ...binds)
+    .bind(workerId, plusMinutes(LEASE_MINUTES), now(), b.arch, ...binds, ...(hostOk ? [actor.w.host_id] : []))
     .first<TaskRow>();
   await touch(task?.id ?? null);
   if (!task) return new Response(null, { status: 204 });

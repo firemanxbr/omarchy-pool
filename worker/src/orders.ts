@@ -895,6 +895,14 @@ export function orderVerdicts(c: { login: string; role: string } | null, w: Orde
     if (kind === "resume") {
       if (!w.drained_at) return no(409, "it is not drained: there is nothing to resume");
       const owner = w.owner !== null && c!.login === w.owner;
+      // A host's registration (#322, D57): a drain by its owner is lifted by its owner only — they may need the machine —; one by
+      // another maintainer by either of the two.
+      if (w.kind === "host") {
+        const said = `${w.drained_at ? utc(w.drained_at) : "?"}${w.drain_reason ? `: ${w.drain_reason}` : ""}`;
+        if (w.drained_by === w.owner && !owner) return no(403, `${w.owner} drained their host (${said}): it goes back to work on ${w.owner}'s word only — they may need the machine`);
+        if (w.drained_by !== w.owner && !owner && c!.login !== w.drained_by) return no(403, `${w.drained_by ?? "a maintainer"} drained it (${said}): ${w.owner ?? "its owner"} or ${w.drained_by ?? "that maintainer"} resumes it`);
+        return allow;
+      }
       // A project worker is the maintainers' to keep out: its owner, when not a maintainer, lifts only a drain of their own.
       if (w.trust === "project" && c!.role !== "maintainer" && w.drained_by !== c!.login) {
         return no(403, `${w.drained_by ?? "a maintainer"} drained it (${w.drained_at ? utc(w.drained_at) : "?"}${w.drain_reason ? `: ${w.drain_reason}` : ""}): a project worker goes back to work on a maintainer's word`);
@@ -1714,8 +1722,7 @@ export const CANCEL_LINES_SQL = (which: string) => `INSERT INTO events (kind, ri
 export const CANCEL_ORDERS_SQL = (which: string) => `UPDATE worker_orders SET state = 'cancelled', answered_at = ?, answered_by = 'pool', detail = ? WHERE worker_id IN (${which}) AND state IN ('pending', 'delivered')`;
 export const CANCEL_ROWS_SQL = (which: string) => `UPDATE build_workers SET open_orders = NULL, agent_error_since = NULL WHERE id IN (${which}) AND (open_orders IS NOT NULL OR agent_error_since IS NOT NULL)`;
 
-export function cancelOrdersOf(env: Env, which: { sql: string; binds: unknown[] }, by: string, at: string): D1PreparedStatement[] {
-  const detail = `the worker was revoked by ${by}`;
+export function cancelOrdersOf(env: Env, which: { sql: string; binds: unknown[] }, by: string, at: string, detail = `the worker was revoked by ${by}`): D1PreparedStatement[] {
   return [
     env.DB.prepare(CANCEL_LINES_SQL(which.sql)).bind(detail, ...which.binds),
     env.DB.prepare(CANCEL_ORDERS_SQL(which.sql)).bind(at, detail, ...which.binds),

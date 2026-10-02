@@ -21,6 +21,8 @@ import { page, servedGrey, workerPanels } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { POOL_HOSTS } from "../routes/contributors";
+import { OWNER_NOT_MAINTAINER } from "../hosts";
+import { SELF_CAUSE } from "../routes/passkeys";
 
 /**
  * The controls served grey for everyone, whose they are in their title —
@@ -85,6 +87,8 @@ const CSS = String.raw`
   @media (max-width: 520px) { #hosts-table th:nth-child(3), #hosts-table td:nth-child(3), #hosts-table th:nth-child(5), #hosts-table td:nth-child(5), #hosts-table th:nth-child(6), #hosts-table td:nth-child(6) { display: none; } }
   #h-new pre { position: relative; padding-right: 76px; white-space: pre-wrap; overflow-wrap: anywhere; }
   #hosts-table .h-detail { overflow-wrap: anywhere; min-width: 16ch; }
+  #h-stop { margin-top: 10px; display: grid; gap: 8px; justify-items: start; }
+  #h-stop .small-btn.danger { border-color: var(--red); color: var(--red); }
 `;
 
 const body = (login: string) => String.raw`
@@ -137,6 +141,7 @@ const body = (login: string) => String.raw`
     <div class="table-wrap"><table id="hosts-table"><thead><tr><th>Host</th><th>Status</th><th>Arches</th><th>Units</th><th>Release</th><th>Reported</th><th aria-label="Confirm"></th></tr></thead><tbody></tbody></table></div>
     <p class="sub" id="h-none" hidden style="margin:0">No host under this name.</p>
     <div id="h-notices" hidden style="margin-top:10px"></div>
+    <div id="h-stop" hidden></div>
   </section>
 
   <section id="agents" hidden>
@@ -247,13 +252,16 @@ const SCRIPT = String.raw`
     if (hs.length) $("#hosts").hidden = false;
     var pending = false;
     var rows = hs.map(function (h) {
-      var p = h.status === "active" ? ["ok", "active"] : h.status === "pending-owner" ? ["warn", "waits for Confirm"] : ["na", h.status];
+      var p = h.status === "active" ? ["ok", "active"] : h.status === "pending-owner" ? ["warn", "waits for Confirm"] : h.status === "suspended" ? ["error", "suspended"] : ["na", h.status];
       if (h.status === "pending-owner") pending = true;
       var confirm = h.status === "pending-owner" ? gate('<button type="button" class="small-btn" data-host-confirm="' + esc(h.id) + '" data-name="' + esc(h.name) + '" title="the fingerprint matches what the machine printed: make it a pool host">Confirm</button>', isOwner(h.owner), "only " + h.owner + " confirms their host") : "";
       var detail = h.fingerprint ? '<div class="muted h-detail" style="font-size:12px">' + esc((h.hostname || "") + (h.where ? " · " + h.where : "")) + (h.capacity ? " · " + esc(hostCaps(h)) : "") + '<br><span class="mono">' + esc(h.fingerprint) + '</span>' + (h.below_minimum ? '<br>' + esc(h.below_minimum) : '') + '</div>' : '';
-      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1]) + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + confirm + '</td></tr>';
+      // Who stopped it and why, readable on a phone too (the pill's title is a hover).
+      if ((h.status === "suspended" || h.status === "retired") && h.status_by) detail += '<div class="muted" style="font-size:12px">' + esc(h.status + " by " + h.status_by + (h.status_reason ? ": " + h.status_reason : "")) + '</div>';
+      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1], h.status_reason ? h.status + " by " + (h.status_by || "?") + ": " + h.status_reason : "") + (h.claims_stopped_at && h.status !== "retired" ? " " + pillHtml("error", "claims stopped", NOT_LISTED) : "") + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + confirm + '</td></tr>';
     });
     $("#hosts-table tbody").innerHTML = rows.join("");
+    renderHostStop(hs);
     $("#h-none").hidden = hs.length > 0;
     // The other maintainers' new hosts (D40): a notice, no approval asked.
     var notes = isOwner(login) ? (HOSTS.notices || []) : [];
@@ -263,6 +271,35 @@ const SCRIPT = String.raw`
     clearTimeout(HOST_T); HOST_T = 0;
     if (isOwner(login) && (pending || Date.now() < WAIT_UNTIL)) HOST_T = setTimeout(loadHosts, 5000);
   }
+  // Stopping hosts (#322): an owner the maintainer list names again resumes all their hosts the sync stopped with one press and a passkey; on another maintainer's page, a maintainer removes them for cause — every host suspended, its tasks fenced — with a passkey and a reason. Every reader sees the controls, greyed with whose they are.
+  function renderHostStop(hs) {
+    var running = hs.filter(function (h) { return h.status === "active" || h.status === "suspended"; });
+    var listStopped = hs.filter(function (h) { return h.claims_stopped_at && h.status !== "retired"; });
+    var out = [];
+    if (listStopped.length) out.push('<p class="sub" style="margin:0;font-size:12.5px">' + pillHtml("error", "claims stopped") + " " + esc(NOT_LISTED) + " at a sync of factory/MAINTAINERS.toml: " + listStopped.map(function (h) { return '<a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>'; }).join(", ") + ". Their running tasks finish; listed again, one press brings them all back.</p>" + gate('<button type="button" class="small-btn" id="h-resume-all">Resume my hosts</button>', isOwner(login) && isMaintainer(), !WHO.me ? "sign in with GitHub" : !isOwner(login) ? "only " + login + " resumes their hosts, with their passkey" : NOT_LISTED_YOU));
+    if (running.length) out.push(gate('<button type="button" class="small-btn danger" id="h-cause" title="suspend every host of ' + esc(login) + ' and fence their running tasks: another maintainer\'s act, with a passkey and a reason">Remove for cause…</button>', isMaintainer() && !isOwner(login), !WHO.me ? "sign in with GitHub" : isOwner(login) ? SELF_CAUSE : "removing a maintainer for cause is another maintainer's act"));
+    $("#h-stop").hidden = !out.length;
+    $("#h-stop").innerHTML = out.join("");
+  }
+  var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)}, SELF_CAUSE = ${JSON.stringify(SELF_CAUSE)}, NOT_LISTED_YOU = "you are not on factory/MAINTAINERS.toml now: once a pull request lists you again, this resumes them";
+  function failed(e) { toast("failed: " + esc(errorText(e)), "error"); }
+  function hostsDone(d) { if (d.error) { toast(esc(d.error), "error"); return; } toast(esc(d.line || "done")); loadHosts(); }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("#h-resume-all, #h-cause") : null;
+    if (!b || b.disabled) return;
+    var base = "/api/v1/hosts/owners/" + encodeURIComponent(login);
+    if (b.id === "h-resume-all") {
+      ask({ title: "Resume my hosts", text: "Every host of yours the maintainer list stopped claims again from its next claim. A suspended host stays suspended.", held: "Your passkey confirms it.", confirm: "Resume", first: "Register a passkey and resume", nothing: "Nothing was resumed." }).then(function (go) {
+        if (go === null) return;
+        passkeyed("host:resume-all:" + login, function (a) { return api("POST", base + "/resume", { assertion: a }); }).then(hostsDone).catch(failed);
+      });
+    } else {
+      ask({ title: "Remove " + login + " for cause", text: "Every host of " + esc(login) + " that runs or is suspended is suspended now, and their running tasks are fenced. Taking them off factory/MAINTAINERS.toml stays a pull request. The reason goes on the public journal.", held: "Your passkey confirms it.", input: "required", confirm: "Remove for cause", first: "Register a passkey and remove for cause", nothing: "Nothing was removed.", danger: true }).then(function (r) {
+        if (r === null) return;
+        passkeyed("host:cause:" + login, function (a) { return api("POST", base + "/cause", { reason: r, assertion: a }); }).then(hostsDone).catch(failed);
+      });
+    }
+  });
   document.addEventListener("submit", function (ev) { if (ev.target && ev.target.id === "host-form") { ev.preventDefault(); addHost(); } });
   function addHost() {
     $("#h-btn").disabled = true;
@@ -1033,6 +1070,21 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       script: ["function renderHostForm()", "if (!isMaintainer() || !isOwner(login) || HOST_DRAWN) return;", "HOST_TOGGLE", "HOST_FORM", "HOST_OWN", '"#host-form"', '"#h-name"', '"#h-where"', '"#h-btn"', '"#h-cmd"', 'api("POST", "/api/v1/hosts/enrollments"', "d.command", "WAIT_UNTIL", '\\"/docs/worker-host#maintainer-hosts\\"'],
       acts: [{ method: "POST", path: "/api/v1/hosts/enrollments", body: { name: "vps-1" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: ["maintainer"],
+    },
+    {
+      // Stopping hosts (#322): an owner listed again resumes all their hosts the list stopped, with a passkey; another maintainer removes a
+      // maintainer for cause, with a passkey and a reason. The doors refuse everyone else server-side, and a session's write without the
+      // page's own Origin for every role.
+      id: "user.hosts-stop",
+      page: `/user/${F.m1}`,
+      anchor: ['id="h-stop"'],
+      script: ["function renderHostStop(hs)", "h.claims_stopped_at", 'id="h-resume-all"', 'id="h-cause"', 'passkeyed("host:resume-all:" + login', 'passkeyed("host:cause:" + login', 'base + "/resume"', 'base + "/cause"', '"/api/v1/hosts/owners/" + encodeURIComponent(login)', "NOT_LISTED", "SELF_CAUSE"],
+      reads: [{ path: `/api/v1/hosts?owner=${F.m1}`, fields: ["hosts.0.status_by", "hosts.0.status_reason", "hosts.0.claims_stopped_at"] }],
+      acts: [
+        { method: "POST", path: `/api/v1/hosts/owners/${F.m1}/resume`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+        { method: "POST", path: `/api/v1/hosts/owners/${F.m1}/cause`, body: { reason: "a reason enough" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      ],
+      visible: EVERYONE,
     },
     {
       // The hosts under this name for everyone; the fingerprint and the capacity for their owner and the maintainers; Confirm on one that waits, its owner's; a maintainer's notices of the others' new hosts.
