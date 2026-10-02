@@ -67,8 +67,10 @@ arch="$(uname -m)"; [[ "$arch" == arm64 ]] && arch=aarch64
 id_of() { local i; i="$("$RT" image inspect --format '{{.Id}}' "$1")"; echo "sha256:${i#sha256:}"; }
 worker_id="$(id_of "$WORKER_IMAGE")" || fail "no worker image $WORKER_IMAGE (build it, or set WORKER_IMAGE)"
 # The build image: the worker image without its entrypoint (it has bash and curl for the probe task).
+# FROM names the image by its tag: BuildKit (docker's builder) reads a bare image id as a
+# docker.io name and cannot resolve it; buildah (podman) takes either.
 mkdir -p "$tmp/build-image"
-printf 'FROM %s\nLABEL org.omarchy-pool.agent.host=%s\nENTRYPOINT []\n' "$worker_id" "$host" > "$tmp/build-image/Containerfile"
+printf 'FROM %s\nLABEL org.omarchy-pool.agent.host=%s\nENTRYPOINT []\n' "$WORKER_IMAGE" "$host" > "$tmp/build-image/Containerfile"
 build_id="$("$RT" build -q -f "$tmp/build-image/Containerfile" "$tmp/build-image" | tail -n1)"; build_id="sha256:${build_id#sha256:}"
 built+=("$build_id")
 subnets="10.$((200 + RANDOM % 50)).$(( (RANDOM % 16) * 16 )).0/20"
