@@ -25,7 +25,12 @@ set -euo pipefail
 image="${1:?usage: tests/image-smoke.sh <image>}"
 RT="${RUNTIME:-docker}"
 tmp="$(mktemp -d)"; broker=""; stub=""; egress=""
-cleanup() { for c in "$broker" "$egress"; do [[ -z "$c" ]] || "$RT" rm -f "$c" >/dev/null 2>&1 || true; done; [[ -z "$stub" ]] || kill "$stub" 2>/dev/null || true; rm -rf "$tmp"; }
+# The dispatcher writes its state under the work root as the container's user, which the
+# runner's user may not remove: what rm cannot, a container of the image removes.
+cleanup() {
+  for c in "$broker" "$egress"; do [[ -z "$c" ]] || "$RT" rm -f "$c" >/dev/null 2>&1 || true; done; [[ -z "$stub" ]] || kill "$stub" 2>/dev/null || true
+  rm -rf "$tmp" 2>/dev/null || { [[ -z "${image:-}" ]] || "$RT" run --rm --security-opt label=disable -v "$tmp:$tmp" --entrypoint rm "$image" -rf "$tmp/work" >/dev/null 2>&1; rm -rf "$tmp"; }
+}
 trap cleanup EXIT
 fail() { echo "image smoke: FAIL — $*" >&2; exit 1; }
 sock="${DOCKER_SOCKET:-/var/run/docker.sock}"
