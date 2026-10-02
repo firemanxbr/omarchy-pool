@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::client::{Api, ReleaseRequest};
 use crate::gate::{self, GateOptions, Verdict};
@@ -32,7 +32,7 @@ use crate::RepoError;
 /// few kilobytes since the last claim; what a build printed goes to its
 /// log and staging, never here.
 static WORKER_LOG: Mutex<String> = Mutex::new(String::new());
-fn say(line: impl AsRef<str>) {
+pub(crate) fn say(line: impl AsRef<str>) {
     let line = line.as_ref();
     eprintln!("{line}");
     let stamp = chrono_stamp();
@@ -53,7 +53,7 @@ fn say(line: impl AsRef<str>) {
     }
 }
 /// What the claim takes with it, and the buffer forgets.
-fn log_chunk() -> String {
+pub(crate) fn log_chunk() -> String {
     WORKER_LOG
         .lock()
         .map(|mut l| std::mem::take(&mut *l))
@@ -161,14 +161,11 @@ pub struct WorkOptions {
     /// Exit after this many seconds without work (0 = never).
     pub idle_exit: u64,
     pub work_dir: PathBuf,
-    /// Local key id that signs packages and databases against a pool
-    /// without its own signing key (transition; ignored when the pool signs).
-    pub sign: Option<String>,
     /// A checkout of the repository (its tests/ scripts); cloned when absent.
     pub repo_dir: Option<PathBuf>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Task {
     pub id: u64,
     pub kind: String,
@@ -394,9 +391,15 @@ impl AgentCheck {
 }
 
 fn chrono_now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    iso_of(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    )
+}
+
+/// Seconds since the epoch as ISO 8601, UTC, whole seconds.
+pub(crate) fn iso_of(secs: u64) -> String {
     // ISO 8601 without a date crate: civil-from-days (Howard Hinnant).
     let days = i64::try_from(secs / 86400).unwrap_or(0);
     let (hour, minute, second) = ((secs % 86400) / 3600, (secs % 3600) / 60, secs % 60);
@@ -1609,7 +1612,7 @@ fn s(v: &serde_json::Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_owned()
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .ok()
         .map(|h| h.trim().to_owned())
@@ -1758,7 +1761,7 @@ fn execute(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Resul
         "render" => {
             let ring = s(&task.params, "ring");
             let arch = s(&task.params, "arch");
-            let r = ops::render(&job, &ring, &arch, opts.sign.as_deref())?;
+            let r = ops::render(&job, &ring, &arch, None)?;
             Ok(Outcome {
                 summary: format!("{ring}/{arch} rendered: {}", r.join(", ")),
                 result: serde_json::json!({ "repos": r }),
@@ -1935,17 +1938,31 @@ fn keyrings(opts: &WorkOptions) -> Result<PathBuf> {
 /// still fresh.
 fn keyrings_for(opts: &WorkOptions, required: &[String]) -> Result<PathBuf> {
     let dir = opts.work_dir.join("keyrings");
+    let fresh = fresh_within(&dir.join(".fetched"), Duration::from_secs(86400));
+    let present = |name: &str| dir.join(format!("{name}.gpg")).exists();
+    if fresh && present("archlinux") && required.iter().all(|k| present(k)) {
+        return Ok(dir);
+    }
+    keyrings_in(&dir, &repo_dir(opts)?, required)
+}
+
+/// The keyrings in `dir`, refreshed daily by `tests/fetch-keyrings.sh` of the checkout `repo`
+/// (the dispatcher's trial helper reads them too, #335).
+pub(crate) fn keyrings_in(dir: &Path, repo: &Path, required: &[String]) -> Result<PathBuf> {
+    let dir = dir.to_path_buf();
     let stamp = dir.join(".fetched");
     let fresh = fresh_within(&stamp, Duration::from_secs(86400));
     let present = |name: &str| dir.join(format!("{name}.gpg")).exists();
     if fresh && present("archlinux") && required.iter().all(|k| present(k)) {
         return Ok(dir);
     }
-    let repo = repo_dir(opts)?;
     std::fs::create_dir_all(&dir)?;
     let status = Command::new("bash")
         .arg(repo.join("tests/fetch-keyrings.sh"))
         .arg(&dir)
+        // It fetches public files: no token of this process reaches it.
+        .env_remove("OMARCHY_TOKEN")
+        .env_remove("OMARCHY_WORKER_TOKEN")
         .status()
         .context("fetch-keyrings.sh")?;
     if !status.success() {
@@ -1996,13 +2013,7 @@ fn sync_options(
 /// except the ones the pool says a release left exactly as its parent
 /// (`unchanged`): those are already rendered at the live keys and the
 /// release carries their artifact rows.
-fn render_both(
-    opts: &WorkOptions,
-    job: &Api,
-    ring: &str,
-    arch: &str,
-    unchanged: &[String],
-) -> Result<Vec<String>> {
+fn render_both(job: &Api, ring: &str, arch: &str, unchanged: &[String]) -> Result<Vec<String>> {
     let other = if arch == "aarch64" {
         "x86_64"
     } else {
@@ -2014,7 +2025,7 @@ fn render_both(
             eprintln!("{ring}/{a}: unchanged since the parent release; databases kept");
             continue;
         }
-        rendered.extend(ops::render(job, ring, a, opts.sign.as_deref())?);
+        rendered.extend(ops::render(job, ring, a, None)?);
     }
     Ok(rendered)
 }
@@ -2108,13 +2119,13 @@ fn publish_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         )),
         &pkgs,
     )?;
-    let mut rendered = ops::render(job, "edge", &task.arch, opts.sign.as_deref())?;
+    let mut rendered = ops::render(job, "edge", &task.arch, None)?;
     let other = if task.arch == "aarch64" {
         "x86_64"
     } else {
         "aarch64"
     };
-    rendered.extend(ops::render(job, "edge", other, opts.sign.as_deref())?);
+    rendered.extend(ops::render(job, "edge", other, None)?);
     let main = pkgs
         .iter()
         .find(|p| {
@@ -2124,7 +2135,7 @@ fn publish_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         .unwrap_or(&pkgs[0]);
     let manifest = pkg_extract::extract_manifest(main)?;
     let fast = if s(&task.params, "trial") == "ok" {
-        fast_lane(opts, job, task, built, &pkgs, &manifest, &mut rendered)?
+        fast_lane(job, task, built, &pkgs, &manifest, &mut rendered)?
     } else {
         Vec::new()
     };
@@ -2151,7 +2162,6 @@ fn publish_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
 /// stable with edge, the same objects — the maintainer decided the build,
 /// the evidence decides the speed. Recorded as a fast-track.
 fn fast_lane(
-    opts: &WorkOptions,
     job: &Api,
     task: &Task,
     built: i64,
@@ -2175,7 +2185,7 @@ fn fast_lane(
             )),
             ..ReleaseRequest::default()
         })?;
-        rendered.extend(ops::render(job, ring, &task.arch, opts.sign.as_deref())?);
+        rendered.extend(ops::render(job, ring, &task.arch, None)?);
         fast.push(format!("{ring}#{}", created.release.seq));
     }
     job.post_event(&serde_json::json!({
@@ -2252,7 +2262,7 @@ fn trial_job(
         )),
         &pkgs,
     )?;
-    let rendered = ops::render(job, "lab", &task.arch, opts.sign.as_deref())?;
+    let rendered = ops::render(job, "lab", &task.arch, None)?;
     let _ = std::fs::remove_dir_all(&dir);
     let log = opts.work_dir.join("tmp").join(format!("trial-{built}.log"));
     let mut args: Vec<&str> = vec![&task.arch];
@@ -2323,7 +2333,7 @@ fn sync_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         let o = sync_options(opts, &task.params, &keys, false);
         let report = ops::run_sync_report(job, &o)?;
         let rendered = if report.release.is_some() {
-            render_both(opts, job, &o.ring, &o.arch, &report.unchanged_arches)?
+            render_both(job, &o.ring, &o.arch, &report.unchanged_arches)?
         } else {
             Vec::new()
         };
@@ -2393,13 +2403,7 @@ fn sync_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             ..ReleaseRequest::default()
         })?;
         releases.push(serde_json::json!({ "ring": ring, "id": created.release.id, "seq": created.release.seq, "packages": created.package_count, "unchanged": created.unchanged_arches }));
-        rendered.extend(render_both(
-            opts,
-            job,
-            ring,
-            &arch,
-            &created.unchanged_arches,
-        )?);
+        rendered.extend(render_both(job, ring, &arch, &created.unchanged_arches)?);
     }
     Ok(Outcome {
         summary: format!(
@@ -2486,7 +2490,7 @@ fn rollback_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             .map(|a| (*a).to_owned())
             .collect()
     };
-    let rendered = render_both(opts, job, &ring, &opts.arch, &keep)?;
+    let rendered = render_both(job, &ring, &opts.arch, &keep)?;
     Ok(Outcome {
         summary: format!(
             "{ring} rolled back to release {to} as release {created}; rendered {}",
@@ -2541,7 +2545,7 @@ fn relayout_job(opts: &WorkOptions, token: &Arc<Mutex<String>>) -> Result<Outcom
     let mut rendered = Vec::new();
     for ring in ["edge", "rc", "stable"] {
         for arch in ["x86_64", "aarch64"] {
-            let repos = ops::render(&fresh()?, ring, arch, opts.sign.as_deref())
+            let repos = ops::render(&fresh()?, ring, arch, None)
                 .with_context(|| format!("rendering {ring}/{arch} after the move"))?;
             rendered.extend(repos.into_iter().map(|r| format!("{ring}/{arch}/{r}")));
         }
@@ -2595,7 +2599,7 @@ fn verify_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
     )?;
     let mut rendered = Vec::new();
     for (ring, arch) in &report.repinned_rings {
-        rendered.extend(ops::render(job, ring, arch, opts.sign.as_deref())?);
+        rendered.extend(ops::render(job, ring, arch, None)?);
     }
     for d in &report.details {
         eprintln!("  {d}");
@@ -2991,15 +2995,7 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
             result: serde_json::json!({ "sha256": manifest.sha256, "filename": manifest.filename, "version": manifest.version, "dry_run": true }),
         });
     }
-    // The pool signs what it stores (/docs/security-model); a local key only covers
-    // a pool that has none.
-    if let Some(key) = &opts.sign {
-        if !job.signing()? {
-            for p in &pkgs {
-                crate::sign::detach_sign(p, key)?;
-            }
-        }
-    }
+    // The pool signs what it stores (/docs/security-model): nothing on a worker signs (#335, S5).
     ops::publish(
         job,
         "edge",
@@ -3013,13 +3009,13 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
     )?;
     // A release covers both architectures: render both so the head is
     // complete (the other architecture's databases do not change content).
-    let mut rendered = ops::render(job, "edge", &task.arch, opts.sign.as_deref())?;
+    let mut rendered = ops::render(job, "edge", &task.arch, None)?;
     let other = if task.arch == "aarch64" {
         "x86_64"
     } else {
         "aarch64"
     };
-    rendered.extend(ops::render(job, "edge", other, opts.sign.as_deref())?);
+    rendered.extend(ops::render(job, "edge", other, None)?);
     let main = pkgs
         .iter()
         .find(|p| {
@@ -3239,7 +3235,7 @@ fn promote_job(
     // gate had just promoted (zero trust, 2026-09-16; the loop went 2026-09-18).
     let mut rendered = Vec::new();
     for arch in &arches {
-        rendered.extend(ops::render(job, &to, arch, opts.sign.as_deref())?);
+        rendered.extend(ops::render(job, &to, arch, None)?);
     }
     let mut unhealthy = Vec::new();
     for arch in &arches {
@@ -3269,7 +3265,7 @@ fn promote_job(
                 only_arch,
             )?;
             for arch in &arches {
-                ops::render(job, &to, arch, opts.sign.as_deref())?;
+                ops::render(job, &to, arch, None)?;
             }
             job.post_event(&serde_json::json!({ "kind": "rollback", "ring": to, "source": from, "status": "error",
                 "summary": format!("{to} rolled back to release {prev}: health failed on {} after promotion from {from}", unhealthy.join(", ")),
@@ -3343,7 +3339,7 @@ fn verify_fast_track(
 ) -> Result<bool> {
     let arches = ["x86_64", "aarch64"];
     for arch in arches {
-        ops::render(job, ring, arch, opts.sign.as_deref())?;
+        ops::render(job, ring, arch, None)?;
     }
     let mut unhealthy = Vec::new();
     for arch in arches {
@@ -3371,7 +3367,7 @@ fn verify_fast_track(
         None,
     )?;
     for arch in arches {
-        ops::render(job, ring, arch, opts.sign.as_deref())?;
+        ops::render(job, ring, arch, None)?;
     }
     job.post_event(&serde_json::json!({ "kind": "rollback", "ring": ring, "source": "edge", "status": "warn",
         "summary": format!("{ring}: security fast-track failed health on {}; rolled back to {prev}", unhealthy.join(", ")),
@@ -3667,7 +3663,6 @@ mod tests {
             once: false,
             idle_exit: 0,
             work_dir: dir.path().into(),
-            sign: None,
             repo_dir: Some(dir.path().into()),
         };
         Some((dir, opts))
@@ -4885,7 +4880,6 @@ mod orders_tests {
             once: false,
             idle_exit: 30,
             work_dir: work.path().into(),
-            sign: None,
             repo_dir: Some(work.path().into()),
         };
         run(&opts).unwrap();
@@ -4948,7 +4942,6 @@ mod stop_tests {
             once: false,
             idle_exit: 0,
             work_dir: dir.path().into(),
-            sign: None,
             repo_dir: Some(dir.path().into()),
         };
         (dir, opts)

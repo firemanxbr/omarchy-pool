@@ -41,6 +41,13 @@
 #              and GitHub served to build containers that cannot run the
 #              agent themselves (the project's review builds; the emulated
 #              x86_64 worker, where Claude Code's binary dies under qemu).
+#   dispatcher a maintainer host's one service (the host set, factory/sets/host;
+#              design v2 §9, #335): `pkg-repo dispatch` — it claims as many
+#              tasks as the host's capacity allows and runs each in one
+#              isolated, credential-less task container through the
+#              runtime's socket. Its host's worker token comes from
+#              etc/dispatcher.env; it holds no agent key and refuses a
+#              package signing key.
 #
 # OMARCHY_BROKER makes this container a builder: it holds no token and no
 # key, asks the broker who it is, builds one task and exits (/docs/security-model,
@@ -77,7 +84,7 @@ ensure_claude() { # returns non-zero when Claude Code is not there after it
 }
 
 role="${OMARCHY_WORKER_ROLE:-}"
-case "$role" in ""|pool|review|community|agent|broker|updater) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker, agent or updater (or unset)" >&2; exit 2 ;; esac
+case "$role" in ""|pool|review|community|agent|broker|updater|dispatcher) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker, agent, updater or dispatcher (or unset)" >&2; exit 2 ;; esac
 # The updater: the compose project (COMPOSE_DIR, mounted at the same path)
 # follows the pool's release through the runtime's socket
 # (factory/bin/omarchy-rollout) — as a service it asks the pool every two
@@ -88,6 +95,11 @@ case "$role" in ""|pool|review|community|agent|broker|updater) ;; *) echo "omarc
 if [[ "$role" == updater ]]; then
   [[ -S /var/run/docker.sock ]] || { echo "omarchy-worker: the updater needs the runtime's socket at /var/run/docker.sock" >&2; exit 2; }
   exec /usr/local/lib/omarchy-factory/bin/omarchy-rollout "${@:---loop}"
+fi
+if [[ "$role" == dispatcher ]]; then
+  sock="${DOCKER_HOST:-unix:///var/run/docker.sock}"; sock="${sock#unix://}"
+  [[ "$sock" == *://* || -S "$sock" ]] || { echo "omarchy-worker: the dispatcher starts task containers through the runtime's socket; mount it at $sock" >&2; exit 2; }
+  exec pkg-repo dispatch "$@"
 fi
 if [[ "$role" == broker || "$role" == agent ]]; then
   # The broker: the credentials stay here. Claude Code is installed the

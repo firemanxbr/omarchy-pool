@@ -30,7 +30,11 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 signal-hook = "0.3"
 # A stopped task's process groups are signalled without unsafe code (#277): kill(2) on a group, and whether it is still there.
-rustix = { version = "1", default-features = false, features = ["std", "process"] }
+# The dispatcher (#335) reads the free space of its work root with statvfs(2), the same way.
+rustix = { version = "1", default-features = false, features = ["std", "process", "fs"] }
+# The dispatcher (#335) reads the signed capacity constants from factory/bundle/manifest.toml, compiled in,
+# as the pool does (worker/src/hosts.ts): one source of truth for a unit's CPUs and memory and the disk floor.
+toml = "0.9"
 
 [dev-dependencies]
 tempfile = "3"

@@ -8,7 +8,7 @@ use pkg_repo::gate::{self, GateOptions};
 use pkg_repo::security::{self, FastTrackOptions, SecurityOptions};
 use pkg_repo::sync::SyncOptions;
 use pkg_repo::verify;
-use pkg_repo::{build_database, ops, sign, work, Flavor};
+use pkg_repo::{build_database, dispatch, ops, sign, work, Flavor};
 
 fn api(remote: &Remote) -> Result<Api> {
     Ok(Api::new(&remote.api, &remote.token)?)
@@ -332,10 +332,6 @@ enum Command {
             default_value = "/var/tmp/omarchy-pool-worker"
         )]
         work_dir: PathBuf,
-        /// Local GPG key id, only for a pool without its own signing key
-        /// (the pool signs what it stores; the flag is then ignored).
-        #[arg(long, env = "OMARCHY_GPG_KEYID")]
-        sign: Option<String>,
         /// A checkout of the repository (its tests/ scripts); cloned into the work dir when absent.
         #[arg(long)]
         repo_dir: Option<PathBuf>,
@@ -343,6 +339,60 @@ enum Command {
         /// any pool: the release's smoke start of this image (#277), before any tag moves.
         #[arg(long)]
         self_test: bool,
+    },
+    /// A maintainer host's dispatcher (#335, design v2 §9): claims as many
+    /// tasks as the host's capacity allows and runs each in one isolated,
+    /// credential-less container, staged in and out; re-adopts its task
+    /// containers across restarts. The host set's one service
+    /// (`OMARCHY_WORKER_ROLE=dispatcher`).
+    Dispatch {
+        #[arg(
+            long,
+            env = "OMARCHY_API",
+            default_value = "https://pkgs.omarchy-pool.org"
+        )]
+        api: String,
+        #[arg(
+            long,
+            env = "OMARCHY_POOL",
+            default_value = "https://pool.omarchy-pool.org"
+        )]
+        pool: String,
+        /// The host's worker token (`etc/dispatcher.env`, written by the agent).
+        #[arg(long, env = "OMARCHY_WORKER_TOKEN", hide_env_values = true)]
+        worker_token: String,
+        /// The work root: task directories, release checkouts, lease files. The same path on the
+        /// host and in this container, since task containers mount parts of it.
+        #[arg(long, env = "OMARCHY_WORK_ROOT")]
+        work_root: PathBuf,
+        /// The agent's `run/capacity.json`, read-only.
+        #[arg(
+            long,
+            env = "OMARCHY_CAPACITY_FILE",
+            default_value = "/run/omarchy/capacity.json"
+        )]
+        capacity_file: PathBuf,
+        /// A release checkout to mount at /pool instead of `<work root>/releases/<release>`.
+        #[arg(long)]
+        checkout: Option<PathBuf>,
+        /// Where `/ready` and `/leases` answer: a loopback address only.
+        #[arg(long, default_value = "127.0.0.1:8791")]
+        ready: String,
+        /// Seconds between two turns of the loop (the engine tests shorten the rhythm).
+        #[arg(long, default_value_t = 3, hide = true)]
+        tick_s: u64,
+        #[arg(long, default_value_t = 300, hide = true)]
+        heartbeat_s: u64,
+        /// The lease plus its grace, from the last accepted heartbeat.
+        #[arg(long, default_value_t = 2100, hide = true)]
+        lease_s: u64,
+        #[arg(long, default_value_t = 900, hide = true)]
+        stall_s: u64,
+        #[arg(long, default_value_t = 30, hide = true)]
+        idle_claim_s: u64,
+        /// The disk floor in GB, instead of the signed one.
+        #[arg(long, hide = true)]
+        disk_floor_gb: Option<u64>,
     },
     /// Deletes pool objects no recent release references (retention).
     Gc {
@@ -607,7 +657,6 @@ fn main() -> Result<()> {
             once,
             idle_exit,
             work_dir,
-            sign,
             repo_dir,
             self_test,
         } => {
@@ -640,8 +689,43 @@ fn main() -> Result<()> {
                 once,
                 idle_exit,
                 work_dir,
-                sign,
                 repo_dir,
+            })
+        }
+        Command::Dispatch {
+            api,
+            pool,
+            worker_token,
+            work_root,
+            capacity_file,
+            checkout,
+            ready,
+            tick_s,
+            heartbeat_s,
+            lease_s,
+            stall_s,
+            idle_claim_s,
+            disk_floor_gb,
+        } => {
+            use std::time::Duration;
+            let lease = Duration::from_secs(lease_s);
+            dispatch::run(&dispatch::Options {
+                api,
+                pool,
+                worker_token,
+                work_root,
+                capacity_file,
+                checkout,
+                ready,
+                timing: dispatch::Timing {
+                    tick: Duration::from_secs(tick_s.max(1)),
+                    heartbeat: Duration::from_secs(heartbeat_s.max(1)),
+                    lease: lease.mul_f64(30.0 / 35.0),
+                    grace: lease.mul_f64(5.0 / 35.0),
+                    stall: Duration::from_secs(stall_s.max(1)),
+                    idle_claim: Duration::from_secs(idle_claim_s.max(1)),
+                },
+                disk_floor_gb,
             })
         }
         Command::Event {
