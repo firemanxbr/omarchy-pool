@@ -115,7 +115,13 @@ OMW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
 [[ $OMW == omw_* ]] || fail "no worker token in dispatcher.env"
 
 step "The host claims with it (nothing queued: 204)"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $OMW" -H 'content-type: application/json' -d "{\"arch\":\"$ARCH\"}")
+# A host registration claims with its capacity, a claim_id new per attempt, want
+# and every lease it holds (#334); the dispatcher (#335) will send these itself.
+host_claim() { # token
+  curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $1" -H 'content-type: application/json' \
+    -d "{\"arch\":\"$ARCH\",\"claim_id\":\"c_e2e_${RANDOM}${RANDOM}${RANDOM}\",\"want\":1,\"leases\":[],\"capacity\":{\"cpus\":8,\"mem_gb\":16,\"disk_free_gb\":{\"work\":100,\"engine\":100},\"lanes\":[{\"arch\":\"$ARCH\",\"mode\":\"native\"}]}}"
+}
+code=$(host_claim "$OMW")
 [[ $code == 204 ]] || fail "the claim: $code"
 [[ $(curl -fs "$POOL/api/v1/factory/workers/self" -H "authorization: Bearer $OMW" | jq -r .id) == "$WORKER" ]] || fail "the token is not $WORKER's"
 
@@ -124,7 +130,7 @@ XDG_DATA_HOME="$DATA" "$AGENT" token >> "$E2E/agent.log" 2>&1 || fail "the rotat
 NEW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
 [[ $NEW == omw_* && $NEW != "$OMW" ]] || fail "no new token"
 for t in "$OMW" "$NEW"; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $t" -H 'content-type: application/json' -d "{\"arch\":\"$ARCH\"}")
+  code=$(host_claim "$t")
   [[ $code == 204 ]] || fail "a claim after the rotation: $code"
 done
 
