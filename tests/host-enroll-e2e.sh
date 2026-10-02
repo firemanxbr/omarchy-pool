@@ -12,9 +12,15 @@
 #   claims → the journal has the new-host line → running it again keeps the
 #   identity and the worker token.
 #
-# What stands in for the parts of P1 still to come: the capacity report is a
-# file this script writes (the detection is #333), and the claim is a curl
-# with the token (the dispatcher is #335).
+# The agent runs `omarchy-agent enroll`, the enrollment step `install` runs
+# after its preflight and the envelope's confirm (#317): the same code
+# (enroll::run), without what install needs a signed release, an engine and
+# systemd --user for — those are its unit tests (agent.toml with host_id and
+# worker_id only after Confirm) and tests/agent-install.sh.
+#
+# What stands in for the rest: the capacity report is a file this script
+# writes (install's preflight writes it; the detection is #333), and the claim
+# is a curl with the token (the dispatcher is #335).
 #
 # Requires: cargo, node (worker deps installed: cd worker && npm ci), jq, curl.
 # Usage: tests/host-enroll-e2e.sh
@@ -82,7 +88,7 @@ cat > "$DATA/omarchy-agent/sets/host/run/capacity.json" <<JSON
 {"schema":2,"cpus":8,"mem_gb":16,"page_kb":4,"disk_free_gb":{"work":120,"engine":80},"units":7,"job_reserved":1,"agent_slots":2,
  "lanes":[{"arch":"$ARCH","mode":"native"}],"isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}
 JSON
-XDG_DATA_HOME="$DATA" OMARCHY_ENROLL="$TOKEN" "$AGENT" install --pool "$POOL" --wait-minutes 3 > "$E2E/agent.log" 2>&1 &
+XDG_DATA_HOME="$DATA" OMARCHY_ENROLL="$TOKEN" "$AGENT" enroll --pool "$POOL" --wait-minutes 3 > "$E2E/agent.log" 2>&1 &
 AGENT_PID=$!
 for _ in $(seq 1 60); do grep -q "host key fingerprint:" "$E2E/agent.log" && grep -q "waiting for e2e" "$E2E/agent.log" && break; sleep 1; done
 grep -q "waiting for e2e" "$E2E/agent.log" || fail "the agent did not reach the wait"
@@ -100,6 +106,8 @@ HOST=$(jq -r '.hosts[0].id' <<<"$hosts")
 [[ $(jq -r '.hosts[0].fingerprint' <<<"$hosts") == "$FP" ]] || fail "the page's fingerprint is not the agent's: $hosts"
 [[ $(jq -r '.hosts[0].units' <<<"$hosts") == 7 ]] || fail "units: $hosts"
 [[ $(curl -fs "$POOL/api/v1/factory?limit=50" | jq '[.workers[] | select(.kind == "host")] | length') == 0 ]] || fail "a registration before Confirm"
+# No envelope either: install writes agent.toml only after Confirm, and enrollment never does.
+[[ ! -e "$DATA/omarchy-agent/agent.toml" ]] || fail "an agent.toml before Confirm"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/hosts/enroll" -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}")
 [[ $code == 400 || $code == 401 ]] || fail "the token again: $code"
 
@@ -113,6 +121,8 @@ ENV_FILE="$DATA/omarchy-agent/sets/host/etc/dispatcher.env"
 [[ $(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE") == 600 ]] || fail "dispatcher.env is not 0600"
 OMW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
 [[ $OMW == omw_* ]] || fail "no worker token in dispatcher.env"
+# The registration beside it is what install writes into agent.toml's worker_id (#317).
+[[ $(sed -n 's/^# worker: //p' "$ENV_FILE") == "$WORKER" ]] || fail "dispatcher.env does not name $WORKER"
 
 step "The host claims with it (nothing queued: 204)"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $OMW" -H 'content-type: application/json' -d "{\"arch\":\"$ARCH\"}")
@@ -130,7 +140,7 @@ done
 
 step "The journal, the notice's words, and a second run that keeps the identity"
 curl -fs "$POOL/api/v1/events?kind=host" | jq -e --arg h "$HOST" '.events[] | select(.payload.host == $h) | select(.summary | startswith("new host of e2e: 8 cores, 16 GB, '"$ARCH"' native, isolation root (dedicated)"))' >/dev/null || fail "no journal line"
-XDG_DATA_HOME="$DATA" "$AGENT" install > "$E2E/again.log" 2>&1 || { cat "$E2E/again.log"; fail "the second run"; }
+XDG_DATA_HOME="$DATA" "$AGENT" enroll > "$E2E/again.log" 2>&1 || { cat "$E2E/again.log"; fail "the second run"; }
 grep -q "this machine is host $HOST" "$E2E/again.log" || fail "the second run did not keep the identity"
 # ...and the worker token: a fetch rotates, so a second one would cut off the token a running dispatcher holds.
 grep -q "keeps its worker token" "$E2E/again.log" || fail "the second run fetched a token again"
