@@ -17,7 +17,9 @@ as a call of the stopped task is still in flight here, an upload the
 stopped builder's shell is inside; the task is never taken up again
 (STOPPED, and adopt() refuses a view with stop_order, read past the edge
 cache); a builder from before #277, or from its first part (orders but no
-stop-task), keeps its hold.
+stop-task), keeps its hold. And an agent sidecar (#336): one task's for its
+whole life, its calls, tokens and wall time capped, what it spent written
+to BROKER_USAGE_FILE at start and after every completion.
 Run: python3 tests/broker.py"""
 import json
 import os
@@ -455,4 +457,71 @@ status, out = call("GET", "/pool/factory/workers/self")
 assert status == 503 and "no worker token" in out["error"], out
 assert call("GET", "/health")[1]["pool"] is False
 assert call("GET", "/github/repos/o/r")[0] == 200
+
+# 20. An agent sidecar (#336): no worker token, one task's; its caps are the process's, its usage in a file.
+import tempfile  # noqa: E402
+
+usage_dir = tempfile.mkdtemp()
+usage = os.path.join(usage_dir, "usage.json")
+os.environ.update({"BROKER_USAGE_FILE": usage, "BROKER_AGENT_TOKENS": "10", "BROKER_AGENT_WALL_SECONDS": "3600"})
+broker.AGENT_CALLS = 3
+broker.SPENT = broker.Spent()
+broker.SPENT.write()
+assert json.load(open(usage)) == {"calls": 0, "tokens": 0}, "a sidecar that made no call says 0"
+# The provider's own count when it gives one; four characters a token when it does not.
+real_complete = broker.agent.complete
+
+
+def counted(system, user, max_tokens=4000, timeout=300):
+    broker.agent.USAGE["tokens"] += 4
+    return real_complete(system, user, max_tokens, timeout)
+
+
+broker.agent.complete = counted
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "draft"}]})
+assert status == 200, out
+assert json.load(open(usage)) == {"calls": 1, "tokens": 4}, json.load(open(usage))
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "again"}]})
+assert status == 200 and json.load(open(usage))["tokens"] == 8
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "a third"}]})
+assert status == 200 and json.load(open(usage)) == {"calls": 3, "tokens": 12}
+# Past the token cap (10) and the call cap (3): every completion is a 429, and nothing more is spent.
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "one more"}]})
+assert status == 429 and "completions" in out["error"]["message"], out
+broker.AGENT_CALLS = 100
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "one more"}]})
+assert status == 429 and "tokens" in out["error"]["message"], out
+assert json.load(open(usage)) == {"calls": 3, "tokens": 12}
+# Its /health is liveness only: the task container reaches it, so no completion goes through it.
+probes = []
+real_probe = broker.agent.probe
+broker.agent.probe = lambda timeout=90: probes.append(1) or real_probe(timeout)
+for _ in range(5):
+    status, out = call("GET", "/health")
+    assert status == 200 and out["ok"] is True and out["agent"].startswith("claude-code/"), out
+assert probes == [] and json.load(open(usage)) == {"calls": 3, "tokens": 12}, "a sidecar's /health made a model call"
+broker.agent.probe = real_probe
+# Past its wall time.
+broker.SPENT = broker.Spent()
+broker.SPENT.started -= 3601
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "late"}]})
+assert status == 429 and "3600 s" in out["error"]["message"], out
+# One call cannot overshoot the token cap: the answer's max_tokens is clamped to what is left, and a
+# prompt larger than what is left is refused before it is sent.
+broker.agent.complete = real_complete
+os.environ["BROKER_AGENT_TOKENS"] = "100"
+broker.SPENT = broker.Spent()
+broker.SPENT.tokens = 90
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 32000, "messages": [{"role": "user", "content": "short"}]})
+assert status == 200 and seen[-1]["max_tokens"] == 10, (status, seen[-1])
+broker.SPENT = broker.Spent()
+broker.SPENT.tokens = 90
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "x" * 400}]})
+assert status == 429 and "more than this task's agent sidecar has left" in out["error"]["message"], out
+assert broker.SPENT.calls == 0, "a refused prompt is no call"
+# A provider that counts nothing: about four characters a token.
+broker.agent.complete = real_complete
+broker.SPENT = broker.Spent()
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "system": "s" * 40, "messages": [{"role": "user", "content": "u" * 40}]})
+assert status == 200 and json.load(open(usage))["tokens"] == (40 + 40 + len("OK from the fake")) // 4, json.load(open(usage))
 print("broker: ok")

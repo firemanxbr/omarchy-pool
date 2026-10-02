@@ -64,6 +64,12 @@ pub struct Lease {
     /// What a kind's preparation leaves for its finish (a trial's packages and rendered databases).
     #[serde(default)]
     pub notes: serde_json::Value,
+    /// Its network's /28 of the task subnets, once it was given one (#336).
+    #[serde(default)]
+    pub net_slot: Option<u32>,
+    /// The calls its agent sidecar may make, set aside from the day's budget while it runs (#336, D45).
+    #[serde(default)]
+    pub agent_calls: Option<u32>,
 }
 
 impl Lease {
@@ -186,6 +192,8 @@ mod tests {
             phase: Phase::Preparing,
             ending: None,
             notes: serde_json::Value::Null,
+            net_slot: None,
+            agent_calls: None,
         }
     }
 

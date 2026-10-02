@@ -908,10 +908,29 @@ cap_log() { # bytes — stdin to stdout, cut at that many bytes with a marker; t
   fi
 }
 
+# A model kind's agent sidecar starts with its task and may still be getting ready (a Claude
+# subscription's sidecar installs Claude Code through the egress first): its port is waited for,
+# bounded, before the first agent or GitHub call — a connection refused is no retry for agent.py.
+AGENT_READY_S="${AGENT_READY_S:-300}"   # the tests set a shorter one; a task container is never given it
+agent_ready() {
+  [[ -n "${ANTHROPIC_BASE_URL:-}" ]] || return 0
+  local hostport="${ANTHROPIC_BASE_URL#*://}" waited=0
+  hostport="${hostport%%/*}"
+  until timeout 3 bash -c "exec 3<>/dev/tcp/${hostport%:*}/${hostport##*:}" 2>/dev/null; do
+    if (( waited >= AGENT_READY_S )); then
+      echo "==> the agent sidecar at ${hostport} did not answer in ${AGENT_READY_S} s; going on"
+      return 0
+    fi
+    sleep 2; waited=$((waited + 2))
+  done
+  (( waited == 0 )) || echo "==> the agent sidecar at ${hostport} answers (after ${waited} s)"
+}
+
 task_run() {
   local kind="" name="" ref="" arch="" pool="" staged="" review_url="" review_source="" review_version="" review_desc="" review_license="" lesson="" hint="" staged_task="" built_task="" keyring=""
   # shellcheck source=/dev/null
   source /task/in/meta.sh
+  agent_ready
   case "$kind" in
     build)
       TASK_IN=/task/in LESSON_TASK="${lesson:-}" BUILD_HINT="${hint:-}"; export TASK_IN LESSON_TASK BUILD_HINT

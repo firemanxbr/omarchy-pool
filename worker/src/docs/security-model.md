@@ -122,6 +122,37 @@ secret). Everything travels in the `Authorization` header over TLS only.
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
   runs the dispatcher on a real engine (`tests/dispatch-engine.sh`).
+- **Each task on its own network, its own egress, its own agent (#336).**
+  A task container is on an internal network of its own (a /28 of
+  `OMARCHY_TASK_SUBNETS`) that no other task, the host's LAN, the dispatcher
+  or the pool is on; the dispatcher joins none. Its one way out is its egress
+  sidecar (`pkg-repo egress`), which holds nothing and allows `CONNECT`,
+  `GET` and `HEAD` to public addresses only: private, CGNAT, link-local
+  (cloud metadata), loopback, multicast and reserved ranges, the task
+  subnets and the host's own addresses are refused by the address a name
+  resolves to, and the connection goes to the address that was checked, so
+  DNS rebinding has no second answer. A raw socket fails with "Network is
+  unreachable"; a package that needs one gets a reviewed exception in
+  `factory/sizing` (a bridge network of its own). A task that needs a model
+  gets an agent sidecar of its own, on its network only, with the keys file
+  read-only and its caps (calls, tokens, wall time); the dispatcher refuses to
+  start with an agent key or a GitHub token in its own environment and keeps the
+  host's per-day budget from the usage each sidecar writes where its task
+  cannot. So a recipe that subverts its sidecar reaches that task's answers
+  and keys only, never another contributor's draft or an audit's verdict,
+  and an audit's agent belongs to the audit, whose container runs no recipe.
+  The audit quotes the build's output as data, has no tool with side
+  effects, and its report is evidence for a maintainer, never a gate.
+  An internal network's bridge address is otherwise the host itself, so
+  the dispatcher asks the engine to leave it off: Docker's isolated gateway
+  mode (Docker 28 or newer; an older daemon is refused) or, on podman's own
+  CLI, a network without DNS. Stated plainly: podman behind docker's API
+  cannot be asked (it forces DNS on and drops docker's option), so there a
+  service of the host listening on all addresses is reachable from a task
+  unless the host's firewall (`prep-root.sh`'s INPUT drop for the task
+  subnets) closes it. A signed `factory/sizing` exception is per package:
+  it also covers a contributor's recipe of that package, so its reviewer
+  approves exactly that.
 - **A log that carries a secret is refused.** Text evidence uploaded to
   staging is read whole and checked for the shapes of the pool's tokens,
   agents' keys, GitHub's and the clouds' tokens, private keys, credentials

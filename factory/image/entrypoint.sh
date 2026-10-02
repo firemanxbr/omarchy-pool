@@ -41,6 +41,15 @@
 #              and GitHub served to build containers that cannot run the
 #              agent themselves (the project's review builds; the emulated
 #              x86_64 worker, where Claude Code's binary dies under qemu).
+#              On a maintainer host it is a task's agent sidecar (#336): its
+#              keys come from the read-only file OMARCHY_AGENT_ENV names
+#              (OMARCHY_SECRETS_DIR/agent.env), never from the environment
+#              the engine shows; `agent --probe` answers the probe sidecar's
+#              one question and exits.
+#   egress     a task's egress sidecar on a maintainer host (#336, design v2
+#              §9.4): `pkg-repo egress`, a forward proxy that allows CONNECT,
+#              GET and HEAD to public addresses only. No token, no key, no
+#              mount; the dispatcher starts one per task.
 #   dispatcher a maintainer host's one service (the host set, factory/sets/host;
 #              design v2 §9, #335): `pkg-repo dispatch` — it claims as many
 #              tasks as the host's capacity allows and runs each in one
@@ -84,7 +93,28 @@ ensure_claude() { # returns non-zero when Claude Code is not there after it
 }
 
 role="${OMARCHY_WORKER_ROLE:-}"
-case "$role" in ""|pool|review|community|agent|broker|updater|dispatcher) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker, agent, updater or dispatcher (or unset)" >&2; exit 2 ;; esac
+case "$role" in ""|pool|review|community|agent|broker|updater|dispatcher|egress) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker, agent, updater, dispatcher or egress (or unset)" >&2; exit 2 ;; esac
+if [[ "$role" == egress ]]; then
+  exec pkg-repo egress "$@"
+fi
+# An agent sidecar's keys (#336): KEY=VALUE lines of a file mounted read-only, the agent's keys and settings only — a worker
+# token or anything else in it is ignored, and named. A value may be quoted; nothing in the file is run.
+load_agent_env() {
+  local file="$1" line k v
+  [[ -r "$file" && -f "$file" ]] || { echo "omarchy-worker: no agent keys at $file (OMARCHY_SECRETS_DIR/agent.env)" >&2; return 1; }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" || "$line" == \#* ]] && continue
+    line="${line#export }"
+    k="${line%%=*}"; v="${line#*=}"
+    [[ "$line" == *=* ]] || { echo "omarchy-worker: $file: a line that is not KEY=VALUE; ignored" >&2; continue; }
+    if [[ "$v" == \"*\" || "$v" == \'*\' ]]; then v="${v:1:${#v}-2}"; fi
+    case "$k" in
+      ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|GEMINI_API_KEY|XAI_API_KEY|GITHUB_TOKEN|FACTORY_PROVIDER|FACTORY_MODEL|FACTORY_REASONING) export "$k=$v" ;;
+      *) echo "omarchy-worker: $file: $k is not an agent setting; ignored" >&2 ;;
+    esac
+  done < "$file"
+}
 # The updater: the compose project (COMPOSE_DIR, mounted at the same path)
 # follows the pool's release through the runtime's socket
 # (factory/bin/omarchy-rollout) — as a service it asks the pool every two
@@ -100,6 +130,16 @@ if [[ "$role" == dispatcher ]]; then
   sock="${DOCKER_HOST:-unix:///var/run/docker.sock}"; sock="${sock#unix://}"
   [[ "$sock" == *://* || -S "$sock" ]] || { echo "omarchy-worker: the dispatcher starts task containers through the runtime's socket; mount it at $sock" >&2; exit 2; }
   exec pkg-repo dispatch "$@"
+fi
+if [[ "$role" == agent && -n "${OMARCHY_AGENT_ENV:-}" ]]; then
+  # A task's agent sidecar, or the probe's: never the pool's path, whatever the environment says.
+  unset OMARCHY_WORKER_TOKEN FACTORY_TOKEN
+  load_agent_env "$OMARCHY_AGENT_ENV" || exit 2
+fi
+if [[ "$role" == agent && "${1:-}" == --probe ]]; then
+  ensure_claude || echo "omarchy-worker: Claude Code did not install" >&2
+  export PATH="$HOME/.local/bin:$PATH"
+  exec python3 /usr/local/lib/omarchy-factory/bin/agent.py --probe
 fi
 if [[ "$role" == broker || "$role" == agent ]]; then
   # The broker: the credentials stay here. Claude Code is installed the

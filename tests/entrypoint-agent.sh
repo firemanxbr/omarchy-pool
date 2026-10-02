@@ -8,7 +8,12 @@
 # broker it starts is a stub that says it ran. And a project worker's start
 # writes its id to /run/omarchy/worker-id, mode 0644, where its set's
 # updater reads it to name it to the pool (#277, part 3) — the id the pool
-# answered for its token, and never the token.
+# answered for its token, and never the token. And on a maintainer host
+# (#336): the egress role is `pkg-repo egress` with the dispatcher's
+# arguments; an agent sidecar reads its keys from the read-only file
+# OMARCHY_AGENT_ENV names — the agent's settings only, a worker token in the
+# file or the environment dropped, nothing in it run — and `--probe` runs
+# agent.py's probe instead of the broker.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -31,6 +36,7 @@ S
 cat > "$tmp/bin/python3" <<'S'
 #!/usr/bin/env bash
 echo "broker started: $*" >> "$STUB_LOG"
+echo "env: key=${ANTHROPIC_API_KEY:-} gh=${GITHUB_TOKEN:-} model=${FACTORY_MODEL:-} wt=${OMARCHY_WORKER_TOKEN:-} ft=${FACTORY_TOKEN:-} evil=${EVIL:-}" >> "$STUB_LOG"
 S
 cat > "$tmp/bin/pkg-repo" <<'S'
 #!/usr/bin/env bash
@@ -81,4 +87,33 @@ env -i PATH="$tmp/bin:/usr/bin:/bin" HOME="$tmp/proj" STUB_LOG="$STUB_LOG" STUB_
   OMARCHY_RUN_DIR="$tmp/ro/omarchy" DOCKER_HOST=tcp://127.0.0.1:2375 OMARCHY_WORK_DIR="$tmp/work" bash "$root/factory/image/entrypoint.sh" 2> "$tmp/stderr"
 grep -q "could not write $tmp/ro/omarchy/worker-id" "$tmp/stderr" && grep -q '^pkg-repo work' "$STUB_LOG" || { echo "an unwritable run directory is said, and the worker starts: $(cat "$tmp/stderr" "$STUB_LOG")"; exit 1; }
 chmod 755 "$tmp/ro"
+# 6. The egress role (#336): pkg-repo egress, with what the dispatcher passed.
+: > "$STUB_LOG"
+env -i PATH="$tmp/bin:/usr/bin:/bin" HOME="$tmp/eg" STUB_LOG="$STUB_LOG" OMARCHY_WORKER_ROLE=egress bash "$root/factory/image/entrypoint.sh" --listen 10.231.0.2:3128 --deny 10.231.0.0/16 2> "$tmp/stderr"
+grep -qx 'pkg-repo egress --listen 10.231.0.2:3128 --deny 10.231.0.0/16' "$STUB_LOG" || { echo "the egress role: $(cat "$STUB_LOG" "$tmp/stderr")"; exit 1; }
+
+# 7. An agent sidecar: its keys from the file, quoted or not; a worker token in the file or the environment dropped; a line that would run something is only text.
+cat > "$tmp/agent.env" <<'E'
+# the agent's keys, written by omarchy-agent
+ANTHROPIC_API_KEY="sk-ant-from-the-file"
+export GITHUB_TOKEN=github_pat_public_read
+FACTORY_MODEL='claude-sonnet-5'
+OMARCHY_WORKER_TOKEN=omw_must_not_load
+EVIL=$(touch /tmp/omarchy-entrypoint-pwned)
+E
+: > "$STUB_LOG"
+env -i PATH="$tmp/bin:/usr/bin:/bin" HOME="$tmp/side" STUB_LOG="$STUB_LOG" OMARCHY_WORKER_ROLE=agent OMARCHY_AGENT_ENV="$tmp/agent.env" OMARCHY_WORKER_TOKEN=omw_env FACTORY_TOKEN=omw_env2 bash "$root/factory/image/entrypoint.sh" 2> "$tmp/stderr"
+grep -qx 'env: key=sk-ant-from-the-file gh=github_pat_public_read model=claude-sonnet-5 wt= ft= evil=' "$STUB_LOG" || { echo "an agent sidecar's keys: $(cat "$STUB_LOG" "$tmp/stderr")"; exit 1; }
+grep -q 'broker started: /usr/local/lib/omarchy-factory/bin/broker' "$STUB_LOG" || { echo "the sidecar is the broker: $(cat "$STUB_LOG")"; exit 1; }
+grep -q 'OMARCHY_WORKER_TOKEN is not an agent setting; ignored' "$tmp/stderr" && grep -q 'EVIL is not an agent setting' "$tmp/stderr" || { echo "what it ignores, it names: $(cat "$tmp/stderr")"; exit 1; }
+[[ ! -e /tmp/omarchy-entrypoint-pwned ]] || { echo "a line of the keys file ran"; exit 1; }
+# 8. The probe sidecar: agent.py --probe, with the file's keys; a missing file is a refusal, not an agent without keys.
+: > "$STUB_LOG"
+env -i PATH="$tmp/bin:/usr/bin:/bin" HOME="$tmp/side" STUB_LOG="$STUB_LOG" OMARCHY_WORKER_ROLE=agent OMARCHY_AGENT_ENV="$tmp/agent.env" bash "$root/factory/image/entrypoint.sh" --probe 2> "$tmp/stderr"
+grep -q 'broker started: /usr/local/lib/omarchy-factory/bin/agent.py --probe' "$STUB_LOG" && grep -q 'key=sk-ant-from-the-file' "$STUB_LOG" || { echo "the probe: $(cat "$STUB_LOG" "$tmp/stderr")"; exit 1; }
+: > "$STUB_LOG"
+if env -i PATH="$tmp/bin:/usr/bin:/bin" HOME="$tmp/side" STUB_LOG="$STUB_LOG" OMARCHY_WORKER_ROLE=agent OMARCHY_AGENT_ENV="$tmp/missing.env" bash "$root/factory/image/entrypoint.sh" 2> "$tmp/stderr"; then
+  echo "a missing keys file must stop the sidecar"; exit 1
+fi
+grep -q "no agent keys at $tmp/missing.env" "$tmp/stderr" && [[ ! -s "$STUB_LOG" ]] || { echo "and say so: $(cat "$tmp/stderr" "$STUB_LOG")"; exit 1; }
 echo "entrypoint agent: ok"

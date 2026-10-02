@@ -9,6 +9,7 @@
 pub mod client;
 pub mod desc;
 pub mod dispatch;
+pub mod egress;
 pub mod gate;
 pub mod ops;
 pub mod orders;
