@@ -89,7 +89,7 @@ impl Pool for Http {
     fn whoami(&self) -> Result<String, RepoError> {
         let v = self
             .short(&self.worker_token)?
-            .get_json("/factory/workers/self")?;
+            .get_json_as(&self.worker_token, "/factory/workers/self")?;
         v.get("id")
             .and_then(Value::as_str)
             .map(str::to_owned)

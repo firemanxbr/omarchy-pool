@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The build script's --task mode (factory/worker/omarchy-build-worker.sh, #335):
 # what `pkg-repo dispatch` runs in a task container. Run here in a container of
-# STUB_IMAGE with the mounts the spec gives it (/task/in read-only, /task/out,
+# STUB_IMAGE with the mounts and the capabilities the spec gives it (/task/in read-only, /task/out,
 # /task/log, the checkout at /pool read-only) and the kinds that need no
 # network: a trial's helper that passes and one that fails, the log cut at its
 # cap with a marker while the task's own status survives the cut (no SIGPIPE),
@@ -19,6 +19,14 @@ trap 'rm -rf "$tmp" 2>/dev/null || "$RT" run --rm -v "$tmp:$tmp" "$STUB_IMAGE" s
 fail() { echo "worker-task-mode: FAIL — $*" >&2; exit 1; }
 "$RT" image inspect "$STUB_IMAGE" >/dev/null 2>&1 || "$RT" pull -q "$STUB_IMAGE" >/dev/null
 
+# The capabilities the spec keeps after --cap-drop ALL (crates/pkg-repo/src/dispatch/spec.rs, CAPS):
+# without DAC_OVERRIDE the container's root cannot write to /task/out and /task/log, which belong to
+# the host's user (the runner's uid on CI) — the redirection fails, the task dies of SIGPIPE (141) and
+# no verdict is written. Rootless podman hides that: there the container's root owns them.
+caps=()
+while read -r c; do caps+=(--cap-add "$c"); done < <(sed -n '/^pub const CAPS/,/^];/s/^ *"\([A-Z_]*\)",$/\1/p' "$root/crates/pkg-repo/src/dispatch/spec.rs")
+(( ${#caps[@]} > 0 )) || fail "no CAPS in crates/pkg-repo/src/dispatch/spec.rs"
+
 runs=0
 run() { # kind check-script [env…] → $t/{out,log}, a new directory each time; the status in $status
   local kind="$1" check="$2"; shift 2
@@ -29,7 +37,7 @@ run() { # kind check-script [env…] → $t/{out,log}, a new directory each time
   local e=() kv
   for kv in "$@"; do e+=(-e "$kv"); done
   status=0
-  "$RT" run --rm --cap-drop ALL --security-opt no-new-privileges ${e[@]+"${e[@]}"} \
+  "$RT" run --rm --cap-drop ALL "${caps[@]}" --security-opt no-new-privileges ${e[@]+"${e[@]}"} \
     -v "$t/in:/task/in:ro" -v "$t/out:/task/out" -v "$t/log:/task/log" -v "$root:/pool:ro" \
     "$STUB_IMAGE" bash /pool/factory/worker/omarchy-build-worker.sh --task >/dev/null 2>&1 || status=$?
   [[ -f "$t/out/verdict.json" ]] || fail "$kind: no verdict.json (status $status)"
