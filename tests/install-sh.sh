@@ -11,8 +11,8 @@
 # - it downloads into a fresh mktemp -d under the agent's data directory,
 #   never a predictable /tmp path, and writes nothing to TMPDIR;
 # - it installs versions/<agent version>/omarchy-agent, points current at it
-#   and runs `omarchy-agent install` with the options given and OMARCHY_ENROLL
-#   in the environment, never in argv;
+#   and runs `omarchy-agent install --release <its release>` with the options
+#   given and OMARCHY_ENROLL in the environment, never in argv;
 # - it picks the asset of each platform and refuses one with no agent;
 # - a truncated download runs nothing (everything is inside main).
 #
@@ -118,7 +118,7 @@ for shell in "${shells[@]}"; do
   [[ -x "$data/versions/0.4.0/omarchy-agent" ]] || fail "$shell: versions/0.4.0/omarchy-agent, executable"
   [[ "$(readlink "$data/current")" == versions/0.4.0 ]] || fail "$shell: current points at versions/0.4.0: $(readlink "$data/current")"
   grep -qx "asset=omarchy-agent-x86_64-linux-musl" "$tmp/case/record" || fail "$shell: the installed agent ran"
-  grep -qx "argv=install --work-root /srv/omarchy-pool/host" "$tmp/case/record" || fail "$shell: omarchy-agent install with the options given: $(cat "$tmp/case/record")"
+  grep -qx "argv=install --release v1.2.3 --work-root /srv/omarchy-pool/host" "$tmp/case/record" || fail "$shell: omarchy-agent install --release with the options given: $(cat "$tmp/case/record")"
   grep -qx "enroll=ome_secret" "$tmp/case/record" || fail "$shell: OMARCHY_ENROLL reaches the agent through the environment"
   ! grep -q "ome_secret" <<<"$(grep '^argv=' "$tmp/case/record")" || fail "$shell: the token is never in argv"
   n=$((n + 1))

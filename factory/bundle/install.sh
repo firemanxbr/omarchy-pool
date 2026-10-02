@@ -15,8 +15,10 @@
 # It refuses root, downloads the agent into a fresh `mktemp -d` under the
 # agent's data directory (never a predictable /tmp path), checks its SHA-256,
 # installs it as versions/<agent version>/omarchy-agent, points `current` at
-# it and runs `omarchy-agent install` with the options given. An enrollment
-# token travels in the environment (OMARCHY_ENROLL), never on a command line.
+# it and runs `omarchy-agent install --release <this release>` with the
+# options given (#317: the agent verifies that release's bundle and its own
+# hash against it). An enrollment token travels in the environment
+# (OMARCHY_ENROLL), never on a command line.
 # Everything runs inside main, so a truncated download runs nothing.
 set -eu
 
@@ -75,7 +77,7 @@ main() {
   rm -rf "$tmp"
   trap - EXIT
   say "installed $dest/omarchy-agent; $data/current points at it"
-  exec "$data/current/omarchy-agent" install "$@"
+  exec "$data/current/omarchy-agent" install --release "$RELEASE" "$@"
 }
 
 main "$@"

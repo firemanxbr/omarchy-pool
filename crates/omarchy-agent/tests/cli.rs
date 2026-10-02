@@ -42,7 +42,7 @@ fn enroll_needs_the_token_in_the_environment_and_a_capacity_report_before_it_sen
     );
     let token = format!("ome_{}", "ab".repeat(24));
     let o = run_env(
-        &["install", "--pool", "http://127.0.0.1:9"],
+        &["enroll", "--pool", "http://127.0.0.1:9"],
         &data,
         Some(&token),
     );
@@ -316,17 +316,30 @@ fn usage_errors_exit_2() {
         let o = run(args);
         assert_eq!(o.status.code(), Some(2), "{args:?}: {}", text(&o));
     }
-    // install.sh's last step: without a token or an identity it changes nothing yet (#317);
-    // an option it does not know is a usage error, a token on the command line too (#321).
+    // install and preflight need a release (install.sh passes --release); an option they do
+    // not know is a usage error, a token on the command line too (#321), and the run loop's
+    // commands take the one --data-dir every command takes (#317).
     let data = std::env::temp_dir().join(format!("omarchy-agent-cli-{}", std::process::id()));
-    let o = run_env(&["install"], &data, None);
-    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
-    assert!(text(&o).contains("arrives in P1"), "{}", text(&o));
-    assert!(!data.join("omarchy-agent").exists(), "nothing was written");
     for args in [
-        &["install", "--any-option"][..],
+        &["install"][..],
+        &["preflight"],
+        &["install", "--release", "latest"],
+        &["install", "--bundle", "b.tar.gz"],
+        &[
+            "install",
+            "--release",
+            "v1.2.3",
+            "--bundle",
+            "b",
+            "--sig",
+            "s",
+        ],
+        &["install", "--release", "v1.2.3", "--any-option"],
+        &["install", "--release", "v1.2.3", "--max-units", "many"],
         &["enroll", "--token", "ome_x"],
         &["token", "extra"],
+        &["status", "--data", "/tmp"],
+        &["uninstall", "extra"],
     ] {
         assert_eq!(
             run_env(args, &data, None).status.code(),
@@ -335,11 +348,48 @@ fn usage_errors_exit_2() {
         );
     }
 
+    assert!(!data.join("omarchy-agent").exists(), "nothing was written");
+
     let o = run(&["--version"]);
     assert_eq!(
         String::from_utf8_lossy(&o.stdout).trim(),
         format!("omarchy-agent {}", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn preflight_prints_one_screen_and_writes_nothing() {
+    let data = scratch("preflight");
+    let o = run_env(
+        &[
+            "preflight",
+            "--bundle",
+            "/nonexistent/omarchy-host.tar.gz",
+            "--sig",
+            "/nonexistent/omarchy-host.tar.gz.sigstore.json",
+            "--socket",
+            "/nonexistent/engine.sock",
+            "--task-subnets",
+            "10.0.0.0/33",
+        ],
+        &data,
+        None,
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    let t = text(&o);
+    for want in [
+        "thing(s) to fix before the install; nothing was changed",
+        "/nonexistent/omarchy-host.tar.gz",
+        "no container engine answers on /nonexistent/engine.sock",
+        "task subnets",
+    ] {
+        assert!(t.contains(want), "{want}: {t}");
+    }
+    assert!(
+        !data.join("omarchy-agent").exists(),
+        "nothing was written: {t}"
+    );
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -354,14 +404,14 @@ fn run_stops_with_78_on_a_local_configuration_error_only() {
     let data = scratch("run");
     let d = data.to_string_lossy().into_owned();
     // No agent.toml: nothing the network could fix.
-    let o = run(&["run", "--data", &d]);
+    let o = run(&["run", "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(78), "{}", text(&o));
     assert!(text(&o).contains("agent.toml"), "{}", text(&o));
     // One that others may write is refused the same way.
     let toml = data.join("agent.toml");
     std::fs::write(&toml, "pool = \"https://pkgs.omarchy-pool.org\"\n").unwrap();
     std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o666)).unwrap();
-    let o = run(&["run", "--data", &d]);
+    let o = run(&["run", "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(78), "{}", text(&o));
     assert!(text(&o).contains("writable"), "{}", text(&o));
     // A state.json that is there but unreadable is not "start from nothing".
@@ -372,7 +422,7 @@ fn run_stops_with_78_on_a_local_configuration_error_only() {
     )
     .unwrap();
     std::fs::write(data.join("state.json"), "{\"floor\": \"latest\"}").unwrap();
-    let o = run(&["run", "--data", &d]);
+    let o = run(&["run", "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(78), "{}", text(&o));
     assert!(text(&o).contains("state.json"), "{}", text(&o));
 }
@@ -381,7 +431,7 @@ fn run_stops_with_78_on_a_local_configuration_error_only() {
 fn status_logs_and_round_read_the_data_directory() {
     let data = scratch("status");
     let d = data.to_string_lossy().into_owned();
-    let o = run(&["status", "--data", &d]);
+    let o = run(&["status", "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert!(text(&o).contains("no state yet"), "{}", text(&o));
 
@@ -390,7 +440,7 @@ fn status_logs_and_round_read_the_data_directory() {
         r#"{"floor":"v1.2.0","applied":"v1.2.0","target":"v1.3.0","round":{"at":1,"outcome":"rolled-back","from":"v1.3.0","step":"revert","detail":"guard: the dispatcher exited with 1"},"quarantine":{"v1.3.0":{"until":null,"reverts":2}}}"#,
     )
     .unwrap();
-    let o = run(&["status", "--data", &d]);
+    let o = run(&["status", "--data-dir", &d]);
     let t = text(&o);
     assert_eq!(o.status.code(), Some(0), "{t}");
     assert!(
@@ -408,15 +458,15 @@ fn status_logs_and_round_read_the_data_directory() {
         "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n",
     )
     .unwrap();
-    let o = run(&["logs", "--data", &d, "-n", "2"]);
+    let o = run(&["logs", "--data-dir", &d, "-n", "2"]);
     assert_eq!(String::from_utf8_lossy(&o.stdout), "{\"n\":2}\n{\"n\":3}\n");
     assert_eq!(
-        run(&["logs", "--data", &d, "-n", "x"]).status.code(),
+        run(&["logs", "--data-dir", &d, "-n", "x"]).status.code(),
         Some(2)
     );
 
     // No agent runs here: `round` says so.
-    let o = run(&["round", "--data", &d]);
+    let o = run(&["round", "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));
     assert!(text(&o).contains("is the agent running?"), "{}", text(&o));
 }
@@ -437,7 +487,7 @@ fn run_keeps_running_with_no_pool_and_round_asks_it_again() {
     .unwrap();
     std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_omarchy-agent"))
-        .args(["run", "--data", &d])
+        .args(["run", "--data-dir", &d])
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
@@ -462,11 +512,11 @@ fn run_keeps_running_with_no_pool_and_round_asks_it_again() {
         "no first poll: {:?}",
         std::fs::read_to_string(&journal)
     );
-    let o = run(&["round", "--data", &d]);
+    let o = run(&["round", "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert!(wait(2), "SIGUSR1 started no poll");
     assert!(child.try_wait().unwrap().is_none(), "the agent stopped");
-    let o = run(&["status", "--data", &d]);
+    let o = run(&["status", "--data-dir", &d]);
     assert!(text(&o).contains("pool:      no-answer"), "{}", text(&o));
     child.kill().unwrap();
     child.wait().unwrap();
@@ -508,7 +558,7 @@ fn a_new_agent_counts_its_start_before_its_configuration_and_its_third_rolls_bac
     // Its third start: counted first, then current points back, with nothing else read.
     let (data, d) = swapped("third", 2);
     let o = Command::new(data.join("current/omarchy-agent"))
-        .args(["run", "--data", &d])
+        .args(["run", "--data-dir", &d])
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
@@ -521,7 +571,7 @@ fn a_new_agent_counts_its_start_before_its_configuration_and_its_third_rolls_bac
     // A configuration the new agent refuses is a failed start, not exit 78 (which the
     // service manager would leave stopped): counted, and current points back at once.
     let (data, d) = swapped("config", 0);
-    let o = run(&["run", "--data", &d]);
+    let o = run(&["run", "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert!(
         text(&o).contains("refused its configuration"),
@@ -535,7 +585,7 @@ fn a_new_agent_counts_its_start_before_its_configuration_and_its_third_rolls_bac
 
     // `status` shows the update in flight.
     let (_, d) = swapped("status-pending", 1);
-    let o = run(&["status", "--data", &d]);
+    let o = run(&["status", "--data-dir", &d]);
     assert!(
         text(&o).contains("update:    agent 0.0.1 to"),
         "{}",
@@ -555,7 +605,7 @@ fn self_test_says_ok_only_when_it_verified_the_release() {
     .unwrap();
     std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o600)).unwrap();
     // No bundle of that release here.
-    let o = run(&["self-test", "--data", &d, "--release", "v1.2.3"]);
+    let o = run(&["self-test", "--data-dir", &d, "--release", "v1.2.3"]);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));
     assert!(
         text(&o).contains("omarchy-host-v1.2.3.tar.gz"),
@@ -572,12 +622,12 @@ fn self_test_says_ok_only_when_it_verified_the_release() {
         b"{}",
     )
     .unwrap();
-    let o = run(&["self-test", "--data", &d, "--release", "v1.2.3"]);
+    let o = run(&["self-test", "--data-dir", &d, "--release", "v1.2.3"]);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));
     assert!(text(&o).contains("refused"), "{}", text(&o));
     // Usage.
-    assert_eq!(run(&["self-test", "--data", &d]).status.code(), Some(2));
-    let o = run(&["self-test", "--data", &d, "--release", "latest"]);
+    assert_eq!(run(&["self-test", "--data-dir", &d]).status.code(), Some(2));
+    let o = run(&["self-test", "--data-dir", &d, "--release", "latest"]);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));
 }
 

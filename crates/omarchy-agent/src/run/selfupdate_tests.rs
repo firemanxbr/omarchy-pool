@@ -21,7 +21,7 @@ fn above(minor: u64) -> Version {
     Version(me().0, me().1 + minor, 0)
 }
 
-/// What a new agent's binary does in these tests: answers `self-test --data <dir>
+/// What a new agent's binary does in these tests: answers `self-test --data-dir <dir>
 /// --release <vX.Y.Z>`, and nothing else.
 fn binary(ok: bool) -> Vec<u8> {
     let answer = if ok {
@@ -30,7 +30,7 @@ fn binary(ok: bool) -> Vec<u8> {
         "echo 'agent.toml: no'; exit 1"
     };
     format!(
-        "#!/bin/sh\n[ \"$1 $2 $4\" = 'self-test --data --release' ] && {{ {answer}; }}\nexit 2\n"
+        "#!/bin/sh\n[ \"$1 $2 $4\" = 'self-test --data-dir --release' ] && {{ {answer}; }}\nexit 2\n"
     )
     .into_bytes()
 }

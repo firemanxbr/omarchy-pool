@@ -3,7 +3,24 @@
 use std::fs;
 
 use super::*;
+use crate::lint::Engine;
 use crate::run::state::{tempdir, Quarantine, Rollout};
+
+#[test]
+fn a_socket_that_refuses_the_agent_needs_a_person() {
+    let d = engine_detail(
+        "pull",
+        "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+    );
+    assert!(
+        d.starts_with("needs a person: pull:") && d.contains("log out and back in, or reboot"),
+        "{d}"
+    );
+    assert_eq!(
+        engine_detail("pull", "no answer in 60 s"),
+        "pull: no answer in 60 s"
+    );
+}
 
 #[test]
 fn only_steps_before_commit_are_preemptible() {
