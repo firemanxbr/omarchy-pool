@@ -648,7 +648,8 @@ engine leave the round at `engine-unreachable` until a newer release.
 | `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep`, `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
 | `engine-unreachable`, `pull-failed` | nothing changes; the step or the next poll tries again |
-| `needs-newer-agent` | the release needs an agent this one is not (self-update is #316) |
+| `needs-newer-agent` | the release needs an agent this one is not and the update to it did not happen (why is in `detail`; *Self-update*, below) |
+| `agent-rollback` | a self-update's new agent did not pass its health gate: the agent named in `detail` is back, and the one it left is skipped until a higher one |
 
 On the host: `omarchy-agent status` (from `state.json` and
 `run/capacity.json`, with the pool and the engine down), `omarchy-agent
@@ -659,6 +660,44 @@ running on the same data directory — that stops the agent until a person
 fixes it; no network answer ever does, and a write that fails while it runs
 (a full disk) is retried every tick, each step being safe to run again. `tests/agent-run-loop.sh` runs the
 loop against a real engine in CI (rootful docker and rootless podman).
+
+### Self-update
+
+The agent updates itself from the releases it verifies (#316; design v2
+§16.3), with no one at the host: a release whose manifest ships a **higher**
+agent than the running one updates it before the round touches anything; a
+release with the same or a lower agent (a rollback, or a release that did not
+change the agent) never restarts it, and any agent at or above a release's
+`min_agent` applies that release. Only a rollback statement's `agent_to` moves
+the agent down, and only to the agent the statement's release ships.
+
+The update downloads the binary the manifest lists for the host from the
+release, checks its SHA-256, installs it as `versions/<version>/omarchy-agent`
+and runs its `self-test` (agent.toml and state.json read, the release's bundle
+verified, the host set linted in memory; `ok` within 30 s). Then it writes
+`pending` (`from`, `to`, the starts counted, a 10-minute deadline), points
+`previous` at itself and `current` at the new agent, and exits; the service
+manager starts `current`. The dispatcher and the task containers keep running
+throughout. A download, a hash or a self-test that fails changes nothing: the
+running agent applies the release itself when its `min_agent` admits it, and
+the update is tried again an hour later (at once after a restart), while the
+pool still names that release too.
+
+The new agent counts its start in `pending` before it reads anything else, and
+touches no container until its health gate passed: a cached bundle verifies,
+the engine answers, the pool answers (or is plainly unreachable). Its third
+start without passing it, a start after the deadline, a configuration it
+refuses, or a gate still shut at the deadline points `current` back at the
+previous agent, which reports `agent-rollback` and skips that version until a
+higher one. Under systemd the unit is `Type=notify`: a start that hangs before
+the agent says it is ready fails after `TimeoutStartSec=120`, and a loop that
+stops making progress is killed after `WatchdogSec=300`; on both systems the
+agent's own watchdog ends a loop stuck for 15 minutes. Three versions stay
+under `versions/`. `omarchy-agent status` shows an update in flight and a
+skipped version; `state.json` is read leniently, so the agent rolled back to
+reads what the newer one wrote. `tests/agent-self-update.sh` runs deliberately
+broken builds (a panic at start, a hang before ready, a hang after it) under a
+real `systemd --user` in CI.
 
 ## The Studio host
 

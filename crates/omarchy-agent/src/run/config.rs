@@ -66,6 +66,24 @@ impl Paths {
     pub fn last_good(&self, set: &str) -> PathBuf {
         self.data.join("last-good").join(set)
     }
+    /// `versions/<X.Y.Z>/omarchy-agent`: every agent binary on the host (install.sh puts
+    /// the first one there), `current` and `previous` link to two of them (#316).
+    pub fn versions(&self) -> PathBuf {
+        self.data.join("versions")
+    }
+    pub fn binary(&self, v: crate::version::Version) -> PathBuf {
+        self.versions().join(v.to_string()).join("omarchy-agent")
+    }
+    pub fn current(&self) -> PathBuf {
+        self.data.join("current")
+    }
+    pub fn previous(&self) -> PathBuf {
+        self.data.join("previous")
+    }
+    /// The self-update in flight: `from`, `to`, the starts counted, the deadline.
+    pub fn pending(&self) -> PathBuf {
+        self.data.join("pending")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -57,6 +57,8 @@ pub(crate) enum Outcome {
     EngineUnreachable,
     NeedsNewerAgent,
     PullFailed,
+    /// A self-update that did not pass its health gate was rolled back (#316).
+    AgentRollback,
 }
 
 impl Outcome {
@@ -72,6 +74,7 @@ impl Outcome {
             Outcome::EngineUnreachable => "engine-unreachable",
             Outcome::NeedsNewerAgent => "needs-newer-agent",
             Outcome::PullFailed => "pull-failed",
+            Outcome::AgentRollback => "agent-rollback",
         }
     }
 }
@@ -478,46 +481,57 @@ fn render(state: &mut State, pending: Option<&Target>, ctx: &mut Ctx) -> Result<
 
 fn lint_step(state: &mut State, ctx: &mut Ctx) {
     let dir = staging(ctx);
-    let read = || -> Result<(String, String, Option<String>), String> {
+    let read = || -> Result<(Pins, String, String), String> {
         let pins: Pins = serde_json::from_slice(
             &fs::read(dir.join(PINS)).map_err(|e| format!("pins.json: {e}"))?,
         )
         .map_err(|e| format!("pins.json: {e}"))?;
-        let compose = pins.lint_view(&read_text(&dir.join("compose.yml"))?);
+        let compose = read_text(&dir.join("compose.yml"))?;
         let set = read_text(&dir.join("set.toml"))?;
-        let over = ctx.cfg.set_dir.join("compose.override.yml");
-        let over = over.exists().then(|| read_text(&over)).transpose()?;
-        Ok((compose, set, over))
+        Ok((pins, compose, set))
     };
-    let (compose, set, over) = match read() {
+    let v = match read().and_then(|(pins, compose, set)| violations(ctx.cfg, &pins, &compose, &set))
+    {
         Ok(v) => v,
         Err(e) => return finish(state, ctx, Outcome::Refused, None, &format!("lint: {e}")),
     };
-    // The engine is linted strictly (rootful) until runtime discovery (#317) says which.
-    let mut v = lint::lint_compose(
-        &compose,
-        over.as_deref(),
-        &ctx.cfg.envelope,
-        Engine::Rootful,
-    )
-    .err()
-    .unwrap_or_default();
-    v.extend(
-        lint::lint_set_toml(&set, &compose)
-            .err()
-            .unwrap_or_default(),
-    );
     if v.is_empty() {
         go(state, ctx, Step::Plan);
     } else {
-        let list: Vec<String> = v.iter().map(ToString::to_string).collect();
         finish(
             state,
             ctx,
             Outcome::Refused,
             None,
-            &format!("lint: {}", list.join("; ")),
+            &format!("lint: {}", v.join("; ")),
         );
+    }
+}
+
+/// The lint of a rendered set with the owner's override: every violation, by name.
+fn violations(cfg: &Config, pins: &Pins, compose: &str, set: &str) -> Result<Vec<String>, String> {
+    let compose = pins.lint_view(compose);
+    let over = cfg.set_dir.join("compose.override.yml");
+    let over = over.exists().then(|| read_text(&over)).transpose()?;
+    // The engine is linted strictly (rootful) until runtime discovery (#317) says which.
+    let mut v = lint::lint_compose(&compose, over.as_deref(), &cfg.envelope, Engine::Rootful)
+        .err()
+        .unwrap_or_default();
+    v.extend(lint::lint_set_toml(set, &compose).err().unwrap_or_default());
+    Ok(v.iter().map(ToString::to_string).collect())
+}
+
+/// A round's render and lint in memory, writing nothing (a new agent's self-test, #316).
+pub(crate) fn dry_run(cfg: &Config, t: &Target) -> Result<(), String> {
+    let text = |name: &str| {
+        String::from_utf8(t.files.get(name).cloned().unwrap_or_default())
+            .map_err(|_| format!("{name}: not UTF-8"))
+    };
+    let v = violations(cfg, &t.pins, &text("compose.yml")?, &text("set.toml")?)?;
+    if v.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("lint: {}", v.join("; ")))
     }
 }
 

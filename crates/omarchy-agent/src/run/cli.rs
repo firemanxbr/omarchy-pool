@@ -1,5 +1,6 @@
 //! The commands: `run` (the loop), `status` (works with the pool down), `round`
-//! (SIGUSR1 to the running agent) and `logs` (the journal's tail).
+//! (SIGUSR1 to the running agent), `logs` (the journal's tail) and `self-test` (what a
+//! self-update asks of a new agent before it hands over, #316).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -13,16 +14,21 @@ use std::time::Duration;
 use super::agent::{Agent, Drivers, Sigstore};
 use super::config::{data_dir, Config, Paths};
 use super::pool::Https;
+use super::selfupdate::{self, notify, Start};
 use super::state::{self, State};
+use crate::version::{self, Release};
 
 /// Local configuration errors only (design v2 §16.4): systemd's
 /// `RestartPreventExitStatus=78` leaves the agent stopped until a person fixes it.
 pub const CONFIG_ERROR: u8 = 78;
 /// The loop ticks this often; nothing in a tick blocks longer than one timed-out call.
 const TICK: Duration = Duration::from_secs(3);
-/// The watchdog aborts a loop that made no progress for this long. A pinned tool's
-/// download (600 s at most) moves the progress on before it starts.
+/// The watchdog aborts a loop that made no progress for this long. A download moves the
+/// progress on as its bytes arrive.
 const WATCHDOG_S: i64 = 15 * 60;
+/// How often the watchdog thread looks; it pings systemd's watchdog (`WatchdogSec=300`)
+/// only when the loop made progress since its last look.
+const WATCHDOG_LOOK: Duration = Duration::from_secs(10);
 
 fn paths(data: Option<&str>) -> Result<Paths, String> {
     Ok(Paths {
@@ -30,18 +36,96 @@ fn paths(data: Option<&str>) -> Result<Paths, String> {
     })
 }
 
-/// `omarchy-agent run [--data <dir>]`: the loop, until stopped.
+/// A deliberately broken build for `tests/agent-self-update.sh`, chosen when the binary
+/// is built (`OMARCHY_AGENT_TEST_FAULT`); a build without it has none. Each acts in `run`
+/// only, so it gets past the self-test like a fault that shows only under the service
+/// manager does.
+fn fault(at: &str) {
+    if option_env!("OMARCHY_AGENT_TEST_FAULT") == Some(at) {
+        assert!(at != "panic-at-config", "a test build that panics at {at}");
+        loop {
+            thread::sleep(Duration::from_secs(3600));
+        }
+    }
+}
+
+/// `omarchy-agent run [--data <dir>]`: the loop, until stopped (or until a self-update
+/// swapped `current`: exit 0 and the service manager starts the new agent).
 pub fn run(data: Option<&str>) -> u8 {
-    match setup(data) {
-        Ok((mut agent, usr1)) => loop_forever(&mut agent, &usr1),
+    let me = version::agent();
+    // A self-update's start is counted before agent.toml or state.json are read (#316);
+    // a second `run` beside the running agent is no start of it: neither counted nor
+    // flipped back.
+    if let Ok(p) = paths(data) {
+        if let Some(pid) = running_agent(&p) {
+            eprintln!(
+                "omarchy-agent run: another agent runs on {} as pid {pid}",
+                p.data.display()
+            );
+            return CONFIG_ERROR;
+        }
+        if let Start::RolledBack(why) = selfupdate::count_start(&p.data, me, super::now()) {
+            eprintln!("omarchy-agent run: {why}");
+            return 0;
+        }
+    }
+    let progress = Arc::new(AtomicI64::new(super::now()));
+    watchdog(Arc::clone(&progress));
+    match setup(data, &progress) {
+        Ok((mut agent, usr1)) => {
+            fault("hang-before-ready");
+            notify("READY=1");
+            fault("hang-after-ready");
+            // After READY=1: the pinned tools may be downloaded again, longer than
+            // TimeoutStartSec allows.
+            agent.open_tools();
+            loop_forever(&mut agent, &usr1, &progress)
+        }
         Err(e) => {
             eprintln!("omarchy-agent run: {e}");
+            // A configuration the new agent refuses is a failed start of the new agent,
+            // not a person's to fix: back to the one that read it.
+            let dir = data_dir(data).unwrap_or_default();
+            if let Some(p) = selfupdate::candidate(&dir, me) {
+                if selfupdate::flip_back(&dir, &p).is_ok() {
+                    eprintln!(
+                        "omarchy-agent run: agent {me} refused its configuration; current points at {} again",
+                        p.from
+                    );
+                    return 0;
+                }
+            }
             CONFIG_ERROR
         }
     }
 }
 
-fn setup(data: Option<&str>) -> Result<(Agent, Arc<AtomicBool>), String> {
+/// The progress watchdog (both OSes): aborts a loop that made no progress for
+/// [`WATCHDOG_S`], so the service manager starts the agent again (a counted start
+/// during a self-update), and pings systemd's watchdog while the loop moves.
+fn watchdog(progress: Arc<AtomicI64>) {
+    thread::spawn(move || {
+        let mut pinged = progress.load(Ordering::Relaxed);
+        loop {
+            thread::sleep(WATCHDOG_LOOK);
+            let seen = progress.load(Ordering::Relaxed);
+            let idle = super::now() - seen;
+            if idle > WATCHDOG_S {
+                eprintln!("omarchy-agent: the loop made no progress for {idle} s; aborting so the service manager restarts it");
+                std::process::abort();
+            }
+            if seen != pinged {
+                notify("WATCHDOG=1");
+                pinged = seen;
+            }
+        }
+    });
+}
+
+fn setup(
+    data: Option<&str>,
+    progress: &Arc<AtomicI64>,
+) -> Result<(Agent, Arc<AtomicBool>), String> {
     let paths = paths(data)?;
     fs::DirBuilder::new()
         .recursive(true)
@@ -72,35 +156,27 @@ fn setup(data: Option<&str>) -> Result<(Agent, Arc<AtomicBool>), String> {
             meta.mode() & 0o7777
         ));
     }
+    fault("panic-at-config");
     let cfg = Config::load(&paths.agent_toml(), uid)?;
     let state = state::load(&paths.state())?.unwrap_or_default();
     let usr1 = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&usr1))
         .map_err(|e| format!("SIGUSR1: {e}"))?;
-    let pool = Box::new(Https::new(&cfg.pool));
+    let pool = Box::new(Https::new(&cfg.pool).with_progress(Arc::clone(progress)));
     let mut agent = Agent::new(cfg, paths, state, pool, Box::new(Sigstore), Drivers::Pinned);
-    agent.open_tools();
+    agent.progress = Some(Arc::clone(progress));
+    agent.exe = std::env::current_exe().ok();
     agent.resume(super::now());
     agent.journal.write(
         super::now(),
         "start",
         serde_json::json!({"agent": crate::AGENT_VERSION, "applied": agent.state.applied.map(|r| r.to_string()), "step": agent.state.rollout.step.name()}),
     );
+    agent.settle(super::now())?;
     Ok((agent, usr1))
 }
 
-fn loop_forever(agent: &mut Agent, usr1: &AtomicBool) -> u8 {
-    let progress = Arc::new(AtomicI64::new(super::now()));
-    let seen = Arc::clone(&progress);
-    agent.progress = Some(Arc::clone(&progress));
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(30));
-        let idle = super::now() - seen.load(Ordering::Relaxed);
-        if idle > WATCHDOG_S {
-            eprintln!("omarchy-agent: the loop made no progress for {idle} s; aborting so the service manager restarts it");
-            std::process::abort();
-        }
-    });
+fn loop_forever(agent: &mut Agent, usr1: &AtomicBool, progress: &AtomicI64) -> u8 {
     let mut failing: Option<String> = None;
     loop {
         let now = super::now();
@@ -115,10 +191,33 @@ fn loop_forever(agent: &mut Agent, usr1: &AtomicBool) -> u8 {
             Err(_) => {}
         }
         progress.store(super::now(), Ordering::Relaxed);
+        // A self-update swapped `current` (and the state is saved): the service manager
+        // starts the new agent; containers keep running across the restart.
+        if let (Some(code), None) = (agent.exit, &failing) {
+            let _ = fs::remove_file(agent.paths.pid());
+            return code;
+        }
         let mut slept = Duration::ZERO;
         while slept < TICK && !usr1.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(250));
             slept += Duration::from_millis(250);
+        }
+    }
+}
+
+/// `omarchy-agent self-test --release vX.Y.Z [--data <dir>]`: prints `ok`, or why not.
+pub fn self_test(data: Option<&str>, release: &str) -> u8 {
+    let result = Release::parse(release)
+        .ok_or_else(|| format!("{release:?} is not vX.Y.Z"))
+        .and_then(|r| selfupdate::self_test(&paths(data)?, r, &Sigstore));
+    match result {
+        Ok(()) => {
+            println!("ok");
+            0
+        }
+        Err(e) => {
+            eprintln!("omarchy-agent self-test: {e}");
+            1
         }
     }
 }
@@ -141,6 +240,7 @@ pub fn status(data: Option<&str>) -> u8 {
                 crate::AGENT_VERSION,
                 paths.state().display()
             );
+            print_pending(&paths);
             return 0;
         }
         Err(e) => {
@@ -149,6 +249,7 @@ pub fn status(data: Option<&str>) -> u8 {
         }
     };
     print!("{}", summary(&s, crate::run::now()));
+    print_pending(&paths);
     let capacity = fs::read_to_string(paths.agent_toml())
         .ok()
         .and_then(|t| Config::parse(&t).ok())
@@ -164,6 +265,20 @@ pub fn status(data: Option<&str>) -> u8 {
     0
 }
 
+/// A self-update in flight (#316), from `pending`.
+fn print_pending(paths: &Paths) {
+    if let Some(p) = selfupdate::read_pending(&paths.data) {
+        println!(
+            "update:    agent {} to {}: start {} of {}, its health gate open for {} s more",
+            p.from,
+            p.to,
+            p.tries,
+            selfupdate::MAX_TRIES + 1,
+            (p.deadline - crate::run::now()).max(0)
+        );
+    }
+}
+
 fn opt<T: ToString>(v: Option<T>) -> String {
     v.map_or_else(|| "none".into(), |v| v.to_string())
 }
@@ -175,7 +290,14 @@ pub(crate) fn summary(s: &State, now: i64) -> String {
     };
     line(
         "agent:",
-        format!("{} (state written by {})", crate::AGENT_VERSION, s.agent),
+        format!(
+            "{} (state written by {}){}",
+            crate::AGENT_VERSION,
+            s.agent,
+            s.agent_skip.map_or_else(String::new, |v| format!(
+                "; {v} was rolled back here and is skipped until a higher one"
+            ))
+        ),
     );
     line(
         "release:",

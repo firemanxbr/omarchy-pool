@@ -14,8 +14,8 @@
 //! - capacity detection (#333): `run/capacity.json`, hashed as an input of the set, so a
 //!   file `capacity::write_if_changed` rewrote (`omarchy-agent capacity --write`) starts
 //!   a round; the loop does not run the detection itself yet;
-//! - self-update (#316): a bundle with a newer agent is noted, and rolled out by this
-//!   agent meanwhile (its `min_agent` admits it). A release's pinned docker and compose
+//! - self-update (#316, [`selfupdate`]): a bundle with a higher agent updates the agent
+//!   first, upward only, behind a health gate. A release's pinned docker and compose
 //!   roll forward only: they are switched before its round and not reverted with it;
 //! - the host state (#344) replaces `follow.latest` as the target.
 
@@ -28,6 +28,7 @@ pub(crate) mod exec;
 pub(crate) mod journal;
 pub(crate) mod pool;
 pub(crate) mod rollout;
+pub(crate) mod selfupdate;
 pub(crate) mod target;
 pub(crate) mod tools;
 pub(crate) mod trust;
@@ -35,7 +36,7 @@ pub(crate) mod trust;
 mod agent;
 mod cli;
 
-pub use cli::{logs, round, run, status};
+pub use cli::{logs, round, run, self_test, status};
 
 /// Unix seconds now.
 pub(crate) fn now() -> i64 {
