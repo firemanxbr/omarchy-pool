@@ -13,8 +13,8 @@
 #   identity and the worker token → (#322) a suspension refuses its claims,
 #   its follow and the agent's token call, changing nothing on the machine,
 #   and the owner's Resume with a passkey brings the same token back → Retire
-#   burns it, and a new install with a new token enrolls the machine as a new
-#   host, with a new key.
+#   burns it, and a new enrollment with a new token enrolls the machine as a
+#   new host, with a new key.
 #
 # The agent runs `omarchy-agent enroll`, the enrollment step `install` runs
 # after its preflight and the envelope's confirm (#317): the same code
@@ -172,12 +172,12 @@ res=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/resume" "${WEB[@]}" -d "$(jq -n
 [[ $(claim_code "$NEW") == 204 ]] || fail "the same token after the resume"
 [[ $(curl -s -o /dev/null -w '%{http_code}' "$POOL/api/v1/factory/follow?ids=$WORKER") == 200 ]] || fail "the follow after the resume"
 
-step "Retire (#322): the key and the token burnt; a new install enrolls the machine as a new host, with a new key"
+step "Retire (#322): the key and the token burnt; a new enrollment enrolls the machine as a new host, with a new key"
 ret=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/retire" "${WEB[@]}" -d '{"reason":"e2e: moving it"}')
 [[ $(jq -r .status <<<"$ret") == retired ]] || fail "retire: $ret"
 [[ $(claim_code "$NEW") == 401 ]] || fail "a retired host's token claimed"
 TOKEN2=$(curl -fs -X POST "$POOL/api/v1/hosts/enrollments" "${WEB[@]}" -d '{"name":"e2e-vm"}' | jq -r .token)
-XDG_DATA_HOME="$DATA" OMARCHY_ENROLL="$TOKEN2" "$AGENT" install --wait-minutes 3 > "$E2E/reinstall.log" 2>&1 &
+XDG_DATA_HOME="$DATA" OMARCHY_ENROLL="$TOKEN2" "$AGENT" enroll --wait-minutes 3 > "$E2E/reinstall.log" 2>&1 &
 AGENT_PID=$!
 for _ in $(seq 1 60); do grep -q "waiting for e2e" "$E2E/reinstall.log" && break; sleep 1; done
 grep -q "host $HOST was retired: this install enrolls the machine as a new host" "$E2E/reinstall.log" || { cat "$E2E/reinstall.log"; fail "the re-install did not see the retirement"; }
