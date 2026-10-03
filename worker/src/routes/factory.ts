@@ -880,12 +880,15 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   const head = scopeOf("c");
   const owners = scopeOf("c2");
   const readOwners = k.kinds.includes("build") && k.legacy?.trust !== "project";
-  const [h1, h2] = await env.DB.batch<CandidateRow>([
+  const none = () => env.DB.prepare("SELECT NULL AS id WHERE 0");
+  const [h1, h2, h3] = await env.DB.batch<CandidateRow>([
     env.DB.prepare(`SELECT ${candidateCols("c")} FROM build_tasks c WHERE c.status = 'queued' AND ${head.sql} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`).bind(...head.binds),
-    readOwners ? env.DB.prepare(OWNER_HEADS_SQL(owners.sql)).bind(OWNERS_LIMIT, ...owners.binds) : env.DB.prepare("SELECT NULL AS id WHERE 0"),
+    readOwners ? env.DB.prepare(OWNER_HEADS_SQL(owners.sql)).bind(OWNERS_LIMIT, ...owners.binds) : none(),
+    // The task this host reserves for, wherever it stands in the queue: the one it may take while it reserves.
+    host && k.hostId ? env.DB.prepare(`SELECT ${candidateCols("c")} FROM build_tasks c WHERE c.id = (SELECT reserving_task FROM hosts WHERE id = ?) AND c.status = 'queued' AND ${head.sql}`).bind(k.hostId, ...head.binds) : none(),
   ]);
   const rows = new Map<number, CandidateRow>();
-  for (const r of [...h1.results, ...h2.results]) if (r.id !== null) rows.set(r.id, r);
+  for (const r of [...h1.results, ...h2.results, ...h3.results]) if (r.id !== null) rows.set(r.id, r);
   if (!rows.size) return null;
   // The fleet, every lease, the setting, the host's own row and the oldest build; then what the candidates' packages say of their size and native history.
   const [fleetRows, leaseRows, setting, self, oldestRows] = await env.DB.batch<unknown>([
@@ -893,7 +896,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     env.DB.prepare(LEASES_HELD_SQL),
     env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(OWNER_CAP_KEY),
     env.DB.prepare("SELECT name, pool_cap_units, reserving_task, reserving_since FROM hosts WHERE id = ?").bind(k.hostId ?? ""),
-    host ? env.DB.prepare(OLDEST_BUILD_SQL) : env.DB.prepare("SELECT NULL AS id WHERE 0"),
+    host ? env.DB.prepare(OLDEST_BUILD_SQL) : none(),
   ]);
   const oldestRow = (oldestRows.results as CandidateRow[]).find((r) => r.id !== null) ?? null;
   const cands = [...rows.values(), ...(oldestRow && !rows.has(oldestRow.id) ? [oldestRow] : [])];

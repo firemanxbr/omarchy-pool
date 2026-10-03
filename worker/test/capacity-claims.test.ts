@@ -275,7 +275,7 @@ describe("fairness between contributors (D51)", () => {
 });
 
 describe("sizes and the reservation for large tasks (D31)", () => {
-  it("a size-4 task on a busy host: after 30 minutes the host reserves for it, takes nothing else, and leases it once its units fit; the mark clears", async () => {
+  it("a size-4 task on a busy host: after 30 minutes the host reserves for it, takes nothing else, and leases it once its units fit, however far down the queue; the mark clears", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const t0 = Date.now();
     const host = await seedHost("studio-r", { ...STUDIO, lanes: [{ arch: "aarch64", mode: "native" }] });
@@ -285,7 +285,8 @@ describe("sizes and the reservation for large tasks (D31)", () => {
     expect(running).toHaveLength(5);
     await env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, size) VALUES ('chromium', 'm1', 'https://chromium.org', '[\"aarch64\"]', 'waiting', 4)").run();
     const big = await seedTask({ name: "chromium", ago: 31 });
-    for (let i = 0; i < 6; i++) await seedTask({});
+    // Sixty more urgent small builds: the size-4 one is beyond the head of the queue a claim reads, yet the host that reserves for it reads it.
+    for (let i = 0; i < 60; i++) await seedTask({ priority: 50 });
     const held = () => running.filter((r) => !ended.includes(r.task)).map(({ task, gen }) => ({ task, gen }));
     const ended: number[] = [];
     // One build ends: 2 units free — the size-4 needs 8. The host reserves for it, with a line, and takes no small build.
