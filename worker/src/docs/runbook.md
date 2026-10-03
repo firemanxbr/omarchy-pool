@@ -856,7 +856,9 @@ VM's clock (`date` inside it) with the pool's `Date` through the Mac's own;
 beyond five seconds it sets the VM's clock from the Mac's, and restarts the
 profile (within the rate limit) when that does not hold. A Mac whose own clock
 is off the pool's is said ("needs a person"), never set from the network. The
-journal's `vm` and `vm-clock` lines say what it did.
+journal's `vm` and `vm-clock` lines say what it did. The memory check before
+every claim is the dispatcher's, which runs inside the VM: the
+`/proc/meminfo` it reads there is the VM's own.
 
 ### Self-update
 
