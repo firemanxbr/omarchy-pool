@@ -21,7 +21,7 @@ services:
       OMARCHY_BUILD_IMAGE_X86_64: "@BUILD_X86_64@"
       OMARCHY_WORKER_IMAGE: "@RELEASE_IMAGE@"          # sidecars run the same signed image
       OMARCHY_TASK_SUBNETS: ${OMARCHY_TASK_SUBNETS:-10.231.0.0/16}
-    env_file: [etc/dispatcher.env]       # the host worker token, written by the agent
+    env_file: [etc/dispatcher.env]       # the host worker token, and the host's addresses and agent budget beside it (#371): written by the agent
     volumes:
       - ${OMARCHY_SOCKET}:/var/run/docker.sock
       - ${OMARCHY_WORK_ROOT}:${OMARCHY_WORK_ROOT}      # same path inside and outside

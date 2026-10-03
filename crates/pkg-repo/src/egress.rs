@@ -15,12 +15,14 @@
 //! (DNS rebinding) has no second answer to give. A name with any refused
 //! address is refused whole.
 //!
-//! Seams: the host's own public addresses reach `--deny` from the
-//! dispatcher's `OMARCHY_HOST_ADDRESSES`, which the install child issue
-//! (#317) writes; until it does, a task can CONNECT to them through this
-//! proxy, and prep-root.sh's INPUT drop does not stop that (it matches the
+//! The host's own addresses reach `--deny` from the dispatcher's
+//! `OMARCHY_HOST_ADDRESSES`, which the agent writes into
+//! `etc/dispatcher.env` (#371): every address of the host's interfaces (an
+//! IPv6 one as its /64) and the public address its install's egress probe saw
+//! tasks leave from, rendered again by the run loop when they change. This
+//! list is what keeps a task off them: prep-root.sh's INPUT drop matches the
 //! task subnets, and this proxy's traffic comes from the `omarchy-egress`
-//! bridge). `DOCKER-USER` rules are prep-root.sh's (the P0 sets issue).
+//! bridge. `DOCKER-USER` rules are prep-root.sh's (the P0 sets issue).
 
 use std::fmt::Write as _;
 use std::io::{self, Read as _, Write as _};

@@ -641,10 +641,14 @@ otherwise), the user manager (`XDG_RUNTIME_DIR` and its D-Bus), the task
 subnets against the host's routes and other projects' networks, the owner
 files' owners and modes, the legacy project, a `GITHUB_TOKEN` to copy or in
 the `agent.env` a re-run keeps (public read only: a classic token with no scope; any scope, or a token
-GitHub names no scopes for, is refused), and the **egress probe**: a task
+GitHub names no scopes for, is refused), a secrets directory with a character
+the dispatcher refuses (letters, digits and `/ . _ - +` only), and the **egress probe**: a task
 on its own network in the task subnets must fail to reach `169.254.169.254`,
 the default gateway and the host's LAN address and must reach GitHub, which
-on a rootful host is what prep-root.sh's `DOCKER-USER` rules give. Until the
+on a rootful host is what prep-root.sh's `DOCKER-USER` rules give. The probe
+task also asks the pool's origin (`/cdn-cgi/trace`, at Cloudflare's edge) which
+address it comes from: that public address is kept in `egress.json` and every
+task's egress refuses it (#371); not seen is a note, not a blocker. Until the
 egress sidecar lands, a rootless host is expected to fail it: rootless
 podman's network carries the host's own address into the task's namespace,
 and the `DOCKER-USER` rules are rootful only. The probe's answers decide;
@@ -659,7 +663,15 @@ Then it prints the envelope (`agent.toml`) to confirm, writes
 `run/capacity.json`, enrolls ([Maintainer hosts](/docs/worker-host#maintainer-hosts):
 the fingerprint, your Confirm on the site, the host worker token) and only then writes `agent.toml` with
 the `host_id` and `worker_id` the enrollment gave — before your Confirm
-there is no run loop, no dispatcher and nothing that claims. It writes the
+there is no run loop, no dispatcher and nothing that claims. Then
+`etc/dispatcher.env` (0600) holds, beside the worker token, what the
+dispatcher takes from the agent (#371): `OMARCHY_HOST_ADDRESSES` (every
+address of the host's interfaces but loopback's and the container bridges', an
+IPv6 one as its /64, and the public address the probe saw), `OMARCHY_SECRETS_DIR`
+(the path chosen here, never mounted into the dispatcher) and, when the
+envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
+`…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK` and `…_CALLS_PER_DAY` (without one, the
+dispatcher's defaults). Every other line of that file is yours and kept. It writes the
 agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
 `--legacy`, and the unit `~/.config/systemd/user/omarchy-agent.service`
 (`Type=notify`, `Restart=always`, `WatchdogSec=300`,
@@ -703,6 +715,16 @@ lives under the data directory (`~/.local/share/omarchy-agent`, or `--data-dir`)
 fetched, the pinned docker CLI and compose plugin (`tools/`, by the SHA-256
 the manifest names; no other docker or compose binary is ever run),
 `staging/host/` and `last-good/host/`.
+
+At its start and then every minute the loop reads the host's addresses again
+(`/proc/net/fib_trie`, `/proc/net/route`, `/proc/net/if_inet6`) and renders
+`etc/dispatcher.env` with them and `agent.toml`'s secrets directory and
+budget (#371): the token and your own lines kept, written only when that
+changes it, and never made when it is missing (that waits for your Confirm).
+A new DHCP lease or a new interface changes the file, which starts a round
+like any `etc/` change, so the dispatcher is recreated with it and its tasks
+run on; the journal says `dispatcher-env` with the addresses. `omarchy-agent
+dispatcher-env` prints what it would write; `--write` writes it now.
 
 Each round goes `render → lint → plan → pull → replace → guard → commit`,
 or `revert`, each step written to `state.json` before it acts, so a restart

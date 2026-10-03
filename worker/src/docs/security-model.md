@@ -131,7 +131,13 @@ secret). Everything travels in the `Authorization` header over TLS only.
   (cloud metadata), loopback, multicast and reserved ranges, the task
   subnets and the host's own addresses are refused by the address a name
   resolves to, and the connection goes to the address that was checked, so
-  DNS rebinding has no second answer. A raw socket fails with "Network is
+  DNS rebinding has no second answer. The host's own addresses are the
+  agent's word, in `etc/dispatcher.env` (#371): every address of its
+  interfaces (an IPv6 one as its /64) and the public address install's egress
+  probe saw its tasks leave from — behind a router that forwards a port, a task
+  connecting to it would reach the host, and the firewall's INPUT drop does not
+  see that traffic, which leaves from the egress bridge. The run loop renders
+  them again every minute, so a new lease is refused too. A raw socket fails with "Network is
   unreachable"; a package that needs one gets a reviewed exception in
   `factory/sizing` (a bridge network of its own). A task that needs a model
   gets an agent sidecar of its own, on its network only, with the keys file
@@ -481,7 +487,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
   id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
   digits and dashes), so a pool cannot add a variable to the dispatcher's
-  environment; strings the pool sends reach the terminal without control
+  environment (what else the agent writes there — the host's addresses, the
+  secrets directory's path, the agent budget — comes from the host and
+  `agent.toml`, never from the pool, #371); strings the pool sends reach the terminal without control
   characters. It is a new one at every fetch; the agent
   rotates it every 30 days. The one it replaces works ten more minutes (kept
   on the host's row, never on the registration that older Workers list), so
