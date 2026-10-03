@@ -398,10 +398,15 @@ impl Agent {
         // again): the next poll sees it unconsumed.
         let busy = self.state.rollout.step != Step::Idle
             && !rollout::preemptible(&self.state.rollout.step);
+        // The last Update an agent before 0.3.0 took (`update_seen`) counts as seen.
         if let Some(id) = s
             .updates
             .iter()
-            .find(|id| !busy && !self.state.orders.seen(id))
+            .find(|id| {
+                !busy
+                    && !self.state.orders.seen(id)
+                    && self.state.update_seen.as_deref() != Some(id.as_str())
+            })
             .cloned()
         {
             if !self.state.quarantine.is_empty() {

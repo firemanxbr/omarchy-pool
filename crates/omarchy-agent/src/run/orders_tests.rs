@@ -731,3 +731,21 @@ fn reports_go_on_change_and_every_five_minutes_and_one_that_failed_is_retried() 
     let text = r.to_string();
     assert!(!text.contains(crate::run::fake::TOKEN), "{text}");
 }
+
+#[test]
+fn an_update_the_agent_before_took_is_not_taken_again_and_a_new_one_starts_a_round() {
+    // state.json as agent 0.2.0 left it: the last Update it took, and no ring.
+    let mut w = World::running_v1();
+    w.agent.state.update_seen = Some("wo_old".into());
+    w.target("v1.0.0", Some("wo_old"));
+    let changes = w.changes().len();
+    w.poll();
+    assert_eq!((w.step(), w.changes().len()), ("idle", changes));
+    // A new Update: a round now, and its id joins the ring.
+    w.target("v1.0.0", Some("wo_new"));
+    w.poll();
+    assert_ne!(w.step(), "idle");
+    assert_eq!(w.agent.state.rollout.why, "Update order wo_new");
+    assert!(w.agent.state.orders.seen("wo_new"));
+    assert_eq!(w.agent.state.update_seen.as_deref(), Some("wo_new"));
+}
