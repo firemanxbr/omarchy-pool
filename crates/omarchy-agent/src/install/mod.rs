@@ -467,6 +467,13 @@ pub(crate) fn measure(
             secrets_dir.display()
         ));
     }
+    // The agent budget a re-run keeps reaches it too, and agent.toml is refused with a bad
+    // one: said here, before the owner's Confirm, not after the token is written.
+    if let Err(e) =
+        dispatcher_env::Budget::from_envelope(envelope::envelope_value(ex, "agent_budget").as_ref())
+    {
+        r.blockers.push(e);
+    }
     if let Err(e) = secrets::outside(&secrets_dir, &work_root, &set_dir) {
         r.blockers.push(e);
     }
@@ -860,12 +867,7 @@ pub(crate) fn apply(
     // The public address tasks leave from, before the token is written beside the host's
     // addresses (#371). Not seen this time: an earlier install's stays.
     if let Some(ip) = ready.public {
-        let seen = addresses::Seen {
-            public: ip,
-            at: at.clone(),
-        };
-        let body = serde_json::to_vec_pretty(&seen).map_err(|e| Failure::Refused(e.to_string()))?;
-        files::write(&p.data, addresses::SEEN_FILE, &body, 0o600).map_err(Failure::Refused)?;
+        addresses::keep_seen(&p.data, ip, &at).map_err(Failure::Refused)?;
     }
 
     // Enrollment: the owner's Confirm, then the host worker token.

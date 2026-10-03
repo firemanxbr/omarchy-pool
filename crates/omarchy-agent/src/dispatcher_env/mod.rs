@@ -14,12 +14,15 @@
 //!   so an envelope without one leaves the dispatcher's defaults.
 //!
 //! It is written on install, on enrollment, on every rotation, and by the run loop when the
-//! host's addresses change (it looks every minute) or agent.toml did (it reads it at its
-//! start). A rotation keeps the rest, a change of address never touches the token, and
-//! every line the agent does not own — an owner's own variable, a comment — is kept as it
-//! was. The file is made only with a token: before the owner's Confirm there is none, and
-//! the run loop holds the dispatcher while it is missing. A file that changed is an input
-//! of the set, so the next round recreates the dispatcher with it; its tasks run on.
+//! host's addresses or agent.toml changed (it reads both every minute, and asks the pool's
+//! edge for the public address every hour). A rotation keeps the rest, a change of address
+//! never touches the token, and every line the agent does not own — an owner's own
+//! variable, a comment — is kept as it was. Every writer holds `etc/` locked (an advisory
+//! `flock` on the directory) from its read to its rename, so a refresh never puts back a
+//! token a rotation in another process just replaced. The file is made only with a token:
+//! before the owner's Confirm there is none, and the run loop holds the dispatcher while it
+//! is missing. A file that changed is an input of the set, so the next round recreates the
+//! dispatcher with it; its tasks run on.
 
 pub mod addresses;
 
@@ -27,10 +30,13 @@ pub mod addresses;
 mod tests;
 
 use std::io::Read as _;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 pub use addresses::{Range, Sources};
+
+use crate::install::net::{self, Cidr};
 
 /// The host worker token.
 pub const TOKEN: &str = "OMARCHY_WORKER_TOKEN";
@@ -128,16 +134,26 @@ impl Budget {
     }
 }
 
-/// What agent.toml gives the file: the secrets directory and the agent budget.
+/// What agent.toml gives the file: the secrets directory and the agent budget, and the
+/// task subnets, whose container bridges' addresses are not the host's own to refuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
     pub secrets_dir: PathBuf,
     pub budget: Budget,
+    pub(crate) task_subnets: Vec<Cidr>,
+}
+
+/// The task subnets agent.toml names (install's default when it names none); a value that
+/// does not read leaves only the private ranges for a bridge's addresses (the dispatcher
+/// refuses to start on it anyway).
+fn task_subnets(value: Option<&str>) -> Vec<Cidr> {
+    net::parse_list(value.unwrap_or(crate::install::TASK_SUBNETS)).unwrap_or_default()
 }
 
 impl Envelope {
-    /// From agent.toml's text: `set.secrets_dir` and `envelope.agent_budget`, nothing else
-    /// (the enrollment reads it where the run loop's stricter configuration does not apply).
+    /// From agent.toml's text: `set.secrets_dir`, `envelope.agent_budget` and
+    /// `envelope.task_subnets`, nothing else (the enrollment reads it where the run loop's
+    /// stricter configuration does not apply).
     pub fn from_agent_toml(text: &str) -> Result<Self, String> {
         let t: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
         let secrets_dir = t
@@ -146,11 +162,26 @@ impl Envelope {
             .and_then(toml::Value::as_str)
             .map(PathBuf::from)
             .ok_or("agent.toml: set.secrets_dir is missing")?;
-        let budget = Budget::from_envelope(t.get("envelope").and_then(|e| e.get("agent_budget")))?;
+        let envelope = t.get("envelope");
+        let budget = Budget::from_envelope(envelope.and_then(|e| e.get("agent_budget")))?;
         Ok(Self {
             secrets_dir,
             budget,
+            task_subnets: task_subnets(
+                envelope
+                    .and_then(|e| e.get("task_subnets"))
+                    .and_then(toml::Value::as_str),
+            ),
         })
+    }
+
+    /// The run loop's configuration's, as it read agent.toml.
+    pub(crate) fn of_config(cfg: &crate::run::config::Config) -> Self {
+        Self {
+            secrets_dir: cfg.secrets_dir.clone(),
+            budget: cfg.agent_budget,
+            task_subnets: task_subnets(cfg.task_subnets.as_deref()),
+        }
     }
 
     /// `<data>/agent.toml`'s, when there is one: `None` before install wrote it.
@@ -186,10 +217,13 @@ pub struct Rendered {
 }
 
 impl Rendered {
-    /// The host's addresses now (its interfaces', the public one install saw), with `envelope`.
+    /// The host's addresses now (its interfaces', the public one last seen), with `envelope`.
     pub fn now(sources: &Sources, data: &Path, envelope: Option<Envelope>) -> Self {
+        let task = envelope
+            .as_ref()
+            .map_or_else(|| task_subnets(None), |e| e.task_subnets.clone());
         Self {
-            addresses: addresses::detect(sources, data),
+            addresses: addresses::detect(sources, data, &task),
             envelope,
         }
     }
@@ -307,9 +341,34 @@ pub fn read(path: &Path) -> Result<Option<(String, u32)>, String> {
     Ok(Some((text, meta.mode() & 0o7777)))
 }
 
+/// `etc/` locked for one writer, until the returned descriptor is dropped: an advisory
+/// `flock` on the directory itself, so no lock file appears among the set's inputs. `None`
+/// when there is no `etc/` (nor a file in it).
+fn lock(path: &Path) -> Result<Option<OwnedFd>, String> {
+    use rustix::fs::{FlockOperation, Mode, OFlags};
+    let dir = path.parent().ok_or("dispatcher.env: no directory")?;
+    let fd = match rustix::fs::open(
+        dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+    };
+    loop {
+        match rustix::fs::flock(&fd, FlockOperation::LockExclusive) {
+            Ok(()) => return Ok(Some(fd)),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(format!("{}: locking it: {e}", dir.display())),
+        }
+    }
+}
+
 /// A new host worker token, with the rest rendered by `r` (enrollment and every rotation).
 /// A file that is not the agent's own is replaced, never read.
 pub fn write_token(path: &Path, worker: &str, token: &str, r: &Rendered) -> Result<(), String> {
+    let _held = lock(path)?;
     let existing = read(path)
         .ok()
         .flatten()
@@ -332,6 +391,9 @@ pub enum Refresh {
 /// The file rendered again by `r`, its token and the owner's lines kept; written only when
 /// that changes it (or its mode is not 0600).
 pub fn refresh(path: &Path, r: &Rendered) -> Result<Refresh, String> {
+    let Some(_held) = lock(path)? else {
+        return Ok(Refresh::NoFile);
+    };
     let Some((text, mode)) = read(path)? else {
         return Ok(Refresh::NoFile);
     };
@@ -353,14 +415,7 @@ pub fn command(
 ) -> Result<(Vec<String>, Option<Refresh>), String> {
     let cfg =
         crate::run::config::Config::load(&data.join("agent.toml"), crate::install::files::euid())?;
-    let r = Rendered::now(
-        sources,
-        data,
-        Some(Envelope {
-            secrets_dir: cfg.secrets_dir.clone(),
-            budget: cfg.agent_budget,
-        }),
-    );
+    let r = Rendered::now(sources, data, Some(Envelope::of_config(&cfg)));
     let lines = r.lines()?;
     let written = if write {
         Some(refresh(&path_in(&cfg.set_dir), &r)?)

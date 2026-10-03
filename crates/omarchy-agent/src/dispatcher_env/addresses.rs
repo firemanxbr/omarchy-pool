@@ -4,18 +4,23 @@
 //! where the host has a public one, on an interface (a VPS) or behind a router that
 //! forwards a port to it (a home), since a task that connects to it reaches the host.
 //!
-//! - Every address on the host's interfaces, IPv4 and IPv6, but loopback's and those of
-//!   container bridges (docker's, podman's, libvirt's: a task network comes and goes with
-//!   its task, and its range is refused by the egress anyway). They are read from the
-//!   kernel's own lists — `/proc/net/fib_trie` (IPv4, matched to its interface through
-//!   `/proc/net/route`) and `/proc/net/if_inet6` — so the agent runs no `ip` and needs no
-//!   ioctl (no unsafe code).
+//! - Every address on the host's interfaces, IPv4 and IPv6, but loopback's and a container
+//!   bridge's (docker's, podman's, libvirt's) that the egress refuses anyway: a private,
+//!   CGNAT, link-local or unique local one, or one in the task subnets. A task network
+//!   comes and goes with its task, and the dispatcher is not recreated for it; a bridge
+//!   given a global range (docker's `fixed-cidr-v6` from the host's delegated prefix) is
+//!   the host's like any other interface. They are read from the kernel's own lists —
+//!   `/proc/net/fib_trie` (IPv4, matched to its interface through `/proc/net/route`) and
+//!   `/proc/net/if_inet6` — so the agent runs no `ip` and needs no ioctl (no unsafe code).
 //! - An IPv6 address is written as its /64 (a wider on-link prefix narrowed to it, a
 //!   narrower one kept): temporary addresses (RFC 8981) change every day inside it, and
 //!   each new value would recreate the dispatcher; the /64 is the host's own link, which
 //!   no task reaches anyway.
-//! - The public address the install's egress probe saw tasks leave from ([`SEEN_FILE`]
-//!   in the data directory, written by install).
+//! - The public address the host's tasks leave from ([`SEEN_FILE`] in the data directory):
+//!   what install's egress probe saw, then what the pool's edge says the run loop's own
+//!   request came from, asked every hour over IPv4 and not through a proxy ([`from_trace`]):
+//!   the host and its tasks leave through the same NAT, whose public address a home
+//!   connection's provider may change at any time.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -26,7 +31,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::install::net::{is_bridge, parse_routes, Cidr, Route};
 
-/// Where the install's egress probe keeps the public address it saw, in the data directory.
+/// Where the public address the host's tasks leave from is kept, in the data directory:
+/// written by install's egress probe, then by the run loop when the pool's edge says another.
 pub const SEEN_FILE: &str = "egress.json";
 
 /// An IPv6 address is refused with its /64 at least.
@@ -161,6 +167,21 @@ pub(crate) fn parse_if_inet6(text: &str) -> Vec<V6> {
         .collect()
 }
 
+/// A bridge's IPv4 address the egress refuses anyway: private (RFC 1918), carrier-grade
+/// NAT, link-local, or in the task subnets.
+fn refused_anyway_v4(a: Ipv4Addr, task: &[Cidr]) -> bool {
+    let one = Cidr::new(u32::from(a), 32);
+    a.is_private()
+        || a.is_link_local()
+        || Cidr::new(u32::from(Ipv4Addr::new(100, 64, 0, 0)), 10).overlaps(one)
+        || task.iter().any(|t| t.overlaps(one))
+}
+
+/// A bridge's IPv6 address the egress refuses anyway: link-local or unique local.
+fn refused_anyway_v6(a: Ipv6Addr) -> bool {
+    a.is_unicast_link_local() || a.is_unique_local()
+}
+
 /// The interface an IPv4 address of the host is on: the most specific route that holds it
 /// (the default route says nothing). `None` for an address no route holds (a /32 with an
 /// on-link gateway, an address on `lo`).
@@ -173,28 +194,41 @@ fn iface_of(a: Ipv4Addr, routes: &[Route]) -> Option<&str> {
         .map(|r| r.iface.as_str())
 }
 
-/// The addresses of the host's interfaces, as the egress refuses them.
-pub(crate) fn of_interfaces(fib_trie: &str, routes: &str, if_inet6: &str) -> Vec<Range> {
+/// The addresses of the host's interfaces, as the egress refuses them; `task` is the task
+/// subnets.
+pub(crate) fn of_interfaces(
+    fib_trie: &str,
+    routes: &str,
+    if_inet6: &str,
+    task: &[Cidr],
+) -> Vec<Range> {
     let routes = parse_routes(routes);
     let v4 = parse_fib_trie(fib_trie)
         .into_iter()
         .filter(|a| !a.is_loopback() && !a.is_unspecified())
-        .filter(|a| !iface_of(*a, &routes).is_some_and(is_bridge))
+        .filter(|a| !(iface_of(*a, &routes).is_some_and(is_bridge) && refused_anyway_v4(*a, task)))
         .map(|a| Range::host(IpAddr::V4(a)));
     let v6 = parse_if_inet6(if_inet6)
         .into_iter()
-        .filter(|v| v.iface != "lo" && !v.addr.is_loopback() && !is_bridge(&v.iface))
+        .filter(|v| v.iface != "lo" && !v.addr.is_loopback())
+        .filter(|v| !(is_bridge(&v.iface) && refused_anyway_v6(v.addr)))
         .map(|v| Range::new(IpAddr::V6(v.addr), v.prefix.max(V6_PREFIX)));
     v4.chain(v6).collect()
 }
 
-/// What install's egress probe saw ([`SEEN_FILE`]).
+/// The public address the host's tasks leave from ([`SEEN_FILE`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Seen {
-    /// The address the pool saw the probe task come from.
+    /// The address the pool saw the probe task (install) or the run loop come from.
     pub public: IpAddr,
     /// When (RFC 3339).
     pub at: String,
+}
+
+/// One address the pool could have seen a host come from: never loopback, unspecified or
+/// multicast.
+fn public(ip: IpAddr) -> Option<IpAddr> {
+    Some(ip).filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
 }
 
 /// The public address [`SEEN_FILE`] holds, if it holds one that reads.
@@ -202,17 +236,37 @@ pub fn seen(data: &Path) -> Option<IpAddr> {
     let b = std::fs::read(data.join(SEEN_FILE)).ok()?;
     serde_json::from_slice::<Seen>(&b)
         .ok()
-        .map(|s| s.public)
-        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
+        .and_then(|s| public(s.public))
 }
 
-/// The host's own addresses now: its interfaces' and the public one install saw, sorted,
-/// each once and none inside another.
-pub fn detect(sources: &Sources, data: &Path) -> Vec<Range> {
+/// [`SEEN_FILE`] written (0600) with `ip`, seen at `at` (RFC 3339).
+pub fn keep_seen(data: &Path, ip: IpAddr, at: &str) -> Result<(), String> {
+    let body = serde_json::to_vec_pretty(&Seen {
+        public: ip,
+        at: at.to_owned(),
+    })
+    .map_err(|e| e.to_string())?;
+    crate::install::files::write(data, SEEN_FILE, &body, 0o600)
+}
+
+/// The address Cloudflare's edge saw a request come from: the `ip=` line of
+/// `/cdn-cgi/trace`, one address and nothing else.
+pub fn from_trace(body: &str) -> Option<IpAddr> {
+    body.lines()
+        .find_map(|l| l.strip_prefix("ip="))
+        .and_then(|a| a.trim().parse().ok())
+        .and_then(public)
+}
+
+/// The host's own addresses now: its interfaces' (a container bridge's in `task` or
+/// another range the egress refuses left out) and the public one last seen, sorted, each
+/// once and none inside another.
+pub(crate) fn detect(sources: &Sources, data: &Path, task: &[Cidr]) -> Vec<Range> {
     let mut all: BTreeSet<Range> = of_interfaces(
         &sources.read("fib_trie"),
         &sources.read("route"),
         &sources.read("if_inet6"),
+        task,
     )
     .into_iter()
     .collect();

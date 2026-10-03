@@ -589,6 +589,141 @@ fn the_host_s_addresses_reach_dispatcher_env_and_a_change_recreates_the_dispatch
     assert!(!env.exists());
 }
 
+/// A world whose host's interfaces are a copy of the home fixture, with the run loop's half
+/// of `etc/dispatcher.env` on (#371).
+fn with_host_env() -> World {
+    let mut w = World::running_v1();
+    let net = w.dir.join("net");
+    fs::create_dir_all(&net).unwrap();
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home");
+    for f in ["fib_trie", "if_inet6", "route"] {
+        fs::copy(fixture.join(f), net.join(f)).unwrap();
+    }
+    w.agent.host_env = Some(HostEnv::new(Sources { proc_net: net }));
+    w
+}
+
+fn settle(w: &mut World) {
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+}
+
+#[test]
+fn the_public_address_the_pool_s_edge_sees_is_asked_hourly_and_a_new_one_refused_with_the_token_kept(
+) {
+    let mut w = with_host_env();
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let addresses = |w: &World| {
+        fs::read_to_string(w.set_dir().join("etc/dispatcher.env"))
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("OMARCHY_HOST_ADDRESSES="))
+            .unwrap()
+            .to_owned()
+    };
+    // Install saw 198.51.100.20; the pool's edge says the same at the loop's start.
+    crate::dispatcher_env::addresses::keep_seen(
+        &w.agent.paths.data,
+        "198.51.100.20".parse().unwrap(),
+        "2027-01-15T07:00:00Z",
+    )
+    .unwrap();
+    w.remote.borrow_mut().public = Some(Net::Ok("198.51.100.20".parse().unwrap()));
+    w.tick(3);
+    assert_eq!(w.remote.borrow().publics, 1);
+    assert_eq!(
+        addresses(&w),
+        "10.8.0.2,192.168.1.20,198.51.100.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64"
+    );
+    settle(&mut w);
+    let text = fs::read_to_string(&env).unwrap();
+    let dispatcher = w.engine.borrow().dispatcher().unwrap().id.clone();
+
+    // The provider hands the home connection a new public address: within the hour the
+    // edge is asked again, and every task's egress refuses the new one; the token stays.
+    w.remote.borrow_mut().public = Some(Net::Ok("198.51.100.77".parse().unwrap()));
+    for _ in 0..10 {
+        w.tick(61);
+    }
+    assert_eq!(
+        w.remote.borrow().publics,
+        1,
+        "asked hourly, not every minute"
+    );
+    assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    for _ in 0..55 {
+        w.tick(61);
+    }
+    assert_eq!(w.remote.borrow().publics, 2);
+    assert_eq!(
+        fs::read_to_string(&env).unwrap(),
+        text.replace("198.51.100.20", "198.51.100.77")
+    );
+    assert_eq!(
+        crate::dispatcher_env::addresses::seen(&w.agent.paths.data),
+        Some("198.51.100.77".parse().unwrap())
+    );
+    settle(&mut w);
+    assert_ne!(w.engine.borrow().dispatcher().unwrap().id, dispatcher);
+
+    // No answer (the pool down, an IPv6-only host): the address last seen stays.
+    let text = fs::read_to_string(&env).unwrap();
+    w.remote.borrow_mut().public = Some(Net::NoAnswer("timed out".into()));
+    for _ in 0..61 {
+        w.tick(61);
+    }
+    assert_eq!(w.remote.borrow().publics, 3);
+    assert_eq!(fs::read_to_string(&env).unwrap(), text);
+}
+
+#[test]
+fn agent_toml_is_read_again_so_the_loop_never_puts_back_what_a_rotation_or_dispatcher_env_wrote() {
+    let mut w = with_host_env();
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let secrets = w.dir.join("secrets");
+    // The loop started without a budget; the owner then gives agent.toml one.
+    fs::write(
+        w.agent.paths.data.join("agent.toml"),
+        format!(
+            "[set]\nsecrets_dir = \"{}\"\n[envelope]\nagent_budget = {{ calls_per_task = 40 }}\n",
+            secrets.display()
+        ),
+    )
+    .unwrap();
+    w.tick(3);
+    settle(&mut w);
+    let text = fs::read_to_string(&env).unwrap();
+    assert!(
+        text.contains(&format!(
+            "\nOMARCHY_SECRETS_DIR={}\nOMARCHY_AGENT_CALLS_PER_TASK=40\n",
+            secrets.display()
+        )),
+        "{text}"
+    );
+    // Rendered every minute from then on, it stays as agent.toml says.
+    for _ in 0..3 {
+        w.tick(61);
+    }
+    assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    assert_eq!(w.step(), "idle");
+    // An agent.toml that does not read now (an edit half done): what the loop started with.
+    fs::write(
+        w.agent.paths.data.join("agent.toml"),
+        "[envelope]\nagent_budget = { calls_per_tusk = 40 }\n",
+    )
+    .unwrap();
+    w.tick(61);
+    assert!(
+        !fs::read_to_string(&env)
+            .unwrap()
+            .contains("OMARCHY_AGENT_CALLS_PER_TASK"),
+        "the start's configuration has no budget"
+    );
+}
+
 #[test]
 fn interpolated_output_and_the_token_never_reach_the_disk_or_a_report() {
     let mut w = World::running_v1();

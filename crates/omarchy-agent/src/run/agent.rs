@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use crate::dispatcher_env::{self, Envelope, Refresh, Rendered, Sources};
+use crate::dispatcher_env::{self, addresses, Envelope, Refresh, Rendered, Sources};
 use crate::manifest::{Manifest, Outer};
 use crate::statement::Statement;
 use crate::verify::{self, BundleOutcome, Rejection, StatementOutcome, VerifiedBundle};
@@ -35,6 +35,8 @@ const UNAUTHORIZED_S: i64 = 3600;
 const DRIFT_S: i64 = 900;
 /// How often the host's own addresses are read again for `etc/dispatcher.env` (#371).
 pub(crate) const ADDRESSES_S: i64 = 60;
+/// How often the pool's edge is asked which public address the host leaves from (#371).
+pub(crate) const PUBLIC_S: i64 = 3600;
 
 /// The cryptographic check, pinned identities and parsing (`crate::verify`).
 pub(crate) trait Verifier {
@@ -103,12 +105,15 @@ pub(crate) struct Agent {
 }
 
 /// The run loop's half of `etc/dispatcher.env` (#371): at its start, then every
-/// [`ADDRESSES_S`], the host's own addresses are read again and the file rendered with
-/// them and agent.toml's secrets directory and budget, its token kept. A file that
-/// changed starts a round (an input of the set), which recreates the dispatcher.
+/// [`ADDRESSES_S`], the host's own addresses and agent.toml are read again and the file
+/// rendered with them, its token kept; at its start, then every [`PUBLIC_S`], the pool's
+/// edge is asked which public address the host leaves from (`egress.json`, which install
+/// wrote first). A file that changed starts a round (an input of the set), which
+/// recreates the dispatcher.
 pub(crate) struct HostEnv {
     pub sources: Sources,
     next_at: i64,
+    public_at: i64,
     /// The last failure said, so a failure that lasts is said once.
     failing: Option<String>,
 }
@@ -118,6 +123,7 @@ impl HostEnv {
         Self {
             sources,
             next_at: 0,
+            public_at: 0,
             failing: None,
         }
     }
@@ -755,14 +761,30 @@ impl Agent {
             return;
         }
         h.next_at = now + ADDRESSES_S;
-        let r = Rendered::now(
-            &h.sources,
-            &self.paths.data,
-            Some(Envelope {
-                secrets_dir: self.cfg.secrets_dir.clone(),
-                budget: self.cfg.agent_budget,
-            }),
-        );
+        if now >= h.public_at {
+            h.public_at = now + PUBLIC_S;
+            // The address the pool's edge saw: no answer keeps the one last seen.
+            if let Net::Ok(ip) = self.pool.public_address() {
+                if addresses::seen(&self.paths.data) != Some(ip) {
+                    let at = crate::capacity::utc(u64::try_from(now).unwrap_or(0));
+                    if let Err(e) = addresses::keep_seen(&self.paths.data, ip, &at) {
+                        self.journal.write(
+                            now,
+                            "dispatcher-env",
+                            serde_json::json!({"detail": format!("the public address {ip} was not kept: {e}")}),
+                        );
+                    }
+                }
+            }
+        }
+        // agent.toml as it is now, as `omarchy-agent token` and `dispatcher-env --write`
+        // read it, so the loop never puts back what they wrote; one that does not read now
+        // (an edit half done) leaves what the loop started with.
+        let envelope = match Envelope::of_data_dir(&self.paths.data) {
+            Some(Ok(e)) if dispatcher_env::dispatcher_path(&e.secrets_dir) => e,
+            _ => Envelope::of_config(&self.cfg),
+        };
+        let r = Rendered::now(&h.sources, &self.paths.data, Some(envelope));
         let path = dispatcher_env::path_in(&self.cfg.set_dir);
         match dispatcher_env::refresh(&path, &r) {
             Ok(done) => {

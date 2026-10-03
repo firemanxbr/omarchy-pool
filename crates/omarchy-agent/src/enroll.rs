@@ -29,7 +29,7 @@ use crate::pool::{shown, Answer, Pool};
 /// `${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-agent`).
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// The data directory: agent.toml, and the public address install's egress probe saw.
+    /// The data directory: agent.toml, and the public address the host's tasks leave from.
     pub data: PathBuf,
     /// The host key and `host.json`.
     pub state: PathBuf,

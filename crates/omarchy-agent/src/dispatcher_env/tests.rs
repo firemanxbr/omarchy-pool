@@ -19,8 +19,13 @@ fn fixture(name: &str) -> Sources {
     }
 }
 
+/// The task subnets install writes by default.
+fn task() -> Vec<Cidr> {
+    crate::install::net::parse_list(crate::install::TASK_SUBNETS).unwrap()
+}
+
 fn joined(sources: &Sources, data: &Path) -> String {
-    addresses::joined(&addresses::detect(sources, data))
+    addresses::joined(&addresses::detect(sources, data, &task()))
 }
 
 fn mode(p: &Path) -> u32 {
@@ -56,6 +61,27 @@ fn every_address_of_the_host_s_interfaces_but_loopback_and_container_bridges() {
         envelope: None,
     };
     assert!(r.lines().unwrap().is_empty());
+
+    // A bridge's address is left out only where the egress refuses it anyway (a private,
+    // CGNAT, link-local or unique local one, or one in the task subnets): a bridge on a
+    // routed public range, or docker's `fixed-cidr-v6` from the host's delegated prefix,
+    // is the host's own.
+    let routes = format!(
+        "{}br-0a0b0c0d0e0f\t006433C6\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n",
+        fs::read_to_string(fixture("home").proc_net.join("route")).unwrap()
+    );
+    let fib = "Local:\n  +-- 0.0.0.0/0 1 0 0\n     |-- 10.231.0.1\n        /32 host LOCAL\n     |-- 172.17.0.1\n        /32 host LOCAL\n     |-- 192.168.1.20\n        /32 host LOCAL\n     |-- 198.51.100.1\n        /32 host LOCAL\n";
+    let v6 = "fe800000000000000042acfffe110001 03 40 20 80  docker0\nfd000000000000000000000000000001 03 40 00 80  docker0\n20010db8000100050000000000000001 03 40 00 80  docker0\nfe80000000000000a8bbccfffedd0001 07 40 20 80 vethab12cd3\n";
+    assert_eq!(
+        addresses::joined(&addresses::of_interfaces(fib, &routes, v6, &task())),
+        "192.168.1.20,198.51.100.1,2001:db8:1:5::/64"
+    );
+    // The same public range taken for the task subnets: its bridges come and go with tasks.
+    let public_tasks = crate::install::net::parse_list("198.51.100.0/24").unwrap();
+    assert_eq!(
+        addresses::joined(&addresses::of_interfaces(fib, &routes, v6, &public_tasks)),
+        "192.168.1.20,2001:db8:1:5::/64"
+    );
 }
 
 #[test]
@@ -90,6 +116,7 @@ fn the_kernel_s_lists_parse_as_the_kernel_writes_them() {
         "Local:\n  +-- 0.0.0.0/0 1 0 0\n     |-- 10.231.0.1\n        /32 host LOCAL\n     |-- 100.64.7.7\n        /32 host LOCAL\n",
         &routes,
         "",
+        &task(),
     );
     assert_eq!(addresses::joined(&got), "100.64.7.7");
 }
@@ -126,6 +153,41 @@ fn the_public_address_the_egress_probe_saw_joins_them_once() {
     assert_eq!(addresses::seen(&data), None);
     write("127.0.0.1");
     assert_eq!(addresses::seen(&data), None);
+    // What the run loop keeps when the pool's edge says the host comes from elsewhere now.
+    addresses::keep_seen(
+        &data,
+        "198.51.100.21".parse().unwrap(),
+        "2026-10-03T01:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(
+        addresses::seen(&data),
+        Some("198.51.100.21".parse().unwrap())
+    );
+    assert_eq!(mode(&data.join(addresses::SEEN_FILE)), 0o600);
+}
+
+#[test]
+fn the_address_the_pool_s_edge_saw_is_the_trace_s_ip_line_alone() {
+    let trace = "fl=465f1\nh=pkgs.omarchy-pool.org\nip=198.51.100.20\nts=1790000000.1\nvisit_scheme=https\nuag=omarchy-agent/0.3.1\ncolo=LIS\nhttp=http/1.1\nloc=PT\ntls=TLSv1.3\nsni=plaintext\nwarp=off\n";
+    assert_eq!(
+        addresses::from_trace(trace),
+        Some("198.51.100.20".parse().unwrap())
+    );
+    assert_eq!(
+        addresses::from_trace("ip=2001:db8::7\n"),
+        Some("2001:db8::7".parse().unwrap())
+    );
+    for bad in [
+        "",
+        "<html>not a trace</html>",
+        "ip=198.51.100.20,10.0.0.1\n",
+        "ip=127.0.0.1\n",
+        "ip=0.0.0.0\n",
+        "ip=198.51.100.20 OMARCHY_X=1\n",
+    ] {
+        assert_eq!(addresses::from_trace(bad), None, "{bad:?}");
+    }
 }
 
 #[test]
@@ -187,12 +249,13 @@ fn envelope(secrets: &str, budget: Budget) -> Envelope {
     Envelope {
         secrets_dir: PathBuf::from(secrets),
         budget,
+        task_subnets: task(),
     }
 }
 
 #[test]
 fn rendering_keeps_the_token_and_every_line_the_agent_does_not_own() {
-    let home = addresses::detect(&fixture("home"), &tempdir());
+    let home = addresses::detect(&fixture("home"), &tempdir(), &task());
     let r = Rendered {
         addresses: home.clone(),
         envelope: Some(envelope(
@@ -222,7 +285,7 @@ fn rendering_keeps_the_token_and_every_line_the_agent_does_not_own() {
     assert_eq!(rotated, text.replace(OMW, &new));
     // An address change: the addresses only, the token as it was.
     let moved = Rendered {
-        addresses: addresses::detect(&fixture("vps"), &tempdir()),
+        addresses: addresses::detect(&fixture("vps"), &tempdir(), &task()),
         ..r.clone()
     };
     let after = render(&text, None, &moved).unwrap();
@@ -270,7 +333,7 @@ fn refresh_never_makes_the_file_and_writes_it_only_when_it_changes() {
     fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
     let env = d.join("dispatcher.env");
     let r = Rendered {
-        addresses: addresses::detect(&fixture("home"), &d),
+        addresses: addresses::detect(&fixture("home"), &d, &task()),
         envelope: Some(envelope("/srv/s", Budget::default())),
     };
     // No file: no token yet (the owner has not confirmed), and none is made.
@@ -314,6 +377,58 @@ fn refresh_never_makes_the_file_and_writes_it_only_when_it_changes() {
         fs::read_to_string(&elsewhere).unwrap(),
         "OMARCHY_WORKER_TOKEN=theirs\n"
     );
+}
+
+#[test]
+fn a_refresh_waits_for_another_writer_and_never_puts_back_the_token_it_replaced() {
+    let d = tempdir();
+    let env = path_in(&d);
+    crate::host::private_dir(env.parent().unwrap()).unwrap();
+    let r = Rendered {
+        addresses: addresses::detect(&fixture("home"), &d, &task()),
+        envelope: None,
+    };
+    write_token(&env, "m1-rack-0a9z", OMW, &r).unwrap();
+    // `omarchy-agent token` in another process holds etc/ from its read to its rename; the
+    // run loop's refresh, with an address change, waits for it.
+    let rotation = lock(&env).unwrap().expect("etc/ is there");
+    let moved = Rendered {
+        addresses: addresses::detect(&fixture("vps"), &d, &task()),
+        envelope: None,
+    };
+    let refresh_in_loop = {
+        let (env, moved) = (env.clone(), moved.clone());
+        std::thread::spawn(move || refresh(&env, &moved))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        !refresh_in_loop.is_finished(),
+        "a refresh waits while etc/ is held"
+    );
+    let new = format!("omw_{}", "a1".repeat(24));
+    let rotated = render(
+        &fs::read_to_string(&env).unwrap(),
+        Some(("m1-rack-0a9z", &new)),
+        &r,
+    )
+    .unwrap();
+    crate::host::replace(&env, rotated.as_bytes()).unwrap();
+    drop(rotation);
+    assert_eq!(refresh_in_loop.join().unwrap().unwrap(), Refresh::Written);
+    let text = fs::read_to_string(&env).unwrap();
+    assert!(
+        text.contains(&format!("OMARCHY_WORKER_TOKEN={new}\n")),
+        "{text}"
+    );
+    assert!(!text.contains(OMW), "{text}");
+    assert!(
+        text.contains("OMARCHY_HOST_ADDRESSES=203.0.113.10,"),
+        "{text}"
+    );
+    // No etc/ at all: nothing to lock, no file, none made.
+    let none = path_in(&d.join("elsewhere"));
+    assert_eq!(refresh(&none, &r).unwrap(), Refresh::NoFile);
+    assert!(!none.exists());
 }
 
 #[test]

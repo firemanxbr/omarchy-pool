@@ -1148,6 +1148,21 @@ fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_
         )
     );
 
+    // A budget agent.toml would be refused with is a preflight blocker of the re-run, not a
+    // failure after the Confirm and the token.
+    let typo = fs::read_to_string(p.data.join("agent.toml"))
+        .unwrap()
+        .replace("calls_per_task = 50", "calls_per_tusk = 50");
+    fs::write(p.data.join("agent.toml"), typo).unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    assert!(
+        r.screen()
+            .contains("envelope.agent_budget.calls_per_tusk is none of calls_per_task"),
+        "{}",
+        r.screen()
+    );
+
     // A secrets directory the dispatcher would refuse is a preflight blocker.
     let mut h = host(INFO, EGRESS_OK);
     h.options.secrets_dir = Some(h.root.join("my secrets"));
