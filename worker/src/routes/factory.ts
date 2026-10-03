@@ -304,8 +304,21 @@ function workerLog(v: unknown): string {
  * events, not the row.
  */
 export const TOUCH_MINUTES = 3;
+/**
+ * A host registration's row is written at least this often (#337): its
+ * last claim is what selection counts it alive by — claimed in the last 2
+ * minutes (selection.ts ALIVE_MS) — as native capacity an emulated lane
+ * waits for, the largest host a size is clamped to, the fleet's builds the
+ * per-owner cap divides, and a reservation's holder. A host claims every
+ * 30 s, so a row a minute old at most stays alive; there are a handful of
+ * hosts, and a legacy registration keeps TOUCH_MINUTES (selection counts it
+ * alive that long and a minute more, LEGACY_ALIVE_MS).
+ */
+export const HOST_TOUCH_MINUTES = 1;
+/** How long a legacy registration counts as alive for selection: its row's pace and a claim's slack. */
+export const LEGACY_ALIVE_MS = (TOUCH_MINUTES + 1) * 60000;
 
-export async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string; agentVia?: string | null; at?: string; spell?: { from: string | null; to: string | null } | null }, currentTask: number | null, step?: Pick<InstanceStep, "set" | "guard"> | null): Promise<D1Meta> {
+export async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string; agentVia?: string | null; at?: string; spell?: { from: string | null; to: string | null } | null; touchMinutes?: number }, currentTask: number | null, step?: Pick<InstanceStep, "set" | "guard"> | null): Promise<D1Meta> {
   // The agent is what the worker says it runs ("<provider>/<model>"): a
   // worker that reports none ("" or null) clears it, one that says nothing
   // (an older client) keeps what it last reported. The probe's answer
@@ -353,7 +366,7 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
        OR COALESCE(excluded.labels, labels) IS NOT labels
        OR excluded.arch IS NOT arch
        OR COALESCE(excluded.hostname, hostname) IS NOT hostname
-       OR last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', excluded.last_seen, '-${TOUCH_MINUTES} minutes')`,
+       OR last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', excluded.last_seen, '-${w.touchMinutes ?? TOUCH_MINUTES} minutes')`,
   )
     .bind(
       w.worker, w.arch, w.hostname ?? null, w.labels ? JSON.stringify(w.labels) : null, w.version ?? null, w.at ?? now(), currentTask, agent ?? null,
@@ -724,7 +737,7 @@ export const OWNER_HEADS_SQL = (scope: string) => `WITH RECURSIVE o(owner) AS (
   SELECT ${candidateCols("c")} FROM o CROSS JOIN build_tasks c ON c.id = (
     SELECT c2.id FROM build_tasks c2 WHERE c2.status = 'queued' AND c2.trust = 'community' AND c2.owner = o.owner AND ${scope} ORDER BY c2.priority, c2.id LIMIT 1)`;
 
-/** The registrations alive (§8.3: claimed in the last 2 minutes) with their host's capacity, as the fleet. */
+/** The registrations alive (§8.3: claimed in the last 2 minutes; a legacy one, LEGACY_ALIVE_MS) with their host's capacity, as the fleet. */
 export const FLEET_SQL = `SELECT w.id, w.kind, w.arch, w.labels, w.kinds, w.agent_status, w.drained_at, w.trust, w.owner, w.mode, w.version, w.last_seen, w.current_task,
     h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL`;
@@ -771,7 +784,7 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
     id: r.id, legacy: !host, lanes, units: Math.min(r.units ?? 0, r.pool_cap_units ?? Number.MAX_SAFE_INTEGER), agent_slots: r.agent_slots ?? 0,
     disk: jsonOr<{ work: number; engine: number } | null>(r.disk_free, null), kinds, probe_ok: r.agent_status === "ok", drained: r.drained_at !== null,
     below_minimum: !!cap?.below_minimum, may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool).required,
-    seen_at: Date.parse(r.last_seen), reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
+    seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
     scope: host ? { trust: "host", owner: null, shared: false } : r.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: r.owner, shared: r.mode === "shared" },
     busy: !host && r.current_task !== null,
   };
@@ -876,7 +889,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   if (!rows.size) return null;
   // The fleet, every lease, the setting, the host's own row and the oldest build; then what the candidates' packages say of their size and native history.
   const [fleetRows, leaseRows, setting, self, oldestRows] = await env.DB.batch<unknown>([
-    env.DB.prepare(FLEET_SQL).bind(new Date(nowMs - ALIVE_MS).toISOString()),
+    env.DB.prepare(FLEET_SQL).bind(new Date(nowMs - Math.max(ALIVE_MS, LEGACY_ALIVE_MS)).toISOString()),
     env.DB.prepare(LEASES_HELD_SQL),
     env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(OWNER_CAP_KEY),
     env.DB.prepare("SELECT name, pool_cap_units, reserving_task, reserving_since FROM hosts WHERE id = ?").bind(k.hostId ?? ""),
@@ -1059,7 +1072,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // The spell's start, written only by the claim that begins or ends it.
   const spellFrom = row?.agent_error_since ?? null;
   const spellTo = row ? spellAfter(spellFrom, probe, at) : spellFrom;
-  const said = { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent, kinds, probe, usage, log, agentVia: facts?.agent_via ?? row?.agent_via ?? null, at, spell: spellTo !== spellFrom ? { from: spellFrom, to: spellTo } : null };
+  const said = { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent, kinds, probe, usage, log, agentVia: facts?.agent_via ?? row?.agent_via ?? null, at, spell: spellTo !== spellFrom ? { from: spellFrom, to: spellTo } : null, touchMinutes: host ? HOST_TOUCH_MINUTES : undefined };
   // A host's row holds no current_task: its leases are build_tasks.lease_owner's (§8.6).
   const touch = (task: number | null) => touchSaying(env, said, host ? null : task, step);
   const after = row && facts ? afterClaim(row, facts, step, probe, at) : null;
@@ -1535,7 +1548,7 @@ export const OOM_ERROR = /^out of memory at \d+ GB/;
 
 /** The largest size the registrations alive run now (D31, selection.ts): what a retry or a size may ask at most. */
 export async function largestAlive(env: Env, at = Date.now()): Promise<number> {
-  const rows = (await env.DB.prepare(FLEET_SQL).bind(new Date(at - ALIVE_MS).toISOString()).all<FleetRow>()).results;
+  const rows = (await env.DB.prepare(FLEET_SQL).bind(new Date(at - Math.max(ALIVE_MS, LEGACY_ALIVE_MS)).toISOString()).all<FleetRow>()).results;
   const pool = running(env);
   return largestSize({ members: rows.map((r) => memberOf(r, pool)), leases: [] }, at, selectionRules());
 }

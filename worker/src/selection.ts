@@ -88,8 +88,9 @@ export interface Member {
   may_claim: boolean;
   /** Behind the pool's release past the grace: handed nothing (426). */
   behind: boolean;
-  /** The pool's time of its last claim, ms. */
+  /** The pool's time of its last claim, ms, and how long that counts as alive (ALIVE_MS unless said: a legacy row is written less often). */
   seen_at: number;
+  alive_ms?: number;
   reserving: { task: number; since: number } | null;
   scope: Scope;
   /** A legacy registration's row names a task in hand (current_task): not idle, whatever the leases say. */
@@ -170,7 +171,7 @@ export const HELPER_KINDS: readonly string[] = ["health"];
 /** What is not a pool job: these never take the reserved job unit. */
 export const TASK_KINDS: readonly string[] = ["build", "trial", "audit"];
 
-export const alive = (m: Pick<Member, "seen_at">, now: number): boolean => m.seen_at > now - ALIVE_MS;
+export const alive = (m: Pick<Member, "seen_at" | "alive_ms">, now: number): boolean => m.seen_at > now - (m.alive_ms ?? ALIVE_MS);
 
 /** The threshold an emulated candidate waits for native capacity (D50). */
 export function thresholdMs(nativeMs: number | null): number {

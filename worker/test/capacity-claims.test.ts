@@ -31,7 +31,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
-import { FLEET_SQL, LEASES_HELD_SQL, NATIVE_MS_SQL, OLDEST_BUILD_SQL, OWNER_CAP_KEY, OWNER_HEADS_SQL, PACKAGE_SIZES_SQL } from "../src/routes/factory";
+import { FLEET_SQL, LEASES_HELD_SQL, MARKED_WAITING_SQL, NATIVE_MS_SQL, OLDEST_BUILD_SQL, OWNER_CAP_KEY, OWNER_HEADS_SQL, PACKAGE_SIZES_SQL } from "../src/routes/factory";
 import { unitsOf } from "../src/hosts";
 import { toB64url } from "../src/webauthn";
 
@@ -156,6 +156,21 @@ describe("the P1 host at its full unit count", () => {
     const next = await fill("p1", got.slice(1));
     expect(next.map((g) => g.task)).toEqual([ids[3]]);
     expect((await taskOf(ids[4])).status).toBe("queued");
+  });
+});
+
+describe("a host's liveness", () => {
+  it("its row is written at least every minute, so selection counts it alive (claimed in the last 2 minutes) between claims that say nothing new", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    await seedHost("p1-live", P1);
+    const seen = async () => (await env.DB.prepare("SELECT last_seen FROM build_workers WHERE id = 'p1-live'").first<{ last_seen: string }>())!.last_seen;
+    await claim("p1-live", { want: 0 });
+    const s0 = await seen();
+    at(t0, 0.5); await claim("p1-live", { want: 0 });
+    expect(await seen()).toBe(s0);
+    at(t0, 1.1); await claim("p1-live", { want: 0 });
+    expect(Date.parse(await seen())).toBe(t0 + 1.1 * MIN);
   });
 });
 
@@ -414,6 +429,7 @@ describe("what the planner reads", () => {
       ["the oldest build", OLDEST_BUILD_SQL, [], /SEARCH c USING INDEX idx_build_tasks_kind /],
       ["the packages' sizes", PACKAGE_SIZES_SQL, ['["a"]'], /SEARCH factory_packages USING INDEX sqlite_autoindex_factory_packages_1|SEARCH factory_packages USING PRIMARY KEY|SEARCH factory_packages USING INDEX/],
       ["the native history", NATIVE_MS_SQL, ['[["a","x86_64"]]'], /SEARCH d USING INDEX idx_build_tasks_name /],
+      ["the marked tasks still waiting", MARKED_WAITING_SQL, ["[1]"], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
     ];
     for (const [what, sql, args, want] of cases) {
       const p = await plan(sql, args);
