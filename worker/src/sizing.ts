@@ -23,6 +23,7 @@
  */
 import { parse } from "smol-toml";
 import tasksToml from "../../factory/sizing/tasks.toml";
+import { BUILD_GB_PER_SIZE } from "./hosts";
 
 export interface Sizing { size: number | null; disk_gb: number | null }
 
@@ -64,4 +65,20 @@ export function shippedSizing(): Map<string, Sizing> {
     SHIPPED = new Map();
   } else SHIPPED = r;
   return SHIPPED;
+}
+
+/**
+ * What a package's builds ask for, as its page shows it: the size and the
+ * disk budget set on the page, else factory/sizing's, else size 1 and the
+ * signed GB per size — before the claim clamps the size (a contributor's to
+ * 2, every one to the largest host alive). `from` says whose word the size
+ * is, `disk_from` the budget's.
+ */
+export function sizingView(pkg: { name?: unknown; size?: unknown; disk_gb?: unknown }): { size: number; disk_gb: number; from: "page" | "file" | null; disk_from: "page" | "file" | null } {
+  const file = typeof pkg.name === "string" ? shippedSizing().get(pkg.name) : undefined;
+  const pageSize = typeof pkg.size === "number" ? pkg.size : null;
+  const pageDisk = typeof pkg.disk_gb === "number" ? pkg.disk_gb : null;
+  const size = pageSize ?? file?.size ?? 1;
+  const disk = pageDisk ?? file?.disk_gb ?? null;
+  return { size, disk_gb: disk ?? BUILD_GB_PER_SIZE * size, from: pageSize !== null ? "page" : file?.size ? "file" : null, disk_from: pageDisk !== null ? "page" : file?.disk_gb ? "file" : null };
 }

@@ -27,7 +27,7 @@
  *   GET  /api/v1/security/components              what the rings' packages embed (Go modules, crates), for OSV
  *   PUT  /api/v1/security/advisories|matches       vulnerability data from the Security workflow
  *   POST /api/v1/security/prune                  {advisories, matches}: the run's keys; the rest goes
- *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,artifacts/<file>}
+ *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,retry,artifacts/<file>}
  *   POST /api/v1/factory/drafts · GET /factory/drafts/:id · POST /factory/grants/:id/revoke   an agent's drafts and grants (#252, routes/agents.ts)
  *   GET|POST /auth/agent · POST /auth/agent/token · POST /auth/agent/revoke · GET|POST /auth/confirm/:id   the grant, the swap, logout, a draft confirmed
  *   POST /auth/confirm/:id/challenge · POST /auth/passkeys/challenge · POST /auth/passkeys · POST /auth/passkeys/:id/remove   passkeys: approve and block confirmed with one (#257, routes/passkeys.ts)
@@ -39,6 +39,7 @@
  *   POST /api/v1/hosts/enrollments · POST /hosts/enroll · GET /hosts[/:id] · POST /hosts/:id/confirm   maintainer hosts: a one-time token, the machine's enrollment, the owner's Confirm (#321, routes/hosts.ts)
  *   GET  /api/v1/hosts/self/state · POST /hosts/self/token · POST /hosts/self/report   a host's calls, signed with its key (Omarchy-Host)
  *   POST /api/v1/hosts/:id/suspend|resume|retire · POST /hosts/owners/:login/cause|resume   stopping a host, removed for cause, an owner listed again (#322)
+ *   POST /api/v1/hosts/:id/cap                    {units | null, reason}: the pool's cap on a host's units, its owner or any maintainer (#337)
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
@@ -69,7 +70,7 @@ import { browseQuery, browseSearch, handleBrowse, type BrowseAnswer } from "./ro
 import { handlePrune, handlePutAdvisories, handlePutMatches, handleSecurity, handleComponents } from "./routes/security";
 import {
   handleCancelTask, handleClaim, handleComplete, handleEnqueue, handleFactory, handleFail,
-  handleHeartbeat, handleTask, handleBuilt,
+  handleHeartbeat, handleTask, handleBuilt, handleRetryAtSize, handleSetSize,
 } from "./routes/factory";
 import { authorize, authorizeRelease, authorizeArtifacts, authorizeJobOrMaintainer, maintainerOf } from "./auth";
 import {
@@ -80,7 +81,7 @@ import {
 import { handleSourceRead } from "./routes/sources";
 import { handleAnswerOrder, handleCancelOrder, handleFollow, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
 import { handleRollbackStatement } from "./routes/rollback";
-import { handleConfirmHost, handleEnroll, handleHostGet, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSuspendHost, signedHost } from "./routes/hosts";
+import { handleCapHost, handleConfirmHost, handleEnroll, handleHostGet, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSuspendHost, signedHost } from "./routes/hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
@@ -458,6 +459,8 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/build$/)) && method === "POST") return handleBuildPackage(c, m[1], request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)$/)) && method === "DELETE") return handleDeletePackage(c, m[1], env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/category$/)) && method === "POST") return handleSetCategory(c, m[1], request, env);
+    // A package's size and disk budget (#337): a maintainer, on its page; factory/sizing's word stands when it is cleared.
+    if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/size$/)) && method === "POST") return handleSetSize(c, m[1], request, env);
     if (method === "POST" && path === "/factory/workers") return handleRegisterWorker(c, request, env);
     if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/builds\/(\d+)$/)) && method === "DELETE") return handleDequeueBuild(c, m[1], Number(m[2]), env);
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "DELETE") return handleRevokeWorker(c, m[1], env);
@@ -482,6 +485,12 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (!c) return nobody();
     // Approve is decided with the maintainer's passkey, in the browser (#271): webGate, run by the handler once the predicate allowed it.
     return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env, undefined, webGate(request, url, env, c.login, `approve:${Number(m[1])}`)) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
+  }
+  // Retry at size (#337): a maintainer queues a build that ran out of memory again, at the size they choose.
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/retry$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return nobody();
+    return handleRetryAtSize(c, Number(m[1]), request, env);
   }
   // Review's workspace (#247): changes requested on a package in review, a claim let go — the same predicate, the same words.
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(changes|release)$/)) && method === "POST") {
@@ -709,6 +718,11 @@ async function api(method: string, path: string, url: URL, request: Request, env
     const c = await contributorOf(request, env);
     if (!c) return json({ error: SIGN_IN }, 401);
     return m[2] === "suspend" ? handleSuspendHost(c, m[1], request, env, url) : m[2] === "resume" ? handleResumeHost(c, m[1], request, env, url) : handleRetireHost(c, m[1], request, env, url);
+  }
+  // The pool's cap on a host's units (#337): its owner or any maintainer, the browser's session only.
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/cap$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleCapHost(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
   }
   if ((m = path.match(/^\/hosts\/owners\/([A-Za-z0-9-]{1,39})\/(cause|resume)$/)) && method === "POST") {
     const c = await contributorOf(request, env);

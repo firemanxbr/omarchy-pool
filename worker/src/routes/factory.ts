@@ -1,7 +1,7 @@
 import { json, readJson, type Env } from "../index";
 import { writeAttestation, recipesDir } from "./seal";
 import { isRepoArch } from "../r2";
-import { viaOf, type Contributor, type WorkerIdentity } from "./contributors";
+import { isMaintainer, viaOf, type Contributor, type WorkerIdentity } from "./contributors";
 import { issueJobToken, scopesFor, type JobClaims } from "../jobtoken";
 import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
@@ -13,9 +13,9 @@ import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
-import { belowMinimum, parseCapacity, unitsOf, BUILD_GB_PER_SIZE, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
+import { belowMinimum, parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
 import { largestSize, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, OWNER_DIVISOR, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Rules } from "../selection";
-import { shippedSizing, type Sizing } from "../sizing";
+import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
   capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
@@ -80,6 +80,8 @@ interface TaskRow {
   /** #334: a host registration's lease — its generation (NULL for a legacy one's), the units it takes, the claim that took it, and the `lost` reports that gave the attempt back. */
   lease_gen: string | null;
   units: number | null;
+  /** #337: a build's size at lease. */
+  size: number | null;
   claim_id: string | null;
   host_losses: number;
 }
@@ -735,6 +737,8 @@ export const LEASES_HELD_SQL = `SELECT id, lease_owner, kind, arch, lane, units,
 interface LeaseRow { id: number; lease_owner: string; kind: string; arch: string; lane: string | null; units: number | null; size: number | null; disk_gb: number | null; trust: string; owner: string | null; model: number }
 /** The oldest queued build, by the kind index: what a host may reserve for. */
 export const OLDEST_BUILD_SQL = `SELECT ${candidateCols("c")} FROM build_tasks c WHERE c.kind = 'build' AND c.status = 'queued' ORDER BY c.id LIMIT 1`;
+/** The tasks hosts reserve for that still wait, by their primary keys. */
+export const MARKED_WAITING_SQL = "SELECT id FROM build_tasks WHERE id IN (SELECT value FROM json_each(?)) AND +status = 'queued'";
 /** The sizes and budgets set on the candidates' packages' pages. */
 export const PACKAGE_SIZES_SQL = "SELECT name, size, disk_gb FROM factory_packages WHERE name IN (SELECT value FROM json_each(?)) AND (size IS NOT NULL OR disk_gb IS NOT NULL)";
 /** The last native build of each (package, arch), by the name index: T for an emulated candidate (D50). */
@@ -773,13 +777,14 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
   };
 }
 
+/** A candidate for selection: a build's size is its own (a Retry at size), else its package page's, else factory/sizing's; its budget the page's, else the file's. */
 function candidateOf(r: CandidateRow, sizes: Map<string, Sizing>, nativeMs: Map<string, number>): Candidate {
-  const set = sizes.get(r.name) ?? shippedSizing().get(r.name);
+  const page = sizes.get(r.name), file = shippedSizing().get(r.name), build = r.kind === "build";
   return {
     id: r.id, name: r.name, kind: r.kind, arch: r.arch, trust: r.trust, owner: r.owner, priority: r.priority, queued_at: Date.parse(r.created_at), pinned_to: r.pinned_to,
     needs_native: r.needs_native === 1, model: r.model === 1,
-    size: Number.isInteger(r.asked) && (r.asked as number) >= 1 ? (r.asked as number) : r.kind === "build" ? set?.size ?? null : null,
-    disk_gb: r.kind === "build" ? set?.disk_gb ?? null : null, native_ms: nativeMs.get(`${r.name}\0${r.arch}`) ?? null,
+    size: build ? (Number.isInteger(r.asked) && (r.asked as number) >= 1 ? (r.asked as number) : page?.size ?? file?.size ?? null) : null,
+    disk_gb: build ? page?.disk_gb ?? file?.disk_gb ?? null : null, native_ms: nativeMs.get(`${r.name}\0${r.arch}`) ?? null,
   };
 }
 
@@ -914,7 +919,10 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   const all = [...rows.values()].map((r) => candidateOf(r, sizes, nativeMs));
   // The reservation for large tasks, decided at a host's claim; the marks it moves are written compare-and-set.
   if (host) {
-    const marks = reserve(fleet, oldestRow ? candidateOf(oldestRow, sizes, nativeMs) : null, nowMs, rules);
+    // A mark holds while its task still waits in the queue: one cancelled or leased elsewhere frees its host at once.
+    const marked = [...new Set(members.flatMap((m) => (m.reserving ? [m.reserving.task] : [])))];
+    const waiting = new Set(marked.length ? (await env.DB.prepare(MARKED_WAITING_SQL).bind(JSON.stringify(marked)).all<{ id: number }>()).results.map((r) => r.id) : []);
+    const marks = reserve(fleet, oldestRow ? candidateOf(oldestRow, sizes, nativeMs) : null, (t) => waiting.has(t), nowMs, rules);
     const hostOf = new Map((fleetRows.results as FleetRow[]).map((r) => [r.id, r.host_id]));
     hostOf.set(k.workerId, k.hostId);
     const writes: D1PreparedStatement[] = [];
@@ -1430,7 +1438,10 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   const lost = hostLease && b.lost === true && task.host_losses < HOST_LOSSES_MAX;
   const lostSpent = hostLease && b.lost === true && !lost;
   const said = (await withheld(env, id, "error", b.error ?? "build failed")).slice(0, 2000);
-  const error = (oom ? `out of memory (the engine killed it): ${said}` : lostSpent ? `lost a third time on its host, the attempt spent: ${said}` : said).slice(0, 2000);
+  // Out of memory says the memory its lease had, from its units, and a build's size (#337): "out of memory at 4 GB (size 1)" — the
+  // words the package and Review pages show beside a maintainer's Retry at size (OOM_ERROR).
+  const oomAt = `out of memory at ${(task.units ?? 1) * UNIT.mem_gb} GB${task.kind === "build" ? ` (size ${task.size ?? 1})` : ""}`;
+  const error = (oom ? `${oomAt} — the engine killed it: ${said}` : lostSpent ? `lost a third time on its host, the attempt spent: ${said}` : said).slice(0, 2000);
   // Retries are for the infrastructure (a download, a mirror, a container
   // killed), not for the recipe: a PKGBUILD that failed to build fails the
   // same way three times, each in a fresh container — the first
@@ -1482,6 +1493,87 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   const tale = lost ? ` lost on ${who} (a host event, ${task.host_losses + 1} of ${HOST_LOSSES_MAX}) — back in the queue, the attempt given back` : needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
   await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative, ...(hostLease ? { lost: b.lost === true, oom } : {}) });
   return json({ task: id, status: exhausted ? "failed" : "queued", attempts });
+}
+
+/** A disk budget a maintainer may set on a package's page, in GB. */
+export const DISK_GB_MAX = 4096;
+
+/**
+ * POST /factory/packages/:name/size {size, disk_gb} — a maintainer sets the
+ * size and the disk budget a package's builds run with (#337, design v2
+ * §7.4; D31), on its page: a size from 1 to the signed maximum, a budget in
+ * GB; null clears one, and factory/sizing/tasks.toml's word — or size 1 and
+ * the signed GB per size — stands again. The page's word wins over the
+ * file's until it is cleared; the claim still clamps a contributor's build
+ * to 2 and every one to the largest host alive. Journaled with who.
+ */
+export async function handleSetSize(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
+  if (!isMaintainer(c)) return json({ error: "a maintainer sets a package's size" }, 403);
+  const b = await readJson<{ size?: unknown; disk_gb?: unknown }>(request);
+  if (b instanceof Response) return b;
+  const whole = (v: unknown, max: number) => v === null || (typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= max);
+  if (b.size === undefined && b.disk_gb === undefined) return json({ error: "size and/or disk_gb: a whole number, or null to clear it" }, 400);
+  if (b.size !== undefined && !whole(b.size, MAX_SIZE)) return json({ error: `size: a whole number from 1 to ${MAX_SIZE}, or null for factory/sizing's (or 1)` }, 400);
+  if (b.disk_gb !== undefined && !whole(b.disk_gb, DISK_GB_MAX)) return json({ error: `disk_gb: a whole number of GB from 1 to ${DISK_GB_MAX}, or null for factory/sizing's (or ${BUILD_GB_PER_SIZE} per size)` }, 400);
+  const pkg = await env.DB.prepare("SELECT name, size, disk_gb FROM factory_packages WHERE name = ?").bind(name).first<{ name: string; size: number | null; disk_gb: number | null }>();
+  if (!pkg) return json({ error: "not registered" }, 404);
+  const size = b.size === undefined ? pkg.size : (b.size as number | null);
+  const disk = b.disk_gb === undefined ? pkg.disk_gb : (b.disk_gb as number | null);
+  const view = sizingView({ name, size, disk_gb: disk });
+  if (size === pkg.size && disk === pkg.disk_gb) return json({ package: name, sizing: view, by: c.login, unchanged: true });
+  const words = (z: number | null, d: number | null) => `size ${z ?? "unset"}, disk ${d === null ? "unset" : `${d} GB`}`;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE factory_packages SET size = ?, disk_gb = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(size, disk, name),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('build', NULL, 'factory', 'ok', ?, ?)")
+      .bind(`${name}: ${words(size, disk)} (was ${words(pkg.size, pkg.disk_gb)}), set by ${c.login} — its builds ask size ${view.size} and ${view.disk_gb} GB from now on`, JSON.stringify({ name, size, disk_gb: disk, was: { size: pkg.size, disk_gb: pkg.disk_gb }, by: c.login, sizing: view })),
+  ]);
+  return json({ package: name, sizing: view, was: { size: pkg.size, disk_gb: pkg.disk_gb }, by: c.login });
+}
+
+/** What an out-of-memory failure's error begins with (handleFail): the builds a maintainer may retry at another size. */
+export const OOM_ERROR = /^out of memory at \d+ GB/;
+
+/** The largest size the registrations alive run now (D31, selection.ts): what a retry or a size may ask at most. */
+export async function largestAlive(env: Env, at = Date.now()): Promise<number> {
+  const rows = (await env.DB.prepare(FLEET_SQL).bind(new Date(at - ALIVE_MS).toISOString()).all<FleetRow>()).results;
+  const pool = running(env);
+  return largestSize({ members: rows.map((r) => memberOf(r, pool)), leases: [] }, at, selectionRules());
+}
+
+/**
+ * POST /factory/tasks/:id/retry {size} — Retry at size (#337, design v2
+ * §7.4; D31): a maintainer queues a build that ran out of memory again at
+ * the size they choose, up to the largest host alive and the signed maximum
+ * (a contributor's 2). The task's own size (`params.size`) says it: the
+ * package's size is not changed — that is factory/sizing's or the
+ * package's page's. A failed one gets one more attempt; a queued one (its
+ * attempts not spent yet) only its size. The journal says who and why.
+ */
+export async function handleRetryAtSize(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
+  if (!isMaintainer(c)) return json({ error: "a maintainer retries a build at another size" }, 403);
+  const b = await readJson<{ size?: unknown }>(request);
+  if (b instanceof Response) return b;
+  const t = await env.DB.prepare("SELECT id, name, arch, kind, trust, owner, status, error, size, attempts, max_attempts, params FROM build_tasks WHERE id = ?").bind(id)
+    .first<{ id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; status: string; error: string | null; size: number | null; attempts: number; max_attempts: number; params: string | null }>();
+  if (!t) return json({ error: "no such task" }, 404);
+  if (t.kind !== "build" || !OOM_ERROR.test(t.error ?? "") || (t.status !== "failed" && t.status !== "queued")) return json({ error: `task ${id} is no build that ran out of memory and waits: only those are retried at another size`, code: "not_oom" }, 409);
+  const max = t.trust === "community" ? COMMUNITY_MAX_SIZE : MAX_SIZE;
+  const size = b.size;
+  if (typeof size !== "number" || !Number.isInteger(size) || size < 1 || size > max) return json({ error: `size: a whole number from 1 to ${max}${t.trust === "community" ? " (a contributor's build)" : ""}` }, 400);
+  const largest = await largestAlive(env);
+  if (size > largest) return json({ error: `no host alive runs size ${size}: the largest runs ${largest}`, code: "too_large", largest }, 409);
+  const was = jsonOr<{ size?: unknown }>(t.params, {}).size ?? t.size ?? 1;
+  const back = await env.DB.prepare(
+    `UPDATE build_tasks SET status = 'queued', finished_at = NULL, lease_owner = NULL, lease_expires_at = NULL, attempts = MIN(attempts, max_attempts - 1),
+       params = json_set(COALESCE(params, '{}'), '$.size', ?) WHERE id = ? AND kind = 'build' AND status IN ('failed', 'queued') AND error LIKE 'out of memory at %' RETURNING id, attempts`,
+  ).bind(size, id).first<{ id: number; attempts: number }>();
+  if (!back) return json({ error: `task ${id} moved meanwhile; look again` }, 409);
+  const review = jsonOr<{ review?: unknown }>(t.params, {}).review;
+  if (t.trust === "community") await packageAfterFailure(env, t.name, "waiting", `queued again at size ${size} after running out of memory at size ${was} (task ${id}), by ${c.login}`);
+  else if (typeof review === "number") await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`the project's build (task ${id}) is queued again at size ${size} by ${c.login}`, t.name).run();
+  await settleTargets(env, t.name);
+  await event(env, "build", "ok", `${t.name} for ${t.arch} (task ${id}): ran out of memory at size ${was}; queued again at size ${size} by ${c.login}`, { task: id, name: t.name, arch: t.arch, size, was, by: c.login, attempts: back.attempts });
+  return json({ task: id, status: "queued", size, was, attempts: back.attempts, by: c.login });
 }
 
 /**

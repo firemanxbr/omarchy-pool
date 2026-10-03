@@ -35,7 +35,7 @@
  * closes (Cancel, or Escape). The project's workers are read when a claim
  * or the workspace first needs them, never for the queue alone.
  */
-import { page, servedGrey } from "./layout";
+import { page, servedGrey, RETRY_AT_SIZE } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { lucide } from "./kit";
 import type { RunningVersion } from "../meta";
@@ -698,7 +698,9 @@ const SCRIPT = String.raw`
     // Sent back by an emulated worker (#281): no review worker of that kind takes it again, so the words are the shell's.
     else log.innerHTML = empty(b.status === "leased" ? "building on " + (b.lease_owner || "a review worker") + (isMaintainer() ? "" : " — its log is here once it built") : waitsForNative(b) ? waitsForNative(b) + ": it could not run emulated" : "queued for a review worker");
     var yev = b ? evidenceOf(b.id) || {} : {};
-    $("#rv-y-evid").innerHTML = b ? (built(b) ? '<span>gate ' + gatePill(vetOf(b), yev.tests) + '</span> <span>trial ' + trialPill(shown.trial ? { status: shown.trial.status, verdict: shown.trial.result && shown.trial.result.verdict } : null, shown.trial ? yev.trial : "") + '</span> ' : '') + '<a href="/build/' + b.id + '">build #' + b.id + '</a> ' + builtOn(b.id) : '';
+    // Out of memory (#337): the engine's words, and a maintainer's Retry at size.
+    var oom = b && oomSize(b) ? '<span>' + pillHtml("error", b.error.split(" — ")[0], b.error) + '</span> ' + retryAtSize(b) + ' ' : '';
+    $("#rv-y-evid").innerHTML = b ? oom + (built(b) ? '<span>gate ' + gatePill(vetOf(b), yev.tests) + '</span> <span>trial ' + trialPill(shown.trial ? { status: shown.trial.status, verdict: shown.trial.result && shown.trial.result.verdict } : null, shown.trial ? yev.trial : "") + '</span> ' : '') + '<a href="/build/' + b.id + '">build #' + b.id + '</a> ' + builtOn(b.id) : '';
   }
 
   // ---- below: the checklist, the verdict with the agent's draft, and the three decisions — each confirmed before it is posted. Each line of the checklist is what the pool checks, nothing it cannot.
@@ -921,7 +923,7 @@ export function reviewHtml(poolUrl: string, version: RunningVersion): string {
     description: "Review what others asked for: claim a package, rebuild it from scratch on a review worker, and decide with the factory's build beside yours.",
     active: "review",
     body: BODY,
-    script: SCRIPT,
+    script: SCRIPT + RETRY_AT_SIZE,
     poolUrl,
     version,
     kit: true,
@@ -1064,7 +1066,9 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="rv-yours"', '<b id="rv-y-title">The rebuild</b>', 'id="rv-agents"', 'id="rv-steps"', 'id="rv-progress"', 'id="rv-y-pkgbuild"', 'id="rv-diffnote"', 'id="rv-y-log"', "If approved, this build is the one that ships."],
     script: ["function diff(a, b)", '"s differ"', '" from the factory\'s"', '"Your rebuild"', "\"'s rebuild\"", '"Re-check the request"', '"Derive the recipe from scratch"', '"Install with a real pacman"', '"Compare with the factory"', ">Claim and rebuild</button>", "data-agent=", '"/workers/"', '"/log"', "localStorage.getItem(AGENT_KEY)", "function needWorkers()", "RECIPE_LINES = 1000", '"native worker"', "waitsForNative(b)", "waitsForNative(r.rebuild)",
       // The claim never pins its rebuild to a drained worker (#277): the door refuses one, and the page never offers it.
-      "function agentWorkers(arch)", "!w.drained"],
+      "function agentWorkers(arch)", "!w.drained",
+      // A rebuild that ran out of memory (#337) says it in the engine's words, with a maintainer's Retry at size (layout.ts).
+      "oomSize(b)", "retryAtSize(b)"],
     reads: [
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.kinds", "workers.0.alive", "workers.0.agent", "workers.0.agent_status", "workers.0.drained"] },
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/PKGBUILD`, json: false },
@@ -1072,6 +1076,8 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/trial.log`, json: false },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log"] },
     ],
+    // Retry at size (#337): a maintainer only; the probe's task never ran out of memory, so nothing is queued.
+    acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/retry`, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } }],
     visible: EVERYONE,
   },
   {

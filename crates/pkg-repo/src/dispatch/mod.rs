@@ -22,7 +22,15 @@
 //! refused at start for its budget keeps builds out of the claims — trials
 //! and audits go on — until that budget plus the floor is free, for 30
 //! minutes at most); then a claim — `want: 1` while units, memory, disk
-//! and the lane's image allow, every 30 s with `want: 0` otherwise. A lease
+//! and the lane's image allow, every 30 s with `want: 0` otherwise. The pool
+//! selects (#337: as many leases as the units hold, native first, emulated
+//! after a threshold); before each claim the dispatcher checks `MemAvailable`
+//! against the largest task it could receive and offers only what the memory
+//! still holds — another workload on the machine leaves it what fits, or
+//! nothing that round — and after a task it claims again at the next tick
+//! while units are free. Fewer units than leases (a cap lowered) claims
+//! nothing until they fit; nothing running is killed for it. There is no
+//! queue on the host: a task is started the moment it is leased. A lease
 //! ends (its report, its lease file, its units) only once the engine says
 //! its container is gone. A tick spends at most a third of the stall on the
 //! pool's heartbeats and reports; the rest wait for the next tick, and every
@@ -349,6 +357,8 @@ pub struct Dispatcher {
     hold_until: u64,
     /// The capacity file's `at` when the watcher last killed on the engine's value: once per probe.
     engine_kill_at: Option<String>,
+    /// What the memory available let the last claim offer, when it was below its free units (said once per change).
+    mem_held: Option<u32>,
     /// This tick's heartbeats and reports wait for the next tick past this.
     pool_until: Instant,
     instance: String,
@@ -410,6 +420,7 @@ impl Dispatcher {
             disk_hold: 0,
             hold_until: 0,
             engine_kill_at: None,
+            mem_held: None,
             pool_until: Instant::now(),
             instance: orders::new_instance(),
             started,
@@ -1194,22 +1205,34 @@ impl Dispatcher {
         }
         let cap = capacity::read(&self.capacity_file);
         let used: u32 = self.leases.values().map(|v| v.lease.units).sum();
-        let mem_ok = self
-            .probes
-            .mem_available_gb()
-            .is_none_or(|m| m >= u64::from(self.ctx.constants.unit_mem_gb));
-        let want = cap.as_ref().is_some_and(|c| {
-            !c.below_minimum
-                && c.units > 0
-                && used + 1 + c.job_reserved <= c.units
-                && c.engine_free_gb >= self.floor_gb
-                && spec::digest_ok(self.images.of(&c.arch))
-        }) && !self.disk_low
-            && mem_ok;
-        // What a task may take: the units this claim offered, none when it said `want: 0`.
-        let room = cap.as_ref().filter(|_| want).map_or(0, |c| {
+        // What a task may take now (§7.6, #337): the units beside its leases and the job unit — none when
+        // fewer units than leases remain (a cap lowered: nothing running is killed, it claims nothing until
+        // they fit) — and, when MemAvailable is below the largest task it could receive, only what the memory
+        // still holds: another workload on the machine leaves it what still fits, or nothing this round.
+        let free = cap.as_ref().map_or(0, |c| {
             c.units.saturating_sub(c.job_reserved).saturating_sub(used)
         });
+        let mem = self.probes.mem_available_gb();
+        let offer = self.ctx.constants.offer(free, mem);
+        if offer < free {
+            if self.mem_held != Some(offer) {
+                say(format!(
+                    "{} GB available in memory: this claim offers {offer} of {free} free unit(s)",
+                    mem.unwrap_or_default()
+                ));
+            }
+            self.mem_held = Some(offer);
+        } else {
+            self.mem_held = None;
+        }
+        let want = cap.as_ref().is_some_and(|c| {
+            !c.below_minimum
+                && offer > 0
+                && c.engine_free_gb >= self.floor_gb
+                && spec::digest_ok(self.images.of(&c.arch))
+        }) && !self.disk_low;
+        // What a task may take: the units this claim offered, none when it said `want: 0`.
+        let room = if want { offer } else { 0 };
         let claim_id = self
             .claim_id
             .get_or_insert_with(|| format!("c_{}", &orders::new_instance()[..24]))
@@ -1228,6 +1251,18 @@ impl Dispatcher {
         });
         if let Some(c) = &cap {
             body["capacity"] = c.claim.clone();
+            // The pool hands only what this claim offers (it counts free units from its own leases): what
+            // the memory holds back is declared away for this claim only.
+            if want && offer < free {
+                body["capacity"]["units"] = json!(used + c.job_reserved + offer);
+            }
+            // The work root as measured now, when it has less than the agent's last probe said.
+            if let (Some(w), Some(f)) = (
+                self.probes.work_free_gb(),
+                c.claim["disk_free_gb"]["work"].as_u64(),
+            ) {
+                body["capacity"]["disk_free_gb"]["work"] = json!(w.min(f));
+            }
             // The day's agent budget spent: no model work until tomorrow (the pool counts agent slots like units).
             if !self.agent_day_left(now) {
                 body["capacity"]["agent_slots"] = json!(0);

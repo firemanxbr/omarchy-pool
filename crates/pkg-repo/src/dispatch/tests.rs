@@ -538,6 +538,7 @@ impl Pool for FakePool {
 struct FakeProbes {
     now: Arc<AtomicU64>,
     work: Arc<Mutex<Option<u64>>>,
+    mem: Arc<Mutex<Option<u64>>>,
 }
 
 impl Probes for FakeProbes {
@@ -548,7 +549,7 @@ impl Probes for FakeProbes {
         *self.work.lock().unwrap()
     }
     fn mem_available_gb(&self) -> Option<u64> {
-        None
+        *self.mem.lock().unwrap()
     }
 }
 
@@ -563,6 +564,8 @@ struct H {
     pool: Arc<FakePool>,
     now: Arc<AtomicU64>,
     free: Arc<Mutex<Option<u64>>>,
+    /// `MemAvailable`, in GB: none (no `/proc/meminfo`) unless a test sets it.
+    mem: Arc<Mutex<Option<u64>>>,
 }
 
 impl H {
@@ -586,6 +589,7 @@ impl H {
             pool: Arc::new(FakePool::default()),
             now: Arc::new(AtomicU64::new(1_000_000)),
             free: Arc::new(Mutex::new(Some(500))),
+            mem: Arc::new(Mutex::new(None)),
         };
         h.units(11);
         h
@@ -626,6 +630,7 @@ impl H {
             Box::new(FakeProbes {
                 now: Arc::clone(&self.now),
                 work: Arc::clone(&self.free),
+                mem: Arc::clone(&self.mem),
             }),
             timing,
             HOST.into(),
@@ -656,6 +661,7 @@ impl H {
             Box::new(FakeProbes {
                 now: Arc::clone(&self.now),
                 work: Arc::clone(&self.free),
+                mem: Arc::clone(&self.mem),
             }),
             Timing::default(),
             HOST.into(),
@@ -883,6 +889,120 @@ fn the_claim_lists_the_leases_with_the_capacity_and_reuses_its_claim_id_after_a_
     d.tick();
     assert_eq!(h.pool.last_claim()["want"], 0);
     assert!(h.pool.last_claim().get("capacity").is_none());
+}
+
+/// A lease generation for the n-th of several tasks.
+fn gen_of(n: u64) -> String {
+    format!("g_{:016x}", 0xc000 + n)
+}
+
+#[test]
+fn a_host_takes_as_many_tasks_as_its_units_hold_one_container_each_then_claims_want_0() {
+    // The pool hands one task per claim (D29); the dispatcher claims again at the next tick while units
+    // are free, starts each lease in its own container at once (no queue on the host), and once its 11
+    // units hold five builds and the pool jobs' unit is all that is left, claims with want 0 every 30 s.
+    let h = H::new();
+    let mut d = h.dispatcher();
+    for n in 0..6 {
+        h.give(community(100 + n, &gen_of(n)));
+    }
+    h.ticks(&mut d, 12);
+    let bodies = h.pool.claim_bodies.lock().unwrap().clone();
+    let wants: Vec<u64> = bodies.iter().map(|b| b["want"].as_u64().unwrap()).collect();
+    assert_eq!(&wants[..6], &[1, 1, 1, 1, 1, 0], "{wants:?}");
+    assert_eq!(h.leases().len(), 5);
+    for n in 0..5 {
+        assert!(
+            h.engine.has(100 + n, &gen_of(n)),
+            "task {} runs in its own container",
+            100 + n
+        );
+    }
+    assert_eq!(h.engine.runs.lock().unwrap().len(), 5);
+    // The sixth was handed to a claim that offered nothing: given back, never started.
+    assert_eq!(h.pool.fails_of(105)[0]["lost"], true);
+    // Full: one claim in 30 s, with want 0, listing all five.
+    let n = h.pool.claim_bodies.lock().unwrap().len();
+    h.ticks(&mut d, 10);
+    assert_eq!(h.pool.claim_bodies.lock().unwrap().len(), n + 1);
+    assert_eq!(h.pool.last_claim()["want"], 0);
+    assert_eq!(h.pool.last_claim()["leases"].as_array().unwrap().len(), 5);
+    // One ends: a build's units are free again, and the next claim wants a task.
+    h.leave(100, &gen_of(0), &built_ok(), "==> Finished making: felix\n");
+    h.engine.exit(100, &gen_of(0), 0, false);
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert_eq!(h.leases().len(), 4);
+    assert_eq!(h.pool.last_claim()["want"], 1);
+}
+
+#[test]
+fn a_memory_check_that_refuses_claims_only_what_still_fits_or_nothing() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    // Another workload holds the machine: less than a unit's 2 GB available — nothing this round.
+    *h.mem.lock().unwrap() = Some(1);
+    d.tick();
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], 0);
+    assert_eq!(
+        c["capacity"]["units"], 11,
+        "want 0 changes nothing of the capacity"
+    );
+    // 9 GB: four units of the ten free — the claim offers those only, declaring what the pool may count.
+    *h.mem.lock().unwrap() = Some(9);
+    h.advance(31);
+    let mut big = community(7, GEN);
+    big["task"]["units"] = json!(6);
+    h.give(big);
+    d.tick();
+    let c = h.pool.last_claim();
+    assert_eq!(
+        (c["want"].clone(), c["capacity"]["units"].clone()),
+        (json!(1), json!(5))
+    );
+    // A task above what it offered (the pool's mistake) is given back, never started.
+    h.ticks(&mut d, 2);
+    assert!(h.engine.runs.lock().unwrap().is_empty());
+    assert_eq!(h.pool.fails_of(7)[0]["lost"], true);
+    // A task that fits what it offered runs.
+    h.advance(31);
+    h.give(community(8, GEN2));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(8, GEN2));
+    // The memory back: the largest task it could receive fits (16 GB), every free unit is offered again.
+    *h.mem.lock().unwrap() = Some(64);
+    h.advance(31);
+    h.ticks(&mut d, 1);
+    let c = h.pool.last_claim();
+    assert_eq!(
+        (c["want"].clone(), c["capacity"]["units"].clone()),
+        (json!(1), json!(11))
+    );
+}
+
+#[test]
+fn fewer_units_than_leases_claims_nothing_until_they_fit_and_kills_nothing() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    for n in 0..3 {
+        h.give(community(200 + n, &gen_of(n)));
+    }
+    h.ticks(&mut d, 8);
+    assert_eq!(h.leases().len(), 3);
+    // The cap lowered below what it holds (the owner's envelope, or a VM shrunk): want 0, and all three run on.
+    h.units(3);
+    h.advance(31);
+    h.ticks(&mut d, 12);
+    assert_eq!(h.pool.last_claim()["want"], 0);
+    assert_eq!(h.leases().len(), 3);
+    for n in 0..3 {
+        assert!(
+            h.engine.has(200 + n, &gen_of(n)),
+            "nothing running is killed for a lower cap"
+        );
+    }
+    assert!(h.pool.fails_of(200).is_empty());
 }
 
 #[test]

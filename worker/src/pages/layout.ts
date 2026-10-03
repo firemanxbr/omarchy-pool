@@ -10,6 +10,39 @@ import { EXPECTED_SOURCES, LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RING_T
 import { escapeHtml } from "../html";
 import { KIT_HELPERS, KIT_SHEET_PATH, lucideSvg, type LucideName } from "./kit";
 import { PKGNAME } from "../request";
+import { COMMUNITY_MAX_SIZE, MAX_SIZE, TASK_UNITS, UNIT } from "../hosts";
+
+/** What Retry at size offers (#337): the signed maximum sizes, and what one size is in CPUs and memory. */
+const SIZES_SPLICE = { max: MAX_SIZE, community_max: COMMUNITY_MAX_SIZE, cpus: TASK_UNITS.build_per_size * UNIT.cpus, mem_gb: TASK_UNITS.build_per_size * UNIT.mem_gb };
+
+/**
+ * The pages that show a build's failure carry this (#337): the package page and Review. Its own snippet, not the shared helpers,
+ * so only the pages that offer Retry at size fetch its door.
+ */
+export const RETRY_AT_SIZE = String.raw`
+  // An out-of-memory failure (#337): the engine's words, "out of memory at 4 GB (size 1)" (handleFail), and for a maintainer Retry at
+  // size — the build queued again at the size they choose, one more try (POST /api/v1/factory/tasks/:id/retry), up to the signed
+  // maximum (a contributor's lower; SIZES, the signed constants); the pool refuses a size no host alive runs and says the largest.
+  var SIZES = ${JSON.stringify(SIZES_SPLICE)};
+  function oomSize(b) { var m = b && (b.kind || "build") === "build" && typeof b.error === "string" ? /^out of memory at \d+ GB(?: \(size (\d+)\))?/.exec(b.error) : null; return m ? Number(m[1] || 1) : 0; }
+  function retryAtSize(b) {
+    var s = oomSize(b), max = b && b.trust === "community" ? SIZES.community_max : SIZES.max;
+    if (!s || !isMaintainer() || (b.status !== "failed" && b.status !== "queued") || s >= max) return "";
+    return '<button type="button" class="op-btn" data-retry-size="' + esc(b.id) + '" data-size="' + s + '" data-max="' + max + '">Retry at size ' + (s + 1) + '</button>';
+  }
+  document.addEventListener("click", function (ev) {
+    var t = ev.target.closest ? ev.target.closest("[data-retry-size]") : null; if (!t || t.disabled) return;
+    var id = t.getAttribute("data-retry-size"), s = Number(t.getAttribute("data-size")), max = Number(t.getAttribute("data-max")), opts = [];
+    for (var z = s + 1; z <= max; z++) opts.push({ value: String(z), text: "size " + z + " — " + z * SIZES.cpus + " CPUs, " + z * SIZES.mem_gb + " GB", selected: z === s + 1 });
+    ask({ title: "Retry #" + id + " at a larger size", text: "It ran out of memory at size " + s + ". It goes back to the queue at the size you choose, for one more try; the package's own size stays as it is.", select: { label: "Size", options: opts }, confirm: "Retry" }).then(function (r) {
+      if (r === null) return;
+      api("POST", "/api/v1/factory/tasks/" + encodeURIComponent(id) + "/retry", { size: Number(r.pick) }).then(function (d) {
+        if (d.error) { toast(esc(d.error), "error"); return; }
+        toast("#" + esc(id) + " is queued again at size " + esc(d.size) + "."); t.disabled = true;
+      }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    });
+  });
+`;
 
 /**
  * The palette, typed once (#239, the handoff's "Design tokens"): every

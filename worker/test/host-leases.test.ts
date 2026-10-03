@@ -394,7 +394,8 @@ describe("host events and attempts", () => {
     await call("POST", `/factory/tasks/${t}/fail`, { error: "Killed (exit 137): rustc took 9 GB", oom: true }, job(await run()));
     row = await taskOf(t);
     expect(row).toMatchObject({ status: "queued", attempts: 2 });
-    expect(row.error).toBe("out of memory (the engine killed it): Killed (exit 137): rustc took 9 GB");
+    // The memory its lease had, from its units, and its size (#337): the words the package and Review pages show.
+    expect(row.error).toBe("out of memory at 4 GB (size 1) — the engine killed it: Killed (exit 137): rustc took 9 GB");
     const line = await env.DB.prepare("SELECT payload FROM events WHERE kind = 'build' AND json_extract(payload, '$.task') = ? ORDER BY id DESC LIMIT 1").bind(t).first<{ payload: string }>();
     expect(JSON.parse(line!.payload)).toMatchObject({ oom: true, lost: false });
 

@@ -103,7 +103,7 @@ class Sim {
     const got: Ran[] = [];
     for (;;) {
       const oldest = this.candidates().filter((t) => t.kind === "build").sort((a, b) => a.id - b.id)[0] ?? null;
-      const marks = reserve(this.fleet(), oldest, this.now, this.rules);
+      const marks = reserve(this.fleet(), oldest, (id) => this.queue.some((q) => q.id === id), this.now, this.rules);
       for (const id of marks.clear) this.members.find((x) => x.id === id)!.reserving = null;
       if (marks.set) this.members.find((x) => x.id === marks.set!.host)!.reserving = { task: marks.set.task, since: this.now };
       const c = select(m, this.fleet(), this.candidates(), this.now, this.rules)[0];
@@ -402,20 +402,25 @@ describe("sizes and the reservation for large tasks", () => {
     expect(marked.filter((x) => x.task.kind === "build")).toHaveLength(0);
   });
 
-  it("a mark clears when its task is leased, when it is no longer the oldest, when its host leaves, or after 2 hours; a host that could never run it is never marked", () => {
+  it("a mark clears when its task leaves the queue, when its host leaves, or after 2 hours; one at a time; a size-1 build or a host that could never run it is never reserved for", async () => {
     const studio = host("studio", "aarch64", 11, { reserving: { task: 1, since: T0 } });
-    const t1 = task({ arch: "aarch64", size: 4, queued_at: T0 - 60 * MIN });
+    const t1 = { ...task({ arch: "aarch64", size: 4, queued_at: T0 - 60 * MIN }), id: 1 };
     const busy: Held = { task: 500, by: "studio", kind: "build", arch: "aarch64", lane: "native", units: 8, model: false, trust: "project", owner: null, disk_gb: 20 };
-    expect(reserve({ members: [studio], leases: [busy] }, { ...t1, id: 1 }, T0 + MIN, R)).toEqual({ set: null, clear: [] });
-    expect(reserve({ members: [studio], leases: [busy] }, { ...t1, id: 2 }, T0 + MIN, R).clear).toEqual(["studio"]);
-    expect(reserve({ members: [studio], leases: [busy] }, { ...t1, id: 1 }, T0 + RESERVE_FOR_MS + MIN, R).clear).toEqual(["studio"]);
-    expect(reserve({ members: [{ ...studio, seen_at: T0 - ALIVE_MS - MIN }], leases: [busy] }, { ...t1, id: 1 }, T0, R).clear).toEqual(["studio"]);
-    // Waited 30 minutes or less: no mark yet. A task no alive host runs (its arch): none.
-    const fresh = task({ arch: "aarch64", size: 4, trust: "project", queued_at: T0 - 20 * MIN });
-    expect(reserve({ members: [{ ...studio, reserving: null }], leases: [busy] }, fresh, T0, R).set).toBeNull();
-    expect(reserve({ members: [{ ...studio, reserving: null }], leases: [busy] }, task({ arch: "x86_64", size: 4, trust: "project", queued_at: T0 - 60 * MIN }), T0, R).set).toBeNull();
+    const waits = () => true;
+    expect(reserve({ members: [studio], leases: [busy] }, t1, waits, T0 + MIN, R)).toEqual({ set: null, clear: [] });
+    // Its task leased or cancelled: gone, and the oldest marked again when it waits.
+    expect(reserve({ members: [studio], leases: [busy] }, t1, () => false, T0 + MIN, R).clear).toEqual(["studio"]);
+    expect(reserve({ members: [{ ...studio, seen_at: T0 + RESERVE_FOR_MS + MIN }], leases: [busy] }, t1, waits, T0 + RESERVE_FOR_MS + MIN, R)).toEqual({ set: { host: "studio", task: 1 }, clear: ["studio"] });
+    expect(reserve({ members: [{ ...studio, seen_at: T0 - ALIVE_MS - MIN }], leases: [busy] }, t1, waits, T0, R)).toEqual({ set: null, clear: ["studio"] });
+    // One at a time: a valid mark keeps another task from being marked.
+    expect(reserve({ members: [studio, host("vps", "aarch64", 11)], leases: [busy] }, { ...t1, id: 2 }, waits, T0 + MIN, R).set).toBeNull();
+    const free = { ...studio, reserving: null };
+    // Waited 30 minutes or less: no mark yet. A task no alive host runs (its arch): none. A size-1 build: none — the next build that ends fits it.
+    expect(reserve({ members: [free], leases: [busy] }, task({ arch: "aarch64", size: 4, queued_at: T0 - 20 * MIN }), waits, T0, R).set).toBeNull();
+    expect(reserve({ members: [free], leases: [busy] }, task({ arch: "x86_64", size: 4, queued_at: T0 - 60 * MIN }), waits, T0, R).set).toBeNull();
+    expect(reserve({ members: [free], leases: [busy] }, task({ arch: "aarch64", queued_at: T0 - 60 * MIN }), waits, T0, R).set).toBeNull();
     // A free host fits it now: nobody needs to reserve.
-    expect(reserve({ members: [{ ...studio, reserving: null }], leases: [] }, t1, T0, R).set).toBeNull();
+    expect(reserve({ members: [free], leases: [] }, t1, waits, T0, R).set).toBeNull();
   });
 
   it("a task larger than every host alive is clamped to the largest, saying what it asked; a contributor's never above 2", () => {

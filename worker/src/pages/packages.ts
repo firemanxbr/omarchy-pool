@@ -3,7 +3,7 @@
  * its binaries actually load, who depends on it, drawn as a graph — with
  * the file list on demand. The packages list is pages/browse.ts.
  */
-import { page } from "./layout";
+import { page, RETRY_AT_SIZE } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { EXPECTED_SOURCES, type RunningVersion } from "../meta";
 import { lucide } from "./kit";
@@ -669,7 +669,7 @@ const PACKAGE_SCRIPT = String.raw`
       ["Installs and starts with a real pacman", bs.map(function (b) { return gateMark(b, ["smoke"]); })],
       ["Audited by a second agent", au.map(function (a, i) { if (!bs[i]) return ["na", "", "no build"]; if (!a) return ["wait", "", "not queued yet"]; var v = a.result && a.result.verdict; return a.status !== "done" ? ["run", a.status, "the audit is " + a.status] : v === "ok" || v === "pass" ? ["ok", "", (a.result && a.result.summary) || "ok"] : v === "fail" || v === "block" ? ["fail", v, (a.result && a.result.summary) || v] : ["warn", v || "done", (a.result && a.result.summary) || ""]; })]
     ];
-    var notes = ARCHES.filter(function (a, i) { return (ts[a] || {}).status === "not_supported" || (bs[i] && bs[i].status === "failed"); }).map(function (a) { var b = bs[ARCHES.indexOf(a)]; return esc(a) + (ts[a] && ts[a].status === "not_supported" ? " did not build after the tries it had, so it is not supported; the other architectures go on to the review" : " failed") + (b && b.error ? ': “' + esc(b.error.slice(0, 240)) + '”' : '') + '.'; });
+    var notes = ARCHES.filter(function (a, i) { return (ts[a] || {}).status === "not_supported" || (bs[i] && bs[i].status === "failed"); }).map(function (a) { var b = bs[ARCHES.indexOf(a)]; return esc(a) + (ts[a] && ts[a].status === "not_supported" ? " did not build after the tries it had, so it is not supported; the other architectures go on to the review" : " failed") + (b && b.error ? ': “' + esc(b.error.slice(0, 240)) + '”' : '') + '.' + (b ? retryAtSize(b) : ''); });
     return panel({
       title: "Factory build", tag: anyRun ? "running" : anyOk ? "ready" : bs.some(Boolean) ? "not built" : "waiting", tone: anyRun ? "run" : anyOk ? "ok" : bs.some(Boolean) ? "fail" : "wait",
       who: (agent ? [glyphChip("built by", agent, "agent")] : []).concat(bs.filter(Boolean).map(function (b) { return glyphChip("on", wtShort(b.lease_owner || "a worker"), "", "W"); })),
@@ -1024,6 +1024,23 @@ const PACKAGE_SCRIPT = String.raw`
     }
     $("#who").innerHTML = rows.join("");
   }
+  function sizeWords(z) { return "size " + esc(String(z.size)) + " · " + esc(String(z.disk_gb)) + " GB of disk" + (z.from === "page" ? " · set on this page" : z.from === "file" ? " · factory/sizing" : z.disk_from ? "" : " · the default"); }
+  // A maintainer sets the size (the select) and the disk budget (the line, in GB; empty: factory/sizing's, or 20 per size) — on the journal with who.
+  $("#facts").addEventListener("click", function (ev) {
+    var t = ev.target.closest ? ev.target.closest("[data-set-size]") : null; if (!t) return;
+    var z = ((ST && ST.package) || {}).sizing || { size: 1 }, opts = [{ value: "", text: "As factory/sizing says, or 1", selected: z.from !== "page" }];
+    for (var n = 1; n <= SIZES.max; n++) opts.push({ value: String(n), text: "size " + n + " — " + n * SIZES.cpus + " CPUs, " + n * SIZES.mem_gb + " GB" + (n > SIZES.community_max ? " (a contributor's build runs at " + SIZES.community_max + ")" : ""), selected: z.from === "page" && z.size === n });
+    ask({ title: "The size of " + name, text: "What its builds ask for: the CPUs and memory of the size, clamped to the largest host alive. The disk budget is in GB.", select: { label: "Size", options: opts }, input: true, placeholder: "disk budget in GB — empty: factory/sizing's, or 20 per size", confirm: "Set" }).then(function (r) {
+      if (r === null) return;
+      var disk = r.note === "" ? null : Number(r.note);
+      if (disk !== null && !(disk >= 1 && disk === Math.floor(disk))) { toast("The disk budget is a whole number of GB.", "error"); return; }
+      api("POST", "/api/v1/factory/packages/" + encodeURIComponent(name) + "/size", { size: r.pick === "" ? null : Number(r.pick), disk_gb: disk }).then(function (d) {
+        if (d.error) { toast(esc(d.error), "error"); return; }
+        if (ST && ST.package) ST.package.sizing = d.sizing;
+        toast(esc(name) + ": " + sizeWords(d.sizing) + "."); renderFacts();
+      }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    });
+  });
   function fact(icon, k, v, cls) { return '<div>' + lucide(icon, 15, k) + '<span' + (cls ? ' class="' + cls + '"' : '') + ' title="' + esc(k) + '">' + v + '</span></div>'; }
   function renderFacts() {
     var rows = [], m = D ? D.manifest || {} : {}, pi = m.pkginfo || {}, pk = (ST && ST.package) || {};
@@ -1033,6 +1050,8 @@ const PACKAGE_SCRIPT = String.raw`
       rows.push(fact("scale", "licence", esc(pk.license || (m.licenses || []).join(", ") || "—")));
       rows.push(fact("factory", "origin", "factory · only in the pool"));
       if (pk.category) rows.push(fact("tag", "category", esc(pk.category)));
+      // The size and disk budget its builds ask for (#337): this page's word, factory/sizing's, or the default; a maintainer sets it here.
+      if (pk.sizing) rows.push(fact("cpu", "size", sizeWords(pk.sizing) + (isMaintainer() ? ' <button type="button" class="op-btn" data-set-size>Set</button>' : "")));
       rows.push(fact("calendar", "requested", esc(onDay((ST && ST.request && ST.request.created_at) || pk.created_at))));
     } else if (D) {
       rows.push(fact("globe", "project", m.url ? '<a href="' + esc(m.url) + '">' + esc(m.url.replace(/^https?:\/\//, "")) + '</a>' : "—"));
@@ -1195,7 +1214,7 @@ export function packageHtml(name: string, poolUrl: string, version: RunningVersi
     description: `${name}: where it comes from, how it got into the pool, its seal, its dependencies and files.`,
     active: "pool",
     body: packageBody(name),
-    script: PACKAGE_SCRIPT.replace("__SOURCE_WORDS__", JSON.stringify(SOURCE_WORDS)),
+    script: PACKAGE_SCRIPT.replace("__SOURCE_WORDS__", JSON.stringify(SOURCE_WORDS)) + RETRY_AT_SIZE,
     poolUrl,
     version,
     kit: true,
@@ -1316,12 +1335,14 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.build-panels",
       page,
       anchor: ['id="stage-panel"'],
-      script: ["buildPanel()", "syncedBuildPanel()", 'gateMark(b, ["checksums"])', 'gateMark(b, ["smoke"])', "v.failed", "v.warned", "evidenceHref(bs[i].id)", "wtShort(b.lease_owner", "rs[0].has_signature"],
+      script: ["buildPanel()", "syncedBuildPanel()", 'gateMark(b, ["checksums"])', 'gateMark(b, ["smoke"])', "v.failed", "v.warned", "evidenceHref(bs[i].id)", "wtShort(b.lease_owner", "rs[0].has_signature", "retryAtSize(b)", "function oomSize(b)", "data-retry-size"],
       reads: [
         { path: story, fields: ["chains.0.contributor.result.vet.verdict", "chains.0.contributor.result.vet.failed", "chains.0.contributor.result.vet.warned", "chains.0.contributor.lease_owner", "chains.0.contributor.duration_ms", "chains.0.contributor.error", "chains.0.audit"] },
         { path: shipped, fields: ["chains.0.audit.status", "chains.0.audit.result.verdict", "chains.0.audit.result.summary"] },
         { path: pkg, fields: ["arches.x86_64.rings.0.has_signature"] },
       ],
+      // Retry at size (#337): a maintainer's, on a build that ran out of memory; the probe's task never did, so nothing is queued.
+      acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/retry`, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } }],
       visible: EVERYONE,
     },
     {
@@ -1434,11 +1455,13 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.facts",
       page,
       anchor: ['id="facts-section"', 'id="facts"'],
-      script: ["renderFacts", '"licence"', '"origin"', "D.pool_url", "D.package.has_signature", "pk.category"],
+      script: ["renderFacts", '"licence"', '"origin"', "D.pool_url", "D.package.has_signature", "pk.category", "sizeWords(pk.sizing)", "data-set-size", '"/size"', "z.from"],
       reads: [
         { path: pkg, fields: ["manifest.url", "manifest.licenses", "manifest.pkginfo.builddate", "pool_url", "package.has_signature", "package.size_download"] },
-        { path: shipped, fields: ["package.project", "package.license", "package.category", "package.created_at"] },
+        { path: shipped, fields: ["package.project", "package.license", "package.category", "package.created_at", "package.sizing.size", "package.sizing.disk_gb", "package.sizing.from"] },
       ],
+      // A package's size (#337): a maintainer's; the probe names none, so nothing is set.
+      acts: [{ method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/size`, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 400 } }],
       visible: EVERYONE,
     },
     {

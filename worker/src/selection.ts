@@ -368,29 +368,32 @@ export function select(H: Member, fleet: Fleet, candidates: Candidate[], now: nu
 
 /**
  * Reservation for large tasks (§8.3): when the oldest queued build has
- * waited more than 30 minutes and fits no registration's free units now but
- * fits some host's total, the host with the most free units among those
- * that could run it is marked reserving for it; a mark clears when the task
- * is leased (routes/factory.ts), when it is no longer the oldest, when its
- * host leaves, or after 2 hours. Returns the marks to write: `set` a host's
- * new mark, `clear` the hosts whose mark ends.
+ * waited more than 30 minutes, is larger than one build (a size-1 build fits
+ * the next build that ends, so nothing needs keeping for it) and fits no
+ * registration's free units now but fits some host's total, the host with
+ * the most free units among those that could run it is marked reserving for
+ * it. One mark at a time; it clears when its task is leased
+ * (routes/factory.ts) or leaves the queue, when its host leaves, or after 2
+ * hours. Returns the marks to write: `set` a host's new mark, `clear` the
+ * hosts whose mark ends. `queued` says whether a marked task still waits.
  */
-export function reserve(fleet: Fleet, oldest: Candidate | null, now: number, r: Rules): { set: { host: string; task: number } | null; clear: string[] } {
+export function reserve(fleet: Fleet, oldest: Candidate | null, queued: (task: number) => boolean, now: number, r: Rules): { set: { host: string; task: number } | null; clear: string[] } {
   const clear: string[] = [];
-  // A build its owner's cap holds back is no task to keep a host for: it could not be leased when the units free up.
-  if (oldest && communityBuild(oldest) && oldest.owner && (ownersLeased(fleet).get(oldest.owner) ?? 0) >= ownerCap(fleet, now, r)) oldest = null;
   let kept = false;
   for (const m of fleet.members) {
     if (!m.reserving) continue;
     const mark = reservingNow(m, now);
-    if (!mark || !oldest || mark.task !== oldest.id || !alive(m, now)) clear.push(m.id);
+    if (!mark || !queued(mark.task) || !alive(m, now)) clear.push(m.id);
     else kept = true;
   }
   if (kept || !oldest || oldest.kind !== "build" || now - oldest.queued_at <= RESERVE_AFTER_MS) return { set: null, clear };
-  // Those that could run it, units aside: a host alive and claiming, a lane for it, its filters.
+  // A build its owner's cap holds back is no task to keep a host for: it could not be leased when the units free up.
+  if (communityBuild(oldest) && oldest.owner && (ownersLeased(fleet).get(oldest.owner) ?? 0) >= ownerCap(fleet, now, r)) return { set: null, clear };
   const largest = largestSize(fleet, now, r);
   const s = sizeOf(oldest, largest, r);
   const units = unitsOf(oldest.kind, s?.size ?? null, r);
+  if (units <= r.build_per_size) return { set: null, clear };
+  // Those that could run it, units aside: a host alive and claiming, a lane for it, its filters.
   const could = fleet.members.filter((m) => counts(m, now) && !m.drained && !m.behind && takes(m, oldest) && laneFor(m, oldest, r) && !(oldest.needs_native && laneFor(m, oldest, r)?.mode === "emulated"));
   const free = (m: Member) => (m.legacy ? (m.busy || fleet.leases.some((l) => l.by === m.id) ? 0 : r.build_per_size) : m.units - r.job_reserved - heldBy(fleet, m).reduce((n, l) => n + l.units, 0));
   if (could.some((m) => free(m) >= units)) return { set: null, clear };
