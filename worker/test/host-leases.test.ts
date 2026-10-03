@@ -13,8 +13,8 @@
  *   with its attempt; a fenced one ends only when a claim stops listing it;
  * - Stop is per lease, capped per login;
  * - `lost` gives the attempt back twice per task, `oom` spends it;
- * - units, the reserved job unit, agent slots and P1's one build and one
- *   audit, from the pool's own leases;
+ * - units, the reserved job unit and agent slots, from the pool's own
+ *   leases: a host runs its full unit count at once (#337);
  * - and a legacy registration behaves as before.
  *
  * Tokens: workers omw_<id>, people's CLI omc_<login>.
@@ -427,34 +427,50 @@ describe("capacity, from the pool's own leases", () => {
     await seedHost("h-shy");
     await seedTask({ name: "felix", pin: "h-shy" });
     expect((await claim("h-shy", { capacity: { ...STUDIO, units: 1 } })).status).toBe(204);
-    // The pool's cap (hosts.pool_cap_units): three units, the Studio's totals — a build, and no audit beside it.
+    // The pool's cap (hosts.pool_cap_units): three units, the Studio's totals — a build, and no audit beside it. (Another contributor's
+    // build than bob's, whose build h-small holds: the per-owner cap, #337, is not what this holds.)
     await seedHost("h-capped", { poolCap: 3 });
-    const cb = await seedTask({ name: "felix", pin: "h-capped" });
+    const cb = await seedTask({ name: "felix", pin: "h-capped", owner: "dave" });
     await seedTask({ name: "gus", pin: "h-capped", kind: "audit", trust: "project", params: { task: cb }, ref: `staging:${cb}`, priority: 200 });
     const cc = await claim("h-capped");
     expect(cc.json.task.id).toBe(cb);
     expect((await claim("h-capped", { leases: [lease(cc)] })).status).toBe(204);
   });
 
-  it("in P1 one build and one audit per host, model work within its agent slots", async () => {
-    await seedHost("h-p1");
-    const b1 = await seedTask({ name: "felix", pin: "h-p1" });
-    const b2 = await seedTask({ name: "gus", pin: "h-p1" });
-    const tr = await seedTask({ name: "gus", pin: "h-p1", kind: "trial", trust: "project", params: { task: b1 }, ref: `staging:${b1}` });
-    const a1 = await seedTask({ name: "felix", pin: "h-p1", kind: "audit", trust: "project", params: { task: b1 }, ref: `staging:${b1}`, priority: 200 });
-    const a2 = await seedTask({ name: "gus", pin: "h-p1", kind: "audit", trust: "project", params: { task: b2 }, ref: `staging:${b2}`, priority: 200 });
+  it("a host runs its full unit count at once — builds, a trial and audits side by side — the reserved unit kept, model work within its agent slots (#337)", async () => {
+    // The Studio's 11 units: four builds (each a contributor's own, so no per-owner cap holds one) and a trial take the ten a task may;
+    // the eleventh is kept for pool jobs, so the audit waits.
+    await seedHost("h-units");
+    const builds = [];
+    for (const owner of ["bob", "dave", "erin", "fay"]) builds.push(await seedTask({ name: "felix", pin: "h-units", owner }));
+    const tr = await seedTask({ name: "gus", pin: "h-units", kind: "trial", trust: "project", params: { task: builds[0] }, ref: `staging:${builds[0]}` });
+    const au = await seedTask({ name: "felix", pin: "h-units", kind: "audit", trust: "project", params: { task: builds[0] }, ref: `staging:${builds[0]}`, priority: 200 });
     const held: { task: number; gen: string }[] = [];
-    for (let i = 0; i < 4; i++) {
-      const c = await claim("h-p1", { leases: held });
-      if (c.status === 200) held.push(lease(c));
+    for (let i = 0; i < 8; i++) {
+      const c = await claim("h-units", { leases: held });
+      if (c.status !== 200) break;
+      held.push(lease(c));
     }
-    expect((await leasedTo("h-p1")).map((t) => t.kind).sort()).toEqual(["audit", "build"]);
-    expect(held.map((l) => l.task).sort()).toEqual([b1, a1].sort());
-    for (const id of [b2, tr, a2]) expect((await taskOf(id)).status).toBe("queued");
+    expect(held.map((l) => l.task).sort()).toEqual([...builds, tr].sort());
+    expect((await leasedTo("h-units")).reduce((n, t) => n + t.units, 0)).toBe(10);
+    expect((await taskOf(au)).status).toBe("queued");
+    // Model work within the agent slots: two audits of three, and a build beside them.
+    await seedHost("h-slots");
+    const sb = await seedTask({ name: "gus", pin: "h-slots", owner: "gil" });
+    const audits = [];
+    for (let i = 0; i < 3; i++) audits.push(await seedTask({ name: "felix", pin: "h-slots", kind: "audit", trust: "project", params: { task: sb }, ref: `staging:${sb}`, priority: 200 }));
+    const sh: { task: number; gen: string }[] = [];
+    for (let i = 0; i < 6; i++) {
+      const c = await claim("h-slots", { leases: sh });
+      if (c.status !== 200) break;
+      sh.push(lease(c));
+    }
+    expect((await leasedTo("h-slots")).map((t) => t.kind).sort()).toEqual(["audit", "audit", "build"]);
+    expect((await taskOf(audits[2])).status).toBe("queued");
     // No agent slot: an audit is never leased, a build is.
     await seedHost("h-noslot");
-    const na = await seedTask({ name: "felix", pin: "h-noslot", kind: "audit", trust: "project", params: { task: b1 }, ref: `staging:${b1}`, priority: 10 });
-    const nb = await seedTask({ name: "gus", pin: "h-noslot" });
+    const na = await seedTask({ name: "felix", pin: "h-noslot", kind: "audit", trust: "project", params: { task: sb }, ref: `staging:${sb}`, priority: 10 });
+    const nb = await seedTask({ name: "gus", pin: "h-noslot", owner: "hal" });
     const n1 = await claim("h-noslot", { capacity: { ...STUDIO, agent_slots: 0 } });
     expect(n1.json.task.id).toBe(nb);
     expect((await claim("h-noslot", { capacity: { ...STUDIO, agent_slots: 0 }, leases: [lease(n1)] })).status).toBe(204);
