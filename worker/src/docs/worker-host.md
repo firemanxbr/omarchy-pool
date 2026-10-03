@@ -196,7 +196,7 @@ the updater refuse there from then on. The page shows the set, its state and
 its directory before you press it (and why it would be refused, such as a
 directory the agent's user does not own), and each order with its agent's
 answer after
-([Runbook](/docs/runbook#the-run-loop)).
+([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
 
 To stop a host, use its page, `/hosts/<id>` (#322). **Suspend** (its
 owner or any maintainer, with a reason) stops its claims at once and
