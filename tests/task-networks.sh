@@ -26,8 +26,8 @@
 #      task's own agent sidecar answers; through the egress, the host's LAN
 #      address is refused, and so is its public one, a public address that only
 #      the agent's OMARCHY_HOST_ADDRESSES refuses ("an address of this host"),
-#      which every egress sidecar was given; the agent sidecar's caps are the
-#      envelope's budget
+#      which every egress sidecar was given (as an IPv4-mapped IPv6 literal
+#      too); the agent sidecar's caps are the envelope's budget
 #   2. the probe sidecar's word reaches the claim (`agent`): with a key the
 #      provider refuses, it says so, which shows the agent sidecar's way out
 #   3. a package with a signed exception in factory/sizing gets a bridge
@@ -90,10 +90,14 @@ built+=("$build_id")
 subnets="10.$((200 + RANDOM % 50)).$(( (RANDOM % 16) * 16 )).0/20"
 
 # The host's LAN address and its upstream router, as this machine sees them (a container must reach neither).
+# The agent reads interface addresses from /proc/net only: the LAN address is checked among the ones it
+# wrote (`lan_seen`) only where iproute2 found it on Linux, not a stand-in or a Mac's.
+lan_seen=
 if command -v ip >/dev/null 2>&1; then
   read -r router lan < <(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i <= NF; i++) { if ($i == "via") r = $(i + 1); if ($i == "src") s = $(i + 1) } } END { print r, s }')
+  [[ -r /proc/net/fib_trie ]] && lan_seen="$lan"
 else
-  router="$(route -n get default 2>/dev/null | awk '/gateway:/ { print $2 }')"; lan="$(ipconfig getifaddr en0 2>/dev/null || true)"
+  router="$(route -n get default 2>/dev/null | awk '/gateway:/ { print $2 }' || true)"; lan="$(ipconfig getifaddr en0 2>/dev/null || true)"
 fi
 router="${router:-192.168.0.1}"; lan="${lan:-192.168.0.2}"
 # A stand-in for the public address install's egress probe saw this host's tasks leave from:
@@ -139,6 +143,8 @@ say other_agent_proxy "$(code "http://$OTHER_AGENT:8790/health")"
 say lan_proxy "$(code "http://$LAN:22/")"
 say host_public_proxy "$(code "http://$HOST_PUBLIC/")"
 say host_public_why "$(curl -s --max-time 30 "http://$HOST_PUBLIC/" 2>/dev/null | tr -d '\r\n' | cut -c1-200)"
+# The same address as an IPv4-mapped IPv6 literal, which an IPv6 socket would reach over IPv4.
+say host_public_mapped_proxy "$(code "http://[::ffff:$HOST_PUBLIC]/")"
 if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then say own_agent "$(code "$ANTHROPIC_BASE_URL/health")"; fi
 # Whole, then said done: a reader on the host (a VM's shared directory) never sees half of it.
 mv /task/log/net.tmp /task/log/net.txt && touch /task/log/net.done
@@ -174,11 +180,13 @@ chmod 600 "$agent_data/agent.toml"
 printf '{"public":"%s","at":"2026-10-03T00:00:00Z"}\n' "$host_public" > "$agent_data/egress.json"
 printf '# worker: net-test-0a9z\nOMARCHY_WORKER_TOKEN=%s\nTZ=UTC\n' "$token" > "$envfile"
 "$OMARCHY_AGENT" dispatcher-env --data-dir "$agent_data" --write > "$tmp/agent.out" 2>&1 || { cat "$tmp/agent.out" >&2; fail "omarchy-agent dispatcher-env --write"; }
-[[ "$(stat -c %a "$envfile")" == 600 ]] || fail "dispatcher.env is not 0600: $(stat -c %a "$envfile")"
+mode="$(stat -c %a "$envfile" 2>/dev/null || stat -f %Lp "$envfile")"
+[[ "$mode" == 600 ]] || fail "dispatcher.env is not 0600: $mode"
 key() { sed -n "s/^$1=//p" "$envfile"; }
 [[ "$(key OMARCHY_WORKER_TOKEN)" == "$token" && "$(key TZ)" == UTC ]] || fail "the token or the owner's line was not kept: $(sed 's/omw_[0-9a-f]*/omw_…/' "$envfile")"
 addresses=",$(key OMARCHY_HOST_ADDRESSES),"
-[[ "$addresses" == *",$lan,"* && "$addresses" == *",$host_public,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($addresses) lacks the LAN address $lan or the public $host_public"
+[[ -z "$lan_seen" || "$addresses" == *",$lan_seen,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($addresses) lacks the LAN address $lan_seen"
+[[ "$addresses" == *",$host_public,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($addresses) lacks the public $host_public"
 [[ "$(key OMARCHY_SECRETS_DIR)" == "$tmp/secrets" ]] || fail "OMARCHY_SECRETS_DIR: $(key OMARCHY_SECRETS_DIR)"
 [[ "$(key OMARCHY_AGENT_CALLS_PER_TASK) $(key OMARCHY_AGENT_TOKENS_PER_TASK) $(key OMARCHY_AGENT_MINUTES_PER_TASK) $(key OMARCHY_AGENT_CALLS_PER_DAY)" == "37 123456 7 4000" ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$envfile")"
 # The dispatcher's environment is that file, as compose's env_file gives it.
@@ -302,14 +310,15 @@ for t in 1 2; do
   [[ "$(result "$t" lan_proxy)" == 403 ]] || fail "task $t: the host's LAN address $lan through its egress: $(result "$t" lan_proxy)"
   [[ "$(result "$t" host_public_proxy)" == 403 && "$(result "$t" host_public_why)" == *"an address of this host"* ]] \
     || fail "task $t: the host's public address $host_public through its egress: $(result "$t" host_public_proxy) $(result "$t" host_public_why)"
+  [[ "$(result "$t" host_public_mapped_proxy)" == 403 ]] || fail "task $t: [::ffff:$host_public] through its egress: $(result "$t" host_public_mapped_proxy)"
 done
 for side in "$A-egress" "$B-egress"; do
   denied=" $("$RT" inspect "$side" | jq -r '.[0].Args | join(" ")') "
-  [[ "$denied" == *" --deny $lan "* && "$denied" == *" --deny $host_public "* ]] || fail "$side was not given the agent's addresses: $denied"
+  [[ ( -z "$lan_seen" || "$denied" == *" --deny $lan_seen "* ) && "$denied" == *" --deny $host_public "* ]] || fail "$side was not given the agent's addresses: $denied"
 done
 caps="$("$RT" inspect "$A-agent" | jq -r '.[0].Config.Env[] | select(startswith("BROKER_AGENT_"))' | sort | tr '\n' ' ')"
 [[ "$caps" == "BROKER_AGENT_CALLS=37 BROKER_AGENT_TOKENS=123456 BROKER_AGENT_WALL_SECONDS=420 " ]] || fail "the agent sidecar's caps are not the envelope's budget: $caps"
-echo "ok: started from the agent's etc/dispatcher.env, every egress refuses the host's LAN address and its public one ($host_public: 'an address of this host'), and the agent sidecar's caps are the envelope's budget"
+echo "ok: started from the agent's etc/dispatcher.env, every egress refuses the host's LAN address and its public one ($host_public: 'an address of this host', as [::ffff:$host_public] too), and the agent sidecar's caps are the envelope's budget"
 
 # ---------- 2. the probe sidecar ----------
 probe_said() { jq -c 'select(.path == "/api/v1/factory/claim") | .body.agent // empty' "$tmp/requests.jsonl" | tail -n1; }

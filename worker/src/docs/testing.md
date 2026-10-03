@@ -712,14 +712,19 @@ directory, a budget): a public mirror answers through the egress only; cloud met
 public name resolving to loopback, a raw socket ("Network is unreachable"),
 the host's LAN address and gateway, and the other task's container, egress
 and agent are out of reach; through the egress the host's LAN address is
-refused and so is the stand-in public one, as "an address of this host", which
-every egress sidecar was given (`--deny`); the agent sidecar's caps are the
+refused and so is the stand-in public one, as "an address of this host" and
+as an IPv4-mapped IPv6 literal, which every egress sidecar was given
+(`--deny`; the LAN address is checked among the agent's where iproute2 and
+`/proc/net` found it); the agent sidecar's caps are the
 budget's; the probe sidecar's word reaches the claim; a
 signed exception's task gets a bridge network; a stop removes only that
 task's container, sidecars and network. The agent's side of that file is
 unit-tested on interface lists (`crates/omarchy-agent/tests/fixtures/addresses/`:
-a home LAN host with docker's bridges and IPv6, a VPS with a public /32) and in
-the run loop against the fake engine, and `tests/host-enroll-e2e.sh` (the E2E
+a home LAN host with docker's bridges and IPv6, a VPS with a public /32; a
+bridge on a global range kept), on `/cdn-cgi/trace` answers, on two writers
+(a refresh waits for a rotation's lock and keeps its token), and in the run
+loop against the fake engine and pool (a new DHCP lease, a new public address
+asked hourly, agent.toml read again), and `tests/host-enroll-e2e.sh` (the E2E
 workflow) checks its keys after the Confirm and a rotation.
 
 What the build sees is checked by hand in the worker image (SECURITY.md,

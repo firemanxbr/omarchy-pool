@@ -160,7 +160,9 @@ internal network: it reaches public addresses only, through its own egress
 sidecar (cloud metadata, the host's LAN and every other private range are
 refused, judged by the address a name resolves to, and so are the host's own
 addresses: every address of its interfaces and the public one its tasks leave
-from, which the agent keeps current in `etc/dispatcher.env`), never another task. A
+from, which the agent writes into `etc/dispatcher.env` and keeps current — it
+reads the interfaces every minute and asks the pool's edge for the public
+address every hour), never another task. A
 task that needs a model — a draft, a review rebuild, an audit — gets its own
 agent sidecar, which mounts `OMARCHY_SECRETS_DIR/agent.env` read-only; no two
 tasks share one, and the dispatcher itself never holds the key. Per task a
@@ -171,9 +173,10 @@ sidecar makes at most `OMARCHY_AGENT_CALLS_PER_TASK` calls (200),
 each run included), after which it takes no model work until the next
 day. To set them, give `agent.toml`'s envelope an `agent_budget` (any of
 `calls_per_task`, `tokens_per_task`, `minutes_per_task`, `calls_per_day`,
-each a whole number from 1) and restart the agent (`systemctl --user restart
-omarchy-agent`): it writes them into `etc/dispatcher.env` and the dispatcher is
-recreated with them; a key you leave out keeps its default. The sidecars run as root with no capabilities (no `CAP_DAC_OVERRIDE`),
+each a whole number from 1): within a minute the agent writes them into
+`etc/dispatcher.env` (`omarchy-agent dispatcher-env --write` does it at once)
+and the dispatcher is recreated with them; a key you leave out keeps its
+default. The sidecars run as root with no capabilities (no `CAP_DAC_OVERRIDE`),
 so `agent.env` must be owned by the uid their root maps to (root on a rootful
 engine, the maintainer on a rootless one) at 0600, or be 0644 inside the 0700
 `etc/`; otherwise the probe fails and the host takes no model work (#317's

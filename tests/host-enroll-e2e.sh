@@ -129,15 +129,18 @@ OMW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
 [[ $OMW == omw_* ]] || fail "no worker token in dispatcher.env"
 # The registration beside it is what install writes into agent.toml's worker_id (#317).
 [[ $(sed -n 's/^# worker: //p' "$ENV_FILE") == "$WORKER" ]] || fail "dispatcher.env does not name $WORKER"
-# The host's own addresses beside the token (#371), its LAN address among them; no agent.toml yet,
-# so no secrets directory and no budget (the dispatcher's defaults).
+# The host's own addresses beside the token (#371), its LAN address among them, where the agent reads
+# the kernel's interface lists (Linux); no agent.toml yet, so no secrets directory and no budget (the
+# dispatcher's defaults).
 ADDRS=$(sed -n 's/^OMARCHY_HOST_ADDRESSES=//p' "$ENV_FILE")
-[[ -n $ADDRS ]] || fail "no OMARCHY_HOST_ADDRESSES in dispatcher.env"
-if command -v ip >/dev/null; then
-  LAN=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}')
-  [[ -z $LAN || ",$ADDRS," == *",$LAN,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($ADDRS) lacks the LAN address $LAN"
+if [[ -r /proc/net/fib_trie ]]; then
+  [[ -n $ADDRS ]] || fail "no OMARCHY_HOST_ADDRESSES in dispatcher.env"
+  if command -v ip >/dev/null; then
+    LAN=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}')
+    [[ -z $LAN || ",$ADDRS," == *",$LAN,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($ADDRS) lacks the LAN address $LAN"
+  fi
 fi
-grep -q '^OMARCHY_SECRETS_DIR=\|^OMARCHY_AGENT_' "$ENV_FILE" && fail "a secrets directory or a budget before agent.toml"
+grep -Eq '^(OMARCHY_SECRETS_DIR|OMARCHY_AGENT_)' "$ENV_FILE" && fail "a secrets directory or a budget before agent.toml"
 
 step "The host claims with it (nothing queued: 204)"
 # A host registration claims with its capacity, a claim_id new per attempt, want
@@ -173,7 +176,7 @@ done
 [[ $(sed -n 's/^TZ=//p' "$ENV_FILE") == UTC ]] || fail "the rotation did not keep the owner's line"
 [[ $(sed -n 's/^OMARCHY_SECRETS_DIR=//p' "$ENV_FILE") == "$DATA/omarchy-agent/secrets" ]] || fail "no OMARCHY_SECRETS_DIR from agent.toml"
 [[ $(sed -n 's/^OMARCHY_AGENT_CALLS_PER_TASK=//p' "$ENV_FILE")/$(sed -n 's/^OMARCHY_AGENT_CALLS_PER_DAY=//p' "$ENV_FILE") == 50/900 ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$ENV_FILE")"
-grep -q '^OMARCHY_AGENT_TOKENS_PER_TASK=\|^OMARCHY_AGENT_MINUTES_PER_TASK=' "$ENV_FILE" && fail "a budget key agent.toml does not set"
+grep -Eq '^OMARCHY_AGENT_(TOKENS|MINUTES)_PER_TASK=' "$ENV_FILE" && fail "a budget key agent.toml does not set"
 [[ $(grep -c '^OMARCHY_WORKER_TOKEN=' "$ENV_FILE") == 1 ]] || fail "more than one token line"
 
 step "The journal, the notice's words, and a second run that keeps the identity"
