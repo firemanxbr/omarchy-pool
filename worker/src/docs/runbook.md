@@ -203,7 +203,11 @@ under the host agent goes below its floor only on one, within 14 days of the
 target's release (security-model, *Rollback statements*). A statement that
 did not reach R2 fails the run after the rest is done; running it again
 stores a freshly signed one. The updaters follow the
-pool's release down as they follow it up, within two minutes. Back past
+pool's release down as they follow it up, within two minutes, and so do the
+host agents: back below the release that brought agent 0.3.0 (#344), the
+Worker that comes back names no release in its host state, so an agent on
+0.3.0 reads that Worker's `follow` instead, as the agents before it did
+(its journal says so once), and goes down on the statement. Back past
 #277's last part, the updater that comes back is the older one: it follows
 at its own fifteen-minute round and takes no Update, until a release brings
 one that follows again. That older Worker lists a worker's whole row, so the
@@ -710,7 +714,10 @@ anywhere resumes it (a ready wait or a guard in flight starts its clock again:
 after a reboot the dispatcher is still re-adopting its leases). The pool's
 host state names the target (#344: `GET /api/v1/hosts/self/state`, signed
 with the host key; agents before 0.3.0 read `follow`'s `latest`, which the
-legacy sets' updaters still poll); the bundle must verify against `release.yml` on main, the pool's
+legacy sets' updaters still poll — and so does agent 0.3.0, only when the
+state names no release at all: a Worker from before #344, which only a
+rollback below that release deploys again, *Releasing the pool itself*;
+the journal says it once); the bundle must verify against `release.yml` on main, the pool's
 origin must be in its `pools`, and the target must be at or above the floor
 (the highest release applied), `min_release` and outside `revoked` (both
 merged from every verified manifest and never lowered) — or covered by a
@@ -766,14 +773,21 @@ given on the host's page:
   project's networks, and records the retirement in `legacy.json`. It never
   touches another project, a container that carries the agent's host label
   (the bundle, a task), a volume, an image or a file of the set; one it
-  cannot finish within 30 minutes answers `failed` with the marker left, and
-  can be given again.
+  cannot finish within 30 minutes answers `failed` with the marker left —
+  the set's own tools then refuse there although it was not retired, which
+  is the price of the marker first: from the stop on, the set's updater
+  cannot bring it back — and is given again. The button is greyed, with the
+  agent's words, while its report says it would refuse (the directory above;
+  the report after the fix, within five minutes, lifts it).
 
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the
 release applied, targeted and its floor, the rollout and the last round, the
-legacy set and the last answers), which closes the order on the site; an
-order its agent does not take within its hour expires there.
+legacy set and the last answers), which closes the order on the site — one
+the site expired meanwhile too (a retire-legacy answers only at its end); an
+order its agent does not take within its hour expires there. A report that
+does not get through is sent again a minute later, or hourly while the pool
+answers 401/403, as the polls go then.
 
 On the host: `omarchy-agent status` (from `state.json` and
 `run/capacity.json`, with the pool and the engine down; a `retire-legacy`

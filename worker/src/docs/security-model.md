@@ -480,7 +480,10 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
 - **The host state and its orders** (#344, design v2 §11, §17.1). From agent
   0.3.0 the release a host rolls out is the one its signed state names —
   still checked against `release.yml`'s signature, the floor, `min_release`,
-  `revoked` and the signed `pools` like any target — and the state carries
+  `revoked` and the signed `pools` like any target; from a Worker before
+  #344, whose state names no release (only a rollback below it deploys one),
+  the public `follow` names it, as for the agents before 0.3.0: the pool's
+  word either way, which the bundle's signature and the floor bound — and the state carries
   the host orders: a closed set, each with an id and a `not_after`, which the
   agent reads leniently and refuses when the kind is unknown, the order is
   past its `not_after` or its id is one of the last 512 it took. P3 has two.
@@ -497,8 +500,13 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   owner recorded and the owner's passkey did not order — the second only
   where a legacy set is recorded at all, and never anything else on the
   host; the switch guard (#313) then keeps the retired set from coming back.
-  The agent answers in its report, which closes the order; the pool's journal
-  says who gave it and how it ended, in the pool's own words.
+  The marker goes in first, before anything stops, so the set's own updater
+  cannot bring back what the order stops; a retirement that does not finish
+  within 30 minutes answers `failed` and leaves it, and the set's tools
+  refuse there until the order is given again. The agent answers in its
+  report, which closes the order (also one the pool expired while the agent
+  carried it out); the pool's journal says who gave it and how it ended, in
+  the pool's own words.
 - **The host worker token** (`omw_…`) is the dispatcher's only, written
   0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
   id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,

@@ -194,7 +194,8 @@ directory, then stops and removes that compose project's containers and
 networks — nothing else — so `rollout.sh`, `setup.sh`, `omarchy-worker` and
 the updater refuse there from then on. The page shows the set, its state and
 its directory before you press it (and why it would be refused, such as a
-directory the agent's user does not own), and each order with its agent's
+directory the agent's user does not own: the button stays greyed until the
+agent's next report says it is fixed), and each order with its agent's
 answer after
 ([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
 
