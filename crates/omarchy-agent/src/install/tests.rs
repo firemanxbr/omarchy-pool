@@ -17,7 +17,9 @@ use crate::run::fake::{TestVerifier, HOST_SET, T0};
 use crate::run::state::tempdir;
 use crate::verify::tests_support;
 
-/// The person's machine, played: answers given up front, every call recorded.
+/// The person's machine, played: answers given up front, every call recorded. A Mac's
+/// (#320): launchctl, sysctl, route and a Colima that saves `colima.yaml` under
+/// `colima_home` as it starts the profile.
 pub(crate) struct Fake {
     pub calls: Vec<String>,
     pub confirm: bool,
@@ -26,6 +28,15 @@ pub(crate) struct Fake {
     pub linger: bool,
     pub enable_linger: bool,
     pub systemd: bool,
+    /// The person's GUI login: launchctl's `gui/<uid>` answers.
+    pub gui: bool,
+    pub loaded: bool,
+    pub bootstrap_fails: bool,
+    pub colima: bool,
+    pub vm_running: bool,
+    pub colima_home: Option<PathBuf>,
+    /// `sysctl -n hw.ncpu hw.memsize`.
+    pub mac: String,
 }
 
 impl Default for Fake {
@@ -38,20 +49,103 @@ impl Default for Fake {
             linger: false,
             enable_linger: true,
             systemd: true,
+            gui: true,
+            loaded: false,
+            bootstrap_fails: false,
+            colima: true,
+            vm_running: false,
+            colima_home: None,
+            mac: "16\n68719476736\n".into(),
         }
     }
+}
+
+/// `colima.yaml` as Colima saves it after `colima start <args>`.
+fn colima_saves(args: &[&str]) -> String {
+    let value = |flag: &str| {
+        args.iter()
+            .position(|a| *a == flag)
+            .and_then(|i| args.get(i + 1))
+            .copied()
+            .unwrap_or("")
+    };
+    let rosetta = args.contains(&"--vz-rosetta=true");
+    let mut y = format!(
+        "cpu: {}\nmemory: {}\ndisk: {}\narch: {}\nvmType: {}\nrosetta: {rosetta}\nforwardAgent: false\nmounts:\n",
+        value("--cpu"),
+        value("--memory"),
+        value("--disk"),
+        value("--arch"),
+        value("--vm-type")
+    );
+    for (i, a) in args.iter().enumerate() {
+        if *a == "--mount" {
+            let m = args[i + 1];
+            let (path, w) = m.strip_suffix(":w").map_or((m, false), |p| (p, true));
+            let _ = writeln!(y, "  - location: {path}\n    writable: {w}");
+        }
+    }
+    y
 }
 
 impl Sys for Fake {
     fn run(&mut self, prog: &str, args: &[&str]) -> Result<String, String> {
         let line = format!("{prog} {}", args.join(" "));
         self.calls.push(line.clone());
+        let no = || Err(format!("{line}: no"));
         match (prog, args.first().copied()) {
             ("loginctl", Some("show-user")) => {
                 Ok(if self.linger { "yes\n" } else { "no\n" }.into())
             }
             ("loginctl", Some("enable-linger")) if self.enable_linger => Ok(String::new()),
             ("systemctl", _) if self.systemd => Ok(String::new()),
+            ("launchctl", Some("print")) => {
+                let agent = args.get(1).is_some_and(|d| d.ends_with(launchd::LABEL));
+                if self.gui && (!agent || self.loaded) {
+                    Ok("state = running\n".into())
+                } else {
+                    Err("Could not find domain for port identifier".into())
+                }
+            }
+            ("launchctl", Some("bootstrap")) if self.gui && !self.bootstrap_fails => {
+                self.loaded = true;
+                Ok(String::new())
+            }
+            ("launchctl", Some("bootstrap")) => {
+                Err("Bootstrap failed: 125: Domain does not support specified action".into())
+            }
+            ("launchctl", Some("bootout")) if self.loaded => {
+                self.loaded = false;
+                Ok(String::new())
+            }
+            ("sysctl", _) => Ok(self.mac.clone()),
+            ("route", _) => {
+                Ok("   route to: default\ndestination: default\n    gateway: 192.168.1.1\n".into())
+            }
+            ("colima", _) if !self.colima => Err(format!("{prog}: not found")),
+            ("colima", Some("version")) => Ok("colima version 0.8.1\n".into()),
+            ("colima", Some("status")) => {
+                if self.vm_running {
+                    Ok(String::new())
+                } else {
+                    no()
+                }
+            }
+            ("colima", Some("stop")) => {
+                self.vm_running = false;
+                Ok(String::new())
+            }
+            ("colima", Some("start")) => {
+                if let Some(home) = &self.colima_home {
+                    fs::create_dir_all(home.join(crate::vm::PROFILE)).unwrap();
+                    fs::write(crate::vm::config_path(home), colima_saves(args)).unwrap();
+                }
+                self.vm_running = true;
+                Ok(String::new())
+            }
+            ("colima", Some("ssh")) => {
+                Ok("MemTotal: 32000000 kB\nMemAvailable: 30000000 kB\n".into())
+            }
             _ => Err(format!("{line}: not allowed here")),
         }
     }
@@ -585,6 +679,7 @@ fn values(root: &Path) -> envelope::Values {
         work_root: root.join("work"),
         secrets_dir: root.join("secrets"),
         socket: root.join("engine.sock"),
+        socket_mount: root.join("engine.sock"),
         task_subnets: TASK_SUBNETS.into(),
         rootful: false,
         userns_remap: false,
@@ -592,6 +687,7 @@ fn values(root: &Path) -> envelope::Values {
         max_units: None,
         max_cpus: None,
         max_mem_gb: None,
+        vm: None,
     }
 }
 
@@ -676,6 +772,14 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
             linger_dir: root.join("linger"),
             routes: root.join("routes"),
             binfmt: root.join("binfmt"),
+            uid: 501,
+            colima_home: root.join("home/.colima"),
+            colima_home_env: None,
+            launch_agents: root.join("home/Library/LaunchAgents"),
+            logs: root.join("home/Library/Logs/omarchy-agent"),
+            ssh: false,
+            rosetta: root.join("rosetta"),
+            mac_root: root.join("shared"),
         },
         source: Some(Source::Files(
             root.join("bundle.tar.gz"),
@@ -684,7 +788,9 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
         pool: None,
         work_root: Some(root.join("work")),
         secrets_dir: Some(root.join("secrets")),
+        set_dir: None,
         socket: Some(root.join("engine.sock")),
+        rosetta: true,
         task_subnets: None,
         dedicated: true,
         legacy: None,
@@ -962,7 +1068,7 @@ fn pool(state: String, token: String) -> String {
 fn ready_to_enroll(h: &Host, state: &str) -> Ready {
     let state_dir = h.options.places.data.join("state");
     let _ = fs::remove_file(state_dir.join("host.json"));
-    let (r, ready) = measure_on(h, &mut Fake::default());
+    let (r, ready) = measure_on(h, &mut mac_sys(h));
     assert!(r.ok(), "{}", r.screen());
     let mut ready = ready.unwrap();
     let token = format!(
@@ -1275,6 +1381,490 @@ fn a_rerun_without_legacy_uses_the_recorded_project_and_its_exception() {
     assert!(screen.contains("exception until P6"), "{screen}");
     // The recorded project is looked at again (this stub engine has none of it).
     assert!(screen.contains("omarchy-pool"), "{screen}");
+}
+
+// --- a Mac (#320), played on Linux ------------------------------------------------
+
+/// The engine inside the omarchy VM: rootful docker, 8 CPUs and 32 GB (half the Mac).
+const INFO_VM: &str = r#"{"NCPU":8,"MemTotal":33443418112,"DockerRootDir":"/var/lib/docker","Architecture":"aarch64","SecurityOptions":["name=seccomp,profile=builtin","name=cgroupns"],"CgroupVersion":"2","MemoryLimit":true,"CpuCfsQuota":true,"PidsLimit":true}"#;
+
+/// A Mac: `os` macos, prep-mac.sh's three directories under `<root>/shared`, Colima's
+/// home under `<root>/home/.colima`, and a docker stub for the engine in the VM that
+/// refuses a bind of the home directory (`home-visible` lets it), runs an amd64 smoke
+/// run (`no-rosetta` fails it), and answers the rest as the Linux stub does.
+fn mac_host(min_cpus: u32) -> Host {
+    let mut h = host_min(INFO_VM, EGRESS_OK, min_cpus);
+    let r = h.root.clone();
+    for d in ["work", "secrets", "set"] {
+        fs::create_dir_all(r.join("shared").join(d)).unwrap();
+        fs::set_permissions(r.join("shared").join(d), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    h.options.places.os = "macos";
+    h.options.places.xdg_runtime_dir = None;
+    h.options.work_root = None;
+    h.options.secrets_dir = None;
+    h.options.socket = None;
+    h.options.dedicated = false;
+    fs::write(
+        &h.docker,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\"source={r}/home,\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; exit 0 ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            r = r.display()
+        ),
+    )
+    .unwrap();
+    h
+}
+
+/// The Mac's programs, with Colima saving its profile where this host's places say.
+fn mac_sys(h: &Host) -> Fake {
+    Fake {
+        colima_home: Some(h.options.places.colima_home.clone()),
+        ..Fake::default()
+    }
+}
+
+fn starts(sys: &Fake) -> Vec<&String> {
+    sys.calls
+        .iter()
+        .filter(|c| c.starts_with("colima start"))
+        .collect()
+}
+
+#[test]
+fn on_a_mac_preflight_sizes_the_omarchy_vm_at_half_the_mac_and_mounts_only_its_three_directories() {
+    let h = mac_host(4);
+    let shared = h.root.join("shared");
+    let mut sys = mac_sys(&h);
+    let (r, ready) = measure_on(&h, &mut sys);
+    assert!(r.ok(), "{}", r.screen());
+    let ready = ready.unwrap();
+    // A 16-core, 64 GB Mac: 8 CPUs and 32 GB, the three directories at their own paths,
+    // no SSH agent, no Docker context switched; Rosetta is not installed here.
+    assert_eq!(
+        starts(&sys),
+        [&format!(
+            "colima start --profile omarchy --vm-type vz --arch aarch64 --runtime docker --mount-type virtiofs --ssh-agent=false --ssh-config=false --activate=false --cpu 8 --memory 32 --disk 100 --mount {s}/work:w --mount {s}/secrets --mount {s}/set --vz-rosetta=false",
+            s = shared.display()
+        )]
+    );
+    let screen = r.screen();
+    for want in [
+        "isolation: vm (the dedicated omarchy VM",
+        "capacity: 8 CPUs, 31 GB",
+        "7 units",
+        "Rosetta 2 is not installed",
+        "nothing of your home directory",
+        "egress: a task reaches public addresses only",
+    ] {
+        assert!(screen.contains(want), "{want}:\n{screen}");
+    }
+    // What the agent reads of the VM: its own MemAvailable, through M7.
+    assert_eq!(ready.capacity.mem_available_gb(), Some(28));
+    assert_eq!(ready.capacity.isolation(), Isolation::Vm);
+    let v = &ready.values;
+    assert_eq!(v.socket, h.root.join("home/.colima/omarchy/docker.sock"));
+    assert_eq!(v.socket_mount, Path::new("/var/run/docker.sock"));
+    assert_eq!(
+        (
+            v.work_root.clone(),
+            v.secrets_dir.clone(),
+            v.set_dir.clone()
+        ),
+        (
+            shared.join("work"),
+            shared.join("secrets"),
+            shared.join("set")
+        )
+    );
+    assert!(v.dedicated && v.rootful);
+    assert_eq!((v.max_cpus, v.max_mem_gb), (Some(8), Some(32)));
+    assert_eq!(v.vm.as_ref().map(|x| x.runtime), Some("colima"));
+    // The gateway the egress probe keeps a task from: the Mac's (route -n get default).
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(log.contains("192.168.1.1"), "{log}");
+    // The envelope reads back as the run loop and the lint read it: the VM and its mounts.
+    let text = envelope::render(None, v, Some(("h_0123456789", "m1-mac-0a9z"))).unwrap();
+    let cfg = crate::run::config::Config::parse(&text).unwrap();
+    assert_eq!(
+        cfg.vm.as_ref().map(|x| (x.cpus, x.mem_gb, x.rosetta)),
+        Some((8, 32, false))
+    );
+    assert_eq!(cfg.envelope.vm_mounts.as_ref().map(Vec::len), Some(3));
+    crate::lint::lint_compose(
+        crate::run::fake::HOST_COMPOSE,
+        None,
+        &cfg.envelope,
+        cfg.engine,
+    )
+    .unwrap();
+
+    // Run again with the VM up as it should be: nothing is restarted.
+    let mut again = Fake {
+        vm_running: true,
+        ..mac_sys(&h)
+    };
+    let (r, _) = measure_on(&h, &mut again);
+    assert!(r.ok() && starts(&again).is_empty(), "{:?}", again.calls);
+    assert!(r.screen().contains("the omarchy VM runs as it should"));
+}
+
+#[test]
+fn a_mac_that_cannot_give_the_vm_the_minimum_or_keeps_a_directory_under_home_starts_no_vm() {
+    // Half of a 6-core, 16 GB Mac is 3 CPUs: below the release's 4.
+    let h = mac_host(4);
+    let mut sys = Fake {
+        mac: "6\n17179869184\n".into(),
+        ..mac_sys(&h)
+    };
+    let (r, ready) = measure_on(&h, &mut sys);
+    assert!(ready.is_none());
+    assert!(
+        r.screen().contains("the VM would get 3 CPUs and 8 GB"),
+        "{}",
+        r.screen()
+    );
+    assert!(
+        r.screen()
+            .contains("--max-cpus and --max-mem-gb give it more, up to 5 CPUs"),
+        "{}",
+        r.screen()
+    );
+    assert!(starts(&sys).is_empty());
+    // The owner gives it 4: it joins.
+    let mut o = h.options.clone();
+    o.max_cpus = Some(4);
+    let mut sys = Fake {
+        mac: "6\n17179869184\n".into(),
+        ..mac_sys(&h)
+    };
+    let (r, _) = measure(&o, &mut sys, &verifier(), Some(&h.docker))
+        .map_err(|e| e.to_string())
+        .unwrap();
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        starts(&sys)[0].contains("--cpu 4 --memory 8"),
+        "{:?}",
+        sys.calls
+    );
+
+    // A work root under the home directory, a secrets directory that does not exist.
+    let mut h = mac_host(1);
+    fs::create_dir_all(h.root.join("home/omarchy-work")).unwrap();
+    h.options.work_root = Some(h.root.join("home/omarchy-work"));
+    h.options.secrets_dir = Some(h.root.join("shared/missing"));
+    let mut sys = mac_sys(&h);
+    let (r, _) = measure_on(&h, &mut sys);
+    let screen = r.screen();
+    assert!(screen.contains("is under your home directory"), "{screen}");
+    assert!(
+        screen.contains("shared/missing does not exist: run factory/host/prep-mac.sh"),
+        "{screen}"
+    );
+    assert!(starts(&sys).is_empty(), "{:?}", sys.calls);
+}
+
+#[test]
+fn over_ssh_without_a_gui_login_the_installer_says_to_run_it_from_terminal() {
+    let mut h = mac_host(1);
+    h.options.places.ssh = true;
+    let mut sys = Fake {
+        gui: false,
+        ..mac_sys(&h)
+    };
+    let before = tree(&h.root.join("shared"));
+    let mut out = Vec::new();
+    let e = install_with(&h.options, &mut sys, &verifier(), Some(&h.docker), &mut out).unwrap_err();
+    assert!(matches!(e, Failure::Refused(_)), "{e}");
+    let screen = String::from_utf8_lossy(&out).into_owned();
+    assert!(
+        screen.contains("no GUI login")
+            && screen.contains("this is an SSH session")
+            && screen.contains("run the installer from Terminal there"),
+        "{screen}"
+    );
+    // Nothing was started or written: no VM, no plist.
+    assert!(starts(&sys).is_empty(), "{:?}", sys.calls);
+    assert_eq!(tree(&h.root.join("shared")), before);
+    assert!(!h.options.places.launch_agents.exists());
+}
+
+#[test]
+fn a_saved_profile_that_lets_the_persons_files_in_is_restarted_and_another_vm_type_is_refused() {
+    let h = mac_host(1);
+    let cfg = crate::vm::config_path(&h.options.places.colima_home);
+    fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    fs::write(
+        &cfg,
+        format!(
+            "cpu: 8\nmemory: 32\ndisk: 100\narch: aarch64\nvmType: vz\nforwardAgent: true\nmounts:\n  - location: {}\n    writable: true\n",
+            h.root.join("home").display()
+        ),
+    )
+    .unwrap();
+    let mut sys = Fake {
+        vm_running: true,
+        ..mac_sys(&h)
+    };
+    let (r, _) = measure_on(&h, &mut sys);
+    assert!(r.ok(), "{}", r.screen());
+    let stop = sys
+        .calls
+        .iter()
+        .position(|c| c == "colima stop --profile omarchy")
+        .unwrap();
+    let start = sys
+        .calls
+        .iter()
+        .position(|c| c.starts_with("colima start"))
+        .unwrap();
+    assert!(stop < start);
+    let saved = crate::vm::parse_config(&fs::read_to_string(&cfg).unwrap()).unwrap();
+    assert!(crate::vm::exposures(&saved, &h.root.join("home")).is_empty());
+
+    fs::write(
+        &cfg,
+        "cpu: 8\nmemory: 32\narch: aarch64\nvmType: qemu\nmounts: []\n",
+    )
+    .unwrap();
+    let mut sys = mac_sys(&h);
+    let (r, _) = measure_on(&h, &mut sys);
+    assert!(
+        r.screen().contains("colima delete -p omarchy"),
+        "{}",
+        r.screen()
+    );
+    assert!(starts(&sys).is_empty());
+}
+
+#[test]
+fn the_home_directory_visible_in_the_vm_is_refused_and_rosetta_gives_an_x86_64_lane() {
+    let h = mac_host(1);
+    fs::write(h.root.join("home-visible"), "").unwrap();
+    let (r, _) = measure_on(&h, &mut mac_sys(&h));
+    assert!(
+        r.screen()
+            .contains("is visible inside the engine's VM: remove the home mount"),
+        "{}",
+        r.screen()
+    );
+
+    // Rosetta 2 installed: the VM runs with --vz-rosetta and the amd64 smoke run turns the
+    // lane on, `via: rosetta`.
+    let h = mac_host(1);
+    fs::write(h.root.join("rosetta"), "").unwrap();
+    let mut sys = mac_sys(&h);
+    let (r, ready) = measure_on(&h, &mut sys);
+    assert!(r.ok(), "{}", r.screen());
+    assert!(starts(&sys)[0].ends_with("--vz-rosetta=true"));
+    let ready = ready.unwrap();
+    let lanes = serde_json::to_value(ready.capacity.file("t").lanes).unwrap();
+    assert_eq!(
+        lanes,
+        serde_json::json!([{"arch": "aarch64", "mode": "native"}, {"arch": "x86_64", "mode": "emulated", "via": "rosetta"}])
+    );
+    assert!(
+        r.screen().contains("the x86_64 lane through rosetta"),
+        "{}",
+        r.screen()
+    );
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(log.contains("--platform linux/amd64"), "{log}");
+    // A smoke run that fails leaves the lane off, with a warning; nothing else blocks.
+    let h = mac_host(1);
+    fs::write(h.root.join("rosetta"), "").unwrap();
+    fs::write(h.root.join("no-rosetta"), "").unwrap();
+    let (r, ready) = measure_on(&h, &mut mac_sys(&h));
+    assert!(
+        r.ok() && r.screen().contains("no x86_64 lane through Rosetta"),
+        "{}",
+        r.screen()
+    );
+    assert!(ready.unwrap().capacity.emulated().is_empty());
+}
+
+#[test]
+fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_dedicated() {
+    let mut h = mac_host(1);
+    let dd = h.root.join("home/.docker/run");
+    fs::create_dir_all(&dd).unwrap();
+    let _l = std::os::unix::net::UnixListener::bind(dd.join("docker.sock")).unwrap();
+    let mut sys = Fake {
+        colima: false,
+        ..mac_sys(&h)
+    };
+    let (r, _) = measure_on(&h, &mut sys);
+    let screen = r.screen();
+    assert!(
+        screen.contains("used because it is here, never installed"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("qualifies only with the home mount removed and --dedicated"),
+        "{screen}"
+    );
+    assert!(sys.calls.iter().all(|c| !c.starts_with("colima start")));
+    h.options.dedicated = true;
+    let (r, ready) = measure_on(
+        &h,
+        &mut Fake {
+            colima: false,
+            ..mac_sys(&h)
+        },
+    );
+    assert!(r.ok(), "{}", r.screen());
+    let ready = ready.unwrap();
+    assert_eq!(ready.capacity.isolation(), Isolation::VmShared);
+    let v = &ready.values;
+    assert_eq!(v.socket, dd.join("docker.sock"));
+    assert_eq!(v.socket_mount, Path::new("/var/run/docker.sock"));
+    assert_eq!(v.vm.as_ref().map(|x| x.runtime), Some("docker-desktop"));
+    // Its size is Docker Desktop's: not written into the envelope.
+    assert_eq!((v.max_cpus, v.max_mem_gb), (None, None));
+    let text = envelope::render(None, v, None).unwrap();
+    assert!(
+        text.contains("[vm]\nruntime = \"docker-desktop\"\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn on_a_mac_install_writes_the_launchagent_and_bootstraps_it_in_the_gui_domain() {
+    let h = mac_host(1);
+    let p = &h.options.places;
+    let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+    let mut sys = mac_sys(&h);
+    let mut out = Vec::new();
+    let done = apply(&h.options, &ready, &mut sys, &mut out)
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let said = String::from_utf8_lossy(&out).into_owned();
+    assert!(done.needs_person.is_empty(), "{:?}", done.needs_person);
+    let plist = p.launch_agents.join(launchd::PLIST);
+    let text = fs::read_to_string(&plist).unwrap();
+    assert!(text.contains(&format!(
+        "<string>{}/current/omarchy-agent</string>",
+        p.data.display()
+    )));
+    assert_eq!(
+        sys.calls
+            .iter()
+            .filter(|c| c.starts_with("launchctl"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        [
+            "launchctl print gui/501".to_owned(),
+            format!("launchctl print gui/501/{}", launchd::LABEL),
+            format!("launchctl bootstrap gui/501 {}", plist.display()),
+        ]
+    );
+    assert!(sys
+        .calls
+        .iter()
+        .all(|c| !c.starts_with("systemctl") && !c.starts_with("loginctl")));
+    assert!(p.logs.is_dir());
+    assert!(
+        said.contains("loaded (gui/501)") && said.contains("isolation vm"),
+        "{said}"
+    );
+    // The token and the capacity report in the set directory the VM mounts, outside ~.
+    let set = h.root.join("shared/set");
+    assert!(set.join("etc/dispatcher.env").exists() && set.join("run/capacity.json").exists());
+    let cap: serde_json::Value =
+        serde_json::from_slice(&fs::read(set.join("run/capacity.json")).unwrap()).unwrap();
+    assert_eq!(
+        (cap["isolation"].as_str(), cap["units"].as_u64()),
+        (Some("vm"), Some(7))
+    );
+    let cfg = crate::run::config::Config::load(&p.data.join("agent.toml"), files::euid()).unwrap();
+    assert_eq!(cfg.set_dir, set);
+    assert!(cfg.vm.is_some());
+
+    // A bootstrap that fails although there is a GUI login: the line to run in Terminal.
+    let ready = ready_to_enroll(&h, r#"{"status":"active","token":"held"}"#);
+    let mut sys = Fake {
+        bootstrap_fails: true,
+        ..mac_sys(&h)
+    };
+    let done = apply(&h.options, &ready, &mut sys, &mut Vec::new())
+        .map_err(|e| e.to_string())
+        .unwrap();
+    assert!(
+        done.needs_person[0].contains(&format!(
+            "in Terminal at the Mac: launchctl bootstrap gui/501 {}",
+            plist.display()
+        )),
+        "{:?}",
+        done.needs_person
+    );
+
+    // Uninstall: the agent booted out, the plist gone, the VM started for the containers
+    // and stopped after, the set directory emptied but kept for the VM's mount.
+    let mut sys = Fake {
+        loaded: true,
+        ..mac_sys(&h)
+    };
+    let mut out = Vec::new();
+    uninstall(p, &mut sys, &mut out).unwrap();
+    assert!(!plist.exists());
+    assert!(sys
+        .calls
+        .contains(&format!("launchctl bootout gui/501/{}", launchd::LABEL)));
+    assert!(
+        sys.calls
+            .contains(&"colima stop --profile omarchy".to_owned()),
+        "{:?}",
+        sys.calls
+    );
+    assert!(set.is_dir() && fs::read_dir(&set).unwrap().next().is_none());
+    // Over SSH with no GUI login, uninstall stops before removing anything.
+    let mut sys = Fake {
+        gui: false,
+        ..mac_sys(&h)
+    };
+    let e = uninstall(p, &mut sys, &mut Vec::new()).unwrap_err();
+    assert!(e.contains("run uninstall from Terminal"), "{e}");
+}
+
+#[test]
+fn the_launchagent_plist_has_every_key_the_design_names() {
+    let text = launchd::render(
+        Path::new("/Users/m/.local/share/omarchy-agent"),
+        Path::new("/Users/m"),
+        Path::new("/Users/m/Library/Logs/omarchy-agent"),
+        &[("COLIMA_HOME", "/Users/m/colima & co".into())],
+    )
+    .unwrap();
+    for want in [
+        "<key>Label</key>\n  <string>org.omarchy-pool.agent</string>",
+        "<string>/Users/m/.local/share/omarchy-agent/current/omarchy-agent</string>\n    <string>run</string>\n    <string>--data-dir</string>\n    <string>/Users/m/.local/share/omarchy-agent</string>",
+        "<key>RunAtLoad</key>\n  <true/>",
+        "<key>KeepAlive</key>\n  <true/>",
+        "<key>ThrottleInterval</key>\n  <integer>10</integer>",
+        "<key>ProcessType</key>\n  <string>Background</string>",
+        "<key>Umask</key>\n  <integer>63</integer>",
+        "<key>PATH</key>\n    <string>/opt/homebrew/bin:",
+        "<key>HOME</key>\n    <string>/Users/m</string>",
+        "<key>COLIMA_HOME</key>\n    <string>/Users/m/colima &amp; co</string>",
+        "<key>StandardErrorPath</key>\n  <string>/Users/m/Library/Logs/omarchy-agent/agent.log</string>",
+    ] {
+        assert!(text.contains(want), "{want}:\n{text}");
+    }
+    assert_eq!(0o077, 63);
+    assert!(launchd::render(Path::new("/a\nb"), Path::new("/h"), Path::new("/l"), &[]).is_err());
+    // A macOS runner checks it with the system's own parser.
+    #[cfg(target_os = "macos")]
+    {
+        let dir = tempdir();
+        let f = dir.join("agent.plist");
+        fs::write(&f, &text).unwrap();
+        let o = std::process::Command::new("plutil")
+            .arg("-lint")
+            .arg(&f)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    }
 }
 
 /// The egress probe and a legacy project on a real engine (`tests/agent-install.sh`; it

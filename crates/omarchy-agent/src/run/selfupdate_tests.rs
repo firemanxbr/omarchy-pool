@@ -610,6 +610,46 @@ fn the_pool_not_answering_does_not_keep_the_gate_shut() {
 }
 
 #[test]
+fn a_new_agent_that_hangs_is_ended_past_its_gates_deadline_and_its_next_start_rolls_it_back() {
+    // launchd restarts the agent only when it exits (#320): the progress watchdog ends a
+    // candidate whose loop hangs with its gate shut, and the start that follows flips back.
+    use crate::run::cli::watchdog_verdict;
+    let new = above(1);
+    let mut w = host_with(new, "0.1.0", &binary(true));
+    w.tick(200);
+    let data = w.agent.paths.data.clone();
+    let start = w.now;
+    assert_eq!(count_start(&data, new, start), Start::Run);
+    let p = super::candidate(&data, new).unwrap();
+    assert!(p.deadline > start && p.deadline <= start + DEADLINE_S);
+    // The loop moves (a download, a tick): nothing until the gate's deadline and its grace.
+    assert_eq!(
+        watchdog_verdict(p.deadline, p.deadline, Some(p.deadline)),
+        None
+    );
+    assert_eq!(
+        watchdog_verdict(p.deadline + 30, p.deadline + 30, Some(p.deadline)),
+        None
+    );
+    let why = watchdog_verdict(p.deadline + 31, p.deadline + 31, Some(p.deadline)).unwrap();
+    assert!(
+        why.contains("health gate is still shut 31 s past its deadline"),
+        "{why}"
+    );
+    // Without a gate: fifteen minutes without progress, as before.
+    assert_eq!(watchdog_verdict(start + 900, start, None), None);
+    assert!(watchdog_verdict(start + 901, start, None)
+        .unwrap()
+        .contains("no progress for 901 s"));
+    // launchd starts it again: past the deadline, `current` points back.
+    match count_start(&data, new, p.deadline + 41) {
+        Start::RolledBack(why) => assert!(why.contains("did not pass within 10 minutes"), "{why}"),
+        Start::Run => panic!("not rolled back"),
+    }
+    assert_eq!(link(&data.join("current")), format!("versions/{}", me()));
+}
+
+#[test]
 fn the_unit_is_type_notify_with_the_start_and_watchdog_timers() {
     let unit = include_str!("omarchy-agent.service");
     for line in [

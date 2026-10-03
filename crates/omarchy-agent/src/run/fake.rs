@@ -387,6 +387,18 @@ impl Driver for FakeDriver {
         self.0.borrow_mut().removed_images.push(image.to_owned());
         Answer::Yes(())
     }
+
+    fn tasks_running(&mut self) -> Answer<bool> {
+        let e = self.0.borrow();
+        if e.down {
+            return Answer::NoAnswer("down".into());
+        }
+        Answer::Yes(
+            e.containers
+                .iter()
+                .any(|c| c.project.is_empty() && c.status == "running"),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -689,6 +701,7 @@ impl World {
             latest: Release::parse(latest),
             update: update.map(str::to_owned),
             poll_s: Some(120),
+            date: None,
         }));
     }
 

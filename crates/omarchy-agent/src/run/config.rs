@@ -110,6 +110,21 @@ pub struct Config {
     /// What install detected behind the socket (`set.engine`, #317): the lint holds a
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
     pub engine: Engine,
+    /// A Mac's `omarchy` Colima VM (#320, `[vm] runtime = "colima"`), which the loop keeps
+    /// running, sized and on time. `None` on Linux, and for Docker Desktop's or `OrbStack`'s
+    /// VM, which the agent uses but never manages.
+    pub vm: Option<Vm>,
+}
+
+/// The `omarchy` VM as agent.toml describes it (#320, design v2 §19.2): its size is the
+/// envelope's `max_cpus` and `max_mem_gb` (install writes half the Mac's), its mounts the
+/// set's three directories (`crate::vm::mounts`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Vm {
+    pub cpus: u32,
+    pub mem_gb: u32,
+    pub disk_gb: u32,
+    pub rosetta: bool,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +136,15 @@ struct File {
     set: SetPart,
     #[serde(default)]
     envelope: EnvelopePart,
+    vm: Option<VmPart>,
+}
+
+#[derive(Deserialize)]
+struct VmPart {
+    runtime: String,
+    profile: Option<String>,
+    rosetta: Option<bool>,
+    disk_gb: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -139,6 +163,8 @@ struct SetPart {
 #[derive(Deserialize, Default)]
 struct EnvelopePart {
     task_subnets: Option<String>,
+    max_cpus: Option<u32>,
+    max_mem_gb: Option<u32>,
 }
 
 /// An id the pool hands out (host and worker ids): what `follow` accepts.
@@ -218,6 +244,35 @@ impl Config {
             None => socket_cli.clone(),
             some => need_path(some, "set.socket_mount")?,
         };
+        let vm = match f.vm {
+            None => None,
+            Some(v) => match v.runtime.as_str() {
+                "colima" => {
+                    if let Some(p) = v.profile.filter(|p| p != crate::vm::PROFILE) {
+                        return Err(format!(
+                            "agent.toml: vm.profile {p:?}: the agent's VM is the {} profile",
+                            crate::vm::PROFILE
+                        ));
+                    }
+                    let (Some(cpus), Some(mem_gb)) = (f.envelope.max_cpus, f.envelope.max_mem_gb)
+                    else {
+                        return Err("agent.toml: [vm] runtime colima takes its size from envelope.max_cpus and envelope.max_mem_gb (install writes them)".into());
+                    };
+                    Some(Vm {
+                        cpus,
+                        mem_gb,
+                        disk_gb: v.disk_gb.unwrap_or(crate::vm::DISK_GB),
+                        rosetta: v.rosetta.unwrap_or(false),
+                    })
+                }
+                "docker-desktop" | "orbstack" => None,
+                other => {
+                    return Err(format!(
+                    "agent.toml: vm.runtime {other:?} is none of colima, docker-desktop, orbstack"
+                ))
+                }
+            },
+        };
         Ok(Config {
             pool,
             host_id,
@@ -232,6 +287,7 @@ impl Config {
             task_subnets: f.envelope.task_subnets,
             envelope,
             engine,
+            vm,
         })
     }
 
@@ -336,6 +392,47 @@ max_units = 3
             let e = Config::parse(&text).unwrap_err();
             assert!(e.contains(why), "{why}: {e}");
         }
+    }
+
+    #[test]
+    fn a_macs_vm_takes_its_size_from_the_envelope() {
+        let mac = include_str!("../../tests/fixtures/lint/envelope/mac.toml");
+        let c = Config::parse(&format!("worker_id = \"w_1\"\n{mac}")).unwrap();
+        assert_eq!(
+            c.vm,
+            Some(Vm {
+                cpus: 8,
+                mem_gb: 32,
+                disk_gb: 100,
+                rosetta: true
+            })
+        );
+        assert_eq!(c.socket_mount, Path::new("/var/run/docker.sock"));
+        assert_eq!(c.envelope.vm_mounts.as_ref().map(Vec::len), Some(3));
+        for (from, to, why) in [
+            ("max_cpus     = 8\n", "", "takes its size"),
+            (
+                "profile = \"omarchy\"",
+                "profile = \"default\"",
+                "the omarchy profile",
+            ),
+            (
+                "runtime = \"colima\"",
+                "runtime = \"podman\"",
+                "none of colima",
+            ),
+        ] {
+            let e = Config::parse(&format!(
+                "worker_id = \"w_1\"\n{}",
+                mac.replacen(from, to, 1)
+            ))
+            .unwrap_err();
+            assert!(e.contains(why), "{why}: {e}");
+        }
+        // Docker Desktop's VM is used, never managed.
+        let shared = mac.replace("runtime = \"colima\"", "runtime = \"docker-desktop\"");
+        let c = Config::parse(&format!("worker_id = \"w_1\"\n{shared}")).unwrap();
+        assert_eq!(c.vm, None);
     }
 
     #[test]

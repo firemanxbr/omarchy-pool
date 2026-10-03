@@ -475,6 +475,16 @@ impl Driver for Compose {
         c.args(["image", "rm", image]);
         Self::call(Ok(c)).map_none()
     }
+
+    fn tasks_running(&mut self) -> Answer<bool> {
+        let mut c = self.docker();
+        c.args(["ps", "-q", "--filter", "label=org.omarchy-pool.task.role"]);
+        match Self::call(Ok(c)) {
+            Answer::Yes(o) => Answer::Yes(!o.stdout.trim().is_empty()),
+            Answer::NotFound => Answer::Yes(false),
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
 }
 
 /// Whether the probe is not in the image: 126/127 and "not found in $PATH". Podman says

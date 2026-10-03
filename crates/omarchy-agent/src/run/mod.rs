@@ -18,6 +18,11 @@
 //!   first, upward only, behind a health gate. A release's pinned docker and compose
 //!   roll forward only: they are switched before its round and not reverted with it;
 //! - the host state (#344) replaces `follow.latest` as the target.
+//!
+//! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
+//! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
+//! agent only when it exits, so the progress watchdog ([`cli`]) also ends a self-update's
+//! candidate that hangs past its health gate's deadline.
 
 pub mod config;
 pub mod state;
@@ -32,9 +37,10 @@ pub(crate) mod selfupdate;
 pub(crate) mod target;
 pub(crate) mod tools;
 pub(crate) mod trust;
+pub(crate) mod vm;
 
 mod agent;
-mod cli;
+pub(crate) mod cli;
 
 pub use cli::{logs, round, run, self_test, status};
 

@@ -36,6 +36,22 @@ impl Paths {
             set: data.join("sets").join("host"),
         }
     }
+    /// As installed: the set directory agent.toml names (a Mac's is outside the data
+    /// directory, #320), else the default one.
+    pub fn installed(data: &Path) -> Self {
+        let set = std::fs::read_to_string(data.join("agent.toml"))
+            .ok()
+            .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+            .and_then(|t| t.get("set")?.get("dir")?.as_str().map(PathBuf::from))
+            .filter(|d| crate::lint::is_plain_absolute(d));
+        match set {
+            Some(set) => Self {
+                state: data.join("state"),
+                set,
+            },
+            None => Self::under(data),
+        }
+    }
     pub fn capacity(&self) -> PathBuf {
         self.set.join("run").join("capacity.json")
     }
@@ -438,10 +454,19 @@ pub fn fetch_token(
 
 /// The machine's name as the pool takes it: a DNS label's characters, at most 63.
 fn hostname() -> String {
+    // A Mac has neither file and exports no HOSTNAME: uname's node name (#320).
     let raw = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .or_else(|_| std::fs::read_to_string("/etc/hostname"))
         .ok()
         .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| {
+            Some(
+                rustix::system::uname()
+                    .nodename()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        })
         .unwrap_or_default();
     let name: String = raw
         .trim()

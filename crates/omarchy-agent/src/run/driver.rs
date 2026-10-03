@@ -94,4 +94,8 @@ pub(crate) trait Driver {
     fn ready(&mut self, id: &str, http: &str) -> Answer<bool>;
     /// Removes an image no container uses; the engine refuses one in use.
     fn remove_image(&mut self, image: &str) -> Answer<()>;
+    /// Whether a task container runs on the engine (labelled `org.omarchy-pool.task.role`
+    /// by the dispatcher): what holds back a resize of a Mac's VM (#320), which would end
+    /// it. The driver lists it; it never acts on one.
+    fn tasks_running(&mut self) -> Answer<bool>;
 }

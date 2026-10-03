@@ -3,7 +3,7 @@ name = "omarchy-agent"
 description = "The host agent: verify a signed host bundle or rollback statement, lint the host set, and roll it out"
 # The agent's own semver (design v2 D17), bumped only when its code changes; never the
 # release tag, so an unchanged agent keeps its hash from release to release.
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -46,9 +46,9 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 signal-hook = { version = "0.3", default-features = false }
 # capacity/: statvfs on the work root and the engine's data root, and the page size;
 # install/ (#317): owner files written through openat with O_NOFOLLOW in a directory the
-# agent owns (its effective uid), and secrets typed on /dev/tty without echo. No unsafe
-# code here.
-rustix = { version = "1", default-features = false, features = ["std", "fs", "param", "process", "termios"] }
+# agent owns (its effective uid), and secrets typed on /dev/tty without echo; enroll/: the
+# host name from uname on a Mac, which has no /proc (#320). No unsafe code here.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "param", "process", "system", "termios"] }
 
 [dev-dependencies]
 rcgen = "0.14"

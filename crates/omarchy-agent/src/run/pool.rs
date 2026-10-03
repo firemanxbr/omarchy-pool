@@ -32,6 +32,9 @@ pub(crate) struct Follow {
     pub update: Option<String>,
     /// How often the pool asks to be polled, in seconds.
     pub poll_s: Option<i64>,
+    /// The answer's `Date` header, Unix seconds: the pool's clock, which a Mac's VM is held
+    /// to after a wake (#320).
+    pub date: Option<i64>,
 }
 
 /// A signed rollback statement as the pool relays it: the exact signed bytes and the
@@ -87,6 +90,7 @@ pub(crate) fn parse_follow(body: &[u8], worker_id: &str) -> Result<Follow, Strin
         latest,
         update,
         poll_s: raw.poll_s,
+        date: None,
     })
 }
 
@@ -156,6 +160,20 @@ impl Https {
     }
 
     fn get(&self, agent: &ureq::Agent, url: &str, max: u64) -> Net<(u16, Vec<u8>)> {
+        match self.get_dated(agent, url, max) {
+            Net::Ok((s, b, _)) => Net::Ok((s, b)),
+            Net::NoAnswer(e) => Net::NoAnswer(e),
+            Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
+    }
+
+    /// [`Https::get`], with the answer's `Date` header read.
+    fn get_dated(
+        &self,
+        agent: &ureq::Agent,
+        url: &str,
+        max: u64,
+    ) -> Net<(u16, Vec<u8>, Option<i64>)> {
         let mut res = match agent.get(url).call() {
             Ok(r) => r,
             Err(e) => return Net::NoAnswer(e.to_string()),
@@ -164,12 +182,17 @@ impl Https {
         if let Net::Unauthorized(s) = classify(status) {
             return Net::Unauthorized(s);
         }
+        let date = res
+            .headers()
+            .get("date")
+            .and_then(|v| v.to_str().ok())
+            .and_then(crate::vm::parse_http_date);
         let mut reader = res.body_mut().with_config().limit(max).reader();
         let mut body = Vec::new();
         let mut chunk = vec![0u8; 64 << 10];
         loop {
             match reader.read(&mut chunk) {
-                Ok(0) => return Net::Ok((status, body)),
+                Ok(0) => return Net::Ok((status, body, date)),
                 Ok(n) => body.extend_from_slice(&chunk[..n]),
                 Err(e) => return Net::NoAnswer(format!("HTTP {status}: {e}")),
             }
@@ -195,10 +218,14 @@ impl Https {
 impl Pool for Https {
     fn follow(&mut self, worker_id: &str) -> Net<Follow> {
         let url = format!("{}/api/v1/factory/follow?ids={worker_id}", self.origin);
-        match self.get_ok(&self.agent, &url, FOLLOW_MAX) {
-            Net::Ok(body) => match parse_follow(&body, worker_id) {
-                Ok(f) => Net::Ok(f),
-                Err(e) => Net::NoAnswer(e),
+        match self.get_dated(&self.agent, &url, FOLLOW_MAX) {
+            Net::Ok((s, body, date)) => match classify(s) {
+                Net::Ok(()) => match parse_follow(&body, worker_id) {
+                    Ok(f) => Net::Ok(Follow { date, ..f }),
+                    Err(e) => Net::NoAnswer(e),
+                },
+                Net::Unauthorized(s) => Net::Unauthorized(s),
+                Net::NoAnswer(e) => Net::NoAnswer(e),
             },
             Net::NoAnswer(e) => Net::NoAnswer(e),
             Net::Unauthorized(s) => Net::Unauthorized(s),

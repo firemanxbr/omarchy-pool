@@ -94,6 +94,10 @@ pub(crate) struct Agent {
     pub(super) retry: Option<(Version, i64)>,
     /// The applied release whose agent was checked and needs no update (once per start).
     pub(super) upward_checked: Option<Release>,
+    /// A Mac's `omarchy` VM (#320), kept running, sized and on time.
+    pub vm: Option<super::vm::Keeper>,
+    /// The last `follow`'s `Date` and when it came (the Mac's clock): the VM's is held to it.
+    pool_date: Option<(i64, i64)>,
 }
 
 enum Fetched {
@@ -143,6 +147,8 @@ impl Agent {
             gate_next: 0,
             retry: None,
             upward_checked: None,
+            vm: None,
+            pool_date: None,
         }
     }
 
@@ -249,12 +255,19 @@ impl Agent {
         // A new agent touches nothing until its health gate passed; once a self-update
         // swapped `current`, the state is saved and the agent exits before anything
         // else (#316).
+        let asks = self
+            .vm
+            .as_mut()
+            .map(|k| k.before_poll(now, &self.journal))
+            .unwrap_or_default();
         if self.gate.is_some() {
+            self.keep_vm(now, true);
             self.gate_step(now);
         } else if self.exit.is_none() {
-            if round_now || now >= self.state.poll.next_at {
+            if round_now || asks.poll_now || now >= self.state.poll.next_at {
                 self.poll(now, round_now);
             }
+            self.keep_vm(now, false);
             if self.state.rollout.step == Step::Idle && self.exit.is_none() {
                 self.drift(now);
             }
@@ -267,6 +280,21 @@ impl Agent {
             self.saved = Some(self.state.clone());
         }
         Ok(())
+    }
+
+    /// A Mac's VM, one step: started when it is not running, restarted when it differs
+    /// from agent.toml (a size or mount change only while no task runs), its clock held to
+    /// the pool's (#320).
+    fn keep_vm(&mut self, now: i64, gate: bool) {
+        let Some(k) = self.vm.as_mut() else {
+            return;
+        };
+        let driver = &mut self.driver;
+        let mut tasks = || match driver.as_deref_mut().map(Driver::tasks_running) {
+            Some(Answer::Yes(b)) => Some(b),
+            _ => None,
+        };
+        k.step(now, self.pool_date, &mut tasks, gate, &self.journal);
     }
 
     fn step(&mut self, now: i64) -> Result<(), String> {
@@ -343,6 +371,9 @@ impl Agent {
         p.last_at = now;
         match answer {
             Net::Ok(f) => {
+                if let Some(d) = f.date {
+                    self.pool_date = Some((d, super::now()));
+                }
                 p.last = "ok".into();
                 p.backoff_s = 0;
                 let every = f.poll_s.unwrap_or(POLL_S).clamp(60, MAX_BACKOFF_S);

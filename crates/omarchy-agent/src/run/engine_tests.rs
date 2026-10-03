@@ -165,6 +165,7 @@ impl Host {
             latest: Release::parse(latest),
             update: None,
             poll_s: Some(60),
+            date: None,
         }));
     }
 

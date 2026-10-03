@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::{DiskFree, Isolation, Limits};
+use super::{DiskFree, Isolation, Lane, Limits, VmKind};
 
 const GB: u64 = 1 << 30;
 /// One engine call (design v2 §10: no call blocks longer than this).
@@ -62,6 +62,10 @@ pub struct Facts {
     pub(super) page_size: u64,
     pub(super) disk_free: (u64, u64),
     pub(super) limits: Limits,
+    /// The VM the engine runs in on macOS (#320); `None` on Linux.
+    pub(super) vm: Option<VmKind>,
+    /// Emulated lanes a smoke run turned on (a Mac's Rosetta lane, #320).
+    pub(super) emulated: Vec<Lane>,
 }
 
 impl Facts {
@@ -107,7 +111,17 @@ impl Facts {
         &self.engine.arch
     }
 
+    /// The level the host page shows (design v2 §19.3): the VM on macOS, else the engine's.
     pub fn isolation(&self) -> Isolation {
+        match self.vm {
+            Some(VmKind::Dedicated) => Isolation::Vm,
+            Some(VmKind::Shared) => Isolation::VmShared,
+            None => self.inner_isolation(),
+        }
+    }
+
+    /// The engine's own level: inside the VM on macOS (`vm`, inside `root`).
+    pub fn inner_isolation(&self) -> Isolation {
         if self.engine.userns {
             Isolation::Subuid
         } else if self.engine.rootless {
@@ -115,6 +129,40 @@ impl Facts {
         } else {
             Isolation::Root
         }
+    }
+
+    /// The facts of an engine install found in a VM on macOS (#320): its level is the VM's.
+    #[must_use]
+    pub fn in_vm(mut self, kind: VmKind) -> Self {
+        self.vm = Some(kind);
+        self
+    }
+
+    /// An emulated lane `via` something, once its smoke run passed ([`rosetta_lane`]).
+    #[must_use]
+    pub fn with_lane(mut self, arch: &str, via: &'static str) -> Self {
+        if arch != self.arch() && !self.emulated.iter().any(|l| l.arch == arch) {
+            self.emulated.push(Lane {
+                arch: arch.to_owned(),
+                mode: "emulated",
+                via: Some(via),
+            });
+        }
+        self
+    }
+
+    pub fn vm(&self) -> Option<VmKind> {
+        self.vm
+    }
+
+    /// `MemAvailable` from the VM's own `/proc/meminfo` on macOS (M7: the agent reads it
+    /// inside the `omarchy` profile), where this process has none to read.
+    #[must_use]
+    pub fn with_meminfo(mut self, meminfo: &str) -> Self {
+        if let Some(m) = mem_available(meminfo) {
+            self.mem_available = Some(m);
+        }
+        self
     }
 
     pub fn limits(&self) -> Limits {
@@ -259,7 +307,33 @@ pub fn detect(p: &Probe<'_>) -> Result<Facts, String> {
         page_size: page_size.unwrap_or(rustix::param::page_size() as u64),
         disk_free: (work, engine_free),
         limits,
+        vm: None,
+        emulated: Vec::new(),
     })
+}
+
+/// The smoke run of an `x86_64` lane through Rosetta (design v2 §7.5 step 2, §19.2; #320):
+/// the release's `x86_64` build image, by digest, starts `/usr/bin/true` and answers
+/// `pacman --version` on `linux/amd64`. In a Colima VM started with `--vz-rosetta` the
+/// engine runs it through Rosetta, on the VM's 4K pages.
+pub fn rosetta_lane(p: &Probe<'_>, image_x86_64: &str) -> Result<(), String> {
+    let mut c = p.docker();
+    c.args([
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--platform",
+        "linux/amd64",
+        "--entrypoint",
+        "sh",
+        image_x86_64,
+        "-c",
+        "/usr/bin/true && pacman --version >/dev/null",
+    ]);
+    run(c, PROBE_TIMEOUT)
+        .map(drop)
+        .map_err(|e| format!("the x86_64 smoke run: {e}"))
 }
 
 /// `docker info` (the driver's `capacity()` once the driver trait exists, #315).
@@ -371,7 +445,7 @@ fn cpu_max(s: &str) -> Option<u32> {
     (period > 0).then(|| gb(quota / period))
 }
 
-pub(super) fn mem_available(meminfo: &str) -> Option<u64> {
+pub(crate) fn mem_available(meminfo: &str) -> Option<u64> {
     let line = meminfo.lines().find(|l| l.starts_with("MemAvailable:"))?;
     let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kb * 1024)
@@ -496,6 +570,8 @@ impl Facts {
             page_size: 4096,
             disk_free: (disk_free_gb.0 * GB, disk_free_gb.1 * GB),
             limits,
+            vm: None,
+            emulated: Vec::new(),
         }
     }
 }

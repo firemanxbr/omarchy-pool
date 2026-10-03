@@ -26,6 +26,9 @@ const TICK: Duration = Duration::from_secs(3);
 /// The watchdog aborts a loop that made no progress for this long. A download moves the
 /// progress on as its bytes arrive.
 const WATCHDOG_S: i64 = 15 * 60;
+/// A self-update's candidate is ended this long after its health gate's deadline, when
+/// its loop did not give up by itself (it hangs): the start that follows rolls it back.
+const GATE_GRACE_S: i64 = 30;
 /// How often the watchdog thread looks; it pings systemd's watchdog (`WatchdogSec=300`)
 /// only when the loop made progress since its last look.
 const WATCHDOG_LOOK: Duration = Duration::from_secs(10);
@@ -70,7 +73,7 @@ pub fn run(data: Option<&str>) -> u8 {
         }
     }
     let progress = Arc::new(AtomicI64::new(super::now()));
-    watchdog(Arc::clone(&progress));
+    watchdog(Arc::clone(&progress), data_dir(data).ok(), me);
     match setup(data, &progress) {
         Ok((mut agent, usr1)) => {
             fault("hang-before-ready");
@@ -102,16 +105,22 @@ pub fn run(data: Option<&str>) -> u8 {
 
 /// The progress watchdog (both OSes): aborts a loop that made no progress for
 /// [`WATCHDOG_S`], so the service manager starts the agent again (a counted start
-/// during a self-update), and pings systemd's watchdog while the loop moves.
-fn watchdog(progress: Arc<AtomicI64>) {
+/// during a self-update), and pings systemd's watchdog while the loop moves. launchd
+/// restarts only on exit and has no watchdog of its own (#320): a self-update's candidate
+/// whose loop hangs past its health gate's deadline is aborted too, and the next start
+/// points `current` back.
+fn watchdog(progress: Arc<AtomicI64>, data: Option<std::path::PathBuf>, me: version::Version) {
     thread::spawn(move || {
         let mut pinged = progress.load(Ordering::Relaxed);
         loop {
             thread::sleep(WATCHDOG_LOOK);
             let seen = progress.load(Ordering::Relaxed);
-            let idle = super::now() - seen;
-            if idle > WATCHDOG_S {
-                eprintln!("omarchy-agent: the loop made no progress for {idle} s; aborting so the service manager restarts it");
+            let gate = data
+                .as_deref()
+                .and_then(|d| selfupdate::candidate(d, me))
+                .map(|p| p.deadline);
+            if let Some(why) = watchdog_verdict(super::now(), seen, gate) {
+                eprintln!("omarchy-agent: {why}; aborting so the service manager restarts it");
                 std::process::abort();
             }
             if seen != pinged {
@@ -120,6 +129,26 @@ fn watchdog(progress: Arc<AtomicI64>) {
             }
         }
     });
+}
+
+/// Why the watchdog ends the loop now, if it does: no progress for [`WATCHDOG_S`], or a
+/// self-update's health gate whose deadline passed [`GATE_GRACE_S`] ago with the gate
+/// still shut (a running loop gives up by itself at the deadline; one that hangs does not).
+pub(crate) fn watchdog_verdict(
+    now: i64,
+    progress: i64,
+    gate_deadline: Option<i64>,
+) -> Option<String> {
+    let idle = now - progress;
+    if idle > WATCHDOG_S {
+        return Some(format!("the loop made no progress for {idle} s"));
+    }
+    gate_deadline.filter(|d| now > d + GATE_GRACE_S).map(|d| {
+        format!(
+            "this agent's health gate is still shut {} s past its deadline",
+            now - d
+        )
+    })
 }
 
 fn setup(
@@ -163,7 +192,9 @@ fn setup(
     signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&usr1))
         .map_err(|e| format!("SIGUSR1: {e}"))?;
     let pool = Box::new(Https::new(&cfg.pool).with_progress(Arc::clone(progress)));
+    let vm = cfg.vm.as_ref().map(|v| keeper(&cfg, v, &paths));
     let mut agent = Agent::new(cfg, paths, state, pool, Box::new(Sigstore), Drivers::Pinned);
+    agent.vm = vm;
     agent.progress = Some(Arc::clone(progress));
     agent.exe = std::env::current_exe().ok();
     agent.resume(super::now());
@@ -174,6 +205,32 @@ fn setup(
     );
     agent.settle(super::now())?;
     Ok((agent, usr1))
+}
+
+/// A Mac's VM keeper (#320): the `omarchy` profile as agent.toml describes it.
+fn keeper(cfg: &Config, v: &super::config::Vm, paths: &Paths) -> super::vm::Keeper {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let colima_home = crate::vm::colima_home(&home, std::env::var_os("COLIMA_HOME").as_deref());
+    let want = crate::vm::Want {
+        size: crate::vm::Size {
+            cpus: v.cpus,
+            mem_gb: v.mem_gb,
+        },
+        disk_gb: v.disk_gb,
+        mounts: crate::vm::mounts(&cfg.work_root, &cfg.secrets_dir, &cfg.set_dir),
+        rosetta: v.rosetta,
+    };
+    super::vm::Keeper::new(
+        Box::new(super::vm::Cli {
+            colima_home,
+            start: None,
+        }),
+        want,
+        &home,
+        &paths.data,
+    )
 }
 
 fn loop_forever(agent: &mut Agent, usr1: &AtomicBool, progress: &AtomicI64) -> u8 {

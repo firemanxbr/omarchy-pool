@@ -12,15 +12,17 @@
 //!     <set dir>/run/capacity.json rewritten when it changed)
 //! omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
 //!     [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
-//!     [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated] [--legacy <project>]
-//!     [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>]
-//!     [--wait-minutes <n>] [--yes]
+//!     [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
+//!     [--legacy <project>] [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>]
+//!     [--max-mem-gb <n>] [--no-rosetta] [--wait-minutes <n>] [--yes]
 //!     (#317, what install.sh runs once the binary is in place: preflight, the envelope,
-//!     the enrollment below, agent.toml, the agent keys, the unit and linger, the service)
+//!     the enrollment below, agent.toml, the agent keys, the unit and linger, the service;
+//!     on a Mac, #320, the omarchy Colima VM and the LaunchAgent)
 //! omarchy-agent preflight <the same options>
 //!     (one screen of everything that stops an install; changes nothing)
 //! omarchy-agent uninstall [--data-dir <dir>]
-//!     (the unit, the bundle, task containers and sidecars; never the legacy project)
+//!     (the unit or the LaunchAgent, the bundle, task containers and sidecars; never the
+//!     legacy project; on a Mac the omarchy VM is stopped, not deleted)
 //! omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
 //!     (#321: the one-time token from OMARCHY_ENROLL — never an argument — the host key,
 //!     the owner's Confirm, the host worker token in sets/host/etc/dispatcher.env)
@@ -63,9 +65,9 @@ const USAGE: &str = "usage:
       [--probe-image <image>] [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
   omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
       [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
-      [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated] [--legacy <project>]
-      [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>]
-      [--wait-minutes <n>] [--yes]
+      [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
+      [--legacy <project>] [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>]
+      [--max-mem-gb <n>] [--no-rosetta] [--wait-minutes <n>] [--yes]
   omarchy-agent preflight <install's options>
   omarchy-agent uninstall [--data-dir <dir>]
   omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
@@ -292,7 +294,7 @@ fn enroll_options(args: &[String]) -> Result<Options, String> {
     };
     Ok(Options {
         pool: get("--pool").map(str::to_owned),
-        paths: Paths::under(&run::config::data_dir(get("--data-dir"))?),
+        paths: Paths::installed(&run::config::data_dir(get("--data-dir"))?),
         // From the environment only: an argument would show in `ps` (design v2 §13.1).
         token: std::env::var("OMARCHY_ENROLL")
             .ok()
@@ -332,7 +334,7 @@ fn switches(args: &[String], known: &[&'static str]) -> (Vec<String>, Vec<&'stat
 }
 
 fn install_options(args: &[String]) -> Result<install::Options, String> {
-    let (args, on) = switches(args, &["--yes", "--dedicated"]);
+    let (args, on) = switches(args, &["--yes", "--dedicated", "--no-rosetta"]);
     let mut rest = Vec::new();
     let f = flags(
         &args,
@@ -345,6 +347,7 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
             "--wait-minutes",
             "--work-root",
             "--secrets-dir",
+            "--set-dir",
             "--socket",
             "--task-subnets",
             "--legacy",
@@ -386,7 +389,9 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
         pool: get("--pool").map(str::to_owned),
         work_root: path("--work-root"),
         secrets_dir: path("--secrets-dir"),
+        set_dir: path("--set-dir"),
         socket: path("--socket"),
+        rosetta: !on.contains(&"--no-rosetta"),
         task_subnets: get("--task-subnets").map(str::to_owned),
         dedicated: on.contains(&"--dedicated"),
         legacy: get("--legacy").map(str::to_owned),
@@ -439,6 +444,45 @@ fn install_failure(e: &install::Failure) -> u8 {
     }
 }
 
+/// A Mac's engine (#320): the VM's level, the omarchy VM's own `MemAvailable` (M7), and
+/// the `x86_64` lane through Rosetta once its smoke run passed.
+fn mac_facts(
+    facts: capacity::Facts,
+    runtime: &str,
+    rosetta: bool,
+    how: &probe::Probe<'_>,
+    manifest: Option<&omarchy_agent::manifest::Manifest>,
+) -> capacity::Facts {
+    use capacity::VmKind;
+    if runtime != "colima" {
+        return facts.in_vm(VmKind::Shared);
+    }
+    let mut facts = facts.in_vm(VmKind::Dedicated);
+    if let Ok(o) = std::process::Command::new("colima")
+        .args([
+            "ssh",
+            "--profile",
+            omarchy_agent::vm::PROFILE,
+            "--",
+            "cat",
+            "/proc/meminfo",
+        ])
+        .output()
+    {
+        facts = facts.with_meminfo(&String::from_utf8_lossy(&o.stdout));
+    }
+    let x86 = manifest
+        .and_then(|m| m.build_image("x86_64"))
+        .map(ToString::to_string);
+    if let (true, Some(img)) = (rosetta, x86) {
+        match probe::rosetta_lane(how, &img) {
+            Ok(()) => facts = facts.with_lane("x86_64", "rosetta"),
+            Err(e) => eprintln!("capacity: no x86_64 lane through Rosetta: {e}"),
+        }
+    }
+    facts
+}
+
 fn uninstall_cmd(args: &[String]) -> Result<u8, String> {
     let mut rest = Vec::new();
     let f = flags(args, &["--data-dir"], &mut rest)?;
@@ -475,7 +519,7 @@ fn token_cmd(args: &[String]) -> Result<u8, String> {
     let dir = run::config::data_dir(f.iter().find(|(k, _)| *k == "--data-dir").map(|(_, v)| *v))?;
     let o = Options {
         pool: None,
-        paths: Paths::under(&dir),
+        paths: Paths::installed(&dir),
         token: None,
         wait: Duration::ZERO,
         poll: Duration::ZERO,
@@ -553,6 +597,10 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
             eprintln!("capacity: {e}; nothing was changed");
             return Ok(REFUSED);
         }
+    };
+    let facts = match &toml.vm {
+        Some((runtime, rosetta)) => mac_facts(facts, runtime, *rosetta, &how, manifest.as_ref()),
+        None => facts,
     };
     let Some(manifest) = manifest else {
         println!("{}", facts.report());
