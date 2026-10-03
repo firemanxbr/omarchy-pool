@@ -269,13 +269,13 @@ pub(crate) fn engine(
         rosetta,
     };
     // Nothing is started while anything else blocks: the screen lists it all first.
-    if r.ok() && ensure_profile(o, sys, &want, r) {
+    if !r.ok() {
+        r.notes.push(format!(
+            "the {} VM was not started: what blocks comes first",
+            vm::PROFILE
+        ));
+    } else if ensure_profile(o, sys, &want, r) {
         found.socket = Some(colima_socket);
-    } else if r.ok() {
-        // ensure_profile said why.
-    } else {
-        r.notes
-            .push(format!("the {} VM was not started", vm::PROFILE));
     }
     found.want = Some(want);
     found
