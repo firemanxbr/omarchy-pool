@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use crate::dispatcher_env::{self, Envelope, Refresh, Rendered, Sources};
 use crate::manifest::{Manifest, Outer};
 use crate::statement::Statement;
 use crate::verify::{self, BundleOutcome, Rejection, StatementOutcome, VerifiedBundle};
@@ -32,6 +33,8 @@ const MAX_BACKOFF_S: i64 = 600;
 const UNAUTHORIZED_S: i64 = 3600;
 /// The safety timer: the running set is checked against `last-good/` at least this often.
 const DRIFT_S: i64 = 900;
+/// How often the host's own addresses are read again for `etc/dispatcher.env` (#371).
+pub(crate) const ADDRESSES_S: i64 = 60;
 
 /// The cryptographic check, pinned identities and parsing (`crate::verify`).
 pub(crate) trait Verifier {
@@ -94,6 +97,30 @@ pub(crate) struct Agent {
     pub(super) retry: Option<(Version, i64)>,
     /// The applied release whose agent was checked and needs no update (once per start).
     pub(super) upward_checked: Option<Release>,
+    /// `etc/dispatcher.env` rendered again from the host and agent.toml (#371); `None`
+    /// leaves the file alone (the tests that play other parts).
+    pub host_env: Option<HostEnv>,
+}
+
+/// The run loop's half of `etc/dispatcher.env` (#371): at its start, then every
+/// [`ADDRESSES_S`], the host's own addresses are read again and the file rendered with
+/// them and agent.toml's secrets directory and budget, its token kept. A file that
+/// changed starts a round (an input of the set), which recreates the dispatcher.
+pub(crate) struct HostEnv {
+    pub sources: Sources,
+    next_at: i64,
+    /// The last failure said, so a failure that lasts is said once.
+    failing: Option<String>,
+}
+
+impl HostEnv {
+    pub fn new(sources: Sources) -> Self {
+        Self {
+            sources,
+            next_at: 0,
+            failing: None,
+        }
+    }
 }
 
 enum Fetched {
@@ -143,6 +170,7 @@ impl Agent {
             gate_next: 0,
             retry: None,
             upward_checked: None,
+            host_env: None,
         }
     }
 
@@ -252,6 +280,7 @@ impl Agent {
         if self.gate.is_some() {
             self.gate_step(now);
         } else if self.exit.is_none() {
+            self.dispatcher_env(now);
             if round_now || now >= self.state.poll.next_at {
                 self.poll(now, round_now);
             }
@@ -714,6 +743,50 @@ impl Agent {
     fn start(&mut self, now: i64, target: Release, rollback: bool, why: &str) {
         self.journal.set_secrets(env_secrets(&self.cfg.set_dir));
         rollout::start(&mut self.state, &self.journal, now, target, rollback, why);
+    }
+
+    /// `etc/dispatcher.env` rendered again when it is time (#371): before the drift check,
+    /// so a file that changed starts its round in the same tick.
+    fn dispatcher_env(&mut self, now: i64) {
+        let Some(h) = self.host_env.as_mut() else {
+            return;
+        };
+        if now < h.next_at {
+            return;
+        }
+        h.next_at = now + ADDRESSES_S;
+        let r = Rendered::now(
+            &h.sources,
+            &self.paths.data,
+            Some(Envelope {
+                secrets_dir: self.cfg.secrets_dir.clone(),
+                budget: self.cfg.agent_budget,
+            }),
+        );
+        let path = dispatcher_env::path_in(&self.cfg.set_dir);
+        match dispatcher_env::refresh(&path, &r) {
+            Ok(done) => {
+                h.failing = None;
+                if done == Refresh::Written {
+                    let addresses: Vec<String> =
+                        r.addresses.iter().map(ToString::to_string).collect();
+                    self.journal.write(
+                        now,
+                        "dispatcher-env",
+                        serde_json::json!({"addresses": addresses, "detail": "etc/dispatcher.env rendered again (the host's addresses or agent.toml changed), its token kept: the next round recreates the dispatcher"}),
+                    );
+                }
+            }
+            Err(e) if h.failing.as_ref() != Some(&e) => {
+                self.journal.write(
+                    now,
+                    "dispatcher-env",
+                    serde_json::json!({"detail": format!("etc/dispatcher.env was not rendered again: {e}; tried again every minute")}),
+                );
+                h.failing = Some(e);
+            }
+            Err(_) => {}
+        }
     }
 
     /// When idle: a changed input (the override, `etc/`, `run/capacity.json`) starts a

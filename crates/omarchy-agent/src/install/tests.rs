@@ -676,6 +676,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
             linger_dir: root.join("linger"),
             routes: root.join("routes"),
             binfmt: root.join("binfmt"),
+            proc_net: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home"),
         },
         source: Some(Source::Files(
             root.join("bundle.tar.gz"),
@@ -1073,6 +1074,91 @@ fn nothing_can_claim_before_the_owner_confirms_and_the_ids_land_in_agent_toml_af
         toml::from_str(&fs::read_to_string(p.data.join("agent.toml")).unwrap()).unwrap();
     assert_eq!(t["envelope"]["max_units"].as_integer(), Some(2));
     assert_eq!(t["host_id"].as_str(), Some("h_0123456789"));
+}
+
+#[test]
+fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_beside_the_token() {
+    // The probe task saw the pool see it come from 198.51.100.20 (#371).
+    let h = host(INFO, &format!("{EGRESS_OK}\negress seen 198.51.100.20"));
+    let p = &h.options.places;
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(
+        r.screen()
+            .contains("egress: tasks leave from 198.51.100.20, which every task's egress refuses"),
+        "{}",
+        r.screen()
+    );
+    // Asked of the release's signed pool, at its edge.
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(
+        log.contains(
+            "public github.com 443 seen https://omarchy-pool.example.org/cdn-cgi/trace 443"
+        ),
+        "{log}"
+    );
+    let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+    assert_eq!(ready.public, Some("198.51.100.20".parse().unwrap()));
+    let mut out = Vec::new();
+    apply(&h.options, &ready, &mut Fake::default(), &mut out)
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let env = p.set_dir().join("etc/dispatcher.env");
+    let text = fs::read_to_string(&env).unwrap();
+    let secrets = h.root.join("secrets");
+    for want in [
+        format!("\nOMARCHY_WORKER_TOKEN=omw_{}\n", "0f".repeat(24)),
+        "\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,198.51.100.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n".into(),
+        format!("\nOMARCHY_SECRETS_DIR={}\n", secrets.display()),
+    ] {
+        assert!(text.contains(&want), "{want:?} in:\n{text}");
+    }
+    // No agent_budget in the envelope: the dispatcher's defaults.
+    assert!(!text.contains("OMARCHY_AGENT_"), "{text}");
+    assert_eq!(mode(&env), 0o600);
+    let said = String::from_utf8_lossy(&out).into_owned();
+    assert!(
+        said.contains("dispatcher.env (0600): the worker token, OMARCHY_HOST_ADDRESSES=10.8.0.2,"),
+        "{said}"
+    );
+    let seen: crate::dispatcher_env::addresses::Seen =
+        serde_json::from_slice(&fs::read(p.data.join("egress.json")).unwrap()).unwrap();
+    assert_eq!(seen.public.to_string(), "198.51.100.20");
+
+    // The owner sets a budget; re-running install keeps the token and writes it.
+    let edited = fs::read_to_string(p.data.join("agent.toml"))
+        .unwrap()
+        .replace(
+            "[envelope]\n",
+            "[envelope]\nagent_budget = { calls_per_task = 50, minutes_per_task = 30 }\n",
+        );
+    fs::write(p.data.join("agent.toml"), edited).unwrap();
+    let ready = ready_to_enroll(&h, r#"{"status":"active","token":"held"}"#);
+    apply(&h.options, &ready, &mut Fake::default(), &mut Vec::new())
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let again = fs::read_to_string(&env).unwrap();
+    assert_eq!(
+        again,
+        text.replace(
+            &format!("OMARCHY_SECRETS_DIR={}\n", secrets.display()),
+            &format!(
+                "OMARCHY_SECRETS_DIR={}\nOMARCHY_AGENT_CALLS_PER_TASK=50\nOMARCHY_AGENT_MINUTES_PER_TASK=30\n",
+                secrets.display()
+            )
+        )
+    );
+
+    // A secrets directory the dispatcher would refuse is a preflight blocker.
+    let mut h = host(INFO, EGRESS_OK);
+    h.options.secrets_dir = Some(h.root.join("my secrets"));
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    assert!(
+        r.screen()
+            .contains("has a character the dispatcher refuses"),
+        "{}",
+        r.screen()
+    );
 }
 
 #[test]
@@ -1490,52 +1576,63 @@ mod engine_tests {
                 &image,
                 "sh",
                 "-c",
-                "mkdir -p /w && httpd -f -p 8080 -h /w",
+                // A stand-in for the pool's /cdn-cgi/trace too: the address it saw (#371).
+                "mkdir -p /w/cdn-cgi && printf 'fl=1\nip=203.0.113.9\nts=1\n' > /w/cdn-cgi/trace && httpd -f -p 8080 -h /w",
             ])
             .unwrap();
         let probe_on = |t: &egress::Targets| {
             // The probe gets its own network; joined to the target's by sharing it here.
+            let mut args = vec![
+                "run".to_owned(),
+                "--rm".into(),
+                "--network".into(),
+                target_net.clone(),
+                "--entrypoint".into(),
+                "sh".into(),
+                image.clone(),
+                "-c".into(),
+                egress::SCRIPT.into(),
+                "sh".into(),
+                t.forbidden[0].0.into(),
+                t.forbidden[0].1.clone(),
+                t.forbidden[0].2.to_string(),
+                "public".into(),
+                t.public.0.clone(),
+                t.public.1.to_string(),
+            ];
+            if let Some(url) = &t.seen {
+                args.extend(["seen".into(), url.clone(), "443".into()]);
+            }
             let out = d
-                .run(&[
-                    "run",
-                    "--rm",
-                    "--network",
-                    &target_net,
-                    "--entrypoint",
-                    "sh",
-                    &image,
-                    "-c",
-                    egress::SCRIPT,
-                    "sh",
-                    t.forbidden[0].0,
-                    &t.forbidden[0].1,
-                    &t.forbidden[0].2.to_string(),
-                    "public",
-                    &t.public.0,
-                    &t.public.1.to_string(),
-                ])
+                .run(&args.iter().map(String::as_str).collect::<Vec<_>>())
                 .unwrap();
-            egress::verdict(&out, t)
+            (egress::verdict(&out, t), egress::seen(&out))
         };
         let reach_lan = egress::Targets {
             forbidden: vec![("lan", "10.198.7.10".into(), 8080)],
             public: ("10.198.7.10".into(), 8080),
+            seen: None,
         };
-        let b = probe_on(&reach_lan);
+        let (b, _) = probe_on(&reach_lan);
         assert!(b.len() == 1 && b[0].contains("LAN address"), "{b:?}");
         // A closed port on it answers too: refused, not blocked.
         let closed = egress::Targets {
             forbidden: vec![("lan", "10.198.7.10".into(), 8081)],
             public: ("10.198.7.10".into(), 8080),
+            seen: None,
         };
-        let b = probe_on(&closed);
+        let (b, _) = probe_on(&closed);
         assert!(b.len() == 1 && b[0].contains("port 8081: refused"), "{b:?}");
         let only_public = egress::Targets {
             forbidden: vec![("metadata", "192.0.2.1".into(), 80)],
             public: ("10.198.7.10".into(), 8080),
+            seen: Some("http://10.198.7.10:8080/cdn-cgi/trace".into()),
         };
-        let b = probe_on(&only_public);
+        let (b, seen) = probe_on(&only_public);
         assert!(b.is_empty(), "{b:?}");
+        // The address the stand-in pool says it saw, through busybox's wget (the build
+        // image has curl).
+        assert_eq!(seen, Some("203.0.113.9".parse().unwrap()));
         // And the probe itself, on its own network: it is created and removed again, and
         // a network an interrupted probe left on its /28 is no reason to refuse.
         d.run(&[
@@ -1551,6 +1648,7 @@ mod engine_tests {
         let t = egress::Targets {
             forbidden: vec![("metadata", "192.0.2.1".into(), 80)],
             public: ("192.0.2.2".into(), 80),
+            seen: None,
         };
         let out = egress::probe(&d, &image, Cidr::parse("10.197.7.240/28").unwrap(), &t).unwrap();
         assert!(out.contains("egress metadata blocked"), "{out}");

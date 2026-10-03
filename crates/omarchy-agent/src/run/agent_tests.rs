@@ -3,6 +3,8 @@
 
 use std::fs;
 
+use crate::dispatcher_env::{Budget, Sources};
+use crate::run::agent::HostEnv;
 use crate::run::fake::{publish, relay_statement, rendered_compose, World, T0, TOKEN};
 use crate::run::pool::{Follow, Net};
 use crate::run::state::{Files, Phase, Step};
@@ -500,6 +502,91 @@ fn with_the_dispatcher_env_missing_the_dispatcher_is_held_and_the_reason_reporte
     w.round();
     assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
     assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
+}
+
+#[test]
+fn the_host_s_addresses_reach_dispatcher_env_and_a_change_recreates_the_dispatcher_with_the_token_kept(
+) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut w = World::running_v1();
+    // The host's interfaces, a copy of a fixture the test changes as the host would (#371).
+    let net = w.dir.join("net");
+    fs::create_dir_all(&net).unwrap();
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home");
+    for f in ["fib_trie", "if_inet6", "route"] {
+        fs::copy(fixture.join(f), net.join(f)).unwrap();
+    }
+    w.agent.host_env = Some(HostEnv::new(Sources {
+        proc_net: net.clone(),
+    }));
+    w.agent.cfg.agent_budget = Budget {
+        calls_per_day: Some(900),
+        ..Budget::default()
+    };
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let first = w.engine.borrow().dispatcher().unwrap().id.clone();
+
+    // At its start: rendered with the token kept, 0600, and a round recreates the dispatcher.
+    w.tick(3);
+    let text = fs::read_to_string(&env).unwrap();
+    for want in [
+        format!("\nOMARCHY_WORKER_TOKEN={TOKEN}\n"),
+        "\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n".into(),
+        format!("\nOMARCHY_SECRETS_DIR={}\nOMARCHY_AGENT_CALLS_PER_DAY=900\n", w.dir.join("secrets").display()),
+    ] {
+        assert!(text.contains(&want), "{want:?} in:\n{text}");
+    }
+    assert_eq!(
+        fs::metadata(&env).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        w.agent.state.rollout.why.contains("an input changed"),
+        "{:?}",
+        w.agent.state.rollout
+    );
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    let second = w.engine.borrow().dispatcher().unwrap().id.clone();
+    assert_ne!(first, second, "the dispatcher was recreated with the file");
+    assert!(
+        w.journal().contains("\"event\":\"dispatcher-env\""),
+        "{}",
+        w.journal()
+    );
+
+    // Nothing changed: read again every minute, never written, no round.
+    for _ in 0..3 {
+        w.tick(61);
+    }
+    assert_eq!(w.step(), "idle");
+    assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    assert_eq!(w.engine.borrow().dispatcher().unwrap().id, second);
+
+    // The LAN address changes (a new DHCP lease): the addresses only, the token as it was.
+    let fib = fs::read_to_string(net.join("fib_trie")).unwrap();
+    fs::write(
+        net.join("fib_trie"),
+        fib.replace("192.168.1.20", "192.168.1.21"),
+    )
+    .unwrap();
+    w.tick(61);
+    let moved = fs::read_to_string(&env).unwrap();
+    assert_eq!(moved, text.replace("192.168.1.20", "192.168.1.21"));
+    assert_ne!(w.step(), "idle");
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_ne!(w.engine.borrow().dispatcher().unwrap().id, second);
+    assert_eq!(w.engine.borrow().tasks().len(), 1, "the task runs on");
+
+    // No file (the owner has not confirmed): none is made, the dispatcher is held.
+    fs::remove_file(&env).unwrap();
+    w.tick(61);
+    assert!(!env.exists());
 }
 
 #[test]
