@@ -307,6 +307,24 @@ fn after_a_wake_the_vms_clock_is_set_from_the_macs_and_the_profile_restarted_if_
 }
 
 #[test]
+fn a_saved_profile_that_cannot_be_read_is_said_and_never_restarted() {
+    let mut h = Host::new(World {
+        running: true,
+        saved: Some("mounts: x\n".into()),
+        ..World::default()
+    });
+    h.tick(0, false);
+    h.tick(40, false);
+    assert!(h.calls().is_empty(), "{:?}", h.calls());
+    assert_eq!(
+        h.journal().matches("left as it runs").count(),
+        1,
+        "{}",
+        h.journal()
+    );
+}
+
+#[test]
 fn a_tick_long_after_the_last_is_a_wake_and_asks_the_pool_now() {
     let mut h = Host::new(World {
         running: true,

@@ -267,21 +267,37 @@ impl Keeper {
         if gate {
             return;
         }
-        let drift = match self.colima.saved() {
-            Some(Ok(c)) => vm::drift(&c, &self.want, &self.home),
-            Some(Err(e)) => Drift::Restart(vec![e]),
-            None => Drift::Restart(vec!["no saved configuration".into()]),
+        // What the profile saved, read back. One that cannot be read is said and left as
+        // it runs: install checked it, and a restart would not make it readable.
+        let saved = match self.colima.saved() {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => {
+                return self.say(
+                    journal,
+                    now,
+                    "vm",
+                    &format!("the {} VM's colima.yaml: {e}; left as it runs", vm::PROFILE),
+                );
+            }
+            None => {
+                return self.say(
+                    journal,
+                    now,
+                    "vm",
+                    &format!(
+                        "the {} VM runs with no colima.yaml to read; left as it runs",
+                        vm::PROFILE
+                    ),
+                );
+            }
         };
-        match drift {
+        match vm::drift(&saved, &self.want, &self.home) {
             Drift::Same => {}
             Drift::Recreate(e) => {
                 return self.say(journal, now, "vm", &format!("needs a person: {e}"));
             }
             Drift::Restart(why) => {
-                let exposed = match self.colima.saved() {
-                    Some(Ok(c)) => !vm::exposures(&c, &self.home).is_empty(),
-                    _ => true,
-                };
+                let exposed = !vm::exposures(&saved, &self.home).is_empty();
                 // A size, a mount or Rosetta waits for the tasks to end; an exposure of the
                 // person's files or keys does not.
                 if !exposed && tasks_running() != Some(false) {

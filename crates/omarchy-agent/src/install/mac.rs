@@ -155,13 +155,20 @@ pub(crate) fn ensure_profile(o: &Options, sys: &mut dyn Sys, want: &Want, r: &mu
             }
             exposed.is_empty()
         }
+        // Started with every setting given; what decides then is the probe from a
+        // container that the VM sees nothing of the home directory (`sees`).
         Ok(Err(e)) => {
-            r.blockers.push(e);
-            false
+            r.warnings.push(format!(
+                "{e}: not read back; the VM's mounts are probed instead"
+            ));
+            true
         }
         Err(e) => {
-            r.blockers.push(format!("{}: {e}", cfg_path.display()));
-            false
+            r.warnings.push(format!(
+                "{}: {e}; the VM's mounts are probed instead",
+                cfg_path.display()
+            ));
+            true
         }
     }
 }
