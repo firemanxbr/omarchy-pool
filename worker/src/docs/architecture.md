@@ -362,7 +362,10 @@ seconds per release of the pool, so a deploy is never answered from before
 it — and runs a round when the release changes (a release, or a rollback),
 when an Update it has not acted on appears, and every fifteen minutes when
 the pool does not answer. A Worker from before #277 knows no follow: the
-updater reads its release from `/api/v1/version` instead. It names
+updater reads its release from `/api/v1/version` instead. (A maintainer
+host's agent, from 0.3.0, reads none of this: its signed host state names
+the release, its registration's open Updates and its host orders — #344,
+the runbook's *The run loop*.) It names
 its workers by id from inside the set: a project worker's entrypoint writes
 its own to `/run/omarchy/worker-id`, and a builder's is asked of its broker,
 which holds the token; nothing is read of a builder's container. A round is
