@@ -534,7 +534,9 @@ CGNAT, link-local and the host (IPv4; task networks stay IPv4 only), kept across
 `omarchy-task-firewall.service` (rootful). A second run changes nothing;
 exit 1 lists what needs a person. The task subnets and the work root must be
 the ones the agent's install is given. The Studio does not run it: it keeps
-its legacy set (below) until the switch of design v2 §21.
+its legacy set (below) until the switch of design v2 §21. A Mac runs
+[`factory/host/prep-mac.sh`](../factory/host/prep-mac.sh) instead, with no
+sudo (*Installing a Mac*, below).
 
 ### The host bundle
 
@@ -606,7 +608,7 @@ job of its own that holds no signing identity and no token that writes.
 ### Installing a host
 
 `omarchy-agent install` (#317; design v2 §13) is what install.sh runs, on
-Linux (macOS is P3). Run as the user the agent will run as — a dedicated
+Linux (a Mac: *Installing a Mac*, below). Run as the user the agent will run as — a dedicated
 machine or VM, or a dedicated `omarchy` user on a shared machine, never your
 daily login — after `factory/host/prep-root.sh` did the root-only steps:
 
@@ -691,6 +693,98 @@ from nothing with the pasted command and confirm on the site, then
 stand-in legacy compose project, `--legacy` leaves its container ids the
 same before and after.
 
+### Installing a Mac
+
+A Mac (Apple silicon, macOS 13 or later) is a maintainer host through its own
+Linux VM, the `omarchy` Colima profile (#320; design v2 §19.2, §19.3, D11;
+[A Mac as a maintainer host](/docs/worker-host#a-mac-as-a-maintainer-host)).
+Once, as the user the agent will run as, with Homebrew installed:
+
+```bash
+sh factory/host/prep-mac.sh --dry-run   # what it would do
+sh factory/host/prep-mac.sh             # Colima and Lima from Homebrew; /Users/Shared/omarchy-pool/{work,secrets,set}, 0700
+```
+
+It never uses sudo and installs nothing else: the docker CLI and the compose
+plugin are the release's pinned Darwin binaries, which the agent fetches. It
+says whether Rosetta 2 is installed (for the x86_64 lane; an administrator's
+`softwareupdate --install-rosetta --agree-to-license`) and whether Docker
+Desktop or OrbStack is here (never installed: their licence terms are in
+[A Mac as a maintainer host](/docs/worker-host#a-mac-as-a-maintainer-host)).
+`--root <dir>` puts the three directories elsewhere, outside your home
+directory, and prints the install flags that go with it. Then, **in Terminal
+at the Mac** (a LaunchAgent is login-scoped), paste the command your page
+prints, as on Linux:
+
+```bash
+curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh \
+  | OMARCHY_ENROLL=ome_... sh
+```
+
+On a Mac `omarchy-agent install` takes the same options, and the work root,
+the secrets directory and the set directory default to prep-mac.sh's
+(`--work-root`, `--secrets-dir`, `--set-dir`). `--max-cpus` and `--max-mem-gb`
+size the VM (by default half of the Mac; written into the envelope, where the
+owner can change them and restart the agent with
+`launchctl kickstart -k gui/$(id -u)/org.omarchy-pool.agent`), and
+`--no-rosetta` leaves the x86_64 lane off. Preflight, before it starts any VM:
+
+- a GUI login: over SSH, with nobody logged in at the Mac, `launchctl` has no
+  `gui/<uid>` domain, and preflight says to run the installer from Terminal
+  at the Mac instead of failing later;
+- the three directories exist (prep-mac.sh), none is under `~` or holds it
+  (case-insensitively, links resolved), none overlaps another;
+- the VM's size: the envelope's caps, by default half of the Mac (`sysctl`),
+  never the whole Mac; one below the release's minimum (4 CPUs, 8 GB) is
+  refused with the numbers, and what the caps could give it;
+- then it creates or starts the profile with every setting given — `colima
+  start --profile omarchy --vm-type vz --arch aarch64 --runtime docker
+  --mount-type virtiofs --ssh-agent=false --ssh-config=false
+  --activate=false --cpu N --memory N --disk 100 --mount <work>:w --mount
+  <secrets> --mount <set> --vz-rosetta=<bool>` — so nothing of yours carries
+  over (your Docker context and `~/.ssh/config` stay as they are), restarts
+  one whose saved `colima.yaml` differs, and refuses one of another VM type
+  or architecture (`colima delete -p omarchy` is yours to run);
+- through the release's pinned CLI on `~/.colima/omarchy/docker.sock`: the
+  capacity inside the VM (`MemAvailable` read inside it), the three
+  directories visible in the VM at their own paths and your home directory
+  not, the x86_64 smoke run through Rosetta, and the egress probe (the Mac's
+  default gateway from `route -n get default`).
+
+`agent.toml` records the VM (`[vm] runtime = "colima"`, `rosetta`,
+`disk_gb`) and the two sockets: `socket_cli` (the Mac's
+`~/.colima/omarchy/docker.sock`, for the agent) and `socket_mount`
+(`/var/run/docker.sock`, inside the VM, which the dispatcher mounts). The
+lint then refuses any bind of the set (the owner's override included) whose
+source lies under none of the VM's three mounts. Install writes
+`~/Library/LaunchAgents/org.omarchy-pool.agent.plist` (`RunAtLoad`,
+`KeepAlive`, `ThrottleInterval` 10, `ProcessType` Background, `Umask` 63, a
+`PATH` with `/opt/homebrew/bin`, logs in `~/Library/Logs/omarchy-agent/`)
+and loads it with `launchctl bootstrap gui/$(id -u)`; when that fails it
+prints the line to run in Terminal and exits 1. Docker Desktop or OrbStack
+is taken only when Colima is not installed or with `--socket` (their socket
+under `~/.docker/run` or `~/.orbstack/run`), as `vm-shared`, with `--dedicated`
+and its home mount removed (Docker Desktop: Settings, Resources, File
+sharing); the agent never starts, stops or sizes their VM.
+
+`omarchy-agent uninstall`, from Terminal: boots the agent out and removes
+the plist, removes the bundle's and the tasks' containers (starting the VM
+for it when it is stopped), empties the set directory, and stops the VM;
+`colima delete -p omarchy` removes it and its disk.
+
+What needs the laptop, by hand, following this section word for word before
+#320 is called done: install from nothing with the pasted command and confirm
+on the site; reboot and log in, then `omarchy-agent status` and `colima list`
+show the agent and the VM back; close the lid for at least 30 minutes, then
+check the journal (`omarchy-agent logs`) says the Mac woke and the VM's
+clock is within five seconds of the pool's, and that a task running across
+the sleep finished or was requeued; a release with no one at the Mac; a
+release whose agent hangs, rolled back (the watchdog's line in
+`~/Library/Logs/omarchy-agent/agent.log`, `agent-rollback` on the host's
+page); an x86_64 build on the lane `via: rosetta` (it needs the emulated
+lanes of #338 on the pool's side); and over SSH with nobody logged in at the
+Mac, the Terminal instruction.
+
 ### The run loop
 
 `omarchy-agent run` (#315; design v2 §16) keeps the host on the pool's
@@ -750,6 +844,20 @@ fixes it; no network answer ever does, and a write that fails while it runs
 (a full disk) is retried every tick, each step being safe to run again. `tests/agent-run-loop.sh` runs the
 loop against a real engine in CI (rootful docker and rootless podman).
 
+On a Mac (#320) the loop also keeps the `omarchy` VM: it starts the profile
+when it is not running (after a login, which is when launchd starts the
+agent; after a crash), as a child it polls, and restarts it with the agent's
+flags when its saved `colima.yaml` differs from `agent.toml` — at once when it
+would let anything of yours in, otherwise only while no task container runs
+— each start, stop or restart at most once every ten minutes and six times a
+day (`vm.json` in the data directory). A tick more than a minute after the
+last means the Mac slept: the loop asks the pool at once and compares the
+VM's clock (`date` inside it) with the pool's `Date` through the Mac's own;
+beyond five seconds it sets the VM's clock from the Mac's, and restarts the
+profile (within the rate limit) when that does not hold. A Mac whose own clock
+is off the pool's is said ("needs a person"), never set from the network. The
+journal's `vm` and `vm-clock` lines say what it did.
+
 ### Self-update
 
 The agent updates itself from the releases it verifies (#316; design v2
@@ -781,7 +889,11 @@ previous agent, which reports `agent-rollback` and skips that version until a
 higher one. Under systemd the unit is `Type=notify`: a start that hangs before
 the agent says it is ready fails after `TimeoutStartSec=120`, and a loop that
 stops making progress is killed after `WatchdogSec=300`; on both systems the
-agent's own watchdog ends a loop stuck for 15 minutes. Three versions stay
+agent's own watchdog ends a loop stuck for 15 minutes, and a new agent whose
+gate is still shut 30 seconds past its deadline. launchd restarts the agent
+only when it exits (#320), so on a Mac that watchdog is what turns a new agent
+that hangs into a counted start, and the start after it points `current`
+back. Three versions stay
 under `versions/`. `omarchy-agent status` shows an update in flight and a
 skipped version; `state.json` is read leniently, so the agent rolled back to
 reads what the newer one wrote. `tests/agent-self-update.sh` runs deliberately

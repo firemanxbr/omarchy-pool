@@ -563,6 +563,7 @@ factory/
   sizing/tasks.toml               maintainer-set task sizes, disk budgets and network exceptions per package (empty until P2 of #307)
   sets/host/                      the host agent's set (#307): compose.yml with the one dispatcher service, set.toml, files/
   host/prep-root.sh               the root-only steps a new maintainer host needs once (never run by the agent)
+  host/prep-mac.sh                a Mac's once, without sudo: Colima and Lima from Homebrew, the omarchy VM's three directories (#320)
   bin/agent.py                    the owner's agent, whichever provider: Anthropic, OpenAI, Gemini, xAI (by the key set)
   bin/draft-pkgbuild              project URL → PKGBUILD (the agent, or a template), checksums left to updpkgsums
   prompts/pkgbuild.md             the packaging rules the drafter follows

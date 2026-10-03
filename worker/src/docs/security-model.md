@@ -491,6 +491,17 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
   the host declared.
+- **A Mac** (#320, design v2 §19.2, §19.3) runs its tasks in the agent's own
+  `omarchy` Colima VM (isolation `vm`): a container escape lands in the VM,
+  which mounts only the work root (writable), the secrets directory and the
+  set directory (read-only, so nothing in the VM can plant a link the agent
+  would write through), each at its own path and none under the home
+  directory — no `~/.ssh`, no Keychain files, no forwarded SSH agent; preflight
+  checks from a container that the VM sees those three and not the home
+  directory, and the lint refuses a bind outside them. Docker Desktop's or
+  OrbStack's VM (`vm-shared`) is used only if it is already there, with its
+  home mount removed and `--dedicated`. The agent sets the VM's clock from the
+  Mac's own after a wake, never from the pool's answer.
 
 ## Stopping a host
 

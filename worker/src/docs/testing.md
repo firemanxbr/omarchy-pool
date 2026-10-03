@@ -721,6 +721,61 @@ the build with zero secrets. `factory/worker/omarchy-build-worker.sh` is
 sourced up to its dispatch line for that (`sed '/^hold_secrets$/,$d'`), in
 `docker run --rm ghcr.io/firemanxbr/omarchy-worker:aarch64` with fake values.
 
+## A Mac host
+
+What #320 adds is tested on Linux, where a Mac is played, and on a macOS
+runner, where the agent's tests run whole (the `agent` job's macOS entry:
+`cargo test -p omarchy-agent`):
+
+- `crates/omarchy-agent/src/vm/` — the VM's size (half of a 16-core, 64 GB
+  Mac is 8 CPUs and 32 GB; the envelope's caps; never the whole Mac; half of
+  a 6-core Mac refused below the minimum, with what the caps could give), its
+  three mounts (under the home directory in any case, holding it, linked into
+  it, overlapping, a `:` or `,` all refused), the `colima start` argv, the
+  saved `colima.yaml` read back (a size, a mount or Rosetta is a restart; the
+  home mount, Colima's default with no mounts, a mount point elsewhere and a
+  forwarded SSH agent are exposures; another VM type or architecture is the
+  person's to delete), the clock after a wake (set from the Mac's; a Mac off
+  the pool's said), an HTTP `Date`, and M7's rate limit.
+- `run/vm/` — the run loop's keeper on a played Colima: a stopped VM started
+  as a child the loop polls, the rate limit holding a second start and said
+  once, a size change waiting for running tasks (an engine that does not
+  answer counts as a task), an exposure restarted at once, only a start
+  while a self-update's gate is shut, a wake asking the pool now, the clock
+  set from the Mac's and the profile restarted when that does not hold.
+- `install/tests.rs` — preflight and install on a played Mac (`os` macos;
+  launchctl, sysctl, route and a Colima that saves its profile played; a
+  docker stub for the engine in the VM): the VM sized and started with only
+  its three mounts, `MemAvailable` read inside it, isolation `vm`, the
+  envelope's `[vm]` and two sockets read back by the run loop and the lint;
+  a Mac below the minimum, a directory under `~` or a missing one starting no
+  VM; over SSH with no GUI login, the Terminal instruction and nothing
+  written; a saved profile that mounts `~` or forwards the SSH agent restarted,
+  one of another VM type refused; the home directory visible in the VM
+  refused; Rosetta's lane after its smoke run, off when it fails; Docker
+  Desktop taken as `vm-shared` only with `--dedicated`; the LaunchAgent
+  written and bootstrapped in `gui/<uid>` (its plist checked by `plutil
+  -lint` on the macOS runner), a failed bootstrap's Terminal line, and
+  uninstall.
+- `lint/tests.rs` — on a Mac every bind source lies under a directory the VM
+  mounts (`vm_mount`); `run/selfupdate_tests.rs` — the watchdog ends a new
+  agent still behind its shut gate 30 s past its deadline, and the next start
+  rolls it back (launchd restarts only on exit).
+- `bash tests/prep-mac.sh` (CI) — `factory/host/prep-mac.sh` against stubs
+  (uname, id, sw_vers, brew, stat), under dash: Colima and Lima only, the
+  three directories 0700, nothing changed on a second run, `--dry-run`, and
+  refusals (root, Linux, Intel, macOS 12, no Homebrew, a root under or
+  holding `~`, relative, with `:`, another user's, a link); shellcheck.
+- `python3 tests/host-bundle.py` — the release pins the Darwin docker CLI and
+  compose plugin at the worker image's versions; `worker/test/host-enroll.test.ts`
+  — a Mac enrolls at `vm` with its Rosetta lane, which the host's page shows,
+  and reports `vm-shared`.
+
+What only the laptop shows — a reboot, a sleep of at least 30 minutes, a
+release, a broken agent's release, an x86_64 build through Rosetta, an SSH
+session with nobody logged in — is the runbook's *Installing a Mac*
+([A new maintainer host](/docs/runbook#a-new-maintainer-host)), followed by hand.
+
 ## The agent without a key
 
 `factory/bin/agent.py` honours `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
