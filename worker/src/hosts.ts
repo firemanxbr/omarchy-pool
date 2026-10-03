@@ -59,7 +59,8 @@ export const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 export const HOST_ID = /^h_[0-9a-z]{10}$/;
 const ARCHES = ["x86_64", "aarch64"] as const;
 export type Arch = (typeof ARCHES)[number];
-export const ISOLATIONS = ["root", "user", "subuid"] as const;
+/** Where a task-container escape lands (design v2 §19.3): on Linux the engine's level; on a Mac (#320) its dedicated omarchy VM (`vm`) or Docker Desktop's / OrbStack's shared VM (`vm-shared`). */
+export const ISOLATIONS = ["root", "user", "subuid", "vm", "vm-shared"] as const;
 export type Isolation = (typeof ISOLATIONS)[number];
 
 export interface Lane { arch: Arch; mode: "native" | "emulated"; via?: string; page16k?: boolean }
