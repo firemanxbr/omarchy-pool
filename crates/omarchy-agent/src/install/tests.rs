@@ -1399,6 +1399,7 @@ fn mac_host(min_cpus: u32) -> Host {
         fs::create_dir_all(r.join("shared").join(d)).unwrap();
         fs::set_permissions(r.join("shared").join(d), fs::Permissions::from_mode(0o700)).unwrap();
     }
+    fs::write(r.join("home-path"), r.join("home").display().to_string()).unwrap();
     h.options.places.os = "macos";
     h.options.places.xdg_runtime_dir = None;
     h.options.work_root = None;
@@ -1408,7 +1409,7 @@ fn mac_host(min_cpus: u32) -> Host {
     fs::write(
         &h.docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\"source={r}/home,\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; exit 0 ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\"source=$(cat {r}/home-path),\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; exit 0 ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = r.display()
         ),
     )
@@ -1686,7 +1687,12 @@ fn the_home_directory_visible_in_the_vm_is_refused_and_rosetta_gives_an_x86_64_l
 #[test]
 fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_dedicated() {
     let mut h = mac_host(1);
-    let dd = h.root.join("home/.docker/run");
+    // A home under /tmp: a socket path fits macOS's 104 bytes there (its TMPDIR is long).
+    let home = PathBuf::from(format!("/tmp/oa-dd-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    h.options.places.home.clone_from(&home);
+    fs::write(h.root.join("home-path"), home.display().to_string()).unwrap();
+    let dd = home.join(".docker/run");
     fs::create_dir_all(&dd).unwrap();
     let _l = std::os::unix::net::UnixListener::bind(dd.join("docker.sock")).unwrap();
     let mut sys = Fake {
@@ -1726,6 +1732,7 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
         text.contains("[vm]\nruntime = \"docker-desktop\"\n"),
         "{text}"
     );
+    let _ = fs::remove_dir_all(&home);
 }
 
 #[test]

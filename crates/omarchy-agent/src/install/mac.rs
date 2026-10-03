@@ -219,6 +219,9 @@ pub(crate) fn engine(
                 found.socket = Some(s);
                 found.kind = Some(VmKind::Shared);
             }
+            // The socket given (--socket, agent.toml's) is named; none found here is
+            // prep-mac.sh's to fix.
+            Err(e) if given.is_some() => r.blockers.push(e),
             Err(_) => r.blockers.push(
                 "no engine: install Colima and Lima with factory/host/prep-mac.sh (Homebrew, no sudo); the agent runs them in its own omarchy VM".into(),
             ),

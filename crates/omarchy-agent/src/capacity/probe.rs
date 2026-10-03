@@ -131,10 +131,15 @@ impl Facts {
         }
     }
 
-    /// The facts of an engine install found in a VM on macOS (#320): its level is the VM's.
+    /// The facts of an engine install found in a VM on macOS (#320): its level is the VM's,
+    /// and this process's own cgroup and `MemAvailable` say nothing of the VM's (it has its
+    /// own kernel): the engine's view and the VM's `/proc/meminfo` ([`Facts::with_meminfo`])
+    /// stand.
     #[must_use]
     pub fn in_vm(mut self, kind: VmKind) -> Self {
         self.vm = Some(kind);
+        self.cgroup = CgroupLimits::default();
+        self.mem_available = None;
         self
     }
 
