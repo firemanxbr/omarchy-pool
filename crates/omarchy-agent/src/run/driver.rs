@@ -3,8 +3,10 @@
 //! long (a pull, a stop) is started and then polled.
 //!
 //! The driver never learns about tasks: it sees only the set's compose project, and task
-//! containers are the dispatcher's. Capacity (`capacity()`, #333), fingerprinting (#317)
-//! and emulation (P2) join this trait in their own issues.
+//! containers are the dispatcher's. The one other project it ever lists, stops and removes
+//! is the legacy compose project `legacy.json` records, at the `retire-legacy` host order
+//! (#344, design v2 §11.1 M4). Capacity (`capacity()`, #333), fingerprinting (#317) and
+//! emulation (P2) join this trait in their own issues.
 
 use std::path::PathBuf;
 
@@ -56,6 +58,42 @@ impl Unit {
     }
 }
 
+/// A container of another compose project, as `retire-legacy` reads it (#344): never its
+/// environment, only what the order needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Foreign {
+    pub id: String,
+    pub status: String,
+    /// compose's `com.docker.compose.project.working_dir` label: the project's directory.
+    pub working_dir: String,
+    /// The agent's `org.omarchy-pool.agent.host` label: a container of a host's bundle or
+    /// one of its tasks, which `retire-legacy` never touches whatever project it names.
+    pub agent_host: String,
+}
+
+impl Foreign {
+    pub fn stopped(&self) -> bool {
+        matches!(self.status.as_str(), "exited" | "dead" | "created")
+    }
+
+    pub fn running(&self) -> bool {
+        matches!(self.status.as_str(), "running" | "restarting")
+    }
+
+    /// The container as `begin_drain`, `drained` and `remove` take one.
+    pub fn unit(&self) -> Unit {
+        Unit {
+            id: self.id.clone(),
+            service: String::new(),
+            status: self.status.clone(),
+            restarts: 0,
+            exit_code: 0,
+            config_hash: String::new(),
+            release: String::new(),
+        }
+    }
+}
+
 /// An exit of a container: when (unix seconds) and with what code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Exit {
@@ -94,4 +132,11 @@ pub(crate) trait Driver {
     fn ready(&mut self, id: &str, http: &str) -> Answer<bool>;
     /// Removes an image no container uses; the engine refuses one in use.
     fn remove_image(&mut self, image: &str) -> Answer<()>;
+    /// The containers labelled with compose project `project`, exactly (#344: only ever
+    /// the legacy project `legacy.json` records).
+    fn project_containers(&mut self, project: &str) -> Answer<Vec<Foreign>>;
+    /// The ids of the networks labelled with compose project `project`, exactly.
+    fn project_networks(&mut self, project: &str) -> Answer<Vec<String>>;
+    /// Removes a network; the engine refuses one a container still uses.
+    fn remove_network(&mut self, id: &str) -> Answer<()>;
 }

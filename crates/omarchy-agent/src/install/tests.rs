@@ -471,6 +471,7 @@ fn the_legacy_project_is_checked_and_never_removed() {
         networks: vec!["n1".into()],
         paths: vec![PathBuf::from("/srv/omarchy-pool/work")],
         subnets: vec![Cidr::parse("10.231.0.0/24").unwrap()],
+        dirs: vec![PathBuf::from("/srv/omarchy-pool")],
     };
     let task = net::parse_list("10.231.0.0/16").unwrap();
     let b = legacy::check(
@@ -1145,6 +1146,7 @@ fn a_legacy_project_is_recorded_in_legacy_json_and_changed_in_nothing() {
     ready.legacy = Some(legacy::Seen {
         containers: vec!["c0ffee".into(), "beef".into()],
         networks: vec!["omarchy-pool_default".into()],
+        dirs: vec![PathBuf::from("/srv/omarchy-pool")],
         ..legacy::Seen::default()
     });
     let mut o = h.options.clone();
@@ -1158,6 +1160,17 @@ fn a_legacy_project_is_recorded_in_legacy_json_and_changed_in_nothing() {
     assert_eq!(l.project, "omarchy-pool");
     assert_eq!(l.containers, ["c0ffee", "beef"]);
     assert!(!l.rootful_exception);
+    // Its directory, where retire-legacy (#344) writes the marker; not retired.
+    assert_eq!(l.dir.as_deref(), Some(Path::new("/srv/omarchy-pool")));
+    assert_eq!((l.retired_at, l.retired_by), (None, None));
+    // Two directories, or none, record none: retire-legacy reads it again then.
+    for dirs in [vec![], vec!["/a".into(), "/b".into()], vec!["rel".into()]] {
+        let s = legacy::Seen {
+            dirs,
+            ..legacy::Seen::default()
+        };
+        assert_eq!(s.dir(), None);
+    }
     // After preflight, the engine was asked nothing at all.
     assert_eq!(fs::read_to_string(h.root.join("docker.log")).unwrap(), "");
 }
@@ -1261,6 +1274,9 @@ fn a_rerun_without_legacy_uses_the_recorded_project_and_its_exception() {
         containers: vec!["c0ffee".into()],
         networks: Vec::new(),
         rootful_exception: true,
+        dir: None,
+        retired_at: None,
+        retired_by: None,
     };
     files::write(
         &h.options.places.data,

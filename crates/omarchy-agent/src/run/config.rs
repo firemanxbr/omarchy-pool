@@ -87,6 +87,11 @@ impl Paths {
     pub fn pending(&self) -> PathBuf {
         self.data.join("pending")
     }
+    /// The host key the enrollment made (`crate::enroll::Paths`): the host state's and
+    /// the report's requests are signed with it (#344).
+    pub fn host_key(&self) -> PathBuf {
+        self.data.join("state").join(crate::host::KEY_FILE)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +99,8 @@ pub struct Config {
     /// The pool origin (`https://...`); it must also be in a bundle's signed `pools`.
     pub pool: String,
     pub host_id: String,
-    /// The host's worker registration (#321), whose open Update `follow` reports.
+    /// The host's worker registration (#321); its open Update orders reach the agent in
+    /// the host state (#344).
     pub worker_id: String,
     pub set_name: String,
     pub set_dir: PathBuf,
@@ -141,7 +147,7 @@ struct EnvelopePart {
     task_subnets: Option<String>,
 }
 
-/// An id the pool hands out (host and worker ids): what `follow` accepts.
+/// An id the pool hands out (host and worker ids).
 fn is_id(s: &str) -> bool {
     (1..=128).contains(&s.len())
         && s.bytes()

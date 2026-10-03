@@ -468,10 +468,12 @@ pub(crate) fn measure(
     let project = envelope::set_str(ex, "project").unwrap_or_else(|| envelope::PROJECT.to_owned());
     // The legacy project: `--legacy`, or the one an earlier install recorded, so running
     // install again repairs it without the flag (legacy.json's owner is checked below).
+    // A project retire-legacy removed (#344) is no legacy set any more.
     let legacy_project = o.legacy.clone().or_else(|| {
         std::fs::read(p.data.join(legacy::FILE))
             .ok()
             .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok())
+            .filter(|l| l.retired_at.is_none())
             .map(|l| l.project)
     });
     if let Some(l) = &legacy_project {
@@ -874,10 +876,12 @@ pub(crate) fn apply(
             containers: seen.containers.clone(),
             networks: seen.networks.clone(),
             rootful_exception: ready.facts.isolation() == capacity::Isolation::Root,
+            // Where retire-legacy will write its marker (#344): compose's working directory.
+            dir: seen.dir(),
+            retired_at: None,
+            retired_by: None,
         };
-        let body =
-            serde_json::to_vec_pretty(&record).map_err(|e| Failure::Refused(e.to_string()))?;
-        files::write(&p.data, legacy::FILE, &body, 0o600).map_err(Failure::Refused)?;
+        legacy::record(&p.data, &record).map_err(Failure::Refused)?;
         say(
             out,
             &format!(

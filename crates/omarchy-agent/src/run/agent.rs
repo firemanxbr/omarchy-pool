@@ -1,9 +1,12 @@
-//! One tick of the run loop (design v2 §16.1): ask the pool when a poll is due, check the
-//! target against the trust rules, start or preempt a round, and take one step of it.
-//! Network answers never stop the agent (§16.4): no answer, a 5xx or a malformed body
-//! changes nothing and backs off to 10 minutes; a 401/403 changes nothing and polls
-//! hourly; both recover by themselves at the next answer.
+//! One tick of the run loop (design v2 §16.1): ask the pool for the host state when a poll
+//! is due (#344: the release target, the open Updates and the host orders), check the
+//! target against the trust rules, start or preempt a round, and take one step of it; one
+//! step of a `retire-legacy` in flight; the host report when it is due. Network answers
+//! never stop the agent (§16.4): no answer, a 5xx or a malformed body changes nothing and
+//! backs off to 10 minutes; a 401/403 changes nothing and polls hourly; both recover by
+//! themselves at the next answer.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -18,7 +21,8 @@ use super::compose::Compose;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver};
 use super::journal::{env_secrets, Journal};
-use super::pool::{Follow, Net, Pool};
+use super::pool::{HostState, Net, Pool};
+use super::report::Reported;
 use super::rollout::{self, Ctx, Outcome};
 use super::selfupdate::Pending;
 use super::state::{self, Files, Phase, State, Step};
@@ -94,6 +98,12 @@ pub(crate) struct Agent {
     pub(super) retry: Option<(Version, i64)>,
     /// The applied release whose agent was checked and needs no update (once per start).
     pub(super) upward_checked: Option<Release>,
+    /// Order ids refused as seen already, said once per process (#344).
+    pub(super) repeated: BTreeSet<String>,
+    /// The legacy set as last looked at, for the report, and when.
+    pub(super) legacy_seen: Option<(i64, serde_json::Value)>,
+    /// The host report last sent (#344).
+    pub(super) reported: Reported,
 }
 
 enum Fetched {
@@ -143,6 +153,9 @@ impl Agent {
             gate_next: 0,
             retry: None,
             upward_checked: None,
+            repeated: BTreeSet::new(),
+            legacy_seen: None,
+            reported: Reported::default(),
         }
     }
 
@@ -260,6 +273,8 @@ impl Agent {
             }
             if self.exit.is_none() {
                 self.step(now)?;
+                self.retire_step(now);
+                self.report(now);
             }
         }
         if self.saved.as_ref() != Some(&self.state) {
@@ -338,7 +353,7 @@ impl Agent {
     }
 
     fn poll(&mut self, now: i64, round_now: bool) {
-        let answer = self.pool.follow(&self.cfg.worker_id);
+        let answer = self.pool.state();
         let p = &mut self.state.poll;
         p.last_at = now;
         match answer {
@@ -347,7 +362,7 @@ impl Agent {
                 p.backoff_s = 0;
                 let every = f.poll_s.unwrap_or(POLL_S).clamp(60, MAX_BACKOFF_S);
                 p.next_at = now + jitter(every, now);
-                self.on_follow(f, now, round_now);
+                self.on_state(f, now, round_now);
             }
             Net::NoAnswer(e) => {
                 p.last = "no-answer".into();
@@ -375,16 +390,19 @@ impl Agent {
         }
     }
 
-    fn on_follow(&mut self, f: Follow, now: i64, round_now: bool) {
+    /// The host state (#344): its Update orders, its host orders, then its target.
+    fn on_state(&mut self, s: HostState, now: i64, round_now: bool) {
         let mut force: Option<String> =
             round_now.then(|| "a round was asked for (SIGUSR1)".to_owned());
         // An Update order waits while commit or a revert finishes (a revert quarantines
         // again): the next poll sees it unconsumed.
         let busy = self.state.rollout.step != Step::Idle
             && !rollout::preemptible(&self.state.rollout.step);
-        if let Some(id) = f
-            .update
-            .filter(|id| !busy && self.state.update_seen.as_ref() != Some(id))
+        if let Some(id) = s
+            .updates
+            .iter()
+            .find(|id| !busy && !self.state.orders.seen(id))
+            .cloned()
         {
             if !self.state.quarantine.is_empty() {
                 self.journal.write(
@@ -395,9 +413,43 @@ impl Agent {
             }
             self.state.quarantine.clear();
             force = Some(format!("Update order {id}"));
+            self.state.orders.remember(&id);
             self.state.update_seen = Some(id);
         }
-        let Some(target) = f.latest else {
+        let taken = self.take_orders(s.orders, now, busy);
+        if let (None, Some(id)) = (&force, taken.reconcile.first()) {
+            force = Some(format!("host order {id} (reconcile-now)"));
+        }
+        let named = s.target.is_some();
+        self.follow_target(s.target, force, now);
+        for id in taken.reconcile {
+            let detail = if self.state.rollout.step != Step::Idle {
+                format!(
+                    "a round now: {} ({})",
+                    self.state.rollout.why,
+                    self.state.rollout.step.name()
+                )
+            } else if !named {
+                "the pool names no release for this host: no round".to_owned()
+            } else if self.state.round.detail.is_empty() {
+                format!(
+                    "no round started; the last round says {}",
+                    self.state.round.outcome
+                )
+            } else {
+                format!(
+                    "no round started; the last round says {}: {}",
+                    self.state.round.outcome, self.state.round.detail
+                )
+            };
+            self.answer(&id, "reconcile-now", "done", &detail, now);
+        }
+    }
+
+    /// The release the pool names: a round to it, preempting one in flight when it may,
+    /// or a round to the release that runs when `force` says why.
+    fn follow_target(&mut self, target: Option<Release>, force: Option<String>, now: i64) {
+        let Some(target) = target else {
             return;
         };
         self.state.target = Some(target);

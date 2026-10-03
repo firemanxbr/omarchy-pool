@@ -162,8 +162,26 @@ fn setup(
     let usr1 = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&usr1))
         .map_err(|e| format!("SIGUSR1: {e}"))?;
-    let pool = Box::new(Https::new(&cfg.pool).with_progress(Arc::clone(progress)));
+    // The host state and the report are signed with the key the enrollment made (#344).
+    // Without it they answer "no answer" (the agent keeps running and says why); a missing
+    // key is no reason to stop.
+    let mut https = Https::new(&cfg.pool).with_progress(Arc::clone(progress));
+    let key_error = match crate::host::HostKey::load(&paths.host_key()) {
+        Ok(k) => {
+            https = https.with_host(k, &cfg.host_id);
+            None
+        }
+        Err(e) => Some(e),
+    };
+    let pool = Box::new(https);
     let mut agent = Agent::new(cfg, paths, state, pool, Box::new(Sigstore), Drivers::Pinned);
+    if let Some(e) = key_error {
+        agent.journal.write(
+            super::now(),
+            "host-key",
+            serde_json::json!({"detail": format!("{e}: the host state and the report cannot be signed; the agent keeps the set running")}),
+        );
+    }
     agent.progress = Some(Arc::clone(progress));
     agent.exe = std::env::current_exe().ok();
     agent.resume(super::now());
@@ -370,6 +388,47 @@ pub(crate) fn summary(s: &State, now: i64) -> String {
             (s.poll.next_at - now).max(0)
         ),
     );
+    out.push_str(&orders_lines(s, now));
+    out
+}
+
+/// `status`'s lines for the host orders (#344): a `retire-legacy` in flight, and the
+/// last answers.
+fn orders_lines(s: &State, now: i64) -> String {
+    let mut out = String::new();
+    let mut line = |k: &str, v: String| {
+        let _ = writeln!(out, "{k:<10} {v}");
+    };
+    if let Some(r) = &s.orders.retire {
+        line(
+            "retiring:",
+            format!(
+                "legacy project {} ({}) for {} s, at its {} step (order {})",
+                r.project,
+                r.dir.display(),
+                (now - r.since).max(0),
+                if r.step == super::state::RetireStep::Stop {
+                    "stop"
+                } else {
+                    "remove"
+                },
+                r.order
+            ),
+        );
+    }
+    for a in &s.orders.answers {
+        line(
+            "order:",
+            format!(
+                "{} {} {} {} s ago: {}",
+                a.id,
+                a.kind,
+                a.outcome,
+                (now - a.at).max(0),
+                a.detail
+            ),
+        );
+    }
     out
 }
 
