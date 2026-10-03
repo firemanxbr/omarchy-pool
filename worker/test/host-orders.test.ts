@@ -17,6 +17,12 @@
  *   none of another host's — with a journal line in the pool's words; the
  *   cron and the door expire what its agent did not take; a suspension and a
  *   retirement cancel what is open.
+ * - The contract with the agent, written once (crates/omarchy-agent/tests/
+ *   fixtures/host-api, which the agent's own tests read too): the state's
+ *   keys and value types are the fixture's, and the agent's reports — a
+ *   legacy set it would refuse to retire, then a done retire-legacy and a
+ *   refused order — close the orders and read back field by field; an answer
+ *   that arrives after the pool expired its order still closes it.
  * - Every new statement through an index.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
@@ -26,9 +32,12 @@ import { applyGovernance } from "../src/governance";
 import { sha256Hex } from "../src/routes/contributors";
 import { toB64url } from "../src/webauthn";
 import { agentTakesOrders, enrollMessage, legacyOf, orderAnswers, signedMessage, HOST_ORDER_TTL_MIN } from "../src/hosts";
-import { EXPIRE_ALL_HOST_ORDERS_SQL, EXPIRE_HOST_ORDERS_SQL, HOST_OPEN_ORDERS_SQL, HOST_ORDERS_SQL, hostVerdicts, pruneHosts } from "../src/routes/hosts";
+import { ANSWER_HOST_ORDER_SQL, EXPIRE_ALL_HOST_ORDERS_SQL, EXPIRE_HOST_ORDERS_SQL, HOST_OPEN_ORDERS_SQL, HOST_ORDERS_SQL, hostVerdicts, pruneHosts } from "../src/routes/hosts";
 import { SUBJECT } from "../src/routes/passkeys";
 import { assert as answer, createAuthenticator, register } from "./soft-authenticator.mjs";
+import stateFixture from "../../crates/omarchy-agent/tests/fixtures/host-api/state.json?raw";
+import reportFixture from "../../crates/omarchy-agent/tests/fixtures/host-api/report.json?raw";
+import blockedFixture from "../../crates/omarchy-agent/tests/fixtures/host-api/report-blocked.json?raw";
 
 /** localhost: where a passkey works (relyingParty), as wrangler dev's. */
 const ORIGIN = "http://localhost:8787";
@@ -312,6 +321,91 @@ describe("the agent's answers (POST /hosts/self/report, `orders`)", () => {
   });
 });
 
+/** A JSON value's shape: its keys and each value's type, an array by its first item — the same as the agent's orders_tests. */
+function shape(v: unknown): unknown {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return v.length ? [shape(v[0])] : [];
+  if (typeof v === "object") return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, shape(x)]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  return typeof v;
+}
+
+describe("the contract with the agent (crates/omarchy-agent/tests/fixtures/host-api)", () => {
+  it("the host state answers with the fixture's keys and value types, which the agent's parse_state reads", async () => {
+    const { k, host, worker } = await activeHost("m1", "contract-state");
+    const deployed = { ...RELEASED, POOL_DEPLOYED_AT: "2027-01-15T08:00:00Z" } as typeof env;
+    // An open Update on its registration and an open order of each kind, as in the fixture.
+    await report(k, host, { agent: { version: "0.3.0" }, release: { applied: "v1.20.0" } });
+    const u = await worker_fetch(deployed, `/factory/workers/${worker}/orders`, { kind: "update", reason: "a release" }, createExecutionContext());
+    expect(u.status, JSON.stringify(u.json)).toBe(201);
+    const later = new Date(Date.now() + 3600_000).toISOString();
+    for (const [i, kind] of ["retire-legacy", "reconcile-now"].entries()) {
+      await env.DB.prepare("INSERT INTO host_orders (id, host_id, kind, issued_by, issued_at, not_after) VALUES (?, ?, ?, 'm1', ?, ?)")
+        .bind(`ho_${hex(16)}`, host, kind, new Date(Date.now() - 2000 + i * 1000).toISOString(), later).run();
+    }
+    const s = await state(k, host, deployed);
+    expect(s.status, JSON.stringify(s.json)).toBe(200);
+    const fixture = JSON.parse(stateFixture);
+    expect(shape(s.json)).toEqual(shape(fixture));
+    // What the agent reads of it, by name.
+    expect(s.json.release.target).toBe("v1.21.0");
+    expect(s.json.updates).toEqual([u.json.order.id]);
+    expect(s.json.orders.map((o: { kind: string }) => o.kind)).toEqual(["retire-legacy", "reconcile-now"]);
+  });
+
+  it("the agent's reports close its orders with its outcome and words, and its legacy set reads back field by field", async () => {
+    const { k, host } = await activeHost("m1", "contract-report");
+    const name = "contract-report";
+    // A legacy set it would refuse to retire: the page shows why and greys the button; the door refuses with the same words.
+    const blocked = JSON.parse(blockedFixture);
+    expect((await signed(k, host, "POST", "/hosts/self/report", blockedFixture)).status).toBe(200);
+    let page = (await call("GET", `/hosts/${host}`, { session: "m1" })).json;
+    expect(page.host.legacy).toEqual({ ...blocked.legacy, order: null });
+    const why = `${name}'s agent would refuse it: ${blocked.legacy.blocked}`;
+    expect(page.can.retire_legacy).toBe(false);
+    expect(page.can.why.retire_legacy).toBe(why);
+    expect(await order("m1", host, { kind: "retire-legacy", assertion: await assertion("m1", `host:retire-legacy:${host}`) })).toMatchObject({ status: 409, json: { error: why } });
+    expect(page.can.reconcile).toBe(true);
+
+    // The two orders the fixture answers, open on this host.
+    const after = JSON.parse(reportFixture);
+    const later = new Date(Date.now() + 3600_000).toISOString();
+    for (const a of after.orders as { id: string; kind: string }[]) {
+      await env.DB.prepare("INSERT INTO host_orders (id, host_id, kind, issued_by, not_after) VALUES (?, ?, ?, 'm1', ?)").bind(a.id, host, a.kind, later).run();
+    }
+    const r = await signed(k, host, "POST", "/hosts/self/report", reportFixture);
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(r.json.orders_closed).toBe(2);
+    for (const a of after.orders as { id: string; outcome: string; detail: string }[]) {
+      expect(await orderRow(a.id)).toMatchObject({ state: a.outcome, detail: a.detail });
+    }
+    page = (await call("GET", `/hosts/${host}`, { session: "m1" })).json;
+    expect(page.host.legacy).toEqual({ containers: null, running: null, blocked: null, ...after.legacy });
+    expect(page.can.why.retire_legacy).toBe(`${name}'s legacy set omarchy-pool was retired already (${after.legacy.since})`);
+  });
+
+  it("an answer that arrives after the pool expired its order still closes it with what the agent did", async () => {
+    const { k, host } = await withLegacy("m1", "late");
+    const o = await order("m1", host, { kind: "retire-legacy", assertion: await assertion("m1", `host:retire-legacy:${host}`) });
+    expect(o.status).toBe(201);
+    const id = o.json.order.id;
+    // Taken late in its hour; the cron expires it while the agent stops and removes the set.
+    await env.DB.prepare("UPDATE host_orders SET not_after = ? WHERE id = ?").bind(new Date(Date.now() - 1000).toISOString(), id).run();
+    await pruneHosts(env);
+    expect((await orderRow(id)).state).toBe("expired");
+    const detail = "stopped and removed 7 container(s) and 1 network(s) of compose project omarchy-pool";
+    const r = await report(k, host, { agent: { version: "0.3.0" }, legacy: { ...LEGACY, state: "retired", order: id }, orders: [{ id, outcome: "done", detail }] });
+    expect(r.json.orders_closed).toBe(1);
+    expect(await orderRow(id)).toMatchObject({ state: "done", detail });
+    expect((await lines("order-answer")).filter((l) => l.payload.order === id)).toHaveLength(1);
+    // Carried again, it closes nothing more; an order cancelled by a suspension is never reopened by an answer.
+    expect((await report(k, host, { orders: [{ id, outcome: "done", detail }] })).json.orders_closed).toBe(0);
+    const c = await order("m1", host, { kind: "reconcile-now" });
+    await env.DB.prepare("UPDATE host_orders SET state = 'cancelled' WHERE id = ?").bind(c.json.order.id).run();
+    expect((await report(k, host, { orders: [{ id: c.json.order.id, outcome: "done", detail: "x" }] })).json.orders_closed).toBe(0);
+    expect((await orderRow(c.json.order.id)).state).toBe("cancelled");
+  });
+});
+
 describe("orders its agent does not take", () => {
   it("expire past their not_after: by the cron, and by the door before a new one", async () => {
     const { host } = await activeHost("m1", "expiry");
@@ -362,6 +456,6 @@ describe("the pure rules", () => {
     expect(await plan(HOST_ORDERS_SQL, ["h_0123456789"])).toMatch(/USING INDEX idx_host_orders_host \(host_id=\?\)/);
     expect(await plan(EXPIRE_HOST_ORDERS_SQL, [now, "h_0123456789"])).toMatch(/USING INDEX (uq_host_orders_open_kind \(host_id=\?\)|idx_host_orders_open_until)/);
     expect(await plan(EXPIRE_ALL_HOST_ORDERS_SQL, [now])).toMatch(/USING INDEX idx_host_orders_open_until \(not_after<\?\)/);
-    expect(await plan("UPDATE host_orders SET state = ?, answered_at = ?, detail = ? WHERE id = ? AND host_id = ? AND state = 'open'", ["done", now, "", "ho_x", "h_x"])).toMatch(/USING INDEX sqlite_autoindex_host_orders_1 \(id=\?\)|USING INDEX uq_host_orders_open_kind/);
+    expect(await plan(ANSWER_HOST_ORDER_SQL, ["done", now, "", "ho_x", "h_x"])).toMatch(/USING INDEX sqlite_autoindex_host_orders_1 \(id=\?\)|USING INDEX uq_host_orders_open_kind/);
   });
 });

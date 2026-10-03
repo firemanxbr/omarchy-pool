@@ -280,7 +280,10 @@ type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; wh
  *   whose agent takes host orders (HOST_ORDERS_AGENT on);
  * - Retire legacy set (#344): its owner only, while a maintainer, with their
  *   passkey, on an active host whose agent takes host orders and reports a
- *   legacy set that is not retired or being retired.
+ *   legacy set that is not retired or being retired, and that it would not
+ *   refuse (its report's `blocked`: no directory it may write its marker
+ *   into) — the button is greyed with the agent's words, at most one report
+ *   (five minutes) after the owner fixed it.
  */
 export function hostVerdicts(
   v: HostViewer | null,
@@ -299,6 +302,7 @@ export function hostVerdicts(
   const legacyWhy = !legacy ? no(409, `${h.name} reports no legacy set: an install with --legacy records one`)
     : legacy.state === "retired" ? no(409, `${h.name}'s legacy set ${legacy.project} was retired already${legacy.since ? ` (${legacy.since})` : ""}`)
     : legacy.state === "retiring" ? no(409, `${h.name}'s legacy set ${legacy.project} is being retired (${legacy.order ?? "an order"})`)
+    : legacy.blocked ? no(409, `${h.name}'s agent would refuse it: ${legacy.blocked}`)
     : null;
   return {
     suspend: theirs ?? gone ?? (h.status === "suspended" ? no(409, `${h.name} is suspended already — its owner's Resume ends it`) : h.status !== "active" ? no(409, `${h.name} waits for its owner's Confirm: it claims nothing yet`) : { ok: true }),
@@ -553,6 +557,12 @@ export const ORDER_EXPIRED = "not taken by its agent before its not_after";
 export const EXPIRE_HOST_ORDERS_SQL = `UPDATE host_orders SET state = 'expired', answered_at = ?1, detail = '${ORDER_EXPIRED}' WHERE host_id = ?2 AND state = 'open' AND not_after <= ?1`;
 /** Every host's (the cron's), by the open orders' not_after. */
 export const EXPIRE_ALL_HOST_ORDERS_SQL = `UPDATE host_orders SET state = 'expired', answered_at = ?1, detail = '${ORDER_EXPIRED}' WHERE state = 'open' AND not_after <= ?1`;
+/**
+ * An agent's answer closing its host's order: an open one, or one the pool expired meanwhile — the agent takes an order
+ * before its not_after but answers a retire-legacy only at its end (up to 30 minutes on), so its answer, not "not taken",
+ * is what happened. Once answered, a later report carrying the same answer closes nothing more.
+ */
+export const ANSWER_HOST_ORDER_SQL = "UPDATE host_orders SET state = ?, answered_at = ?, detail = ? WHERE id = ? AND host_id = ? AND state IN ('open', 'expired')";
 /** A host's open orders, oldest first: what its state hands its agent, by the open-kind index. */
 export const HOST_OPEN_ORDERS_SQL = "SELECT id, kind, not_after FROM host_orders WHERE host_id = ? AND state = 'open' AND not_after > ? ORDER BY issued_at LIMIT 16";
 
@@ -827,7 +837,7 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   let closed = 0;
   if (answers.length) {
     const results = await env.DB.batch(answers.flatMap((a) => [
-      env.DB.prepare("UPDATE host_orders SET state = ?, answered_at = ?, detail = ? WHERE id = ? AND host_id = ? AND state = 'open'").bind(a.outcome, at, a.detail, a.id, h.id),
+      env.DB.prepare(ANSWER_HOST_ORDER_SQL).bind(a.outcome, at, a.detail, a.id, h.id),
       env.DB.prepare(
         `INSERT INTO events (kind, ring, source, status, summary, payload)
          SELECT 'host', NULL, 'factory', ?, ? || kind || ' ' || state || ' (' || id || ')', json_object('host', host_id, 'owner', ?, 'action', 'order-answer', 'order', id, 'kind', kind, 'outcome', state, 'by', issued_by)
