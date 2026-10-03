@@ -5,6 +5,12 @@
 # release checkout whose build script is a probe task. Two tasks run at once:
 # A, a draft (a model kind: an agent sidecar), and B, a contributor's build.
 #
+#   0. the dispatcher starts from what the agent wrote (#371): `omarchy-agent
+#      dispatcher-env --write` renders etc/dispatcher.env beside a worker
+#      token — this machine's own addresses (its interfaces', and a stand-in
+#      for the public address install's egress probe saw), the secrets
+#      directory and the envelope's agent budget — keeping the token and an
+#      owner's line, 0600; the dispatcher's environment is that file
 #   1. from inside a task container: a public mirror answers through its
 #      egress sidecar (CONNECT and a plain GET); 169.254.169.254 is refused by
 #      the egress and unreachable directly; a public name that resolves to
@@ -17,7 +23,11 @@
 #      docker API the engine cannot be asked, prep-root.sh's INPUT drop is the
 #      seam there and the test says so; the other task's container, egress and agent
 #      sidecar are unreachable directly and refused through the egress; the
-#      task's own agent sidecar answers
+#      task's own agent sidecar answers; through the egress, the host's LAN
+#      address is refused, and so is its public one, a public address that only
+#      the agent's OMARCHY_HOST_ADDRESSES refuses ("an address of this host"),
+#      which every egress sidecar was given; the agent sidecar's caps are the
+#      envelope's budget
 #   2. the probe sidecar's word reaches the claim (`agent`): with a key the
 #      provider refuses, it says so, which shows the agent sidecar's way out
 #   3. a package with a signed exception in factory/sizing gets a bridge
@@ -28,10 +38,10 @@
 # Every container, network and image it makes is labelled with this run's own
 # host id and removed at the end; nothing else on the engine is touched.
 #
-# Requires: cargo (or PKG_REPO=<a built pkg-repo>), python3, jq, docker or
-# podman, the internet, and a worker image with this commit's pkg-repo,
-# entrypoint and broker (WORKER_IMAGE, default omarchy-worker:ci, which the
-# ci.yml image job builds).
+# Requires: cargo (or PKG_REPO=<a built pkg-repo> and OMARCHY_AGENT=<a built
+# omarchy-agent>), python3, jq, docker or podman, the internet, and a worker
+# image with this commit's pkg-repo, entrypoint and broker (WORKER_IMAGE,
+# default omarchy-worker:ci, which the ci.yml image job builds).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -63,6 +73,10 @@ if [[ -z "${PKG_REPO:-}" ]]; then
   (cd "$root" && cargo build -q -p pkg-repo)
   PKG_REPO="$root/target/debug/pkg-repo"
 fi
+if [[ -z "${OMARCHY_AGENT:-}" ]]; then
+  (cd "$root" && cargo build -q -p omarchy-agent)
+  OMARCHY_AGENT="$root/target/debug/omarchy-agent"
+fi
 arch="$(uname -m)"; [[ "$arch" == arm64 ]] && arch=aarch64
 id_of() { local i; i="$("$RT" image inspect --format '{{.Id}}' "$1")"; echo "sha256:${i#sha256:}"; }
 worker_id="$(id_of "$WORKER_IMAGE")" || fail "no worker image $WORKER_IMAGE (build it, or set WORKER_IMAGE)"
@@ -82,6 +96,9 @@ else
   router="$(route -n get default 2>/dev/null | awk '/gateway:/ { print $2 }')"; lan="$(ipconfig getifaddr en0 2>/dev/null || true)"
 fi
 router="${router:-192.168.0.1}"; lan="${lan:-192.168.0.2}"
+# A stand-in for the public address install's egress probe saw this host's tasks leave from:
+# a public address that answers, which nothing but OMARCHY_HOST_ADDRESSES refuses.
+host_public=1.0.0.1
 
 # A service of the host on every address: a task must not reach it through its network's gateway.
 gw_port=$((22000 + RANDOM % 2000))
@@ -119,6 +136,9 @@ say router_direct "$(raw "$ROUTER" 80 | grep -c reached)"
 for p in $GW_PORT 22 53; do say "gw_direct_$p" "$(raw "$GATEWAY" "$p" | grep -c reached)"; done
 for t in $OTHER; do say "other_direct_$t" "$(raw "${t%:*}" "${t#*:}" | grep -c reached)"; done
 say other_agent_proxy "$(code "http://$OTHER_AGENT:8790/health")"
+say lan_proxy "$(code "http://$LAN:22/")"
+say host_public_proxy "$(code "http://$HOST_PUBLIC/")"
+say host_public_why "$(curl -s --max-time 30 "http://$HOST_PUBLIC/" 2>/dev/null | tr -d '\r\n' | cut -c1-200)"
 if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then say own_agent "$(code "$ANTHROPIC_BASE_URL/health")"; fi
 # Whole, then said done: a reader on the host (a VM's shared directory) never sees half of it.
 mv /task/log/net.tmp /task/log/net.txt && touch /task/log/net.done
@@ -129,12 +149,49 @@ STUB
 # The agent's keys: a key the provider refuses, so the probe's answer shows the sidecar reached it.
 printf 'FACTORY_PROVIDER=anthropic\nANTHROPIC_API_KEY=sk-ant-not-a-real-key\n' > "$tmp/secrets/agent.env"
 
+# ---------- 0. the dispatcher's environment, as the agent writes it (#371) ----------
+# The agent's data directory: its envelope (the secrets directory, a budget), the public address
+# its install saw, and the dispatcher.env enrollment left: a worker token and an owner's own line.
+token="omw_$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+agent_data="$tmp/agent"; envfile="$agent_data/sets/host/etc/dispatcher.env"
+mkdir -p "$(dirname "$envfile")"; chmod 700 "$agent_data"
+cat > "$agent_data/agent.toml" <<TOML
+pool = "https://pkgs.omarchy-pool.org"
+host_id = "h_0123456789"
+worker_id = "net-test-0a9z"
+[set]
+dir = "$agent_data/sets/host"
+work_root = "$tmp/work"
+secrets_dir = "$tmp/secrets"
+socket_cli = "/var/run/docker.sock"
+[envelope]
+allow_socket = true
+rootful_ack = true
+dedicated = true
+agent_budget = { calls_per_task = 37, tokens_per_task = 123456, minutes_per_task = 7, calls_per_day = 4000 }
+TOML
+chmod 600 "$agent_data/agent.toml"
+printf '{"public":"%s","at":"2026-10-03T00:00:00Z"}\n' "$host_public" > "$agent_data/egress.json"
+printf '# worker: net-test-0a9z\nOMARCHY_WORKER_TOKEN=%s\nTZ=UTC\n' "$token" > "$envfile"
+"$OMARCHY_AGENT" dispatcher-env --data-dir "$agent_data" --write > "$tmp/agent.out" 2>&1 || { cat "$tmp/agent.out" >&2; fail "omarchy-agent dispatcher-env --write"; }
+[[ "$(stat -c %a "$envfile")" == 600 ]] || fail "dispatcher.env is not 0600: $(stat -c %a "$envfile")"
+key() { sed -n "s/^$1=//p" "$envfile"; }
+[[ "$(key OMARCHY_WORKER_TOKEN)" == "$token" && "$(key TZ)" == UTC ]] || fail "the token or the owner's line was not kept: $(sed 's/omw_[0-9a-f]*/omw_…/' "$envfile")"
+addresses=",$(key OMARCHY_HOST_ADDRESSES),"
+[[ "$addresses" == *",$lan,"* && "$addresses" == *",$host_public,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($addresses) lacks the LAN address $lan or the public $host_public"
+[[ "$(key OMARCHY_SECRETS_DIR)" == "$tmp/secrets" ]] || fail "OMARCHY_SECRETS_DIR: $(key OMARCHY_SECRETS_DIR)"
+[[ "$(key OMARCHY_AGENT_CALLS_PER_TASK) $(key OMARCHY_AGENT_TOKENS_PER_TASK) $(key OMARCHY_AGENT_MINUTES_PER_TASK) $(key OMARCHY_AGENT_CALLS_PER_DAY)" == "37 123456 7 4000" ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$envfile")"
+# The dispatcher's environment is that file, as compose's env_file gives it.
+from_agent=()
+while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || from_agent+=("$line"); done < "$envfile"
+echo "ok: the agent wrote etc/dispatcher.env (0600): the token and the owner's line kept, OMARCHY_HOST_ADDRESSES=${addresses:1:${#addresses}-2}, the secrets directory, the budget"
+
 # The pool: who the host is, tasks one per claim (then 204), heartbeats by beats/<id>, every request kept.
 mkdir -p "$tmp/beats"; : > "$tmp/tasks.jsonl"; : > "$tmp/requests.jsonl"
 cat > "$tmp/pool.py" <<'P'
 import json, os, re, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-d, host = sys.argv[1], sys.argv[2]
+d, host, token = sys.argv[1], sys.argv[2], sys.argv[3]
 served = 0
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -149,7 +206,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.record()
         # Who the host is answers only to its worker token, as the pool does.
-        if self.path == "/api/v1/factory/workers/self": return self.send(200, {"id": host}) if self.headers.get("authorization") == "Bearer omw_it" else self.send(401, {"error": "unauthorized"})
+        if self.path == "/api/v1/factory/workers/self": return self.send(200, {"id": host}) if self.headers.get("authorization") == f"Bearer {token}" else self.send(401, {"error": "unauthorized"})
         return self.send(404, {"error": "none"})
     def do_PUT(self):
         self.record(); return self.send(200, {})
@@ -170,7 +227,7 @@ srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
 open(f"{d}/port", "w").write(str(srv.server_address[1]))
 srv.serve_forever()
 P
-python3 "$tmp/pool.py" "$tmp" "$host" & stub=$!
+python3 "$tmp/pool.py" "$tmp" "$host" "$token" & stub=$!
 for _ in $(seq 50); do [[ -s "$tmp/port" ]] && break; sleep 0.1; done
 port="$(cat "$tmp/port")"; ready_port=$((20000 + RANDOM % 2000))
 printf '{"schema":2,"at":"2026-10-02T00:00:00Z","cpus":12,"mem_gb":32,"page_kb":4,"disk_free_gb":{"work":200,"engine":150},"units":11,"job_reserved":1,"agent_slots":2,"lanes":[{"arch":"%s","mode":"native"}],"isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}\n' "$arch" > "$tmp/capacity.json"
@@ -192,9 +249,11 @@ net_gone() { ! "$RT" network inspect "$1" >/dev/null 2>&1; }
 
 give 1 probe-a "draft:probe-a"
 give 2 probe-b "https://example.invalid/b@v1:PKGBUILD"
-env -u SIGNING_KEY -u GITHUB_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY OMARCHY_BUILD_IMAGE_AARCH64="$build_id" OMARCHY_BUILD_IMAGE_X86_64="$build_id" \
-  OMARCHY_WORKER_IMAGE="$worker_id" OMARCHY_TASK_SUBNETS="$subnets" OMARCHY_SECRETS_DIR="$tmp/secrets" \
-  "$PKG_REPO" dispatch --api "http://127.0.0.1:$port" --pool "http://127.0.0.1:$port" --worker-token omw_it \
+# The worker token, the host's addresses, the secrets directory and the budget: from the agent's file only.
+env -u SIGNING_KEY -u GITHUB_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY \
+  -u OMARCHY_WORKER_TOKEN -u OMARCHY_HOST_ADDRESSES -u OMARCHY_SECRETS_DIR "${from_agent[@]}" \
+  OMARCHY_BUILD_IMAGE_AARCH64="$build_id" OMARCHY_BUILD_IMAGE_X86_64="$build_id" OMARCHY_WORKER_IMAGE="$worker_id" OMARCHY_TASK_SUBNETS="$subnets" \
+  "$PKG_REPO" dispatch --api "http://127.0.0.1:$port" --pool "http://127.0.0.1:$port" \
     --work-root "$tmp/work" --capacity-file "$tmp/capacity.json" --checkout "$tmp/checkout" --ready "127.0.0.1:$ready_port" \
     --tick-s 1 --heartbeat-s 2 --idle-claim-s 1 >> "$tmp/dispatcher.log" 2>&1 & disp=$!
 A="$(name 1)" B="$(name 2)"
@@ -207,7 +266,7 @@ targets() { # me other
   {
     echo "LAN=$lan"; echo "ROUTER=$router"; echo "GATEWAY=$(gateway_of "$1")"; echo "GW_PORT=$gw_port"
     echo "OTHER='$(ip_on "$o" "$o"):22 $(ip_on "$o-egress" "$o"):3128 $( [[ "$o" == "$A" ]] && echo "$(ip_on "$A-agent" "$A"):8790")'"
-    echo "OTHER_AGENT=$(ip_on "$A-agent" "$A")"
+    echo "OTHER_AGENT=$(ip_on "$A-agent" "$A")"; echo "HOST_PUBLIC=$host_public"
   } > "$tmp/targets.tmp"
   # Whole, then there: the probe task starts on the file's existence.
   mv "$tmp/targets.tmp" "$tmp/work/tasks/$3-$(gen "$3")/in/targets"
@@ -238,6 +297,19 @@ done
 [[ "$(result 2 other_agent_proxy)" == 403 ]] || fail "task B reached A's agent through its egress: $(result 2 other_agent_proxy)"
 [[ "$(result 1 own_agent)" =~ ^[2-5][0-9][0-9]$ ]] || fail "task A's own agent sidecar did not answer: $(result 1 own_agent)"
 echo "ok: a task reaches a public mirror through its egress only — not metadata, a name resolving to loopback, a raw socket ('Network is unreachable'), the host's LAN address or upstream router, its network's gateway ($gw_expected), the other task's container, egress or agent; its own agent answers"
+# The host's own addresses, as the agent wrote them (#371): every egress sidecar refuses them.
+for t in 1 2; do
+  [[ "$(result "$t" lan_proxy)" == 403 ]] || fail "task $t: the host's LAN address $lan through its egress: $(result "$t" lan_proxy)"
+  [[ "$(result "$t" host_public_proxy)" == 403 && "$(result "$t" host_public_why)" == *"an address of this host"* ]] \
+    || fail "task $t: the host's public address $host_public through its egress: $(result "$t" host_public_proxy) $(result "$t" host_public_why)"
+done
+for side in "$A-egress" "$B-egress"; do
+  denied=" $("$RT" inspect "$side" | jq -r '.[0].Args | join(" ")') "
+  [[ "$denied" == *" --deny $lan "* && "$denied" == *" --deny $host_public "* ]] || fail "$side was not given the agent's addresses: $denied"
+done
+caps="$("$RT" inspect "$A-agent" | jq -r '.[0].Config.Env[] | select(startswith("BROKER_AGENT_"))' | sort | tr '\n' ' ')"
+[[ "$caps" == "BROKER_AGENT_CALLS=37 BROKER_AGENT_TOKENS=123456 BROKER_AGENT_WALL_SECONDS=420 " ]] || fail "the agent sidecar's caps are not the envelope's budget: $caps"
+echo "ok: started from the agent's etc/dispatcher.env, every egress refuses the host's LAN address and its public one ($host_public: 'an address of this host'), and the agent sidecar's caps are the envelope's budget"
 
 # ---------- 2. the probe sidecar ----------
 probe_said() { jq -c 'select(.path == "/api/v1/factory/claim") | .body.agent // empty' "$tmp/requests.jsonl" | tail -n1; }

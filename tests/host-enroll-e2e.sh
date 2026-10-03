@@ -7,9 +7,11 @@
 #   its host key, enrolls with a capacity report and prints the fingerprint →
 #   nothing is registered and the token is in no process's argv → the owner's
 #   page shows the same fingerprint, and Confirm → the agent fetches the host
-#   worker token with a host-key-signed request into etc/dispatcher.env (0600)
-#   → that token claims → a rotation gives a new one while the old one still
-#   claims → the journal has the new-host line → running it again keeps the
+#   worker token with a host-key-signed request into etc/dispatcher.env (0600),
+#   beside the host's own addresses (#371) → that token claims → a rotation
+#   gives a new one while the old one still claims, keeping the addresses and
+#   an owner's own line, and writing agent.toml's secrets directory and agent
+#   budget → the journal has the new-host line → running it again keeps the
 #   identity and the worker token → (#322) a suspension refuses its claims,
 #   its follow and the agent's token call, changing nothing on the machine,
 #   and the owner's Resume with a passkey brings the same token back → Retire
@@ -127,6 +129,15 @@ OMW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
 [[ $OMW == omw_* ]] || fail "no worker token in dispatcher.env"
 # The registration beside it is what install writes into agent.toml's worker_id (#317).
 [[ $(sed -n 's/^# worker: //p' "$ENV_FILE") == "$WORKER" ]] || fail "dispatcher.env does not name $WORKER"
+# The host's own addresses beside the token (#371), its LAN address among them; no agent.toml yet,
+# so no secrets directory and no budget (the dispatcher's defaults).
+ADDRS=$(sed -n 's/^OMARCHY_HOST_ADDRESSES=//p' "$ENV_FILE")
+[[ -n $ADDRS ]] || fail "no OMARCHY_HOST_ADDRESSES in dispatcher.env"
+if command -v ip >/dev/null; then
+  LAN=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}')
+  [[ -z $LAN || ",$ADDRS," == *",$LAN,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($ADDRS) lacks the LAN address $LAN"
+fi
+grep -q '^OMARCHY_SECRETS_DIR=\|^OMARCHY_AGENT_' "$ENV_FILE" && fail "a secrets directory or a budget before agent.toml"
 
 step "The host claims with it (nothing queued: 204)"
 # A host registration claims with its capacity, a claim_id new per attempt, want
@@ -141,7 +152,15 @@ code=$(host_claim "$OMW")
 [[ $code == 204 ]] || fail "the claim: $code"
 [[ $(curl -fs "$POOL/api/v1/factory/workers/self" -H "authorization: Bearer $OMW" | jq -r .id) == "$WORKER" ]] || fail "the token is not $WORKER's"
 
-step "A rotation: a new token, the old one still good for ten minutes"
+step "A rotation: a new token, the old one still good for ten minutes; the rest kept, agent.toml's keys written"
+# What install writes after the Confirm (the envelope's secrets directory and a budget), and an owner's own line.
+cat > "$DATA/omarchy-agent/agent.toml" <<TOML
+[set]
+secrets_dir = "$DATA/omarchy-agent/secrets"
+[envelope]
+agent_budget = { calls_per_task = 50, calls_per_day = 900 }
+TOML
+echo 'TZ=UTC' >> "$ENV_FILE"
 XDG_DATA_HOME="$DATA" "$AGENT" token >> "$E2E/agent.log" 2>&1 || fail "the rotation"
 NEW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
 [[ $NEW == omw_* && $NEW != "$OMW" ]] || fail "no new token"
@@ -149,6 +168,13 @@ for t in "$OMW" "$NEW"; do
   code=$(host_claim "$t")
   [[ $code == 204 ]] || fail "a claim after the rotation: $code"
 done
+[[ $(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE") == 600 ]] || fail "dispatcher.env is not 0600 after the rotation"
+[[ $(sed -n 's/^OMARCHY_HOST_ADDRESSES=//p' "$ENV_FILE") == "$ADDRS" ]] || fail "the rotation did not keep the host's addresses"
+[[ $(sed -n 's/^TZ=//p' "$ENV_FILE") == UTC ]] || fail "the rotation did not keep the owner's line"
+[[ $(sed -n 's/^OMARCHY_SECRETS_DIR=//p' "$ENV_FILE") == "$DATA/omarchy-agent/secrets" ]] || fail "no OMARCHY_SECRETS_DIR from agent.toml"
+[[ $(sed -n 's/^OMARCHY_AGENT_CALLS_PER_TASK=//p' "$ENV_FILE")/$(sed -n 's/^OMARCHY_AGENT_CALLS_PER_DAY=//p' "$ENV_FILE") == 50/900 ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$ENV_FILE")"
+grep -q '^OMARCHY_AGENT_TOKENS_PER_TASK=\|^OMARCHY_AGENT_MINUTES_PER_TASK=' "$ENV_FILE" && fail "a budget key agent.toml does not set"
+[[ $(grep -c '^OMARCHY_WORKER_TOKEN=' "$ENV_FILE") == 1 ]] || fail "more than one token line"
 
 step "The journal, the notice's words, and a second run that keeps the identity"
 curl -fs "$POOL/api/v1/events?kind=host" | jq -e --arg h "$HOST" '.events[] | select(.payload.host == $h) | select(.summary | startswith("new host of e2e: 8 cores, 16 GB, '"$ARCH"' native, isolation root (dedicated)"))' >/dev/null || fail "no journal line"
