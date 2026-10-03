@@ -560,6 +560,21 @@ mod tests {
         assert!("0.0.0.0/0".parse::<Cidr>().unwrap().contains(ip("8.8.8.8")));
     }
 
+    #[test]
+    fn the_agents_host_addresses_are_a_deny_list_as_written() {
+        // `OMARCHY_HOST_ADDRESSES` as the agent renders it (#371): plain addresses, an IPv6
+        // address as its /64 (a temporary address in it is the host's too), link-local.
+        let deny: Vec<Cidr> = "203.0.114.10,2a01:4f8:1:2::/64,fe80::/64"
+            .split(',')
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let host = Some("an address of this host or of its task networks".to_owned());
+        assert_eq!(refused(ip("203.0.114.10"), &deny), host);
+        assert_eq!(refused(ip("2a01:4f8:1:2:9c1e:44ff:fe00:7"), &deny), host);
+        assert_eq!(refused(ip("2a01:4f8:1:3::1"), &deny), None);
+        assert_eq!(refused(ip("203.0.114.11"), &deny), None);
+    }
+
     fn rebinding(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
         let a = |s: &str| SocketAddr::new(s.parse().unwrap(), port);
         Ok(match host {
