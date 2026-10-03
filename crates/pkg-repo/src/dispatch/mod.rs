@@ -50,8 +50,10 @@
 //! **Its environment** (#371): the agent writes `etc/dispatcher.env` (0600,
 //! the host set's `env_file`) with the host's worker token, the host's own
 //! addresses for the egress to refuse (`OMARCHY_HOST_ADDRESSES`: its
-//! interfaces' and the public one its install's egress probe saw, rendered
-//! again by the run loop when they change, never touching the token),
+//! interfaces', read again by the run loop every minute, and the public one
+//! its tasks leave from, which install's egress probe saw and the run loop
+//! asks the pool's edge for again every hour; rendered again when they
+//! change, never touching the token),
 //! `OMARCHY_SECRETS_DIR` as install chose it (a path only: never mounted
 //! here) and the envelope's agent budget (`OMARCHY_AGENT_CALLS_PER_TASK`,
 //! `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK`, `…_CALLS_PER_DAY`), each only
