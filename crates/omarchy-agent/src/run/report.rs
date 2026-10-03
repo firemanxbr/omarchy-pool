@@ -5,10 +5,12 @@
 //! the last host orders (`orders`), which the pool closes the orders with. Capacity,
 //! runtime, bundle and task fields stay with the issues that read them.
 //!
-//! A report that does not get through changes nothing and is tried again a minute later;
-//! the pool keeps the last one it got. Every word in it went through the journal's scrub
-//! (the env files' values), and the pool refuses whole a report that looks like it carries
-//! a secret.
+//! A report that does not get through changes nothing and is tried again a minute later —
+//! an hour later when the pool refuses the host's calls (401/403: suspended, retired, a
+//! clock off by more than two minutes), as the polls go hourly then (design v2 §16.4), and
+//! at once when a poll gets through again; the pool keeps the last one it got. Every word
+//! in it went through the journal's scrub (the env files' values), and the pool refuses
+//! whole a report that looks like it carries a secret.
 
 use super::agent::Agent;
 use super::orders::iso;
@@ -74,18 +76,20 @@ impl Agent {
                 self.reported.body = Some(body);
                 self.reported.next_at = now + EVERY_S;
             }
-            Net::NoAnswer(e) => self.unreported(now, &e),
-            Net::Unauthorized(s) => self.unreported(now, &format!("HTTP {s}")),
+            Net::NoAnswer(e) => self.unreported(now, &e, RETRY_S),
+            Net::Unauthorized(s) => {
+                self.unreported(now, &format!("HTTP {s}"), super::agent::UNAUTHORIZED_S);
+            }
         }
     }
 
-    fn unreported(&mut self, now: i64, why: &str) {
+    fn unreported(&mut self, now: i64, why: &str, retry_s: i64) {
         // Said once per spell: the next one that gets through ends it.
         if self.reported.body.is_some() || self.reported.next_at == 0 {
             self.journal
-                .write(now, "report", serde_json::json!({"detail": format!("not sent: {why}; tried again in {RETRY_S} s")}));
+                .write(now, "report", serde_json::json!({"detail": format!("not sent: {why}; tried again in {retry_s} s")}));
         }
         self.reported.body = None;
-        self.reported.next_at = now + RETRY_S;
+        self.reported.next_at = now + retry_s;
     }
 }

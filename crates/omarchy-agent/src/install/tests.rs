@@ -1195,9 +1195,31 @@ fn uninstall_removes_the_unit_and_the_bundle_and_keeps_the_identity() {
     state.rollout.step = crate::run::state::Step::Pull;
     state.rollout.target = Some(v);
     crate::run::state::save(&p.data.join("state.json"), &state).unwrap();
+    // A legacy set retire-legacy retired (#344): said as such, its record kept.
+    legacy::record(
+        &p.data,
+        &legacy::Legacy {
+            project: "omarchy-pool".into(),
+            recorded_at: "2027-01-14T08:00:00Z".into(),
+            containers: Vec::new(),
+            networks: Vec::new(),
+            rootful_exception: false,
+            dir: Some(PathBuf::from("/srv/omarchy-pool")),
+            retired_at: Some("2027-02-01T08:00:00Z".into()),
+            retired_by: Some(format!("ho_{}", "a".repeat(32))),
+        },
+    )
+    .unwrap();
     let mut sys = Fake::default();
     let mut out = Vec::new();
     let left = uninstall(p, &mut sys, &mut out).unwrap();
+    let said = String::from_utf8(out).unwrap();
+    assert!(
+        said.contains("the legacy project omarchy-pool was retired already (2027-02-01T08:00:00Z); its marker stays in /srv/omarchy-pool"),
+        "{said}"
+    );
+    assert!(!said.contains("was not touched"), "{said}");
+    assert!(p.data.join(legacy::FILE).exists());
     assert!(!p.unit_dir().join(unit::NAME).exists());
     assert!(!p.data.join("bundles").exists() && !p.set_dir().exists());
     assert!(p.data.join("state/host.json").exists() && p.data.join("agent.toml").exists());
@@ -1291,6 +1313,67 @@ fn a_rerun_without_legacy_uses_the_recorded_project_and_its_exception() {
     assert!(screen.contains("exception until P6"), "{screen}");
     // The recorded project is looked at again (this stub engine has none of it).
     assert!(screen.contains("omarchy-pool"), "{screen}");
+}
+
+#[test]
+fn a_rerun_after_retire_legacy_keeps_the_rootful_exception_and_looks_at_nothing_of_the_set() {
+    // The Studio after step 6 (#344): the legacy set stopped and removed by retire-legacy,
+    // the daemon still rootful without remapping until P6.
+    let rootful = INFO.replace(
+        r#""SecurityOptions":["name=rootless"]"#,
+        r#""SecurityOptions":[]"#,
+    );
+    let h = host(&rootful, EGRESS_OK);
+    let record = legacy::Legacy {
+        project: "omarchy-pool".into(),
+        recorded_at: "2027-01-14T08:00:00Z".into(),
+        containers: vec!["c0ffee".into()],
+        networks: Vec::new(),
+        rootful_exception: true,
+        dir: Some(PathBuf::from("/srv/omarchy-pool")),
+        retired_at: Some("2027-02-01T08:00:00Z".into()),
+        retired_by: Some(format!("ho_{}", "a".repeat(32))),
+    };
+    files::write(
+        &h.options.places.data,
+        legacy::FILE,
+        &serde_json::to_vec(&record).unwrap(),
+        0o600,
+    )
+    .unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    let screen = r.screen();
+    assert!(r.blockers.is_empty(), "{screen}");
+    assert!(!screen.contains("needs userns-remap"), "{screen}");
+    assert!(screen.contains("exception until P6"), "{screen}");
+    assert!(
+        screen.contains("legacy: omarchy-pool was retired at 2027-02-01T08:00:00Z (ho_"),
+        "{screen}"
+    );
+    // Nothing of the retired set is looked for (the engine has none of it any more).
+    assert!(
+        !screen.contains("no container of the compose project"),
+        "{screen}"
+    );
+    assert!(
+        !screen.contains("recorded only and left running"),
+        "{screen}"
+    );
+
+    // A retired record without the exception (a host that never had one) gets none.
+    let record = legacy::Legacy {
+        rootful_exception: false,
+        ..record
+    };
+    files::write(
+        &h.options.places.data,
+        legacy::FILE,
+        &serde_json::to_vec(&record).unwrap(),
+        0o600,
+    )
+    .unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(r.screen().contains("needs userns-remap"), "{}", r.screen());
 }
 
 /// The egress probe and a legacy project on a real engine (`tests/agent-install.sh`; it

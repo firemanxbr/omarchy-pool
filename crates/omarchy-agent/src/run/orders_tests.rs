@@ -11,8 +11,9 @@ use std::process::Command;
 
 use crate::install::legacy::{self, Legacy};
 use crate::run::fake::World;
-use crate::run::pool::Net;
+use crate::run::pool::{Follow, HostState, Net};
 use crate::run::state::{RetireStep, SEEN_RING};
+use crate::version::Release;
 
 const LEGACY: &str = "omarchy-pool";
 const OTHER: &str = "omarchy-other";
@@ -119,6 +120,60 @@ fn the_release_target_comes_from_the_host_state() {
     assert_eq!(r["agent"]["version"], w.agent.version.to_string());
     assert_eq!(r["round"]["outcome"], "ok");
     assert_eq!(r["legacy"], serde_json::Value::Null);
+}
+
+#[test]
+fn a_pool_from_before_the_host_state_names_its_target_by_its_follow_and_only_it() {
+    // rollback.yml deploys the Worker of the tag it goes back to: below #344 its host state
+    // names no release at all, and without its follow a host on agent 0.3.0 would never see
+    // the rollback's target (nor fetch its statement).
+    let mut w = World::running_v1();
+    w.release("v1.1.0");
+    w.pool_answers(Net::Ok(HostState {
+        older_pool: true,
+        ..HostState::default()
+    }));
+    w.remote.borrow_mut().follow = Some(Net::Ok(Follow {
+        latest: Release::parse("v1.1.0"),
+        update: None,
+        poll_s: Some(120),
+    }));
+    w.round();
+    assert_eq!(w.applied().as_deref(), Some("v1.1.0"), "{:?}", w.outcome());
+    let worker = w.agent.cfg.worker_id.clone();
+    assert!(w.remote.borrow().follows.iter().all(|f| *f == worker));
+    assert_eq!(
+        w.journal().matches("a pool from before #344").count(),
+        1,
+        "said once: {}",
+        w.journal()
+    );
+    // Its follow's open Update for this host's worker is an Update order, as before 0.3.0.
+    w.remote.borrow_mut().follow = Some(Net::Ok(Follow {
+        latest: Release::parse("v1.1.0"),
+        update: Some("wo_9".into()),
+        poll_s: Some(120),
+    }));
+    w.poll();
+    assert_eq!(w.agent.state.rollout.why, "Update order wo_9");
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    // A follow that does not answer is a pool that does not: nothing changes, it backs off.
+    w.remote.borrow_mut().follow = Some(Net::NoAnswer("HTTP 502".into()));
+    let changes = w.changes().len();
+    w.poll();
+    assert_eq!(w.agent.state.poll.last, "no-answer");
+    assert_eq!(w.agent.state.poll.backoff_s, 60);
+    assert_eq!(w.changes().len(), changes);
+    assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
+    // A pool from #344 on is never asked its follow, even one that runs no release.
+    let asked = w.remote.borrow().follows.len();
+    w.target("v1.1.0", None);
+    w.poll();
+    w.target("dev", None);
+    w.poll();
+    assert_eq!(w.remote.borrow().follows.len(), asked);
 }
 
 #[test]
@@ -730,6 +785,169 @@ fn reports_go_on_change_and_every_five_minutes_and_one_that_failed_is_retried() 
     // A secret of the set's env files never reaches it.
     let text = r.to_string();
     assert!(!text.contains(crate::run::fake::TOKEN), "{text}");
+}
+
+#[test]
+fn a_report_the_pool_refuses_is_tried_again_hourly_and_at_once_when_the_pool_takes_the_host_again()
+{
+    let mut w = World::running_v1();
+    w.target("v1.0.0", None);
+    w.tick(20);
+    // Suspended (or a clock too far off): every host call answers 403.
+    w.remote.borrow_mut().report_answer = Some(Net::Unauthorized(403));
+    w.pool_answers(Net::Unauthorized(403));
+    w.agent.state.round.detail = "something to report".into();
+    let tries = w.remote.borrow().report_tries;
+    for _ in 0..58 {
+        w.tick(60);
+    }
+    let tried = w.remote.borrow().report_tries - tries;
+    assert_eq!(tried, 1, "one try in the hour, not one a minute");
+    assert!(
+        w.journal()
+            .contains("not sent: HTTP 403; tried again in 3600 s"),
+        "{}",
+        w.journal()
+    );
+    // Resumed: the next poll that gets through sends the report at once.
+    w.target("v1.0.0", None);
+    w.remote.borrow_mut().report_answer = None;
+    let reports = w.remote.borrow().reports.len();
+    w.poll();
+    assert_eq!(w.remote.borrow().reports.len(), reports + 1);
+}
+
+#[test]
+fn a_step_that_cannot_write_lets_a_retire_legacy_go_on_and_the_report_go_out() {
+    let (mut w, dir) = beside_a_legacy_set(true);
+    w.release("v1.1.0");
+    w.target("v1.1.0", None);
+    w.round_now();
+    while w.step() != "commit" {
+        w.tick(3);
+    }
+    // The set directory cannot be written (a full disk, a path in the way): the commit
+    // fails every tick until it can.
+    let set = w.set_dir();
+    let aside = w.dir.join("set-aside");
+    fs::rename(&set, &aside).unwrap();
+    fs::write(&set, "in the way").unwrap();
+    w.orders(&[("retire-legacy", "ho_e", 3600)]);
+    w.agent.state.poll.next_at = 0;
+    for _ in 0..5 {
+        w.now += 20;
+        w.engine.borrow_mut().clock = w.now;
+        let failed = w.agent.tick(w.now, false);
+        assert!(failed.is_err(), "{failed:?}");
+    }
+    assert_eq!(w.step(), "commit");
+    assert!(dir.join(".omarchy-agent").exists());
+    assert_eq!(answer_of(&w, "ho_e").0, "done");
+    assert_eq!(running(&w, LEGACY).len(), 0);
+    let r = w.last_report();
+    assert!(
+        r["orders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == "ho_e" && a["outcome"] == "done"),
+        "{r}"
+    );
+    assert_eq!(r["legacy"]["state"], "retired");
+    // Once it can write, the commit finishes.
+    fs::remove_file(&set).unwrap();
+    fs::rename(&aside, &set).unwrap();
+    w.tick(3);
+    assert_eq!(w.step(), "idle");
+    assert_eq!(w.applied().as_deref(), Some("v1.1.0"), "{:?}", w.outcome());
+}
+
+#[test]
+fn a_retire_legacy_marks_retired_only_the_project_it_retired() {
+    let (mut w, _dir) = beside_a_legacy_set(true);
+    w.orders(&[("retire-legacy", "ho_r", 3600)]);
+    w.poll();
+    // install --legacy records another project while the order runs.
+    record(&w, None, Some(OTHER));
+    for _ in 0..5 {
+        w.tick(3);
+    }
+    let (outcome, detail) = answer_of(&w, "ho_r");
+    assert_eq!(outcome, "done", "{detail}");
+    assert!(
+        detail.ends_with(
+            "; legacy.json was not updated: it names omarchy-other now, not omarchy-pool"
+        ),
+        "{detail}"
+    );
+    let l = legacy::recorded(&w.agent.paths.data).unwrap().unwrap();
+    assert_eq!(l.project, OTHER);
+    assert_eq!((l.retired_at, l.retired_by), (None, None));
+    assert_eq!(running(&w, LEGACY).len(), 0);
+    assert_eq!(running(&w, OTHER).len(), 1);
+}
+
+/// A JSON value's shape: its keys and each value's type, an array by its first item. The
+/// same as worker/test/host-orders.test.ts's.
+fn shape(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value as V;
+    match v {
+        V::Null => "null".into(),
+        V::Bool(_) => "boolean".into(),
+        V::Number(_) => "number".into(),
+        V::String(_) => "string".into(),
+        V::Array(a) => V::Array(a.first().map(shape).into_iter().collect()),
+        V::Object(o) => V::Object(o.iter().map(|(k, v)| (k.clone(), shape(v))).collect()),
+    }
+}
+
+fn fixture(name: &str) -> serde_json::Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/host-api")
+        .join(name);
+    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap()
+}
+
+/// The reports as the pool reads them (`tests/fixtures/host-api/report-*.json`, which
+/// worker/test/host-orders.test.ts posts, signed, and reads back field by field): before an
+/// order, with a legacy set a retire-legacy would be refused for, and after a done
+/// retire-legacy and a refused (expired) reconcile-now. The contract both sides read,
+/// written once.
+#[test]
+fn the_reports_keep_the_shape_the_pool_reads() {
+    let (mut w, dir) = beside_a_legacy_set(true);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o775)).unwrap();
+    w.agent.legacy_seen = None;
+    w.tick(20);
+    let before = w.last_report();
+    assert_eq!(shape(&before), shape(&fixture("report-blocked.json")));
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    w.agent.legacy_seen = None;
+    let (retire, refused) = (
+        format!("ho_{}", "1".repeat(32)),
+        format!("ho_{}", "2".repeat(32)),
+    );
+    w.orders(&[
+        ("retire-legacy", &retire, 3600),
+        ("reconcile-now", &refused, -1),
+    ]);
+    w.poll();
+    for _ in 0..5 {
+        w.tick(3);
+    }
+    w.tick(20);
+    let after = w.last_report();
+    let outcomes: Vec<(&str, &str)> = after["orders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| (a["id"].as_str().unwrap(), a["outcome"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [(refused.as_str(), "refused"), (retire.as_str(), "done")]
+    );
+    assert_eq!(shape(&after), shape(&fixture("report.json")));
 }
 
 #[test]

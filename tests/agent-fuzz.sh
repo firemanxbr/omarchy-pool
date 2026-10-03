@@ -2,7 +2,8 @@
 # Every parser the agent runs on a signed bundle, a statement, an owner's
 # files or its own state, fuzzed for a short budget (design v2 §11.3): the
 # manifest, the statement, the bundle archive, the set template with its
-# override, and state.json with the pool's host state (#315, #344). Each
+# override, and state.json with the pool's host state and the follow answer
+# of a pool from before it (#315, #344). Each
 # target starts from the crate's fixtures as its corpus; a crash, a leak or a
 # timeout fails the run and leaves the input under
 # crates/omarchy-agent/fuzz/artifacts/.
@@ -22,9 +23,11 @@ mkdir -p "$corpus"/{manifest,statement,bundle,set,state}
 cp "$fixtures"/manifest/*.json "$corpus/manifest/"
 printf '%s' '{"schema":1,"seq":7,"to":"v1.13.4","retracts_through":"v1.14.2","issued":"2026-10-20T14:00:00Z","agent_to":null,"run":"https://github.com/firemanxbr/omarchy-pool/actions/runs/1"}' \
   >"$corpus/statement/example.json"
-# state.json as the run loop writes it mid-round, and a host state with its orders.
+# state.json as the run loop writes it mid-round, a host state with its orders,
+# and a follow answer (read only from a pool from before #344).
 printf '%s' '{"state_schema":1,"agent":"0.2.0","floor":"v1.20.0","min_release":"v1.18.0","revoked":["v1.19.1"],"statement_seq":3,"applied":"v1.20.0","target":"v1.21.0","quarantine":{"v1.19.0":{"until":1800000000,"reverts":1}},"update_seen":"ord_1","tools":null,"pulled":{"v1.20.0":["ghcr.io/firemanxbr/omarchy-worker@sha256:1bc04b5291c26a46d918139138b992d2de976d6851d0893b0476b85bfbdfc6e6"]},"rollout":{"step":{"state":"replace","files":"staging","phase":"drain","since":1800000000},"since":1800000000,"target":"v1.21.0","from":"v1.20.0","rollback":false,"why":"the pool names v1.21.0","services":["dispatcher"],"reverting":null},"round":{"at":1,"outcome":"ok","from":null,"step":"commit","detail":""},"poll":{"next_at":2,"backoff_s":0,"last":"ok","last_at":1}}'   >"$corpus/state/state.json"
 printf '%s' '{"host":"h_0123456789","status":"active","release":{"target":"v1.21.0","deployed_at":"2026-10-01T00:00:00Z"},"poll_s":120,"updates":["wo_1"],"orders":[{"id":"ho_1","kind":"retire-legacy","not_after":"2026-10-01T01:00:00.000Z"},{"id":"ho_2","kind":"reconcile-now","not_after":1790000000}]}'   >"$corpus/state/host-state.json"
+printf '%s' '{"latest":"v1.21.0","deployed_at":"2026-10-01T00:00:00Z","poll_s":120,"workers":[{"id":"w_fuzz","version":"v1.20.0","outdated":true,"update":"ord_1"}]}'   >"$corpus/state/follow.json"
 # A bundle archive as release.yml writes it: manifest.json and a set.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

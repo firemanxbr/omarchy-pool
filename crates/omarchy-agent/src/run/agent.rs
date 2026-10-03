@@ -33,7 +33,7 @@ use super::trust::{self, Refusal};
 /// The poll interval when the pool names none (its `FOLLOW_POLL_S`), and the bounds.
 const POLL_S: i64 = 120;
 const MAX_BACKOFF_S: i64 = 600;
-const UNAUTHORIZED_S: i64 = 3600;
+pub(super) const UNAUTHORIZED_S: i64 = 3600;
 /// The safety timer: the running set is checked against `last-good/` at least this often.
 const DRIFT_S: i64 = 900;
 
@@ -104,6 +104,9 @@ pub(crate) struct Agent {
     pub(super) legacy_seen: Option<(i64, serde_json::Value)>,
     /// The host report last sent (#344).
     pub(super) reported: Reported,
+    /// Said once per process: the pool predates the host state's release (#344), so its
+    /// `follow` names the target.
+    older_pool_said: bool,
 }
 
 enum Fetched {
@@ -156,6 +159,7 @@ impl Agent {
             repeated: BTreeSet::new(),
             legacy_seen: None,
             reported: Reported::default(),
+            older_pool_said: false,
         }
     }
 
@@ -272,9 +276,13 @@ impl Agent {
                 self.drift(now);
             }
             if self.exit.is_none() {
-                self.step(now)?;
+                // A step that cannot write (a set directory, a full disk) is retried every
+                // tick; a retire-legacy in flight goes on meanwhile, and the report still
+                // says what the host knows, its answers above all.
+                let stepped = self.step(now);
                 self.retire_step(now);
                 self.report(now);
+                stepped?;
             }
         }
         if self.saved.as_ref() != Some(&self.state) {
@@ -353,15 +361,24 @@ impl Agent {
     }
 
     fn poll(&mut self, now: i64, round_now: bool) {
-        let answer = self.pool.state();
+        let answer = match self.pool.state() {
+            Net::Ok(s) if s.older_pool => self.target_by_follow(s, now),
+            other => other,
+        };
         let p = &mut self.state.poll;
         p.last_at = now;
+        let refused = p.last == "unauthorized";
         match answer {
             Net::Ok(f) => {
                 p.last = "ok".into();
                 p.backoff_s = 0;
                 let every = f.poll_s.unwrap_or(POLL_S).clamp(60, MAX_BACKOFF_S);
                 p.next_at = now + jitter(every, now);
+                // The pool takes the host's calls again: the report waiting for its hourly
+                // retry goes now.
+                if refused {
+                    self.reported.next_at = self.reported.next_at.min(now);
+                }
                 self.on_state(f, now, round_now);
             }
             Net::NoAnswer(e) => {
@@ -388,6 +405,40 @@ impl Agent {
                 self.say(now, Outcome::Unauthorized, &detail);
             }
         }
+    }
+
+    /// A host state with no `release` member, a pool from before #344: only a rollback below
+    /// the release that brought agent 0.3.0 deploys one again (rollback.yml deploys the
+    /// Worker of the tag it goes back to). Its target and the open Update of the host's
+    /// registration are then its `follow`'s, as agents before 0.3.0 read them, so the host
+    /// follows the rollback (its statement) down; a pool from #344 on is never asked.
+    fn target_by_follow(&mut self, mut s: HostState, now: i64) -> Net<HostState> {
+        let f = match self.pool.follow(&self.cfg.worker_id) {
+            Net::Ok(f) => f,
+            Net::NoAnswer(e) => {
+                return Net::NoAnswer(format!(
+                    "its host state names no release (a pool from before #344) and its follow did not answer: {e}"
+                ))
+            }
+            Net::Unauthorized(c) => return Net::Unauthorized(c),
+        };
+        if !self.older_pool_said {
+            self.older_pool_said = true;
+            self.journal.write(
+                now,
+                "poll",
+                serde_json::json!({"detail": format!(
+                    "the pool's host state names no release: a pool from before #344 (a rollback below it); its follow names the target ({})",
+                    f.latest.map_or_else(|| "none".to_owned(), |r| r.to_string())
+                )}),
+            );
+        }
+        s.target = f.latest;
+        if s.updates.is_empty() {
+            s.updates.extend(f.update);
+        }
+        s.poll_s = s.poll_s.or(f.poll_s);
+        Net::Ok(s)
     }
 
     /// The host state (#344): its Update orders, its host orders, then its target.

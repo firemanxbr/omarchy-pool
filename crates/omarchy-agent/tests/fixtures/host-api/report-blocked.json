@@ -1,0 +1,35 @@
+{
+  "agent": {
+    "skip": null,
+    "version": "0.3.0"
+  },
+  "legacy": {
+    "blocked": "the marker cannot be written: /srv/omarchy-pool: group- or world-writable (mode 775)",
+    "containers": 3,
+    "dir": "/srv/omarchy-pool",
+    "project": "omarchy-pool",
+    "running": 3,
+    "since": "2027-01-01T08:00:00Z",
+    "state": "running"
+  },
+  "orders": [],
+  "quarantine": [],
+  "release": {
+    "applied": "v1.0.0",
+    "floor": "v1.0.0",
+    "min_release": "v1.0.0",
+    "target": "v1.0.0"
+  },
+  "rollout": {
+    "since": "2027-01-15T08:01:55Z",
+    "state": "idle",
+    "target": null
+  },
+  "round": {
+    "at": "2027-01-15T08:01:55Z",
+    "detail": "host runs v1.0.0",
+    "from": null,
+    "outcome": "ok",
+    "step": "commit"
+  }
+}

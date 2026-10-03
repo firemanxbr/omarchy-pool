@@ -8,7 +8,11 @@
 //!
 //! From this agent on the target is the host state's, never `follow.latest`: the pool's
 //! public `GET /factory/follow` is read by the legacy sets' updaters and the agents before
-//! this one only.
+//! this one — and by this one only against a pool from before #344, whose host state names
+//! no release at all. Only a rollback below the release that brought agent 0.3.0 deploys
+//! such a Worker again (rollback.yml deploys the Worker of the tag it goes back to), and
+//! without its `follow` every host already on 0.3.0 would see no target and never fetch the
+//! rollback statement (design v2 §16).
 
 use std::io::Read;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -42,6 +46,22 @@ pub(crate) struct HostState {
     pub updates: Vec<String>,
     /// The host orders, in the pool's order.
     pub orders: Vec<Order>,
+    /// How often the pool asks to be polled, in seconds.
+    pub poll_s: Option<i64>,
+    /// The answer has no `release` member at all: a pool from before #344, whose target and
+    /// open Update are its `follow`'s. A pool from #344 on always sends one, `{"target":
+    /// null}` when it runs no release.
+    pub older_pool: bool,
+}
+
+/// What `GET /api/v1/factory/follow?ids=<worker>` says, as far as the agent reads it: read
+/// only against a pool from before #344 ([`HostState::older_pool`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct Follow {
+    /// The pool's release; `None` when it runs none (a build with no tag).
+    pub latest: Option<Release>,
+    /// The open Update order for this host's worker, if any.
+    pub update: Option<String>,
     /// How often the pool asks to be polled, in seconds.
     pub poll_s: Option<i64>,
 }
@@ -98,6 +118,8 @@ pub(crate) struct Relayed {
 pub(crate) trait Pool {
     /// The host state, signed with the host key.
     fn state(&mut self) -> Net<HostState>;
+    /// The pool's public `follow` for `worker_id`: asked only of a pool from before #344.
+    fn follow(&mut self, worker_id: &str) -> Net<Follow>;
     /// Posts the host report (signed); the pool keeps it and closes the orders it answers.
     fn report(&mut self, body: &[u8]) -> Net<()>;
     /// `Ok(None)`: the pool has no statement for going back to `to` (404).
@@ -109,6 +131,7 @@ pub(crate) trait Pool {
 }
 
 const STATE_MAX: u64 = 64 << 10;
+const FOLLOW_MAX: u64 = 64 << 10;
 const STATE_PATH: &str = "/api/v1/hosts/self/state";
 const REPORT_PATH: &str = "/api/v1/hosts/self/report";
 const STATEMENT_MAX: u64 = 1 << 20;
@@ -128,35 +151,29 @@ pub(crate) fn is_order_id(s: &str) -> bool {
 /// Reads a host state leniently: unknown fields ignored, a target that is not a release
 /// read as none, an Update id or an order whose id is not one dropped, an order whose
 /// `not_after` is not a time kept with none (and refused), an unknown kind kept as
-/// `Unknown` (and refused).
+/// `Unknown` (and refused). An answer with no `release` member at all is a pool from before
+/// #344 ([`HostState::older_pool`]).
 pub(crate) fn parse_state(body: &[u8]) -> Result<HostState, String> {
-    #[derive(Deserialize)]
-    struct Raw {
-        release: Option<serde_json::Value>,
-        poll_s: Option<serde_json::Value>,
-        updates: Option<serde_json::Value>,
-        orders: Option<serde_json::Value>,
+    fn list(v: Option<&serde_json::Value>) -> &[serde_json::Value] {
+        match v {
+            Some(serde_json::Value::Array(a)) => &a[..a.len().min(MAX_ORDERS)],
+            _ => &[],
+        }
     }
-    let raw: Raw = serde_json::from_slice(body).map_err(|e| format!("host state: {e}"))?;
+    let raw: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("host state: {e}"))?;
+    let raw = raw.as_object().ok_or("host state: not a JSON object")?;
     let target = raw
-        .release
-        .as_ref()
+        .get("release")
         .and_then(|r| r.get("target"))
         .and_then(serde_json::Value::as_str)
-        .and_then(|t| {
-            let t = t.trim();
-            Release::parse(t).or_else(|| Release::parse(&format!("v{t}")))
-        });
-    let list = |v: Option<serde_json::Value>| match v {
-        Some(serde_json::Value::Array(a)) => a.into_iter().take(MAX_ORDERS).collect(),
-        _ => Vec::new(),
-    };
-    let updates = list(raw.updates)
-        .into_iter()
+        .and_then(release_word);
+    let updates = list(raw.get("updates"))
+        .iter()
         .filter_map(|u| u.as_str().filter(|u| is_order_id(u)).map(str::to_owned))
         .collect();
-    let orders = list(raw.orders)
-        .into_iter()
+    let orders = list(raw.get("orders"))
+        .iter()
         .filter_map(|o| {
             let id = o.get("id")?.as_str().filter(|i| is_order_id(i))?.to_owned();
             let kind = OrderKind::parse(
@@ -180,7 +197,43 @@ pub(crate) fn parse_state(body: &[u8]) -> Result<HostState, String> {
         target,
         updates,
         orders,
-        poll_s: raw.poll_s.as_ref().and_then(serde_json::Value::as_i64),
+        poll_s: raw.get("poll_s").and_then(serde_json::Value::as_i64),
+        older_pool: !raw.contains_key("release"),
+    })
+}
+
+/// A release as the pool says it: its own version may lack the `v`.
+fn release_word(t: &str) -> Option<Release> {
+    let t = t.trim();
+    Release::parse(t).or_else(|| Release::parse(&format!("v{t}")))
+}
+
+/// Reads a `follow` body leniently: unknown fields ignored, a `latest` that is not a
+/// release read as none. `worker_id`'s entry gives the open Update, if any.
+pub(crate) fn parse_follow(body: &[u8], worker_id: &str) -> Result<Follow, String> {
+    #[derive(Deserialize)]
+    struct Raw {
+        latest: Option<String>,
+        poll_s: Option<i64>,
+        #[serde(default)]
+        workers: Vec<Worker>,
+    }
+    #[derive(Deserialize)]
+    struct Worker {
+        id: String,
+        update: Option<String>,
+    }
+    let raw: Raw = serde_json::from_slice(body).map_err(|e| format!("follow: {e}"))?;
+    let update = raw
+        .workers
+        .into_iter()
+        .find(|w| w.id == worker_id)
+        .and_then(|w| w.update)
+        .filter(|u| is_order_id(u));
+    Ok(Follow {
+        latest: raw.latest.as_deref().and_then(release_word),
+        update,
+        poll_s: raw.poll_s,
     })
 }
 
@@ -302,20 +355,32 @@ impl Https {
         ok_body(self.get(agent, url, max))
     }
 
-    /// A call signed with the host key (`Omarchy-Host`, design v2 D7): a GET, or a POST
-    /// of `body` as JSON.
+    /// The URL of a call signed with the host key and its `Omarchy-Host` header (design v2
+    /// D7): the signature covers the path as the pool reads it (`/api/v1/...`) and the body.
+    fn signed_request(&self, method: &str, path: &str, body: &[u8]) -> Option<(String, String)> {
+        let (key, host) = self.host.as_ref()?;
+        Some((
+            format!("{}{path}", self.origin),
+            key.header(host, method, path, body),
+        ))
+    }
+
+    /// A call signed with the host key: a GET, or a POST of `body` as JSON.
     fn signed_call(&self, method: &str, path: &str, body: Option<&[u8]>) -> Net<Vec<u8>> {
-        let Some((key, host)) = &self.host else {
+        let Some((url, header)) = self.signed_request(method, path, body.unwrap_or_default())
+        else {
             return Net::NoAnswer("no host key on this machine to sign with".into());
         };
-        let header = key.header(host, method, path, body.unwrap_or_default());
-        let url = format!("{}{path}", self.origin);
         let res = match body {
-            None => self.signed.get(&url).header("omarchy-host", &header).call(),
+            None => self
+                .signed
+                .get(&url)
+                .header(crate::host::HEADER, &header)
+                .call(),
             Some(b) => self
                 .signed
                 .post(&url)
-                .header("omarchy-host", &header)
+                .header(crate::host::HEADER, &header)
                 .header("content-type", "application/json")
                 .send(b),
         };
@@ -341,6 +406,18 @@ impl Pool for Https {
         match self.signed_call("GET", STATE_PATH, None) {
             Net::Ok(body) => match parse_state(&body) {
                 Ok(s) => Net::Ok(s),
+                Err(e) => Net::NoAnswer(e),
+            },
+            Net::NoAnswer(e) => Net::NoAnswer(e),
+            Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
+    }
+
+    fn follow(&mut self, worker_id: &str) -> Net<Follow> {
+        let url = format!("{}/api/v1/factory/follow?ids={worker_id}", self.origin);
+        match self.get_ok(&self.agent, &url, FOLLOW_MAX) {
+            Net::Ok(body) => match parse_follow(&body, worker_id) {
+                Ok(f) => Net::Ok(f),
                 Err(e) => Net::NoAnswer(e),
             },
             Net::NoAnswer(e) => Net::NoAnswer(e),
@@ -421,8 +498,7 @@ mod tests {
             ]
         );
         assert!(matches!(s.orders[2].kind, OrderKind::Unknown(_)));
-        // The pool's own version may lack the v; a build with no release is none, and so is
-        // a pool from before #344, whose state names no release.
+        // The pool's own version may lack the v; a build with no release is none.
         assert_eq!(
             parse_state(br#"{"release":{"target":"1.2.3"}}"#)
                 .unwrap()
@@ -431,18 +507,127 @@ mod tests {
         );
         for none in [
             &br#"{"release":{"target":"dev-abc"}}"#[..],
+            br#"{"release":{"target":null}}"#,
             br#"{"release":null,"orders":{"x":1},"updates":"wo_1"}"#,
-            br#"{"host":"h_0123456789","status":"active","token":null}"#,
         ] {
             let s = parse_state(none).unwrap();
             assert_eq!(s, HostState::default());
         }
+        // A pool from before #344 sends no release member at all (v1.0.7's state): its
+        // target is its follow's (a rollback below agent 0.3.0's release deploys one).
+        let old = br#"{"host":"h_0123456789","status":"active","name":"studio","owner":"m1",
+            "worker":"w_1","fingerprint":"SHA256:x","token":null,"report_every_s":300}"#;
+        assert_eq!(
+            parse_state(old).unwrap(),
+            HostState {
+                older_pool: true,
+                ..HostState::default()
+            }
+        );
         assert!(parse_state(b"<html>").is_err());
         assert!(parse_state(b"[]").is_err());
         // A kind's word is kept without control characters, at most 64 of them.
         let k = OrderKind::parse(&format!("x\u{1b}[2K{}", "y".repeat(100)));
         assert_eq!(k.name().len(), 64);
         assert!(!k.name().contains('\u{1b}'));
+    }
+
+    /// The host state as the Worker answers it (`tests/fixtures/host-api/state.json`), whose
+    /// keys and value types worker/test/host-orders.test.ts holds handleHostState's answer
+    /// to: the contract both sides read, written once.
+    #[test]
+    fn the_golden_host_state_reads_as_the_pool_means_it() {
+        let s = parse_state(include_bytes!("../../tests/fixtures/host-api/state.json")).unwrap();
+        assert!(!s.older_pool);
+        assert_eq!(s.target, Release::parse("v1.21.0"));
+        assert_eq!(s.poll_s, Some(120));
+        assert_eq!(s.updates, ["wo_0123456789abcdef0123456789abcdef"]);
+        let got: Vec<(&str, &OrderKind, Option<i64>)> = s
+            .orders
+            .iter()
+            .map(|o| (o.id.as_str(), &o.kind, o.not_after))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "ho_11111111111111111111111111111111",
+                    &OrderKind::RetireLegacy,
+                    Some(1_800_003_600)
+                ),
+                (
+                    "ho_22222222222222222222222222222222",
+                    &OrderKind::ReconcileNow,
+                    Some(1_800_003_900)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_follow_answer_is_read_leniently_for_this_worker_only() {
+        let body = br#"{"latest":"1.0.7","deployed_at":"x","poll_s":120,"new":1,
+            "workers":[{"id":"w_other","update":"wo_x"},{"id":"w_1","version":"v1.0.8","update":"wo_1"}]}"#;
+        let f = parse_follow(body, "w_1").unwrap();
+        assert_eq!(
+            f,
+            Follow {
+                latest: Release::parse("v1.0.7"),
+                update: Some("wo_1".into()),
+                poll_s: Some(120),
+            }
+        );
+        assert_eq!(parse_follow(body, "w_2").unwrap().update, None);
+        let odd = br#"{"latest":"dev","workers":[{"id":"w_1","update":"bad id"}]}"#;
+        assert_eq!(parse_follow(odd, "w_1").unwrap(), Follow::default());
+        assert!(parse_follow(b"[]", "w_1").is_err());
+    }
+
+    #[test]
+    fn the_state_and_the_report_are_signed_over_the_paths_the_pool_reads() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let dir = std::env::temp_dir().join(format!("omarchy-agent-signed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("host.ed25519");
+        let public = HostKey::load_or_create(&key).unwrap().public_b64u();
+        let https = Https::new("https://pool.example/")
+            .with_host(HostKey::load(&key).unwrap(), "h_0123456789");
+        for (method, path, body) in [
+            ("GET", STATE_PATH, &b""[..]),
+            ("POST", REPORT_PATH, b"{\"orders\":[]}"),
+        ] {
+            let (url, header) = https.signed_request(method, path, body).unwrap();
+            assert_eq!(url, format!("https://pool.example{path}"));
+            // The pool's routes: GET /hosts/self/state and POST /hosts/self/report, under /api/v1.
+            assert!(path.starts_with("/api/v1/hosts/self/"), "{path}");
+            let parts: Vec<&str> = header.split("; ").collect();
+            assert_eq!(parts[0], "h_0123456789");
+            let ts: u64 = parts[1].strip_prefix("ts=").unwrap().parse().unwrap();
+            let nonce = parts[2].strip_prefix("nonce=").unwrap();
+            let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(parts[3].strip_prefix("sig=").unwrap())
+                .unwrap();
+            let msg = crate::host::signed_message(
+                "h_0123456789",
+                method,
+                path,
+                &hex::encode(sha2::Sha256::digest(body)),
+                ts,
+                nonce,
+            );
+            let public = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&public)
+                .unwrap();
+            aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, &public)
+                .verify(msg.as_bytes(), &sig)
+                .unwrap();
+        }
+        assert_eq!(crate::host::HEADER, "omarchy-host");
+        assert!(Https::new("https://pool.example")
+            .signed_request("GET", STATE_PATH, b"")
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::version::Release;
 
 use super::agent::Verifier;
 use super::driver::{Answer, Driver, Exit, Foreign, Project, PullState, Unit};
-use super::pool::{HostState, Net, Order, OrderKind, Pool, Relayed};
+use super::pool::{Follow, HostState, Net, Order, OrderKind, Pool, Relayed};
 
 // ---------------------------------------------------------------------------------------
 // The engine.
@@ -507,6 +507,11 @@ pub(crate) struct PoolState {
     /// The host reports posted, as JSON; `report_answer` is what posting one answers.
     pub reports: Vec<serde_json::Value>,
     pub report_answer: Option<Net<()>>,
+    /// How many times a report was posted, whatever the answer.
+    pub report_tries: u32,
+    /// The public `follow` a pool from before #344 answers, and the workers it was asked for.
+    pub follow: Option<Net<Follow>>,
+    pub follows: Vec<String>,
 }
 
 pub(crate) type Remote = Rc<RefCell<PoolState>>;
@@ -520,8 +525,15 @@ impl Pool for FakePool {
         s.state.clone().unwrap_or(Net::NoAnswer("no pool".into()))
     }
 
+    fn follow(&mut self, worker_id: &str) -> Net<Follow> {
+        let mut s = self.0.borrow_mut();
+        s.follows.push(worker_id.to_owned());
+        s.follow.clone().unwrap_or(Net::NoAnswer("HTTP 404".into()))
+    }
+
     fn report(&mut self, body: &[u8]) -> Net<()> {
         let mut s = self.0.borrow_mut();
+        s.report_tries += 1;
         let answer = s.report_answer.clone().unwrap_or(Net::Ok(()));
         if answer == Net::Ok(()) {
             s.reports
@@ -811,6 +823,7 @@ impl World {
             updates: update.map(str::to_owned).into_iter().collect(),
             orders: Vec::new(),
             poll_s: Some(120),
+            older_pool: false,
         }));
     }
 

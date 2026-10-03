@@ -126,6 +126,10 @@ pub fn enroll_message(token: &str, pubkey: &str) -> String {
     format!("omarchy-host-enroll-v1\n{token}\n{pubkey}")
 }
 
+/// The header a signed request carries [`HostKey::header`] in (the pool's `signedHost`
+/// reads it): install's calls and the run loop's alike.
+pub const HEADER: &str = "omarchy-host";
+
 /// What a signed request's signature covers, one field a line (the pool's
 /// `signedMessage`).
 pub fn signed_message(

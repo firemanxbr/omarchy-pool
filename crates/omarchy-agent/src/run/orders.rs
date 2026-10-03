@@ -10,13 +10,17 @@
 //!   that carries the agent's host label (this host's bundle or one of its tasks), never a
 //!   volume, an image or a file of it — and write the `.omarchy-agent` marker into its
 //!   directory, so `rollout.sh`, `setup.sh`, the `omarchy-worker` CLI and the updater
-//!   refuse there from then on (#313's switch guard). The marker is written first: a
-//!   directory the agent cannot write refuses the order with nothing changed, and from the
-//!   moment the containers stop, nothing of the legacy set can bring them back. Then it
-//!   runs to its end across ticks and restarts (`state.json`), each engine call bounded:
-//!   stop every container (a grace of [`GRACE_S`], the engine's `docker stop`), remove
-//!   them, remove the project's networks, record the retirement in `legacy.json`, and
-//!   answer. Past [`LIMIT_S`] it answers `failed` with what is left; the marker stays.
+//!   refuse there from then on (#313's switch guard). The marker is written first, before
+//!   anything stops (the issue and design v2 §13.4 name it with the removal; a decision for
+//!   the maintainer to confirm): a directory the agent cannot write refuses the order with
+//!   nothing changed, and from the moment the containers stop, nothing of the legacy set
+//!   (its own updater above all) can `compose up` them again. Then it runs to its end
+//!   across ticks and restarts (`state.json`), each engine call bounded: stop every
+//!   container (a grace of [`GRACE_S`], the engine's `docker stop`), remove them, remove
+//!   the project's networks, record the retirement in `legacy.json` (only if it still
+//!   names that project), and answer. Past [`LIMIT_S`] it answers `failed` with what is
+//!   left; the marker stays, so the set's own tools refuse there although it was not
+//!   retired, and the order is given again.
 //!
 //! An unknown kind, an order past its `not_after` (or with none) and an id in the ring of
 //! the last 512 taken are refused: an id is taken once, whatever the pool says again, and
@@ -291,7 +295,7 @@ impl Agent {
                 &r,
                 "failed",
                 &format!(
-                    "not finished within {} min at the {} step; the marker stays in {}, and the order can be given again",
+                    "not finished within {} min at the {} step; the marker stays in {}, so rollout.sh, setup.sh, omarchy-worker and the updater refuse there although the set was not retired: give the order again",
                     LIMIT_S / 60,
                     if r.step == RetireStep::Stop { "stop" } else { "remove" },
                     r.dir.display()
@@ -360,8 +364,17 @@ impl Agent {
                     "; the marker is in {}: rollout.sh, setup.sh, omarchy-worker and the updater refuse there",
                     r.dir.join(MARKER).display()
                 );
+                // Only the record of the project this order retired: an install --legacy
+                // meanwhile may have recorded another, which stays retirable.
                 let recorded = legacy::recorded(&self.paths.data)
                     .and_then(|l| l.ok_or_else(|| "legacy.json is gone".to_owned()))
+                    .and_then(|l| {
+                        if l.project == r.project {
+                            Ok(l)
+                        } else {
+                            Err(format!("it names {} now, not {}", l.project, r.project))
+                        }
+                    })
                     .and_then(|mut l| {
                         l.retired_at = Some(iso(now));
                         l.retired_by = Some(r.order.clone());
@@ -395,7 +408,7 @@ impl Agent {
         }
         if let Some(r) = &self.state.orders.retire {
             return Some(serde_json::json!({
-                "project": l.project, "state": "retiring", "since": iso(r.since), "dir": r.dir, "order": r.order,
+                "project": r.project, "state": "retiring", "since": iso(r.since), "dir": r.dir, "order": r.order,
                 "step": if r.step == RetireStep::Stop { "stop" } else { "remove" },
             }));
         }

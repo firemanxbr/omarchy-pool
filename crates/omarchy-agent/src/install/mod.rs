@@ -468,14 +468,34 @@ pub(crate) fn measure(
     let project = envelope::set_str(ex, "project").unwrap_or_else(|| envelope::PROJECT.to_owned());
     // The legacy project: `--legacy`, or the one an earlier install recorded, so running
     // install again repairs it without the flag (legacy.json's owner is checked below).
-    // A project retire-legacy removed (#344) is no legacy set any more.
+    // A project retire-legacy removed (#344) is no legacy set any more: nothing of it is
+    // looked at again. The rootful exception it was recorded with stays until P6 (design v2
+    // §19.3, §21.1): the Studio stays rootful after step 6, and install again repairs it.
+    let recorded = std::fs::read(p.data.join(legacy::FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok());
+    let retired = recorded.as_ref().filter(|l| l.retired_at.is_some());
     let legacy_project = o.legacy.clone().or_else(|| {
-        std::fs::read(p.data.join(legacy::FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok())
+        recorded
+            .as_ref()
             .filter(|l| l.retired_at.is_none())
-            .map(|l| l.project)
+            .map(|l| l.project.clone())
     });
+    let rootful_exception =
+        legacy_project.is_some() || retired.is_some_and(|l| l.rootful_exception);
+    if let (None, Some(l)) = (&legacy_project, retired) {
+        r.notes.push(format!(
+            "legacy: {} was retired at {} ({}); {}",
+            l.project,
+            l.retired_at.as_deref().unwrap_or_default(),
+            l.retired_by.as_deref().unwrap_or("retire-legacy"),
+            if l.rootful_exception {
+                "its rootful exception stays until P6"
+            } else {
+                "nothing of it is looked at again"
+            }
+        ));
+    }
     if let Some(l) = &legacy_project {
         if !legacy::valid_project(l) {
             r.blockers
@@ -620,7 +640,7 @@ pub(crate) fn measure(
             f.isolation(),
             !f.rootless(),
             dedicated,
-            legacy_project.is_some(),
+            rootful_exception,
             &mut r,
         );
         checks::emulation(f.arch(), Some(f.page_kb()), &p.binfmt, &mut r);
@@ -1008,10 +1028,10 @@ pub fn uninstall(
     say(out, &format!("stopped and removed {}", unit::NAME));
 
     let cfg = std::fs::read_to_string(places.agent_toml()).ok();
-    let legacy_project = std::fs::read(places.data.join(legacy::FILE))
+    let legacy_record = std::fs::read(places.data.join(legacy::FILE))
         .ok()
-        .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok())
-        .map(|l| l.project);
+        .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok());
+    let legacy_project = legacy_record.as_ref().map(|l| l.project.clone());
     let socket = envelope::set_path(cfg.as_deref(), "socket_cli");
     let project = envelope::set_str(cfg.as_deref(), "project")
         .unwrap_or_else(|| envelope::PROJECT.to_owned());
@@ -1067,8 +1087,23 @@ pub fn uninstall(
             places.data.display()
         ),
     );
-    if let Some(l) = legacy_project {
-        say(out, &format!("the legacy project {l} was not touched"));
+    match legacy_record {
+        Some(l) if l.retired_at.is_some() => say(
+            out,
+            &format!(
+                "the legacy project {} was retired already ({}); its marker stays in {}",
+                l.project,
+                l.retired_at.as_deref().unwrap_or_default(),
+                l.dir
+                    .as_ref()
+                    .map_or_else(|| "its directory".to_owned(), |d| d.display().to_string())
+            ),
+        ),
+        Some(l) => say(
+            out,
+            &format!("the legacy project {} was not touched", l.project),
+        ),
+        None => {}
     }
     Ok(left)
 }
