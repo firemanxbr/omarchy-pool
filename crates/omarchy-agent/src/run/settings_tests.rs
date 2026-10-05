@@ -9,6 +9,7 @@ use std::fs;
 
 use serde_json::{json, Value};
 
+use crate::run::brake::Ask;
 use crate::run::fake::World;
 use crate::run::pool::{parse_state, Net};
 use crate::run::settings::Settings;
@@ -538,11 +539,14 @@ fn retry_release_lifts_the_quarantine_and_tries_the_release_again() {
     w.round();
     assert_eq!(w.outcome().0, "rolled-back");
     assert!(!w.agent.state.quarantine.is_empty());
-    // The order: the quarantine lifted, a round to v1.1.0 now (the same change tried again).
+    // The order: the quarantine lifted, a round to v1.1.0 now (the same change tried again),
+    // one more of the pool's dispatcher restarts on the brake.
+    let restarts = w.agent.state.brake.count(Ask::Restart, w.now);
     let body = json!({"release": {"target": "v1.1.0"}, "poll_s": 120,
         "orders": [{"id": "ho_retry", "kind": "retry-release", "not_after": w.now + 3600}]});
     w.pool_answers(Net::Ok(parse_state(body.to_string().as_bytes()).unwrap()));
     w.poll();
+    assert_eq!(w.agent.state.brake.count(Ask::Restart, w.now), restarts + 1);
     let a = w
         .agent
         .state

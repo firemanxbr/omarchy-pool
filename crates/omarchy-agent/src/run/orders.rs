@@ -345,6 +345,12 @@ impl Agent {
             OrderKind::RetryRelease => {
                 self.state.orders.remember(&o.id);
                 let lifted = self.lift_quarantine(&o.id, now);
+                // The round to a release the guard reverted recreates the dispatcher again:
+                // one of the pool's restarts (the release change itself was counted when it
+                // was first tried, and its round to it again is no new change).
+                if !lifted.is_empty() {
+                    self.state.brake.record(now, &[Ask::Restart]);
+                }
                 let said = if lifted.is_empty() {
                     "no release was quarantined here; ".to_owned()
                 } else {
