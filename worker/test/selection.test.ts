@@ -4,8 +4,13 @@
  * minute the leases whose time is up end (a native build's duration is the
  * history T is drawn from), then every registration alive claims as its
  * dispatcher would — again at once while it was handed a task — and is
- * handed the first choice of `select`; before each claim the reservation is
- * decided as the claim decides it. The fleets:
+ * handed the first choice of `select` over the candidates the claim's
+ * bounded reads bring (routes/factory.ts selectAndLease, mirrored here on
+ * the whole queue: each lane's head, the arch-neutral head, each
+ * contributor's first build, the first native task, the reserved one, each
+ * bounded and filtered by what the claimer can take now); at a host's claim
+ * the reservation is decided as the claim decides it, over the oldest builds
+ * it reads. The fleets:
  *
  * - native only: a host runs its full unit count at once, the rest waits
  *   in the queue and starts as units free up; the reserved job unit is
@@ -18,21 +23,30 @@
  *   3 to 60 minutes — or at once when none is; `needs_native` never runs
  *   emulated;
  * - a continuous aarch64 backlog with x86_64 arrivals on an aarch64-only
- *   fleet: x86_64 tasks still start (the guaranteed emulated share);
+ *   fleet: x86_64 tasks still start (the guaranteed emulated share),
+ *   however far the backlog runs past the bound a claim reads;
  * - one contributor flooding the queue: another's single package is not
- *   delayed by more than one build, and the per-owner cap holds;
+ *   delayed by more than one build, the per-owner cap holds, and a capped
+ *   flood longer than the bound hides no project build;
+ * - a head of tasks the claimer cannot take now (model work while its
+ *   agent slots are full, size-4 builds beyond its free units) hides none
+ *   it can;
  * - a size-4 task on busy hosts: the reservation starts it within its
- *   window; one larger than every host alive is clamped;
+ *   window, whatever older build waits for another reason; its two hours
+ *   spent, it is not marked again; one larger than every host alive is
+ *   clamped; an emulated one of any size starts when the emulated lanes hold
+ *   nothing; a claim's memory offer bounds that claim only;
  * - a drained, below-minimum, suspended or behind native host never makes an
  *   emulated lane wait;
  * - and a legacy registration as a host with one lane and one build.
  */
 import { describe, expect, it } from "vitest";
 import {
-  ALIVE_MS, buildsOf, largestSize, nativeCapacity, ownerCap, reserve, select, thresholdMs, MIN, OWNER_DIVISOR, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
+  alive, buildsOf, diskOf, largestSize, nativeCapacity, noRoom, ownerCap, ownersLeased, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
+  ALIVE_MS, HELPER_KINDS, LANE_KINDS, MIN, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
   type Candidate, type Fleet, type Held, type Member, type Mode,
 } from "../src/selection";
-import { selectionRules } from "../src/routes/factory";
+import { selectionRules, HEAD_LIMIT, OWNERS_LIMIT, RESERVE_CANDIDATES, RESERVE_WINDOW } from "../src/routes/factory";
 import { readSizing, shippedSizing } from "../src/sizing";
 import { BUILD_GB_PER_SIZE, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, MAX_SIZE, TASK_UNITS } from "../src/hosts";
 
@@ -97,16 +111,73 @@ class Sim {
   candidates(): Candidate[] {
     return this.queue.map((t) => ({ ...t, native_ms: this.history.get(`${t.name}/${t.arch}`) ?? null }));
   }
+  /**
+   * The candidates as a claim of `m` reads them (routes/factory.ts selectAndLease), from the whole queue: each read bounded and filtered
+   * by what `m` can take now (noRoom, the capped contributors) — the head of each lane's arch, the arch-neutral kinds' head, each
+   * contributor's first build of each arch, the first native task whatever its size, the task it reserves for — and, at a host's claim,
+   * the oldest builds the reservation weighs.
+   */
+  reads(m: Member): { candidates: Candidate[]; oldest: Candidate[] } {
+    const r = this.rules, now = this.now, fleet = this.fleet(), queue = this.candidates();
+    const held = m.legacy ? [] : this.leases.filter((l) => l.by === m.id);
+    const largest = largestSize(fleet, now, r);
+    const cap = ownerCap(fleet, now, r);
+    const capped = new Set([...ownersLeased(fleet)].filter(([, n]) => n >= cap).map(([o]) => o));
+    const isCapped = (c: Candidate) => c.kind === "build" && c.trust === "community" && c.owner !== null && capped.has(c.owner);
+    const scope = (c: Candidate) => takes(m, c) && !(m.legacy && m.lanes[0].mode === "emulated" && c.needs_native);
+    const fits = (c: Candidate) => {
+      const z = sizeOf(c, largest, r)?.size ?? null;
+      return !noRoom(m, held, c, unitsOf(c.kind, z, r), diskOf(c, z, r), r) && !isCapped(c);
+    };
+    const byOrder = (a: Candidate, b: Candidate) => a.priority - b.priority || a.id - b.id;
+    const neutral = (k: string) => !LANE_KINDS.includes(k) && !HELPER_KINDS.includes(k);
+    const emulatedOnly = (a: string) => !m.lanes.some((l) => l.arch === a && l.mode === "native");
+    const out = new Map<number, Candidate>();
+    const put = (cs: Candidate[]) => cs.forEach((c) => out.set(c.id, c));
+    const owners = [...new Set(queue.filter((c) => c.trust === "community" && c.owner).map((c) => c.owner!))].sort().slice(0, OWNERS_LIMIT);
+    for (const a of [...new Set(m.lanes.map((l) => l.arch))]) {
+      if (m.legacy) put(queue.filter((c) => (c.arch === a || r.legacy_any_arch.includes(c.kind)) && scope(c) && fits(c)).sort(byOrder).slice(0, HEAD_LIMIT));
+      else put(queue.filter((c) => c.arch === a && !neutral(c.kind) && scope(c) && fits(c) && !(emulatedOnly(a) && c.needs_native)).sort(byOrder).slice(0, HEAD_LIMIT));
+      if (m.kinds.includes("build") && m.scope.trust !== "project") {
+        for (const o of owners) {
+          if (capped.has(o)) continue;
+          put(queue.filter((c) => c.trust === "community" && c.owner === o && c.arch === a && c.kind === "build" && scope(c) && fits(c) && !(!m.legacy && emulatedOnly(a) && c.needs_native)).sort(byOrder).slice(0, 1));
+        }
+      }
+    }
+    let oldest: Candidate[] = [];
+    if (!m.legacy) {
+      put(queue.filter((c) => neutral(c.kind) && scope(c) && fits(c)).sort(byOrder).slice(0, HEAD_LIMIT));
+      const native = m.lanes.find((l) => l.mode === "native")!.arch;
+      if (m.lanes.some((l) => l.mode === "emulated")) put(queue.filter((c) => c.arch === native && LANE_KINDS.includes(c.kind) && scope(c) && !isCapped(c)).sort(byOrder).slice(0, 1));
+      if (m.reserving) put(queue.filter((c) => c.id === m.reserving!.task && scope(c)));
+      const hosts = this.members.filter((x) => !x.legacy && alive(x, now) && x.may_claim && !x.below_minimum && !x.drained && !x.behind);
+      const runs = (c: Candidate, native: boolean) => hosts.some((x) => x.lanes.some((l) => l.arch === c.arch && (!native || l.mode === "native")));
+      if (largest >= 2 && hosts.length) {
+        oldest = queue
+          .filter((c) => c.kind === "build" && runs(c, false) && (!c.needs_native || runs(c, true)) && !isCapped(c) && (c.pinned_to === null || hosts.some((x) => x.id === c.pinned_to)) && (c.reserved_at == null || c.reserved_at > now - RESERVE_FOR_MS))
+          .sort((a, b) => a.id - b.id).slice(0, RESERVE_WINDOW)
+          .filter((c) => c.queued_at <= now - RESERVE_AFTER_MS && (c.size ?? 1) >= 2).slice(0, RESERVE_CANDIDATES);
+      }
+    }
+    return { candidates: [...out.values()], oldest };
+  }
   /** One registration's claims until it is handed nothing (its dispatcher claims again at once after a task). */
   claim(m: Member): Ran[] {
     m.seen_at = this.now;
     const got: Ran[] = [];
     for (;;) {
-      const oldest = this.candidates().filter((t) => t.kind === "build").sort((a, b) => a.id - b.id)[0] ?? null;
-      const marks = reserve(this.fleet(), oldest, (id) => this.queue.some((q) => q.id === id), this.now, this.rules);
-      for (const id of marks.clear) this.members.find((x) => x.id === id)!.reserving = null;
-      if (marks.set) this.members.find((x) => x.id === marks.set!.host)!.reserving = { task: marks.set.task, since: this.now };
-      const c = select(m, this.fleet(), this.candidates(), this.now, this.rules)[0];
+      const { candidates, oldest } = this.reads(m);
+      // A host's claim decides the reservation (a legacy one's does not); the task's window starts with its mark.
+      if (!m.legacy) {
+        const marks = reserve(this.fleet(), oldest, (id) => this.queue.some((q) => q.id === id), this.now, this.rules);
+        for (const id of marks.clear) this.members.find((x) => x.id === id)!.reserving = null;
+        if (marks.set) {
+          this.members.find((x) => x.id === marks.set!.host)!.reserving = { task: marks.set.task, since: this.now };
+          this.queue.find((q) => q.id === marks.set!.task)!.reserved_at = this.now;
+        }
+      }
+      const c = select(m, this.fleet(), candidates, this.now, this.rules)[0];
       if (!c) return got;
       const t = this.queue.find((q) => q.id === c.id)!;
       this.queue = this.queue.filter((q) => q.id !== c.id);
@@ -269,6 +340,26 @@ describe("emulated only, then native work arriving", () => {
     // Running emulated work above the cap was never ended for it: every emulated lease ran its full hour.
     expect(s.ran.filter((r) => r.lane === "emulated").length).toBeGreaterThan(4);
   });
+  it("behind an x86_64 backlog longer than the bound a claim reads, native work arriving still takes the build kept, and an emulated build of any size starts while the emulated lanes hold none", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"] });
+    const s = new Sim([studio], () => 600);
+    s.add({ arch: "x86_64" }, HEAD_LIMIT + 10);
+    s.run(1);
+    expect(s.held("studio", (l) => l.lane === "emulated")).toHaveLength(4);
+    const [native] = s.add({ arch: "aarch64" });
+    s.run(1);
+    expect(s.startOf(native)).toMatchObject({ by: "studio", lane: "native" });
+    // D50, emulated builds are never discarded: a size-4 x86_64 build on a host of four builds starts when its emulated lanes hold
+    // nothing — idle, or with native work queued (the share puts it first on an aarch64-only fleet) — never a second one above the cap.
+    const h9 = host("h9", "aarch64", 9, { emulated: ["x86_64"] });
+    const big = task({ arch: "x86_64", size: 4 });
+    const nat = task({ arch: "aarch64" });
+    expect(select(h9, { members: [h9], leases: [] }, [big], T0, R)).toMatchObject([{ id: big.id, lane: "emulated", size: 4, units: 8 }]);
+    const both = select(studio, { members: [studio], leases: [] }, [nat, big], T0, R);
+    expect(both.map((c) => [c.id, c.lane, c.share])).toEqual([[big.id, "emulated", true], [nat.id, "native", false]]);
+    const held: Held = { task: big.id, by: "h9", kind: "build", arch: "x86_64", lane: "emulated", units: 8, model: false, trust: "project", owner: null, disk_gb: 80 };
+    expect(select(h9, { members: [h9], leases: [held] }, [task({ arch: "x86_64" })], T0, R)).toEqual([]);
+  });
 });
 
 describe("mixed backlogs: native preferred, emulated after T", () => {
@@ -347,6 +438,15 @@ describe("a continuous aarch64 backlog with x86_64 arrivals on an aarch64-only f
     const order = select(freeA, { ...fleet, members: [freeA, box] }, [task({ arch: "aarch64", queued_at: s.now - 60 * MIN }), task({ arch: "x86_64", queued_at: s.now - 30 * MIN })], s.now, R);
     expect(order.map((c) => [c.lane, c.share])).toEqual([["native", false], ["emulated", false]]);
   });
+  it("however far the aarch64 backlog runs past the bound a claim reads, the oldest x86_64 build is read and goes first", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"] });
+    const s = new Sim([studio], () => 600);
+    s.add({ arch: "aarch64", queued_at: T0 - 120 * MIN }, HEAD_LIMIT + 10);
+    const [x86] = s.add({ arch: "x86_64", queued_at: T0 - 5 * MIN });
+    s.run(1);
+    expect(s.startOf(x86)).toMatchObject({ by: "studio", lane: "emulated", share: true });
+    expect(s.held("studio")).toHaveLength(5);
+  });
 });
 
 describe("one contributor flooding the queue", () => {
@@ -379,6 +479,38 @@ describe("one contributor flooding the queue", () => {
     // A small fleet: still one at least.
     expect(ownerCap({ members: [host("tiny", "aarch64", 3)], leases: [] }, T0, R)).toBe(1);
   });
+  it("a capped flood longer than the bound a claim reads hides no project build, nor a requeued one behind it", () => {
+    const s = new Sim([host("h1", "aarch64", 9)], () => 600); // 4 builds: 1 per contributor
+    s.add({ arch: "aarch64", owner: "flood", trust: "community", queued_at: T0 - 60 * MIN }, HEAD_LIMIT + 10);
+    const [project] = s.add({ arch: "aarch64" });
+    const [requeued] = s.add({ arch: "aarch64", priority: 110 });
+    s.run(1);
+    expect(s.leases.filter((l) => l.owner === "flood")).toHaveLength(1);
+    expect(s.startOf(project)).toMatchObject({ by: "h1" });
+    expect(s.startOf(requeued)).toMatchObject({ by: "h1" });
+  });
+});
+
+describe("a head of tasks the claimer cannot take now", () => {
+  it("audits ahead while its agent slots are full, or size-4 builds ahead of its free units, hide no build it can run", () => {
+    // Its agent slots full (the day's agent budget spent: the dispatcher says 0): fifty-five audits ahead of a build.
+    const p1 = host("p1", "aarch64", 7, { agent_slots: 0 });
+    const s = new Sim([p1], () => 600);
+    s.add({ arch: "aarch64", kind: "audit", model: true, priority: 40 }, HEAD_LIMIT + 5);
+    const [b] = s.add({ arch: "aarch64" });
+    s.run(1);
+    expect(s.startOf(b)).toMatchObject({ by: "p1", lane: "native" });
+    expect(s.held("p1", (l) => l.kind === "audit")).toHaveLength(0);
+    // Two free units: fifty-five size-4 builds ahead of a size-1 one.
+    const studio = host("studio", "aarch64", 11);
+    const s2 = new Sim([studio], () => 600);
+    s2.add({ arch: "aarch64" }, 4);
+    s2.run(1);
+    s2.add({ arch: "aarch64", size: 4, priority: 50 }, HEAD_LIMIT + 5);
+    const [small] = s2.add({ arch: "aarch64" });
+    s2.run(1);
+    expect(s2.startOf(small)).toMatchObject({ by: "studio", size: 1 });
+  });
 });
 
 describe("sizes and the reservation for large tasks", () => {
@@ -402,25 +534,110 @@ describe("sizes and the reservation for large tasks", () => {
     expect(marked.filter((x) => x.task.kind === "build")).toHaveLength(0);
   });
 
-  it("a mark clears when its task leaves the queue, when its host leaves, or after 2 hours; one at a time; a size-1 build or a host that could never run it is never reserved for", async () => {
+  it("a mark clears when its task leaves the queue, when its host leaves, or after 2 hours — and its task is not marked again; one at a time; a size-1 build or a host that could never run it is never reserved for", () => {
     const studio = host("studio", "aarch64", 11, { reserving: { task: 1, since: T0 } });
-    const t1 = { ...task({ arch: "aarch64", size: 4, queued_at: T0 - 60 * MIN }), id: 1 };
+    const t1 = { ...task({ arch: "aarch64", size: 4, queued_at: T0 - 60 * MIN }), id: 1, reserved_at: T0 };
     const busy: Held = { task: 500, by: "studio", kind: "build", arch: "aarch64", lane: "native", units: 8, model: false, trust: "project", owner: null, disk_gb: 20 };
     const waits = () => true;
-    expect(reserve({ members: [studio], leases: [busy] }, t1, waits, T0 + MIN, R)).toEqual({ set: null, clear: [] });
+    expect(reserve({ members: [studio], leases: [busy] }, [t1], waits, T0 + MIN, R)).toEqual({ set: null, clear: [] });
     // Its task leased or cancelled: gone, and the oldest marked again when it waits.
-    expect(reserve({ members: [studio], leases: [busy] }, t1, () => false, T0 + MIN, R).clear).toEqual(["studio"]);
-    expect(reserve({ members: [{ ...studio, seen_at: T0 + RESERVE_FOR_MS + MIN }], leases: [busy] }, t1, waits, T0 + RESERVE_FOR_MS + MIN, R)).toEqual({ set: { host: "studio", task: 1 }, clear: ["studio"] });
-    expect(reserve({ members: [{ ...studio, seen_at: T0 - ALIVE_MS - MIN }], leases: [busy] }, t1, waits, T0, R)).toEqual({ set: null, clear: ["studio"] });
+    expect(reserve({ members: [studio], leases: [busy] }, [t1], () => false, T0 + MIN, R).clear).toEqual(["studio"]);
+    // Its two hours spent: the mark clears, and its task is not marked again until it is leased — the host goes back to selection.
+    const later = T0 + RESERVE_FOR_MS + MIN;
+    expect(reserve({ members: [{ ...studio, seen_at: later }], leases: [busy] }, [t1], waits, later, R)).toEqual({ set: null, clear: ["studio"] });
+    // Another task that waits its turn is marked in its place; one never marked yet is.
+    const t2 = task({ arch: "aarch64", size: 4, queued_at: T0 - 40 * MIN });
+    expect(reserve({ members: [{ ...studio, seen_at: later }], leases: [busy] }, [t1, t2], waits, later, R)).toEqual({ set: { host: "studio", task: t2.id }, clear: ["studio"] });
+    expect(reserve({ members: [{ ...studio, seen_at: T0 - ALIVE_MS - MIN }], leases: [busy] }, [t1], waits, T0, R)).toEqual({ set: null, clear: ["studio"] });
     // One at a time: a valid mark keeps another task from being marked.
-    expect(reserve({ members: [studio, host("vps", "aarch64", 11)], leases: [busy] }, { ...t1, id: 2 }, waits, T0 + MIN, R).set).toBeNull();
+    expect(reserve({ members: [studio, host("vps", "aarch64", 11)], leases: [busy] }, [{ ...t1, id: 2 }], waits, T0 + MIN, R).set).toBeNull();
     const free = { ...studio, reserving: null };
     // Waited 30 minutes or less: no mark yet. A task no alive host runs (its arch): none. A size-1 build: none — the next build that ends fits it.
-    expect(reserve({ members: [free], leases: [busy] }, task({ arch: "aarch64", size: 4, queued_at: T0 - 20 * MIN }), waits, T0, R).set).toBeNull();
-    expect(reserve({ members: [free], leases: [busy] }, task({ arch: "x86_64", size: 4, queued_at: T0 - 60 * MIN }), waits, T0, R).set).toBeNull();
-    expect(reserve({ members: [free], leases: [busy] }, task({ arch: "aarch64", queued_at: T0 - 60 * MIN }), waits, T0, R).set).toBeNull();
+    expect(reserve({ members: [free], leases: [busy] }, [task({ arch: "aarch64", size: 4, queued_at: T0 - 20 * MIN })], waits, T0, R).set).toBeNull();
+    expect(reserve({ members: [free], leases: [busy] }, [task({ arch: "x86_64", size: 4, queued_at: T0 - 60 * MIN })], waits, T0, R).set).toBeNull();
+    expect(reserve({ members: [free], leases: [busy] }, [task({ arch: "aarch64", queued_at: T0 - 60 * MIN })], waits, T0, R).set).toBeNull();
     // A free host fits it now: nobody needs to reserve.
-    expect(reserve({ members: [free], leases: [] }, t1, waits, T0, R).set).toBeNull();
+    expect(reserve({ members: [free], leases: [] }, [{ ...t1, reserved_at: null }], waits, T0, R).set).toBeNull();
+  });
+
+  it("an older build that waits for another reason (needs_native, size 1, its owner's cap) turns nothing off: the oldest that could be kept for is", () => {
+    // The Studio of an aarch64-only fleet, its five builds busy; a needs_native x86_64 build queued 5 hours ago waits for a native host
+    // that does not exist; a size-1 build and a capped contributor's size-2 build are older than the size-4 one too.
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"] });
+    const busy: Held[] = [0, 1, 2, 3, 4].map((i) => ({ task: 600 + i, by: "studio", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: i ? "project" : "community", owner: i ? null : "flood", disk_gb: 20 }));
+    const stuck = task({ arch: "x86_64", size: 2, needs_native: true, queued_at: T0 - 300 * MIN });
+    const small = task({ arch: "aarch64", queued_at: T0 - 200 * MIN });
+    const capped = task({ arch: "aarch64", size: 2, trust: "community", owner: "flood", queued_at: T0 - 150 * MIN });
+    const big = task({ arch: "aarch64", name: "chromium", size: 4, queued_at: T0 - 31 * MIN });
+    const fleet: Fleet = { members: [studio], leases: busy };
+    expect(ownerCap(fleet, T0, R)).toBe(2);
+    const capFleet: Fleet = { members: [studio], leases: busy.map((l, i) => (i === 1 ? { ...l, trust: "community", owner: "flood" } : l)) };
+    expect(reserve(capFleet, [stuck, small, capped, big], () => true, T0, R)).toEqual({ set: { host: "studio", task: big.id }, clear: [] });
+    // An emulated size-4 build on a host of four builds: never marked for — its emulated lanes, the cap and T allow it once the host is idle.
+    const h9 = host("h9", "aarch64", 9, { emulated: ["x86_64"] });
+    const busy9: Held[] = [0, 1].map((i) => ({ task: 700 + i, by: "h9", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: "project", owner: null, disk_gb: 20 }));
+    const big86 = task({ arch: "x86_64", size: 4, queued_at: T0 - 40 * MIN });
+    expect(reserve({ members: [h9], leases: busy9 }, [big86], () => true, T0, R).set).toEqual({ host: "h9", task: big86.id });
+    // A host that could never lease it is never marked: a needs_native one on an emulated lane.
+    expect(reserve({ members: [h9], leases: busy9 }, [{ ...big86, needs_native: true }], () => true, T0, R).set).toBeNull();
+  });
+
+  it("whatever older build waits for another reason: a needs_native x86_64 build on an aarch64-only fleet turns nothing off", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"] });
+    let k = 0;
+    const s = new Sim([studio], (t) => (t.size === 4 ? 120 : 45 + (k++ % 5) * 7));
+    const [stuck] = s.add({ arch: "x86_64", needs_native: true, queued_at: T0 - 300 * MIN });
+    s.add({ arch: "aarch64" }, 5);
+    s.run(10);
+    const [big] = s.add({ arch: "aarch64", name: "chromium", size: 4 });
+    const at = s.now;
+    s.run(240, (sim) => {
+      if (sim.queue.filter((t) => t.size !== 4 && !t.needs_native).length < 10) sim.add({ arch: "aarch64" }, 10);
+    });
+    const r = s.startOf(big)!;
+    expect(r, "it started").toBeTruthy();
+    expect(r.at - at).toBeLessThanOrEqual(30 * MIN + RESERVE_FOR_MS);
+    expect(s.startOf(stuck)).toBeUndefined();
+  });
+
+  it("its two hours spent, the host goes back to selection, and the task is not marked again until it is leased", () => {
+    const studio = host("studio", "aarch64", 11);
+    let k = 0;
+    // One build ends at minute 100, the other four at 400: the size-4 task cannot fit within its window.
+    const s = new Sim([studio], (t) => (t.size === 4 ? 120 : k++ === 0 ? 100 : 400));
+    s.add({ arch: "aarch64" }, 5);
+    s.run(1);
+    const [big] = s.add({ arch: "aarch64", size: 4 });
+    const smalls = s.add({ arch: "aarch64" }, 3);
+    s.run(40);
+    expect(studio.reserving?.task).toBe(big.id);
+    const since = studio.reserving!.since;
+    // The first build ends: two units free, and the host keeps them for the task.
+    s.run(80);
+    expect(smalls.every((t) => !s.startOf(t))).toBe(true);
+    // Two hours after the mark: cleared, not set again, and the next small build takes the two free units.
+    s.now = since + RESERVE_FOR_MS - MIN;
+    s.run(10);
+    expect(studio.reserving).toBeNull();
+    expect(s.queue.find((t) => t.id === big.id)!.reserved_at).toBe(since);
+    expect(s.startOf(smalls[0])?.at).toBeGreaterThan(since + RESERVE_FOR_MS - MIN);
+    s.run(60);
+    expect(studio.reserving).toBeNull();
+    expect(s.startOf(big)).toBeUndefined();
+  });
+
+  it("a claim's memory offer bounds that claim only: the host's size, its builds and the largest size it runs stay what its units say", () => {
+    const studio = host("studio", "aarch64", 11);
+    const big = task({ arch: "aarch64", size: 4 });
+    const small = task({ arch: "aarch64" });
+    const offering: Member = { ...studio, offer: 6 };
+    const fleet: Fleet = { members: [offering], leases: [] };
+    expect(largestSize(fleet, T0, R)).toBe(4);
+    expect(buildsOf(offering, R)).toBe(5);
+    // The size-4 build waits for memory rather than run smaller; a size-1 build fits the offer.
+    expect(noRoom(offering, [], big, 8, 80, R)).toBe("memory");
+    expect(select(offering, fleet, [big, small], T0, R)).toMatchObject([{ id: small.id, size: 1, asked: null }]);
+    expect(select(studio, { members: [studio], leases: [] }, [big], T0, R)).toMatchObject([{ id: big.id, size: 4, asked: null }]);
   });
 
   it("a task larger than every host alive is clamped to the largest, saying what it asked; a contributor's never above 2", () => {

@@ -22,11 +22,13 @@ const SIZES_SPLICE = { max: MAX_SIZE, community_max: COMMUNITY_MAX_SIZE, cpus: T
 export const RETRY_AT_SIZE = String.raw`
   // An out-of-memory failure (#337): the engine's words, "out of memory at 4 GB (size 1)" (handleFail), and for a maintainer Retry at
   // size — the build queued again at the size they choose, one more try (POST /api/v1/factory/tasks/:id/retry), up to the signed
-  // maximum (a contributor's lower; SIZES, the signed constants); the pool refuses a size no host alive runs and says the largest.
-  var SIZES = ${JSON.stringify(SIZES_SPLICE)};
+  // maximum (a contributor's lower; SIZES, the signed constants) and the largest size a host alive runs (the story's largest_size, read
+  // when one of its builds ran out of memory: sizesAlive) — the pool refuses a size no host alive runs.
+  var SIZES = ${JSON.stringify(SIZES_SPLICE)}, LARGEST = 0;
+  function sizesAlive(d) { LARGEST = d && d.largest_size > 0 ? d.largest_size : 0; }
   function oomSize(b) { var m = b && (b.kind || "build") === "build" && typeof b.error === "string" ? /^out of memory at \d+ GB(?: \(size (\d+)\))?/.exec(b.error) : null; return m ? Number(m[1] || 1) : 0; }
   function retryAtSize(b) {
-    var s = oomSize(b), max = b && b.trust === "community" ? SIZES.community_max : SIZES.max;
+    var s = oomSize(b), max = Math.min(b && b.trust === "community" ? SIZES.community_max : SIZES.max, LARGEST || SIZES.max);
     if (!s || !isMaintainer() || (b.status !== "failed" && b.status !== "queued") || s >= max) return "";
     return '<button type="button" class="op-btn" data-retry-size="' + esc(b.id) + '" data-size="' + s + '" data-max="' + max + '">Retry at size ' + (s + 1) + '</button>';
   }

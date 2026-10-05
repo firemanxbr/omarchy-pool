@@ -11,9 +11,15 @@
 -- hours after this.
 ALTER TABLE hosts ADD COLUMN reserving_since TEXT;
 
--- Each contributor's head of the queue, in the claim's order (priority, id),
--- and the walk over the owners that have one: one index entry per owner,
--- never a contributor's whole backlog. Partial, so only the statements that
--- say `status = 'queued' AND trust = 'community'` can use it, and no other
--- read of build_tasks changes its plan (D1 keeps no statistics).
-CREATE INDEX idx_build_tasks_owner_head ON build_tasks (owner, priority) WHERE status = 'queued' AND trust = 'community';
+-- When a host was last marked reserving for this task: two hours later its
+-- window is spent, and it is not marked again until it is leased (the lease
+-- clears it), so a mark bounds how long a host holds back work for one task.
+ALTER TABLE build_tasks ADD COLUMN reserved_at TEXT;
+
+-- Each contributor's head of the queue for each arch, in the claim's order
+-- (priority, id), and the walk over the owners that have one: one index
+-- entry per owner, never a contributor's whole backlog. Partial, so only the
+-- statements that say `status = 'queued' AND trust = 'community'` can use
+-- it, and no other read of build_tasks changes its plan (D1 keeps no
+-- statistics).
+CREATE INDEX idx_build_tasks_owner_head ON build_tasks (owner, arch, priority) WHERE status = 'queued' AND trust = 'community';

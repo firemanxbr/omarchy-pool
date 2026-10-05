@@ -559,7 +559,7 @@ const SCRIPT = String.raw`
     var q = FRESH; FRESH = "";
     api("GET", API + "/packages/" + encodeURIComponent(name) + "/story" + q).then(function (d) {
       if (OPEN !== name) return;
-      if (d.error) { STORY = null; STORY_DOWN = d.error; } else { STORY = d; STORY_DOWN = null; }
+      if (d.error) { STORY = null; STORY_DOWN = d.error; } else { STORY = d; STORY_DOWN = null; sizesAlive(d); }
       renderWork();
       var b = round().map(function (r) { return r.rebuild; }).filter(function (x) { return x && x.status === "leased" && x.lease_owner; })[0];
       if (!b || !isMaintainer()) { WLOG = null; return; }

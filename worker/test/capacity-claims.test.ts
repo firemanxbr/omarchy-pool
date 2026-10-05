@@ -9,16 +9,29 @@
  * - an x86_64 task goes to a native x86_64 host while one is eligible, to an
  *   aarch64 host's emulated lane after T (3 minutes with no native history,
  *   twice the last native build otherwise), at once when the native host is
- *   full, drained or below the minimum; `needs_native` never runs emulated;
+ *   full, drained or below the minimum by its last report; `needs_native`
+ *   never runs emulated;
  * - with only x86_64 work queued an aarch64 host fills all but one build
- *   with emulated builds, and native work arriving takes the one kept;
- * - on an aarch64-only fleet the oldest x86_64 build goes first (the share);
+ *   with emulated builds, and native work arriving takes the one kept —
+ *   behind an x86_64 backlog longer than the bound a claim reads too;
+ * - on an aarch64-only fleet the oldest x86_64 build goes first (the share),
+ *   however long the aarch64 backlog ahead of it;
  * - a contributor's 150 packages hold one build at a time under the cap,
  *   and with the cap lifted round-robin by owner hands another contributor's
- *   single package the next build;
+ *   single package the next build — its place in the queue says second, not
+ *   last; a capped flood longer than the bound hides no project build;
+ * - the reads are bounded by what the claimer can take: audits ahead while
+ *   its agent slots are full, or size-4 builds ahead of its free units, hide
+ *   no build it can run;
  * - a size-4 task on a busy host: after 30 minutes the host reserves for
- *   it, takes nothing else, and leases it when its units fit; a task larger
- *   than every host alive is clamped, with a Status line;
+ *   it, takes nothing else, and leases it when its units fit — an older build
+ *   that waits for another reason (needs_native) turns nothing off; its two
+ *   hours spent, it is not marked again; a task larger than every host alive
+ *   is clamped, with a Status line;
+ * - what the dispatcher's memory offers bounds this claim, not the host's
+ *   size: a large build waits rather than run smaller;
+ * - a host below the minimum by its last report claims nothing; a work root
+ *   its own builds fill is no minimum;
  * - out of memory says "out of memory at 4 GB (size 1)", and a maintainer's
  *   Retry at size requeues it at the size chosen; a package's size set on its
  *   page; the pool's cap on a host set by its owner or any maintainer;
@@ -31,8 +44,10 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
-import { FLEET_SQL, LEASES_HELD_SQL, MARKED_WAITING_SQL, NATIVE_MS_SQL, OLDEST_BUILD_SQL, OWNER_CAP_KEY, OWNER_HEADS_SQL, PACKAGE_SIZES_SQL } from "../src/routes/factory";
+import { ANY_QUEUED_SQL, FLEET_SQL, HEAD_LIMIT, LANE_HEAD_SQL, LEASES_HELD_SQL, MARKED_WAITING_SQL, NATIVE_MS_SQL, NEUTRAL_HEAD_SQL, OLDEST_BUILDS_SQL, OWNER_CAP_KEY, OWNER_HEADS_SQL, PACKAGE_SIZES_SQL } from "../src/routes/factory";
 import { unitsOf } from "../src/hosts";
+import { queuePosition } from "../src/queue";
+import { RETRY_AT_SIZE } from "../src/pages/layout";
 import { toB64url } from "../src/webauthn";
 
 const ORIGIN = "http://localhost:8787";
@@ -78,20 +93,21 @@ async function seedHost(id: string, b: Box, o: { poolCap?: number | null } = {})
 const keepAlive = (id: string) => env.DB.prepare("UPDATE build_workers SET last_seen = ? WHERE id = ?").bind(new Date().toISOString(), id).run();
 
 let seq = 0;
-interface ClaimOpts { want?: 0 | 1; leases?: { task: number; gen: string }[]; capacity?: unknown }
+interface ClaimOpts { want?: 0 | 1; leases?: { task: number; gen: string }[]; capacity?: unknown; offer?: number }
 /** A claim as the host's dispatcher sends it (design v2 §8.1). */
 const claim = (id: string, o: ClaimOpts = {}) => {
   const b = boxes.get(id)!;
   return call("POST", "/factory/claim", { token: `omw_${id}`, body: {
     arch: b.lanes.find((l) => l.mode === "native")!.arch, version: "v1.0.2", hostname: id, kinds: ["build", "trial", "audit"], claim_id: `c_cap${String(++seq).padStart(8, "0")}`, want: o.want ?? 1,
     leases: o.leases ?? [], capacity: o.capacity ?? capOf(b), agent: { provider: "anthropic", model: "claude-test", probe: "ok", checked_at: "2026-10-01T00:00:00Z" },
+    ...(o.offer === undefined ? {} : { offer: o.offer }),
   } });
 };
 /** Claims until it is handed nothing, as the dispatcher claims again at once after a task: the leases it got. */
-async function fill(id: string, held: { task: number; gen: string }[] = [], max = 20): Promise<{ task: number; gen: string; token: string }[]> {
+async function fill(id: string, held: { task: number; gen: string }[] = [], max = 20, o: Omit<ClaimOpts, "leases"> = {}): Promise<{ task: number; gen: string; token: string }[]> {
   const got: { task: number; gen: string; token: string }[] = [];
   for (let i = 0; i < max; i++) {
-    const c = await claim(id, { leases: [...held, ...got.map(({ task, gen }) => ({ task, gen }))] });
+    const c = await claim(id, { ...o, leases: [...held, ...got.map(({ task, gen }) => ({ task, gen }))] });
     if (c.status !== 200) break;
     got.push({ task: c.json.task.id, gen: c.json.task.lease_gen, token: c.json.token });
   }
@@ -133,11 +149,12 @@ afterEach(async () => {
 });
 
 describe("the D1 migration (0046)", () => {
-  it("adds a host's reservation time, and a partial index of each contributor's queued community builds", async () => {
-    const cols = (await env.DB.prepare("SELECT name FROM pragma_table_info('hosts')").all<{ name: string }>()).results.map((r) => r.name);
-    expect(cols).toEqual(expect.arrayContaining(["reserving_task", "reserving_since"]));
+  it("adds a host's reservation time, a task's reservation window, and a partial index of each contributor's queued community builds by arch", async () => {
+    const cols = (t: string) => env.DB.prepare(`SELECT name FROM pragma_table_info('${t}')`).all<{ name: string }>().then((r) => r.results.map((x) => x.name));
+    expect(await cols("hosts")).toEqual(expect.arrayContaining(["reserving_task", "reserving_since"]));
+    expect(await cols("build_tasks")).toEqual(expect.arrayContaining(["reserved_at"]));
     const idx = await env.DB.prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_build_tasks_owner_head'").first<{ sql: string }>();
-    expect(idx?.sql).toMatch(/\(owner, priority\) WHERE status = 'queued' AND trust = 'community'/);
+    expect(idx?.sql).toMatch(/\(owner, arch, priority\) WHERE status = 'queued' AND trust = 'community'/);
   });
 });
 
@@ -250,6 +267,44 @@ describe("native preferred, emulated after T", () => {
     expect(got[0].task).toBe(x86);
     expect(got.slice(1).map((g) => g.task)).toEqual(backlog.slice(0, 4));
   });
+  it("with an x86_64 backlog longer than the bound a claim reads, native work arriving takes the build kept; with an aarch64 one, the oldest x86_64 build still goes first", async () => {
+    await seedHost("studio-b", STUDIO);
+    for (let i = 0; i < HEAD_LIMIT + 10; i++) await seedTask({ arch: "x86_64", ago: 60 });
+    const emu = await fill("studio-b");
+    expect(emu).toHaveLength(4);
+    const native = await seedTask({ arch: "aarch64" });
+    const c = await claim("studio-b", { leases: emu.map(({ task, gen }) => ({ task, gen })) });
+    expect(c.json.task).toMatchObject({ id: native, lane: "native" });
+    // The other way round: sixty aarch64 builds queued before one x86_64 build, on an aarch64-only fleet.
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE status IN ('queued', 'leased')").run();
+    for (let i = 0; i < HEAD_LIMIT + 10; i++) await seedTask({ arch: "aarch64", ago: 120 });
+    const x86 = await seedTask({ arch: "x86_64", ago: 5 });
+    const got = await fill("studio-b");
+    expect(got[0].task).toBe(x86);
+    expect((await taskOf(x86)).lane).toBe("emulated");
+    expect(got).toHaveLength(5);
+  });
+
+  it("a native host below the minimum by its last report claims nothing and holds no emulated lane; a work root its own builds fill is no minimum", async () => {
+    const studio = await seedHost("studio-m", STUDIO);
+    const vps = await seedHost("vps-m", VPS86);
+    await env.DB.prepare("UPDATE hosts SET capacity = json_set(capacity, '$.below_minimum', ?) WHERE id = ?").bind("below the minimum to join: 40 GB free on the work root (60 needed)", vps).run();
+    const t = await seedTask({ arch: "x86_64" });
+    // D44: it keeps its bundle running and claims nothing.
+    expect((await claim("vps-m")).status).toBe(204);
+    // No eligible native capacity: the emulated lane takes the task at once, without waiting T.
+    const e = await claim("studio-m");
+    expect(e.json.task).toMatchObject({ id: t, lane: "emulated" });
+    // The Studio's own claim says 55 GB free on its work root now (its build writes there): below the 60 GB to join, above the floor
+    // and the budgets of its builds — judged by its agent's last report like every other host, it still takes work.
+    const own = await seedTask({ arch: "aarch64" });
+    const c = await claim("studio-m", { leases: [{ task: t, gen: e.json.task.lease_gen }], capacity: { ...capOf(STUDIO), disk_free_gb: { work: 55, engine: 220 } } });
+    expect(c.json.task).toMatchObject({ id: own, lane: "native" });
+    // Its agent's report below the minimum: nothing more, whatever the claim says.
+    await env.DB.prepare("UPDATE hosts SET capacity = json_set(capacity, '$.below_minimum', ?) WHERE id = ?").bind("below the minimum to join: 55 GB free on the work root (60 needed)", studio).run();
+    await seedTask({ arch: "aarch64" });
+    expect((await claim("studio-m", { leases: [{ task: t, gen: e.json.task.lease_gen }, { task: own, gen: c.json.task.lease_gen }] })).status).toBe(204);
+  });
 });
 
 describe("fairness between contributors (D51)", () => {
@@ -271,6 +326,51 @@ describe("fairness between contributors (D51)", () => {
     await finish(all[0].task);
     const held = [...capped, ...all.slice(1)].map(({ task, gen }) => ({ task, gen }));
     expect((await claim("big-f", { leases: held })).json.task.id).toBe(late);
+  });
+  it("a package's place in the queue counts as selection hands builds out: a contributor's one package behind another's 150 is second", async () => {
+    const flood: number[] = [];
+    for (let i = 0; i < 150; i++) flood.push(await seedTask({ trust: "community", owner: "flood", ago: 60 }));
+    const single = await seedTask({ trust: "community", owner: "single" });
+    expect(await queuePosition(env, { id: single, arch: "aarch64" })).toEqual({ position: 2, total: 151 });
+    expect(await queuePosition(env, { id: flood[0], arch: "aarch64" })).toEqual({ position: 1, total: 151 });
+    expect(await queuePosition(env, { id: flood[149], arch: "aarch64" })).toEqual({ position: 151, total: 151 });
+    // A more urgent build is ahead of every one at its priority, whoever's.
+    await seedTask({ trust: "community", owner: "single", priority: 50 });
+    expect(await queuePosition(env, { id: single, arch: "aarch64" })).toEqual({ position: 3, total: 152 });
+  });
+
+  it("a capped contributor's flood longer than the bound a claim reads hides no project build, nor a requeued one", async () => {
+    await seedHost("big-g", { cpus: 10, mem_gb: 20, lanes: [{ arch: "aarch64", mode: "native" }] }); // 9 units: 4 builds, 1 per contributor
+    for (let i = 0; i < HEAD_LIMIT + 10; i++) await seedTask({ trust: "community", owner: "flood", ago: 60 });
+    const project = await seedTask({});
+    const requeued = await seedTask({ priority: 110 });
+    const got = await fill("big-g");
+    expect(got.map((g) => g.task).slice(1).sort()).toEqual([project, requeued].sort());
+    expect((await leasesOf("big-g"))).toHaveLength(3);
+  });
+});
+
+describe("the reads are bounded by what the claimer can take", () => {
+  it("model work ahead (audits, an agent's drafts) while its agent slots are full, or size-4 builds ahead of its free units, hide no build it can run", async () => {
+    await seedHost("p1-h", P1);
+    // Model work ahead of a build: audits (the arch-neutral head) and an agent's drafts (the lane's own head), more than either bound.
+    for (let i = 0; i < HEAD_LIMIT + 5; i++) await seedTask({ kind: "audit", priority: 40 });
+    for (let i = 0; i < HEAD_LIMIT + 5; i++) await seedTask({ ref: `draft:${i}`, priority: 40 });
+    const b = await seedTask({});
+    // The day's agent budget spent: the dispatcher says no agent slot.
+    const c = await claim("p1-h", { capacity: { ...capOf(P1), agent_slots: 0 } });
+    expect(c.json.task).toMatchObject({ id: b, kind: "build", lane: "native" });
+    // Two free units on the Studio: fifty-five size-4 builds ahead of a size-1 one.
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE status IN ('queued', 'leased')").run();
+    await seedHost("studio-h", { ...STUDIO, lanes: [{ arch: "aarch64", mode: "native" }] });
+    for (let i = 0; i < 4; i++) await seedTask({});
+    const running = await fill("studio-h");
+    expect(running).toHaveLength(4);
+    await env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, size) VALUES ('huge', 'm1', 'https://huge.example', '[\"aarch64\"]', 'waiting', 4)").run();
+    for (let i = 0; i < HEAD_LIMIT + 5; i++) await seedTask({ name: "huge", priority: 50 });
+    const small = await seedTask({});
+    const s = await claim("studio-h", { leases: running.map(({ task, gen }) => ({ task, gen })) });
+    expect(s.json.task).toMatchObject({ id: small, size: 1 });
   });
 });
 
@@ -304,6 +404,54 @@ describe("sizes and the reservation for large tasks (D31)", () => {
     const c = await claim("studio-r", { leases: held() });
     expect(c.json.task).toMatchObject({ id: big, size: 4, units: 8, disk_gb: 80 });
     expect((await env.DB.prepare("SELECT reserving_task FROM hosts WHERE id = ?").bind(host).first<any>()).reserving_task).toBeNull();
+  });
+
+  it("an older build that waits for another reason (needs_native on an aarch64-only fleet) turns nothing off; its two hours spent, the task is not marked again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    const host = await seedHost("studio-q", STUDIO);
+    const stuck = await seedTask({ arch: "x86_64", params: { needs_native: 1 }, ago: 300 });
+    for (let i = 0; i < 5; i++) await seedTask({ ago: 40 });
+    const running = await fill("studio-q");
+    expect(running).toHaveLength(5);
+    await env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, size) VALUES ('chromium-q', 'm1', 'https://chromium.org', '[\"aarch64\"]', 'waiting', 4)").run();
+    const big = await seedTask({ name: "chromium-q", ago: 31 });
+    const smalls = [await seedTask({}), await seedTask({})];
+    const ended: number[] = [];
+    const held = () => running.filter((r) => !ended.includes(r.task)).map(({ task, gen }) => ({ task, gen }));
+    await finish(running[0].task); ended.push(running[0].task);
+    expect((await claim("studio-q", { leases: held() })).status).toBe(204);
+    const mark = async () => env.DB.prepare("SELECT reserving_task, reserving_since FROM hosts WHERE id = ?").bind(host).first<any>();
+    expect((await mark()).reserving_task).toBe(big);
+    expect((await taskOf(big)).reserved_at).toBe(new Date(t0).toISOString());
+    expect((await taskOf(stuck)).status).toBe("queued");
+    // Two hours on, the other four still running (their leases renewed by their heartbeats): the mark clears, the task is not marked
+    // again, and the two free units take the next small build.
+    at(t0, 121);
+    await env.DB.prepare("UPDATE build_tasks SET lease_expires_at = ? WHERE status = 'leased'").bind(new Date(Date.now() + 30 * MIN).toISOString()).run();
+    const c = await claim("studio-q", { leases: held() });
+    expect(c.json.task).toMatchObject({ id: smalls[0], size: 1 });
+    expect(await mark()).toEqual({ reserving_task: null, reserving_since: null });
+    at(t0, 122);
+    expect((await claim("studio-q", { leases: [...held(), { task: c.json.task.id, gen: c.json.task.lease_gen }] })).status).toBe(204);
+    expect((await mark()).reserving_task).toBeNull();
+  });
+
+  it("what the dispatcher's memory offers bounds this claim, not the host's size: a large build waits rather than run smaller", async () => {
+    await seedHost("studio-mem", { ...STUDIO, lanes: [{ arch: "aarch64", mode: "native" }] });
+    await env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, size) VALUES ('llvm-m', 'm1', 'https://llvm.org', '[\"aarch64\"]', 'waiting', 4)").run();
+    const big = await seedTask({ name: "llvm-m" });
+    // 12 GB available: six units offered of the ten free. The host is still 11 units: size 4 is its, and the build waits for memory.
+    expect((await claim("studio-mem", { offer: 6 })).status).toBe(204);
+    expect((await taskOf(big)).status).toBe("queued");
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE json_extract(payload, '$.task') = ? AND json_extract(payload, '$.clamped') = 1").bind(big).first<{ n: number }>())!.n).toBe(0);
+    // A small build fits the offer.
+    const small = await seedTask({});
+    expect((await claim("studio-mem", { offer: 6 })).json.task).toMatchObject({ id: small, size: 1 });
+    // The memory back: the size-4 build at its size.
+    expect((await claim("studio-mem", { leases: [] })).json.task).toMatchObject({ id: big, size: 4, units: 8 });
+    // What the pool refuses of an offer.
+    expect((await claim("studio-mem", { offer: -1 })).json.error).toMatch(/^offer:/);
   });
 
   it("a task larger than every host alive is clamped to the largest, with a Status line; a contributor's never above 2", async () => {
@@ -352,11 +500,25 @@ describe("out of memory, and Retry at size", () => {
     expect((await call("POST", `/factory/tasks/${plain}/retry`, { token: "omc_m1", body: { size: 2 } })).json.code).toBe("not_oom");
   });
 
-  it("a size no host alive runs is refused, with the largest", async () => {
+  it("a size no host alive runs is refused, with the largest; the dialog offers none above it", async () => {
     await seedHost("p1-o", P1); // size 3 at most
-    const t = await seedTask({});
+    const t = await seedTask({ name: "oomed" });
     await env.DB.prepare("UPDATE build_tasks SET status = 'failed', error = 'out of memory at 4 GB (size 1) — the engine killed it: x' WHERE id = ?").bind(t).run();
     expect((await call("POST", `/factory/tasks/${t}/retry`, { token: "omc_m1", body: { size: 4 } })).json).toMatchObject({ code: "too_large", largest: 3 });
+    // The package's story says the largest size alive while one of its builds ran out of memory, so the pages offer up to it.
+    expect((await call("GET", "/factory/packages/oomed/story?t=oom")).json.largest_size).toBe(3);
+    const plain = await seedTask({ name: "fine" });
+    expect(plain).toBeTruthy();
+    expect((await call("GET", "/factory/packages/fine/story?t=oom")).json.largest_size).toBeNull();
+    // The dialog's button, as the package page and Review run it: its options stop at the largest size alive.
+    const run = new Function("isMaintainer", "esc", "document", `${RETRY_AT_SIZE}; return { sizesAlive: sizesAlive, retryAtSize: retryAtSize };`);
+    const ui = run(() => true, (x: unknown) => String(x), { addEventListener() {} }) as { sizesAlive: (d: unknown) => void; retryAtSize: (b: unknown) => string };
+    const b = { id: t, kind: "build", trust: "project", status: "failed", error: "out of memory at 4 GB (size 1) — x" };
+    expect(ui.retryAtSize(b)).toMatch(/data-max="4"/);
+    ui.sizesAlive({ largest_size: 3 });
+    expect(ui.retryAtSize(b)).toMatch(/data-size="1" data-max="3">Retry at size 2</);
+    ui.sizesAlive({ largest_size: 1 });
+    expect(ui.retryAtSize(b)).toBe("");
   });
 });
 
@@ -423,11 +585,17 @@ describe("legacy registrations", () => {
 describe("what the planner reads", () => {
   it("the claim's new statements by their indexes: a contributor's head through the partial index, never a scan of build_tasks", async () => {
     const plan = async (sql: string, args: unknown[]) => (await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...args).all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
-    const scope = "c2.kind IN (SELECT value FROM json_each(?)) AND (c2.pinned_to IS NULL OR c2.pinned_to = ?)";
+    const scope = (t: string) => `${t}.kind IN (SELECT value FROM json_each(?)) AND (${t}.pinned_to IS NULL OR ${t}.pinned_to = ?)`;
+    // The claimer's room as the claim writes it (fitsOf): a build's units by its size, its disk budget, the capped owners.
+    const size = (t: string) => `MIN(4, 4, MAX(1, COALESCE((SELECT p.size FROM factory_packages p WHERE p.name = ${t}.name), (SELECT json_extract(f.value, '$[0]') FROM json_each(?) f WHERE f.key = ${t}.name), 1)))`;
+    const fits = (t: string) => ` AND CASE ${t}.kind WHEN 'build' THEN 2 * ${size(t)} ELSE 1 END <= 4 AND NOT (${t}.kind = 'build' AND ${t}.trust = 'community' AND ${t}.owner IN (SELECT value FROM json_each(?)))`;
     const cases: [string, string, unknown[], RegExp][] = [
-      ["each contributor's head", OWNER_HEADS_SQL(scope), [50, '["build"]', "w"], /USING (COVERING )?INDEX idx_build_tasks_owner_head/],
+      ["each contributor's head", OWNER_HEADS_SQL(scope("c2") + fits("c2")), [50, "aarch64", '["build"]', "w", "{}", "[]", "[]"], /SEARCH c2 USING INDEX idx_build_tasks_owner_head \(owner=\? AND arch=\?\)/],
+      ["a lane's head", LANE_HEAD_SQL(scope("c") + fits("c")), ["aarch64", '["build"]', "w", "{}", "[]"], /SEARCH c USING INDEX idx_build_tasks_queue \(status=\? AND arch=\?\)/],
+      ["the arch-neutral kinds' head", NEUTRAL_HEAD_SQL(scope("c") + fits("c")), ['["audit"]', "w", "{}", "[]"], /SEARCH c USING INDEX idx_build_tasks_(queue|kind) /],
+      ["anything queued of its kinds", ANY_QUEUED_SQL, ['["build","trial","audit"]'], /SEARCH build_tasks USING (COVERING )?INDEX idx_build_tasks_kind \(kind=\? AND status=\?\)/],
       ["every lease", LEASES_HELD_SQL, [], /SEARCH build_tasks USING INDEX idx_build_tasks_(lease|queue|kind) /],
-      ["the oldest build", OLDEST_BUILD_SQL, [], /SEARCH c USING INDEX idx_build_tasks_kind /],
+      ["the oldest builds", OLDEST_BUILDS_SQL(" AND w.arch IN (SELECT value FROM json_each(?))"), ['["aarch64"]', "2026-10-01T00:00:00Z", "{}"], /SEARCH w USING INDEX idx_build_tasks_kind /],
       ["the packages' sizes", PACKAGE_SIZES_SQL, ['["a"]'], /SEARCH factory_packages USING INDEX sqlite_autoindex_factory_packages_1|SEARCH factory_packages USING PRIMARY KEY|SEARCH factory_packages USING INDEX/],
       ["the native history", NATIVE_MS_SQL, ['[["a","x86_64"]]'], /SEARCH d USING INDEX idx_build_tasks_name /],
       ["the marked tasks still waiting", MARKED_WAITING_SQL, ["[1]"], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
@@ -435,7 +603,8 @@ describe("what the planner reads", () => {
     for (const [what, sql, args, want] of cases) {
       const p = await plan(sql, args);
       expect(p, what).toMatch(want);
-      expect(p, what).not.toMatch(/SCAN (build_tasks|c|c2|d|t)(?! USING)/);
+      // The oldest builds scan the window they read (at most RESERVE_WINDOW rows), never the table.
+      expect(p, what).not.toMatch(what === "the oldest builds" ? /SCAN (build_tasks|w)(?! USING)/ : /SCAN (build_tasks|c|c2|d|t)(?! USING)/);
     }
     // The fleet: the registrations alive, a few dozen rows; the hosts by their primary key.
     expect(await plan(FLEET_SQL, ["2026-10-01T00:00:00Z"])).toMatch(/SEARCH h USING INDEX sqlite_autoindex_hosts_1|SEARCH h USING PRIMARY KEY/);

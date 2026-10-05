@@ -1196,6 +1196,7 @@ const PACKAGE_SCRIPT = String.raw`
     if (D) { renderTiles(); renderSecurity(); renderDeps(); renderFilesHead(); }
     fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (st) {
       if (st && st.package) ST = st;
+      sizesAlive(st);
       // The story is the fresher word (30 s at the edge, the package's answer 10 min): when it puts this architecture in no ring — blocked, or lifted and back in the factory — the answer's object is not what a ring serves any more, and the page draws it as served nowhere here. (A publish younger than the story's 30 s waits for its next read.)
       if (D && ST && ST.rings && !ST.rings.some(function (r) { return r.arch === arch; })) { D404 = { error: name + " is in no ring for " + arch, arches: D.arches }; D = null; }
       renderAll();
