@@ -162,6 +162,103 @@ fn a_switch_whose_guard_fails_goes_back_to_docker_and_quarantines_nothing() {
 }
 
 #[test]
+fn a_switch_keeps_the_owners_comments_and_layout_in_agent_toml() {
+    let (mut w, podman) = drained_beside_podman();
+    let path = w.agent.paths.agent_toml();
+    let toml = fs::read_to_string(&path).unwrap().replace(
+        "max_units = 3\n",
+        "# Three: the Studio also renders video at night.\nmax_units = 3 # not more\nagent_budget = { calls_per_task = 200 }\n",
+    );
+    fs::write(&path, &toml).unwrap();
+    ask(&w, "compose/podman", PODMAN);
+    through(&mut w);
+    assert_eq!(
+        w.agent.state.switch_last.as_ref().unwrap().outcome,
+        "done",
+        "{:?}",
+        w.agent.state.switch_last
+    );
+    assert_eq!(running_dispatcher(&podman).as_deref(), Some("v1.0.0"));
+    let after = fs::read_to_string(&path).unwrap();
+    // Only [set]'s keys changed: its socket line in place, the keys it lacked after its
+    // last one; every other line as the owner wrote it.
+    let expected = toml.replace(
+        "socket_cli = \"/var/run/docker.sock\"\n",
+        &format!("socket_cli = \"{PODMAN}\"\ndriver = \"compose\"\nruntime = \"podman\"\nsocket_mount = \"{PODMAN}\"\nengine = \"rootful\"\n"),
+    );
+    assert_eq!(after, expected);
+}
+
+#[test]
+fn a_switch_whose_agent_toml_cannot_be_written_goes_back() {
+    let (mut w, podman) = drained_beside_podman();
+    let toml = fs::read_to_string(w.agent.paths.agent_toml()).unwrap();
+    ask(&w, "compose/podman", PODMAN);
+    w.tick(1);
+    for _ in 0..400 {
+        if w.agent.state.switch.as_ref().map(|s| s.step) == Some(SwitchStep::Up)
+            && w.step() == "guard"
+        {
+            break;
+        }
+        w.tick(3);
+    }
+    assert_eq!(w.step(), "guard");
+    // Up on podman; then agent.toml is a file the agent cannot replace: a directory stands
+    // where its temporary file goes.
+    let blocker = w.agent.paths.agent_toml().with_file_name(".agent.toml.tmp");
+    fs::create_dir_all(blocker.join("x")).unwrap();
+    through(&mut w);
+    fs::remove_dir_all(&blocker).unwrap();
+    let end = w.agent.state.switch_last.clone().unwrap();
+    assert_eq!(end.outcome, "rolled-back", "{}", end.detail);
+    assert!(
+        end.detail
+            .starts_with("the switch to compose/podman was rolled back (agent.toml could not be written to name it ("),
+        "{}",
+        end.detail
+    );
+    // Back on docker, nothing left on podman, agent.toml as it was: a restart brings up no
+    // second dispatcher.
+    assert_eq!(running_dispatcher(&w.engine).as_deref(), Some("v1.0.0"));
+    assert!(podman.borrow().dispatcher().is_none());
+    assert_eq!(w.agent.cfg.runtime, Runtime::Docker);
+    assert_eq!(
+        fs::read_to_string(w.agent.paths.agent_toml()).unwrap(),
+        toml
+    );
+}
+
+#[test]
+fn a_task_claimed_before_the_old_dispatcher_stopped_sends_the_switch_back() {
+    let (mut w, podman) = drained_beside_podman();
+    ask(&w, "compose/podman", PODMAN);
+    // The request is checked with no task running...
+    w.tick(1);
+    assert_eq!(
+        w.agent.state.switch.as_ref().map(|s| s.step),
+        Some(SwitchStep::Stop)
+    );
+    // ...and the dispatcher claims one before its stop.
+    let task = w.engine.borrow_mut().start_task();
+    through(&mut w);
+    let end = w.agent.state.switch_last.clone().unwrap();
+    assert_eq!(end.outcome, "rolled-back", "{}", end.detail);
+    assert!(
+        end.detail.starts_with(
+            "the switch to compose/podman was rolled back (1 task container(s) were claimed on compose/docker before its dispatcher stopped"
+        ),
+        "{}",
+        end.detail
+    );
+    // Back on docker with its task, which runs on; nothing on podman.
+    assert_eq!(running_dispatcher(&w.engine).as_deref(), Some("v1.0.0"));
+    assert!(w.engine.borrow().tasks().iter().any(|c| c.id == task));
+    assert!(podman.borrow().dispatcher().is_none());
+    assert_eq!(w.agent.cfg.runtime, Runtime::Docker);
+}
+
+#[test]
 fn a_restart_mid_switch_resumes_on_the_engine_it_was_on() {
     let (mut w, podman) = drained_beside_podman();
     ask(&w, "compose/podman", PODMAN);

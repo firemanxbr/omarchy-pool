@@ -19,7 +19,9 @@
 //!    engine and runtime from then on.
 //! 3. `back`, when that round fails — the guard or the ready wait (intercepted before the
 //!    round's own revert, so the release is never quarantined for an engine's fault), a
-//!    refusal, a pull that failed, or no end within [`LIMIT_S`]: the new engine's dispatcher
+//!    refusal, a pull that failed, agent.toml that cannot be written to name the new engine,
+//!    or no end within [`LIMIT_S`] — or when a task container runs on the old engine once its
+//!    dispatcher stopped (claimed after the request was checked): the new engine's dispatcher
 //!    is stopped and removed, the old engine named again, and a round brings the dispatcher
 //!    back there (`return`); the round's outcome says the switch was rolled back and why.
 //!    agent.toml was never changed.
@@ -144,7 +146,11 @@ pub(crate) fn point(cfg: &mut Config, p: &Place) {
     };
 }
 
-/// agent.toml with `[set]` naming `p`; every other key as it was, the file's mode kept.
+/// agent.toml with `[set]` naming `p`, the file's mode kept. Only those keys' lines change:
+/// agent.toml is the owner's policy document (design v2 §12), so their comments — an
+/// `[envelope]` note on why `max_units` is what it is — and its layout stay as they were.
+/// A layout the line edit cannot name `p` in (a dotted `set.runtime` key, `set` as an
+/// inline table) is written again from its table instead, its leading comment kept.
 pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -153,7 +159,98 @@ pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
         .permissions()
         .mode()
         & 0o777;
-    let mut t: toml::Table = toml::from_str(&text).map_err(|e| format!("agent.toml: {e}"))?;
+    let v = |s: &str| toml::Value::String(s.to_owned()).to_string();
+    let keys = [
+        ("driver", v("compose")),
+        ("runtime", v(&p.runtime)),
+        ("socket_cli", v(&p.socket_cli.display().to_string())),
+        ("socket_mount", v(&p.socket_mount.display().to_string())),
+        ("engine", v(&p.engine)),
+    ];
+    let names = |t: &str| {
+        Config::parse(t).is_ok_and(|c| {
+            place_of(&c) == *p
+                && toml::from_str::<toml::Table>(t).is_ok_and(|t| {
+                    t.get("set")
+                        .and_then(|s| s.get("driver"))
+                        .and_then(toml::Value::as_str)
+                        == Some("compose")
+                })
+        })
+    };
+    let mut new = set_lines(&text, &keys);
+    if !names(&new) {
+        new = reserialized(&text, p)?;
+    }
+    // Checked as the loop will read it before it replaces the one that works.
+    Config::parse(&new)?;
+    state::write_atomic(path, new.as_bytes())?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// `text` with `[set]`'s `keys` (each `key = <TOML value>`) set line by line: a key's line
+/// replaced where it is, a missing one added after the section's last key, a missing
+/// section added at the end; every other line as it was.
+fn set_lines(text: &str, keys: &[(&str, String)]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut done = vec![false; keys.len()];
+    // While in `[set]`: the index of its last line that is a key or its header.
+    let mut last: Option<usize> = None;
+    let mut seen = false;
+    let add = |out: &mut Vec<String>, done: &mut [bool], at: usize| {
+        let missing: Vec<String> = keys
+            .iter()
+            .zip(done.iter())
+            .filter(|(_, d)| !**d)
+            .map(|((k, v), _)| format!("{k} = {v}"))
+            .collect();
+        out.splice(at..at, missing);
+        done.fill(true);
+    };
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with('[') {
+            if let Some(i) = last.take() {
+                add(&mut out, &mut done, i + 1);
+            }
+            let name = t.trim_start_matches('[').split(']').next().unwrap_or("");
+            if !t.starts_with("[[") && name.trim() == "set" {
+                seen = true;
+                last = Some(out.len());
+            }
+            out.push(line.to_owned());
+            continue;
+        }
+        if let Some(i) = last.as_mut() {
+            if !t.is_empty() && !t.starts_with('#') {
+                *i = out.len();
+                let key = t.split_once('=').map(|(k, _)| k.trim().trim_matches('"'));
+                if let Some(k) = key.and_then(|k| keys.iter().position(|(n, _)| *n == k)) {
+                    let indent = &line[..line.len() - t.len()];
+                    out.push(format!("{indent}{} = {}", keys[k].0, keys[k].1));
+                    done[k] = true;
+                    continue;
+                }
+            }
+        }
+        out.push(line.to_owned());
+    }
+    if let Some(i) = last {
+        add(&mut out, &mut done, i + 1);
+    }
+    if !seen {
+        out.push(String::new());
+        out.push("[set]".to_owned());
+        let at = out.len();
+        add(&mut out, &mut done, at);
+    }
+    out.join("\n") + "\n"
+}
+
+/// agent.toml written again from its table, `[set]` naming `p`, its leading comment kept.
+fn reserialized(text: &str, p: &Place) -> Result<String, String> {
+    let mut t: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
     let set = t
         .entry("set")
         .or_insert_with(|| toml::Value::Table(toml::Table::new()))
@@ -166,7 +263,6 @@ pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
     set.insert("socket_mount".into(), s(&p.socket_mount));
     set.insert("engine".into(), toml::Value::String(p.engine.clone()));
     let body = toml::to_string(&t).map_err(|e| format!("agent.toml: {e}"))?;
-    // Its leading comment, kept: it says who writes the file.
     let head = text
         .lines()
         .take_while(|l| l.starts_with('#'))
@@ -175,11 +271,7 @@ pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
             h.push('\n');
             h
         });
-    // Checked as the loop will read it before it replaces the one that works.
-    Config::parse(&format!("{head}{body}"))?;
-    state::write_atomic(path, format!("{head}{body}").as_bytes())?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|e| format!("{}: {e}", path.display()))
+    Ok(format!("{head}{body}"))
 }
 
 impl Agent {
@@ -448,6 +540,29 @@ impl Agent {
                 );
             }
         }
+        // The request found no task running, but the dispatcher claimed until its stop: a
+        // task it started meanwhile runs on the old engine, where only a dispatcher there
+        // re-adopts it. The bundle goes back to it.
+        let host = self.cfg.host_id.clone();
+        match self.driver.as_deref_mut().map(|d| d.host_tasks(&host)) {
+            Some(Answer::Yes(0) | Answer::NotFound) => {}
+            Some(Answer::Yes(n)) => {
+                let why = format!(
+                    "{n} task container(s) were claimed on compose/{} before its dispatcher stopped, and only a dispatcher there re-adopts them: drain the host first (Drain on its registration's page), let its tasks finish, then switch",
+                    sw.from.runtime
+                );
+                return self.go_back(&sw, &why, now);
+            }
+            Some(Answer::NoAnswer(_)) | None if now - sw.since < GRACE_S => return,
+            Some(Answer::NoAnswer(e)) => {
+                let why = format!("the old engine did not say whether a task runs on it ({e})");
+                return self.go_back(&sw, &why, now);
+            }
+            None => {
+                let why = "the pinned engine tools are not installed".to_owned();
+                return self.go_back(&sw, &why, now);
+            }
+        }
         let why = format!(
             "runtime switch to compose/{} (the owner's, at the host)",
             sw.to.runtime
@@ -507,19 +622,19 @@ impl Agent {
         }
         let r = &self.state.round;
         if r.outcome == Outcome::Ok.name() || r.outcome == Outcome::NoChange.name() {
-            let detail = match write_agent_toml(&self.paths.agent_toml(), &sw.to) {
-                Ok(()) => format!(
-                    "the bundle runs on compose/{} at {}; agent.toml says so",
-                    sw.to.runtime,
-                    sw.to.socket_cli.display()
-                ),
-                Err(e) => format!(
-                    "the bundle runs on compose/{} at {}, but agent.toml could not be written ({e}): a restart of the agent goes back to {}",
-                    sw.to.runtime,
-                    sw.to.socket_cli.display(),
-                    sw.from.runtime
-                ),
-            };
+            // Up and guarded: agent.toml names the new engine from now on. One that cannot
+            // be written would bring the dispatcher up on the old engine again at the next
+            // start of the agent, beside this one — two dispatchers on one registration —
+            // so the switch goes back instead.
+            if let Err(e) = write_agent_toml(&self.paths.agent_toml(), &sw.to) {
+                let why = format!("agent.toml could not be written to name it ({e})");
+                return self.go_back(&sw, &why, now);
+            }
+            let detail = format!(
+                "the bundle runs on compose/{} at {}; agent.toml says so",
+                sw.to.runtime,
+                sw.to.socket_cli.display()
+            );
             let to = format!("compose/{}", sw.to.runtime);
             return self.switch_end(&to, "done", &detail, now);
         }
