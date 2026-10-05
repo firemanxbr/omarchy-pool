@@ -12,8 +12,9 @@
 ALTER TABLE hosts ADD COLUMN reserving_since TEXT;
 
 -- When a host was last marked reserving for this task: two hours later its
--- window is spent, and it is not marked again until it is leased (the lease
--- clears it), so a mark bounds how long a host holds back work for one task.
+-- window is spent, and it is not marked again for 30 minutes (the lease
+-- clears it), so a mark bounds how long a host holds back work for one task
+-- at a time, and the task still starts when its host ran something longer.
 ALTER TABLE build_tasks ADD COLUMN reserved_at TEXT;
 
 -- Each contributor's head of the queue for each arch, in the claim's order

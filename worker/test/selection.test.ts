@@ -33,16 +33,20 @@
  *   it can;
  * - a size-4 task on busy hosts: the reservation starts it within its
  *   window, whatever older build waits for another reason; its two hours
- *   spent, it is not marked again; one larger than every host alive is
- *   clamped; an emulated one of any size starts when the emulated lanes hold
- *   nothing; a claim's memory offer bounds that claim only;
+ *   spent, it is not marked again for 30 minutes, then is, and starts when
+ *   its host ran a build longer than the window; a reserving host whose free
+ *   units reach the task takes other work while it cannot lease it (its
+ *   owner's cap, the claim's memory offer), the task first when it can; one
+ *   larger than every host alive is clamped; an emulated one of any size
+ *   starts when the emulated lanes hold nothing; a claim's memory offer
+ *   bounds that claim only;
  * - a drained, below-minimum, suspended or behind native host never makes an
  *   emulated lane wait;
  * - and a legacy registration as a host with one lane and one build.
  */
 import { describe, expect, it } from "vitest";
 import {
-  alive, buildsOf, diskOf, largestSize, nativeCapacity, noRoom, ownerCap, ownersLeased, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
+  alive, buildsOf, cooling, diskOf, largestSize, nativeCapacity, noRoom, ownerCap, ownersLeased, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
   ALIVE_MS, HELPER_KINDS, LANE_KINDS, MIN, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
   type Candidate, type Fleet, type Held, type Member, type Mode,
 } from "../src/selection";
@@ -155,7 +159,7 @@ class Sim {
       const runs = (c: Candidate, native: boolean) => hosts.some((x) => x.lanes.some((l) => l.arch === c.arch && (!native || l.mode === "native")));
       if (largest >= 2 && hosts.length) {
         oldest = queue
-          .filter((c) => c.kind === "build" && runs(c, false) && (!c.needs_native || runs(c, true)) && !isCapped(c) && (c.pinned_to === null || hosts.some((x) => x.id === c.pinned_to)) && (c.reserved_at == null || c.reserved_at > now - RESERVE_FOR_MS))
+          .filter((c) => c.kind === "build" && runs(c, false) && (!c.needs_native || runs(c, true)) && !isCapped(c) && (c.pinned_to === null || hosts.some((x) => x.id === c.pinned_to)) && (c.reserved_at == null || c.reserved_at > now - RESERVE_FOR_MS || c.reserved_at <= now - RESERVE_FOR_MS - RESERVE_AFTER_MS))
           .sort((a, b) => a.id - b.id).slice(0, RESERVE_WINDOW)
           .filter((c) => c.queued_at <= now - RESERVE_AFTER_MS && (c.size ?? 1) >= 2).slice(0, RESERVE_CANDIDATES);
       }
@@ -534,7 +538,7 @@ describe("sizes and the reservation for large tasks", () => {
     expect(marked.filter((x) => x.task.kind === "build")).toHaveLength(0);
   });
 
-  it("a mark clears when its task leaves the queue, when its host leaves, or after 2 hours — and its task is not marked again; one at a time; a size-1 build or a host that could never run it is never reserved for", () => {
+  it("a mark clears when its task leaves the queue, when its host leaves, or after 2 hours — and its task is not marked again for 30 minutes; one at a time; a size-1 build or a host that could never run it is never reserved for", () => {
     const studio = host("studio", "aarch64", 11, { reserving: { task: 1, since: T0 } });
     const t1 = { ...task({ arch: "aarch64", size: 4, queued_at: T0 - 60 * MIN }), id: 1, reserved_at: T0 };
     const busy: Held = { task: 500, by: "studio", kind: "build", arch: "aarch64", lane: "native", units: 8, model: false, trust: "project", owner: null, disk_gb: 20 };
@@ -542,9 +546,15 @@ describe("sizes and the reservation for large tasks", () => {
     expect(reserve({ members: [studio], leases: [busy] }, [t1], waits, T0 + MIN, R)).toEqual({ set: null, clear: [] });
     // Its task leased or cancelled: gone, and the oldest marked again when it waits.
     expect(reserve({ members: [studio], leases: [busy] }, [t1], () => false, T0 + MIN, R).clear).toEqual(["studio"]);
-    // Its two hours spent: the mark clears, and its task is not marked again until it is leased — the host goes back to selection.
+    // Its two hours spent: the mark clears, and its task is not marked again for 30 minutes — the host goes back to selection.
     const later = T0 + RESERVE_FOR_MS + MIN;
     expect(reserve({ members: [{ ...studio, seen_at: later }], leases: [busy] }, [t1], waits, later, R)).toEqual({ set: null, clear: ["studio"] });
+    expect([T0 + RESERVE_FOR_MS - MIN, T0 + RESERVE_FOR_MS, later, T0 + RESERVE_FOR_MS + RESERVE_AFTER_MS - MIN, T0 + RESERVE_FOR_MS + RESERVE_AFTER_MS].map((n) => cooling(T0, n)))
+      .toEqual([false, true, true, true, false]);
+    expect(cooling(null, later)).toBe(false);
+    // Thirty minutes on, it waits its turn again as a build queued 30 minutes does: marked anew.
+    const again = T0 + RESERVE_FOR_MS + RESERVE_AFTER_MS;
+    expect(reserve({ members: [{ ...studio, seen_at: again }], leases: [busy] }, [t1], waits, again, R)).toEqual({ set: { host: "studio", task: 1 }, clear: ["studio"] });
     // Another task that waits its turn is marked in its place; one never marked yet is.
     const t2 = task({ arch: "aarch64", size: 4, queued_at: T0 - 40 * MIN });
     expect(reserve({ members: [{ ...studio, seen_at: later }], leases: [busy] }, [t1, t2], waits, later, R)).toEqual({ set: { host: "studio", task: t2.id }, clear: ["studio"] });
@@ -600,10 +610,10 @@ describe("sizes and the reservation for large tasks", () => {
     expect(s.startOf(stuck)).toBeUndefined();
   });
 
-  it("its two hours spent, the host goes back to selection, and the task is not marked again until it is leased", () => {
+  it("its two hours spent, the host goes back to selection for 30 minutes, then the task is marked again: it starts the minute the builds longer than its window end", () => {
     const studio = host("studio", "aarch64", 11);
     let k = 0;
-    // One build ends at minute 100, the other four at 400: the size-4 task cannot fit within its window.
+    // One build ends at minute 100, the other four at 400: the size-4 task cannot fit within its first window, nor its second.
     const s = new Sim([studio], (t) => (t.size === 4 ? 120 : k++ === 0 ? 100 : 400));
     s.add({ arch: "aarch64" }, 5);
     s.run(1);
@@ -615,15 +625,85 @@ describe("sizes and the reservation for large tasks", () => {
     // The first build ends: two units free, and the host keeps them for the task.
     s.run(80);
     expect(smalls.every((t) => !s.startOf(t))).toBe(true);
-    // Two hours after the mark: cleared, not set again, and the next small build takes the two free units.
+    // Two hours after the mark: cleared, not set again for 30 minutes, and the next small build takes the two free units.
     s.now = since + RESERVE_FOR_MS - MIN;
     s.run(10);
     expect(studio.reserving).toBeNull();
     expect(s.queue.find((t) => t.id === big.id)!.reserved_at).toBe(since);
     expect(s.startOf(smalls[0])?.at).toBeGreaterThan(since + RESERVE_FOR_MS - MIN);
-    s.run(60);
+    s.run(20);
     expect(studio.reserving).toBeNull();
-    expect(s.startOf(big)).toBeUndefined();
+    // Thirty minutes on, marked again: its window starts anew.
+    s.run(2);
+    const again = since + RESERVE_FOR_MS + RESERVE_AFTER_MS;
+    expect(studio.reserving).toEqual({ task: big.id, since: again });
+    expect(s.queue.find((t) => t.id === big.id)!.reserved_at).toBe(again);
+    // That window lapses too while the four builds run, and the third one stands when they end: it starts that minute, at size 4,
+    // ahead of the small builds that waited beside it.
+    s.run(300);
+    expect(s.startOf(big)).toMatchObject({ at: T0 + 400 * MIN, size: 4 });
+    expect(smalls.slice(1).filter((t) => (s.startOf(t)?.at ?? Infinity) < T0 + 400 * MIN)).toEqual([]);
+  });
+
+  it("a host whose mark lapses while it runs a build longer than the window: the task is marked again 30 minutes on, and starts under a steady flow of small builds", () => {
+    // Two hosts of four builds each: a size-4 build needs one whole. Each runs a 4-hour build; small builds of 17 to 45 minutes refill
+    // every unit that frees up.
+    const a = host("a", "aarch64", 9), b = host("b", "aarch64", 9);
+    let k = 0;
+    const s = new Sim([a, b], (t) => (t.size === 4 ? 120 : t.name.startsWith("long") ? 240 : 17 + ((k++ * 7) % 29)));
+    s.add({ arch: "aarch64", name: "long-a", pinned_to: "a" });
+    s.add({ arch: "aarch64", name: "long-b", pinned_to: "b" });
+    const refill = (sim: Sim) => {
+      if (sim.queue.filter((t) => t.size !== 4).length < 10) sim.add({ arch: "aarch64" }, 10);
+    };
+    refill(s);
+    s.run(1, refill);
+    const [big] = s.add({ arch: "aarch64", name: "chromium", size: 4 });
+    const marks: { host: string; since: number }[] = [];
+    s.run(400, (sim) => {
+      for (const m of sim.members) if (m.reserving && !marks.some((x) => x.since === m.reserving!.since)) marks.push({ host: m.id, since: m.reserving.since });
+      refill(sim);
+    });
+    const r = s.startOf(big)!;
+    expect(r, "it started").toBeTruthy();
+    expect(r.size).toBe(4);
+    // The first window lapsed while both 4-hour builds ran; the second, 30 minutes after it, saw one of them end.
+    expect(marks).toHaveLength(2);
+    expect(marks[1].since - marks[0].since).toBe(RESERVE_FOR_MS + RESERVE_AFTER_MS);
+    expect(r.at).toBeGreaterThan(marks[0].since + RESERVE_FOR_MS);
+    expect(r.at).toBeLessThan(marks[1].since + RESERVE_FOR_MS);
+    expect(r.by).toBe(marks[1].host);
+    // While a mark stood, its host took no other build.
+    for (const [i, m] of marks.entries()) {
+      const until = i === 0 ? m.since + RESERVE_FOR_MS : r.at;
+      expect(s.ran.filter((x) => x.by === m.host && x.at > m.since && x.at < until && x.task.id !== big.id)).toHaveLength(0);
+    }
+  });
+
+  it("a reserving host whose free units reach its task's takes other work while it cannot lease it — its owner at their cap, the memory its claim offers — and the task first when it can", () => {
+    const builds = [0, 1, 2, 3, 4].map(() => task({ arch: "aarch64", queued_at: T0 - 5 * MIN }));
+    // G, idle, reserves for alice's size-2 build; alice holds two builds on H, her cap (ceil(8 / 4) = 2).
+    const mine = task({ arch: "aarch64", size: 2, trust: "community", owner: "alice", queued_at: T0 - 60 * MIN });
+    const g = host("g", "aarch64", 9, { reserving: { task: mine.id, since: T0 - 10 * MIN } });
+    const h = host("h", "aarch64", 9);
+    const alices: Held[] = [0, 1].map((i) => ({ task: 800 + i, by: "h", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: "community", owner: "alice", disk_gb: 20 }));
+    const fleet: Fleet = { members: [g, h], leases: alices };
+    expect(ownerCap(fleet, T0, R)).toBe(2);
+    // Its eight free units fit the task, which her cap holds back: G takes the project's builds rather than idle out the mark.
+    expect(select(g, fleet, [mine, ...builds], T0, R).map((c) => c.id)).toEqual(builds.map((t) => t.id));
+    // While its free units are below the task's, the mark holds: nothing but the task and pool jobs.
+    const busy: Held[] = [0, 1, 2].map((i) => ({ task: 810 + i, by: "g", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: "project", owner: null, disk_gb: 20 }));
+    expect(select(g, { members: [g, h], leases: [...alices, ...busy] }, [mine, ...builds], T0, R)).toEqual([]);
+    // A size-4 build, the claim's memory offering 6 units of the 8 free: the build waits for memory, and G takes what fits the offer.
+    const llvm = task({ arch: "aarch64", size: 4, queued_at: T0 - 60 * MIN });
+    const g4 = host("g4", "aarch64", 9, { reserving: { task: llvm.id, since: T0 - 10 * MIN } });
+    const short = { ...g4, offer: 6 };
+    expect(select(short, { members: [short], leases: [] }, [llvm, ...builds], T0, R).map((c) => c.id)).toEqual(builds.map((t) => t.id));
+    // The memory back: the task first, ahead of a more urgent build that arrived since.
+    const urgent = task({ arch: "aarch64", priority: 50, queued_at: T0 });
+    expect(select(g4, { members: [g4], leases: [] }, [urgent, llvm, ...builds], T0, R)[0]).toMatchObject({ id: llvm.id, size: 4, units: 8 });
+    // A mark whose task the claim did not read holds: set at this very claim, after the reads, its task fits no host now.
+    expect(select(g4, { members: [g4], leases: [] }, builds, T0, R)).toEqual([]);
   });
 
   it("a claim's memory offer bounds that claim only: the host's size, its builds and the largest size it runs stay what its units say", () => {

@@ -26,8 +26,8 @@
  * - a size-4 task on a busy host: after 30 minutes the host reserves for
  *   it, takes nothing else, and leases it when its units fit — an older build
  *   that waits for another reason (needs_native) turns nothing off; its two
- *   hours spent, it is not marked again; a task larger than every host alive
- *   is clamped, with a Status line;
+ *   hours spent, it is not marked again for 30 minutes, then is; a task
+ *   larger than every host alive is clamped, with a Status line;
  * - what the dispatcher's memory offers bounds this claim, not the host's
  *   size: a large build waits rather than run smaller;
  * - a host below the minimum by its last report claims nothing; a work root
@@ -406,7 +406,7 @@ describe("sizes and the reservation for large tasks (D31)", () => {
     expect((await env.DB.prepare("SELECT reserving_task FROM hosts WHERE id = ?").bind(host).first<any>()).reserving_task).toBeNull();
   });
 
-  it("an older build that waits for another reason (needs_native on an aarch64-only fleet) turns nothing off; its two hours spent, the task is not marked again", async () => {
+  it("an older build that waits for another reason (needs_native on an aarch64-only fleet) turns nothing off; its two hours spent, the task is not marked again for 30 minutes, then is", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const t0 = Date.now();
     const host = await seedHost("studio-q", STUDIO);
@@ -426,15 +426,24 @@ describe("sizes and the reservation for large tasks (D31)", () => {
     expect((await taskOf(big)).reserved_at).toBe(new Date(t0).toISOString());
     expect((await taskOf(stuck)).status).toBe("queued");
     // Two hours on, the other four still running (their leases renewed by their heartbeats): the mark clears, the task is not marked
-    // again, and the two free units take the next small build.
+    // again for 30 minutes, and the two free units take the next small build.
     at(t0, 121);
     await env.DB.prepare("UPDATE build_tasks SET lease_expires_at = ? WHERE status = 'leased'").bind(new Date(Date.now() + 30 * MIN).toISOString()).run();
     const c = await claim("studio-q", { leases: held() });
     expect(c.json.task).toMatchObject({ id: smalls[0], size: 1 });
     expect(await mark()).toEqual({ reserving_task: null, reserving_since: null });
     at(t0, 122);
-    expect((await claim("studio-q", { leases: [...held(), { task: c.json.task.id, gen: c.json.task.lease_gen }] })).status).toBe(204);
+    const all = () => [...held(), { task: c.json.task.id, gen: c.json.task.lease_gen }];
+    expect((await claim("studio-q", { leases: all() })).status).toBe(204);
     expect((await mark()).reserving_task).toBeNull();
+    // Thirty minutes after its window lapsed it waits its turn again, as a build queued 30 minutes does: marked anew, its window with it,
+    // and the host keeps its units for it again.
+    at(t0, 150);
+    await env.DB.prepare("UPDATE build_tasks SET lease_expires_at = ? WHERE status = 'leased'").bind(new Date(Date.now() + 30 * MIN).toISOString()).run();
+    expect((await claim("studio-q", { leases: all() })).status).toBe(204);
+    expect(await mark()).toEqual({ reserving_task: big, reserving_since: new Date(t0 + 150 * MIN).toISOString() });
+    expect((await taskOf(big)).reserved_at).toBe(new Date(t0 + 150 * MIN).toISOString());
+    expect((await taskOf(smalls[1])).status).toBe("queued");
   });
 
   it("what the dispatcher's memory offers bounds this claim, not the host's size: a large build waits rather than run smaller", async () => {

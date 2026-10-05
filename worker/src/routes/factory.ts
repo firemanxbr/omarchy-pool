@@ -785,8 +785,9 @@ interface LeaseRow { id: number; lease_owner: string; kind: string; arch: string
 /**
  * The oldest queued builds a host may reserve for, by the kind index (`filters` on alias w): within the window of the oldest builds some
  * host alive could run — of an arch a host runs, a `needs_native` one only where a host runs its arch natively, not a contributor's at
- * their cap, not pinned to a registration that is not alive, its two hours of reservation not spent — those that waited 30 minutes and
- * ask a size above 1. Bindings: the filters', then the time 30 minutes ago, then factory/sizing's sizes.
+ * their cap, not pinned to a registration that is not alive, not within 30 minutes of its two hours of reservation spent (selection.ts
+ * `cooling`) — those that waited 30 minutes and ask a size above 1. Bindings: the filters', then the time 30 minutes ago, then
+ * factory/sizing's sizes.
  */
 export const OLDEST_BUILDS_SQL = (filters: string) => `SELECT ${candidateCols("c")} FROM (
     SELECT * FROM build_tasks w WHERE w.kind = 'build' AND w.status = 'queued'${filters} ORDER BY w.id LIMIT ${RESERVE_WINDOW}) c
@@ -1035,9 +1036,11 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     const nativeArchs = JSON.stringify([...new Set(claimers.flatMap((m) => m.lanes.filter((l) => l.mode === "native").map((l) => l.arch)))]);
     const filters = ` AND w.arch IN (SELECT value FROM json_each(?)) AND (json_extract(w.params, '$.needs_native') IS NOT 1 OR w.arch IN (SELECT value FROM json_each(?)))
         AND NOT (w.trust = 'community' AND w.owner IN (SELECT value FROM json_each(?))) AND (w.pinned_to IS NULL OR w.pinned_to IN (SELECT value FROM json_each(?)))
-        AND (w.reserved_at IS NULL OR w.reserved_at > ?)`;
-    reads.push(env.DB.prepare(OLDEST_BUILDS_SQL(filters))
-      .bind(laneArchs, nativeArchs, capped, JSON.stringify(claimers.map((m) => m.id)), new Date(nowMs - RESERVE_FOR_MS).toISOString(), new Date(nowMs - RESERVE_AFTER_MS).toISOString(), files));
+        AND (w.reserved_at IS NULL OR w.reserved_at > ? OR w.reserved_at <= ?)`;
+    reads.push(env.DB.prepare(OLDEST_BUILDS_SQL(filters)).bind(
+      laneArchs, nativeArchs, capped, JSON.stringify(claimers.map((m) => m.id)), new Date(nowMs - RESERVE_FOR_MS).toISOString(),
+      new Date(nowMs - RESERVE_FOR_MS - RESERVE_AFTER_MS).toISOString(), new Date(nowMs - RESERVE_AFTER_MS).toISOString(), files,
+    ));
   }
   const got = await env.DB.batch<CandidateRow>(reads);
   const oldestRows = weighs ? got.pop()!.results : [];
@@ -1081,7 +1084,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
         env.DB.prepare("UPDATE hosts SET reserving_task = ?, reserving_since = ? WHERE id = ? AND reserving_task IS NULL").bind(marks.set.task, at, hostOf.get(m.id) ?? ""),
         env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'ok', ?, ? WHERE changes() > 0")
           .bind(`${m.id} reserves for ${t?.name ?? "task"} (task ${marks.set.task}${size ? `, size ${size}` : ""}): it takes nothing else but pool jobs until its units fit it, two hours at most`, JSON.stringify({ worker: m.id, host: hostOf.get(m.id), task: marks.set.task, size })),
-        // The task's window starts with the mark: two hours later it is not marked again until it is leased (selection.ts reserve).
+        // The task's window starts with the mark: once its two hours are spent it is not marked again for 30 minutes (selection.ts cooling).
         env.DB.prepare("UPDATE build_tasks SET reserved_at = ? WHERE id = ? AND status = 'queued' AND changes() > 0").bind(at, marks.set.task),
       );
       m.reserving = { task: marks.set.task, since: nowMs };
