@@ -492,6 +492,36 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   five minutes), so nothing is replayable. A signed request reads the host's
   state, fetches or rotates its worker token and reports; it cannot claim,
   change the maintainer list or widen anything.
+- **The host state and its orders** (#344, design v2 §11, §17.1). From agent
+  0.3.0 the release a host rolls out is the one its signed state names —
+  still checked against `release.yml`'s signature, the floor, `min_release`,
+  `revoked` and the signed `pools` like any target; from a Worker before
+  #344, whose state names no release (only a rollback below it deploys one),
+  the public `follow` names it, as for the agents before 0.3.0: the pool's
+  word either way, which the bundle's signature and the floor bound — and the state carries
+  the host orders: a closed set, each with an id and a `not_after`, which the
+  agent reads leniently and refuses when the kind is unknown, the order is
+  past its `not_after` or its id is one of the last 512 it took. P3 has two.
+  *Reconcile now* (its owner or any maintainer) only starts a round. *Retire
+  legacy set* — its owner only, while a maintainer, with a passkey
+  (`host:retire-legacy:<id>`) — lets the agent do what it otherwise never
+  does (design v2 §11.1 M4, M5): stop and then remove the containers and
+  networks of the one compose project its own `legacy.json` records (never a
+  project it does not record, never a container labelled with an agent host,
+  never a volume, an image or a file), and write the `.omarchy-agent` marker
+  into that project's directory, through `openat` with `O_NOFOLLOW`, only in
+  a directory the agent's user owns and nobody else may write. A pool that
+  is compromised can therefore order a round, or the retirement of a set the
+  owner recorded and the owner's passkey did not order — the second only
+  where a legacy set is recorded at all, and never anything else on the
+  host; the switch guard (#313) then keeps the retired set from coming back.
+  The marker goes in first, before anything stops, so the set's own updater
+  cannot bring back what the order stops; a retirement that does not finish
+  within 30 minutes answers `failed` and leaves it, and the set's tools
+  refuse there until the order is given again. The agent answers in its
+  report, which closes the order (also one the pool expired while the agent
+  carried it out); the pool's journal says who gave it and how it ended, in
+  the pool's own words.
 - **The host worker token** (`omw_…`) is the dispatcher's only, written
   0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
   id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
@@ -580,12 +610,15 @@ refused), is refused server-side to anyone without the right, and writes a
   v2 §6.4: Resume by the owner), and their hosts still waiting for Confirm
   are not touched: the pull request is what closes both.
 - **The agent on a suspended or retired host** sees `403` on its calls
-  (its signed requests, and in P1 the release `follow` it polls, refused
-  for a suspended or retired host's registration and never cached): it
+  (its signed requests — the host state, from agent 0.3.0 its release
+  target too — and, for the agents before it, the release `follow` they
+  poll, refused for a suspended or retired host's registration and never
+  cached): it
   changes nothing, keeps its bundle and every task container running, polls
   hourly with jitter and never exits (§16.4); it recovers by itself at its
-  next poll after a Resume. An owner removed from the list sees `403` on its
-  claims only.
+  next poll after a Resume. Its open host orders are cancelled with the
+  suspension or the retirement. An owner removed from the list sees `403`
+  on its claims only.
 
 ## After approval, the gates still hold
 

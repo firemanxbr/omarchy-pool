@@ -203,7 +203,11 @@ under the host agent goes below its floor only on one, within 14 days of the
 target's release (security-model, *Rollback statements*). A statement that
 did not reach R2 fails the run after the rest is done; running it again
 stores a freshly signed one. The updaters follow the
-pool's release down as they follow it up, within two minutes. Back past
+pool's release down as they follow it up, within two minutes, and so do the
+host agents: back below the release that brought agent 0.3.0 (#344), the
+Worker that comes back names no release in its host state, so an agent on
+0.3.0 reads that Worker's `follow` instead, as the agents before it did
+(its journal says so once), and goes down on the statement. Back past
 #277's last part, the updater that comes back is the older one: it follows
 at its own fifteen-minute round and takes no Update, until a release brings
 one that follows again. That older Worker lists a worker's whole row, so the
@@ -747,8 +751,13 @@ dispatcher-env` prints what it would write; `--write` writes it now.
 Each round goes `render → lint → plan → pull → replace → guard → commit`,
 or `revert`, each step written to `state.json` before it acts, so a restart
 anywhere resumes it (a ready wait or a guard in flight starts its clock again:
-after a reboot the dispatcher is still re-adopting its leases). The pool's `follow` names the target (until P3's host
-state); the bundle must verify against `release.yml` on main, the pool's
+after a reboot the dispatcher is still re-adopting its leases). The pool's
+host state names the target (#344: `GET /api/v1/hosts/self/state`, signed
+with the host key; agents before 0.3.0 read `follow`'s `latest`, which the
+legacy sets' updaters still poll — and so does agent 0.3.0, only when the
+state names no release at all: a Worker from before #344, which only a
+rollback below that release deploys again, *Releasing the pool itself*;
+the journal says it once); the bundle must verify against `release.yml` on main, the pool's
 origin must be in its `pools`, and the target must be at or above the floor
 (the highest release applied), `min_release` and outside `revoked` (both
 merged from every verified manifest and never lowered) — or covered by a
@@ -780,8 +789,49 @@ engine leave the round at `engine-unreachable` until a newer release.
 | `needs-newer-agent` | the release needs an agent this one is not and the update to it did not happen (why is in `detail`; *Self-update*, below) |
 | `agent-rollback` | a self-update's new agent did not pass its health gate: the agent named in `detail` is back, and the one it left is skipped until a higher one |
 
+**Host orders** (#344; design v2 §17.1) ride the same host state: a closed
+set, each with an id and a `not_after` an hour after it was given. The agent
+refuses (and answers `refused`) an unknown kind, an order past its
+`not_after` or with none, and runs no id twice — the last 512 ids it took
+are kept in `state.json`, whatever the pool sends again. P3 has two, both
+given on the host's page:
+
+- **Reconcile now** (`reconcile-now`), its owner or any maintainer: a round
+  now, as `omarchy-agent round` starts one — the release the pool names,
+  checked and rolled out as any round, no quarantine lifted (an Update does;
+  P4's `retry-release` will), and never past the owner's soak once P4 brings
+  one. It waits while a commit or a revert finishes.
+- **Retire legacy set** (`retire-legacy`), its owner only, with a passkey:
+  the agent reads `legacy.json` (the project `install --legacy` recorded)
+  and finds the project's directory — the one recorded, or the one compose's
+  `working_dir` label of its containers names, which must hold a compose
+  file — then **writes the `.omarchy-agent` marker there first** (refused,
+  with nothing changed, when the directory is not the agent user's own or
+  others may write it: `/srv/omarchy-pool` is `setup.sh`'s user's, so run
+  the agent as that user or `chown` it), stops every container of that
+  project (`docker stop`, 120 s before the kill), removes them and the
+  project's networks, and records the retirement in `legacy.json`. It never
+  touches another project, a container that carries the agent's host label
+  (the bundle, a task), a volume, an image or a file of the set; one it
+  cannot finish within 30 minutes answers `failed` with the marker left —
+  the set's own tools then refuse there although it was not retired, which
+  is the price of the marker first: from the stop on, the set's updater
+  cannot bring it back — and is given again. The button is greyed, with the
+  agent's words, while its report says it would refuse (the directory above;
+  the report after the fix, within five minutes, lifts it).
+
+The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
+signed, on every change and at least every five minutes: its version, the
+release applied, targeted and its floor, the rollout and the last round, the
+legacy set and the last answers), which closes the order on the site — one
+the site expired meanwhile too (a retire-legacy answers only at its end); an
+order its agent does not take within its hour expires there. A report that
+does not get through is sent again a minute later, or hourly while the pool
+answers 401/403, as the polls go then.
+
 On the host: `omarchy-agent status` (from `state.json` and
-`run/capacity.json`, with the pool and the engine down), `omarchy-agent
+`run/capacity.json`, with the pool and the engine down; a `retire-legacy`
+in flight and the last order answers too), `omarchy-agent
 round` (a round now: SIGUSR1 to the running agent) and `omarchy-agent logs
 [-n N]`. Exit 78 means a local configuration error at start — `agent.toml`,
 a data directory others may write, an unreadable `state.json`, another agent
@@ -974,10 +1024,13 @@ docker kill <container>                          # one that must end now, or who
 ```
 
 **On a host the agent manages, nothing needs to be run** (#313). Once
-`omarchy-agent` has retired this set (its `retire-legacy` order, after the
-switch and the 14 days the set stays as the way back), it leaves a marker,
-`/srv/omarchy-pool/.omarchy-agent`, with its version, the host id and the
-time. From then on `./rollout.sh` and `setup.sh` refuse there (exit 4),
+`omarchy-agent` has retired this set (its `retire-legacy` order, #344:
+*Retire legacy set* on the host's page, by its owner with a passkey, after
+the switch and the 14 days the set stays as the way back), it leaves a
+marker, `/srv/omarchy-pool/.omarchy-agent`, with its version, the host id
+and the time, written before it stops and removes the set's containers and
+networks (*The run loop*, above: the files, volumes and images of the set
+stay, for a person to remove). From then on `./rollout.sh` and `setup.sh` refuse there (exit 4),
 `omarchy-worker start|update|remove` refuse in a directory that holds it,
 each before it changes a file or a container, and the updater stands down:
 its rounds change nothing, and its `--self-test` says `stands-down`. What to
@@ -995,6 +1048,30 @@ updater. `grep -q omarchy-agent /srv/omarchy-pool/rollout.sh` then says the
 copy has the guard. Fetch an `omarchy-worker` downloaded before this release
 again (the `curl` line at its top). An old `rollout.sh` that is missed
 brings back only the updater, which stands down.
+
+**Rehearse `retire-legacy` before the Studio's** (#344), on the P1 host,
+with a stand-in legacy set the agent's user owns:
+
+```bash
+# on the P1 host, as the agent's user
+mkdir -p ~/legacy-rehearsal && cd ~/legacy-rehearsal
+cat > compose.yml <<'EOF'
+services:
+  worker:
+    image: busybox:1.37.0
+    command: ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1 & wait $$!; done"]
+EOF
+docker compose -p omarchy-rehearsal up -d
+# record it as install --legacy does (preflight checks it and legacy.json gets its directory):
+curl … /install.sh | sh -s -- --legacy omarchy-rehearsal   # the host's own install options again
+```
+
+Then on the host's page: the *Legacy set* card shows `omarchy-rehearsal`
+running with its directory; *Retire legacy set*, with your passkey; within
+two minutes the order says `done`, `docker compose -p omarchy-rehearsal ps
+-a` is empty, `~/legacy-rehearsal/.omarchy-agent` is there, the dispatcher
+and any task kept running, and `omarchy-agent status` shows the answer. A
+copy of `factory/host/rollout.sh` in that directory now exits 4.
 
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,

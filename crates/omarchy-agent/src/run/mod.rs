@@ -21,7 +21,11 @@
 //! - self-update (#316, [`selfupdate`]): a bundle with a higher agent updates the agent
 //!   first, upward only, behind a health gate. A release's pinned docker and compose
 //!   roll forward only: they are switched before its round and not reverted with it;
-//! - the host state (#344) replaces `follow.latest` as the target.
+//! - the host state (#344, [`pool`]) is the target, signed with the host key: from this
+//!   agent on `follow.latest` is read only from a pool from before #344, whose state
+//!   names no release (a rollback below it). It carries the open Updates and the host
+//!   orders ([`orders`]: `retire-legacy` and `reconcile-now`; P4 adds the rest and the
+//!   settings), whose answers ride the host report ([`report`]).
 
 pub mod config;
 pub mod state;
@@ -30,7 +34,9 @@ pub(crate) mod compose;
 pub(crate) mod driver;
 pub(crate) mod exec;
 pub(crate) mod journal;
+pub(crate) mod orders;
 pub(crate) mod pool;
+pub(crate) mod report;
 pub(crate) mod rollout;
 pub(crate) mod selfupdate;
 pub(crate) mod target;

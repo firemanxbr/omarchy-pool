@@ -1,0 +1,48 @@
+{
+  "agent": {
+    "skip": null,
+    "version": "0.3.0"
+  },
+  "legacy": {
+    "dir": "/srv/omarchy-pool",
+    "order": "ho_11111111111111111111111111111111",
+    "project": "omarchy-pool",
+    "since": "2027-01-15T08:02:22Z",
+    "state": "retired"
+  },
+  "orders": [
+    {
+      "at": "2027-01-15T08:02:16Z",
+      "detail": "expired at 2027-01-15T08:02:15Z",
+      "id": "ho_22222222222222222222222222222222",
+      "kind": "reconcile-now",
+      "outcome": "refused"
+    },
+    {
+      "at": "2027-01-15T08:02:22Z",
+      "detail": "stopped and removed 3 container(s) and 1 network(s) of compose project omarchy-pool; the marker is in /srv/omarchy-pool/.omarchy-agent: rollout.sh, setup.sh, omarchy-worker and the updater refuse there",
+      "id": "ho_11111111111111111111111111111111",
+      "kind": "retire-legacy",
+      "outcome": "done"
+    }
+  ],
+  "quarantine": [],
+  "release": {
+    "applied": "v1.0.0",
+    "floor": "v1.0.0",
+    "min_release": "v1.0.0",
+    "target": "v1.0.0"
+  },
+  "rollout": {
+    "since": "2027-01-15T08:01:55Z",
+    "state": "idle",
+    "target": null
+  },
+  "round": {
+    "at": "2027-01-15T08:01:55Z",
+    "detail": "host runs v1.0.0",
+    "from": null,
+    "outcome": "ok",
+    "step": "commit"
+  }
+}

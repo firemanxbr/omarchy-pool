@@ -49,9 +49,11 @@ pub mod fuzz {
         let _ = crate::statement::parse(data);
     }
 
-    /// `state.json` as the run loop reads it, and the pool's `follow` answer.
+    /// `state.json` as the run loop reads it, the pool's host state (#344) and the `follow`
+    /// answer of a pool from before it.
     pub fn state(data: &[u8]) {
         let _ = crate::run::state::parse(data);
+        let _ = crate::run::pool::parse_state(data);
         let _ = crate::run::pool::parse_follow(data, "w_fuzz");
     }
 

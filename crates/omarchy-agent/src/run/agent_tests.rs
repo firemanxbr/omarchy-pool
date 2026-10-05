@@ -6,7 +6,7 @@ use std::fs;
 use crate::dispatcher_env::{Budget, Sources};
 use crate::run::agent::HostEnv;
 use crate::run::fake::{publish, relay_statement, rendered_compose, World, T0, TOKEN};
-use crate::run::pool::{Follow, Net};
+use crate::run::pool::{HostState, Net};
 use crate::run::state::{Files, Phase, Step};
 use crate::version::Release;
 
@@ -30,7 +30,7 @@ fn a_release_reaches_the_host_with_no_human_action_and_a_running_task_keeps_runn
 
     // A release: the pool names it, and the next poll rolls it out.
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     let start = w.journal().lines().count();
     w.tick(200);
     while w.step() != "idle" {
@@ -102,7 +102,7 @@ fn a_broken_dispatcher_is_reverted_and_quarantined_and_an_update_order_lifts_it(
         &[],
         "    command: [broken]\n",
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     let (outcome, detail) = w.outcome();
     assert_eq!(outcome, "rolled-back", "{detail}");
@@ -142,7 +142,7 @@ fn a_broken_dispatcher_is_reverted_and_quarantined_and_an_update_order_lifts_it(
     );
 
     // An Update order lifts the quarantine and starts a round at once.
-    w.follow("v1.1.0", Some("ord_1"));
+    w.target("v1.1.0", Some("ord_1"));
     w.tick(600);
     assert!(w.agent.state.quarantine.is_empty() || w.step() != "idle");
     assert_eq!(w.agent.state.rollout.target, r("v1.1.0"));
@@ -172,7 +172,7 @@ fn a_quarantine_ends_after_an_hour_with_one_retry() {
         &[],
         "    command: [broken]\n",
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     assert_eq!(w.outcome().0, "rolled-back");
     w.tick(3601);
@@ -195,7 +195,7 @@ fn a_quarantine_ends_after_an_hour_with_one_retry() {
         w.outcome()
     );
     w.release("v1.1.1");
-    w.follow("v1.1.1", None);
+    w.target("v1.1.1", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.1.1"));
 }
@@ -204,7 +204,7 @@ fn a_quarantine_ends_after_an_hour_with_one_retry() {
 fn two_ordered_restarts_during_the_guard_do_not_fail_it() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while w.step() != "guard" {
         w.tick(3);
@@ -230,7 +230,7 @@ fn two_ordered_restarts_during_the_guard_do_not_fail_it() {
 fn an_exit_other_than_75_during_the_guard_fails_it() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while w.step() != "guard" {
         w.tick(3);
@@ -265,21 +265,21 @@ fn an_exit_other_than_75_during_the_guard_fails_it() {
 fn a_rollback_statement_mid_round_preempts_it_and_moves_the_host_down() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
     let task = w.engine.borrow().tasks()[0].id.clone();
 
     // v1.2.0 is rolling out ...
     w.release("v1.2.0");
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round_now();
     while w.step() != "guard" {
         w.tick(3);
     }
     // ... when rollback.yml retracts everything above v1.0.0 and the pool goes back to it.
     relay_statement(&w.remote, 1, "v1.0.0", "v1.2.0", b"signed");
-    w.follow("v1.0.0", None);
+    w.target("v1.0.0", None);
     w.round_now();
     assert!(
         w.journal().contains("\"event\":\"preempted\""),
@@ -304,7 +304,7 @@ fn a_rollback_statement_mid_round_preempts_it_and_moves_the_host_down() {
     assert!(!w.journal().contains("agent-available"));
 
     // The same statement again is not a second rollback: going forward needs nothing.
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
 }
@@ -329,13 +329,13 @@ fn forged_targets_are_refused_with_named_reasons_and_nothing_changes() {
         &["v1.2.5"],
         "",
     );
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
     let changes = w.changes().len();
 
     let refused = |w: &mut World, target: &str, reason: &str| {
-        w.follow(target, None);
+        w.target(target, None);
         w.round_now();
         let (outcome, detail) = w.outcome();
         assert_eq!(outcome, "refused", "{target}: {detail}");
@@ -427,11 +427,11 @@ fn storms_of_401_and_5xx_leave_everything_running_and_the_agent_recovers_by_itse
 
     // Two hours of 503s: back-off to 10 minutes, nothing changes.
     w.pool_answers(Net::NoAnswer("HTTP 503".into()));
-    let polls = w.remote.borrow().follows;
+    let polls = w.remote.borrow().polls;
     for _ in 0..(2 * 3600 / 30) {
         w.tick(30);
     }
-    let asked = w.remote.borrow().follows - polls;
+    let asked = w.remote.borrow().polls - polls;
     assert!(
         (12..=30).contains(&asked),
         "{asked} polls in two hours of 5xx"
@@ -442,11 +442,11 @@ fn storms_of_401_and_5xx_leave_everything_running_and_the_agent_recovers_by_itse
     // Then four hours of 401s: hourly polls, nothing changes.
     w.pool_answers(Net::Unauthorized(401));
     w.tick(600);
-    let polls = w.remote.borrow().follows;
+    let polls = w.remote.borrow().polls;
     for _ in 0..(4 * 3600 / 60) {
         w.tick(60);
     }
-    let asked = w.remote.borrow().follows - polls;
+    let asked = w.remote.borrow().polls - polls;
     assert!(
         (3..=5).contains(&asked),
         "{asked} polls in four hours of 401"
@@ -466,7 +466,7 @@ fn storms_of_401_and_5xx_leave_everything_running_and_the_agent_recovers_by_itse
 
     // The pool answers again, with a release: rolled out by the same process.
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     for _ in 0..400 {
         w.tick(5);
         if w.applied().as_deref() == Some("v1.1.0") {
@@ -482,7 +482,7 @@ fn with_the_dispatcher_env_missing_the_dispatcher_is_held_and_the_reason_reporte
     let mut w = World::new();
     fs::remove_file(w.set_dir().join("etc/dispatcher.env")).unwrap();
     w.release("v1.0.0");
-    w.follow("v1.0.0", None);
+    w.target("v1.0.0", None);
     w.round();
     let (outcome, detail) = w.outcome();
     assert_eq!(outcome, "held");
@@ -784,7 +784,7 @@ fn agent_toml_is_read_again_so_the_loop_never_puts_back_what_a_rotation_or_dispa
 fn interpolated_output_and_the_token_never_reach_the_disk_or_a_report() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     let work_root = w.dir.join("work").display().to_string();
     let mut files = Vec::new();
@@ -881,7 +881,7 @@ fn the_agent_resumes_a_round_after_a_restart_at_every_step() {
     // The ticks of one good round, then the same round with a restart after each tick.
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     let mut ticks = 0;
     while w.step() != "idle" {
@@ -893,7 +893,7 @@ fn the_agent_resumes_a_round_after_a_restart_at_every_step() {
         let mut w = World::running_v1();
         let task = w.engine.borrow().tasks()[0].id.clone();
         w.release("v1.1.0");
-        w.follow("v1.1.0", None);
+        w.target("v1.1.0", None);
         w.round_now();
         for _ in 0..at {
             w.tick(3);
@@ -935,7 +935,7 @@ fn a_reboot_during_the_ready_wait_or_the_guard_does_not_revert_a_good_release() 
     for at in ["ready", "guard"] {
         let mut w = World::running_v1();
         w.release("v1.1.0");
-        w.follow("v1.1.0", None);
+        w.target("v1.1.0", None);
         w.round_now();
         let reached = |w: &World| match &w.agent.state.rollout.step {
             Step::Replace {
@@ -978,7 +978,7 @@ fn a_reboot_during_the_ready_wait_or_the_guard_does_not_revert_a_good_release() 
 fn a_pull_failure_changes_nothing_and_the_next_poll_retries() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.engine.borrow_mut().pull_fails = true;
     w.round();
     assert_eq!(w.outcome().0, "pull-failed");
@@ -1001,7 +1001,7 @@ fn a_lint_violation_is_refused_by_name() {
     )
     .unwrap();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     let (outcome, detail) = w.outcome();
     assert_eq!(outcome, "refused");
@@ -1015,7 +1015,7 @@ fn a_lint_violation_is_refused_by_name() {
 fn an_engine_that_does_not_answer_changes_nothing_until_it_does() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.engine.borrow_mut().down = true;
     w.round_now();
     for _ in 0..20 {
@@ -1035,12 +1035,12 @@ fn a_newer_release_preempts_a_round_before_its_commit() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
     w.release("v1.2.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while w.step() != "pull" {
         w.tick(3);
     }
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round_now();
     assert_eq!(w.agent.state.rollout.target, r("v1.2.0"));
     // Preempted at pull: the new round rendered v1.2.0 in the same tick.
@@ -1059,10 +1059,10 @@ fn a_newer_release_preempts_a_round_before_its_commit() {
 }
 
 #[test]
-fn a_follow_answer_without_a_release_changes_nothing() {
+fn a_host_state_without_a_release_changes_nothing() {
     let mut w = World::running_v1();
     let changes = w.changes().len();
-    w.pool_answers(Net::Ok(Follow::default()));
+    w.pool_answers(Net::Ok(HostState::default()));
     w.round_now();
     w.tick(300);
     assert_eq!(w.changes().len(), changes);
@@ -1074,13 +1074,13 @@ fn an_older_release_does_not_preempt_a_round() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
     w.release("v1.2.0");
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round_now();
     while w.step() != "pull" {
         w.tick(3);
     }
     // Admitted, but neither newer nor under a rollback statement: the round goes on.
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     assert_eq!(w.agent.state.rollout.target, r("v1.2.0"));
     assert!(!w.journal().contains("\"preempted\""), "{}", w.journal());
@@ -1101,7 +1101,7 @@ fn an_update_order_seen_while_a_revert_finishes_is_kept_for_the_next_poll() {
         &[],
         "    command: [broken]\n",
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while !matches!(
         w.agent.state.rollout.step,
@@ -1112,7 +1112,7 @@ fn an_update_order_seen_while_a_revert_finishes_is_kept_for_the_next_poll() {
     ) {
         w.tick(3);
     }
-    w.follow("v1.1.0", Some("ord_1"));
+    w.target("v1.1.0", Some("ord_1"));
     w.round_now();
     assert_eq!(w.agent.state.update_seen, None);
     while w.step() != "idle" {
@@ -1132,7 +1132,7 @@ fn an_update_order_seen_while_a_revert_finishes_is_kept_for_the_next_poll() {
 fn at_commit() -> World {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while w.step() != "commit" {
         w.tick(3);

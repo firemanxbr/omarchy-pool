@@ -209,7 +209,24 @@ isolation level, the release it applied, the pool cap, the large task it
 reserves for when it does, and its leases with their lane and units. Every later call of
 the host to the pool is signed with its key (`Omarchy-Host`); the pool
 refuses a replay, a changed body and a clock more than 120 s off
-([Security model](/docs/security-model#maintainer-hosts)).
+([Security model](/docs/security-model#maintainer-hosts)). The agent asks
+for the host's state every two minutes or so — the release to run, and the
+host orders (#344) — and reports what it did.
+
+**Host orders** (#344) are given on the host's page. **Reconcile now** (its
+owner or any maintainer) makes its agent run a round at its next poll.
+**Retire legacy set** is for a host installed beside an older set with
+`--legacy` (the Studio's role containers, or an `omarchy-worker` set): once
+that set has been drained as the way back for 14 days, its owner retires it,
+with a passkey. The agent writes the `.omarchy-agent` marker into the set's
+directory, then stops and removes that compose project's containers and
+networks — nothing else — so `rollout.sh`, `setup.sh`, `omarchy-worker` and
+the updater refuse there from then on. The page shows the set, its state and
+its directory before you press it (and why it would be refused, such as a
+directory the agent's user does not own: the button stays greyed until the
+agent's next report says it is fixed), and each order with its agent's
+answer after
+([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
 
 To stop a host, use its page, `/hosts/<id>` (#322). **Suspend** (its
 owner or any maintainer, with a reason) stops its claims at once and

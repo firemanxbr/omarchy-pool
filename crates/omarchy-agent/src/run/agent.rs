@@ -1,9 +1,12 @@
-//! One tick of the run loop (design v2 §16.1): ask the pool when a poll is due, check the
-//! target against the trust rules, start or preempt a round, and take one step of it.
-//! Network answers never stop the agent (§16.4): no answer, a 5xx or a malformed body
-//! changes nothing and backs off to 10 minutes; a 401/403 changes nothing and polls
-//! hourly; both recover by themselves at the next answer.
+//! One tick of the run loop (design v2 §16.1): ask the pool for the host state when a poll
+//! is due (#344: the release target, the open Updates and the host orders), check the
+//! target against the trust rules, start or preempt a round, and take one step of it; one
+//! step of a `retire-legacy` in flight; the host report when it is due. Network answers
+//! never stop the agent (§16.4): no answer, a 5xx or a malformed body changes nothing and
+//! backs off to 10 minutes; a 401/403 changes nothing and polls hourly; both recover by
+//! themselves at the next answer.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -19,7 +22,8 @@ use super::compose::Compose;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver};
 use super::journal::{env_secrets, Journal};
-use super::pool::{Follow, Net, Pool};
+use super::pool::{HostState, Net, Pool};
+use super::report::Reported;
 use super::rollout::{self, Ctx, Outcome};
 use super::selfupdate::Pending;
 use super::state::{self, Files, Phase, State, Step};
@@ -30,7 +34,7 @@ use super::trust::{self, Refusal};
 /// The poll interval when the pool names none (its `FOLLOW_POLL_S`), and the bounds.
 const POLL_S: i64 = 120;
 const MAX_BACKOFF_S: i64 = 600;
-const UNAUTHORIZED_S: i64 = 3600;
+pub(super) const UNAUTHORIZED_S: i64 = 3600;
 /// The safety timer: the running set is checked against `last-good/` at least this often.
 const DRIFT_S: i64 = 900;
 /// How often the host's own addresses are read again for `etc/dispatcher.env` (#371).
@@ -103,6 +107,15 @@ pub(crate) struct Agent {
     pub(super) retry: Option<(Version, i64)>,
     /// The applied release whose agent was checked and needs no update (once per start).
     pub(super) upward_checked: Option<Release>,
+    /// Order ids refused as seen already, said once per process (#344).
+    pub(super) repeated: BTreeSet<String>,
+    /// The legacy set as last looked at, for the report, and when.
+    pub(super) legacy_seen: Option<(i64, serde_json::Value)>,
+    /// The host report last sent (#344).
+    pub(super) reported: Reported,
+    /// Said once per process: the pool predates the host state's release (#344), so its
+    /// `follow` names the target.
+    older_pool_said: bool,
     /// `etc/dispatcher.env` rendered again from the host and agent.toml (#371); `None`
     /// leaves the file alone (the tests that play other parts).
     pub host_env: Option<HostEnv>,
@@ -183,6 +196,10 @@ impl Agent {
             gate_next: 0,
             retry: None,
             upward_checked: None,
+            repeated: BTreeSet::new(),
+            legacy_seen: None,
+            reported: Reported::default(),
+            older_pool_said: false,
             host_env: None,
         }
     }
@@ -301,7 +318,13 @@ impl Agent {
                 self.drift(now);
             }
             if self.exit.is_none() {
-                self.step(now)?;
+                // A step that cannot write (a set directory, a full disk) is retried every
+                // tick; a retire-legacy in flight goes on meanwhile, and the report still
+                // says what the host knows, its answers above all.
+                let stepped = self.step(now);
+                self.retire_step(now);
+                self.report(now);
+                stepped?;
             }
         }
         if self.saved.as_ref() != Some(&self.state) {
@@ -380,16 +403,25 @@ impl Agent {
     }
 
     fn poll(&mut self, now: i64, round_now: bool) {
-        let answer = self.pool.follow(&self.cfg.worker_id);
+        let answer = match self.pool.state() {
+            Net::Ok(s) if s.older_pool => self.target_by_follow(s, now),
+            other => other,
+        };
         let p = &mut self.state.poll;
         p.last_at = now;
+        let refused = p.last == "unauthorized";
         match answer {
             Net::Ok(f) => {
                 p.last = "ok".into();
                 p.backoff_s = 0;
                 let every = f.poll_s.unwrap_or(POLL_S).clamp(60, MAX_BACKOFF_S);
                 p.next_at = now + jitter(every, now);
-                self.on_follow(f, now, round_now);
+                // The pool takes the host's calls again: the report waiting for its hourly
+                // retry goes now.
+                if refused {
+                    self.reported.next_at = self.reported.next_at.min(now);
+                }
+                self.on_state(f, now, round_now);
             }
             Net::NoAnswer(e) => {
                 p.last = "no-answer".into();
@@ -417,16 +449,58 @@ impl Agent {
         }
     }
 
-    fn on_follow(&mut self, f: Follow, now: i64, round_now: bool) {
+    /// A host state with no `release` member, a pool from before #344: only a rollback below
+    /// the release that brought agent 0.3.0 deploys one again (rollback.yml deploys the
+    /// Worker of the tag it goes back to). Its target and the open Update of the host's
+    /// registration are then its `follow`'s, as agents before 0.3.0 read them, so the host
+    /// follows the rollback (its statement) down; a pool from #344 on is never asked.
+    fn target_by_follow(&mut self, mut s: HostState, now: i64) -> Net<HostState> {
+        let f = match self.pool.follow(&self.cfg.worker_id) {
+            Net::Ok(f) => f,
+            Net::NoAnswer(e) => {
+                return Net::NoAnswer(format!(
+                    "its host state names no release (a pool from before #344) and its follow did not answer: {e}"
+                ))
+            }
+            Net::Unauthorized(c) => return Net::Unauthorized(c),
+        };
+        if !self.older_pool_said {
+            self.older_pool_said = true;
+            self.journal.write(
+                now,
+                "poll",
+                serde_json::json!({"detail": format!(
+                    "the pool's host state names no release: a pool from before #344 (a rollback below it); its follow names the target ({})",
+                    f.latest.map_or_else(|| "none".to_owned(), |r| r.to_string())
+                )}),
+            );
+        }
+        s.target = f.latest;
+        if s.updates.is_empty() {
+            s.updates.extend(f.update);
+        }
+        s.poll_s = s.poll_s.or(f.poll_s);
+        Net::Ok(s)
+    }
+
+    /// The host state (#344): its Update orders, its host orders, then its target.
+    fn on_state(&mut self, s: HostState, now: i64, round_now: bool) {
         let mut force: Option<String> =
             round_now.then(|| "a round was asked for (SIGUSR1)".to_owned());
         // An Update order waits while commit or a revert finishes (a revert quarantines
         // again): the next poll sees it unconsumed.
         let busy = self.state.rollout.step != Step::Idle
             && !rollout::preemptible(&self.state.rollout.step);
-        if let Some(id) = f
-            .update
-            .filter(|id| !busy && self.state.update_seen.as_ref() != Some(id))
+        // The last Update an agent before 0.3.0 took (`update_seen`) counts as seen.
+        if let Some(id) = s
+            .updates
+            .iter()
+            .find(|id| {
+                !busy
+                    && !self.state.orders.seen(id)
+                    && self.state.update_seen.as_deref() != Some(id.as_str())
+            })
+            .cloned()
         {
             if !self.state.quarantine.is_empty() {
                 self.journal.write(
@@ -437,9 +511,43 @@ impl Agent {
             }
             self.state.quarantine.clear();
             force = Some(format!("Update order {id}"));
+            self.state.orders.remember(&id);
             self.state.update_seen = Some(id);
         }
-        let Some(target) = f.latest else {
+        let taken = self.take_orders(s.orders, now, busy);
+        if let (None, Some(id)) = (&force, taken.reconcile.first()) {
+            force = Some(format!("host order {id} (reconcile-now)"));
+        }
+        let named = s.target.is_some();
+        self.follow_target(s.target, force, now);
+        for id in taken.reconcile {
+            let detail = if self.state.rollout.step != Step::Idle {
+                format!(
+                    "a round now: {} ({})",
+                    self.state.rollout.why,
+                    self.state.rollout.step.name()
+                )
+            } else if !named {
+                "the pool names no release for this host: no round".to_owned()
+            } else if self.state.round.detail.is_empty() {
+                format!(
+                    "no round started; the last round says {}",
+                    self.state.round.outcome
+                )
+            } else {
+                format!(
+                    "no round started; the last round says {}: {}",
+                    self.state.round.outcome, self.state.round.detail
+                )
+            };
+            self.answer(&id, "reconcile-now", "done", &detail, now);
+        }
+    }
+
+    /// The release the pool names: a round to it, preempting one in flight when it may,
+    /// or a round to the release that runs when `force` says why.
+    fn follow_target(&mut self, target: Option<Release>, force: Option<String>, now: i64) {
+        let Some(target) = target else {
             return;
         };
         self.state.target = Some(target);
