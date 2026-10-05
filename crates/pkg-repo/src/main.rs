@@ -399,13 +399,15 @@ enum Command {
         /// The IPv4 range task networks are cut from, one /28 per task.
         #[arg(long, env = "OMARCHY_TASK_SUBNETS", default_value = "10.231.0.0/16")]
         task_subnets: String,
-        /// The host's own addresses, comma-separated, which the egress sidecars refuse besides the private ranges.
+        /// The host's own addresses, comma-separated, which the egress sidecars refuse besides the private ranges
+        /// (`etc/dispatcher.env`, rendered by the agent, #371).
         #[arg(long, env = "OMARCHY_HOST_ADDRESSES", value_delimiter = ',')]
         host_addresses: Vec<String>,
         /// The host directory whose agent.env agent sidecars mount read-only (never read by the dispatcher).
         #[arg(long, env = "OMARCHY_SECRETS_DIR")]
         secrets_dir: Option<PathBuf>,
-        /// Per-task caps of an agent sidecar, and the host's calls per day (UTC) (D45).
+        /// Per-task caps of an agent sidecar, and the host's calls per day (UTC) (D45): the envelope's
+        /// `agent_budget`, which the agent writes into `etc/dispatcher.env` (#371), or these defaults.
         #[arg(long, env = "OMARCHY_AGENT_CALLS_PER_TASK", default_value_t = 200)]
         agent_calls_per_task: u32,
         #[arg(

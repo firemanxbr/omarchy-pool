@@ -131,11 +131,15 @@ impl Pool {
         let header = key.header(host, method, path, &bytes);
         let url = format!("{}{path}", self.origin);
         let res = match method {
-            "GET" => self.agent.get(&url).header("omarchy-host", &header).call(),
+            "GET" => self
+                .agent
+                .get(&url)
+                .header(crate::host::HEADER, &header)
+                .call(),
             "POST" => self
                 .agent
                 .post(&url)
-                .header("omarchy-host", &header)
+                .header(crate::host::HEADER, &header)
                 .header("content-type", "application/json")
                 .send(&bytes[..]),
             _ => return Err(format!("{method}: not a method the agent uses")),

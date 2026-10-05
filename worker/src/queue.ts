@@ -56,11 +56,19 @@ export async function queuePosition(env: Env, task: { id: number; arch: string; 
   // Not in the shared queue: asked for one worker, or a bump still the owner's worker's (shared_after ahead).
   if (task.pinned_to || (task.shared_after && task.shared_after > now())) return null;
   const pr = task.priority ?? 100;
-  // The claim takes by priority, then by id: the place counts the same way.
+  // The place counts as selection hands builds out (#337, selection.ts): by priority, then round-robin by owner, then by age. Every
+  // more urgent build is ahead; at its priority, its owner's older builds, and from each other owner as many builds as rounds pass
+  // before its own (its owner's builds ahead), one more when that owner's head is older. An estimate: a lane's wait, the per-owner
+  // cap and the emulated share move it a little — a contributor's one package behind another's hundred and fifty is second, not last.
   const r = await env.DB.prepare(
-    `SELECT SUM(CASE WHEN priority < ? OR (priority = ? AND id < ?) THEN 1 ELSE 0 END) AS ahead, COUNT(*) AS total FROM build_tasks
-      WHERE status = 'queued' AND kind = 'build' AND trust = 'community' AND arch = ? AND pinned_to IS NULL AND (shared_after IS NULL OR shared_after <= ?)`,
-  ).bind(pr, pr, task.id, task.arch, now()).first<{ ahead: number | null; total: number }>();
+    `WITH q AS (SELECT id, owner, priority FROM build_tasks
+        WHERE status = 'queued' AND kind = 'build' AND trust = 'community' AND arch = ?1 AND pinned_to IS NULL AND (shared_after IS NULL OR shared_after <= ?2)),
+      me AS (SELECT ?3 AS id, ?4 AS pr, (SELECT owner FROM build_tasks WHERE id = ?3) AS owner),
+      k AS (SELECT COUNT(*) AS n FROM q, me WHERE q.owner IS me.owner AND q.priority = me.pr AND q.id < me.id),
+      o AS (SELECT q.owner, COUNT(*) AS n, MIN(q.id) AS head FROM q, me WHERE q.priority = me.pr AND q.owner IS NOT me.owner GROUP BY q.owner)
+    SELECT (SELECT COUNT(*) FROM q, me WHERE q.priority < me.pr) + (SELECT n FROM k)
+        + COALESCE((SELECT SUM(MIN(o.n, k.n) + (o.n > k.n AND o.head < me.id)) FROM o, k, me), 0) AS ahead,
+      (SELECT COUNT(*) FROM q) AS total`,
+  ).bind(task.arch, now(), task.id, pr).first<{ ahead: number | null; total: number }>();
   return { position: (r?.ahead ?? 0) + 1, total: Math.max(r?.total ?? 0, (r?.ahead ?? 0) + 1) };
 }
-

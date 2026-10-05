@@ -2,7 +2,8 @@
 //!
 //! agent.toml is written by `omarchy-agent install` (#317: with the `host_id` and
 //! `worker_id` the enrollment gave, #321) and by a person at the host, never by the pool. It is refused when group- or world-writable or owned by another
-//! user. Unknown keys are left alone (capacity caps are #333's, settings P4's). Any
+//! user. Unknown keys are left alone (capacity caps are #333's, settings P4's), but
+//! `[envelope].agent_budget`, which reaches the dispatcher (#371), is read strictly. Any
 //! problem here is a local configuration error: the loop exits 78 and says why.
 
 use std::fs;
@@ -11,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::dispatcher_env::Budget;
 use crate::lint::{Engine, Envelope};
 
 /// Where the agent keeps everything (design v2 §13.1), for every command: `--data-dir`,
@@ -87,6 +89,11 @@ impl Paths {
     pub fn pending(&self) -> PathBuf {
         self.data.join("pending")
     }
+    /// The host key the enrollment made (`crate::enroll::Paths`): the host state's and
+    /// the report's requests are signed with it (#344).
+    pub fn host_key(&self) -> PathBuf {
+        self.data.join("state").join(crate::host::KEY_FILE)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +101,8 @@ pub struct Config {
     /// The pool origin (`https://...`); it must also be in a bundle's signed `pools`.
     pub pool: String,
     pub host_id: String,
-    /// The host's worker registration (#321), whose open Update `follow` reports.
+    /// The host's worker registration (#321); its open Update orders reach the agent in
+    /// the host state (#344).
     pub worker_id: String,
     pub set_name: String,
     pub set_dir: PathBuf,
@@ -106,6 +114,8 @@ pub struct Config {
     pub socket_cli: PathBuf,
     pub socket_mount: PathBuf,
     pub task_subnets: Option<String>,
+    /// `[envelope].agent_budget` (#371): what `etc/dispatcher.env` gives the dispatcher.
+    pub agent_budget: Budget,
     pub envelope: Envelope,
     /// What install detected behind the socket (`set.engine`, #317): the lint holds a
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
@@ -165,9 +175,10 @@ struct EnvelopePart {
     task_subnets: Option<String>,
     max_cpus: Option<u32>,
     max_mem_gb: Option<u32>,
+    agent_budget: Option<toml::Value>,
 }
 
-/// An id the pool hands out (host and worker ids): what `follow` accepts.
+/// An id the pool hands out (host and worker ids).
 fn is_id(s: &str) -> bool {
     (1..=128).contains(&s.len())
         && s.bytes()
@@ -285,6 +296,7 @@ impl Config {
             socket_cli,
             socket_mount,
             task_subnets: f.envelope.task_subnets,
+            agent_budget: Budget::from_envelope(f.envelope.agent_budget.as_ref())?,
             envelope,
             engine,
             vm,
@@ -371,6 +383,15 @@ max_units = 3
         assert_eq!(c.project.as_deref(), Some("omarchy-host"));
         assert_eq!(c.task_subnets.as_deref(), Some("10.232.0.0/16"));
         assert!(c.envelope.allow_socket);
+        // The design's budget, for etc/dispatcher.env (#371); the other two keep their defaults.
+        assert_eq!(
+            c.agent_budget,
+            Budget {
+                calls_per_task: Some(200),
+                calls_per_day: Some(5000),
+                ..Budget::default()
+            }
+        );
         for (from, to, why) in [
             (
                 "https://omarchy-pool.example.org",
@@ -386,6 +407,11 @@ max_units = 3
                 "/var/run/docker.sock\"\nsocket_mount",
                 "docker.sock\"\nsocket_mount",
                 "plain absolute",
+            ),
+            (
+                "calls_per_day = 5000",
+                "calls_per_day = 0",
+                "agent_budget.calls_per_day must be a whole number from 1",
             ),
         ] {
             let text = format!("worker_id = \"w_1\"\n{}", studio.replacen(from, to, 1));

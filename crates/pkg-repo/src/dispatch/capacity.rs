@@ -25,6 +25,9 @@ pub struct Constants {
     pub unit_mem_gb: u32,
     /// Free disk below this, on the work root or the engine's data root, stops claims and starts the disk watcher.
     pub floor_gb: u64,
+    /// The units of the largest task the pool may hand: a build of the signed maximum size (#337). Memory is checked against it
+    /// before a claim.
+    pub largest_task_units: u32,
 }
 
 #[derive(Deserialize)]
@@ -33,8 +36,14 @@ struct Manifest {
 }
 #[derive(Deserialize)]
 struct Cap {
+    max_size: u32,
     unit: Unit,
+    units: Units,
     disk: Disk,
+}
+#[derive(Deserialize)]
+struct Units {
+    build_per_size: u32,
 }
 #[derive(Deserialize)]
 struct Unit {
@@ -58,7 +67,25 @@ impl Constants {
             unit_cpus: m.capacity.unit.cpus,
             unit_mem_gb: m.capacity.unit.mem_gb,
             floor_gb: m.capacity.disk.floor_gb,
+            largest_task_units: m.capacity.units.build_per_size * m.capacity.max_size.max(1),
         }
+    }
+
+    /// The units a claim may offer now (design v2 §7.6): what its units leave beside its leases and the
+    /// job unit, and — when `MemAvailable` is below the largest task it could receive — only what the
+    /// memory available still holds, so a host another workload is using claims what still fits, or
+    /// nothing. `None` (no `/proc/meminfo`) leaves the units alone.
+    pub fn offer(&self, room: u32, mem_available_gb: Option<u64>) -> u32 {
+        let Some(mem) = mem_available_gb else {
+            return room;
+        };
+        let largest = room.min(self.largest_task_units);
+        if mem >= u64::from(largest) * u64::from(self.unit_mem_gb) {
+            return room;
+        }
+        u32::try_from(mem / u64::from(self.unit_mem_gb.max(1)))
+            .unwrap_or(u32::MAX)
+            .min(room)
     }
 
     /// A lease's share: its units' CPUs and memory.
@@ -157,11 +184,28 @@ mod tests {
             Constants {
                 unit_cpus: 1,
                 unit_mem_gb: 2,
-                floor_gb: 10
+                floor_gb: 10,
+                largest_task_units: 8
             }
         );
         assert_eq!(c.share(4), (4, 8));
         assert_eq!(c.share(0), (1, 2));
+    }
+
+    #[test]
+    fn a_claim_offers_what_the_memory_available_still_holds() {
+        let c = Constants::signed();
+        // Memory for the largest task it could receive (a size-4 build, 8 units, 16 GB): every free unit.
+        assert_eq!(c.offer(10, Some(16)), 10);
+        assert_eq!(c.offer(10, Some(64)), 10);
+        // Three free units: the largest it could receive is 3 units, 6 GB.
+        assert_eq!(c.offer(3, Some(6)), 3);
+        // Another workload holds the machine: only what fits, or nothing.
+        assert_eq!(c.offer(10, Some(9)), 4);
+        assert_eq!(c.offer(10, Some(1)), 0);
+        assert_eq!(c.offer(0, Some(64)), 0);
+        // No /proc/meminfo (a VM's view comes later): the units decide.
+        assert_eq!(c.offer(10, None), 10);
     }
 
     #[test]

@@ -19,8 +19,11 @@
 //! Self-update (#316) is part of [`run`]; [`install`] (#317) puts a Linux host together:
 //! preflight, the envelope, enrollment, the agent keys, the unit and linger; and a Mac
 //! (#320): the `LaunchAgent` and the `omarchy` Colima VM [`vm`] sizes and keeps.
+//! [`dispatcher_env`] (#371) renders the dispatcher's `etc/dispatcher.env` beside its
+//! worker token: the host's own addresses, the secrets directory and the agent budget.
 
 pub mod capacity;
+pub mod dispatcher_env;
 pub mod enroll;
 pub mod host;
 pub mod install;
@@ -48,9 +51,11 @@ pub mod fuzz {
         let _ = crate::statement::parse(data);
     }
 
-    /// `state.json` as the run loop reads it, and the pool's `follow` answer.
+    /// `state.json` as the run loop reads it, the pool's host state (#344) and the `follow`
+    /// answer of a pool from before it.
     pub fn state(data: &[u8]) {
         let _ = crate::run::state::parse(data);
+        let _ = crate::run::pool::parse_state(data);
         let _ = crate::run::pool::parse_follow(data, "w_fuzz");
     }
 

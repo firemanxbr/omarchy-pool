@@ -41,22 +41,7 @@ impl HostKey {
     /// or through a symlink) when there is none.
     pub fn load_or_create(path: &Path) -> Result<Self, String> {
         match fs::symlink_metadata(path) {
-            Ok(m) => {
-                if !m.file_type().is_file() {
-                    return Err(format!("{}: not a regular file", path.display()));
-                }
-                if m.permissions().mode() & 0o077 != 0 {
-                    return Err(format!(
-                        "{}: readable by others (mode {:o}); the host key is the owner's alone",
-                        path.display(),
-                        m.permissions().mode() & 0o777
-                    ));
-                }
-                let der = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                let pair = Ed25519KeyPair::from_pkcs8(&der)
-                    .map_err(|_| format!("{}: not an Ed25519 key", path.display()))?;
-                Ok(Self { pair })
-            }
+            Ok(_) => Self::load(path),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let doc = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
                     .map_err(|_| "the system could not make a key".to_owned())?;
@@ -65,6 +50,27 @@ impl HostKey {
             }
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
+    }
+
+    /// Reads the key at `path`, which must be there: the run loop signs with the key the
+    /// enrollment made (#344), never a new one. A link, another mode than the owner's
+    /// alone, or anything but an Ed25519 key is refused.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let m = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !m.file_type().is_file() {
+            return Err(format!("{}: not a regular file", path.display()));
+        }
+        if m.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "{}: readable by others (mode {:o}); the host key is the owner's alone",
+                path.display(),
+                m.permissions().mode() & 0o777
+            ));
+        }
+        let der = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let pair = Ed25519KeyPair::from_pkcs8(&der)
+            .map_err(|_| format!("{}: not an Ed25519 key", path.display()))?;
+        Ok(Self { pair })
     }
 
     /// A new key at `path`, replacing the one there (atomically, mode 0600): a machine
@@ -119,6 +125,10 @@ impl HostKey {
 pub fn enroll_message(token: &str, pubkey: &str) -> String {
     format!("omarchy-host-enroll-v1\n{token}\n{pubkey}")
 }
+
+/// The header a signed request carries [`HostKey::header`] in (the pool's `signedHost`
+/// reads it): install's calls and the run loop's alike.
+pub const HEADER: &str = "omarchy-host";
 
 /// What a signed request's signature covers, one field a line (the pool's
 /// `signedMessage`).
@@ -259,6 +269,12 @@ mod tests {
             .err()
             .unwrap()
             .contains("not a regular file"));
+        // The run loop's load never makes one (#344): a missing key is an error.
+        let missing = d.join("missing.ed25519");
+        assert!(HostKey::load(&missing).is_err());
+        assert!(!missing.exists());
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(HostKey::load(&p).is_ok());
     }
 
     #[test]

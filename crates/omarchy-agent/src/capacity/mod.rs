@@ -518,7 +518,7 @@ pub fn now() -> String {
 }
 
 /// Seconds since the epoch as `YYYY-MM-DDTHH:MM:SSZ` (civil from days, H. Hinnant).
-fn utc(secs: u64) -> String {
+pub(crate) fn utc(secs: u64) -> String {
     let (days, rem) = (secs / 86_400, secs % 86_400);
     let z = days + 719_468;
     let era = z / 146_097;

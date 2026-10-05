@@ -421,7 +421,7 @@ impl Keeper {
     }
 
     /// After the poll: the profile kept running, sized and walled, and its clock checked
-    /// when due. `pool_date` is the last `follow`'s `Date` and when it came (Mac seconds);
+    /// when due. `pool_date` is the host state's last `Date` and when it came (Mac seconds);
     /// `tasks_running` asks the engine, when a restart would end them. `true` when a start
     /// of the profile ended this step: the loop counts the host's capacity again.
     ///

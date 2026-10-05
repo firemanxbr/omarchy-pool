@@ -1,14 +1,18 @@
-//! One tick of the run loop (design v2 §16.1): ask the pool when a poll is due, check the
-//! target against the trust rules, start or preempt a round, and take one step of it.
-//! Network answers never stop the agent (§16.4): no answer, a 5xx or a malformed body
-//! changes nothing and backs off to 10 minutes; a 401/403 changes nothing and polls
-//! hourly; both recover by themselves at the next answer.
+//! One tick of the run loop (design v2 §16.1): ask the pool for the host state when a poll
+//! is due (#344: the release target, the open Updates and the host orders), check the
+//! target against the trust rules, start or preempt a round, and take one step of it; one
+//! step of a `retire-legacy` in flight; the host report when it is due. Network answers
+//! never stop the agent (§16.4): no answer, a 5xx or a malformed body changes nothing and
+//! backs off to 10 minutes; a 401/403 changes nothing and polls hourly; both recover by
+//! themselves at the next answer.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use crate::dispatcher_env::{self, addresses, Envelope, Refresh, Rendered, Sources};
 use crate::manifest::{Manifest, Outer};
 use crate::statement::Statement;
 use crate::verify::{self, BundleOutcome, Rejection, StatementOutcome, VerifiedBundle};
@@ -18,7 +22,8 @@ use super::compose::Compose;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver};
 use super::journal::{env_secrets, Journal};
-use super::pool::{Follow, Net, Pool};
+use super::pool::{HostState, Net, Pool};
+use super::report::Reported;
 use super::rollout::{self, Ctx, Outcome};
 use super::selfupdate::Pending;
 use super::state::{self, Files, Phase, State, Step};
@@ -29,11 +34,19 @@ use super::trust::{self, Refusal};
 /// The poll interval when the pool names none (its `FOLLOW_POLL_S`), and the bounds.
 const POLL_S: i64 = 120;
 const MAX_BACKOFF_S: i64 = 600;
-const UNAUTHORIZED_S: i64 = 3600;
+pub(super) const UNAUTHORIZED_S: i64 = 3600;
 /// The safety timer: the running set is checked against `last-good/` at least this often.
 const DRIFT_S: i64 = 900;
 /// A count of a Mac's capacity that did not happen after a start of the VM, tried again.
 const RECOUNT_AGAIN_S: i64 = 3600;
+/// How often the host's own addresses are read again for `etc/dispatcher.env` (#371).
+pub(crate) const ADDRESSES_S: i64 = 60;
+/// How often the pool's edge is asked which public address the host leaves from (#371).
+pub(crate) const PUBLIC_S: i64 = 3600;
+/// After an ask the edge did not answer, the next comes after [`ADDRESSES_S`], doubled up
+/// to this: a reboot that gave the home connection a new address often starts the loop
+/// before the network is up, and the new address must not wait the hour to be refused.
+pub(crate) const PUBLIC_RETRY_S: i64 = 300;
 
 /// The cryptographic check, pinned identities and parsing (`crate::verify`).
 pub(crate) trait Verifier {
@@ -98,7 +111,8 @@ pub(crate) struct Agent {
     pub(super) upward_checked: Option<Release>,
     /// A Mac's `omarchy` VM (#320), kept running, sized, walled and on time.
     pub vm: Option<super::vm::Keeper>,
-    /// The last `follow`'s `Date` and when it came (the Mac's clock): the VM's is held to it.
+    /// The `Date` of the host state's last answer, whatever its status, and when it came
+    /// (the Mac's clock): the VM's is held to it.
     pool_date: Option<(i64, i64)>,
     /// The applied release whose signed minimum the keeper holds the VM's size to.
     vm_release: Option<Release>,
@@ -110,6 +124,46 @@ pub(crate) struct Agent {
     docker_cli: Option<PathBuf>,
     /// How the host's capacity is counted (a test plays it).
     pub count: Box<Count>,
+    /// Order ids refused as seen already, said once per process (#344).
+    pub(super) repeated: BTreeSet<String>,
+    /// The legacy set as last looked at, for the report, and when.
+    pub(super) legacy_seen: Option<(i64, serde_json::Value)>,
+    /// The host report last sent (#344).
+    pub(super) reported: Reported,
+    /// Said once per process: the pool predates the host state's release (#344), so its
+    /// `follow` names the target.
+    older_pool_said: bool,
+    /// `etc/dispatcher.env` rendered again from the host and agent.toml (#371); `None`
+    /// leaves the file alone (the tests that play other parts).
+    pub host_env: Option<HostEnv>,
+}
+
+/// The run loop's half of `etc/dispatcher.env` (#371): at its start, then every
+/// [`ADDRESSES_S`], the host's own addresses and agent.toml are read again and the file
+/// rendered with them, its token kept; at its start, then every [`PUBLIC_S`], the pool's
+/// edge is asked which public address the host leaves from (`egress.json`, which install
+/// wrote first), and within minutes after an ask it did not answer ([`PUBLIC_RETRY_S`]). A
+/// file that changed starts a round (an input of the set), which recreates the dispatcher.
+pub(crate) struct HostEnv {
+    pub sources: Sources,
+    next_at: i64,
+    public_at: i64,
+    /// The wait after the next ask the edge does not answer.
+    public_retry: i64,
+    /// The last failure said, so a failure that lasts is said once.
+    failing: Option<String>,
+}
+
+impl HostEnv {
+    pub fn new(sources: Sources) -> Self {
+        Self {
+            sources,
+            next_at: 0,
+            public_at: 0,
+            public_retry: ADDRESSES_S,
+            failing: None,
+        }
+    }
 }
 
 /// [`super::vm::count`], or a test's stand-in.
@@ -168,6 +222,11 @@ impl Agent {
             vm_recount_at: None,
             docker_cli: None,
             count: Box::new(super::vm::count),
+            repeated: BTreeSet::new(),
+            legacy_seen: None,
+            reported: Reported::default(),
+            older_pool_said: false,
+            host_env: None,
         }
     }
 
@@ -288,6 +347,7 @@ impl Agent {
             self.keep_vm(now, true);
             self.gate_step(now);
         } else if self.exit.is_none() {
+            self.dispatcher_env(now);
             if round_now || asks.poll_now || now >= self.state.poll.next_at {
                 self.poll(now, round_now);
             }
@@ -296,7 +356,13 @@ impl Agent {
                 self.drift(now);
             }
             if self.exit.is_none() {
-                self.step(now)?;
+                // A step that cannot write (a set directory, a full disk) is retried every
+                // tick; a retire-legacy in flight goes on meanwhile, and the report still
+                // says what the host knows, its answers above all.
+                let stepped = self.step(now);
+                self.retire_step(now);
+                self.report(now);
+                stepped?;
             }
         }
         if self.saved.as_ref() != Some(&self.state) {
@@ -453,19 +519,31 @@ impl Agent {
     }
 
     fn poll(&mut self, now: i64, round_now: bool) {
-        let answer = self.pool.follow(&self.cfg.worker_id);
+        let answer = self.pool.state();
+        // The pool's clock, from any answer it gave: a 401 for a Mac whose clock is too far
+        // off to sign is the answer the VM's clock rule needs most (#320).
+        if let Some(d) = self.pool.date() {
+            self.pool_date = Some((d, super::now()));
+        }
+        let answer = match answer {
+            Net::Ok(s) if s.older_pool => self.target_by_follow(s, now),
+            other => other,
+        };
         let p = &mut self.state.poll;
         p.last_at = now;
+        let refused = p.last == "unauthorized";
         match answer {
             Net::Ok(f) => {
-                if let Some(d) = f.date {
-                    self.pool_date = Some((d, super::now()));
-                }
                 p.last = "ok".into();
                 p.backoff_s = 0;
                 let every = f.poll_s.unwrap_or(POLL_S).clamp(60, MAX_BACKOFF_S);
                 p.next_at = now + jitter(every, now);
-                self.on_follow(f, now, round_now);
+                // The pool takes the host's calls again: the report waiting for its hourly
+                // retry goes now.
+                if refused {
+                    self.reported.next_at = self.reported.next_at.min(now);
+                }
+                self.on_state(f, now, round_now);
             }
             Net::NoAnswer(e) => {
                 p.last = "no-answer".into();
@@ -493,16 +571,58 @@ impl Agent {
         }
     }
 
-    fn on_follow(&mut self, f: Follow, now: i64, round_now: bool) {
+    /// A host state with no `release` member, a pool from before #344: only a rollback below
+    /// the release that brought agent 0.3.0 deploys one again (rollback.yml deploys the
+    /// Worker of the tag it goes back to). Its target and the open Update of the host's
+    /// registration are then its `follow`'s, as agents before 0.3.0 read them, so the host
+    /// follows the rollback (its statement) down; a pool from #344 on is never asked.
+    fn target_by_follow(&mut self, mut s: HostState, now: i64) -> Net<HostState> {
+        let f = match self.pool.follow(&self.cfg.worker_id) {
+            Net::Ok(f) => f,
+            Net::NoAnswer(e) => {
+                return Net::NoAnswer(format!(
+                    "its host state names no release (a pool from before #344) and its follow did not answer: {e}"
+                ))
+            }
+            Net::Unauthorized(c) => return Net::Unauthorized(c),
+        };
+        if !self.older_pool_said {
+            self.older_pool_said = true;
+            self.journal.write(
+                now,
+                "poll",
+                serde_json::json!({"detail": format!(
+                    "the pool's host state names no release: a pool from before #344 (a rollback below it); its follow names the target ({})",
+                    f.latest.map_or_else(|| "none".to_owned(), |r| r.to_string())
+                )}),
+            );
+        }
+        s.target = f.latest;
+        if s.updates.is_empty() {
+            s.updates.extend(f.update);
+        }
+        s.poll_s = s.poll_s.or(f.poll_s);
+        Net::Ok(s)
+    }
+
+    /// The host state (#344): its Update orders, its host orders, then its target.
+    fn on_state(&mut self, s: HostState, now: i64, round_now: bool) {
         let mut force: Option<String> =
             round_now.then(|| "a round was asked for (SIGUSR1)".to_owned());
         // An Update order waits while commit or a revert finishes (a revert quarantines
         // again): the next poll sees it unconsumed.
         let busy = self.state.rollout.step != Step::Idle
             && !rollout::preemptible(&self.state.rollout.step);
-        if let Some(id) = f
-            .update
-            .filter(|id| !busy && self.state.update_seen.as_ref() != Some(id))
+        // The last Update an agent before 0.3.0 took (`update_seen`) counts as seen.
+        if let Some(id) = s
+            .updates
+            .iter()
+            .find(|id| {
+                !busy
+                    && !self.state.orders.seen(id)
+                    && self.state.update_seen.as_deref() != Some(id.as_str())
+            })
+            .cloned()
         {
             if !self.state.quarantine.is_empty() {
                 self.journal.write(
@@ -513,9 +633,43 @@ impl Agent {
             }
             self.state.quarantine.clear();
             force = Some(format!("Update order {id}"));
+            self.state.orders.remember(&id);
             self.state.update_seen = Some(id);
         }
-        let Some(target) = f.latest else {
+        let taken = self.take_orders(s.orders, now, busy);
+        if let (None, Some(id)) = (&force, taken.reconcile.first()) {
+            force = Some(format!("host order {id} (reconcile-now)"));
+        }
+        let named = s.target.is_some();
+        self.follow_target(s.target, force, now);
+        for id in taken.reconcile {
+            let detail = if self.state.rollout.step != Step::Idle {
+                format!(
+                    "a round now: {} ({})",
+                    self.state.rollout.why,
+                    self.state.rollout.step.name()
+                )
+            } else if !named {
+                "the pool names no release for this host: no round".to_owned()
+            } else if self.state.round.detail.is_empty() {
+                format!(
+                    "no round started; the last round says {}",
+                    self.state.round.outcome
+                )
+            } else {
+                format!(
+                    "no round started; the last round says {}: {}",
+                    self.state.round.outcome, self.state.round.detail
+                )
+            };
+            self.answer(&id, "reconcile-now", "done", &detail, now);
+        }
+    }
+
+    /// The release the pool names: a round to it, preempting one in flight when it may,
+    /// or a round to the release that runs when `force` says why.
+    fn follow_target(&mut self, target: Option<Release>, force: Option<String>, now: i64) {
+        let Some(target) = target else {
             return;
         };
         self.state.target = Some(target);
@@ -832,6 +986,71 @@ impl Agent {
     fn start(&mut self, now: i64, target: Release, rollback: bool, why: &str) {
         self.journal.set_secrets(env_secrets(&self.cfg.set_dir));
         rollout::start(&mut self.state, &self.journal, now, target, rollback, why);
+    }
+
+    /// `etc/dispatcher.env` rendered again when it is time (#371): before the drift check,
+    /// so a file that changed starts its round in the same tick.
+    fn dispatcher_env(&mut self, now: i64) {
+        let Some(h) = self.host_env.as_mut() else {
+            return;
+        };
+        if now < h.next_at {
+            return;
+        }
+        h.next_at = now + ADDRESSES_S;
+        if now >= h.public_at {
+            // The address the pool's edge saw, asked again in the hour; no answer keeps the
+            // one last seen and asks again within minutes.
+            if let Net::Ok(ip) = self.pool.public_address() {
+                h.public_at = now + PUBLIC_S;
+                h.public_retry = ADDRESSES_S;
+                if addresses::seen(&self.paths.data) != Some(ip) {
+                    let at = crate::capacity::utc(u64::try_from(now).unwrap_or(0));
+                    if let Err(e) = addresses::keep_seen(&self.paths.data, ip, &at) {
+                        self.journal.write(
+                            now,
+                            "dispatcher-env",
+                            serde_json::json!({"detail": format!("the public address {ip} was not kept: {e}")}),
+                        );
+                    }
+                }
+            } else {
+                h.public_at = now + h.public_retry;
+                h.public_retry = (h.public_retry * 2).min(PUBLIC_RETRY_S);
+            }
+        }
+        // agent.toml as it is now, as `omarchy-agent token` and `dispatcher-env --write`
+        // read it, so the loop never puts back what they wrote; one that does not read now
+        // (an edit half done) leaves what the loop started with.
+        let envelope = match Envelope::of_data_dir(&self.paths.data) {
+            Some(Ok(e)) if dispatcher_env::dispatcher_path(&e.secrets_dir) => e,
+            _ => Envelope::of_config(&self.cfg),
+        };
+        let r = Rendered::now(&h.sources, &self.paths.data, Some(envelope));
+        let path = dispatcher_env::path_in(&self.cfg.set_dir);
+        match dispatcher_env::refresh(&path, &r) {
+            Ok(done) => {
+                h.failing = None;
+                if done == Refresh::Written {
+                    let addresses: Vec<String> =
+                        r.addresses.iter().map(ToString::to_string).collect();
+                    self.journal.write(
+                        now,
+                        "dispatcher-env",
+                        serde_json::json!({"addresses": addresses, "detail": "etc/dispatcher.env rendered again (the host's addresses or agent.toml changed), its token kept: the next round recreates the dispatcher"}),
+                    );
+                }
+            }
+            Err(e) if h.failing.as_ref() != Some(&e) => {
+                self.journal.write(
+                    now,
+                    "dispatcher-env",
+                    serde_json::json!({"detail": format!("etc/dispatcher.env was not rendered again: {e}; tried again every minute")}),
+                );
+                h.failing = Some(e);
+            }
+            Err(_) => {}
+        }
     }
 
     /// When idle: a changed input (the override, `etc/`, `run/capacity.json`) starts a

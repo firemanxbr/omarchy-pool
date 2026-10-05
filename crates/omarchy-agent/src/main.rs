@@ -28,6 +28,10 @@
 //!     the owner's Confirm, the host worker token in sets/host/etc/dispatcher.env)
 //! omarchy-agent token [--data-dir <dir>]
 //!     (a new host worker token: the rotation every 30 days, #321)
+//! omarchy-agent dispatcher-env [--data-dir <dir>] [--write]
+//!     (#371: what sets/host/etc/dispatcher.env holds beside the worker token, as the agent
+//!     renders it now — the host's own addresses, the secrets directory, the agent budget;
+//!     --write writes it, the token and the owner's own lines kept, as the run loop does)
 //! omarchy-agent run [--data-dir <dir>]       the loop (systemd --user / launchd run it)
 //! omarchy-agent status [--data-dir <dir>]    state.json and capacity.json; works with the pool down
 //! omarchy-agent round [--data-dir <dir>]     a round now (SIGUSR1 to the running agent)
@@ -51,6 +55,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use omarchy_agent::capacity::{self, probe, AgentToml, Capacity, Written};
+use omarchy_agent::dispatcher_env::{self, Sources};
 use omarchy_agent::enroll::{self, Failure, Options, Paths};
 use omarchy_agent::install;
 use omarchy_agent::lint::{self, Engine, Envelope};
@@ -72,6 +77,7 @@ const USAGE: &str = "usage:
   omarchy-agent uninstall [--data-dir <dir>]
   omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
   omarchy-agent token [--data-dir <dir>]
+  omarchy-agent dispatcher-env [--data-dir <dir>] [--write]
   omarchy-agent run [--data-dir <dir>]
   omarchy-agent status [--data-dir <dir>]
   omarchy-agent round [--data-dir <dir>]
@@ -96,6 +102,7 @@ fn main() -> ExitCode {
         Some("uninstall") => uninstall_cmd(&args[1..]),
         Some("enroll") => enroll_cmd(&args[1..]),
         Some("token") => token_cmd(&args[1..]),
+        Some("dispatcher-env") => dispatcher_env_cmd(&args[1..]),
         Some("--version" | "version") => {
             println!("omarchy-agent {}", omarchy_agent::AGENT_VERSION);
             Ok(0)
@@ -301,6 +308,7 @@ fn enroll_options(args: &[String]) -> Result<Options, String> {
             .filter(|t| !t.is_empty()),
         wait: Duration::from_secs(wait * 60),
         poll: Duration::from_secs(5),
+        sources: Sources::system(),
     })
 }
 
@@ -544,11 +552,49 @@ fn token_cmd(args: &[String]) -> Result<u8, String> {
         token: None,
         wait: Duration::ZERO,
         poll: Duration::ZERO,
+        sources: Sources::system(),
     };
     match enroll::rotate(&o, &mut std::io::stdout()) {
         Ok(()) => Ok(0),
         Err(e) => {
             eprintln!("omarchy-agent: {e}");
+            Ok(REFUSED)
+        }
+    }
+}
+
+/// `dispatcher-env [--write]` (#371): the lines the agent renders beside the worker token;
+/// with `--write`, `etc/dispatcher.env` rendered again.
+fn dispatcher_env_cmd(args: &[String]) -> Result<u8, String> {
+    let (args, on) = switches(args, &["--write"]);
+    let mut rest = Vec::new();
+    let f = flags(&args, &["--data-dir"], &mut rest)?;
+    if !rest.is_empty() {
+        return Err(USAGE.to_owned());
+    }
+    let dir = run::config::data_dir(f.iter().find(|(k, _)| *k == "--data-dir").map(|(_, v)| *v))?;
+    match dispatcher_env::command(&dir, &Sources::system(), on.contains(&"--write")) {
+        Ok((lines, written)) => {
+            for l in lines {
+                println!("{l}");
+            }
+            match written {
+                Some(dispatcher_env::Refresh::Written) => {
+                    eprintln!("omarchy-agent: wrote etc/dispatcher.env (0600), the worker token and the owner's own lines kept");
+                }
+                Some(dispatcher_env::Refresh::Unchanged) => {
+                    eprintln!("omarchy-agent: etc/dispatcher.env already says this");
+                }
+                Some(dispatcher_env::Refresh::NoFile) => {
+                    eprintln!("omarchy-agent: no etc/dispatcher.env yet (the owner has not confirmed the host); nothing written");
+                    return Ok(REFUSED);
+                }
+                None => {}
+            }
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("omarchy-agent dispatcher-env: {e}");
             Ok(REFUSED)
         }
     }

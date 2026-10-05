@@ -7,8 +7,13 @@
 //!
 //! `tests/agent-run-loop.sh` runs it (CI: rootful docker, and rootless podman's API
 //! socket); it needs `OMARCHY_AGENT_ENGINE_SOCKET` and `OMARCHY_STANDIN_IMAGE`.
+//!
+//! The host orders of #344 against a stand-in legacy compose project — `reconcile-now`,
+//! then `retire-legacy`, which stops and removes that project and nothing else and writes
+//! the marker into its directory — are `tests/agent-host-orders.sh`'s, on the same host.
 
 use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -22,7 +27,7 @@ use crate::run::config::{Config, Paths};
 use crate::run::fake::{
     relay_statement, FakePool, PoolState, Remote, TestVerifier, HOST_COMPOSE, HOST_SET,
 };
-use crate::run::pool::{Follow, Https, Net, Pool};
+use crate::run::pool::{HostState, Https, Net, Order, OrderKind, Pool};
 use crate::run::state::{State, Step};
 use crate::run::tools::{self, Tools};
 use crate::verify::tests_support;
@@ -160,12 +165,11 @@ impl Host {
         );
     }
 
-    fn follow(&self, latest: &str) {
-        self.remote.borrow_mut().follow = Some(Net::Ok(Follow {
-            latest: Release::parse(latest),
-            update: None,
+    fn target(&self, latest: &str) {
+        self.remote.borrow_mut().state = Some(Net::Ok(HostState {
+            target: Release::parse(latest),
             poll_s: Some(60),
-            date: None,
+            ..HostState::default()
         }));
     }
 
@@ -244,6 +248,8 @@ impl Drop for Host {
             .args(["rm", "-f", &self.task])
             .args(ids.split_whitespace());
         let _ = rm.output();
+        // And the network compose made for the set.
+        sweep(&self.tools, &self.socket, &self.project);
     }
 }
 
@@ -381,7 +387,7 @@ fn real_engine_rollouts_keep_the_task_running() {
 /// ordered restarts (exit 75) during its guard, and its dispatcher re-adopts the task.
 fn releases_with_ordered_restarts(h: &mut Host) {
     h.publish("v1.0.0", "ok");
-    h.follow("v1.0.0");
+    h.target("v1.0.0");
     h.round("v1.0.0");
     assert_eq!(
         h.agent.state.round.outcome, "ok",
@@ -392,7 +398,7 @@ fn releases_with_ordered_restarts(h: &mut Host) {
     assert_eq!(rel, "v1.0.0");
 
     h.publish("v1.1.0", "ok");
-    h.follow("v1.1.0");
+    h.target("v1.1.0");
     h.tick(true);
     h.until("the v1.1.0 guard", Duration::from_secs(300), |h| {
         matches!(h.agent.state.rollout.step, Step::Guard(_))
@@ -436,7 +442,7 @@ fn a_broken_release_is_reverted(h: &mut Host) {
         ("v1.2.1", "crash", "guard: "),
     ] {
         h.publish(r, mode);
-        h.follow(r);
+        h.target(r);
         h.round(r);
         let round = &h.agent.state.round;
         assert_eq!(round.outcome, "rolled-back", "{round:?}");
@@ -454,13 +460,13 @@ fn a_broken_release_is_reverted(h: &mut Host) {
 /// A rollback statement mid-round preempts it and moves the host down.
 fn a_statement_preempts_and_goes_down(h: &mut Host) {
     h.publish("v1.3.0", "ok");
-    h.follow("v1.3.0");
+    h.target("v1.3.0");
     h.tick(true);
     h.until("the v1.3.0 guard", Duration::from_secs(300), |h| {
         matches!(h.agent.state.rollout.step, Step::Guard(_))
     });
     relay_statement(&h.remote, 1, "v1.0.0", "v1.3.0", b"signed");
-    h.follow("v1.0.0");
+    h.target("v1.0.0");
     h.round("the rollback to v1.0.0");
     assert_eq!(
         h.agent.state.round.outcome, "ok",
@@ -506,4 +512,259 @@ fn nothing_but_the_pinned_tools_and_no_secret_on_disk(h: &Host, decoys: &Path) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// #344: the host orders against a stand-in legacy compose project.
+
+/// A compose project made by the pinned compose, as the legacy set's updater makes its own:
+/// services that end on SIGTERM, in `dir`, with compose's own network.
+fn compose_up(h: &Host, project: &str, dir: &Path, services: &[&str]) {
+    let mut yml = String::from("services:\n");
+    for s in services {
+        // stop_grace_period as the Studio's workers have it: the order's own grace applies.
+        let _ = write!(
+            yml,
+            "  {s}:\n    image: {}\n    command: [\"sh\", \"-c\", \"trap 'exit 0' TERM; while :; do sleep 1 & wait $$!; done\"]\n    stop_grace_period: 3h\n",
+            h.image
+        );
+    }
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join("compose.yml"), yml).unwrap();
+    let out = Command::new(&h.tools.compose)
+        .env_clear()
+        .env("DOCKER_HOST", format!("unix://{}", h.socket.display()))
+        .env("DOCKER_CONFIG", h.dir.join("data/docker-config"))
+        .current_dir(dir)
+        .args([
+            "--project-name",
+            project,
+            "up",
+            "--detach",
+            "--pull",
+            "never",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "compose up {project}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Every container and network labelled with `project`, removed (the test's cleanup).
+fn sweep(tools: &Tools, socket: &Path, project: &str) {
+    let docker = |args: &[&str]| {
+        Command::new(&tools.docker)
+            .env_clear()
+            .env("DOCKER_HOST", format!("unix://{}", socket.display()))
+            .args(args)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    let label = format!("label=com.docker.compose.project={project}");
+    let ids = docker(&["ps", "-aq", "--filter", &label]);
+    let mut rm = vec!["rm", "-f"];
+    rm.extend(ids.split_whitespace());
+    if rm.len() > 2 {
+        docker(&rm);
+    }
+    for n in docker(&["network", "ls", "-q", "--filter", &label]).split_whitespace() {
+        docker(&["network", "rm", n]);
+    }
+}
+
+struct Projects(Tools, PathBuf, Vec<String>);
+
+impl Drop for Projects {
+    fn drop(&mut self) {
+        for p in &self.2 {
+            sweep(&self.0, &self.1, p);
+        }
+    }
+}
+
+impl Host {
+    fn orders(&self, orders: &[(OrderKind, &str)]) {
+        let now = crate::run::now();
+        let mut r = self.remote.borrow_mut();
+        let mut s = match r.state.take() {
+            Some(Net::Ok(s)) => s,
+            _ => HostState::default(),
+        };
+        s.orders = orders
+            .iter()
+            .map(|(kind, id)| Order {
+                id: (*id).into(),
+                kind: kind.clone(),
+                not_after: Some(now + 3600),
+            })
+            .collect();
+        r.state = Some(Net::Ok(s));
+    }
+
+    fn answer(&self, id: &str) -> Option<(String, String)> {
+        self.agent
+            .state
+            .orders
+            .answers
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| (a.outcome.clone(), a.detail.clone()))
+    }
+
+    /// `docker ps -a` of a project: (id, status), sorted.
+    fn of_project(&self, project: &str) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .docker(&[
+                "ps",
+                "-a",
+                "--no-trunc",
+                "--format",
+                "{{.ID}} {{.State}}",
+                "--filter",
+                &format!("label=com.docker.compose.project={project}"),
+            ])
+            .lines()
+            .filter_map(|l| l.split_once(' '))
+            .map(|(a, b)| (a.to_owned(), b.to_owned()))
+            .collect();
+        v.sort();
+        v
+    }
+}
+
+#[test]
+#[ignore = "needs a real engine: tests/agent-host-orders.sh"]
+#[allow(clippy::too_many_lines)] // one host, one story: a round on order, then the retirement
+fn real_engine_host_orders_reconcile_and_retire_the_legacy_set() {
+    let mut h = host();
+    let legacy_project = format!("omarchy-legacy-it-{}", std::process::id());
+    let other_project = format!("omarchy-other-it-{}", std::process::id());
+    let _cleanup = Projects(
+        h.tools.clone(),
+        h.socket.clone(),
+        vec![legacy_project.clone(), other_project.clone()],
+    );
+    h.publish("v1.0.0", "ok");
+    h.target("v1.0.0");
+    h.round("v1.0.0");
+    assert_eq!(
+        h.agent.state.round.outcome, "ok",
+        "{:?}",
+        h.agent.state.round
+    );
+    let (dispatcher, _) = h.dispatcher();
+    let task0 = h.task_state();
+
+    // The legacy set (the Studio's, in small) and a project nobody recorded, side by side.
+    let legacy_dir = h.dir.join("srv-omarchy-pool");
+    compose_up(
+        &h,
+        &legacy_project,
+        &legacy_dir,
+        &["pool", "review", "updater"],
+    );
+    let other_dir = h.dir.join("other");
+    compose_up(&h, &other_project, &other_dir, &["worker"]);
+    let other = h.of_project(&other_project);
+    assert_eq!(h.of_project(&legacy_project).len(), 3);
+    // Recorded as install records it, against the same engine (its directory included).
+    let d = crate::install::engine::Docker {
+        cli: h.tools.docker.clone(),
+        socket: h.socket.clone(),
+    };
+    let seen = crate::install::legacy::look(&d, &legacy_project).unwrap();
+    assert_eq!(seen.containers.len(), 3);
+    assert_eq!(seen.dir().as_deref(), Some(legacy_dir.as_path()));
+    crate::install::legacy::record(
+        &h.agent.paths.data,
+        &crate::install::legacy::Legacy {
+            project: legacy_project.clone(),
+            recorded_at: "2027-01-01T08:00:00Z".into(),
+            containers: seen.containers.clone(),
+            networks: seen.networks.clone(),
+            rootful_exception: true,
+            dir: seen.dir(),
+            retired_at: None,
+            retired_by: None,
+        },
+    )
+    .unwrap();
+
+    // reconcile-now: a round now, answered; the legacy set untouched.
+    h.orders(&[(OrderKind::ReconcileNow, "ho_it_reconcile")]);
+    h.agent.state.poll.next_at = 0;
+    h.tick(false);
+    assert_eq!(
+        h.answer("ho_it_reconcile").map(|a| a.0).as_deref(),
+        Some("done")
+    );
+    h.until("the reconcile round", Duration::from_secs(300), |h| {
+        h.agent.state.rollout.step == Step::Idle
+    });
+    assert_eq!(
+        h.agent.state.round.outcome, "no-change",
+        "{:?}",
+        h.agent.state.round
+    );
+    assert_eq!(
+        h.dispatcher().0,
+        dispatcher,
+        "nothing changed, nothing replaced"
+    );
+    assert!(h
+        .of_project(&legacy_project)
+        .iter()
+        .all(|(_, s)| s == "running"));
+
+    // retire-legacy: the marker, then stopped, then removed — exactly that project.
+    h.orders(&[(OrderKind::RetireLegacy, "ho_it_retire")]);
+    h.agent.state.poll.next_at = 0;
+    h.tick(false);
+    assert!(
+        legacy_dir.join(".omarchy-agent").exists(),
+        "the marker first"
+    );
+    h.until("the retirement", Duration::from_secs(300), |h| {
+        h.answer("ho_it_retire").is_some()
+    });
+    let (outcome, detail) = h.answer("ho_it_retire").unwrap();
+    assert_eq!(outcome, "done", "{detail}");
+    assert!(
+        detail.starts_with(&format!(
+            "stopped and removed 3 container(s) and 1 network(s) of compose project {legacy_project}"
+        )),
+        "{detail}"
+    );
+    assert!(h.of_project(&legacy_project).is_empty());
+    assert!(h
+        .docker(&[
+            "network",
+            "ls",
+            "-q",
+            "--filter",
+            &format!("label=com.docker.compose.project={legacy_project}")
+        ])
+        .is_empty());
+    // Everything else as it was: the other project, the task, the bundle's dispatcher.
+    assert_eq!(h.of_project(&other_project), other);
+    assert_eq!(h.task_state(), task0);
+    assert_eq!(h.dispatcher().0, dispatcher);
+    // The record and the marker say so; the legacy directory's files are all there.
+    let l = crate::install::legacy::recorded(&h.agent.paths.data)
+        .unwrap()
+        .unwrap();
+    assert_eq!(l.retired_by.as_deref(), Some("ho_it_retire"));
+    assert!(legacy_dir.join("compose.yml").exists());
+    let marker = fs::read_to_string(legacy_dir.join(".omarchy-agent")).unwrap();
+    assert!(
+        marker.starts_with(&format!(
+            "agent={}\nhost=h_engine_test\nsince=",
+            h.agent.version
+        )),
+        "{marker}"
+    );
 }

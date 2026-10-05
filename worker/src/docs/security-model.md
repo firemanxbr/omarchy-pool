@@ -131,7 +131,22 @@ secret). Everything travels in the `Authorization` header over TLS only.
   (cloud metadata), loopback, multicast and reserved ranges, the task
   subnets and the host's own addresses are refused by the address a name
   resolves to, and the connection goes to the address that was checked, so
-  DNS rebinding has no second answer. A raw socket fails with "Network is
+  DNS rebinding has no second answer; an IPv4 address is refused in every
+  IPv6 form that reaches it too (v4-mapped, NAT64, 6to4). The host's own
+  addresses are the agent's word, in `etc/dispatcher.env` (#371): every
+  address of its interfaces (an IPv6 one as its /64) and the public address
+  its tasks leave from, which install's egress probe saw first — behind a
+  router that forwards a port, a task connecting to it would reach the host,
+  and the firewall's INPUT drop does not see that traffic, which leaves from
+  the egress bridge. The run loop reads the interfaces again every minute and
+  asks the pool's edge for the public address every hour (over IPv4, not
+  through a proxy: the way the tasks leave), and within five minutes after an
+  ask it did not answer; a change recreates the dispatcher, so every task
+  started after a new lease has it refused, and every task started after the
+  agent saw a new public address — within the hour while the edge answers,
+  within minutes of its answering again after a reboot or an outage — has
+  that one refused, while a task already running keeps the list its egress was
+  started with. A raw socket fails with "Network is
   unreachable"; a package that needs one gets a reviewed exception in
   `factory/sizing` (a bridge network of its own). A task that needs a model
   gets an agent sidecar of its own, on its network only, with the keys file
@@ -477,11 +492,45 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   five minutes), so nothing is replayable. A signed request reads the host's
   state, fetches or rotates its worker token and reports; it cannot claim,
   change the maintainer list or widen anything.
+- **The host state and its orders** (#344, design v2 §11, §17.1). From agent
+  0.3.0 the release a host rolls out is the one its signed state names —
+  still checked against `release.yml`'s signature, the floor, `min_release`,
+  `revoked` and the signed `pools` like any target; from a Worker before
+  #344, whose state names no release (only a rollback below it deploys one),
+  the public `follow` names it, as for the agents before 0.3.0: the pool's
+  word either way, which the bundle's signature and the floor bound — and the state carries
+  the host orders: a closed set, each with an id and a `not_after`, which the
+  agent reads leniently and refuses when the kind is unknown, the order is
+  past its `not_after` or its id is one of the last 512 it took. P3 has two.
+  *Reconcile now* (its owner or any maintainer) only starts a round. *Retire
+  legacy set* — its owner only, while a maintainer, with a passkey
+  (`host:retire-legacy:<id>`) — lets the agent do what it otherwise never
+  does (design v2 §11.1 M4, M5): stop and then remove the containers and
+  networks of the one compose project its own `legacy.json` records (never a
+  project it does not record, never a container labelled with an agent host,
+  never a volume, an image or a file), and write the `.omarchy-agent` marker
+  into that project's directory, through `openat` with `O_NOFOLLOW`, only in
+  a directory the agent's user owns and nobody else may write. A pool that
+  is compromised can therefore order a round, or the retirement of a set the
+  owner recorded and the owner's passkey did not order — the second only
+  where a legacy set is recorded at all, and never anything else on the
+  host; the switch guard (#313) then keeps the retired set from coming back.
+  The marker goes in first, before anything stops, so the set's own updater
+  cannot bring back what the order stops; a retirement that does not finish
+  within 30 minutes answers `failed` and leaves it, and the set's tools
+  refuse there until the order is given again. The agent answers in its
+  report, which closes the order (also one the pool expired while the agent
+  carried it out); the pool's journal says who gave it and how it ended, in
+  the pool's own words.
 - **The host worker token** (`omw_…`) is the dispatcher's only, written
   0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
   id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
   digits and dashes), so a pool cannot add a variable to the dispatcher's
-  environment; strings the pool sends reach the terminal without control
+  environment (#371: the secrets directory's path and the agent budget come
+  from `agent.toml`, the host's addresses from its interfaces and from the
+  address the pool's edge saw the probe task or the agent come from, which is
+  read as one IP address, so a pool can at most add one address to the deny
+  list, never a variable); strings the pool sends reach the terminal without control
   characters. It is a new one at every fetch; the agent
   rotates it every 30 days. The one it replaces works ten more minutes (kept
   on the host's row, never on the registration that older Workers list), so
@@ -548,6 +597,14 @@ refused), is refused server-side to anyone without the right, and writes a
   upload and complete it. To stop them at once, suspend first. A new install on the machine enrolls a new host with a
   new key (the agent sees `retired` on its signed request and enrolls again
   with the new token).
+- **Cap** — its owner or any maintainer, with a reason (#337, design v2
+  §7.2): the pool hands the host at most N units (`hosts.pool_cap_units`,
+  read by every claim), 0 included, whatever its envelope and its reports
+  say; lifted with none. Nothing running ends: a host holding more than its
+  new cap claims nothing until its leases fit (§7.6). A maintainer can so
+  stop another maintainer's host from taking new work — the same as a
+  drain, a delay and never a publish — with their login and reason on the
+  `host` line, and the owner can lift it.
 - **Drain** — a worker order on the host's registration (stop claiming, let
   the tasks finish). A drain by the owner is resumed by the owner only (they
   may need the machine); a drain by another maintainer by either of the two
@@ -576,12 +633,15 @@ refused), is refused server-side to anyone without the right, and writes a
   v2 §6.4: Resume by the owner), and their hosts still waiting for Confirm
   are not touched: the pull request is what closes both.
 - **The agent on a suspended or retired host** sees `403` on its calls
-  (its signed requests, and in P1 the release `follow` it polls, refused
-  for a suspended or retired host's registration and never cached): it
+  (its signed requests — the host state, from agent 0.3.0 its release
+  target too — and, for the agents before it, the release `follow` they
+  poll, refused for a suspended or retired host's registration and never
+  cached): it
   changes nothing, keeps its bundle and every task container running, polls
   hourly with jitter and never exits (§16.4); it recovers by itself at its
-  next poll after a Resume. An owner removed from the list sees `403` on its
-  claims only.
+  next poll after a Resume. Its open host orders are cancelled with the
+  suspension or the retirement. An owner removed from the list sees `403`
+  on its claims only.
 
 ## After approval, the gates still hold
 
@@ -678,7 +738,7 @@ instead of stopping them.
 | a community worker's token | claims of that owner's tasks; uploads to those tasks' staging | its owner or a maintainer revokes the worker |
 | a job token | that task's writes, until its lease ends | expires by itself; the task can be cancelled, or stopped from its worker's page (its lease is fenced — nothing it sends is taken, nothing renews it — until the worker has stopped, #277) |
 | a project worker's token | claims of pool jobs — each still executed with a scoped job token — until revoked | a maintainer revokes the worker |
-| a maintainer's token | rejections and requests for changes (never on their own package), one word on a worker's trust, withdrawals, lifts, a pool job by hand — a rollback inside its ring, a promotion the gate still decides —, a dry run by hand and a note on the journal (#284: a build queued by hand never publishes, and the gate's evidence is the jobs' alone), and orders to any worker, 20 an hour (#277: a restart, a drain or a stopped task at worst — a delay, and a drain of everything is an error on Status —, never a publish or a cancel) — not an approval, a block nor a forced promotion: those take the browser's session and the maintainer's passkey (#271, #284) | the person replaces the token (their page's *Token*: the old one stops working), and a reset of their passkeys revokes it (#284); a governance pull request removes the login; decisions and builds are journaled and reversible (rollback); trust takes a second maintainer |
+| a maintainer's token | rejections and requests for changes (never on their own package), one word on a worker's trust, withdrawals, lifts, a pool job by hand — a rollback inside its ring, a promotion the gate still decides —, a dry run by hand and a note on the journal (#284: a build queued by hand never publishes, and the gate's evidence is the jobs' alone), and orders to any worker, 20 an hour (#277: a restart, a drain or a stopped task at worst — a delay, and a drain of everything is an error on Status —, never a publish or a cancel), a package's size and disk budget (`POST /factory/packages/:name/size`, #337: up to size 4 — the units and memory a build of it takes, and a large one makes a host reserve for it two hours at most —, said on the package's story and the journal) and a Retry at size of a build that ran out of memory (`POST /factory/tasks/:id/retry`, #337: queued again at a larger size, up to the largest host alive, with one attempt given back — one more build of the same recipe, never a publish) — not an approval, a block nor a forced promotion: those take the browser's session and the maintainer's passkey (#271, #284) | the person replaces the token (their page's *Token*: the old one stops working), and a reset of their passkeys revokes it (#284); a governance pull request removes the login; decisions and builds are journaled and reversible (rollback); trust takes a second maintainer |
 | a maintainer's agent token (`oma_`) | drafts; request changes and reject once the person confirms them in the browser — approve and block drafted by the agent also need the maintainer's passkey, which the token cannot answer (user verification) | revoke the grant on the person's page or `omarchy-cli logout` |
 | a maintainer's signed-in browser, driven by an agent | what the session decides alone: request changes, reject, withdraw, a lift, a claim, a pool job by hand other than a forced promotion, a dry run by hand, and orders to any worker (20 an hour). Approve, block and a forced promotion need the person's passkey (#257, #271, #284), and so do adding a second passkey and removing one; only a login that holds none yet registers its first with the session | sign out (the session ends on the server); a first passkey registered meanwhile is on the public journal (`passkey`), and another maintainer resets it |
 | a maintainer's authenticator, lost or stolen | nothing without its user verification (a PIN or a biometric on the device); with it, what the person decides — approve, block and a forced promotion | another maintainer resets the login's passkeys with a reason (#271), after confirming the request out of band: every one removed, the login signed out, its `omc_` token and its agents' live grants revoked (#284), the journal — a line each — and a signed record say who and why; the person ends the device's GitHub sessions and revokes the GitHub tokens it held (the GitHub CLI's authorization, personal access tokens) — until they make a new token on their page, `POST /factory/register` mints the login none (`token_reset`) —, signs in again, registers a new one, makes a new token and grants their agents again (RUNBOOK, *A lost passkey*) |
