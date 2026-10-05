@@ -18,6 +18,7 @@
 //! rollback statement (design v2 §16).
 
 use std::io::Read;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -195,6 +196,9 @@ pub(crate) trait Pool {
     fn token(&mut self) -> Net<serde_json::Value>;
     /// Posts the dispatcher's scrubbed log lines (signed, #325's `diagnostics`).
     fn diagnostics(&mut self, body: &[u8]) -> Net<()>;
+    /// The public address the pool's edge sees this host come from over IPv4 (#371): the
+    /// one its tasks leave from too, through the same NAT.
+    fn public_address(&mut self) -> Net<IpAddr>;
 }
 
 const STATE_MAX: u64 = 64 << 10;
@@ -203,6 +207,8 @@ const STATE_PATH: &str = "/api/v1/hosts/self/state";
 const REPORT_PATH: &str = "/api/v1/hosts/self/report";
 const TOKEN_PATH: &str = "/api/v1/hosts/self/token";
 const DIAGNOSTICS_PATH: &str = "/api/v1/hosts/self/diagnostics";
+/// `/cdn-cgi/trace` is a dozen short lines.
+const TRACE_MAX: u64 = 4 << 10;
 const STATEMENT_MAX: u64 = 1 << 20;
 const BUNDLE_MAX: u64 = 64 << 20;
 pub(crate) const RELEASES: &str = "https://github.com/firemanxbr/omarchy-pool/releases/download";
@@ -368,6 +374,8 @@ pub(crate) struct Https {
     /// The host key and the host's id, which sign the host state's and the report's
     /// requests; `None` (no key on this machine yet) answers them "no answer".
     host: Option<(HostKey, String)>,
+    /// IPv4 only and never through a proxy: the way a task's egress leaves the host.
+    direct_v4: ureq::Agent,
     /// The watchdog's clock, moved on as a body's bytes arrive: a long download is
     /// progress, a stalled one is not.
     progress: Option<Arc<AtomicI64>>,
@@ -376,7 +384,7 @@ pub(crate) struct Https {
 impl Https {
     /// `origin` is agent.toml's `pool`, already checked to be an `https://` origin.
     pub fn new(origin: &str) -> Self {
-        let agent = |timeout: Duration, redirects: u32| -> ureq::Agent {
+        let config = |timeout: Duration, redirects: u32| {
             ureq::Agent::config_builder()
                 .tls_config(crate::pool::tls())
                 .timeout_global(Some(timeout))
@@ -384,17 +392,20 @@ impl Https {
                 .https_only(true)
                 .max_redirects(redirects)
                 .user_agent(format!("omarchy-agent/{}", crate::AGENT_VERSION))
-                .build()
-                .into()
         };
         Https {
             origin: origin.trim_end_matches('/').to_owned(),
             // GitHub's release downloads redirect to its object store.
-            agent: agent(Duration::from_secs(60), 10),
-            signed: agent(Duration::from_secs(60), 0),
+            agent: config(Duration::from_secs(60), 10).build().into(),
+            signed: config(Duration::from_secs(60), 0).build().into(),
             // The pinned tools are tens of MiB: a longer deadline, still a deadline.
-            downloads: agent(Duration::from_secs(600), 10),
+            downloads: config(Duration::from_secs(600), 10).build().into(),
             host: None,
+            direct_v4: config(Duration::from_secs(20), 10)
+                .ip_family(ureq::config::IpFamily::Ipv4Only)
+                .proxy(None)
+                .build()
+                .into(),
             progress: None,
         }
     }
@@ -564,6 +575,18 @@ impl Pool for Https {
     fn diagnostics(&mut self, body: &[u8]) -> Net<()> {
         match self.signed_call("POST", DIAGNOSTICS_PATH, Some(body)) {
             Net::Ok(_) => Net::Ok(()),
+            Net::NoAnswer(e) => Net::NoAnswer(e),
+            Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
+    }
+
+    fn public_address(&mut self) -> Net<IpAddr> {
+        let url = format!("{}/cdn-cgi/trace", self.origin);
+        match self.get_ok(&self.direct_v4, &url, TRACE_MAX) {
+            Net::Ok(body) => {
+                crate::dispatcher_env::addresses::from_trace(&String::from_utf8_lossy(&body))
+                    .map_or_else(|| Net::NoAnswer(format!("{url}: no ip= line")), Net::Ok)
+            }
             Net::NoAnswer(e) => Net::NoAnswer(e),
             Net::Unauthorized(s) => Net::Unauthorized(s),
         }

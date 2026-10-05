@@ -3,8 +3,11 @@
 #
 # The dispatcher reads `network` from P1 (#336: crates/pkg-repo/src/dispatch/sizing.rs,
 # from the release's own checkout; a file that does not read, or an exception
-# without its reason, fails the task); the pool and the dispatcher take a
-# package's size and budget from it in P2. It ships in the signed
+# without its reason, fails the task); the pool's claims take a package's size
+# and budget from it (#337: worker/src/sizing.ts, the file the pool was
+# deployed with), after the package page's own (a maintainer's Set, journaled),
+# and clamp the size to the signed maximum (a contributor's to 2) and to the
+# largest host alive. It ships in the signed
 # release like every file of the repository, and CODEOWNERS makes every
 # maintainer an owner of factory/sizing/, so an entry is a maintainer's
 # decision another maintainer approves in a pull request: that review and

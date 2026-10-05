@@ -645,10 +645,16 @@ otherwise), the user manager (`XDG_RUNTIME_DIR` and its D-Bus), the task
 subnets against the host's routes and other projects' networks, the owner
 files' owners and modes, the legacy project, a `GITHUB_TOKEN` to copy or in
 the `agent.env` a re-run keeps (public read only: a classic token with no scope; any scope, or a token
-GitHub names no scopes for, is refused), and the **egress probe**: a task
+GitHub names no scopes for, is refused), a secrets directory with a character
+the dispatcher refuses (letters, digits and `/ . _ - +` only), an
+`agent_budget` the agent would refuse (an unknown key, or not a whole number
+from 1), and the **egress probe**: a task
 on its own network in the task subnets must fail to reach `169.254.169.254`,
 the default gateway and the host's LAN address and must reach GitHub, which
-on a rootful host is what prep-root.sh's `DOCKER-USER` rules give. Until the
+on a rootful host is what prep-root.sh's `DOCKER-USER` rules give. The probe
+task also asks the pool's origin (`/cdn-cgi/trace`, at Cloudflare's edge) which
+address it comes from: that public address is kept in `egress.json` and every
+task's egress refuses it (#371); not seen is a note, not a blocker. Until the
 egress sidecar lands, a rootless host is expected to fail it: rootless
 podman's network carries the host's own address into the task's namespace,
 and the `DOCKER-USER` rules are rootful only. The probe's answers decide;
@@ -663,7 +669,17 @@ Then it prints the envelope (`agent.toml`) to confirm, writes
 `run/capacity.json`, enrolls ([Maintainer hosts](/docs/worker-host#maintainer-hosts):
 the fingerprint, your Confirm on the site, the host worker token) and only then writes `agent.toml` with
 the `host_id` and `worker_id` the enrollment gave — before your Confirm
-there is no run loop, no dispatcher and nothing that claims. It writes the
+there is no run loop, no dispatcher and nothing that claims. Then
+`etc/dispatcher.env` (0600) holds, beside the worker token, what the
+dispatcher takes from the agent (#371): `OMARCHY_HOST_ADDRESSES` (every
+address of the host's interfaces but loopback's and a container bridge's the
+egress refuses anyway — private, link-local, unique local or in the task
+subnets —, an IPv6 one as its /64, and the public address the probe saw, which
+the run loop asks again every hour, and within minutes after no answer), `OMARCHY_SECRETS_DIR`
+(the path chosen here, never mounted into the dispatcher) and, when the
+envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
+`…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK` and `…_CALLS_PER_DAY` (without one, the
+dispatcher's defaults). Every other line of that file is yours and kept. It writes the
 agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
 `--legacy`, and the unit `~/.config/systemd/user/omarchy-agent.service`
 (`Type=notify`, `Restart=always`, `WatchdogSec=300`,
@@ -707,6 +723,30 @@ lives under the data directory (`~/.local/share/omarchy-agent`, or `--data-dir`)
 fetched, the pinned docker CLI and compose plugin (`tools/`, by the SHA-256
 the manifest names; no other docker or compose binary is ever run),
 `staging/host/` and `last-good/host/`.
+
+At its start and then every minute the loop reads the host's addresses again
+(`/proc/net/fib_trie`, `/proc/net/route`, `/proc/net/if_inet6`) and
+`agent.toml` (one others may write, another user's or a link is refused as at
+the loop's start, and what the loop started with stays), and renders
+`etc/dispatcher.env` with them: the addresses,
+the secrets directory and the budget (#371), the token and your own lines
+kept, written only when that changes it, and never made when it is missing
+(that waits for your Confirm). At its start and then every hour it also asks
+the pool's edge (`<pool>/cdn-cgi/trace`, over IPv4 and not through a proxy)
+which public address the host leaves from, and keeps it in `egress.json`
+when it changed; no answer keeps the one last seen and asks again after one
+minute, then two, four and every five (after a reboot the loop often starts
+before the network is up), so a new public address is refused once the agent
+has seen it: within the hour while the edge answers, within minutes of its
+answering again. A new DHCP lease, a new
+interface, a new public address from your provider or an edited budget
+changes the file, which starts a round like any `etc/` change, so the
+dispatcher is recreated with it and its tasks run on (a task already running
+keeps the list its egress sidecar was started with); the journal says
+`dispatcher-env` with the addresses. Every writer of the file (the loop,
+`omarchy-agent token`, install) holds `etc/` locked from its read to its
+rename, so none puts back what another just wrote. `omarchy-agent
+dispatcher-env` prints what it would write; `--write` writes it now.
 
 Each round goes `render → lint → plan → pull → replace → guard → commit`,
 or `revert`, each step written to `state.json` before it acts, so a restart
@@ -912,6 +952,83 @@ skipped version; `state.json` is read leniently, so the agent rolled back to
 reads what the newer one wrote. `tests/agent-self-update.sh` runs deliberately
 broken builds (a panic at start, a hang before ready, a hang after it) under a
 real `systemd --user` in CI.
+
+### How the pool hands a host work
+
+Every claim of a host — and of a legacy registration, selected as a host
+with one lane and one build until it retires — goes through the pool's
+selection (#337, design v2 §8.3; `worker/src/selection.ts`). A host is
+handed as many tasks as its units hold: a build 2 units per size, a trial 2,
+an audit 1, one unit kept for pool jobs, model work within its agent slots,
+each lease its own container; what does not fit waits in the pool's queue
+and starts as units free up. Its units are min(what it declares, what the
+pool recomputes from its totals with the signed constants, the pool's cap).
+Before each claim its dispatcher checks `MemAvailable` against the largest
+task it could receive and offers only what still fits (a shared machine, a
+laptop in use, the Studio's legacy set during the canary): its log says
+`… GB available in memory: this claim offers N of M free unit(s)`. The
+shares of the leases it started in the last five minutes count as used
+(`… (K GB of it promised to leases just started)`): their containers have
+not grown yet, so a burst of claims never offers the same memory twice.
+The offer bounds that claim only — the host is still counted by its units,
+so a size-4 build waits for memory rather than run smaller.
+
+- **Native first, emulated after T.** A build of an arch the host runs
+  emulated waits its threshold T — twice the last native build of that
+  package and arch, 3 to 60 minutes, 3 with no history — while a native host
+  that would take it now is alive (claimed in the last 2 minutes, not
+  drained, not below the minimum, units and disk free); a drained or busy
+  native host never makes it wait. A `needs_native` build never runs
+  emulated. While no host runs an arch natively, every host with an emulated
+  lane of it keeps one of its builds running, however long the native
+  backlog (the guaranteed share). Emulated lanes hold at most half a host's
+  builds while native work for it waits, all but one otherwise; nothing
+  running is ended for that.
+- **Contributors take turns.** Community builds are handed round-robin by
+  owner (fewest leased first), and a contributor holds at most
+  ceil(the alive fleet's builds / 4) at once. The divisor is a setting: 0
+  lifts the cap (round-robin stays); with the legacy fleet alone (a few
+  registrations, one build each) the cap is 1 or 2 — lift it if that leaves
+  builds idle while one contributor's queue waits:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "INSERT INTO settings (key, value) VALUES ('owner-cap-divisor', '0') ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+  npx wrangler d1 execute omarchy-repo --remote --command "DELETE FROM settings WHERE key = 'owner-cap-divisor'"   # back to 4
+  ```
+- **Sizes.** A build asks size 1 unless a maintainer set more: in
+  `factory/sizing/tasks.toml` (`size`, `disk_gb`, in a pull request another
+  maintainer approves) or on the package's page (*size · Set*, journaled;
+  the page's word wins until it is cleared). A contributor's build runs at
+  size 2 at most, every build at the largest size a host alive runs — a
+  clamped one says so in the journal (`… asked size 4; the largest host
+  alive runs size 3`). The oldest build of size 2 or more that has waited
+  30 minutes, that some host alive could run and its owner's cap does not
+  hold back, and that fits no host's free units makes the host with the
+  most free units **reserve** for it: that host takes nothing else but pool
+  jobs while its free units are below the build's (a `host` line says so),
+  two hours at most; the host page shows it. Once its units fit, the build
+  goes first; when it still cannot be leased there (its owner reached their
+  cap meanwhile, the host's memory is short this round), the host takes
+  other work rather than sit idle — as it does, whatever its free units,
+  while its claim cannot take the build at all (a draft while its agent's
+  probe fails, any build while it holds builds back for disk). An older
+  build waiting for another reason (a `needs_native` one with no native
+  host, a capped contributor's) does not stop it. Two hours spent, the
+  mark clears and the host goes back to normal selection for 30 minutes
+  (`build_tasks.reserved_at`); then the build waits its turn again and is
+  reserved for anew, so a host never holds back work for one task more
+  than two hours at a time, and a build whose host ran something longer
+  than the window still starts. A maintainer who wants it built sooner
+  lowers its size on the package's page. A build that ran out of memory
+  says *out of memory at 4 GB (size 1)* on its package's page — as soon as
+  it is queued again, not only once its attempts are spent, with the size
+  it waits at — and on Review, where a maintainer's **Retry at size N**
+  queues it again at the size chosen (up to the largest a host alive
+  runs), for one more try.
+- **The pool's cap** (`hosts.pool_cap_units`): its owner or any maintainer
+  sets it on the host's page, with a reason — the Studio canary runs at 3
+  units, one build (§21.1). Lowered below what the host runs, nothing ends;
+  it claims nothing until its leases fit. Lifted, the host's count decides.
 
 ## The Studio host
 

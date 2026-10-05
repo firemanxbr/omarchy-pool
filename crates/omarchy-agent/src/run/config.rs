@@ -4,9 +4,11 @@
 //! `worker_id` the enrollment gave, #321), by a person at the host and by the person's
 //! `omarchy-agent runtime switch` there (#325), never by the pool. It is refused when
 //! group- or world-writable or owned by another user. Unknown keys are left alone
-//! (capacity caps are #333's). What the pool may narrow inside it — units, emulated lanes
-//! — and what it allows the pool to ask — diagnostics — is [`Policy`] (#325, design v2
-//! §12). Any problem here is a local configuration error: the loop exits 78 and says why.
+//! (capacity caps are #333's), but `[envelope].agent_budget`, which reaches the
+//! dispatcher (#371), is read strictly. What the pool may narrow inside it — units,
+//! emulated lanes — and what it allows the pool to ask — diagnostics — is [`Policy`]
+//! (#325, design v2 §12). Any problem here is a local configuration error: the loop exits
+//! 78 and says why.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -14,6 +16,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::dispatcher_env::Budget;
 use crate::lint::{Engine, Envelope};
 
 /// Where the agent keeps everything (design v2 §13.1), for every command: `--data-dir`,
@@ -115,6 +118,8 @@ pub struct Config {
     pub socket_cli: PathBuf,
     pub socket_mount: PathBuf,
     pub task_subnets: Option<String>,
+    /// `[envelope].agent_budget` (#371): what `etc/dispatcher.env` gives the dispatcher.
+    pub agent_budget: Budget,
     pub envelope: Envelope,
     /// What install detected behind the socket (`set.engine`, #317): the lint holds a
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
@@ -217,6 +222,7 @@ struct SetPart {
 #[derive(Deserialize, Default)]
 struct EnvelopePart {
     task_subnets: Option<String>,
+    agent_budget: Option<toml::Value>,
     max_units: Option<u32>,
     emulate: Option<Vec<String>>,
     #[serde(default)]
@@ -342,6 +348,7 @@ impl Config {
             socket_cli,
             socket_mount,
             task_subnets: f.envelope.task_subnets,
+            agent_budget: Budget::from_envelope(f.envelope.agent_budget.as_ref())?,
             envelope,
             engine,
             runtime,
@@ -429,6 +436,15 @@ max_units = 3
         assert_eq!(c.project.as_deref(), Some("omarchy-host"));
         assert_eq!(c.task_subnets.as_deref(), Some("10.232.0.0/16"));
         assert!(c.envelope.allow_socket);
+        // The design's budget, for etc/dispatcher.env (#371); the other two keep their defaults.
+        assert_eq!(
+            c.agent_budget,
+            Budget {
+                calls_per_task: Some(200),
+                calls_per_day: Some(5000),
+                ..Budget::default()
+            }
+        );
         for (from, to, why) in [
             (
                 "https://omarchy-pool.example.org",
@@ -444,6 +460,11 @@ max_units = 3
                 "/var/run/docker.sock\"\nsocket_mount",
                 "docker.sock\"\nsocket_mount",
                 "plain absolute",
+            ),
+            (
+                "calls_per_day = 5000",
+                "calls_per_day = 0",
+                "agent_budget.calls_per_day must be a whole number from 1",
             ),
         ] {
             let text = format!("worker_id = \"w_1\"\n{}", studio.replacen(from, to, 1));

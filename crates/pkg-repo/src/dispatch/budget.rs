@@ -15,8 +15,9 @@
 //!   read counts as the whole cap it was given. Each probe that ran counts
 //!   one call (its one tiny completion).
 //!
-//! Seam (#317): the caps come from the envelope's `agent_budget`, which the
-//! install writes into the dispatcher's environment.
+//! The caps come from the envelope's `agent_budget` (agent.toml), which the
+//! agent writes into `etc/dispatcher.env` (#371); a key the envelope does not
+//! set keeps its default here.
 
 use std::path::Path;
 

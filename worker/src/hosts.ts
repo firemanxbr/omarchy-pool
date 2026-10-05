@@ -27,7 +27,7 @@ import { fromB64url } from "./webauthn";
 interface Resources { cpus: number; mem_gb: number }
 export interface MinHost extends Resources { work_disk_gb: number; engine_disk_gb: number }
 interface TaskUnits { build_per_size: number; trial: number; audit: number; job: number; job_reserved: number }
-interface SignedCapacity { max_size: number; community_max_size: number; min: MinHost; reserve: Resources; unit: Resources; units: TaskUnits; disk: { build_gb_per_size: number } }
+interface SignedCapacity { max_size: number; community_max_size: number; min: MinHost; reserve: Resources; unit: Resources; units: TaskUnits; disk: { build_gb_per_size: number; floor_gb: number }; emulated: { share_when_native_waits: number } }
 
 const SIGNED = (parse(manifestToml) as unknown as { capacity: SignedCapacity }).capacity;
 /** The minimum a host must have to join (D30), as the release signs it. */
@@ -40,6 +40,10 @@ export const TASK_UNITS: Readonly<TaskUnits> = Object.freeze({ ...SIGNED.units }
 export const MAX_SIZE = SIGNED.max_size;
 export const COMMUNITY_MAX_SIZE = SIGNED.community_max_size;
 export const BUILD_GB_PER_SIZE = SIGNED.disk.build_gb_per_size;
+/** Free disk a host keeps below every build's budget, on the work root and on the engine's data root (D53). */
+export const DISK_FLOOR_GB = SIGNED.disk.floor_gb;
+/** The share of a host's builds its emulated lanes may hold while native work for it is queued (D50: the work-conserving cap). */
+export const EMULATED_SHARE = SIGNED.emulated.share_when_native_waits;
 
 /** An enrollment token lives this long, and is spent once. */
 export const ENROLL_TTL_MIN = 15;

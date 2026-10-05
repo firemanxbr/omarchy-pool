@@ -55,6 +55,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::dispatcher_env::{self, Sources};
 use crate::install::legacy::{self, Legacy};
 use crate::version::Release;
 
@@ -477,8 +478,16 @@ impl Agent {
                 self.cfg.worker_id
             ));
         }
-        let env = self.cfg.set_dir.join("etc").join("dispatcher.env");
-        crate::enroll::write_worker_token(&env, &a).map_err(|e| {
+        // Where enrollment writes it, the rest of the file rendered as the loop's own
+        // refresh renders it (#371): the host's addresses, the secrets directory, the agent
+        // budget and the owner's lines stay. The seam #327's token file moves.
+        let sources = self
+            .host_env
+            .as_ref()
+            .map_or_else(Sources::system, |h| h.sources.clone());
+        let r = super::agent::rendered(&self.cfg, &self.paths, &sources);
+        let env = dispatcher_env::path_in(&self.cfg.set_dir);
+        crate::enroll::write_worker_token(&env, &a, &r).map_err(|e| {
             format!("{e} (the old token keeps working for ten minutes only: rotate again)")
         })?;
         self.journal.set_secrets(env_secrets(&self.cfg.set_dir));

@@ -12,11 +12,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use super::agent::{Agent, Drivers, Sigstore};
+use super::agent::{Agent, Drivers, HostEnv, Sigstore};
 use super::config::{data_dir, Config, Paths};
 use super::pool::Https;
 use super::selfupdate::{self, notify, Start};
 use super::state::{self, State};
+use crate::dispatcher_env::Sources;
 use crate::version::{self, Release};
 
 /// Local configuration errors only (design v2 §16.4): systemd's
@@ -185,6 +186,7 @@ fn setup(
     }
     agent.progress = Some(Arc::clone(progress));
     agent.exe = std::env::current_exe().ok();
+    agent.host_env = Some(HostEnv::new(Sources::system()));
     agent.resume(super::now());
     agent.journal.write(
         super::now(),

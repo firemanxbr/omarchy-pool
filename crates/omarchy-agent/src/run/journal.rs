@@ -85,7 +85,9 @@ impl Journal {
 }
 
 /// Reads `etc/*.env` of the set directory: each `KEY=value` value of 8 or more
-/// characters is a secret to scrub (shorter ones would scrub ordinary words).
+/// characters is a secret to scrub (shorter ones would scrub ordinary words), but those of
+/// the keys the agent renders into `etc/dispatcher.env` that hold none (#371: the host's
+/// addresses, the secrets directory's path, the budget), which an engine's error may name.
 pub(crate) fn env_secrets(set_dir: &Path) -> Vec<String> {
     env_values(&set_dir.join("etc"))
 }
@@ -101,9 +103,9 @@ pub(crate) fn env_values(dir: &Path) -> Vec<String> {
         if e.path().extension().is_some_and(|x| x == "env") {
             if let Ok(text) = fs::read_to_string(e.path()) {
                 for line in text.lines() {
-                    if let Some((_, v)) = line.split_once('=') {
+                    if let Some((k, v)) = line.split_once('=') {
                         let v = v.trim().trim_matches(['"', '\'']);
-                        if v.len() >= 8 {
+                        if v.len() >= 8 && !crate::dispatcher_env::not_secret(k.trim()) {
                             out.push(v.to_owned());
                         }
                     }
