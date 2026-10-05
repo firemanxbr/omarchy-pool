@@ -519,6 +519,7 @@ fn the_host_s_addresses_reach_dispatcher_env_and_a_change_recreates_the_dispatch
     }
     w.agent.host_env = Some(HostEnv::new(Sources {
         proc_net: net.clone(),
+        ifconfig: None,
     }));
     w.agent.cfg.agent_budget = Budget {
         calls_per_day: Some(900),
@@ -600,7 +601,10 @@ fn with_host_env() -> World {
     for f in ["fib_trie", "if_inet6", "route"] {
         fs::copy(fixture.join(f), net.join(f)).unwrap();
     }
-    w.agent.host_env = Some(HostEnv::new(Sources { proc_net: net }));
+    w.agent.host_env = Some(HostEnv::new(Sources {
+        proc_net: net,
+        ifconfig: None,
+    }));
     w
 }
 
@@ -1192,6 +1196,8 @@ mod on_a_mac {
     use std::rc::Rc;
 
     use super::r;
+    use crate::dispatcher_env::Sources;
+    use crate::run::agent::HostEnv;
     use crate::run::fake::World;
     use crate::run::pool::{HostState, Net};
     use crate::run::vm::tests::{saved_for, want, Fake, World as Colima};
@@ -1263,6 +1269,71 @@ mod on_a_mac {
         assert!(
             journal.contains("the VM's clock was -2400 s off"),
             "{journal}"
+        );
+    }
+
+    /// The host state is signed (#344), and the pool refuses a signature whose time is more
+    /// than 120 s from its own: a Mac whose clock is that far off hears the pool's time from
+    /// the refusal's `Date`, is said to need a person, and its VM is held to the Mac's clock,
+    /// never moved to the pool's.
+    #[test]
+    fn a_mac_whose_clock_the_pool_refuses_hears_its_time_from_the_refusal() {
+        let (mut w, colima) = mac(Colima {
+            running: true,
+            saved: Some(saved_for(&want())),
+            set_holds: true,
+            ..Colima::default()
+        });
+        colima.borrow_mut().skew = -300;
+        w.pool_answers(Net::Unauthorized(401));
+        w.remote.borrow_mut().date = Some(crate::run::now() + 600);
+        w.agent.state.poll.next_at = w.now;
+        w.tick(3);
+        let journal = w.journal();
+        assert!(journal.contains("the pool answered 401"), "{journal}");
+        // 600 s and -300 s, give or take the second the tick may take.
+        assert!(
+            journal.contains("needs a person: this Mac's clock is")
+                && journal.contains("s off the pool's; the agent does not set it"),
+            "{journal}"
+        );
+        assert!(
+            journal.contains("the VM's clock was -30")
+                && journal.contains("s off the Mac's; set to it"),
+            "{journal}"
+        );
+        assert!(colima.borrow().skew.abs() <= 1, "held to the Mac's clock");
+    }
+
+    /// A Mac that woke may be on another network: the pool's edge is asked at once which
+    /// public address its tasks leave from, not at the hour, and dispatcher.env gets it on
+    /// that tick (#371).
+    #[test]
+    fn a_wake_asks_the_pools_edge_for_the_public_address_at_once() {
+        let (mut w, _colima) = mac(Colima {
+            running: true,
+            saved: Some(saved_for(&want())),
+            set_holds: true,
+            ..Colima::default()
+        });
+        w.agent.host_env = Some(HostEnv::new(Sources {
+            proc_net: w.dir.join("no-proc"),
+            ifconfig: None,
+        }));
+        w.remote.borrow_mut().public = Some(Net::Ok("198.51.100.20".parse().unwrap()));
+        w.tick(3);
+        assert_eq!(w.remote.borrow().publics, 1);
+        for _ in 0..10 {
+            w.tick(30);
+        }
+        assert_eq!(w.remote.borrow().publics, 1, "hourly while it is awake");
+        w.remote.borrow_mut().public = Some(Net::Ok("203.0.113.9".parse().unwrap()));
+        w.tick(crate::vm::WAKE_GAP_S + 1);
+        assert_eq!(w.remote.borrow().publics, 2, "{}", w.journal());
+        let env = std::fs::read_to_string(w.set_dir().join("etc/dispatcher.env")).unwrap();
+        assert!(
+            env.contains("\nOMARCHY_HOST_ADDRESSES=203.0.113.9\n"),
+            "{env}"
         );
     }
 

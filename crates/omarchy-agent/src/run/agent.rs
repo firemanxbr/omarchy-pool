@@ -343,6 +343,14 @@ impl Agent {
             .as_mut()
             .map(|k| k.before_poll(now, &self.journal))
             .unwrap_or_default();
+        if asks.poll_now {
+            // A Mac that woke may be on another network: its addresses, and the public one
+            // its tasks leave from, are read again at once, not at the hour (#371).
+            if let Some(h) = self.host_env.as_mut() {
+                h.next_at = now;
+                h.public_at = now;
+            }
+        }
         if self.gate.is_some() {
             self.keep_vm(now, true);
             self.gate_step(now);

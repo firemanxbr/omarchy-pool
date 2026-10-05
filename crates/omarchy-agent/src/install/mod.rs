@@ -109,8 +109,10 @@ pub struct Places {
     pub rosetta: PathBuf,
     /// Where prep-mac.sh makes the work root, the secrets and the set directories.
     pub mac_root: PathBuf,
-    /// Where the host's own addresses are read (`/proc/net`, #371).
+    /// Where the host's own addresses are read (`/proc/net`, #371), and a Mac's `ifconfig`
+    /// (#320).
     pub proc_net: PathBuf,
+    pub ifconfig: Option<PathBuf>,
 }
 
 impl Places {
@@ -127,6 +129,7 @@ impl Places {
             .filter(|u| !u.is_empty())
             .ok_or("USER is not set")?;
         let colima_env = std::env::var_os("COLIMA_HOME").filter(|v| !v.is_empty());
+        let sources = Sources::system();
         Ok(Places {
             data: crate::run::config::data_dir(data_flag)?,
             config_home: var("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
@@ -147,7 +150,8 @@ impl Places {
             rosetta: PathBuf::from(crate::vm::ROSETTA_RUNTIME),
             mac_root: PathBuf::from(crate::vm::MAC_ROOT),
             home,
-            proc_net: Sources::system().proc_net,
+            proc_net: sources.proc_net,
+            ifconfig: sources.ifconfig,
         })
     }
 
@@ -206,6 +210,7 @@ impl Places {
     fn sources(&self) -> Sources {
         Sources {
             proc_net: self.proc_net.clone(),
+            ifconfig: self.ifconfig.clone(),
         }
     }
 }

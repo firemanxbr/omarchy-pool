@@ -805,7 +805,13 @@ Preflight, before it starts any VM:
 `~/.colima/omarchy/docker.sock`, for the agent) and `socket_mount`
 (`/var/run/docker.sock`, inside the VM, which the dispatcher mounts). The
 lint then refuses any bind of the set (the owner's override included) whose
-source lies under none of the VM's three mounts. Install writes
+source lies under none of the VM's three mounts. `etc/dispatcher.env` is in
+the set directory (`<root>/set/etc/dispatcher.env`, read-only in the VM), and
+its `OMARCHY_HOST_ADDRESSES` are the Mac's own: a Mac has no `/proc`, so they
+are `/sbin/ifconfig -a`'s, by the same rules as on Linux (a vmnet bridge such
+as `bridge100`, the VMs' NAT, counts as a container bridge), and the public
+address the probe task in the VM saw. A task leaves through the Mac, so an
+address of the Mac is what it must not reach. Install writes
 `~/Library/LaunchAgents/org.omarchy-pool.agent.plist` (`RunAtLoad`,
 `KeepAlive`, `ThrottleInterval` 10, `ProcessType` Background, `Umask` 63, a
 `PATH` with `/opt/homebrew/bin`, logs in `~/Library/Logs/omarchy-agent/`)
@@ -848,7 +854,8 @@ release whose agent hangs, rolled back (the watchdog's line in
 `~/Library/Logs/omarchy-agent/agent.log`, `agent-rollback` on the host's
 page); from inside a task container, `nc -z -w 3 <your router> 53` and the
 same to the Mac's LAN address time out (the VM's task firewall), as
-preflight's egress probe said; an x86_64 build on the lane `via: rosetta`
+preflight's egress probe said; `omarchy-agent dispatcher-env` names the
+Mac's LAN and public addresses (and, with IPv6, its /64); an x86_64 build on the lane `via: rosetta`
 (it needs the emulated lanes of #338 on the pool's side: the dispatcher's
 per-lane `--platform` and the pool's choice of tasks by lane); and over SSH
 with nobody logged in at the Mac, the Terminal instruction.
@@ -867,7 +874,8 @@ the manifest names; no other docker or compose binary is ever run),
 `staging/host/` and `last-good/host/`.
 
 At its start and then every minute the loop reads the host's addresses again
-(`/proc/net/fib_trie`, `/proc/net/route`, `/proc/net/if_inet6`) and
+(`/proc/net/fib_trie`, `/proc/net/route`, `/proc/net/if_inet6`; on a Mac,
+`/sbin/ifconfig -a`) and
 `agent.toml` (one others may write, another user's or a link is refused as at
 the loop's start, and what the loop started with stays), and renders
 `etc/dispatcher.env` with them: the addresses,
@@ -1005,8 +1013,13 @@ the earlier image, proved the VM's Rosetta), and the new size still reaches
 the file. It runs the task firewall again after every start,
 hourly and after a wake (the VM itself applies it at boot). A tick more
 than a minute after the last means the Mac slept: the loop asks the
-pool at once and compares the VM's clock (`date` inside it) with the pool's
-`Date` through the Mac's own; beyond five seconds it sets the VM's clock to
+pool at once (and, since a Mac that woke may be on another network, reads
+its addresses again and asks the pool's edge for the public one) and
+compares the VM's clock (`date` inside it) with the pool's `Date` through
+the Mac's own. That `Date` is the host state's answer's, whatever its
+status: the host state is signed, and a Mac whose clock is too far off for
+the pool to take its signature (a 401) still hears the pool's time from the
+refusal. Beyond five seconds it sets the VM's clock to
 the pool's time, and restarts the profile (within the rate limit) when that
 does not hold. A Mac whose own clock is more than six seconds off the pool's
 is said ("needs a person"), never set; the VM is then held to the Mac's

@@ -541,6 +541,7 @@ mod tests {
     fn fixture() -> Sources {
         Sources {
             proc_net: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home"),
+            ifconfig: None,
         }
     }
 

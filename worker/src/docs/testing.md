@@ -726,8 +726,10 @@ budget's; the probe sidecar's word reaches the claim; a
 signed exception's task gets a bridge network; a stop removes only that
 task's container, sidecars and network. The agent's side of that file is
 unit-tested on interface lists (`crates/omarchy-agent/tests/fixtures/addresses/`:
-a home LAN host with docker's bridges and IPv6, a VPS with a public /32; a
-bridge on a global range kept, an address on `lo` but loopback's kept), on
+a home LAN host with docker's bridges and IPv6, a VPS with a public /32, and
+a Mac's `ifconfig -a` listing with its vmnet bridge and a VPN tunnel, read
+through a played `ifconfig` beside no `/proc/net`; a bridge on a global range
+kept, an address on `lo` but loopback's kept), on
 `/cdn-cgi/trace` answers (an IPv4 address in its v4-mapped form kept as
 IPv4), on two writers (a refresh waits for a rotation's lock and keeps its
 token), and in the run loop against the fake engine and pool (a new DHCP
@@ -796,7 +798,11 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   written; the native build image it lacks: no pull, no run, the file as it
   was. `run/agent_tests.rs` (`on_a_mac`) — the agent with its
   keeper: a wake polls the pool at once (no poll due) and the VM's clock is
-  set to the `Date` of that answer on the same tick; a start that ended
+  set to the `Date` of that answer on the same tick; a Mac whose clock the
+  pool refuses (a 401 for the signed host state) hearing the pool's time
+  from the refusal, said to need a person and its VM held to the Mac's; a
+  wake asking the pool's edge for the public address at once, which reaches
+  `etc/dispatcher.env` on that tick; a start that ended
   counts the capacity again, and a count that did not happen is tried again
   an hour later, not every tick; the applied release's minimum holds the
   size.
@@ -805,7 +811,8 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   its smoke run, none under `emulate = []` or when it fails, and Docker
   Desktop's VM at `vm-shared` only. `run/compose.rs` — a running task is any
   container labelled `com.omarchy.task` (a task with the `direct` exception
-  has no sidecar). `run/pool.rs` — the answer's `Date` header read;
+  has no sidecar). `run/pool.rs` — the answer's `Date` header read (the host
+  state's, whatever its status);
   `enroll.rs` — `token` and `enroll` find a Mac's set directory from
   agent.toml.
 - `install/tests.rs` — preflight and install on a played Mac (`os` macos;
@@ -839,7 +846,10 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   drop `--socket`; install making the set directory it was given, never the
   default (Linux and a Mac); the LaunchAgent written and bootstrapped in
   `gui/<uid>` (its plist checked by `plutil -lint` on the macOS runner), a
-  failed bootstrap's Terminal line, and uninstall.
+  failed bootstrap's Terminal line, and uninstall; `etc/dispatcher.env` in
+  the Mac's set directory with the token, the Mac's addresses (a played
+  `ifconfig`, no `/proc/net`) and the public one the probe task in the VM
+  saw, and the secrets directory the VM mounts.
 - `lint/tests.rs` — on a Mac every bind source lies under a directory the VM
   mounts (`vm_mount`); `run/selfupdate_tests.rs` — the watchdog ends a new
   agent still behind its shut gate 30 s past its deadline, and the next start

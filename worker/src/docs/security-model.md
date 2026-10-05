@@ -554,11 +554,14 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   dockerd is up, as on a Linux host, not when the agent next looks; it runs
   it again after every start, hourly and after a wake. A task reaches
   neither your LAN nor the Mac through Colima's NAT, and the egress probe
-  checks it before install goes on. Docker Desktop's or OrbStack's VM
+  checks it before install goes on; every task's egress sidecar also refuses
+  the Mac's own addresses (`/sbin/ifconfig -a`'s, a Mac having no `/proc`,
+  and the public one it leaves from, #371). Docker Desktop's or OrbStack's VM
   (`vm-shared`) is used only if it is already there, with nothing of the
   home directory shared with it and `--dedicated`; the agent puts nothing in
   it, and its egress probe decides. After a wake the agent holds the VM's
-  clock within five seconds of the pool's `Date`, but only while the Mac's
+  clock within five seconds of the pool's `Date` (the signed host state's
+  answer, a refusal's included), but only while the Mac's
   own clock agrees with it: a pool's answer never moves the VM's clock more
   than six seconds from the Mac's (a lying pool cannot take the VM's TLS
   checks back to a time whose certificates expired), and a Mac that is off

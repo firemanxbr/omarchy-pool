@@ -832,6 +832,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
             rosetta: root.join("rosetta"),
             mac_root: root.join("shared"),
             proc_net: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home"),
+            ifconfig: None,
         },
         source: Some(Source::Files(
             root.join("bundle.tar.gz"),
@@ -1677,6 +1678,21 @@ fn mac_host(min_cpus: u32) -> Host {
     fs::write(r.join("egress-nat"), EGRESS_NAT).unwrap();
     h.options.places.os = "macos";
     h.options.places.xdg_runtime_dir = None;
+    // No /proc on a Mac: its interfaces' addresses are `ifconfig -a`'s (#371).
+    h.options.places.proc_net = r.join("no-proc");
+    let ifconfig = r.join("ifconfig");
+    fs::write(
+        &ifconfig,
+        format!(
+            "#!/bin/sh\ncat '{}'\n",
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/addresses/mac/ifconfig")
+                .display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&ifconfig, fs::Permissions::from_mode(0o755)).unwrap();
+    h.options.places.ifconfig = Some(ifconfig);
     h.options.work_root = None;
     h.options.secrets_dir = None;
     h.options.socket = None;
@@ -2400,10 +2416,37 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
     let _ = fs::remove_dir_all(&home);
 }
 
+/// `etc/dispatcher.env` in the Mac's set directory, which the VM mounts: the token, the
+/// Mac's own addresses (`ifconfig`'s and the public one the probe task in the VM saw) and
+/// the secrets directory (#371).
+fn holds_the_macs_dispatcher_env(h: &Host) {
+    let set = h.root.join("shared/set");
+    let p = &h.options.places;
+    let env = fs::read_to_string(set.join("etc/dispatcher.env")).unwrap();
+    for want in [
+        format!("\nOMARCHY_WORKER_TOKEN=omw_{}\n", "0f".repeat(24)),
+        "\nOMARCHY_HOST_ADDRESSES=100.101.102.103,192.168.1.23,203.0.113.7,2001:db8:1:2::/64,fd7a:115c:a1e0::/64,fe80::/64\n".into(),
+        format!("\nOMARCHY_SECRETS_DIR={}\n", h.root.join("shared/secrets").display()),
+    ] {
+        assert!(env.contains(&want), "{want:?} in:\n{env}");
+    }
+    assert!(
+        !p.data.join("sets").exists(),
+        "nothing in the data directory's default set"
+    );
+}
+
 #[test]
 fn on_a_mac_install_writes_the_launchagent_and_bootstraps_it_in_the_gui_domain() {
     let h = mac_host(1);
     let p = &h.options.places;
+    // The probe task in the VM saw the pool see it come from the Mac's public address.
+    let egress = h.root.join("egress");
+    let seen = format!(
+        "{}\negress seen 203.0.113.7",
+        fs::read_to_string(&egress).unwrap()
+    );
+    fs::write(&egress, seen).unwrap();
     let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
     let mut sys = mac_sys(&h);
     let mut out = Vec::new();
@@ -2439,9 +2482,12 @@ fn on_a_mac_install_writes_the_launchagent_and_bootstraps_it_in_the_gui_domain()
         said.contains("loaded (gui/501)") && said.contains("isolation vm"),
         "{said}"
     );
-    // The token and the capacity report in the set directory the VM mounts, outside ~.
+    // The token and the capacity report in the set directory the VM mounts, outside ~;
+    // beside the token, the Mac's own addresses (ifconfig's and the public one the probe
+    // saw) and the secrets directory the VM mounts, for every task's egress (#371).
     let set = h.root.join("shared/set");
     assert!(set.join("etc/dispatcher.env").exists() && set.join("run/capacity.json").exists());
+    holds_the_macs_dispatcher_env(&h);
     let cap: serde_json::Value =
         serde_json::from_slice(&fs::read(set.join("run/capacity.json")).unwrap()).unwrap();
     assert_eq!(
