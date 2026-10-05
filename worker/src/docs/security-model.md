@@ -498,10 +498,19 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   would write through), each at its own path and none under the home
   directory — no `~/.ssh`, no Keychain files, no forwarded SSH agent; preflight
   checks from a container that the VM sees those three and not the home
-  directory, and the lint refuses a bind outside them. Docker Desktop's or
-  OrbStack's VM (`vm-shared`) is used only if it is already there, with its
-  home mount removed and `--dedicated`. The agent sets the VM's clock from the
-  Mac's own after a wake, never from the pool's answer.
+  directory, and the lint refuses a bind outside them. Inside the VM the
+  agent is root (Colima's passwordless sudo) and puts prep-root.sh's task
+  firewall there after every start — a boot loses it — so a task reaches
+  neither your LAN nor the Mac through Colima's NAT, and the egress probe
+  checks it before install goes on. Docker Desktop's or OrbStack's VM
+  (`vm-shared`) is used only if it is already there, with nothing of the
+  home directory shared with it and `--dedicated`; the agent puts nothing in
+  it, and its egress probe decides. After a wake the agent holds the VM's
+  clock within five seconds of the pool's `Date`, but only while the Mac's
+  own clock agrees with it: a pool's answer never moves the VM's clock more
+  than six seconds from the Mac's (a lying pool cannot take the VM's TLS
+  checks back to a time whose certificates expired), and a Mac that is off
+  is said, never set.
 
 ## Stopping a host
 

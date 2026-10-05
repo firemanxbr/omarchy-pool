@@ -217,7 +217,10 @@ macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
   cannot give it the release's minimum (4 CPUs, 8 GB) does not join. The
   agent starts, stops and sizes the profile itself, at most once every ten
   minutes and six times a day, and never restarts it for a new size while a
-  task runs.
+  task runs; after a resize it reports the VM's new size to the pool.
+- **Tasks reach only the internet.** The agent puts the same task firewall
+  in the VM as on a Linux host: a task reaches no address of your LAN, your
+  router or the Mac itself, which preflight's egress probe checks.
 - **An x86_64 lane through Rosetta.** With Rosetta 2 installed the VM runs
   with `--vz-rosetta` (4K pages): x86_64 builds run on a lane that reports
   `via: rosetta`, faster than qemu.

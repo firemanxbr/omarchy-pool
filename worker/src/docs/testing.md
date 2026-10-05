@@ -735,32 +735,77 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   saved `colima.yaml` read back (a size, a mount or Rosetta is a restart; the
   home mount, Colima's default with no mounts, a mount point elsewhere and a
   forwarded SSH agent are exposures; another VM type or architecture is the
-  person's to delete), the clock after a wake (set from the Mac's; a Mac off
-  the pool's said), an HTTP `Date`, and M7's rate limit.
+  person's to delete), the task firewall's script (prep-root.sh's step 9 for
+  the task subnets, DNS to the VM's resolvers before the drops, hooked in
+  once), Colima's environment (the pinned docker CLI first on its `PATH`,
+  the agent's own `DOCKER_CONFIG`), the clock after a wake (the VM held
+  within five seconds of the pool's `Date` through the Mac's own — 5 s
+  behind a Mac 5 s behind the pool is 10 s and set; a Mac off the pool's
+  said, the VM then held to the Mac's, a sleep's drift on top of it removed,
+  a `Date` years off moving nothing), an HTTP `Date`, and M7's rate limit.
 - `run/vm/` — the run loop's keeper on a played Colima: a stopped VM started
-  as a child the loop polls, the rate limit holding a second start and said
-  once, a size change waiting for running tasks (an engine that does not
-  answer counts as a task), an exposure restarted at once, only a start
-  while a self-update's gate is shut, a wake asking the pool now, the clock
-  set from the Mac's and the profile restarted when that does not hold.
+  as a child the loop polls (only once the pinned docker CLI is known, which
+  Colima needs), the rate limit holding a second start and said once, the
+  task firewall put in after every start, hourly and after a wake (one that
+  does not apply said and tried again), a size change waiting for running
+  tasks (an engine that does not answer counts as a task), a size below the
+  release's signed minimum neither started nor resized and one above the Mac
+  held to it, an exposure restarted at once, only a start while a
+  self-update's gate is shut, a wake asking the pool now, the clock set to
+  the pool's and the profile restarted when that does not hold, the clock
+  checked while a resize waits for tasks and beside an unreadable
+  `colima.yaml`; and the count after a start (a docker stub for the engine in
+  the VM): `run/capacity.json` rewritten with the VM's totals and the
+  Rosetta lane, unchanged when nothing changed, the lane left out under
+  `emulate = []`. `run/agent_tests.rs` (`on_a_mac`) — the agent with its
+  keeper: a wake polls the pool at once (no poll due) and the VM's clock is
+  set to the `Date` of that answer on the same tick; a start that ended
+  counts the capacity again; the applied release's minimum holds the size.
+  `capacity/tests.rs` — a Mac's facts, one function for install, `capacity`
+  and the count: the VM's level and `MemAvailable`, the Rosetta lane after
+  its smoke run, none under `emulate = []` or when it fails, and Docker
+  Desktop's VM at `vm-shared` only. `run/compose.rs` — a running task is any
+  container labelled `com.omarchy.task` (a task with the `direct` exception
+  has no sidecar). `run/pool.rs` — the answer's `Date` header read;
+  `enroll.rs` — `token` and `enroll` find a Mac's set directory from
+  agent.toml.
 - `install/tests.rs` — preflight and install on a played Mac (`os` macos;
   launchctl, sysctl, route and a Colima that saves its profile played; a
-  docker stub for the engine in the VM): the VM sized and started with only
-  its three mounts, `MemAvailable` read inside it, isolation `vm`, the
+  docker stub for the engine in the VM whose egress probe answers as Colima's
+  NAT until the task firewall went in): the VM sized and started with only
+  its three mounts, Colima given the pinned docker CLI on its `PATH` (a
+  played Colima refuses to start without it, as on a Mac with only Colima
+  and Lima from Homebrew) and the agent's `DOCKER_CONFIG`, the task firewall
+  put in after the start and before the probe (one that does not apply:
+  blocked, and the probe shows a task reaching the Mac's router and the Mac
+  at `192.168.5.2`), `MemAvailable` read inside it, isolation `vm`, the
   envelope's `[vm]` and two sockets read back by the run loop and the lint;
-  a Mac below the minimum, a directory under `~` or a missing one starting no
-  VM; over SSH with no GUI login, the Terminal instruction and nothing
-  written; a saved profile that mounts `~` or forwards the SSH agent restarted,
-  one of another VM type refused; the home directory visible in the VM
-  refused; Rosetta's lane after its smoke run, off when it fails; Docker
-  Desktop taken as `vm-shared` only with `--dedicated`; the LaunchAgent
-  written and bootstrapped in `gui/<uid>` (its plist checked by `plutil
-  -lint` on the macOS runner), a failed bootstrap's Terminal line, and
-  uninstall.
+  a Mac below the minimum or a directory under `~` starting no VM; the three
+  directories missing (Colima installed by hand): preflight says install
+  makes them and starts nothing, install makes them 0700 and starts the VM,
+  one whose parent this user cannot write refused; preflight never
+  restarting a running VM that differs, install refusing to while a task
+  runs in it and counting the action before the stop; `--rosetta`,
+  `--no-rosetta` and agent.toml's `[vm] rosetta` carried over a repair; over
+  SSH with no GUI login, the Terminal instruction and nothing written; a
+  saved profile that mounts `~` or forwards the SSH agent restarted, one of
+  another VM type refused; the home directory visible in the VM refused;
+  Rosetta's lane after its smoke run, off when it fails; Docker Desktop
+  taken as `vm-shared` only with `--dedicated`, no firewall put in it (its
+  probe decides), a shared `~/.ssh` refused though `~` is not, and a given
+  socket that does not answer told to start Docker Desktop or OrbStack or
+  drop `--socket`; install making the set directory it was given, never the
+  default (Linux and a Mac); the LaunchAgent written and bootstrapped in
+  `gui/<uid>` (its plist checked by `plutil -lint` on the macOS runner), a
+  failed bootstrap's Terminal line, and uninstall.
 - `lint/tests.rs` — on a Mac every bind source lies under a directory the VM
   mounts (`vm_mount`); `run/selfupdate_tests.rs` — the watchdog ends a new
   agent still behind its shut gate 30 s past its deadline, and the next start
-  rolls it back (launchd restarts only on exit).
+  rolls it back (launchd restarts only on exit); its first look after a
+  sleep (a wall-clock gap between two looks) starts the count again instead
+  of ending a loop whose first tick after the wake is a slow one; under
+  launchd (`XPC_SERVICE_NAME`) a refused agent.toml is waited on until it
+  changes, not said every 10 s.
 - `bash tests/prep-mac.sh` (CI) — `factory/host/prep-mac.sh` against stubs
   (uname, id, sw_vers, brew, stat), under dash: Colima and Lima only, the
   three directories 0700, nothing changed on a second run, `--dry-run`, and
