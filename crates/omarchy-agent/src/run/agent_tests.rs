@@ -966,6 +966,9 @@ mod on_a_mac {
         // The Mac slept: the VM's clock stayed 40 minutes behind, and no poll is due yet.
         colima.borrow_mut().skew = -2400;
         w.agent.state.poll.next_at = w.now + 600;
+        // The pool's Date at the wake's poll is its time then, not the first poll's: the
+        // test's own pauses are not a Mac clock off the pool's.
+        dated(&w);
         let follows = w.remote.borrow().follows;
         w.tick(crate::vm::WAKE_GAP_S + 1);
         assert_eq!(w.remote.borrow().follows, follows + 1, "{}", w.journal());
