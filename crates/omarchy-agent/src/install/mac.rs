@@ -235,7 +235,8 @@ pub(crate) fn ensure_profile(
             ));
         }
     }
-    // The task firewall, before the egress probe judges it (a boot of the VM loses it).
+    // The task firewall, kept for the VM's every boot and applied now, before the egress
+    // probe judges it.
     wall(sys, env, ask.subnets, r);
     // What it saved, read back: nothing of the person's may be in it.
     match std::fs::read_to_string(&cfg_path).map(|t| vm::parse_config(&t)) {
@@ -274,7 +275,7 @@ fn wall(sys: &mut dyn Sys, env: &[(&'static str, String)], subnets: &[Cidr], r: 
     args.extend(vm::as_root(&script));
     match colima(sys, env, &args) {
         Ok(_) => r.notes.push(format!(
-            "the {} VM's task firewall is in place: the task subnets reach no private, CGNAT, link-local or VM address",
+            "the {} VM's task firewall is in place, and applied at its every boot: the task subnets reach no private, CGNAT, link-local or VM address",
             vm::PROFILE
         )),
         Err(e) => r.blockers.push(format!(
@@ -348,7 +349,7 @@ pub(crate) fn engine(o: &Options, sys: &mut dyn Sys, ask: &Ask<'_>, r: &mut Repo
                 e
             } else {
                 format!(
-                    "nothing answers on {}: start Docker Desktop or OrbStack, or leave out --socket (and agent.toml's set.socket_cli) to use the agent's own omarchy Colima VM (factory/host/prep-mac.sh installs Colima)",
+                    "no container engine answers on {}: start Docker Desktop or OrbStack, or leave out --socket (and agent.toml's set.socket_cli) to use the agent's own omarchy Colima VM (factory/host/prep-mac.sh installs Colima)",
                     list.iter()
                         .map(|p| p.display().to_string())
                         .collect::<Vec<_>>()

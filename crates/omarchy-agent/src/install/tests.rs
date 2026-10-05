@@ -1682,22 +1682,25 @@ fn with_only_colima_installed_install_makes_the_three_directories_and_preflight_
         assert_eq!(mode(&shared.join(d)), 0o700, "{d}");
     }
     assert_eq!(starts(&sys).len(), 1);
-    // One whose parent this user cannot write is prep-mac.sh's (or another path's).
-    let h = mac_host(1);
-    fs::create_dir_all(h.root.join("locked")).unwrap();
-    fs::set_permissions(h.root.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
-    let mut o = h.options.clone();
-    o.work_root = Some(h.root.join("locked/work"));
-    let (r, _) = measure(&o, &mut mac_sys(&h), &verifier(), Some(&h.docker))
-        .map_err(|e| e.to_string())
-        .unwrap();
-    fs::set_permissions(h.root.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(
-        r.screen()
-            .contains("is not writable by this user: run factory/host/prep-mac.sh"),
-        "{}",
-        r.screen()
-    );
+    // One whose parent this user cannot write is prep-mac.sh's (or another path's); root
+    // may write anywhere, so the check has nothing to refuse there.
+    if files::euid() != 0 {
+        let h = mac_host(1);
+        fs::create_dir_all(h.root.join("locked")).unwrap();
+        fs::set_permissions(h.root.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+        let mut o = h.options.clone();
+        o.work_root = Some(h.root.join("locked/work"));
+        let (r, _) = measure(&o, &mut mac_sys(&h), &verifier(), Some(&h.docker))
+            .map_err(|e| e.to_string())
+            .unwrap();
+        fs::set_permissions(h.root.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            r.screen()
+                .contains("is not writable by this user: run factory/host/prep-mac.sh"),
+            "{}",
+            r.screen()
+        );
+    }
 }
 
 #[test]
@@ -2138,8 +2141,12 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
     .map_err(|e| e.to_string())
     .unwrap();
     let screen = r.screen();
+    // The same first words as on Linux, which tests/cli.rs looks for on either runner.
     assert!(
-        screen.contains("start Docker Desktop or OrbStack, or leave out --socket"),
+        screen.contains(&format!(
+            "no container engine answers on {}: start Docker Desktop or OrbStack, or leave out --socket",
+            home.join(".orbstack/run/docker.sock").display()
+        )),
         "{screen}"
     );
     assert!(
