@@ -3,8 +3,10 @@
 //! long (a pull, a stop) is started and then polled.
 //!
 //! The driver never learns about tasks: it sees only the set's compose project, and task
-//! containers are the dispatcher's. Capacity (`capacity()`, #333), fingerprinting (#317)
-//! and emulation (P2) join this trait in their own issues.
+//! containers are the dispatcher's. Capacity (`capacity()`, #333) and fingerprinting
+//! (#317) join this trait in their own issues; the emulated lane's smoke run (§15's
+//! `emulation(arch, image)`, #338) is `capacity::emulation::Smoke` on the probe's engine
+//! CLI until then, and joins it with `capacity()` when the run loop detects.
 
 use std::path::PathBuf;
 

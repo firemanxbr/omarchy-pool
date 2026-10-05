@@ -52,6 +52,15 @@
 //! A probe sidecar ([`probe`]) says who this host's agent is with every
 //! claim (`agent`) and answers `recheck-agent` and `restart-agent`.
 //!
+//! **Lanes** (#338, design v2 §7.4, §7.5): a build or a trial runs on the
+//! lane the pool leased it on — its architecture's `--platform`, natively
+//! or emulated through the host's binfmt handler when `run/capacity.json`
+//! lists that emulated lane — and only a container on an emulated lane is
+//! told so (`WORKER_LABELS={"emulated":true}`); an audit runs natively. A
+//! lease on a lane the host does not run now is handed back `lost` before
+//! anything starts, and the claim offers no emulated lane without its
+//! build image by digest.
+//!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
 //! restart makes the dispatcher exit 75 (tasks survive), recheck-agent and
@@ -1634,12 +1643,27 @@ fn lane_of(
                 emulated: true,
             })
         }
-        other => Err(format!(
-            "this host runs no {} lane of {} (its native lane is {native}, its emulated ones {}): handed back",
-            other.unwrap_or("native"),
-            task.arch,
-            cap.map_or_else(|| "unknown".to_owned(), |c| if c.emulated.is_empty() { "none".to_owned() } else { c.emulated.join(", ") }),
-        )),
+        other => {
+            let word = match other {
+                None | Some("native") => "native",
+                Some("emulated") => "emulated",
+                Some(_) => "such",
+            };
+            let emulated = cap.map_or_else(
+                || "unknown".to_owned(),
+                |c| {
+                    if c.emulated.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        c.emulated.join(", ")
+                    }
+                },
+            );
+            Err(format!(
+                "this host runs no {word} lane of {} (its native lane is {native}, its emulated ones {emulated}): handed back",
+                task.arch
+            ))
+        }
     }
 }
 

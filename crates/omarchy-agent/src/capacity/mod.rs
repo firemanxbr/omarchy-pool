@@ -23,17 +23,18 @@
 //! exceed `units`, and gives each task `--cpus` and the job counts of its share (#335,
 //! #337); the driver trait (#315) wraps [`probe::engine`] as its `capacity()` and the
 //! smoke run ([`emulation::Smoke`] on [`probe::Probe`]) as its `emulation()`, and runs the
-//! engine CLI under a cleared environment.
+//! engine CLI under a cleared environment. Also for #315: one `agent.toml` reader in
+//! place of [`AgentToml`] and `lint::Envelope::from_agent_toml`, with one closed
+//! `[envelope]` schema (until then [`AgentToml::parse`] refuses a key design v2 §12 does
+//! not name); whether a change of free disk alone (in `DISK_STEP_GB` steps, at most
+//! hourly) is worth a whole round; and the set directory's files opened with `openat` and
+//! `O_NOFOLLOW` (until then [`write_if_changed`] refuses a linked `run/` or
+//! `capacity.json`).
 //!
 //! [`emulation`] (#338, design v2 §7.5) adds the foreign architecture's lane to `lanes`
 //! when the envelope allows it, binfmt is there and the smoke run passes — on 16K pages
 //! too (D33) — and says why it is held otherwise (`held_lanes`); the native lane never
-//! depends on it. Also for #315: one `agent.toml` reader in place of [`AgentToml`] and
-//! `lint::Envelope::from_agent_toml`, with one closed `[envelope]` schema (until then
-//! [`AgentToml::parse`] refuses a key design v2 §12 does not name); whether a change of
-//! free disk alone (in `DISK_STEP_GB` steps, at most hourly) is worth a whole round; and
-//! the set directory's files opened with `openat` and `O_NOFOLLOW` (until then
-//! [`write_if_changed`] refuses a linked `run/` or `capacity.json`).
+//! depends on it.
 
 pub mod emulation;
 pub mod probe;
