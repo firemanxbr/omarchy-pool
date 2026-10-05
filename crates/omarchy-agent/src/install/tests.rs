@@ -377,35 +377,69 @@ fn a_task_that_reaches_its_networks_gateway_on_any_port_fails_the_probe_with_wha
 /// prep-root.sh's firewall script for the default task subnets, as it writes it (step 9).
 const FIREWALL: &str = "#!/bin/sh\nset -e\niptables -N OMARCHY-TASKS-HOST 2>/dev/null || true\niptables -F OMARCHY-TASKS-HOST\niptables -A OMARCHY-TASKS-HOST -s 10.231.0.0/16 -j DROP\niptables -C INPUT -j OMARCHY-TASKS-HOST 2>/dev/null || iptables -I INPUT -j OMARCHY-TASKS-HOST\n";
 
+/// prep-root.sh's firewall as it leaves it (step 9): `script`, and its unit there and enabled.
+fn installed(script: &str) -> egress::Firewall<'_> {
+    egress::Firewall {
+        script: Some(script),
+        unit: true,
+        enabled: true,
+    }
+}
+
+/// prep-root.sh's firewall on a test host as step 9 leaves it: its script, its unit, and the
+/// unit's link in `multi-user.target.wants` (`systemctl enable`'s).
+fn prepare(root: &Path) {
+    fs::write(root.join("omarchy-task-firewall"), FIREWALL).unwrap();
+    let wants = root.join("systemd/multi-user.target.wants");
+    fs::create_dir_all(&wants).unwrap();
+    fs::write(
+        root.join("systemd/omarchy-task-firewall.service"),
+        "[Install]\nWantedBy=multi-user.target\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../omarchy-task-firewall.service",
+        wants.join("omarchy-task-firewall.service"),
+    )
+    .unwrap();
+}
+
+/// No firewall of prep-root.sh's at all.
+const NONE: egress::Firewall<'static> = egress::Firewall {
+    script: None,
+    unit: false,
+    enabled: false,
+};
+
 #[test]
 fn a_rootful_host_is_told_the_command_that_puts_prep_roots_input_drop_in_place() {
     let task = net::parse_list(TASK_SUBNETS).unwrap();
     let w = Path::new("/srv/omarchy-pool/host");
     let prep = "sudo factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-pool/host --task-subnets 10.231.0.0/16";
     assert_eq!(
-        egress::firewall_command(None, None, &task, "omarchy", w, TASK_SUBNETS),
+        egress::firewall_command(NONE, None, &task, "omarchy", w, TASK_SUBNETS),
         prep
     );
     assert_eq!(
-        egress::unprepared(None, &task).as_deref(),
-        Some("it is not there")
+        egress::unprepared(NONE, &task).as_deref(),
+        Some("/usr/local/libexec/omarchy-task-firewall, its unit's script, is not there")
     );
-    // prep-root.sh's script, which drops these subnets: installed. A rule flushed since it
-    // ran is put back by its unit.
-    assert_eq!(egress::unprepared(Some(FIREWALL), &task), None);
+    // prep-root.sh's script, which drops these subnets, and its unit, enabled: installed. A
+    // rule flushed since it ran is put back by its unit.
+    assert_eq!(egress::unprepared(installed(FIREWALL), &task), None);
     assert_eq!(
-        egress::firewall_command(Some(FIREWALL), None, &task, "omarchy", w, TASK_SUBNETS),
+        egress::firewall_command(installed(FIREWALL), None, &task, "omarchy", w, TASK_SUBNETS),
         "sudo systemctl restart omarchy-task-firewall.service"
     );
     // One that drops other subnets, or not all of these, or never jumps from INPUT: not
-    // installed, and prep-root.sh again, with these.
+    // installed, and prep-root.sh again, with these, whatever the unit.
     let two = net::parse_list("10.231.0.0/16,10.232.0.0/16").unwrap();
     assert_eq!(
-        egress::unprepared(Some(FIREWALL), &two).as_deref(),
-        Some("it does not drop 10.232.0.0/16")
+        egress::unprepared(installed(FIREWALL), &two).as_deref(),
+        Some("/usr/local/libexec/omarchy-task-firewall, its unit's script, does not drop 10.232.0.0/16")
     );
     assert!(egress::firewall_command(
-        Some(FIREWALL),
+        installed(FIREWALL),
         None,
         &two,
         "omarchy",
@@ -415,22 +449,29 @@ fn a_rootful_host_is_told_the_command_that_puts_prep_roots_input_drop_in_place()
     .ends_with("--task-subnets 10.231.0.0/16,10.232.0.0/16"));
     let no_jump = FIREWALL.replace("iptables -C INPUT", "# iptables -C INPUT");
     assert_eq!(
-        egress::unprepared(Some(&no_jump), &task).as_deref(),
-        Some("it does not jump from INPUT to OMARCHY-TASKS-HOST")
+        egress::unprepared(installed(&no_jump), &task).as_deref(),
+        Some("/usr/local/libexec/omarchy-task-firewall, its unit's script, does not jump from INPUT to OMARCHY-TASKS-HOST")
     );
     assert_eq!(
-        egress::firewall_command(Some("#!/bin/sh\n"), None, &task, "omarchy", w, TASK_SUBNETS),
+        egress::firewall_command(
+            installed("#!/bin/sh\n"),
+            None,
+            &task,
+            "omarchy",
+            w,
+            TASK_SUBNETS
+        ),
         prep
     );
     // The address pool daemon.json names is carried, or prep-root.sh would set its own default;
     // one prep-root.sh would not keep as it is is said.
     let pool = r#"{"default-address-pools":[{"base":"10.200.0.0/16","size":24}],"userns-remap":"default"}"#;
     assert_eq!(
-        egress::firewall_command(None, Some(pool), &task, "omarchy", w, TASK_SUBNETS),
+        egress::firewall_command(NONE, Some(pool), &task, "omarchy", w, TASK_SUBNETS),
         format!("{prep} --address-pool 10.200.0.0/16")
     );
     let pools = r#"{"default-address-pools":[{"base":"10.200.0.0/16","size":26},{"base":"10.201.0.0/16","size":24}]}"#;
-    let c = egress::firewall_command(None, Some(pools), &task, "omarchy", w, TASK_SUBNETS);
+    let c = egress::firewall_command(NONE, Some(pools), &task, "omarchy", w, TASK_SUBNETS);
     assert!(
         c.starts_with(&format!("{prep} --address-pool 10.200.0.0/16 ("))
             && c.contains("check it first"),
@@ -438,14 +479,14 @@ fn a_rootful_host_is_told_the_command_that_puts_prep_roots_input_drop_in_place()
     );
     for none in ["{}", "not json", r#"{"default-address-pools":[]}"#] {
         assert_eq!(
-            egress::firewall_command(None, Some(none), &task, "omarchy", w, TASK_SUBNETS),
+            egress::firewall_command(NONE, Some(none), &task, "omarchy", w, TASK_SUBNETS),
             prep
         );
     }
     // Every word is one shell word.
     assert_eq!(
         egress::firewall_command(
-            None,
+            NONE,
             None,
             &task,
             "o'mar chy",
@@ -461,7 +502,47 @@ fn a_rootful_host_is_told_the_command_that_puts_prep_roots_input_drop_in_place()
         r#""iptables -C INPUT -j OMARCHY-TASKS-HOST 2>/dev/null || iptables -I INPUT -j OMARCHY-TASKS-HOST")"#
     ));
     assert!(prep_root.contains("put /usr/local/libexec/omarchy-task-firewall 0755"));
+    assert!(prep_root.contains("put /etc/systemd/system/omarchy-task-firewall.service 0644"));
+    assert!(prep_root.contains("'WantedBy=multi-user.target'"));
     assert!(prep_root.contains(r#"address_pool="172.16.0.0/12""#));
+}
+
+#[test]
+fn a_firewall_unit_that_does_not_run_at_boot_is_not_prepared() {
+    let task = net::parse_list(TASK_SUBNETS).unwrap();
+    let w = Path::new("/srv/omarchy-pool/host");
+    let prep = "sudo factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-pool/host --task-subnets 10.231.0.0/16";
+    // The unit disabled (or never enabled): the rule may be in effect now, but nothing puts it
+    // back at boot, and nothing probes again after install. Enabled, then restarted.
+    let disabled = egress::Firewall {
+        enabled: false,
+        ..installed(FIREWALL)
+    };
+    assert_eq!(
+        egress::unprepared(disabled, &task).as_deref(),
+        Some("omarchy-task-firewall.service, the unit that runs /usr/local/libexec/omarchy-task-firewall at boot, is not enabled (/etc/systemd/system/multi-user.target.wants has no link to it), so a reboot takes the drop away")
+    );
+    assert_eq!(
+        egress::firewall_command(disabled, None, &task, "omarchy", w, TASK_SUBNETS),
+        "sudo systemctl enable omarchy-task-firewall.service && sudo systemctl restart omarchy-task-firewall.service"
+    );
+    // The unit removed, the script left: systemctl has nothing to restart, and prep-root.sh
+    // writes the unit again and enables it. A link left behind changes nothing.
+    for enabled in [false, true] {
+        let gone = egress::Firewall {
+            unit: false,
+            enabled,
+            ..installed(FIREWALL)
+        };
+        assert_eq!(
+            egress::unprepared(gone, &task).as_deref(),
+            Some("/etc/systemd/system/omarchy-task-firewall.service, the unit that runs /usr/local/libexec/omarchy-task-firewall at boot, is not there")
+        );
+        assert_eq!(
+            egress::firewall_command(gone, None, &task, "omarchy", w, TASK_SUBNETS),
+            prep
+        );
+    }
 }
 
 /// A process in a stand-in `/proc`: its command line, NUL-separated.
@@ -1135,6 +1216,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
             binfmt: root.join("binfmt"),
             proc_net: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home"),
             task_firewall: root.join("omarchy-task-firewall"),
+            systemd_system: root.join("systemd"),
             docker_daemon: root.join("daemon.json"),
             proc: root.join("proc"),
         },
@@ -1354,7 +1436,7 @@ fn a_rootful_host_whose_tasks_reach_it_through_their_bridge_is_refused_with_the_
         h.root.join("work").display()
     );
     assert!(
-        s.contains("prep-root.sh's INPUT drop for the task subnets (OMARCHY-TASKS-HOST) is not installed: /usr/local/libexec/omarchy-task-firewall, its unit's script, it is not there"),
+        s.contains("prep-root.sh's INPUT drop for the task subnets (OMARCHY-TASKS-HOST) is not installed: /usr/local/libexec/omarchy-task-firewall, its unit's script, is not there"),
         "{s}"
     );
     assert!(
@@ -1384,14 +1466,14 @@ fn a_rootful_host_whose_tasks_reach_it_through_their_bridge_is_refused_with_the_
     let (r, _) = measure_on(&h, &mut Fake::default());
     assert!(
         r.screen()
-            .contains("its unit's script, it does not drop 10.231.0.0/16"),
+            .contains("its unit's script, does not drop 10.231.0.0/16"),
         "{}",
         r.screen()
     );
 
-    // The unit's script drops the task subnets, and the probe still reaches the host: the rule
-    // was flushed since, and the unit puts it back.
-    fs::write(h.root.join("omarchy-task-firewall"), FIREWALL).unwrap();
+    // The unit's script drops the task subnets, its unit is enabled, and the probe still
+    // reaches the host: the rule was flushed since, and the unit puts it back.
+    prepare(&h.root);
     let (r, _) = measure_on(&h, &mut Fake::default());
     let s = r.screen();
     assert!(!s.contains("is not installed"), "{s}");
@@ -1424,10 +1506,68 @@ fn a_rootful_host_whose_tasks_reach_it_through_their_bridge_is_refused_with_the_
 }
 
 #[test]
+fn a_rootful_host_whose_firewall_unit_does_not_run_at_boot_is_refused_with_the_command_to_run() {
+    // The script drops the task subnets, but the host answers: restarting the unit alone,
+    // when it is not enabled, would last until the next reboot.
+    let h = host(
+        &rootful_info(),
+        &EGRESS_OK
+            .replace("gateway-22 blocked", "gateway-22 refused")
+            .replace("lan blocked", "lan refused"),
+    );
+    prepare(&h.root);
+    let wanted = h
+        .root
+        .join("systemd/multi-user.target.wants/omarchy-task-firewall.service");
+    fs::remove_file(&wanted).unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    let s = r.screen();
+    assert!(s.contains("is not installed: omarchy-task-firewall.service, the unit that runs /usr/local/libexec/omarchy-task-firewall at boot, is not enabled"), "{s}");
+    assert_eq!(r.blockers.len(), 3, "{s}");
+    assert!(
+        r.blockers.iter().all(|b| b.ends_with(
+            "run sudo systemctl enable omarchy-task-firewall.service && sudo systemctl restart omarchy-task-firewall.service"
+        )),
+        "{s}"
+    );
+    // The unit removed, the script left: there is nothing to restart, and prep-root.sh writes
+    // it again.
+    fs::remove_file(h.root.join("systemd/omarchy-task-firewall.service")).unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    let s = r.screen();
+    assert!(s.contains("is not installed: /etc/systemd/system/omarchy-task-firewall.service, the unit that runs /usr/local/libexec/omarchy-task-firewall at boot, is not there"), "{s}");
+    assert_eq!(r.blockers.len(), 3, "{s}");
+    let cmd = format!(
+        "run sudo factory/host/prep-root.sh --user omarchy --work-root {} --task-subnets 10.231.0.0/16",
+        h.root.join("work").display()
+    );
+    assert!(r.blockers.iter().all(|b| b.ends_with(&cmd)), "{s}");
+
+    // The drop in effect now, and nothing reaches the host, but its unit is not enabled: the
+    // next reboot takes it away, and nothing probes again after install. Refused.
+    let d = host(&rootful_info(), EGRESS_OK);
+    prepare(&d.root);
+    fs::remove_file(
+        d.root
+            .join("systemd/multi-user.target.wants/omarchy-task-firewall.service"),
+    )
+    .unwrap();
+    let (r, ready) = measure_on(&d, &mut Fake::default());
+    assert!(ready.is_none());
+    assert_eq!(r.blockers.len(), 1, "{}", r.screen());
+    assert!(
+        r.blockers[0].contains("is not enabled")
+            && r.blockers[0].ends_with("run sudo systemctl enable omarchy-task-firewall.service && sudo systemctl restart omarchy-task-firewall.service"),
+        "{}",
+        r.screen()
+    );
+}
+
+#[test]
 fn a_rootful_host_with_prep_roots_input_drop_passes_and_its_task_networks_are_probed_too() {
     // Installed, and nothing answers there: both probes pass.
     let h = host(&rootful_info(), EGRESS_OK);
-    fs::write(h.root.join("omarchy-task-firewall"), FIREWALL).unwrap();
+    prepare(&h.root);
     let (r, ready) = measure_on(&h, &mut Fake::default());
     assert!(r.ok() && ready.is_some(), "{}", r.screen());
     for note in [
@@ -1440,7 +1580,7 @@ fn a_rootful_host_with_prep_roots_input_drop_passes_and_its_task_networks_are_pr
     // podman behind its docker API, rootful: a task's own network keeps a gateway on the
     // host, which the same drop closes.
     let h = host(&rootful_info(), EGRESS_OK);
-    fs::write(h.root.join("omarchy-task-firewall"), FIREWALL).unwrap();
+    prepare(&h.root);
     fs::write(
         h.root.join("version"),
         r#"{"Version":"4.9.3","Components":[{"Name":"Podman Engine","Version":"4.9.3"}]}"#,
@@ -1466,7 +1606,7 @@ fn a_rootful_host_with_prep_roots_input_drop_passes_and_its_task_networks_are_pr
 
     // A Docker older than 28 cannot keep the gateway off: refused, as the dispatcher refuses it.
     let h = host(&rootful_info(), EGRESS_OK);
-    fs::write(h.root.join("omarchy-task-firewall"), FIREWALL).unwrap();
+    prepare(&h.root);
     fs::write(
         h.root.join("version"),
         r#"{"Version":"27.5.1","Components":[{"Name":"Engine","Version":"27.5.1"}]}"#,

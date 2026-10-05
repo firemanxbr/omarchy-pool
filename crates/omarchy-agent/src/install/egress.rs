@@ -20,12 +20,13 @@
 //!    podman's docker API there is one, the host's own on a rootful engine (prep-root.sh's
 //!    INPUT drop closes it there) and rootless podman's namespace otherwise.
 //!
-//! On a rootful engine preflight also reads prep-root.sh's firewall script, which is
-//! world-readable: one that does not drop every task subnet, or none, refuses the install with
-//! the command that installs it ([`unprepared`], [`firewall_command`]), whatever the probe
-//! says, since a host's own firewall may close the ports probed and leave the others open. The
-//! agent is never root and cannot read the rules in effect: the probe is what shows they hold
-//! (a rule flushed since the unit ran is refused with the command that puts it back).
+//! On a rootful engine preflight also reads prep-root.sh's firewall script and its boot unit,
+//! which are world-readable: a script that does not drop every task subnet, or none, or a unit
+//! that is not there or not enabled (a reboot would take the drop away), refuses the install
+//! with the command that installs it ([`unprepared`], [`firewall_command`]), whatever the
+//! probe says, since a host's own firewall may close the ports probed and leave the others
+//! open. The agent is never root and cannot read the rules in effect: the probe is what shows
+//! they hold (a rule flushed since the unit ran is refused with the command that puts it back).
 //!
 //! On a rootless engine there is no such rule, and what could reach the host is the user-mode
 //! network stack's host loopback: while both probe tasks run, preflight reads the stack's
@@ -423,29 +424,78 @@ impl Advice {
     }
 }
 
-/// Why prep-root.sh's INPUT drop for the task subnets is not installed, if it is not (#367):
-/// its unit's script (`/usr/local/libexec/omarchy-task-firewall`, world-readable) is not
-/// there, does not jump from INPUT to `OMARCHY-TASKS-HOST`, or does not drop a task subnet
-/// there. It says what the unit puts in place at boot, not what is in effect now: the probe
-/// shows that.
-pub(crate) fn unprepared(script: Option<&str>, task: &[Cidr]) -> Option<String> {
+/// prep-root.sh's firewall script, which its unit runs (#367).
+const FIREWALL_SCRIPT: &str = "/usr/local/libexec/omarchy-task-firewall";
+/// prep-root.sh's boot unit for that script, in `/etc/systemd/system`, after docker (#367).
+pub(crate) const UNIT: &str = "omarchy-task-firewall.service";
+
+/// prep-root.sh's firewall as preflight reads it without root, every file of it
+/// world-readable (#367): its unit's script, and whether the unit that runs that script at
+/// boot is there and enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Firewall<'a> {
+    /// `/usr/local/libexec/omarchy-task-firewall`, when it is there.
+    pub script: Option<&'a str>,
+    /// `/etc/systemd/system/omarchy-task-firewall.service` is there.
+    pub unit: bool,
+    /// The unit's link in `/etc/systemd/system/multi-user.target.wants`, which
+    /// `systemctl enable` makes from prep-root.sh's `WantedBy=multi-user.target`: without it
+    /// the unit never runs at boot, and a reboot takes the drop away while nothing after
+    /// install probes again.
+    pub enabled: bool,
+}
+
+impl<'a> Firewall<'a> {
+    /// The unit and its link in `systemd` (`/etc/systemd/system`), with the script read.
+    pub fn read(script: Option<&'a str>, systemd: &Path) -> Self {
+        Firewall {
+            script,
+            unit: systemd.join(UNIT).is_file(),
+            enabled: systemd.join("multi-user.target.wants").join(UNIT).exists(),
+        }
+    }
+}
+
+/// Why prep-root.sh's firewall script does not drop the task subnets, if it does not: it is
+/// not there, does not jump from INPUT to `OMARCHY-TASKS-HOST`, or does not drop a task
+/// subnet there.
+fn unscripted(script: Option<&str>, task: &[Cidr]) -> Option<String> {
     let Some(script) = script else {
-        return Some("it is not there".into());
+        return Some("is not there".into());
     };
     let has = |rule: &str| script.lines().any(|l| l.trim() == rule);
     if !has("iptables -C INPUT -j OMARCHY-TASKS-HOST 2>/dev/null || iptables -I INPUT -j OMARCHY-TASKS-HOST") {
-        return Some("it does not jump from INPUT to OMARCHY-TASKS-HOST".into());
+        return Some("does not jump from INPUT to OMARCHY-TASKS-HOST".into());
     }
     let missing: Vec<String> = task
         .iter()
         .filter(|c| !has(&format!("iptables -A OMARCHY-TASKS-HOST -s {c} -j DROP")))
         .map(ToString::to_string)
         .collect();
+    (!missing.is_empty()).then(|| format!("does not drop {}", missing.join(", ")))
+}
+
+/// Why prep-root.sh's INPUT drop for the task subnets is not installed, if it is not (#367):
+/// its unit's script does not drop every task subnet ([`unscripted`]), or the unit that runs
+/// it at boot is not there, or is not enabled. It says what puts the drop in place at boot,
+/// not what is in effect now: the probe shows that.
+pub(crate) fn unprepared(fw: Firewall<'_>, task: &[Cidr]) -> Option<String> {
     if task.is_empty() {
-        Some("there is no task subnet to read it for".into())
-    } else {
-        (!missing.is_empty()).then(|| format!("it does not drop {}", missing.join(", ")))
+        return Some(format!(
+            "there is no task subnet to read {FIREWALL_SCRIPT} for"
+        ));
     }
+    if let Some(why) = unscripted(fw.script, task) {
+        return Some(format!("{FIREWALL_SCRIPT}, its unit's script, {why}"));
+    }
+    if !fw.unit {
+        return Some(format!(
+            "/etc/systemd/system/{UNIT}, the unit that runs {FIREWALL_SCRIPT} at boot, is not there"
+        ));
+    }
+    (!fw.enabled).then(|| format!(
+        "{UNIT}, the unit that runs {FIREWALL_SCRIPT} at boot, is not enabled (/etc/systemd/system/multi-user.target.wants has no link to it), so a reboot takes the drop away"
+    ))
 }
 
 /// `s` as one shell word: as it is when it needs no quoting, else in single quotes.
@@ -461,21 +511,27 @@ fn sh(s: &str) -> Cow<'_, str> {
 }
 
 /// The command that puts prep-root.sh's INPUT drop for the task subnets in place (#367).
-/// When its unit's script already drops every task subnet ([`unprepared`]) the rule was
-/// flushed since it ran (a firewall reload), and restarting the unit puts it back; otherwise
-/// prep-root.sh, with this install's user, work root and task subnets, and the base of
-/// docker's default address pools `/etc/docker/daemon.json` (`daemon_json`, world-readable)
-/// names, since prep-root.sh sets it to its own default otherwise.
+/// When its unit's script drops every task subnet ([`unscripted`]) and the unit is there,
+/// the unit puts the rule back: restarted, when the rule was flushed since it ran (a firewall
+/// reload), and enabled first when it is not, or the next reboot takes the rule away again.
+/// Otherwise prep-root.sh, which writes both and enables the unit, with this install's user,
+/// work root and task subnets, and the base of docker's default address pools
+/// `/etc/docker/daemon.json` (`daemon_json`, world-readable) names, since prep-root.sh sets
+/// it to its own default otherwise.
 pub(crate) fn firewall_command(
-    script: Option<&str>,
+    fw: Firewall<'_>,
     daemon_json: Option<&str>,
     task: &[Cidr],
     user: &str,
     work_root: &Path,
     task_subnets: &str,
 ) -> String {
-    if unprepared(script, task).is_none() {
-        return "sudo systemctl restart omarchy-task-firewall.service".into();
+    if !task.is_empty() && unscripted(fw.script, task).is_none() && fw.unit {
+        return if fw.enabled {
+            format!("sudo systemctl restart {UNIT}")
+        } else {
+            format!("sudo systemctl enable {UNIT} && sudo systemctl restart {UNIT}")
+        };
     }
     let mut cmd = format!(
         "sudo factory/host/prep-root.sh --user {} --work-root {} --task-subnets {}",
@@ -533,7 +589,7 @@ pub(crate) fn check(
 ) -> Option<IpAddr> {
     if let Some(why) = h.unprepared.as_deref().filter(|_| h.advice.rootful) {
         r.blockers.push(format!(
-            "egress: prep-root.sh's INPUT drop for the task subnets (OMARCHY-TASKS-HOST) is not installed: /usr/local/libexec/omarchy-task-firewall, its unit's script, {why}; on a rootful engine a network's gateway and the host's LAN address are this host itself, which DOCKER-USER (in FORWARD) never sees, and that drop is what keeps a task off every service of it, not only the ports the probe tries: run {}",
+            "egress: prep-root.sh's INPUT drop for the task subnets (OMARCHY-TASKS-HOST) is not installed: {why}; on a rootful engine a network's gateway and the host's LAN address are this host itself, which DOCKER-USER (in FORWARD) never sees, and that drop is what keeps a task off every service of it, not only the ports the probe tries: run {}",
             h.advice.firewall
         ));
     }
