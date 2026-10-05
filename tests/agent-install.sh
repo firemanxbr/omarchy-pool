@@ -10,11 +10,14 @@
 #   - a task network's gateway and the host's loopback (#367): a signed
 #     exception's bridge reaches its gateway (the host itself on rootful
 #     docker, the engine's namespace on rootless podman) and, rootful, does
-#     not behind the INPUT drop prep-root.sh installs, which this script gives
-#     a test /28 of its own for the run where it may (root, or `sudo -n`); a
-#     task's own network, made as the dispatcher makes it, has no gateway a
-#     task reaches on docker and keeps one behind podman's docker API; the
-#     host's loopback is reached through neither;
+#     not behind an INPUT drop for a test /28 of its own (the rule
+#     prep-root.sh's OMARCHY-TASKS-HOST chain holds for each task subnet),
+#     which this script adds for the run where it may (a rootful engine, and
+#     root or `sudo -n`); a task's own network, made as the dispatcher makes
+#     it, has no gateway a task reaches on docker and keeps one behind
+#     podman's docker API; a rootless engine's network stack, read in /proc
+#     while both probe tasks run as preflight reads it, is seen and maps
+#     nothing to the host's loopback;
 #   - a stand-in legacy compose project (two containers, a network, a bind
 #     mount) is read as preflight reads it, and uninstall's removal takes the
 #     new host's task container but leaves every legacy container running,
@@ -52,12 +55,14 @@ image="${BUSYBOX%%@*}"
 export OMARCHY_STANDIN_IMAGE="${image%:*}@${BUSYBOX#*@}"
 export OMARCHY_AGENT_ENGINE_SOCKET="$socket"
 
-# prep-root.sh's INPUT drop (OMARCHY-TASKS-HOST), for one test /28 only and for this run
-# only: a rootful engine's bridge gateway is the host, and behind the drop a task reaches
-# nothing of it. A rootless engine's bridges live in its own namespace, which INPUT never sees.
+# An INPUT drop for one test /28, as prep-root.sh's OMARCHY-TASKS-HOST holds one for each task
+# subnet, for this run only: a rootful engine's bridge gateway is the host, and behind the drop a
+# task reaches nothing of it. A rootless engine's bridges live in its own namespace, which INPUT
+# never sees: no drop there.
 ipt() { if [[ $EUID -eq 0 ]]; then iptables -w "$@"; else sudo -n iptables -w "$@"; fi; }
 drop=(INPUT -s 10.197.9.240/28 -j DROP)
-if [[ "$engine" == docker ]] && ipt -S INPUT >/dev/null 2>&1; then
+rootful() { ! docker -H "unix://$socket" info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q name=rootless; }
+if [[ "$engine" == docker ]] && rootful && ipt -S INPUT >/dev/null 2>&1; then
   ipt -I "${drop[@]}"
   trap 'ipt -D "${drop[@]}" 2>/dev/null || true' EXIT
   export OMARCHY_TEST_INPUT_DROP=10.197.9.240/28
