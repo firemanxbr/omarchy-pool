@@ -25,8 +25,10 @@
 //! and the lane's image allow, every 30 s with `want: 0` otherwise. The pool
 //! selects (#337: as many leases as the units hold, native first, emulated
 //! after a threshold); before each claim the dispatcher checks `MemAvailable`
-//! against the largest task it could receive and offers only what the memory
-//! still holds — another workload on the machine leaves it what fits, or
+//! against the largest task it could receive, less the shares of the leases
+//! it started in the last few minutes (their containers have not grown to
+//! them yet), and offers only what the memory still holds (the claim's
+//! `offer`) — another workload on the machine leaves it what fits, or
 //! nothing that round — and after a task it claims again at the next tick
 //! while units are free. Fewer units than leases (a cap lowered) claims
 //! nothing until they fit; nothing running is killed for it. There is no
@@ -120,6 +122,11 @@ const CLAIM_RETRY: u64 = 60;
 pub const DISK_HOLD: u64 = 30 * 60;
 /// What a host claims while a disk hold keeps builds out.
 const KINDS_HELD: [&str; 2] = ["trial", "audit"];
+/// How long after its container starts a lease's memory share still counts as promised before a
+/// claim (#337, design v2 §7.6): a container just started has not grown to its share, so
+/// `MemAvailable` does not show it yet, and claims that follow each other at once would each offer
+/// the same memory again. Past this, `MemAvailable` is taken to hold what the container uses.
+pub const MEM_RAMP: u64 = 5 * 60;
 
 /// The environment variables that would put a package signing key in the dispatcher (S5).
 const SIGNING_VARS: [&str; 4] = [
@@ -1212,13 +1219,34 @@ impl Dispatcher {
         let free = cap.as_ref().map_or(0, |c| {
             c.units.saturating_sub(c.job_reserved).saturating_sub(used)
         });
-        let mem = self.probes.mem_available_gb();
+        // What the leases just started still owe the memory: their whole share, from their claim until
+        // MEM_RAMP after their container started — a burst of claims never offers the same memory twice.
+        let promised: u64 = self
+            .leases
+            .values()
+            .filter(|v| {
+                v.lease.ending.is_none()
+                    && match v.lease.phase {
+                        Phase::Preparing => true,
+                        Phase::Running => now < v.lease.started_at.unwrap_or(now) + MEM_RAMP,
+                        Phase::Finishing => false,
+                    }
+            })
+            .map(|v| u64::from(self.ctx.constants.share(v.lease.units).1))
+            .sum();
+        let available = self.probes.mem_available_gb();
+        let mem = available.map(|m| m.saturating_sub(promised));
         let offer = self.ctx.constants.offer(free, mem);
         if offer < free {
             if self.mem_held != Some(offer) {
+                let owed = if promised > 0 {
+                    format!(" ({promised} GB of it promised to leases just started)")
+                } else {
+                    String::new()
+                };
                 say(format!(
-                    "{} GB available in memory: this claim offers {offer} of {free} free unit(s)",
-                    mem.unwrap_or_default()
+                    "{} GB available in memory{owed}: this claim offers {offer} of {free} free unit(s)",
+                    available.unwrap_or_default()
                 ));
             }
             self.mem_held = Some(offer);
@@ -1249,13 +1277,14 @@ impl Dispatcher {
             "orders": TAKES, "instance": self.instance, "started_at": iso(self.started),
             "claim_id": claim_id, "want": u8::from(want), "leases": leases,
         });
+        // What the memory holds back bounds this claim only (#337): the pool hands no task above `offer`,
+        // and still counts the host by its units — its builds, the largest size it runs, its owner's share —
+        // so a large build waits for memory rather than be leased smaller.
+        if want && offer < free {
+            body["offer"] = json!(offer);
+        }
         if let Some(c) = &cap {
             body["capacity"] = c.claim.clone();
-            // The pool hands only what this claim offers (it counts free units from its own leases): what
-            // the memory holds back is declared away for this claim only.
-            if want && offer < free {
-                body["capacity"]["units"] = json!(used + c.job_reserved + offer);
-            }
             // The work root as measured now, when it has less than the agent's last probe said.
             if let (Some(w), Some(f)) = (
                 self.probes.work_free_gb(),

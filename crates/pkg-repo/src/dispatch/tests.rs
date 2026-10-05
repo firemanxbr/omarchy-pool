@@ -18,7 +18,7 @@ use super::kinds::Ctx;
 use super::lease::{Lease, Phase, Store};
 use super::pool::Pool;
 use super::spec::{self, HOST_LABEL};
-use super::{Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS};
+use super::{Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS, MEM_RAMP};
 use crate::stop::Beat;
 use crate::RepoError;
 
@@ -949,7 +949,9 @@ fn a_memory_check_that_refuses_claims_only_what_still_fits_or_nothing() {
         c["capacity"]["units"], 11,
         "want 0 changes nothing of the capacity"
     );
-    // 9 GB: four units of the ten free — the claim offers those only, declaring what the pool may count.
+    assert!(c.get("offer").is_none());
+    // 9 GB: four units of the ten free — the claim offers those only (`offer`), and its capacity still
+    // says the host's 11 units: the pool counts the host by them, and hands nothing above the offer.
     *h.mem.lock().unwrap() = Some(9);
     h.advance(31);
     let mut big = community(7, GEN);
@@ -958,8 +960,12 @@ fn a_memory_check_that_refuses_claims_only_what_still_fits_or_nothing() {
     d.tick();
     let c = h.pool.last_claim();
     assert_eq!(
-        (c["want"].clone(), c["capacity"]["units"].clone()),
-        (json!(1), json!(5))
+        (
+            c["want"].clone(),
+            c["offer"].clone(),
+            c["capacity"]["units"].clone()
+        ),
+        (json!(1), json!(4), json!(11))
     );
     // A task above what it offered (the pool's mistake) is given back, never started.
     h.ticks(&mut d, 2);
@@ -970,7 +976,8 @@ fn a_memory_check_that_refuses_claims_only_what_still_fits_or_nothing() {
     h.give(community(8, GEN2));
     h.ticks(&mut d, 3);
     assert!(h.engine.has(8, GEN2));
-    // The memory back: the largest task it could receive fits (16 GB), every free unit is offered again.
+    // The memory back: the largest task it could receive fits (16 GB, beside the 4 GB the build just
+    // started still owes), every free unit is offered again — no `offer` at all.
     *h.mem.lock().unwrap() = Some(64);
     h.advance(31);
     h.ticks(&mut d, 1);
@@ -979,6 +986,68 @@ fn a_memory_check_that_refuses_claims_only_what_still_fits_or_nothing() {
         (c["want"].clone(), c["capacity"]["units"].clone()),
         (json!(1), json!(11))
     );
+    assert!(c.get("offer").is_none());
+}
+
+#[test]
+fn claims_that_follow_each_other_at_once_never_offer_the_same_memory_twice() {
+    // MemAvailable holds at 9 GB: the containers just started have not grown yet. Each lease's share
+    // (2 GB a unit) counts as promised from its claim until MEM_RAMP after its start, so the burst of
+    // claims after each task takes 4 units (8 GB) in all, never the host's ten free units.
+    let h = H::new();
+    let mut d = h.dispatcher();
+    *h.mem.lock().unwrap() = Some(9);
+    for n in 0..4 {
+        h.give(community(300 + n, &gen_of(n)));
+    }
+    h.ticks(&mut d, 8);
+    let offers: Vec<Value> = h
+        .pool
+        .claim_bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| json!([b["want"], b["offer"]]))
+        .collect();
+    assert_eq!(
+        &offers[..3],
+        &[json!([1, 4]), json!([1, 2]), json!([0, null])],
+        "{offers:?}"
+    );
+    let held: u32 = h.leases().iter().map(|l| l.units).sum();
+    assert_eq!(held, 4, "8 GB of memory limits against 9 GB available");
+    // The third was handed to a claim that offered nothing: given back, never started.
+    assert_eq!(h.pool.fails_of(302)[0]["lost"], true);
+    assert_eq!(h.engine.runs.lock().unwrap().len(), 2);
+    // Past the ramp, MemAvailable holds what the containers use (4 GB of their 8): what is left is offered.
+    h.advance(MEM_RAMP + 31);
+    *h.mem.lock().unwrap() = Some(5);
+    h.ticks(&mut d, 1);
+    let c = h.pool.last_claim();
+    assert_eq!(
+        (c["want"].clone(), c["offer"].clone()),
+        (json!(1), json!(2))
+    );
+}
+
+#[test]
+fn the_claim_says_the_work_root_as_measured_now_when_it_holds_less_than_the_agents_probe() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    // The agent's file says 200 GB on the work root; the dispatcher measures 150 now (builds write there).
+    *h.free.lock().unwrap() = Some(150);
+    d.tick();
+    let c = h.pool.last_claim();
+    assert_eq!(c["capacity"]["disk_free_gb"]["work"], 150);
+    assert_eq!(
+        c["capacity"]["disk_free_gb"]["engine"], 150,
+        "the engine's is the agent's"
+    );
+    // More now than the probe said: the probe's value stands, never a higher one.
+    *h.free.lock().unwrap() = Some(500);
+    h.advance(31);
+    d.tick();
+    assert_eq!(h.pool.last_claim()["capacity"]["disk_free_gb"]["work"], 200);
 }
 
 #[test]
