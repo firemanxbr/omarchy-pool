@@ -105,6 +105,9 @@ pub struct File {
     pub below_minimum: bool,
     /// The native lane's architecture.
     pub arch: String,
+    /// The architectures this host runs emulated (#338, design v2 §7.5): the agent turned
+    /// each on after binfmt and a smoke run, within the owner's envelope.
+    pub emulated: Vec<String>,
     pub engine_free_gb: u64,
     /// The claim's `capacity`, as the pool reads it (worker/src/hosts.ts parseCapacity).
     pub claim: Value,
@@ -120,12 +123,20 @@ pub fn read(path: &Path) -> Option<File> {
     let units = u32::try_from(n("units")?).ok()?;
     let job_reserved = u32::try_from(n("job_reserved").unwrap_or(0)).ok()?;
     let lanes = v.get("lanes")?.as_array()?;
+    let mode = |l: &Value, m: &str| l.get("mode").and_then(Value::as_str) == Some(m);
     let arch = lanes
         .iter()
-        .find(|l| l.get("mode").and_then(Value::as_str) == Some("native"))?
+        .find(|l| mode(l, "native"))?
         .get("arch")?
         .as_str()?
         .to_owned();
+    let emulated = lanes
+        .iter()
+        .filter(|l| mode(l, "emulated"))
+        .filter_map(|l| l.get("arch")?.as_str())
+        .filter(|a| *a != arch)
+        .map(str::to_owned)
+        .collect();
     let disk = v.get("disk_free_gb")?;
     let claim = serde_json::json!({
         "cpus": v.get("cpus")?, "mem_gb": v.get("mem_gb")?,
@@ -133,6 +144,7 @@ pub fn read(path: &Path) -> Option<File> {
         "units": units, "job_reserved": job_reserved,
         "agent_slots": v.get("agent_slots").cloned().unwrap_or(Value::from(0)),
         "lanes": lanes,
+        "held_lanes": v.get("held_lanes").cloned().unwrap_or(Value::Array(Vec::new())),
     });
     Some(File {
         at: v
@@ -147,6 +159,7 @@ pub fn read(path: &Path) -> Option<File> {
             .and_then(Value::as_bool)
             .unwrap_or(true),
         arch,
+        emulated,
         engine_free_gb: disk.get("engine")?.as_u64()?,
         claim,
     })
@@ -227,6 +240,22 @@ mod tests {
         );
         assert_eq!(f.claim["disk_free_gb"]["work"], 200);
         assert_eq!(f.claim["lanes"][0]["mode"], "native");
+        assert!(f.emulated.is_empty());
+        // An emulated lane (#338) goes with the claim as the agent wrote it, and so does a held one.
+        std::fs::write(&p, r#"{"schema":2,"at":"2026-10-01T00:00:00Z","cpus":12,"mem_gb":32,"page_kb":16,"disk_free_gb":{"work":200,"engine":150},"units":11,"job_reserved":1,"agent_slots":1,"lanes":[{"arch":"aarch64","mode":"native"},{"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true}],"held_lanes":[],"below_minimum":false}"#).unwrap();
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (f.arch.as_str(), f.emulated.as_slice()),
+            ("aarch64", &["x86_64".to_owned()][..])
+        );
+        assert_eq!(
+            f.claim["lanes"][1],
+            serde_json::json!({"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true})
+        );
+        std::fs::write(&p, r#"{"schema":2,"cpus":12,"mem_gb":32,"disk_free_gb":{"work":200,"engine":150},"units":11,"lanes":[{"arch":"x86_64","mode":"native"}],"held_lanes":[{"arch":"aarch64","reason":"needs a person: prep-root.sh installs qemu-user-static-binfmt"}]}"#).unwrap();
+        let f = read(&p).unwrap();
+        assert!(f.emulated.is_empty());
+        assert_eq!(f.claim["held_lanes"][0]["arch"], "aarch64");
         std::fs::write(&p, r#"{"schema":1,"units":3}"#).unwrap();
         assert!(read(&p).is_none(), "another schema: nothing is guessed");
     }
