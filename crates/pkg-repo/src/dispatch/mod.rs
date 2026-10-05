@@ -58,8 +58,10 @@
 //! lists that emulated lane — and only a container on an emulated lane is
 //! told so (`WORKER_LABELS={"emulated":true}`); an audit runs natively. A
 //! lease on a lane the host does not run now is handed back `lost` before
-//! anything starts, and the claim offers no emulated lane without its
-//! build image by digest.
+//! anything starts — checked when it is taken and again before its
+//! container starts (a lease prepared across a restart, or while the file
+//! changed) — and the claim offers no emulated lane without its build image
+//! by digest.
 //!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
@@ -108,6 +110,9 @@ use crate::work::{say, Task};
 use crate::RepoError;
 
 /// What a host claims in P1 (design v2 §8.2): builds of every trust, trials and audits.
+/// Seam (#340): pool jobs join here, the pool's `HOST_KINDS` with them; those with helper
+/// containers (`health`, `promote`'s ABI gates and health checks) then take a lane of each
+/// ring architecture they check, native or emulated, as selection already decides (#338).
 pub const KINDS: [&str; 3] = ["build", "trial", "audit"];
 /// The orders the dispatcher executes: drain (a notice), stop-task (the heartbeat's 409), restart (exit 75),
 /// recheck-agent and restart-agent (a fresh probe).
@@ -959,6 +964,20 @@ impl Dispatcher {
             self.begin_ending(&mut live, Ending::Lost("no container kind".into()));
             return live;
         };
+        // Its lane against what `run/capacity.json` says now (#338), as `take` checked it: a
+        // lease on an emulated lane the agent has since turned off (the owner's `emulate`,
+        // binfmt gone) — prepared again after a dispatcher restart, or while the file changed —
+        // goes back lost before anything starts, its attempt with it.
+        if live.lease.emulated() {
+            let arch = live.lease.arch().to_owned();
+            if !capacity::read(&self.capacity_file).is_some_and(|c| c.emulated.contains(&arch)) {
+                let why = format!(
+                    "this host runs no emulated lane of {arch} now (run/capacity.json): handed back"
+                );
+                self.begin_ending(&mut live, Ending::Lost(why));
+                return live;
+            }
+        }
         if live.lease.task.kind == "build" {
             let need = live.lease.disk_gb + self.floor_gb;
             let work = self.probes.work_free_gb();

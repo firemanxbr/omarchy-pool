@@ -259,4 +259,45 @@ mod tests {
         std::fs::write(&p, r#"{"schema":1,"units":3}"#).unwrap();
         assert!(read(&p).is_none(), "another schema: nothing is guessed");
     }
+
+    /// The agent's own files (#338): its capacity tests write exactly these, so a field
+    /// renamed on either side fails one of the two crates.
+    #[test]
+    fn the_files_the_agent_writes_with_its_lanes_read_whole() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("capacity.json");
+        let agent = |name: &str| -> Value {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../omarchy-agent/tests/fixtures/capacity")
+                .join(name);
+            let text = std::fs::read_to_string(path).unwrap();
+            std::fs::write(&p, &text).unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        let wrote = agent("emulated-lane.json");
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (
+                f.arch.as_str(),
+                f.emulated.as_slice(),
+                f.units,
+                f.below_minimum
+            ),
+            ("aarch64", &["x86_64".to_owned()][..], 11, false)
+        );
+        assert_eq!(f.claim["lanes"], wrote["lanes"]);
+        assert_eq!(f.claim["held_lanes"], serde_json::json!([]));
+        let wrote = agent("held-lane.json");
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (f.arch.as_str(), f.emulated.len(), f.units),
+            ("x86_64", 0, 7)
+        );
+        assert_eq!(f.claim["lanes"], wrote["lanes"]);
+        assert_eq!(f.claim["held_lanes"], wrote["held_lanes"]);
+        assert!(f.claim["held_lanes"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("needs a person: prep-root.sh installs qemu-user-static-binfmt"));
+    }
 }

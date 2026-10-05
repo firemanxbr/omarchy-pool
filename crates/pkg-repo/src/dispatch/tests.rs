@@ -1496,6 +1496,51 @@ fn a_lease_on_a_lane_this_host_does_not_run_is_given_back_its_attempt_with_it() 
 }
 
 #[test]
+fn a_lease_prepared_again_after_a_restart_is_given_back_when_its_emulated_lane_went_off() {
+    let h = H::new();
+    emulated_lanes(&h);
+    let mut d = h.dispatcher();
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
+    d.tick(); // claimed on the emulated lane, Preparing
+    drop(d);
+    // The owner's `emulate = []` (or binfmt gone): the agent rewrote the file without the lane,
+    // and the run loop started a new dispatcher, which prepares the lease again.
+    h.capacity_file(11, 150, "2026-10-01T01:00:00Z");
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 3);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(
+        (f["lost"].clone(), f["final"].clone()),
+        (json!(true), json!(false)),
+        "{f}"
+    );
+    assert!(
+        f["error"]
+            .as_str()
+            .unwrap()
+            .contains("no emulated lane of x86_64 now"),
+        "{f}"
+    );
+    assert!(
+        h.engine.runs.lock().unwrap().is_empty(),
+        "nothing was started"
+    );
+    assert!(h.leases().is_empty());
+    // With the lane still on, the same restart starts it on that lane.
+    emulated_lanes(&h);
+    let mut d = h.dispatcher();
+    h.give(on_lane(community(8, GEN2), "x86_64", Some("emulated")));
+    d.tick();
+    drop(d);
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 3);
+    assert_eq!(
+        value_of(&h.engine.args(8, GEN2), "--platform"),
+        Some("linux/amd64")
+    );
+}
+
+#[test]
 fn an_output_outside_the_kinds_list_or_above_its_cap_is_not_uploaded_and_fails_the_task() {
     let h = H::new();
     let mut d = h.dispatcher();
