@@ -341,6 +341,16 @@ pub fn rosetta_lane(p: &Probe<'_>, image_x86_64: &str) -> Result<(), String> {
         .map_err(|e| format!("the x86_64 smoke run: {e}"))
 }
 
+/// Whether `image` is in the engine's image store (`docker image inspect`), so a run of it
+/// pulls nothing: the run loop's count never pulls (#320).
+pub fn image_here(p: &Probe<'_>, image: &str) -> Result<(), String> {
+    let mut c = p.docker();
+    c.args(["image", "inspect", "--format", "{{.Id}}", image]);
+    run(c, ENGINE_TIMEOUT)
+        .map(drop)
+        .map_err(|e| format!("docker image inspect: {e}"))
+}
+
 /// What a Mac's VM adds to the engine's facts (#320; design v2 §19.2, §19.3): one way for
 /// install, `omarchy-agent capacity` and the run loop's count after a start of the VM.
 #[derive(Debug, Clone, Copy)]

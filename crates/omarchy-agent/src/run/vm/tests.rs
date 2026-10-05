@@ -33,7 +33,8 @@ pub(crate) struct World {
     pub mac: String,
     /// The docker CLI Colima was given.
     pub docker: Option<PathBuf>,
-    /// Whether the task firewall is in the running VM (a start loses it).
+    /// Whether the agent ran the task firewall in the running VM (a played start loses it:
+    /// the worst case, a VM with no unit that applies it at boot).
     pub walled: bool,
     pub firewall_fails: bool,
 }
@@ -269,7 +270,7 @@ fn a_stopped_vm_is_started_with_the_agents_flags_within_the_rate_limit_and_walle
     h.tick(3, false);
     assert!(!h.world.borrow().running);
     // The tick its start ends in says so (the loop counts the capacity again), and the
-    // task firewall goes into the new VM at once: a boot loses it.
+    // task firewall is run in the new VM at once.
     assert!(h.tick_started(3, false).1);
     assert!(h.world.borrow().running && h.journal().contains("the omarchy VM started"));
     assert!(h.world.borrow().walled && h.walls() == 1, "{:?}", h.calls());
@@ -601,8 +602,9 @@ fn a_start_that_fails_is_said_and_tried_again_after_the_rate_limit() {
     assert_eq!(h.starts(), 2);
 }
 
-/// A docker CLI for the engine in the VM: `info`, the probe container, and the `x86_64`
-/// smoke run through Rosetta.
+/// A docker CLI for the engine in the VM: `info`, the build images in its store (all but
+/// the one `missing` names), the probe container, and the `x86_64` smoke run through
+/// Rosetta.
 fn engine_in_the_vm(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     let d = dir.display();
@@ -618,6 +620,10 @@ fn engine_in_the_vm(dir: &Path) -> PathBuf {
             r#"#!/bin/sh
 echo "$*" >> '{d}/docker.log'
 case " $* " in
+*" image inspect "*)
+  m=$(cat '{d}/missing' 2>/dev/null)
+  case "$*" in *"${{m:-//none//}}"*) echo "Error response from daemon: No such image: $m" >&2; exit 1 ;; esac
+  echo sha256:0a ;;
 *" info "*) cat '{d}/info.json' ;;
 *" --platform linux/amd64 "*) exit 0 ;;
 *" run "*) printf 'cpu.max=50000 100000\nmemory.max=67108864\npids.max=32\npagesize=4096\noverlay 1 1 104857600 1%% /\n' ;;
@@ -677,4 +683,23 @@ fn a_count_after_a_start_writes_the_vms_capacity_and_the_lane_the_envelope_allow
     // The engine through the pinned CLI on the Mac's socket.
     let log = std::fs::read_to_string(dir.join("docker.log")).unwrap();
     assert!(log.contains("--platform linux/amd64"), "{log}");
+    // A build image the VM's store lacks (a VM made again, a release's new x86_64 image):
+    // the loop pulls nothing, runs nothing, and leaves the file as it was.
+    let before = std::fs::read(set.join("run/capacity.json")).unwrap();
+    let x86 = manifest.build_image("x86_64").unwrap().to_string();
+    std::fs::write(dir.join("missing"), &x86).unwrap();
+    std::fs::write(dir.join("docker.log"), "").unwrap();
+    let e = count_with(&toml("")).unwrap_err();
+    assert!(
+        e.contains(&format!(
+            "the release's build image {x86} is not in the VM's image store, and the loop pulls none"
+        )),
+        "{e}"
+    );
+    let log = std::fs::read_to_string(dir.join("docker.log")).unwrap();
+    assert!(log.lines().all(|l| l.contains("image inspect")), "{log}");
+    assert_eq!(
+        std::fs::read(set.join("run/capacity.json")).unwrap(),
+        before
+    );
 }

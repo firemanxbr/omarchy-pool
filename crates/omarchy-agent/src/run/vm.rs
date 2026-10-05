@@ -2,11 +2,12 @@
 //! when it is not running (after a login, which is when launchd starts the agent; after a
 //! crash), restarted with the agent's flags when what it saved differs from agent.toml —
 //! at once when it would let anything of the person's in, otherwise only while no task
-//! runs, since a restart ends them — its task firewall put back after every start (a boot
-//! of the VM loses it), and its clock held to the pool's after a wake. Every start, stop or
-//! restart is held to M7's rate limit ([`crate::vm::allowed`]), recorded in `vm.json`. A
-//! start is a child the loop polls, so no tick blocks on it; once one ends the loop counts
-//! the host's capacity again (`run/capacity.json`), so a new size reaches the dispatcher.
+//! runs, since a restart ends them — its task firewall (which the VM applies at its every
+//! boot) checked and repaired after every start, hourly and after a wake, and its clock
+//! held to the pool's after a wake. Every start, stop or restart is held to M7's rate
+//! limit ([`crate::vm::allowed`]), recorded in `vm.json`. A start is a child the loop
+//! polls, so no tick blocks on it; once one ends the loop counts the host's capacity again
+//! (`run/capacity.json`, with no pull), so a new size reaches the dispatcher.
 //!
 //! The size agent.toml gives (`[envelope] max_cpus`, `max_mem_gb`) is held to what install
 //! holds it to ([`crate::vm::size`]): never more than the Mac less what it keeps, and never
@@ -178,8 +179,24 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         work_root: c.work_root,
         image: image.as_deref(),
     };
-    let facts = probe::detect(&how)?;
+    // The loop pulls nothing: a pull of a multi-GB build image would hold the tick far past
+    // one engine call (and the watchdog's patience). An image the VM's store lacks (a VM
+    // made again, a release whose x86_64 image an aarch64 rollout does not pull) leaves
+    // `run/capacity.json` as it was until a task's pull brings it (the agent tries again).
     let x86 = c.manifest.build_image("x86_64").map(ToString::to_string);
+    let lane = toml.vm.as_ref().is_some_and(|v| v.1)
+        && toml
+            .emulate
+            .as_deref()
+            .is_none_or(|a| a.iter().any(|x| x == "x86_64"));
+    for img in image.iter().chain(x86.iter().filter(|_| lane)) {
+        probe::image_here(&how, img).map_err(|e| {
+            format!(
+                "the release's build image {img} is not in the VM's image store, and the loop pulls none ({e})"
+            )
+        })?;
+    }
+    let facts = probe::detect(&how)?;
     let vm = probe::MacVm {
         kind: VmKind::Dedicated,
         meminfo: c.meminfo,
@@ -615,7 +632,7 @@ impl Keeper {
                     now,
                     "vm",
                     &format!(
-                        "the {} VM's task firewall is in place: the task subnets reach no private, CGNAT, link-local or VM address",
+                        "the {} VM's task firewall is in place, and applied at its every boot: the task subnets reach no private, CGNAT, link-local or VM address",
                         vm::PROFILE
                     ),
                 );

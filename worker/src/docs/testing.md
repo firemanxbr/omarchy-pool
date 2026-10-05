@@ -735,18 +735,22 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   saved `colima.yaml` read back (a size, a mount or Rosetta is a restart; the
   home mount, Colima's default with no mounts, a mount point elsewhere and a
   forwarded SSH agent are exposures; another VM type or architecture is the
-  person's to delete), the task firewall's script (prep-root.sh's step 9 for
+  person's to delete), the task firewall's rules (prep-root.sh's step 9 for
   the task subnets, DNS to the VM's resolvers before the drops, hooked in
-  once), Colima's environment (the pinned docker CLI first on its `PATH`,
-  the agent's own `DOCKER_CONFIG`), the clock after a wake (the VM held
-  within five seconds of the pool's `Date` through the Mac's own — 5 s
-  behind a Mac 5 s behind the pool is 10 s and set; a Mac off the pool's
-  said, the VM then held to the Mac's, a sleep's drift on top of it removed,
-  a `Date` years off moving nothing), an HTTP `Date`, and M7's rate limit.
+  once) and its script run under `sh` with iptables and systemctl played
+  (the rules kept in the VM, 0755; under systemd the unit after
+  `docker.service` enabled for every boot and reloaded only when it
+  changed; the rules applied each run), Colima's environment (the pinned
+  docker CLI first on its `PATH`, the agent's own `DOCKER_CONFIG`), the
+  clock after a wake (the VM held within five seconds of the pool's `Date`
+  through the Mac's own — 5 s behind a Mac 5 s behind the pool is 10 s and
+  set; a Mac off the pool's said, the VM then held to the Mac's, a sleep's
+  drift on top of it removed, a `Date` years off moving nothing), an HTTP
+  `Date`, and M7's rate limit.
 - `run/vm/` — the run loop's keeper on a played Colima: a stopped VM started
   as a child the loop polls (only once the pinned docker CLI is known, which
   Colima needs), the rate limit holding a second start and said once, the
-  task firewall put in after every start, hourly and after a wake (one that
+  task firewall run after every start, hourly and after a wake (one that
   does not apply said and tried again), a size change waiting for running
   tasks (an engine that does not answer counts as a task), a size below the
   release's signed minimum neither started nor resized and one above the Mac
@@ -757,10 +761,13 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   `colima.yaml`; and the count after a start (a docker stub for the engine in
   the VM): `run/capacity.json` rewritten with the VM's totals and the
   Rosetta lane, unchanged when nothing changed, the lane left out under
-  `emulate = []`. `run/agent_tests.rs` (`on_a_mac`) — the agent with its
+  `emulate = []`, and a build image the VM's store lacks: no pull, no run,
+  the file as it was. `run/agent_tests.rs` (`on_a_mac`) — the agent with its
   keeper: a wake polls the pool at once (no poll due) and the VM's clock is
   set to the `Date` of that answer on the same tick; a start that ended
-  counts the capacity again; the applied release's minimum holds the size.
+  counts the capacity again, and a count that did not happen is tried again
+  an hour later, not every tick; the applied release's minimum holds the
+  size.
   `capacity/tests.rs` — a Mac's facts, one function for install, `capacity`
   and the count: the VM's level and `MemAvailable`, the Rosetta lane after
   its smoke run, none under `emulate = []` or when it fails, and Docker

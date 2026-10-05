@@ -898,9 +898,14 @@ once every ten minutes and six times a day (`vm.json` in the data
 directory). The size it gives the VM is held to the applied release's signed
 minimum and to the Mac less one CPU and 2 GB; once a start ended it counts
 the host's capacity again (the VM's `MemAvailable`, the Rosetta lane the
-envelope allows) and rewrites `run/capacity.json` when it changed. It puts
-the task firewall back after every start, hourly and after a wake. A tick
-more than a minute after the last means the Mac slept: the loop asks the
+envelope allows) and rewrites `run/capacity.json` when it changed. That
+count pulls nothing: a build image the VM's store lacks (a VM made again
+after `colima delete`, a release's new x86_64 image, which the rollout does
+not pull) leaves the file as it was, says so, and is tried again an hour
+later, once a task's pull has brought it; `omarchy-agent capacity --write`
+counts it at once. It runs the task firewall again after every start,
+hourly and after a wake (the VM itself applies it at boot). A tick more
+than a minute after the last means the Mac slept: the loop asks the
 pool at once and compares the VM's clock (`date` inside it) with the pool's
 `Date` through the Mac's own; beyond five seconds it sets the VM's clock to
 the pool's time, and restarts the profile (within the rate limit) when that

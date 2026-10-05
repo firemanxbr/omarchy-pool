@@ -1012,6 +1012,45 @@ mod on_a_mac {
     }
 
     #[test]
+    fn a_count_that_did_not_happen_after_a_start_is_tried_again_an_hour_later() {
+        let (mut w, colima) = mac(Colima::default());
+        let tries: Rc<RefCell<usize>> = Rc::default();
+        let seen = Rc::clone(&tries);
+        w.agent.count = Box::new(move |_| {
+            *seen.borrow_mut() += 1;
+            if *seen.borrow() == 1 {
+                Err("the release's build image x is not in the VM's image store, and the loop pulls none".into())
+            } else {
+                Ok("counted: 8 CPUs".into())
+            }
+        });
+        w.agent.docker_cli = Some(PathBuf::from("/data/tools/0a/docker"));
+        w.tick(3);
+        w.tick(3);
+        assert!(colima.borrow().running);
+        assert_eq!(*tries.borrow(), 1);
+        assert!(
+            w.journal().contains("the loop tries again in an hour"),
+            "{}",
+            w.journal()
+        );
+        // Not on every tick: an hour later, then no more once it counted.
+        for _ in 0..115 {
+            w.tick(30);
+        }
+        assert_eq!(*tries.borrow(), 1);
+        for _ in 0..5 {
+            w.tick(30);
+        }
+        assert_eq!(*tries.borrow(), 2);
+        assert!(w.journal().contains("counted: 8 CPUs"), "{}", w.journal());
+        for _ in 0..240 {
+            w.tick(30);
+        }
+        assert_eq!(*tries.borrow(), 2);
+    }
+
+    #[test]
     fn the_applied_releases_signed_minimum_holds_the_vms_size() {
         // agent.toml edited down to 2 CPUs and 4 GB: below the release's minimum.
         let (mut w, colima) = mac(Colima::default());

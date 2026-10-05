@@ -32,6 +32,8 @@ const MAX_BACKOFF_S: i64 = 600;
 const UNAUTHORIZED_S: i64 = 3600;
 /// The safety timer: the running set is checked against `last-good/` at least this often.
 const DRIFT_S: i64 = 900;
+/// A count of a Mac's capacity that did not happen after a start of the VM, tried again.
+const RECOUNT_AGAIN_S: i64 = 3600;
 
 /// The cryptographic check, pinned identities and parsing (`crate::verify`).
 pub(crate) trait Verifier {
@@ -100,8 +102,10 @@ pub(crate) struct Agent {
     pool_date: Option<(i64, i64)>,
     /// The applied release whose signed minimum the keeper holds the VM's size to.
     vm_release: Option<Release>,
-    /// A start of the VM ended: the host's capacity is counted again once the gate is open.
-    vm_recount: bool,
+    /// A start of the VM ended: the host's capacity is counted again from then, once the
+    /// gate is open; a count that did not happen (an image the VM lacks, which the loop does
+    /// not pull) is tried again an hour later.
+    vm_recount_at: Option<i64>,
     /// The pinned docker CLI the driver runs, for that count.
     docker_cli: Option<PathBuf>,
     /// How the host's capacity is counted (a test plays it).
@@ -161,7 +165,7 @@ impl Agent {
             vm: None,
             pool_date: None,
             vm_release: None,
-            vm_recount: false,
+            vm_recount_at: None,
             docker_cli: None,
             count: Box::new(super::vm::count),
         }
@@ -329,20 +333,21 @@ impl Agent {
             Some(Answer::Yes(b)) => Some(b),
             _ => None,
         };
-        self.vm_recount |= k.step(now, self.pool_date, &mut tasks, gate, &self.journal);
+        if k.step(now, self.pool_date, &mut tasks, gate, &self.journal) {
+            self.vm_recount_at = Some(now);
+        }
         // A new agent's health gate touches nothing but the VM's start.
-        if self.vm_recount && !gate {
-            self.vm_recount = false;
-            self.recount(now);
+        if !gate && self.vm_recount_at.is_some_and(|t| now >= t) {
+            self.vm_recount_at = (!self.recount(now)).then_some(now + RECOUNT_AGAIN_S);
         }
     }
 
     /// The host's capacity counted again after a start of the VM, as `omarchy-agent
     /// capacity --write` counts it ([`super::vm::count`]): a new size or Rosetta lane
     /// reaches `run/capacity.json`, whose change reloads the dispatcher (an input of the
-    /// set) and reaches the pool with its next report.
-    fn recount(&mut self, now: i64) {
-        // The probe container may take a while (its image, the engine just up): the
+    /// set) and reaches the pool with its next report. Whether it was counted.
+    fn recount(&mut self, now: i64) -> bool {
+        // The probe container may take a while (the engine just up; it pulls nothing): the
         // watchdog counts from here.
         if let Some(p) = &self.progress {
             p.store(super::now(), Ordering::Relaxed);
@@ -367,14 +372,16 @@ impl Agent {
             },
             _ => Err("no release applied yet, or no pinned docker CLI".into()),
         };
+        let counted = said.is_ok();
         let detail = match said {
             Ok(s) => s,
             Err(e) => format!(
-                "the host's capacity was not counted again after the VM started ({e}); `omarchy-agent capacity --write` counts it"
+                "the host's capacity was not counted again after the VM started ({e}); the loop tries again in an hour, `omarchy-agent capacity --write` counts it now"
             ),
         };
         self.journal
             .write(now, "capacity", serde_json::json!({ "detail": detail }));
+        counted
     }
 
     fn step(&mut self, now: i64) -> Result<(), String> {
