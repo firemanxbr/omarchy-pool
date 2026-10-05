@@ -9,7 +9,9 @@
 //!    rootful daemon), fetches the release's pinned docker CLI and compose plugin into the
 //!    agent's own `tools/` (hash-checked; preflight measures through them), and runs
 //!    **preflight**: any blocker stops it, with one screen listing everything to fix,
-//!    before anything else is written;
+//!    before anything else is written. The foreign architecture's lane (#338, design v2
+//!    §7.5) is detected there too — binfmt, then a smoke run of the release's build image
+//!    of that architecture — and only reported: a held lane never stops an install;
 //! 3. prints the envelope (agent.toml) for the person to confirm on `/dev/tty` (`--yes`
 //!    skips) and writes `run/capacity.json`;
 //! 4. enrolls (#321): the owner's Confirm, then the host worker token;
@@ -28,9 +30,9 @@
 //! Seams left for later issues, by name: macOS (launchd, Colima) is P3; the egress probe
 //! behind the egress sidecar on an internal network, once the worker image has it
 //! ([`egress`]); the `subuid` level for rootless podman, once the dispatcher (#335) starts
-//! task containers with `--userns=auto` (until then rootless podman reads as `user`); the
-//! emulated lane's smoke run (#338, reported only here); task containers and sidecars
-//! carry `org.omarchy-pool.agent.host=<host>` (design v2 §9.3), which uninstall removes by.
+//! task containers with `--userns=auto` (until then rootless podman reads as `user`); task
+//! containers and sidecars carry `org.omarchy-pool.agent.host=<host>` (design v2 §9.3),
+//! which uninstall removes by.
 
 pub mod checks;
 
@@ -576,6 +578,18 @@ pub(crate) fn measure(
         .as_ref()
         .and_then(|m| m.build_image(std::env::consts::ARCH))
         .map(ToString::to_string);
+    // The emulated lane (#338): the foreign architecture's build image for its smoke run,
+    // within the envelope an earlier install's owner may have narrowed (`emulate`).
+    let foreign_image = capacity::emulation::foreign_of(std::env::consts::ARCH)
+        .and_then(|f| manifest.as_ref()?.build_image(f))
+        .map(ToString::to_string);
+    let emulate: Option<Vec<String>> = envelope::envelope_value(ex, "emulate").map(|v| {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str().map(str::to_owned))
+            .collect()
+    });
     let facts = docker.as_ref().and_then(|d| {
         let host = d.host();
         let how = probe::Probe {
@@ -583,6 +597,11 @@ pub(crate) fn measure(
             host: Some(&host),
             work_root: &existing_ancestor(&work_root),
             image: image.as_deref(),
+            emulation: Some(capacity::emulation::Probe {
+                binfmt: &p.binfmt,
+                image: foreign_image.as_deref(),
+                emulate: emulate.as_deref(),
+            }),
         };
         match probe::detect(&how) {
             Ok(f) => Some(f),
@@ -597,6 +616,7 @@ pub(crate) fn measure(
         max_cpus: o.max_cpus,
         max_mem_gb: o.max_mem_gb,
         dedicated,
+        emulate,
         ..Caps::default()
     };
     let capacity = facts.as_ref().zip(manifest.as_ref()).map(|(f, m)| {
@@ -611,6 +631,7 @@ pub(crate) fn measure(
             c.units(),
             f.arch()
         ));
+        checks::emulation(&c, &mut r);
         c
     });
     if let Some(f) = &facts {
@@ -621,7 +642,6 @@ pub(crate) fn measure(
             legacy_project.is_some(),
             &mut r,
         );
-        checks::emulation(f.arch(), Some(f.page_kb()), &p.binfmt, &mut r);
     }
     checks::credentials_verdict(&checks::credentials(&p.home), dedicated, &mut r);
     if p.os == "linux" {
@@ -903,15 +923,20 @@ pub(crate) fn apply(
     let fingerprint = HostKey::load_or_create(&eo.paths.state.join(KEY_FILE))
         .map_or_else(|e| e, |k| k.fingerprint());
     let c = &ready.capacity;
+    let lanes = c
+        .lanes()
+        .iter()
+        .map(|l| format!("{} {}", l.arch, l.mode))
+        .collect::<Vec<_>>()
+        .join(", ");
     say(
         out,
         &format!(
-            "host {} on {}: {} CPUs, {} GB, lane {} native, {} units ({} kept for pool jobs), isolation {}, host key {fingerprint}",
+            "host {} on {}: {} CPUs, {} GB, lanes {lanes}, {} units ({} kept for pool jobs), isolation {}, host key {fingerprint}",
             id.host,
             ready.pool,
             c.cpus(),
             c.mem_gb(),
-            ready.facts.arch(),
             c.units(),
             c.job_reserved(),
             checks::level(c.isolation()),

@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use std::cell::RefCell;
+
+use super::emulation::{self, Binfmt, Emulated, Held, Lanes, Smoke};
 use super::probe::{self, CgroupLimits, Engine, Facts};
 use super::{preflight, write_if_changed, AgentToml, Capacity, Caps, Isolation, Limits, Written};
 use crate::manifest::{self, Parsed};
@@ -404,6 +407,7 @@ fn a_limited_probe_run_that_fails_once_is_retried_before_the_limits_read_as_refu
             host: None,
             work_root: &dir,
             image: Some("build-image"),
+            emulation: None,
         };
         let out = probe::detect(&p);
         let _ = std::fs::remove_dir_all(&dir);
@@ -469,6 +473,7 @@ fn capacity_json_is_rewritten_only_when_something_changed() {
             "disk_free_gb": {"work": 410, "engine": 220},
             "units": 11, "job_reserved": 1, "agent_slots": 2,
             "lanes": [{"arch": "aarch64", "mode": "native"}],
+            "held_lanes": [],
             "isolation": "root", "dedicated": true,
             "limits": {"cpus_hard": true, "memory_hard": true, "pids": true},
             "below_minimum": false
@@ -544,9 +549,22 @@ dedicated = true
             max_mem_gb: Some(32),
             agent_slots: 1,
             dedicated: true,
+            emulate: Some(vec!["x86_64".into()]),
         }
     );
     assert_eq!(a.work_root.as_deref(), Some("/srv/omarchy-pool/host"));
+    // `emulate = []` keeps every emulated lane off; absent, detection decides; an
+    // architecture the pool does not build is refused, not ignored.
+    assert_eq!(
+        AgentToml::parse("[envelope]\nemulate = []\n")
+            .unwrap()
+            .caps
+            .emulate,
+        Some(vec![])
+    );
+    assert_eq!(AgentToml::parse("[envelope]\n").unwrap().caps.emulate, None);
+    assert!(AgentToml::parse("[envelope]\nemulate = [\"riscv64\"]\n").is_err());
+    assert!(AgentToml::parse("[envelope]\nemulate = \"x86_64\"\n").is_err());
     assert_eq!(AgentToml::parse("").unwrap().caps, Caps::default());
     assert!(AgentToml::parse("[envelope]\nmax_units = -1\n").is_err());
     assert!(AgentToml::parse("[envelope]\nmax_units = \"all\"\n").is_err());
@@ -570,4 +588,415 @@ fn at_is_an_rfc3339_utc_time() {
     assert_eq!(super::utc(951_782_400), "2000-02-29T00:00:00Z");
     assert_eq!(super::utc(1_790_812_799), "2026-09-30T23:59:59Z");
     assert!(crate::manifest::is_timestamp(&super::now()));
+}
+
+// ---------- emulated lanes (#338, design v2 §7.5; D33) ----------
+
+/// The `x86_64` build image of a release, by digest.
+const X86_IMAGE: &str =
+    "docker.io/library/archlinux@sha256:b944cc65c5f28665dfd5fdbf5ed2997c88f5bb4a0aefac7ee8a7ef01893e5ed9";
+
+/// A smoke run that passes or fails, and remembers what it was asked.
+struct FakeSmoke {
+    fails: Option<&'static str>,
+    asked: RefCell<Vec<(String, String)>>,
+}
+
+impl FakeSmoke {
+    fn passing() -> Self {
+        FakeSmoke {
+            fails: None,
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+    fn failing(why: &'static str) -> Self {
+        FakeSmoke {
+            fails: Some(why),
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+    fn asked(&self) -> Vec<(String, String)> {
+        self.asked.borrow().clone()
+    }
+}
+
+impl Smoke for FakeSmoke {
+    fn emulation(&self, arch: &str, image: &str) -> Result<(), String> {
+        self.asked.borrow_mut().push((arch.into(), image.into()));
+        self.fails.map_or(Ok(()), |w| Err(w.into()))
+    }
+}
+
+/// A binfmt table as the kernel shows it, with one handler file per entry.
+fn binfmt_tree(name: &str, handlers: &[(&str, &str)]) -> PathBuf {
+    let d = tmp(name);
+    for (h, text) in handlers {
+        put(&d, h, text);
+    }
+    d
+}
+
+const QEMU_X86_F: &str = "enabled\ninterpreter /usr/bin/qemu-x86_64-static\nflags: POCF\noffset 0\nmagic 7f454c4602010100\n";
+
+fn studio(binfmt: &Path, emulate: Option<&[String]>, page_kb: u32, smoke: &FakeSmoke) -> Lanes {
+    emulation::detect(
+        "aarch64",
+        page_kb,
+        &emulation::Probe {
+            binfmt,
+            image: Some(X86_IMAGE),
+            emulate,
+        },
+        smoke,
+    )
+}
+
+#[test]
+fn an_aarch64_host_with_binfmt_reports_its_x86_64_lane_after_the_smoke_run() {
+    let d = binfmt_tree("emu-on", &[("qemu-x86_64", QEMU_X86_F)]);
+    let smoke = FakeSmoke::passing();
+    let lanes = studio(&d, None, 4, &smoke);
+    assert_eq!(
+        smoke.asked(),
+        [("x86_64".to_owned(), X86_IMAGE.to_owned())],
+        "the smoke run is the release's x86_64 build image, by digest"
+    );
+    assert_eq!(
+        lanes,
+        Lanes {
+            on: vec![Emulated {
+                arch: "x86_64".into(),
+                via: "qemu",
+                page16k: false
+            }],
+            held: vec![]
+        }
+    );
+    // In capacity.json, the claim's and the host report's: the native lane first.
+    let f = facts(ROOTFUL).with_emulation(4, lanes);
+    let c = Capacity::new(&f, &Caps::default(), &constants());
+    let v = serde_json::to_value(c.file("t")).unwrap();
+    assert_eq!(
+        v["lanes"],
+        serde_json::json!([
+            {"arch": "aarch64", "mode": "native"},
+            {"arch": "x86_64", "mode": "emulated", "via": "qemu", "page16k": false}
+        ])
+    );
+    assert_eq!(v["held_lanes"], serde_json::json!([]));
+    // An emulated lane shares the host's units: it adds none.
+    assert_eq!(c.units(), 11);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn without_binfmt_the_lane_is_held_for_a_person_and_the_native_lane_stays() {
+    for (name, handlers, detail) in [
+        ("emu-missing", &[][..], "no qemu-x86_64 handler"),
+        (
+            "emu-disabled",
+            &[(
+                "qemu-x86_64",
+                "disabled\ninterpreter /usr/bin/qemu-x86_64\nflags: POCF\n",
+            )][..],
+            "qemu-x86_64 is disabled",
+        ),
+        (
+            "emu-no-f",
+            &[(
+                "qemu-x86_64",
+                "enabled\ninterpreter /usr/bin/qemu-x86_64\nflags: OC\n",
+            )][..],
+            "without the F flag",
+        ),
+    ] {
+        let d = binfmt_tree(name, handlers);
+        let smoke = FakeSmoke::passing();
+        let lanes = studio(&d, None, 16, &smoke);
+        assert!(
+            smoke.asked().is_empty(),
+            "{name}: no smoke run without binfmt"
+        );
+        assert!(lanes.on.is_empty(), "{name}");
+        assert_eq!(lanes.held.len(), 1, "{name}");
+        assert_eq!(lanes.held[0].arch, "x86_64");
+        assert!(
+            lanes.held[0]
+                .reason
+                .starts_with("needs a person: prep-root.sh installs qemu-user-static-binfmt")
+                && lanes.held[0].reason.contains(detail),
+            "{name}: {}",
+            lanes.held[0].reason
+        );
+        let c = Capacity::new(
+            &facts(ROOTFUL).with_emulation(16, lanes),
+            &Caps::default(),
+            &constants(),
+        );
+        let v = serde_json::to_value(c.file("t")).unwrap();
+        assert_eq!(
+            v["lanes"],
+            serde_json::json!([{"arch": "aarch64", "mode": "native"}]),
+            "{name}: the native lane is unaffected"
+        );
+        assert_eq!(v["held_lanes"][0]["arch"], "x86_64");
+        assert!(
+            preflight(&c).is_empty(),
+            "{name}: a held lane is no blocker"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    // The binfmt handlers as the kernel lists them: qemu's, and Rosetta's for x86_64 only.
+    let d = binfmt_tree(
+        "emu-rosetta",
+        &[(
+            "rosetta",
+            "enabled\ninterpreter /mnt/lima-rosetta/rosetta\nflags: OCF\n",
+        )],
+    );
+    assert_eq!(
+        emulation::binfmt(&d, "x86_64"),
+        Binfmt::Ready { via: "rosetta" }
+    );
+    assert_eq!(emulation::binfmt(&d, "aarch64"), Binfmt::Missing);
+    let lanes = studio(&d, None, 16, &FakeSmoke::passing());
+    assert_eq!(lanes.on[0].via, "rosetta");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn emulate_empty_in_the_envelope_keeps_every_emulated_lane_off() {
+    let d = binfmt_tree("emu-envelope", &[("qemu-x86_64", QEMU_X86_F)]);
+    // Told by the envelope: nothing is pulled or run for a lane the owner turned off.
+    let smoke = FakeSmoke::passing();
+    let lanes = studio(&d, Some(&[]), 16, &smoke);
+    assert!(smoke.asked().is_empty());
+    assert_eq!(
+        lanes,
+        Lanes {
+            on: vec![],
+            held: vec![Held {
+                arch: "x86_64".into(),
+                reason: "off: the envelope's emulate does not list it".into()
+            }]
+        }
+    );
+    // Listed, it runs.
+    let smoke = FakeSmoke::passing();
+    assert_eq!(
+        studio(&d, Some(&["x86_64".to_owned()]), 16, &smoke)
+            .on
+            .len(),
+        1
+    );
+    assert_eq!(smoke.asked().len(), 1);
+    // A lane found on by a probe that was not told: the envelope still holds it off.
+    let found = studio(&d, None, 16, &FakeSmoke::passing());
+    let c = Capacity::new(
+        &facts(ROOTFUL).with_emulation(16, found),
+        &Caps {
+            emulate: Some(vec![]),
+            ..Caps::default()
+        },
+        &constants(),
+    );
+    let v = serde_json::to_value(c.file("t")).unwrap();
+    assert_eq!(
+        v["lanes"],
+        serde_json::json!([{"arch": "aarch64", "mode": "native"}])
+    );
+    assert_eq!(
+        v["held_lanes"],
+        serde_json::json!([{"arch": "x86_64", "reason": "off: the envelope's emulate does not list it"}])
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn on_a_16k_page_host_the_x86_64_lane_is_on_and_says_page16k() {
+    let d = binfmt_tree("emu-16k", &[("qemu-x86_64", QEMU_X86_F)]);
+    let lanes = studio(&d, None, 16, &FakeSmoke::passing());
+    assert_eq!(
+        lanes.on,
+        [Emulated {
+            arch: "x86_64".into(),
+            via: "qemu",
+            page16k: true
+        }],
+        "D33: on anyway; a toolchain that cannot start sends its build back"
+    );
+    let c = Capacity::new(
+        &facts(ROOTFUL).with_emulation(16, lanes),
+        &Caps::default(),
+        &constants(),
+    );
+    let v = serde_json::to_value(c.file("t")).unwrap();
+    assert_eq!(v["page_kb"], 16);
+    assert_eq!(
+        v["lanes"][1],
+        serde_json::json!({"arch": "x86_64", "mode": "emulated", "via": "qemu", "page16k": true})
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_smoke_run_that_fails_or_cannot_run_holds_the_lane_with_its_reason() {
+    let d = binfmt_tree("emu-smoke", &[("qemu-x86_64", QEMU_X86_F)]);
+    let lanes = studio(
+        &d,
+        None,
+        4,
+        &FakeSmoke::failing("exec /usr/bin/true: exec format error"),
+    );
+    assert!(lanes.on.is_empty());
+    assert_eq!(
+        lanes.held[0].reason,
+        "the smoke run failed: exec /usr/bin/true: exec format error"
+    );
+    // No release, no image to run: not checked, and said so.
+    let smoke = FakeSmoke::passing();
+    let lanes = emulation::detect(
+        "aarch64",
+        4,
+        &emulation::Probe {
+            binfmt: &d,
+            image: None,
+            emulate: None,
+        },
+        &smoke,
+    );
+    assert!(smoke.asked().is_empty());
+    assert!(lanes.held[0].reason.starts_with("not checked"), "{lanes:?}");
+    // The reverse host: x86_64 native, aarch64 emulated.
+    put(
+        &d,
+        "qemu-aarch64",
+        "enabled\ninterpreter /usr/bin/qemu-aarch64-static\nflags: F\n",
+    );
+    let smoke = FakeSmoke::passing();
+    let lanes = emulation::detect(
+        "x86_64",
+        4,
+        &emulation::Probe {
+            binfmt: &d,
+            image: Some(X86_IMAGE),
+            emulate: None,
+        },
+        &smoke,
+    );
+    assert_eq!(lanes.on[0].arch, "aarch64");
+    assert_eq!(smoke.asked()[0].0, "aarch64");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A docker CLI for the smoke run: each call's arguments to `calls`, `pacman --version`
+/// printing `pacman_says`.
+fn smoke_docker(dir: &Path, pacman_says: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let d = dir.display();
+    let docker = dir.join("docker");
+    put(
+        dir,
+        "docker",
+        &format!(
+            "#!/bin/sh\necho \"$*\" >> '{d}/calls'\ncase \" $* \" in\n  *\" --entrypoint pacman \"*) echo '{pacman_says}' ;;\n  *\" --entrypoint /usr/bin/true \"*) ;;\n  *) exit 2 ;;\nesac\n"
+        ),
+    );
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    docker
+}
+
+#[test]
+fn the_smoke_run_starts_true_then_pacman_under_the_lane_platform_by_digest() {
+    let dir = tmp("smoke-docker");
+    let docker = smoke_docker(&dir, " .--.  Pacman v7.0.0 - libalpm v15.0.0");
+    let p = probe::Probe {
+        docker: docker.to_str().unwrap(),
+        host: Some("unix:///run/docker.sock"),
+        work_root: &dir,
+        image: None,
+        emulation: None,
+    };
+    p.emulation("x86_64", X86_IMAGE).unwrap();
+    let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [
+            format!("--host unix:///run/docker.sock run --rm --network none --platform linux/amd64 --entrypoint /usr/bin/true {X86_IMAGE}"),
+            format!("--host unix:///run/docker.sock run --rm --network none --platform linux/amd64 --entrypoint pacman {X86_IMAGE} --version"),
+        ]
+    );
+    // A pacman that does not answer as pacman fails the lane.
+    let dir2 = tmp("smoke-docker-bad");
+    let docker = smoke_docker(&dir2, "sh: pacman: not found");
+    let p = probe::Probe {
+        docker: docker.to_str().unwrap(),
+        ..p
+    };
+    assert!(p
+        .emulation("aarch64", X86_IMAGE)
+        .unwrap_err()
+        .contains("not \"Pacman v\""));
+    assert!(std::fs::read_to_string(dir2.join("calls"))
+        .unwrap()
+        .contains("--platform linux/arm64"));
+    // Nothing outside the grammar reaches the argv: an image by tag, a flag, an arch.
+    std::fs::remove_file(dir2.join("calls")).unwrap();
+    for (arch, image) in [
+        ("x86_64", "docker.io/library/archlinux:latest"),
+        (
+            "x86_64",
+            "--privileged@sha256:b944cc65c5f28665dfd5fdbf5ed2997c88f5bb4a0aefac7ee8a7ef01893e5ed9",
+        ),
+        ("x86_64", "archlinux@sha256:abc"),
+        ("riscv64", X86_IMAGE),
+    ] {
+        assert!(p.emulation(arch, image).is_err(), "{arch} {image}");
+    }
+    assert!(!dir2.join("calls").exists(), "refused before docker ran");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
+}
+
+#[test]
+fn detection_runs_the_emulated_lane_through_the_engine_with_the_envelope() {
+    // The whole probe on a fake engine: `docker info`, the probe container, then the smoke.
+    let dir = tmp("detect-emu");
+    let docker = fake_docker(&dir, 0);
+    let bin = binfmt_tree("detect-emu-binfmt", &[("qemu-x86_64", QEMU_X86_F)]);
+    let p = probe::Probe {
+        docker: docker.to_str().unwrap(),
+        host: None,
+        work_root: &dir,
+        image: Some("build-image"),
+        emulation: Some(emulation::Probe {
+            binfmt: &bin,
+            image: Some(X86_IMAGE),
+            emulate: None,
+        }),
+    };
+    // The fake engine prints no pacman: the lane is held with what the smoke run saw.
+    let f = probe::detect(&p).unwrap();
+    let e = f.emulation().unwrap();
+    assert!(
+        e.on.is_empty() && e.held[0].reason.starts_with("the smoke run failed"),
+        "{e:?}"
+    );
+    assert_eq!(f.report()["emulation"]["held_lanes"][0]["arch"], "x86_64");
+    // Off in the envelope: no smoke run at all.
+    let p = probe::Probe {
+        emulation: Some(emulation::Probe {
+            binfmt: &bin,
+            image: Some(X86_IMAGE),
+            emulate: Some(&[]),
+        }),
+        ..p
+    };
+    let f = probe::detect(&p).unwrap();
+    assert_eq!(
+        f.emulation().unwrap().held[0].reason,
+        "off: the envelope's emulate does not list it"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&bin);
 }

@@ -185,28 +185,8 @@ fn the_task_subnets_must_not_collide_with_routes_or_other_projects_networks() {
 }
 
 #[test]
-fn emulation_linger_and_the_user_manager_are_reported() {
+fn linger_and_the_user_manager_are_reported() {
     let d = tempdir();
-    fs::write(
-        d.join("qemu-x86_64"),
-        "enabled\ninterpreter /usr/bin/qemu-x86_64\nflags: POCF\n",
-    )
-    .unwrap();
-    let mut r = Report::default();
-    checks::emulation("aarch64", Some(16), &d, &mut r);
-    checks::emulation("x86_64", Some(4), &d, &mut r);
-    assert!(
-        r.notes[0].contains("x86_64: binfmt handler on (F flag), 16K pages"),
-        "{:?}",
-        r.notes
-    );
-    assert!(
-        r.notes[1].contains("aarch64: no binfmt handler"),
-        "{:?}",
-        r.notes
-    );
-    assert!(r.ok());
-
     let mut r = Report::default();
     checks::user_manager("omarchy", &d, None, &mut r);
     assert!(r.blockers[0].contains("XDG_RUNTIME_DIR"));
@@ -658,7 +638,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
     fs::write(
         &docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" --entrypoint pacman \"*) cat {r}/pacman 2>/dev/null || exit 125 ;;\n  *\" --entrypoint /usr/bin/true \"*) test -e {r}/pacman || exit 125 ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = root.display()
         ),
     )
@@ -790,6 +770,99 @@ fn preflight_lists_every_missing_prerequisite_on_one_screen_and_changes_nothing(
         .map_err(|e| e.to_string())
         .unwrap();
     assert!(r.screen().contains("no unit is left"), "{}", r.screen());
+}
+
+#[test]
+fn preflight_reports_the_emulated_lane_and_never_stops_on_a_held_one() {
+    // An aarch64 host without binfmt: the x86_64 lane is held for a person, the install goes on.
+    let h = host(INFO, EGRESS_OK);
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    let ready = ready.expect("ready");
+    assert!(
+        r.notes.iter().any(|n| n.starts_with("emulation x86_64: held — needs a person: prep-root.sh installs qemu-user-static-binfmt")),
+        "{:?}",
+        r.notes
+    );
+    let lanes: Vec<_> = ready
+        .capacity
+        .lanes()
+        .iter()
+        .map(|l| (l.arch.clone(), l.mode))
+        .collect();
+    assert_eq!(lanes, [("aarch64".to_owned(), "native")]);
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(
+        !log.contains("--platform"),
+        "no smoke run without binfmt: {log}"
+    );
+
+    // With qemu's handler (the F flag) and an engine that runs the release's x86_64 image: on.
+    let h = host(INFO, EGRESS_OK);
+    fs::write(
+        h.root.join("binfmt/qemu-x86_64"),
+        "enabled\ninterpreter /usr/bin/qemu-x86_64-static\nflags: POCF\n",
+    )
+    .unwrap();
+    fs::write(h.root.join("pacman"), "Pacman v7.0.0 - libalpm v15.0.0\n").unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n == "emulation x86_64: on, through qemu"),
+        "{:?}",
+        r.notes
+    );
+    let lanes: Vec<_> = ready
+        .unwrap()
+        .capacity
+        .lanes()
+        .iter()
+        .map(|l| (l.arch.clone(), l.mode))
+        .collect();
+    assert_eq!(
+        lanes,
+        [
+            ("aarch64".to_owned(), "native"),
+            ("x86_64".to_owned(), "emulated")
+        ]
+    );
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(
+        log.contains("run --rm --network none --platform linux/amd64 --entrypoint /usr/bin/true "),
+        "{log}"
+    );
+    assert!(
+        log.contains("--platform linux/amd64 --entrypoint pacman "),
+        "{log}"
+    );
+
+    // The owner's envelope from an earlier install keeps it off: nothing is run for it.
+    let h = host(INFO, EGRESS_OK);
+    fs::write(
+        h.root.join("binfmt/qemu-x86_64"),
+        "enabled\ninterpreter /usr/bin/qemu-x86_64-static\nflags: POCF\n",
+    )
+    .unwrap();
+    fs::write(h.root.join("pacman"), "Pacman v7.0.0\n").unwrap();
+    fs::create_dir_all(h.root.join("data")).unwrap();
+    fs::write(h.root.join("data/agent.toml"), "[envelope]\nemulate = []\n").unwrap();
+    fs::set_permissions(
+        h.root.join("data/agent.toml"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n == "emulation x86_64: held — off: the envelope's emulate does not list it"),
+        "{}",
+        r.screen()
+    );
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(!log.contains("--platform"), "{log}");
 }
 
 #[test]

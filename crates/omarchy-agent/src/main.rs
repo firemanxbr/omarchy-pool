@@ -7,8 +7,11 @@
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
 //!     (<dir>/compose.yml and <dir>/set.toml)
 //! omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
-//!     [--probe-image <image>] [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
-//!     (what the host has; with a verified release, its units, the preflight blockers, and
+//!     [--probe-image <image>] [--emulate-image <image>]
+//!     [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
+//!     (what the host has, the foreign architecture's lane included (#338: binfmt, then a
+//!     smoke run of the release's build image of that architecture, or --emulate-image);
+//!     with a verified release, its units, the preflight blockers, and
 //!     <set dir>/run/capacity.json rewritten when it changed)
 //! omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
 //!     [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
@@ -60,7 +63,8 @@ const USAGE: &str = "usage:
   omarchy-agent verify --statement <json> --sig <sigstore.json>
   omarchy-agent lint-set <dir> [--override <file>] [--envelope <agent.toml>]
   omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
-      [--probe-image <image>] [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
+      [--probe-image <image>] [--emulate-image <image>]
+      [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
   omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
       [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
       [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated] [--legacy <project>]
@@ -498,6 +502,7 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
             "--work-root",
             "--docker",
             "--probe-image",
+            "--emulate-image",
             "--bundle",
             "--sig",
             "--write",
@@ -541,11 +546,20 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
         .as_ref()
         .and_then(|m| m.build_image(std::env::consts::ARCH))
         .map(ToString::to_string);
+    // The foreign architecture's build image, for the emulated lane's smoke run (#338).
+    let foreign_image = capacity::emulation::foreign_of(std::env::consts::ARCH)
+        .and_then(|f| manifest.as_ref()?.build_image(f))
+        .map(ToString::to_string);
     let how = probe::Probe {
         docker: get("--docker").unwrap_or("docker"),
         host: host.as_deref(),
         work_root: Path::new(&work_root),
         image: get("--probe-image").or(build_image.as_deref()),
+        emulation: Some(capacity::emulation::Probe {
+            binfmt: Path::new(probe::BINFMT),
+            image: get("--emulate-image").or(foreign_image.as_deref()),
+            emulate: toml.caps.emulate.as_deref(),
+        }),
     };
     let facts = match probe::detect(&how) {
         Ok(f) => f,

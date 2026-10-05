@@ -6,7 +6,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::capacity::Isolation;
+use crate::capacity::{Capacity, Isolation};
 
 use super::net::{self, Cidr, Route};
 
@@ -207,36 +207,26 @@ pub(crate) fn subnets(
     }
 }
 
-/// The other architecture, reported only in P1 (its lane turns on in P2, #338).
-pub(crate) fn emulation(native: &str, page_kb: Option<u32>, binfmt_dir: &Path, r: &mut Report) {
-    let foreign = if native == "aarch64" {
-        "x86_64"
-    } else {
-        "aarch64"
-    };
-    let handler = binfmt_dir.join(format!("qemu-{foreign}"));
-    let state = match std::fs::read_to_string(&handler) {
-        Ok(t) if t.lines().next() == Some("enabled") => {
-            let fix = t
-                .lines()
-                .find_map(|l| l.strip_prefix("flags: "))
-                .is_some_and(|f| f.contains('F'));
-            if fix {
-                "binfmt handler on (F flag)"
-            } else {
-                "binfmt handler on, without the F flag containers need"
-            }
-        }
-        Ok(_) => "binfmt handler disabled",
-        Err(_) => "no binfmt handler (prep-root.sh installs it)",
-    };
-    let pages = match page_kb {
-        Some(16) => ", 16K pages",
-        _ => "",
-    };
-    r.notes.push(format!(
-        "emulation {foreign}: {state}{pages}; reported only, the lane comes in P2"
-    ));
+/// The emulated lanes detection found (#338, design v2 §7.5), reported only: a lane held
+/// for binfmt, the envelope or a smoke run that failed never stops an install, and the
+/// native lane never depends on it.
+pub(crate) fn emulation(c: &Capacity, r: &mut Report) {
+    for l in c.lanes().iter().filter(|l| l.mode == "emulated") {
+        let pages = if l.page16k == Some(true) {
+            ", on pages larger than the guest's: a toolchain that cannot start here sends its build back for a native host (D33)"
+        } else {
+            ""
+        };
+        r.notes.push(format!(
+            "emulation {}: on, through {}{pages}",
+            l.arch,
+            l.via.unwrap_or("?")
+        ));
+    }
+    for h in c.held_lanes() {
+        r.notes
+            .push(format!("emulation {}: held — {}", h.arch, h.reason));
+    }
 }
 
 /// Linger and the user manager (design v2 §13.3): linger is enabled at install when polkit
