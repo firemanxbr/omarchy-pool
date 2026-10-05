@@ -730,7 +730,8 @@ guard then samples it for `guard_s`: a restart streak, two restarts that
 were not ordered, an exit other than 0 and 75 (#277's ordered restart) or a
 lost `/ready` revert to `last-good/` and quarantine the release for an hour
 (one retry, then until a newer release); an Update order on the host's
-worker lifts every quarantine and starts a round. A changed
+worker, or the host order `retry-release`, lifts every quarantine and starts
+a round. A changed
 `compose.override.yml`, `etc/` file or `run/capacity.json` starts a round
 too, and the running set is compared with `last-good/` every 15 minutes.
 Two known gaps: a round preempted during its replace leaves the dispatcher
@@ -741,13 +742,14 @@ engine leave the round at `engine-unreachable` until a newer release.
 | The last round says | What it means |
 |---|---|
 | `ok`, `no-change` | the set runs the target |
-| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined |
+| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again) |
 | `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
 | `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep`, `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
 | `engine-unreachable`, `pull-failed` | nothing changes; the step or the next poll tries again |
 | `needs-newer-agent` | the release needs an agent this one is not and the update to it did not happen (why is in `detail`; *Self-update*, below) |
 | `agent-rollback` | a self-update's new agent did not pass its health gate: the agent named in `detail` is back, and the one it left is skipped until a higher one |
+| `rolled-back` after `runtime switch` | the owner's switch to another driver failed on the new engine (#325): `detail` says why, and the dispatcher is back on the engine it ran on; the release is not quarantined for it |
 
 **Host orders** (#344; design v2 §17.1) ride the same host state: a closed
 set, each with an id and a `not_after` an hour after it was given. The agent
@@ -758,9 +760,9 @@ given on the host's page:
 
 - **Reconcile now** (`reconcile-now`), its owner or any maintainer: a round
   now, as `omarchy-agent round` starts one — the release the pool names,
-  checked and rolled out as any round, no quarantine lifted (an Update does;
-  P4's `retry-release` will), and never past the owner's soak once P4 brings
-  one. It waits while a commit or a revert finishes.
+  checked and rolled out as any round, no quarantine lifted (an Update or
+  `retry-release` does), and never past the owner's soak once its issue
+  brings one. It waits while a commit or a revert finishes.
 - **Retire legacy set** (`retire-legacy`), its owner only, with a passkey:
   the agent reads `legacy.json` (the project `install --legacy` recorded)
   and finds the project's directory — the one recorded, or the one compose's
@@ -780,6 +782,78 @@ given on the host's page:
   agent's words, while its report says it would refuse (the directory above;
   the report after the fix, within five minutes, lifts it).
 
+P4 (#325; design v2 §12, §17.1) adds the host's **settings** and the rest of
+the closed set, each its owner's or any maintainer's on the host's page, for
+an agent from 0.4.0 (an older one is given none and the page says why):
+
+- **Narrow units** (`set-units <n>`, or its envelope's own back) and **Set
+  emulated lanes** (`set-emulate <archs>`): the agent keeps the setting in
+  `state.json` and writes `run/capacity.json` through it — the units become
+  the smallest of what detection found, the envelope's `max_units` and the
+  setting; an emulated lane stays only while both the envelope's `emulate`
+  and the setting name it (detection's values ride the file under
+  `detected`, so a later, wider setting starts from them). The changed file
+  recreates the dispatcher, which claims by it from its next claim: a host
+  holding more units than the new count claims nothing until its leases fit,
+  and no running task is stopped for it. Anything above the envelope — more
+  units than it allows, a lane its `emulate` excludes, the native lane, no
+  `run/capacity.json` yet — is refused on the host with why, and nothing
+  changes; the page greys those values from the last report. When the owner
+  lowers the envelope below a setting taken earlier, the envelope wins and
+  the report says which part of the setting it leaves out (`above`). The
+  pool keeps the last setting answered done and sends it back in the host
+  state, which only an agent that lost its own (`state.json` gone) takes.
+- **Rotate token** (`rotate-token`): a new host worker token from the pool
+  (`POST /hosts/self/token`, signed), written to `etc/dispatcher.env` as
+  enrollment writes it; the changed `etc/` recreates the dispatcher within
+  the ten minutes the old one still works. A token the pool does not give,
+  or one for another registration, is refused with nothing written.
+- **Retry release** (`retry-release`): lifts every quarantine and starts a
+  round, as an Update does; the page greys it while the report says nothing
+  is quarantined.
+- **Diagnostics** (`diagnostics`, design v2 M10): only when the envelope says
+  `diagnostics = true`, the dispatcher's last 500 log lines, each cut to 300
+  characters, scrubbed of every value (8 characters or more) of the set's
+  `etc/*.env` and the secrets directory's `*.env`, and of anything shaped like a pool,
+  GitHub, Anthropic or OpenAI token; posted to the pool
+  (`POST /hosts/self/diagnostics`, signed, at most 64 KiB), which drops a
+  line that still looks like a secret and keeps them a week for the page's
+  *Its lines*. Refused otherwise, saying so.
+
+**The host-side brake** (#325, design v2 §17.1) holds even against a pool
+that is compromised: at least 2 s between host orders (the agent paces a
+burst, taking the next one a tick later); at most 20 host orders an hour, 6
+dispatcher restarts the pool caused (a settings order, `rotate-token`,
+`retry-release`, a round to another release), 4 capacity narrowings and one
+release change every 10 minutes — the first release a host applies and a
+rollback under a signed statement are exempt, and a round tried again to the
+release the last change went to is no new change. An order beyond them is
+answered `refused` with `brake: …` and when the next would fit; a release
+change beyond them is `held` and asked again at the next poll. What the agent
+does on its own — a changed input, drift, `omarchy-agent round` — is never
+braked. The counters are in `state.json`, so restarting the agent resets
+nothing; `omarchy-agent status` and the host page show the last window.
+
+**Changing the runtime is the owner's, at the host** (#325): `omarchy-agent
+runtime switch compose/podman` (or `compose/docker`; `--socket <path>` when
+it is not the engine's usual one — rootless first, then rootful) moves the
+bundle to the other driver this binary carries. Nothing the pool sends names
+a driver. The running agent takes the request between rounds and refuses it,
+with nothing changed, unless the envelope's `drivers` name the new one
+(`compose` names both), its socket answers as that engine, a release runs,
+and no task container runs on the old engine — task containers, named
+volumes and caches do not move between engines, so drain the host's
+registration first and let its tasks finish. Then it stops the dispatcher on
+the old engine, brings the release that runs up on the new one through a
+whole round — lint (a rootful engine still needs `rootful_ack` and
+`dedicated`), pull, replace, guard — and only once that round is `ok` writes
+the new socket, runtime and engine into `agent.toml`. A guard or ready wait
+that fails, a refusal or no end within 20 minutes stops the new dispatcher
+and brings it back on the old engine (`rolled-back`, with why; the release is
+not quarantined for the engine's fault, and `agent.toml` was never changed).
+A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
+and `logs` follow it.
+
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the
 release applied, targeted and its floor, the rollout and the last round, the
@@ -791,9 +865,10 @@ answers 401/403, as the polls go then.
 
 On the host: `omarchy-agent status` (from `state.json` and
 `run/capacity.json`, with the pool and the engine down; a `retire-legacy`
-in flight and the last order answers too), `omarchy-agent
-round` (a round now: SIGUSR1 to the running agent) and `omarchy-agent logs
-[-n N]`. Exit 78 means a local configuration error at start — `agent.toml`,
+in flight and the last order answers too, and the settings, the brake's
+last window and a runtime switch in flight or its end), `omarchy-agent
+round` (a round now: SIGUSR1 to the running agent), `omarchy-agent logs
+[-n N]` and `omarchy-agent runtime switch <driver>`. Exit 78 means a local configuration error at start — `agent.toml`,
 a data directory others may write, an unreadable `state.json`, another agent
 running on the same data directory — that stops the agent until a person
 fixes it; no network answer ever does, and a write that fails while it runs
@@ -955,6 +1030,18 @@ two minutes the order says `done`, `docker compose -p omarchy-rehearsal ps
 -a` is empty, `~/legacy-rehearsal/.omarchy-agent` is there, the dispatcher
 and any task kept running, and `omarchy-agent status` shows the answer. A
 copy of `factory/host/rollout.sh` in that directory now exits 4.
+
+**Rehearse a narrowing on the P1 host** (#325) once its agent reports 0.4.0
+(`tests/agent-host-orders.sh` does the same against a stand-in in CI): on
+the host's page, *Settings* shows the units and lanes its agent reports
+inside its envelope, every value above it greyed. Narrow units to one less
+than it gives; within two minutes the order says `done`, `jq .units
+run/capacity.json` in the set directory says the new count (and
+`.detected.units` the old), the dispatcher was recreated (`docker ps`: a new
+start time), a task that was running finishes, and the page's units say the
+new count after the agent's next report. Give its envelope's units back (the first entry of the
+list), then ask Diagnostics while `agent.toml` says `diagnostics = false`:
+refused, saying so.
 
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,
