@@ -18,9 +18,11 @@
  * - **lane**: a build or a trial of H's native arch is on the native lane;
  *   one of an arch H runs emulated is on the emulated lane when it is not
  *   marked `needs_native` and it waited its threshold T, or no *eligible*
- *   native capacity exists for it; a job with helper containers (`health`)
- *   needs any lane of its arch, with no wait; every other kind is
- *   arch-neutral;
+ *   native capacity exists for it; a job with helper containers of a ring's
+ *   architecture (`health`; the ABI gate and the health checks inside
+ *   `promote`, the fast-track's inside `security`) needs a lane of each
+ *   architecture it checks, native or emulated, with no preference and no
+ *   wait (#338); every other kind is arch-neutral;
  * - **the emulated cap** (work-conserving): H's emulated lanes hold at most
  *   ceil(builds × share) builds while a native-lane task for H is queued,
  *   builds − 1 otherwise, never below 1 — one emulated build of any size
@@ -135,6 +137,8 @@ export interface Candidate {
   native_ms: number | null;
   /** When a host was last marked reserving for it, ms (build_tasks.reserved_at): two hours later its window is spent, and it is marked again no sooner than 30 minutes after. */
   reserved_at?: number | null;
+  /** The one ring architecture a job names (`params.arch`: a promotion of one architecture); none, it covers both. */
+  job_arch?: string | null;
 }
 
 /** The signed constants (hosts.ts, factory/bundle/manifest.toml) and the settings selection runs with. */
@@ -198,6 +202,24 @@ export const OWNER_DIVISOR = 4;
 export const LANE_KINDS: readonly string[] = ["build", "trial"];
 /** Jobs whose helper containers run the task's architecture: any lane of it, no preference, no wait. */
 export const HELPER_KINDS: readonly string[] = ["health"];
+/** The architectures a ring serves. */
+export const RING_ARCHES: readonly string[] = ["x86_64", "aarch64"];
+/**
+ * Jobs whose helper containers run each ring architecture they cover (#338): `promote` runs the ABI gate (tests/abi-gate.sh) and the
+ * health check (tests/health-check.sh) of every architecture it promotes — `params.arch`, or both — and `security` a fast-track's
+ * health checks of both. Their own process is arch-neutral (they are read with the arch-neutral kinds, whatever their row's arch),
+ * but a host takes one only with a lane — native or emulated, no preference, no wait — of each architecture its helpers run: a
+ * promotion whose x86_64 health check could not start would roll a good release back.
+ */
+export const RING_JOBS: readonly string[] = ["promote", "security"];
+
+/** The architectures a job's helper containers run, or null for a kind that starts none. */
+export function helperArches(c: Pick<Candidate, "kind" | "arch" | "job_arch">): readonly string[] | null {
+  if (HELPER_KINDS.includes(c.kind)) return [c.arch];
+  if (c.kind === "promote") return c.job_arch && RING_ARCHES.includes(c.job_arch) ? [c.job_arch] : RING_ARCHES;
+  if (c.kind === "security") return RING_ARCHES;
+  return null;
+}
 /** What is not a pool job: these never take the reserved job unit. */
 export const TASK_KINDS: readonly string[] = ["build", "trial", "audit"];
 
@@ -247,7 +269,7 @@ export function diskOf(c: Pick<Candidate, "kind" | "disk_gb">, size: number | nu
 }
 
 /** The lane a registration would run a candidate on, or null when it has none for it; `byLane` when native is preferred and the emulated lane waits. */
-export function laneFor(m: Pick<Member, "lanes" | "legacy">, c: Pick<Candidate, "kind" | "arch">, r: Rules): { mode: Mode | null; byLane: boolean } | null {
+export function laneFor(m: Pick<Member, "lanes" | "legacy">, c: Pick<Candidate, "kind" | "arch" | "job_arch">, r: Rules): { mode: Mode | null; byLane: boolean } | null {
   const lanes = m.lanes.filter((l) => l.arch === c.arch);
   const native = lanes.some((l) => l.mode === "native");
   if (LANE_KINDS.includes(c.kind)) {
@@ -260,6 +282,9 @@ export function laneFor(m: Pick<Member, "lanes" | "legacy">, c: Pick<Candidate, 
     return r.legacy_any_arch.includes(c.kind) ? { mode: null, byLane: false } : null;
   }
   if (HELPER_KINDS.includes(c.kind)) return lanes.length ? { mode: native ? "native" : "emulated", byLane: false } : null;
+  // A ring job's helpers: a lane of every architecture they run, whichever mode; the job itself runs in the dispatcher's own process.
+  const helpers = helperArches(c);
+  if (helpers && !helpers.every((a) => m.lanes.some((l) => l.arch === a))) return null;
   return { mode: null, byLane: false };
 }
 

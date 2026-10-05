@@ -831,7 +831,7 @@ describe("where a build runs", () => {
     expect(n.status).toBe(200);
     expect(n.json.task).toMatchObject({ id, attempts: 1, params: { hint: "cargo, not make", needs_native: 1 } });
     expect((await call("POST", `/factory/tasks/${id}/fail`, { error: "exit 96: rustc cannot start on this worker", needs_native: true, final: false }, n.json.token)).json).toEqual({ task: id, status: "queued", attempts: 1 });
-    expect(await env.DB.prepare("SELECT status, summary FROM events WHERE kind = 'build' ORDER BY id DESC LIMIT 1").first()).toEqual({ status: "warn", summary: expect.stringMatching(/^rusty for aarch64 failed on w7 \(attempt 1\/3\) — back in the queue/) });
+    expect(await env.DB.prepare("SELECT status, summary FROM events WHERE kind = 'build' ORDER BY id DESC LIMIT 1").first()).toEqual({ status: "warn", summary: expect.stringMatching(/^rusty for aarch64 failed on w7 \(attempt 1\/3\) \(its needs_native refused: it ran on the native lane\) — back in the queue/) });
     // And its failure that is the recipe's fails at once, as before: the package says why.
     const n2 = await call("POST", "/factory/claim", nat, "omw_w7");
     expect(n2.json.task).toMatchObject({ id, attempts: 2 });
