@@ -170,7 +170,9 @@ secret). Everything travels in the `Authorization` header over TLS only.
   `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
   preflight checks it rather than trusting it (#367): on a rootful engine it
   refuses a host whose prep-root.sh firewall script (world-readable) does
-  not drop every task subnet in INPUT, and a probe task on a bridge and one
+  not drop every task subnet in INPUT, or whose boot unit for it is not
+  there or not enabled (a reboot would take the drop away, and nothing
+  probes again after install), and a probe task on a bridge and one
   on a network made as a task's try their gateway on 22, 53 and the pool's
   ports, and the bridge's the host's LAN address: a connection made or
   refused there fails the install, with the command that puts the INPUT drop

@@ -531,7 +531,8 @@ subvolume where it can); turns on linger; delegates cgroup v2 controllers to
 the user's systemd (rootless); and installs `DOCKER-USER` drop rules from
 the task subnets (`--task-subnets`, default `10.231.0.0/16`) to RFC 1918,
 CGNAT, link-local and the host (IPv4; task networks stay IPv4 only), kept across reboots by
-`omarchy-task-firewall.service` (rootful). A second run changes nothing;
+`omarchy-task-firewall.service` (rootful). A second run changes nothing,
+but enables and restarts that unit when it was disabled or stopped since;
 exit 1 lists what needs a person. The task subnets and the work root must be
 the ones the agent's install is given. The Studio does not run it: it keeps
 its legacy set (below) until the switch of design v2 §21.
@@ -662,13 +663,20 @@ keeps a task off the host's own services. So on a rootful engine preflight
 checks it two ways, and either refuses the install with the command to run:
 the unit's script (`/usr/local/libexec/omarchy-task-firewall`,
 world-readable) must jump from `INPUT` to `OMARCHY-TASKS-HOST` and drop every
-task subnet there, whatever the probe says — a host whose own firewall drops
-the ports probed may leave its other services open to a task — and the probe
-must reach neither the gateway nor the LAN address, which shows the rule is
-in effect (the agent is never root and cannot read the firewall itself). The
-command is `sudo systemctl restart omarchy-task-firewall.service` when the
-script is in place, the rule having been flushed since (a firewall reload),
-and otherwise `sudo factory/host/prep-root.sh` with this install's `--user`,
+task subnet there, and the unit that runs it at boot
+(`/etc/systemd/system/omarchy-task-firewall.service`) must be there and
+enabled (its link in `/etc/systemd/system/multi-user.target.wants`), whatever
+the probe says — a host whose own firewall drops the ports probed may leave
+its other services open to a task, and a unit that does not run at boot
+leaves the host open after the next reboot, when nothing probes again — and
+the probe must reach neither the gateway nor the LAN address, which shows the
+rule is in effect (the agent is never root and cannot read the firewall
+itself). The command is `sudo systemctl restart
+omarchy-task-firewall.service` when the script and the enabled unit are in
+place, the rule having been flushed since (a firewall reload); `sudo
+systemctl enable omarchy-task-firewall.service && sudo systemctl restart
+omarchy-task-firewall.service` when the unit is there but not enabled; and
+otherwise `sudo factory/host/prep-root.sh` with this install's `--user`,
 `--work-root` and `--task-subnets`, and `--address-pool` with the base
 `/etc/docker/daemon.json` names (prep-root.sh would set its own default
 otherwise; one it would not keep as it is, several pools or a size other

@@ -738,7 +738,7 @@ The install's preflight probe tries the same gateways on a real engine in
 `tests/agent-install.sh` (rootful docker and rootless podman in CI; the
 runbook's *Installing a host*), and reads rootless podman's network stack in
 `/proc` as preflight does; preflight's reading of prep-root.sh's firewall
-script and of a rootless stack's command line (each engine's flags, a stack
+script and its boot unit (not there, or not enabled) and of a rootless stack's command line (each engine's flags, a stack
 seen only while the probe runs) is unit-tested in `omarchy-agent`. The agent's side of that file is
 unit-tested on interface lists (`crates/omarchy-agent/tests/fixtures/addresses/`:
 a home LAN host with docker's bridges and IPv6, a VPS with a public /32; a
