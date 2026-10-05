@@ -165,7 +165,18 @@ secret). Everything travels in the `Authorization` header over TLS only.
   cannot be asked (it forces DNS on and drops docker's option), so there a
   service of the host listening on all addresses is reachable from a task
   unless the host's firewall (`prep-root.sh`'s INPUT drop for the task
-  subnets) closes it. A signed `factory/sizing` exception is per package:
+  subnets) closes it; and a signed exception's bridge always has its gateway,
+  the host itself on a rootful engine, where the `DOCKER-USER` rules (in
+  `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
+  preflight checks it rather than trusting it (#367): a probe task on a
+  bridge and one on a network made as a task's try their gateway on 22, 53
+  and the pool's ports, and a connection made or refused there fails the
+  install, on a rootful host with the command that puts the INPUT drop back.
+  On a rootless engine the gateway is the engine's own namespace, and what
+  could reach the host is the user-mode stack's host loopback (RootlessKit's,
+  slirp4netns's or pasta's), off by default and refused at install when on,
+  with the setting that turns it off (the runbook's *Rootless engines*).
+  A signed `factory/sizing` exception is per package:
   it also covers a contributor's recipe of that package, so its reviewer
   approves exactly that.
 - **A log that carries a secret is refused.** Text evidence uploaded to

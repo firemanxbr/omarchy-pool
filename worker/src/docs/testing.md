@@ -710,7 +710,9 @@ dispatcher-env --write` rendered (#371: the token and an owner's line kept,
 0600, the machine's own addresses with a stand-in public one, the secrets
 directory, a budget): a public mirror answers through the egress only; cloud metadata, a
 public name resolving to loopback, a raw socket ("Network is unreachable"),
-the host's LAN address and gateway, and the other task's container, egress
+the host's LAN address and upstream router, the task network's gateway (a
+listener of the host's on every address, 22, 53 and the pool's ports 3128,
+8790 and 8791; #367), and the other task's container, egress
 and agent are out of reach; through the egress the host's LAN address is
 refused and so is the stand-in public one, as "an address of this host" and
 as an IPv4-mapped IPv6 literal, which every egress sidecar was given
@@ -718,8 +720,20 @@ as an IPv4-mapped IPv6 literal, which every egress sidecar was given
 `/proc/net` found it; a deny entry written v4-mapped is the IPv4 address,
 unit-tested in `pkg-repo`); the agent sidecar's caps are the
 budget's; the probe sidecar's word reaches the claim; a
-signed exception's task gets a bridge network; a stop removes only that
-task's container, sidecars and network. The agent's side of that file is
+signed exception's task gets a bridge network, whose gateway (the host
+itself on a rootful engine) is out of reach behind prep-root.sh's `INPUT`
+drop for the task subnets, which the script adds for its own subnets for the
+run where it may (a rootful engine, root or `sudo -n`, as on CI's runners); a
+stop removes only that task's container, sidecars and network. CI runs it on
+docker; `RUNTIME=podman` runs it on podman by hand, the dispatcher then
+taking podman's own CLI (its task networks without DNS, so without a
+gateway) even where docker's is installed; behind podman's docker API a task
+network keeps its gateway, which the script asserts closed behind the drop
+and notes otherwise. A podman run in CI comes with #372, which makes the
+dispatcher's podman networks through libpod's API. The install's preflight
+probe tries the same gateways on a real engine in `tests/agent-install.sh`
+(rootful docker and rootless podman in CI; the runbook's *Installing a
+host*). The agent's side of that file is
 unit-tested on interface lists (`crates/omarchy-agent/tests/fixtures/addresses/`:
 a home LAN host with docker's bridges and IPv6, a VPS with a public /32; a
 bridge on a global range kept, an address on `lo` but loopback's kept), on
