@@ -256,91 +256,22 @@ impl Agent {
                 return self.switch_end("?", "refused", &format!("{REQUEST}: {e}"), now);
             }
         };
-        let word = req.driver.clone();
-        if let Err(why) = self.switch_check(&req) {
-            return self.switch_end(&word, "refused", &format!("{why}; nothing changed"), now);
-        }
-        let Some(r) = Runtime::parse(&req.driver) else {
-            return;
-        };
-        let mut new = match self.driver_on(&req.socket) {
-            Ok(d) => d,
-            Err(e) => {
-                return self.switch_end(&word, "refused", &format!("{e}; nothing changed"), now)
-            }
-        };
-        let id = match new.engine() {
-            Answer::Yes(id) => id,
-            Answer::NotFound => {
+        let (to, version) = match self.switch_ready(&req) {
+            Ok(ready) => ready,
+            Err(why) => {
                 return self.switch_end(
-                    &word,
+                    &req.driver,
                     "refused",
-                    &format!(
-                        "the engine on {} does not answer; nothing changed",
-                        req.socket.display()
-                    ),
-                    now,
-                )
-            }
-            Answer::NoAnswer(e) => {
-                return self.switch_end(
-                    &word,
-                    "refused",
-                    &format!(
-                        "the engine on {} does not answer ({e}); nothing changed",
-                        req.socket.display()
-                    ),
+                    &format!("{why}; nothing changed"),
                     now,
                 )
             }
         };
-        if id.runtime != r {
-            return self.switch_end(
-                &word,
-                "refused",
-                &format!(
-                    "{} answers as {} {}, not {}; nothing changed",
-                    req.socket.display(),
-                    id.runtime.word(),
-                    id.version,
-                    r.word()
-                ),
-                now,
-            );
-        }
-        let host = self.cfg.host_id.clone();
-        let tasks = match self.driver.as_deref_mut().map(|d| d.host_tasks(&host)) {
-            Some(Answer::Yes(n)) => n,
-            Some(Answer::NoAnswer(e)) => {
-                return self.switch_end(&word, "refused", &format!("the engine it runs on now does not answer ({e}): its dispatcher and task containers cannot be stopped or counted; nothing changed"), now)
-            }
-            Some(Answer::NotFound) => 0,
-            None => {
-                return self.switch_end(&word, "refused", "the pinned engine tools are not installed yet; nothing changed", now)
-            }
-        };
-        if tasks > 0 {
-            return self.switch_end(
-                &word,
-                "refused",
-                &format!(
-                    "{tasks} task container(s) run on {}: task containers, named volumes and caches do not move between engines — drain the host first (Drain on its registration's page), let its tasks finish, then switch; nothing changed",
-                    self.cfg.runtime.driver()
-                ),
-                now,
-            );
-        }
         let from = place_of(&self.cfg);
-        let to = Place {
-            runtime: r.word().to_owned(),
-            socket_cli: req.socket.clone(),
-            socket_mount: req.socket.clone(),
-            engine: if id.rootless { "rootless" } else { "rootful" }.to_owned(),
-        };
         self.journal.write(
             now,
             "runtime-switch",
-            serde_json::json!({"to": r.driver(), "socket": req.socket, "engine": to.engine, "version": id.version, "from": self.cfg.runtime.driver(), "step": "stopping the dispatcher on the old engine"}),
+            serde_json::json!({"to": format!("compose/{}", to.runtime), "socket": req.socket, "engine": to.engine, "version": version, "from": self.cfg.runtime.driver(), "step": "stopping the dispatcher on the old engine"}),
         );
         self.state.switch = Some(Switch {
             from,
@@ -350,6 +281,60 @@ impl Agent {
             since: now,
             why: None,
         });
+    }
+
+    /// Where a request moves the bundle, and the new engine's version — or why it is
+    /// refused: [`Agent::switch_check`]'s reasons, a socket that does not answer as the
+    /// engine named, or a task container still running on the engine the bundle runs on.
+    fn switch_ready(&mut self, req: &Request) -> Result<(Place, String), String> {
+        self.switch_check(req)?;
+        let r = Runtime::parse(&req.driver)
+            .ok_or_else(|| format!("{:?} is not a driver this agent carries", req.driver))?;
+        let mut new = self.driver_on(&req.socket)?;
+        let id = match new.engine() {
+            Answer::Yes(id) => id,
+            Answer::NotFound => {
+                return Err(format!(
+                    "the engine on {} does not answer",
+                    req.socket.display()
+                ))
+            }
+            Answer::NoAnswer(e) => {
+                return Err(format!(
+                    "the engine on {} does not answer ({e})",
+                    req.socket.display()
+                ))
+            }
+        };
+        if id.runtime != r {
+            return Err(format!(
+                "{} answers as {} {}, not {}",
+                req.socket.display(),
+                id.runtime.word(),
+                id.version,
+                r.word()
+            ));
+        }
+        let host = self.cfg.host_id.clone();
+        let tasks = match self.driver.as_deref_mut().map(|d| d.host_tasks(&host)) {
+            Some(Answer::Yes(n)) => n,
+            Some(Answer::NoAnswer(e)) => return Err(format!("the engine it runs on now does not answer ({e}): its dispatcher and task containers cannot be stopped or counted")),
+            Some(Answer::NotFound) => 0,
+            None => return Err("the pinned engine tools are not installed yet".into()),
+        };
+        if tasks > 0 {
+            return Err(format!(
+                "{tasks} task container(s) run on {}: task containers, named volumes and caches do not move between engines — drain the host first (Drain on its registration's page), let its tasks finish, then switch",
+                self.cfg.runtime.driver()
+            ));
+        }
+        let to = Place {
+            runtime: r.word().to_owned(),
+            socket_cli: req.socket.clone(),
+            socket_mount: req.socket.clone(),
+            engine: if id.rootless { "rootless" } else { "rootful" }.to_owned(),
+        };
+        Ok((to, id.version))
     }
 
     /// What refuses a request before any engine is asked.
