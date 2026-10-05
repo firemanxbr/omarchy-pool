@@ -771,8 +771,9 @@ fn a_count_after_a_start_writes_the_vms_capacity_and_the_lane_the_envelope_allow
     // The engine through the pinned CLI on the Mac's socket.
     let log = std::fs::read_to_string(dir.join("docker.log")).unwrap();
     assert!(log.contains("--platform linux/amd64"), "{log}");
-    // A release's new x86_64 image, which no task pulls before #338: the lane stays as the
-    // file had it, its smoke run not repeated, and the native count still reaches the file.
+    // A release's new x86_64 image, which only an x86_64 task on the lane pulls: the lane
+    // stays as the file had it, its smoke run not repeated, and the native count still
+    // reaches the file.
     // Here the file has no lane (the owner's emulate above): none is added.
     let x86 = manifest.build_image("x86_64").unwrap().to_string();
     let native = manifest.build_image("aarch64").unwrap().to_string();

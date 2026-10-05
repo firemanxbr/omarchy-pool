@@ -202,9 +202,10 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         emulate: toml.emulate.as_deref(),
         x86_64_image: x86.as_deref(),
     };
-    // No task pulls a release's x86_64 image before #338. When the VM lacks it, the lane
-    // stays as the last count found it (its smoke run proved the VM's Rosetta, which a new
-    // image does not change), so the native CPUs, memory and units still reach the file.
+    // Only an x86_64 task on the Rosetta lane pulls a release's x86_64 image (the loop pulls
+    // none). When the VM lacks it, the lane stays as the last count found it (its smoke run
+    // proved the VM's Rosetta, which a new image does not change), so the native CPUs,
+    // memory and units still reach the file.
     let mut carried = None;
     let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img| {
         if probe::image_here(&how, img).is_ok() {

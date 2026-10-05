@@ -855,9 +855,10 @@ release whose agent hangs, rolled back (the watchdog's line in
 page); from inside a task container, `nc -z -w 3 <your router> 53` and the
 same to the Mac's LAN address time out (the VM's task firewall), as
 preflight's egress probe said; `omarchy-agent dispatcher-env` names the
-Mac's LAN and public addresses (and, with IPv6, its /64); an x86_64 build on the lane `via: rosetta`
-(it needs the emulated lanes of #338 on the pool's side: the dispatcher's
-per-lane `--platform` and the pool's choice of tasks by lane); and over SSH
+Mac's LAN and public addresses (and, with IPv6, its /64); an x86_64 build
+on the lane `via: rosetta` (the pool hands the Mac's emulated lane x86_64
+work after its threshold, or at once with no native x86_64 host eligible,
+#337, and the dispatcher runs it with `--platform linux/amd64`); and over SSH
 with nobody logged in at the Mac, the Terminal instruction.
 
 ### The run loop
@@ -1007,7 +1008,8 @@ VM made again after `colima delete`, a release no native task has run yet;
 the rollout does not pull build images) leaves the file as it was, says so,
 and is tried again an hour later, once a task's pull has brought it;
 `omarchy-agent capacity --write` counts it at once. A release's new x86_64
-image, which nothing pulls on a Mac before #338, does not hold the count
+image, which a Mac pulls only when an x86_64 task runs on its Rosetta lane,
+does not hold the count
 back: the x86_64 lane stays as `run/capacity.json` had it (its smoke run, on
 the earlier image, proved the VM's Rosetta), and the new size still reaches
 the file. It runs the task firewall again after every start,
