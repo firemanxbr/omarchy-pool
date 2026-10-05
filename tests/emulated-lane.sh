@@ -10,7 +10,11 @@
 #      `page16k`); the envelope's `emulate = []` holds it off and runs
 #      nothing for it; the handler disabled, the lane is held for a person
 #      and the native lane stays (where this script may write the binfmt
-#      table: root, or passwordless sudo);
+#      table: root, or passwordless sudo — and only in CI or with
+#      EMULATED_LANE_TOGGLE_BINFMT=1: the handler is the kernel's, so for
+#      those few seconds every emulated container on the machine fails to
+#      start; by hand, run it under the engine lock on a machine no one
+#      else uses);
 #   2. one emulated build through the dispatcher: a stubbed pool hands it a
 #      build of the foreign architecture on the emulated lane; its task
 #      container runs that architecture under qemu (`uname -m` inside), told
@@ -92,7 +96,9 @@ out="$("$AGENT" capacity --envelope "$tmp/agent.toml" --probe-image "$STUB_IMAGE
 check "$out" "j['emulation'] == {'emulated': [], 'held_lanes': [{'arch': '$foreign', 'reason': \"off: the envelope's emulate does not list it\"}]}" "emulate = [] keeps it off"
 echo "ok: the envelope's emulate = [] keeps the lane off"
 
-if [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; then
+if [[ -z "${CI:-}" && "${EMULATED_LANE_TOGGLE_BINFMT:-}" != 1 ]]; then
+  echo "skipped: switching the binfmt handler off (machine-wide, for a few seconds) runs in CI or with EMULATED_LANE_TOGGLE_BINFMT=1"
+elif [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; then
   binfmt_write 0; restore=1
   out="$("$AGENT" capacity --work-root "$tmp/work-root" --probe-image "$STUB_IMAGE" --emulate-image "$image")" || fail "capacity: $out"
   binfmt_write 1; restore=""
@@ -210,7 +216,10 @@ done_body="$(jq -c 'select(.path == "/api/v1/factory/tasks/1/complete") | .body'
 jq -e --arg f "emu-1.0-1-$foreign.pkg.tar.zst" '.filename == $f' <<<"$done_body" >/dev/null || fail "the completed build: $done_body"
 [[ -s "$tmp/uploads/emu-1.0-1-$foreign.pkg.tar.zst" ]] || fail "the package was not uploaded: $(ls "$tmp/uploads")"
 grep -q "arch=($foreign)" "$tmp/uploads/PKGBUILD" || fail "the recipe it staged: $(cat "$tmp/uploads/PKGBUILD")"
-jq -e 'select(.path | test("/factory/tasks/1/")) | .auth == "Bearer omj.secret-of-1" or (.auth | startswith("Bearer omj."))' "$tmp/requests.jsonl" | grep -qv true && fail "a call for task 1 without its job token"
+# Every call for task 1 carries the claim's job token (this stub's heartbeat renews none): one boolean over them all, so a call
+# with no Authorization header, or with the worker's token, fails it wherever it stands.
+jq -se '[.[] | select(.path | test("/factory/tasks/1/"))] | length > 0 and all(.auth == "Bearer omj.secret-of-1")' "$tmp/requests.jsonl" >/dev/null \
+  || fail "a call for task 1 without its job token: $(jq -c 'select(.path | test("/factory/tasks/1/")) | [.path, .auth]' "$tmp/requests.jsonl")"
 echo "ok: one emulated $foreign build on this $native machine — built under qemu, uploaded and completed with its job token"
 kill "$disp" 2>/dev/null; wait "$disp" 2>/dev/null || true; disp=""
 echo "ok: an emulated lane on a real engine ($native emulating $foreign)"

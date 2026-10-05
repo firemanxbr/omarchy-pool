@@ -820,7 +820,7 @@ so a size-4 build waits for memory rather than run smaller.
   builds while native work for it waits, all but one otherwise; nothing
   running is ended for that.
 - **Emulated lanes are detected (#338).** At install and at each
-  `omarchy-agent capacity --write` the agent looks at the other
+  `omarchy-agent capacity … --write` (below) the agent looks at the other
   architecture: the envelope's `emulate` (absent: allowed; `emulate = []`:
   off), then the binfmt handler (`/proc/sys/fs/binfmt_misc/qemu-<arch>`,
   enabled with the `F` flag — `factory/host/prep-root.sh` installs
@@ -832,9 +832,25 @@ so a size-4 build waits for memory rather than run smaller.
   `jq '.lanes, .held_lanes' <set dir>/run/capacity.json` (or
   `omarchy-agent capacity --work-root <dir> --emulate-image <image by digest>`
   without a release); a lane held with *needs a person* wants prep-root.sh
-  run once as root, then `omarchy-agent capacity --write`. On 16K pages the
-  x86_64 lane stays on (D33): a build whose toolchain cannot start under qemu
-  fails at once with `needs_native` (the build script's probe; only a
+  run once as root, then detection again with the owner's envelope and the
+  release the host applied (`omarchy-agent status`, *release: applied*),
+  whose bundle the agent keeps under its data directory:
+
+  ```bash
+  d=~/.local/share/omarchy-agent r=vX.Y.Z   # the data directory, the applied release
+  "$d/current/omarchy-agent" capacity --envelope "$d/agent.toml" \
+    --bundle "$d/bundles/omarchy-host-$r.tar.gz" \
+    --sig "$d/bundles/omarchy-host-$r.tar.gz.sigstore.json" --write "$d/sets/host"
+  ```
+
+  Leave out `--envelope` and the owner's `emulate` and caps are not
+  applied: the file could turn on a lane the envelope keeps off. The run
+  loop sees `run/capacity.json` change and starts a round (re-running
+  install does the same). Install writes `emulate` into the envelope with
+  the architecture it found, for the owner to confirm; `emulate = []` there
+  keeps it off. On 16K pages the x86_64 lane stays on (D33): a build whose
+  toolchain cannot start under qemu fails at once with `needs_native` (the
+  build script's probe; only a
   container on an emulated lane is told it is one,
   `WORKER_LABELS={"emulated":true}`), goes back to the queue with its attempt
   given back and never runs emulated again — it waits for a native host,
