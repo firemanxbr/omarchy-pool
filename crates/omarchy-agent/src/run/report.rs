@@ -28,6 +28,8 @@ const SPACING_S: i64 = 10;
 const RETRY_S: i64 = 60;
 /// A round's detail in the report is cut to this many characters (the report's 16 KiB).
 const ROUND_DETAIL_MAX: usize = 1000;
+/// The runtime switch's words, so `runtime` stays within the 2 KiB the pool keeps whole.
+const RUNTIME_WORDS_MAX: usize = 400;
 
 /// When the report was last sent, what it said, and when one is due again.
 #[derive(Debug, Default)]
@@ -63,14 +65,21 @@ impl Agent {
             &self.cfg.policy,
         );
         body["brake"] = self.state.brake.view(now);
-        body["capacity"] = self.capacity_view();
+        // Only a whole one: a pool refuses the report (and the answers it carries) whose
+        // capacity it cannot read, `null` too before #325.
+        if let Some(c) = self.capacity_view() {
+            body["capacity"] = c;
+        }
+        // The pool keeps `runtime` whole only within 2 KiB: the words are cut to fit.
+        let short = |t: &str| -> String { t.chars().take(RUNTIME_WORDS_MAX).collect() };
         body["runtime"] = serde_json::json!({
             "driver": self.cfg.runtime.driver(),
             "switch": self.state.switch.as_ref().map(|w| serde_json::json!({
-                "to": format!("compose/{}", w.to.runtime), "since": iso(w.started), "step": w.step, "why": w.why,
+                "to": format!("compose/{}", w.to.runtime), "since": iso(w.started), "step": w.step,
+                "why": w.why.as_deref().map(short),
             })),
             "switch_last": self.state.switch_last.as_ref().map(|e| serde_json::json!({
-                "to": e.to, "outcome": e.outcome, "detail": e.detail, "at": iso(e.at),
+                "to": e.to, "outcome": e.outcome, "detail": short(&e.detail), "at": iso(e.at),
             })),
         });
         body
@@ -80,17 +89,14 @@ impl Agent {
     /// page; only one whole as the pool takes one (its totals, its free disk, one to four
     /// lanes with exactly one native, of this machine's architecture) — the pool refuses a
     /// report whose capacity it cannot read, and the answers it carries with it.
-    fn capacity_view(&self) -> serde_json::Value {
+    fn capacity_view(&self) -> Option<serde_json::Value> {
         use serde_json::Value;
         let Ok(Some(_)) = super::settings::Base::read(&self.cfg.set_dir) else {
-            return Value::Null;
+            return None;
         };
-        let Some(mut c) = std::fs::read(self.cfg.set_dir.join("run/capacity.json"))
+        let mut c = std::fs::read(self.cfg.set_dir.join("run/capacity.json"))
             .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        else {
-            return Value::Null;
-        };
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())?;
         let lanes = c["lanes"].as_array().cloned().unwrap_or_default();
         let natives: Vec<&Value> = lanes.iter().filter(|l| l["mode"] == "native").collect();
         let whole = c["cpus"].as_u64().is_some_and(|n| (1..=4096).contains(&n))
@@ -105,14 +111,14 @@ impl Agent {
             && natives.len() == 1
             && natives[0]["arch"] == std::env::consts::ARCH;
         if !whole {
-            return Value::Null;
+            return None;
         }
         // The narrowing's own record stays on the host.
         if let Some(o) = c.as_object_mut() {
             o.remove("detected");
             o.remove("settings");
         }
-        c
+        Some(c)
     }
 
     /// Posts the report when something changed or one is due.

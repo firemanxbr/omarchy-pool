@@ -9,7 +9,6 @@
     "release_change_at": null,
     "restarts_hour": 0
   },
-  "capacity": null,
   "legacy": {
     "blocked": "the marker cannot be written: /srv/omarchy-pool: group- or world-writable (mode 775)",
     "containers": 3,

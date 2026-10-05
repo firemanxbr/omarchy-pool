@@ -9,7 +9,6 @@
     "release_change_at": null,
     "restarts_hour": 0
   },
-  "capacity": null,
   "legacy": {
     "dir": "/srv/omarchy-pool",
     "order": "ho_11111111111111111111111111111111",
