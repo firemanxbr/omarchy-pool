@@ -1,6 +1,7 @@
 //! The commands: `run` (the loop), `status` (works with the pool down), `round`
-//! (SIGUSR1 to the running agent), `logs` (the journal's tail) and `self-test` (what a
-//! self-update asks of a new agent before it hands over, #316).
+//! (SIGUSR1 to the running agent), `logs` (the journal's tail), `self-test` (what a
+//! self-update asks of a new agent before it hands over, #316) and `runtime switch` (the
+//! owner's move of the bundle to another driver, #325).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -389,7 +390,117 @@ pub(crate) fn summary(s: &State, now: i64) -> String {
         ),
     );
     out.push_str(&orders_lines(s, now));
+    out.push_str(&p4_lines(s, now));
     out
+}
+
+/// `status`'s lines for P4 (#325): the settings the pool narrowed, the brake, and the
+/// owner's runtime switch.
+fn p4_lines(s: &State, now: i64) -> String {
+    use super::brake::Ask;
+    let mut out = String::new();
+    let mut line = |k: &str, v: String| {
+        let _ = writeln!(out, "{k:<10} {v}");
+    };
+    if let Some(set) = &s.settings {
+        line(
+            "settings:",
+            format!(
+                "units {}, emulated lanes {} (the pool's narrowing, inside the envelope)",
+                set.units
+                    .map_or_else(|| "as the envelope".to_owned(), |u| u.to_string()),
+                set.emulate.as_ref().map_or_else(
+                    || "as the envelope".to_owned(),
+                    |e| if e.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        e.join(", ")
+                    }
+                )
+            ),
+        );
+    }
+    let brake = &s.brake;
+    let (orders, restarts, narrowings, releases) = (
+        brake.count(Ask::Order, now),
+        brake.count(Ask::Restart, now),
+        brake.count(Ask::Narrowing, now),
+        brake.count(Ask::Release, now),
+    );
+    if orders + restarts + narrowings + releases > 0 {
+        line(
+            "brake:",
+            format!(
+                "{orders}/{} host orders, {restarts}/{} dispatcher restarts, {narrowings}/{} narrowings in the last hour; {releases}/1 release change in the last 10 min",
+                super::brake::ORDERS_PER_HOUR,
+                super::brake::RESTARTS_PER_HOUR,
+                super::brake::NARROWINGS_PER_HOUR
+            ),
+        );
+    }
+    if let Some(sw) = &s.switch {
+        line(
+            "switching:",
+            format!(
+                "to compose/{} at {} from compose/{}, at its {} step for {} s{}",
+                sw.to.runtime,
+                sw.to.socket_cli.display(),
+                sw.from.runtime,
+                match sw.step {
+                    super::switch::SwitchStep::Stop => "stop",
+                    super::switch::SwitchStep::Up => "up",
+                    super::switch::SwitchStep::Back => "back",
+                    super::switch::SwitchStep::Return => "return",
+                },
+                (now - sw.since).max(0),
+                sw.why
+                    .as_ref()
+                    .map_or_else(String::new, |w| format!(": {w}"))
+            ),
+        );
+    }
+    if let Some(e) = &s.switch_last {
+        line(
+            "switch:",
+            format!(
+                "to {} {} {} s ago: {}",
+                e.to,
+                e.outcome,
+                (now - e.at).max(0),
+                e.detail
+            ),
+        );
+    }
+    out
+}
+
+/// `omarchy-agent runtime switch <driver> [--socket <path>] [--data-dir <dir>]` (#325): the
+/// request for the running agent, which it takes between rounds; SIGUSR1 wakes it.
+pub fn runtime_switch(data: Option<&str>, driver: &str, socket: Option<&str>) -> u8 {
+    let result = paths(data).and_then(|p| {
+        let said = super::switch::request(&p.data, driver, socket.map(Path::new))?;
+        if let Some(pid) = running_agent(&p) {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-USR1", &pid])
+                .status();
+            Ok(said)
+        } else {
+            Ok(format!(
+                "{said}\nno agent runs on {} now: it takes the request when it starts",
+                p.data.display()
+            ))
+        }
+    });
+    match result {
+        Ok(said) => {
+            println!("omarchy-agent: {said}");
+            0
+        }
+        Err(e) => {
+            eprintln!("omarchy-agent runtime switch: {e}");
+            1
+        }
+    }
 }
 
 /// `status`'s lines for the host orders (#344): a `retire-legacy` in flight, and the

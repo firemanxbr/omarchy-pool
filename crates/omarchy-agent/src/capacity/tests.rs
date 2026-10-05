@@ -502,6 +502,32 @@ fn capacity_json_is_rewritten_only_when_something_changed() {
         (Some(5), Some("2026-10-01T02:00:00Z"))
     );
 
+    // A file the run loop narrowed to the pool's settings (#325): the same detection
+    // leaves the narrowing in place; another one goes in whole (the loop narrows it again).
+    let mut narrowed = v.clone();
+    narrowed["detected"] = serde_json::json!({"units": 5, "job_reserved": 1, "lanes": v["lanes"]});
+    narrowed["settings"] = serde_json::json!({"units": 2, "emulate": null});
+    narrowed["units"] = 2.into();
+    std::fs::write(&path, narrowed.to_string()).unwrap();
+    assert_eq!(
+        write_if_changed(&dir, &capped, "2026-10-01T02:30:00Z").unwrap(),
+        Written::Unchanged
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
+            .unwrap()["units"],
+        2
+    );
+    assert_eq!(
+        write_if_changed(&dir, &studio, "2026-10-01T02:45:00Z").unwrap(),
+        Written::Changed
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
+            .unwrap()["units"],
+        11
+    );
+
     // A file someone else wrote, or garbage, is replaced.
     std::fs::write(&path, "{}").unwrap();
     assert_eq!(

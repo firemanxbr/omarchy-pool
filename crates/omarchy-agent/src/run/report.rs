@@ -2,8 +2,12 @@
 //! signed with the host key, on every change and at least every [`EVERY_S`]. It carries
 //! what the agent knows of itself — its version, the release applied, targeted and its
 //! floor, the rollout and the last round, the legacy set (`legacy`), and the answers to
-//! the last host orders (`orders`), which the pool closes the orders with. Capacity,
-//! runtime, bundle and task fields stay with the issues that read them.
+//! the last host orders (`orders`), which the pool closes the orders with. P4 (#325) adds
+//! `capacity` (`run/capacity.json` as the dispatcher reads it, narrowed), `settings` (what
+//! the pool narrowed, the envelope it narrows inside and what applies: the host page's
+//! controls), `brake` (how much of each limit the last window spent) and `runtime` (the
+//! driver, and the owner's switch in flight or its last end). Bundle and task fields stay
+//! with the issues that read them.
 //!
 //! A report that does not get through changes nothing and is tried again a minute later —
 //! an hour later when the pool refuses the host's calls (401/403: suspended, retired, a
@@ -53,7 +57,62 @@ impl Agent {
             })).collect::<Vec<_>>(),
         });
         body["legacy"] = self.legacy_view(now).unwrap_or(serde_json::Value::Null);
+        body["settings"] = super::settings::view(
+            self.state.settings.as_ref(),
+            &self.cfg.set_dir,
+            &self.cfg.policy,
+        );
+        body["brake"] = self.state.brake.view(now);
+        body["capacity"] = self.capacity_view();
+        body["runtime"] = serde_json::json!({
+            "driver": self.cfg.runtime.driver(),
+            "switch": self.state.switch.as_ref().map(|w| serde_json::json!({
+                "to": format!("compose/{}", w.to.runtime), "since": iso(w.started), "step": w.step, "why": w.why,
+            })),
+            "switch_last": self.state.switch_last.as_ref().map(|e| serde_json::json!({
+                "to": e.to, "outcome": e.outcome, "detail": e.detail, "at": iso(e.at),
+            })),
+        });
         body
+    }
+
+    /// `run/capacity.json` as the dispatcher reads it, for the pool's units and the host
+    /// page; only one whole as the pool takes one (its totals, its free disk, one to four
+    /// lanes with exactly one native, of this machine's architecture) — the pool refuses a
+    /// report whose capacity it cannot read, and the answers it carries with it.
+    fn capacity_view(&self) -> serde_json::Value {
+        use serde_json::Value;
+        let Ok(Some(_)) = super::settings::Base::read(&self.cfg.set_dir) else {
+            return Value::Null;
+        };
+        let Some(mut c) = std::fs::read(self.cfg.set_dir.join("run/capacity.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        else {
+            return Value::Null;
+        };
+        let lanes = c["lanes"].as_array().cloned().unwrap_or_default();
+        let natives: Vec<&Value> = lanes.iter().filter(|l| l["mode"] == "native").collect();
+        let whole = c["cpus"].as_u64().is_some_and(|n| (1..=4096).contains(&n))
+            && c["mem_gb"].is_number()
+            && c["disk_free_gb"]["work"].is_number()
+            && c["disk_free_gb"]["engine"].is_number()
+            && (1..=4).contains(&lanes.len())
+            && lanes.iter().all(|l| {
+                super::config::ARCHES.contains(&l["arch"].as_str().unwrap_or(""))
+                    && (l["mode"] == "native" || l["mode"] == "emulated")
+            })
+            && natives.len() == 1
+            && natives[0]["arch"] == std::env::consts::ARCH;
+        if !whole {
+            return Value::Null;
+        }
+        // The narrowing's own record stays on the host.
+        if let Some(o) = c.as_object_mut() {
+            o.remove("detected");
+            o.remove("settings");
+        }
+        c
     }
 
     /// Posts the report when something changed or one is due.

@@ -340,6 +340,10 @@ fn usage_errors_exit_2() {
         &["token", "extra"],
         &["status", "--data", "/tmp"],
         &["uninstall", "extra"],
+        &["runtime"],
+        &["runtime", "switch"],
+        &["runtime", "swap", "compose/podman"],
+        &["runtime", "switch", "compose/podman", "--pool", "https://x"],
     ] {
         assert_eq!(
             run_env(args, &data, None).status.code(),
@@ -354,6 +358,47 @@ fn usage_errors_exit_2() {
     assert_eq!(
         String::from_utf8_lossy(&o.stdout).trim(),
         format!("omarchy-agent {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+/// `runtime switch` (#325): a driver this binary does not carry, or a socket nothing
+/// answers on, is refused at the host with nothing asked of the running agent.
+#[test]
+fn a_runtime_switch_the_host_cannot_make_is_refused_and_asks_nothing() {
+    let data = scratch("runtime-switch");
+    for (args, why) in [
+        (
+            &["runtime", "switch", "quadlet"][..],
+            "\"quadlet\" is not a driver this agent carries: compose/docker or compose/podman",
+        ),
+        (
+            &[
+                "runtime",
+                "switch",
+                "compose/podman",
+                "--socket",
+                "/nonexistent/podman.sock",
+            ],
+            "nothing answers on /nonexistent/podman.sock",
+        ),
+        (
+            &[
+                "runtime",
+                "switch",
+                "compose/podman",
+                "--socket",
+                "relative/podman.sock",
+            ],
+            "relative/podman.sock is not a plain absolute path",
+        ),
+    ] {
+        let o = run_env(args, &data, None);
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {}", text(&o));
+        assert!(text(&o).contains(why), "{args:?}: {}", text(&o));
+    }
+    assert!(
+        !data.join("omarchy-agent/runtime-switch.json").exists(),
+        "nothing was asked of the agent"
     );
 }
 

@@ -87,7 +87,13 @@ impl Journal {
 /// Reads `etc/*.env` of the set directory: each `KEY=value` value of 8 or more
 /// characters is a secret to scrub (shorter ones would scrub ordinary words).
 pub(crate) fn env_secrets(set_dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(set_dir.join("etc")) else {
+    env_values(&set_dir.join("etc"))
+}
+
+/// The values of `dir/*.env`, as [`env_secrets`] reads them: the set's `etc/`, or (#325's
+/// `diagnostics`) the secrets directory's `agent.env`, longest first.
+pub(crate) fn env_values(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut out = Vec::new();

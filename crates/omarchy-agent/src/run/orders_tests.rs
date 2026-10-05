@@ -262,6 +262,8 @@ fn reconcile_now_lifts_no_quarantine_and_says_why_no_round_started() {
     // The pool names no release (a pool from before #344): nothing to roll out.
     w.target("dev", None);
     w.orders(&[("reconcile-now", "ho_none", 3600)]);
+    // Two seconds after the last: the brake paces orders (#325).
+    w.tick(1);
     w.poll();
     assert_eq!(
         answer_of(&w, "ho_none").1,
@@ -308,8 +310,8 @@ fn an_unknown_kind_an_expired_order_and_one_without_a_deadline_are_refused() {
     let (mut w, dir) = beside_a_legacy_set(true);
     let changes = w.changes().len();
     w.orders(&[
-        ("rotate-token", "ho_u", 3600),
-        ("set-units", "ho_s", 3600),
+        ("drain-host", "ho_u", 3600),
+        ("shell", "ho_s", 3600),
         ("retire-legacy", "ho_x", -1),
         ("reconcile-now", "ho_y", 0),
     ]);
@@ -329,15 +331,10 @@ fn an_unknown_kind_an_expired_order_and_one_without_a_deadline_are_refused() {
     assert_eq!(got.len(), 5, "{got:?}");
     assert!(got.iter().all(|a| a.2 == "refused"), "{got:?}");
     assert!(
-        got[0]
-            .3
-            .starts_with("unknown kind \"rotate-token\": agent "),
+        got[0].3.starts_with("unknown kind \"drain-host\": agent "),
         "{got:?}"
     );
-    assert!(
-        got[1].3.starts_with("unknown kind \"set-units\""),
-        "{got:?}"
-    );
+    assert!(got[1].3.starts_with("unknown kind \"shell\""), "{got:?}");
     assert!(got[2].3.starts_with("expired at 2027-01-15T"), "{got:?}");
     assert!(got[3].3.starts_with("expired at"), "{got:?}");
     assert_eq!(got[4].3, "it carries no not_after the agent can read");
@@ -753,9 +750,11 @@ fn a_retire_legacy_that_cannot_finish_fails_after_its_limit_and_a_used_network_i
     w.orders(&[("retire-legacy", "ho_r", 3600)]);
     w.poll();
     w.engine.borrow_mut().down = true;
-    // Another order meanwhile is refused: one at a time.
+    // Another order meanwhile is refused: one at a time (taken two seconds after the
+    // first: the brake paces orders, #325).
     w.orders(&[("retire-legacy", "ho_r2", 3600)]);
     w.poll();
+    w.tick(2);
     assert!(answer_of(&w, "ho_r2")
         .1
         .starts_with("a retire-legacy is in flight already (order ho_r"));
@@ -921,7 +920,7 @@ fn a_retire_legacy_marks_retired_only_the_project_it_retired() {
 
 /// A JSON value's shape: its keys and each value's type, an array by its first item. The
 /// same as worker/test/host-orders.test.ts's.
-fn shape(v: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn shape(v: &serde_json::Value) -> serde_json::Value {
     use serde_json::Value as V;
     match v {
         V::Null => "null".into(),
@@ -933,7 +932,7 @@ fn shape(v: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn fixture(name: &str) -> serde_json::Value {
+pub(crate) fn fixture(name: &str) -> serde_json::Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/host-api")
         .join(name);

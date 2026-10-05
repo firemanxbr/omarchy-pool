@@ -1,0 +1,101 @@
+{
+  "agent": {
+    "skip": null,
+    "version": "0.4.0"
+  },
+  "brake": {
+    "narrowings_hour": 2,
+    "orders_hour": 2,
+    "release_change_at": null,
+    "restarts_hour": 2
+  },
+  "capacity": {
+    "agent_slots": 2,
+    "at": "2027-01-15T07:00:00Z",
+    "below_minimum": false,
+    "cpus": 12,
+    "dedicated": true,
+    "disk_free_gb": {
+      "engine": 220,
+      "work": 410
+    },
+    "isolation": "root",
+    "job_reserved": 1,
+    "lanes": [
+      {
+        "arch": "aarch64",
+        "mode": "native"
+      }
+    ],
+    "limits": {
+      "cpus_hard": true,
+      "memory_hard": true,
+      "pids": true
+    },
+    "mem_gb": 32,
+    "page_kb": 16,
+    "schema": 2,
+    "units": 4
+  },
+  "legacy": null,
+  "orders": [
+    {
+      "at": "2027-01-15T08:03:56Z",
+      "detail": "units 8 → 4 (its envelope gives 8); the dispatcher is recreated with it and claims by it from its next claim, and running tasks above it finish",
+      "id": "ho_33333333333333333333333333333333",
+      "kind": "set-units",
+      "outcome": "done"
+    },
+    {
+      "at": "2027-01-15T08:03:58Z",
+      "detail": "emulated lanes x86_64 → none; the dispatcher is recreated with it and claims by it from its next claim, and running tasks above it finish",
+      "id": "ho_44444444444444444444444444444444",
+      "kind": "set-emulate",
+      "outcome": "done"
+    }
+  ],
+  "quarantine": [],
+  "release": {
+    "applied": "v1.21.0",
+    "floor": "v1.21.0",
+    "min_release": "v1.20.0",
+    "target": "v1.21.0"
+  },
+  "rollout": {
+    "since": "2027-01-15T08:04:19Z",
+    "state": "idle",
+    "target": null
+  },
+  "round": {
+    "at": "2027-01-15T08:04:19Z",
+    "detail": "host runs v1.21.0",
+    "from": null,
+    "outcome": "ok",
+    "step": "commit"
+  },
+  "runtime": {
+    "driver": "compose/docker",
+    "switch": null,
+    "switch_last": null
+  },
+  "settings": {
+    "above": [],
+    "effective": {
+      "emulated": [],
+      "units": 4
+    },
+    "emulate": [],
+    "envelope": {
+      "detected_lanes": [
+        "x86_64"
+      ],
+      "detected_units": 11,
+      "diagnostics": true,
+      "emulate": [
+        "x86_64"
+      ],
+      "max_units": 8
+    },
+    "units": 4
+  }
+}

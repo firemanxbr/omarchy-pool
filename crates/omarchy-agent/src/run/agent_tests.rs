@@ -758,12 +758,26 @@ fn a_newer_release_preempts_a_round_before_its_commit() {
     w.release("v1.1.0");
     w.release("v1.2.0");
     w.target("v1.1.0", None);
+    // A pull that takes ten minutes: the brake takes one release change every ten minutes
+    // (#325), so v1.2.0 waits for that before it preempts.
+    w.engine.borrow_mut().pull_polls = 1000;
     w.round_now();
     while w.step() != "pull" {
         w.tick(3);
     }
     w.target("v1.2.0", None);
     w.round_now();
+    assert_eq!(w.agent.state.rollout.target, r("v1.1.0"));
+    assert!(
+        w.journal().contains(
+            "v1.2.0 waits: brake: at most one release change every 10 minutes (a rollback is exempt)"
+        ),
+        "{}",
+        w.journal()
+    );
+    // Ten minutes on, the next poll preempts the pull still in flight.
+    w.engine.borrow_mut().pull_polls = 0;
+    w.tick(600);
     assert_eq!(w.agent.state.rollout.target, r("v1.2.0"));
     // Preempted at pull: the new round rendered v1.2.0 in the same tick.
     assert_eq!(w.agent.state.rollout.step, Step::Lint);

@@ -186,7 +186,9 @@ fn a_release_with_a_higher_agent_updates_the_agent_first_and_the_same_one_does_n
         (task.id, task.started_at, "running")
     );
 
-    // A later release with the same agent rolls out with no update at all.
+    // A later release with the same agent rolls out with no update at all (ten minutes on:
+    // the brake takes one release change every ten minutes, #325).
+    w.tick(600);
     publish_agent(
         &w.remote,
         "v1.2.0",
@@ -272,6 +274,8 @@ fn a_wrong_hash_or_a_failing_self_test_changes_nothing_and_this_agent_applies_th
             binary: &binary(true),
         };
         publish_agent(&w.remote, "v1.2.0", &ships);
+        // Ten minutes on: the brake takes one release change every ten minutes (#325).
+        w.tick(600);
         w.target("v1.2.0", None);
         w.round();
         assert_eq!(

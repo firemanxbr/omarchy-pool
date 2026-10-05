@@ -1,7 +1,8 @@
 //! `state.json` (design v2 §16.1, §16.2): what the agent knows across restarts — the trust
 //! floor, the merged `min_release` and `revoked`, the last accepted rollback statement, the
-//! rollout in flight, quarantines, the last round, the poll schedule, and the host orders
-//! (#344): the ids taken, their answers and a `retire-legacy` in flight.
+//! rollout in flight, quarantines, the last round, the poll schedule, the host orders
+//! (#344): the ids taken, their answers and a `retire-legacy` in flight — and (#325) the
+//! settings the pool narrowed, the brake's counters, and the owner's runtime switch.
 //!
 //! Written before each step acts, atomically (a temporary file, fsync, rename), so a
 //! restart anywhere resumes where it was. Read leniently (#316): unknown fields are
@@ -60,6 +61,13 @@ pub struct State {
     pub agent_skip: Option<Version>,
     /// The host orders (#344, design v2 §17.1).
     pub orders: Orders,
+    /// The settings the pool narrowed (#325); `None` until it gave one.
+    pub settings: Option<super::settings::Settings>,
+    /// The host-side brake's counters (#325): kept here so a restart resets nothing.
+    pub brake: super::brake::Brake,
+    /// The owner's runtime switch in flight (#325), and how the last one ended.
+    pub switch: Option<super::switch::Switch>,
+    pub switch_last: Option<super::switch::SwitchEnd>,
 }
 
 impl Default for State {
@@ -82,6 +90,10 @@ impl Default for State {
             poll: Poll::default(),
             agent_skip: None,
             orders: Orders::default(),
+            settings: None,
+            brake: super::brake::Brake::default(),
+            switch: None,
+            switch_last: None,
         }
     }
 }
@@ -338,6 +350,10 @@ const LENIENT: &[&str] = &[
     "poll",
     "agent_skip",
     "orders",
+    "settings",
+    "brake",
+    "switch",
+    "switch_last",
 ];
 
 /// The lenient parser `load` uses (and the fuzz target).
@@ -533,7 +549,17 @@ mod tests {
             .keys()
             .filter(|k| !previous.contains(&k.as_str()))
             .collect();
-        assert_eq!(added, ["agent_skip", "orders"]);
+        assert_eq!(
+            added,
+            [
+                "agent_skip",
+                "brake",
+                "orders",
+                "settings",
+                "switch",
+                "switch_last"
+            ]
+        );
     }
 
     #[test]
