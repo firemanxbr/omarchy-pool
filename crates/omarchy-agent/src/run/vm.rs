@@ -9,6 +9,11 @@
 //! polls, so no tick blocks on it; once one ends the loop counts the host's capacity again
 //! (`run/capacity.json`, with no pull), so a new size reaches the dispatcher.
 //!
+//! Before every start or restart the mounts are checked again as preflight checks them
+//! ([`crate::vm::check_paths`], [`crate::vm::check_owned`]): a directory below
+//! `/Users/Shared` that became a link or another account's is "needs a person", and the
+//! profile is neither started nor stopped for it.
+//!
 //! The size agent.toml gives (`[envelope] max_cpus`, `max_mem_gb`) is held to what install
 //! holds it to ([`crate::vm::size`]): never more than the Mac less what it keeps, and never
 //! below the applied release's signed minimum — a size below it is "needs a person", and
@@ -168,10 +173,8 @@ pub(crate) struct Counting<'a> {
 pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
     let toml = AgentToml::parse(c.agent_toml)?;
     let host = format!("unix://{}", c.socket.display());
-    let image = c
-        .manifest
-        .build_image(std::env::consts::ARCH)
-        .map(ToString::to_string);
+    // The VM's own lane: the profile is aarch64 whatever runs the agent.
+    let image = c.manifest.build_image(vm::ARCH).map(ToString::to_string);
     let docker = c.docker.to_string_lossy();
     let how = probe::Probe {
         docker: &docker,
@@ -180,16 +183,10 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         image: image.as_deref(),
     };
     // The loop pulls nothing: a pull of a multi-GB build image would hold the tick far past
-    // one engine call (and the watchdog's patience). An image the VM's store lacks (a VM
-    // made again, a release whose x86_64 image an aarch64 rollout does not pull) leaves
+    // one engine call (and the watchdog's patience). A native build image the VM's store
+    // lacks (a VM made again, a release no native task has pulled yet) leaves
     // `run/capacity.json` as it was until a task's pull brings it (the agent tries again).
-    let x86 = c.manifest.build_image("x86_64").map(ToString::to_string);
-    let lane = toml.vm.as_ref().is_some_and(|v| v.1)
-        && toml
-            .emulate
-            .as_deref()
-            .is_none_or(|a| a.iter().any(|x| x == "x86_64"));
-    for img in image.iter().chain(x86.iter().filter(|_| lane)) {
+    if let Some(img) = &image {
         probe::image_here(&how, img).map_err(|e| {
             format!(
                 "the release's build image {img} is not in the VM's image store, and the loop pulls none ({e})"
@@ -197,6 +194,7 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         })?;
     }
     let facts = probe::detect(&how)?;
+    let x86 = c.manifest.build_image("x86_64").map(ToString::to_string);
     let vm = probe::MacVm {
         kind: VmKind::Dedicated,
         meminfo: c.meminfo,
@@ -204,13 +202,34 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         emulate: toml.emulate.as_deref(),
         x86_64_image: x86.as_deref(),
     };
-    let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img| probe::rosetta_lane(&how, img));
+    // No task pulls a release's x86_64 image before #338. When the VM lacks it, the lane
+    // stays as the last count found it (its smoke run proved the VM's Rosetta, which a new
+    // image does not change), so the native CPUs, memory and units still reach the file.
+    let mut carried = None;
+    let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img| {
+        if probe::image_here(&how, img).is_ok() {
+            return probe::rosetta_lane(&how, img);
+        }
+        let why = format!(
+            "the release's x86_64 build image {img} is not in the VM's image store, and the loop pulls none"
+        );
+        if rosetta_counted(c.set_dir) {
+            carried = Some(format!(
+                "the x86_64 lane through Rosetta is kept as run/capacity.json had it, its smoke run not repeated: {why}"
+            ));
+            Ok(())
+        } else {
+            Err(why)
+        }
+    });
     let cap = Capacity::new(&facts, &toml.caps, c.manifest.capacity());
     let w = capacity::write_if_changed(c.set_dir, &cap, &capacity::now())
         .map_err(|e| format!("{}/run/capacity.json: {e}", c.set_dir.display()))?;
-    let lane = match said {
-        Some(probe::LaneSaid::Note(s) | probe::LaneSaid::Warning(s)) => format!("; {s}"),
-        None => String::new(),
+    let lane = match (said, carried) {
+        (Some(probe::LaneSaid::Note(s) | probe::LaneSaid::Warning(s)), _) | (None, Some(s)) => {
+            format!("; {s}")
+        }
+        (None, None) => String::new(),
     };
     Ok(format!(
         "the host's capacity counted again after the VM started: {} CPUs, {} GB, {} units, lanes {}{lane}; run/capacity.json {}",
@@ -228,6 +247,20 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
     ))
 }
 
+/// Whether `run/capacity.json` holds the `x86_64` lane through Rosetta: a count before
+/// this one (install's, the loop's) passed its smoke run in this VM.
+fn rosetta_counted(set_dir: &Path) -> bool {
+    std::fs::read(set_dir.join("run").join("capacity.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("lanes").and_then(|l| l.as_array()).cloned())
+        .is_some_and(|lanes| {
+            lanes
+                .iter()
+                .any(|l| l["arch"] == "x86_64" && l["via"] == "rosetta")
+        })
+}
+
 /// What the keeper asks of the rest of the loop this tick.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Asks {
@@ -242,6 +275,9 @@ pub(crate) struct Keeper {
     /// The task firewall ([`vm::firewall`]) for agent.toml's task subnets.
     firewall: String,
     home: PathBuf,
+    /// `/Users/Shared` ([`vm::shared_dir`]), below which every directory of a mount must be
+    /// the person's own and no link ([`vm::check_owned`]).
+    shared: PathBuf,
     /// The data directory, where `vm.json` records M7's actions.
     data: PathBuf,
     /// The applied release's signed minimum (CPUs, GB), once known.
@@ -273,6 +309,7 @@ impl Keeper {
             want,
             firewall,
             home: home.to_owned(),
+            shared: vm::shared_dir(Path::new(vm::MAC_ROOT)).to_owned(),
             data: data.to_owned(),
             minimum: None,
             mac: None,
@@ -542,6 +579,34 @@ impl Keeper {
         }
     }
 
+    /// The mounts checked again before a start or restart, as preflight checks them
+    /// ([`vm::check_paths`], [`vm::check_owned`]): what install found may have changed since
+    /// (another account's link put in place of a directory below `/Users/Shared`), and the
+    /// VM would mount what a link points at. `true`, said, when one is refused: the profile
+    /// is then neither started nor stopped for a restart.
+    fn refused(&mut self, now: i64, journal: &Journal, want: &Want) -> bool {
+        let mut no = vm::check_paths(&self.home, &want.mounts, &crate::install::mac::NAMES);
+        no.extend(vm::check_owned(
+            &self.shared,
+            &want.mounts,
+            crate::install::files::euid(),
+        ));
+        if no.is_empty() {
+            return false;
+        }
+        self.say(
+            journal,
+            now,
+            "vm",
+            &format!(
+                "needs a person: {}; the {} VM is neither started nor restarted with these mounts",
+                no.join("; "),
+                vm::PROFILE
+            ),
+        );
+        true
+    }
+
     /// Says what a start or restart waits for, when it cannot be made now.
     fn held(&mut self, now: i64, journal: &Journal, what: &str, why: &str) -> bool {
         if self.docker {
@@ -562,7 +627,7 @@ impl Keeper {
     /// Starts the profile as `want` says, within the rate limit (`counted`: a restart
     /// recorded its action before the stop).
     fn start(&mut self, now: i64, journal: &Journal, want: &Want, why: &str, counted: bool) {
-        if self.held(now, journal, "started", why) {
+        if self.refused(now, journal, want) || self.held(now, journal, "started", why) {
             return;
         }
         if !counted {
@@ -596,7 +661,7 @@ impl Keeper {
     /// A stop and a start, one action of the rate limit, recorded before the stop: `true`
     /// once the profile was stopped.
     fn restart(&mut self, now: i64, journal: &Journal, want: &Want, why: &str) -> bool {
-        if self.held(now, journal, "restarted", why) {
+        if self.refused(now, journal, want) || self.held(now, journal, "restarted", why) {
             return false;
         }
         if let Err(wait) = self.act(now) {

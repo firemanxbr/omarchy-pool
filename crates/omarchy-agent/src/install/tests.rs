@@ -1704,6 +1704,50 @@ fn with_only_colima_installed_install_makes_the_three_directories_and_preflight_
 }
 
 #[test]
+fn a_mac_root_that_is_a_link_or_another_accounts_is_refused_and_nothing_is_made_or_started() {
+    // The pasted command, no prep-mac.sh: another account made `omarchy-pool` in
+    // /Users/Shared (`<root>` plays it) as a link, before the person installed.
+    let h = mac_host(1);
+    let shared = h.root.join("shared");
+    fs::rename(&shared, h.root.join("theirs")).unwrap();
+    for d in ["work", "secrets", "set"] {
+        fs::remove_dir(h.root.join("theirs").join(d)).unwrap();
+    }
+    std::os::unix::fs::symlink(h.root.join("theirs"), &shared).unwrap();
+    let said = format!(
+        "{} is a symbolic link: refused (the VM would mount what it points at)",
+        shared.display()
+    );
+    for mode in [Mode::Preflight, Mode::Install] {
+        let mut sys = mac_sys(&h);
+        let (r, ready) = measure_as(&h.options, &mut sys, &verifier(), Some(&h.docker), mode)
+            .map_err(|e| e.to_string())
+            .unwrap();
+        assert!(ready.is_none() && !r.ok(), "{mode:?}: {}", r.screen());
+        assert!(r.screen().contains(&said), "{mode:?}: {}", r.screen());
+        assert!(starts(&sys).is_empty(), "{mode:?}: {:?}", sys.calls);
+        assert!(tree(&h.root.join("theirs")).is_empty(), "{mode:?}");
+    }
+    // Another account's own directory: root can play it here (`chown`); refused the same.
+    if files::euid() == 0 {
+        let h = mac_host(1);
+        let shared = h.root.join("shared");
+        std::os::unix::fs::chown(&shared, Some(4242), None).unwrap();
+        let mut sys = mac_sys(&h);
+        let (r, _) = measure_on(&h, &mut sys);
+        assert!(
+            r.screen().contains(&format!(
+                "{} belongs to uid 4242, not this user's 0: use another --root",
+                shared.display()
+            )),
+            "{}",
+            r.screen()
+        );
+        assert!(starts(&sys).is_empty(), "{:?}", sys.calls);
+    }
+}
+
+#[test]
 fn colima_gets_the_pinned_docker_cli_on_its_path_and_its_own_docker_config() {
     let h = mac_host(1);
     let mut sys = mac_sys(&h);

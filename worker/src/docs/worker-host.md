@@ -209,8 +209,10 @@ macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
   own path — the work root (writable), the secrets directory and the set
   directory (read-only), under `/Users/Shared/omarchy-pool` by default — and
   nothing of your home directory: no `~/.ssh`, no Keychain files, no
-  forwarded SSH agent. Preflight refuses any of the three under `~` and
-  checks, from a container, that the VM sees them and not your home.
+  forwarded SSH agent. Preflight refuses any of the three under `~`, or
+  below `/Users/Shared` another account's or a link, and checks, from a
+  container, that the VM sees them and not your home; the agent checks the
+  paths again before every start of the VM.
 - **Sized from capacity.** The VM gets the envelope's `max_cpus` and
   `max_mem_gb`, by default half of the Mac: a 16-core, 64 GB Mac gives it 8
   CPUs and 32 GB, which are 7 units (3 builds and the job unit). A Mac that

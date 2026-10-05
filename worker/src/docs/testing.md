@@ -731,7 +731,10 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   Mac is 8 CPUs and 32 GB; the envelope's caps; never the whole Mac; half of
   a 6-core Mac refused below the minimum, with what the caps could give), its
   three mounts (under the home directory in any case, holding it, linked into
-  it, overlapping, a `:` or `,` all refused), the `colima start` argv, the
+  it, overlapping, a `:` or `,` all refused; below `/Users/Shared`, a root
+  another account owns said once for the three, a directory swapped for a
+  link refused, the root itself a link, one not there yet left to install,
+  a mount elsewhere not looked at), the `colima start` argv, the
   saved `colima.yaml` read back (a size, a mount or Rosetta is a restart; the
   home mount, Colima's default with no mounts, a mount point elsewhere and a
   forwarded SSH agent are exposures; another VM type or architecture is the
@@ -758,11 +761,16 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   self-update's gate is shut, a wake asking the pool now, the clock set to
   the pool's and the profile restarted when that does not hold, the clock
   checked while a resize waits for tasks and beside an unreadable
-  `colima.yaml`; and the count after a start (a docker stub for the engine in
-  the VM): `run/capacity.json` rewritten with the VM's totals and the
-  Rosetta lane, unchanged when nothing changed, the lane left out under
-  `emulate = []`, and a build image the VM's store lacks: no pull, no run,
-  the file as it was. `run/agent_tests.rs` (`on_a_mac`) — the agent with its
+  `colima.yaml`, a work root swapped for a link into the home directory
+  keeping a stopped VM stopped and a set directory swapped for a link
+  keeping a running one from being stopped for a resize ("needs a person");
+  and the count after a start (a docker stub for the engine in the VM):
+  `run/capacity.json` rewritten with the VM's totals and the Rosetta lane,
+  unchanged when nothing changed, the lane left out under `emulate = []`; a
+  release's x86_64 image the VM's store lacks: no smoke run, the lane kept as
+  the file had it (none added to a file without it) and a resize's new CPUs
+  written; the native build image it lacks: no pull, no run, the file as it
+  was. `run/agent_tests.rs` (`on_a_mac`) — the agent with its
   keeper: a wake polls the pool at once (no poll due) and the VM's clock is
   set to the `Date` of that answer on the same tick; a start that ended
   counts the capacity again, and a count that did not happen is tried again
@@ -790,7 +798,10 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   a Mac below the minimum or a directory under `~` starting no VM; the three
   directories missing (Colima installed by hand): preflight says install
   makes them and starts nothing, install makes them 0700 and starts the VM,
-  one whose parent this user cannot write refused; preflight never
+  one whose parent this user cannot write refused; prep-mac.sh's root made
+  first by another account as a link (preflight and install refuse it,
+  make nothing in it and start no VM) or owned by another uid (played with
+  `chown` when the tests run as root); preflight never
   restarting a running VM that differs, install refusing to while a task
   runs in it and counting the action before the stop; `--rosetta`,
   `--no-rosetta` and agent.toml's `[vm] rosetta` carried over a repair; over

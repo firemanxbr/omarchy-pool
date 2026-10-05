@@ -286,7 +286,8 @@ fn wall(sys: &mut dyn Sys, env: &[(&'static str, String)], subnets: &[Cidr], r: 
 }
 
 /// Preflight's Mac half before the engine is measured: the GUI login, the three mounts
-/// (install makes a missing one, 0700, as prep-mac.sh does), the engine (the `omarchy`
+/// and their directories below `/Users/Shared` ([`vm::check_owned`]; install makes a
+/// missing one, 0700, as prep-mac.sh does), the engine (the `omarchy`
 /// profile, sized, started and walled, or a shared VM already here), the gateway.
 #[allow(clippy::too_many_lines)] // one check after another, in the screen's order
 pub(crate) fn engine(o: &Options, sys: &mut dyn Sys, ask: &Ask<'_>, r: &mut Report) -> Found {
@@ -305,6 +306,11 @@ pub(crate) fn engine(o: &Options, sys: &mut dyn Sys, ask: &Ask<'_>, r: &mut Repo
     }
     r.blockers
         .extend(vm::check_paths(&p.home, ask.mounts, &NAMES));
+    // Below /Users/Shared, which every account may write, each directory there is this
+    // user's and no link (prep-mac.sh's check, for the pasted command that runs without it).
+    let shared = vm::shared_dir(&p.mac_root);
+    r.blockers
+        .extend(vm::check_owned(shared, ask.mounts, files::euid()));
     // A missing one is install's to make where this user may (`/Users/Shared` is sticky
     // and writable by everyone): the pasted command needs only Colima installed.
     let mut missing = Vec::new();
@@ -427,6 +433,12 @@ pub(crate) fn engine(o: &Options, sys: &mut dyn Sys, ask: &Ask<'_>, r: &mut Repo
                 ));
                 return found;
             }
+        }
+        // What another account made in between (the parents `make_dir` found there).
+        let late = vm::check_owned(shared, ask.mounts, files::euid());
+        if !late.is_empty() {
+            r.blockers.extend(late);
+            return found;
         }
         r.notes.push(format!("made {} (0700)", shown.join(", ")));
     }

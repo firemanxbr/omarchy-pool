@@ -12,11 +12,13 @@
 //!   by default half of the Mac's; never the whole Mac ([`MAC_KEEPS`]), and never below
 //!   the release's signed minimum: a Mac that cannot give the VM 4 CPUs and 8 GB does not
 //!   join. A 16-core, 64 GB Mac gives 8 CPUs and 32 GB: 7 units, 3 builds and the job unit.
-//! - **Mounts** ([`mounts`], [`check_paths`]): no home directory. The work root
-//!   (writable), the secrets directory and the set directory (both read-only), each at its
-//!   identical path, none under `~` and none holding it. The set directory is mounted
-//!   because the host set binds `./run/capacity.json` into the dispatcher; read-only, so
-//!   nothing in the VM can plant a link the agent would then write through.
+//! - **Mounts** ([`mounts`], [`check_paths`], [`check_owned`]): no home directory. The
+//!   work root (writable), the secrets directory and the set directory (both read-only),
+//!   each at its identical path, none under `~` and none holding it, and every directory of
+//!   theirs below `/Users/Shared` the person's own and no link — checked again before every
+//!   start of the profile. The set directory is mounted because the host set binds
+//!   `./run/capacity.json` into the dispatcher; read-only, so nothing in the VM can plant a
+//!   link the agent would then write through.
 //! - **Two sockets**: [`socket_cli`] (`~/.colima/omarchy/docker.sock`) for the agent's
 //!   pinned CLI, [`SOCKET_MOUNT`] (`/var/run/docker.sock`, inside the VM) for the
 //!   dispatcher's bind mount.
@@ -49,6 +51,8 @@ use crate::lint::yaml::{self, Node};
 
 /// The Colima profile the agent owns (decision D11).
 pub const PROFILE: &str = "omarchy";
+/// The profile's architecture (`--arch aarch64`, D11): its engine's native lane.
+pub const ARCH: &str = "aarch64";
 /// The socket the dispatcher bind-mounts: the engine's own, inside the VM.
 pub const SOCKET_MOUNT: &str = "/var/run/docker.sock";
 /// launchd's `PATH` lacks Homebrew's prefix, where Colima and Lima are (`prep-mac.sh`).
@@ -270,6 +274,62 @@ pub fn check_paths(home: &Path, mounts: &[Mount], names: &[&str]) -> Vec<String>
     out
 }
 
+/// The directory the default mounts are made in, sticky and writable by every account:
+/// `/Users/Shared` for [`MAC_ROOT`].
+pub fn shared_dir(mac_root: &Path) -> &Path {
+    mac_root.parent().unwrap_or(Path::new("/"))
+}
+
+/// The directories below `shared` ([`shared_dir`]) that hold a mount, as prep-mac.sh checks
+/// them: each one there (the mount and its parents below `shared`) this user's (`uid`),
+/// none a symbolic link. Another account may make `omarchy-pool` in `/Users/Shared` before
+/// the person does; owning it, it could later rename the work root and leave a link into
+/// the person's home in its place, which the next start of the VM would mount. Checked by
+/// preflight, install, and the run loop before every start of the profile.
+pub fn check_owned(shared: &Path, mounts: &[Mount], uid: u32) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let mut out = Vec::new();
+    // Each directory once (the three mounts share their root), with whether it was refused.
+    let mut seen: Vec<(PathBuf, bool)> = Vec::new();
+    let depth = shared.components().count();
+    for m in mounts {
+        let mut below: Vec<&Path> = m
+            .path
+            .ancestors()
+            .filter(|a| a.components().count() > depth && within(a, shared))
+            .collect();
+        // From the top down: below a link, every path is its target's.
+        below.reverse();
+        for d in below {
+            if let Some((_, refused)) = seen.iter().find(|(s, _)| s == d) {
+                if *refused {
+                    break;
+                }
+                continue;
+            }
+            // One not there yet is install's to make, 0700, this user's.
+            let why = match std::fs::symlink_metadata(d) {
+                Ok(meta) if meta.file_type().is_symlink() => Some(format!(
+                    "{} is a symbolic link: refused (the VM would mount what it points at)",
+                    d.display()
+                )),
+                Ok(meta) if meta.uid() != uid => Some(format!(
+                    "{} belongs to uid {}, not this user's {uid}: use another --root with factory/host/prep-mac.sh (and --work-root, --secrets-dir and --set-dir)",
+                    d.display(),
+                    meta.uid()
+                )),
+                Ok(_) | Err(_) => None,
+            };
+            seen.push((d.to_owned(), why.is_some()));
+            if let Some(why) = why {
+                out.push(why);
+                break;
+            }
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------------------
 // The profile.
 
@@ -294,7 +354,7 @@ pub fn start_args(w: &Want) -> Vec<String> {
         "--vm-type",
         "vz",
         "--arch",
-        "aarch64",
+        ARCH,
         "--runtime",
         "docker",
         "--mount-type",
@@ -439,7 +499,7 @@ pub enum Drift {
 /// place is the person's to delete; a size, a mount, Rosetta or an exposure is a restart.
 pub fn drift(have: &Config, want: &Want, home: &Path) -> Drift {
     if (!have.vm_type.is_empty() && have.vm_type != "vz")
-        || (!have.arch.is_empty() && have.arch != "aarch64")
+        || (!have.arch.is_empty() && have.arch != ARCH)
     {
         return Drift::Recreate(format!(
             "the omarchy profile is {} {}, not vz aarch64: `colima delete -p {PROFILE}` and install again",

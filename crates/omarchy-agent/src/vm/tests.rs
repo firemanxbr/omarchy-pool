@@ -128,6 +128,55 @@ fn the_mounts_hold_nothing_of_the_home_directory_and_never_overlap() {
     assert!(found.contains("under your home"), "{found}");
 }
 
+#[test]
+fn every_directory_of_a_mount_below_users_shared_is_this_users_and_no_link() {
+    use std::os::unix::fs::MetadataExt as _;
+    // `<tmp>` plays /Users/Shared: prep-mac.sh's root and its three directories in it.
+    let shared = tempdir();
+    let root = shared.join("omarchy-pool");
+    for d in ["work", "secrets", "set"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    let ms = mounts(&root.join("work"), &root.join("secrets"), &root.join("set"));
+    let uid = std::fs::metadata(&root).unwrap().uid();
+    assert_eq!(shared_dir(Path::new(MAC_ROOT)), Path::new("/Users/Shared"));
+    assert!(check_owned(&shared, &ms, uid).is_empty());
+    // Not there yet: install makes them, this user's.
+    let fresh = mounts(
+        &shared.join("new/work"),
+        &shared.join("new/s"),
+        &shared.join("new/t"),
+    );
+    assert!(check_owned(&shared, &fresh, uid).is_empty());
+    // Another account's root, said once for the three mounts it holds.
+    let found = check_owned(&shared, &ms, uid + 1);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with(&format!(
+            "{} belongs to uid {uid}, not this user's {}: use another --root",
+            root.display(),
+            uid + 1
+        )),
+        "{found:?}"
+    );
+    // The work root put back as a link (to anywhere): refused, never followed.
+    std::fs::rename(root.join("work"), root.join("was-work")).unwrap();
+    std::os::unix::fs::symlink(root.join("was-work"), root.join("work")).unwrap();
+    let found = check_owned(&shared, &ms, uid).join("\n");
+    assert_eq!(
+        found,
+        format!(
+            "{} is a symbolic link: refused (the VM would mount what it points at)",
+            root.join("work").display()
+        )
+    );
+    // So is the root itself, once for all three; and a mount elsewhere is not looked at.
+    std::fs::rename(&root, shared.join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(shared.join("elsewhere"), &root).unwrap();
+    assert_eq!(check_owned(&shared, &ms, uid).len(), 1);
+    assert!(check_owned(&shared.join("other"), &ms, uid + 1).is_empty());
+}
+
 fn want() -> Want {
     Want {
         size: Size {

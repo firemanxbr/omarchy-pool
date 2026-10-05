@@ -741,7 +741,12 @@ Preflight, before it starts any VM:
   links resolved), none overlaps another; one that does not exist is made by
   install (0700) where this user may write its parent (`/Users/Shared` is
   writable by everyone), and preflight says it would and starts no VM until
-  then;
+  then. Every directory of theirs below `/Users/Shared` that is there (the
+  root and the three) must be yours and no link, as prep-mac.sh checks: an
+  `omarchy-pool` another account made first could later have a directory
+  swapped for a link the VM would mount. The run loop checks the mounts
+  again before every start or restart of the VM, and says "needs a person"
+  instead of starting it;
 - the VM's size: the envelope's caps, by default half of the Mac (`sysctl`),
   never the whole Mac; one below the release's minimum (4 CPUs, 8 GB) is
   refused with the numbers, and what the caps could give it;
@@ -899,11 +904,15 @@ directory). The size it gives the VM is held to the applied release's signed
 minimum and to the Mac less one CPU and 2 GB; once a start ended it counts
 the host's capacity again (the VM's `MemAvailable`, the Rosetta lane the
 envelope allows) and rewrites `run/capacity.json` when it changed. That
-count pulls nothing: a build image the VM's store lacks (a VM made again
-after `colima delete`, a release's new x86_64 image, which the rollout does
-not pull) leaves the file as it was, says so, and is tried again an hour
-later, once a task's pull has brought it; `omarchy-agent capacity --write`
-counts it at once. It runs the task firewall again after every start,
+count pulls nothing: a native (aarch64) build image the VM's store lacks (a
+VM made again after `colima delete`, a release no native task has run yet;
+the rollout does not pull build images) leaves the file as it was, says so,
+and is tried again an hour later, once a task's pull has brought it;
+`omarchy-agent capacity --write` counts it at once. A release's new x86_64
+image, which nothing pulls on a Mac before #338, does not hold the count
+back: the x86_64 lane stays as `run/capacity.json` had it (its smoke run, on
+the earlier image, proved the VM's Rosetta), and the new size still reaches
+the file. It runs the task firewall again after every start,
 hourly and after a wake (the VM itself applies it at boot). A tick more
 than a minute after the last means the Mac slept: the loop asks the
 pool at once and compares the VM's clock (`date` inside it) with the pool's

@@ -1,8 +1,9 @@
 //! The `omarchy` VM kept by the run loop (#320), against a played Colima: started when
 //! stopped (once the pinned docker CLI is known), held to the rate limit, restarted when
 //! it differs (a size only while no task runs and never below the signed minimum, an
-//! exposure at once), walled by the task firewall after every start, and its clock held to
-//! the pool's after a wake whatever else waits.
+//! exposure at once), never started or restarted with a mount that became a link, walled
+//! by the task firewall after every start, and its clock held to the pool's after a wake
+//! whatever else waits; the count after a start, which pulls nothing.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -455,6 +456,93 @@ fn a_size_below_the_signed_minimum_is_neither_started_nor_resized_and_one_above_
 const T: i64 = 1_800_000_000;
 
 #[test]
+fn a_mount_that_became_a_link_is_neither_started_nor_restarted_with() {
+    // `<tmp>` plays /Users/Shared, with prep-mac.sh's three directories and a home beside.
+    let dir = tempdir();
+    let root = dir.join("omarchy-pool");
+    let home = dir.join("home/me");
+    for d in ["work", "secrets", "set"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    std::fs::create_dir_all(home.join("projects")).unwrap();
+    let mut w = want();
+    w.mounts = vm::mounts(&root.join("work"), &root.join("secrets"), &root.join("set"));
+    let world = Rc::new(RefCell::new(World {
+        want: Some(w.clone()),
+        mac: "16\n68719476736\n".into(),
+        ..World::default()
+    }));
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let journal = Journal::new(&data.join("journal.ndjson"));
+    let said = || std::fs::read_to_string(data.join("journal.ndjson")).unwrap_or_default();
+    let mut k = Keeper::new(
+        Box::new(Fake(Rc::clone(&world))),
+        w.clone(),
+        String::new(),
+        &home,
+        &data,
+    );
+    k.shared.clone_from(&dir);
+    k.use_docker(Path::new("/data/tools/0a/docker"));
+    // Another account that owns the root renamed the work root and left a link into the
+    // person's home in its place: the stopped VM is not started with it.
+    std::fs::rename(root.join("work"), root.join("old-work")).unwrap();
+    std::os::unix::fs::symlink(home.join("projects"), root.join("work")).unwrap();
+    k.step(T, None, &mut || Some(false), false, &journal);
+    assert!(
+        world.borrow().calls.is_empty(),
+        "{:?}",
+        world.borrow().calls
+    );
+    assert!(
+        said().contains(&format!(
+            "needs a person: the work root {} is under your home directory",
+            root.join("work").display()
+        )) && said().contains(&format!(
+            "{} is a symbolic link: refused (the VM would mount what it points at)",
+            root.join("work").display()
+        )) && said().contains("the omarchy VM is neither started nor restarted with these mounts"),
+        "{}",
+        said()
+    );
+    // Put right: started. Then the running VM differs (a resize) while the link is back:
+    // it is not stopped for a restart it would make with that link.
+    std::fs::remove_file(root.join("work")).unwrap();
+    std::fs::rename(root.join("old-work"), root.join("work")).unwrap();
+    k.step(T + 40, None, &mut || Some(false), false, &journal);
+    k.step(T + 43, None, &mut || Some(false), false, &journal);
+    assert_eq!(world.borrow().calls[0], vm::start_args(&w).join(" "));
+    assert!(world.borrow().running);
+    let mut smaller = w.clone();
+    smaller.size = vm::Size { cpus: 4, mem_gb: 8 };
+    world.borrow_mut().saved = Some(saved_for(&smaller));
+    std::fs::rename(root.join("set"), root.join("old-set")).unwrap();
+    std::os::unix::fs::symlink(root.join("old-set"), root.join("set")).unwrap();
+    k.step(
+        T + 43 + vm::COOLDOWN_S,
+        None,
+        &mut || Some(false),
+        false,
+        &journal,
+    );
+    let calls = world.borrow().calls.clone();
+    assert!(
+        !calls.iter().any(|c| c == "stop")
+            && calls.iter().filter(|c| c.starts_with("start")).count() == 1,
+        "{calls:?}"
+    );
+    assert!(
+        said().contains(&format!(
+            "{} is a symbolic link: refused",
+            root.join("set").display()
+        )),
+        "{}",
+        said()
+    );
+}
+
+#[test]
 fn a_vm_that_lets_the_persons_files_in_is_restarted_at_once() {
     let mut h = Host::new(World {
         running: true,
@@ -683,16 +771,58 @@ fn a_count_after_a_start_writes_the_vms_capacity_and_the_lane_the_envelope_allow
     // The engine through the pinned CLI on the Mac's socket.
     let log = std::fs::read_to_string(dir.join("docker.log")).unwrap();
     assert!(log.contains("--platform linux/amd64"), "{log}");
-    // A build image the VM's store lacks (a VM made again, a release's new x86_64 image):
-    // the loop pulls nothing, runs nothing, and leaves the file as it was.
-    let before = std::fs::read(set.join("run/capacity.json")).unwrap();
+    // A release's new x86_64 image, which no task pulls before #338: the lane stays as the
+    // file had it, its smoke run not repeated, and the native count still reaches the file.
+    // Here the file has no lane (the owner's emulate above): none is added.
     let x86 = manifest.build_image("x86_64").unwrap().to_string();
+    let native = manifest.build_image("aarch64").unwrap().to_string();
+    assert_ne!(x86, native);
     std::fs::write(dir.join("missing"), &x86).unwrap();
+    let said = count_with(&toml("")).unwrap();
+    assert!(
+        said.contains(&format!("no x86_64 lane through Rosetta: the release's x86_64 build image {x86} is not in the VM's image store"))
+            && said.ends_with("run/capacity.json unchanged"),
+        "{said}"
+    );
+    std::fs::remove_file(dir.join("missing")).unwrap();
+    assert!(count_with(&toml("")).unwrap().ends_with("changed"));
+    std::fs::write(dir.join("missing"), &x86).unwrap();
+    std::fs::write(dir.join("docker.log"), "").unwrap();
+    // A resize: the VM's new size reaches the file, the lane kept as it was.
+    std::fs::write(
+        dir.join("info.json"),
+        std::fs::read_to_string(dir.join("info.json"))
+            .unwrap()
+            .replace(r#""NCPU":8"#, r#""NCPU":6"#),
+    )
+    .unwrap();
+    let said = count_with(&toml("")).unwrap();
+    assert!(
+        said.contains("6 CPUs")
+            && said.contains("x86_64 via rosetta")
+            && said.contains(&format!(
+                "the x86_64 lane through Rosetta is kept as run/capacity.json had it, its smoke run not repeated: the release's x86_64 build image {x86} is not in the VM's image store, and the loop pulls none"
+            ))
+            && said.ends_with("run/capacity.json changed"),
+        "{said}"
+    );
+    let file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(set.join("run/capacity.json")).unwrap()).unwrap();
+    assert_eq!(
+        (file["cpus"].as_u64(), &file["lanes"][1]["via"]),
+        (Some(6), &serde_json::json!("rosetta"))
+    );
+    let log = std::fs::read_to_string(dir.join("docker.log")).unwrap();
+    assert!(!log.contains("--platform linux/amd64"), "{log}");
+    // The native build image the VM's store lacks (a VM made again): the loop pulls
+    // nothing, runs nothing, and leaves the file as it was until a task's pull brings it.
+    let before = std::fs::read(set.join("run/capacity.json")).unwrap();
+    std::fs::write(dir.join("missing"), &native).unwrap();
     std::fs::write(dir.join("docker.log"), "").unwrap();
     let e = count_with(&toml("")).unwrap_err();
     assert!(
         e.contains(&format!(
-            "the release's build image {x86} is not in the VM's image store, and the loop pulls none"
+            "the release's build image {native} is not in the VM's image store, and the loop pulls none"
         )),
         "{e}"
     );
