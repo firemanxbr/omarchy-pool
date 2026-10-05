@@ -29,8 +29,9 @@
 //! Every owner file is written through [`files`] (`openat`, `O_NOFOLLOW`).
 //!
 //! Seams left for later issues, by name: macOS (launchd, Colima) is P3; the egress probe
-//! behind the egress sidecar on an internal network, once the worker image has it
-//! ([`egress`]); the `subuid` level for rootless podman, once the dispatcher (#335) starts
+//! behind the egress sidecar on a task's internal network (#373), and on podman the task
+//! network made through libpod's own API with DNS off (#372), until which a rootless host
+//! fails the probe ([`egress`]); the `subuid` level for rootless podman, once the dispatcher (#335) starts
 //! task containers with `--userns=auto` (until then rootless podman reads as `user`); the
 //! emulated lane's smoke run (#338, reported only here); task containers and sidecars
 //! carry `org.omarchy-pool.agent.host=<host>` (design v2 §9.3), which uninstall removes by.
@@ -87,6 +88,9 @@ pub struct Places {
     pub binfmt: PathBuf,
     /// Where the host's own addresses are read (`/proc/net`, #371).
     pub proc_net: PathBuf,
+    /// prep-root.sh's firewall script (world-readable): which command a host whose task
+    /// subnets reach it is told to run (#367).
+    pub task_firewall: PathBuf,
 }
 
 impl Places {
@@ -113,6 +117,7 @@ impl Places {
             routes: PathBuf::from("/proc/net/route"),
             binfmt: PathBuf::from("/proc/sys/fs/binfmt_misc"),
             proc_net: Sources::system().proc_net,
+            task_firewall: PathBuf::from("/usr/local/libexec/omarchy-task-firewall"),
         })
     }
 
@@ -689,25 +694,28 @@ pub(crate) fn measure(
         }
         match (task.first().and_then(|t| t.last_28()), &image) {
             (Some(subnet), Some(img)) => {
-                let t = egress::Targets::of_host(net::default_gateway(&routes), net::lan_address())
-                    .asking(pool.as_deref());
-                match egress::probe(d, img, subnet, &t) {
-                    Ok(out) => {
-                        let b = egress::verdict(&out, &t);
-                        if b.is_empty() {
-                            r.notes
-                                .push("egress: a task reaches public addresses only".into());
-                        }
-                        r.blockers.extend(b);
-                        public = egress::seen(&out);
-                        r.notes.push(match (public, &t.seen) {
-                            (Some(ip), _) => format!("egress: tasks leave from {ip}, which every task's egress refuses with the host's own addresses"),
-                            (None, Some(url)) => format!("egress: the address tasks leave from was not seen ({url} gave none); every task's egress refuses the interfaces' addresses"),
-                            (None, None) => "egress: the address tasks leave from was not asked (the pool is not HTTPS)".into(),
-                        });
-                    }
-                    Err(e) => r.blockers.push(format!("egress: {e}")),
-                }
+                let router = net::default_gateway(&routes);
+                let rootful = facts.as_ref().is_none_or(|f| !f.rootless());
+                let server = d.server();
+                let firewall = egress::firewall_command(
+                    std::fs::read_to_string(&p.task_firewall).ok().as_deref(),
+                    &task,
+                    &p.user,
+                    &work_root,
+                    &task_subnets,
+                );
+                let host = egress::Host {
+                    router,
+                    lan: net::lan_address(),
+                    pool: pool.as_deref(),
+                    advice: egress::Advice {
+                        rootful,
+                        podman: server == Ok(engine::Server::Podman),
+                        firewall,
+                    },
+                    server,
+                };
+                public = egress::check(d, img, subnet, &host, &mut r);
             }
             _ => r
                 .blockers

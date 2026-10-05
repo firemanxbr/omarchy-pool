@@ -285,8 +285,9 @@ pub enum Gateway {
     /// podman's own CLI: `--disable-dns`, which leaves netavark's bridge without the gateway address.
     NoDns,
     /// podman behind docker's API, which forces DNS on and drops docker's option: the address stays.
-    /// Seam: prep-root.sh's INPUT drop for the task subnets (rootful), or the install child issue's
-    /// preflight probe (#317), is what keeps a task off it there.
+    /// prep-root.sh's INPUT drop for the task subnets keeps a task off it on a rootful host, and the
+    /// install's preflight probe refuses a host where a task reaches it (#367); seam: #372 makes the
+    /// network through libpod's own API, with DNS off.
     Engine,
 }
 
