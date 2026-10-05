@@ -14,7 +14,7 @@
 //!     [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
 //!     [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
 //!     [--legacy <project>] [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>]
-//!     [--max-mem-gb <n>] [--no-rosetta] [--wait-minutes <n>] [--yes]
+//!     [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>] [--yes]
 //!     (#317, what install.sh runs once the binary is in place: preflight, the envelope,
 //!     the enrollment below, agent.toml, the agent keys, the unit and linger, the service;
 //!     on a Mac, #320, the omarchy Colima VM and the LaunchAgent)
@@ -67,7 +67,7 @@ const USAGE: &str = "usage:
       [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
       [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
       [--legacy <project>] [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>]
-      [--max-mem-gb <n>] [--no-rosetta] [--wait-minutes <n>] [--yes]
+      [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>] [--yes]
   omarchy-agent preflight <install's options>
   omarchy-agent uninstall [--data-dir <dir>]
   omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
@@ -334,7 +334,13 @@ fn switches(args: &[String], known: &[&'static str]) -> (Vec<String>, Vec<&'stat
 }
 
 fn install_options(args: &[String]) -> Result<install::Options, String> {
-    let (args, on) = switches(args, &["--yes", "--dedicated", "--no-rosetta"]);
+    let (args, on) = switches(args, &["--yes", "--dedicated", "--rosetta", "--no-rosetta"]);
+    let rosetta = match (on.contains(&"--rosetta"), on.contains(&"--no-rosetta")) {
+        (true, true) => return Err(format!("--rosetta or --no-rosetta, not both\n{USAGE}")),
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+    };
     let mut rest = Vec::new();
     let f = flags(
         &args,
@@ -391,7 +397,7 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
         secrets_dir: path("--secrets-dir"),
         set_dir: path("--set-dir"),
         socket: path("--socket"),
-        rosetta: !on.contains(&"--no-rosetta"),
+        rosetta,
         task_subnets: get("--task-subnets").map(str::to_owned),
         dedicated: on.contains(&"--dedicated"),
         legacy: get("--legacy").map(str::to_owned),
@@ -444,41 +450,56 @@ fn install_failure(e: &install::Failure) -> u8 {
     }
 }
 
-/// A Mac's engine (#320): the VM's level, the omarchy VM's own `MemAvailable` (M7), and
-/// the `x86_64` lane through Rosetta once its smoke run passed.
+/// A Mac's engine (#320, [`probe::in_mac_vm`], as install and the run loop count it): the
+/// VM's level, the omarchy VM's own `MemAvailable` (M7, read inside it with a deadline),
+/// and the `x86_64` lane through Rosetta once its smoke run passed, unless the envelope's
+/// `emulate` leaves it out.
 fn mac_facts(
     facts: capacity::Facts,
-    runtime: &str,
-    rosetta: bool,
+    toml: &AgentToml,
     how: &probe::Probe<'_>,
     manifest: Option<&omarchy_agent::manifest::Manifest>,
 ) -> capacity::Facts {
-    use capacity::VmKind;
-    if runtime != "colima" {
-        return facts.in_vm(VmKind::Shared);
-    }
-    let mut facts = facts.in_vm(VmKind::Dedicated);
-    if let Ok(o) = std::process::Command::new("colima")
-        .args([
-            "ssh",
-            "--profile",
-            omarchy_agent::vm::PROFILE,
-            "--",
-            "cat",
-            "/proc/meminfo",
-        ])
-        .output()
-    {
-        facts = facts.with_meminfo(&String::from_utf8_lossy(&o.stdout));
-    }
+    let Some((runtime, rosetta)) = &toml.vm else {
+        return facts;
+    };
+    let kind = if runtime == "colima" {
+        capacity::VmKind::Dedicated
+    } else {
+        capacity::VmKind::Shared
+    };
+    let meminfo = (kind == capacity::VmKind::Dedicated)
+        .then(|| {
+            omarchy_agent::vm::colima(
+                &[
+                    "ssh",
+                    "--profile",
+                    omarchy_agent::vm::PROFILE,
+                    "--",
+                    "cat",
+                    "/proc/meminfo",
+                ],
+                &[],
+                probe::ENGINE_TIMEOUT,
+            )
+            .map_err(|e| eprintln!("capacity: the VM's /proc/meminfo: {e}"))
+            .ok()
+        })
+        .flatten();
     let x86 = manifest
         .and_then(|m| m.build_image("x86_64"))
         .map(ToString::to_string);
-    if let (true, Some(img)) = (rosetta, x86) {
-        match probe::rosetta_lane(how, &img) {
-            Ok(()) => facts = facts.with_lane("x86_64", "rosetta"),
-            Err(e) => eprintln!("capacity: no x86_64 lane through Rosetta: {e}"),
-        }
+    let vm = probe::MacVm {
+        kind,
+        meminfo: meminfo.as_deref(),
+        rosetta: *rosetta,
+        emulate: toml.emulate.as_deref(),
+        x86_64_image: x86.as_deref(),
+    };
+    let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img| probe::rosetta_lane(how, img));
+    match said {
+        Some(probe::LaneSaid::Note(s) | probe::LaneSaid::Warning(s)) => eprintln!("capacity: {s}"),
+        None => {}
     }
     facts
 }
@@ -598,10 +619,7 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
             return Ok(REFUSED);
         }
     };
-    let facts = match &toml.vm {
-        Some((runtime, rosetta)) => mac_facts(facts, runtime, *rosetta, &how, manifest.as_ref()),
-        None => facts,
-    };
+    let facts = mac_facts(facts, &toml, &how, manifest.as_ref());
     let Some(manifest) = manifest else {
         println!("{}", facts.report());
         return Ok(0);

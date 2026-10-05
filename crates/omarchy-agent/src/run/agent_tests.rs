@@ -906,3 +906,137 @@ fn a_commit_whose_set_directory_write_failed_finishes_once_it_can_write() {
     w.tick(3);
     assert_committed(&w);
 }
+
+/// A Mac's run loop (#320): the agent with its VM keeper over a played Colima.
+mod on_a_mac {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+    use std::rc::Rc;
+
+    use super::r;
+    use crate::run::fake::World;
+    use crate::run::pool::{Follow, Net};
+    use crate::run::vm::tests::{saved_for, want, Fake, World as Colima};
+    use crate::run::vm::Keeper;
+
+    /// What a played count was given: the set directory and the VM's meminfo.
+    type Counted = Vec<(PathBuf, Option<String>)>;
+
+    /// A host running v1.0.0 whose VM is played by `colima`, the pinned docker CLI known.
+    fn mac(colima: Colima) -> (World, Rc<RefCell<Colima>>) {
+        let mut w = World::running_v1();
+        let played = Rc::new(RefCell::new(Colima {
+            want: Some(want()),
+            mac: "16\n68719476736\n".into(),
+            ..colima
+        }));
+        let subnets = crate::install::net::parse_list("10.231.0.0/16").unwrap();
+        let mut k = Keeper::new(
+            Box::new(Fake(Rc::clone(&played))),
+            want(),
+            crate::vm::firewall(&subnets),
+            Path::new("/Users/maintainer"),
+            &w.agent.paths.data,
+        );
+        k.use_docker(Path::new("/data/tools/0a/docker"));
+        w.agent.vm = Some(k);
+        (w, played)
+    }
+
+    /// The pool answers v1.0.0 with its `Date`: this machine's clock, as a pool on time.
+    fn dated(w: &World) {
+        w.pool_answers(Net::Ok(Follow {
+            latest: r("v1.0.0"),
+            update: None,
+            poll_s: Some(120),
+            date: Some(crate::run::now()),
+        }));
+    }
+
+    #[test]
+    fn a_wake_polls_the_pool_at_once_and_the_vms_clock_is_set_to_its_date_on_that_tick() {
+        let (mut w, colima) = mac(Colima {
+            running: true,
+            saved: Some(saved_for(&want())),
+            set_holds: true,
+            ..Colima::default()
+        });
+        dated(&w);
+        w.tick(3);
+        // The Mac slept: the VM's clock stayed 40 minutes behind, and no poll is due yet.
+        colima.borrow_mut().skew = -2400;
+        w.agent.state.poll.next_at = w.now + 600;
+        let follows = w.remote.borrow().follows;
+        w.tick(crate::vm::WAKE_GAP_S + 1);
+        assert_eq!(w.remote.borrow().follows, follows + 1, "{}", w.journal());
+        let calls = colima.borrow().calls.clone();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("ssh sudo -n date -u -s @")),
+            "{calls:?}"
+        );
+        assert!(colima.borrow().skew.abs() <= 1);
+        let journal = w.journal();
+        assert!(journal.contains("the Mac woke"), "{journal}");
+        assert!(
+            journal.contains("the VM's clock was -2400 s off"),
+            "{journal}"
+        );
+    }
+
+    #[test]
+    fn once_a_start_of_the_vm_ended_the_hosts_capacity_is_counted_again() {
+        let (mut w, colima) = mac(Colima::default());
+        let counted: Rc<RefCell<Counted>> = Rc::default();
+        let seen = Rc::clone(&counted);
+        w.agent.count = Box::new(move |c| {
+            seen.borrow_mut()
+                .push((c.set_dir.to_owned(), c.meminfo.map(str::to_owned)));
+            Ok("counted: 8 CPUs".into())
+        });
+        w.agent.docker_cli = Some(PathBuf::from("/data/tools/0a/docker"));
+        w.tick(3);
+        assert!(colima.borrow().calls[0].starts_with("start --profile omarchy"));
+        assert!(counted.borrow().is_empty(), "not before the start ended");
+        w.tick(3);
+        assert!(colima.borrow().running);
+        let c = counted.borrow();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, w.set_dir());
+        assert!(c[0]
+            .1
+            .as_deref()
+            .is_some_and(|m| m.contains("MemAvailable")));
+        assert!(w.journal().contains("counted: 8 CPUs"), "{}", w.journal());
+    }
+
+    #[test]
+    fn the_applied_releases_signed_minimum_holds_the_vms_size() {
+        // agent.toml edited down to 2 CPUs and 4 GB: below the release's minimum.
+        let (mut w, colima) = mac(Colima::default());
+        let mut tiny = want();
+        tiny.size = crate::vm::Size { cpus: 2, mem_gb: 4 };
+        let subnets = crate::install::net::parse_list("10.231.0.0/16").unwrap();
+        let mut k = Keeper::new(
+            Box::new(Fake(Rc::clone(&colima))),
+            tiny,
+            crate::vm::firewall(&subnets),
+            Path::new("/Users/maintainer"),
+            &w.agent.paths.data,
+        );
+        k.use_docker(Path::new("/data/tools/0a/docker"));
+        w.agent.vm = Some(k);
+        w.tick(3);
+        assert!(
+            colima.borrow().calls.is_empty(),
+            "{:?}",
+            colima.borrow().calls
+        );
+        assert!(
+            w.journal().contains("below the minimum to join"),
+            "{}",
+            w.journal()
+        );
+    }
+}

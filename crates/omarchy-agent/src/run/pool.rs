@@ -182,11 +182,7 @@ impl Https {
         if let Net::Unauthorized(s) = classify(status) {
             return Net::Unauthorized(s);
         }
-        let date = res
-            .headers()
-            .get("date")
-            .and_then(|v| v.to_str().ok())
-            .and_then(crate::vm::parse_http_date);
+        let date = date_of(res.headers());
         let mut reader = res.body_mut().with_config().limit(max).reader();
         let mut body = Vec::new();
         let mut chunk = vec![0u8; 64 << 10];
@@ -213,6 +209,15 @@ impl Https {
             Net::Unauthorized(s) => Net::Unauthorized(s),
         }
     }
+}
+
+/// An answer's `Date` header as Unix seconds: the pool's clock, which a Mac's VM is held to
+/// after a wake (#320). `None` when it is missing or is no IMF-fixdate.
+fn date_of(headers: &ureq::http::HeaderMap) -> Option<i64> {
+    headers
+        .get(ureq::http::header::DATE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::vm::parse_http_date)
 }
 
 impl Pool for Https {
@@ -261,6 +266,19 @@ impl Pool for Https {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_answers_date_is_the_pools_clock() {
+        let mut h = ureq::http::HeaderMap::new();
+        assert_eq!(date_of(&h), None);
+        h.insert(
+            ureq::http::header::DATE,
+            "Thu, 14 Jan 2027 08:00:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(date_of(&h), Some(1_799_913_600));
+        h.insert(ureq::http::header::DATE, "yesterday".parse().unwrap());
+        assert_eq!(date_of(&h), None);
+    }
 
     #[test]
     fn follow_is_read_leniently() {

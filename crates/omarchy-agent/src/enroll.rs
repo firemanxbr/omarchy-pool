@@ -487,6 +487,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_installed_set_directory_is_the_one_agent_toml_names() {
+        // A Mac's set directory is outside the data directory (#320): `token` and `enroll`
+        // write dispatcher.env there, where the VM mounts it.
+        let data = crate::run::state::tempdir();
+        assert_eq!(Paths::installed(&data).set, data.join("sets/host"));
+        std::fs::write(
+            data.join("agent.toml"),
+            "[set]\ndir = \"/Users/Shared/omarchy-pool/set\"\n",
+        )
+        .unwrap();
+        let p = Paths::installed(&data);
+        assert_eq!(
+            p.dispatcher_env(),
+            Path::new("/Users/Shared/omarchy-pool/set/etc/dispatcher.env")
+        );
+        assert_eq!(p.state, data.join("state"));
+        // One that is not a plain absolute path is not followed.
+        std::fs::write(data.join("agent.toml"), "[set]\ndir = \"../elsewhere\"\n").unwrap();
+        assert_eq!(Paths::installed(&data).set, data.join("sets/host"));
+    }
+
+    #[test]
     fn a_token_is_ome_and_48_hex_digits() {
         assert!(valid_token(&format!("ome_{}", "a1".repeat(24))));
         assert!(!valid_token(&format!("ome_{}", "A1".repeat(24))));

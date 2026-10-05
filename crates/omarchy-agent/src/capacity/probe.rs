@@ -18,7 +18,7 @@ use super::{DiskFree, Isolation, Lane, Limits, VmKind};
 
 const GB: u64 = 1 << 30;
 /// One engine call (design v2 §10: no call blocks longer than this).
-const ENGINE_TIMEOUT: Duration = Duration::from_secs(60);
+pub const ENGINE_TIMEOUT: Duration = Duration::from_secs(60);
 /// The probe container may pull its image first (install only).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -339,6 +339,66 @@ pub fn rosetta_lane(p: &Probe<'_>, image_x86_64: &str) -> Result<(), String> {
     run(c, PROBE_TIMEOUT)
         .map(drop)
         .map_err(|e| format!("the x86_64 smoke run: {e}"))
+}
+
+/// What a Mac's VM adds to the engine's facts (#320; design v2 §19.2, §19.3): one way for
+/// install, `omarchy-agent capacity` and the run loop's count after a start of the VM.
+#[derive(Debug, Clone, Copy)]
+pub struct MacVm<'a> {
+    pub kind: VmKind,
+    /// The `omarchy` VM's own `/proc/meminfo` (M7), when it was read.
+    pub meminfo: Option<&'a str>,
+    /// The VM runs `x86_64` through Rosetta (`--vz-rosetta`, `[vm] rosetta`).
+    pub rosetta: bool,
+    /// The envelope's `emulate`: the emulated lanes the owner allows; absent, every one.
+    pub emulate: Option<&'a [String]>,
+    /// The release's `x86_64` build image, by digest.
+    pub x86_64_image: Option<&'a str>,
+}
+
+/// What became of the `x86_64` lane, for the screen or the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneSaid {
+    Note(String),
+    Warning(String),
+}
+
+/// The facts of an engine in a Mac's VM: the VM's level; in the `omarchy` VM its own
+/// `MemAvailable` and, with Rosetta, the `x86_64` lane once `smoke` ([`rosetta_lane`])
+/// passed on the release's image — unless the envelope's `emulate` leaves it out, which
+/// no count may widen.
+pub fn in_mac_vm(
+    facts: Facts,
+    vm: &MacVm<'_>,
+    smoke: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> (Facts, Option<LaneSaid>) {
+    let mut f = facts.in_vm(vm.kind);
+    if vm.kind != VmKind::Dedicated {
+        return (f, None);
+    }
+    if let Some(m) = vm.meminfo {
+        f = f.with_meminfo(m);
+    }
+    let allowed = vm.emulate.is_none_or(|a| a.iter().any(|x| x == "x86_64"));
+    let said = match (vm.rosetta, allowed, vm.x86_64_image) {
+        (false, _, _) => None,
+        (true, false, _) => Some(LaneSaid::Note(
+            "the x86_64 lane is off: the envelope's emulate leaves it out".into(),
+        )),
+        (true, true, None) => Some(LaneSaid::Warning(
+            "no x86_64 lane through Rosetta: the release names no x86_64 build image".into(),
+        )),
+        (true, true, Some(img)) => match smoke(img) {
+            Ok(()) => {
+                f = f.with_lane("x86_64", "rosetta");
+                None
+            }
+            Err(e) => Some(LaneSaid::Warning(format!(
+                "no x86_64 lane through Rosetta: {e}"
+            ))),
+        },
+    };
+    (f, said)
 }
 
 /// `docker info` (the driver's `capacity()` once the driver trait exists, #315).

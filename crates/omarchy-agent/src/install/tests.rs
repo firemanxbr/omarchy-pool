@@ -37,6 +37,15 @@ pub(crate) struct Fake {
     pub colima_home: Option<PathBuf>,
     /// `sysctl -n hw.ncpu hw.memsize`.
     pub mac: String,
+    /// Made when the task firewall runs in the VM: the docker stub's egress probe answers
+    /// as a walled VM then, and as Colima's NAT without it otherwise.
+    pub walled: Option<PathBuf>,
+    pub firewall_fails: bool,
+    /// Where the only docker client on this played Mac is (the release's pinned CLI):
+    /// Colima starts a profile only with it on its PATH. `None`: not checked.
+    pub docker_at: Option<PathBuf>,
+    /// The environment of each `colima` call, in order.
+    pub colima_env: Vec<Vec<(&'static str, String)>>,
 }
 
 impl Default for Fake {
@@ -56,6 +65,10 @@ impl Default for Fake {
             vm_running: false,
             colima_home: None,
             mac: "16\n68719476736\n".into(),
+            walled: None,
+            firewall_fails: false,
+            docker_at: None,
+            colima_env: Vec::new(),
         }
     }
 }
@@ -89,10 +102,29 @@ fn colima_saves(args: &[&str]) -> String {
 }
 
 impl Sys for Fake {
-    fn run(&mut self, prog: &str, args: &[&str]) -> Result<String, String> {
-        let line = format!("{prog} {}", args.join(" "));
+    fn run_env(
+        &mut self,
+        prog: &str,
+        args: &[&str],
+        env: &[(&'static str, String)],
+    ) -> Result<String, String> {
+        let firewall = args.iter().any(|a| a.contains("OMARCHY-TASKS"));
+        let line = if firewall {
+            format!("{prog} ssh --profile omarchy -- sudo -n sh -c <firewall>")
+        } else {
+            format!("{prog} {}", args.join(" "))
+        };
         self.calls.push(line.clone());
+        if prog == "colima" {
+            self.colima_env.push(env.to_vec());
+        }
         let no = || Err(format!("{line}: no"));
+        // Colima looks for a docker client on its PATH before it starts a profile.
+        let docker_on_path = self.docker_at.as_ref().is_none_or(|at| {
+            env.iter()
+                .find(|(k, _)| *k == "PATH")
+                .is_some_and(|(_, v)| v.split(':').any(|d| Path::new(d) == at))
+        });
         match (prog, args.first().copied()) {
             ("loginctl", Some("show-user")) => {
                 Ok(if self.linger { "yes\n" } else { "no\n" }.into())
@@ -135,12 +167,27 @@ impl Sys for Fake {
                 self.vm_running = false;
                 Ok(String::new())
             }
+            ("colima", Some("start")) if !docker_on_path => Err(
+                "dependency check failed for docker: docker not found, run 'brew install docker' to install".into(),
+            ),
             ("colima", Some("start")) => {
+                if let Some(w) = &self.walled {
+                    let _ = fs::remove_file(w);
+                }
                 if let Some(home) = &self.colima_home {
                     fs::create_dir_all(home.join(crate::vm::PROFILE)).unwrap();
                     fs::write(crate::vm::config_path(home), colima_saves(args)).unwrap();
                 }
                 self.vm_running = true;
+                Ok(String::new())
+            }
+            ("colima", Some("ssh")) if firewall => {
+                if self.firewall_fails {
+                    return Err("sudo: a password is required".into());
+                }
+                if let Some(w) = &self.walled {
+                    fs::write(w, "").unwrap();
+                }
                 Ok(String::new())
             }
             ("colima", Some("ssh")) => {
@@ -703,7 +750,10 @@ struct Host {
 const INFO: &str = r#"{"NCPU":12,"MemTotal":33443418112,"DockerRootDir":"/nonexistent/storage","Architecture":"aarch64","SecurityOptions":["name=rootless"],"CgroupVersion":"2","MemoryLimit":true,"CpuCfsQuota":true,"PidsLimit":true}"#;
 const PROBE: &str = "cpu.max=50000 100000\nmemory.max=67108864\npids.max=32\npagesize=4096\noverlay 482344960 1 230686720 1% /";
 const EGRESS_OK: &str =
-    "egress metadata blocked\negress gateway blocked\negress lan blocked\negress public open";
+    "egress metadata blocked\negress gateway blocked\negress lan blocked\negress vm-host blocked\negress public open";
+/// What a probe task reaches through Colima's NAT in a VM without the task firewall.
+const EGRESS_NAT: &str =
+    "egress metadata blocked\negress gateway open\negress lan refused\negress vm-host refused\negress public open";
 
 fn host(info: &str, egress: &str) -> Host {
     host_min(info, egress, 1)
@@ -790,7 +840,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
         secrets_dir: Some(root.join("secrets")),
         set_dir: None,
         socket: Some(root.join("engine.sock")),
-        rosetta: true,
+        rosetta: None,
         task_subnets: None,
         dedicated: true,
         legacy: None,
@@ -1085,6 +1135,30 @@ fn ready_to_enroll(h: &Host, state: &str) -> Ready {
     .write(&state_dir)
     .unwrap();
     ready
+}
+
+#[test]
+fn install_makes_the_set_directory_it_was_given_and_never_the_default_one() {
+    for on_a_mac in [false, true] {
+        let mut h = if on_a_mac {
+            mac_host(1)
+        } else {
+            host(INFO, EGRESS_OK)
+        };
+        let chosen = h.root.join("shared/elsewhere");
+        let default = h.options.places.set_dir();
+        let _ = fs::remove_dir(&default);
+        h.options.set_dir = Some(chosen.clone());
+        let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+        assert_eq!(ready.values.set_dir, chosen);
+        let mut sys = mac_sys(&h);
+        apply(&h.options, &ready, &mut sys, &mut Vec::new())
+            .map_err(|e| e.to_string())
+            .unwrap();
+        assert_eq!(mode(&chosen), 0o700, "mac: {on_a_mac}");
+        assert!(chosen.join("run/capacity.json").exists());
+        assert!(!default.exists(), "mac: {on_a_mac}: {}", default.display());
+    }
 }
 
 #[test]
@@ -1400,6 +1474,7 @@ fn mac_host(min_cpus: u32) -> Host {
         fs::set_permissions(r.join("shared").join(d), fs::Permissions::from_mode(0o700)).unwrap();
     }
     fs::write(r.join("home-path"), r.join("home").display().to_string()).unwrap();
+    fs::write(r.join("egress-nat"), EGRESS_NAT).unwrap();
     h.options.places.os = "macos";
     h.options.places.xdg_runtime_dir = None;
     h.options.work_root = None;
@@ -1409,7 +1484,7 @@ fn mac_host(min_cpus: u32) -> Host {
     fs::write(
         &h.docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\"source=$(cat {r}/home-path),\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; exit 0 ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\"source=$(cat {r}/home-path),\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"source=$(cat {r}/home-path)/\"*) case \" $* \" in *\"source=$(cat {r}/part-visible 2>/dev/null),\"*) exit 0 ;; esac; echo 'path is not shared' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; exit 0 ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" ps -q --filter label=com.omarchy.task \"*) cat {r}/tasks 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) if [ -e {r}/walled ]; then cat {r}/egress; else cat {r}/egress-nat; fi ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = r.display()
         ),
     )
@@ -1421,6 +1496,8 @@ fn mac_host(min_cpus: u32) -> Host {
 fn mac_sys(h: &Host) -> Fake {
     Fake {
         colima_home: Some(h.options.places.colima_home.clone()),
+        walled: Some(h.root.join("walled")),
+        docker_at: h.docker.parent().map(Path::to_path_buf),
         ..Fake::default()
     }
 }
@@ -1549,7 +1626,8 @@ fn a_mac_that_cannot_give_the_vm_the_minimum_or_keeps_a_directory_under_home_sta
         sys.calls
     );
 
-    // A work root under the home directory, a secrets directory that does not exist.
+    // A work root under the home directory, a secrets directory that does not exist yet
+    // (install would make it): nothing is made or started while anything blocks.
     let mut h = mac_host(1);
     fs::create_dir_all(h.root.join("home/omarchy-work")).unwrap();
     h.options.work_root = Some(h.root.join("home/omarchy-work"));
@@ -1559,10 +1637,290 @@ fn a_mac_that_cannot_give_the_vm_the_minimum_or_keeps_a_directory_under_home_sta
     let screen = r.screen();
     assert!(screen.contains("is under your home directory"), "{screen}");
     assert!(
-        screen.contains("shared/missing does not exist: run factory/host/prep-mac.sh"),
+        screen.contains(&format!(
+            "install makes {} (0700)",
+            h.root.join("shared/missing").display()
+        )),
         "{screen}"
     );
+    assert!(!h.root.join("shared/missing").exists());
     assert!(starts(&sys).is_empty(), "{:?}", sys.calls);
+}
+
+#[test]
+fn with_only_colima_installed_install_makes_the_three_directories_and_preflight_says_it_would() {
+    // Colima installed by hand, no prep-mac.sh: the default directories are missing.
+    let h = mac_host(1);
+    let shared = h.root.join("shared");
+    for d in ["work", "secrets", "set"] {
+        fs::remove_dir(shared.join(d)).unwrap();
+    }
+    // Preflight makes nothing, starts no VM, and says what install will do.
+    let mut sys = mac_sys(&h);
+    let (r, _) = measure_as(
+        &h.options,
+        &mut sys,
+        &verifier(),
+        Some(&h.docker),
+        Mode::Preflight,
+    )
+    .map_err(|e| e.to_string())
+    .unwrap();
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.screen().contains("install makes")
+            && r.screen().contains("its directories are made first"),
+        "{}",
+        r.screen()
+    );
+    assert!(starts(&sys).is_empty() && !shared.join("work").exists());
+    // Install makes them, 0700, then starts the VM that mounts them.
+    let mut sys = mac_sys(&h);
+    let (r, _) = measure_on(&h, &mut sys);
+    assert!(r.ok(), "{}", r.screen());
+    for d in ["work", "secrets", "set"] {
+        assert_eq!(mode(&shared.join(d)), 0o700, "{d}");
+    }
+    assert_eq!(starts(&sys).len(), 1);
+    // One whose parent this user cannot write is prep-mac.sh's (or another path's).
+    let h = mac_host(1);
+    fs::create_dir_all(h.root.join("locked")).unwrap();
+    fs::set_permissions(h.root.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+    let mut o = h.options.clone();
+    o.work_root = Some(h.root.join("locked/work"));
+    let (r, _) = measure(&o, &mut mac_sys(&h), &verifier(), Some(&h.docker))
+        .map_err(|e| e.to_string())
+        .unwrap();
+    fs::set_permissions(h.root.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        r.screen()
+            .contains("is not writable by this user: run factory/host/prep-mac.sh"),
+        "{}",
+        r.screen()
+    );
+}
+
+#[test]
+fn colima_gets_the_pinned_docker_cli_on_its_path_and_its_own_docker_config() {
+    let h = mac_host(1);
+    let mut sys = mac_sys(&h);
+    let (r, _) = measure_on(&h, &mut sys);
+    assert!(r.ok(), "{}", r.screen());
+    let start = sys
+        .calls
+        .iter()
+        .position(|c| c.starts_with("colima start"))
+        .unwrap();
+    let env = &sys.colima_env[sys.calls[..start]
+        .iter()
+        .filter(|c| c.starts_with("colima"))
+        .count()];
+    let path = &env.iter().find(|(k, _)| *k == "PATH").unwrap().1;
+    assert!(
+        path.starts_with(&format!("{}:", h.root.display())) && path.contains("/opt/homebrew/bin"),
+        "{path}"
+    );
+    assert!(
+        env.contains(&(
+            "DOCKER_CONFIG",
+            h.options
+                .places
+                .data
+                .join("docker-config")
+                .display()
+                .to_string()
+        )),
+        "{env:?}"
+    );
+    // Without it on the PATH, Colima refuses to start the profile, as on a Mac that has
+    // only Colima and Lima from Homebrew.
+    let mut sys = mac_sys(&h);
+    let mut ask_env = Vec::new();
+    let r = {
+        let mut r = Report::default();
+        let a = mac::Ask {
+            given: None,
+            mounts: &crate::vm::mounts(
+                &h.root.join("shared/work"),
+                &h.root.join("shared/secrets"),
+                &h.root.join("shared/set"),
+            ),
+            caps: (None, None),
+            rosetta: false,
+            min: Some((1, 1)),
+            docker_cli: None,
+            subnets: &net::parse_list(TASK_SUBNETS).unwrap(),
+            mode: Mode::Install,
+        };
+        let f = mac::engine(&h.options, &mut sys, &a, &mut r);
+        ask_env.extend(f.colima_env);
+        r
+    };
+    assert!(
+        r.screen().contains("dependency check failed for docker"),
+        "{}",
+        r.screen()
+    );
+    assert!(
+        ask_env.contains(&("PATH", crate::vm::PATH.to_owned())),
+        "{ask_env:?}"
+    );
+}
+
+#[test]
+fn the_task_firewall_goes_into_the_vm_before_the_egress_probe_and_without_it_a_task_reaches_the_lan(
+) {
+    let h = mac_host(1);
+    let mut sys = mac_sys(&h);
+    let (r, _) = measure_on(&h, &mut sys);
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.screen().contains("task firewall is in place"),
+        "{}",
+        r.screen()
+    );
+    let wall = sys
+        .calls
+        .iter()
+        .position(|c| c.ends_with("sudo -n sh -c <firewall>"))
+        .unwrap();
+    let start = sys
+        .calls
+        .iter()
+        .position(|c| c.starts_with("colima start"))
+        .unwrap();
+    assert!(start < wall, "{:?}", sys.calls);
+    // The probe also keeps a task from the Mac as the VM reaches it.
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(
+        log.contains(&format!("vm-host {} 22", crate::vm::VM_HOST)),
+        "{log}"
+    );
+    // A VM where the firewall does not apply: Colima's NAT carries a task to the Mac's
+    // router and LAN, and the probe says so.
+    let _ = fs::remove_file(h.root.join("walled"));
+    let mut sys = Fake {
+        firewall_fails: true,
+        ..mac_sys(&h)
+    };
+    let (r, ready) = measure_on(&h, &mut sys);
+    assert!(ready.is_none());
+    let screen = r.screen();
+    for want in [
+        "the omarchy VM's task firewall did not apply (sudo: a password is required)",
+        "egress: a task reaches the default gateway 192.168.1.1 (port 53: open)",
+        "egress: a task reaches the Mac as its VM reaches it 192.168.5.2 (port 22: refused)",
+    ] {
+        assert!(screen.contains(want), "{want}:\n{screen}");
+    }
+    // The script is prep-root.sh's step 9 for the task subnets.
+    let script = crate::vm::firewall(&net::parse_list(TASK_SUBNETS).unwrap());
+    assert!(script.contains("iptables -A OMARCHY-TASKS -s 10.231.0.0/16 -d 192.168.0.0/16 -j DROP"));
+}
+
+#[test]
+fn preflight_never_restarts_a_running_vm_and_install_waits_for_its_tasks() {
+    let h = mac_host(1);
+    // A running VM of another size than install gives it.
+    let cfg = crate::vm::config_path(&h.options.places.colima_home);
+    fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    let s = h.root.join("shared");
+    fs::write(
+        &cfg,
+        format!(
+            "cpu: 4\nmemory: 8\ndisk: 100\narch: aarch64\nvmType: vz\nrosetta: false\nmounts:\n  - location: {s}/work\n    writable: true\n  - location: {s}/secrets\n    writable: false\n  - location: {s}/set\n    writable: false\n",
+            s = s.display()
+        ),
+    )
+    .unwrap();
+    let running = || Fake {
+        vm_running: true,
+        ..mac_sys(&h)
+    };
+    let mut sys = running();
+    let (r, _) = measure_as(
+        &h.options,
+        &mut sys,
+        &verifier(),
+        Some(&h.docker),
+        Mode::Preflight,
+    )
+    .map_err(|e| e.to_string())
+    .unwrap();
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.screen().contains("4 CPUs, not 8") && r.screen().contains("install restarts it"),
+        "{}",
+        r.screen()
+    );
+    assert!(
+        sys.calls
+            .iter()
+            .all(|c| !c.starts_with("colima stop") && !c.starts_with("colima start")),
+        "{:?}",
+        sys.calls
+    );
+    assert!(!h.options.places.data.join(crate::vm::ACTIONS_FILE).exists());
+    // Install with a task running in it: refused, the VM left as it runs.
+    fs::write(h.root.join("tasks"), "0a1b2c\n").unwrap();
+    let mut sys = running();
+    let (r, _) = measure_on(&h, &mut sys);
+    assert!(
+        r.screen()
+            .contains("which would end the tasks running in it"),
+        "{}",
+        r.screen()
+    );
+    assert!(sys.calls.iter().all(|c| !c.starts_with("colima stop")));
+    // None running: the action is counted before the stop, then the start.
+    fs::remove_file(h.root.join("tasks")).unwrap();
+    let mut sys = running();
+    let (r, _) = measure_on(&h, &mut sys);
+    assert!(r.ok(), "{}", r.screen());
+    let acts: Vec<&String> = sys
+        .calls
+        .iter()
+        .filter(|c| c.starts_with("colima stop") || c.starts_with("colima start"))
+        .collect();
+    assert!(acts[0].starts_with("colima stop") && acts[1].contains("--cpu 8 --memory 32"));
+    let recorded = crate::vm::read_actions(
+        &fs::read_to_string(h.options.places.data.join(crate::vm::ACTIONS_FILE)).unwrap(),
+    );
+    assert_eq!(recorded.len(), 1);
+}
+
+#[test]
+fn the_owners_choice_of_the_rosetta_lane_carries_over_a_repair() {
+    let h = mac_host(1);
+    fs::write(h.root.join("rosetta"), "").unwrap();
+    let existing = |rosetta: bool| {
+        format!(
+            "[set]\ndir = \"{s}/set\"\n[vm]\nruntime = \"colima\"\nrosetta = {rosetta}\n",
+            s = h.root.join("shared").display()
+        )
+    };
+    fs::create_dir_all(&h.options.places.data).unwrap();
+    for (written, flag, want) in [
+        (false, None, "--vz-rosetta=false"),
+        (true, None, "--vz-rosetta=true"),
+        (false, Some(true), "--vz-rosetta=true"),
+        (true, Some(false), "--vz-rosetta=false"),
+    ] {
+        fs::write(h.options.places.data.join("agent.toml"), existing(written)).unwrap();
+        let mut o = h.options.clone();
+        o.rosetta = flag;
+        let mut sys = mac_sys(&h);
+        let (r, _) = measure(&o, &mut sys, &verifier(), Some(&h.docker))
+            .map_err(|e| e.to_string())
+            .unwrap();
+        assert!(
+            starts(&sys).first().is_some_and(|s| s.ends_with(want)),
+            "{written} {flag:?}: {:?}\n{}",
+            sys.calls,
+            r.screen()
+        );
+        let _ = fs::remove_file(crate::vm::config_path(&h.options.places.colima_home));
+    }
 }
 
 #[test]
@@ -1710,6 +2068,16 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
         "{screen}"
     );
     assert!(sys.calls.iter().all(|c| !c.starts_with("colima start")));
+    // The agent puts no firewall in a VM it does not own: its NAT carries a task to the
+    // LAN, and the egress probe says so as on any host.
+    assert!(
+        screen.contains("egress: a task reaches the default gateway 192.168.1.1 (port 53: open)"),
+        "{screen}"
+    );
+    assert!(!sys.calls.iter().any(|c| c.ends_with("<firewall>")));
+    // A shared VM whose network drops what a task must not reach (the egress sidecar's
+    // job, once it lands) qualifies with --dedicated.
+    fs::write(h.root.join("walled"), "").unwrap();
     h.options.dedicated = true;
     let (r, ready) = measure_on(
         &h,
@@ -1731,6 +2099,52 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
     assert!(
         text.contains("[vm]\nruntime = \"docker-desktop\"\n"),
         "{text}"
+    );
+    // A subdirectory of the home directory shared with the VM (~/.ssh here), though the
+    // home directory itself is not: refused.
+    fs::create_dir_all(home.join(".ssh")).unwrap();
+    fs::write(
+        h.root.join("part-visible"),
+        home.join(".ssh").display().to_string(),
+    )
+    .unwrap();
+    let (r, _) = measure_on(
+        &h,
+        &mut Fake {
+            colima: false,
+            ..mac_sys(&h)
+        },
+    );
+    assert!(
+        r.screen().contains(&format!(
+            "part of your home directory is visible inside the engine's VM ({})",
+            home.join(".ssh").display()
+        )),
+        "{}",
+        r.screen()
+    );
+    // A socket given that does not answer: what to do on a Mac, not on Linux.
+    let mut o = h.options.clone();
+    o.socket = Some(home.join(".orbstack/run/docker.sock"));
+    let (r, _) = measure(
+        &o,
+        &mut Fake {
+            colima: false,
+            ..mac_sys(&h)
+        },
+        &verifier(),
+        Some(&h.docker),
+    )
+    .map_err(|e| e.to_string())
+    .unwrap();
+    let screen = r.screen();
+    assert!(
+        screen.contains("start Docker Desktop or OrbStack, or leave out --socket"),
+        "{screen}"
+    );
+    assert!(
+        !screen.contains("prep-root.sh") && !screen.contains("podman"),
+        "{screen}"
     );
     let _ = fs::remove_dir_all(&home);
 }

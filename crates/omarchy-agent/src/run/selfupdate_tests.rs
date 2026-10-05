@@ -613,7 +613,7 @@ fn the_pool_not_answering_does_not_keep_the_gate_shut() {
 fn a_new_agent_that_hangs_is_ended_past_its_gates_deadline_and_its_next_start_rolls_it_back() {
     // launchd restarts the agent only when it exits (#320): the progress watchdog ends a
     // candidate whose loop hangs with its gate shut, and the start that follows flips back.
-    use crate::run::cli::watchdog_verdict;
+    use crate::run::cli::{watchdog_look, watchdog_verdict, Look};
     let new = above(1);
     let mut w = host_with(new, "0.1.0", &binary(true));
     w.tick(200);
@@ -641,12 +641,60 @@ fn a_new_agent_that_hangs_is_ended_past_its_gates_deadline_and_its_next_start_ro
     assert!(watchdog_verdict(start + 901, start, None)
         .unwrap()
         .contains("no progress for 901 s"));
+    // A Mac that slept an hour: the first look after the wake sees the loop's progress an
+    // hour old, and starts the count again instead of ending it; the looks after it judge.
+    let woke = start + 3600;
+    assert_eq!(watchdog_look(woke, start + 10, start, None), Look::Woke);
+    assert_eq!(watchdog_look(woke + 10, woke, woke, None), Look::Fine);
+    assert!(matches!(
+        watchdog_look(woke + 910, woke + 900, woke, None),
+        Look::Abort(_)
+    ));
+    // Looks that come on time judge as before.
+    assert!(matches!(
+        watchdog_look(start + 901, start + 891, start, None),
+        Look::Abort(_)
+    ));
     // launchd starts it again: past the deadline, `current` points back.
     match count_start(&data, new, p.deadline + 41) {
         Start::RolledBack(why) => assert!(why.contains("did not pass within 10 minutes"), "{why}"),
         Start::Run => panic!("not rolled back"),
     }
     assert_eq!(link(&data.join("current")), format!("versions/{}", me()));
+}
+
+#[test]
+fn under_launchd_a_refused_configuration_waits_for_agent_toml_to_change() {
+    // launchd's KeepAlive starts the agent again 10 s after any exit (#320); a refused
+    // agent.toml is waited on instead, not said every 10 s.
+    use crate::run::cli::{under_launchd, wait_for_change};
+    use std::time::{Duration, Instant};
+    assert!(under_launchd(Some("org.omarchy-pool.agent")));
+    assert!(!under_launchd(Some("application.com.apple.Terminal.1234")));
+    assert!(!under_launchd(None));
+    let dir = crate::run::state::tempdir();
+    let toml = dir.join("agent.toml");
+    fs::write(&toml, "pool = \"x\"\n").unwrap();
+    let t = Instant::now();
+    assert!(!wait_for_change(
+        &toml,
+        Duration::from_millis(20),
+        Duration::from_millis(100)
+    ));
+    assert!(t.elapsed() >= Duration::from_millis(100));
+    let edit = {
+        let toml = toml.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            fs::write(&toml, "pool = \"https://pkgs.omarchy-pool.org\"\n").unwrap();
+        })
+    };
+    assert!(wait_for_change(
+        &toml,
+        Duration::from_millis(20),
+        Duration::from_secs(30)
+    ));
+    edit.join().unwrap();
 }
 
 #[test]

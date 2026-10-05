@@ -267,29 +267,51 @@ fn the_saved_profile_is_read_back_and_compared_with_what_the_agent_wants() {
 }
 
 #[test]
-fn the_vms_clock_is_set_from_the_macs_when_it_drifts_and_a_wrong_mac_is_reported() {
+fn the_vm_is_held_within_five_seconds_of_the_pool_and_a_wrong_mac_is_said_and_held_to() {
     let now = 1_800_000_000;
+    let fine = Clock {
+        resync: None,
+        mac_off: None,
+    };
+    let resync = |to, skew| Some(Resync { to, skew });
     // The pool and the Mac agree; the VM slept behind.
-    assert_eq!(clock(now, now, Some((now, now))), Clock::Fine);
-    assert_eq!(clock(now - 5, now, Some((now + 1, now))), Clock::Fine);
+    assert_eq!(clock(now, now, Some((now, now))), fine);
+    assert_eq!(clock(now - 4, now, Some((now + 1, now))), fine);
     assert_eq!(
-        clock(now - 1800, now, Some((now, now))),
-        Clock::Resync {
-            to: now,
-            skew: -1800
+        clock(now - 1800, now, Some((now, now))).resync,
+        resync(now, -1800)
+    );
+    // Without a Date the Mac's clock stands for the pool's.
+    assert_eq!(clock(now + 6, now, None).resync, resync(now, 6));
+    // The VM 5 s behind the Mac and the Mac 5 s behind the pool: 10 s off the pool, set
+    // to the pool's time (the Mac's own offset is within its allowance).
+    assert_eq!(
+        clock(now - 5, now, Some((now + 5, now))),
+        Clock {
+            resync: resync(now + 5, -10),
+            mac_off: None
         }
     );
-    assert_eq!(
-        clock(now + 6, now, None),
-        Clock::Resync { to: now, skew: 6 }
-    );
-    // The Mac itself is off the pool's clock: reported, never set from the network.
+    // The Mac itself is off the pool's clock: said, never set; the VM on the Mac's time
+    // is left there, as the pool's answer moves it no further from the Mac's own.
     assert_eq!(
         clock(now, now, Some((now + 30, now))),
-        Clock::MacOff { by: 30 }
+        Clock {
+            resync: None,
+            mac_off: Some(30)
+        }
     );
-    // One second of the Date header's resolution is allowed.
-    assert_eq!(clock(now, now, Some((now + 6, now))), Clock::Fine);
+    // The Mac off, and the VM drifted on top of that during a sleep: the drift goes (the
+    // VM is set to the Mac's time) and the Mac is said as well.
+    let c = clock(now - 600, now, Some((now - 40, now)));
+    assert_eq!(c.resync, resync(now, -600));
+    assert_eq!(c.mac_off, Some(-40));
+    // A pool whose Date is years off moves the VM nowhere.
+    let c = clock(now, now, Some((now - 3 * 365 * 86_400, now)));
+    assert!(c.vm_fine() && c.mac_off.is_some(), "{c:?}");
+    // One second of the Date header's resolution is allowed for the Mac.
+    assert_eq!(clock(now + 6, now, Some((now + 6, now))), fine);
+    assert_eq!(clock(now, now, Some((now + 6, now))).mac_off, None);
 }
 
 #[test]
@@ -357,4 +379,77 @@ fn colima_lives_under_colima_home_or_the_home_directory() {
         colima_home(home, Some(std::ffi::OsStr::new(""))),
         home.join(".colima")
     );
+}
+
+#[test]
+fn colima_runs_with_the_pinned_docker_cli_first_and_the_agents_own_docker_config() {
+    let env = colima_env(
+        Some(Path::new(
+            "/Users/m/.local/share/omarchy-agent/tools/0a/docker",
+        )),
+        Path::new("/Users/m/.local/share/omarchy-agent/docker-config"),
+    );
+    assert_eq!(
+        env,
+        [
+            (
+                "PATH",
+                format!("/Users/m/.local/share/omarchy-agent/tools/0a:{PATH}")
+            ),
+            (
+                "DOCKER_CONFIG",
+                "/Users/m/.local/share/omarchy-agent/docker-config".to_owned()
+            ),
+        ]
+    );
+    // Before the tools are known: launchd's PATH, Colima's own check says what is missing.
+    assert_eq!(
+        colima_env(None, Path::new("/d"))[0],
+        ("PATH", PATH.to_owned())
+    );
+}
+
+#[test]
+fn the_task_firewall_is_prep_roots_step_nine_with_dns_to_the_vms_resolvers() {
+    let subnets = crate::install::net::parse_list("10.231.0.0/16,10.232.0.0/16").unwrap();
+    let s = firewall(&subnets);
+    assert!(s.starts_with("set -e\n"));
+    for t in ["10.231.0.0/16", "10.232.0.0/16"] {
+        assert!(s.contains(&format!(
+            "iptables -A OMARCHY-TASKS -s {t} -d {t} -j RETURN"
+        )));
+        for d in FORBIDDEN {
+            assert!(
+                s.contains(&format!("iptables -A OMARCHY-TASKS -s {t} -d {d} -j DROP")),
+                "{t} {d}\n{s}"
+            );
+        }
+        assert!(s.contains(&format!("iptables -A OMARCHY-TASKS-HOST -s {t} -j DROP")));
+        // DNS to the VM's resolvers comes before the drops.
+        let dns = s
+            .find(&format!(
+                "iptables -A OMARCHY-TASKS -s {t} -d \"$d\" -p \"$p\" --dport 53 -j RETURN"
+            ))
+            .unwrap();
+        let drop = s
+            .find(&format!(
+                "iptables -A OMARCHY-TASKS -s {t} -d 10.0.0.0/8 -j DROP"
+            ))
+            .unwrap();
+        assert!(dns < drop);
+    }
+    // Rebuilt whole each time, hooked in once: running it again changes nothing.
+    assert!(s.contains("iptables -F OMARCHY-TASKS\n"));
+    assert!(s.contains(
+        "iptables -C DOCKER-USER -j OMARCHY-TASKS 2>/dev/null || iptables -I DOCKER-USER -j OMARCHY-TASKS"
+    ));
+    assert!(s.contains(
+        "iptables -C INPUT -j OMARCHY-TASKS-HOST 2>/dev/null || iptables -I INPUT -j OMARCHY-TASKS-HOST"
+    ));
+    // The VM's own address range is among the forbidden: the Mac as the VM reaches it.
+    let vm_host = crate::install::net::Cidr::parse(&format!("{VM_HOST}/32")).unwrap();
+    assert!(crate::install::net::Cidr::parse("192.168.0.0/16")
+        .unwrap()
+        .overlaps(vm_host));
+    assert_eq!(as_root(&s)[..4], ["sudo", "-n", "sh", "-c"]);
 }

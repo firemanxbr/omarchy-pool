@@ -158,8 +158,13 @@ pub(crate) fn table_str(existing: Option<&str>, table: &str, key: &str) -> Optio
     t.get(table)?.get(key)?.as_str().map(str::to_owned)
 }
 
+/// An existing agent.toml's `[<table>].<key>`.
+pub(crate) fn table_value(existing: Option<&str>, table: &str, key: &str) -> Option<Value> {
+    let t: Table = toml::from_str(existing?).ok()?;
+    t.get(table)?.get(key).cloned()
+}
+
 /// An existing agent.toml's `[envelope].<key>`.
 pub(crate) fn envelope_value(existing: Option<&str>, key: &str) -> Option<Value> {
-    let t: Table = toml::from_str(existing?).ok()?;
-    t.get("envelope")?.get(key).cloned()
+    table_value(existing, "envelope", key)
 }

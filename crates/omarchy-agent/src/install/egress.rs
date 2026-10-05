@@ -10,6 +10,13 @@
 //! the worker image has the sidecar, the probe runs on an internal network behind it, as
 //! every task will, and must reach the public address through it.
 //!
+//! On a Mac (#320) the probe runs in the `omarchy` VM, whose task firewall the agent puts
+//! there itself (`crate::vm::firewall`, before the probe), and one more target is
+//! forbidden: the Mac as the VM reaches it (Lima's `host.lima.internal`). Colima's NAT
+//! would carry a task's connection to the Mac's router and LAN otherwise. The agent puts
+//! nothing in Docker Desktop's or `OrbStack`'s VM: such a host is judged on the probe's
+//! answers like any other.
+//!
 //! Until then a rootless host is expected to fail the probe: rootless podman's network
 //! (pasta) carries the host's own address into the task's namespace, so the LAN target
 //! answers `refused` from inside it, and prep-root.sh's DOCKER-USER rules are rootful
@@ -168,6 +175,7 @@ pub(crate) fn verdict(out: &str, t: &Targets) -> Vec<String> {
         let what = match *name {
             "metadata" => "the cloud metadata address",
             "gateway" => "the default gateway",
+            "vm-host" => "the Mac as its VM reaches it",
             _ => "the host's LAN address",
         };
         match seen(name) {

@@ -166,6 +166,14 @@ impl Places {
     pub fn unit_dir(&self) -> PathBuf {
         self.config_home.join("systemd").join("user")
     }
+    /// The agent's own `DOCKER_CONFIG`, the run loop's: a Mac's Colima writes its Docker
+    /// context there, never into the person's `~/.docker` (#320).
+    pub fn docker_config(&self) -> PathBuf {
+        crate::run::config::Paths {
+            data: self.data.clone(),
+        }
+        .docker_config()
+    }
     fn agent_toml(&self) -> PathBuf {
         self.data.join("agent.toml")
     }
@@ -210,8 +218,9 @@ pub struct Options {
     /// The set directory (`<data>/sets/host` on Linux, prep-mac.sh's on a Mac).
     pub set_dir: Option<PathBuf>,
     pub socket: Option<PathBuf>,
-    /// An `x86_64` lane through Rosetta in the Mac's VM (`--no-rosetta` turns it off).
-    pub rosetta: bool,
+    /// An `x86_64` lane through Rosetta in the Mac's VM: `--rosetta`, `--no-rosetta`, else
+    /// what agent.toml's `[vm] rosetta` says, else on.
+    pub rosetta: Option<bool>,
     pub task_subnets: Option<String>,
     /// The person says this is a machine or VM used only as a pool host (design v2 §19.1).
     pub dedicated: bool,
@@ -232,7 +241,16 @@ pub struct Options {
 /// What the person's machine does for install: the terminal, the network, systemd.
 pub trait Sys {
     /// `systemctl` or `loginctl` with `args`: its stdout, or why it failed.
-    fn run(&mut self, prog: &str, args: &[&str]) -> Result<String, String>;
+    fn run(&mut self, prog: &str, args: &[&str]) -> Result<String, String> {
+        self.run_env(prog, args, &[])
+    }
+    /// [`Sys::run`] with `env` added to the environment (a Mac's `colima`, #320).
+    fn run_env(
+        &mut self,
+        prog: &str,
+        args: &[&str],
+        env: &[(&'static str, String)],
+    ) -> Result<String, String>;
     /// Shows `text` on `/dev/tty` and asks yes or no.
     fn confirm(&mut self, text: &str) -> Result<bool, String>;
     /// `KEY=value` lines typed on `/dev/tty` without echo, until an empty line.
@@ -271,6 +289,15 @@ pub(crate) struct Ready {
     pub values: envelope::Values,
     pub legacy: Option<legacy::Seen>,
     pub existing: Option<String>,
+}
+
+/// What measures the host: preflight changes nothing but the agent's tool cache, and on a
+/// Mac starts a stopped `omarchy` VM to measure it; install also makes the Mac's missing
+/// directories and restarts a VM that differs (#320).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Preflight,
+    Install,
 }
 
 fn say(out: &mut dyn Write, line: &str) {
@@ -358,7 +385,7 @@ pub(crate) fn choose_pool(
 
 /// The nearest directory that exists, from `p` up: where free disk is measured for a work
 /// root install has not made yet.
-fn existing_ancestor(p: &Path) -> PathBuf {
+pub(crate) fn existing_ancestor(p: &Path) -> PathBuf {
     let mut d = p.to_path_buf();
     while !d.is_dir() {
         if !d.pop() {
@@ -412,16 +439,27 @@ fn other_networks(
 /// `omarchy-agent preflight`: one screen, changing nothing but the agent's own cache of
 /// the release's hash-checked tools (and, on a Mac, the `omarchy` VM it starts to measure).
 pub fn preflight(o: &Options, sys: &mut dyn Sys) -> Result<Report, Failure> {
-    measure(o, sys, &crate::run::Sigstore, None).map(|(r, _)| r)
+    measure_as(o, sys, &crate::run::Sigstore, None, Mode::Preflight).map(|(r, _)| r)
 }
 
-/// Preflight's report, and what install needs when nothing blocks.
-#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // one check after another, in the screen's order
+/// Install's measure: preflight's report, and what install needs when nothing blocks.
 pub(crate) fn measure(
     o: &Options,
     sys: &mut dyn Sys,
     verifier: &dyn Verifier,
     docker_cli: Option<&Path>,
+) -> Result<(Report, Option<Ready>), Failure> {
+    measure_as(o, sys, verifier, docker_cli, Mode::Install)
+}
+
+/// Preflight's report, and what install needs when nothing blocks.
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // one check after another, in the screen's order
+pub(crate) fn measure_as(
+    o: &Options,
+    sys: &mut dyn Sys,
+    verifier: &dyn Verifier,
+    docker_cli: Option<&Path>,
+    mode: Mode,
 ) -> Result<(Report, Option<Ready>), Failure> {
     let p = &o.places;
     let mac = p.mac();
@@ -624,46 +662,8 @@ pub(crate) fn measure(
         }
     }
 
-    // The engine: on a Mac in its VM, started and sized here when it is the omarchy one.
-    let given = o
-        .socket
-        .clone()
-        .or_else(|| envelope::set_path(ex, "socket_cli"));
-    let caps = (
-        o.max_cpus.or_else(|| envelope_u32(ex, "max_cpus")),
-        o.max_mem_gb.or_else(|| envelope_u32(ex, "max_mem_gb")),
-    );
-    let vm_mounts = crate::vm::mounts(&work_root, &secrets_dir, &set_dir);
-    let found = mac.then(|| {
-        let min = manifest.as_ref().map(|m| {
-            let c = m.capacity().constants();
-            (c.min.cpus, c.min.mem_gb)
-        });
-        mac::engine(
-            o,
-            sys,
-            given.as_deref(),
-            &vm_mounts,
-            caps,
-            o.rosetta,
-            min,
-            &mut r,
-        )
-    });
-    let socket = match &found {
-        Some(f) => f.socket.clone(),
-        None => match engine::discover(
-            given.as_deref(),
-            &engine::candidates(p.xdg_runtime_dir.as_deref()),
-            engine::connect,
-        ) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                r.blockers.push(e);
-                None
-            }
-        },
-    };
+    // The release's pinned docker CLI, before the engine: on a Mac Colima needs it to start
+    // the VM.
     let cli = match (docker_cli, &manifest) {
         _ if !trusted => {
             r.notes.push(
@@ -686,6 +686,56 @@ pub(crate) fn measure(
             None => None,
         },
         (None, None) => None,
+    };
+    // The engine: on a Mac in its VM, started and sized here when it is the omarchy one.
+    let given = o
+        .socket
+        .clone()
+        .or_else(|| envelope::set_path(ex, "socket_cli"));
+    let caps = (
+        o.max_cpus.or_else(|| envelope_u32(ex, "max_cpus")),
+        o.max_mem_gb.or_else(|| envelope_u32(ex, "max_mem_gb")),
+    );
+    let vm_mounts = crate::vm::mounts(&work_root, &secrets_dir, &set_dir);
+    let found = mac.then(|| {
+        let min = manifest.as_ref().map(|m| {
+            let c = m.capacity().constants();
+            (c.min.cpus, c.min.mem_gb)
+        });
+        // The owner's choice of the x86_64 lane carries over, as the envelope's caps do.
+        let rosetta = o
+            .rosetta
+            .or_else(|| {
+                (envelope::table_str(ex, "vm", "runtime").as_deref() == Some("colima"))
+                    .then(|| envelope::table_value(ex, "vm", "rosetta")?.as_bool())
+                    .flatten()
+            })
+            .unwrap_or(true);
+        let ask = mac::Ask {
+            given: given.as_deref(),
+            mounts: &vm_mounts,
+            caps,
+            rosetta,
+            min,
+            docker_cli: cli.as_deref(),
+            subnets: &task,
+            mode,
+        };
+        mac::engine(o, sys, &ask, &mut r)
+    });
+    let socket = match &found {
+        Some(f) => f.socket.clone(),
+        None => match engine::discover(
+            given.as_deref(),
+            &engine::candidates(p.xdg_runtime_dir.as_deref()),
+            engine::connect,
+        ) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                r.blockers.push(e);
+                None
+            }
+        },
     };
     let docker = socket.zip(cli).map(|(socket, cli)| Docker { cli, socket });
     let image = manifest
@@ -817,7 +867,12 @@ pub(crate) fn measure(
         }
         match (task.first().and_then(|t| t.last_28()), &image) {
             (Some(subnet), Some(img)) => {
-                let t = egress::Targets::of_host(gateway, net::lan_address());
+                let mut t = egress::Targets::of_host(gateway, net::lan_address());
+                if found.as_ref().and_then(|f| f.kind) == Some(VmKind::Dedicated) {
+                    // The Mac as the omarchy VM reaches it, past Colima's NAT.
+                    t.forbidden
+                        .push(("vm-host", crate::vm::VM_HOST.to_owned(), 22));
+                }
                 match egress::probe(d, img, subnet, &t) {
                     Ok(out) => {
                         let b = egress::verdict(&out, &t);
@@ -921,7 +976,7 @@ pub(crate) fn measure(
         }
         _ => None,
     };
-    if r.ok() && ready.is_none() {
+    if r.ok() && ready.is_none() && !found.as_ref().is_some_and(|f| f.deferred) {
         r.blockers
             .push("preflight could not measure this host".into());
     }
@@ -935,10 +990,11 @@ fn envelope_u32(existing: Option<&str>, key: &str) -> Option<u32> {
         .and_then(|n| u32::try_from(n).ok())
 }
 
-/// The facts of an engine in a Mac's VM (#320): the VM's level; on the omarchy VM its
-/// own `MemAvailable` (M7) and, with Rosetta, the `x86_64` lane once its smoke run passed
-/// and the envelope's `emulate` does not leave it out; and what the VM may see.
-#[allow(clippy::too_many_arguments, clippy::many_single_char_names)] // preflight's state, passed through once
+/// The facts of an engine in a Mac's VM (#320, [`probe::in_mac_vm`]): the VM's level; on
+/// the omarchy VM its own `MemAvailable` (M7) and, with Rosetta, the `x86_64` lane once its
+/// smoke run passed and the envelope's `emulate` does not leave it out; and what the VM may
+/// see.
+#[allow(clippy::too_many_arguments)] // preflight's state, passed through once
 fn mac_facts(
     o: &Options,
     sys: &mut dyn Sys,
@@ -952,47 +1008,51 @@ fn mac_facts(
     mounts: &[crate::vm::Mount],
     r: &mut Report,
 ) -> Facts {
-    let mut f = f.in_vm(kind);
-    if kind == VmKind::Dedicated {
-        if let Some(text) = mac::meminfo(sys) {
-            f = f.with_meminfo(&text);
-        }
-    }
-    let rosetta = found
-        .and_then(|x| x.want.as_ref())
-        .is_some_and(|w| w.rosetta);
-    let emulate_x86 = envelope::envelope_value(ex, "emulate")
+    let meminfo = (kind == VmKind::Dedicated)
+        .then(|| mac::meminfo(sys, found.map_or(&[][..], |x| &x.colima_env)))
+        .flatten();
+    let emulate: Option<Vec<String>> = envelope::envelope_value(ex, "emulate")
         .and_then(|v| v.as_array().cloned())
-        .is_none_or(|a| a.iter().any(|x| x.as_str() == Some("x86_64")));
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        });
     let x86 = manifest
         .and_then(|m| m.build_image("x86_64"))
         .map(ToString::to_string);
-    match (rosetta && emulate_x86, docker, x86) {
-        (true, Some(d), Some(img)) => {
-            let host = d.host();
-            let how = probe::Probe {
-                docker: &d.cli.to_string_lossy(),
-                host: Some(&host),
-                work_root: &o.places.home,
-                image: None,
-            };
-            match probe::rosetta_lane(&how, &img) {
-                Ok(()) => f = f.with_lane("x86_64", "rosetta"),
-                Err(e) => r
-                    .warnings
-                    .push(format!("no x86_64 lane through Rosetta: {e}")),
-            }
-        }
-        (true, _, _) => r
-            .warnings
-            .push("no x86_64 lane through Rosetta: the release names no x86_64 build image".into()),
-        (false, _, _) if rosetta => r
-            .notes
-            .push("the x86_64 lane is off: the envelope's emulate leaves it out".into()),
-        (false, _, _) => {}
+    let vm = probe::MacVm {
+        kind,
+        meminfo: meminfo.as_deref(),
+        rosetta: found
+            .and_then(|x| x.want.as_ref())
+            .is_some_and(|w| w.rosetta),
+        emulate: emulate.as_deref(),
+        x86_64_image: x86.as_deref(),
+    };
+    let (f, said) = probe::in_mac_vm(f, &vm, &mut |img| {
+        let d = docker.ok_or("no engine")?;
+        let host = d.host();
+        let how = probe::Probe {
+            docker: &d.cli.to_string_lossy(),
+            host: Some(&host),
+            work_root: &o.places.home,
+            image: None,
+        };
+        probe::rosetta_lane(&how, img)
+    });
+    match said {
+        Some(probe::LaneSaid::Note(n)) => r.notes.push(n),
+        Some(probe::LaneSaid::Warning(w)) => r.warnings.push(w),
+        None => {}
     }
     if let (Some(d), Some(img)) = (docker, image) {
-        mac::sees(d, img, &o.places.home, mounts, r);
+        let extra = if kind == VmKind::Shared {
+            mac::home_parts(&o.places.home)
+        } else {
+            Vec::new()
+        };
+        mac::sees(d, img, &o.places.home, mounts, &extra, r);
     }
     f
 }
@@ -1075,7 +1135,7 @@ pub(crate) fn apply(
     }
 
     // The directories, and the capacity report enrollment sends.
-    for d in [&p.data, &p.set_dir(), &v.secrets_dir, &v.work_root] {
+    for d in [&p.data, &v.set_dir, &v.secrets_dir, &v.work_root] {
         files::make_dir(d).map_err(Failure::Refused)?;
     }
     let at = capacity::now();
@@ -1298,14 +1358,23 @@ pub fn uninstall(
     }
 
     let cfg = std::fs::read_to_string(places.agent_toml()).ok();
-    // The omarchy VM is started (its saved configuration) for the containers to be removed.
+    let state = crate::run::state::load(&places.data.join("state.json"))
+        .ok()
+        .flatten();
+    let cli = state
+        .and_then(|s| s.tools)
+        .and_then(|pins| tools::open(&places.data.join("tools"), &pins).ok())
+        .map(|t| t.docker);
+    // The omarchy VM is started (its saved configuration) for the containers to be removed;
+    // Colima wants the pinned docker CLI on its PATH for that (#320).
     let colima = envelope::table_str(cfg.as_deref(), "vm", "runtime").as_deref() == Some("colima");
+    let env = crate::vm::colima_env(cli.as_deref(), &places.docker_config());
     if colima
         && sys
-            .run("colima", &["status", "--profile", crate::vm::PROFILE])
+            .run_env("colima", &["status", "--profile", crate::vm::PROFILE], &env)
             .is_err()
     {
-        if let Err(e) = sys.run("colima", &["start", "--profile", crate::vm::PROFILE]) {
+        if let Err(e) = sys.run_env("colima", &["start", "--profile", crate::vm::PROFILE], &env) {
             left.push(format!(
                 "needs a person: the {} VM did not start ({e})",
                 crate::vm::PROFILE
@@ -1323,13 +1392,6 @@ pub fn uninstall(
         .as_deref()
         .and_then(|t| toml::from_str::<toml::Table>(t).ok())
         .and_then(|t| t.get("host_id").and_then(|h| h.as_str().map(str::to_owned)));
-    let state = crate::run::state::load(&places.data.join("state.json"))
-        .ok()
-        .flatten();
-    let cli = state
-        .and_then(|s| s.tools)
-        .and_then(|pins| tools::open(&places.data.join("tools"), &pins).ok())
-        .map(|t| t.docker);
     // Containers that could not be removed keep their set (its dispatcher.env) until a
     // later uninstall removes them.
     let mut keep_set = false;
@@ -1382,7 +1444,7 @@ pub fn uninstall(
         say(out, &format!("the legacy project {l} was not touched"));
     }
     if colima {
-        match sys.run("colima", &["stop", "--profile", crate::vm::PROFILE]) {
+        match sys.run_env("colima", &["stop", "--profile", crate::vm::PROFILE], &env) {
             Ok(_) => say(
                 out,
                 &format!(

@@ -94,11 +94,22 @@ pub(crate) struct Agent {
     pub(super) retry: Option<(Version, i64)>,
     /// The applied release whose agent was checked and needs no update (once per start).
     pub(super) upward_checked: Option<Release>,
-    /// A Mac's `omarchy` VM (#320), kept running, sized and on time.
+    /// A Mac's `omarchy` VM (#320), kept running, sized, walled and on time.
     pub vm: Option<super::vm::Keeper>,
     /// The last `follow`'s `Date` and when it came (the Mac's clock): the VM's is held to it.
     pool_date: Option<(i64, i64)>,
+    /// The applied release whose signed minimum the keeper holds the VM's size to.
+    vm_release: Option<Release>,
+    /// A start of the VM ended: the host's capacity is counted again once the gate is open.
+    vm_recount: bool,
+    /// The pinned docker CLI the driver runs, for that count.
+    docker_cli: Option<PathBuf>,
+    /// How the host's capacity is counted (a test plays it).
+    pub count: Box<Count>,
 }
+
+/// [`super::vm::count`], or a test's stand-in.
+pub(crate) type Count = dyn FnMut(&super::vm::Counting<'_>) -> Result<String, String>;
 
 enum Fetched {
     Bundle(Box<VerifiedBundle>),
@@ -149,6 +160,10 @@ impl Agent {
             upward_checked: None,
             vm: None,
             pool_date: None,
+            vm_release: None,
+            vm_recount: false,
+            docker_cli: None,
+            count: Box::new(super::vm::count),
         }
     }
 
@@ -201,6 +216,11 @@ impl Agent {
 
     fn use_tools(&mut self, t: tools::Tools) {
         self.state.tools = Some(t.pins.clone());
+        // Colima wants a docker client on the Mac to start the VM: the release's (#320).
+        if let Some(k) = self.vm.as_mut() {
+            k.use_docker(&t.docker);
+        }
+        self.docker_cli = Some(t.docker.clone());
         self.driver = Some(Box::new(Compose::new(
             t,
             &self.cfg.socket_cli,
@@ -283,9 +303,24 @@ impl Agent {
     }
 
     /// A Mac's VM, one step: started when it is not running, restarted when it differs
-    /// from agent.toml (a size or mount change only while no task runs), its clock held to
-    /// the pool's (#320).
+    /// from agent.toml (a size or mount change only while no task runs, never below the
+    /// applied release's signed minimum), walled, its clock held to the pool's; once a
+    /// start ended, the host's capacity counted again (#320).
     fn keep_vm(&mut self, now: i64, gate: bool) {
+        if self.vm.is_none() {
+            return;
+        }
+        // The applied release's signed minimum, read once per release.
+        if let Some(r) = self.state.applied.filter(|r| self.vm_release != Some(*r)) {
+            self.vm_release = Some(r);
+            if let Some(b) = self.cached(r) {
+                let c = b.manifest().capacity().constants();
+                let min = (c.min.cpus, c.min.mem_gb);
+                if let Some(k) = self.vm.as_mut() {
+                    k.minimum(min);
+                }
+            }
+        }
         let Some(k) = self.vm.as_mut() else {
             return;
         };
@@ -294,7 +329,52 @@ impl Agent {
             Some(Answer::Yes(b)) => Some(b),
             _ => None,
         };
-        k.step(now, self.pool_date, &mut tasks, gate, &self.journal);
+        self.vm_recount |= k.step(now, self.pool_date, &mut tasks, gate, &self.journal);
+        // A new agent's health gate touches nothing but the VM's start.
+        if self.vm_recount && !gate {
+            self.vm_recount = false;
+            self.recount(now);
+        }
+    }
+
+    /// The host's capacity counted again after a start of the VM, as `omarchy-agent
+    /// capacity --write` counts it ([`super::vm::count`]): a new size or Rosetta lane
+    /// reaches `run/capacity.json`, whose change reloads the dispatcher (an input of the
+    /// set) and reaches the pool with its next report.
+    fn recount(&mut self, now: i64) {
+        // The probe container may take a while (its image, the engine just up): the
+        // watchdog counts from here.
+        if let Some(p) = &self.progress {
+            p.store(super::now(), Ordering::Relaxed);
+        }
+        let said = match (self.docker_cli.clone(), self.state.applied) {
+            (Some(docker), Some(r)) => match self.cached(r) {
+                Some(b) => {
+                    let toml = fs::read_to_string(self.paths.agent_toml()).unwrap_or_default();
+                    let meminfo = self.vm.as_mut().and_then(super::vm::Keeper::meminfo);
+                    let c = super::vm::Counting {
+                        docker: &docker,
+                        socket: &self.cfg.socket_cli,
+                        work_root: &self.cfg.work_root,
+                        set_dir: &self.cfg.set_dir,
+                        manifest: b.manifest(),
+                        agent_toml: &toml,
+                        meminfo: meminfo.as_deref(),
+                    };
+                    (self.count)(&c)
+                }
+                None => Err(format!("release {r}'s bundle is not in the cache")),
+            },
+            _ => Err("no release applied yet, or no pinned docker CLI".into()),
+        };
+        let detail = match said {
+            Ok(s) => s,
+            Err(e) => format!(
+                "the host's capacity was not counted again after the VM started ({e}); `omarchy-agent capacity --write` counts it"
+            ),
+        };
+        self.journal
+            .write(now, "capacity", serde_json::json!({ "detail": detail }));
     }
 
     fn step(&mut self, now: i64) -> Result<(), String> {

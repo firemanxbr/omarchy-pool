@@ -131,6 +131,8 @@ pub struct AgentToml {
     /// A Mac's VM (#320, `[vm]`): its runtime (`colima`, `docker-desktop`, `orbstack`) and
     /// whether it runs `x86_64` through Rosetta.
     pub vm: Option<(String, bool)>,
+    /// The emulated lanes the owner allows (`[envelope] emulate`); absent, every lane.
+    pub emulate: Option<Vec<String>>,
 }
 
 impl AgentToml {
@@ -162,6 +164,7 @@ impl AgentToml {
             agent_slots: Option<u32>,
             #[serde(default)]
             dedicated: bool,
+            emulate: Option<Vec<String>>,
         }
         let raw: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
         if let Some(env) = raw.get("envelope").and_then(toml::Value::as_table) {
@@ -189,6 +192,7 @@ impl AgentToml {
             work_root: f.set.work_root,
             socket_cli: f.set.socket_cli,
             vm: f.vm.map(|v| (v.runtime, v.rosetta)),
+            emulate: e.emulate,
         })
     }
 }

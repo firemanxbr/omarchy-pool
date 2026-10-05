@@ -25,14 +25,25 @@
 //!   `x86_64` lane through Rosetta (4K pages in the VM). What `colima.yaml` says the profile
 //!   has decides whether it must be restarted with the agent's flags, or deleted by a
 //!   person (another VM type or architecture).
+//! - **The task firewall** ([`firewall`]): prep-root.sh's step 9 inside the VM, where the
+//!   agent is root (Colima's passwordless sudo) — the task subnets reach no private, CGNAT,
+//!   link-local or VM address — run after every start of the profile, since a boot loses
+//!   it. Colima's NAT carries a task's connection to the Mac's LAN otherwise.
+//! - **Colima's environment** ([`colima_env`], [`colima`]): launchd's `PATH` with the pinned
+//!   docker CLI first (Colima wants a `docker` client before it starts a profile) and the
+//!   agent's own `DOCKER_CONFIG`, every call with a deadline.
 //! - **The clock after a wake** ([`clock`]): the VM's clock against the pool's `Date`,
-//!   through the Mac's own: beyond [`CLOCK_SKEW_S`] the VM is set from the Mac's clock,
-//!   and restarted (within the rate limit) when that does not hold.
+//!   through the Mac's own: beyond [`CLOCK_SKEW_S`] the VM is set to the pool's time, and
+//!   restarted (within the rate limit) when that does not hold; a Mac whose own clock is
+//!   off is said, never set, and the VM is held to the Mac's then.
 //! - **The rate limit** ([`allowed`]): the agent starts, stops and sizes the profile at
 //!   most once per [`COOLDOWN_S`] and [`PER_DAY`] times a day.
 
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
+use crate::install::net::Cidr;
 use crate::lint::yaml::{self, Node};
 
 /// The Colima profile the agent owns (decision D11).
@@ -59,6 +70,18 @@ pub const COOLDOWN_S: i64 = 600;
 pub const PER_DAY: usize = 6;
 /// Where Rosetta 2 lives once installed (`softwareupdate --install-rosetta`).
 pub const ROSETTA_RUNTIME: &str = "/Library/Apple/usr/libexec/oah/libRosettaRuntime";
+/// The Mac as the omarchy VM reaches it (Lima's `host.lima.internal`): a target the egress
+/// probe must find blocked, as it does the Mac's LAN address.
+pub const VM_HOST: &str = "192.168.5.2";
+/// What a task subnet never reaches (design v2 §9.4): RFC 1918, CGNAT (Tailscale's range)
+/// and link-local (cloud metadata) — prep-root.sh's step 9, the same list.
+pub const FORBIDDEN: [&str; 5] = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "169.254.0.0/16",
+];
 
 /// `$COLIMA_HOME`, or `~/.colima`.
 pub fn colima_home(home: &Path, env: Option<&std::ffi::OsStr>) -> PathBuf {
@@ -464,39 +487,148 @@ pub fn drift(have: &Config, want: &Want, home: &Path) -> Drift {
 }
 
 // ---------------------------------------------------------------------------------------
-// The clock after a wake.
+// Colima's environment, and the task firewall inside the VM.
 
-/// What the clock check decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Clock {
-    Fine,
-    /// Set the VM's clock from the Mac's (`date -u -s @<to>` inside the VM).
-    Resync {
-        to: i64,
-        skew: i64,
-    },
-    /// The Mac's own clock is this far from the pool's: not the agent's to set.
-    MacOff {
-        by: i64,
-    },
+/// The environment every `colima` call gets: launchd's `PATH` ([`PATH`]) with the pinned
+/// docker CLI's directory first — Colima looks for a `docker` client on the Mac before it
+/// starts a profile, and runs `docker context create` there — and the agent's own
+/// `DOCKER_CONFIG`, so that context lands in the agent's data directory and never in the
+/// person's `~/.docker`. Homebrew installs Colima and Lima only (`prep-mac.sh`); the docker
+/// CLI is the release's.
+pub fn colima_env(docker_cli: Option<&Path>, docker_config: &Path) -> Vec<(&'static str, String)> {
+    let path = match docker_cli.and_then(Path::parent) {
+        Some(d) => format!("{}:{PATH}", d.display()),
+        None => PATH.to_owned(),
+    };
+    vec![
+        ("PATH", path),
+        ("DOCKER_CONFIG", docker_config.display().to_string()),
+    ]
 }
 
-/// The VM's clock against the pool's `Date` (design v2 §19.2), through the Mac's: the
-/// pool's date as received (`date`, at the Mac's `received`) gives the Mac's offset; the
-/// VM is compared with the Mac read at the same moment (`vm_now`, `mac_now`). A Mac whose
-/// own clock is off is reported, never "fixed" from the network; a VM off by more than
-/// [`CLOCK_SKEW_S`] is set from the Mac's clock. One second is allowed for the `Date`
-/// header's resolution.
+/// `colima <args>` with `env` ([`colima_env`]) and a deadline (design v2 §10: no call
+/// blocks longer than it): its stdout, or why not.
+pub fn colima(
+    args: &[&str],
+    env: &[(&'static str, String)],
+    limit: Duration,
+) -> Result<String, String> {
+    let mut c = Command::new("colima");
+    c.args(args).envs(env.iter().map(|(k, v)| (*k, v)));
+    let o = crate::run::exec::run(c, limit)?;
+    if o.ok() {
+        Ok(o.stdout)
+    } else {
+        Err(format!(
+            "colima {}: exit {:?}: {}",
+            args.first().unwrap_or(&""),
+            o.code,
+            o.stderr.trim()
+        ))
+    }
+}
+
+/// The task firewall of the omarchy VM (#320; design v2 §9.4): prep-root.sh's step 9 as
+/// one idempotent script, run as root inside the VM (`colima ssh -- sudo -n sh -c`) after
+/// every start of the profile, since a boot of the VM loses it. On a Linux host
+/// `omarchy-task-firewall.service` does this; in the VM nothing else would, and Colima's
+/// NAT carries a task's connection to the Mac's router, the Mac's own LAN address and
+/// [`VM_HOST`].
+///
+/// The chains are the script's own and rebuilt whole: the task subnets reach each other
+/// (a task's network holds its sidecars) and no private, CGNAT or link-local address
+/// ([`FORBIDDEN`]) through `DOCKER-USER`, and nothing of the VM itself through `INPUT`.
+/// One exception prep-root.sh does not need: DNS (port 53) to the VM's own resolvers
+/// (Lima's `192.168.5.3`), which Docker's embedded DNS server forwards to from the task's
+/// own namespace — a name is still checked by the egress sidecar against the address it
+/// resolves to. IPv4 only, as there.
+pub(crate) fn firewall(subnets: &[Cidr]) -> String {
+    let mut s = vec![
+        "set -e".to_owned(),
+        // The VM's resolvers: systemd-resolved's upstream, else resolv.conf's; never a
+        // loopback stub.
+        r#"ns=$(cat /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null | awk '$1 == "nameserver" && $2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ && $2 !~ /^127[.]/ { print $2 }' | sort -u)"#.to_owned(),
+        "iptables -N OMARCHY-TASKS 2>/dev/null || true".to_owned(),
+        "iptables -N OMARCHY-TASKS-HOST 2>/dev/null || true".to_owned(),
+        "iptables -F OMARCHY-TASKS".to_owned(),
+        "iptables -F OMARCHY-TASKS-HOST".to_owned(),
+    ];
+    for t in subnets {
+        s.push(format!("iptables -A OMARCHY-TASKS -s {t} -d {t} -j RETURN"));
+        s.push(format!(
+            r#"for d in $ns; do for p in udp tcp; do iptables -A OMARCHY-TASKS -s {t} -d "$d" -p "$p" --dport 53 -j RETURN; done; done"#
+        ));
+        for d in FORBIDDEN {
+            s.push(format!("iptables -A OMARCHY-TASKS -s {t} -d {d} -j DROP"));
+        }
+        s.push(format!("iptables -A OMARCHY-TASKS-HOST -s {t} -j DROP"));
+    }
+    s.extend(
+        [
+            "iptables -N DOCKER-USER 2>/dev/null || true",
+            "iptables -C DOCKER-USER -j OMARCHY-TASKS 2>/dev/null || iptables -I DOCKER-USER -j OMARCHY-TASKS",
+            "iptables -C INPUT -j OMARCHY-TASKS-HOST 2>/dev/null || iptables -I INPUT -j OMARCHY-TASKS-HOST",
+        ]
+        .map(str::to_owned),
+    );
+    let mut out = s.join("\n");
+    out.push('\n');
+    out
+}
+
+/// The command inside the VM (after `colima ssh --profile omarchy --`) that runs
+/// [`firewall`]'s script as root; `-n`: sudo never waits for a password.
+pub(crate) fn as_root(script: &str) -> [&str; 5] {
+    ["sudo", "-n", "sh", "-c", script]
+}
+
+// ---------------------------------------------------------------------------------------
+// The clock after a wake.
+
+/// What the clock check decided: the VM's clock to set, and the Mac's own offset when it
+/// is off the pool's. Both can hold at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clock {
+    /// Set the VM's clock to `to` (`date -u -s @<to>` inside the VM): it is `skew` seconds
+    /// off it (the pool's time, or the Mac's while the Mac's is off the pool's).
+    pub resync: Option<Resync>,
+    /// The Mac's own clock is this far from the pool's: said, never set by the agent.
+    pub mac_off: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resync {
+    pub to: i64,
+    pub skew: i64,
+}
+
+impl Clock {
+    /// The VM is within [`CLOCK_SKEW_S`] of the time it is held to.
+    pub fn vm_fine(&self) -> bool {
+        self.resync.is_none()
+    }
+}
+
+/// The VM's clock against the pool's `Date` (design v2 §19.2, v1 §14.2: beyond 5 s it is
+/// resynced), through the Mac's: the pool's date as received (`date`, at the Mac's
+/// `received`) gives the Mac's offset from the pool, and the pool's time now is the Mac's
+/// (`mac_now`, read with `vm_now`) plus that offset.
+///
+/// While the Mac agrees with the pool (within [`CLOCK_SKEW_S`], one second more for the
+/// `Date` header's resolution), a VM more than [`CLOCK_SKEW_S`] from the pool's time is set
+/// to it. A Mac whose own clock is further off is said ([`Clock::mac_off`], never set by the
+/// agent), and the VM is then held to the Mac's clock: a sleep's drift goes, and the pool's
+/// answer never moves the VM's clock further than that from the Mac's own (a pool that lies
+/// about the time cannot take the VM's TLS checks back to a year whose certificates have
+/// expired). Without a `Date` the Mac's clock stands for the pool's.
 pub fn clock(vm_now: i64, mac_now: i64, pool: Option<(i64, i64)>) -> Clock {
     let mac_off = pool.map_or(0, |(date, received)| date - received);
-    if mac_off.abs() > CLOCK_SKEW_S + 1 {
-        return Clock::MacOff { by: mac_off };
-    }
-    let skew = vm_now - mac_now;
-    if skew.abs() > CLOCK_SKEW_S {
-        Clock::Resync { to: mac_now, skew }
-    } else {
-        Clock::Fine
+    let agrees = mac_off.abs() <= CLOCK_SKEW_S + 1;
+    let to = if agrees { mac_now + mac_off } else { mac_now };
+    let skew = vm_now - to;
+    Clock {
+        resync: (skew.abs() > CLOCK_SKEW_S).then_some(Resync { to, skew }),
+        mac_off: (!agrees).then_some(mac_off),
     }
 }
 
