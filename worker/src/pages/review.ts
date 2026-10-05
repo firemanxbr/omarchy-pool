@@ -698,8 +698,8 @@ const SCRIPT = String.raw`
     // Sent back by an emulated worker (#281): no review worker of that kind takes it again, so the words are the shell's.
     else log.innerHTML = empty(b.status === "leased" ? "building on " + (b.lease_owner || "a review worker") + (isMaintainer() ? "" : " — its log is here once it built") : waitsForNative(b) ? waitsForNative(b) + ": it could not run emulated" : "queued for a review worker");
     var yev = b ? evidenceOf(b.id) || {} : {};
-    // Out of memory (#337): the engine's words, and a maintainer's Retry at size.
-    var oom = b && oomSize(b) ? '<span>' + pillHtml("error", b.error.split(" — ")[0], b.error) + '</span> ' + retryAtSize(b) + ' ' : '';
+    // Out of memory (#337): the engine's words — queued again, at the size it waits at — and a maintainer's Retry at size.
+    var oom = b && oomSize(b) ? '<span>' + pillHtml("error", b.error.split(" — ")[0] + (b.status === "queued" ? "; " + requeuedAt(b) : ""), b.error) + '</span> ' + retryAtSize(b) + ' ' : '';
     $("#rv-y-evid").innerHTML = b ? oom + (built(b) ? '<span>gate ' + gatePill(vetOf(b), yev.tests) + '</span> <span>trial ' + trialPill(shown.trial ? { status: shown.trial.status, verdict: shown.trial.result && shown.trial.result.verdict } : null, shown.trial ? yev.trial : "") + '</span> ' : '') + '<a href="/build/' + b.id + '">build #' + b.id + '</a> ' + builtOn(b.id) : '';
   }
 
@@ -1068,7 +1068,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
       // The claim never pins its rebuild to a drained worker (#277): the door refuses one, and the page never offers it.
       "function agentWorkers(arch)", "!w.drained",
       // A rebuild that ran out of memory (#337) says it in the engine's words, with a maintainer's Retry at size (layout.ts).
-      "oomSize(b)", "retryAtSize(b)"],
+      "oomSize(b)", "retryAtSize(b)", "requeuedAt(b)"],
     reads: [
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.kinds", "workers.0.alive", "workers.0.agent", "workers.0.agent_status", "workers.0.drained"] },
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/PKGBUILD`, json: false },

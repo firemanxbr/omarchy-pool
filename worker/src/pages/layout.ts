@@ -27,16 +27,20 @@ export const RETRY_AT_SIZE = String.raw`
   var SIZES = ${JSON.stringify(SIZES_SPLICE)}, LARGEST = 0;
   function sizesAlive(d) { LARGEST = d && d.largest_size > 0 ? d.largest_size : 0; }
   function oomSize(b) { var m = b && (b.kind || "build") === "build" && typeof b.error === "string" ? /^out of memory at \d+ GB(?: \(size (\d+)\))?/.exec(b.error) : null; return m ? Number(m[1] || 1) : 0; }
+  // The size a build waits at once a maintainer retried it at one (its params.size, handleRetryAtSize): the error keeps the size it ran
+  // out of memory at until its next lease, so a queued one says the size it was queued again at, and offers nothing it already asks.
+  function queuedSize(b) { var z = b && b.status === "queued" && b.params ? Number(b.params.size) : 0; return Math.max(oomSize(b), Number.isInteger(z) ? z : 0); }
+  function requeuedAt(b) { var s = oomSize(b), z = queuedSize(b); return z > s ? "queued again at size " + z : "queued again at the same size"; }
   function retryAtSize(b) {
-    var s = oomSize(b), max = Math.min(b && b.trust === "community" ? SIZES.community_max : SIZES.max, LARGEST || SIZES.max);
-    if (!s || !isMaintainer() || (b.status !== "failed" && b.status !== "queued") || s >= max) return "";
-    return '<button type="button" class="op-btn" data-retry-size="' + esc(b.id) + '" data-size="' + s + '" data-max="' + max + '">Retry at size ' + (s + 1) + '</button>';
+    var s = oomSize(b), cur = queuedSize(b), max = Math.min(b && b.trust === "community" ? SIZES.community_max : SIZES.max, LARGEST || SIZES.max);
+    if (!s || !isMaintainer() || (b.status !== "failed" && b.status !== "queued") || cur >= max) return "";
+    return '<button type="button" class="op-btn" data-oom="' + s + '" data-retry-size="' + esc(b.id) + '" data-size="' + cur + '" data-max="' + max + '">Retry at size ' + (cur + 1) + '</button>';
   }
   document.addEventListener("click", function (ev) {
     var t = ev.target.closest ? ev.target.closest("[data-retry-size]") : null; if (!t || t.disabled) return;
-    var id = t.getAttribute("data-retry-size"), s = Number(t.getAttribute("data-size")), max = Number(t.getAttribute("data-max")), opts = [];
+    var id = t.getAttribute("data-retry-size"), s = Number(t.getAttribute("data-size")), oom = Number(t.getAttribute("data-oom")) || s, max = Number(t.getAttribute("data-max")), opts = [];
     for (var z = s + 1; z <= max; z++) opts.push({ value: String(z), text: "size " + z + " — " + z * SIZES.cpus + " CPUs, " + z * SIZES.mem_gb + " GB", selected: z === s + 1 });
-    ask({ title: "Retry #" + id + " at a larger size", text: "It ran out of memory at size " + s + ". It goes back to the queue at the size you choose, for one more try; the package's own size stays as it is.", select: { label: "Size", options: opts }, confirm: "Retry" }).then(function (r) {
+    ask({ title: "Retry #" + id + " at a larger size", text: "It ran out of memory at size " + oom + (s > oom ? " and is queued again at size " + s : "") + ". It goes back to the queue at the size you choose, for one more try; the package's own size stays as it is.", select: { label: "Size", options: opts }, confirm: "Retry" }).then(function (r) {
       if (r === null) return;
       api("POST", "/api/v1/factory/tasks/" + encodeURIComponent(id) + "/retry", { size: Number(r.pick) }).then(function (d) {
         if (d.error) { toast(esc(d.error), "error"); return; }
