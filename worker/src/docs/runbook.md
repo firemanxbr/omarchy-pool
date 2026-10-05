@@ -853,7 +853,8 @@ so a size-4 build waits for memory rather than run smaller.
   whose host ran something longer than the window still starts. A
   maintainer who wants it built sooner lowers its size on the package's
   page. A build that ran out of memory says *out of memory at 4 GB (size
-  1)* on its package's page and on Review, where a maintainer's **Retry at
+  1)* on its package's page — as soon as it is queued again, not only once
+  its attempts are spent — and on Review, where a maintainer's **Retry at
   size N** queues it again at the size chosen (up to the largest a host
   alive runs), for one more try.
 - **The pool's cap** (`hosts.pool_cap_units`): its owner or any maintainer

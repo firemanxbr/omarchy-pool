@@ -33,7 +33,9 @@
  * - a host below the minimum by its last report claims nothing; a work root
  *   its own builds fill is no minimum;
  * - out of memory says "out of memory at 4 GB (size 1)", and a maintainer's
- *   Retry at size requeues it at the size chosen; a package's size set on its
+ *   Retry at size requeues it at the size chosen — the package page says it
+ *   and offers it for a build queued again after running out of memory, not
+ *   only for one whose attempts are spent; a package's size set on its
  *   page; the pool's cap on a host set by its owner or any maintainer;
  * - a legacy registration as a host with one lane and one build;
  * - and what the planner reads for the new statements.
@@ -48,6 +50,7 @@ import { ANY_QUEUED_SQL, FLEET_SQL, HEAD_LIMIT, LANE_HEAD_SQL, LEASES_HELD_SQL, 
 import { unitsOf } from "../src/hosts";
 import { queuePosition } from "../src/queue";
 import { RETRY_AT_SIZE } from "../src/pages/layout";
+import { runScript, scriptOf } from "./fixture";
 import { toB64url } from "../src/webauthn";
 
 const ORIGIN = "http://localhost:8787";
@@ -528,6 +531,32 @@ describe("out of memory, and Retry at size", () => {
     expect(ui.retryAtSize(b)).toMatch(/data-size="1" data-max="3">Retry at size 2</);
     ui.sizesAlive({ largest_size: 1 });
     expect(ui.retryAtSize(b)).toBe("");
+  });
+
+  it("the package page says it and offers Retry at size for a build queued again after running out of memory, not only once its attempts are spent", async () => {
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request(`${ORIGIN}/package/hungry`), env, ctx);
+    await waitOnExecutionContext(ctx);
+    const d = runScript(scriptOf(await res.text()), { pathname: "/package/hungry", functions: ["buildPanel", "buildMark", "identity"], variables: ["ST", "WHO"] });
+    const error = "out of memory at 4 GB (size 1) — the engine killed it: Killed (exit 137): cc1plus";
+    const b = { id: 41, kind: "build", trust: "community", owner: "bob", status: "queued", arch: "aarch64", attempts: 1, error, params: {} };
+    const story = (t: typeof b) => ({ package: { name: "hungry", owner: "bob", status: "waiting" }, targets: { aarch64: { status: "building", task: t.id } }, request: { checks: [], complete: true }, chains: [{ contributor: t }] });
+    expect(d.buildMark(b)).toEqual(["wait", "queued again", "out of memory at 4 GB (size 1); queued again at the same size"]);
+    d.setWHO(d.identity({ login: "m1", role: "maintainer" }));
+    d.setST(story(b));
+    const html: string = d.buildPanel();
+    expect(html).toContain(`aarch64 is queued again after running out of memory: “${error}”.`);
+    expect(html).toContain('data-retry-size="41" data-size="1" data-max="2">Retry at size 2</button>');
+    // Its owner reads the words, without the button: Retry at size is a maintainer's.
+    d.setWHO(d.identity({ login: "bob", role: "contributor" }));
+    expect(d.buildPanel()).toContain("aarch64 is queued again after running out of memory");
+    expect(d.buildPanel()).not.toContain("data-retry-size");
+    // Queued as any other build: waiting for a worker, nothing said of memory.
+    d.setWHO(d.identity({ login: "m1", role: "maintainer" }));
+    const plain = { ...b, attempts: 0, error: null as unknown as string };
+    expect(d.buildMark(plain)).toEqual(["wait", "queued", "waiting for a worker"]);
+    d.setST(story(plain));
+    expect(d.buildPanel()).not.toMatch(/out of memory|data-retry-size/);
   });
 });
 

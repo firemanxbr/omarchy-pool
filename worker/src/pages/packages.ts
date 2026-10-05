@@ -647,7 +647,8 @@ const PACKAGE_SCRIPT = String.raw`
   }
   function buildMark(b) {
     if (!b) return ["na", "", "no build"];
-    if (b.status === "queued") return waitsForNative(b) ? ["wait", "native worker", waitsForNative(b) + ": it could not run emulated"] : ["wait", "queued", "waiting for a worker"];
+    // Queued again after running out of memory (#337): the engine's words, and the same size will most likely run out again.
+    if (b.status === "queued") return waitsForNative(b) ? ["wait", "native worker", waitsForNative(b) + ": it could not run emulated"] : oomSize(b) ? ["wait", "queued again", b.error.split(" — ")[0] + "; queued again at the same size"] : ["wait", "queued", "waiting for a worker"];
     if (b.status === "leased" || b.status === "building") return ["run", "try " + Math.max(1, b.attempts || 1), "building"];
     if (b.status === "staged" || b.status === "done") return ["ok", "", "built"];
     if (b.status === "failed") return ["fail", (b.attempts || 1) + (b.attempts === 1 ? " try" : " tries"), b.error || "failed"];
@@ -669,7 +670,10 @@ const PACKAGE_SCRIPT = String.raw`
       ["Installs and starts with a real pacman", bs.map(function (b) { return gateMark(b, ["smoke"]); })],
       ["Audited by a second agent", au.map(function (a, i) { if (!bs[i]) return ["na", "", "no build"]; if (!a) return ["wait", "", "not queued yet"]; var v = a.result && a.result.verdict; return a.status !== "done" ? ["run", a.status, "the audit is " + a.status] : v === "ok" || v === "pass" ? ["ok", "", (a.result && a.result.summary) || "ok"] : v === "fail" || v === "block" ? ["fail", v, (a.result && a.result.summary) || v] : ["warn", v || "done", (a.result && a.result.summary) || ""]; })]
     ];
-    var notes = ARCHES.filter(function (a, i) { return (ts[a] || {}).status === "not_supported" || (bs[i] && bs[i].status === "failed"); }).map(function (a) { var b = bs[ARCHES.indexOf(a)]; return esc(a) + (ts[a] && ts[a].status === "not_supported" ? " did not build after the tries it had, so it is not supported; the other architectures go on to the review" : " failed") + (b && b.error ? ': “' + esc(b.error.slice(0, 240)) + '”' : '') + '.' + (b ? retryAtSize(b) : ''); });
+    // A build that ran out of memory and was queued again (#337) says so too, with a maintainer's Retry at size: the same size most
+    // likely runs out again, so the button comes with the first failure, as on Review, not after the last attempt.
+    var oomQueued = function (b) { return b && b.status === "queued" && oomSize(b) > 0; };
+    var notes = ARCHES.filter(function (a, i) { return (ts[a] || {}).status === "not_supported" || (bs[i] && bs[i].status === "failed") || oomQueued(bs[i]); }).map(function (a) { var b = bs[ARCHES.indexOf(a)]; return esc(a) + (ts[a] && ts[a].status === "not_supported" ? " did not build after the tries it had, so it is not supported; the other architectures go on to the review" : oomQueued(b) ? " is queued again after running out of memory" : " failed") + (b && b.error ? ': “' + esc(b.error.slice(0, 240)) + '”' : '') + '.' + (b ? retryAtSize(b) : ''); });
     return panel({
       title: "Factory build", tag: anyRun ? "running" : anyOk ? "ready" : bs.some(Boolean) ? "not built" : "waiting", tone: anyRun ? "run" : anyOk ? "ok" : bs.some(Boolean) ? "fail" : "wait",
       who: (agent ? [glyphChip("built by", agent, "agent")] : []).concat(bs.filter(Boolean).map(function (b) { return glyphChip("on", wtShort(b.lease_owner || "a worker"), "", "W"); })),
@@ -1336,7 +1340,7 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.build-panels",
       page,
       anchor: ['id="stage-panel"'],
-      script: ["buildPanel()", "syncedBuildPanel()", 'gateMark(b, ["checksums"])', 'gateMark(b, ["smoke"])', "v.failed", "v.warned", "evidenceHref(bs[i].id)", "wtShort(b.lease_owner", "rs[0].has_signature", "retryAtSize(b)", "function oomSize(b)", "data-retry-size"],
+      script: ["buildPanel()", "syncedBuildPanel()", 'gateMark(b, ["checksums"])', 'gateMark(b, ["smoke"])', "v.failed", "v.warned", "evidenceHref(bs[i].id)", "wtShort(b.lease_owner", "rs[0].has_signature", "retryAtSize(b)", "function oomSize(b)", "data-retry-size", "oomQueued(bs[i])"],
       reads: [
         { path: story, fields: ["chains.0.contributor.result.vet.verdict", "chains.0.contributor.result.vet.failed", "chains.0.contributor.result.vet.warned", "chains.0.contributor.lease_owner", "chains.0.contributor.duration_ms", "chains.0.contributor.error", "chains.0.audit"] },
         { path: shipped, fields: ["chains.0.audit.status", "chains.0.audit.result.verdict", "chains.0.audit.result.summary"] },
