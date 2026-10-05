@@ -362,8 +362,12 @@ jobs:
           docker build --network host -f factory/image/Containerfile --build-arg ARCH=x86_64 --build-arg POOL_RELEASE="$release" \
             --build-arg TOOLS_URL=http://127.0.0.1:8765 -t omarchy-worker:ci .
           bash tests/image-smoke.sh omarchy-worker:ci
-      - name: Task networks on a real engine — a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host and the other task out of reach; the probe sidecar; a signed exception's bridge; a stop removes only its own
+      # The agent renders the dispatcher's etc/dispatcher.env there (#371); built on its own, so the
+      # image's binaries above are built with their own features.
+      - run: cargo build --release -p omarchy-agent
+      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge; a stop removes only its own
         run: bash tests/task-networks.sh
         env:
           WORKER_IMAGE: omarchy-worker:ci
           PKG_REPO: target/release/pkg-repo
+          OMARCHY_AGENT: target/release/omarchy-agent

@@ -60,6 +60,8 @@ export interface HostRow {
   report: string | null; reported_at: string | null; last_seen: string | null; enrolled_at: string; confirmed_at: string | null; worker_id: string | null; token_issued_at: string | null;
   /** #322: who suspended, resumed or retired it last, when and why; when the sync found its owner gone from the list. */
   status_by: string | null; status_at: string | null; status_reason: string | null; owner_removed_at: string | null;
+  /** #337: the large task it reserves for, since when (selection.ts). */
+  reserving_task: number | null; reserving_since: string | null;
 }
 
 function newToken(prefix: string): string {
@@ -148,6 +150,7 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
     where: h.where, hostname: h.hostname, os: h.os, arch: h.arch, page_kb: h.page_kb, isolation: h.isolation, dedicated: h.dedicated === null ? null : !!h.dedicated,
     fingerprint: await fingerprint(raw),
     capacity, lanes, units: h.units, agent_slots: h.agent_slots, disk_free: h.disk_free ? JSON.parse(h.disk_free) : null, pool_cap_units: h.pool_cap_units,
+    reserving_task: h.reserving_task, reserving_since: h.reserving_since,
     below_minimum: capacity?.below_minimum ?? null,
     runtime: h.runtime ? JSON.parse(h.runtime) : null, provider: h.provider, model: h.model,
     agent_version: h.agent_version, release_target: h.release_target, rolled_back_from: h.rolled_back_from,
@@ -197,7 +200,7 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
   const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
   if (!h) return json({ error: "no such host" }, 404, NO_STORE);
   const leases = h.worker_id
-    ? (await env.DB.prepare("SELECT id, kind, name, arch, started_at, lease_expires_at, stop_order IS NOT NULL AS fenced FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id").bind(h.worker_id).all()).results
+    ? (await env.DB.prepare("SELECT id, kind, name, arch, lane, units, size, started_at, lease_expires_at, stop_order IS NOT NULL AS fenced FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id").bind(h.worker_id).all()).results
     : [];
   const viewer = c ? await viewerOf(env, c) : null;
   const detailed = mayDetail(c, h);
@@ -264,7 +267,7 @@ async function viewerOf(env: Env, c: Contributor): Promise<HostViewer> {
 /** The owner is a GitHub user id, not a login: a renamed owner is still the owner, and a login someone else took is not. */
 const isOwner = (v: HostViewer, h: Pick<HostRow, "owner_github_id">) => v.github_id !== null && v.github_id === h.owner_github_id;
 
-export type HostRight = "suspend" | "resume" | "retire" | "reconcile" | "retire_legacy";
+export type HostRight = "suspend" | "resume" | "retire" | "cap" | "reconcile" | "retire_legacy";
 type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
 
 /**
@@ -275,6 +278,8 @@ type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; wh
  * - Resume: its owner only, with their passkey — so they are a maintainer;
  * - Retire: its owner, or any maintainer with their passkey; a host retired
  *   once stays retired (a new install enrolls a new host).
+ * - Cap: its owner or any maintainer sets or lifts the pool's cap on its
+ *   units (#337, design v2 §7.2), on a host not retired.
  * Every one takes a reason, journaled with who.
  * - Reconcile now (#344): its owner or any maintainer, on an active host
  *   whose agent takes host orders (HOST_ORDERS_AGENT on);
@@ -290,7 +295,7 @@ export function hostVerdicts(
   h: Pick<HostRow, "name" | "status" | "owner_login" | "owner_github_id"> & Partial<Pick<HostRow, "agent_version" | "report">>,
 ): Record<HostRight, HostVerdict> {
   const no = (status: 401 | 403 | 404 | 409, why: string): HostVerdict => ({ ok: false, status, why });
-  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), reconcile: no(401, SIGN_IN), retire_legacy: no(401, SIGN_IN) };
+  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), cap: no(401, SIGN_IN), reconcile: no(401, SIGN_IN), retire_legacy: no(401, SIGN_IN) };
   const owner = isOwner(v, h);
   const theirs = !owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer stops ${h.name}`) : null;
   const gone = h.status === "retired" ? no(409, `${h.name} is retired: a new install enrolls a new host`) : null;
@@ -310,6 +315,7 @@ export function hostVerdicts(
       : !owner ? no(403, `only ${h.owner_login} resumes ${h.name}, with their passkey`)
       : !v.maintainer ? no(403, `${OWNER_NOT_MAINTAINER}: ${h.name} stays suspended`) : { ok: true }),
     retire: theirs ?? gone ?? { ok: true },
+    cap: (!owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer caps ${h.name}`) : null) ?? gone ?? { ok: true },
     reconcile: (!owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer orders ${h.name} a round`) : null) ?? takes ?? { ok: true },
     retire_legacy: (!owner ? no(403, `only ${h.owner_login} retires the legacy set of ${h.name}, with their passkey`) : null)
       ?? (!v.maintainer ? no(403, `${OWNER_NOT_MAINTAINER}: ${h.name}'s legacy set stays`) : null)
@@ -410,6 +416,40 @@ export async function handleSuspendHost(c: Contributor, id: string, request: Req
   if (!res.meta.changes) return json({ error: `${h.name} was not suspended: it changed a moment ago`, code: "host_right" }, 409, NO_STORE);
   const fenced = await fencedBy(env, at, c.login);
   return json({ host: id, status: "suspended", by: c.login, at, reason, fenced, line }, 200, NO_STORE);
+}
+
+/** The pool's cap a person may set on a host's units (#337): none, or 0 (it claims nothing) to this many. */
+export const POOL_CAP_MAX = 4096;
+
+/**
+ * POST /hosts/:id/cap — {units: N | null, reason}: its owner or any
+ * maintainer (design v2 §7.2). The pool hands the host at most N units,
+ * whatever its envelope and its reports say (hosts.pool_cap_units, which
+ * every claim reads); null lifts the cap. Lowered below what it holds,
+ * nothing running ends: it claims nothing until its leases fit (§7.6). The
+ * Studio canary runs at one build under it (§21.1). One journal line with
+ * who and why.
+ */
+export async function handleCapHost(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url);
+  if (p instanceof Response) return p;
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  const no = refusedBy(hostVerdicts(p.v, h).cap);
+  if (no) return no;
+  const units = p.b.units;
+  if (units !== null && (typeof units !== "number" || !Number.isInteger(units) || units < 0 || units > POOL_CAP_MAX)) return json({ error: `units: a whole number from 0 to ${POOL_CAP_MAX}, or null to lift the cap`, code: "units" }, 400, NO_STORE);
+  const reason = reasonOf(p.b.reason);
+  if (reason instanceof Response) return reason;
+  const at = iso(Date.now());
+  const line = units === null ? `${hostLine_(h)}: the pool's cap lifted by ${c.login} (was ${h.pool_cap_units ?? "none"}): ${reason}` : `${hostLine_(h)} capped at ${units} unit${units === 1 ? "" : "s"} by ${c.login} (was ${h.pool_cap_units ?? "none"}; its count is ${h.units ?? "?"}): ${reason}`;
+  const [res] = await env.DB.batch([
+    env.DB.prepare("UPDATE hosts SET pool_cap_units = ? WHERE id = ? AND status != 'retired' AND pool_cap_units IS ?").bind(units, id, h.pool_cap_units),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'ok', ?, ? WHERE changes() > 0")
+      .bind(line, JSON.stringify({ host: id, worker: h.worker_id, owner: h.owner_login, by: c.login, via: "web", action: "cap", units, was: h.pool_cap_units, reason })),
+  ]);
+  if (!res.meta.changes) return json({ error: `${h.name}'s cap was not set: it ${h.pool_cap_units === units ? "is that already" : "changed a moment ago"}`, code: "host_right" }, 409, NO_STORE);
+  return json({ host: id, pool_cap_units: units, was: h.pool_cap_units, by: c.login, at, reason, line }, 200, NO_STORE);
 }
 
 /**

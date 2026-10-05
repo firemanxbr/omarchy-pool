@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use crate::dispatcher_env::{self, addresses, Envelope, Refresh, Rendered, Sources};
 use crate::manifest::{Manifest, Outer};
 use crate::statement::Statement;
 use crate::verify::{self, BundleOutcome, Rejection, StatementOutcome, VerifiedBundle};
@@ -36,6 +37,14 @@ const MAX_BACKOFF_S: i64 = 600;
 pub(super) const UNAUTHORIZED_S: i64 = 3600;
 /// The safety timer: the running set is checked against `last-good/` at least this often.
 const DRIFT_S: i64 = 900;
+/// How often the host's own addresses are read again for `etc/dispatcher.env` (#371).
+pub(crate) const ADDRESSES_S: i64 = 60;
+/// How often the pool's edge is asked which public address the host leaves from (#371).
+pub(crate) const PUBLIC_S: i64 = 3600;
+/// After an ask the edge did not answer, the next comes after [`ADDRESSES_S`], doubled up
+/// to this: a reboot that gave the home connection a new address often starts the loop
+/// before the network is up, and the new address must not wait the hour to be refused.
+pub(crate) const PUBLIC_RETRY_S: i64 = 300;
 
 /// The cryptographic check, pinned identities and parsing (`crate::verify`).
 pub(crate) trait Verifier {
@@ -107,6 +116,37 @@ pub(crate) struct Agent {
     /// Said once per process: the pool predates the host state's release (#344), so its
     /// `follow` names the target.
     older_pool_said: bool,
+    /// `etc/dispatcher.env` rendered again from the host and agent.toml (#371); `None`
+    /// leaves the file alone (the tests that play other parts).
+    pub host_env: Option<HostEnv>,
+}
+
+/// The run loop's half of `etc/dispatcher.env` (#371): at its start, then every
+/// [`ADDRESSES_S`], the host's own addresses and agent.toml are read again and the file
+/// rendered with them, its token kept; at its start, then every [`PUBLIC_S`], the pool's
+/// edge is asked which public address the host leaves from (`egress.json`, which install
+/// wrote first), and within minutes after an ask it did not answer ([`PUBLIC_RETRY_S`]). A
+/// file that changed starts a round (an input of the set), which recreates the dispatcher.
+pub(crate) struct HostEnv {
+    pub sources: Sources,
+    next_at: i64,
+    public_at: i64,
+    /// The wait after the next ask the edge does not answer.
+    public_retry: i64,
+    /// The last failure said, so a failure that lasts is said once.
+    failing: Option<String>,
+}
+
+impl HostEnv {
+    pub fn new(sources: Sources) -> Self {
+        Self {
+            sources,
+            next_at: 0,
+            public_at: 0,
+            public_retry: ADDRESSES_S,
+            failing: None,
+        }
+    }
 }
 
 enum Fetched {
@@ -160,6 +200,7 @@ impl Agent {
             legacy_seen: None,
             reported: Reported::default(),
             older_pool_said: false,
+            host_env: None,
         }
     }
 
@@ -269,6 +310,7 @@ impl Agent {
         if self.gate.is_some() {
             self.gate_step(now);
         } else if self.exit.is_none() {
+            self.dispatcher_env(now);
             if round_now || now >= self.state.poll.next_at {
                 self.poll(now, round_now);
             }
@@ -822,6 +864,71 @@ impl Agent {
     fn start(&mut self, now: i64, target: Release, rollback: bool, why: &str) {
         self.journal.set_secrets(env_secrets(&self.cfg.set_dir));
         rollout::start(&mut self.state, &self.journal, now, target, rollback, why);
+    }
+
+    /// `etc/dispatcher.env` rendered again when it is time (#371): before the drift check,
+    /// so a file that changed starts its round in the same tick.
+    fn dispatcher_env(&mut self, now: i64) {
+        let Some(h) = self.host_env.as_mut() else {
+            return;
+        };
+        if now < h.next_at {
+            return;
+        }
+        h.next_at = now + ADDRESSES_S;
+        if now >= h.public_at {
+            // The address the pool's edge saw, asked again in the hour; no answer keeps the
+            // one last seen and asks again within minutes.
+            if let Net::Ok(ip) = self.pool.public_address() {
+                h.public_at = now + PUBLIC_S;
+                h.public_retry = ADDRESSES_S;
+                if addresses::seen(&self.paths.data) != Some(ip) {
+                    let at = crate::capacity::utc(u64::try_from(now).unwrap_or(0));
+                    if let Err(e) = addresses::keep_seen(&self.paths.data, ip, &at) {
+                        self.journal.write(
+                            now,
+                            "dispatcher-env",
+                            serde_json::json!({"detail": format!("the public address {ip} was not kept: {e}")}),
+                        );
+                    }
+                }
+            } else {
+                h.public_at = now + h.public_retry;
+                h.public_retry = (h.public_retry * 2).min(PUBLIC_RETRY_S);
+            }
+        }
+        // agent.toml as it is now, as `omarchy-agent token` and `dispatcher-env --write`
+        // read it, so the loop never puts back what they wrote; one that does not read now
+        // (an edit half done) leaves what the loop started with.
+        let envelope = match Envelope::of_data_dir(&self.paths.data) {
+            Some(Ok(e)) if dispatcher_env::dispatcher_path(&e.secrets_dir) => e,
+            _ => Envelope::of_config(&self.cfg),
+        };
+        let r = Rendered::now(&h.sources, &self.paths.data, Some(envelope));
+        let path = dispatcher_env::path_in(&self.cfg.set_dir);
+        match dispatcher_env::refresh(&path, &r) {
+            Ok(done) => {
+                h.failing = None;
+                if done == Refresh::Written {
+                    let addresses: Vec<String> =
+                        r.addresses.iter().map(ToString::to_string).collect();
+                    self.journal.write(
+                        now,
+                        "dispatcher-env",
+                        serde_json::json!({"addresses": addresses, "detail": "etc/dispatcher.env rendered again (the host's addresses or agent.toml changed), its token kept: the next round recreates the dispatcher"}),
+                    );
+                }
+            }
+            Err(e) if h.failing.as_ref() != Some(&e) => {
+                self.journal.write(
+                    now,
+                    "dispatcher-env",
+                    serde_json::json!({"detail": format!("etc/dispatcher.env was not rendered again: {e}; tried again every minute")}),
+                );
+                h.failing = Some(e);
+            }
+            Err(_) => {}
+        }
     }
 
     /// When idle: a changed input (the override, `etc/`, `run/capacity.json`) starts a

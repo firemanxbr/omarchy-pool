@@ -18,8 +18,11 @@
 //!
 //! Self-update (#316) is part of [`run`]; [`install`] (#317) puts a Linux host together:
 //! preflight, the envelope, enrollment, the agent keys, the unit and linger.
+//! [`dispatcher_env`] (#371) renders the dispatcher's `etc/dispatcher.env` beside its
+//! worker token: the host's own addresses, the secrets directory and the agent budget.
 
 pub mod capacity;
+pub mod dispatcher_env;
 pub mod enroll;
 pub mod host;
 pub mod install;

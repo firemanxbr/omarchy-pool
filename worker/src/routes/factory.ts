@@ -1,7 +1,7 @@
 import { json, readJson, type Env } from "../index";
 import { writeAttestation, recipesDir } from "./seal";
 import { isRepoArch } from "../r2";
-import { viaOf, type Contributor, type WorkerIdentity } from "./contributors";
+import { isMaintainer, viaOf, type Contributor, type WorkerIdentity } from "./contributors";
 import { issueJobToken, scopesFor, type JobClaims } from "../jobtoken";
 import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
@@ -13,7 +13,9 @@ import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
-import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, COMMUNITY_MAX_SIZE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
+import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
+import { largestSize, ownerCap, ownersLeased, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Rules } from "../selection";
+import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
   capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
@@ -78,6 +80,8 @@ interface TaskRow {
   /** #334: a host registration's lease — its generation (NULL for a legacy one's), the units it takes, the claim that took it, and the `lost` reports that gave the attempt back. */
   lease_gen: string | null;
   units: number | null;
+  /** #337: a build's size at lease. */
+  size: number | null;
   claim_id: string | null;
   host_losses: number;
 }
@@ -300,8 +304,21 @@ function workerLog(v: unknown): string {
  * events, not the row.
  */
 export const TOUCH_MINUTES = 3;
+/**
+ * A host registration's row is written at least this often (#337): its
+ * last claim is what selection counts it alive by — claimed in the last 2
+ * minutes (selection.ts ALIVE_MS) — as native capacity an emulated lane
+ * waits for, the largest host a size is clamped to, the fleet's builds the
+ * per-owner cap divides, and a reservation's holder. A host claims every
+ * 30 s, so a row a minute old at most stays alive; there are a handful of
+ * hosts, and a legacy registration keeps TOUCH_MINUTES (selection counts it
+ * alive that long and a minute more, LEGACY_ALIVE_MS).
+ */
+export const HOST_TOUCH_MINUTES = 1;
+/** How long a legacy registration counts as alive for selection: its row's pace and a claim's slack. */
+export const LEGACY_ALIVE_MS = (TOUCH_MINUTES + 1) * 60000;
 
-export async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string; agentVia?: string | null; at?: string; spell?: { from: string | null; to: string | null } | null }, currentTask: number | null, step?: Pick<InstanceStep, "set" | "guard"> | null): Promise<D1Meta> {
+export async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string; agentVia?: string | null; at?: string; spell?: { from: string | null; to: string | null } | null; touchMinutes?: number }, currentTask: number | null, step?: Pick<InstanceStep, "set" | "guard"> | null): Promise<D1Meta> {
   // The agent is what the worker says it runs ("<provider>/<model>"): a
   // worker that reports none ("" or null) clears it, one that says nothing
   // (an older client) keeps what it last reported. The probe's answer
@@ -349,7 +366,7 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
        OR COALESCE(excluded.labels, labels) IS NOT labels
        OR excluded.arch IS NOT arch
        OR COALESCE(excluded.hostname, hostname) IS NOT hostname
-       OR last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', excluded.last_seen, '-${TOUCH_MINUTES} minutes')`,
+       OR last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', excluded.last_seen, '-${w.touchMinutes ?? TOUCH_MINUTES} minutes')`,
   )
     .bind(
       w.worker, w.arch, w.hostname ?? null, w.labels ? JSON.stringify(w.labels) : null, w.version ?? null, w.at ?? now(), currentTask, agent ?? null,
@@ -394,8 +411,23 @@ export function workerReady(w: { last_seen: string; kinds: string | null; agent:
 }
 
 const ALL_KINDS = ["build", "sync", "promote", "rollback", "render", "health", "security", "metrics", "gc", "enqueue", "audit", "verify", "relayout", "publish", "trial"];
-/** Jobs any architecture can run: they read the index or the staging area, not packages of one arch. */
-const ANY_ARCH_KINDS = "'metrics', 'gc', 'security', 'promote', 'audit', 'verify', 'relayout'";
+/**
+ * Jobs any architecture can run: they read the index or the staging area, not packages of one arch. A legacy registration's
+ * rule; a host's is wider (design v2 §7.4, §8.6): every kind but builds, trials and jobs with helper containers (selection.ts).
+ */
+export const LEGACY_ANY_ARCH: readonly string[] = ["metrics", "gc", "security", "promote", "audit", "verify", "relayout"];
+const ANY_ARCH_KINDS = LEGACY_ANY_ARCH.map((k) => `'${k}'`).join(", ");
+/** What a host runs on no lane of its own: every kind but those selection schedules by lane or by a helper's arch. */
+const HOST_ANY_ARCH_KINDS = ALL_KINDS.filter((k) => !LANE_KINDS.includes(k) && !HELPER_KINDS.includes(k)).map((k) => `'${k}'`).join(", ");
+
+/** The signed constants selection runs with (factory/bundle/manifest.toml, hosts.ts), and the per-owner cap's divisor (the `owner-cap-divisor` setting). */
+export function selectionRules(ownerDivisor: number = OWNER_DIVISOR): Rules {
+  return {
+    build_per_size: TASK_UNITS.build_per_size, trial: TASK_UNITS.trial, audit: TASK_UNITS.audit, job: TASK_UNITS.job, job_reserved: TASK_UNITS.job_reserved,
+    max_size: MAX_SIZE, community_max_size: COMMUNITY_MAX_SIZE, gb_per_size: BUILD_GB_PER_SIZE, floor_gb: DISK_FLOOR_GB, emulated_share: EMULATED_SHARE,
+    owner_divisor: ownerDivisor, legacy_any_arch: LEGACY_ANY_ARCH,
+  };
+}
 /** Jobs that move a ring — one at a time per ring (the claim's lock). */
 const RING_MOVERS = "'promote', 'rollback', 'render', 'security'";
 
@@ -529,10 +561,8 @@ async function giveUp(env: Env, w: OrdersRow, spell: string | null, next: AutoSt
 
 // ---------- host registrations (#334) ----------
 
-/** The kinds P1 enables on a host registration (design v2 §8.2, §22): builds of every trust, trials and audits; pool jobs come in P2. */
+/** The kinds a host registration takes (design v2 §8.2, §22): builds of every trust, trials and audits; pool jobs join with #340. */
 export const HOST_KINDS = ["build", "trial", "audit"];
-/** In P1 a host holds at most one of each slot: a build (or a trial, the other build-sized task) and an audit. */
-const slotOf = (t: string) => `(CASE WHEN ${t}kind IN ('build', 'trial') THEN 'build' ELSE ${t}kind END)`;
 /** An unfenced lease that two consecutive claims of its host do not list goes back to the queue once it is this old (§8.1). */
 export const HOST_LEASE_GRACE_MIN = 2;
 /** `lost` gives the attempt back at most this many times per task (D54). */
@@ -548,15 +578,20 @@ export function leaseGen(): string {
   return `g_${[...b].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
 }
 
-/** A build's size at lease: the package's, at least 1, clamped to the signed maximum (a contributor's lower). */
-const sizeSql = (t: string) => `MIN(MAX(COALESCE((SELECT f.size FROM factory_packages f WHERE f.name = ${t}.name), 1), 1), CASE WHEN ${t}.trust = 'community' THEN ${COMMUNITY_MAX_SIZE} ELSE ${MAX_SIZE} END)`;
-/** The units a task takes, by the signed constants (D30). */
-const unitsSql = (t: string) => `(CASE ${t}.kind WHEN 'build' THEN ${TASK_UNITS.build_per_size} * ${sizeSql(t)} WHEN 'trial' THEN ${TASK_UNITS.trial} WHEN 'audit' THEN ${TASK_UNITS.audit} ELSE ${TASK_UNITS.job} END)`;
-
 /** What a host registration's claim adds (design v2 §8.1), read whole: nothing of it is guessed. */
-export interface HostClaim { claimId: string; want: 0 | 1; leases: { task: number; gen: string }[]; capacity: Capacity | null }
+export interface HostClaim {
+  claimId: string;
+  want: 0 | 1;
+  leases: { task: number; gen: string }[];
+  capacity: Capacity | null;
+  /**
+   * The units this claim offers (#337, design v2 §7.6): its free units, or fewer when MemAvailable holds fewer — the pool hands nothing
+   * above it this round, and counts the host by its capacity still. Null from a dispatcher that does not say it.
+   */
+  offer: number | null;
+}
 
-export function hostClaim(b: { claim_id?: unknown; want?: unknown; leases?: unknown; capacity?: unknown }): HostClaim | string {
+export function hostClaim(b: { claim_id?: unknown; want?: unknown; leases?: unknown; capacity?: unknown; offer?: unknown }): HostClaim | string {
   if (typeof b.claim_id !== "string" || !CLAIM_ID.test(b.claim_id)) return "claim_id: c_ and 8 to 64 letters, digits, '_' or '-', new per attempt (a retry after a lost answer sends the same one)";
   if (b.want !== 0 && b.want !== 1) return "want: 1 to take a task, 0 to reconcile and take orders only";
   if (!Array.isArray(b.leases) || b.leases.length > MAX_LEASES) return `leases: every lease the dispatcher holds, [{task, gen}], at most ${MAX_LEASES}`;
@@ -572,7 +607,8 @@ export function hostClaim(b: { claim_id?: unknown; want?: unknown; leases?: unkn
     if (typeof c === "string") return c;
     capacity = c;
   }
-  return { claimId: b.claim_id, want: b.want, leases, capacity };
+  if (b.offer !== undefined && !(Number.isInteger(b.offer) && (b.offer as number) >= 0 && (b.offer as number) <= 4096)) return "offer: the units this claim offers, a whole number";
+  return { claimId: b.claim_id, want: b.want, leases, capacity, offer: b.offer === undefined ? null : (b.offer as number) };
 }
 
 /** The probe sidecar's word as a host claims it, `agent: {provider, model, probe, error?, checked_at?}`, in the fields every claim reads. */
@@ -680,6 +716,427 @@ async function taskAnswer(env: Env, task: TaskRow, workerId: string): Promise<Re
  */
 export const REPLAY_SQL = `UPDATE build_tasks SET lease_expires_at = ? WHERE status = 'leased' AND lease_owner = ? AND claim_id = ? AND stop_order IS NULL RETURNING *`;
 
+// ---------- selection (#337, design v2 §8.3) ----------
+
+/** The head of each lane a claim reads, and the contributors whose first build it reads beside it: bounded, whatever the backlog. */
+export const HEAD_LIMIT = 50;
+export const OWNERS_LIMIT = 50;
+/** The oldest builds a host's claim weighs for the reservation: the window of the queue it reads them from, and how many it weighs. */
+export const RESERVE_WINDOW = 200;
+export const RESERVE_CANDIDATES = 10;
+/** A lease that another claim took first (its UPDATE changed nothing) gives way to the next choice, this many times. */
+const LEASE_TRIES = 3;
+
+/** One job at a time on a ring (`t` the candidate's alias): a promotion into it, a rollback, a render or the fast-track (any ring) is not handed out while another of them holds a lease on the same ring. */
+const ringLock = (t: string) => ` AND NOT (${t}.kind IN (${RING_MOVERS}) AND EXISTS (
+      SELECT 1 FROM build_tasks l WHERE l.status = 'leased' AND l.trust = 'project' AND l.kind IN (${RING_MOVERS}) AND l.id != ${t}.id
+        AND (l.kind = 'security' OR ${t}.kind = 'security'
+          OR COALESCE(json_extract(l.params, '$.to'), json_extract(l.params, '$.ring')) = COALESCE(json_extract(${t}.params, '$.to'), json_extract(${t}.params, '$.ring')))))`;
+
+/** A task's own size (a Retry at size, `params.size`) when it is a number (`t` the alias): candidateOf keeps it when it is whole and from 1. */
+const ownSize = (t: string) => `CASE WHEN json_type(${t}.params, '$.size') IN ('integer', 'real') THEN json_extract(${t}.params, '$.size') END`;
+/** A candidate as selection reads it (`t` the alias). */
+const candidateCols = (t: string) => `${t}.id, ${t}.name, ${t}.arch, ${t}.kind, ${t}.trust, ${t}.owner, ${t}.priority, ${t}.created_at, ${t}.pinned_to, ${t}.reserved_at, json_extract(${t}.params, '$.needs_native') AS needs_native, ${ownSize(t)} AS asked, ${agentScope(`${t}.`)} AS model`;
+interface CandidateRow { id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; priority: number; created_at: string; pinned_to: string | null; reserved_at: string | null; needs_native: number | null; asked: number | null; model: number }
+
+/**
+ * A build's size before any clamp, in SQL (`t` the alias; one binding: factory/sizing's sizes, `{name: [size, disk_gb]}`), as
+ * candidateOf reads it: its own when whole and from 1, else its package page's, else factory/sizing's, else 1.
+ */
+const askedSql = (t: string) => `COALESCE(CASE WHEN ${ownSize(t)} >= 1 AND ${ownSize(t)} = CAST(${ownSize(t)} AS INTEGER) THEN CAST(${ownSize(t)} AS INTEGER) END,
+    (SELECT p.size FROM factory_packages p WHERE p.name = ${t}.name), (SELECT json_extract(f.value, '$[0]') FROM json_each(?) f WHERE f.key = ${t}.name), 1)`;
+/** factory/sizing's sizes and budgets, as the statements bind them. */
+const fileSizes = (): string => JSON.stringify(Object.fromEntries([...shippedSizing()].map(([name, z]) => [name, [z.size, z.disk_gb]])));
+/** A number written into a statement: one computed here, never a caller's text. */
+const lit = (n: number): string => (Number.isFinite(n) ? String(n) : "1e18");
+
+/**
+ * Each contributor's first community build of one arch, by the owners of the queue's community builds walked one index entry at a time
+ * (a loose index scan: as many reads as owners, not as builds) — so round-robin by owner (D51) sees the contributor whose one package
+ * waits behind another's hundred and fifty. A contributor at their cap is skipped before their builds are read. `scope` is the claim's
+ * filters on alias c2, with its bindings after the owners' limit, the capped owners and the arch.
+ */
+export const OWNER_HEADS_SQL = (scope: string) => `WITH RECURSIVE o(owner) AS (
+    SELECT (SELECT MIN(owner) FROM build_tasks WHERE status = 'queued' AND trust = 'community')
+    UNION ALL
+    SELECT (SELECT MIN(t.owner) FROM build_tasks t WHERE t.status = 'queued' AND t.trust = 'community' AND t.owner > o.owner) FROM o WHERE o.owner IS NOT NULL
+    LIMIT ?
+  )
+  SELECT ${candidateCols("c")} FROM o CROSS JOIN build_tasks c ON c.id = (
+    SELECT c2.id FROM build_tasks c2 WHERE c2.status = 'queued' AND c2.trust = 'community' AND c2.owner = o.owner AND c2.arch = ? AND c2.kind = 'build' AND ${scope} ORDER BY c2.priority, c2.id LIMIT 1)
+  WHERE o.owner NOT IN (SELECT value FROM json_each(?))`;
+
+/** The head of one lane's arch for a host (`filters` on alias c; the arch binds first): a build, a trial or a job with helpers of that arch, by the queue index. */
+export const LANE_HEAD_SQL = (filters: string) => `SELECT ${candidateCols("c")} FROM build_tasks c WHERE c.status = 'queued' AND c.arch = ? AND c.kind NOT IN (${HOST_ANY_ARCH_KINDS}) AND ${filters} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`;
+/** The head of the arch-neutral kinds for a host (`filters` on alias c), whatever their arch. */
+export const NEUTRAL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols("c")} FROM build_tasks c WHERE c.status = 'queued' AND c.kind IN (${HOST_ANY_ARCH_KINDS}) AND ${filters} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`;
+
+/** The registrations alive (§8.3: claimed in the last 2 minutes; a legacy one, LEGACY_ALIVE_MS) with their host's capacity, as the fleet. */
+export const FLEET_SQL = `SELECT w.id, w.kind, w.arch, w.labels, w.kinds, w.agent_status, w.drained_at, w.trust, w.owner, w.mode, w.version, w.last_seen, w.current_task,
+    h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since
+  FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL`;
+interface FleetRow {
+  id: string; kind: string | null; arch: string; labels: string | null; kinds: string | null; agent_status: string | null; drained_at: string | null; trust: string; owner: string | null; mode: string | null; version: string | null; last_seen: string; current_task: number | null;
+  host_id: string | null; host_status: string | null; owner_removed_at: string | null; units: number | null; lanes: string | null; agent_slots: number | null; disk_free: string | null; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null;
+}
+/** Every lease the pool holds, by the lease index: what each registration holds, each owner's builds, the units and slots in use. */
+export const LEASES_HELD_SQL = `SELECT id, lease_owner, kind, arch, lane, units, size, disk_gb, trust, owner, ${AGENT_SCOPE} AS model FROM build_tasks WHERE status = 'leased'`;
+interface LeaseRow { id: number; lease_owner: string; kind: string; arch: string; lane: string | null; units: number | null; size: number | null; disk_gb: number | null; trust: string; owner: string | null; model: number }
+/**
+ * The oldest queued builds a host may reserve for, by the kind index (`filters` on alias w): within the window of the oldest builds some
+ * host alive could run — of an arch a host runs, a `needs_native` one only where a host runs its arch natively, not a contributor's at
+ * their cap, not pinned to a registration that is not alive, not within 30 minutes of its two hours of reservation spent (selection.ts
+ * `cooling`) — those that waited 30 minutes and ask a size above 1. Bindings: the filters', then the time 30 minutes ago, then
+ * factory/sizing's sizes.
+ */
+export const OLDEST_BUILDS_SQL = (filters: string) => `SELECT ${candidateCols("c")} FROM (
+    SELECT * FROM build_tasks w WHERE w.kind = 'build' AND w.status = 'queued'${filters} ORDER BY w.id LIMIT ${RESERVE_WINDOW}) c
+  WHERE c.created_at <= ? AND ${askedSql("c")} >= 2 ORDER BY c.id LIMIT ${RESERVE_CANDIDATES}`;
+/** Whether anything of the claimer's kinds is queued at all, by the kind index: one probe per kind. */
+export const ANY_QUEUED_SQL = "SELECT id FROM build_tasks WHERE kind IN (SELECT value FROM json_each(?)) AND status = 'queued' LIMIT 1";
+/** The tasks hosts reserve for that still wait, by their primary keys. */
+export const MARKED_WAITING_SQL = "SELECT id FROM build_tasks WHERE id IN (SELECT value FROM json_each(?)) AND +status = 'queued'";
+/** The sizes and budgets set on the candidates' packages' pages. */
+export const PACKAGE_SIZES_SQL = "SELECT name, size, disk_gb FROM factory_packages WHERE name IN (SELECT value FROM json_each(?)) AND (size IS NOT NULL OR disk_gb IS NOT NULL)";
+/** The last native build of each (package, arch), by the name index: T for an emulated candidate (D50). */
+export const NATIVE_MS_SQL = `SELECT j.value AS k, (SELECT d.duration_ms FROM build_tasks d WHERE d.name = json_extract(j.value, '$[0]') AND d.arch = json_extract(j.value, '$[1]')
+    AND d.kind = 'build' AND d.lane = 'native' AND d.status IN ('done', 'staged') AND d.duration_ms IS NOT NULL ORDER BY d.id DESC LIMIT 1) AS ms FROM json_each(?) j`;
+/** The setting that divides the fleet's builds into a contributor's cap (D51): 4 when absent, 0 lifts the cap. */
+export const OWNER_CAP_KEY = "owner-cap-divisor";
+
+/** A JSON column as what it should hold, or `or` when empty or not JSON. */
+const jsonOr = <T>(v: string | null, or: T): T => {
+  try {
+    return v ? (JSON.parse(v) as T) : or;
+  } catch {
+    return or;
+  }
+};
+
+/** A legacy registration's one lane, from its labels: its arch, emulated when they say so. */
+function legacyLanes(arch: string, labels: string | null): Lane[] {
+  return [{ arch, mode: jsonOr<{ emulated?: unknown }>(labels, {}).emulated ? "emulated" : "native" }];
+}
+
+/** Below the signed minimum, as the agent's last capacity report left it on the host's row (routes/hosts.ts; D44). */
+const reportedBelow = (capacity: string | null): boolean => !!jsonOr<{ below_minimum?: unknown } | null>(capacity, null)?.below_minimum;
+
+/** A registration of the fleet, from its row (another than the claimer: what it last said). */
+function memberOf(r: FleetRow, pool: RunningVersion): Member {
+  const host = r.kind === "host" && r.host_id !== null;
+  const kinds = jsonOr<string[] | null>(r.kinds, null) ?? (host ? HOST_KINDS : r.trust === "project" ? ALL_KINDS : ["build"]);
+  const lanes = host ? jsonOr<Lane[] | null>(r.lanes, null) ?? [{ arch: r.arch, mode: "native" }] : legacyLanes(r.arch, r.labels);
+  return {
+    id: r.id, legacy: !host, lanes, units: Math.min(r.units ?? 0, r.pool_cap_units ?? Number.MAX_SAFE_INTEGER), agent_slots: r.agent_slots ?? 0,
+    disk: jsonOr<{ work: number; engine: number } | null>(r.disk_free, null), kinds, probe_ok: r.agent_status === "ok", drained: r.drained_at !== null,
+    below_minimum: reportedBelow(r.capacity), may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool).required,
+    seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
+    scope: host ? { trust: "host", owner: null, shared: false } : r.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: r.owner, shared: r.mode === "shared" },
+    busy: !host && r.current_task !== null,
+  };
+}
+
+/** A candidate for selection: a build's size is its own (a Retry at size), else its package page's, else factory/sizing's; its budget the page's, else the file's. */
+function candidateOf(r: CandidateRow, sizes: Map<string, Sizing>, nativeMs: Map<string, number>): Candidate {
+  const page = sizes.get(r.name), file = shippedSizing().get(r.name), build = r.kind === "build";
+  return {
+    id: r.id, name: r.name, kind: r.kind, arch: r.arch, trust: r.trust, owner: r.owner, priority: r.priority, queued_at: Date.parse(r.created_at), pinned_to: r.pinned_to,
+    needs_native: r.needs_native === 1, model: r.model === 1,
+    size: build ? (Number.isInteger(r.asked) && (r.asked as number) >= 1 ? (r.asked as number) : page?.size ?? file?.size ?? null) : null,
+    disk_gb: build ? page?.disk_gb ?? file?.disk_gb ?? null : null, native_ms: nativeMs.get(`${r.name}\0${r.arch}`) ?? null,
+    reserved_at: r.reserved_at ? Date.parse(r.reserved_at) : null,
+  };
+}
+
+/** What the claim knows of the claimer for selection: a host's capacity and lanes, or a legacy registration's one lane and scope. */
+interface Claimer {
+  workerId: string;
+  arch: string;
+  version: string | null;
+  kinds: string[];
+  probeOk: boolean;
+  hostId: string | null;
+  hc: HostClaim | null;
+  legacy: { emulated: boolean; trust: "project" | "community"; owner: string | null; shared: boolean; firstPick: boolean } | null;
+}
+
+/**
+ * The claim's selection and lease (#337, design v2 §8.3). First what the
+ * pool knows — the fleet alive, every lease it holds, the owner-cap setting,
+ * the claimer's host row — so the claimer's room is known: its free units
+ * (and the units its dispatcher's memory offers), a free agent slot, its
+ * disk, the largest size alive, the contributors at their cap. Then the
+ * candidates by bounded reads, each filtered in SQL by what is the claim's
+ * own (kinds, pin, probe, the ring lock, a legacy registration's scope
+ * until #343) and by that room, so a head of tasks the claimer cannot take
+ * never hides one it can: the head of each lane's arch — a long backlog of
+ * one arch never hides another's, so the guaranteed emulated share and
+ * native work arriving are always seen — the head of the arch-neutral
+ * kinds, each contributor's first community build of each arch, the first
+ * native task whatever its size (which holds the emulated lanes to their
+ * share), and the task a host reserves for; for a host's claim also the
+ * oldest builds the reservation weighs. Then the sizes set for their
+ * packages and their native history; selection (selection.ts) orders them,
+ * and the first choice is leased with the single conditional UPDATE — the
+ * next when another claim took it first. A build whose size the fleet
+ * alive clamped says so in the journal (a Status line).
+ */
+async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
+  const host = k.legacy === null;
+  const lanes: Lane[] = host ? k.hc!.capacity!.lanes : [{ arch: k.arch, mode: k.legacy!.emulated ? "emulated" : "native" }];
+  const at = now();
+  const nowMs = Date.parse(at);
+  // Nothing queued of the kinds it takes: nothing more is read — an idle fleet's claims, every 30 s from every host, cost one probe of
+  // the kind index, never the fleet, the leases or the setting.
+  if (!(await env.DB.prepare(ANY_QUEUED_SQL).bind(JSON.stringify(k.kinds)).first())) return null;
+  // The fleet, every lease, the setting and the claimer's host row.
+  const [fleetRows, leaseRows, setting, self] = await env.DB.batch<unknown>([
+    env.DB.prepare(FLEET_SQL).bind(new Date(nowMs - Math.max(ALIVE_MS, LEGACY_ALIVE_MS)).toISOString()),
+    env.DB.prepare(LEASES_HELD_SQL),
+    env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(OWNER_CAP_KEY),
+    env.DB.prepare("SELECT name, capacity, pool_cap_units, reserving_task, reserving_since FROM hosts WHERE id = ?").bind(k.hostId ?? ""),
+  ]);
+  const divisor = Number((setting.results[0] as { value?: string } | undefined)?.value);
+  const rules = selectionRules(Number.isInteger(divisor) && divisor >= 0 ? divisor : OWNER_DIVISOR);
+  const pool = running(env);
+  const members = (fleetRows.results as FleetRow[]).filter((r) => r.id !== k.workerId).map((r) => memberOf(r, pool));
+  const hostRow = self.results[0] as { name: string; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null } | undefined;
+  const cap = host ? k.hc!.capacity! : null;
+  // The claimer as it claims now: a host's capacity is this claim's — units within min(declared, recomputed, the pool's cap), and what its
+  // memory offers this round beside them — but below the minimum as its agent last reported it (D44), as every other host is judged:
+  // the claim's own work-root value is the one measured now, and its builds may fill it while they run.
+  const me: Member = {
+    id: k.workerId, legacy: !host, lanes, units: cap ? Math.min(unitsOf(cap), hostRow?.pool_cap_units ?? Number.MAX_SAFE_INTEGER) : 0, agent_slots: cap?.agent_slots ?? 0,
+    disk: cap?.disk_free_gb ?? null, kinds: k.kinds, probe_ok: k.probeOk, drained: false, below_minimum: host ? reportedBelow(hostRow?.capacity ?? null) : false, may_claim: true, behind: false, seen_at: nowMs,
+    reserving: hostRow?.reserving_task != null && hostRow.reserving_since ? { task: hostRow.reserving_task, since: Date.parse(hostRow.reserving_since) } : null,
+    scope: host ? { trust: "host", owner: null, shared: false } : k.legacy!.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: k.legacy!.owner, shared: k.legacy!.shared },
+    offer: host && k.hc!.offer !== null ? k.hc!.offer : undefined,
+  };
+  // A host below the signed minimum keeps its bundle running and claims nothing (D44).
+  if (me.below_minimum) return null;
+  members.push(me);
+  const leases: Held[] = (leaseRows.results as LeaseRow[]).map((l) => ({
+    task: l.id, by: l.lease_owner, kind: l.kind, arch: l.arch, lane: l.lane === "native" || l.lane === "emulated" ? l.lane : null,
+    units: l.units ?? unitsOfKind(l.kind, l.size, rules), model: l.model === 1, trust: l.trust, owner: l.owner, disk_gb: l.disk_gb ?? 0,
+  }));
+  const fleet: Fleet = { members, leases };
+
+  // The claimer's room now, as selection.ts counts it (noRoom), for the statements: a legacy registration is one build.
+  const held = host ? leases.filter((l) => l.by === me.id) : [];
+  const used = held.reduce((n, l) => n + l.units, 0);
+  const offer = me.offer ?? Number.POSITIVE_INFINITY;
+  const roomTask = host ? Math.min(me.units - rules.job_reserved - used, offer) : rules.build_per_size;
+  const roomJob = host ? Math.min(me.units - used, offer) : rules.build_per_size;
+  const slotFree = !host || held.filter((l) => l.model).length < me.agent_slots;
+  const diskFree = host && me.disk ? Math.min(me.disk.work, me.disk.engine) - held.reduce((n, l) => n + (l.kind === "build" ? l.disk_gb : 0), 0) - rules.floor_gb : null;
+  const largest = largestSize(fleet, nowMs, rules);
+  const ownerMax = ownerCap(fleet, nowMs, rules);
+  const capped = JSON.stringify([...ownersLeased(fleet)].filter(([, n]) => n >= ownerMax).map(([o]) => o));
+  const files = fileSizes();
+
+  const scopeOf = (t: string): { sql: string; binds: unknown[] } => {
+    // A build asked for one worker (pinned_to) is claimed by that worker only; the rest is anyone's that qualifies.
+    let sql = `${t}.kind IN (SELECT value FROM json_each(?)) AND (${t}.pinned_to IS NULL OR ${t}.pinned_to = ?)`;
+    const binds: unknown[] = [JSON.stringify(k.kinds), k.workerId];
+    // Agent work goes only to a worker whose agent answered the probe: a draft or an audit on a worker with no agent, or a failing
+    // one, is a failed task an hour later.
+    if (!k.probeOk) sql += ` AND NOT ${agentScope(`${t}.`)}`;
+    if (k.legacy?.emulated) {
+      // A build a toolchain could not start emulated (the fail report's needs_native) waits for a native worker of its
+      // architecture, whoever's and whatever the trust: handed to an emulated one again it fails the same way, and its attempt is
+      // never spent (handleFail). Selection keeps it off every emulated lane; this keeps an emulated legacy registration's bounded
+      // read free of them.
+      sql += ` AND json_extract(${t}.params, '$.needs_native') IS NOT 1`;
+    }
+    sql += ringLock(t);
+    const lg = k.legacy;
+    if (lg?.trust === "project") {
+      // Project trust takes any kind it declares, but never a contributor's build: project workers do the work a maintainer would
+      // — pool jobs and the rebuild of an approved package — and nothing that has no evidence and no review yet.
+      sql += ` AND (${t}.kind != 'build' OR ${t}.trust = 'project')`;
+    } else if (lg) {
+      // Community trust takes community builds only, and by default only its owner's: a worker started with --shared donates its
+      // compute to anyone's once shared_after has passed (at once when it is unset). Community results never reach the pool.
+      sql += ` AND ${t}.trust = 'community'`;
+      if (lg.shared) {
+        sql += ` AND (${t}.owner = ? OR ${t}.shared_after IS NULL OR ${t}.shared_after <= ?)`;
+        binds.push(lg.owner ?? "-", at);
+        if (lg.firstPick) {
+          sql += lg.emulated ? ` AND (${t}.pinned_to = ? OR ${t}.created_at <= ?)` : ` AND (${t}.owner = ? OR ${t}.pinned_to = ? OR ${t}.created_at <= ?)`;
+          if (!lg.emulated) binds.push(lg.owner ?? "-");
+          binds.push(k.workerId, new Date(nowMs - FIRST_PICK_MINUTES * 60000).toISOString());
+        }
+      } else {
+        // A dedicated worker takes its owner's builds — and one somebody asked for it by name while it was shared.
+        sql += ` AND (${t}.owner = ? OR ${t}.pinned_to = ?)`;
+        binds.push(lg.owner ?? "-", k.workerId);
+      }
+    }
+    return { sql, binds };
+  };
+  // The claimer's room in the statements themselves: selection.ts's cheap filters again — units (a build's by its size, clamped as
+  // sizeOf clamps it; the reserved job unit for pool jobs only; the memory's offer), a free agent slot, the disk budget, the per-owner
+  // cap. selection.ts still decides; this only keeps a head the claimer cannot take — audits while its agent slots are full, size-4
+  // builds on two free units, a capped contributor's flood — from filling the bound and hiding one it can.
+  const fitsOf = (t: string): { sql: string; binds: unknown[] } => {
+    const size = `MIN(${lit(largest)}, CASE WHEN ${t}.trust = 'community' THEN ${lit(rules.community_max_size)} ELSE ${lit(rules.max_size)} END, MAX(1, ${askedSql(t)}))`;
+    const units = `CASE ${t}.kind WHEN 'build' THEN ${lit(rules.build_per_size)} * ${size} WHEN 'trial' THEN ${lit(rules.trial)} WHEN 'audit' THEN ${lit(rules.audit)} ELSE ${lit(rules.job)} END`;
+    let sql = ` AND ${units} <= CASE WHEN ${t}.kind IN (${TASK_KINDS.map((x) => `'${x}'`).join(", ")}) THEN ${lit(roomTask)} ELSE ${lit(roomJob)} END`;
+    const binds: unknown[] = [files];
+    if (!slotFree) sql += ` AND NOT ${agentScope(`${t}.`)}`;
+    if (host) {
+      if (diskFree === null) sql += ` AND ${t}.kind != 'build'`;
+      else {
+        sql += ` AND (${t}.kind != 'build' OR COALESCE((SELECT p.disk_gb FROM factory_packages p WHERE p.name = ${t}.name), (SELECT json_extract(f.value, '$[1]') FROM json_each(?) f WHERE f.key = ${t}.name), ${lit(rules.gb_per_size)} * ${size}) <= ${lit(diskFree)})`;
+        binds.push(files, files);
+      }
+    }
+    sql += ` AND NOT (${t}.kind = 'build' AND ${t}.trust = 'community' AND ${t}.owner IN (SELECT value FROM json_each(?)))`;
+    binds.push(capped);
+    return { sql, binds };
+  };
+  const notNeedsNative = (t: string) => ` AND json_extract(${t}.params, '$.needs_native') IS NOT 1`;
+  const cols = candidateCols("c");
+  const scope = scopeOf("c"), fits = fitsOf("c");
+  const scope2 = scopeOf("c2"), fits2 = fitsOf("c2");
+  const archs = host ? [...new Set(lanes.map((l) => l.arch))] : [k.arch];
+  const native = lanes.find((l) => l.mode === "native")?.arch ?? k.arch;
+  const emulatedOnly = (a: string) => !lanes.some((l) => l.arch === a && l.mode === "native");
+  const reads: D1PreparedStatement[] = [];
+  for (const a of archs) {
+    if (host) {
+      // Each lane's own head (§7.4): a build or a trial of that arch (a job with helpers too); one an emulated lane could not start
+      // (needs_native) waits for a native host and is no candidate here.
+      reads.push(env.DB.prepare(LANE_HEAD_SQL(`${scope.sql}${fits.sql}${emulatedOnly(a) ? notNeedsNative("c") : ""}`)).bind(a, ...scope.binds, ...fits.binds));
+    } else {
+      // A legacy registration's one lane: its arch, or a kind any arch runs.
+      reads.push(env.DB.prepare(`SELECT ${cols} FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope.sql}${fits.sql} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`)
+        .bind(a, ...scope.binds, ...fits.binds));
+    }
+    if (k.kinds.includes("build") && k.legacy?.trust !== "project") {
+      reads.push(env.DB.prepare(OWNER_HEADS_SQL(`${scope2.sql}${fits2.sql}${host && emulatedOnly(a) ? notNeedsNative("c2") : ""}`)).bind(OWNERS_LIMIT, a, ...scope2.binds, ...fits2.binds, capped));
+    }
+  }
+  if (host) {
+    // The arch-neutral kinds (an audit; pool jobs from P2's dispatcher on), whatever their arch.
+    reads.push(env.DB.prepare(NEUTRAL_HEAD_SQL(`${scope.sql}${fits.sql}`)).bind(...scope.binds, ...fits.binds));
+    // The first native task for this host, whatever its size: while one waits, its emulated lanes keep to their share (the cap).
+    if (lanes.some((l) => l.mode === "emulated")) {
+      reads.push(env.DB.prepare(`SELECT ${cols} FROM build_tasks c WHERE c.status = 'queued' AND c.arch = ? AND c.kind IN (${LANE_KINDS.map((x) => `'${x}'`).join(", ")}) AND ${scope.sql}
+          AND NOT (c.kind = 'build' AND c.trust = 'community' AND c.owner IN (SELECT value FROM json_each(?))) ORDER BY c.priority, c.id LIMIT 1`).bind(native, ...scope.binds, capped));
+    }
+    // The task this host reserves for, wherever it stands in the queue: the one it may take while it reserves.
+    if (k.hostId) reads.push(env.DB.prepare(`SELECT ${cols} FROM build_tasks c WHERE c.id = (SELECT reserving_task FROM hosts WHERE id = ?) AND c.status = 'queued' AND ${scope.sql}`).bind(k.hostId, ...scope.binds));
+  }
+  // The oldest builds the reservation weighs (a host's claim decides it): those some host alive could run, larger than one build.
+  const claimers = members.filter((m) => !m.legacy && m.seen_at > nowMs - ALIVE_MS && m.may_claim && !m.below_minimum && !m.drained && !m.behind);
+  const weighs = host && largest >= 2 && claimers.length > 0;
+  if (weighs) {
+    const laneArchs = JSON.stringify([...new Set(claimers.flatMap((m) => m.lanes.map((l) => l.arch)))]);
+    const nativeArchs = JSON.stringify([...new Set(claimers.flatMap((m) => m.lanes.filter((l) => l.mode === "native").map((l) => l.arch)))]);
+    const filters = ` AND w.arch IN (SELECT value FROM json_each(?)) AND (json_extract(w.params, '$.needs_native') IS NOT 1 OR w.arch IN (SELECT value FROM json_each(?)))
+        AND NOT (w.trust = 'community' AND w.owner IN (SELECT value FROM json_each(?))) AND (w.pinned_to IS NULL OR w.pinned_to IN (SELECT value FROM json_each(?)))
+        AND (w.reserved_at IS NULL OR w.reserved_at > ? OR w.reserved_at <= ?)`;
+    reads.push(env.DB.prepare(OLDEST_BUILDS_SQL(filters)).bind(
+      laneArchs, nativeArchs, capped, JSON.stringify(claimers.map((m) => m.id)), new Date(nowMs - RESERVE_FOR_MS).toISOString(),
+      new Date(nowMs - RESERVE_FOR_MS - RESERVE_AFTER_MS).toISOString(), new Date(nowMs - RESERVE_AFTER_MS).toISOString(), files,
+    ));
+  }
+  const got = await env.DB.batch<CandidateRow>(reads);
+  const oldestRows = weighs ? got.pop()!.results : [];
+  const rows = new Map<number, CandidateRow>();
+  for (const r of got.flatMap((g) => g.results)) if (r.id !== null) rows.set(r.id, r);
+  if (!rows.size && !oldestRows.length) return null;
+  // What the candidates' packages say of their size, and their native history.
+  const cands = [...rows.values(), ...oldestRows.filter((r) => !rows.has(r.id))];
+  const emulatedArches = new Set(lanes.filter((l) => l.mode === "emulated").map((l) => l.arch));
+  const [sizeRows, msRows] = await env.DB.batch<unknown>([
+    env.DB.prepare(PACKAGE_SIZES_SQL).bind(JSON.stringify([...new Set(cands.filter((c) => c.kind === "build").map((c) => c.name))])),
+    env.DB.prepare(NATIVE_MS_SQL).bind(JSON.stringify(cands.filter((c) => LANE_KINDS.includes(c.kind) && emulatedArches.has(c.arch)).map((c) => [c.name, c.arch]))),
+  ]);
+  const sizes = new Map((sizeRows.results as { name: string; size: number | null; disk_gb: number | null }[]).map((r) => [r.name, { size: r.size, disk_gb: r.disk_gb }]));
+  const nativeMs = new Map<string, number>();
+  for (const r of msRows.results as { k: string; ms: number | null }[]) {
+    const [name, arch] = jsonOr<[string, string]>(r.k, ["", ""]);
+    if (r.ms !== null) nativeMs.set(`${name}\0${arch}`, r.ms);
+  }
+  const all = [...rows.values()].map((r) => candidateOf(r, sizes, nativeMs));
+  const oldest = oldestRows.map((r) => candidateOf(r, sizes, nativeMs));
+  // The reservation for large tasks, decided at a host's claim; the marks it moves are written compare-and-set.
+  if (host) {
+    // A mark holds while its task still waits in the queue: one cancelled or leased elsewhere frees its host at once.
+    const marked = [...new Set(members.flatMap((m) => (m.reserving ? [m.reserving.task] : [])))];
+    const waiting = new Set(marked.length ? (await env.DB.prepare(MARKED_WAITING_SQL).bind(JSON.stringify(marked)).all<{ id: number }>()).results.map((r) => r.id) : []);
+    const marks = reserve(fleet, oldest, (t) => waiting.has(t), nowMs, rules);
+    const hostOf = new Map((fleetRows.results as FleetRow[]).map((r) => [r.id, r.host_id]));
+    hostOf.set(k.workerId, k.hostId);
+    const writes: D1PreparedStatement[] = [];
+    for (const id of marks.clear) {
+      const m = members.find((x) => x.id === id)!;
+      writes.push(env.DB.prepare("UPDATE hosts SET reserving_task = NULL, reserving_since = NULL WHERE id = ? AND reserving_task IS ?").bind(hostOf.get(id) ?? "", m.reserving?.task ?? null));
+      m.reserving = null;
+    }
+    if (marks.set) {
+      const m = members.find((x) => x.id === marks.set!.host)!;
+      const t = oldest.find((c) => c.id === marks.set!.task) ?? null;
+      const size = t ? sizeOfTask(t, fleet, nowMs, rules) : null;
+      writes.push(
+        env.DB.prepare("UPDATE hosts SET reserving_task = ?, reserving_since = ? WHERE id = ? AND reserving_task IS NULL").bind(marks.set.task, at, hostOf.get(m.id) ?? ""),
+        env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'ok', ?, ? WHERE changes() > 0")
+          .bind(`${m.id} reserves for ${t?.name ?? "task"} (task ${marks.set.task}${size ? `, size ${size}` : ""}): it takes nothing else but pool jobs until its units fit it, two hours at most`, JSON.stringify({ worker: m.id, host: hostOf.get(m.id), task: marks.set.task, size })),
+        // The task's window starts with the mark: once its two hours are spent it is not marked again for 30 minutes (selection.ts cooling).
+        env.DB.prepare("UPDATE build_tasks SET reserved_at = ? WHERE id = ? AND status = 'queued' AND changes() > 0").bind(at, marks.set.task),
+      );
+      m.reserving = { task: marks.set.task, since: nowMs };
+      // Marked at this very claim, after the reads: its task joins the candidates, so the mark holds while H's free units are below it
+      // (selection.ts holds only for a task the claim read — one it can take). It fits no host now, so selection does not choose it.
+      if (m === me && t && !all.some((c) => c.id === t.id)) all.push(t);
+    }
+    if (writes.length) await env.DB.batch(writes);
+  }
+  const choices = select(me, fleet, all, nowMs, rules);
+  const hostOk = k.hostId ? ` AND ${HOST_MAY_LEASE_SQL}` : "";
+  // A host's units, again in the statement itself: what it holds plus this task within its count (the reserved unit for pool jobs only).
+  const guard = host ? " AND (SELECT COALESCE(SUM(l.units), 0) FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ?) + ? <= ?" : "";
+  for (const c of choices.slice(0, LEASE_TRIES)) {
+    const limit = TASK_KINDS.includes(all.find((x) => x.id === c.id)!.kind) ? me.units - rules.job_reserved : me.units;
+    // One statement leases it: D1 serialises writes, so two claims never get the same task. A fence belongs to one lease (#277): a
+    // queued task never carries one — the requeue clears it — but one a Worker from before the fence requeued would stop the new
+    // lease on a worker nobody stopped, so the lease starts without it. A host's lease (#334) carries a new generation, its lane,
+    // size, units and disk budget, the release it was claimed on and the claim that took it; a legacy one no generation — the
+    // column is cleared, so a host's stale one never outlives its lease — and its one lane. A host's registration leases only
+    // while its host may claim, checked by this very statement (#322): a suspension that commits meanwhile leaves it nothing. A
+    // reservation's window ends with the lease: queued again, the task may be reserved for anew.
+    const task = await env.DB.prepare(
+      `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL, stop_order = NULL,
+         lease_gen = ?, lane = ?, size = ?, units = ?, disk_gb = ?, release = ?, claim_id = ?, lease_missed = 0, reserved_at = NULL
+       WHERE id = ? AND status = 'queued'${hostOk}${guard} RETURNING *`,
+    )
+      .bind(
+        k.workerId, plusMinutes(LEASE_MINUTES), at, host ? leaseGen() : null, c.lane, c.size, c.units, c.disk_gb, host ? k.version : null, host ? k.hc!.claimId : null, c.id,
+        ...(hostOk ? [k.hostId] : []), ...(guard ? [k.workerId, c.units, limit] : []),
+      )
+      .first<TaskRow>();
+    if (!task) continue;
+    const writes: D1PreparedStatement[] = [];
+    // A reservation ends with its task's lease.
+    if (members.some((m) => m.reserving?.task === task.id)) writes.push(env.DB.prepare("UPDATE hosts SET reserving_task = NULL, reserving_since = NULL WHERE reserving_task = ?").bind(task.id));
+    // Clamped to the largest host alive (D31): a Status line, so a task never waits for a host that left and a maintainer knows why it runs smaller.
+    if (c.asked !== null) {
+      writes.push(env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('build', NULL, 'factory', 'warn', ?, ?)")
+        .bind(`${task.name} for ${task.arch} (task ${task.id}) asked size ${c.asked}; the largest host alive runs size ${c.size}: it runs clamped on ${k.workerId}`, JSON.stringify({ task: task.id, name: task.name, arch: task.arch, asked: c.asked, size: c.size, worker: k.workerId, clamped: true })));
+    }
+    if (writes.length) await env.DB.batch(writes);
+    return task;
+  }
+  return null;
+}
+
+/** A lease's units when its row has none (a legacy one from before #337): by the signed constants. */
+const unitsOfKind = (kind: string, size: number | null, r: Rules) => (kind === "build" ? r.build_per_size * (size ?? 1) : kind === "trial" ? r.trial : kind === "audit" ? r.audit : r.job);
+/** The size a build runs at in this fleet. */
+const sizeOfTask = (t: Candidate, fleet: Fleet, now: number, r: Rules) => sizeOf(t, largestSize(fleet, now, r), r)?.size ?? null;
+
 export async function handleClaim(request: Request, env: Env, actor: Actor): Promise<Response> {
   const b = await readJson<{ arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown; orders?: unknown; instance?: unknown; started_at?: unknown; agent_via?: unknown; site?: unknown; restarts_left?: unknown; previous_exit?: unknown; rollout?: unknown }>(request);
   if (b instanceof Response) return b;
@@ -700,6 +1157,8 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // A worker is its registration: id, owner, trust and what it may build.
   const workerId = actor.w.id;
   if (actor.w.arch !== b.arch) return json({ error: `this worker is registered for ${actor.w.arch}` }, 400);
+  // A host's native lane is its registration's arch (§8.1): the other lanes say what else it runs.
+  if (hc?.capacity && !hc.capacity.lanes.some((l) => l.mode === "native" && l.arch === b.arch)) return json({ error: `capacity.lanes: the native lane is not ${b.arch}` }, 400);
   // A host's registration (#322, design v2 §6.2, §6.4): its host suspended or retired, or its owner no longer a maintainer — the owner's id
   // joined with the list at this very claim, between two syncs too — claims nothing, and is told why. Its running leases are not this
   // door's: a suspension fenced them; a removal lets them finish and upload. One read by the primary key, for host registrations only.
@@ -751,7 +1210,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // The spell's start, written only by the claim that begins or ends it.
   const spellFrom = row?.agent_error_since ?? null;
   const spellTo = row ? spellAfter(spellFrom, probe, at) : spellFrom;
-  const said = { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent, kinds, probe, usage, log, agentVia: facts?.agent_via ?? row?.agent_via ?? null, at, spell: spellTo !== spellFrom ? { from: spellFrom, to: spellTo } : null };
+  const said = { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent, kinds, probe, usage, log, agentVia: facts?.agent_via ?? row?.agent_via ?? null, at, spell: spellTo !== spellFrom ? { from: spellFrom, to: spellTo } : null, touchMinutes: host ? HOST_TOUCH_MINUTES : undefined };
   // A host's row holds no current_task: its leases are build_tasks.lease_owner's (§8.6).
   const touch = (task: number | null) => touchSaying(env, said, host ? null : task, step);
   const after = row && facts ? afterClaim(row, facts, step, probe, at) : null;
@@ -818,106 +1277,26 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     await touch(null);
     return new Response(null, { status: 204 });
   }
-  // A build asked for one worker (pinned_to) is claimed by that worker only; the rest is anyone's that qualifies.
-  let scope = `kind IN (SELECT value FROM json_each(?)) AND (pinned_to IS NULL OR pinned_to = ?)`;
-  const binds: unknown[] = [JSON.stringify(kinds), workerId];
-  // Agent work goes only to a worker whose agent answered the probe: a
-  // draft or an audit on a worker with no agent, or a failing one, is a
-  // failed task an hour later.
-  if (probe?.status !== "ok") scope += ` AND NOT ${AGENT_SCOPE}`;
   // What this worker is for the queue: emulated (x86_64 under qemu on an
   // aarch64 host) or native, and its size. (A fresh container's first claim
-  // carries no usage yet: what this worker last reported stands in.)
+  // carries no usage yet: what this worker last reported stands in.) A
+  // host's lanes are its capacity's.
   let mine = { emulated: !!(b.labels && typeof b.labels === "object" && (b.labels as Record<string, unknown>).emulated), cores: usage?.cores ?? 0, ram: usage?.ram_gb ?? 0 };
-  if (!usage) {
+  if (!usage && !host) {
     const last = await env.DB.prepare("SELECT labels, usage FROM build_workers WHERE id = ?").bind(workerId).first<{ labels: string | null; usage: string | null }>();
     try { const u = last?.usage ? (JSON.parse(last.usage) as { cores?: number; ram_gb?: number }) : {}; const l = last?.labels ? (JSON.parse(last.labels) as { emulated?: boolean }) : {}; mine = { emulated: mine.emulated || !!l.emulated, cores: u.cores ?? 0, ram: u.ram_gb ?? 0 }; } catch { /* as reported now */ }
   }
-  // A build a toolchain could not start emulated (the fail report's
-  // needs_native) waits for a native worker of its architecture, whoever's
-  // and whatever the trust: handed to an emulated one again it fails the
-  // same way, and its attempt is never spent (handleFail).
-  scope += ` AND (json_extract(c.params, '$.needs_native') IS NOT 1 OR ? = 0)`;
-  binds.push(mine.emulated ? 1 : 0);
-  if (host) {
-    // One scope for a host (§8.2): community builds (the result goes to the contributor's staging), the project's builds and its review
-    // rebuilds alike — the project-trust branch below does not apply. The ring lock stays, as below.
-    scope += ` AND NOT (c.kind IN (${RING_MOVERS}) AND EXISTS (
-      SELECT 1 FROM build_tasks l WHERE l.status = 'leased' AND l.trust = 'project' AND l.kind IN (${RING_MOVERS}) AND l.id != c.id
-        AND (l.kind = 'security' OR c.kind = 'security'
-          OR COALESCE(json_extract(l.params, '$.to'), json_extract(l.params, '$.ring')) = COALESCE(json_extract(c.params, '$.to'), json_extract(c.params, '$.ring')))))`;
-    // Capacity, from the pool's own leases, never from a free count the host reports (§8.1): what it holds plus this task fits
-    // min(declared units, units recomputed from the reported totals with the signed constants, the pool's cap), keeping the reserved
-    // job unit for pool jobs; model work fits its agent slots; and in P1 one build and one audit at most.
-    const capRow = actor.w.host_id ? await env.DB.prepare("SELECT pool_cap_units FROM hosts WHERE id = ?").bind(actor.w.host_id).first<{ pool_cap_units: number | null }>() : null;
-    const cap = hc!.capacity!;
-    const limit = Math.min(unitsOf(cap), capRow?.pool_cap_units ?? Number.MAX_SAFE_INTEGER);
-    scope += ` AND (SELECT COALESCE(SUM(l.units), 0) FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ?) + ${unitsSql("c")} <= ? - CASE WHEN c.kind IN ('build', 'trial', 'audit') THEN ${TASK_UNITS.job_reserved} ELSE 0 END`;
-    scope += ` AND NOT EXISTS (SELECT 1 FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ? AND ${slotOf("l.")} = ${slotOf("c.")})`;
-    scope += ` AND (NOT ${agentScope("c.")} OR (SELECT COUNT(*) FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ? AND ${agentScope("l.")}) < ?)`;
-    binds.push(workerId, limit, workerId, workerId, cap.agent_slots ?? 0);
-  } else if (trust === "project") {
-    scope += ` AND (kind != 'build' OR trust = 'project')`;
-    // One job at a time on a ring. The jobs that move a ring — a promotion
-    // into it, a rollback, a render, the security fast-track (any ring) —
-    // are not handed out while another of them holds a lease on the same
-    // ring: a promotion into rc and a fast-track into rc ran in the same
-    // minute, and the fast-track's late rollback undid the promotion
-    // (rc#34, 2026-09-17). Syncs (one per architecture, edge's releases
-    // carry each other's databases) and the read-only checks are not held.
-    scope += ` AND NOT (c.kind IN (${RING_MOVERS}) AND EXISTS (
-      SELECT 1 FROM build_tasks l WHERE l.status = 'leased' AND l.trust = 'project' AND l.kind IN (${RING_MOVERS}) AND l.id != c.id
-        AND (l.kind = 'security' OR c.kind = 'security'
-          OR COALESCE(json_extract(l.params, '$.to'), json_extract(l.params, '$.ring')) = COALESCE(json_extract(c.params, '$.to'), json_extract(c.params, '$.ring')))))`;
-  } else {
-    // The owner's worker takes the owner's tasks; a donated worker takes
-    // anyone's once shared_after has passed (at once when it is unset).
-    scope += ` AND trust = 'community'`;
-    if (shared) {
-      scope += ` AND (owner = ? OR shared_after IS NULL OR shared_after <= ?)`;
-      binds.push(actor.w.owner ?? "-", now());
-      // The best idle worker has first pick: while a better shared worker of
-      // this architecture — native over emulated, then more cores, then more
-      // memory — is alive and idle, this one leaves the queue's newest builds
-      // to it. A native worker keeps its owner's as its own; an emulated one
-      // has no first pick of those either — it took omarchy-cli's Rust build
-      // at once, installed the toolchain and could not start rustc while a
-      // native worker sat idle (#519, 2026-09-18). After three minutes anyone
-      // takes them: most packages build fine emulated, and a worker that is
-      // alive but never claims holds nobody up.
-      if (await betterIdleWorker(env, workerId, b.arch, mine, probe?.status === "ok")) {
-        scope += mine.emulated ? ` AND (pinned_to = ? OR created_at <= ?)` : ` AND (owner = ? OR pinned_to = ? OR created_at <= ?)`;
-        if (!mine.emulated) binds.push(actor.w.owner ?? "-");
-        binds.push(workerId, new Date(Date.now() - FIRST_PICK_MINUTES * 60000).toISOString());
-      }
-    } else {
-      // A dedicated worker takes its owner's builds — and one somebody asked for it by name while it was shared.
-      scope += ` AND (owner = ? OR pinned_to = ?)`;
-      binds.push(actor.w.owner ?? "-", workerId);
-    }
-  }
-  // One statement claims the next queued task of this architecture: D1
-  // serialises writes, so two workers never get the same one. A fence
-  // belongs to one lease (#277): a queued task never carries one — the
-  // requeue clears it — but one a Worker from before the fence requeued
-  // would stop the new lease on a worker nobody stopped, so the lease
-  // starts without it.
-  //
-  // A host's lease (#334) carries a new generation, the native lane (P1), its size, units and disk budget, the release it was claimed on
-  // and the claim that took it; a legacy one carries no generation — the column is cleared, so a host's stale one never outlives its lease.
-  // A host's registration leases only while its host may claim, checked by this very statement (#322): the read above gives a refusal
-  // its words, and a suspension that commits between the two leaves this claim with nothing.
-  const hostSet = host
-    ? `, lane = 'native', size = CASE WHEN kind = 'build' THEN ${sizeSql("build_tasks")} END, units = ${unitsSql("build_tasks")}, disk_gb = CASE WHEN kind = 'build' THEN ${BUILD_GB_PER_SIZE} * ${sizeSql("build_tasks")} END, release = ?, claim_id = ?, lease_missed = 0`
-    : "";
-  const hostOk = actor.w.host_id ? ` AND ${HOST_MAY_LEASE_SQL}` : "";
-  const task = await env.DB.prepare(
-    `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL, stop_order = NULL, lease_gen = ?${hostSet}
-      WHERE id = (SELECT c.id FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope} ORDER BY c.priority, c.id LIMIT 1) AND status = 'queued'${hostOk}
-      RETURNING *`,
-  )
-    .bind(workerId, plusMinutes(LEASE_MINUTES), now(), host ? leaseGen() : null, ...(host ? [b.version ?? null, hc!.claimId] : []), b.arch, ...binds, ...(hostOk ? [actor.w.host_id] : []))
-    .first<TaskRow>();
+  // The best idle shared worker has first pick (a legacy community registration's, until #343): while a better shared worker of
+  // this architecture — native over emulated, then more cores, then more memory — is alive and idle, this one leaves the queue's
+  // newest builds to it. A native worker keeps its owner's as its own; an emulated one has no first pick of those either — it took
+  // omarchy-cli's Rust build at once, installed the toolchain and could not start rustc while a native worker sat idle (#519,
+  // 2026-09-18). After three minutes anyone takes them: most packages build fine emulated, and a worker that is alive but never
+  // claims holds nobody up.
+  const firstPick = !host && trust === "community" && shared && (await betterIdleWorker(env, workerId, b.arch, mine, probe?.status === "ok"));
+  const task = await selectAndLease(env, {
+    workerId, arch: b.arch, version: b.version ?? null, kinds, probeOk: probe?.status === "ok", hostId: actor.w.host_id ?? null, hc,
+    legacy: host ? null : { emulated: mine.emulated, trust, owner: actor.w.owner ?? null, shared, firstPick },
+  });
   await touch(task?.id ?? null);
   if (!task) return new Response(null, { status: 204 });
   if (task.trust === "community" && task.kind === "build") {
@@ -1210,7 +1589,10 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   const lost = hostLease && b.lost === true && task.host_losses < HOST_LOSSES_MAX;
   const lostSpent = hostLease && b.lost === true && !lost;
   const said = (await withheld(env, id, "error", b.error ?? "build failed")).slice(0, 2000);
-  const error = (oom ? `out of memory (the engine killed it): ${said}` : lostSpent ? `lost a third time on its host, the attempt spent: ${said}` : said).slice(0, 2000);
+  // Out of memory says the memory its lease had, from its units, and a build's size (#337): "out of memory at 4 GB (size 1)" — the
+  // words the package and Review pages show beside a maintainer's Retry at size (OOM_ERROR).
+  const oomAt = `out of memory at ${(task.units ?? 1) * UNIT.mem_gb} GB${task.kind === "build" ? ` (size ${task.size ?? 1})` : ""}`;
+  const error = (oom ? `${oomAt} — the engine killed it: ${said}` : lostSpent ? `lost a third time on its host, the attempt spent: ${said}` : said).slice(0, 2000);
   // Retries are for the infrastructure (a download, a mirror, a container
   // killed), not for the recipe: a PKGBUILD that failed to build fails the
   // same way three times, each in a fresh container — the first
@@ -1262,6 +1644,87 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   const tale = lost ? ` lost on ${who} (a host event, ${task.host_losses + 1} of ${HOST_LOSSES_MAX}) — back in the queue, the attempt given back` : needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
   await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative, ...(hostLease ? { lost: b.lost === true, oom } : {}) });
   return json({ task: id, status: exhausted ? "failed" : "queued", attempts });
+}
+
+/** A disk budget a maintainer may set on a package's page, in GB. */
+export const DISK_GB_MAX = 4096;
+
+/**
+ * POST /factory/packages/:name/size {size, disk_gb} — a maintainer sets the
+ * size and the disk budget a package's builds run with (#337, design v2
+ * §7.4; D31), on its page: a size from 1 to the signed maximum, a budget in
+ * GB; null clears one, and factory/sizing/tasks.toml's word — or size 1 and
+ * the signed GB per size — stands again. The page's word wins over the
+ * file's until it is cleared; the claim still clamps a contributor's build
+ * to 2 and every one to the largest host alive. Journaled with who.
+ */
+export async function handleSetSize(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
+  if (!isMaintainer(c)) return json({ error: "a maintainer sets a package's size" }, 403);
+  const b = await readJson<{ size?: unknown; disk_gb?: unknown }>(request);
+  if (b instanceof Response) return b;
+  const whole = (v: unknown, max: number) => v === null || (typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= max);
+  if (b.size === undefined && b.disk_gb === undefined) return json({ error: "size and/or disk_gb: a whole number, or null to clear it" }, 400);
+  if (b.size !== undefined && !whole(b.size, MAX_SIZE)) return json({ error: `size: a whole number from 1 to ${MAX_SIZE}, or null for factory/sizing's (or 1)` }, 400);
+  if (b.disk_gb !== undefined && !whole(b.disk_gb, DISK_GB_MAX)) return json({ error: `disk_gb: a whole number of GB from 1 to ${DISK_GB_MAX}, or null for factory/sizing's (or ${BUILD_GB_PER_SIZE} per size)` }, 400);
+  const pkg = await env.DB.prepare("SELECT name, size, disk_gb FROM factory_packages WHERE name = ?").bind(name).first<{ name: string; size: number | null; disk_gb: number | null }>();
+  if (!pkg) return json({ error: "not registered" }, 404);
+  const size = b.size === undefined ? pkg.size : (b.size as number | null);
+  const disk = b.disk_gb === undefined ? pkg.disk_gb : (b.disk_gb as number | null);
+  const view = sizingView({ name, size, disk_gb: disk });
+  if (size === pkg.size && disk === pkg.disk_gb) return json({ package: name, sizing: view, by: c.login, unchanged: true });
+  const words = (z: number | null, d: number | null) => `size ${z ?? "unset"}, disk ${d === null ? "unset" : `${d} GB`}`;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE factory_packages SET size = ?, disk_gb = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(size, disk, name),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('build', NULL, 'factory', 'ok', ?, ?)")
+      .bind(`${name}: ${words(size, disk)} (was ${words(pkg.size, pkg.disk_gb)}), set by ${c.login} — its builds ask size ${view.size} and ${view.disk_gb} GB from now on`, JSON.stringify({ name, size, disk_gb: disk, was: { size: pkg.size, disk_gb: pkg.disk_gb }, by: c.login, sizing: view })),
+  ]);
+  return json({ package: name, sizing: view, was: { size: pkg.size, disk_gb: pkg.disk_gb }, by: c.login });
+}
+
+/** What an out-of-memory failure's error begins with (handleFail): the builds a maintainer may retry at another size. */
+export const OOM_ERROR = /^out of memory at \d+ GB/;
+
+/** The largest size the registrations alive run now (D31, selection.ts): what a retry or a size may ask at most. */
+export async function largestAlive(env: Env, at = Date.now()): Promise<number> {
+  const rows = (await env.DB.prepare(FLEET_SQL).bind(new Date(at - Math.max(ALIVE_MS, LEGACY_ALIVE_MS)).toISOString()).all<FleetRow>()).results;
+  const pool = running(env);
+  return largestSize({ members: rows.map((r) => memberOf(r, pool)), leases: [] }, at, selectionRules());
+}
+
+/**
+ * POST /factory/tasks/:id/retry {size} — Retry at size (#337, design v2
+ * §7.4; D31): a maintainer queues a build that ran out of memory again at
+ * the size they choose, up to the largest host alive and the signed maximum
+ * (a contributor's 2). The task's own size (`params.size`) says it: the
+ * package's size is not changed — that is factory/sizing's or the
+ * package's page's. A failed one gets one more attempt; a queued one (its
+ * attempts not spent yet) only its size. The journal says who and why.
+ */
+export async function handleRetryAtSize(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
+  if (!isMaintainer(c)) return json({ error: "a maintainer retries a build at another size" }, 403);
+  const b = await readJson<{ size?: unknown }>(request);
+  if (b instanceof Response) return b;
+  const t = await env.DB.prepare("SELECT id, name, arch, kind, trust, owner, status, error, size, attempts, max_attempts, params FROM build_tasks WHERE id = ?").bind(id)
+    .first<{ id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; status: string; error: string | null; size: number | null; attempts: number; max_attempts: number; params: string | null }>();
+  if (!t) return json({ error: "no such task" }, 404);
+  if (t.kind !== "build" || !OOM_ERROR.test(t.error ?? "") || (t.status !== "failed" && t.status !== "queued")) return json({ error: `task ${id} is no build that ran out of memory and waits: only those are retried at another size`, code: "not_oom" }, 409);
+  const max = t.trust === "community" ? COMMUNITY_MAX_SIZE : MAX_SIZE;
+  const size = b.size;
+  if (typeof size !== "number" || !Number.isInteger(size) || size < 1 || size > max) return json({ error: `size: a whole number from 1 to ${max}${t.trust === "community" ? " (a contributor's build)" : ""}` }, 400);
+  const largest = await largestAlive(env);
+  if (size > largest) return json({ error: `no host alive runs size ${size}: the largest runs ${largest}`, code: "too_large", largest }, 409);
+  const was = jsonOr<{ size?: unknown }>(t.params, {}).size ?? t.size ?? 1;
+  const back = await env.DB.prepare(
+    `UPDATE build_tasks SET status = 'queued', finished_at = NULL, lease_owner = NULL, lease_expires_at = NULL, attempts = MIN(attempts, max_attempts - 1),
+       params = json_set(COALESCE(params, '{}'), '$.size', ?) WHERE id = ? AND kind = 'build' AND status IN ('failed', 'queued') AND error LIKE 'out of memory at %' RETURNING id, attempts`,
+  ).bind(size, id).first<{ id: number; attempts: number }>();
+  if (!back) return json({ error: `task ${id} moved meanwhile; look again` }, 409);
+  const review = jsonOr<{ review?: unknown }>(t.params, {}).review;
+  if (t.trust === "community") await packageAfterFailure(env, t.name, "waiting", `queued again at size ${size} after running out of memory at size ${was} (task ${id}), by ${c.login}`);
+  else if (typeof review === "number") await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`the project's build (task ${id}) is queued again at size ${size} by ${c.login}`, t.name).run();
+  await settleTargets(env, t.name);
+  await event(env, "build", "ok", `${t.name} for ${t.arch} (task ${id}): ran out of memory at size ${was}; queued again at size ${size} by ${c.login}`, { task: id, name: t.name, arch: t.arch, size, was, by: c.login, attempts: back.attempts });
+  return json({ task: id, status: "queued", size, was, attempts: back.attempts, by: c.login });
 }
 
 /**

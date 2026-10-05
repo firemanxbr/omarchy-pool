@@ -500,6 +500,9 @@ impl EngineState {
 #[derive(Default)]
 pub(crate) struct PoolState {
     pub state: Option<Net<HostState>>,
+    /// What the pool's edge says the host comes from; `None` answers nothing.
+    pub public: Option<Net<std::net::IpAddr>>,
+    pub publics: u32,
     pub assets: BTreeMap<String, Vec<u8>>,
     pub statements: BTreeMap<Release, Relayed>,
     /// How many times the host state was asked for.
@@ -557,6 +560,12 @@ impl Pool for FakePool {
 
     fn download(&mut self, url: &str) -> Net<Vec<u8>> {
         Net::NoAnswer(format!("{url}: no downloads in tests"))
+    }
+
+    fn public_address(&mut self) -> Net<std::net::IpAddr> {
+        let mut s = self.0.borrow_mut();
+        s.publics += 1;
+        s.public.clone().unwrap_or(Net::NoAnswer("no pool".into()))
     }
 }
 

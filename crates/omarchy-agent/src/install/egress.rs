@@ -17,8 +17,18 @@
 //! for a rootless engine, and a host whose LAN address is not found, with a gateway that
 //! drops TCP 53, is judged on what remains. Seam for the egress sidecar's issue too: a
 //! rootless host passes once its tasks egress through it.
+//!
+//! The probe task also asks the pool which address it comes from (#371): the pool's origin
+//! answers `/cdn-cgi/trace` at Cloudflare's edge, whose `ip=` line is the public address
+//! the host's tasks leave from. Install keeps it (`egress.json`) and the agent writes it
+//! with the host's own addresses for every task's egress to refuse
+//! ([`crate::dispatcher_env`]): behind a router that forwards a port, a task connecting to
+//! it would reach the host. The run loop asks the edge again every hour (within minutes
+//! after no answer), from the host (the same NAT), for when the provider changes it. Not seen (no curl in the image, no
+//! answer) is a note, never a blocker: the interfaces' addresses are refused all the same,
+//! and the run loop's first answer adds it.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use super::engine::Docker;
 use super::net::Cidr;
@@ -28,6 +38,8 @@ use super::net::Cidr;
 pub(crate) struct Targets {
     pub forbidden: Vec<(&'static str, String, u16)>,
     pub public: (String, u16),
+    /// Where it asks which address it comes from (`ip=` in the answer), if anywhere.
+    pub seen: Option<String>,
 }
 
 impl Targets {
@@ -44,7 +56,17 @@ impl Targets {
         Targets {
             forbidden,
             public: ("github.com".to_owned(), 443),
+            seen: None,
         }
+    }
+
+    /// The pool's own origin answers the question at Cloudflare's edge; a pool that is not
+    /// HTTPS (a test's, on loopback) is not asked.
+    pub fn asking(mut self, pool: Option<&str>) -> Self {
+        self.seen = pool
+            .filter(|p| p.starts_with("https://"))
+            .map(|p| format!("{}/cdn-cgi/trace", p.trim_end_matches('/')));
+        self
     }
 
     fn args(&self) -> Vec<String> {
@@ -57,6 +79,9 @@ impl Targets {
             self.public.0.clone(),
             self.public.1.to_string(),
         ]);
+        if let Some(url) = &self.seen {
+            out.extend(["seen".to_owned(), url.clone(), "443".to_owned()]);
+        }
         out
     }
 }
@@ -65,7 +90,8 @@ impl Targets {
 /// else `nc -z`. Each target prints `egress <name> open|refused|blocked`. busybox's and
 /// OpenBSD's `nc -z` print nothing for a refused connection and return at once, while a
 /// target that does not answer takes the whole `-w 4`: a quiet failure in under 3 s is a
-/// refusal.
+/// refusal. The `seen` target (a URL) prints `egress seen <address>`, or `none` with
+/// neither curl nor wget, or no answer.
 pub(crate) const SCRIPT: &str = r#"reach() {
   if command -v bash >/dev/null 2>&1; then out=$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$2" "$3" 2>&1); rc=$?
   else s=$(date +%s); out=$(nc -z -w 4 "$2" "$3" 2>&1 </dev/null); rc=$?
@@ -73,7 +99,13 @@ pub(crate) const SCRIPT: &str = r#"reach() {
   if [ "$rc" = 0 ]; then r=open; else case "$out" in *efused*) r=refused ;; *) r=blocked ;; esac; fi
   echo "egress $1 $r"
 }
-while [ $# -ge 3 ]; do reach "$1" "$2" "$3"; shift 3; done
+seen() {
+  if command -v curl >/dev/null 2>&1; then a=$(curl -fsS --max-time 10 "$1" 2>/dev/null)
+  elif command -v wget >/dev/null 2>&1; then a=$(wget -q -T 10 -O - "$1" 2>/dev/null); else a=""; fi
+  ip=$(printf '%s\n' "$a" | sed -n 's/^ip=//p' | head -n 1)
+  echo "egress seen ${ip:-none}"
+}
+while [ $# -ge 3 ]; do if [ "$1" = seen ]; then seen "$2"; else reach "$1" "$2" "$3"; fi; shift 3; done
 "#;
 
 const LABEL: &str = "org.omarchy-pool.probe=egress";
@@ -187,4 +219,14 @@ pub(crate) fn verdict(out: &str, t: &Targets) -> Vec<String> {
         None => blockers.push(format!("egress: the probe task gave no answer for {host}:{port}")),
     }
     blockers
+}
+
+/// The address the probe task said the pool saw it come from: one address, never a
+/// loopback, unspecified or multicast one, an IPv4 one as IPv4
+/// ([`crate::dispatcher_env::addresses::public`]).
+pub(crate) fn seen(out: &str) -> Option<IpAddr> {
+    out.lines()
+        .find_map(|l| l.strip_prefix("egress seen "))
+        .and_then(|a| a.trim().parse::<IpAddr>().ok())
+        .and_then(crate::dispatcher_env::addresses::public)
 }
