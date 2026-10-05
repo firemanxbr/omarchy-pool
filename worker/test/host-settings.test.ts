@@ -13,9 +13,11 @@
  * - The signed host state: each order with its value, and the settings its
  *   agent took; a done settings order becomes the host's settings, a refused
  *   one changes nothing.
- * - Narrowed units take effect at the host's next claim, and a host holding
- *   more than the new count keeps its leases (nothing fenced), claiming
- *   nothing until they fit.
+ * - Narrowed units and lanes, ordered from the site and answered done,
+ *   come back in the state, and a claim carrying them (as the agent's
+ *   run/capacity.json does) is handed no more than they allow — no emulated
+ *   build once its lane is off; a host holding more than the new count keeps
+ *   its leases (nothing fenced), claiming nothing until they fit.
  * - POST /hosts/self/diagnostics: the lines of a diagnostics order of that
  *   host only, while it waits for its answer, at most 500 and 64 KiB, a line
  *   that looks like a secret dropped and counted; GET
@@ -198,38 +200,81 @@ describe("the settings in the host state and the agent's answers", () => {
   });
 });
 
-describe("narrowed units at the next claim", () => {
-  it("a claim carrying the narrowed units is handed no more, and a host holding more keeps its leases and claims nothing until they fit", async () => {
-    const { k, host, worker } = await activeHost("m1", "claims");
+describe("narrowed units and lanes at the next claim", () => {
+  // The narrowing itself is the agent's: it rewrites run/capacity.json, whose units and lanes its dispatcher's next claim carries (the
+  // agent's settings_tests.rs). Here, the pool's half: the order, the agent's answer that makes it the host's settings — which the
+  // signed state gives back — and a claim carrying them, which capacity-aware claiming (#337, selection.ts) hands no more than they
+  // allow; a host holding more keeps its leases.
+  const setup = async (name: string) => {
+    const { k, host, worker } = await activeHost("m1", name);
     const tok = await signed(k, host, "POST", "/hosts/self/token");
     expect(tok.status, JSON.stringify(tok.json)).toBe(200);
     const token = tok.json.token as string;
-    const seed = async (t: { name: string; kind?: string; params?: unknown; ref?: string; priority?: number }) => (await env.DB.prepare(
-      "INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, params, pinned_to) VALUES (?, 'aarch64', '1-1', ?, 'test', ?, 'queued', 0, ?, ?, ?, ?, ?) RETURNING id",
-    ).bind(t.name, t.ref ?? `https://github.com/x/${t.name}@v1:PKGBUILD`, t.priority ?? 100, t.kind ? "project" : "community", t.kind ? null : "bob", t.kind ?? "build", t.params === undefined ? null : JSON.stringify(t.params), worker).first<{ id: number }>())!.id;
+    const seed = async (t: { name: string; arch?: string; kind?: string; params?: unknown; ref?: string; priority?: number }) => (await env.DB.prepare(
+      "INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, params, pinned_to) VALUES (?, ?, '1-1', ?, 'test', ?, 'queued', 0, ?, ?, ?, ?, ?) RETURNING id",
+    ).bind(t.name, t.arch ?? "aarch64", t.ref ?? `https://github.com/x/${t.name}@v1:PKGBUILD`, t.priority ?? 100, t.kind ? "project" : "community", t.kind ? null : "bob", t.kind ?? "build", t.params === undefined ? null : JSON.stringify(t.params), worker).first<{ id: number }>())!.id;
     let n = 0;
-    const claim = (units: number, leases: { task: number; gen: string }[]) => call("POST", "/factory/claim", { token, body: {
-      arch: "aarch64", version: "v1.0.2", hostname: "box", kinds: ["build", "audit"], claim_id: `c_narrow${String(++n).padStart(4, "0")}`, want: 1, leases,
-      capacity: { ...STUDIO, units }, agent: { provider: "anthropic", model: "m", probe: "ok", checked_at: new Date().toISOString() }, agent_via: "direct",
+    const claim = (capacity: Record<string, unknown>, leases: { task: number; gen: string }[]) => call("POST", "/factory/claim", { token, body: {
+      arch: "aarch64", version: "v1.0.2", hostname: "box", kinds: ["build", "audit"], claim_id: `c_${name.replace(/[^a-z]/g, "")}${String(++n).padStart(4, "0")}`, want: 1, leases,
+      capacity, agent: { provider: "anthropic", model: "m", probe: "ok", checked_at: new Date().toISOString() }, agent_via: "direct",
       orders: ["drain", "recheck-agent", "restart", "stop-task"], instance: hex(7),
     } });
+    // An order from the site, answered done by the agent as its report does: the host's settings, as the state gives them back.
+    const narrow = async (body: Record<string, unknown>) => {
+      const o = await order("m1", host, body);
+      expect(o.status, JSON.stringify(o.json)).toBe(201);
+      await report(k, host, { orders: [{ id: o.json.order.id, outcome: "done", detail: "narrowed" }] });
+      return (await state(k, host)).json.settings as { units: number | null; emulate: string[] | null } | null;
+    };
+    // run/capacity.json as the agent narrows it by those settings (none: the envelope's own), inside the envelope (here, all the
+    // Studio detected).
+    const capacityBy = (s: { units: number | null; emulate: string[] | null } | null) => ({
+      ...STUDIO,
+      units: Math.min(STUDIO.units, s?.units ?? STUDIO.units),
+      lanes: STUDIO.lanes.filter((l) => l.mode === "native" || !s?.emulate || s.emulate.includes(l.arch)),
+    });
+    return { seed, claim, narrow, capacityBy };
+  };
+
+  it("narrowed units: a claim carrying them is handed no more, and a host holding more keeps its leases and claims nothing until they fit", async () => {
+    const { seed, claim, narrow, capacityBy } = await setup("claims");
     const b = await seed({ name: "felix" });
     const a = await seed({ name: "felix", kind: "audit", params: { task: b }, ref: `staging:${b}`, priority: 200 });
     // 11 units: the build (2 units) leased.
-    const c = await claim(11, []);
+    const c = await claim(STUDIO, []);
     expect(c.status, JSON.stringify(c.json)).toBe(200);
     expect(c.json.task.id).toBe(b);
     const held = [{ task: b, gen: c.json.task.lease_gen as string }];
-    // Narrowed to 2 (its agent rewrote capacity.json; its dispatcher's next claim carries it): the build's 2 units held, one kept for
-    // pool jobs — the audit (1 unit) that 11 would take is not handed; the build is not fenced, it runs on.
-    expect((await claim(2, held)).status).toBe(204);
+    // Narrowed to 2 from the site: the build's 2 units held, one kept for pool jobs — the audit (1 unit) that 11 would take is not
+    // handed; the build is not fenced, it runs on.
+    const two = await narrow({ kind: "set-units", units: 2 });
+    expect(two).toEqual({ units: 2, emulate: null });
+    expect((await claim(capacityBy(two), held)).status).toBe(204);
     const build = await env.DB.prepare("SELECT status, stop_order FROM build_tasks WHERE id = ?").bind(b).first<{ status: string; stop_order: string | null }>();
     expect(build).toEqual({ status: "leased", stop_order: null });
     expect((await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(a).first<{ status: string }>())!.status).toBe("queued");
-    // The envelope's units back: the audit fits again.
-    const d = await claim(11, held);
+    // The envelope's units back (null: no settings left): the audit fits again.
+    const back = await narrow({ kind: "set-units", units: null });
+    expect(back).toBeNull();
+    const d = await claim(capacityBy(back), held);
     expect(d.status, JSON.stringify(d.json)).toBe(200);
     expect(d.json.task.id).toBe(a);
+  });
+
+  it("an emulated lane turned off: a claim without it is handed no emulated build; on again, the next is", async () => {
+    const { seed, claim, narrow, capacityBy } = await setup("lanes");
+    const x = await seed({ name: "xorg-thing", arch: "x86_64" });
+    // No emulated lane from the site: the Studio's claim carries its native lane only, and no x86_64 build runs here.
+    const off = await narrow({ kind: "set-emulate", emulate: [] });
+    expect(off).toEqual({ units: null, emulate: [] });
+    expect(capacityBy(off).lanes).toEqual([{ arch: "aarch64", mode: "native" }]);
+    expect((await claim(capacityBy(off), [])).status).toBe(204);
+    expect((await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(x).first<{ status: string }>())!.status).toBe("queued");
+    // On again: the x86_64 build goes to its emulated lane (no host alive runs x86_64 natively).
+    const on = await narrow({ kind: "set-emulate", emulate: ["x86_64"] });
+    const c = await claim(capacityBy(on), []);
+    expect(c.status, JSON.stringify(c.json)).toBe(200);
+    expect(c.json.task).toMatchObject({ id: x, lane: "emulated" });
   });
 });
 
