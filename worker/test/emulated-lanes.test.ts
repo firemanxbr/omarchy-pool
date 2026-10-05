@@ -14,7 +14,13 @@
  *   the claim from its labels, and for a lease taken before the claim wrote
  *   lanes, its labels;
  * - the claim takes a host's emulated lanes with how they run (`via`,
- *   `page16k`) and its held lanes with their reasons, for the host page.
+ *   `page16k`) and its held lanes with their reasons, for the host page;
+ * - a job with helper containers is read by the claim's statements where
+ *   selection needs it — a health check on the head of its ring's arch, a
+ *   promotion beside the arch-neutral kinds with the arch it names — and an
+ *   aarch64 host's emulated x86_64 lane takes the x86_64 health check at once;
+ *   hosts claim pool jobs from #340 (HOST_KINDS), so the claim itself hands
+ *   them none yet.
  *
  * Tokens: workers omw_<id>, jobs the claim's.
  */
@@ -23,6 +29,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { parseCapacity, unitsOf, HELD_REASON_MAX } from "../src/hosts";
+import { HOST_KINDS, LANE_HEAD_SQL, NEUTRAL_HEAD_SQL, selectionRules } from "../src/routes/factory";
+import { select, type Candidate, type Fleet, type Lane as SelLane, type Member } from "../src/selection";
 import { toB64url } from "../src/webauthn";
 
 const ORIGIN = "http://localhost:8787";
@@ -211,5 +219,62 @@ describe("a host's lanes as its capacity reports them (#338, design v2 §7.3, §
     const c = await claim("studio-4");
     expect(c.status).toBe(200);
     expect(c.json.task).toMatchObject({ id, lane: "emulated" });
+  });
+});
+
+describe("a job with helper containers on a host's lanes (#338, design v2 §7.4, §8.3)", () => {
+  /** A pool job as the scheduler queues one (scheduler.ts createJob). */
+  const seedJob = async (kind: string, arch: string, params: Record<string, string>) =>
+    (await env.DB.prepare(`INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, status, publish, trust, kind, params) VALUES (?, ?, '-', 'test', 50, 'queued', 1, 'project', ?, ?) RETURNING id`)
+      .bind(kind, arch, kind, JSON.stringify(params)).first<{ id: number }>())!.id;
+  /** A host of the fleet, alive and idle, taking the pool jobs #340 gives hosts. */
+  const member = (id: string, lanes: SelLane[], now: number): Member => ({
+    id, legacy: false, lanes, units: 11, agent_slots: 2, disk: { work: 400, engine: 200 }, kinds: [...HOST_KINDS, "health", "promote"], probe_ok: true,
+    drained: false, below_minimum: false, may_claim: true, behind: false, seen_at: now, reserving: null, scope: { trust: "host", owner: null, shared: false },
+  });
+
+  it("the claim's reads bring a health check to the head of its ring's arch and a promotion with the arch it names; the Studio's emulated lane takes the x86_64 health check at once, a host with no x86_64 lane neither", async () => {
+    const health = await seedJob("health", "x86_64", { ring: "stable" });
+    const promote86 = await seedJob("promote", "x86_64", { from: "rc", to: "stable", arch: "x86_64" });
+    const promoteBoth = await seedJob("promote", "x86_64", { from: "rc", to: "stable" });
+    // The claim's own scope (kinds and pin), as selectAndLease writes it for a host claiming them.
+    const scope = "c.kind IN (SELECT value FROM json_each(?)) AND (c.pinned_to IS NULL OR c.pinned_to = ?)";
+    const kinds = JSON.stringify([...HOST_KINDS, "health", "promote"]);
+    const read = async (sql: string, ...binds: unknown[]) => (await env.DB.prepare(sql).bind(...binds).all<any>()).results;
+    const x86Head = await read(LANE_HEAD_SQL(scope), "x86_64", kinds, "studio-h");
+    const armHead = await read(LANE_HEAD_SQL(scope), "aarch64", kinds, "studio-h");
+    const neutral = await read(NEUTRAL_HEAD_SQL(scope), kinds, "studio-h");
+    // The health check by its ring's arch, on that lane's head only; the promotions with the arches their helpers run.
+    expect(x86Head.map((r) => [r.id, r.kind, r.job_arch])).toEqual([[health, "health", null]]);
+    expect(armHead).toEqual([]);
+    expect(neutral.map((r) => [r.id, r.job_arch])).toEqual([[promote86, "x86_64"], [promoteBoth, null]]);
+
+    // Selection over those very rows: the Studio (aarch64 native, x86_64 emulated) beside an idle native x86_64 host that is alive.
+    const now = Date.now();
+    const asCandidate = (r: any): Candidate => ({
+      id: r.id, name: r.name, kind: r.kind, arch: r.arch, trust: r.trust, owner: r.owner, priority: r.priority, queued_at: Date.parse(r.created_at), pinned_to: r.pinned_to,
+      needs_native: r.needs_native === 1, model: r.model === 1, size: null, disk_gb: null, native_ms: null, reserved_at: null, job_arch: r.job_arch,
+    });
+    const cands = [...x86Head, ...neutral].map(asCandidate);
+    const studio = member("studio-h", [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated" }], now);
+    const box = member("vps-h", [{ arch: "x86_64", mode: "native" }], now);
+    const plain = member("arm-h", [{ arch: "aarch64", mode: "native" }], now);
+    const fleet: Fleet = { members: [studio, box, plain], leases: [] };
+    const chosen = (m: Member) => select(m, fleet, cands, now, selectionRules()).map((c) => [c.id, c.lane]);
+    expect(chosen(studio)).toEqual(expect.arrayContaining([[health, "emulated"], [promote86, null], [promoteBoth, null]]));
+    expect(chosen(studio)).toHaveLength(3);
+    // A host with no x86_64 lane: no x86_64 health check, and no promotion whose helpers check x86_64 (one without params.arch checks both).
+    expect(chosen(plain)).toEqual([]);
+
+    // The claim itself: hosts take builds, trials and audits until #340 brings pool jobs to them (HOST_KINDS), whatever kinds the
+    // dispatcher lists — so this criterion's run end to end lands with #340.
+    await seedHost("studio-5", STUDIO);
+    const c = await call("POST", "/factory/claim", { token: "omw_studio-5", body: {
+      arch: "aarch64", version: "v1.0.2", hostname: "studio-5", kinds: ["build", "trial", "audit", "health", "promote"], claim_id: "c_emuhelp0001", want: 1,
+      leases: [], capacity: capOf(STUDIO), labels: { role: "dispatcher" }, agent: { provider: "anthropic", model: "claude-test", probe: "ok", checked_at: "2026-10-01T00:00:00Z" },
+    } });
+    expect(c.status).toBe(204);
+    expect(HOST_KINDS).toEqual(["build", "trial", "audit"]);
+    expect((await taskOf(health)).status).toBe("queued");
   });
 });
