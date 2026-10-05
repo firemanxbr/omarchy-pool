@@ -131,7 +131,22 @@ secret). Everything travels in the `Authorization` header over TLS only.
   (cloud metadata), loopback, multicast and reserved ranges, the task
   subnets and the host's own addresses are refused by the address a name
   resolves to, and the connection goes to the address that was checked, so
-  DNS rebinding has no second answer. A raw socket fails with "Network is
+  DNS rebinding has no second answer; an IPv4 address is refused in every
+  IPv6 form that reaches it too (v4-mapped, NAT64, 6to4). The host's own
+  addresses are the agent's word, in `etc/dispatcher.env` (#371): every
+  address of its interfaces (an IPv6 one as its /64) and the public address
+  its tasks leave from, which install's egress probe saw first — behind a
+  router that forwards a port, a task connecting to it would reach the host,
+  and the firewall's INPUT drop does not see that traffic, which leaves from
+  the egress bridge. The run loop reads the interfaces again every minute and
+  asks the pool's edge for the public address every hour (over IPv4, not
+  through a proxy: the way the tasks leave), and within five minutes after an
+  ask it did not answer; a change recreates the dispatcher, so every task
+  started after a new lease has it refused, and every task started after the
+  agent saw a new public address — within the hour while the edge answers,
+  within minutes of its answering again after a reboot or an outage — has
+  that one refused, while a task already running keeps the list its egress was
+  started with. A raw socket fails with "Network is
   unreachable"; a package that needs one gets a reviewed exception in
   `factory/sizing` (a bridge network of its own). A task that needs a model
   gets an agent sidecar of its own, on its network only, with the keys file
@@ -481,7 +496,11 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
   id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
   digits and dashes), so a pool cannot add a variable to the dispatcher's
-  environment; strings the pool sends reach the terminal without control
+  environment (#371: the secrets directory's path and the agent budget come
+  from `agent.toml`, the host's addresses from its interfaces and from the
+  address the pool's edge saw the probe task or the agent come from, which is
+  read as one IP address, so a pool can at most add one address to the deny
+  list, never a variable); strings the pool sends reach the terminal without control
   characters. It is a new one at every fetch; the agent
   rotates it every 30 days. The one it replaces works ten more minutes (kept
   on the host's row, never on the registration that older Workers list), so
