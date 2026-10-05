@@ -531,7 +531,11 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   above `max_units` or what it detected, a lane its `emulate` excludes, the
   native lane, are refused on the host with nothing changed, whatever the
   pool says; the pool's own claim takes the smaller of the units it computes
-  and the units the host declares, so a narrowed host is handed no more. No
+  and the units the host declares, and hands an emulated build only to a lane
+  the claim names (#337), so a narrowed host is handed no more. The pool's
+  record of a host's settings, which only an agent that lost its own takes,
+  is narrowed by the envelope the same way, and what of it is above the
+  envelope is reported, never applied. No
   order widens the envelope, selects a driver or names a path, an image or a
   command: the closed set is `retire-legacy`, `reconcile-now`, `set-units`,
   `set-emulate`, `rotate-token` (a new worker token from the same signed
@@ -541,20 +545,26 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   M10: the dispatcher's last 500 log lines, only when the envelope says
   `diagnostics = true`, scrubbed on the host of every value in the set's
   `etc/*.env` and the secrets directory's env files and of anything shaped
-  like a pool, GitHub or model provider token, then checked again by the
+  like a pool token (its job tokens `omj.` and agent tokens `oma_` too),
+  GitHub or model provider token, then checked again by the
   pool's leak scan, which drops a line that still looks like one; kept a
   week, for its owner and the maintainers only). Because the pool may be
   compromised, **the host brakes it**, in its own code and with counters it
   keeps in `state.json` (a restart loop resets nothing): orders at least 2 s
   apart and at most 20 an hour; at most 6 dispatcher restarts an hour that
-  the pool caused (a settings order, `rotate-token`, `retry-release`, a
-  round to another release); at most 4 capacity narrowings an hour; at most
-  one release change every 10 minutes, a rollback under a signed statement
-  exempt (the pool cannot forge one). Beyond that an order is answered
-  `refused: brake` and a release change is held. A pool that is compromised
-  can therefore narrow a host down to one unit and its native lane, rotate
-  its token, ask for scrubbed logs where the owner allowed them, and make it
-  restart its dispatcher a few times an hour — a slowdown, never a widening,
+  the pool caused — a settings order, `rotate-token`, and every recreation
+  a round to another release makes, its replace and its revert's, whether
+  the pool's target, an Update or a `retry-release` that lifted a quarantine
+  started it (the same release tried again included: such a round needs
+  room for two, and an Update or a `retry-release` that would lift a
+  quarantine waits or is refused without it); at most 4 capacity
+  narrowings an hour; at most one release change every 10 minutes, a
+  rollback under a signed statement exempt (the pool cannot forge one).
+  Beyond that an order is answered `refused: brake`, an Update waits and a
+  release change is held. A pool that is compromised can therefore narrow a
+  host down to one unit and its native lane, rotate its token, ask for
+  scrubbed logs where the owner allowed them, and make it restart its
+  dispatcher at most six times an hour — a slowdown, never a widening,
   a foreign command or a secret. Changing the runtime is the owner's alone:
   `omarchy-agent runtime switch` at the host, which the pool cannot ask for.
 - **The host worker token** (`omw_…`) is the dispatcher's only, written

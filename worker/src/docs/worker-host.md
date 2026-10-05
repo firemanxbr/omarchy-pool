@@ -250,10 +250,12 @@ journal of orders and the pool's journal.
 
 **The host brakes the pool** (#325): whatever the pool sends, the agent
 takes host orders at least two seconds apart and at most 20 an hour, at most
-4 narrowings and 6 dispatcher restarts an hour, and at most one release
-change every ten minutes (a rollback under a signed statement excepted);
-beyond that it answers `refused: brake`, and the page shows how much of each
-the last hour spent. Restarting the agent resets none of it.
+4 narrowings and 6 dispatcher restarts an hour — a round that tries a
+release again after an Update or **Retry release** counts its restarts too,
+its revert's included — and at most one release change every ten minutes (a
+rollback under a signed statement excepted); beyond that it answers
+`refused: brake` (an Update waits for the next poll), and the page shows how
+much of each the last hour spent. Restarting the agent resets none of it.
 
 **The runtime is the owner's, at the host** (#325): `omarchy-agent runtime
 switch compose/podman` (or `compose/docker`) moves the dispatcher to the

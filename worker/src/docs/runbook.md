@@ -842,34 +842,56 @@ an agent from 0.4.0 (an older one is given none and the page says why):
   lowers the envelope below a setting taken earlier, the envelope wins and
   the report says which part of the setting it leaves out (`above`). The
   pool keeps the last setting answered done and sends it back in the host
-  state, which only an agent that lost its own (`state.json` gone) takes.
+  state, which only an agent that lost its own (`state.json` gone) takes, as
+  the pool says it: the envelope narrows it like any setting, and what of it
+  is above the envelope is journaled and reported (`above`) — a pool record
+  that should not have been sent, shown on the page. The lanes left in
+  `run/capacity.json` ride every claim, and the pool's selection (#337)
+  hands an emulated build only to a lane the claim names, so a lane turned
+  off takes no new emulated build from the dispatcher's next claim; running
+  emulated builds on the host itself (detection per foreign architecture,
+  `needs_native` per lane) is #338's.
 - **Rotate token** (`rotate-token`): a new host worker token from the pool
   (`POST /hosts/self/token`, signed), written to `etc/dispatcher.env` as
-  enrollment writes it; the changed `etc/` recreates the dispatcher within
-  the ten minutes the old one still works. A token the pool does not give,
-  or one for another registration, is refused with nothing written.
+  enrollment writes it — the rest of the file rendered as the run loop
+  renders it (#371), so the host's addresses, the secrets directory, the
+  agent budget and the owner's own lines stay; the changed `etc/` recreates
+  the dispatcher within the ten minutes the old one still works. A token the
+  pool does not give, or one for another registration, is refused with
+  nothing written. (`*_FILE` secrets, #327, move where the token is written:
+  `enroll::write_worker_token` is the one place.)
 - **Retry release** (`retry-release`): lifts every quarantine and starts a
   round, as an Update does; the page greys it while the report says nothing
-  is quarantined.
+  is quarantined. Without room on the brake for that round's restarts (its
+  own and a revert's) it is refused and the quarantine kept.
 - **Diagnostics** (`diagnostics`, design v2 M10): only when the envelope says
   `diagnostics = true`, the dispatcher's last 500 log lines, each cut to 300
   characters, scrubbed of every value (8 characters or more) of the set's
-  `etc/*.env` and the secrets directory's `*.env`, and of anything shaped like a pool,
-  GitHub, Anthropic or OpenAI token; posted to the pool
-  (`POST /hosts/self/diagnostics`, signed, at most 64 KiB), which drops a
+  `etc/*.env` and the secrets directory's `*.env`, and of anything shaped like a pool
+  token (`omj.` job tokens and `oma_` agent tokens among them), GitHub, Anthropic or
+  OpenAI token; the newest that fit 56 KiB as the JSON body carries them, posted to the
+  pool (`POST /hosts/self/diagnostics`, signed, at most 64 KiB), which drops a
   line that still looks like a secret and keeps them a week for the page's
   *Its lines*. Refused otherwise, saying so.
 
 **The host-side brake** (#325, design v2 §17.1) holds even against a pool
 that is compromised: at least 2 s between host orders (the agent paces a
 burst, taking the next one a tick later); at most 20 host orders an hour, 6
-dispatcher restarts the pool caused (a settings order, `rotate-token`,
-`retry-release`, a round to another release), 4 capacity narrowings and one
-release change every 10 minutes — the first release a host applies and a
-rollback under a signed statement are exempt, and a round tried again to the
-release the last change went to is no new change. An order beyond them is
-answered `refused` with `brake: …` and when the next would fit; a release
-change beyond them is `held` and asked again at the next poll. What the agent
+dispatcher restarts the pool caused, 4 capacity narrowings and one release
+change every 10 minutes — the first release a host applies and a rollback
+under a signed statement are exempt, and a round tried again to the release
+the last change went to is no new change. The restarts are a settings order,
+`rotate-token`, and every recreation a round to another release makes — its
+replace and its revert's — whether the pool's target, an Update or a
+`retry-release` that lifted a quarantine started it, the same release tried
+again included: such a round starts only with room for two, and an Update
+or a `retry-release` that would lift a quarantine waits (the Update stays
+open, the quarantine kept, and the next poll asks again) or is refused
+without it, so a pool that keeps lifting the quarantine of a release this
+host's guard reverts recreates its dispatcher at most six times an hour. An
+order beyond them is answered `refused` with `brake: …` and when the next
+would fit; a release change beyond them is `held` and asked again at the
+next poll. What the agent
 does on its own — a changed input, drift, `omarchy-agent round` — is never
 braked. The counters are in `state.json`, so restarting the agent resets
 nothing; `omarchy-agent status` and the host page show the last window.
@@ -887,10 +909,14 @@ registration first and let its tasks finish. Then it stops the dispatcher on
 the old engine, brings the release that runs up on the new one through a
 whole round — lint (a rootful engine still needs `rootful_ack` and
 `dedicated`), pull, replace, guard — and only once that round is `ok` writes
-the new socket, runtime and engine into `agent.toml`. A guard or ready wait
-that fails, a refusal or no end within 20 minutes stops the new dispatcher
-and brings it back on the old engine (`rolled-back`, with why; the release is
-not quarantined for the engine's fault, and `agent.toml` was never changed).
+the new socket, runtime and engine into `agent.toml`, changing only those
+`[set]` lines (the owner's comments and layout stay). A guard or ready wait
+that fails, a refusal, an `agent.toml` it cannot write (a restart would bring
+a second dispatcher up on the old engine), a task claimed on the old engine
+before its dispatcher stopped (only a dispatcher there re-adopts it) or no
+end within 20 minutes stops the new dispatcher and brings it back on the old
+engine (`rolled-back`, with why; the release is not quarantined for the
+engine's fault, and `agent.toml` was never changed).
 A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
 and `logs` follow it.
 
