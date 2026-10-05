@@ -24,8 +24,10 @@
 //!
 //! An unknown kind, an order past its `not_after` (or with none) and an id in the ring of
 //! the last 512 taken are refused: an id is taken once, whatever the pool says again, and
-//! its first answer stands. Every answer goes on the journal and rides the next reports
-//! (`orders`), which the pool closes the order with.
+//! its first answer stands (a repeated id is said once on the journal, as no answer; the
+//! `retire-legacy` in flight, which the pool lists until it is answered, not at all).
+//! Every answer goes on the journal and rides the next reports (`orders`), which the pool
+//! closes the order with.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -157,14 +159,27 @@ impl Agent {
     pub(super) fn take_orders(&mut self, orders: Vec<Order>, now: i64, busy: bool) -> Taken {
         let mut taken = Taken::default();
         for o in orders {
+            // The retire-legacy in flight: the pool keeps it open until the report that
+            // answers it, so a poll while its containers stop lists it again. It is being
+            // carried out and has no answer yet: nothing to say.
+            if self
+                .state
+                .orders
+                .retire
+                .as_ref()
+                .is_some_and(|r| r.order == o.id)
+            {
+                continue;
+            }
             if self.state.orders.seen(&o.id) {
                 // The pool closes an order at the report after its answer; a compromised
-                // one could send it again. It is never run twice; said once per process.
+                // one could send it again. It is never run twice; said once per process,
+                // and with no outcome: that is not an answer, the first one stands.
                 if self.repeated.insert(o.id.clone()) {
                     self.journal.write(
                         now,
                         "order",
-                        serde_json::json!({"id": o.id, "kind": o.kind.name(), "outcome": "refused", "detail": "seen already: an order id is taken once, and its first answer stands"}),
+                        serde_json::json!({"id": o.id, "kind": o.kind.name(), "detail": "seen already: an order id is taken once, and its first answer stands"}),
                     );
                 }
                 continue;

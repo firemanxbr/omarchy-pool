@@ -104,6 +104,15 @@ fn running(w: &World, project: &str) -> Vec<String> {
         .collect()
 }
 
+/// The journal's `order` lines about order `id`.
+fn order_lines(w: &World, id: &str) -> Vec<serde_json::Value> {
+    w.journal()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|l| l["event"] == "order" && l["id"] == id)
+        .collect()
+}
+
 #[test]
 fn the_release_target_comes_from_the_host_state() {
     let mut w = World::running_v1();
@@ -213,6 +222,17 @@ fn reconcile_now_starts_a_round_now_and_is_taken_once() {
     assert_eq!(w.step(), "idle");
     assert_eq!((w.changes().len(), answers(&w)), before);
     assert_eq!(w.journal().matches("seen already").count(), 1, "said once");
+    // And said as no answer: the journal's one outcome for the id is its first.
+    let lines = order_lines(&w, "ho_1");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["outcome"], "done");
+    assert!(
+        lines[1]["detail"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("seen already"))
+            && lines[1].get("outcome").is_none(),
+        "{lines:?}"
+    );
 }
 
 #[test]
@@ -354,6 +374,7 @@ fn the_ring_keeps_the_last_512_ids() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one legacy set, one story: before, in flight, retired, again
 fn retire_legacy_stops_and_removes_exactly_the_recorded_project_writes_the_marker_and_reports_it() {
     let (mut w, dir) = beside_a_legacy_set(false);
     let (task, dispatcher) = {
@@ -391,6 +412,13 @@ fn retire_legacy_stops_and_removes_exactly_the_recorded_project_writes_the_marke
         ("ho_r1", LEGACY)
     );
     assert_eq!(retire.dir, dir);
+    // A poll while its containers stop lists the order again (the pool keeps it open
+    // until a report answers it): it is being carried out, not refused, and goes on.
+    assert_eq!(retire.step, RetireStep::Stop);
+    assert!(answers(&w).is_empty());
+    w.poll();
+    assert!(order_lines(&w, "ho_r1").is_empty(), "{}", w.journal());
+    assert!(answers(&w).is_empty());
     // Then stopped, then removed, across ticks; answered at the end.
     for _ in 0..5 {
         w.tick(3);
@@ -398,6 +426,10 @@ fn retire_legacy_stops_and_removes_exactly_the_recorded_project_writes_the_marke
     assert!(w.agent.state.orders.retire.is_none());
     let (outcome, detail) = answer_of(&w, "ho_r1");
     assert_eq!(outcome, "done", "{detail}");
+    // The journal's one word on the order is its answer.
+    let lines = order_lines(&w, "ho_r1");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["outcome"], "done");
     assert!(
         detail.starts_with(
             "stopped and removed 3 container(s) and 1 network(s) of compose project omarchy-pool; the marker is in "
