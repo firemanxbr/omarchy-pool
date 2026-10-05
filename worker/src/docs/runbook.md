@@ -761,8 +761,13 @@ Preflight, before it starts any VM:
   VM (`colima ssh -- sudo -n sh -c ...`, Colima's passwordless sudo) — the
   task subnets reach no private, CGNAT, link-local or VM address, DNS to the
   VM's own resolvers excepted. Colima's NAT carries a task's connection to
-  your router and your LAN otherwise. A VM boot loses it: the agent puts it
-  back after every start, hourly and after a wake;
+  your router and your LAN otherwise. It is kept in the VM
+  (`/usr/local/libexec/omarchy-task-firewall` and
+  `omarchy-task-firewall.service`, after `docker.service`, as prep-root.sh
+  does on Linux), so every boot of the VM applies it as soon as dockerd is
+  up, not when the agent next looks; the agent runs it again after every
+  start, hourly and after a wake, which repairs it and carries a change of
+  the task subnets;
 - through the release's pinned CLI on `~/.colima/omarchy/docker.sock`: the
   capacity inside the VM (`MemAvailable` read inside it), the three
   directories visible in the VM at their own paths and your home directory
@@ -805,7 +810,7 @@ launchd starts it again), not restarting every ten seconds.
 `omarchy-agent uninstall`, from Terminal: boots the agent out and removes
 the plist, removes the bundle's and the tasks' containers (starting the VM
 for it when it is stopped), empties the set directory, and stops the VM;
-`colima delete -p omarchy` removes it and its disk.
+`colima delete -p omarchy` removes it, its disk and the task firewall in it.
 
 What needs the laptop, by hand, following this section word for word before
 #320 is called done: install from nothing with the pasted command and confirm

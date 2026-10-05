@@ -27,8 +27,9 @@
 //!   person (another VM type or architecture).
 //! - **The task firewall** ([`firewall`]): prep-root.sh's step 9 inside the VM, where the
 //!   agent is root (Colima's passwordless sudo) — the task subnets reach no private, CGNAT,
-//!   link-local or VM address — run after every start of the profile, since a boot loses
-//!   it. Colima's NAT carries a task's connection to the Mac's LAN otherwise.
+//!   link-local or VM address — kept in the VM with a unit that applies it after
+//!   `docker.service` at every boot, and run again after every start of the profile.
+//!   Colima's NAT carries a task's connection to the Mac's LAN otherwise.
 //! - **Colima's environment** ([`colima_env`], [`colima`]): launchd's `PATH` with the pinned
 //!   docker CLI first (Colima wants a `docker` client before it starts a profile) and the
 //!   agent's own `DOCKER_CONFIG`, every call with a deadline.
@@ -528,12 +529,69 @@ pub fn colima(
     }
 }
 
+/// Where the omarchy VM keeps the task firewall's rules, and the unit that applies them at
+/// every boot of the VM: prep-root.sh's names on a Linux host.
+pub(crate) const FIREWALL_RULES: &str = "/usr/local/libexec/omarchy-task-firewall";
+pub(crate) const FIREWALL_UNIT: &str = "/etc/systemd/system/omarchy-task-firewall.service";
+
 /// The task firewall of the omarchy VM (#320; design v2 §9.4): prep-root.sh's step 9 as
-/// one idempotent script, run as root inside the VM (`colima ssh -- sudo -n sh -c`) after
-/// every start of the profile, since a boot of the VM loses it. On a Linux host
-/// `omarchy-task-firewall.service` does this; in the VM nothing else would, and Colima's
-/// NAT carries a task's connection to the Mac's router, the Mac's own LAN address and
-/// [`VM_HOST`].
+/// one idempotent script, run as root inside the VM (`colima ssh -- sudo -n sh -c`). It
+/// writes the rules ([`firewall_rules`]) and, under systemd, the unit that applies them
+/// after `docker.service` at every boot of the VM — as `omarchy-task-firewall.service`
+/// does on a Linux host — so a boot (a login, a resize, a clock restart) leaves no window
+/// in which the dispatcher, which dockerd starts with itself, runs a task unwalled until
+/// the agent looks. The VM's disk keeps both across `colima stop` and `start`. Then it
+/// applies them now. The agent runs it after every start of the profile, hourly and after
+/// a wake, which repairs the rules and carries a change of the task subnets; the unit is
+/// reloaded only when it changed. Colima's NAT carries a task's connection to the Mac's
+/// router, the Mac's own LAN address and [`VM_HOST`]: nothing else in the VM stops it.
+pub(crate) fn firewall(subnets: &[Cidr]) -> String {
+    let unit = [
+        "# omarchy-agent (omarchy-pool): the task subnets' drop rules, after docker, at every boot of the VM.",
+        "[Unit]",
+        "Description=omarchy-pool: task subnets reach no private, link-local or VM address",
+        "After=docker.service systemd-resolved.service",
+        "Wants=docker.service",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        "RemainAfterExit=yes",
+        &format!("ExecStart={FIREWALL_RULES}"),
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+    ]
+    .join("\n");
+    format!(
+        r"set -e
+umask 022
+mkdir -p /usr/local/libexec
+cat > {FIREWALL_RULES}.new <<'OMARCHY_RULES'
+#!/bin/sh
+# omarchy-agent (omarchy-pool): task subnets reach no private, CGNAT, link-local or VM address (design v2 §9.4).
+# Rebuilt whole on every run; the chains are this file's own.
+{rules}OMARCHY_RULES
+chmod 0755 {FIREWALL_RULES}.new
+mv -f {FIREWALL_RULES}.new {FIREWALL_RULES}
+if [ -d /run/systemd/system ]; then
+  cat > {FIREWALL_UNIT}.new <<'OMARCHY_UNIT'
+{unit}
+OMARCHY_UNIT
+  if cmp -s {FIREWALL_UNIT}.new {FIREWALL_UNIT}; then
+    rm -f {FIREWALL_UNIT}.new
+  else
+    mv -f {FIREWALL_UNIT}.new {FIREWALL_UNIT}
+    systemctl daemon-reload
+  fi
+  systemctl is-enabled --quiet omarchy-task-firewall.service || systemctl enable --quiet omarchy-task-firewall.service
+fi
+{FIREWALL_RULES}
+",
+        rules = firewall_rules(subnets),
+    )
+}
+
+/// The rules [`firewall`] keeps in the VM: prep-root.sh's step 9 for the task subnets.
 ///
 /// The chains are the script's own and rebuilt whole: the task subnets reach each other
 /// (a task's network holds its sidecars) and no private, CGNAT or link-local address
@@ -542,7 +600,7 @@ pub fn colima(
 /// (Lima's `192.168.5.3`), which Docker's embedded DNS server forwards to from the task's
 /// own namespace — a name is still checked by the egress sidecar against the address it
 /// resolves to. IPv4 only, as there.
-pub(crate) fn firewall(subnets: &[Cidr]) -> String {
+pub(crate) fn firewall_rules(subnets: &[Cidr]) -> String {
     let mut s = vec![
         "set -e".to_owned(),
         // The VM's resolvers: systemd-resolved's upstream, else resolv.conf's; never a

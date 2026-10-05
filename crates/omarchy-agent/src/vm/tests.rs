@@ -412,7 +412,7 @@ fn colima_runs_with_the_pinned_docker_cli_first_and_the_agents_own_docker_config
 #[test]
 fn the_task_firewall_is_prep_roots_step_nine_with_dns_to_the_vms_resolvers() {
     let subnets = crate::install::net::parse_list("10.231.0.0/16,10.232.0.0/16").unwrap();
-    let s = firewall(&subnets);
+    let s = firewall_rules(&subnets);
     assert!(s.starts_with("set -e\n"));
     for t in ["10.231.0.0/16", "10.232.0.0/16"] {
         assert!(s.contains(&format!(
@@ -452,4 +452,94 @@ fn the_task_firewall_is_prep_roots_step_nine_with_dns_to_the_vms_resolvers() {
         .unwrap()
         .overlaps(vm_host));
     assert_eq!(as_root(&s)[..4], ["sudo", "-n", "sh", "-c"]);
+}
+
+#[test]
+fn the_task_firewall_is_kept_in_the_vm_and_applied_at_its_every_boot_after_docker() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // The script as the VM runs it, its absolute paths moved under a scratch root, with
+    // iptables and systemctl played.
+    let root = tempdir();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let r = root.display();
+    for (tool, body) in [
+        ("iptables", format!("echo \"$*\" >> '{r}/iptables.log'")),
+        (
+            "systemctl",
+            format!(
+                "echo \"$*\" >> '{r}/systemctl.log'\ncase \"$1\" in is-enabled) [ -e '{r}/enabled' ] ;; enable) touch '{r}/enabled' ;; esac"
+            ),
+        ),
+    ] {
+        let p = bin.join(tool);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let subnets = crate::install::net::parse_list("10.231.0.0/16").unwrap();
+    let script = firewall(&subnets)
+        .replace("/usr/local/libexec", &format!("{r}/usr/local/libexec"))
+        .replace("/etc/systemd/system", &format!("{r}/etc/systemd/system"))
+        .replace("/run/systemd/system", &format!("{r}/run/systemd/system"));
+    let run = || {
+        let o = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    };
+    let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap_or_default();
+    let rules = root.join(FIREWALL_RULES.trim_start_matches('/'));
+    let unit = root.join(FIREWALL_UNIT.trim_start_matches('/'));
+
+    // Without systemd: the rules are kept and applied, no unit.
+    run();
+    assert_eq!(
+        std::fs::metadata(&rules).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    let kept = std::fs::read_to_string(&rules).unwrap();
+    assert!(kept.starts_with("#!/bin/sh\n"), "{kept}");
+    assert!(kept.ends_with(&firewall_rules(&subnets)), "{kept}");
+    assert!(read("iptables.log").contains("-A OMARCHY-TASKS-HOST -s 10.231.0.0/16 -j DROP"));
+    assert!(!unit.exists() && read("systemctl.log").is_empty());
+
+    // Under systemd: the unit, after docker, enabled for every boot.
+    std::fs::create_dir_all(root.join("run/systemd/system")).unwrap();
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    run();
+    let u = std::fs::read_to_string(&unit).unwrap();
+    for want in [
+        "After=docker.service",
+        "Wants=docker.service",
+        "Type=oneshot",
+        &format!("ExecStart={}", rules.display()),
+        "WantedBy=multi-user.target",
+    ] {
+        assert!(u.contains(want), "{want}:\n{u}");
+    }
+    let calls = read("systemctl.log");
+    assert!(
+        calls.contains("daemon-reload")
+            && calls.contains("enable --quiet omarchy-task-firewall.service"),
+        "{calls}"
+    );
+    // Again (after the next start, hourly): the rules again, systemd left alone.
+    std::fs::write(root.join("systemctl.log"), "").unwrap();
+    std::fs::write(root.join("iptables.log"), "").unwrap();
+    run();
+    assert_eq!(
+        read("systemctl.log").trim(),
+        "is-enabled --quiet omarchy-task-firewall.service"
+    );
+    assert!(read("iptables.log").contains("-F OMARCHY-TASKS-HOST"));
+    assert!(!Path::new(&format!("{}.new", unit.display())).exists());
 }

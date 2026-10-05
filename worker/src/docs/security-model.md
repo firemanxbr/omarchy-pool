@@ -499,8 +499,11 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   directory — no `~/.ssh`, no Keychain files, no forwarded SSH agent; preflight
   checks from a container that the VM sees those three and not the home
   directory, and the lint refuses a bind outside them. Inside the VM the
-  agent is root (Colima's passwordless sudo) and puts prep-root.sh's task
-  firewall there after every start — a boot loses it — so a task reaches
+  agent is root (Colima's passwordless sudo) and keeps prep-root.sh's task
+  firewall there with the same unit, after `docker.service`, so every boot
+  of the VM (a login, a resize, a clock restart) applies it as soon as
+  dockerd is up, as on a Linux host, not when the agent next looks; it runs
+  it again after every start, hourly and after a wake. A task reaches
   neither your LAN nor the Mac through Colima's NAT, and the egress probe
   checks it before install goes on. Docker Desktop's or OrbStack's VM
   (`vm-shared`) is used only if it is already there, with nothing of the
