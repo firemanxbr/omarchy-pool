@@ -26,8 +26,10 @@
  * - a size-4 task on a busy host: after 30 minutes the host reserves for
  *   it, takes nothing else, and leases it when its units fit — an older build
  *   that waits for another reason (needs_native) turns nothing off; its two
- *   hours spent, it is not marked again for 30 minutes, then is; a task
- *   larger than every host alive is clamped, with a Status line;
+ *   hours spent, it is not marked again for 30 minutes, then is; a host
+ *   whose claim cannot take the task it reserves for (its agent's probe
+ *   failing, builds held for disk) takes other work; a task larger than
+ *   every host alive is clamped, with a Status line;
  * - what the dispatcher's memory offers bounds this claim, not the host's
  *   size: a large build waits rather than run smaller;
  * - a host below the minimum by its last report claims nothing; a work root
@@ -35,7 +37,8 @@
  * - out of memory says "out of memory at 4 GB (size 1)", and a maintainer's
  *   Retry at size requeues it at the size chosen — the package page says it
  *   and offers it for a build queued again after running out of memory, not
- *   only for one whose attempts are spent; a package's size set on its
+ *   only for one whose attempts are spent, at the size it waits at; a
+ *   package's size set on its
  *   page; the pool's cap on a host set by its owner or any maintainer;
  * - a legacy registration as a host with one lane and one build;
  * - and what the planner reads for the new statements.
@@ -96,14 +99,14 @@ async function seedHost(id: string, b: Box, o: { poolCap?: number | null } = {})
 const keepAlive = (id: string) => env.DB.prepare("UPDATE build_workers SET last_seen = ? WHERE id = ?").bind(new Date().toISOString(), id).run();
 
 let seq = 0;
-interface ClaimOpts { want?: 0 | 1; leases?: { task: number; gen: string }[]; capacity?: unknown; offer?: number }
+interface ClaimOpts { want?: 0 | 1; leases?: { task: number; gen: string }[]; capacity?: unknown; offer?: number; kinds?: string[]; agentStatus?: "ok" | "error" }
 /** A claim as the host's dispatcher sends it (design v2 §8.1). */
 const claim = (id: string, o: ClaimOpts = {}) => {
   const b = boxes.get(id)!;
   return call("POST", "/factory/claim", { token: `omw_${id}`, body: {
-    arch: b.lanes.find((l) => l.mode === "native")!.arch, version: "v1.0.2", hostname: id, kinds: ["build", "trial", "audit"], claim_id: `c_cap${String(++seq).padStart(8, "0")}`, want: o.want ?? 1,
+    arch: b.lanes.find((l) => l.mode === "native")!.arch, version: "v1.0.2", hostname: id, kinds: o.kinds ?? ["build", "trial", "audit"], claim_id: `c_cap${String(++seq).padStart(8, "0")}`, want: o.want ?? 1,
     leases: o.leases ?? [], capacity: o.capacity ?? capOf(b), agent: { provider: "anthropic", model: "claude-test", probe: "ok", checked_at: "2026-10-01T00:00:00Z" },
-    ...(o.offer === undefined ? {} : { offer: o.offer }),
+    ...(o.offer === undefined ? {} : { offer: o.offer }), ...(o.agentStatus === undefined ? {} : { agent_status: o.agentStatus }),
   } });
 };
 /** Claims until it is handed nothing, as the dispatcher claims again at once after a task: the leases it got. */
@@ -449,6 +452,27 @@ describe("sizes and the reservation for large tasks (D31)", () => {
     expect((await taskOf(smalls[1])).status).toBe("queued");
   });
 
+  it("a reserving host whose claim cannot take its task — its agent's probe failing, builds held for disk — takes other work, whatever its free units; once it can read it, the mark holds", async () => {
+    const host = await seedHost("studio-p", { ...STUDIO, lanes: [{ arch: "aarch64", mode: "native" }] });
+    await env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, size) VALUES ('drafted', 'm1', 'https://drafted.example', '[\"aarch64\"]', 'waiting', 4)").run();
+    // A contributor's draft of size 4 (model work), reserved for by this idle host.
+    const big = await seedTask({ name: "drafted", ref: "draft:drafted@1", ago: 40 });
+    await env.DB.prepare("UPDATE hosts SET reserving_task = ?, reserving_since = ? WHERE id = ?").bind(big, new Date().toISOString(), host).run();
+    const small = await seedTask({ ago: 5 });
+    const trial = await seedTask({ kind: "trial", ago: 5 });
+    // Its agent's probe failing: the draft is no task this claim can take, so the host takes the project's build rather than idle out the mark.
+    const a = await claim("studio-p", { agentStatus: "error" });
+    expect(a.json.task).toMatchObject({ id: small, size: 1 });
+    // Builds held for disk (the claim's kinds: trials and audits): the trial.
+    const b = await claim("studio-p", { agentStatus: "ok", kinds: ["trial", "audit"], leases: [{ task: small, gen: a.json.task.lease_gen }] });
+    expect(b.json.task).toMatchObject({ id: trial });
+    // The mark stands, and once the claim reads its task it holds: six units free of the eight it needs, nothing else taken.
+    expect((await env.DB.prepare("SELECT reserving_task FROM hosts WHERE id = ?").bind(host).first<any>()).reserving_task).toBe(big);
+    const next = await seedTask({ ago: 1 });
+    expect((await claim("studio-p", { agentStatus: "ok", leases: [{ task: small, gen: a.json.task.lease_gen }, { task: trial, gen: b.json.task.lease_gen }] })).status).toBe(204);
+    expect((await taskOf(next)).status).toBe("queued");
+  });
+
   it("what the dispatcher's memory offers bounds this claim, not the host's size: a large build waits rather than run smaller", async () => {
     await seedHost("studio-mem", { ...STUDIO, lanes: [{ arch: "aarch64", mode: "native" }] });
     await env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, size) VALUES ('llvm-m', 'm1', 'https://llvm.org', '[\"aarch64\"]', 'waiting', 4)").run();
@@ -551,8 +575,20 @@ describe("out of memory, and Retry at size", () => {
     d.setWHO(d.identity({ login: "bob", role: "contributor" }));
     expect(d.buildPanel()).toContain("aarch64 is queued again after running out of memory");
     expect(d.buildPanel()).not.toContain("data-retry-size");
-    // Queued as any other build: waiting for a worker, nothing said of memory.
+    // A maintainer's Retry at size queued it at size 2 (params.size; the error keeps size 1 until its next lease): the page says size 2,
+    // and offers nothing it already asks — a contributor's build stops at 2 — nor size 2 again for a project's build, but size 3.
     d.setWHO(d.identity({ login: "m1", role: "maintainer" }));
+    const retried = { ...b, params: { size: 2 } };
+    expect(d.buildMark(retried)).toEqual(["wait", "queued again", "out of memory at 4 GB (size 1); queued again at size 2"]);
+    d.setST(story(retried));
+    expect(d.buildPanel()).toContain(`aarch64 is queued again at size 2 after running out of memory: “${error}”.`);
+    expect(d.buildPanel()).not.toContain("data-retry-size");
+    d.setST(story({ ...retried, trust: "project" }));
+    expect(d.buildPanel()).toContain('data-oom="1" data-retry-size="41" data-size="2" data-max="4">Retry at size 3</button>');
+    // Once it ran out of memory at size 2 too, the same size again.
+    const again = { ...retried, trust: "project", error: "out of memory at 8 GB (size 2) — the engine killed it: Killed (exit 137): cc1plus" };
+    expect(d.buildMark(again)).toEqual(["wait", "queued again", "out of memory at 8 GB (size 2); queued again at the same size"]);
+    // Queued as any other build: waiting for a worker, nothing said of memory.
     const plain = { ...b, attempts: 0, error: null as unknown as string };
     expect(d.buildMark(plain)).toEqual(["wait", "queued", "waiting for a worker"]);
     d.setST(story(plain));

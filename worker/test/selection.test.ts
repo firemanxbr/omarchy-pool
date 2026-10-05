@@ -36,7 +36,9 @@
  *   spent, it is not marked again for 30 minutes, then is, and starts when
  *   its host ran a build longer than the window; a reserving host whose free
  *   units reach the task takes other work while it cannot lease it (its
- *   owner's cap, the claim's memory offer), the task first when it can; one
+ *   owner's cap, the claim's memory offer), the task first when it can,
+ *   and one whose claim cannot take the task (its probe failing, builds
+ *   held for disk) takes other work, whatever its free units; one
  *   larger than every host alive is clamped; an emulated one of any size
  *   starts when the emulated lanes hold nothing; a claim's memory offer
  *   bounds that claim only;
@@ -179,6 +181,9 @@ class Sim {
         if (marks.set) {
           this.members.find((x) => x.id === marks.set!.host)!.reserving = { task: marks.set.task, since: this.now };
           this.queue.find((q) => q.id === marks.set!.task)!.reserved_at = this.now;
+          // Marked at this very claim, after the reads: the route hands selection its task too, so the mark holds.
+          const t = oldest.find((c) => c.id === marks.set!.task);
+          if (marks.set.host === m.id && t && !candidates.some((c) => c.id === t.id)) candidates.push(t);
         }
       }
       const c = select(m, this.fleet(), candidates, this.now, this.rules)[0];
@@ -702,8 +707,36 @@ describe("sizes and the reservation for large tasks", () => {
     // The memory back: the task first, ahead of a more urgent build that arrived since.
     const urgent = task({ arch: "aarch64", priority: 50, queued_at: T0 });
     expect(select(g4, { members: [g4], leases: [] }, [urgent, llvm, ...builds], T0, R)[0]).toMatchObject({ id: llvm.id, size: 4, units: 8 });
-    // A mark whose task the claim did not read holds: set at this very claim, after the reads, its task fits no host now.
-    expect(select(g4, { members: [g4], leases: [] }, builds, T0, R)).toEqual([]);
+    // A mark whose task the claim did not read holds nothing: the reads bring only what this claim can take, so G takes other work
+    // rather than idle out the mark's two hours (below: its probe failing, builds held for disk).
+    expect(select(g4, { members: [g4], leases: [] }, builds, T0, R).map((c) => c.id)).toEqual(builds.map((t) => t.id));
+  });
+
+  it("a reserving host whose claim cannot take its task — its agent's probe failing, builds held for disk — takes other work, whatever its free units; a mark set at the claim itself holds", () => {
+    // An 11-unit host reserving for a size-4 model build (a contributor's draft), holding nothing.
+    const draft = task({ arch: "aarch64", size: 4, model: true, queued_at: T0 - 60 * MIN });
+    const plain = [0, 1, 2].map(() => task({ arch: "aarch64", queued_at: T0 - 5 * MIN }));
+    const h = host("h", "aarch64", 11, { reserving: { task: draft.id, since: T0 - 10 * MIN } });
+    // Its probe answering, the task read: the task first, then the builds.
+    expect(select(h, { members: [h], leases: [] }, [draft, ...plain], T0, R).map((c) => c.id)).toEqual([draft.id, ...plain.map((t) => t.id)]);
+    // Its probe failing: the claim's reads leave the model build out (and selection would too), and the three builds are taken.
+    const failing: Member = { ...h, probe_ok: false };
+    expect(select(failing, { members: [failing], leases: [] }, [draft, ...plain], T0, R).map((c) => c.id)).toEqual(plain.map((t) => t.id));
+    expect(select(failing, { members: [failing], leases: [] }, plain, T0, R).map((c) => c.id)).toEqual(plain.map((t) => t.id));
+    // Builds held for disk (the claim's kinds: trials and audits): a trial and an audit.
+    const trial = task({ arch: "aarch64", kind: "trial", queued_at: T0 - 5 * MIN });
+    const audit = task({ arch: "aarch64", kind: "audit", model: true, queued_at: T0 - 5 * MIN });
+    const diskHeld: Member = { ...h, kinds: ["trial", "audit"] };
+    expect(select(diskHeld, { members: [diskHeld], leases: [] }, [trial, audit], T0, R).map((c) => c.id)).toEqual([trial.id, audit.id]);
+    // A mark set at this very claim, after its reads: the claim hands selection its task too (as routes/factory.ts does), so it holds
+    // while the host's free units are below it — four free, the task's eight: nothing taken, the small builds wait.
+    const studio = host("studio", "aarch64", 11);
+    const s = new Sim([studio]);
+    s.leases.push(...[0, 1, 2].map((i) => ({ task: 900 + i, by: "studio", kind: "build", arch: "aarch64", lane: "native" as Mode, units: 2, model: false, trust: "project", owner: null, disk_gb: 20, started: T0, ends: T0 + 600 * MIN })));
+    const [big] = s.add({ arch: "aarch64", size: 4, queued_at: T0 - 31 * MIN });
+    s.add({ arch: "aarch64" }, 2);
+    expect(s.claim(studio)).toEqual([]);
+    expect(studio.reserving).toEqual({ task: big.id, since: T0 });
   });
 
   it("a claim's memory offer bounds that claim only: the host's size, its builds and the largest size it runs stay what its units say", () => {

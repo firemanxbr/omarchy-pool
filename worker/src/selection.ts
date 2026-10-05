@@ -35,7 +35,9 @@
  *   pool jobs only while its free units are below the task's; once they
  *   reach it, that task goes first when the host can lease it, and other
  *   work when it cannot (its owner at their cap, the memory this claim
- *   offers, an agent slot), rather than idle out the mark;
+ *   offers, an agent slot), rather than idle out the mark — as it does
+ *   while its claim cannot take the task at all (its kinds this round, the
+ *   probe), whatever its free units;
  * - **the per-owner cap** (D51): a contributor's community builds leased
  *   across the fleet stay within ceil(total builds / divisor), at least 1 —
  *   the divisor is a setting (`owner-cap-divisor`, 4; 0 lifts the cap).
@@ -357,12 +359,14 @@ export function select(H: Member, fleet: Fleet, candidates: Candidate[], now: nu
   const mark = H.legacy ? null : reservingNow(H, now);
   // A host reserving for a large task takes that task and pool jobs only while its free units are below the task's (§8.3: "until its
   // free units reach the task's size"). Once they reach it the task goes first when H can lease it; when it cannot — its owner at their
-  // cap, the memory this claim offers, an agent slot, T — H takes other work rather than idle out the mark. A mark whose task the claim
-  // did not read holds: it was set at this very claim, after the reads, for a task that fits no host now (one leased elsewhere or
-  // cancelled has its mark cleared before selection).
+  // cap, the memory this claim offers, an agent slot, T — H takes other work rather than idle out the mark. A mark whose task is not
+  // among the candidates holds nothing: the claim's reads are filtered by what H takes now (its kinds this round — none but trials
+  // and audits while its dispatcher holds builds for disk —, the probe, the pin), so that task is one this claim could never lease,
+  // and holding for it would idle H until the mark's two hours are up. A mark set at this very claim, after the reads, comes with its
+  // task (routes/factory.ts selectAndLease adds it): it fits no host now, so it holds while H's free units are below it.
   const marked = mark ? candidates.find((c) => c.id === mark.task) : undefined;
   const free = H.units - r.job_reserved - held.reduce((n, l) => n + l.units, 0);
-  const holding = mark !== null && (marked === undefined || free < unitsOf(marked.kind, sizeOf(marked, largest, r)?.size ?? null, r));
+  const holding = mark !== null && marked !== undefined && free < unitsOf(marked.kind, sizeOf(marked, largest, r)?.size ?? null, r);
   const pool = holding ? candidates.filter((c) => c.id === mark.task || !TASK_KINDS.includes(c.kind)) : candidates;
   // A native-lane task for H is queued: the emulated lanes keep to their share while it waits.
   const nativeQueued = pool.some((c) => takes(H, c) && laneFor(H, c, r)?.mode === "native" && LANE_KINDS.includes(c.kind));

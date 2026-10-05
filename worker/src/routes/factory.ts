@@ -1088,6 +1088,9 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
         env.DB.prepare("UPDATE build_tasks SET reserved_at = ? WHERE id = ? AND status = 'queued' AND changes() > 0").bind(at, marks.set.task),
       );
       m.reserving = { task: marks.set.task, since: nowMs };
+      // Marked at this very claim, after the reads: its task joins the candidates, so the mark holds while H's free units are below it
+      // (selection.ts holds only for a task the claim read — one it can take). It fits no host now, so selection does not choose it.
+      if (m === me && t && !all.some((c) => c.id === t.id)) all.push(t);
     }
     if (writes.length) await env.DB.batch(writes);
   }
