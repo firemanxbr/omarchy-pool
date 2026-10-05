@@ -117,7 +117,13 @@ secret). Everything travels in the `Authorization` header over TLS only.
   it exits, uploads only the files its kind may upload, under a size cap, and
   walks a package it wrote for an extension member the archive reader would
   buffer whole before it reads one; the engine's out-of-memory kill is the
-  engine's word, whatever the script said.
+  engine's word, whatever the script said. A task on an emulated lane runs
+  its architecture under the host's binfmt handler and is told only
+  `WORKER_LABELS={"emulated":true}` (#338); the `needs_native` that gives a
+  build its attempt back counts only from a lease the pool itself put on an
+  emulated lane, so a recipe on a native lane cannot buy its attempts back
+  with it, and one that says it on an emulated lane never runs emulated
+  again.
   The dispatcher refuses to start with a package signing key in its
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
