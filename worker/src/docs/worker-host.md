@@ -184,7 +184,7 @@ refuses a replay, a changed body and a clock more than 120 s off
 for the host's state every two minutes or so — the release to run, its
 settings and the host orders (#344, #325) — and reports what it did.
 
-### Settings and host orders
+## Settings and host orders
 
 **Host orders** (#344) are given on the host's page. **Reconcile now** (its
 owner or any maintainer) makes its agent run a round at its next poll.
@@ -231,9 +231,9 @@ switch compose/podman` (or `compose/docker`) moves the dispatcher to the
 other engine with the same guard as a release, and back if it fails there;
 the pool cannot choose it. Drain the host's registration and let its tasks
 finish first: task containers and caches do not move between engines
-([Runbook](/docs/runbook#the-run-loop)).
+([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
 
-### Stopping a host
+## Stopping a host
 
 To stop a host, use its page, `/hosts/<id>` (#322). **Suspend** (its
 owner or any maintainer, with a reason) stops its claims at once and
