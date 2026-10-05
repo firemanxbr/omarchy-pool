@@ -480,6 +480,8 @@ POST /factory/claim   {arch, version, hostname, kinds, agent: {provider, model, 
                        claim_id,            c_…, new per attempt: a retry after a lost answer reuses it and gets the same lease, a fresh token
                        want,                1 to take a task, 0 to reconcile and take orders only (every 30 s while it is full)
                        capacity,            {cpus, mem_gb, disk_free_gb: {work, engine}, units, job_reserved, agent_slots, lanes} (required with want 1)
+                       offer?,              the units this claim offers when MemAvailable holds fewer than its free units (#337): no task
+                                            above it this round; the host is still counted by its capacity (its builds, the largest size)
                        leases}              [{task, gen}]: every lease the dispatcher holds
   400 a field missing or malformed: nothing is guessed
 ```
@@ -513,7 +515,8 @@ loop       per lease: heartbeat (409 stop: kill, fail as stopped), its own watch
            floor: the youngest build killed `lost`, want 0 until the space is back; a build refused at start
            for its budget: builds left out of the claims, trials and audits not, until it fits, 30 min at most);
            then the claim: want 1 while units are free beside its leases and the job unit, offering only what
-           MemAvailable still holds below the largest task it could receive (#337) — again at the next tick
+           MemAvailable still holds below the largest task it could receive (#337; the shares of the leases it
+           started in the last 5 minutes subtracted: their containers have not grown yet) — again at the next tick
            after a task, every 30 s otherwise; want 0 every 30 s when full or when fewer units than leases
            remain (nothing running is killed); each lease starts at once in its own container, no host queue
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
@@ -535,11 +538,22 @@ agent      the claim's agent: {provider, model, probe, error, checked_at} from a
            calls (OMARCHY_AGENT_CALLS_PER_DAY) spent: agent_slots 0 in the claim and no model task starts
 ```
 
-A claim (#337, design v2 §8.3; `worker/src/selection.ts`) reads a bounded
-head of the queue (`ORDER BY priority, id LIMIT 50`) and each contributor's
-first community build beside it (a walk over the owners through a partial
-index, so one contributor's backlog never hides another's package), the
-registrations alive, every lease the pool holds, the sizes set for the
+A claim (#337, design v2 §8.3; `worker/src/selection.ts`) with nothing
+queued of its kinds reads nothing more (one probe of the kind index).
+Otherwise it reads the registrations alive and every lease the pool holds
+first, so it knows the
+claimer's room — its free units (and its `offer`), a free agent slot, its
+disk, the largest size alive, the contributors at their cap. Then bounded
+heads of the queue (`ORDER BY priority, id LIMIT 50`), each filtered in SQL
+by that room so a head of tasks it cannot take never hides one it can: one
+per arch of its lanes (a long backlog of one arch never hides another's, so
+the guaranteed share and native work arriving are always seen), one of the
+arch-neutral kinds, each contributor's first community build of each arch
+(a walk over the owners through a partial index, so one contributor's
+backlog never hides another's package, and a capped contributor's flood
+hides no one's), the first native task whatever its size (it holds the
+emulated lanes to their share), the task the host reserves for, and the
+oldest builds the reservation weighs; then the sizes set for the
 candidates' packages and their last native build; selection orders the
 candidates — priority, then community builds round-robin by owner (within a
 per-owner cap, the `owner-cap-divisor` setting), then effective age (the

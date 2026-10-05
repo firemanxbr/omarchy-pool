@@ -801,7 +801,12 @@ pool recomputes from its totals with the signed constants, the pool's cap).
 Before each claim its dispatcher checks `MemAvailable` against the largest
 task it could receive and offers only what still fits (a shared machine, a
 laptop in use, the Studio's legacy set during the canary): its log says
-`… GB available in memory: this claim offers N of M free unit(s)`.
+`… GB available in memory: this claim offers N of M free unit(s)`. The
+shares of the leases it started in the last five minutes count as used
+(`… (K GB of it promised to leases just started)`): their containers have
+not grown yet, so a burst of claims never offers the same memory twice.
+The offer bounds that claim only — the host is still counted by its units,
+so a size-4 build waits for memory rather than run smaller.
 
 - **Native first, emulated after T.** A build of an arch the host runs
   emulated waits its threshold T — twice the last native build of that
@@ -831,13 +836,21 @@ laptop in use, the Studio's legacy set during the canary): its log says
   the page's word wins until it is cleared). A contributor's build runs at
   size 2 at most, every build at the largest size a host alive runs — a
   clamped one says so in the journal (`… asked size 4; the largest host
-  alive runs size 3`). A build of size 2 or more that has waited 30 minutes
-  and fits no host's free units makes the host with the most free units
-  **reserve** for it: that host takes nothing else but pool jobs until the
-  build fits (a `host` line says so), two hours at most; the host page shows
-  it. A build that ran out of memory says *out of memory at 4 GB (size 1)*
-  on its package's page and on Review, where a maintainer's **Retry at
-  size N** queues it again at the size chosen, for one more try.
+  alive runs size 3`). The oldest build of size 2 or more that has waited
+  30 minutes, that some host alive could run and its owner's cap does not
+  hold back, and that fits no host's free units makes the host with the
+  most free units **reserve** for it: that host takes nothing else but pool
+  jobs until the build fits (a `host` line says so), two hours at most; the
+  host page shows it. An older build waiting for another reason (a
+  `needs_native` one with no native host, a capped contributor's) does not
+  stop it. Two hours spent, the mark clears and the host goes back to
+  normal selection: that build is not reserved for again until it has been
+  leased (`build_tasks.reserved_at`), so a host never holds back work for
+  one task indefinitely; a maintainer who wants it built sooner lowers its
+  size on the package's page. A build that ran out of
+  memory says *out of memory at 4 GB (size 1)* on its package's page and on
+  Review, where a maintainer's **Retry at size N** queues it again at the
+  size chosen (up to the largest a host alive runs), for one more try.
 - **The pool's cap** (`hosts.pool_cap_units`): its owner or any maintainer
   sets it on the host's page, with a reason — the Studio canary runs at 3
   units, one build (§21.1). Lowered below what the host runs, nothing ends;
