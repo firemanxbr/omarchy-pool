@@ -13,12 +13,15 @@
  *   GET  /hosts/:id              one host, and its leases (the host page)
  *   POST /hosts/:id/confirm      its owner, once: the host's one worker registration (kind host, project trust)
  *   POST /hosts/:id/orders       a host order (#344): reconcile-now — its owner or any maintainer —, retire-legacy — its owner,
- *                                with a passkey; one open per kind, each with a not_after
+ *                                with a passkey; one open per kind, each with a not_after; P4's (#325): set-units, set-emulate,
+ *                                rotate-token, retry-release, diagnostics — its owner or any maintainer, an agent from 0.4.0
+ *   GET  /hosts/:id/diagnostics/:order   the dispatcher's log lines a diagnostics order brought: its owner's and the maintainers'
  *   GET  /hosts/self/state       signed by the host key: what the pool says of the host — its release target, its
- *                                registration's open Updates and its open host orders (#344)
+ *                                registration's open Updates, its open host orders (#344) and its settings (#325)
  *   POST /hosts/self/token       signed: mint the host worker token (first fetch and every rotation alike); the one it
  *                                replaces stays valid ten minutes, so only the dispatcher is recreated
  *   POST /hosts/self/report      signed: the host report (design v2 §17.2), at most 16 KiB
+ *   POST /hosts/self/diagnostics signed: the lines a diagnostics order asked for (#325), at most 64 KiB
  *
  * A signed request (hosts.ts) can read the host's state, fetch or rotate its
  * worker token and report — nothing else: it cannot claim (a claim needs the
@@ -41,7 +44,8 @@ import {
   unitsOf, verifySignature, ENROLL_TTL_MIN, MIN_HOST, HOST_NAME, HOST_REPORT_FRESH_MIN, ISOLATIONS, NONCE_KEEP_MIN, OLD_TOKEN_GRACE_MIN, REPORT_MAX_BYTES, SIGNED_SKEW_S, TOKEN_ROTATE_DAYS,
   hostReason, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
   agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT,
-  type Capacity, type HostOrderKind, type Isolation,
+  agentTakesSettings, hostSettingsOf, orderArg, reportedBrakeOf, reportedSettingsOf, DIAGNOSTIC_LINE_MAX, DIAGNOSTIC_LINES, DIAGNOSTICS_MAX_BYTES, HOST_ORDER_ID, HOST_SETTINGS_AGENT, SETTINGS_ORDER_KINDS,
+  type Capacity, type HostOrderKind, type Isolation, type OrderArg,
 } from "../hosts";
 import { parseTag } from "../update";
 
@@ -60,6 +64,8 @@ export interface HostRow {
   report: string | null; reported_at: string | null; last_seen: string | null; enrolled_at: string; confirmed_at: string | null; worker_id: string | null; token_issued_at: string | null;
   /** #322: who suspended, resumed or retired it last, when and why; when the sync found its owner gone from the list. */
   status_by: string | null; status_at: string | null; status_reason: string | null; owner_removed_at: string | null;
+  /** #325: the settings its agent took (its last set-units and set-emulate answered done). */
+  settings: string | null;
 }
 
 function newToken(prefix: string): string {
@@ -154,12 +160,26 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
     round: h.report ? ((JSON.parse(h.report) as { round?: unknown }).round ?? null) : null,
     // The legacy set its agent reports (#344): the project, its state and directory, what a retire-legacy would be refused for.
     legacy: legacyOf(h.report),
+    // Its settings (#325): what its agent reports — the narrowing, the envelope it narrows inside, what applies —, what the pool keeps
+    // for it, the brake's last window, and the releases it holds in quarantine (what retry-release lifts).
+    settings: reportedSettingsOf(h.report), pool_settings: hostSettingsOf(h.settings), brake: reportedBrakeOf(h.report), quarantine: quarantineOf(h.report),
     reported_at: h.reported_at, last_seen: h.last_seen, token_issued_at: h.token_issued_at,
     summary: capacity ? hostLine(capacity, h.isolation, h.dedicated === null ? null : !!h.dedicated) : null,
   };
 }
 
 const mayDetail = (c: Contributor | null, h: Pick<HostRow, "owner_login">) => !!c && (c.role === "maintainer" || c.login === h.owner_login);
+
+/** The releases its last report holds in quarantine (#325: what retry-release lifts), each a tag. */
+function quarantineOf(report: string | null): string[] {
+  if (!report) return [];
+  try {
+    const q = (JSON.parse(report) as { quarantine?: unknown }).quarantine;
+    return Array.isArray(q) ? q.map((x) => (x as { release?: unknown })?.release).filter((r): r is string => typeof r === "string" && /^v\d+\.\d+\.\d+$/.test(r)).slice(0, 8) : [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * GET /hosts[?owner=<login>] — the hosts that are not retired, newest first;
@@ -189,8 +209,8 @@ function newHostLine(h: HostRow): string {
   return `new host of ${h.owner_login}: ${c ? hostLine(c, h.isolation, h.dedicated === null ? null : !!h.dedicated) : h.name}`;
 }
 
-/** A host's last host orders, newest first, through (host_id, issued_at): what its page lists with each answer (#344). */
-export const HOST_ORDERS_SQL = "SELECT id, kind, issued_by, issued_at, not_after, state, answered_at, detail FROM host_orders WHERE host_id = ? ORDER BY issued_at DESC LIMIT 10";
+/** A host's last host orders, newest first, through (host_id, issued_at): what its page lists with each answer (#344), a settings order's value and whether a diagnostics order brought lines (#325). */
+export const HOST_ORDERS_SQL = "SELECT o.id, o.kind, o.arg, o.issued_by, o.issued_at, o.not_after, o.state, o.answered_at, o.detail, d.order_id IS NOT NULL AS lines FROM host_orders o LEFT JOIN host_diagnostics d ON d.order_id = o.id WHERE o.host_id = ? ORDER BY o.issued_at DESC LIMIT 10";
 
 /** GET /hosts/:id — one host and the leases its registration holds (the minimal host page, design v2 §18.1); for its owner and the maintainers its last host orders too (#344). */
 export async function handleHostGet(c: Contributor | null, id: string, env: Env): Promise<Response> {
@@ -201,7 +221,9 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
     : [];
   const viewer = c ? await viewerOf(env, c) : null;
   const detailed = mayDetail(c, h);
-  const orders = detailed ? (await env.DB.prepare(HOST_ORDERS_SQL).bind(h.id).all()).results : undefined;
+  const orders = detailed
+    ? (await env.DB.prepare(HOST_ORDERS_SQL).bind(h.id).all<Record<string, unknown>>()).results.map((o) => ({ ...o, arg: o.arg ? JSON.parse(o.arg as string) : null, lines: !!o.lines }))
+    : undefined;
   return json(
     { host: await hostView(h, detailed, Date.now()), leases, orders, pool: { version: version(env).version }, can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h), retire_legacy: true } },
     200,
@@ -264,7 +286,7 @@ async function viewerOf(env: Env, c: Contributor): Promise<HostViewer> {
 /** The owner is a GitHub user id, not a login: a renamed owner is still the owner, and a login someone else took is not. */
 const isOwner = (v: HostViewer, h: Pick<HostRow, "owner_github_id">) => v.github_id !== null && v.github_id === h.owner_github_id;
 
-export type HostRight = "suspend" | "resume" | "retire" | "reconcile" | "retire_legacy";
+export type HostRight = "suspend" | "resume" | "retire" | "reconcile" | "retire_legacy" | "settings" | "rotate_token" | "retry_release" | "diagnostics";
 type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
 
 /**
@@ -284,13 +306,19 @@ type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; wh
  *   refuse (its report's `blocked`: no directory it may write its marker
  *   into) — the button is greyed with the agent's words, at most one report
  *   (five minutes) after the owner fixed it.
+ * - P4's (#325) — the settings (set-units, set-emulate), Rotate token, Retry
+ *   release, Diagnostics: its owner or any maintainer, on an active host whose
+ *   agent takes them (HOST_SETTINGS_AGENT on). They only narrow or ask what
+ *   the owner's envelope allows: whether a value fits it is the agent's to
+ *   say, and it refuses above it — the page greys what the last report says
+ *   the envelope excludes, never the door.
  */
 export function hostVerdicts(
   v: HostViewer | null,
   h: Pick<HostRow, "name" | "status" | "owner_login" | "owner_github_id"> & Partial<Pick<HostRow, "agent_version" | "report">>,
 ): Record<HostRight, HostVerdict> {
   const no = (status: 401 | 403 | 404 | 409, why: string): HostVerdict => ({ ok: false, status, why });
-  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), reconcile: no(401, SIGN_IN), retire_legacy: no(401, SIGN_IN) };
+  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), reconcile: no(401, SIGN_IN), retire_legacy: no(401, SIGN_IN), settings: no(401, SIGN_IN), rotate_token: no(401, SIGN_IN), retry_release: no(401, SIGN_IN), diagnostics: no(401, SIGN_IN) };
   const owner = isOwner(v, h);
   const theirs = !owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer stops ${h.name}`) : null;
   const gone = h.status === "retired" ? no(409, `${h.name} is retired: a new install enrolls a new host`) : null;
@@ -304,6 +332,11 @@ export function hostVerdicts(
     : legacy.state === "retiring" ? no(409, `${h.name}'s legacy set ${legacy.project} is being retired (${legacy.order ?? "an order"})`)
     : legacy.blocked ? no(409, `${h.name}'s agent would refuse it: ${legacy.blocked}`)
     : null;
+  // P4's orders (#325): its owner or any maintainer, an agent that takes them.
+  const p4 = (!owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer gives ${h.name} its settings and orders`) : null)
+    ?? takes
+    ?? (!agentTakesSettings(h.agent_version) ? no(409, `its agent (${h.agent_version ?? "unknown"}) takes no settings or P4 orders: agent ${HOST_SETTINGS_AGENT} or later does, and a release brings it by itself`) : null)
+    ?? { ok: true } as HostVerdict;
   return {
     suspend: theirs ?? gone ?? (h.status === "suspended" ? no(409, `${h.name} is suspended already — its owner's Resume ends it`) : h.status !== "active" ? no(409, `${h.name} waits for its owner's Confirm: it claims nothing yet`) : { ok: true }),
     resume: gone ?? (h.status !== "suspended" ? no(409, `${h.name} is not suspended: there is nothing to resume`)
@@ -314,6 +347,7 @@ export function hostVerdicts(
     retire_legacy: (!owner ? no(403, `only ${h.owner_login} retires the legacy set of ${h.name}, with their passkey`) : null)
       ?? (!v.maintainer ? no(403, `${OWNER_NOT_MAINTAINER}: ${h.name}'s legacy set stays`) : null)
       ?? takes ?? legacyWhy ?? { ok: true },
+    settings: p4, rotate_token: p4, retry_release: p4, diagnostics: p4,
   };
 }
 const canOf = (v: Record<HostRight, HostVerdict>) => {
@@ -563,23 +597,61 @@ export const EXPIRE_ALL_HOST_ORDERS_SQL = `UPDATE host_orders SET state = 'expir
  * is what happened. Once answered, a later report carrying the same answer closes nothing more.
  */
 export const ANSWER_HOST_ORDER_SQL = "UPDATE host_orders SET state = ?, answered_at = ?, detail = ? WHERE id = ? AND host_id = ? AND state IN ('open', 'expired')";
-/** A host's open orders, oldest first: what its state hands its agent, by the open-kind index. */
-export const HOST_OPEN_ORDERS_SQL = "SELECT id, kind, not_after FROM host_orders WHERE host_id = ? AND state = 'open' AND not_after > ? ORDER BY issued_at LIMIT 16";
+/** A host's open orders, oldest first, with a settings order's value: what its state hands its agent, by the open-kind index. */
+export const HOST_OPEN_ORDERS_SQL = "SELECT id, kind, not_after, arg FROM host_orders WHERE host_id = ? AND state = 'open' AND not_after > ? ORDER BY issued_at LIMIT 16";
+
+/** The right a kind of order needs (hostVerdicts). */
+const RIGHT_OF: Record<HostOrderKind, HostRight> = {
+  "reconcile-now": "reconcile", "retire-legacy": "retire_legacy", "set-units": "settings", "set-emulate": "settings",
+  "rotate-token": "rotate_token", "retry-release": "retry_release", diagnostics: "diagnostics",
+};
+
+/** An order's line on the journal: who asked what of which host (a settings order with its value). */
+function orderLine(h: HostRow, kind: HostOrderKind, by: string, arg: OrderArg | null, passkey: string): string {
+  const lanes = (e: string[]) => (e.length ? e.join(", ") : "none");
+  switch (kind) {
+    case "retire-legacy":
+      return `${hostLine_(h)}: ${by}${passkey} ordered its legacy set ${legacyOf(h.report)?.project ?? "?"} retired — its agent stops and removes it and leaves its marker`;
+    case "set-units": {
+      const u = arg && "units" in arg ? arg.units : null;
+      return u === null ? `${hostLine_(h)}: ${by} gave it its envelope's units back` : `${hostLine_(h)}: ${by} narrowed it to ${u} unit${u === 1 ? "" : "s"}`;
+    }
+    case "set-emulate": {
+      const e = arg && "emulate" in arg ? arg.emulate : null;
+      return e === null ? `${hostLine_(h)}: ${by} gave it its envelope's emulated lanes back` : `${hostLine_(h)}: ${by} set its emulated lanes to ${lanes(e)}`;
+    }
+    case "rotate-token":
+      return `${hostLine_(h)}: ${by} ordered its worker token rotated`;
+    case "retry-release":
+      return `${hostLine_(h)}: ${by} ordered its quarantined release tried again`;
+    case "diagnostics":
+      return `${hostLine_(h)}: ${by} asked for its dispatcher's last log lines`;
+    default:
+      return `${hostLine_(h)}: ${by} ordered a round now`;
+  }
+}
 
 /**
- * POST /hosts/:id/orders — {kind, assertion?}: a host order, from the
- * browser's session on the pool's own page (design v2 §17.1):
+ * POST /hosts/:id/orders — {kind, assertion?, units?, emulate?}: a host order,
+ * from the browser's session on the pool's own page (design v2 §17.1):
  * - `reconcile-now`, its owner or any maintainer: a round now, which never
- *   skips the owner's soak (P4) — what the host page's Reconcile now gives;
+ *   skips the owner's soak — what the host page's Reconcile now gives;
  * - `retire-legacy`, its owner only, with their passkey
  *   (`host:retire-legacy:<id>`): the agent stops and then removes the
  *   legacy compose project its legacy.json records, and nothing else, and
  *   writes the .omarchy-agent marker into its directory, so rollout.sh,
- *   setup.sh, omarchy-worker and the updater refuse there.
- * Both need an active host whose agent takes host orders; one open per kind,
+ *   setup.sh, omarchy-worker and the updater refuse there;
+ * - P4's (#325), its owner or any maintainer, an agent from 0.4.0:
+ *   `set-units` {units: n | null} and `set-emulate` {emulate: [arch] | null}
+ *   narrow the host's units and emulated lanes inside its envelope (null: the
+ *   envelope's own back) — the agent refuses anything above it, and the
+ *   answer says so —; `rotate-token` rotates its worker token; `retry-release`
+ *   lifts a quarantine; `diagnostics` brings the dispatcher's last 500 log
+ *   lines, scrubbed, when its envelope allows it.
+ * Every one needs an active host whose agent takes it; one open per kind,
  * each with a not_after HOST_ORDER_TTL_MIN on, after which it expires. The
- * agent answers in its report, which closes the order; issue and answer are
- * on the journal.
+ * agent answers in its report, which closes the order (a done settings order
+ * becomes the host's settings); issue and answer are on the journal.
  */
 export async function handleHostOrder(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
   const p = await personAct(c, request, env, url, "given orders");
@@ -588,25 +660,24 @@ export async function handleHostOrder(c: Contributor, id: string, request: Reque
   if (!h) return json({ error: "no such host" }, 404, NO_STORE);
   if (!isHostOrderKind(p.b.kind)) return json({ error: `kind is one of ${HOST_ORDER_KINDS.join(", ")}`, code: "kind" }, 400, NO_STORE);
   const kind: HostOrderKind = p.b.kind;
-  const no = refusedBy(hostVerdicts(p.v, h)[kind === "retire-legacy" ? "retire_legacy" : "reconcile"]);
+  const no = refusedBy(hostVerdicts(p.v, h)[RIGHT_OF[kind]]);
   if (no) return no;
+  const arg = orderArg(kind, p.b);
+  if (typeof arg === "string") return json({ error: arg, code: "arg" }, 400, NO_STORE);
   const ok = kind === "retire-legacy" ? await webGate(request, url, env, c.login, `host:retire-legacy:${id}`)(p.b.assertion) : null;
   if (ok instanceof Response) return ok;
   const now = Date.now();
   const at = iso(now);
   const notAfter = iso(now + HOST_ORDER_TTL_MIN * MIN);
   const oid = newOrderId();
-  const legacy = legacyOf(h.report);
-  const line = kind === "retire-legacy"
-    ? `${hostLine_(h)}: ${c.login}${ok ? justNowWords(ok) : ""} ordered its legacy set ${legacy?.project ?? "?"} retired — its agent stops and removes it and leaves its marker`
-    : `${hostLine_(h)}: ${c.login} ordered a round now`;
+  const line = orderLine(h, kind, c.login, arg, ok ? justNowWords(ok) : "");
   try {
     await env.DB.batch([
       env.DB.prepare(EXPIRE_HOST_ORDERS_SQL).bind(at, id),
-      env.DB.prepare("INSERT INTO host_orders (id, host_id, kind, issued_by, via, confirmed_with, issued_at, not_after) SELECT ?, id, ?, ?, 'web', ?, ?, ? FROM hosts WHERE id = ? AND status = 'active'")
-        .bind(oid, kind, c.login, ok ? ok.passkey : null, at, notAfter, id),
+      env.DB.prepare("INSERT INTO host_orders (id, host_id, kind, issued_by, via, confirmed_with, issued_at, not_after, arg) SELECT ?, id, ?, ?, 'web', ?, ?, ?, ? FROM hosts WHERE id = ? AND status = 'active'")
+        .bind(oid, kind, c.login, ok ? ok.passkey : null, at, notAfter, arg ? JSON.stringify(arg) : null, id),
       env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', ?, ?, ? WHERE EXISTS (SELECT 1 FROM host_orders WHERE id = ?)")
-        .bind(kind === "retire-legacy" ? "warn" : "ok", line, JSON.stringify({ host: id, owner: h.owner_login, by: c.login, via: "web", action: "order", order: oid, kind, not_after: notAfter, ...(ok ? { confirmed_with: ok.passkey } : {}) }), oid),
+        .bind(kind === "retire-legacy" ? "warn" : "ok", line, JSON.stringify({ host: id, owner: h.owner_login, by: c.login, via: "web", action: "order", order: oid, kind, not_after: notAfter, ...(arg ?? {}), ...(ok ? { confirmed_with: ok.passkey } : {}) }), oid),
     ]);
   } catch (e) {
     if (/UNIQUE/i.test(String(e))) return json({ error: `${kind} is waiting for ${h.name}'s agent already: one at a time, until it answers or the order expires`, code: "order_open" }, 409, NO_STORE);
@@ -615,7 +686,7 @@ export async function handleHostOrder(c: Contributor, id: string, request: Reque
   if (!(await env.DB.prepare("SELECT 1 FROM host_orders WHERE id = ?").bind(oid).first())) return json({ error: `${h.name} was not ordered: it changed a moment ago`, code: "host_right" }, 409, NO_STORE);
   return json(
     {
-      order: { id: oid, kind, state: "open", not_after: notAfter, ...(ok ? { confirmed_with: ok.passkey } : {}) },
+      order: { id: oid, kind, state: "open", not_after: notAfter, ...(arg ? { arg } : {}), ...(ok ? { confirmed_with: ok.passkey } : {}) },
       host: id, by: c.login, line,
       note: `its agent takes it at its next poll (within ${FOLLOW_POLL_S / 60} min) and answers in its next report; not taken by ${notAfter}, it expires`,
     },
@@ -623,6 +694,18 @@ export async function handleHostOrder(c: Contributor, id: string, request: Reque
     NO_STORE,
   );
 }
+
+/** GET /hosts/:id/diagnostics/:order — the dispatcher's log lines a diagnostics order brought (#325): its owner's and the maintainers'. */
+export async function handleHostDiagnosticsGet(c: Contributor | null, id: string, order: string, env: Env): Promise<Response> {
+  const h = await env.DB.prepare("SELECT owner_login FROM hosts WHERE id = ?").bind(id).first<Pick<HostRow, "owner_login">>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  if (!mayDetail(c, h)) return json({ error: c ? `only ${h.owner_login} and the maintainers read its diagnostics` : SIGN_IN, code: "host_right" }, c ? 403 : 401, NO_STORE);
+  const d = await env.DB.prepare(HOST_DIAGNOSTICS_SQL).bind(order, id).first<{ order_id: string; at: string; lines: string; dropped: number }>();
+  if (!d) return json({ error: "no diagnostics for that order: its agent sent none (refused, or not answered yet)" }, 404, NO_STORE);
+  return json({ host: id, order: d.order_id, at: d.at, lines: JSON.parse(d.lines) as string[], dropped: d.dropped }, 200, NO_STORE);
+}
+/** One order's diagnostics, by its id (the primary key), of that host only. */
+export const HOST_DIAGNOSTICS_SQL = "SELECT order_id, at, lines, dropped FROM host_diagnostics WHERE order_id = ? AND host_id = ?";
 
 // ---------- the host's side ----------
 
@@ -709,13 +792,14 @@ export interface SignedHost { host: HostRow; body: Uint8Array }
 /**
  * The host behind a signed request, or the refusal: its key, a time within
  * 120 seconds of the pool's, a nonce never seen, over the method, the path
- * and the body as sent. A suspended or retired host is refused (403).
+ * and the body as sent, at most `max` bytes (the diagnostics' 64 KiB, #325;
+ * every other call's 16 KiB). A suspended or retired host is refused (403).
  */
-export async function signedHost(request: Request, env: Env, url: URL): Promise<SignedHost | Response> {
+export async function signedHost(request: Request, env: Env, url: URL, max = REPORT_MAX_BYTES): Promise<SignedHost | Response> {
   const hdr = parseHostHeader(request.headers.get("omarchy-host"));
   if (!hdr) return json({ error: "a host's signed request is required: Omarchy-Host: <host>; ts=<unix>; nonce=<32 hex>; sig=<base64url>", code: "host_signature" }, 401, NO_STORE);
   const body = new Uint8Array(await request.arrayBuffer());
-  if (body.byteLength > REPORT_MAX_BYTES) return json({ error: `at most ${REPORT_MAX_BYTES} bytes` }, 413, NO_STORE);
+  if (body.byteLength > max) return json({ error: `at most ${max} bytes` }, 413, NO_STORE);
   const now = Date.now();
   if (Math.abs(hdr.ts - Math.floor(now / 1000)) > SIGNED_SKEW_S) return json({ error: `the request's time is more than ${SIGNED_SKEW_S} s from the pool's (${iso(now)}): set the host's clock`, code: "clock", now: iso(now) }, 401, NO_STORE);
   const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(hdr.host).first<HostRow>();
@@ -736,8 +820,9 @@ export async function signedHost(request: Request, env: Env, url: URL): Promise<
  * design v2 §17.1) — the release target (the pool's own release, which from
  * agent 0.3.0 on replaces follow.latest), its registration's open Update
  * orders, and its open host orders, each with its id and not_after (an
- * order past it is never sent). P4 (#325) adds the settings and the other
- * kinds. Every answer is the host's alone: no-store.
+ * order past it is never sent) and a settings order with its value; P4's
+ * (#325) settings: what its agent took, which an agent that lost its own
+ * narrows to again. Every answer is the host's alone: no-store.
  */
 export async function handleHostState(s: SignedHost, env: Env): Promise<Response> {
   const h = s.host;
@@ -759,7 +844,8 @@ export async function handleHostState(s: SignedHost, env: Env): Promise<Response
     // A Worker that runs no release (a development one) names none: the agent then changes nothing.
     release: { target: parseTag(pool.version) ? pool.version : null, deployed_at: pool.deployed_at },
     updates: openOrdersOf(open).filter((o) => o.kind === "update").map((o) => o.id),
-    orders: (orders.results as { id: string; kind: string; not_after: string }[]).map((o) => ({ id: o.id, kind: o.kind, not_after: o.not_after })),
+    orders: (orders.results as { id: string; kind: string; not_after: string; arg: string | null }[]).map((o) => ({ id: o.id, kind: o.kind, not_after: o.not_after, ...(o.arg ? (JSON.parse(o.arg) as OrderArg) : {}) })),
+    settings: hostSettingsOf(h.settings),
   }, 200, NO_STORE);
 }
 
@@ -807,7 +893,8 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   if (leak) return json({ error: `the report carries what looks like ${leak.kind} (line ${leak.line}); nothing was written`, code: "leak" }, 422, NO_STORE);
   const str = (v: unknown, re: RegExp) => (typeof v === "string" && re.test(v) ? v : null);
   const tag = /^v\d+\.\d+\.\d+$/;
-  const cap = r.capacity === undefined ? null : parseCapacity(r.capacity);
+  // An agent that has no whole capacity file to send leaves it out; null says the same.
+  const cap = r.capacity === undefined || r.capacity === null ? null : parseCapacity(r.capacity);
   if (typeof cap === "string") return json({ error: cap }, 400, NO_STORE);
   // As at enrollment: the native lane is the host's own architecture.
   if (cap && !cap.lanes.some((l) => l.mode === "native" && l.arch === h.arch)) return json({ error: `capacity.lanes: the native lane is not ${h.arch}` }, 400, NO_STORE);
@@ -832,7 +919,7 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
     )
     .run();
   // The host orders it answers (#344): each closes an open order of this host only, once; its line is the pool's words, the
-  // agent's own stay on the host's page.
+  // agent's own stay on the host's page. A settings order answered done becomes the host's settings (#325).
   const answers = orderAnswers(r.orders);
   let closed = 0;
   if (answers.length) {
@@ -843,18 +930,68 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
          SELECT 'host', NULL, 'factory', ?, ? || kind || ' ' || state || ' (' || id || ')', json_object('host', host_id, 'owner', ?, 'action', 'order-answer', 'order', id, 'kind', kind, 'outcome', state, 'by', issued_by)
            FROM host_orders WHERE id = ? AND host_id = ? AND state = ? AND answered_at = ?`,
       ).bind(a.outcome === "done" ? "ok" : "warn", `${hostLine_(h)}: its agent answered the host order `, h.owner_login, a.id, h.id, a.outcome, at),
+      env.DB.prepare(SETTINGS_FROM_ANSWER_SQL).bind(a.id, h.id, at),
     ]));
-    closed = results.filter((x, i) => i % 2 === 0 && x.meta.changes).length;
+    closed = results.filter((x, i) => i % 3 === 0 && x.meta.changes).length;
   }
   return json({ ok: true, at, units: cap ? unitsOf(cap) : h.units, below_minimum: cap ? belowMinimum(cap) : null, orders_closed: closed }, 200, NO_STORE);
 }
 
-/** The cron's share (scheduler.ts): nonces past the window, enrollment tokens nobody used a day after they expired, and host orders past their not_after (#344). */
+/**
+ * A settings order its agent answered done, at this report (`answered_at`): its value becomes the host's settings, the field it
+ * names replaced and the other kept — what the host state sends back (#325).
+ */
+export const SETTINGS_FROM_ANSWER_SQL = `UPDATE hosts SET settings = json_set(COALESCE(settings, '{}'),
+    CASE (SELECT kind FROM host_orders WHERE id = ?1) WHEN 'set-units' THEN '$.units' ELSE '$.emulate' END,
+    json((SELECT COALESCE(json_extract(arg, '$.units'), json_extract(arg, '$.emulate')) FROM host_orders WHERE id = ?1)))
+  WHERE id = ?2 AND EXISTS (SELECT 1 FROM host_orders WHERE id = ?1 AND host_id = ?2 AND kind IN ('set-units', 'set-emulate') AND state = 'done' AND answered_at = ?3)`;
+
+/**
+ * POST /hosts/self/diagnostics — {order, lines, at}, signed, at most 64 KiB
+ * (#325, design v2 M10): the dispatcher's last log lines a diagnostics order
+ * asked for, which the agent read only because its envelope allows it and
+ * scrubbed of every secret it knows. Kept for that order of this host only,
+ * while it waits for its answer; a line that still looks like a secret
+ * (leak.ts) is dropped and counted. Its owner and the maintainers read them
+ * on the host page (GET /hosts/:id/diagnostics/:order).
+ */
+export async function handleHostDiagnostics(s: SignedHost, env: Env): Promise<Response> {
+  const h = s.host;
+  let b: { order?: unknown; lines?: unknown };
+  try {
+    b = JSON.parse(new TextDecoder().decode(s.body));
+  } catch {
+    return json({ error: "a JSON body is required" }, 400, NO_STORE);
+  }
+  if (typeof b?.order !== "string" || !HOST_ORDER_ID.test(b.order)) return json({ error: "order: the diagnostics order's id" }, 400, NO_STORE);
+  if (!Array.isArray(b.lines) || b.lines.length > DIAGNOSTIC_LINES || !b.lines.every((l) => typeof l === "string")) return json({ error: `lines: at most ${DIAGNOSTIC_LINES} lines of the dispatcher's log` }, 400, NO_STORE);
+  const o = await env.DB.prepare("SELECT kind, state FROM host_orders WHERE id = ? AND host_id = ?").bind(b.order, h.id).first<{ kind: string; state: string }>();
+  if (!o || o.kind !== "diagnostics") return json({ error: `${b.order} is no diagnostics order of ${h.name}`, code: "order" }, 404, NO_STORE);
+  if (o.state !== "open" && o.state !== "expired") return json({ error: `${b.order} was answered already: its lines came before its answer, or never`, code: "order" }, 409, NO_STORE);
+  let dropped = 0;
+  const lines: string[] = [];
+  for (const raw of b.lines as string[]) {
+    const line = raw.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, " ").slice(0, DIAGNOSTIC_LINE_MAX);
+    if (findLeak(line)) dropped++;
+    else lines.push(line);
+  }
+  const at = iso(Date.now());
+  await env.DB.prepare("INSERT INTO host_diagnostics (order_id, host_id, at, lines, dropped) VALUES (?, ?, ?, ?, ?) ON CONFLICT (order_id) DO UPDATE SET at = excluded.at, lines = excluded.lines, dropped = excluded.dropped")
+    .bind(b.order, h.id, at, JSON.stringify(lines), dropped)
+    .run();
+  return json({ ok: true, order: b.order, lines: lines.length, dropped }, 200, NO_STORE);
+}
+
+/** The diagnostics the cron keeps: a week. */
+export const DIAGNOSTICS_KEEP_DAYS = 7;
+
+/** The cron's share (scheduler.ts): nonces past the window, enrollment tokens nobody used a day after they expired, host orders past their not_after (#344), and diagnostics older than a week (#325). */
 export async function pruneHosts(env: Env, now = Date.now()): Promise<number> {
-  const [a, b, c] = await env.DB.batch([
+  const [a, b, c, d] = await env.DB.batch([
     env.DB.prepare("DELETE FROM host_nonces WHERE at < ?").bind(iso(now - NONCE_KEEP_MIN * MIN)),
     env.DB.prepare("DELETE FROM host_enrollments WHERE used_at IS NULL AND expires_at < ?").bind(iso(now - 24 * 60 * MIN)),
     env.DB.prepare(EXPIRE_ALL_HOST_ORDERS_SQL).bind(iso(now)),
+    env.DB.prepare("DELETE FROM host_diagnostics WHERE at < ?").bind(iso(now - DIAGNOSTICS_KEEP_DAYS * 24 * 60 * MIN)),
   ]);
-  return (a.meta.changes ?? 0) + (b.meta.changes ?? 0) + (c.meta.changes ?? 0);
+  return (a.meta.changes ?? 0) + (b.meta.changes ?? 0) + (c.meta.changes ?? 0) + (d.meta.changes ?? 0);
 }

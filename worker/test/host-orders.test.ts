@@ -124,7 +124,8 @@ beforeAll(async () => {
 describe("the D1 migration (0046)", () => {
   it("adds host_orders: a closed set of kinds and states, one open order per kind and host", async () => {
     const cols = (await env.DB.prepare("SELECT name FROM pragma_table_info('host_orders')").all<{ name: string }>()).results.map((r) => r.name);
-    expect(cols).toEqual(["id", "host_id", "kind", "issued_by", "via", "confirmed_with", "issued_at", "not_after", "state", "answered_at", "detail"]);
+    // 0047 (#325) adds a settings order's value.
+    expect(cols).toEqual(["id", "host_id", "kind", "issued_by", "via", "confirmed_with", "issued_at", "not_after", "state", "answered_at", "detail", "arg"]);
     const put = (id: string, kind: string, st = "open") => env.DB.prepare("INSERT INTO host_orders (id, host_id, kind, issued_by, not_after, state) VALUES (?, 'h_mig0000001', ?, 'm1', '2030-01-01T00:00:00.000Z', ?)").bind(id, kind, st).run();
     await put("ho_m1", "reconcile-now");
     await expect(put("ho_m2", "reconcile-now")).rejects.toThrow(/UNIQUE/);
@@ -196,7 +197,9 @@ describe("who gives a host order (POST /hosts/:id/orders)", () => {
     expect(await order("alice", host, { kind: "reconcile-now" })).toMatchObject({ status: 403, json: { code: "host_right" } });
     expect(await call("POST", `/hosts/${host}/orders`, { token: "omc_m1", body: { kind: "reconcile-now" } })).toMatchObject({ status: 403, json: { code: "web_only" } });
     expect(await call("POST", `/hosts/${host}/orders`, { session: "m1", body: { kind: "reconcile-now" }, headers: { origin: "https://elsewhere.example" } })).toMatchObject({ status: 403, json: { code: "origin" } });
-    for (const kind of ["shell", "set-units", "rotate-token", undefined]) expect(await order("m1", host, { kind })).toMatchObject({ status: 400, json: { code: "kind" } });
+    for (const kind of ["shell", "drain-host", undefined]) expect(await order("m1", host, { kind })).toMatchObject({ status: 400, json: { code: "kind" } });
+    // P4's kinds (#325) need an agent from 0.4.0: this one (0.3.0) would refuse them as unknown.
+    for (const kind of ["set-units", "rotate-token"]) expect(await order("m1", host, { kind, units: 2 })).toMatchObject({ status: 409, json: { code: "host_right" } });
     // Another maintainer may: a round is "do the same thing now".
     const o = await order("m2", host, { kind: "reconcile-now" });
     expect(o.status, JSON.stringify(o.json)).toBe(201);
@@ -342,6 +345,8 @@ describe("the contract with the agent (crates/omarchy-agent/tests/fixtures/host-
       await env.DB.prepare("INSERT INTO host_orders (id, host_id, kind, issued_by, issued_at, not_after) VALUES (?, ?, ?, 'm1', ?, ?)")
         .bind(`ho_${hex(16)}`, host, kind, new Date(Date.now() - 2000 + i * 1000).toISOString(), later).run();
     }
+    // The settings its agent took (#325), as a done set-units and set-emulate leave them.
+    await env.DB.prepare("UPDATE hosts SET settings = ? WHERE id = ?").bind(JSON.stringify({ units: 6, emulate: ["x86_64"] }), host).run();
     const s = await state(k, host, deployed);
     expect(s.status, JSON.stringify(s.json)).toBe(200);
     const fixture = JSON.parse(stateFixture);
