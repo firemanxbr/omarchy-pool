@@ -18,9 +18,10 @@
 //!   no task reaches anyway.
 //! - The public address the host's tasks leave from ([`SEEN_FILE`] in the data directory):
 //!   what install's egress probe saw, then what the pool's edge says the run loop's own
-//!   request came from, asked every hour over IPv4 and not through a proxy ([`from_trace`]):
-//!   the host and its tasks leave through the same NAT, whose public address a home
-//!   connection's provider may change at any time.
+//!   request came from, asked every hour over IPv4 and not through a proxy ([`from_trace`]),
+//!   and within minutes after an ask it did not answer: the host and its tasks leave
+//!   through the same NAT, whose public address a home connection's provider may change at
+//!   any time. An IPv4 one is kept as IPv4, never in its v4-mapped form.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -210,7 +211,9 @@ pub(crate) fn of_interfaces(
         .map(|a| Range::host(IpAddr::V4(a)));
     let v6 = parse_if_inet6(if_inet6)
         .into_iter()
-        .filter(|v| v.iface != "lo" && !v.addr.is_loopback())
+        // An address on `lo` but `::1` (an anycast /128, a routed service address) is the
+        // host's own, as an IPv4 one there is.
+        .filter(|v| !v.addr.is_loopback())
         .filter(|v| !(is_bridge(&v.iface) && refused_anyway_v6(v.addr)))
         .map(|v| Range::new(IpAddr::V6(v.addr), v.prefix.max(V6_PREFIX)));
     v4.chain(v6).collect()
@@ -226,9 +229,11 @@ pub struct Seen {
 }
 
 /// One address the pool could have seen a host come from: never loopback, unspecified or
-/// multicast.
-fn public(ip: IpAddr) -> Option<IpAddr> {
-    Some(ip).filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
+/// multicast; an IPv4 one written as IPv4 (`::ffff:a.b.c.d` as `a.b.c.d`), the way the
+/// egress judges a destination and reads its deny list.
+pub(crate) fn public(ip: IpAddr) -> Option<IpAddr> {
+    Some(ip.to_canonical())
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
 }
 
 /// The public address [`SEEN_FILE`] holds, if it holds one that reads.
@@ -242,7 +247,7 @@ pub fn seen(data: &Path) -> Option<IpAddr> {
 /// [`SEEN_FILE`] written (0600) with `ip`, seen at `at` (RFC 3339).
 pub fn keep_seen(data: &Path, ip: IpAddr, at: &str) -> Result<(), String> {
     let body = serde_json::to_vec_pretty(&Seen {
-        public: ip,
+        public: ip.to_canonical(),
         at: at.to_owned(),
     })
     .map_err(|e| e.to_string())?;

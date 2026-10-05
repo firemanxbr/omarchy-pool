@@ -14,10 +14,11 @@
 //!   so an envelope without one leaves the dispatcher's defaults.
 //!
 //! It is written on install, on enrollment, on every rotation, and by the run loop when the
-//! host's addresses or agent.toml changed (it reads both every minute, and asks the pool's
-//! edge for the public address every hour). A rotation keeps the rest, a change of address
-//! never touches the token, and every line the agent does not own — an owner's own
-//! variable, a comment — is kept as it was. Every writer holds `etc/` locked (an advisory
+//! host's addresses or agent.toml changed (it reads both every minute, agent.toml only when
+//! it is the agent's own as design v2 §12 says, and asks the pool's edge for the public
+//! address every hour, within minutes after no answer). A rotation keeps the rest, a
+//! change of address never touches the token, and every line the agent does not own — an
+//! owner's own variable, a comment — is kept as it was. Every writer holds `etc/` locked (an advisory
 //! `flock` on the directory) from its read to its rename, so a refresh never puts back a
 //! token a rotation in another process just replaced. The file is made only with a token:
 //! before the owner's Confirm there is none, and the run loop holds the dispatcher while it
@@ -184,13 +185,14 @@ impl Envelope {
         }
     }
 
-    /// `<data>/agent.toml`'s, when there is one: `None` before install wrote it.
+    /// `<data>/agent.toml`'s, when there is one: `None` before install wrote it. It is
+    /// trusted as the run loop's configuration is (design v2 §12): a symbolic link, a file
+    /// another user owns or one others may write is refused, not read.
     pub fn of_data_dir(data: &Path) -> Option<Result<Self, String>> {
-        let path = data.join("agent.toml");
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Some(Self::from_agent_toml(&text)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => Some(Err(format!("{}: {e}", path.display()))),
+        match read(&data.join("agent.toml")) {
+            Ok(Some((text, _))) => Some(Self::from_agent_toml(&text)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
         }
     }
 }
@@ -297,9 +299,9 @@ pub fn render(existing: &str, token: Option<(&str, &str)>, r: &Rendered) -> Resu
     Ok(out.join("\n") + "\n")
 }
 
-/// The file's text and mode, read without following a symbolic link; `None` when there is
-/// no file. One that is not the agent's own (a link, a directory, another user's or one
-/// others may write) is refused.
+/// A file's text and mode (this one's, agent.toml's), read without following a symbolic
+/// link; `None` when there is no file. One that is not the agent's own (a link, a
+/// directory, another user's or one others may write) is refused.
 pub fn read(path: &Path) -> Result<Option<(String, u32)>, String> {
     use rustix::fs::{Mode, OFlags};
     let fd = match rustix::fs::open(

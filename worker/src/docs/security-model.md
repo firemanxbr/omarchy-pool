@@ -140,9 +140,12 @@ secret). Everything travels in the `Authorization` header over TLS only.
   and the firewall's INPUT drop does not see that traffic, which leaves from
   the egress bridge. The run loop reads the interfaces again every minute and
   asks the pool's edge for the public address every hour (over IPv4, not
-  through a proxy: the way the tasks leave); a change recreates the
-  dispatcher, so every task started after a new lease or a new public address
-  has it refused, while a task already running keeps the list its egress was
+  through a proxy: the way the tasks leave), and within five minutes after an
+  ask it did not answer; a change recreates the dispatcher, so every task
+  started after a new lease has it refused, and every task started after the
+  agent saw a new public address — within the hour while the edge answers,
+  within minutes of its answering again after a reboot or an outage — has
+  that one refused, while a task already running keeps the list its egress was
   started with. A raw socket fails with "Network is
   unreachable"; a package that needs one gets a reviewed exception in
   `factory/sizing` (a bridge network of its own). A task that needs a model

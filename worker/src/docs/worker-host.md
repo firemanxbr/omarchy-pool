@@ -162,7 +162,7 @@ refused, judged by the address a name resolves to, and so are the host's own
 addresses: every address of its interfaces and the public one its tasks leave
 from, which the agent writes into `etc/dispatcher.env` and keeps current — it
 reads the interfaces every minute and asks the pool's edge for the public
-address every hour), never another task. A
+address every hour, and within minutes when it did not answer), never another task. A
 task that needs a model — a draft, a review rebuild, an audit — gets its own
 agent sidecar, which mounts `OMARCHY_SECRETS_DIR/agent.env` read-only; no two
 tasks share one, and the dispatcher itself never holds the key. Per task a

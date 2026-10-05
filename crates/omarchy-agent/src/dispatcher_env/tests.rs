@@ -51,6 +51,14 @@ fn every_address_of_the_host_s_interfaces_but_loopback_and_container_bridges() {
         joined(&fixture("vps"), &none),
         "203.0.113.10,2001:db8:abcd::/64,fe80::/64"
     );
+    // An address routed to the host on `lo` (an anycast /128, a service address) is its
+    // own like any other, IPv4 or IPv6; loopback's alone is not.
+    let fib = "Local:\n  +-- 0.0.0.0/0 1 0 0\n     |-- 127.0.0.1\n        /32 host LOCAL\n     |-- 198.51.100.53\n        /32 host LOCAL\n";
+    let lo = "00000000000000000000000000000001 01 80 10 80       lo\n20010db8abcdffff0000000000000053 01 80 00 80       lo\n";
+    assert_eq!(
+        addresses::joined(&addresses::of_interfaces(fib, "", lo, &task())),
+        "198.51.100.53,2001:db8:abcd:ffff::53"
+    );
     // No lists at all (macOS, or a kernel without IPv6): nothing, and no key.
     let empty = Sources {
         proc_net: none.join("absent"),
@@ -188,6 +196,32 @@ fn the_address_the_pool_s_edge_saw_is_the_trace_s_ip_line_alone() {
     ] {
         assert_eq!(addresses::from_trace(bad), None, "{bad:?}");
     }
+    // An IPv4 address in its IPv6 form is kept as IPv4, as the egress reads its deny list:
+    // the edge's line, the probe's and egress.json alike.
+    let v4: std::net::IpAddr = "198.51.100.20".parse().unwrap();
+    assert_eq!(addresses::from_trace("ip=::ffff:198.51.100.20\n"), Some(v4));
+    assert_eq!(addresses::from_trace("ip=::ffff:127.0.0.1\n"), None);
+    assert_eq!(
+        crate::install::egress::seen("egress seen ::ffff:198.51.100.20\n"),
+        Some(v4)
+    );
+    let data = tempdir();
+    fs::write(
+        data.join(addresses::SEEN_FILE),
+        "{\"public\":\"::ffff:198.51.100.20\",\"at\":\"2026-10-03T00:00:00Z\"}",
+    )
+    .unwrap();
+    assert_eq!(addresses::seen(&data), Some(v4));
+    assert!(joined(&fixture("vps"), &data).starts_with("198.51.100.20,203.0.113.10,"));
+    addresses::keep_seen(
+        &data,
+        "::ffff:198.51.100.21".parse().unwrap(),
+        "2026-10-03T01:00:00Z",
+    )
+    .unwrap();
+    assert!(fs::read_to_string(data.join(addresses::SEEN_FILE))
+        .unwrap()
+        .contains("\"198.51.100.21\""));
 }
 
 #[test]

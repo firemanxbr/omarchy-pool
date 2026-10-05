@@ -23,8 +23,8 @@
 //! the host's tasks leave from. Install keeps it (`egress.json`) and the agent writes it
 //! with the host's own addresses for every task's egress to refuse
 //! ([`crate::dispatcher_env`]): behind a router that forwards a port, a task connecting to
-//! it would reach the host. The run loop asks the edge again every hour, from the host
-//! (the same NAT), for when the provider changes it. Not seen (no curl in the image, no
+//! it would reach the host. The run loop asks the edge again every hour (within minutes
+//! after no answer), from the host (the same NAT), for when the provider changes it. Not seen (no curl in the image, no
 //! answer) is a note, never a blocker: the interfaces' addresses are refused all the same,
 //! and the run loop's first answer adds it.
 
@@ -222,10 +222,11 @@ pub(crate) fn verdict(out: &str, t: &Targets) -> Vec<String> {
 }
 
 /// The address the probe task said the pool saw it come from: one address, never a
-/// loopback, unspecified or multicast one.
+/// loopback, unspecified or multicast one, an IPv4 one as IPv4
+/// ([`crate::dispatcher_env::addresses::public`]).
 pub(crate) fn seen(out: &str) -> Option<IpAddr> {
     out.lines()
         .find_map(|l| l.strip_prefix("egress seen "))
         .and_then(|a| a.trim().parse::<IpAddr>().ok())
-        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
+        .and_then(crate::dispatcher_env::addresses::public)
 }

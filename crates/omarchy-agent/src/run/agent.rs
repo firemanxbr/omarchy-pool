@@ -37,6 +37,10 @@ const DRIFT_S: i64 = 900;
 pub(crate) const ADDRESSES_S: i64 = 60;
 /// How often the pool's edge is asked which public address the host leaves from (#371).
 pub(crate) const PUBLIC_S: i64 = 3600;
+/// After an ask the edge did not answer, the next comes after [`ADDRESSES_S`], doubled up
+/// to this: a reboot that gave the home connection a new address often starts the loop
+/// before the network is up, and the new address must not wait the hour to be refused.
+pub(crate) const PUBLIC_RETRY_S: i64 = 300;
 
 /// The cryptographic check, pinned identities and parsing (`crate::verify`).
 pub(crate) trait Verifier {
@@ -108,12 +112,14 @@ pub(crate) struct Agent {
 /// [`ADDRESSES_S`], the host's own addresses and agent.toml are read again and the file
 /// rendered with them, its token kept; at its start, then every [`PUBLIC_S`], the pool's
 /// edge is asked which public address the host leaves from (`egress.json`, which install
-/// wrote first). A file that changed starts a round (an input of the set), which
-/// recreates the dispatcher.
+/// wrote first), and within minutes after an ask it did not answer ([`PUBLIC_RETRY_S`]). A
+/// file that changed starts a round (an input of the set), which recreates the dispatcher.
 pub(crate) struct HostEnv {
     pub sources: Sources,
     next_at: i64,
     public_at: i64,
+    /// The wait after the next ask the edge does not answer.
+    public_retry: i64,
     /// The last failure said, so a failure that lasts is said once.
     failing: Option<String>,
 }
@@ -124,6 +130,7 @@ impl HostEnv {
             sources,
             next_at: 0,
             public_at: 0,
+            public_retry: ADDRESSES_S,
             failing: None,
         }
     }
@@ -762,9 +769,11 @@ impl Agent {
         }
         h.next_at = now + ADDRESSES_S;
         if now >= h.public_at {
-            h.public_at = now + PUBLIC_S;
-            // The address the pool's edge saw: no answer keeps the one last seen.
+            // The address the pool's edge saw, asked again in the hour; no answer keeps the
+            // one last seen and asks again within minutes.
             if let Net::Ok(ip) = self.pool.public_address() {
+                h.public_at = now + PUBLIC_S;
+                h.public_retry = ADDRESSES_S;
                 if addresses::seen(&self.paths.data) != Some(ip) {
                     let at = crate::capacity::utc(u64::try_from(now).unwrap_or(0));
                     if let Err(e) = addresses::keep_seen(&self.paths.data, ip, &at) {
@@ -775,6 +784,9 @@ impl Agent {
                         );
                     }
                 }
+            } else {
+                h.public_at = now + h.public_retry;
+                h.public_retry = (h.public_retry * 2).min(PUBLIC_RETRY_S);
             }
         }
         // agent.toml as it is now, as `omarchy-agent token` and `dispatcher-env --write`

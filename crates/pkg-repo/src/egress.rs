@@ -55,7 +55,9 @@ fn thread(f: impl FnOnce() + Send + 'static) -> io::Result<std::thread::JoinHand
     std::thread::Builder::new().stack_size(STACK).spawn(f)
 }
 
-/// An address range: `10.0.0.0/8`, `fe80::/10`, or one address.
+/// An address range: `10.0.0.0/8`, `fe80::/10`, or one address. An IPv4 range in its
+/// v4-mapped form (`::ffff:a.b.c.d`, a prefix of 96 or more) is read as the IPv4 range it
+/// is, since a destination is judged as IPv4 in every form that reaches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cidr {
     net: IpAddr,
@@ -79,6 +81,14 @@ impl FromStr for Cidr {
                 .filter(|p| *p <= max)
                 .ok_or_else(|| format!("{s:?}: the prefix is not 0..{max}"))?
         };
+        if let IpAddr::V6(v6) = net {
+            if let (Some(v4), Some(p)) = (v6.to_ipv4_mapped(), prefix.checked_sub(96)) {
+                return Ok(Self {
+                    net: IpAddr::V4(v4),
+                    prefix: p,
+                });
+            }
+        }
         Ok(Self { net, prefix })
     }
 }
@@ -607,6 +617,52 @@ mod tests {
         }
         assert_eq!(refused(ip("::ffff:203.0.114.11"), &deny), None);
         assert_eq!(refused(ip("64:ff9b::cb00:720b"), &deny), None);
+    }
+
+    #[test]
+    fn a_denied_ipv4_address_written_v4_mapped_is_refused_in_every_form() {
+        // `--deny ::ffff:203.0.114.10` is the IPv4 address: refused as IPv4, v4-mapped,
+        // NAT64 and 6to4, as `--deny 203.0.114.10` is; a range keeps its width.
+        let host = Some("an address of this host or of its task networks".to_owned());
+        for entry in [
+            "::ffff:203.0.114.10",
+            "::ffff:cb00:720a",
+            "::ffff:203.0.114.0/120",
+        ] {
+            let deny = [entry.parse::<Cidr>().unwrap()];
+            for a in [
+                "203.0.114.10",
+                "::ffff:203.0.114.10",
+                "64:ff9b::cb00:720a",
+                "2002:cb00:720a::1",
+            ] {
+                assert_eq!(refused(ip(a), &deny), host, "--deny {entry}: {a}");
+            }
+            assert_eq!(refused(ip("203.0.115.10"), &deny), None, "--deny {entry}");
+        }
+        assert_eq!(
+            "::ffff:203.0.114.10".parse::<Cidr>().unwrap(),
+            "203.0.114.10".parse::<Cidr>().unwrap()
+        );
+        assert_eq!(
+            "::ffff:203.0.114.0/120".parse::<Cidr>().unwrap(),
+            "203.0.114.0/24".parse::<Cidr>().unwrap()
+        );
+        assert_eq!(
+            refused(
+                ip("203.0.114.11"),
+                &["::ffff:203.0.114.10".parse().unwrap()]
+            ),
+            None
+        );
+        // Wider than the v4-mapped range: an IPv6 range, as written.
+        assert!(matches!(
+            "::ffff:0:0/80".parse::<Cidr>().unwrap(),
+            Cidr {
+                net: IpAddr::V6(_),
+                prefix: 80
+            }
+        ));
     }
 
     fn rebinding(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {

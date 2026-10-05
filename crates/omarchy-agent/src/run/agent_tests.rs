@@ -612,7 +612,7 @@ fn settle(w: &mut World) {
 }
 
 #[test]
-fn the_public_address_the_pool_s_edge_sees_is_asked_hourly_and_a_new_one_refused_with_the_token_kept(
+fn the_public_address_the_pool_s_edge_sees_is_asked_hourly_within_minutes_after_no_answer_and_a_new_one_refused_with_the_token_kept(
 ) {
     let mut w = with_host_env();
     let env = w.set_dir().join("etc/dispatcher.env");
@@ -669,18 +669,47 @@ fn the_public_address_the_pool_s_edge_sees_is_asked_hourly_and_a_new_one_refused
     settle(&mut w);
     assert_ne!(w.engine.borrow().dispatcher().unwrap().id, dispatcher);
 
-    // No answer (the pool down, an IPv6-only host): the address last seen stays.
+    // No answer (the pool down, an IPv6-only host): the address last seen stays, and the
+    // edge is asked again within minutes, not the hour — after a power cut the loop often
+    // starts before the network is up, and the provider's new address must not wait.
     let text = fs::read_to_string(&env).unwrap();
     w.remote.borrow_mut().public = Some(Net::NoAnswer("timed out".into()));
     for _ in 0..61 {
+        if w.remote.borrow().publics == 3 {
+            break;
+        }
         w.tick(61);
     }
-    assert_eq!(w.remote.borrow().publics, 3);
+    assert_eq!(w.remote.borrow().publics, 3, "the hourly ask, unanswered");
+    for _ in 0..10 {
+        w.tick(61);
+    }
+    assert_eq!(
+        w.remote.borrow().publics,
+        6,
+        "asked again after one, two and four minutes, then every five"
+    );
     assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    // The edge answers again, with a new address: refused within five minutes.
+    w.remote.borrow_mut().public = Some(Net::Ok("198.51.100.99".parse().unwrap()));
+    for _ in 0..5 {
+        w.tick(61);
+    }
+    assert_eq!(
+        fs::read_to_string(&env).unwrap(),
+        text.replace("198.51.100.77", "198.51.100.99")
+    );
+    // Answered: hourly again.
+    let asked = w.remote.borrow().publics;
+    for _ in 0..30 {
+        w.tick(61);
+    }
+    assert_eq!(w.remote.borrow().publics, asked);
 }
 
 #[test]
 fn agent_toml_is_read_again_so_the_loop_never_puts_back_what_a_rotation_or_dispatcher_env_wrote() {
+    use std::os::unix::fs::PermissionsExt as _;
     let mut w = with_host_env();
     let env = w.set_dir().join("etc/dispatcher.env");
     let secrets = w.dir.join("secrets");
@@ -722,6 +751,33 @@ fn agent_toml_is_read_again_so_the_loop_never_puts_back_what_a_rotation_or_dispa
             .contains("OMARCHY_AGENT_CALLS_PER_TASK"),
         "the start's configuration has no budget"
     );
+    // One others may write, or a symbolic link, is refused as the loop's start refuses it
+    // (design v2 §12): its budget never reaches the file.
+    let toml = w.agent.paths.data.join("agent.toml");
+    let budget = format!(
+        "[set]\nsecrets_dir = \"{}\"\n[envelope]\nagent_budget = {{ calls_per_task = 99 }}\n",
+        secrets.display()
+    );
+    let budgeted = |w: &World| {
+        fs::read_to_string(w.set_dir().join("etc/dispatcher.env"))
+            .unwrap()
+            .contains("\nOMARCHY_AGENT_CALLS_PER_TASK=99\n")
+    };
+    fs::write(&toml, &budget).unwrap();
+    fs::set_permissions(&toml, fs::Permissions::from_mode(0o664)).unwrap();
+    w.tick(61);
+    assert!(!budgeted(&w), "a group-writable agent.toml is not read");
+    let elsewhere = w.dir.join("elsewhere.toml");
+    fs::write(&elsewhere, &budget).unwrap();
+    fs::remove_file(&toml).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &toml).unwrap();
+    w.tick(61);
+    assert!(!budgeted(&w), "a link is not followed");
+    // Its own again: read.
+    fs::remove_file(&toml).unwrap();
+    fs::write(&toml, &budget).unwrap();
+    w.tick(61);
+    assert!(budgeted(&w));
 }
 
 #[test]

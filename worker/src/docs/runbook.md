@@ -671,7 +671,7 @@ dispatcher takes from the agent (#371): `OMARCHY_HOST_ADDRESSES` (every
 address of the host's interfaces but loopback's and a container bridge's the
 egress refuses anyway — private, link-local, unique local or in the task
 subnets —, an IPv6 one as its /64, and the public address the probe saw, which
-the run loop asks again every hour), `OMARCHY_SECRETS_DIR`
+the run loop asks again every hour, and within minutes after no answer), `OMARCHY_SECRETS_DIR`
 (the path chosen here, never mounted into the dispatcher) and, when the
 envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
 `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK` and `…_CALLS_PER_DAY` (without one, the
@@ -722,13 +722,19 @@ the manifest names; no other docker or compose binary is ever run),
 
 At its start and then every minute the loop reads the host's addresses again
 (`/proc/net/fib_trie`, `/proc/net/route`, `/proc/net/if_inet6`) and
-`agent.toml`, and renders `etc/dispatcher.env` with them: the addresses,
+`agent.toml` (one others may write, another user's or a link is refused as at
+the loop's start, and what the loop started with stays), and renders
+`etc/dispatcher.env` with them: the addresses,
 the secrets directory and the budget (#371), the token and your own lines
 kept, written only when that changes it, and never made when it is missing
 (that waits for your Confirm). At its start and then every hour it also asks
 the pool's edge (`<pool>/cdn-cgi/trace`, over IPv4 and not through a proxy)
 which public address the host leaves from, and keeps it in `egress.json`
-when it changed; no answer keeps the one last seen. A new DHCP lease, a new
+when it changed; no answer keeps the one last seen and asks again after one
+minute, then two, four and every five (after a reboot the loop often starts
+before the network is up), so a new public address is refused once the agent
+has seen it: within the hour while the edge answers, within minutes of its
+answering again. A new DHCP lease, a new
 interface, a new public address from your provider or an edited budget
 changes the file, which starts a round like any `etc/` change, so the
 dispatcher is recreated with it and its tasks run on (a task already running
