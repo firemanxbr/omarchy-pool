@@ -654,29 +654,34 @@ network's gateway (its `.1`) on 22, 53 and the pool's ports (3128, 8790,
 makes a task's (internal and, on Docker, in its isolated gateway mode; a
 Docker older than 28 has no such mode and is refused here, as the dispatcher refuses
 it), must fail to reach its gateway on the same ports. A connection refused counts as reached: the
-refusal is the target's own answer. On a rootful engine a network's gateway
-is the host itself, and the `DOCKER-USER` rules sit in `FORWARD`, which
-traffic to the host never crosses (CVE-2024-29018): only prep-root.sh's
-`INPUT` drop for the task subnets (`OMARCHY-TASKS-HOST`) keeps a task off the
-host's own services. The agent is never root and cannot read the firewall, so
-the probe is the check: a rootful host whose probe task reaches its network's
-gateway is refused with the command to run — `sudo systemctl restart
-omarchy-task-firewall.service` when the unit's script
-(`/usr/local/libexec/omarchy-task-firewall`, world-readable) already drops
-every task subnet, the rule having been flushed since (a firewall reload),
+refusal is the target's own answer. On a rootful engine a network's gateway,
+like the host's LAN address, is the host itself, and the `DOCKER-USER` rules
+sit in `FORWARD`, which traffic to the host never crosses (CVE-2024-29018):
+only prep-root.sh's `INPUT` drop for the task subnets (`OMARCHY-TASKS-HOST`)
+keeps a task off the host's own services. So on a rootful engine preflight
+checks it two ways, and either refuses the install with the command to run:
+the unit's script (`/usr/local/libexec/omarchy-task-firewall`,
+world-readable) must jump from `INPUT` to `OMARCHY-TASKS-HOST` and drop every
+task subnet there, whatever the probe says — a host whose own firewall drops
+the ports probed may leave its other services open to a task — and the probe
+must reach neither the gateway nor the LAN address, which shows the rule is
+in effect (the agent is never root and cannot read the firewall itself). The
+command is `sudo systemctl restart omarchy-task-firewall.service` when the
+script is in place, the rule having been flushed since (a firewall reload),
 and otherwise `sudo factory/host/prep-root.sh` with this install's `--user`,
-`--work-root` and `--task-subnets`. A host whose own firewall drops the same
-traffic passes: the probe judges what a task reaches, not which rule stops
-it. The first task also tries the addresses a rootless engine can map to the
-host's loopback, on the port of a listener the agent opens on `127.0.0.1`
-alone: a connection that arrives there refuses the install with the setting
-to change (*Rootless engines*, below). It asks the pool's origin
-(`/cdn-cgi/trace`, at Cloudflare's edge) which
+`--work-root` and `--task-subnets`, and `--address-pool` with the base
+`/etc/docker/daemon.json` names (prep-root.sh would set its own default
+otherwise; one it would not keep as it is, several pools or a size other
+than /24, is said). On a rootless engine there is no such rule, and what
+could reach the host is the engine's **host loopback**: while both probe
+tasks run, preflight reads the command line of the engine's user-mode network
+stack in `/proc` and refuses one that maps the host's loopback, with the
+setting to change (*Rootless engines*, below). The first task asks the pool's
+origin (`/cdn-cgi/trace`, at Cloudflare's edge) which
 address it comes from too: that public address is kept in `egress.json` and every
 task's egress refuses it (#371); not seen is a note, not a blocker. Until the
 probe runs behind an egress sidecar (#373), a rootless host is expected to
-fail it (below). The probe's answers decide; there is no separate check for
-a rootless engine. Leftovers of an interrupted
+fail it (below). The probe's answers decide, not the engine's kind. Leftovers of an interrupted
 probe (labelled `org.omarchy-pool.probe=egress`) are removed before it
 runs. A work root that does not exist under a directory the user cannot
 write is a blocker naming prep-root.sh. A socket
@@ -723,11 +728,13 @@ running under linger.
 `tests/agent-install.sh` runs the egress probe and the legacy project against
 a real engine in CI, rootful docker and rootless podman: a task network's
 gateway is reached on a plain bridge (the host itself on rootful docker, the
-engine's namespace on rootless podman) and not behind the `INPUT` drop
-prep-root.sh installs, which the script adds for one test /28 where it may
-(root, or `sudo -n`); a task's own network has no gateway a task reaches on
-docker, and keeps one behind podman's docker API; the host's loopback is
-reached through neither. What needs a VM, by hand on Ubuntu LTS, Fedora and
+engine's namespace on rootless podman) and not behind an `INPUT` drop for
+one test /28 (the rule prep-root.sh's `OMARCHY-TASKS-HOST` holds for each
+task subnet), which the script adds on a rootful engine where it may (root,
+or `sudo -n`); a task's own network has no gateway a task reaches on docker,
+and keeps one behind podman's docker API; rootless podman's network stack is
+seen in `/proc` while the probe tasks run, and maps nothing to the host's
+loopback. What needs a VM, by hand on Ubuntu LTS, Fedora and
 Arch (Asahi on the Studio's hardware) before P1 is called done: install
 from nothing with the pasted command and confirm on the site, then
 `sudo reboot` and check `systemctl --user status omarchy-agent` and
@@ -739,26 +746,31 @@ same before and after.
 
 A rootless engine's networks live in a network namespace of its own, which
 reaches the outside through a user-mode network stack (RootlessKit with
-slirp4netns, vpnkit or pasta for rootless Docker; pasta or slirp4netns for
-rootless podman). prep-root.sh installs no firewall there (`--runtime
-rootless`): the host's `INPUT` never sees a task's packets, and a network's
-gateway is the engine's namespace, not the host. What can still reach the
-host from a bridge is the stack's **host loopback**: an address in the
-namespace that the stack forwards to the host's `127.0.0.1`, where services
-that trust local callers listen. Every engine below has it off by default,
-and preflight checks it is off rather than reading the engine's
-configuration: its first probe task tries each address on the port of a
-listener the agent holds on `127.0.0.1` alone, and a connection that arrives
-refuses the install with the setting to change. A task's own network is
-internal, with no route to these addresses; a signed exception's bridge has
-one, and so does the shared `omarchy-egress` bridge, whose sidecars refuse
-private addresses by what a name resolves to.
+slirp4netns, vpnkit, gvisor-tap-vsock or pasta for rootless Docker; pasta or
+slirp4netns for rootless podman). prep-root.sh installs no firewall there
+(`--runtime rootless`): the host's `INPUT` never sees a task's packets, and a
+network's gateway is the engine's namespace, not the host. What can still
+reach the host from a bridge is the stack's **host loopback**: an address in
+the namespace that the stack forwards to the host's `127.0.0.1`, where
+services that trust local callers listen. Every engine below has it off by
+default. Whether it is on is on the stack's command line, which the engine's
+own user (the agent's, design v2 §19.3) reads in `/proc/<pid>/cmdline`:
+preflight reads it there while both probe tasks run (rootless podman starts
+its stack with the first container on a bridge network and stops it with the
+last), and refuses the install with the setting to change when any of this
+user's `rootlesskit`, `slirp4netns` or `pasta` processes maps it — or when
+none was seen, since nothing then says it is off. The agent listens on
+nothing (design v2 §11.2), so it reads the setting rather than waiting for a
+connection. The stack carries both a signed exception's bridge and a task's
+own network; the latter is internal, with no route to these addresses, and
+so is reached only through the former and the shared `omarchy-egress`
+bridge, whose sidecars refuse private addresses by what a name resolves to.
 
 | Engine | Where the host's loopback appears, when on | Default | What turns it off |
 |---|---|---|---|
-| rootless Docker (`dockerd-rootless.sh`, RootlessKit) | `10.0.2.2` | off: RootlessKit runs with `--disable-host-loopback` | remove `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` from `docker.service`'s environment (`systemctl --user edit docker.service`), then `systemctl --user restart docker.service` |
-| rootless podman, pasta (podman 5's default) | the default gateway's address (podman's `--map-gw`), or the address given to `--map-host-loopback` | off: podman passes `--no-map-gw` | in `containers.conf` (`~/.config/containers/containers.conf`, or `/etc/containers/containers.conf`), remove `--map-gw` and any `--map-host-loopback` from `pasta_options` under `[network]`; then stop every container of the user, so its namespace starts again without them |
-| rootless podman, slirp4netns (podman 4's default) | `10.0.2.2` | off: `allow_host_loopback=false` | in `containers.conf`, remove `allow_host_loopback=true` from `network_cmd_options` under `[engine]`; then stop every container of the user |
+| rootless Docker (`dockerd-rootless.sh`, RootlessKit) | by RootlessKit's `--net` (its docs/network.md): `10.0.2.2` (slirp4netns, the default), `192.168.65.2` (vpnkit), `10.0.2.1` (gvisor-tap-vsock), the namespace's gateway (pasta) | off: RootlessKit runs with `--disable-host-loopback` | remove `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` from `docker.service`'s environment (`systemctl --user edit docker.service`), and any `--disable-host-loopback=false` from `DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS`, then `systemctl --user restart docker.service` |
+| rootless podman, pasta (podman 5's default) | the namespace's gateway (podman's `--map-gw`), or the address given to `--map-host-loopback` | off: podman passes `--no-map-gw` | in `containers.conf` (`~/.config/containers/containers.conf`, `/etc/containers/containers.conf`, or a file in their `containers.conf.d`), remove `--map-gw` and any `--map-host-loopback` from `pasta_options` under `[network]`; then stop every container of the user, so its namespace starts again without them |
+| rootless podman, slirp4netns (podman 4's default) | `10.0.2.2` | off: podman passes `--disable-host-loopback` (`allow_host_loopback=false`) | in `containers.conf`, remove `allow_host_loopback=true` from `network_cmd_options` under `[engine]`; then stop every container of the user |
 
 With the host loopback off, a rootless host still fails the probe until two
 follow-ups land, and preflight says which:

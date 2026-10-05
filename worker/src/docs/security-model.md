@@ -168,14 +168,19 @@ secret). Everything travels in the `Authorization` header over TLS only.
   subnets) closes it; and a signed exception's bridge always has its gateway,
   the host itself on a rootful engine, where the `DOCKER-USER` rules (in
   `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
-  preflight checks it rather than trusting it (#367): a probe task on a
-  bridge and one on a network made as a task's try their gateway on 22, 53
-  and the pool's ports, and a connection made or refused there fails the
-  install, on a rootful host with the command that puts the INPUT drop back.
-  On a rootless engine the gateway is the engine's own namespace, and what
-  could reach the host is the user-mode stack's host loopback (RootlessKit's,
-  slirp4netns's or pasta's), off by default and refused at install when on,
-  with the setting that turns it off (the runbook's *Rootless engines*).
+  preflight checks it rather than trusting it (#367): on a rootful engine it
+  refuses a host whose prep-root.sh firewall script (world-readable) does
+  not drop every task subnet in INPUT, and a probe task on a bridge and one
+  on a network made as a task's try their gateway on 22, 53 and the pool's
+  ports, and the bridge's the host's LAN address: a connection made or
+  refused there fails the install, with the command that puts the INPUT drop
+  in place or back. On a rootless engine the gateway is the engine's own
+  namespace, and what could reach the host is the user-mode stack's host
+  loopback (RootlessKit's, slirp4netns's or pasta's), off by default: preflight
+  reads the stack's command line in `/proc` while its probe tasks run and
+  refuses one that maps it, with the setting that turns it off (the runbook's
+  *Rootless engines*). It reads rather than listening for a connection: the
+  agent listens on nothing (design v2 §11.2).
   A signed `factory/sizing` exception is per package:
   it also covers a contributor's recipe of that package, so its reviewer
   approves exactly that.
