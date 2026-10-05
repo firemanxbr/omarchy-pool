@@ -546,10 +546,9 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
         .as_ref()
         .and_then(|m| m.build_image(std::env::consts::ARCH))
         .map(ToString::to_string);
-    // The foreign architecture's build image, for the emulated lane's smoke run (#338).
-    let foreign_image = capacity::emulation::foreign_of(std::env::consts::ARCH)
-        .and_then(|f| manifest.as_ref()?.build_image(f))
-        .map(ToString::to_string);
+    // The build images the emulated lane's smoke run may start (#338): detection picks the
+    // engine's foreign architecture's.
+    let images = capacity::emulation::images(get("--emulate-image"), manifest.as_ref());
     let how = probe::Probe {
         docker: get("--docker").unwrap_or("docker"),
         host: host.as_deref(),
@@ -557,7 +556,7 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
         image: get("--probe-image").or(build_image.as_deref()),
         emulation: Some(capacity::emulation::Probe {
             binfmt: Path::new(probe::BINFMT),
-            image: get("--emulate-image").or(foreign_image.as_deref()),
+            images: &images,
             emulate: toml.caps.emulate.as_deref(),
         }),
     };

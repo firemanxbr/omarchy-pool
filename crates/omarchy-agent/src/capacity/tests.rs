@@ -595,6 +595,17 @@ fn at_is_an_rfc3339_utc_time() {
 /// The `x86_64` build image of a release, by digest.
 const X86_IMAGE: &str =
     "docker.io/library/archlinux@sha256:b944cc65c5f28665dfd5fdbf5ed2997c88f5bb4a0aefac7ee8a7ef01893e5ed9";
+/// Its `aarch64` build image.
+const ARM_IMAGE: &str =
+    "docker.io/menci/archlinuxarm@sha256:15fa2527d481a6b8ddce7d49c535bfd3a2a63a6d7d840ace551fd21c1827c08b";
+
+/// A release's build images, by architecture.
+fn release() -> Vec<(&'static str, String)> {
+    vec![
+        ("aarch64", ARM_IMAGE.to_owned()),
+        ("x86_64", X86_IMAGE.to_owned()),
+    ]
+}
 
 /// A smoke run that passes or fails, and remembers what it was asked.
 struct FakeSmoke {
@@ -644,7 +655,7 @@ fn studio(binfmt: &Path, emulate: Option<&[String]>, page_kb: u32, smoke: &FakeS
         page_kb,
         &emulation::Probe {
             binfmt,
-            image: Some(X86_IMAGE),
+            images: &release(),
             emulate,
         },
         smoke,
@@ -860,14 +871,15 @@ fn a_smoke_run_that_fails_or_cannot_run_holds_the_lane_with_its_reason() {
         4,
         &emulation::Probe {
             binfmt: &d,
-            image: None,
+            images: &[],
             emulate: None,
         },
         &smoke,
     );
     assert!(smoke.asked().is_empty());
     assert!(lanes.held[0].reason.starts_with("not checked"), "{lanes:?}");
-    // The reverse host: x86_64 native, aarch64 emulated.
+    // The reverse host: x86_64 native, aarch64 emulated, through the release's aarch64 image
+    // (the engine's architecture decides which, whatever the agent binary's is).
     put(
         &d,
         "qemu-aarch64",
@@ -879,13 +891,16 @@ fn a_smoke_run_that_fails_or_cannot_run_holds_the_lane_with_its_reason() {
         4,
         &emulation::Probe {
             binfmt: &d,
-            image: Some(X86_IMAGE),
+            images: &release(),
             emulate: None,
         },
         &smoke,
     );
     assert_eq!(lanes.on[0].arch, "aarch64");
-    assert_eq!(smoke.asked()[0].0, "aarch64");
+    assert_eq!(
+        smoke.asked(),
+        [("aarch64".to_owned(), ARM_IMAGE.to_owned())]
+    );
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -964,6 +979,7 @@ fn detection_runs_the_emulated_lane_through_the_engine_with_the_envelope() {
     let dir = tmp("detect-emu");
     let docker = fake_docker(&dir, 0);
     let bin = binfmt_tree("detect-emu-binfmt", &[("qemu-x86_64", QEMU_X86_F)]);
+    let images = release();
     let p = probe::Probe {
         docker: docker.to_str().unwrap(),
         host: None,
@@ -971,7 +987,7 @@ fn detection_runs_the_emulated_lane_through_the_engine_with_the_envelope() {
         image: Some("build-image"),
         emulation: Some(emulation::Probe {
             binfmt: &bin,
-            image: Some(X86_IMAGE),
+            images: &images,
             emulate: None,
         }),
     };
@@ -987,7 +1003,7 @@ fn detection_runs_the_emulated_lane_through_the_engine_with_the_envelope() {
     let p = probe::Probe {
         emulation: Some(emulation::Probe {
             binfmt: &bin,
-            image: Some(X86_IMAGE),
+            images: &images,
             emulate: Some(&[]),
         }),
         ..p
@@ -999,4 +1015,80 @@ fn detection_runs_the_emulated_lane_through_the_engine_with_the_envelope() {
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&bin);
+}
+
+#[test]
+fn the_smoke_runs_images_are_the_releases_by_architecture_or_one_given_by_hand() {
+    let m = match manifest::parse(include_bytes!(
+        "../../tests/fixtures/manifest/v2-example.json"
+    )) {
+        Ok(Parsed::Current(m)) => *m,
+        other => panic!("the example manifest must read whole: {other:?}"),
+    };
+    let images = emulation::images(None, Some(&m));
+    let want: Vec<(&str, String)> = ["aarch64", "x86_64"]
+        .into_iter()
+        .map(|a| (a, m.build_image(a).unwrap().to_string()))
+        .collect();
+    assert_eq!(images, want);
+    assert!(emulation::images(None, None).is_empty(), "no release, none");
+    // `--emulate-image`: the foreign architecture's, whichever the engine's is.
+    assert!(emulation::images(Some(X86_IMAGE), Some(&m))
+        .iter()
+        .all(|(_, i)| i == X86_IMAGE));
+}
+
+/// `run/capacity.json` as this agent writes it, and as the dispatcher reads it
+/// (`crates/pkg-repo` `dispatch::capacity`, its claim, the pool's `parseCapacity`): the
+/// Studio's `x86_64` lane on through qemu on 16K pages, and an `x86_64` host whose
+/// `aarch64` lane is held for a person. Both crates test against these files, so a field renamed on
+/// one side fails the other (#338).
+const EMULATED_LANE_FILE: &str = include_str!("../../tests/fixtures/capacity/emulated-lane.json");
+const HELD_LANE_FILE: &str = include_str!("../../tests/fixtures/capacity/held-lane.json");
+
+#[test]
+fn capacity_json_with_its_lanes_is_the_file_the_dispatcher_tests_against() {
+    let check = |fixture: &str, c: &Capacity| {
+        let want: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let at = want["at"].as_str().unwrap();
+        assert_eq!(serde_json::to_value(c.file(at)).unwrap(), want);
+    };
+    let dedicated = Caps {
+        dedicated: true,
+        ..Caps::default()
+    };
+    let d = binfmt_tree("emu-file", &[("qemu-x86_64", QEMU_X86_F)]);
+    let lanes = studio(&d, None, 16, &FakeSmoke::passing());
+    check(
+        EMULATED_LANE_FILE,
+        &Capacity::new(
+            &facts(ROOTFUL).with_emulation(16, lanes),
+            &dedicated,
+            &constants(),
+        ),
+    );
+    put(
+        &d,
+        "qemu-aarch64",
+        "disabled\ninterpreter /usr/bin/qemu-aarch64-static\nflags: F\n",
+    );
+    let lanes = emulation::detect(
+        "x86_64",
+        4,
+        &emulation::Probe {
+            binfmt: &d,
+            images: &release(),
+            emulate: None,
+        },
+        &FakeSmoke::passing(),
+    );
+    check(
+        HELD_LANE_FILE,
+        &Capacity::new(
+            &facts(ROOTLESS_DOCKER).with_emulation(4, lanes),
+            &dedicated,
+            &constants(),
+        ),
+    );
+    let _ = std::fs::remove_dir_all(&d);
 }

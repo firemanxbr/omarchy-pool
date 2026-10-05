@@ -6,7 +6,9 @@
 //! containers are the dispatcher's. Capacity (`capacity()`, #333) and fingerprinting
 //! (#317) join this trait in their own issues; the emulated lane's smoke run (§15's
 //! `emulation(arch, image)`, #338) is `capacity::emulation::Smoke` on the probe's engine
-//! CLI until then, and joins it with `capacity()` when the run loop detects.
+//! CLI until then, and joins it with `capacity()` when the run loop detects — then as a
+//! start and a poll, like a pull: its first run may pull the foreign build image, longer
+//! than one engine call may block here.
 
 use std::path::PathBuf;
 

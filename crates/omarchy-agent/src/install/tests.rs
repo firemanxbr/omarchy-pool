@@ -490,13 +490,29 @@ fn the_envelope_keeps_the_owners_keys_and_takes_the_ids_after_the_confirm() {
     );
     assert_eq!(c.task_subnets.as_deref(), Some(TASK_SUBNETS));
     assert!(c.envelope.allow_socket && c.envelope.dedicated && !c.envelope.rootful_ack);
-    crate::capacity::AgentToml::parse(&with).unwrap();
+    // The emulated lane's switch, shown to the owner who confirms (#338): the foreign
+    // architecture detection found.
+    assert_eq!(
+        crate::capacity::AgentToml::parse(&with)
+            .unwrap()
+            .caps
+            .emulate,
+        Some(vec!["x86_64".to_owned()])
+    );
     // The owner narrowed it by hand; a re-run keeps that and refreshes the ids.
-    let edited = with.replace("[envelope]\n", "[envelope]\nmax_units = 3\nemulate = []\n");
+    let edited = with
+        .replace("emulate = [\"x86_64\"]\n", "emulate = []\n")
+        .replace("[envelope]\n", "[envelope]\nmax_units = 3\n");
+    assert_ne!(edited, with);
     let again =
         envelope::render(Some(&edited), &v, Some(("h_0123456789", "m1-rack-1b2c"))).unwrap();
     let t: toml::Table = toml::from_str(&again).unwrap();
     assert_eq!(t["envelope"]["max_units"].as_integer(), Some(3));
+    assert_eq!(
+        t["envelope"]["emulate"].as_array().map(Vec::len),
+        Some(0),
+        "an owner's emulate = [] stays"
+    );
     assert_eq!(t["worker_id"].as_str(), Some("m1-rack-1b2c"));
     assert_eq!(
         crate::capacity::AgentToml::parse(&again)
@@ -572,6 +588,7 @@ fn values(root: &Path) -> envelope::Values {
         max_units: None,
         max_cpus: None,
         max_mem_gb: None,
+        emulate: Some(vec!["x86_64".into()]),
     }
 }
 
@@ -828,13 +845,23 @@ fn preflight_reports_the_emulated_lane_and_never_stops_on_a_held_one() {
             ("x86_64".to_owned(), "emulated")
         ]
     );
+    // The release's x86_64 build image, by digest: the engine's foreign architecture picks it,
+    // whatever this test binary's own architecture is.
+    let x86_image = tests_support::manifest("v1.20.0", "v1.0.0", &[])
+        .build_image("x86_64")
+        .unwrap()
+        .to_string();
     let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
     assert!(
-        log.contains("run --rm --network none --platform linux/amd64 --entrypoint /usr/bin/true "),
+        log.contains(&format!(
+            "run --rm --network none --platform linux/amd64 --entrypoint /usr/bin/true {x86_image}"
+        )),
         "{log}"
     );
     assert!(
-        log.contains("--platform linux/amd64 --entrypoint pacman "),
+        log.contains(&format!(
+            "--platform linux/amd64 --entrypoint pacman {x86_image} --version"
+        )),
         "{log}"
     );
 

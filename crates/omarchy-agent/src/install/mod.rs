@@ -578,11 +578,10 @@ pub(crate) fn measure(
         .as_ref()
         .and_then(|m| m.build_image(std::env::consts::ARCH))
         .map(ToString::to_string);
-    // The emulated lane (#338): the foreign architecture's build image for its smoke run,
-    // within the envelope an earlier install's owner may have narrowed (`emulate`).
-    let foreign_image = capacity::emulation::foreign_of(std::env::consts::ARCH)
-        .and_then(|f| manifest.as_ref()?.build_image(f))
-        .map(ToString::to_string);
+    // The emulated lane (#338): the release's build images for its smoke run (the foreign
+    // one of the engine's architecture), within the envelope an earlier install's owner may
+    // have narrowed (`emulate`).
+    let images = capacity::emulation::images(None, manifest.as_ref());
     let emulate: Option<Vec<String>> = envelope::envelope_value(ex, "emulate").map(|v| {
         v.as_array()
             .into_iter()
@@ -599,7 +598,7 @@ pub(crate) fn measure(
             image: image.as_deref(),
             emulation: Some(capacity::emulation::Probe {
                 binfmt: &p.binfmt,
-                image: foreign_image.as_deref(),
+                images: &images,
                 emulate: emulate.as_deref(),
             }),
         };
@@ -742,6 +741,7 @@ pub(crate) fn measure(
                 max_units: o.max_units,
                 max_cpus: o.max_cpus,
                 max_mem_gb: o.max_mem_gb,
+                emulate: capacity::emulation::foreign_of(facts.arch()).map(|f| vec![f.to_owned()]),
             };
             Some(Ready {
                 manifest,

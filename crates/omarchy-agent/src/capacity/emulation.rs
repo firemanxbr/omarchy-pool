@@ -7,7 +7,8 @@
 //! 1. the envelope's `emulate` (design v2 §12) lists it, or is absent: `emulate = []` keeps
 //!    every emulated lane off, and nothing else is tried for one it leaves out — no image
 //!    of an architecture the owner turned off is pulled;
-//! 2. the set's `[needs]` for an emulated lane (`binfmt`, the only one `lint-set` allows):
+//! 2. binfmt, checked always (it is also the only host need `lint-set` lets a set's
+//!    `[needs]` name for an emulated lane, so detection does not read the set):
 //!    `/proc/sys/fs/binfmt_misc/qemu-<arch>` enabled, with the `F` flag so a container's
 //!    own root needs no interpreter of its own (or Rosetta's handler, `rosetta`, in a VM
 //!    started with it). Missing, the lane is held — "needs a person: prep-root.sh installs
@@ -163,13 +164,34 @@ pub fn off_in_envelope(arch: &str) -> Held {
     }
 }
 
-/// What detection needs: where the binfmt table is, the build image of the foreign
-/// architecture by digest (`None` without a release), and the envelope's `emulate`.
+/// What detection needs: where the binfmt table is, the build images the smoke run may
+/// start, by architecture and by digest (the release's; none without one), and the
+/// envelope's `emulate`. The foreign architecture is the engine's other one, so its image
+/// is looked up here: the agent binary's own architecture may not be the engine's.
 #[derive(Debug, Clone, Copy)]
 pub struct Probe<'a> {
     pub binfmt: &'a Path,
-    pub image: Option<&'a str>,
+    pub images: &'a [(&'static str, String)],
     pub emulate: Option<&'a [String]>,
+}
+
+/// The images the smoke run may start ([`Probe::images`]): one given by hand
+/// (`--emulate-image`), as the foreign architecture's whichever the engine's is, or else a
+/// release's build image of each architecture the pool builds.
+pub fn images(
+    given: Option<&str>,
+    release: Option<&crate::manifest::Manifest>,
+) -> Vec<(&'static str, String)> {
+    ARCHES
+        .iter()
+        .filter_map(|a| {
+            let image = match given {
+                Some(i) => i.to_owned(),
+                None => release?.build_image(a)?.to_string(),
+            };
+            Some((*a, image))
+        })
+        .collect()
 }
 
 /// The emulated lanes of a host whose native architecture is `native`, on a kernel with
@@ -208,7 +230,11 @@ pub fn detect(native: &str, page_kb: u32, p: &Probe<'_>, smoke: &dyn Smoke) -> L
             return out;
         }
     };
-    let Some(image) = p.image else {
+    let Some(image) = p
+        .images
+        .iter()
+        .find_map(|(a, i)| (*a == arch).then_some(i.as_str()))
+    else {
         out.held.push(held(format!(
             "not checked: no {arch} build image to run (a release names one)"
         )));
