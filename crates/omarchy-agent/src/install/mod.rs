@@ -43,6 +43,7 @@ pub(crate) mod engine;
 pub(crate) mod envelope;
 pub(crate) mod files;
 pub(crate) mod legacy;
+pub(crate) mod loopback;
 pub(crate) mod net;
 pub(crate) mod secrets;
 mod sys;
@@ -88,9 +89,13 @@ pub struct Places {
     pub binfmt: PathBuf,
     /// Where the host's own addresses are read (`/proc/net`, #371).
     pub proc_net: PathBuf,
-    /// prep-root.sh's firewall script (world-readable): which command a host whose task
-    /// subnets reach it is told to run (#367).
+    /// prep-root.sh's firewall script (world-readable): whether its INPUT drop for the task
+    /// subnets is installed, and which command a rootful host without it is told to run (#367).
     pub task_firewall: PathBuf,
+    /// Docker's `daemon.json` (world-readable): the address pool that command carries (#367).
+    pub docker_daemon: PathBuf,
+    /// Where processes are read (`/proc`): a rootless engine's network stack (#367).
+    pub proc: PathBuf,
 }
 
 impl Places {
@@ -118,6 +123,8 @@ impl Places {
             binfmt: PathBuf::from("/proc/sys/fs/binfmt_misc"),
             proc_net: Sources::system().proc_net,
             task_firewall: PathBuf::from("/usr/local/libexec/omarchy-task-firewall"),
+            docker_daemon: PathBuf::from("/etc/docker/daemon.json"),
+            proc: PathBuf::from("/proc"),
         })
     }
 
@@ -697,8 +704,10 @@ pub(crate) fn measure(
                 let router = net::default_gateway(&routes);
                 let rootful = facts.as_ref().is_none_or(|f| !f.rootless());
                 let server = d.server();
+                let script = std::fs::read_to_string(&p.task_firewall).ok();
                 let firewall = egress::firewall_command(
-                    std::fs::read_to_string(&p.task_firewall).ok().as_deref(),
+                    script.as_deref(),
+                    std::fs::read_to_string(&p.docker_daemon).ok().as_deref(),
                     &task,
                     &p.user,
                     &work_root,
@@ -714,6 +723,9 @@ pub(crate) fn measure(
                         firewall,
                     },
                     server,
+                    unprepared: egress::unprepared(script.as_deref(), &task),
+                    proc: &p.proc,
+                    uid: rustix::process::getuid().as_raw(),
                 };
                 public = egress::check(d, img, subnet, &host, &mut r);
             }

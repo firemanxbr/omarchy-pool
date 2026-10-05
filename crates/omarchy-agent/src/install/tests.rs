@@ -374,82 +374,306 @@ fn a_task_that_reaches_its_networks_gateway_on_any_port_fails_the_probe_with_wha
     assert!(b.iter().all(|x| x.contains("no answer")), "{b:?}");
 }
 
+/// prep-root.sh's firewall script for the default task subnets, as it writes it (step 9).
+const FIREWALL: &str = "#!/bin/sh\nset -e\niptables -N OMARCHY-TASKS-HOST 2>/dev/null || true\niptables -F OMARCHY-TASKS-HOST\niptables -A OMARCHY-TASKS-HOST -s 10.231.0.0/16 -j DROP\niptables -C INPUT -j OMARCHY-TASKS-HOST 2>/dev/null || iptables -I INPUT -j OMARCHY-TASKS-HOST\n";
+
 #[test]
 fn a_rootful_host_is_told_the_command_that_puts_prep_roots_input_drop_in_place() {
     let task = net::parse_list(TASK_SUBNETS).unwrap();
     let w = Path::new("/srv/omarchy-pool/host");
     let prep = "sudo factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-pool/host --task-subnets 10.231.0.0/16";
     assert_eq!(
-        egress::firewall_command(None, &task, "omarchy", w, TASK_SUBNETS),
+        egress::firewall_command(None, None, &task, "omarchy", w, TASK_SUBNETS),
         prep
     );
-    // prep-root.sh's script, which drops these subnets: the rule was flushed since it ran,
-    // and its unit puts it back.
-    let script = "#!/bin/sh\nset -e\niptables -N OMARCHY-TASKS-HOST 2>/dev/null || true\niptables -F OMARCHY-TASKS-HOST\niptables -A OMARCHY-TASKS-HOST -s 10.231.0.0/16 -j DROP\niptables -C INPUT -j OMARCHY-TASKS-HOST 2>/dev/null || iptables -I INPUT -j OMARCHY-TASKS-HOST\n";
     assert_eq!(
-        egress::firewall_command(Some(script), &task, "omarchy", w, TASK_SUBNETS),
+        egress::unprepared(None, &task).as_deref(),
+        Some("it is not there")
+    );
+    // prep-root.sh's script, which drops these subnets: installed. A rule flushed since it
+    // ran is put back by its unit.
+    assert_eq!(egress::unprepared(Some(FIREWALL), &task), None);
+    assert_eq!(
+        egress::firewall_command(Some(FIREWALL), None, &task, "omarchy", w, TASK_SUBNETS),
         "sudo systemctl restart omarchy-task-firewall.service"
     );
-    // One that drops other subnets, or not all of these: prep-root.sh again, with these.
+    // One that drops other subnets, or not all of these, or never jumps from INPUT: not
+    // installed, and prep-root.sh again, with these.
     let two = net::parse_list("10.231.0.0/16,10.232.0.0/16").unwrap();
+    assert_eq!(
+        egress::unprepared(Some(FIREWALL), &two).as_deref(),
+        Some("it does not drop 10.232.0.0/16")
+    );
     assert!(egress::firewall_command(
-        Some(script),
+        Some(FIREWALL),
+        None,
         &two,
         "omarchy",
         w,
         "10.231.0.0/16,10.232.0.0/16"
     )
     .ends_with("--task-subnets 10.231.0.0/16,10.232.0.0/16"));
+    let no_jump = FIREWALL.replace("iptables -C INPUT", "# iptables -C INPUT");
     assert_eq!(
-        egress::firewall_command(Some("#!/bin/sh\n"), &task, "omarchy", w, TASK_SUBNETS),
+        egress::unprepared(Some(&no_jump), &task).as_deref(),
+        Some("it does not jump from INPUT to OMARCHY-TASKS-HOST")
+    );
+    assert_eq!(
+        egress::firewall_command(Some("#!/bin/sh\n"), None, &task, "omarchy", w, TASK_SUBNETS),
         prep
     );
-    // The line is the one prep-root.sh writes, for each task subnet.
-    assert!(include_str!("../../../../factory/host/prep-root.sh")
-        .contains(r#"rules+=("iptables -A OMARCHY-TASKS-HOST -s $s -j DROP")"#));
-    assert!(include_str!("../../../../factory/host/prep-root.sh")
-        .contains("put /usr/local/libexec/omarchy-task-firewall 0755"));
+    // The address pool daemon.json names is carried, or prep-root.sh would set its own default;
+    // one prep-root.sh would not keep as it is is said.
+    let pool = r#"{"default-address-pools":[{"base":"10.200.0.0/16","size":24}],"userns-remap":"default"}"#;
+    assert_eq!(
+        egress::firewall_command(None, Some(pool), &task, "omarchy", w, TASK_SUBNETS),
+        format!("{prep} --address-pool 10.200.0.0/16")
+    );
+    let pools = r#"{"default-address-pools":[{"base":"10.200.0.0/16","size":26},{"base":"10.201.0.0/16","size":24}]}"#;
+    let c = egress::firewall_command(None, Some(pools), &task, "omarchy", w, TASK_SUBNETS);
+    assert!(
+        c.starts_with(&format!("{prep} --address-pool 10.200.0.0/16 ("))
+            && c.contains("check it first"),
+        "{c}"
+    );
+    for none in ["{}", "not json", r#"{"default-address-pools":[]}"#] {
+        assert_eq!(
+            egress::firewall_command(None, Some(none), &task, "omarchy", w, TASK_SUBNETS),
+            prep
+        );
+    }
+    // Every word is one shell word.
+    assert_eq!(
+        egress::firewall_command(
+            None,
+            None,
+            &task,
+            "o'mar chy",
+            Path::new("/srv/my host"),
+            TASK_SUBNETS
+        ),
+        r"sudo factory/host/prep-root.sh --user 'o'\''mar chy' --work-root '/srv/my host' --task-subnets 10.231.0.0/16"
+    );
+    // The lines are the ones prep-root.sh writes, for each task subnet.
+    let prep_root = include_str!("../../../../factory/host/prep-root.sh");
+    assert!(prep_root.contains(r#"rules+=("iptables -A OMARCHY-TASKS-HOST -s $s -j DROP")"#));
+    assert!(prep_root.contains(
+        r#""iptables -C INPUT -j OMARCHY-TASKS-HOST 2>/dev/null || iptables -I INPUT -j OMARCHY-TASKS-HOST")"#
+    ));
+    assert!(prep_root.contains("put /usr/local/libexec/omarchy-task-firewall 0755"));
+    assert!(prep_root.contains(r#"address_pool="172.16.0.0/12""#));
+}
+
+/// A process in a stand-in `/proc`: its command line, NUL-separated.
+fn process(proc: &Path, pid: u32, argv: &[&str]) {
+    let dir = proc.join(pid.to_string());
+    fs::create_dir_all(&dir).unwrap();
+    let mut cmdline = argv.join("\0");
+    cmdline.push('\0');
+    fs::write(dir.join("cmdline"), cmdline).unwrap();
+}
+
+/// What dockerd-rootless.sh runs by default, and what rootless podman 4 runs for its bridge
+/// networks.
+const ROOTLESSKIT: &[&str] = &[
+    "rootlesskit",
+    "--state-dir=/run/user/1000/dockerd-rootless",
+    "--net=slirp4netns",
+    "--mtu=65520",
+    "--slirp4netns-sandbox=auto",
+    "--slirp4netns-seccomp=auto",
+    "--disable-host-loopback",
+    "--port-driver=builtin",
+    "--copy-up=/etc",
+    "--copy-up=/run",
+    "--propagation=rslave",
+    "/usr/bin/dockerd-rootless.sh",
+];
+const SLIRP4NETNS: &[&str] = &[
+    "/usr/bin/slirp4netns",
+    "--disable-host-loopback",
+    "--mtu=65520",
+    "--enable-sandbox",
+    "--enable-seccomp",
+    "-c",
+    "-r",
+    "3",
+    "--netns-type=path",
+    "/run/user/1000/netns/rootless-netns-0",
+    "tap0",
+];
+const PASTA: &[&str] = &[
+    "/usr/bin/pasta",
+    "--config-net",
+    "--pid",
+    "/run/user/1000/containers/networks/rootless-netns/rootless-netns-conn.pid",
+    "--dns-forward",
+    "169.254.1.1",
+    "-t",
+    "none",
+    "-u",
+    "none",
+    "--no-map-gw",
+    "--quiet",
+    "--netns",
+    "/run/user/1000/containers/networks/rootless-netns/rootless-netns",
+    "--map-guest-addr",
+    "169.254.1.2",
+];
+
+#[test]
+fn a_rootless_engines_stack_says_whether_it_maps_the_hosts_loopback() {
+    use loopback::{Kind, Stack};
+    let parse = |argv: &[&str]| Stack::parse(7, format!("{}\0", argv.join("\0")).as_bytes());
+    let without = |argv: &[&str], flag: &str| -> Vec<String> {
+        argv.iter()
+            .filter(|a| **a != flag)
+            .map(|a| (*a).to_owned())
+            .collect()
+    };
+    let with = |argv: Vec<String>| parse(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+    // Each engine's defaults keep it out.
+    for (argv, kind) in [
+        (ROOTLESSKIT, Kind::RootlessKit),
+        (SLIRP4NETNS, Kind::Slirp4netns),
+        (PASTA, Kind::Pasta),
+    ] {
+        let s = parse(argv).unwrap();
+        assert_eq!((s.kind, s.pid, s.args.len()), (kind, 7, argv.len() - 1));
+        assert_eq!(s.host_loopback(), None, "{argv:?}");
+    }
+    // pasta's AVX2 build, by its name too.
+    let mut avx2 = PASTA.to_vec();
+    avx2[0] = "/usr/bin/pasta.avx2";
+    assert_eq!(parse(&avx2).unwrap().kind, Kind::Pasta);
+    for other in [
+        &["/usr/bin/dockerd"][..],
+        &["passt"],
+        &["sh", "-c", "rootlesskit"],
+        &[],
+    ] {
+        assert_eq!(parse(other), None, "{other:?}");
+    }
+    // RootlessKit without --disable-host-loopback, or with it false: where its driver puts it.
+    let on = without(ROOTLESSKIT, "--disable-host-loopback");
+    assert_eq!(
+        with(on.clone()).unwrap().host_loopback().as_deref(),
+        Some("10.0.2.2")
+    );
+    let mut vpnkit = on.clone();
+    vpnkit[2] = "--net=vpnkit".into();
+    assert_eq!(
+        with(vpnkit).unwrap().host_loopback().as_deref(),
+        Some("192.168.65.2")
+    );
+    let mut gvisor = on.clone();
+    gvisor.splice(2..3, ["--net".to_owned(), "gvisor-tap-vsock".to_owned()]);
+    assert_eq!(
+        with(gvisor).unwrap().host_loopback().as_deref(),
+        Some("10.0.2.1")
+    );
+    let mut off_then_on: Vec<String> = ROOTLESSKIT.iter().map(|a| (*a).to_owned()).collect();
+    off_then_on.insert(7, "--disable-host-loopback=false".into());
+    assert!(with(off_then_on).unwrap().host_loopback().is_some());
+    // slirp4netns without it (allow_host_loopback=true): 10.0.2.2.
+    let s = with(without(SLIRP4NETNS, "--disable-host-loopback")).unwrap();
+    assert_eq!(s.host_loopback().as_deref(), Some("10.0.2.2"));
+    // pasta without --no-map-gw (podman's --map-gw) maps its gateway; --map-host-loopback
+    // maps the address it names, whatever comes with it; `none` maps nothing.
+    let s = with(without(PASTA, "--no-map-gw")).unwrap();
+    assert_eq!(
+        s.host_loopback().as_deref(),
+        Some("its namespace's gateway")
+    );
+    let mut named: Vec<String> = PASTA.iter().map(|a| (*a).to_owned()).collect();
+    named.splice(
+        1..1,
+        ["--map-host-loopback".to_owned(), "10.0.2.3".to_owned()],
+    );
+    assert_eq!(
+        with(named).unwrap().host_loopback().as_deref(),
+        Some("10.0.2.3")
+    );
+    let mut none = without(PASTA, "--no-map-gw");
+    none.push("--map-host-loopback=none".into());
+    assert_eq!(with(none).unwrap().host_loopback(), None);
 }
 
 #[test]
-fn a_task_that_reaches_the_hosts_loopback_is_refused_with_the_engines_setting() {
-    // The canary listens on loopback only, and keeps a connection that came and went.
-    let c = egress::Canary::open().unwrap();
-    assert!(c.port() > 0 && !c.reached());
-    drop(std::net::TcpStream::connect(("127.0.0.1", c.port())).unwrap());
-    assert!(c.reached());
-    // Where a rootless engine maps the host's loopback: slirp4netns's and RootlessKit's
-    // 10.0.2.2, and the default gateway (pasta's --map-gw), on the canary's port.
-    let net = Cidr::parse(PROBE_NET).unwrap();
-    let t = egress::Targets::of_host(Some("192.168.1.1".parse().unwrap()), None, net)
-        .and_loopback(Some("192.168.1.1".parse().unwrap()), 4242);
-    let l: Vec<String> = t
-        .forbidden
-        .iter()
-        .filter(|x| x.what == egress::What::Loopback)
-        .map(|x| format!("{} {}:{}", x.name(), x.host, x.port))
-        .collect();
-    assert_eq!(
-        l,
-        [
-            "loopback-10.0.2.2 10.0.2.2:4242",
-            "loopback-192.168.1.1 192.168.1.1:4242"
-        ]
+fn a_rootless_engines_stack_is_read_while_the_probe_runs_and_refused_with_its_setting() {
+    let without = |argv: &[&str], flag: &str| -> Vec<String> {
+        argv.iter()
+            .filter(|a| **a != flag)
+            .map(|a| (*a).to_owned())
+            .collect()
+    };
+    // This user's processes only, and only the stacks among them.
+    let proc = tempdir();
+    process(&proc, 40, ROOTLESSKIT);
+    process(
+        &proc,
+        41,
+        &[
+            "/usr/bin/dockerd",
+            "--config-file=/home/u/.config/docker/daemon.json",
+        ],
     );
-    // Their answers are the canary's to judge: an open port of the router is not the host's.
-    let out = format!("{}egress public open\n", all_blocked(&t))
-        .replace("loopback-192.168.1.1 blocked", "loopback-192.168.1.1 open");
-    assert!(egress::verdict(&out, &t, &advice(false, false)).is_empty());
-    // The setting to change, by engine.
+    process(&proc, 42, SLIRP4NETNS);
+    fs::create_dir_all(proc.join("self")).unwrap();
+    let me = rustix::process::getuid().as_raw();
+    let seen = loopback::scan(&proc, me);
+    assert_eq!(seen.iter().map(|s| s.pid).collect::<Vec<_>>(), [40, 42]);
+    assert!(loopback::scan(&proc, me + 1).is_empty());
+    assert!(loopback::scan(&proc.join("nowhere"), me).is_empty());
+
+    // A stack that runs only while the probe does (rootless podman's) is seen all the same.
+    let (out, seen) = loopback::watching(&proc, me, || {
+        process(
+            &proc,
+            43,
+            &without(PASTA, "--no-map-gw")
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        std::thread::sleep(Duration::from_millis(350));
+        fs::remove_dir_all(proc.join("43")).unwrap();
+        "probed"
+    });
+    assert_eq!(out, "probed");
+    assert_eq!(seen.iter().map(|s| s.pid).collect::<Vec<_>>(), [40, 42, 43]);
+    assert!(!loopback::scan(&proc, me).iter().any(|s| s.pid == 43));
+
+    // The verdict, with the engine's setting.
     let docker = advice(false, false).loopback();
+    let podman = advice(false, true).loopback();
+    let note = loopback::verdict(&seen[..2], &docker).unwrap();
+    assert!(
+        note.contains(
+            "maps nothing to the host's loopback (RootlessKit (pid 40), slirp4netns (pid 42))"
+        ),
+        "{note}"
+    );
+    let b = loopback::verdict(&seen, &podman).unwrap_err();
+    assert!(
+        b.contains("maps this host's loopback into the networks tasks run on (pasta (pid 43) at its namespace's gateway)")
+            && b.contains(&podman),
+        "{b}"
+    );
+    let b = loopback::verdict(&[], &docker).unwrap_err();
+    assert!(
+        b.contains("no network stack of this user's rootless engine"),
+        "{b}"
+    );
+    // The setting to change, by engine.
     assert!(
         docker.contains("DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false")
             && docker.contains("systemctl --user restart docker.service"),
         "{docker}"
     );
-    let podman = advice(false, true).loopback();
     assert!(
         podman.contains("--map-gw")
+            && podman.contains("--map-host-loopback")
             && podman.contains("pasta_options")
             && podman.contains("allow_host_loopback=true")
             && podman.contains("network_cmd_options"),
@@ -826,8 +1050,7 @@ const INFO: &str = r#"{"NCPU":12,"MemTotal":33443418112,"DockerRootDir":"/nonexi
 const PROBE: &str = "cpu.max=50000 100000\nmemory.max=67108864\npids.max=32\npagesize=4096\noverlay 482344960 1 230686720 1% /";
 const EGRESS_OK: &str = "egress metadata blocked\negress router blocked\negress lan blocked\n\
     egress gateway-22 blocked\negress gateway-53 blocked\negress gateway-3128 blocked\n\
-    egress gateway-8790 blocked\negress gateway-8791 blocked\negress loopback-10.0.2.2 refused\n\
-    egress public open";
+    egress gateway-8790 blocked\negress gateway-8791 blocked\negress public open";
 /// What the probe task on a task's own network answers when its gateway is not there.
 const TASK_EGRESS_OK: &str = "egress gateway-22 blocked\negress gateway-53 blocked\n\
     egress gateway-3128 blocked\negress gateway-8790 blocked\negress gateway-8791 blocked";
@@ -886,13 +1109,13 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
     ] {
         fs::write(root.join(name), body).unwrap();
     }
+    // INFO is rootless Docker's: its RootlessKit, as dockerd-rootless.sh runs it.
+    process(&root.join("proc"), 4242, ROOTLESSKIT);
     let docker = root.join("docker");
     fs::write(
         &docker,
         format!(
-            // A probe task that reaches the host's loopback (`reach-loopback`) connects to
-            // the canary's port, each loopback target's third word.
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*-task*) cat {r}/task-egress ;;\n  *omarchy-egress-probe-*)\n    if [ -f {r}/reach-loopback ]; then while [ $# -gt 0 ]; do case \"$1\" in loopback-*) python3 -c 'import socket, sys; socket.create_connection((\"127.0.0.1\", int(sys.argv[1]))).close()' \"$3\" ;; esac; shift; done; fi\n    cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*-task*) cat {r}/task-egress ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = root.display()
         ),
     )
@@ -912,6 +1135,8 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
             binfmt: root.join("binfmt"),
             proc_net: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home"),
             task_firewall: root.join("omarchy-task-firewall"),
+            docker_daemon: root.join("daemon.json"),
+            proc: root.join("proc"),
         },
         source: Some(Source::Files(
             root.join("bundle.tar.gz"),
@@ -1113,45 +1338,100 @@ fn rootful_info() -> String {
 
 #[test]
 fn a_rootful_host_whose_tasks_reach_it_through_their_bridge_is_refused_with_the_command_to_run() {
-    // prep-root.sh's INPUT drop not in effect: the bridge's gateway, the host itself, answers.
+    // prep-root.sh never ran: no firewall script, and the host itself answers a bridge's
+    // task on its gateway and on its LAN address, both through INPUT.
     let h = host(
         &rootful_info(),
-        &EGRESS_OK.replace("gateway-22 blocked", "gateway-22 refused"),
+        &EGRESS_OK
+            .replace("gateway-22 blocked", "gateway-22 refused")
+            .replace("lan blocked", "lan refused"),
     );
     let (r, ready) = measure_on(&h, &mut Fake::default());
     assert!(ready.is_none());
     let s = r.screen();
-    assert!(
-        s.contains("a task on a signed exception's bridge network reaches its gateway 10.231.255.241 (port 22: refused)"),
-        "{s}"
-    );
     let cmd = format!(
         "run sudo factory/host/prep-root.sh --user omarchy --work-root {} --task-subnets 10.231.0.0/16",
         h.root.join("work").display()
     );
-    assert!(s.contains("OMARCHY-TASKS-HOST") && s.contains(&cmd), "{s}");
-    assert_eq!(r.blockers.len(), 1, "{s}");
+    assert!(
+        s.contains("prep-root.sh's INPUT drop for the task subnets (OMARCHY-TASKS-HOST) is not installed: /usr/local/libexec/omarchy-task-firewall, its unit's script, it is not there"),
+        "{s}"
+    );
+    assert!(
+        s.contains("a task on a signed exception's bridge network reaches its gateway 10.231.255.241 (port 22: refused); on a rootful engine that is this host itself"),
+        "{s}"
+    );
+    assert!(
+        s.contains("a task reaches the host's LAN address")
+            && s.contains("(port 22: refused); on a rootful engine that is this host itself"),
+        "{s}"
+    );
+    assert!(
+        !s.contains("DOCKER-USER rules, or the egress sidecar"),
+        "{s}"
+    );
+    assert_eq!(r.blockers.len(), 3, "{s}");
+    assert!(r.blockers.iter().all(|b| b.ends_with(&cmd)), "{s}");
+    // A rootful engine's network stack is the host's own: nothing is read in /proc.
+    assert!(!s.contains("network stack"), "{s}");
 
-    // The firewall unit's script drops the task subnets: the rule was flushed since.
+    // The script there but for other subnets: still not installed.
     fs::write(
         h.root.join("omarchy-task-firewall"),
-        "#!/bin/sh\niptables -A OMARCHY-TASKS-HOST -s 10.231.0.0/16 -j DROP\n",
+        FIREWALL.replace("10.231.0.0/16", "10.232.0.0/16"),
     )
     .unwrap();
     let (r, _) = measure_on(&h, &mut Fake::default());
     assert!(
         r.screen()
-            .contains("run sudo systemctl restart omarchy-task-firewall.service"),
+            .contains("its unit's script, it does not drop 10.231.0.0/16"),
         "{}",
         r.screen()
     );
 
-    // With the drop in place nothing answers there, and both probes pass.
+    // The unit's script drops the task subnets, and the probe still reaches the host: the rule
+    // was flushed since, and the unit puts it back.
+    fs::write(h.root.join("omarchy-task-firewall"), FIREWALL).unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    let s = r.screen();
+    assert!(!s.contains("is not installed"), "{s}");
+    assert_eq!(r.blockers.len(), 2, "{s}");
+    assert!(
+        r.blockers
+            .iter()
+            .all(|b| b.ends_with("run sudo systemctl restart omarchy-task-firewall.service")),
+        "{s}"
+    );
+
+    // A host whose own firewall closes the ports probed, without prep-root.sh's drop: refused
+    // all the same, since its other services stay open to a task.
     let h = host(&rootful_info(), EGRESS_OK);
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert_eq!(r.blockers.len(), 1, "{}", r.screen());
+    assert!(r.blockers[0].contains("is not installed"), "{}", r.screen());
+    // With prep-root.sh's daemon.json: its address pool goes with the command.
+    fs::write(
+        h.root.join("daemon.json"),
+        r#"{"default-address-pools":[{"base":"10.200.0.0/16","size":24}]}"#,
+    )
+    .unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(
+        r.blockers[0].ends_with("--task-subnets 10.231.0.0/16 --address-pool 10.200.0.0/16"),
+        "{}",
+        r.screen()
+    );
+}
+
+#[test]
+fn a_rootful_host_with_prep_roots_input_drop_passes_and_its_task_networks_are_probed_too() {
+    // Installed, and nothing answers there: both probes pass.
+    let h = host(&rootful_info(), EGRESS_OK);
+    fs::write(h.root.join("omarchy-task-firewall"), FIREWALL).unwrap();
     let (r, ready) = measure_on(&h, &mut Fake::default());
     assert!(r.ok() && ready.is_some(), "{}", r.screen());
     for note in [
-        "egress: a task reaches public addresses only, not its network's gateway or the host's loopback",
+        "egress: a task reaches public addresses only, not its network's gateway",
         "egress: a task's own network has no gateway the task reaches",
     ] {
         assert!(r.notes.iter().any(|n| n == note), "{note}: {:?}", r.notes);
@@ -1160,6 +1440,7 @@ fn a_rootful_host_whose_tasks_reach_it_through_their_bridge_is_refused_with_the_
     // podman behind its docker API, rootful: a task's own network keeps a gateway on the
     // host, which the same drop closes.
     let h = host(&rootful_info(), EGRESS_OK);
+    fs::write(h.root.join("omarchy-task-firewall"), FIREWALL).unwrap();
     fs::write(
         h.root.join("version"),
         r#"{"Version":"4.9.3","Components":[{"Name":"Podman Engine","Version":"4.9.3"}]}"#,
@@ -1174,7 +1455,7 @@ fn a_rootful_host_whose_tasks_reach_it_through_their_bridge_is_refused_with_the_
     let s = r.screen();
     assert!(
         s.contains("a task on its own network reaches its gateway 10.231.255.241 (port 53: open)")
-            && s.contains("prep-root.sh --user omarchy"),
+            && s.contains("run sudo systemctl restart omarchy-task-firewall.service"),
         "{s}"
     );
     let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
@@ -1185,6 +1466,7 @@ fn a_rootful_host_whose_tasks_reach_it_through_their_bridge_is_refused_with_the_
 
     // A Docker older than 28 cannot keep the gateway off: refused, as the dispatcher refuses it.
     let h = host(&rootful_info(), EGRESS_OK);
+    fs::write(h.root.join("omarchy-task-firewall"), FIREWALL).unwrap();
     fs::write(
         h.root.join("version"),
         r#"{"Version":"27.5.1","Components":[{"Name":"Engine","Version":"27.5.1"}]}"#,
@@ -1202,37 +1484,63 @@ fn a_rootful_host_whose_tasks_reach_it_through_their_bridge_is_refused_with_the_
 }
 
 #[test]
-fn a_rootless_host_whose_tasks_reach_its_loopback_or_their_gateway_is_refused_with_the_setting() {
-    // Rootless Docker whose RootlessKit maps the host's loopback: the probe task reaches the
-    // agent's canary through 10.0.2.2.
-    let h = host(
-        INFO,
-        &EGRESS_OK.replace("loopback-10.0.2.2 refused", "loopback-10.0.2.2 open"),
+fn a_rootless_host_whose_stack_maps_its_loopback_or_whose_tasks_reach_their_gateway_is_refused() {
+    // Rootless Docker as dockerd-rootless.sh runs it: RootlessKit keeps the host's loopback
+    // out, and nothing of prep-root.sh's is asked for.
+    let h = host(INFO, EGRESS_OK);
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.contains("maps nothing to the host's loopback (RootlessKit (pid 4242))")),
+        "{:?}",
+        r.notes
     );
-    fs::write(h.root.join("reach-loopback"), "").unwrap();
+
+    // With DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false: refused, with the setting.
+    let h = host(INFO, EGRESS_OK);
+    let on: Vec<&str> = ROOTLESSKIT
+        .iter()
+        .copied()
+        .filter(|a| *a != "--disable-host-loopback")
+        .collect();
+    process(&h.root.join("proc"), 4242, &on);
     let (r, ready) = measure_on(&h, &mut Fake::default());
     assert!(ready.is_none());
     let s = r.screen();
     assert!(
-        s.contains("egress: a task reaches this host's loopback through 10.0.2.2")
+        s.contains("maps this host's loopback into the networks tasks run on (RootlessKit (pid 4242) at 10.0.2.2)")
             && s.contains("DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false"),
         "{s}"
     );
     assert_eq!(r.blockers.len(), 1, "{s}");
-    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
-    assert!(log.contains("loopback-10.0.2.2 10.0.2.2 "), "{log}");
 
-    // An open answer the canary did not see is not the host's loopback.
-    let h = host(
-        INFO,
-        &EGRESS_OK.replace("loopback-10.0.2.2 refused", "loopback-10.0.2.2 open"),
-    );
+    // No stack of this user seen while the probes ran: nothing says it is off.
+    let h = host(INFO, EGRESS_OK);
+    fs::remove_dir_all(h.root.join("proc")).unwrap();
     let (r, _) = measure_on(&h, &mut Fake::default());
-    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.blockers.len() == 1
+            && r.blockers[0].contains("no network stack of this user's rootless engine"),
+        "{}",
+        r.screen()
+    );
 
     // Rootless podman: its docker API gives a task's network a gateway, which its namespace
-    // answers; the loopback's setting is containers.conf's.
+    // answers; its slirp4netns with allow_host_loopback=true maps the host's loopback, and
+    // the setting is containers.conf's.
     let h = host(INFO, EGRESS_OK);
+    fs::remove_dir_all(h.root.join("proc")).unwrap();
+    process(
+        &h.root.join("proc"),
+        77,
+        &SLIRP4NETNS
+            .iter()
+            .copied()
+            .filter(|a| *a != "--disable-host-loopback")
+            .collect::<Vec<_>>(),
+    );
     fs::write(
         h.root.join("version"),
         r#"{"Version":"4.9.3","Components":[{"Name":"Podman Engine","Version":"4.9.3"}]}"#,
@@ -1243,7 +1551,6 @@ fn a_rootless_host_whose_tasks_reach_its_loopback_or_their_gateway_is_refused_wi
         TASK_EGRESS_OK.replace("gateway-22 blocked", "gateway-22 refused"),
     )
     .unwrap();
-    fs::write(h.root.join("reach-loopback"), "").unwrap();
     let (r, _) = measure_on(&h, &mut Fake::default());
     let s = r.screen();
     assert!(
@@ -1251,9 +1558,10 @@ fn a_rootless_host_whose_tasks_reach_its_loopback_or_their_gateway_is_refused_wi
         "{s}"
     );
     assert!(
-        s.contains("a task reaches this host's loopback") && s.contains("allow_host_loopback=true"),
+        s.contains("(slirp4netns (pid 77) at 10.0.2.2)") && s.contains("allow_host_loopback=true"),
         "{s}"
     );
+    assert_eq!(r.blockers.len(), 2, "{s}");
     assert!(!s.contains("prep-root.sh --user"), "{s}");
 }
 
@@ -2071,11 +2379,12 @@ mod engine_tests {
 
     /// A task's network's gateway and the host's loopback (#367), on this engine: a signed
     /// exception's bridge reaches its gateway — the host itself on a rootful engine without
-    /// prep-root.sh's INPUT drop, the engine's namespace on a rootless one — and with the drop
-    /// (`OMARCHY_TEST_INPUT_DROP`, the /28 tests/agent-install.sh gave it, rootful only) it
-    /// does not; a task's own network, made as the dispatcher makes it, has no gateway a task
-    /// reaches on Docker, and one behind podman's docker API; the host's loopback is reached
-    /// through neither (the engines' defaults keep it off).
+    /// an INPUT drop for the task subnets, the engine's namespace on a rootless one — and
+    /// behind the drop (`OMARCHY_TEST_INPUT_DROP`, the /28 tests/agent-install.sh gave it, on a
+    /// rootful engine only) it does not; a task's own network, made as the dispatcher makes
+    /// it, has no gateway a task reaches on Docker, and one behind podman's docker API; a
+    /// rootless engine's network stack, read while both probe tasks run, maps nothing to the
+    /// host's loopback (the engines' defaults).
     #[test]
     #[ignore = "needs a real engine: tests/agent-install.sh"]
     fn real_engine_a_tasks_gateway_and_the_hosts_loopback() {
@@ -2096,10 +2405,14 @@ mod engine_tests {
             public: None,
             ..egress::Targets::of_host(None, None, subnet)
         };
+        let me = rustix::process::getuid().as_raw();
+        let mut stacks = Vec::new();
         let open = Cidr::parse("10.197.8.240/28").unwrap();
-        let canary = egress::Canary::open().unwrap();
-        let bridge = gateway_only(open).and_loopback(None, canary.port());
-        let out = egress::probe(&d, &image, open, &bridge).unwrap();
+        let bridge = gateway_only(open);
+        let (out, seen) = loopback::watching(Path::new("/proc"), me, || {
+            egress::probe(&d, &image, open, &bridge).unwrap()
+        });
+        stacks.extend(seen);
         let b = egress::verdict(&out, &bridge, &a);
         println!("{server:?}, rootless {rootless}: a signed exception's bridge:\n{out}");
         assert!(
@@ -2114,11 +2427,12 @@ mod engine_tests {
             }),
             "{b:?}"
         );
-        // Through 10.0.2.2 and nothing else: the engines' defaults map no loopback there.
-        assert!(!canary.reached(), "{out}");
 
         let task = egress::Targets::of_task(open, engine::task_network(server).unwrap());
-        let out = egress::probe(&d, &image, open, &task).unwrap();
+        let (out, seen) = loopback::watching(Path::new("/proc"), me, || {
+            egress::probe(&d, &image, open, &task).unwrap()
+        });
+        stacks.extend(seen);
         let b = egress::verdict(&out, &task, &a);
         println!("a task's own network:\n{out}");
         match (server, rootless) {
@@ -2133,10 +2447,21 @@ mod engine_tests {
             ),
         }
 
-        // Behind the INPUT drop prep-root.sh installs, nothing of the host answers.
+        // A rootless engine's network stack, as preflight reads it: seen while the probe tasks
+        // ran (rootless podman's runs only then), and keeping the host's loopback out.
+        if rootless {
+            println!("its network stack: {stacks:?}");
+            let note = loopback::verdict(&stacks, &a.loopback());
+            assert!(note.is_ok(), "{note:?}");
+        }
+
+        // Behind an INPUT drop for the task subnets (what prep-root.sh's OMARCHY-TASKS-HOST
+        // holds), nothing of the host answers: a rootful engine's only, since a rootless one's
+        // bridges live in its own namespace, which the host's INPUT never sees.
         if let Some(dropped) = std::env::var("OMARCHY_TEST_INPUT_DROP")
             .ok()
             .and_then(|s| Cidr::parse(&s))
+            .filter(|_| !rootless)
         {
             for t in [
                 gateway_only(dropped),
