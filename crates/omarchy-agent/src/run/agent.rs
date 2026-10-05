@@ -20,7 +20,7 @@ use crate::statement::Statement;
 use crate::verify::{self, BundleOutcome, Rejection, StatementOutcome, VerifiedBundle};
 use crate::version::{self, Release, Version};
 
-use super::brake::Ask;
+use super::brake::{Ask, ROUND_RESTARTS};
 use super::compose::Compose;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver};
@@ -554,10 +554,35 @@ impl Agent {
             })
             .cloned()
         {
-            self.lift_quarantine(&id, now);
-            force = Some(format!("Update order {id}"));
-            self.state.orders.remember(&id);
-            self.state.update_seen = Some(id);
+            // An Update lifts every quarantine, and the round it gives the release the guard
+            // reverted recreates the dispatcher, and again if it reverts: without the room
+            // for both on the brake (#325) the Update waits, unconsumed and the quarantine
+            // kept, for a poll that has it — so a pool that keeps sending Updates for a
+            // release this host reverts gets no more restarts than the brake's.
+            let room = if self.state.quarantine.is_empty() {
+                Ok(())
+            } else {
+                self.state
+                    .brake
+                    .check_room(now, &[Ask::Restart], ROUND_RESTARTS)
+            };
+            match room {
+                Ok(()) => {
+                    self.lift_quarantine(&id, now);
+                    force = Some(format!("Update order {id}"));
+                    self.state.orders.remember(&id);
+                    self.state.update_seen = Some(id);
+                }
+                Err(why) => {
+                    if self.said.insert(format!("update:{id}:{why}")) {
+                        self.journal.write(
+                            now,
+                            "update",
+                            serde_json::json!({"id": id, "detail": format!("waits, the quarantine kept: {why}")}),
+                        );
+                    }
+                }
+            }
         }
         self.restore_settings(s.settings, now);
         self.queue_orders(s.orders);
@@ -743,19 +768,32 @@ impl Agent {
             Ok(t) => {
                 // The brake (#325): another release than the one that runs at most every ten
                 // minutes, and within the dispatcher's restarts; a rollback under a signed
-                // statement is exempt (the pool cannot forge one).
-                // The first release a host applies changes none (nothing ran before it), and
-                // a round to the release the last change went to is that change tried again.
-                let again = self.state.brake.last_release.as_deref() == Some(&target.to_string());
-                if !rollback && !again && self.state.applied.is_some_and(|a| a != target) {
-                    if let Err(why) = self.state.brake.check(now, &[Ask::Release, Ask::Restart]) {
+                // statement is exempt (the pool cannot forge one), and so is the first
+                // release a host applies (nothing ran before it). A round to the release the
+                // last change went to (a pull that failed, a quarantine lifted) is that change
+                // tried again: no new release change, but it recreates the dispatcher like
+                // any, so it needs room for its restarts too — which its replace and its
+                // revert's count as they happen (`Rollout::braked`).
+                let braked = !rollback && self.state.applied.is_some_and(|a| a != target);
+                if braked {
+                    let again =
+                        self.state.brake.last_release.as_deref() == Some(&target.to_string());
+                    let asks: &[Ask] = if again {
+                        &[Ask::Restart]
+                    } else {
+                        &[Ask::Release, Ask::Restart]
+                    };
+                    if let Err(why) = self.state.brake.check_room(now, asks, ROUND_RESTARTS) {
                         let detail = format!("{target} waits: {why}");
                         return self.say(now, Outcome::Held, &detail);
                     }
-                    self.state.brake.record(now, &[Ask::Release, Ask::Restart]);
-                    self.state.brake.last_release = Some(target.to_string());
+                    if !again {
+                        self.state.brake.record(now, &[Ask::Release]);
+                        self.state.brake.last_release = Some(target.to_string());
+                    }
                 }
                 self.start(now, target, rollback, why);
+                self.state.rollout.braked = braked;
                 self.pending = Some(t);
             }
             Err(e) => self.say(now, Outcome::Refused, &format!("{target}: {e}")),

@@ -30,9 +30,11 @@
 //!   envelope — more units than it allows, a lane its `emulate` excludes — is refused, with
 //!   nothing changed. `null` gives the envelope's own back.
 //! - `rotate-token`: a new host worker token from the pool (`POST /hosts/self/token`),
-//!   written for the dispatcher where enrollment writes it; the changed `etc/` recreates the
-//!   dispatcher with it within the ten minutes the old one still works.
-//! - `retry-release`: lifts every quarantine and starts a round, as an Update does.
+//!   written for the dispatcher where enrollment writes it, the rest of
+//!   `etc/dispatcher.env` rendered as the loop's own refresh renders it (#371); the changed
+//!   `etc/` recreates the dispatcher with it within the ten minutes the old one still works.
+//! - `retry-release`: lifts every quarantine and starts a round, as an Update does — only
+//!   with room on the brake for that round's restarts (its own and a revert's).
 //! - `diagnostics`: the dispatcher's last [`DIAGNOSTIC_LINES`] log lines, scrubbed of every
 //!   secret the agent knows (the set's and the secrets directory's env values, and anything
 //!   shaped like a token), posted to the pool for the host's page — only when the envelope
@@ -60,7 +62,8 @@ use crate::install::legacy::{self, Legacy};
 use crate::version::Release;
 
 use super::agent::Agent;
-use super::brake::Ask;
+use super::brake::{Ask, ROUND_RESTARTS};
+use super::config::ARCHES;
 use super::driver::{Answer, Foreign};
 use super::journal::{env_secrets, env_values};
 use super::pool::{Arg, Net, Order, OrderKind};
@@ -78,17 +81,22 @@ pub(crate) const LIMIT_S: i64 = 30 * 60;
 const DETAIL_MAX: usize = 500;
 /// The `diagnostics` order reads this many of the dispatcher's last log lines (M10)...
 pub(crate) const DIAGNOSTIC_LINES: u32 = 500;
-/// ...each cut to this many characters, and all of them to this many bytes (the pool's
-/// limit is 64 KiB with the JSON around them).
+/// ...each cut to this many characters, and all of them, as the JSON body carries them
+/// (quotes and backslashes escaped), to this many bytes: the pool takes 64 KiB with the
+/// order and the time around them.
 const DIAGNOSTIC_LINE_MAX: usize = 300;
 const DIAGNOSTICS_MAX: usize = 56 << 10;
-/// What a token looks like after one of these, in a log line (the pool's and GitHub's,
-/// Anthropic's and `OpenAI`'s keys): replaced whatever the env files say.
-const TOKEN_PREFIXES: [&str; 9] = [
+/// What a token looks like after one of these, in a log line (the pool's — its job tokens
+/// `omj.<payload>.<sig>` among them, which the dispatcher holds for its leases — and its
+/// agent tokens, GitHub's, Anthropic's and `OpenAI`'s keys): replaced whatever the env files
+/// say. The pool's own check (worker/src/leak.ts) drops a line that still looks like one.
+const TOKEN_PREFIXES: [&str; 11] = [
     "omw_",
     "ome_",
     "omc_",
     "oms_",
+    "oma_",
+    "omj.",
     "ghp_",
     "gho_",
     "ghs_",
@@ -133,17 +141,26 @@ pub(super) struct Taken {
 }
 
 /// `text` with anything shaped like a token — one of [`TOKEN_PREFIXES`] and at least 16
-/// letters, digits, `_` or `-` — replaced.
+/// letters, digits, `_` or `-` (and the dots between a job token's parts) — replaced.
 pub(crate) fn scrub_tokens(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     'scan: while !rest.is_empty() {
         for p in TOKEN_PREFIXES {
             if let Some(tail) = rest.strip_prefix(p) {
-                let n = tail
+                let dots = p == "omj.";
+                let mut n = tail
                     .bytes()
-                    .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                    .take_while(|b| {
+                        b.is_ascii_alphanumeric()
+                            || matches!(b, b'_' | b'-')
+                            || (dots && *b == b'.')
+                    })
                     .count();
+                // A sentence's full stop after it is no part of it.
+                while dots && n > 0 && tail.as_bytes()[n - 1] == b'.' {
+                    n -= 1;
+                }
                 let word_start = out
                     .chars()
                     .last()
@@ -311,12 +328,20 @@ impl Agent {
                 OrderKind::SetUnits(_) | OrderKind::SetEmulate(_) => {
                     &[Ask::Narrowing, Ask::Restart][..]
                 }
-                // retry-release's round meets the release brake where every round does
-                // (a round to the release the last change went to is that change again).
+                // retry-release's round meets the brake again where every round does, and
+                // its replace and its revert's count there as they happen.
                 OrderKind::RotateToken | OrderKind::RetryRelease => &[Ask::Restart][..],
                 _ => &[][..],
             });
-            if let Err(why) = self.state.brake.check(now, &asks) {
+            // One that would lift a quarantine gives that release a round, which needs room
+            // for its revert too: refused without it, the quarantine kept.
+            let restarts = if o.kind == OrderKind::RetryRelease && !self.state.quarantine.is_empty()
+            {
+                ROUND_RESTARTS
+            } else {
+                1
+            };
+            if let Err(why) = self.state.brake.check_room(now, &asks, restarts) {
                 self.answer(&o.id, o.kind.name(), "refused", &why, now);
                 continue;
             }
@@ -345,13 +370,10 @@ impl Agent {
             },
             OrderKind::RetryRelease => {
                 self.state.orders.remember(&o.id);
+                // The round to the release the guard reverted counts its recreations of the
+                // dispatcher as they happen (`Rollout::braked`); the release change itself
+                // was counted when it was first tried, and the round to it again is no new one.
                 let lifted = self.lift_quarantine(&o.id, now);
-                // The round to a release the guard reverted recreates the dispatcher again:
-                // one of the pool's restarts (the release change itself was counted when it
-                // was first tried, and its round to it again is no new change).
-                if !lifted.is_empty() {
-                    self.state.brake.record(now, &[Ask::Restart]);
-                }
                 let said = if lifted.is_empty() {
                     "no release was quarantined here; ".to_owned()
                 } else {
@@ -545,13 +567,14 @@ impl Agent {
                 }
             })
             .collect();
-        // The newest lines, within the size the pool takes.
+        // The newest lines, within the size the pool takes: each as the body carries it,
+        // escaped and quoted, with its comma.
         let mut size = 0;
         let keep = lines
             .iter()
             .rev()
             .take_while(|l| {
-                size += l.len() + 4;
+                size += serde_json::to_string(l).map_or(l.len() * 6, |j| j.len()) + 1;
                 size <= DIAGNOSTICS_MAX
             })
             .count();
@@ -568,8 +591,12 @@ impl Agent {
     }
 
     /// The settings the pool keeps for this host, taken when the agent has none of its own
-    /// (a `state.json` lost): narrowed into the envelope — never refused, it is a record,
-    /// not an order — and through the brake.
+    /// (a `state.json` lost), through the brake. It is a record, not an order: kept as the
+    /// pool says it — but for what names no setting (no units, the native lane, no
+    /// architecture) — and never refused; the envelope narrows it as it narrows every
+    /// setting, at every tick, and what of it is above the envelope is journaled here and
+    /// reported (`settings.above`) for the host page, as a pool that should not have sent
+    /// it.
     pub(super) fn restore_settings(&mut self, pool: Option<Settings>, now: i64) {
         let Some(s) = pool.filter(|_| self.state.settings.is_none()) else {
             return;
@@ -579,13 +606,16 @@ impl Agent {
         let native = base
             .as_ref()
             .map_or_else(|| std::env::consts::ARCH.to_owned(), Base::native);
-        let ceiling = base.as_ref().and_then(|b| b.ceiling(&p));
         let want = Settings {
-            units: s.units.map(|u| ceiling.map_or(u, |c| u.min(c)).max(1)),
+            units: s.units.map(|u| u.max(1)),
             emulate: s.emulate.map(|e| {
-                e.into_iter()
-                    .filter(|a| a != &native && p.allows_lane(a))
-                    .collect()
+                let mut e: Vec<String> = e
+                    .into_iter()
+                    .filter(|a| a != &native && ARCHES.contains(&a.as_str()))
+                    .collect();
+                e.sort();
+                e.dedup();
+                e
             }),
         };
         if let Err(why) = self.state.brake.check(now, &[Ask::Narrowing, Ask::Restart]) {
@@ -605,10 +635,19 @@ impl Agent {
                         .brake
                         .record(now, &[Ask::Narrowing, Ask::Restart]);
                 }
+                let above = applied.map(|(_, e)| e.above).unwrap_or_default();
+                let detail = if above.is_empty() {
+                    "taken from the pool's record (this host had none of its own)".to_owned()
+                } else {
+                    format!(
+                        "taken from the pool's record (this host had none of its own); above the envelope, which leaves it out: {}",
+                        above.join("; ")
+                    )
+                };
                 self.journal.write(
                     now,
                     "settings",
-                    serde_json::json!({"detail": "taken from the pool's record (this host had none of its own)", "units": want.units, "emulate": want.emulate}),
+                    serde_json::json!({"detail": detail, "units": want.units, "emulate": want.emulate, "above": above}),
                 );
                 self.state.settings = Some(want);
             }

@@ -132,6 +132,10 @@ pub struct Rollout {
     pub services: Vec<String>,
     /// Set while `last-good/` is applied after a failed guard: why it failed.
     pub reverting: Option<String>,
+    /// The pool's target started this round toward another release than the one that ran
+    /// (#325): each recreation of the dispatcher it makes — its replace, and its revert's —
+    /// is one of the pool's restarts on the brake.
+    pub braked: bool,
 }
 
 impl Default for Rollout {
@@ -145,6 +149,7 @@ impl Default for Rollout {
             why: String::new(),
             services: Vec::new(),
             reverting: None,
+            braked: false,
         }
     }
 }

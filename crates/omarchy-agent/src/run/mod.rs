@@ -32,7 +32,8 @@
 //!   `diagnostics`), all behind the host-side brake ([`brake`]), and the owner's runtime
 //!   switch at the host ([`switch`]). Seams: soak and freeze detection, and the `*_FILE`
 //!   secrets, are their own issues; `rotate-token` writes the token where enrollment does
-//!   (`enroll::write_worker_token`), which #371 and #327 move.
+//!   (`enroll::write_worker_token`, through #371's `dispatcher_env`, the rest of the file
+//!   rendered as the loop renders it), which #327 moves.
 
 pub mod brake;
 pub mod config;

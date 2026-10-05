@@ -9,6 +9,8 @@ use std::fs;
 
 use serde_json::{json, Value};
 
+use crate::dispatcher_env::{Budget, Sources};
+use crate::run::agent::HostEnv;
 use crate::run::brake::Ask;
 use crate::run::fake::World;
 use crate::run::pool::{parse_state, Net};
@@ -431,7 +433,7 @@ fn diagnostics_are_the_dispatchers_last_lines_scrubbed_and_only_when_the_envelop
                 .push(format!("2027-01-15T08:00:00.{i:09}Z claimed task {i}"));
         }
         e.log.push(format!(
-            "2027-01-15T08:00:01.000000000Z token {} key sk-ant-api03-key-of-the-owner-0123456789 gh ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "2027-01-15T08:00:01.000000000Z token {} key sk-ant-api03-key-of-the-owner-0123456789 gh ghp_abcdefghijklmnopqrstuvwxyz0123456789 job omj.eyJ0YXNrIjoxMjMsImV4cCI6MX0.c2lnbmF0dXJlLW9mLXRoZS1wb29s. agent oma_0123456789abcdef0123456789abcdef0123456789abcdef",
             crate::run::fake::TOKEN
         ));
     }
@@ -461,22 +463,88 @@ fn diagnostics_are_the_dispatchers_last_lines_scrubbed_and_only_when_the_envelop
         .collect();
     assert_eq!(lines.len(), 500);
     let last = lines[499];
-    assert!(
-        last.starts_with(
-            "2027-01-15T08:00:01.000000000Z token [redacted] key [redacted] gh [redacted]"
-        ),
-        "{last}"
+    assert_eq!(
+        last,
+        "2027-01-15T08:00:01.000000000Z token [redacted] key [redacted] gh [redacted] job [redacted]. agent [redacted]"
     );
-    for secret in [crate::run::fake::TOKEN, "sk-ant-api03", "ghp_abc"] {
+    for secret in [
+        crate::run::fake::TOKEN,
+        "sk-ant-api03",
+        "ghp_abc",
+        "omj.",
+        "oma_",
+    ] {
         assert!(!sent.to_string().contains(secret), "{secret}");
     }
     assert!(lines[0].ends_with("claimed task 101"), "{}", lines[0]);
 }
 
 #[test]
+fn diagnostics_full_of_quotes_stay_within_what_the_pool_takes() {
+    let mut w = studio();
+    w.agent.cfg.policy.diagnostics = true;
+    {
+        // The dispatcher logs the pool's JSON answers: every quote is two bytes in the body.
+        let mut e = w.engine.borrow_mut();
+        for i in 0..500 {
+            e.log.push(format!(
+                "2027-01-15T08:00:00.{i:09}Z pool answered 409: {}",
+                r#"{"error":"lease","code":"x"}"#.repeat(9)
+            ));
+        }
+    }
+    let (outcome, detail) = order(&mut w, &json!({"id": "ho_dq", "kind": "diagnostics"}));
+    assert_eq!(outcome, "done", "{detail}");
+    let sent = w.remote.borrow().diagnostics[0].clone();
+    let body = sent.to_string();
+    assert!(body.len() <= 64 << 10, "{} bytes", body.len());
+    let lines = sent["lines"].as_array().unwrap();
+    assert!(lines.len() < 500, "{}", lines.len());
+    assert!(
+        detail.starts_with(&format!("{} line(s)", lines.len())),
+        "{detail}"
+    );
+    // The newest ones.
+    assert!(lines
+        .last()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .starts_with("2027-01-15T08:00:00.000000499Z"));
+}
+
+#[test]
 fn rotate_token_writes_a_new_token_for_the_dispatcher_which_is_recreated_with_it() {
     let mut w = studio();
+    // etc/dispatcher.env as the run loop renders it (#371): the host's own addresses, the
+    // secrets directory, the agent budget — and a line of the owner's.
+    let net = w.dir.join("net");
+    fs::create_dir_all(&net).unwrap();
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home");
+    for f in ["fib_trie", "if_inet6", "route"] {
+        fs::copy(fixture.join(f), net.join(f)).unwrap();
+    }
+    w.agent.host_env = Some(HostEnv::new(Sources { proc_net: net }));
+    w.agent.cfg.agent_budget = Budget {
+        calls_per_task: Some(40),
+        ..Budget::default()
+    };
     let env = w.set_dir().join("etc/dispatcher.env");
+    w.tick(3);
+    let mut owners = fs::read_to_string(&env).unwrap();
+    owners.push_str("# the owner's own\nOWNER_NOTE=kept\n");
+    fs::write(&env, &owners).unwrap();
+    settle(&mut w);
+    let rendered = fs::read_to_string(&env).unwrap();
+    for line in [
+        "OMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64",
+        &format!("OMARCHY_SECRETS_DIR={}", w.agent.cfg.secrets_dir.display()),
+        "OMARCHY_AGENT_CALLS_PER_TASK=40",
+        "OWNER_NOTE=kept",
+    ] {
+        assert!(rendered.lines().any(|l| l == line), "{line}: {rendered}");
+    }
     let before = dispatcher_id(&w);
     let task = w.engine.borrow().tasks()[0].id.clone();
     let (outcome, detail) = order(&mut w, &json!({"id": "ho_rt", "kind": "rotate-token"}));
@@ -489,11 +557,15 @@ fn rotate_token_writes_a_new_token_for_the_dispatcher_which_is_recreated_with_it
     );
     let text = fs::read_to_string(&env).unwrap();
     let token = format!("omw_{:048x}", 1);
-    assert!(
-        text.contains(&format!("OMARCHY_WORKER_TOKEN={token}")),
-        "{text}"
+    // Only the token changed: the addresses, the secrets directory, the budget and the
+    // owner's lines are as they were, byte for byte.
+    assert_eq!(
+        text,
+        rendered.replace(
+            &format!("OMARCHY_WORKER_TOKEN={}\n", crate::run::fake::TOKEN),
+            &format!("# worker: m1-test-0a9z\nOMARCHY_WORKER_TOKEN={token}\n")
+        )
     );
-    assert!(text.contains("# worker: m1-test-0a9z"), "{text}");
     settle(&mut w);
     assert_ne!(dispatcher_id(&w), before);
     assert_eq!(w.engine.borrow().tasks()[0].id, task);
@@ -539,14 +611,15 @@ fn retry_release_lifts_the_quarantine_and_tries_the_release_again() {
     w.round();
     assert_eq!(w.outcome().0, "rolled-back");
     assert!(!w.agent.state.quarantine.is_empty());
-    // The order: the quarantine lifted, a round to v1.1.0 now (the same change tried again),
-    // one more of the pool's dispatcher restarts on the brake.
+    // The first try recreated the dispatcher twice, both the pool's restarts on the brake:
+    // its replace and its revert's.
     let restarts = w.agent.state.brake.count(Ask::Restart, w.now);
+    assert_eq!(restarts, 2);
+    // The order: the quarantine lifted, a round to v1.1.0 now (the same change tried again).
     let body = json!({"release": {"target": "v1.1.0"}, "poll_s": 120,
         "orders": [{"id": "ho_retry", "kind": "retry-release", "not_after": w.now + 3600}]});
     w.pool_answers(Net::Ok(parse_state(body.to_string().as_bytes()).unwrap()));
     w.poll();
-    assert_eq!(w.agent.state.brake.count(Ask::Restart, w.now), restarts + 1);
     let a = w
         .agent
         .state
@@ -579,12 +652,96 @@ fn retry_release_lifts_the_quarantine_and_tries_the_release_again() {
             .as_deref(),
         Some("v1.1.0")
     );
-    // Still broken: reverted again, now until a newer release.
+    // Still broken: reverted again, now until a newer release; its replace and its revert's
+    // are two more of the pool's restarts.
     while w.step() != "idle" {
         w.tick(3);
     }
     assert_eq!(w.outcome().0, "rolled-back");
     assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
+    assert_eq!(w.agent.state.brake.count(Ask::Restart, w.now), restarts + 2);
+    // Without room for another such round (two restarts), a retry-release is refused and
+    // the quarantine kept.
+    w.agent.state.brake.record(w.now, &[Ask::Restart]);
+    let body = json!({"release": {"target": "v1.1.0"}, "poll_s": 120,
+        "orders": [{"id": "ho_retry2", "kind": "retry-release", "not_after": w.now + 3600}]});
+    w.pool_answers(Net::Ok(parse_state(body.to_string().as_bytes()).unwrap()));
+    w.tick(3);
+    w.poll();
+    let a = w
+        .agent
+        .state
+        .orders
+        .answers
+        .iter()
+        .find(|a| a.id == "ho_retry2")
+        .unwrap();
+    assert_eq!(a.outcome, "refused");
+    assert!(
+        a.detail.starts_with("brake: at most 6 restarts of the dispatcher an hour; 5 in the last 60 min (a round to another release keeps room for its revert)"),
+        "{}",
+        a.detail
+    );
+    assert!(!w.agent.state.quarantine.is_empty());
+    assert_eq!(w.step(), "idle");
+}
+
+#[test]
+fn updates_for_a_release_this_host_reverts_recreate_the_dispatcher_at_most_six_times_an_hour() {
+    let mut w = World::running_v1();
+    crate::run::fake::publish(
+        &w.remote,
+        "v1.1.0",
+        "2027-01-14T08:00:00Z",
+        "v1.0.0",
+        &[],
+        "    command: [broken]\n",
+    );
+    let creates = |w: &World| {
+        w.changes()
+            .iter()
+            .filter(|c| c.starts_with("create "))
+            .count()
+    };
+    let (start, before) = (w.now, creates(&w));
+    w.target("v1.1.0", None);
+    w.round();
+    assert_eq!(w.outcome().0, "rolled-back");
+    // A compromised pool sends a new Update for it at every poll: each lifts the quarantine
+    // and gives it a round, which the guard reverts — two recreations of the dispatcher.
+    for i in 0..8 {
+        w.target("v1.1.0", Some(&format!("wo_{i}")));
+        w.poll();
+        while w.step() != "idle" {
+            w.tick(3);
+        }
+        w.tick(60);
+    }
+    assert!(w.now - start < 3600, "{} s", w.now - start);
+    // Six in the hour, the first try's included; then the Update waits, unconsumed, with
+    // the quarantine kept.
+    assert_eq!(creates(&w) - before, 6, "{:?}", w.changes());
+    assert_eq!(w.agent.state.brake.count(Ask::Restart, w.now), 6);
+    assert!(!w.agent.state.quarantine.is_empty());
+    assert!(!w.agent.state.orders.seen("wo_7"));
+    assert!(
+        w.journal().contains("waits, the quarantine kept: brake: at most 6 restarts of the dispatcher an hour; 6 in the last 60 min"),
+        "{}",
+        w.journal()
+    );
+    // An hour after the first try, the Update the pool still sends is taken.
+    w.tick(3600);
+    w.poll();
+    assert!(w.agent.state.orders.seen("wo_7"));
+    assert_eq!(
+        w.agent
+            .state
+            .rollout
+            .target
+            .map(|r| r.to_string())
+            .as_deref(),
+        Some("v1.1.0")
+    );
 }
 
 #[test]
@@ -595,17 +752,33 @@ fn the_pools_record_of_the_settings_is_taken_only_by_an_agent_without_its_own() 
             "settings": {"units": units, "emulate": [foreign(), std::env::consts::ARCH]}});
         Net::Ok(parse_state(body.to_string().as_bytes()).unwrap())
     };
-    // None of its own (a state.json lost): the record, narrowed into the envelope.
+    // None of its own (a state.json lost): the record as the pool says it (the native lane
+    // is none to name), narrowed by the envelope — and what the envelope leaves out is said,
+    // on the journal and in the next report, for the host page.
     w.pool_answers(state(20));
     w.poll();
     assert_eq!(
         w.agent.state.settings,
         Some(Settings {
-            units: Some(8),
+            units: Some(20),
             emulate: Some(vec![foreign().to_owned()])
         })
     );
     assert_eq!(capacity(&w)["units"], 8);
+    assert!(
+        w.journal().contains("taken from the pool's record (this host had none of its own); above the envelope, which leaves it out: units 20 is above the envelope's 8: 8 applies"),
+        "{}",
+        w.journal()
+    );
+    settle(&mut w);
+    w.tick(600);
+    let r = w.last_report();
+    assert_eq!(r["settings"]["units"], 20);
+    assert_eq!(r["settings"]["effective"]["units"], 8);
+    assert_eq!(
+        r["settings"]["above"],
+        json!(["units 20 is above the envelope's 8: 8 applies"])
+    );
     // Its own from then on: the record never changes them.
     w.agent.state.settings = Some(Settings {
         units: Some(3),

@@ -10,7 +10,12 @@
 //! envelope — starts from them, never from a narrowing. The pool computes its own units
 //! from the reported totals and takes the smaller of the two, so a narrowed host is handed
 //! no more at its next claim; a dispatcher holding more than the new count claims nothing
-//! until its leases fit, and never kills a running task for it (design v2 §7.6).
+//! until its leases fit, and never kills a running task for it (design v2 §7.6). The lanes
+//! left in the file ride every claim too, and the pool's selection (#337) hands an emulated
+//! build only to a lane the claim names, so a lane turned off takes no new emulated build
+//! from the next claim. Running emulated builds on the host — detection per foreign
+//! architecture, `needs_native` per lane — is #338's: its dispatcher must claim only the
+//! emulated lanes this file lists.
 //!
 //! Anything above the envelope is refused here, whatever the pool asks: units above the
 //! detected count or `max_units`, a lane the envelope's `emulate` excludes. When the owner

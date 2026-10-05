@@ -6,8 +6,14 @@
 //!   one a tick later, so a person's two quick orders are both carried out;
 //! - at most [`ORDERS_PER_HOUR`] host orders taken an hour;
 //! - at most [`RESTARTS_PER_HOUR`] restarts of the dispatcher an hour that the pool
-//!   caused — an order that recreates it (`set-units`, `set-emulate`, `rotate-token`,
-//!   `retry-release`) or a round to another release;
+//!   caused: an order that recreates it (`set-units`, `set-emulate`, `rotate-token`), and
+//!   every recreation a round to another release makes — its own replace and its revert's
+//!   — whether the pool's target, an Update order or a `retry-release` that lifted a
+//!   quarantine started it (the same release tried again included). Such a round starts
+//!   only with room for [`ROUND_RESTARTS`] (itself and the revert it may need, which is
+//!   never refused), and an Update or a `retry-release` that would lift a quarantine waits
+//!   or is refused without it, so a pool that keeps lifting the quarantine of a release
+//!   this host's guard reverts gets no more than the limit;
 //! - at most one release change every [`RELEASE_GAP_S`]: a round to a release other than
 //!   the one that runs and the one the last change went to (a round tried again, after a
 //!   pull that failed or a quarantine, is no new change); the first release a host applies
@@ -15,8 +21,8 @@
 //!   (nothing ran before the first; the pool cannot forge a statement);
 //! - at most [`NARROWINGS_PER_HOUR`] changes of the capacity settings an hour.
 //!
-//! Beyond that the order is answered `refused` with `brake: …`, and a release change is
-//! held (`held`, the next poll asks again). What the agent does on its own — a changed
+//! Beyond that the order is answered `refused` with `brake: …`, a release change is held
+//! (`held`, the next poll asks again), and an Update waits, unconsumed. What the agent does on its own — a changed
 //! input, drift, a person's `round` at the host — is never braked. The counters live in
 //! `state.json`, so a restart loop resets nothing.
 
@@ -27,6 +33,8 @@ pub(crate) const ORDERS_PER_HOUR: usize = 20;
 pub(crate) const RESTARTS_PER_HOUR: usize = 6;
 pub(crate) const RELEASE_GAP_S: i64 = 600;
 pub(crate) const NARROWINGS_PER_HOUR: usize = 4;
+/// The restarts a round to another release may make: its replace, and its revert's.
+pub(crate) const ROUND_RESTARTS: usize = 2;
 const HOUR_S: i64 = 3600;
 
 /// What an order or a round asks of the host, as the brake counts it.
@@ -103,7 +111,18 @@ impl Brake {
 
     /// `Err` with the refusal's words when one of `asks` is spent now.
     pub fn check(&self, now: i64, asks: &[Ask]) -> Result<(), String> {
+        self.check_room(now, asks, 1)
+    }
+
+    /// As [`Brake::check`], with room for `restarts` restarts of the dispatcher now
+    /// ([`ROUND_RESTARTS`] for a round to another release).
+    pub fn check_room(&self, now: i64, asks: &[Ask], restarts: usize) -> Result<(), String> {
         for a in asks {
+            let room = if *a == Ask::Restart {
+                restarts.max(1)
+            } else {
+                1
+            };
             let (n, limit, what) = match a {
                 Ask::Order => (
                     self.count(*a, now),
@@ -129,10 +148,15 @@ impl Brake {
                     format!("at most {NARROWINGS_PER_HOUR} capacity narrowings an hour"),
                 ),
             };
-            if n >= limit {
-                let next = self.free_at(*a, now, limit);
+            if n + room > limit {
+                let next = self.free_at(*a, now, limit + 1 - room);
+                let round = if room > 1 {
+                    " (a round to another release keeps room for its revert)"
+                } else {
+                    ""
+                };
                 return Err(format!(
-                    "brake: {what}; {n} in the last {} min, the next from {}",
+                    "brake: {what}; {n} in the last {} min{round}, the next from {}",
                     window(*a) / 60,
                     super::orders::iso(next)
                 ));
@@ -239,6 +263,32 @@ mod tests {
             .unwrap_err()
             .starts_with("brake: at most 20 host orders an hour"));
         assert!(b.check(T + 3600, &[Ask::Order]).is_ok());
+    }
+
+    #[test]
+    fn a_round_to_another_release_keeps_room_for_its_revert() {
+        let mut b = Brake::default();
+        for i in 0..4 {
+            b.record(T + i, &[Ask::Restart]);
+        }
+        // Four of six spent: a round to another release (itself and a revert) still fits...
+        assert!(b
+            .check_room(T + 10, &[Ask::Restart], ROUND_RESTARTS)
+            .is_ok());
+        b.record(T + 10, &[Ask::Restart]);
+        // ...not with five: one order's restart does, the round waits until the oldest of
+        // the five leaves the window.
+        assert!(b.check(T + 11, &[Ask::Restart]).is_ok());
+        let e = b
+            .check_room(T + 11, &[Ask::Release, Ask::Restart], ROUND_RESTARTS)
+            .unwrap_err();
+        assert!(
+            e.starts_with("brake: at most 6 restarts of the dispatcher an hour; 5 in the last 60 min (a round to another release keeps room for its revert), the next from 2027-01-15T09:00:00Z"),
+            "{e}"
+        );
+        assert!(b
+            .check_room(T + 3600, &[Ask::Restart], ROUND_RESTARTS)
+            .is_ok());
     }
 
     #[test]
