@@ -124,8 +124,10 @@ jobs:
     # address fails it, one that reaches only the public stand-in passes —
     # and a stand-in legacy compose project left running with the same
     # container ids while uninstall removes the new host's task container;
-    # with the pinned docker CLI, on rootful docker and rootless podman's API
-    # socket.
+    # #367: a task network's gateway (the host itself on rootful docker, out
+    # of reach behind prep-root.sh's INPUT drop, which the script adds for a
+    # test /28 with sudo) and the host's loopback; with the pinned docker CLI,
+    # on rootful docker and rootless podman's API socket.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -138,7 +140,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The egress probe and a legacy project on ${{ matrix.engine }}
+      - name: The egress probe (a task network's gateway and the host's loopback too) and a legacy project on ${{ matrix.engine }}
         run: bash tests/agent-install.sh ${{ matrix.engine }}
 
   agent-self-update:
@@ -343,7 +345,7 @@ jobs:
       # The agent renders the dispatcher's etc/dispatcher.env there (#371); built on its own, so the
       # image's binaries above are built with their own features.
       - run: cargo build --release -p omarchy-agent
-      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge; a stop removes only its own
+      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge, its gateway closed behind prep-root.sh's INPUT drop; a stop removes only its own
         run: bash tests/task-networks.sh
         env:
           WORKER_IMAGE: omarchy-worker:ci

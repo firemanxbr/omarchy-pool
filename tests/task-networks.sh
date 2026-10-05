@@ -18,10 +18,13 @@
 #      "Network is unreachable"; the host's LAN address and its upstream
 #      router are unreachable; so is its own network's gateway (.1, where the
 #      engine puts the host's own address on the bridge) on a listener this
-#      test opens on 0.0.0.0, and on 22 and 53 — on docker (its isolated
-#      gateway mode) and podman's CLI (no DNS on the network); behind podman's
-#      docker API the engine cannot be asked, prep-root.sh's INPUT drop is the
-#      seam there and the test says so; the other task's container, egress and agent
+#      test opens on 0.0.0.0, and on 22, 53 and the pool's ports (3128, 8790,
+#      8791; #367) — on docker (its isolated gateway mode) and podman's CLI
+#      (no DNS on the network; the dispatcher takes podman's CLI on a podman
+#      run, as on a host without docker's); behind podman's docker API the
+#      engine cannot be asked, and only prep-root.sh's INPUT drop closes it
+#      (asserted where this test could add one, a note otherwise; #372 makes
+#      the network through libpod); the other task's container, egress and agent
 #      sidecar are unreachable directly and refused through the egress; the
 #      task's own agent sidecar answers; through the egress, the host's LAN
 #      address is refused, and so is its public one, a public address that only
@@ -31,7 +34,11 @@
 #   2. the probe sidecar's word reaches the claim (`agent`): with a key the
 #      provider refuses, it says so, which shows the agent sidecar's way out
 #   3. a package with a signed exception in factory/sizing gets a bridge
-#      network, and its raw socket reaches the internet
+#      network, and its raw socket reaches the internet; its bridge's gateway
+#      is the host itself on a rootful engine, out of reach behind the INPUT
+#      drop prep-root.sh installs (OMARCHY-TASKS-HOST, #367), which this test
+#      adds for its own task subnets for the run where it may (a rootful
+#      engine, and root or `sudo -n`), and a note where it may not
 #   4. stopping A removes its container, its egress and agent sidecars and its
 #      network, and nothing of B's
 #
@@ -49,9 +56,11 @@ RT="${RUNTIME:-$(command -v docker >/dev/null 2>&1 && echo docker || echo podman
 WORKER_IMAGE="${WORKER_IMAGE:-omarchy-worker:ci}"
 tmp="$(cd "$(mktemp -d)" && pwd -P)"
 host="h_net-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-stub="" disp="" gwl="" built=()
+stub="" disp="" gwl="" input_drop="" built=()
+ipt() { if [[ $EUID -eq 0 ]]; then iptables -w "$@"; else sudo -n iptables -w "$@"; fi; }
 cleanup() {
   [[ -z "$disp" ]] || kill -9 "$disp" 2>/dev/null || true
+  [[ -z "$input_drop" ]] || ipt -D INPUT -s "$input_drop" -j DROP 2>/dev/null || true
   [[ -z "$stub" ]] || kill "$stub" 2>/dev/null || true
   [[ -z "$gwl" ]] || kill "$gwl" 2>/dev/null || true
   local c
@@ -109,9 +118,25 @@ gw_port=$((22000 + RANDOM % 2000))
 python3 -c 'import socket, sys
 s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("0.0.0.0", int(sys.argv[1]))); s.listen(16)
 while True: s.accept()[0].close()' "$gw_port" & gwl=$!
-# Behind podman's docker API the gateway stays the host's (the engine forces DNS on and drops docker's option).
+# The pool's own ports a host may answer on (the egress proxy, the agent sidecar and broker, the dispatcher's /ready).
+pool_ports="3128 8790 8791"
+# prep-root.sh's INPUT drop (OMARCHY-TASKS-HOST) for this run's task subnets, on a rootful engine where this
+# test may add it: a bridge's gateway is the host itself there, and the drop is what keeps a task off it (#367).
+rootless() {
+  if [[ "$(basename "$RT")" == podman ]]; then [[ "$("$RT" info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" == true ]]
+  else "$RT" info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless'; fi
+}
+if ! rootless && ipt -S INPUT >/dev/null 2>&1 && ipt -I INPUT -s "$subnets" -j DROP; then input_drop="$subnets"; fi
+# Behind podman's docker API the gateway stays the host's (the engine forces DNS on and drops docker's option):
+# closed only behind the drop.
 gw_expected=closed
-if [[ "$(basename "$RT")" != podman ]] && "$RT" version --format '{{json .Server.Components}}' 2>/dev/null | grep -q Podman; then gw_expected=seam; fi
+if [[ "$(basename "$RT")" != podman && -z "$input_drop" ]] && "$RT" version --format '{{json .Server.Components}}' 2>/dev/null | grep -q Podman; then gw_expected=seam; fi
+# The dispatcher takes docker's CLI when it answers; on a podman run it takes podman's own, as on a host without docker's.
+disp_path="$PATH"
+if [[ "$(basename "$RT")" == podman ]] && command -v docker >/dev/null 2>&1; then
+  mkdir -p "$tmp/podman-only"; printf '#!/bin/sh\nexit 127\n' > "$tmp/podman-only/docker"; chmod +x "$tmp/podman-only/docker"
+  disp_path="$tmp/podman-only:$PATH"
+fi
 
 # The release checkout: the probe task, and a sizing file that gives one package its exception.
 mkdir -p "$tmp/checkout/factory/worker" "$tmp/checkout/factory/sizing" "$tmp/work" "$tmp/secrets"
@@ -137,7 +162,7 @@ say meta_direct "$(curl -s --noproxy '*' --max-time 5 http://169.254.169.254/ >/
 say raw_public "$(raw_patient 1.1.1.1 443 | tr '\n' ' ')"
 say lan_direct "$(raw "$LAN" 22 | grep -c reached)"
 say router_direct "$(raw "$ROUTER" 80 | grep -c reached)"
-for p in $GW_PORT 22 53; do say "gw_direct_$p" "$(raw "$GATEWAY" "$p" | grep -c reached)"; done
+for p in $GW_PORT 22 53 $POOL_PORTS; do say "gw_direct_$p" "$(raw "$GATEWAY" "$p" | grep -c reached)"; done
 for t in $OTHER; do say "other_direct_$t" "$(raw "${t%:*}" "${t#*:}" | grep -c reached)"; done
 say other_agent_proxy "$(code "http://$OTHER_AGENT:8790/health")"
 say lan_proxy "$(code "http://$LAN:22/")"
@@ -259,7 +284,7 @@ give 1 probe-a "draft:probe-a"
 give 2 probe-b "https://example.invalid/b@v1:PKGBUILD"
 # The worker token, the host's addresses, the secrets directory and the budget: from the agent's file only.
 env -u SIGNING_KEY -u GITHUB_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY \
-  -u OMARCHY_WORKER_TOKEN -u OMARCHY_HOST_ADDRESSES -u OMARCHY_SECRETS_DIR "${from_agent[@]}" \
+  -u OMARCHY_WORKER_TOKEN -u OMARCHY_HOST_ADDRESSES -u OMARCHY_SECRETS_DIR "${from_agent[@]}" PATH="$disp_path" \
   OMARCHY_BUILD_IMAGE_AARCH64="$build_id" OMARCHY_BUILD_IMAGE_X86_64="$build_id" OMARCHY_WORKER_IMAGE="$worker_id" OMARCHY_TASK_SUBNETS="$subnets" \
   "$PKG_REPO" dispatch --api "http://127.0.0.1:$port" --pool "http://127.0.0.1:$port" \
     --work-root "$tmp/work" --capacity-file "$tmp/capacity.json" --checkout "$tmp/checkout" --ready "127.0.0.1:$ready_port" \
@@ -272,7 +297,7 @@ running "$B-agent" && fail "a build without a model has an agent sidecar"
 targets() { # me other
   local o="$2"
   {
-    echo "LAN=$lan"; echo "ROUTER=$router"; echo "GATEWAY=$(gateway_of "$1")"; echo "GW_PORT=$gw_port"
+    echo "LAN=$lan"; echo "ROUTER=$router"; echo "GATEWAY=$(gateway_of "$1")"; echo "GW_PORT=$gw_port"; echo "POOL_PORTS='$pool_ports'"
     echo "OTHER='$(ip_on "$o" "$o"):22 $(ip_on "$o-egress" "$o"):3128 $( [[ "$o" == "$A" ]] && echo "$(ip_on "$A-agent" "$A"):8790")'"
     echo "OTHER_AGENT=$(ip_on "$A-agent" "$A")"; echo "HOST_PUBLIC=$host_public"
   } > "$tmp/targets.tmp"
@@ -291,11 +316,11 @@ for t in 1 2; do
   [[ "$(result "$t" meta_direct)" == failed ]] || fail "task $t reached 169.254.169.254 directly"
   [[ "$(result "$t" raw_public)" == *"Network is unreachable"* ]] || fail "task $t: a raw socket: $(result "$t" raw_public)"
   [[ "$(result "$t" lan_direct)" == 0 && "$(result "$t" router_direct)" == 0 ]] || fail "task $t reached the host's LAN address or its upstream router"
-  for p in "$gw_port" 22 53; do
+  for p in "$gw_port" 22 53 $pool_ports; do
     if [[ "$gw_expected" == closed ]]; then
       [[ "$(result "$t" "gw_direct_$p")" == 0 ]] || fail "task $t reached the host through its network's gateway ($p)"
     elif [[ "$(result "$t" "gw_direct_$p")" != 0 ]]; then
-      echo "note: task $t reached its network's gateway on $p — podman behind docker's API; prep-root.sh's INPUT drop (rootful) is what closes it"
+      echo "note: task $t reached its network's gateway on $p — podman behind docker's API; prep-root.sh's INPUT drop (rootful) is what closes it, and preflight refuses a host where it reaches the host (#367)"
     fi
   done
   for k in $(sed -n 's/^\(other_direct_[^=]*\)=.*/\1/p' "$tmp/work/tasks/$t-$(gen "$t")/log/net.txt"); do
@@ -337,6 +362,15 @@ targets "$C" "$B" 3
 until_ 300 "the exception's task reported" done_ 3
 [[ "$(result 3 raw_public)" == reached* ]] || fail "the exception's raw socket: $(result 3 raw_public)"
 echo "ok: a package with a signed exception gets a bridge network and its raw socket goes out; without one a raw socket fails 'Network is unreachable'"
+# Its bridge's gateway is the host itself on a rootful engine: behind prep-root.sh's INPUT drop, out of reach.
+if [[ -n "$input_drop" ]]; then
+  for p in "$gw_port" 22 53 $pool_ports; do
+    [[ "$(result 3 "gw_direct_$p")" == 0 ]] || fail "the exception's task reached the host through its bridge's gateway ($p) behind prep-root.sh's INPUT drop"
+  done
+  echo "ok: behind prep-root.sh's INPUT drop for the task subnets, the exception's bridge gateway (the host) is out of reach"
+elif [[ "$(result 3 "gw_direct_$gw_port")" != 0 ]]; then
+  echo "note: the exception's task reached the host through its bridge's gateway — prep-root.sh's INPUT drop closes it on a rootful host, and preflight refuses one without it (#367); this test could not add the drop here"
+fi
 
 # ---------- 4. a stop removes only that task's ----------
 touch "$tmp/beats/1"
