@@ -579,7 +579,12 @@ jobs:
     # that fails before leaves the release a draft, the pool on the
     # previous release (deploy needs this job), so follow.latest never names
     # a release whose bundle does not exist, and every host on the previous
-    # release's images (worker-image-tags needs this job too, #359).
+    # release's images (worker-image-tags needs this job too, #359). Once
+    # factory/MAINTAINERS.toml sets a co-signature threshold (#330), it also
+    # waits for the maintainers' co-signatures on the draft's host bundle
+    # (factory/bin/co-sign release vX.Y.Z, offline, by each maintainer):
+    # without them it fails and the release stays a draft; re-running this
+    # job once they are there publishes it (runbook, Co-signing a release).
     needs: [version, host-bundle-upload]
     permissions:
       contents: write

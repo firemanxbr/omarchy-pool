@@ -28,3 +28,22 @@
 # nobody decides on their own package, so each maintainer decides on the
 # other's. Added 2026-09-17.
 maintainers = ["firemanxbr", "maralcbr"]
+
+# The maintainers' co-signature (#330, design v2 D1 b and D25). Beside
+# release.yml's keyless signature, every host bundle a host agent takes
+# carries the signature of `threshold` of the keys below, and a rollback
+# statement that goes back more than 14 days carries at least one: each
+# made offline on a FIDO security key, with a touch (`ssh-keygen -t
+# ed25519-sk`, or `-t ecdsa-sk` on a key without Ed25519; `factory/bin/co-sign
+# release vX.Y.Z` signs a draft release). One key per maintainer, under their
+# login, as `ssh-keygen` writes the `.pub` file. factory/bin/check-governance
+# --write pins this table into the host agent
+# (crates/omarchy-agent/src/verify/maintainers.toml): an agent requires what
+# the release it shipped in pinned, so a change here is a new agent, taken
+# under the old one's requirement (the runbook, *Co-signing a release*).
+# threshold = 0 asks nothing of a bundle yet; 1 is 1-of-N, 2 is 2-of-N.
+[cosignature]
+threshold = 0
+
+[cosignature.keys]
+# firemanxbr = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t... firemanxbr@security-key"

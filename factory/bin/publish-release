@@ -16,7 +16,20 @@
 # the run itself made (`sha256sum` lines, release.yml's host-bundle-upload
 # hands them over); each asset is downloaded from the draft and must match,
 # or the release stays a draft.
+#
+# The maintainers' co-signature (#330, design v2 D1 b): no run makes it. A
+# maintainer signs the draft's host bundle offline with their security key
+# and uploads omarchy-host-vX.Y.Z.tar.gz.<login>.sshsig to the draft
+# (`factory/bin/co-sign release vX.Y.Z`, the runbook's *Co-signing a
+# release*). The release is published only once the co-signatures meet the
+# threshold factory/MAINTAINERS.toml sets here (the one this release's agent
+# pins) and the one it set at every release of the last 30 days (those
+# releases' agents verify the new bundle before they update themselves, as
+# verify-with-agents runs them): `factory/bin/co-sign check`, with
+# ssh-keygen. Until then it stays a draft; once they are on it, re-running
+# the failed job publishes it. With no threshold anywhere, nothing is asked.
 set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 v="${1:?usage: publish-release vX.Y.Z <sums>}"
 sums="${2:?usage: publish-release vX.Y.Z <sums>}"
 [[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "publish-release: $v is not vX.Y.Z" >&2; exit 2; }
@@ -51,6 +64,35 @@ if (( ${#changed[@]} )); then
   else echo "publish-release: $v is published with ${changed[*]} not the bytes this run made: a person must look" >&2; fi
   exit 1
 fi
+# The maintainers' co-signature: every one on the draft, then the policy of this
+# release and of every release of the last 30 days.
+bundle="omarchy-host-$v.tar.gz"
+cosigned=(); while IFS= read -r a; do [[ "$a" == "$bundle".*.sshsig ]] && cosigned+=("$a"); done <<<"$have"
+mkdir -p "$work/cosignatures"
+if (( ${#cosigned[@]} )); then
+  patterns=(); for a in "${cosigned[@]}"; do patterns+=(--pattern "$a"); done
+  gh release download "$v" --dir "$work/cosignatures" "${patterns[@]}" >/dev/null || { echo "publish-release: cannot download $v's co-signatures" >&2; exit 1; }
+fi
+policies=(--policy "$v=$root/factory/MAINTAINERS.toml")
+cutoff="$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=30)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+tags="$(gh release list --exclude-drafts --limit 200 --json tagName,publishedAt --jq ".[] | select(.publishedAt >= \"$cutoff\") | .tagName")" \
+  || { echo "publish-release: cannot list the releases of the last 30 days, whose agents must take $v; it stays as it is" >&2; exit 1; }
+for tag in $tags; do
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+  if gh api "repos/{owner}/{repo}/contents/factory/MAINTAINERS.toml?ref=$tag" -H "Accept: application/vnd.github.raw" > "$work/maintainers-$tag.toml" 2>"$work/err"; then
+    policies+=(--policy "$tag=$work/maintainers-$tag.toml")
+  elif ! grep -q 'HTTP 404' "$work/err"; then
+    echo "publish-release: cannot read $tag's factory/MAINTAINERS.toml: $(cat "$work/err")" >&2; exit 1
+  fi
+done
+if ! python3 "$root/factory/bin/co-sign" check "$work/$bundle" --namespace host-bundle@omarchy-pool.org \
+    --signatures "$work/cosignatures" "${policies[@]}" > "$work/cosign" 2>&1; then
+  cat "$work/cosign" >&2
+  if [[ "$state" == true ]]; then echo "publish-release: $v lacks the maintainers' co-signature its agents require; it stays a draft (factory/bin/co-sign release $v, then re-run this job)" >&2
+  else echo "publish-release: $v is published without the maintainers' co-signature its agents require: a person must look" >&2; fi
+  exit 1
+fi
+cat "$work/cosign"
 if [[ "$state" != true ]]; then
   echo "publish-release: $v is already published with every asset"
   exit 0
