@@ -189,8 +189,24 @@ read-only"). A package that truly needs direct network access (raw sockets,
 its own name resolution) gets `network = "direct"` with a `reason` in
 `factory/sizing/tasks.toml`, in a pull request another maintainer approves.
 
+**A host runs as many tasks at once as its units hold (#337).** The pool
+hands it one task per claim and its dispatcher claims again at once while
+units are free: a build takes 2 units per size, a trial 2, an audit 1, and
+one unit stays for pool jobs; whatever does not fit waits in the pool's
+queue, never on the host. Native work comes first; a build of an
+architecture the host runs emulated waits a little for a native host
+(twice that package's last native build, 3 to 60 minutes) unless none
+could take it now, and while no host runs that architecture natively each
+host keeps one of its builds moving. Before each claim the dispatcher
+checks the memory available, so a machine you also use takes only what
+still fits. You or any maintainer can lower what the pool hands it with
+the **pool cap** on its page — the Studio canary runs at one build that way
+— and raise it again; nothing running ends when you lower it. The
+runbook's *How the pool hands a host work* has the rules.
+
 The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
-isolation level, the release it applied and its leases. Every later call of
+isolation level, the release it applied, the pool cap, the large task it
+reserves for when it does, and its leases with their lane and units. Every later call of
 the host to the pool is signed with its key (`Omarchy-Host`); the pool
 refuses a replay, a changed body and a clock more than 120 s off
 ([Security model](/docs/security-model#maintainer-hosts)).

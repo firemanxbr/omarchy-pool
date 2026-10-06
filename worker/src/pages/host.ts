@@ -10,7 +10,11 @@
  *   as its agent last reported them; its lanes (native, emulated); its
  *   isolation level; the release it applied against the pool's, and the last
  *   round's outcome.
- * - Its leases: what its registration holds now.
+ * - Its leases: what its registration holds now, each with its lane and
+ *   units (#337).
+ * - The pool's cap on its units (#337, design v2 §7.2): its owner or any
+ *   maintainer sets or lifts it, with a reason; and the large task it
+ *   reserves for, when it does.
  * - Stop it (#322): Suspend, Resume and Retire, each greyed with the door's
  *   own reason (GET /api/v1/hosts/:id answers `can`), and the way to its
  *   registration's page, where Drain and Resume are.
@@ -48,6 +52,8 @@ const CSS = String.raw`
   .hp-note { margin: 12px 0 0; font-size: 12.5px; color: var(--dim); max-width: 760px; }
   .hp-stopped { margin: 0; padding: 10px 12px; border: 1px solid var(--red); font-size: 13px; max-width: 760px; overflow-wrap: anywhere; }
   .hp-stopped:empty { display: none; }
+  .hp-cap { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  .hp-cap:empty { display: none; }
   @media (max-width: 520px) { .hp-ops .op-btn { flex: 1 1 100%; justify-content: center; } }
   @media (max-width: 520px) { .hp-kv { grid-template-columns: 1fr; gap: 2px 0; } .hp-kv dd { margin-bottom: 8px; } }
 `;
@@ -67,6 +73,7 @@ const BODY = String.raw`
     <section class="op-card" id="hp-facts" aria-labelledby="hp-facts-h">
       <div class="op-card-h"><b id="hp-facts-h">What it runs</b><small>as its agent last reported it — the units are the pool's own count</small></div>
       <dl class="hp-kv" id="hp-kv"></dl>
+      <div class="op-card-f hp-cap" id="hp-cap"></div>
     </section>
 
     <section class="op-card" id="hp-operate" aria-labelledby="hp-operate-h">
@@ -84,7 +91,7 @@ const BODY = String.raw`
 
     <section class="op-card" id="hp-leases" aria-labelledby="hp-leases-h">
       <div class="op-card-h"><b id="hp-leases-h">Leases</b><small>the tasks its registration holds now</small></div>
-      <div class="hp-table"><table class="op-table"><thead><tr><th>Task</th><th>Kind</th><th>Package</th><th>Arch</th><th>Since</th></tr></thead><tbody id="hp-lease-rows"></tbody></table></div>
+      <div class="hp-table"><table class="op-table"><thead><tr><th>Task</th><th>Kind</th><th>Package</th><th>Arch</th><th>Lane</th><th>Units</th><th>Since</th></tr></thead><tbody id="hp-lease-rows"></tbody></table></div>
       <div class="op-card-f"><a href="/docs/worker-host#maintainer-hosts">How a host joins →</a></div>
     </section>
   </div>
@@ -96,7 +103,7 @@ const SCRIPT = String.raw`
   var BASE = "/api/v1/hosts/" + encodeURIComponent(ID);
   var FRESH_MIN = ${HOST_REPORT_FRESH_MIN};
   var PILL = { active: ["ok", "active"], "pending-owner": ["warn", "waits for its owner's Confirm"], suspended: ["fail", "suspended"], retired: ["na", "retired"] };
-  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14) })};
+  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14) })};
   var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)};
   var H = null, PK = {}, TIMER = 0;
   function stat(k, n, s) { return '<div class="op-stat"><span class="k">' + esc(k) + '</span><span class="n">' + n + '</span><span class="s">' + (s || "") + '</span></div>'; }
@@ -127,7 +134,7 @@ const SCRIPT = String.raw`
     var c = h.capacity;
     $("#hp-stats").innerHTML = c ? [
       stat("CPUs", num(c.cpus), "memory " + num(c.mem_gb) + " GB"),
-      stat("Units", h.units === null || h.units === undefined ? "—" : num(h.units), "1 CPU and 2 GB each, one kept for pool jobs"),
+      stat("Units", h.units === null || h.units === undefined ? "—" : num(h.units), h.pool_cap_units !== null && h.pool_cap_units !== undefined ? "capped at " + num(h.pool_cap_units) + " by the pool" : "1 CPU and 2 GB each, one kept for pool jobs"),
       stat("Disk free", num(c.disk_free_gb.work) + " GB", "work root · engine " + num(c.disk_free_gb.engine) + " GB"),
       stat("Agent slots", c.agent_slots === null || c.agent_slots === undefined ? "—" : num(c.agent_slots), "model tasks at once"),
       stat("Release", esc(h.release_applied || "—"), pool.version ? "the pool runs " + esc(pool.version) : ""),
@@ -143,17 +150,23 @@ const SCRIPT = String.raw`
         kv("Isolation", esc(h.isolation || "?") + (h.dedicated ? " (dedicated)" : "")),
         kv("Lanes", lanes || "—"),
         kv("Capacity", h.below_minimum ? esc(h.below_minimum) : c ? "meets the minimum to join" : "—"),
+        kv("Pool cap", capWords(h)),
+        kv("Reserving", h.reserving_task ? 'for <a href="/build/' + esc(h.reserving_task) + '">#' + esc(h.reserving_task) + '</a> since ' + when(h.reserving_since) + ': it takes nothing else but pool jobs until its units fit it' : '<span class="muted">no</span>'),
         kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + ")" : "")),
         kv("Last round", round),
         kv("Agent", esc(h.agent_version || "?") + (h.provider ? " · " + esc(h.provider) + (h.model ? " " + esc(h.model) : "") : "")),
         kv("Reported", when(h.reported_at)),
       ].join("");
-    $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + '</td><td>' + esc(t.name) + (t.fenced ? ' ' + pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : '') + '</td><td>' + esc(t.arch) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="5" class="muted">no lease — nothing runs on it now</td></tr>';
+    $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + (t.size > 1 ? " · size " + esc(t.size) : "") + '</td><td>' + esc(t.name) + (t.fenced ? ' ' + pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : '') + '</td><td>' + esc(t.arch) + '</td><td>' + esc(t.lane || "—") + '</td><td>' + esc(t.units === null || t.units === undefined ? "—" : t.units) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="7" class="muted">no lease — nothing runs on it now</td></tr>';
     endSkeleton();
   }
+  // The pool's cap (#337): what the pool hands it at most, whatever its envelope says; none lets its count decide.
+  function capWords(h) { return h.pool_cap_units === null || h.pool_cap_units === undefined ? '<span class="muted">none — its count decides</span>' : esc(String(h.pool_cap_units)) + " unit" + (h.pool_cap_units === 1 ? "" : "s") + (h.units !== null && h.units !== undefined ? " of its " + esc(String(h.units)) : ""); }
   // Stop it (#322): the three buttons as the door answers them for this reader, greyed with its reason; Drain is its registration's page's.
   function drawOps(h, can) {
     var why = can.why || {};
+    // The pool's cap (#337): its owner or any maintainer, greyed with the door's reason for everyone else.
+    $("#hp-cap").innerHTML = h.status === "retired" ? "" : '<span>Pool cap: ' + capWords(h) + '</span>' + gate('<button type="button" class="op-btn" data-host-act="cap">' + ICON.cap + 'Set the pool cap</button>', can.cap === true, why.cap || "");
     $("#hp-ops").innerHTML = [
       gate('<button type="button" class="op-btn" data-host-act="suspend">' + ICON.suspend + 'Suspend</button>', can.suspend === true, why.suspend || ""),
       gate('<button type="button" class="op-btn" data-host-act="resume">' + ICON.resume + 'Resume</button>', can.resume === true, why.resume || ""),
@@ -177,6 +190,14 @@ const SCRIPT = String.raw`
       ask({ title: "Resume " + H.name, text: "It claims again from its next claim and its agent recovers at its next poll; nothing is done on the machine.", held: "Your passkey confirms it.", confirm: "Resume", first: "Register a passkey and resume", nothing: "Nothing was resumed." }).then(function (go) {
         if (go === null) return;
         passkeyed("host:resume:" + ID, function (a) { return api("POST", BASE + "/resume", { assertion: a }); }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+    } else if (act === "cap") {
+      // Lowered below what it holds, nothing running ends: it claims nothing until its leases fit.
+      var top = Math.max(16, H.units || 0), opts = [{ value: "", text: "No cap — its count decides", selected: H.pool_cap_units === null || H.pool_cap_units === undefined }];
+      for (var u = 0; u <= top; u++) opts.push({ value: String(u), text: u + " unit" + (u === 1 ? "" : "s") + (u === 0 ? " — it claims nothing" : u === 3 ? " — one build and the pool jobs' unit" : ""), selected: H.pool_cap_units === u });
+      ask({ title: "The pool's cap on " + H.name, text: "The pool hands it at most this many units, whatever its envelope says. Lowered below what it runs, nothing running ends: it claims nothing until its tasks fit.", select: { label: "Units", options: opts }, input: "required", confirm: "Set the cap" }).then(function (r) {
+        if (r === null) return;
+        api("POST", BASE + "/cap", { units: r.pick === "" ? null : Number(r.pick), reason: r.note }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     } else if (act === "retire") {
       ask({ title: "Retire " + H.name, text: "Its key and its worker token are burnt for good; its running tasks end with their lease. A new install on the machine enrolls a new host.", held: PK.retire ? "Your passkey confirms it." : "", input: "required", confirm: "Retire", first: PK.retire ? "Register a passkey and retire" : "", nothing: "Nothing was retired.", danger: true }).then(function (r) {
@@ -236,8 +257,22 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "host.leases",
     page: `/hosts/${F.host}`,
-    anchor: ['id="hp-leases"', 'id="hp-lease-rows"', 'href="/docs/worker-host#maintainer-hosts"'],
-    script: ['$("#hp-lease-rows")', "no lease — nothing runs on it now", 'href="/build/'],
+    anchor: ['id="hp-leases"', 'id="hp-lease-rows"', 'href="/docs/worker-host#maintainer-hosts"', "<th>Lane</th>", "<th>Units</th>"],
+    script: ['$("#hp-lease-rows")', "no lease — nothing runs on it now", 'href="/build/', "t.lane", "t.units"],
+    visible: EVERYONE,
+  },
+  {
+    // The pool's cap (#337, design v2 §7.2): what the pool hands the host at most; its owner or any maintainer sets or lifts it on the
+    // site, with a reason — greyed for everyone else with the door's reason; and the large task it reserves for.
+    id: "host.cap",
+    page: `/hosts/${F.host}`,
+    anchor: ['id="hp-cap"'],
+    script: ["function capWords(h)", 'data-host-act="cap"', "can.cap === true", 'BASE + "/cap"', '"Pool cap"', '"Reserving"', "h.reserving_task"],
+    reads: [
+      { path: `/api/v1/hosts/${F.host}`, fields: ["can.cap"] },
+      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.pool_cap_units", "host.reserving_task", "host.reserving_since"] },
+    ],
+    acts: [{ method: "POST", path: `/api/v1/hosts/${F.host}/cap`, body: { units: 3, reason: "a reason enough" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
     visible: EVERYONE,
   },
 ];
