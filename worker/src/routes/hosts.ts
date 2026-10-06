@@ -69,6 +69,8 @@ export interface HostRow {
   reserving_task: number | null; reserving_since: string | null;
   /** #325: the settings its agent took (its last set-units and set-emulate answered done). */
   settings: string | null;
+  /** #326: its soak and freeze detection as its last report says them (migration 0048): what the claims and listings read. */
+  soaking_until: string | null; soak_quarantine: string | null; pool_behind_github: string | null;
 }
 
 function newToken(prefix: string): string {
@@ -148,7 +150,7 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
     id: h.id, name: h.name, owner: h.owner_login, status: h.status, arches: lanes.map((l) => l.arch), release_applied: h.release_applied, alive,
     worker: h.worker_id, enrolled_at: h.enrolled_at, confirmed_at: h.confirmed_at,
     // Freeze detection (#326): its agent says GitHub has shown a newer release than the pool names for over a day — about the pool, public as Status says it.
-    pool_behind_github: poolBehindOf(h.report),
+    pool_behind_github: poolBehindOf(h.pool_behind_github),
     // Who stopped it and why (#322) — the journal's words, public as the journal is — and whether the list stopped its claims.
     status_by: h.status_by, status_at: h.status_at, status_reason: h.status_reason, claims_stopped_at: h.owner_removed_at,
   };
@@ -235,7 +237,9 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
   const pool = version(env);
   return json(
     {
-      host: await hostView(h, detailed, Date.now()), leases, orders, pool: { version: pool.version, deployed_at: pool.deployed_at }, update: await gateOf(env, h, pool),
+      // Where its registration stands at the 426 gate (#326) tells its soak and the releases it holds in quarantine: its owner's and the
+      // maintainers', as host.soak and host.quarantine are.
+      host: await hostView(h, detailed, Date.now()), leases, orders, pool: { version: pool.version, deployed_at: pool.deployed_at }, update: detailed ? await gateOf(env, h, pool) : undefined,
       can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h), retire_legacy: true },
     },
     200,
@@ -251,20 +255,11 @@ async function gateOf(env: Env, h: HostRow, pool: ReturnType<typeof version>) {
   if (!h.worker_id) return null;
   const w = await env.DB.prepare("SELECT version FROM build_workers WHERE id = ?").bind(h.worker_id).first<{ version: string | null }>();
   if (!parseTag(w?.version)) return null;
-  const soak = soakOf(soakColumnsOf(h.report));
-  const u = updateState(w!.version, pool, Date.now(), soak);
-  return { ...u, words: gateWords(u, soak, pool.deployed_at) };
-}
-
-/** The soak columns a claim reads with SQL (SOAK_COLUMNS), from the report itself. */
-function soakColumnsOf(report: string | null): { soaking_until: unknown; quarantine: unknown } | null {
-  if (!report) return null;
-  try {
-    const r = JSON.parse(report) as { release?: { soaking_until?: unknown }; quarantine?: unknown };
-    return { soaking_until: r?.release?.soaking_until ?? null, quarantine: r?.quarantine ?? null };
-  } catch {
-    return null;
-  }
+  // The columns the claim reads (SOAK_COLUMNS), from the same row.
+  const soak = soakOf({ soaking_until: h.soaking_until, quarantine: h.soak_quarantine });
+  const at = Date.now();
+  const u = updateState(w!.version, pool, at, soak);
+  return { ...u, words: gateWords(u, soak, pool.deployed_at, at) };
 }
 
 /**
@@ -978,18 +973,23 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   const dedicated = runtime && typeof runtime.dedicated === "boolean" ? (runtime.dedicated ? 1 : 0) : h.dedicated;
   const round = r.round && typeof r.round === "object" ? r.round : null;
   const at = iso(Date.now());
-  // Freeze detection (#326): the journal says when a host starts and stops reporting the pool behind GitHub, once each.
-  const [behindWas, behindNow] = [poolBehindOf(h.report), poolBehindOf(text)];
+  // The soak and freeze detection (#326), read here and kept in plain columns — the claims, the fleet and the listings read those,
+  // never the report parsed by SQL: SQLite's JSON parser refuses nesting V8's accepts, and one report would fail them pool-wide.
+  const soak = soakOf({ soaking_until: r.release?.soaking_until, quarantine: r.quarantine });
+  // The journal says when a host starts and stops reporting the pool behind GitHub, once each.
+  const [behindWas, behindNow] = [poolBehindOf(h.pool_behind_github), poolBehindOf(r.release?.pool_behind_github)];
   await env.DB.prepare(
     `UPDATE hosts SET report = ?, reported_at = ?, last_seen = ?, agent_version = COALESCE(?, agent_version), release_applied = ?, release_target = ?, rolled_back_from = ?,
        isolation = ?, dedicated = ?, runtime = COALESCE(?, runtime), provider = ?, model = ?,
-       capacity = COALESCE(?, capacity), lanes = COALESCE(?, lanes), units = COALESCE(?, units), agent_slots = COALESCE(?, agent_slots), disk_free = COALESCE(?, disk_free)
+       capacity = COALESCE(?, capacity), lanes = COALESCE(?, lanes), units = COALESCE(?, units), agent_slots = COALESCE(?, agent_slots), disk_free = COALESCE(?, disk_free),
+       soaking_until = ?, soak_quarantine = ?, pool_behind_github = ?
      WHERE id = ?`,
   )
     .bind(
       text, at, at, str(r.agent?.version, /^\d{1,4}\.\d{1,4}\.\d{1,6}$/), str(r.release?.applied, tag), str(r.release?.target, tag), round?.outcome === "rolled-back" ? str(round.from, tag) : null,
       isolation, dedicated, runtime ? JSON.stringify(runtime) : null, str(r.agent?.provider, /^[a-z0-9-]{1,40}$/), str(r.agent?.model, /^[A-Za-z0-9._:-]{1,80}$/),
       cap ? JSON.stringify({ ...cap, below_minimum: belowMinimum(cap) }) : null, cap ? JSON.stringify(cap.lanes) : null, cap ? unitsOf(cap) : null, cap ? cap.agent_slots : null, cap ? JSON.stringify(cap.disk_free_gb) : null,
+      soak ? soak.until : null, soak ? JSON.stringify(soak.quarantined) : null, behindNow ? JSON.stringify(behindNow) : null,
       h.id,
     )
     .run();

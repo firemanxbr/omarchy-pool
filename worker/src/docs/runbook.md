@@ -1299,14 +1299,16 @@ waits.
 An owner may make a host take a new release later than the pool names it
 (#326; design v2 D16), so a bad one can be caught on another host first:
 `soak_minutes = 30` under `[envelope]` in `agent.toml`, at the host (0, the
-default, takes it at once; at most 120 — more is refused at the agent's
-start, exit 78), then `systemctl --user restart omarchy-agent`. A release
+default, takes it at once; at most 100 — more is refused at the agent's
+start, exit 78: the soak, the poll that first names the release and the
+round after it fit inside the pool's two-hour grace), then
+`systemctl --user restart omarchy-agent`. A release
 the pool names above the one that runs waits that long from when the agent
 first saw the pool name it (its own clock, kept in `state.json` across
 restarts); its bundle is fetched and verified meanwhile, so the host still
 learns of a revocation. A newer release named meanwhile waits its own soak
-from then, but the soak never keeps the host more than two hours behind the
-release it ran when it fell behind: when releases land faster than the
+from then, but the soak never keeps the host more than 100 minutes behind
+the release it ran when it fell behind: when releases land faster than the
 soak, the one named then is taken at that bound. The last round says `held`
 with `… waits for the owner's soak until <time>`, once; `omarchy-agent
 status` says `soak:` with the seconds left. What the soak does not hold: a
@@ -1323,8 +1325,13 @@ says when the soak of the release the pool names ends
 covered too), and the host's registration is kept out of the 426 gate until
 then and `SOAK_ROUND_MINUTES` (15) after it, whatever the releases behind —
 never more than `SOAK_GRACE_MAX_MINUTES` (120) after the deploy, and not at
-all while its report holds the pool's release (or a later one) in
-quarantine: it reverted it, and its claim on last-good is a rule of its own.
+all while its report holds the pool's release in quarantine (a quarantine
+past its end, or of another release, does not count): it reverted it, and
+its claim on last-good is a rule of its own. The pool reads the report's
+soak and freeze detection with its own JSON reader when it comes and keeps
+them in columns of the host (`soaking_until`, `soak_quarantine`,
+`pool_behind_github`, migration 0048): no claim nor listing parses a
+report.
 The host's page says where its registration stands at the gate and why
 (*Claims*): claiming through its soak, within the plain grace, or `refused
 with 426` with what ended the grace — the soak over, the two hours after

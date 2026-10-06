@@ -451,8 +451,8 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="hp-freeze"'],
     script: ["function soakWords(h)", "function gateLine(u)", '"Soak"', '"Claims"', '"GitHub"', "h.pool_behind_github", "Pool behind GitHub", 'href="/docs/runbook#a-new-maintainer-host">A new maintainer host</a>, Freeze detection', "u.required", "u.words"],
     reads: [
-      { path: `/api/v1/hosts/${F.host}`, fields: ["host.pool_behind_github", "pool.deployed_at", "update"] },
-      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.soak"] },
+      { path: `/api/v1/hosts/${F.host}`, fields: ["host.pool_behind_github", "pool.deployed_at"] },
+      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.soak", "update"] },
     ],
     visible: EVERYONE,
   },

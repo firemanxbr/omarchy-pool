@@ -1896,8 +1896,8 @@ export const WORKERS_LISTING_SQL = `SELECT w.*, ${SOAK_COLUMNS("h")} FROM build_
  * The hosts whose agent reports the pool behind GitHub (#326, design v2 §5.5): an active host, its report fresh, saying
  * `pool_behind_github` — Status's warning. The hosts are a handful of maintainers' machines: no index needed.
  */
-export const POOL_BEHIND_SQL = `SELECT id, name, owner_login, report FROM hosts
-  WHERE status = 'active' AND reported_at > ? AND json_extract(report, '$.release.pool_behind_github') IS NOT NULL ORDER BY id LIMIT 20`;
+export const POOL_BEHIND_SQL = `SELECT id, name, owner_login, pool_behind_github FROM hosts
+  WHERE status = 'active' AND reported_at > ? AND pool_behind_github IS NOT NULL ORDER BY id LIMIT 20`;
 
 /**
  * GET /factory — the workers and the queue. `?live=1` is the read a page
@@ -1920,7 +1920,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
     .all<WorkerRow>();
   const tasks = await env.DB.prepare(`SELECT * FROM build_tasks ${live ? "WHERE status IN ('leased', 'queued') " : ""}ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?`).bind(limit).all<TaskRow>();
   const pool = running(env);
-  const behind = await env.DB.prepare(POOL_BEHIND_SQL).bind(new Date(Date.now() - HOST_REPORT_FRESH_MIN * 60000).toISOString()).all<{ id: string; name: string; owner_login: string; report: string | null }>();
+  const behind = await env.DB.prepare(POOL_BEHIND_SQL).bind(new Date(Date.now() - HOST_REPORT_FRESH_MIN * 60000).toISOString()).all<{ id: string; name: string; owner_login: string; pool_behind_github: string | null }>();
   return json(
     {
       generated_at: now(),
@@ -1935,7 +1935,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, claim_id: undefined, lease_gen: undefined, params: parseJson(t.params), result: parseJson(t.result) })),
       // Freeze detection (#326): each host whose agent says GitHub has shown a newer release than the pool names for over a day.
       pool_behind_github: behind.results.flatMap((h) => {
-        const b: PoolBehind | null = poolBehindOf(h.report);
+        const b: PoolBehind | null = poolBehindOf(h.pool_behind_github);
         return b ? [{ host: h.id, name: h.name, owner: h.owner_login, ...b }] : [];
       }),
     },

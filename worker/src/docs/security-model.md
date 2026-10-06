@@ -612,7 +612,7 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   itself from the reported totals and the signed constants, never more than
   the host declared.
 - **The owner's soak and freeze detection** (#326, design v2 D16, §5.5).
-  An owner may make a host wait `soak_minutes` (at most 120) before it takes
+  An owner may make a host wait `soak_minutes` (at most 100) before it takes
   a new release, from when its agent first saw the pool name it — its own
   clock, never the pool's word on when it deployed, which would let a
   compromised pool skip the soak; the agent's own update waits with it
@@ -626,7 +626,13 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   deploy and not at all while the host holds the pool's release in
   quarantine — so an agent that reports a soak it is not in gains at most
   that window of claims on the release it runs, which the 426 gate let any
-  worker have for 45 minutes before. Freeze detection is the host's check
+  worker have for 45 minutes before. The longest soak (100 minutes), the
+  poll that starts its clock and the round after it fit inside those two
+  hours, so a soak never ends at the gate. The pool reads the soak and
+  `pool-behind-github` from a report with its own JSON reader, once, and
+  keeps them in columns of the host: no claim nor listing parses a report
+  in SQL, whose JSON parser refuses nesting V8's accepts — one maintainer
+  host's report cannot fail every claim and listing of the pool. Freeze detection is the host's check
   on a pool that holds it on an old release: every six hours the agent
   reads the tag of GitHub's latest release (`api.github.com`,
   unauthenticated) and nothing else, and when GitHub has shown a newer

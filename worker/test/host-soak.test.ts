@@ -8,7 +8,10 @@
  *   15 minutes after — two releases behind included —, never past two hours
  *   after the deploy, and not at all while it holds the pool's release in
  *   quarantine; the same registration with no soak is refused. The host page
- *   says where it stands at the gate, and why; the listings agree.
+ *   says where it stands at the gate, and why, to its owner and the
+ *   maintainers; the listings agree.
+ * - The report is read by the Worker's own JSON reader, never by SQL: one
+ *   nested past SQLite's JSON depth stops nobody's claims nor the listings.
  * - Freeze detection: a report that says `pool_behind_github` puts the host
  *   on Status (GET /factory's `pool_behind_github`, while the report is
  *   fresh) and on its page — for anyone —, and on the journal once when it
@@ -23,7 +26,7 @@ import worker from "../src/index";
 import { applyGovernance } from "../src/governance";
 import { sha256Hex } from "../src/routes/contributors";
 import { toB64url } from "../src/webauthn";
-import { enrollMessage, poolBehindOf, reportedSoakOf, signedMessage, soakOf } from "../src/hosts";
+import { enrollMessage, poolBehindOf, reportedSoakOf, signedMessage, soakOf, SOAK_COLUMNS } from "../src/hosts";
 import { POOL_BEHIND_SQL } from "../src/routes/factory";
 import { SOAK_GRACE_MAX_MINUTES, SOAK_ROUND_MINUTES } from "../src/update";
 import soakFixture from "../../crates/omarchy-agent/tests/fixtures/host-api/report-soak.json?raw";
@@ -148,18 +151,53 @@ describe("a soaking host's claim grace (POST /factory/claim, #326)", () => {
     expect((await claim(token, "v1.0.2", deployed("v1.0.4", 10))).status).toBe(426);
     const held = (await call("GET", `/hosts/${host}`, { session: "m1", env: deployed("v1.0.4", 10) })).json;
     expect(held.update.words).toContain("it holds v1.0.4 in quarantine");
-    // An older release in quarantine does not count.
+    // An older release in quarantine does not count, nor a later one the pool rolled back from: the host waits for v1.0.4 and soaks it.
     await soaking(isoIn(20), ["v1.0.3"]);
     expect((await claim(token, "v1.0.2", deployed("v1.0.4", 10))).status).not.toBe(426);
+    await soaking(isoIn(20), ["v1.0.5"]);
+    expect((await claim(token, "v1.0.2", deployed("v1.0.4", 10))).status).not.toBe(426);
+    // Nor a quarantine of the pool's release that ended.
+    await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 100, soaking_until: isoIn(20) }, quarantine: [{ release: "v1.0.4", until: isoIn(-1) }] });
+    expect((await claim(token, "v1.0.2", deployed("v1.0.4", 10))).status).not.toBe(426);
+  });
+
+  it("reads the report with its own JSON reader: one nested past SQLite's JSON depth stops no claim and no listing", async () => {
+    // SQLite refuses JSON nested deeper than 1000 levels, and fails the whole statement; V8 reads it. A report of 3 KiB holds 1500.
+    const deep = await activeHost("m1", "deep-report");
+    const healthy = await activeHost("m2", "healthy-host");
+    const pool = deployed("v1.0.4", 10);
+    const nested = `{"agent":{"version":"0.5.0"},"release":{"applied":"v1.0.2","target":"v1.0.4","soak_minutes":30,"soaking_until":"${isoIn(20)}","pool_behind_github":{"github":"v1.0.5","pool":"v1.0.4","since":"2027-01-14T08:00:56Z"}},"quarantine":[],"x":${"[".repeat(1500)}${"]".repeat(1500)}}`;
+    const r = await report(deep.k, deep.host, nested);
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    // Its own claim reads its soak, and claims through it; another host's claim selects over the fleet with it in; the listings answer.
+    const mine = await seed(deep.worker, "deep-pkg"), theirs = await seed(healthy.worker, "healthy-pkg");
+    const c1 = await claim(deep.token, "v1.0.2", pool);
+    expect(c1.status, JSON.stringify(c1.json)).toBe(200);
+    expect(c1.json.task.id).toBe(mine);
+    const c2 = await claim(healthy.token, "v1.0.4", pool);
+    expect(c2.status, JSON.stringify(c2.json)).toBe(200);
+    expect(c2.json.task.id).toBe(theirs);
+    const f = await call("GET", "/factory?limit=14", { env: pool });
+    expect(f.status, JSON.stringify(f.json)).toBe(200);
+    expect(f.json.workers.find((w: { id: string }) => w.id === deep.worker).update).toMatchObject({ required: false });
+    expect(f.json.pool_behind_github.some((b: { host: string }) => b.host === deep.host)).toBe(true);
+    expect((await call("GET", `/factory/workers/${deep.worker}`, { env: pool })).status).toBe(200);
+    expect((await call("GET", "/users/m1")).status).toBe(200);
+    expect((await call("GET", `/hosts/${deep.host}`, { session: "m1", env: pool })).json.update).toMatchObject({ required: false });
   });
 
   it("reads the soak a report carries leniently: none, or one that is no time, is no soak", () => {
     expect(soakOf({ soaking_until: null, quarantine: "[]" })).toBeNull();
     expect(soakOf({ soaking_until: "soon", quarantine: "[]" })).toBeNull();
-    expect(soakOf({ soaking_until: "2027-01-15T08:30:00Z", quarantine: '[{"release":"v1.0.4","until":null},{"release":"x"}]' })).toEqual({ until: "2027-01-15T08:30:00Z", quarantined: ["v1.0.4"] });
+    expect(soakOf({ soaking_until: "2027-01-15T08:30:00Z", quarantine: '[{"release":"v1.0.4","until":null},{"release":"x"},{"release":"v1.0.3","until":"2027-01-16T08:00:00Z"},{"release":"v1.0.2","until":"later"}]' }))
+      .toEqual({ until: "2027-01-15T08:30:00Z", quarantined: [{ release: "v1.0.4", until: null }, { release: "v1.0.3", until: "2027-01-16T08:00:00Z" }, { release: "v1.0.2", until: null }] });
     expect(soakOf({ soaking_until: "2027-01-15T08:30:00Z", quarantine: "{" })).toEqual({ until: "2027-01-15T08:30:00Z", quarantined: [] });
+    // The report's quarantine as it comes (an array), as the report's handler reads it.
+    expect(soakOf({ soaking_until: "2027-01-15T08:30:00Z", quarantine: [{ release: "v1.0.4", until: null }, null, 7] })).toEqual({ until: "2027-01-15T08:30:00Z", quarantined: [{ release: "v1.0.4", until: null }] });
     expect(reportedSoakOf(JSON.stringify({ release: { soak_minutes: -1, soaking_until: 3, github_latest: "latest" } }))).toBeNull();
-    expect(poolBehindOf(JSON.stringify({ release: { pool_behind_github: { github: "v1.2.0", pool: "dev", since: "2027-01-15T08:00:00Z" } } }))).toBeNull();
+    expect(poolBehindOf({ github: "v1.2.0", pool: "dev", since: "2027-01-15T08:00:00Z" })).toBeNull();
+    expect(poolBehindOf('{"github":"v1.2.0","pool":"v1.1.0","since":"2027-01-15T08:00:00Z"}')).toEqual({ github: "v1.2.0", pool: "v1.1.0", since: "2027-01-15T08:00:00Z" });
+    expect(poolBehindOf("{")).toBeNull();
   });
 });
 
@@ -211,12 +249,16 @@ describe("the contract with the agent (report-soak.json)", () => {
     expect(page.host.pool_behind_github).toEqual(fixture.release.pool_behind_github);
     expect(page.host.release_target).toBe(fixture.release.target);
     expect(page.host.round).toMatchObject({ outcome: "held" });
-    // The soak the claim reads, by SQL, is the report's.
-    const row = await env.DB.prepare("SELECT json_extract(report, '$.release.soaking_until') AS soaking_until, json_extract(report, '$.quarantine') AS quarantine FROM hosts WHERE id = ?").bind(host).first<{ soaking_until: unknown; quarantine: unknown }>();
+    // The soak the claim reads (its columns, which the report's handler fills) is the report's.
+    const row = await env.DB.prepare(`SELECT ${SOAK_COLUMNS("hosts")} FROM hosts WHERE id = ?`).bind(host).first<{ soaking_until: unknown; quarantine: unknown }>();
     expect(soakOf(row)).toEqual({ until: fixture.release.soaking_until, quarantined: [] });
-    // A contributor sees the freeze (it is about the pool), not the soak.
-    const pub = (await call("GET", `/hosts/${host}`, { session: "alice" })).json;
-    expect(pub.host.soak).toBeUndefined();
-    expect(pub.host.pool_behind_github).toEqual(fixture.release.pool_behind_github);
+    // A contributor and anyone see the freeze (it is about the pool), not the soak nor where it stands at the gate: those tell the
+    // releases it holds in quarantine and its owner's soak.
+    for (const session of ["alice", undefined]) {
+      const pub = (await call("GET", `/hosts/${host}`, { session })).json;
+      expect(pub.host.soak).toBeUndefined();
+      expect(pub.update).toBeUndefined();
+      expect(pub.host.pool_behind_github).toEqual(fixture.release.pool_behind_github);
+    }
   });
 });

@@ -274,17 +274,18 @@ agent resets none of it.
 
 **A soak is the owner's, at the host** (#326): `soak_minutes = 30` under
 `[envelope]` in `agent.toml` (0, the default, takes a release at once; at
-most 120) makes the host take a new release that long after its agent
-first saw the pool name it, so a bad one can be caught on another host
-first — a release that lands meanwhile waits its own soak, but the host is
-never kept more than two hours behind. It covers the agent's own update
+most 100, so the soak and its round fit inside the pool's two-hour grace)
+makes the host take a new release that long after its agent first saw the
+pool name it, so a bad one can be caught on another host first — a release
+that lands meanwhile waits its own soak, but the host is never kept more
+than 100 minutes behind. It covers the agent's own update
 too, unless the release's manifest sets `agent.urgent` (only a security
 release does). A rollback statement skips it and applies at once;
 **Reconcile now** never does. Meanwhile the pool keeps the host's
 registration out of the 426 gate until the soak ends (and the round's 15
 minutes after it), at most two hours after the deploy, unless the host
 holds the pool's release in quarantine; its page says where it stands at
-the gate and why ([Runbook](/docs/runbook#a-new-maintainer-host), *Soak*).
+the gate and why, to its owner and the maintainers ([Runbook](/docs/runbook#a-new-maintainer-host), *Soak*).
 
 **The host watches the pool** (#326, freeze detection): every six hours
 its agent reads the tag of GitHub's latest release, and nothing else. If

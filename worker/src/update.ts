@@ -58,17 +58,37 @@ export interface UpdateState {
  * agent reports ends (`release.soaking_until`), and the round's
  * SOAK_ROUND_MINUTES after it (the pull, the replace, the guard), whatever
  * the releases behind — but never past SOAK_GRACE_MAX_MINUTES after the
- * pool's deploy, and none for a host that holds the pool's release (or a
- * later one) in quarantine: it reverted it, it is not waiting for it, and
- * its claim on last-good is a rule of its own.
+ * pool's deploy (the agent's longest soak, 100 minutes, leaves its first
+ * poll and its round inside them), and none for a host that holds the
+ * pool's release in quarantine now: it reverted it, it is not waiting for
+ * it, and its claim on last-good is a rule of its own.
  */
 export const SOAK_GRACE_MAX_MINUTES = 120;
 export const SOAK_ROUND_MINUTES = 15;
 
+/** A release a host's report holds in quarantine: its tag, and until when — an ISO time, or null: until a newer release. */
+export interface Quarantined {
+  release: string;
+  until: string | null;
+}
+
 /** What a host's last report says of its soak: when it ends, and the releases it holds in quarantine. */
 export interface HostSoak {
   until: string | null;
-  quarantined: string[];
+  quarantined: Quarantined[];
+}
+
+/**
+ * The pool's release `latest` as a host holds it in quarantine at `at`, by its agent's own rule (rollout::quarantined): that
+ * release, its quarantine not past its `until`. Another release's does not count — a host that reverted a later release the pool
+ * has since rolled back from waits for, and soaks, the one the pool names —, nor a quarantine that ended.
+ */
+export function quarantinedNow(soak: HostSoak | null | undefined, latest: Tag, at: number): Quarantined | null {
+  return soak?.quarantined.find((q) => {
+    const t = parseTag(q.release);
+    // An end it cannot read holds, as the agent's "until a newer release" does.
+    return t !== null && compareTags(t, latest) === 0 && (q.until === null || !(Date.parse(q.until) <= at));
+  }) ?? null;
 }
 
 /** Until when a soaking host's registration may claim behind the pool's release `latest`, deployed at `deployed` (ms), at `at`; null when it may not. */
@@ -76,7 +96,7 @@ export function soakGraceUntil(soak: HostSoak | null | undefined, latest: Tag, d
   if (!soak?.until || !Number.isFinite(deployed)) return null;
   const until = Date.parse(soak.until);
   if (!Number.isFinite(until)) return null;
-  if (soak.quarantined.some((q) => { const t = parseTag(q); return t !== null && compareTags(t, latest) >= 0; })) return null;
+  if (quarantinedNow(soak, latest, at)) return null;
   const end = Math.min(until + SOAK_ROUND_MINUTES * 60000, deployed + SOAK_GRACE_MAX_MINUTES * 60000);
   return at < end ? new Date(end).toISOString() : null;
 }
@@ -111,14 +131,14 @@ export function updateMessage(u: UpdateState): string {
  * its end and the round's margin, the two hours after the deploy, or a
  * quarantine of the pool's release. Null when it runs the pool's release.
  */
-export function gateWords(u: UpdateState, soak: HostSoak | null, deployedAt: string | null): string | null {
+export function gateWords(u: UpdateState, soak: HostSoak | null, deployedAt: string | null, at = Date.now()): string | null {
   if (!u.outdated) return null;
   const behind = u.behind ? ` (${u.behind} release${u.behind === 1 ? "" : "s"} behind)` : "";
   const runs = `its registration runs ${u.yours}, the pool ${u.latest}${behind}`;
   if (u.soaking_until) return `${runs}: it claims through its owner's soak, until ${u.soaking_until} — the pool's grace follows the soak its agent reports, ${SOAK_ROUND_MINUTES} minutes past its end for the round, at most ${SOAK_GRACE_MAX_MINUTES / 60} hours after the deploy`;
   if (!u.required) return `${runs}: within the rollout's grace (${UPDATE_GRACE_MINUTES} minutes after the deploy, one release behind at most); its agent rolls the release out`;
   const latest = parseTag(u.latest);
-  const held = soak && latest ? soak.quarantined.find((q) => { const t = parseTag(q); return t !== null && compareTags(t, latest) >= 0; }) : undefined;
+  const held = latest ? quarantinedNow(soak, latest, at)?.release : undefined;
   const deployed = deployedAt ? Date.parse(deployedAt) : NaN;
   const why = held
     ? `it holds ${held} in quarantine — its guard reverted it — so its soak gives no grace: Retry release, or the release after it`

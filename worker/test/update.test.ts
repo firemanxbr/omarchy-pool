@@ -1,7 +1,7 @@
 // Every worker follows the latest image (src/update.ts): what the pool
 // makes of the release a worker reports, and when it stops handing it work.
 import { describe, expect, it } from "vitest";
-import { gateWords, parseTag, soakGraceUntil, updateState, updateMessage, SOAK_GRACE_MAX_MINUTES, SOAK_ROUND_MINUTES, UPDATE_GRACE_MINUTES } from "../src/update";
+import { gateWords, parseTag, quarantinedNow, soakGraceUntil, updateState, updateMessage, SOAK_GRACE_MAX_MINUTES, SOAK_ROUND_MINUTES, UPDATE_GRACE_MINUTES } from "../src/update";
 
 const pool = (version: string, deployedMinutesAgo: number | null) => ({
   version, commit: null, release_url: null, commit_url: null, analytics: "",
@@ -51,7 +51,11 @@ describe("a soaking host's grace", () => {
   const at = (m: number) => T0 + m * MIN;
   const iso = (m: number) => new Date(at(m)).toISOString();
   const deployed = (version: string, m: number) => ({ version, deployed_at: iso(m) });
-  const soak = (untilMin: number | null, quarantined: string[] = []) => ({ until: untilMin === null ? null : iso(untilMin), quarantined });
+  // Each quarantined release until a newer one, as the agent says it (`until` null), unless given with the minute it ends.
+  const soak = (untilMin: number | null, quarantined: (string | [string, number])[] = []) => ({
+    until: untilMin === null ? null : iso(untilMin),
+    quarantined: quarantined.map((q) => (typeof q === "string" ? { release: q, until: null } : { release: q[0], until: iso(q[1]) })),
+  });
 
   it("is not refused during the soak, even when two releases land in it, and is once it and its round's margin end", () => {
     // v1.0.3 at T0: the agent soaks it until T0+30.
@@ -81,16 +85,32 @@ describe("a soaking host's grace", () => {
     expect(updateState("v1.0.2", pool, at(SOAK_GRACE_MAX_MINUTES - 1), long)).toMatchObject({ required: false, soaking_until: iso(SOAK_GRACE_MAX_MINUTES) });
     expect(updateState("v1.0.2", pool, at(SOAK_GRACE_MAX_MINUTES), long)).toMatchObject({ required: true });
     expect(soakGraceUntil(long, [1, 0, 4], at(0), at(SOAK_GRACE_MAX_MINUTES + 1))).toBeNull();
+    // The longest soak an owner may set (100 minutes: crates/omarchy-agent run/config.rs MAX_SOAK_MINUTES), its clock started by a
+    // first poll two minutes after the deploy: the soak and the round's margin after it fit inside the two hours, never refused.
+    const AGENT_MAX_SOAK = 100, firstPoll = 2;
+    const longest = soak(firstPoll + AGENT_MAX_SOAK);
+    expect(firstPoll + AGENT_MAX_SOAK + SOAK_ROUND_MINUTES).toBeLessThan(SOAK_GRACE_MAX_MINUTES);
+    for (const m of [firstPoll, 60, firstPoll + AGENT_MAX_SOAK, firstPoll + AGENT_MAX_SOAK + SOAK_ROUND_MINUTES - 1]) {
+      expect(updateState("v1.0.2", pool, at(m), longest), `T0+${m}`).toMatchObject({ required: false, soaking_until: iso(firstPoll + AGENT_MAX_SOAK + SOAK_ROUND_MINUTES) });
+    }
     // A soak that ended before the grace would have — still the plain 45 minutes for one behind.
     expect(updateState("v1.0.3", pool, at(UPDATE_GRACE_MINUTES - 1), soak(5))).toMatchObject({ required: false });
     expect(updateState("v1.0.3", pool, at(UPDATE_GRACE_MINUTES + 1), soak(5))).toMatchObject({ required: true });
   });
 
-  it("gives none to a host that holds the pool's release, or a later one, in quarantine; an older one quarantined does not count", () => {
+  it("gives none to a host that holds the pool's release in quarantine now; another release quarantined, or a quarantine that ended, does not count", () => {
     const pool = deployed("v1.0.4", 0);
     expect(updateState("v1.0.2", pool, at(10), soak(30, ["v1.0.4"]))).toMatchObject({ required: true });
-    expect(updateState("v1.0.2", pool, at(10), soak(30, ["v1.0.5"]))).toMatchObject({ required: true });
+    expect(updateState("v1.0.2", pool, at(10), soak(30, [["v1.0.4", 20]]))).toMatchObject({ required: true });
     expect(updateState("v1.0.2", pool, at(10), soak(30, ["v1.0.3"]))).toMatchObject({ required: false });
+    // Its quarantine of the pool's release ended: it waits for that release again, and soaks it.
+    expect(updateState("v1.0.2", pool, at(10), soak(30, [["v1.0.4", 5]]))).toMatchObject({ required: false });
+    // It reverted v1.0.5, then the pool rolled back to v1.0.4 (rollback.yml): it waits for v1.0.4 and soaks it, as its agent says.
+    expect(updateState("v1.0.2", pool, at(10), soak(30, ["v1.0.5"]))).toMatchObject({ required: false, soaking_until: iso(45) });
+    expect(quarantinedNow(soak(30, ["v1.0.5", ["v1.0.4", 20]]), [1, 0, 4], at(10))).toEqual({ release: "v1.0.4", until: iso(20) });
+    expect(quarantinedNow(soak(30, ["v1.0.5", ["v1.0.4", 20]]), [1, 0, 4], at(20))).toBeNull();
+    // An end the pool cannot read holds, as "until a newer release" does.
+    expect(quarantinedNow({ until: iso(30), quarantined: [{ release: "v1.0.4", until: "soon" }] }, [1, 0, 4], at(10))).not.toBeNull();
     // A report's soak that is no time, or none, is no soak.
     expect(updateState("v1.0.2", pool, at(10), { until: "soon", quarantined: [] })).toMatchObject({ required: true });
     expect(updateState("v1.0.2", pool, at(10), null)).toMatchObject({ required: true });
@@ -100,12 +120,13 @@ describe("a soaking host's grace", () => {
 
   it("the host page explains its 426: the soak's grace, the plain grace, and what ended them", () => {
     const pool = deployed("v1.0.4", 0);
-    const words = (m: number, s: ReturnType<typeof soak> | null) => gateWords(updateState("v1.0.2", pool, at(m), s), s, pool.deployed_at);
+    const words = (m: number, s: ReturnType<typeof soak> | null) => gateWords(updateState("v1.0.2", pool, at(m), s), s, pool.deployed_at, at(m));
     expect(gateWords(updateState("v1.0.4", pool, at(5)), null, pool.deployed_at)).toBeNull();
     expect(words(10, soak(30))).toBe(`its registration runs v1.0.2, the pool v1.0.4 (2 releases behind): it claims through its owner's soak, until ${iso(45)} — the pool's grace follows the soak its agent reports, 15 minutes past its end for the round, at most 2 hours after the deploy`);
     expect(gateWords(updateState("v1.0.3", pool, at(10)), null, pool.deployed_at)).toBe("its registration runs v1.0.3, the pool v1.0.4 (1 release behind): within the rollout's grace (45 minutes after the deploy, one release behind at most); its agent rolls the release out");
     expect(words(10, null)).toBe("refused with 426 — its registration runs v1.0.2, the pool v1.0.4 (2 releases behind): past the rollout's grace (45 minutes after the deploy, one release behind at most), and its agent reports no soak");
     expect(words(10, soak(30, ["v1.0.4"]))).toContain("it holds v1.0.4 in quarantine — its guard reverted it — so its soak gives no grace");
+    expect(words(10, soak(30, [["v1.0.4", 15]]))).toContain("it holds v1.0.4 in quarantine");
     expect(words(60, soak(30))).toContain(`its soak ended at ${iso(30)} and its round has not brought the release yet`);
     expect(words(121, soak(200))).toContain(`past the pool's grace for a soak, which ends 2 hours after the deploy (${iso(120)})`);
   });
