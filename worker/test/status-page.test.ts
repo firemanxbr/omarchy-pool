@@ -476,4 +476,15 @@ describe("the Status page", () => {
     expect(silent([{ last_seen: ago(20), revoked_at: ago(5) }])).toEqual([]);
     expect(silent([{ last_seen: ago(20) }], { version: "dev", deployed_at: null })).toEqual([]);
   });
+
+  // #342 (design v2 §18.3): a host whose agent reverted the pool's release, claiming on its last-good — the gate's own word from the listing.
+  it("warns of a host claiming on its last-good, until when, once per registration; nothing for one offline or with no such word", () => {
+    const { fleetLines } = runScript(SCRIPT, { pathname: "/status", functions: ["fleetLines"] }) as unknown as { fleetLines: (ws: unknown[], pool: unknown, now: number) => [string, string][] };
+    const now = Date.parse("2026-11-10T14:00:00Z");
+    const pool = { version: "v3.4.2", deployed_at: "2026-11-10T12:00:00Z" };
+    const w = (o: Record<string, unknown>) => ({ id: "m1-studio-ab12", alive: true, side: "omarchy", kind: "host", labels: { where: "studio" }, last_seen: "2026-11-10T13:59:00Z", set_rollout: "host", update: { latest: "v3.4.2", yours: "v3.4.1", outdated: true, behind: 1, required: false, last_good_until: "2026-11-10T19:00:00.000Z" }, ...o });
+    const lines = fleetLines([w({}), w({ id: "off", alive: false }), w({ id: "now", update: { latest: "v3.4.2", yours: "v3.4.2", outdated: false, behind: 0, required: false } })], pool, now);
+    expect(lines).toEqual([["warn", expect.stringContaining("studio: its agent reverted v3.4.2 — claiming on last-good v3.4.1 until 2026-11-10 19:00 UTC, then handed nothing until it runs the pool's release")]]);
+    expect(lines[0][1]).toContain('href="/docs/runbook#a-new-maintainer-host"');
+  });
 });

@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// The signed release's manifest, as built into this binary.
-const MANIFEST: &str = include_str!("../../../../factory/bundle/manifest.toml");
+pub(crate) const MANIFEST: &str = include_str!("../../../../factory/bundle/manifest.toml");
 
 /// The constants the dispatcher needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

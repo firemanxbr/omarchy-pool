@@ -507,6 +507,40 @@ signature in Rekor over bytes anyone can rebuild; a pool could serve that
 statement although that rollback never took effect, but a maintainer
 approved that dispatch and every rule above still applies to it.
 
+**Revoked releases, and a host on its last-good** (#342, design v2 §8.6,
+§9.1; D55). `revoked` and `min_release` reach the pool the way they reach
+the hosts: the Worker reads `factory/bundle/manifest.toml` of the release it
+was deployed from, the file `release.yml` signs into that release's bundle,
+and it is deployed only once `publish-release` has published that release,
+with its maintainers' co-signatures where `factory/MAINTAINERS.toml` asks
+for them (#330, below).
+A lease records the release it was claimed on (`build_tasks.release`, the
+claim's `version`); once the pool's release revokes it, nothing of that
+lease is taken — heartbeat, staging upload, pool or ring write, completion —
+whichever token sends it, and a claim on it is refused (`426`). Its host's
+dispatcher kills its containers on the merged set it keeps (the signed
+lists of every dispatcher release it ran, never the pool's word), or on the
+pool's `409 {stop, state: "revoked"}` for that lease alone, which gives the
+pool no more than a Stop already does and is not kept. The agent's own
+union (§5.2, every manifest it verified, applied or not) is not handed to
+the dispatcher: a revocation only the agent has seen — its release's
+dispatcher never ran on this host — is acted on at the lease's next
+heartbeat, by the pool's word. A Worker rolled back
+to a release before the revocation forgets it (its manifest did not have
+it): the hosts do not, and their dispatchers still kill such tasks, which
+that Worker then requeues as `lost`; a dispatcher whose own release is in
+its set takes no new task (`want: 0`), so such a Worker does not hand it one
+task after another to kill, each a host loss.
+
+The one exception to the update gate rests on the host's own signed
+reports: a host whose agent says it reverted the pool's release claims on
+the release it applied for six hours from the first such report, never
+below the signed `min_release`, never on a revoked release, and Status and
+the host's page say so. A host that lies about a revert (a stolen host key,
+a modified agent) gains claims on an older release that is neither revoked
+nor below the floor — work any release in that range could do anyway, on a
+registration whose worker token that key fetches anyway — and in public.
+
 ## The maintainers' co-signature
 
 From #330 (design v2 D1 b, P6), what a maintainer's host takes can be held
@@ -733,7 +767,8 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   registration out of the 426 gate until the soak its agent reports ends,
   15 minutes more for the round, never more than two hours after the
   deploy and not at all while the host holds the pool's release in
-  quarantine — so an agent that reports a soak it is not in gains at most
+  quarantine (its claim on its last-good is the rule then, #342) nor on a
+  revoked release — so an agent that reports a soak it is not in gains at most
   that window of claims on the release it runs, which the 426 gate let any
   worker have for 45 minutes before. The longest soak (100 minutes), the
   poll that starts its clock and the round after it fit inside those two
