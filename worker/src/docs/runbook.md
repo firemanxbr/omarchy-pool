@@ -497,9 +497,11 @@ pulls and runs them:
 pkg-repo work --worker-token omw_… --labels '{"where":"droplet-1"}'
 ```
 
-The worker is registered like any other (`POST /factory/workers`) and a
-maintainer promotes it: `POST /factory/workers/<id>/trust {"trust":"project"}`
-with a maintainer's contributor token; maintainers are named by
+The worker is registered like any other (`POST /factory/workers`, a
+maintainer's); project trust is no longer given one worker at a time
+(#343: `POST /factory/workers/<id>/trust` answers 410), so only a
+registration that already holds it takes the pool's jobs this way — a new
+machine joins as a host (*A new maintainer host*, below); maintainers are named by
 `factory/MAINTAINERS.toml` (docs/GOVERNANCE.md), nowhere else. Every task
 runs with a per-job token the pool issues at claim time (SECURITY.md);
 the worker's own token only claims. No pipeline step runs on GitHub any
@@ -1556,7 +1558,7 @@ so a size-4 build waits for memory rather than run smaller.
   machines apart by owner and host: two registrations are on different
   machines only when their owners differ or they are two hosts'
   registrations of different hosts. A maintainer's legacy role containers
-  (the Studio's `community-*` and `review-*`, until #343), and a host's
+  (the Studio's `community-*` and `review-*`, until P3), and a host's
   registration beside its own legacy set during the canary, are one
   machine, so an audit one takes of another's build says `none`, never
   `host`. An audit of the project's
@@ -1776,7 +1778,7 @@ profile, off until `register.sh` has registered it)
 |---|---|---|
 | `pool-x86_64`, `pool-aarch64` | project trust | the pool's jobs: sync, render, promote, rollback, health, security, enqueue, gc, verify, relayout, trial |
 | `review-x86_64`, `review-aarch64`, `review2-x86_64`, `review2-aarch64` | project trust, an agent key | the project's builds from staged evidence, the audit of staged builds — two pairs, so an audit does not wait for a build |
-| `community-x86_64`, `community-aarch64` | community, shared, an agent key | contributors' requested packages, with the project's agent |
+| `community-x86_64`, `community-aarch64` | community, an agent key | contributors' requested packages, anyone's, as a host takes them (#343), with the project's agent |
 | `broker-community-{x86_64,aarch64}` | `etc/agent.env` + the builder's token | the broker (`factory/bin/broker`): the worker token, the agent key and `GITHUB_TOKEN` for the builder beside it, which holds nothing; the pool's calls for the one task it claimed, the agent, GitHub read-only |
 | `agent-proxy` | `etc/agent.env` — no worker token | the agent and GitHub, natively, over HTTP for the review workers' audits and their build containers (the `review` network): Claude Code's binary dies under qemu, so the emulated worker asks this one (`FACTORY_PROVIDER=anthropic`, `ANTHROPIC_BASE_URL=http://agent-proxy:8790`; `factory/bin/agent-proxy`) |
 
@@ -1849,9 +1851,12 @@ before this release, paste the block in *Once: the updater* again: it takes
 the release's `setup.sh`, which on a host whose updater already runs only
 installs the new host files (keeping the ones it replaces) and wakes the
 updater. `grep -q omarchy-agent /srv/omarchy-pool/rollout.sh` then says the
-copy has the guard. Fetch an `omarchy-worker` downloaded before this release
-again (the `curl` line at its top). An old `rollout.sh` that is missed
-brings back only the updater, which stands down.
+copy has the guard. An `omarchy-worker` downloaded before #313 has none, and
+the pool no longer serves the command (#343): take the repository's,
+`factory/host/omarchy-worker` (it reads the pool's address from
+`OMARCHY_API`, `https://pkgs.omarchy-pool.org` by default), into the set's
+directory once. An old `rollout.sh` that is missed brings back only the
+updater, which stands down.
 
 **Rehearse `retire-legacy` before the Studio's** (#344), on the P1 host,
 with a stand-in legacy set the agent's user owns:
@@ -1953,8 +1958,8 @@ registration claims on through its owner's soak, at most two hours after
 the deploy (#326, *Soak*). Every set carries an
 **updater** container of the same image (`OMARCHY_WORKER_ROLE=updater`,
 `factory/bin/omarchy-rollout`: the same rolling replacement, itself
-last) — contributors' sets since `omarchy-worker start` writes one, this
-host since its one-time step below. It asks the pool every two minutes
+last) — a maintainer's `omarchy-worker` set since its start wrote one,
+this host since its one-time step below. It asks the pool every two minutes
 (`GET /api/v1/factory/follow`) and follows its release, and an Update
 pressed on any of its workers' pages; it replaces itself last, and only
 with an image under which what it replaced stays up. A set without one
@@ -2223,7 +2228,7 @@ the pool itself*).
 ## Maintainers: reviewing contributed builds
 
 The **Review** page lists staged builds (a contributor's package built on
-their worker or a shared one, with PKGBUILD, log, the gate's verdict and
+a maintainer's host, with PKGBUILD, log, the gate's verdict and
 the audit — and the worker and host behind it). A maintainer — a login
 listed in `factory/MAINTAINERS.toml`, signed in with GitHub — never
 decides on their own package, and never on a contributor's bytes:
@@ -2491,20 +2496,20 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
 
 - **Add a package**: sign in and request it on `/factory` (the project's
   URL, a description, the licence, the checklist — written once to the
-  public record); the build starts by itself in the shared queue — the
-  best idle shared worker of the architecture, or a worker of your own at
-  once — and a maintainer reviews the staged build (docs/GOVERNANCE.md).
+  public record); the build starts by itself in the queue — the next host
+  of the architecture with room, contributors' builds in turn by owner —
+  and a maintainer reviews the staged build (docs/GOVERNANCE.md).
   The person's page says where the build stands.
-- **Rebuild**: press *Build* on the person's page (the queue, or a worker
-  of yours), or `POST $API/factory/packages/<name>/build`; a maintainer's
+- **Rebuild**: press *Build* on the person's page (the queue, or a legacy
+  community set of yours), or `POST $API/factory/packages/<name>/build`; a maintainer's
   `POST $API/factory/enqueue` (`{"name","pkgbuild_ref":"<commit>","version","arches","publish":false}`)
   queues a sizing recipe as a dry run: by hand a build never publishes
   (#284, `dry_run_only`).
 - **A failed task**: the person's page says what stopped it and how to fix
   it (the build's page has the whole log); *Build* again starts from that
   build's PKGBUILD and log.
-- **Workers**: contributors' builds run on their own and on the shared
-  workers; project builds (the rebuild of what a maintainer reviews) on
+- **Workers**: contributors' builds run on the maintainers' hosts and their
+  legacy community sets, anyone's (#343); project builds (the rebuild of what a maintainer reviews) on
   project-trusted workers — today the
   Mac (`pkg-repo work`, one process per architecture). No GitHub runner
   builds packages; a queued build waits for a project worker. Workers
@@ -2552,11 +2557,11 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   - a package a contributor registered: once a day (05:45 UTC) the brain
     asks GitHub for each approved package's latest release and queues a
     community build from the approved PKGBUILD with `pkgver` moved to the
-    tag (`bump:<task>@<tag>`, `updpkgsums` in the worker). The owner's
-    worker has **14 days**; then any shared worker (`WORKER_SHARED=1`,
-    anyone's) may build it. (A contributor's request is different: it lands in the
-    shared queue at once — any shared worker, the best idle one first for
-    three minutes, the owner's own native worker at any time — and a build asked for one
+    tag (`bump:<task>@<tag>`, `updpkgsums` in the worker), into the queue
+    at once, as a request's build (#343: the fourteen days a bump waited for
+    its owner's own worker are gone). (A contributor's request lands in the
+    queue the same way — the next host of the architecture with room takes
+    it, contributors' builds in turn by owner — and a build asked for one
     worker — `worker` in `POST /factory/packages/<name>/build`, `pinned_to`
     on the task — waits for that worker only; revoking the worker frees it;
     the owner takes a queued build out with
@@ -2598,9 +2603,10 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   owner or as a maintainer (the Revoke button on the owner's page is the same
   door).
 - **Tokens**: there is no shared worker secret. Every worker — each of the
-  Studio's six, a droplet's, a contributor's — is a registration with its
-  own `omw_` token; project trust is a maintainer's decision on that
-  registration. The Studio's tokens live in `/srv/omarchy-pool/etc/*.env`
+  Studio's eight, a host's, a maintainer's legacy set — is a registration
+  with its own `omw_` token; the project trust a legacy registration holds
+  was given on two maintainers' word, and is given that way no more (#343:
+  a host's trust is the maintainer list). The Studio's tokens live in `/srv/omarchy-pool/etc/*.env`
   on the host (`factory/host/register.sh` writes them); to rotate one,
   revoke the worker, blank its env file, run `register.sh` again,
   `docker compose up -d`.

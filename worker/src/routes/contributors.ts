@@ -709,7 +709,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
     const keepsStaged = byName?.status === "staged" && (byName.release ?? "") === tag;
     const queuedNow = keepsStaged ? { tasks: [], building: [], arches: [], pkgbuild_ref: "", pinned_to: null, lessons: {}, hint: null, queue: {} } as Queued : await queueBuilds(env, c, name, {});
     const targets = (await settleTargets(env, name))[name] ?? {};
-    return json({ package: row ? { ...row, targets } : row, targets, request: { id: req.id, record: recordUrl(env, record.key), signature: record.signed ? recordUrl(env, `${record.key}.sig`) : null, sha256: record.sha256 }, skipped: upstream, build: queuedNow instanceof Response ? { error: (await queuedNow.json<{ error: string }>()).error } : queuedNow, next: `queued: the shared workers build it into your staging workspace (a worker of yours takes it at once); follow it on /user/${c.login}` }, byName ? 200 : 201);
+    return json({ package: row ? { ...row, targets } : row, targets, request: { id: req.id, record: recordUrl(env, record.key), signature: record.signed ? recordUrl(env, `${record.key}.sig`) : null, sha256: record.sha256 }, skipped: upstream, build: queuedNow instanceof Response ? { error: (await queuedNow.json<{ error: string }>()).error } : queuedNow, next: `queued: the pool's hosts build it into your staging workspace, contributors' builds in turn; follow it on /user/${c.login}` }, byName ? 200 : 201);
   };
   try {
     return await recordRequest();

@@ -36,9 +36,9 @@ please do not file a public issue for it.
 | Credential | Held by | Can do | Cannot do | Status |
 |---|---|---|---|---|
 | Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, register and revoke their workers and give them orders from the worker's page or the API (re-check the agent, restart, restart the agent service, drain and resume, stop the task in hand, update; #277), read their own state | write to the pool, claim jobs, approve | live; replaced from the person's page, revoked by a reset of their passkeys (#284) — then made again on that page only, never with a GitHub token |
-| Worker token `omw_…` | one machine, registered by a contributor | claim tasks its trust allows (community: its owner's or shared builds; project: pool jobs too); heartbeat | write to the pool or staging directly | live |
+| Worker token `omw_…` | one machine, registered by a maintainer (#331) | claim tasks its trust allows (community: contributors' builds, anyone's; project: pool jobs too; a host: every kind its phase enables); heartbeat | write to the pool or staging directly | live |
 | Job token `omj.…` | the worker running one task, for the lease | the routes that task needs — e.g. `sync`: upload objects, index, create a release in one ring, store that ring's databases; community `build`: upload to that task's staging folder, and nothing into the journal (the health and abi rows the gate reads are the project's jobs' alone); a dry run (`publish` 0): its task and the journal, no pool and no ring (#284) | anything outside its scopes (403, journaled); anything after the lease (30 min, renewed by heartbeat) — a task stopped from its worker's page is not renewed, and goes back to the queue only once its worker has stopped or the lease has ended, so no second runner overlaps its token; an audit's or a trial's report beside a staged build is taken only while the job's own task is still leased to its worker and not stopped (#277) | live |
-| Maintainer role | a contributor listed in `factory/MAINTAINERS.toml` on `main` — one list, no groups (applied by the brain every ten minutes) | propose or confirm a worker's project trust (two of them), take it back alone; withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded; approve, and a block, in the browser with their passkey, #271); queue any pool job by hand (`POST /factory/jobs`; a promotion forced past its evidence in the browser with their passkey, #284); queue a dry run by hand, cancel, remove a registration; give any worker orders (the same list), capped at 20 an hour per login and on the journal — none of them needs the passkey (#277); review governance pull requests | write to the pool with their own token (a job does); publish a build queued by hand (#284: a dry run only); write the gate's evidence (#284: a journal note only); roll a ring back to another ring's release; operate as a worker; grant a role | live |
+| Maintainer role | a contributor listed in `factory/MAINTAINERS.toml` on `main` — one list, no groups (applied by the brain every ten minutes) | withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded; approve, and a block, in the browser with their passkey, #271); queue any pool job by hand (`POST /factory/jobs`; a promotion forced past its evidence in the browser with their passkey, #284); queue a dry run by hand, cancel, remove a registration; give any worker orders (the same list), capped at 20 an hour per login and on the journal — none of them needs the passkey (#277); review governance pull requests | write to the pool with their own token (a job does); publish a build queued by hand (#284: a dry run only); write the gate's evidence (#284: a journal note only); roll a ring back to another ring's release; operate as a worker; grant a role | live |
 | Agent token `oma_…` | one agent on one person's machine, granted by that person in their signed-in browser (`omarchy-cli login`: a loopback address and PKCE), kept in `~/.config/omarchy-cli/credentials.toml` (0600) and bound to the origin that granted it | the tools of `omarchy-cli mcp` its scopes hold, as that person: request and follow packages (`contribute`); claim, release, read evidence and draft a verdict (`review`) or a block (`block`) — the two a maintainer's only, read again on every call; twenty calls a minute, five requests, ten claims and thirty drafts a day | decide anything — approve, request changes, reject and block are drafts the person confirms in the browser, approve and block with the person's passkey; every other route (403); give the project's agent a hint; outlive seven days with `review` or `block`, ninety with `contribute` | live; revoked by `omarchy-cli logout`, the person's page, a block of the person, or a reset of their passkeys (#284) |
 | Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered with the browser's session, on their own page or, the first one, in the dialog of the act that needs it (#287); the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
 | Host enrollment token `ome_…` | the maintainer who pressed *Add a host*, for the one command they paste on the machine (in the environment of `sh`, never an argument) | enroll one host, once, within 15 minutes, as that maintainer — while they are still in `factory/MAINTAINERS.toml` and still the same GitHub user id | claim, confirm the host, or enroll a second one | live (#321); stored as its SHA-256; burnt by the enrollment in the same D1 batch that creates the host |
@@ -79,9 +79,9 @@ secret). Everything travels in the `Authorization` header over TLS only.
 |---|---|---|
 | Contributor | submit packages only: request them, build them and follow them — on the pool's hosts. A contributor runs no worker: `POST /factory/workers` refuses them (403, *your packages build on the pool's hosts*) | GitHub account |
 | Host | the workers: every one is provided by a maintainer — the project's compute is its maintainers' hosts. A maintainer's host is trusted by the same act that makes them a maintainer | enrolled by a maintainer listed in `factory/MAINTAINERS.toml` at the last sync (*Maintainer hosts* below, #321), owned by their GitHub user id, confirmed by fingerprint; a legacy registration (`POST /factory/workers`) keeps claiming until a maintainer revokes it. A removal from the list stops its claims and lets its running tasks finish (*Stopping a host* below, #322) |
-| Community worker | none: the tier ends (#307). The registrations made before #331 — expected to be the maintainers' own, which a one-time query of the last 90 days checks (recorded on #331) — keep their claims (their owner's packages; anyone's when shared) until they retire | no new one |
-| Project worker | pool jobs (sync, render, promote, health, security, gc) and the rebuild of approved packages — never a build without evidence and review | two maintainers' word (`POST /factory/workers/:id/trust`): one proposes, another confirms, never the worker's owner; the trust is a signed record under `workers/<id>/`; one maintainer takes it back. The Review page names the worker and host behind every build |
-| Maintainer | provide the project's hosts, approve the project's staged builds — never their own package — settle categories, block with a reason, vouch for a worker with a second maintainer, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
+| Community worker | none: the tier ended (#307, #343) — contributors run no worker, the command that ran one and a worker's mode are gone (`GET /omarchy-worker`, `POST /factory/workers/self/mode` and `/factory/workers/:id/mode` answer 410 with the pointer to the maintainer-host docs). The community registrations left — the maintainers' own legacy sets, checked on #331 — build any contributor's packages, as a host does, selected as hosts with one lane and one build, until they retire (P3) | no new one |
+| Project worker | pool jobs (sync, render, promote, health, security, gc) and the rebuild of approved packages — never a build without evidence and review | the legacy registrations that hold it were given it on two maintainers' word, each step a signed record under `workers/<id>/` that stays as history; no worker is trusted one by one any more (#343: `POST /factory/workers/:id/trust` answers 410) — a host's trust is the pull request that names its owner in `factory/MAINTAINERS.toml` (S2). The Review page names the worker and host behind every build |
+| Maintainer | provide the project's hosts, approve the project's staged builds — never their own package — settle categories, block with a reason, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
 | Agent key | drafts and corrects PKGBUILDs on a community worker; audits staged builds on a project worker | the worker owner's own key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` or `XAI_API_KEY` — set in the container's environment; the pool and GitHub hold none. The worker reports only the provider and model name (`anthropic/claude-sonnet-5`) for the Workers page. An audit's report is evidence a maintainer reads, never something the pool acts on |
 
 ## Isolation
@@ -250,8 +250,9 @@ secret). Everything travels in the `Authorization` header over TLS only.
 - **Approved packages are the project's own build.** A contributor's build
   is evidence, not the product: the project's agent writes its own recipe
   with that evidence as the lesson (`pkgbuild_ref = review:<task>`; a build
-  never starts from a contributor's staged artifact), builds it on a worker
-  two maintainers vouched for, a second agent audits it, a real pacman
+  never starts from a contributor's staged artifact), builds it on a
+  maintainer's host (or a project worker, until P3), a second agent audits
+  it, a real pacman
   installs it from the lab, and a maintainer who is not the owner approves
   *that* build before it is signed and enters `edge`.
 - **The pool serves immutable objects.** An object under a filename is
@@ -316,29 +317,31 @@ secret). Everything travels in the `Authorization` header over TLS only.
   token's end. Two processes on one token is a token to revoke, as the pages
   say whenever they see one.
 - **Drains and stops are the pool's, and bounded (#277, part 2).** A drain
-  holds at the claim for every image, until a Resume: a contributor's
-  machine its owner drained goes back to work on its owner's word only; a
-  maintainer who must keep it out revokes it, or sets it to its owner's
-  packages only. A project worker — trusted on two maintainers' word, and
-  it may be a contributor's machine — goes back to work on a maintainer's
-  word: its owner lifts only a drain of their own. Six drains an hour per
+  holds at the claim for every image, until a Resume: a community
+  registration its owner drained goes back to work on its owner's word
+  only; a maintainer who must keep it out revokes it. A project worker —
+  its trust given on two maintainers' word before #343, and its owner need
+  not be a maintainer — goes back to work on a maintainer's word: its owner
+  lifts only a drain of their own. Six drains an hour per
   worker at most; a resume is never counted, not in the login's twenty nor
   in the worker's hour, so no run of drains can keep a worker out. Stop its task counts with the restarts (six an hour per
   worker) and in the login's twenty; it never cancels — a stranger's build
   goes back to the queue, where another worker takes it. When every live
   pool or review worker of an architecture is drained, Status says so as an
   error.
-- **A contributor's workers can say an outage that is not there, and only
-  their own kind listens (#277).** A worker's agent error is its own word.
-  So a contributor's registrations count only toward the breaker that holds
-  contributors' workers, never the project's, and spend only the
+- **A community registration can say an outage that is not there, and only
+  its own kind listens (#277).** A worker's agent error is its own word.
+  So a community registration counts only toward the breaker that holds
+  the community's workers, never the project's, and spends only the
   community's share of the pool's own orders (forty of the sixty a day, six
   of the ten restarts an hour); the project's workers keep the rest. A site
   is kept under the name of who runs the worker: a leaked site of another
-  person's host joins neither its election nor its pacing. The worst a
-  hostile contributor does with free registrations is hold the pool's
-  automatic restarts of other contributors' workers — whose owners restart
-  them on their own host, or from their page — and put a warning on Status.
+  person's host joins neither its election nor its pacing. Only a
+  maintainer registers a worker (#331) and the community ones left are
+  legacy sets until P3 (#343); the worst a hostile owner of one does is
+  hold the pool's automatic restarts of the other community sets — whose
+  owners restart them on their own host, or from their page — and put a
+  warning on Status.
 - **A Worker rolled back past #277 lists what #277 keeps to itself.** The
   Workers listing of a Worker from before #277 spreads the whole row, in
   `GET /factory` and in `GET /users/:login` (revoked workers too). It would
@@ -569,10 +572,10 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   make a project-trusted host. A token stolen before use enrolls nothing the
   owner does not see and confirm. The journal and Status say it, and the
   other maintainers see a notice; no approval is asked (D40), and the pool
-  writes the signed trust record the per-worker door writes
+  writes a signed trust record of the shape the per-worker door wrote
   (`workers/<id>/trust-<time>.json`: the host, its fingerprint, who
-  confirmed). The per-worker trust door does not move a host's
-  registration: its trust is `MAINTAINERS.toml`'s. Confirm asks no passkey
+  confirmed). That door is gone (#343, 410): a host's trust is
+  `MAINTAINERS.toml`'s, and the records it wrote stay as history. Confirm asks no passkey
   yet: one stolen browser session of a maintainer could still mint, enroll
   and confirm a machine of its own. A passkey assertion on Confirm, as
   Approve's (#271), is the named seam for a later issue.
@@ -934,7 +937,7 @@ instead of stopping them.
 | a community worker's token | claims of that owner's tasks; uploads to those tasks' staging | its owner or a maintainer revokes the worker |
 | a job token | that task's writes, until its lease ends | expires by itself; the task can be cancelled, or stopped from its worker's page (its lease is fenced — nothing it sends is taken, nothing renews it — until the worker has stopped, #277) |
 | a project worker's token | claims of pool jobs — each still executed with a scoped job token — until revoked | a maintainer revokes the worker |
-| a maintainer's token | rejections and requests for changes (never on their own package), one word on a worker's trust, withdrawals, lifts, a pool job by hand — a rollback inside its ring, a promotion the gate still decides —, a dry run by hand and a note on the journal (#284: a build queued by hand never publishes, and the gate's evidence is the jobs' alone), and orders to any worker, 20 an hour (#277: a restart, a drain or a stopped task at worst — a delay, and a drain of everything is an error on Status —, never a publish or a cancel), a package's size and disk budget (`POST /factory/packages/:name/size`, #337: up to size 4 — the units and memory a build of it takes, and a large one makes a host reserve for it two hours at most —, said on the package's story and the journal) and a Retry at size of a build that ran out of memory (`POST /factory/tasks/:id/retry`, #337: queued again at a larger size, up to the largest host alive, with one attempt given back — one more build of the same recipe, never a publish) — not an approval, a block nor a forced promotion: those take the browser's session and the maintainer's passkey (#271, #284) | the person replaces the token (their page's *Token*: the old one stops working), and a reset of their passkeys revokes it (#284); a governance pull request removes the login; decisions and builds are journaled and reversible (rollback); trust takes a second maintainer |
+| a maintainer's token | rejections and requests for changes (never on their own package), withdrawals, lifts, a pool job by hand — a rollback inside its ring, a promotion the gate still decides —, a dry run by hand and a note on the journal (#284: a build queued by hand never publishes, and the gate's evidence is the jobs' alone), and orders to any worker, 20 an hour (#277: a restart, a drain or a stopped task at worst — a delay, and a drain of everything is an error on Status —, never a publish or a cancel), a package's size and disk budget (`POST /factory/packages/:name/size`, #337: up to size 4 — the units and memory a build of it takes, and a large one makes a host reserve for it two hours at most —, said on the package's story and the journal) and a Retry at size of a build that ran out of memory (`POST /factory/tasks/:id/retry`, #337: queued again at a larger size, up to the largest host alive, with one attempt given back — one more build of the same recipe, never a publish) — not an approval, a block nor a forced promotion: those take the browser's session and the maintainer's passkey (#271, #284) | the person replaces the token (their page's *Token*: the old one stops working), and a reset of their passkeys revokes it (#284); a governance pull request removes the login; decisions and builds are journaled and reversible (rollback); a host's trust takes a reviewed pull request to `factory/MAINTAINERS.toml` (no token trusts a worker since #343) |
 | a maintainer's agent token (`oma_`) | drafts; request changes and reject once the person confirms them in the browser — approve and block drafted by the agent also need the maintainer's passkey, which the token cannot answer (user verification) | revoke the grant on the person's page or `omarchy-cli logout` |
 | a maintainer's signed-in browser, driven by an agent | what the session decides alone: request changes, reject, withdraw, a lift, a claim, a pool job by hand other than a forced promotion, a dry run by hand, and orders to any worker (20 an hour). Approve, block and a forced promotion need the person's passkey (#257, #271, #284), and so do adding a second passkey and removing one; only a login that holds none yet registers its first with the session | sign out (the session ends on the server); a first passkey registered meanwhile is on the public journal (`passkey`), and another maintainer resets it |
 | a maintainer's authenticator, lost or stolen | nothing without its user verification (a PIN or a biometric on the device); with it, what the person decides — approve, block and a forced promotion | another maintainer resets the login's passkeys with a reason (#271), after confirming the request out of band: every one removed, the login signed out, its `omc_` token and its agents' live grants revoked (#284), the journal — a line each — and a signed record say who and why; the person ends the device's GitHub sessions and revokes the GitHub tokens it held (the GitHub CLI's authorization, personal access tokens) — until they make a new token on their page, `POST /factory/register` mints the login none (`token_reset`) —, signs in again, registers a new one, makes a new token and grants their agents again (RUNBOOK, *A lost passkey*) |
@@ -956,7 +959,9 @@ instead of stopping them.
 6. ~~**Who trusts whom.** A worker becomes `project` on two maintainers' word,
    never its owner's alone; the Review page names the worker and host behind
    every build. A record can be withdrawn: a signed tombstone says who and
-   why, and the record is cached a day, not a year.~~ — live. (The six
-   workers on the Studio were trusted before the rule, on one word; the
-   Workers page says so, and a maintainer can set one back and have it
-   proposed again.)
+   why, and the record is cached a day, not a year.~~ — live, then replaced
+   (#343): a host is trusted by the pull request that names its owner in
+   `factory/MAINTAINERS.toml`, and `POST /factory/workers/:id/trust`
+   answers 410; the signed records of the two words stay under
+   `workers/<id>/` as history. (The six workers on the Studio were trusted
+   before the rule, on one word; the Workers page says so.)

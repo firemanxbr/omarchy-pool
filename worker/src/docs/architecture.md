@@ -114,9 +114,10 @@ per-job token, and a maintainer queues the same by hand (`pkg-repo job`).
 Nothing of the pipeline runs on GitHub Actions. The project's workers are
 three roles of one image ([factory/README.md](../factory/README.md) *Three
 roles*): *pool* workers take the rows below, *review* workers the project's
-`build` and the `audit`, shared *community* workers the contributors' builds
-— two of each, one per architecture, on the project's host (RUNBOOK, *The
-Studio host*). A community worker is a pair: a **broker** that holds the
+`build` and the `audit`, *community* workers the contributors' builds,
+anyone's, as a host takes them (#343) — two of each, one per architecture,
+on the project's host (RUNBOOK, *The Studio host*), beside its host until
+P3 retires them. A community worker is a pair: a **broker** that holds the
 worker's token, the agent key and a GitHub token and only receives,
 processes and answers, and a **builder** born with nothing that builds one
 task and dies (`factory/bin/broker`; SECURITY.md, *Isolation*). A project
@@ -135,7 +136,7 @@ reach the agent through `agent-proxy`.
 | `verify` | weekly (Saturday 03:00 UTC), or by hand | does what the pool serves verify? Every OPR object of every ring and architecture downloaded and checked: the bytes are the ones the index names, the `.sig` beside them is Omarchy's signature of those bytes. What is wrong is repaired — the right signature from the upstream channel that still serves the bytes, the ring re-pinned to the object the pool actually holds (indexed from the bytes if the index never saw them), rendered — and what no channel serves any more is reported for a replacement (`verify` event, `pkg-repo verify --repair`) |
 | `trial` | when the project's review build is staged, or by hand (`pkg-repo job trial --param task=<build>`) | the build into the lab and a real pacman on it: the staged packages go into the pool under the factory's directory, pinned into the `lab` ring (never a promised one), the lab rendered; then `tests/trial.sh` runs a clean container of that architecture with the include of `--ring lab` — the lab's sections above `edge`'s — and installs the packages for real (dependencies from `edge`, hooks run, `pacman -Qkk` on the files), checking each came from the lab. The transcript is attached to the evidence (`trial.log`), a `trial` event records it, the Review page shows *installs* or what stopped it. Evidence for the maintainer, never a decision. A pool worker's job |
 | `audit` | when a build is staged: a contributor's, and the project's review rebuild — the publish-bound one, whose audit is the second opinion | the second agent ([Governance](GOVERNANCE.md#learn)): a project worker whose owner set an agent key (Anthropic, OpenAI, Gemini or xAI) reads the staged PKGBUILD, log and `.PKGINFO`, asks its model for a structured review (`factory/bin/audit-pkgbuild`, `factory/prompts/audit.md`) and attaches `audit.json` / `audit.md` to the evidence; the Review page shows the verdict. A review worker's job. Placed as the second opinion (#339, design v2 §8.4, D36): it prefers a machine other than the one that built what it audits, and an audit of the review rebuild takes another model (the claim's `agent`) whenever a registration with one answered in the last 24 hours; its lease records `build_tasks.independent` (`model`, `host` or `none`), shown beside the verdict. Evidence for the maintainer, never an automatic gate |
-| `build` | on a request (at once, in the shared queue), on a new upstream release, and when a maintainer presses *Build by the project* | a package built in a fresh container through the gate (checksums, shellcheck, namcap ×2, files, metadata, `check()`, smoke): community trust on a contributor's or a shared worker into the owner's staging workspace as evidence; project trust (`review:<task>`) on a worker two maintainers vouched for, the project's agent writing its own recipe from that evidence, into `staging/@project/` for the audit, the trial and the approval |
+| `build` | on a request (at once, in the queue), on a new upstream release, and when a maintainer presses *Build by the project* | a package built in a fresh container through the gate (checksums, shellcheck, namcap ×2, files, metadata, `check()`, smoke): a contributor's build on a maintainer's host (or a legacy community set, until P3) into the owner's staging workspace as evidence; project trust (`review:<task>`) on a worker two maintainers vouched for, the project's agent writing its own recipe from that evidence, into `staging/@project/` for the audit, the trial and the approval |
 | `publish` | on approval | carries the project's approved build into `edge` as source `factory`, signed by the pool; when the trial passed, into rc and stable too (the fast lane) |
 | audience (`src/audience.ts`) | once a day, 00:30 UTC | taken by the Worker itself from the account's request analytics, both pool hosts in one query: distinct addresses that fetched a ring database the day before, per ring and per architecture, as an `audience` event, which `/api/v1/stats` carries (the last 30 days; no page draws it since the Pool's redesign, #243); nothing per request is kept |
 | metrics snapshot (`src/metrics.ts`) | every 30 minutes | taken by the Worker itself, no job: the pool's jobs of the last 7 days (runs, failures, worker minutes, per kind), builds, workers alive, pool totals and ring sizes, as a `metrics` event — the pool's history, in `/api/v1/stats` (the pool's totals, the Pool's package count among them); the jobs of the week the Status page's tiles, table and charts say are one reduce over the live series (`jobs_daily`, the shell's `jobsSummary`; a job's bucket is `jobBucket`, the rule the Workers page's cards apply too), never the snapshot's, which is up to half an hour older and counts a cancelled job as a success; a job still queued or leased rides the series on today whatever its age, so the tile that says what waits counts every job in flight, as the snapshot did. Between two changes of the pool a snapshot carries the previous one's pool block and counts its jobs afresh |
@@ -315,12 +316,12 @@ Three more are the pool's own to carry out (#277, part 2), so they work on
 every image. **Drain** holds at the claim: a drained worker is handed
 nothing (`204`) until a **Resume** — its first claim that understands
 notices hears it once —, the Build door and the project-build door refuse to
-pin it, the cron's sweep sends the builds already pinned to it to the shared
-queue once it has been drained three minutes (`FIRST_PICK_MINUTES`), and
+pin it, the cron's sweep sends the builds already pinned to it to the
+queue once it has been drained three minutes (`UNPIN_AFTER_DRAIN_MINUTES`), and
 Status raises an error when every live pool or review worker of an
 architecture is drained. Who resumes: any maintainer a project worker (its
-owner, when not a maintainer, only a drain of their own); a contributor's
-worker its owner, and a maintainer only when a maintainer drained it. A
+owner, when not a maintainer, only a drain of their own); a community
+registration its owner, and a maintainer only when a maintainer drained it. A
 drain counts toward six an hour per worker, a resume toward nothing, so a
 drain can always be undone. **Stop its task** is the way out of a task that hangs, which
 every other order waits for: it **fences** the lease (`build_tasks.stop_order`)
