@@ -386,6 +386,9 @@ struct FakePool {
     public: Mutex<HashMap<String, Vec<u8>>>,
     /// The public files asked for.
     public_asked: Mutex<Vec<String>>,
+    /// Public files are held, once asked for, until this is cleared (a pool slow to answer):
+    /// a pass of the caches' upkeep waits in its thread meanwhile.
+    hold_public: AtomicBool,
     /// Fetches fail as a pool that does not answer them, while claims go on: a preparation
     /// that fetches tries again later.
     deaf_fetch: AtomicBool,
@@ -565,6 +568,9 @@ impl Pool for FakePool {
     }
     fn public_file(&self, url: &str, dest: &Path) -> Result<bool, RepoError> {
         self.public_asked.lock().unwrap().push(url.into());
+        while self.hold_public.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         if self.down.load(Ordering::SeqCst) {
             return Err(down());
         }
@@ -1139,6 +1145,157 @@ fn two_builds_at_once_download_into_their_own_caches_and_only_the_signed_bytes_a
     h.give(community(3, GEN2));
     h.ticks(&mut d, 12);
     assert!(h.mounts(3, GEN2).contains(&shared));
+}
+
+/// Two builds that end a tick apart (#341), as CI's engine test saw them: the first one's
+/// downloads go aside and a pass of the caches' upkeep starts in its thread, which lists what
+/// is aside before it asks the pool anything; the second ends while that pass runs (held here
+/// at the pool's databases). Its downloads go aside beside the first's and wait: the running
+/// pass merges only what it listed, and the next — one pass at a time, started once the loop
+/// has taken the one that ran, a tick after it — takes them. Nothing is lost or left aside, and
+/// the dependency both downloaded is merged once, with the pool's copy of its `.sig`. How long
+/// that takes is the loop's ticks and the passes, never a fixed time: the engine test waits for
+/// the passes to have said both leases.
+#[test]
+#[allow(clippy::too_many_lines)] // two leases ending on either side of a pass's start, then the pass after it
+fn a_lease_that_ends_while_a_merge_back_runs_is_merged_by_the_pass_after_it() {
+    use super::cache::tests::fixture_bytes;
+    let h = H::new();
+    h.serve_fixture_dbs("aarch64");
+    let mut d = h.dispatcher();
+    let gen2 = "g_00000000000000c3";
+    for (id, name, gen) in [(1, "alpha", GEN), (2, "beta", gen2)] {
+        h.give(task(
+            id,
+            "build",
+            name,
+            &format!("https://github.com/{name}/{name}@v1:PKGBUILD"),
+            "community",
+            json!({}),
+            gen,
+        ));
+    }
+    h.ticks(&mut d, 4);
+    assert!(
+        h.engine.has(1, GEN) && h.engine.has(2, gen2),
+        "both run at once"
+    );
+    let lib = fixture_bytes("libfixture", "libfixture", "aarch64");
+    let libname = "libfixture-1.0-1-aarch64.pkg.tar.zst";
+    let sig_name = format!("{libname}.sig");
+    let upstream = b"libfixture's upstream signature".to_vec();
+    h.pool.public.lock().unwrap().insert(
+        format!("https://pool.example/core/aarch64/{sig_name}"),
+        upstream.clone(),
+    );
+    // The first to end downloaded the dependency with its upstream signature, and a file two
+    // databases list at odds; the second the dependency with a signature its recipe forged, a
+    // file planted under a listed name and one no database lists.
+    let (one, two) = (
+        h.tdir(1, GEN).join("pkgcache"),
+        h.tdir(2, gen2).join("pkgcache"),
+    );
+    for (dir, sig) in [
+        (&one, &upstream[..]),
+        (&two, &b"forged by beta's recipe"[..]),
+    ] {
+        std::fs::write(dir.join(libname), &lib).unwrap();
+        std::fs::write(dir.join(&sig_name), sig).unwrap();
+    }
+    std::fs::write(
+        one.join("twin-1.0-1-aarch64.pkg.tar.zst"),
+        fixture_bytes("twin", "core", "aarch64"),
+    )
+    .unwrap();
+    std::fs::write(
+        two.join("evil-1.0-1-aarch64.pkg.tar.zst"),
+        b"planted by beta's recipe",
+    )
+    .unwrap();
+    std::fs::write(two.join("stranger-1.0-1-aarch64.pkg.tar.zst"), b"x").unwrap();
+    let incoming = h.work.join("cache/incoming/aarch64");
+    let aside = || -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(&incoming)
+            .map(|d| {
+                d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    let shared = h.work.join("cache/pacman/aarch64");
+    let in_shared = || -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(&shared)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+
+    // The first ends, its finish and its pass in threads of their own as in the dispatcher (not
+    // inline); the pass lists what is aside, then waits for the pool's databases.
+    h.pool.public_asked.lock().unwrap().clear();
+    h.pool.hold_public.store(true, Ordering::SeqCst);
+    d.inline = false;
+    h.leave(1, GEN, &built_ok(), "==> Finished making\n");
+    h.engine.exit(1, GEN, 0, false);
+    let mut asked = false;
+    for _ in 0..2000 {
+        d.tick();
+        if !h.pool.public_asked.lock().unwrap().is_empty() {
+            asked = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        asked,
+        "the first lease's pass asks the pool for its databases"
+    );
+    assert!(super::busy(d.caches.job.as_ref()), "its pass runs");
+    assert_eq!(aside(), [format!("1-{GEN}")]);
+
+    // The second ends while that pass runs: its downloads go aside beside the first's.
+    d.inline = true;
+    h.leave(2, gen2, &built_ok(), "==> Finished making\n");
+    h.engine.exit(2, gen2, 0, false);
+    h.ticks(&mut d, 1);
+    assert!(h.leases().is_empty(), "both ended");
+    assert!(
+        super::busy(d.caches.job.as_ref()),
+        "the first pass still runs: no second one beside it"
+    );
+    assert_eq!(aside(), [format!("1-{GEN}"), format!("2-{gen2}")]);
+
+    // The pool answers: the running pass merges what it listed when it began, the first's alone.
+    h.pool.hold_public.store(false, Ordering::SeqCst);
+    for _ in 0..2000 {
+        if !super::busy(d.caches.job.as_ref()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!super::busy(d.caches.job.as_ref()), "the first pass ended");
+    assert_eq!(
+        aside(),
+        [format!("2-{gen2}")],
+        "the second's downloads wait for the next pass"
+    );
+    assert_eq!(in_shared(), [libname.to_owned(), sig_name.clone()]);
+
+    // The loop takes the pass that ran (a tick), then starts the next, which takes the second's.
+    h.ticks(&mut d, 2);
+    assert!(aside().is_empty(), "nothing is left aside");
+    assert_eq!(
+        in_shared(),
+        [libname.to_owned(), sig_name.clone()],
+        "the dependency once with the pool's copy of its signature; the forged one, the planted, \
+         the unlisted and the ambiguous files discarded"
+    );
+    assert_eq!(std::fs::read(shared.join(libname)).unwrap(), lib);
+    assert_eq!(std::fs::read(shared.join(&sig_name)).unwrap(), upstream);
 }
 
 /// The caches stay under the envelope's caps (#341): the pacman cache keeps the two newest

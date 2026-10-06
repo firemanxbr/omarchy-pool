@@ -38,7 +38,8 @@
 #      same dependency, at once — each mounts its own package's build cache
 #      (a project cache of the same name and the other package's out of its
 #      reach) and the shared pacman cache read-only, and downloads into a
-#      cache of its own; after them, only the bytes the pool's signed
+#      cache of its own; after them (in one pass of the merge-back or in two,
+#      as they end), only the bytes the pool's signed
 #      databases list (the fixture databases, served by the stub pool, signed
 #      by their own key) are merged into the shared cache, with the pool's copy
 #      of the dependency's signature beside it — a planted file, an unlisted
@@ -482,6 +483,7 @@ echo "ok: a pool job that hangs is killed at its timeout and failed, with its sc
 # ---------- 7. the task caches (#341) ----------
 # A project cache of the same name as a community package's: a community build never reaches it.
 mkdir -p "$tmp/work/cache/build/project/$arch/cache-a"; echo project > "$tmp/work/cache/build/project/$arch/cache-a/marker-project"
+log_at="$(wc -l < "$tmp/dispatcher.log")"
 give 30 cache-a 2; give 31 cache-b 2
 until_ 60 "tasks 30 and 31 run" all_running 30 31
 log_of() { echo "$tmp/work/tasks/$1-$(gen "$1")/log/task.log"; }
@@ -506,17 +508,28 @@ grep -q '^== escapes tried' "$(log_of 30)" || fail "cache-a's recipe did not try
 finish 30; finish 31
 all_completed() { local i; for i; do reported "$i" complete || return 1; done; }
 until_ 60 "tasks 30 and 31 completed" all_completed 30 31
+# A pass of the merge-back takes the downloads set aside when it begins, one pass at a time, and says how many leases' it
+# took. Two builds that end a tick or two apart go in two passes, the second begun once the loop has taken the first — a
+# few ticks, never a fixed time — so this waits until the passes have said both leases. However they are split, the
+# dependency is merged once, with the pool's signature (cache-a's forged one keeps it out when cache-a's pass comes first,
+# and finds the pool's there when it comes second); cache-b's twin (two databases at odds), cache-a's evil (other bytes)
+# and its stranger (no database) are discarded.
+said() { # leases merged signed mismatched unknown ambiguous: what the passes said since this section began, summed
+  tail -n +"$((log_at + 1))" "$tmp/dispatcher.log" \
+    | sed -nE 's/^caches: the downloads of ([0-9]+) lease\(s\): ([0-9]+) merged .* and ([0-9]+) signature\(s\) .*\(([0-9]+) not the bytes .*, ([0-9]+) listed by none, ([0-9]+) listed twice .*/\1 \2 \3 \4 \5 \6/p' \
+    | awk '{ for (i = 1; i <= 6; i++) s[i] += $i } END { printf "%d %d %d %d %d %d\n", s[1], s[2], s[3], s[4], s[5], s[6] }'
+}
+both_said() { local n; read -r n _ <<<"$(said)"; (( n >= 2 )); }
+until_ 60 "the passes of the merge-back said both leases' downloads" both_said
+[[ "$(said)" == "2 1 1 1 1 1" ]] || fail "what the merge-back said of the two leases' downloads (leases, merged, signatures, other bytes, listed by none, listed twice): $(said) — $(grep '^caches: the downloads of' "$tmp/dispatcher.log")"
 lib="libfixture-1.0-1-$arch.pkg.tar.zst"
-merged() { [[ -f "$tmp/work/cache/pacman/$arch/$lib" ]]; }
-until_ 60 "the dependency merged into the shared pacman cache" merged
+[[ -f "$tmp/work/cache/pacman/$arch/$lib" ]] || fail "the dependency was not merged into the shared pacman cache"
 want_sha="$(printf 'omarchy-pool fixture package %s (%s) for %s\n' libfixture libfixture "$arch" | sha256sum | cut -c1-64)"
 [[ "$(sha256sum "$tmp/work/cache/pacman/$arch/$lib" | cut -c1-64)" == "$want_sha" ]] || fail "the merged dependency is not the bytes the signed database lists"
-sleep 2
 [[ "$(ls -A "$tmp/work/cache/pacman/$arch")" == "$(printf '%s\n%s' "$lib" "$lib.sig")" ]] || fail "the shared pacman cache holds more than the signed bytes and the pool's signature of them: $(ls -A "$tmp/work/cache/pacman/$arch")"
 [[ "$(cat "$tmp/work/cache/pacman/$arch/$lib.sig")" == "omarchy-pool fixture signature of libfixture for $arch" ]] || fail "the dependency's signature is not the pool's copy: $(cat "$tmp/work/cache/pacman/$arch/$lib.sig")"
 jq -r '.path' "$tmp/requests.jsonl" | grep -qx "/core/$arch/$lib.sig" || fail "the dependency's signature was not asked of the pool"
 [[ -z "$(ls -A "$tmp/work/cache/incoming/$arch" 2>/dev/null)" ]] || fail "downloads left aside: $(ls -A "$tmp/work/cache/incoming/$arch")"
-grep -q 'caches: the downloads of' "$tmp/dispatcher.log" || fail "the merge-back was not said"
 jq -r 'select(.path | test("^/(core|packages)/")) | .path' "$tmp/requests.jsonl" | grep -qx "/core/$arch/omarchy-core-edge.db.sig" || fail "the databases' signatures were not asked of the pool"
 # Each build's cache holds what it wrote, and only that; the project cache of the same name is untouched.
 [[ "$(ls -A "$tmp/work/cache/build/community/$arch/cache-a")" == own-cache-a ]] || fail "cache-a's build cache: $(ls -A "$tmp/work/cache/build/community/$arch/cache-a")"
