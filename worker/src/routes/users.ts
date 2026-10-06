@@ -73,9 +73,9 @@ export async function recordOf(env: Env, login: string): Promise<TrackRecord> {
 
 /** A person's decisions as the record keeps them: each row with its review's own word on it — the architectures it decided, those not supported, whether it freed the name, whether it asked for changes. */
 const DECISIONS = `SELECT a.id, a.task_id, a.name, a.arch, a.version, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, a.review_id, a.agent,
-                          v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released, v.changes AS review_changes
+                          v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released, v.changes AS review_changes, v.solo_since AS review_solo_since
                      FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id`;
-type DecisionOf = { id: number; task_id: number; name: string; arch: string; version: string | null; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; agent: string | null; review_arches: string | null; review_not_supported: string | null; review_released: number | null; review_changes: number | null };
+type DecisionOf = { id: number; task_id: number; name: string; arch: string; version: string | null; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; agent: string | null; review_arches: string | null; review_not_supported: string | null; review_released: number | null; review_changes: number | null; review_solo_since: string | null };
 
 export async function handleUser(login: string, env: Env): Promise<Response> {
   const person = await env.DB.prepare("SELECT login, name, avatar_url, role, created_at, last_seen, blocked_at, blocked_by, blocked_reason FROM contributors WHERE login = ?")
@@ -180,13 +180,17 @@ export async function handleUserCan(c: Contributor | null, login: string, env: E
  * name it.
  */
 export async function maintenanceOf(env: Env, name: string, source: string, packager: string | undefined): Promise<Record<string, unknown>> {
-  const adopted = await env.DB.prepare("SELECT login, since FROM package_maintainers WHERE name = ?").bind(name).first<{ login: string; since: string }>();
-  const out: Record<string, unknown> = { packager: packager ?? null, maintainer: adopted ? { login: adopted.login, since: adopted.since, adopted: true } : null };
+  // `solo_exception` (#394): the maintainer became one by a decision taken under the solo-maintainer exception — their own package
+  // adopted, or approved, by themselves — who and since when, for as long as it stands; null otherwise.
+  const mark = (login: string, since: string | null) => (since ? { maintainer: login, since } : null);
+  const adopted = await env.DB.prepare("SELECT login, since, solo_since FROM package_maintainers WHERE name = ?").bind(name).first<{ login: string; since: string; solo_since: string | null }>();
+  const out: Record<string, unknown> = { packager: packager ?? null, maintainer: adopted ? { login: adopted.login, since: adopted.since, adopted: true, solo_exception: mark(adopted.login, adopted.solo_since) } : null };
   if (source !== "factory") return out;
   const pkg = await env.DB.prepare(`SELECT owner, category, url, status FROM factory_packages WHERE name = ?`).bind(name).first<{ owner: string; category: string | null; url: string; status: string }>();
-  const approval = await env.DB.prepare(`SELECT by, version, arch, created_at, task_id FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id DESC LIMIT 1`)
+  // The approval's review by its primary key, for the one word the row does not carry: taken under the solo-maintainer exception (#394).
+  const approval = await env.DB.prepare(`SELECT by, version, arch, created_at, task_id, (SELECT v.solo_since FROM reviews v WHERE v.id = approvals.review_id) AS solo_since FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id DESC LIMIT 1`)
     .bind(name)
-    .first<{ by: string; version: string | null; arch: string; created_at: string; task_id: number }>();
+    .first<{ by: string; version: string | null; arch: string; created_at: string; task_id: number; solo_since: string | null }>();
   out.factory = {
     owner: pkg?.owner ?? null,
     url: pkg?.url ?? null,
@@ -197,6 +201,6 @@ export async function maintenanceOf(env: Env, name: string, source: string, pack
     approved_version: approval?.version ?? null,
     task: approval?.task_id ?? null,
   };
-  if (!adopted && approval && pkg?.status !== "unmaintained") out.maintainer = { login: approval.by, since: approval.created_at, adopted: false };
+  if (!adopted && approval && pkg?.status !== "unmaintained") out.maintainer = { login: approval.by, since: approval.created_at, adopted: false, solo_exception: mark(approval.by, approval.solo_since) };
   return out;
 }

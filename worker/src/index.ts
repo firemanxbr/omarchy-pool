@@ -32,7 +32,7 @@
  *   GET|POST /auth/agent · POST /auth/agent/token · POST /auth/agent/revoke · GET|POST /auth/confirm/:id   the grant, the swap, logout, a draft confirmed
  *   POST /auth/confirm/:id/challenge · POST /auth/passkeys/challenge · POST /auth/passkeys · POST /auth/passkeys/:id/remove   passkeys: approve and block confirmed with one (#257, routes/passkeys.ts)
  *   POST /auth/passkeys/assert · POST /auth/passkeys/reset   the web's approve and block, a passkey added or removed, with one; a lost one reset by another maintainer (#271)
- *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
+ *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,self-reviewed,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
  *   GET  /api/v1/factory/workers/:id[/orders|/can] · POST /factory/workers/:id/orders · DELETE /factory/workers/:id/orders/:oid · POST /factory/workers/self/orders/:id   orders to a worker (#277, routes/orders.ts)
  *   GET  /api/v1/factory/follow?ids=a,b          the pool's release and those workers' open Updates: what each set's updater polls (#277)
  *   GET  /api/v1/factory/rollback/:to            the latest rollback statement rollback.yml signed for going back to :to, and its bundle, from R2 (#314), with the maintainers' co-signatures over it (#330)
@@ -96,7 +96,7 @@ import { DIAGNOSTICS_MAX_BYTES } from "./hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { gone, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerLog, GONE, HOST_DOCS, SIGN_IN } from "./routes/contributors";
-import { maintainersOf, GOVERNANCE_FILE } from "./governance";
+import { maintainersOf, GOVERNANCE_FILE, handleSelfReviewed, soloView } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
@@ -678,8 +678,12 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if ((m = path.match(/^\/users\/([A-Za-z0-9-]{1,39})\/can$/)) && method === "GET") return handleUserCan(await contributorOf(request, env), m[1], env);
   if (method === "GET" && path === "/factory/maintainers") {
     const synced = await env.DB.prepare("SELECT updated_at FROM settings WHERE key = 'governance_sha256'").first<{ updated_at: string }>();
-    return json({ maintainers: await maintainersOf(env), source: GOVERNANCE_FILE, synced_at: synced?.updated_at ?? null }, 200, { "cache-control": "public, max-age=60" });
+    // `solo`: the solo-maintainer exception while the file's [solo] is in force (#394) — who, since when, why, the decisions taken under it
+    // and the second opinion's independence beside it; null without it.
+    return json({ maintainers: await maintainersOf(env), source: GOVERNANCE_FILE, synced_at: synced?.updated_at ?? null, solo: await soloView(env) }, 200, { "cache-control": "public, max-age=60" });
   }
+  // Every decision taken under the solo-maintainer exception (#394): the journal's lines, public — the list Status and the governance chapter link.
+  if (method === "GET" && path === "/factory/self-reviewed") return handleSelfReviewed(env, url);
   // No-store: each row says what the caller may do on it.
   if (method === "GET" && path === "/factory/review") return handleReviewList(env, request);
   if (method === "GET" && path === "/factory/approvals") return handleApprovals(env);

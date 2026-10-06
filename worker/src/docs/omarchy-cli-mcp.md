@@ -316,7 +316,11 @@ page shows them.
    (`blockRefusal`, which the block's own door reads) — and refuses the way the
    web refuses. The requester is told "you brought my-app — another maintainer
    decides" (403), with `code: "conflict_of_interest"` so an agent can say it
-   plainly. A build that is not staged is a 409.
+   plainly — except the one maintainer `factory/MAINTAINERS.toml`'s `[solo]`
+   table names while it is there (the solo-maintainer exception, #394): their
+   draft on their own package is taken, and once confirmed the decision is
+   marked self-reviewed (`solo_exception` on the answer, the record and the
+   journal line), as the web's is. A build that is not staged is a 409.
 2. Nothing is decided. The server stores a draft — table `drafts`: an
    unguessable id, the grant, the login, the agent and the client, the
    verdict and the note, the package's name and build, a digest of the facts

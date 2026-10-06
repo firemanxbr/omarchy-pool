@@ -349,7 +349,7 @@ export function factoryLoopDiagram(): string {
   s += darrow(670, RY, 710, RY);
   s += dbox({ x: 710, y: R, w: 190, h: RH, title: "The lab · the trial", cls: "amber", tcls: "amber", lines: ["pinned, never promised", "a real pacman installs it", "the transcript: trial.log"] });
   s += darrow(900, RY, 940, RY);
-  s += dbox({ x: 940, y: R, w: 190, h: RH, title: "A maintainer approves", cls: "amber", tcls: "amber", lines: ["never their own package", "decided on the record", "a publish job follows"] });
+  s += dbox({ x: 940, y: R, w: 190, h: RH, title: "A maintainer approves", cls: "amber", tcls: "amber", lines: ["never their own package", "but under [solo], marked", "a publish job follows"] });
   s += darrow(1130, RY, 1170, RY);
   s += dbox({ x: 1170, y: R, w: 140, h: RH, title: "edge", big: true, tcls: "edge", cls: "edge", lines: ["source factory", "the pool signs it"] });
   // The fast lane: the same publish reaches rc and stable when the trial installed the build.

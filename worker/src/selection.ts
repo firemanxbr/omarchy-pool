@@ -50,7 +50,9 @@
  *   package — its review rebuild, publish-bound — is never handed to a host
  *   its requester owns unless another maintainer released it to any host
  *   (Review offers that release, with a passkey, as soon as only the
- *   requester's hosts have a lane allowed for it: `placementOf`); a
+ *   requester's hosts have a lane allowed for it: `placementOf`), or the
+ *   requester is the maintainer the governance file's solo-maintainer
+ *   exception names (#394: their own hosts take it, `solo`); a
  *   publish-bound audit takes a model other than the one that built what it
  *   audits while a registration with another model was alive in the last 24
  *   hours; and an audit leaves the machine that built what it audits — the
@@ -195,6 +197,11 @@ export interface Candidate {
   requesters?: string[];
   /** A publish-bound build another maintainer released to any host (D35), with their passkey: their login; none while it is not. */
   any_host?: string | null;
+  /**
+   * The solo-maintainer exception (#394): the one maintainer factory/MAINTAINERS.toml's [solo] names while it is in force. Their hosts
+   * may build the project's copy of a package they asked for (requesterHost); none: the rule holds for every requester.
+   */
+  solo?: string | null;
   /** An audit's: the registration that built what it audits, and the model that built it (its `built_with`, else that registration's). */
   built_by?: string | null;
   built_with?: string | null;
@@ -486,10 +493,14 @@ const projectCopy = (c: Pick<Candidate, "kind" | "publish_bound">): boolean => c
  * requesters never takes the project's copy of it — the review rebuild,
  * published once another maintainer approves it — unless another
  * maintainer released it to any host. Its leases elsewhere are untouched:
- * a contributor's build of it, its trial and its audit go anywhere.
+ * a contributor's build of it, its trial and its audit go anywhere. The one
+ * exception is the governance file's (#394): while [solo] names a
+ * maintainer, that maintainer's own registrations take the copy of their
+ * own package (`solo`) — nothing waits for a release; any other requester's
+ * are still kept off it.
  */
-export function requesterHost(m: Pick<Member, "owner">, c: Pick<Candidate, "kind" | "publish_bound" | "requesters" | "any_host">): boolean {
-  return projectCopy(c) && !c.any_host && m.owner != null && (c.requesters ?? []).includes(m.owner);
+export function requesterHost(m: Pick<Member, "owner">, c: Pick<Candidate, "kind" | "publish_bound" | "requesters" | "any_host" | "solo">): boolean {
+  return projectCopy(c) && !c.any_host && m.owner != null && m.owner !== c.solo && (c.requesters ?? []).includes(m.owner);
 }
 
 /**
@@ -539,6 +550,11 @@ export interface Placement {
   mine: string[];
   /** Only its requesters' registrations have one, and nobody released it to any host: Review offers another maintainer the release, at once. */
   held: boolean;
+  /**
+   * Only while the solo-maintainer exception holds for this copy (#394) — the maintainer [solo] names is among its requesters: who, and
+   * their registrations among `mine`, which may take it with no release (Review says why). Absent otherwise.
+   */
+  solo?: { maintainer: string; hosts: string[] };
 }
 
 /**
@@ -548,18 +564,23 @@ export interface Placement {
  * is `held` — it waits, and Review offers another maintainer, at once and
  * not after a timeout, the release to any host with their passkey. A task
  * nobody can run now (no lane alive at all) is not held: it waits for any
- * host, as every build does.
+ * host, as every build does. Under the solo-maintainer exception (#394) the
+ * copy of the named maintainer's own package is not held while one of their
+ * own registrations has a lane for it: it is theirs to build (`solo`).
  */
 export function placementOf(fleet: Fleet, c: Candidate, now: number, r: Rules): Placement {
-  const others: string[] = [], mine: string[] = [];
+  const others: string[] = [], mine: string[] = [], own: string[] = [];
+  const exempt = c.solo != null && (c.requesters ?? []).includes(c.solo) ? c.solo : null;
   if (projectCopy(c)) {
     const largest = largestSize(fleet, now, r);
     for (const m of fleet.members) {
       if (m.owner == null || !mayRun(m, c, now, r, largest, heldBy(fleet, m))) continue;
       ((c.requesters ?? []).includes(m.owner) ? mine : others).push(m.id);
+      if (m.owner === exempt) own.push(m.id);
     }
   }
-  return { others, mine, held: projectCopy(c) && !c.any_host && !others.length && mine.length > 0 };
+  const held = projectCopy(c) && !c.any_host && !others.length && !own.length && mine.length > 0;
+  return { others, mine, held, ...(projectCopy(c) && exempt ? { solo: { maintainer: exempt, hosts: own } } : {}) };
 }
 
 /** The models other than the one that built what an audit audits, of the registrations alive with one in the last 24 hours (D36). */
