@@ -649,8 +649,9 @@ cat ~/.ssh/id_ed25519_sk.pub     # the line that goes into MAINTAINERS.toml
 Add it under `[cosignature.keys]` as `<login> = "<that line>"` in a pull
 request, with `factory/bin/check-governance --write` (it rewrites the agent's
 pin) and the agent's version raised (`crates/omarchy-agent/Cargo.toml`; CI's
-`agent-version-check` says so). Keys are added with the threshold still at
-0, released, and only then is the threshold raised.
+`agent-version-check` says so). Keys may come with the threshold still at
+0: bundles are not asked for anything yet, and a deep rollback can already
+be co-signed.
 
 **Switching it on** is a pull request that sets `threshold = 1` (1-of-N) or
 `2` (2-of-N), the same `--write` and version raise, approved by another

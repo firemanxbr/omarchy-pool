@@ -723,7 +723,17 @@ a draft without the co-signature its release's policy asks (none, Carol's,
 one without a touch) and publishes it once Alice's is on it, asks Bob's too
 while a release of the last 30 days pinned only him, takes an older release
 with no `[cosignature]` table as asking nothing, and says that a published
-release without it needs a person.
+release without it needs a person. A maintainer's side runs against a played
+security key (`ssh-keygen -Y sign` hands over the fixture's signature; every
+`-Y verify` is OpenSSH's), a stubbed `gh` and agent and a stand-in pool:
+`co-sign release` checks `release.yml`'s signature first, shows the
+manifest and the bundle's SHA-256, signs with the key `MAINTAINERS.toml` pins
+for the signed-in login and uploads to the draft (which `publish-release`
+then publishes), and signs and uploads nothing when the agent refuses the
+bundle, the key is another, the login has none or the signature carries no
+touch; `co-sign rollback` checks `rollback.yml`'s signature, shows the
+statement, signs it in the rollback namespace and hands it to the pool's
+`PUT .../cosignature` with the maintainer's token, and refuses without one.
 `bash tests/image-smoke.sh <image>` (the release, on each architecture's
 `:<arch>-vX.Y.Z` before any tag moves; CI, on a local build of the commit)
 starts every role from the image: the updater's `follows` label, the project

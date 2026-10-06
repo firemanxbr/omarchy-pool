@@ -349,7 +349,11 @@ def cmd_release(a):
         said = keyless("release", bundle, f"{bundle}.sigstore.json")
         data = bundle.read_bytes()
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
-            m = json.load(t.extractfile("manifest.json"))
+            names = t.getnames()
+            member = next((n for n in ("manifest.json", "./manifest.json") if n in names), None)
+            if member is None:
+                raise Refused(f"{bundle.name} has no manifest.json")
+            m = json.load(t.extractfile(member))
         inner = m.get("inner", {})
         confirm(a, "\n".join([
             f"{bundle.name}  sha256:{hashlib.sha256(data).hexdigest()}",

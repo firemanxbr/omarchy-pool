@@ -16,7 +16,11 @@
 #   would refuse, and pins the table into the agent with --write;
 # - `factory/bin/publish-release` keeps a draft without the co-signature
 #   this release's agent and the last 30 days' agents require, and
-#   publishes it once they are on it.
+#   publishes it once they are on it;
+# - a maintainer's `co-sign release` and `co-sign rollback` (a played
+#   security key, a stubbed gh and agent, a stand-in pool): the keyless
+#   signature checked first, what is signed shown, the pinned key only, a
+#   touch, the draft or the pool given the signature.
 #
 # Needs ssh-keygen (OpenSSH 8.9 or later), python3. CI runs it (ci.yml); by
 # hand: `bash tests/cosignature.sh`.
@@ -196,4 +200,109 @@ echo false > "$GH_STATE"; rm -f "$tmp/draft/"*.sshsig
 publish && fail "a published release without its co-signature is reported"
 grep -qF "is published without the maintainers' co-signature its agents require: a person must look" "$tmp/out" || fail "$(cat "$tmp/out")"
 echo "ok: publish-release keeps a draft until the co-signatures its agent and the last 30 days' agents require are on it"
+
+# 5. A maintainer's side, `co-sign release` and `co-sign rollback`, with a played
+# security key: `ssh-keygen -Y sign` hands over the fixture's signature (no
+# key here to touch), every `-Y verify` is OpenSSH's own.
+real_keygen="$(command -v ssh-keygen)"
+mkdir -p "$tmp/mbin" "$tmp/keys"
+cat > "$tmp/mbin/ssh-keygen" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1 \$2" == "-Y sign" ]]; then
+  echo "\$*" >> "\$KEYGEN_LOG"
+  file="\${!#}"; [[ "\$*" == *"-n \$SIGN_NAMESPACE "* ]] || exit 9
+  cp "\$SIGN_AS" "\$file.sig"; exit 0
+fi
+exec "$real_keygen" "\$@"
+STUB
+cat > "$tmp/mbin/omarchy-agent" <<'STUB'
+#!/usr/bin/env bash
+echo "omarchy-agent $*" >> "$KEYGEN_LOG"
+[[ -z "${AGENT_REFUSES:-}" ]] || { echo "refused (signature): forged" >&2; exit 1; }
+echo '{"verified":"'"${2#--}"'"}'
+STUB
+cat > "$tmp/mbin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$GH_LOG"
+case "$1 $2" in
+  "api user") echo "$GH_USER" ;;
+  "release download")
+    dir=""; pats=(); while [[ $# -gt 0 ]]; do case "$1" in --dir) dir="$2"; shift ;; --pattern) pats+=("$2"); shift ;; esac; shift; done
+    for p in "${pats[@]}"; do cp "$GH_DRAFT/$p" "$dir/"; done ;;
+  "release upload") cp "$4" "$GH_DRAFT/" ;;
+  *) echo "unexpected gh $*" >&2; exit 2 ;;
+esac
+STUB
+chmod +x "$tmp/mbin/"*
+governance 1 alice bob > "$rel/factory/MAINTAINERS.toml"
+printf 'a security key handle, never a key\n' > "$tmp/keys/id_ed25519_sk"
+cp "$fx/alice.pub" "$tmp/keys/id_ed25519_sk.pub"
+export KEYGEN_LOG="$tmp/keygen.log" GH_USER=alice SIGN_NAMESPACE="$B" SIGN_AS="$fx/bundle.alice.sshsig"
+mine() { PATH="$tmp/mbin:$PATH" python3 "$rel/factory/bin/co-sign" "$@" --key "$tmp/keys/id_ed25519_sk" --yes > "$tmp/out" 2>&1; }
+draft; : > "$KEYGEN_LOG"
+mine release "$v" || fail "co-sign release: $(cat "$tmp/out")"
+cmp -s "$tmp/draft/omarchy-host-$v.tar.gz.alice.sshsig" "$fx/bundle.alice.sshsig" || fail "Alice's co-signature is on the draft"
+grep -qF "release upload $v" "$GH_LOG" || fail "uploaded to the draft: $(cat "$GH_LOG")"
+grep -qF "omarchy-agent verify --bundle" "$KEYGEN_LOG" || fail "release.yml's signature is checked first"
+grep -qF "release v1.2.3, created 2027-01-14T08:00:00Z, agent 0.3.0" "$tmp/out" || fail "the manifest is shown: $(cat "$tmp/out")"
+grep -qF "sha256:$(sha256sum "$fx/bundle" | cut -d' ' -f1)" "$tmp/out" || fail "the bundle's SHA-256 is shown"
+publish || fail "publish-release takes what co-sign uploaded: $(cat "$tmp/out")"
+# release.yml's signature refused: nothing is signed or uploaded.
+draft; : > "$KEYGEN_LOG"
+AGENT_REFUSES=1 mine release "$v" && fail "a bundle omarchy-agent refuses is co-signed"
+grep -q -- '-Y sign' "$KEYGEN_LOG" && fail "signed what the agent refused"
+ls "$tmp/draft/"*.sshsig >/dev/null 2>&1 && fail "uploaded what the agent refused"
+# Another key than the one pinned for Alice, a login with no key, a signature without a touch.
+cp "$fx/carol.pub" "$tmp/keys/id_ed25519_sk.pub"
+mine release "$v" && fail "a key MAINTAINERS.toml does not pin for alice"
+grep -qF "is the one MAINTAINERS.toml pins for alice" "$tmp/out" || fail "$(cat "$tmp/out")"
+cp "$fx/alice.pub" "$tmp/keys/id_ed25519_sk.pub"
+GH_USER=carol mine release "$v" && fail "carol has no key"
+grep -qF "carol has no key in factory/MAINTAINERS.toml" "$tmp/out" || fail "$(cat "$tmp/out")"
+draft
+SIGN_AS="$fx/bundle.untouched.sshsig" mine release "$v" && fail "a signature made without a touch is uploaded"
+ls "$tmp/draft/"*.sshsig >/dev/null 2>&1 && fail "uploaded a signature made without a touch"
+echo "ok: co-sign release checks release.yml's signature, shows the manifest, signs with the pinned key and a touch, and uploads to the draft"
+
+# co-sign rollback against a stand-in pool: the relay, and the maintainer's PUT.
+cat > "$tmp/pool.py" <<'POOL'
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+statement = open(sys.argv[1]).read()
+out = sys.argv[2]
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path != "/api/v1/factory/rollback/v1.0.1":
+            self.send_response(404); self.end_headers(); return
+        body = json.dumps({"to": "v1.0.1", "statement": statement, "bundle": "{}", "cosignatures": {}}).encode()
+        self.send_response(200); self.send_header("content-type", "application/json"); self.end_headers(); self.wfile.write(body)
+    def do_PUT(self):
+        n = int(self.headers.get("content-length", 0))
+        open(out, "w").write(json.dumps({"path": self.path, "auth": self.headers.get("authorization"), "body": self.rfile.read(n).decode()}))
+        self.send_response(200); self.send_header("content-type", "application/json"); self.end_headers()
+        self.wfile.write(b'{"to":"v1.0.1","login":"alice"}')
+s = HTTPServer(("127.0.0.1", 0), H)
+open(out + ".port", "w").write(str(s.server_port))
+s.serve_forever()
+POOL
+python3 "$tmp/pool.py" "$fx/statement.json" "$tmp/put.json" & pool=$!
+trap 'kill "$pool" 2>/dev/null; rm -rf "$tmp"' EXIT
+for _ in $(seq 1 50); do [[ -s "$tmp/put.json.port" ]] && break; sleep 0.1; done
+OMARCHY_API="http://127.0.0.1:$(cat "$tmp/put.json.port")"
+export OMARCHY_API
+SIGN_NAMESPACE="$R" SIGN_AS="$fx/statement.json.alice.sshsig" mine rollback v1.0.1 && fail "no token, no co-signature handed in"
+grep -qF "OMARCHY_TOKEN is not set" "$tmp/out" || fail "$(cat "$tmp/out")"
+OMARCHY_TOKEN=omc_alice SIGN_NAMESPACE="$R" SIGN_AS="$fx/statement.json.alice.sshsig" mine rollback v1.0.1 || fail "co-sign rollback: $(cat "$tmp/out")"
+python3 - "$tmp/put.json" "$fx/statement.json.alice.sshsig" <<'PY' || fail "the pool got Alice's co-signature with her token: $(cat "$tmp/put.json")"
+import json, sys
+put = json.load(open(sys.argv[1]))
+assert put["path"] == "/api/v1/factory/rollback/v1.0.1/cosignature", put
+assert put["auth"] == "Bearer omc_alice", put
+assert put["body"] == open(sys.argv[2]).read(), put
+PY
+grep -qF "omarchy-agent verify --statement" "$KEYGEN_LOG" || fail "rollback.yml's signature is checked first"
+grep -qF "rollback statement 9: back to v1.0.1, retracting everything through v1.2.0" "$tmp/out" || fail "the statement is shown: $(cat "$tmp/out")"
+OMARCHY_TOKEN=omc_alice mine rollback v1.0.2 && fail "a release the pool relays no statement for"
+echo "ok: co-sign rollback checks rollback.yml's signature, shows the statement, signs it in its own namespace and hands it to the pool with the maintainer's token"
 echo "COSIGNATURE OK"

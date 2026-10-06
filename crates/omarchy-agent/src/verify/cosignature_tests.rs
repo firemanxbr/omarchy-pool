@@ -299,7 +299,6 @@ fn a_signature_openssh_made_verifies_here_so_the_framing_is_openssh_s() {
 
 #[test]
 fn the_security_key_fixtures_verify_and_are_refused_as_they_should() {
-    assert_eq!(fixture("bundle"), BUNDLE);
     let key = |n: &str| String::from_utf8(fixture(&format!("{n}.pub"))).unwrap();
     let p = Policy::parse(&format!(
         "threshold = 2\n[keys]\nalice = \"{}\"\nbob = \"{}\"\n",
@@ -340,9 +339,12 @@ fn the_security_key_fixtures_verify_and_are_refused_as_they_should() {
     }
 }
 
-/// Writes `tests/fixtures/cosignature/`: Alice's and Carol's keys are the same every run,
-/// Bob's (P-256) and his signatures are new. `alice.pub` and `bob.pub` are
-/// `tests/cosignature.sh`'s maintainers.
+/// Writes `tests/fixtures/cosignature/`'s keys and signatures over its `bundle` (a stand-in
+/// host bundle, a `.tar.gz` with a `manifest.json`, as `factory/bin/co-sign release` reads
+/// one) and `statement.json`: Alice's and Carol's keys are the same every run, Bob's (P-256)
+/// and his signatures are new. `alice.pub` and `bob.pub` are `tests/cosignature.sh`'s
+/// maintainers; `plain.pub` and `bundle.plain.sshsig` are OpenSSH's (`ssh-keygen -t ed25519`,
+/// `-Y sign`), made again by hand when `bundle` changes.
 #[test]
 #[ignore = "writes tests/fixtures/cosignature/; run by hand to make them again"]
 fn write_the_fixtures() {
@@ -352,7 +354,7 @@ fn write_the_fixtures() {
     let alice = TestKey::ed25519("alice", 1);
     let bob = TestKey::ecdsa("bob");
     let carol = TestKey::ed25519("carol", 3);
-    write("bundle", BUNDLE);
+    let bundle = fixture("bundle");
     let statement = br#"{"schema":1,"seq":9,"to":"v1.0.1","retracts_through":"v1.2.0","issued":"2027-02-20T08:00:00Z","agent_to":null,"run":"https://github.com/firemanxbr/omarchy-pool/actions/runs/9"}
 "#;
     write("statement.json", statement);
@@ -363,7 +365,7 @@ fn write_the_fixtures() {
         );
         write(
             &file_name("bundle", &k.login),
-            &k.sign(BUNDLE_NAMESPACE, BUNDLE),
+            &k.sign(BUNDLE_NAMESPACE, &bundle),
         );
     }
     write(
@@ -372,10 +374,10 @@ fn write_the_fixtures() {
     );
     write(
         "bundle.untouched.sshsig",
-        &alice.sign_with(BUNDLE_NAMESPACE, BUNDLE, 0x00, "sha512"),
+        &alice.sign_with(BUNDLE_NAMESPACE, &bundle, 0x00, "sha512"),
     );
     write(
         "bundle.wrong-namespace.sshsig",
-        &alice.sign(ROLLBACK_NAMESPACE, BUNDLE),
+        &alice.sign(ROLLBACK_NAMESPACE, &bundle),
     );
 }
