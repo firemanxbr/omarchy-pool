@@ -1087,9 +1087,14 @@ an agent from 0.4.0 (an older one is given none and the page says why):
   that should not have been sent, shown on the page. The lanes left in
   `run/capacity.json` ride every claim, and the pool's selection (#337)
   hands an emulated build only to a lane the claim names, so a lane turned
-  off takes no new emulated build from the dispatcher's next claim; running
-  emulated builds on the host itself (detection per foreign architecture,
-  `needs_native` per lane) is #338's.
+  off takes no new emulated build from the dispatcher's next claim. A lane
+  turned off moves to `held_lanes` with why ("off: the pool's settings turn
+  it off (set-emulate)"), beside the ones detection holds (#338), and the
+  dispatcher starts an emulated lease only on a lane the file lists, read
+  again when it starts one: a lease taken before the narrowing that has not
+  started is handed back with its attempt, and a running one finishes. On a
+  Mac the lane is the VM's Rosetta one (#320); a count after a start of the
+  VM keeps it as detected, and the setting narrows the new file again.
 - **Rotate token** (`rotate-token`): a new host worker token from the pool
   (`POST /hosts/self/token`, signed), written to `etc/dispatcher.env` as
   enrollment writes it — the rest of the file rendered as the run loop

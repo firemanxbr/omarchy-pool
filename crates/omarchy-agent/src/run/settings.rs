@@ -13,9 +13,11 @@
 //! until its leases fit, and never kills a running task for it (design v2 §7.6). The lanes
 //! left in the file ride every claim too, and the pool's selection (#337) hands an emulated
 //! build only to a lane the claim names, so a lane turned off takes no new emulated build
-//! from the next claim. Running emulated builds on the host — detection per foreign
-//! architecture, `needs_native` per lane — is #338's: its dispatcher must claim only the
-//! emulated lanes this file lists.
+//! from the next claim. A lane turned off moves to `held_lanes` with why, as detection
+//! holds one the envelope leaves out (#338), so the claim and the host page say it; and
+//! the dispatcher starts an emulated lease only on a lane the file lists, read again when
+//! it starts one (#338's `lane_of`): a lease taken before the narrowing that has not
+//! started is handed back with its attempt, and a running one finishes.
 //!
 //! Anything above the envelope is refused here, whatever the pool asks: units above the
 //! detected count or `max_units`, a lane the envelope's `emulate` excludes. When the owner
@@ -29,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::config::{Policy, ARCHES};
+use crate::capacity::emulation;
 
 /// What the pool narrowed, as the agent took it; `None` is the envelope's own.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -55,6 +58,10 @@ pub(crate) struct Base {
 
 const DETECTED: &str = "detected";
 const SETTINGS: &str = "settings";
+/// What the narrowed file keeps of detection's, under [`DETECTED`].
+const NARROWED: [&str; 4] = ["units", "job_reserved", "lanes", "held_lanes"];
+/// Why a lane the pool's settings turn off is held (`held_lanes`).
+pub(crate) const OFF_IN_SETTINGS: &str = "off: the pool's settings turn it off (set-emulate)";
 
 impl Base {
     /// Reads the file in the set directory; `Ok(None)` when there is none. A `run/` or a
@@ -96,7 +103,8 @@ impl Base {
             .and_then(|u| u32::try_from(u).ok())
     }
 
-    fn lanes(&self) -> Vec<Value> {
+    /// The lanes detection found: the native one and each emulated one it turned on.
+    pub fn lanes(&self) -> Vec<Value> {
         self.file
             .get("lanes")
             .and_then(Value::as_array)
@@ -138,17 +146,34 @@ impl Base {
             (Some(c), Some(u)) => Some(c.min(u)),
             (c, _) => c,
         };
-        let lanes: Vec<Value> = self
-            .lanes()
-            .into_iter()
-            .filter(|l| {
-                l["mode"] != "emulated"
-                    || l["arch"].as_str().is_some_and(|a| {
-                        p.allows_lane(a)
-                            && s.emulate.as_ref().is_none_or(|e| e.iter().any(|x| x == a))
-                    })
-            })
-            .collect();
+        // An emulated lane runs while both the envelope and the setting name it; one either
+        // leaves out is held, with why, beside the ones detection held (#338).
+        let mut held: Vec<Value> = self
+            .file
+            .get("held_lanes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let (lanes, off): (Vec<Value>, Vec<Value>) = self.lanes().into_iter().partition(|l| {
+            l["mode"] != "emulated"
+                || l["arch"].as_str().is_some_and(|a| {
+                    p.allows_lane(a) && s.emulate.as_ref().is_none_or(|e| e.iter().any(|x| x == a))
+                })
+        });
+        for a in off.iter().filter_map(|l| l["arch"].as_str()) {
+            if held.iter().any(|h| h["arch"] == a) {
+                continue;
+            }
+            let why = if p.allows_lane(a) {
+                emulation::Held {
+                    arch: a.to_owned(),
+                    reason: OFF_IN_SETTINGS.to_owned(),
+                }
+            } else {
+                emulation::off_in_envelope(a)
+            };
+            held.push(serde_json::to_value(why).unwrap_or(Value::Null));
+        }
         let emulated: Vec<String> = lanes
             .iter()
             .filter(|l| l["mode"] == "emulated")
@@ -163,9 +188,12 @@ impl Base {
         if self.file.contains_key("lanes") {
             out.insert("lanes".into(), Value::Array(lanes));
         }
+        if !off.is_empty() {
+            out.insert("held_lanes".into(), Value::Array(held));
+        }
         if out != self.file {
             let mut d = Map::new();
-            for k in ["units", "job_reserved", "lanes"] {
+            for k in NARROWED {
                 if let Some(v) = self.file.get(k) {
                     d.insert(k.into(), v.clone());
                 }
@@ -333,7 +361,7 @@ mod tests {
     /// The Studio's file: 11 units, the native `aarch64` lane and an emulated `x86_64` one.
     const STUDIO: &str = r#"{"schema":2,"at":"2027-01-15T08:00:00Z","cpus":12,"mem_gb":32,"page_kb":16,
         "disk_free_gb":{"work":410,"engine":220},"units":11,"job_reserved":1,"agent_slots":2,
-        "lanes":[{"arch":"aarch64","mode":"native"},{"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true}],
+        "lanes":[{"arch":"aarch64","mode":"native"},{"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true}],"held_lanes":[],
         "isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}"#;
 
     fn studio() -> std::path::PathBuf {
@@ -434,8 +462,14 @@ mod tests {
             f["lanes"],
             serde_json::json!([{"arch":"aarch64","mode":"native"}])
         );
+        // Held with why, as detection holds one the envelope leaves out (#338).
+        assert_eq!(
+            f["held_lanes"],
+            serde_json::json!([{"arch": "x86_64", "reason": OFF_IN_SETTINGS}])
+        );
         assert_eq!(f["units"], 11);
         assert_eq!(f["detected"]["lanes"].as_array().unwrap().len(), 2);
+        assert_eq!(f["detected"]["held_lanes"], serde_json::json!([]));
         // On again.
         let on = Settings {
             units: None,
@@ -453,6 +487,19 @@ mod tests {
             e.above,
             ["x86_64's emulated lane is one the envelope excludes: it stays off"]
         );
+        assert_eq!(
+            read(&d)["held_lanes"][0]["reason"],
+            "off: the envelope's emulate does not list it"
+        );
+        // A lane detection held already keeps detection's reason.
+        let held = STUDIO.replace(
+            r#",{"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true}],"held_lanes":[]"#,
+            r#"],"held_lanes":[{"arch":"x86_64","reason":"needs a person: prep-root.sh installs qemu-user-static-binfmt"}]"#,
+        );
+        fs::write(d.join("run/capacity.json"), &held).unwrap();
+        let (changed, _) = apply(&d, &off, &policy(None, None)).unwrap().unwrap();
+        assert!(!changed);
+        assert_eq!(read(&d), serde_json::from_str::<Value>(&held).unwrap());
     }
 
     #[test]

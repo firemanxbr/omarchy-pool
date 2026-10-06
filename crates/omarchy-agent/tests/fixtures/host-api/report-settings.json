@@ -19,6 +19,12 @@
       "engine": 220,
       "work": 410
     },
+    "held_lanes": [
+      {
+        "arch": "x86_64",
+        "reason": "off: the pool's settings turn it off (set-emulate)"
+      }
+    ],
     "isolation": "root",
     "job_reserved": 1,
     "lanes": [

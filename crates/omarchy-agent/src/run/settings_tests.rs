@@ -45,8 +45,8 @@ fn studio_file() -> Value {
     json!({
         "schema": 2, "at": "2027-01-15T07:00:00Z", "cpus": 12, "mem_gb": 32, "page_kb": 4,
         "disk_free_gb": {"work": 410, "engine": 220}, "units": 11, "job_reserved": 1, "agent_slots": 2,
-        "lanes": [{"arch": std::env::consts::ARCH, "mode": "native"}, {"arch": foreign(), "mode": "emulated", "via": "qemu"}],
-        "isolation": "root", "dedicated": true,
+        "lanes": [{"arch": std::env::consts::ARCH, "mode": "native"}, {"arch": foreign(), "mode": "emulated", "via": "qemu", "page16k": false}],
+        "held_lanes": [], "isolation": "root", "dedicated": true,
         "limits": {"cpus_hard": true, "memory_hard": true, "pids": true}, "below_minimum": false
     })
 }
@@ -195,10 +195,15 @@ fn an_emulated_lane_turned_off_leaves_the_claims_and_one_the_envelope_excludes_i
         detail.starts_with(&format!("emulated lanes {} → none", foreign())),
         "{detail}"
     );
-    // The file the dispatcher claims by names the native lane only: no emulated claim.
+    // The file the dispatcher claims by names the native lane only: no emulated claim; the
+    // lane is held with why, as the claim and the host page say it (#338's held_lanes).
     assert_eq!(
         capacity(&w)["lanes"],
         json!([{"arch": std::env::consts::ARCH, "mode": "native"}])
+    );
+    assert_eq!(
+        capacity(&w)["held_lanes"],
+        json!([{"arch": foreign(), "reason": crate::run::settings::OFF_IN_SETTINGS}])
     );
     // The owner's envelope excludes it: turning it on from the site is refused, and said.
     w.agent.cfg.policy.emulate = Some(Vec::new());
@@ -227,6 +232,7 @@ fn an_emulated_lane_turned_off_leaves_the_claims_and_one_the_envelope_excludes_i
     );
     assert_eq!(outcome, "done", "{detail}");
     assert_eq!(capacity(&w)["lanes"].as_array().unwrap().len(), 2);
+    assert_eq!(capacity(&w)["held_lanes"], json!([]));
 }
 
 #[test]
@@ -819,6 +825,10 @@ fn the_report_with_settings_keeps_the_shape_the_pool_reads() {
         json!([foreign()])
     );
     assert_eq!(r["capacity"]["lanes"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        r["capacity"]["held_lanes"],
+        json!([{"arch": foreign(), "reason": crate::run::settings::OFF_IN_SETTINGS}])
+    );
     assert_eq!(r["brake"]["narrowings_hour"], 2);
     assert_eq!(shape(&r), shape(&fixture("report-settings.json")));
 }

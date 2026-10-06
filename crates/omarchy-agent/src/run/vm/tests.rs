@@ -815,6 +815,42 @@ fn a_count_after_a_start_writes_the_vms_capacity_and_the_lane_the_envelope_allow
     );
     let log = std::fs::read_to_string(dir.join("docker.log")).unwrap();
     assert!(!log.contains("--platform linux/amd64"), "{log}");
+    // The pool's settings turned the lane off (#325): the file lists it under `detected`
+    // only, and the count still keeps it as counted; the loop narrows the new file again.
+    let off = crate::run::settings::Settings {
+        units: None,
+        emulate: Some(Vec::new()),
+    };
+    let policy = crate::run::config::Policy::default();
+    assert!(
+        crate::run::settings::apply(&set, &off, &policy)
+            .unwrap()
+            .unwrap()
+            .0
+    );
+    std::fs::write(
+        dir.join("info.json"),
+        std::fs::read_to_string(dir.join("info.json"))
+            .unwrap()
+            .replace(r#""NCPU":6"#, r#""NCPU":7"#),
+    )
+    .unwrap();
+    let said = count_with(&toml("")).unwrap();
+    assert!(
+        said.contains("7 CPUs")
+            && said.contains("x86_64 via rosetta")
+            && said.contains("kept as run/capacity.json had it"),
+        "{said}"
+    );
+    let file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(set.join("run/capacity.json")).unwrap()).unwrap();
+    assert_eq!(file["lanes"][1]["via"], "rosetta");
+    assert!(
+        crate::run::settings::apply(&set, &off, &policy)
+            .unwrap()
+            .unwrap()
+            .0
+    );
     // The native build image the VM's store lacks (a VM made again): the loop pulls
     // nothing, runs nothing, and leaves the file as it was until a task's pull brings it.
     let before = std::fs::read(set.join("run/capacity.json")).unwrap();

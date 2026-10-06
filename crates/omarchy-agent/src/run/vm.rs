@@ -251,14 +251,14 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
 }
 
 /// Whether `run/capacity.json` holds the `x86_64` lane through Rosetta: a count before
-/// this one (install's, the loop's) passed its smoke run in this VM.
+/// this one (install's, the loop's) passed its smoke run in this VM. Read through a
+/// narrowing the pool's settings made (#325): a lane they turned off was still counted.
 fn rosetta_counted(set_dir: &Path) -> bool {
-    std::fs::read(set_dir.join("run").join("capacity.json"))
+    super::settings::Base::read(set_dir)
         .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.get("lanes").and_then(|l| l.as_array()).cloned())
-        .is_some_and(|lanes| {
-            lanes
+        .flatten()
+        .is_some_and(|b| {
+            b.lanes()
                 .iter()
                 .any(|l| l["arch"] == "x86_64" && l["via"] == "rosetta")
         })
