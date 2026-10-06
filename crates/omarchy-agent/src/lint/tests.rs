@@ -750,3 +750,49 @@ fn the_same_set_renders_for_the_quadlet_driver() {
     // A file that is not YAML is compose's lint's to say, once.
     assert_eq!(lint_quadlet(HOST, Some("a: ["), &vars), Ok(()));
 }
+
+#[test]
+fn the_token_file_s_bind_renders_for_quadlet_and_a_quadlet_host_keeps_the_secret_file_rule() {
+    // #327's bind, long syntax with read_only and `create_host_path: false`, is what the
+    // template and the fixture use: rendered, read-only, by both drivers' lints.
+    let vars = reference_variables();
+    for t in [real_set("compose.yml"), HOST.to_owned()] {
+        assert!(t.contains("bind: { create_host_path: false }"), "{t}");
+        lint_quadlet(&t, None, &vars).unwrap();
+        assert_eq!(secret_files(&t), [token_file_of("dispatcher")]);
+    }
+    // A directory made where the file belongs is what a unit cannot do (podman never makes a
+    // bind's source): compose's lint takes it, Quadlet's refuses it, in an override too.
+    let creates = mutate(
+        HOST,
+        "bind: { create_host_path: false }",
+        "bind: { create_host_path: true }",
+    );
+    lint_compose(&creates, None, &Envelope::reference(), Engine::Rootful).unwrap();
+    refused_for(
+        lint_quadlet(&creates, None, &vars),
+        "quadlet",
+        "create_host_path: true",
+    );
+    let over = "services:\n  dispatcher:\n    volumes:\n      - {type: bind, source: ./run/host/dispatcher/token, target: /run/omarchy/worker-token, read_only: true, bind: {create_host_path: true}}\n";
+    refused_for(
+        lint_quadlet(HOST, Some(over), &vars),
+        "quadlet",
+        "create_host_path: true in an override",
+    );
+    // Another service's secret file, or its own mounted writable, renders as any bind
+    // would; the round lint of a Quadlet host runs compose's lint as well, whose
+    // `secret_file` rule refuses both (`run::quadlet::tests` has the round).
+    for over in [
+        read("override/other-secret-file.yml"),
+        "services:\n  dispatcher:\n    volumes:\n      - ./run/host/dispatcher/token:/run/omarchy/worker-token\n"
+            .to_owned(),
+    ] {
+        lint_quadlet(HOST, Some(&over), &vars).unwrap();
+        refused_for(
+            lint_compose(HOST, Some(&over), &Envelope::reference(), Engine::Rootless),
+            "secret_file",
+            &over,
+        );
+    }
+}

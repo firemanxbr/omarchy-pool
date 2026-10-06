@@ -14,8 +14,15 @@
 //! alone moves a host to another release, behind its guard.
 //!
 //! The unit holds agent.toml's interpolated values — paths, the task subnets — and names
-//! the env files by path: the worker token in `etc/dispatcher.env` is never copied into it,
-//! and the lint refuses an interpolated agent key or GitHub token before it is rendered.
+//! the env files and the host worker token's file by path, never a secret: the token is
+//! `run/host/dispatcher/token` (#327), a read-only `Volume=` whose path
+//! `OMARCHY_WORKER_TOKEN_FILE` gives the dispatcher, and which podman never creates when
+//! it is missing (the unit does not start, `bind_options`); `etc/dispatcher.env`, read by
+//! podman's `--env-file`, carries the token too only while a release from before #327 is on
+//! the host, as on compose ([`crate::dispatcher_env`]). The lint refuses an interpolated
+//! agent key or GitHub token before it is rendered, and a service mounting a secret file
+//! not its own.
+//!
 //! Its hash (of everything but its comments and the hash label itself) is the container's
 //! `org.omarchy-pool.agent.config-hash` label: the planner compares it as it compares
 //! compose's config hash.
@@ -901,6 +908,9 @@ fn volumes(
                     }
                 }
                 let t = target(item.get("target").and_then(Node::as_str).unwrap_or(""))?;
+                if let Some(b) = item.get("bind") {
+                    bind_options(item, b)?;
+                }
                 let ro = match item.get("read_only").and_then(Node::as_str) {
                     None | Some("false") => "",
                     Some("true") => ":ro",
@@ -926,6 +936,37 @@ fn volumes(
         }
     }
     Ok(out)
+}
+
+/// A long-syntax bind's `bind:` options: only `create_host_path: false` (#327's token file),
+/// which is what `Volume=` does anyway. podman never creates a bind's source that is not
+/// there: `podman run` stops with `statfs <source>: no such file or directory` (exit 125),
+/// so the unit fails to start and systemd tries it again each second, never making a
+/// directory where the file belongs, until the agent wrote it (the run loop holds the
+/// dispatcher until then, `run::rollout`'s `missing_inputs`). `create_host_path: true`, a
+/// directory compose would make, is what a unit cannot do; propagation and the other
+/// options are outside the subset.
+fn bind_options(item: &Node, options: &Node) -> Result<(), String> {
+    if item.get("type").and_then(Node::as_str) != Some("bind") {
+        return Err(format!(
+            "volume {item:?}: bind options on what is not a bind"
+        ));
+    }
+    let Node::Map(entries) = options else {
+        return Err(format!("volume {item:?}: bind is not a mapping"));
+    };
+    for (k, v) in entries {
+        match (k.as_str(), v.as_str()) {
+            ("create_host_path", Some("false")) => {}
+            ("create_host_path", Some("true")) => {
+                return Err(format!(
+                    "volume {item:?}: create_host_path: true is not rendered for Quadlet (podman never creates a bind's source; a unit without it does not start)"
+                ))
+            }
+            _ => return Err(format!("volume {item:?}: bind {k} is outside the subset")),
+        }
+    }
+    Ok(())
 }
 
 /// `p` as compose reads a path in the set: absolute as it is, relative from `dir`; `.`

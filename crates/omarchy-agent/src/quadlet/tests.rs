@@ -138,6 +138,8 @@ fn the_host_set_renders_field_by_field() {
         "Volume=/run/user/1000/podman/podman.sock:/var/run/docker.sock",
         "Volume=/srv/work:/srv/work",
         "Volume=/srv/set/run/capacity.json:/run/omarchy/capacity.json:ro",
+        // Its own token file, read-only (#327): a path, never the token.
+        "Volume=/srv/set/run/host/dispatcher/token:/run/omarchy/worker-token:ro",
         "PodmanArgs=\"--stop-timeout=60\"",
         "[Service]",
         "Restart=always",
@@ -182,8 +184,14 @@ fn the_host_set_renders_field_by_field() {
             "OMARCHY_TASK_SUBNETS=10.231.0.0/16".into(),
             format!("OMARCHY_WORKER_IMAGE={worker}"),
             "OMARCHY_WORKER_ROLE=dispatcher".into(),
+            "OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token".into(),
             "OMARCHY_WORK_ROOT=/srv/work".into(),
         ]
+    );
+    // No token in the unit or the environment it gives: the file's path alone.
+    assert!(
+        !t.contains("OMARCHY_WORKER_TOKEN=") && !t.contains("omw_"),
+        "{t}"
     );
     // The secrets directory is a path the dispatcher is told, never a mount.
     assert!(
@@ -269,6 +277,7 @@ fn an_override_merges_as_compose_merges_it() {
             "/run/user/1000/podman/podman.sock:/var/run/docker.sock",
             "/srv/work:/srv/work",
             "/srv/other/capacity.json:/run/omarchy/capacity.json:ro",
+            "/srv/set/run/host/dispatcher/token:/run/omarchy/worker-token:ro",
             "/srv/cache:/srv/cache",
         ]
     );
@@ -416,9 +425,59 @@ fn named_volumes_tmpfs_and_anonymous_volumes() {
             "/scratch",
             "omarchy-host_cache:/cache:ro",
             "/srv/set/run:/srv/run",
+            "/srv/set/run/host/dispatcher/token:/run/omarchy/worker-token:ro",
         ]
     );
     assert_eq!(flat(&r.text, "Tmpfs"), ["/tmp"]);
+}
+
+#[test]
+fn the_token_file_is_a_read_only_bind_podman_never_creates() {
+    // #327's long-syntax bind renders as the short one would: the file, read-only.
+    let token = "Volume=/srv/set/run/host/dispatcher/token:/run/omarchy/worker-token:ro";
+    let long = host("").unwrap();
+    assert!(long.text.lines().any(|l| l == token), "{}", long.text);
+    let short = crate::run::fake::rendered_compose("").replace(
+        "      - type: bind\n        source: ./run/host/dispatcher/token\n        target: /run/omarchy/worker-token\n        read_only: true\n        bind: { create_host_path: false }\n",
+        "      - ./run/host/dispatcher/token:/run/omarchy/worker-token:ro\n",
+    );
+    assert!(!short.contains("create_host_path"), "the template changed");
+    let r = one(&[("compose.yml", &short), ("agent.yml", OVERLAY)]).unwrap();
+    assert_eq!(r.text, long.text);
+    // podman never makes a bind's missing source (it stops: `statfs <source>: no such file
+    // or directory`), which is what `create_host_path: false` asks: a unit cannot make the
+    // directory `true` asks for, nor carry a bind option outside the subset.
+    for (bind, why) in [
+        (
+            "{ create_host_path: true }",
+            "create_host_path: true is not rendered for Quadlet",
+        ),
+        (
+            "{ propagation: rshared }",
+            "bind propagation is outside the subset",
+        ),
+        (
+            "{ create_host_path: maybe }",
+            "bind create_host_path is outside the subset",
+        ),
+        ("[create_host_path]", "bind is not a mapping"),
+    ] {
+        let compose = crate::run::fake::rendered_compose("").replace(
+            "bind: { create_host_path: false }",
+            &format!("bind: {bind}"),
+        );
+        let e = one(&[("compose.yml", &compose), ("agent.yml", OVERLAY)]).unwrap_err();
+        assert!(
+            e.starts_with("dispatcher: volume ") && e.contains(why),
+            "{bind}: {e}"
+        );
+    }
+    let named = with_volumes(
+        "      - {type: volume, source: cache, target: /c, bind: {create_host_path: false}}\n",
+        "volumes:\n  cache: {}\n",
+    );
+    let e = one(&[("compose.yml", &named)]).unwrap_err();
+    assert!(e.contains("bind options on what is not a bind"), "{e}");
 }
 
 #[test]
@@ -606,6 +665,8 @@ fn the_generator_reads_the_rendered_host_set() {
         "/run/user/1000/podman/podman.sock:/var/run/docker.sock",
         "/srv/work:/srv/work",
         "/srv/set/run/capacity.json:/run/omarchy/capacity.json:ro",
+        // The token's own file, read-only (#327): `-v`, which never creates a source.
+        "/srv/set/run/host/dispatcher/token:/run/omarchy/worker-token:ro",
     ] {
         assert!(pair("-v", v), "{v}: {argv:?}");
     }
@@ -614,6 +675,13 @@ fn the_generator_reads_the_rendered_host_set() {
         "{argv:?}"
     );
     assert!(pair("--env", "OMARCHY_WORK_ROOT=/srv/work"), "{argv:?}");
+    assert!(
+        pair(
+            "--env",
+            "OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token"
+        ) && !argv.iter().any(|a| a.starts_with("OMARCHY_WORKER_TOKEN=")),
+        "{argv:?}"
+    );
     assert!(
         pair("--label", &format!("{HASH_LABEL}={}", r.hash)),
         "{argv:?}"
