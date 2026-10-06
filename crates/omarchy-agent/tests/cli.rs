@@ -926,3 +926,73 @@ fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the
     assert_eq!(std::fs::read_to_string(&env).unwrap(), written);
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// `envelope pin-passkey` and `unpin-passkey` (#328): a pin needs the installed host's
+/// agent.toml, is checked here (a recorded one made for another host is refused for its
+/// host, which is read before any time: the refusal is the same at every date; the time
+/// window is the unit tests', with a fixed clock), and is read from stdin when it is not
+/// given; `status` says what is pinned.
+#[test]
+fn envelope_pin_passkey_checks_the_pin_at_the_host_and_status_says_what_is_pinned() {
+    let data = scratch("envelope");
+    let d = data.to_string_lossy().into_owned();
+    let cases: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixtures().join("owner/cases.json")).unwrap())
+            .unwrap();
+    let pin = cases["pins"]["other_host"].as_str().unwrap();
+    // No agent.toml yet: a host is pinned once it is installed and confirmed.
+    let o = run(&["envelope", "pin-passkey", pin, "--data-dir", &d]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("installed and confirmed"), "{}", text(&o));
+    let toml = data.join("agent.toml");
+    std::fs::write(
+        &toml,
+        format!(
+            "pool = \"https://pkgs.omarchy-pool.org\"\nhost_id = \"h_0123456789\"\nworker_id = \"w_1\"\n[set]\ndir = \"{0}/set\"\nwork_root = \"{0}/work\"\nsecrets_dir = \"{0}/secrets\"\nsocket_cli = \"{0}/no.sock\"\n",
+            data.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let o = run(&["envelope", "pin-passkey", pin, "--data-dir", &d]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("is for host h_9999999999, not this one (h_0123456789)"),
+        "{}",
+        text(&o)
+    );
+    // From stdin.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omarchy-agent"))
+        .args(["envelope", "pin-passkey", "--data-dir", &d])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write as _;
+        let mut w = child.stdin.take().unwrap();
+        writeln!(w, "not a pin").unwrap();
+    }
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("copy it again"), "{}", text(&o));
+    assert!(!data.join("state/owner.json").exists());
+    let o = run(&["envelope", "unpin-passkey", "--data-dir", &d]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(
+        text(&o).contains("no passkey was pinned here"),
+        "{}",
+        text(&o)
+    );
+    assert_eq!(run(&["envelope", "--data-dir", &d]).status.code(), Some(2));
+    assert_eq!(run(&["envelope", "pin"]).status.code(), Some(2));
+    // status: what is pinned (nothing yet).
+    std::fs::write(data.join("state.json"), r#"{"floor":"v1.2.0"}"#).unwrap();
+    let o = run(&["status", "--data-dir", &d]);
+    assert!(
+        text(&o).contains("owner:     no passkey pinned"),
+        "{}",
+        text(&o)
+    );
+}

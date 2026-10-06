@@ -230,6 +230,128 @@ impl Base {
     }
 }
 
+impl Base {
+    fn number(&self, key: &str) -> Option<u32> {
+        self.file
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|u| u32::try_from(u).ok())
+    }
+
+    /// Detection's file counted again under the owner's caps as a signed widening left them
+    /// (#328, design v2 D6 b): the CPUs and memory are the detected totals (`hardware`, or
+    /// the file's own when no cap lowered them) under `max_cpus` and `max_mem_gb`; the units
+    /// are [`crate::capacity::units_of`] those under the signed constants and `max_units` —
+    /// never more than the constants and the detected hardware give, whatever the envelope
+    /// says; the agent slots are the envelope's. A host below the minimum stays as detection
+    /// counted it, and the lanes stay detection's: an emulated lane detection never ran its
+    /// smoke run for comes on at the next count (`omarchy-agent capacity --write`), never
+    /// here. The new base and what changed (`units 3 → 8`), or `None` when nothing did.
+    pub(crate) fn recapped(
+        &self,
+        caps: &crate::capacity::Caps,
+        c: &crate::manifest::CapacityConstants,
+    ) -> Option<(Self, Vec<String>)> {
+        let (cpus_now, mem_now) = (self.number("cpus")?, self.number("mem_gb")?);
+        let hw = self.file.get("hardware");
+        let hw_of = |k: &str, own: u32| {
+            hw.and_then(|h| h.get(k))
+                .and_then(Value::as_u64)
+                .and_then(|u| u32::try_from(u).ok())
+                .unwrap_or(own)
+        };
+        let (hw_cpus, hw_mem) = (hw_of("cpus", cpus_now), hw_of("mem_gb", mem_now));
+        let mut file = self.file.clone();
+        let set = |file: &mut Map<String, Value>, k: &str, v: Value| {
+            file.insert(k.to_owned(), v);
+        };
+        set(&mut file, "agent_slots", caps.agent_slots.into());
+        if self.file.get("below_minimum") != Some(&Value::Bool(true)) {
+            let cpus = caps.max_cpus.map_or(hw_cpus, |m| hw_cpus.min(m));
+            let mem = caps.max_mem_gb.map_or(hw_mem, |m| hw_mem.min(m));
+            let short = cpus < c.min.cpus || mem < c.min.mem_gb;
+            let units = if short {
+                0
+            } else {
+                crate::capacity::units_of(cpus, mem, caps.max_units, c)
+            };
+            set(&mut file, "cpus", cpus.into());
+            set(&mut file, "mem_gb", mem.into());
+            set(&mut file, "units", units.into());
+            set(
+                &mut file,
+                "job_reserved",
+                c.units.job_reserved.min(units).into(),
+            );
+            set(&mut file, "below_minimum", short.into());
+            if (cpus, mem) == (hw_cpus, hw_mem) {
+                file.remove("hardware");
+            } else {
+                set(
+                    &mut file,
+                    "hardware",
+                    serde_json::json!({"cpus": hw_cpus, "mem_gb": hw_mem}),
+                );
+            }
+        }
+        let changes: Vec<String> = ["cpus", "mem_gb", "units", "job_reserved", "agent_slots"]
+            .iter()
+            .filter_map(|k| {
+                let (a, b) = (self.file.get(*k), file.get(*k));
+                (a != b).then(|| {
+                    let s = |v: Option<&Value>| {
+                        v.map_or_else(|| "none".to_owned(), ToString::to_string)
+                    };
+                    format!("{k} {} → {}", s(a), s(b))
+                })
+            })
+            .collect();
+        (file != self.file).then_some((Base { file }, changes))
+    }
+}
+
+/// `run/capacity.json` counted again for a signed widening (#328), not written yet.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Recount {
+    /// The narrowed file to write; `None`: there is no file (nothing detected yet).
+    file: Option<Value>,
+    /// What changed (`units 3 → 8`).
+    pub changes: Vec<String>,
+}
+
+/// `run/capacity.json` counted again for a signed widening (#328): [`Base::recapped`] under
+/// the new caps, then narrowed to the settings and the new envelope — in memory, so a file
+/// that does not read refuses the widening before anything changed, and the dispatcher,
+/// which reads the file before every claim, never reads the count un-narrowed
+/// ([`Recount::write`] writes it once).
+pub(crate) fn recount(
+    set_dir: &Path,
+    caps: &crate::capacity::Caps,
+    c: &crate::manifest::CapacityConstants,
+    s: &Settings,
+    p: &Policy,
+) -> Result<Recount, String> {
+    let Some(base) = Base::read(set_dir)? else {
+        return Ok(Recount::default());
+    };
+    let (base, changes) = base
+        .recapped(caps, c)
+        .unwrap_or_else(|| (base.clone(), Vec::new()));
+    Ok(Recount {
+        file: Some(Value::Object(base.narrowed(s, p).0)),
+        changes,
+    })
+}
+
+impl Recount {
+    /// Writes the narrowed file, once, when it differs from what is there.
+    pub(crate) fn write(&self, set_dir: &Path) -> Result<bool, String> {
+        self.file
+            .as_ref()
+            .map_or(Ok(false), |f| write_if_changed(&file(set_dir), f))
+    }
+}
+
 /// What the settings give now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Effect {
@@ -256,18 +378,22 @@ pub(crate) fn apply(
         return Ok(None);
     };
     let (narrowed, effect) = base.narrowed(s, p);
-    let path = file(set_dir);
-    let now: Option<Value> = fs::read(&path)
+    let changed = write_if_changed(&file(set_dir), &Value::Object(narrowed))?;
+    Ok(Some((changed, effect)))
+}
+
+/// Writes `v` at `path` (atomically) unless the file holds it already; whether it wrote.
+fn write_if_changed(path: &Path, v: &Value) -> Result<bool, String> {
+    let now: Option<Value> = fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
-    let narrowed = Value::Object(narrowed);
-    if now.as_ref() == Some(&narrowed) {
-        return Ok(Some((false, effect)));
+    if now.as_ref() == Some(v) {
+        return Ok(false);
     }
-    let mut bytes = serde_json::to_vec(&narrowed).map_err(|e| e.to_string())?;
+    let mut bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
-    super::state::write_atomic(&path, &bytes)?;
-    Ok(Some((true, effect)))
+    super::state::write_atomic(path, &bytes)?;
+    Ok(true)
 }
 
 /// Checks a `set-units` against the envelope: `Err` with why it is refused.
