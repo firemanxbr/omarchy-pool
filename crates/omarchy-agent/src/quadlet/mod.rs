@@ -298,7 +298,7 @@ fn braced(inner: &str, env: &[(String, String)]) -> Result<String, String> {
     } else if rest.is_empty() {
         ("", "")
     } else {
-        rest.split_at(1)
+        rest.split_at(rest.chars().next().map_or(0, char::len_utf8))
     };
     // `:` asks for a value that is set and not empty; without it, set is enough.
     let given = if op.starts_with(':') {

@@ -361,6 +361,7 @@ fn interpolation_is_compose_s_with_agent_toml_s_variables_only() {
         ("cost $5", "neither $$ nor a variable"),
         ("${1A}", "not a variable name"),
         ("${A/x/y}", "not a form"),
+        ("${A€x}", "not a form"),
     ] {
         let e = interpolate(src, &env).unwrap_err();
         assert!(e.contains(why), "{src}: {e}");
