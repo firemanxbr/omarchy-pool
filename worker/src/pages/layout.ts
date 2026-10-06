@@ -1630,6 +1630,13 @@ export const HELPERS = String.raw`
     if (a.status === "done") return pillHtml("none", "unreadable");
     return '<span class="muted">—</span>';
   }
+  // How independent the second opinion is of what it audits (#339, D36), next to the audit's verdict: its lease's word (the audit's task, or auditOf's) — another model, the same model on another machine, or neither. An audit not leased yet, or queued again after a lease it lost (the requeue clears its word), or leased before #339, says nothing.
+  var INDEPENDENT = {
+    model: ["ok", "another model judged it than the one that built it"],
+    host: ["warn", "the same model judged it, on another host than the one that built it"],
+    none: ["warn", "the model that built it judged it: the project's copy takes another model whenever a host with one was alive in the last 24 hours — one host running another model makes the next audit a second opinion"],
+  };
+  function independentPill(a) { var i = a && a.status !== "queued" && a.independent, w = i && INDEPENDENT[i]; return w ? " " + pillHtml(w[0], "independent: " + i, w[1]) : ""; }
   function trialPill(t, href) {
     t = t || { status: "none" };
     if (t.status === "done" && t.verdict) {

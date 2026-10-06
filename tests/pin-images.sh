@@ -21,7 +21,7 @@ x86="$(digest library/archlinux base)"; arm="$(digest menci/archlinuxarm base)";
   echo "# The tag is kept beside the digest for the reader; the digest is what pulls."
   echo "ARCHLINUX_BASE=\"docker.io/library/archlinux:base@$x86\""
   echo "ARCHLINUXARM_BASE=\"docker.io/menci/archlinuxarm:base@$arm\""
-  echo "# The host agent's stand-ins (tests/agent-run-loop.sh, tests/agent-install.sh, tests/agent-host-orders.sh): sh, httpd, wget and nc."
+  echo "# The host agent's stand-ins (tests/agent-run-loop.sh, tests/agent-install.sh, tests/agent-host-orders.sh, tests/agent-runtime-switch.sh): sh, httpd, wget and nc."
   echo "BUSYBOX=\"docker.io/library/busybox:1.37.0@$bb\""
 } > "$OUT"
 cat "$OUT"

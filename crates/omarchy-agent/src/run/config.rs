@@ -1,11 +1,14 @@
 //! The agent's local configuration: `agent.toml` (design v2 §12) and the data directory.
 //!
 //! agent.toml is written by `omarchy-agent install` (#317: with the `host_id` and
-//! `worker_id` the enrollment gave, #321) and by a person at the host, never by the pool. It is refused when group- or world-writable or owned by another
-//! user. Unknown keys are left alone (capacity caps are #333's, settings P4's), but
-//! `[envelope].agent_budget` and `[envelope].direct_network`, which reach the dispatcher
-//! (#371, #373), are read strictly. Any problem here is a local configuration error: the loop
-//! exits 78 and says why.
+//! `worker_id` the enrollment gave, #321), by a person at the host and by the person's
+//! `omarchy-agent runtime switch` there (#325), never by the pool. It is refused when
+//! group- or world-writable or owned by another user. Unknown keys are left alone
+//! (capacity caps are #333's), but `[envelope].agent_budget` and
+//! `[envelope].direct_network`, which reach the dispatcher (#371, #373), are read strictly.
+//! What the pool may narrow inside it — units, emulated lanes — and what it allows the pool
+//! to ask — diagnostics — is [`Policy`] (#325, design v2 §12). Any problem here is a local
+//! configuration error: the loop exits 78 and says why.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -124,10 +127,21 @@ pub struct Config {
     /// What install detected behind the socket (`set.engine`, #317): the lint holds a
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
     pub engine: Engine,
+    /// The engine the compose driver talks to (`set.runtime`, `docker` or `podman`): what
+    /// `runtime switch` moved the bundle to (#325). Absent — install writes none: it finds
+    /// a socket, and podman's speaks docker's API — the run loop asks the engine behind
+    /// the socket which it is ([`super::agent::Agent::identify_runtime`]).
+    pub runtime: Option<Runtime>,
+    /// The envelope's bounds on what the pool may narrow and ask (#325).
+    pub policy: Policy,
     /// A Mac's `omarchy` Colima VM (#320, `[vm] runtime = "colima"`), which the loop keeps
     /// running, sized and on time. `None` on Linux, and for Docker Desktop's or `OrbStack`'s
     /// VM, which the agent uses but never manages.
     pub vm: Option<Vm>,
+    /// agent.toml has `[vm]`, whatever its runtime (Colima, Docker Desktop, `OrbStack`):
+    /// the host is a Mac, whose sleep the agent holds off and reports (#329) and whose
+    /// runtime switch it refuses (#325), as it does on a Mac's build without `[vm]`.
+    pub mac: bool,
 }
 
 /// The `omarchy` VM as agent.toml describes it (#320, design v2 §19.2): its size is the
@@ -139,6 +153,66 @@ pub struct Vm {
     pub mem_gb: u32,
     pub disk_gb: u32,
     pub rosetta: bool,
+}
+
+/// The container engine behind the compose driver's socket: the drivers this binary
+/// carries are `compose/docker` and `compose/podman` (design v2 §15, v1 §10.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Runtime {
+    Docker,
+    Podman,
+}
+
+impl Runtime {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "docker" | "compose/docker" => Some(Runtime::Docker),
+            "podman" | "compose/podman" => Some(Runtime::Podman),
+            _ => None,
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Runtime::Docker => "docker",
+            Runtime::Podman => "podman",
+        }
+    }
+
+    /// The driver's name, as the report and `runtime switch` say it.
+    pub fn driver(self) -> String {
+        format!("compose/{}", self.word())
+    }
+}
+
+/// What the envelope says the pool may narrow and ask (design v2 §12, #325): the owner's
+/// own words at the host. The pool's settings only ever narrow inside it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Policy {
+    /// `max_units`: the most units the host gives, whatever the pool says.
+    pub max_units: Option<u32>,
+    /// `emulate`: the foreign architectures whose emulated lane may run; `None` (the key
+    /// absent) leaves it to detection, `[]` turns emulated lanes off.
+    pub emulate: Option<Vec<String>>,
+    /// `diagnostics`: whether the pool may ask for the dispatcher's last log lines (M10).
+    pub diagnostics: bool,
+    /// `drivers`: the drivers `runtime switch` may move the bundle to (`compose` names
+    /// both of this binary's).
+    pub drivers: Vec<String>,
+}
+
+impl Policy {
+    /// Whether the envelope lets the bundle run on `r`'s driver.
+    pub fn allows_driver(&self, r: Runtime) -> bool {
+        self.drivers
+            .iter()
+            .any(|d| d == "compose" || *d == r.driver())
+    }
+
+    /// Whether the envelope lets an emulated lane of `arch` run.
+    pub fn allows_lane(&self, arch: &str) -> bool {
+        crate::capacity::emulation::allowed(self.emulate.as_deref(), arch)
+    }
 }
 
 #[derive(Deserialize)]
@@ -172,6 +246,7 @@ struct SetPart {
     socket_cli: Option<PathBuf>,
     socket_mount: Option<PathBuf>,
     engine: Option<String>,
+    runtime: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -181,7 +256,15 @@ struct EnvelopePart {
     max_mem_gb: Option<u32>,
     agent_budget: Option<toml::Value>,
     direct_network: Option<bool>,
+    max_units: Option<u32>,
+    emulate: Option<Vec<String>>,
+    #[serde(default)]
+    diagnostics: bool,
+    drivers: Option<Vec<String>>,
 }
+
+/// The architectures a lane may be (design v2 §7.4): detection's own list (#338).
+pub(crate) use crate::capacity::emulation::ARCHES;
 
 /// An id the pool hands out (host and worker ids).
 fn is_id(s: &str) -> bool {
@@ -203,6 +286,62 @@ fn is_https_origin(s: &str) -> bool {
             && h.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
     })
+}
+
+impl Policy {
+    /// The envelope's bounds as agent.toml says them; an architecture the pool does not
+    /// build is refused.
+    fn of(e: &EnvelopePart) -> Result<Self, String> {
+        if let Some(bad) = e
+            .emulate
+            .iter()
+            .flatten()
+            .find(|a| !ARCHES.contains(&a.as_str()))
+        {
+            return Err(format!(
+                "agent.toml: envelope.emulate names {bad:?}, which is neither x86_64 nor aarch64"
+            ));
+        }
+        Ok(Policy {
+            max_units: e.max_units,
+            emulate: e.emulate.clone(),
+            diagnostics: e.diagnostics,
+            drivers: e
+                .drivers
+                .clone()
+                .unwrap_or_else(|| vec!["compose".to_owned()]),
+        })
+    }
+}
+
+impl Vm {
+    /// `[vm]`: the `omarchy` Colima profile, sized by the envelope; `None` for a VM the
+    /// agent uses but never manages (Docker Desktop's, `OrbStack`'s).
+    fn of(v: VmPart, e: &EnvelopePart) -> Result<Option<Self>, String> {
+        match v.runtime.as_str() {
+            "colima" => {
+                if let Some(p) = v.profile.filter(|p| p != crate::vm::PROFILE) {
+                    return Err(format!(
+                        "agent.toml: vm.profile {p:?}: the agent's VM is the {} profile",
+                        crate::vm::PROFILE
+                    ));
+                }
+                let (Some(cpus), Some(mem_gb)) = (e.max_cpus, e.max_mem_gb) else {
+                    return Err("agent.toml: [vm] runtime colima takes its size from envelope.max_cpus and envelope.max_mem_gb (install writes them)".into());
+                };
+                Ok(Some(Vm {
+                    cpus,
+                    mem_gb,
+                    disk_gb: v.disk_gb.unwrap_or(crate::vm::DISK_GB),
+                    rosetta: v.rosetta.unwrap_or(false),
+                }))
+            }
+            "docker-desktop" | "orbstack" => Ok(None),
+            other => Err(format!(
+                "agent.toml: vm.runtime {other:?} is none of colima, docker-desktop, orbstack"
+            )),
+        }
+    }
 }
 
 impl Config {
@@ -255,39 +394,22 @@ impl Config {
                 ))
             }
         };
+        let runtime = match f.set.runtime.as_deref() {
+            None => None,
+            Some(r) => Some(Runtime::parse(r).ok_or_else(|| {
+                format!("agent.toml: set.runtime {r:?} is neither \"docker\" nor \"podman\"")
+            })?),
+        };
+        let policy = Policy::of(&f.envelope)?;
         let socket_cli = need_path(f.set.socket_cli, "set.socket_cli")?;
         let socket_mount = match f.set.socket_mount {
             None => socket_cli.clone(),
             some => need_path(some, "set.socket_mount")?,
         };
+        let mac = f.vm.is_some();
         let vm = match f.vm {
             None => None,
-            Some(v) => match v.runtime.as_str() {
-                "colima" => {
-                    if let Some(p) = v.profile.filter(|p| p != crate::vm::PROFILE) {
-                        return Err(format!(
-                            "agent.toml: vm.profile {p:?}: the agent's VM is the {} profile",
-                            crate::vm::PROFILE
-                        ));
-                    }
-                    let (Some(cpus), Some(mem_gb)) = (f.envelope.max_cpus, f.envelope.max_mem_gb)
-                    else {
-                        return Err("agent.toml: [vm] runtime colima takes its size from envelope.max_cpus and envelope.max_mem_gb (install writes them)".into());
-                    };
-                    Some(Vm {
-                        cpus,
-                        mem_gb,
-                        disk_gb: v.disk_gb.unwrap_or(crate::vm::DISK_GB),
-                        rosetta: v.rosetta.unwrap_or(false),
-                    })
-                }
-                "docker-desktop" | "orbstack" => None,
-                other => {
-                    return Err(format!(
-                    "agent.toml: vm.runtime {other:?} is none of colima, docker-desktop, orbstack"
-                ))
-                }
-            },
+            Some(v) => Vm::of(v, &f.envelope)?,
         };
         Ok(Config {
             pool,
@@ -305,7 +427,10 @@ impl Config {
             direct_network: f.envelope.direct_network.unwrap_or(false),
             envelope,
             engine,
+            runtime,
+            policy,
             vm,
+            mac,
         })
     }
 
@@ -362,7 +487,7 @@ pub(crate) mod tests {
         format!(
             r#"pool = "https://pkgs.omarchy-pool.org"
 host_id = "h_test"
-worker_id = "w_test"
+worker_id = "m1-test-0a9z"
 [set]
 dir = "{}"
 work_root = "{}"
@@ -389,6 +514,8 @@ max_units = 3
         assert_eq!(c.project.as_deref(), Some("omarchy-host"));
         assert_eq!(c.task_subnets.as_deref(), Some("10.232.0.0/16"));
         assert!(c.envelope.allow_socket);
+        // No `[vm]`: not a Mac, so nothing of its sleep (#329).
+        assert!(!c.mac);
         // The design's budget, for etc/dispatcher.env (#371); the other two keep their defaults.
         assert_eq!(
             c.agent_budget,
@@ -467,6 +594,69 @@ max_units = 3
     }
 
     #[test]
+    fn the_envelope_bounds_what_the_pool_may_narrow_and_ask() {
+        let studio = include_str!("../../tests/fixtures/lint/envelope/studio.toml");
+        let c = Config::parse(&format!("worker_id = \"w_1\"\n{studio}")).unwrap();
+        assert_eq!(
+            c.policy,
+            Policy {
+                max_units: Some(11),
+                emulate: Some(vec!["x86_64".into()]),
+                diagnostics: false,
+                drivers: vec!["compose".into()],
+            }
+        );
+        assert!(c.policy.allows_lane("x86_64") && !c.policy.allows_lane("aarch64"));
+        assert!(c.policy.allows_driver(Runtime::Podman));
+        // No set.runtime (install writes none): the engine is asked which it is.
+        assert_eq!(c.runtime, None);
+        // No emulate key: detection decides; [] turns every emulated lane off.
+        let open = Config::parse(&format!(
+            "worker_id = \"w_1\"\n{}",
+            studio.replace("emulate      = [\"x86_64\"]\n", "")
+        ))
+        .unwrap();
+        assert!(open.policy.emulate.is_none() && open.policy.allows_lane("aarch64"));
+        let only_docker = Config::parse(&format!(
+            "worker_id = \"w_1\"\n{}",
+            studio.replace(
+                "drivers      = [\"compose\"]",
+                "drivers = [\"compose/docker\"]"
+            )
+        ))
+        .unwrap();
+        assert!(!only_docker.policy.allows_driver(Runtime::Podman));
+        for (from, to, why) in [
+            (
+                "emulate      = [\"x86_64\"]",
+                "emulate = [\"riscv64\"]",
+                "neither x86_64 nor aarch64",
+            ),
+            (
+                "driver       = \"compose\"",
+                "driver = \"compose\"\nruntime = \"lxc\"",
+                "neither \"docker\" nor \"podman\"",
+            ),
+        ] {
+            let e = Config::parse(&format!(
+                "worker_id = \"w_1\"\n{}",
+                studio.replacen(from, to, 1)
+            ))
+            .unwrap_err();
+            assert!(e.contains(why), "{why}: {e}");
+        }
+        let podman = Config::parse(&format!(
+            "worker_id = \"w_1\"\n{}",
+            studio.replace(
+                "driver       = \"compose\"",
+                "driver = \"compose\"\nruntime = \"podman\""
+            )
+        ))
+        .unwrap();
+        assert_eq!(podman.runtime, Some(Runtime::Podman));
+    }
+
+    #[test]
     fn a_macs_vm_takes_its_size_from_the_envelope() {
         let mac = include_str!("../../tests/fixtures/lint/envelope/mac.toml");
         let c = Config::parse(&format!("worker_id = \"w_1\"\n{mac}")).unwrap();
@@ -501,10 +691,15 @@ max_units = 3
             .unwrap_err();
             assert!(e.contains(why), "{why}: {e}");
         }
-        // Docker Desktop's VM is used, never managed.
-        let shared = mac.replace("runtime = \"colima\"", "runtime = \"docker-desktop\"");
-        let c = Config::parse(&format!("worker_id = \"w_1\"\n{shared}")).unwrap();
-        assert_eq!(c.vm, None);
+        assert!(c.mac);
+        // Docker Desktop's VM and OrbStack's are used, never managed; the host is a Mac all
+        // the same (#329).
+        for runtime in ["docker-desktop", "orbstack"] {
+            let shared = mac.replace("runtime = \"colima\"", &format!("runtime = {runtime:?}"));
+            let c = Config::parse(&format!("worker_id = \"w_1\"\n{shared}")).unwrap();
+            assert_eq!(c.vm, None, "{runtime}");
+            assert!(c.mac, "{runtime}");
+        }
     }
 
     #[test]

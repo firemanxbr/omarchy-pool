@@ -120,10 +120,11 @@ export async function holdsPasskey(env: Env, login: string): Promise<boolean> {
  * forcing a promotion past its evidence (#284). The door computes it from
  * the route and the body — `approve:<task>`, `block:package:<name>`,
  * `block:contributor:<login>`, `passkey:add`, `passkey:remove:<id>`,
- * `passkey:reset:<login>`, `promote:force:<from>:<to>[:<arch>]` — so an
- * answer made for one act decides no other.
+ * `passkey:reset:<login>`, `promote:force:<from>:<to>[:<arch>]`, a host's
+ * acts, and `any-host:<task>` — the project's copy of a package released to
+ * any host (#339, D35) — so an answer made for one act decides no other.
  */
-export const SUBJECT = new RegExp(String.raw`^(?:approve:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39}|promote:force:(?:${PROMOTED_RINGS.join("|")}):(?:${PROMOTED_RINGS.join("|")})(?::(?:${REPO_ARCHES.join("|")}))?|host:(?:resume|retire|retire-legacy):h_[0-9a-z]{10}|host:(?:cause|resume-all):[A-Za-z0-9-]{1,39})$`);
+export const SUBJECT = new RegExp(String.raw`^(?:approve:[1-9]\d{0,14}|any-host:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39}|promote:force:(?:${PROMOTED_RINGS.join("|")}):(?:${PROMOTED_RINGS.join("|")})(?::(?:${REPO_ARCHES.join("|")}))?|host:(?:resume|retire|retire-legacy):h_[0-9a-z]{10}|host:(?:cause|resume-all):[A-Za-z0-9-]{1,39})$`);
 
 /** A forced promotion's act (#284): the rings and the architecture it names, as the door and the Status page's button bind it. */
 export const forcedSubject = (from: string, to: string, arch?: string): string => `promote:force:${from}:${to}${arch ? `:${arch}` : ""}`;
@@ -132,6 +133,7 @@ export const forcedSubject = (from: string, to: string, arch?: string): string =
 function actOf(subject: string): { act: string; nothing: string } {
   const [kind, a, b, c, d] = subject.split(":");
   if (kind === "approve") return { act: `approving build #${a}`, nothing: "nothing was decided" };
+  if (kind === "any-host") return { act: `releasing build #${a} to any host`, nothing: "nothing was released" };
   if (kind === "block") return { act: `blocking ${b}`, nothing: "nothing was decided" };
   if (kind === "promote") return { act: `forcing ${b} into ${c}${d ? ` on ${d}` : ""}`, nothing: "nothing was queued" };
   // A host's acts (#322): the host's id, or the owner's login.
@@ -501,7 +503,7 @@ export async function handlePasskeyAssert(url: URL, request: Request, env: Env):
   const { c, rp } = who;
   const b = (await request.json().catch(() => null)) as { for?: unknown } | null;
   const subject = typeof b?.for === "string" && SUBJECT.test(b.for) ? b.for : null;
-  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id>, passkey:reset:<login>, promote:force:<from>:<to>[:<arch>], host:resume:<host>, host:retire:<host>, host:retire-legacy:<host>, host:cause:<login> or host:resume-all:<login>", code: "for" }, 400, NO_STORE);
+  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id>, passkey:reset:<login>, promote:force:<from>:<to>[:<arch>], host:resume:<host>, host:retire:<host>, host:retire-legacy:<host>, host:cause:<login>, host:resume-all:<login> or any-host:<task>", code: "for" }, 400, NO_STORE);
   if (!subject.startsWith("passkey:remove:")) {
     const no = maintainerRefusal(c);
     if (no) return no;
@@ -614,9 +616,10 @@ export type PasskeyGate = (assertion: unknown) => Promise<Confirmed | Response>;
  * in the same words as anywhere else.
  */
 export function webGate(request: Request, url: URL, env: Env, login: string, subject: string): PasskeyGate {
-  // The door's words: approve and block, or a promotion forced past its evidence (#284).
+  // The door's words: approve and block, a promotion forced past its evidence (#284), a host's acts (#322), a release to any host (#339).
   const [are, nothing] = subject.startsWith("promote:") ? ["a promotion forced past its evidence is", "nothing was queued"]
     : subject.startsWith("host:") ? ["a host's resume and retirement, the retirement of its legacy set, and a removal for cause, are", "nothing changed"]
+    : subject.startsWith("any-host:") ? ["a release to any host is", "nothing was released"]
     : ["approve and block are", "nothing was decided"];
   return async (assertion) => {
     if (browserSession(request).bearer) {

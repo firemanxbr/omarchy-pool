@@ -24,16 +24,32 @@
 //! - the host state (#344, [`pool`]) is the target, signed with the host key: from this
 //!   agent on `follow.latest` is read only from a pool from before #344, whose state
 //!   names no release (a rollback below it). It carries the open Updates and the host
-//!   orders ([`orders`]: `retire-legacy` and `reconcile-now`; P4 adds the rest and the
-//!   settings), whose answers ride the host report ([`report`]).
+//!   orders ([`orders`]: `retire-legacy` and `reconcile-now`), whose answers ride the host
+//!   report ([`report`]);
+//! - P4's host state (#325): the settings the pool may narrow inside the envelope
+//!   ([`settings`]: units and emulated lanes, applied to `run/capacity.json`), the other
+//!   host orders (`set-units`, `set-emulate`, `rotate-token`, `retry-release`,
+//!   `diagnostics`), all behind the host-side brake ([`brake`]), and the owner's runtime
+//!   switch at the host ([`switch`]). Seams: soak and freeze detection, and the `*_FILE`
+//!   secrets, are their own issues; `rotate-token` writes the token where enrollment does
+//!   (`enroll::write_worker_token`, through #371's `dispatcher_env`, the rest of the file
+//!   rendered as the loop renders it), which #327 moves.
 //!
 //! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
 //! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
 //! agent only when it exits, so the progress watchdog ([`cli`]) also ends a self-update's
-//! candidate that hangs past its health gate's deadline.
+//! candidate that hangs past its health gate's deadline. A restart of the VM recreates the
+//! dispatcher, so the brake counts it as one of its restarts (it never holds the keeper,
+//! whose own rate limit governs it), and the runtime switch, which moves between Linux
+//! engines, is refused there. It keeps the Mac awake while a task runs, and reports
+//! `asleep` before the Mac sleeps and again after it woke (#329, [`power`]): a sleeping
+//! host has zero free units.
 
+pub mod brake;
 pub mod config;
+pub mod settings;
 pub mod state;
+pub mod switch;
 
 pub(crate) mod compose;
 pub(crate) mod driver;
@@ -41,6 +57,7 @@ pub(crate) mod exec;
 pub(crate) mod journal;
 pub(crate) mod orders;
 pub(crate) mod pool;
+pub(crate) mod power;
 pub(crate) mod report;
 pub(crate) mod rollout;
 pub(crate) mod selfupdate;
@@ -52,7 +69,7 @@ pub(crate) mod vm;
 mod agent;
 pub(crate) mod cli;
 
-pub use cli::{logs, round, run, self_test, status};
+pub use cli::{logs, round, run, runtime_switch, self_test, status};
 
 // What install (#317) shares with the loop: the verifier, the release assets' names and
 // where they are, and the pinned tools.
@@ -70,3 +87,5 @@ pub(crate) fn now() -> i64 {
 mod engine_tests;
 #[cfg(test)]
 pub(crate) mod fake;
+#[cfg(test)]
+mod settings_tests;
