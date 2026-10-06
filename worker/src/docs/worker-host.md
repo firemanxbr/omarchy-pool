@@ -292,6 +292,29 @@ much of each the last hour spent. On a Mac, a restart of its VM counts as
 one of those restarts, though the brake never holds it. Restarting the
 agent resets none of it.
 
+**A soak is the owner's, at the host** (#326): `soak_minutes = 30` under
+`[envelope]` in `agent.toml` (0, the default, takes a release at once; at
+most 100, so the soak and its round fit inside the pool's two-hour grace)
+makes the host take a new release that long after its agent first saw the
+pool name it, so a bad one can be caught on another host first — a release
+that lands meanwhile waits its own soak, but the host is never kept more
+than 100 minutes behind. It covers the agent's own update
+too, unless the release's manifest sets `agent.urgent` (only a security
+release does). A rollback statement skips it and applies at once;
+**Reconcile now** never does. Meanwhile the pool keeps the host's
+registration out of the 426 gate until the soak ends (and the round's 15
+minutes after it), at most two hours after the deploy, unless the host
+holds the pool's release in quarantine; its page says where it stands at
+the gate and why, to its owner and the maintainers ([Runbook](/docs/runbook#a-new-maintainer-host), *Soak*).
+
+**The host watches the pool** (#326, freeze detection): every six hours
+its agent reads the tag of GitHub's latest release, and nothing else. If
+GitHub has shown a newer release than the pool names for more than a day
+(and no revocation or signed rollback explains it), the host's page and
+Status warn `pool-behind-github`: the pool may be held on an old release.
+The agent changes nothing for it — it follows only the pool and what is
+signed ([Runbook](/docs/runbook#a-new-maintainer-host), *Freeze detection*).
+
 **The runtime is the owner's, at the host** (#325): `omarchy-agent runtime
 switch compose/podman` (or `compose/docker`) moves the dispatcher to the
 other engine with the same guard as a release, and back if it fails there;

@@ -10,26 +10,22 @@
     "release_change_at": null,
     "restarts_hour": 0
   },
-  "legacy": {
-    "blocked": "the marker cannot be written: /srv/omarchy-pool: group- or world-writable (mode 775)",
-    "containers": 3,
-    "dir": "/srv/omarchy-pool",
-    "project": "omarchy-pool",
-    "running": 3,
-    "since": "2027-01-01T08:00:00Z",
-    "state": "running"
-  },
+  "legacy": null,
   "orders": [],
   "quarantine": [],
   "release": {
     "applied": "v1.0.0",
     "floor": "v1.0.0",
-    "github_latest": null,
+    "github_latest": "v1.2.0",
     "min_release": "v1.0.0",
-    "pool_behind_github": null,
-    "soak_minutes": 0,
-    "soaking_until": null,
-    "target": "v1.0.0"
+    "pool_behind_github": {
+      "github": "v1.2.0",
+      "pool": "v1.1.0",
+      "since": "2027-01-14T08:00:56Z"
+    },
+    "soak_minutes": 30,
+    "soaking_until": "2027-01-15T08:31:56Z",
+    "target": "v1.1.0"
   },
   "rollout": {
     "since": "2027-01-15T08:01:55Z",
@@ -37,11 +33,11 @@
     "target": null
   },
   "round": {
-    "at": "2027-01-15T08:01:55Z",
-    "detail": "host runs v1.0.0",
+    "at": "2027-01-15T08:01:56Z",
+    "detail": "v1.1.0 waits for the owner's soak until 2027-01-15T08:31:56Z (soak_minutes = 30); a rollback statement skips it, reconcile-now and an Update do not",
     "from": null,
-    "outcome": "ok",
-    "step": "commit"
+    "outcome": "held",
+    "step": "idle"
   },
   "runtime": {
     "driver": "compose/docker",

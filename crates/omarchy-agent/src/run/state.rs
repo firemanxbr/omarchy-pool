@@ -1,8 +1,9 @@
 //! `state.json` (design v2 §16.1, §16.2): what the agent knows across restarts — the trust
 //! floor, the merged `min_release` and `revoked`, the last accepted rollback statement, the
 //! rollout in flight, quarantines, the last round, the poll schedule, the host orders
-//! (#344): the ids taken, their answers and a `retire-legacy` in flight — and (#325) the
-//! settings the pool narrowed, the brake's counters, and the owner's runtime switch.
+//! (#344): the ids taken, their answers and a `retire-legacy` in flight —, (#325) the
+//! settings the pool narrowed, the brake's counters, and the owner's runtime switch, and
+//! (#326) the owner's soak of the release the pool names and what GitHub last showed.
 //!
 //! Written before each step acts, atomically (a temporary file, fsync, rename), so a
 //! restart anywhere resumes where it was. Read leniently (#316): unknown fields are
@@ -68,6 +69,12 @@ pub struct State {
     /// The owner's runtime switch in flight (#325), and how the last one ended.
     pub switch: Option<super::switch::Switch>,
     pub switch_last: Option<super::switch::SwitchEnd>,
+    /// The owner's soak of the release the pool names (#326): kept here so a restart does
+    /// not start it again.
+    pub soak: Option<super::soak::Soak>,
+    /// Freeze detection (#326): GitHub's latest release as last read, and since when the
+    /// pool names an older one.
+    pub github: super::freeze::GitHub,
 }
 
 impl Default for State {
@@ -94,6 +101,8 @@ impl Default for State {
             brake: super::brake::Brake::default(),
             switch: None,
             switch_last: None,
+            soak: None,
+            github: super::freeze::GitHub::default(),
         }
     }
 }
@@ -359,6 +368,8 @@ const LENIENT: &[&str] = &[
     "brake",
     "switch",
     "switch_last",
+    "soak",
+    "github",
 ];
 
 /// The lenient parser `load` uses (and the fuzz target).
@@ -559,8 +570,10 @@ mod tests {
             [
                 "agent_skip",
                 "brake",
+                "github",
                 "orders",
                 "settings",
+                "soak",
                 "switch",
                 "switch_last"
             ]

@@ -40,6 +40,13 @@
  *   Reconcile now — Retry release, Rotate token, Diagnostics — and each
  *   order's value and answer on the journal, a diagnostics order's lines
  *   read in place.
+ * - Its soak and the gate (#326, design v2 D16, §5.5, §18.1): the soak its
+ *   owner set and until when the release the pool names waits on it; where
+ *   its registration stands at the pool's 426 gate and why — claiming through
+ *   its soak, within the rollout's grace, or refused, with what ended the
+ *   grace (the soak over, the two hours after the deploy, a quarantine) —;
+ *   and, for anyone, a warning when its agent reports the pool behind GitHub
+ *   (freeze detection): GitHub has shown a newer release for over a day.
  *
  * Anyone sees the name, the owner, the status, the architectures and the
  * release; the capacity, the hostname and the host key's fingerprint are its
@@ -74,6 +81,8 @@ const CSS = String.raw`
   .hp-note { margin: 12px 0 0; font-size: 12.5px; color: var(--dim); max-width: 760px; }
   .hp-stopped { margin: 0; padding: 10px 12px; border: 1px solid var(--red); font-size: 13px; max-width: 760px; overflow-wrap: anywhere; }
   .hp-stopped:empty { display: none; }
+  .hp-freeze { margin: 0; padding: 10px 12px; border: 1px solid var(--status-warn); font-size: 13px; max-width: 760px; overflow-wrap: anywhere; }
+  .hp-freeze:empty { display: none; }
   .hp-blocked { color: var(--red); }
   .hp .mono { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
   .hp-cap { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
@@ -96,6 +105,7 @@ const BODY = String.raw`
       <p class="hp-id" id="hp-id"></p>
       <p class="hp-lede" id="hp-lede"></p>
       <p class="hp-stopped" id="hp-stopped" role="status"></p>
+      <p class="hp-freeze" id="hp-freeze" role="status"></p>
     </section>
 
     <div class="op-stats" id="hp-stats"></div>
@@ -187,7 +197,7 @@ const SCRIPT = String.raw`
     api("GET", BASE).then(function (d) {
       if (d.__status === 404) { $("#hp-name").textContent = ID; $("#hp-lede").textContent = "no such host: it was never enrolled"; endSkeleton(); return; }
       H = d.host; PK = d.passkey || {};
-      draw(d.host, d.leases || [], d.pool || {});
+      draw(d.host, d.leases || [], d.pool || {}, d.update || null);
       drawOps(d.host, d.can || { why: {} });
       drawSettings(d.host, d.can || { why: {} });
       drawOrders(d.host, d.orders, d.can || { why: {} });
@@ -195,7 +205,19 @@ const SCRIPT = String.raw`
       TIMER = setTimeout(function () { if (!document.hidden) load(); }, 30000);
     }).catch(function (e) { noAnswer("host", e, "#hp-lede"); });
   }
-  function draw(h, leases, pool) {
+  // Its soak (#326): the minutes its owner set at the host, and until when the release the pool names waits on it.
+  function soakWords(h) {
+    var k = h.soak;
+    if (!k || !k.minutes) return '<span class="muted">none — a new release goes at its next poll</span>';
+    return esc(String(k.minutes)) + " minutes" + (k.until ? (Date.parse(k.until) > Date.now() ? " — " + esc(h.release_target || "the pool's release") + " waits until " + when(k.until) : " — over " + when(k.until) + ": its round brings " + esc(h.release_target || "the release")) : "") + '; a rollback statement skips it, Reconcile now does not';
+  }
+  // Where its registration stands at the 426 gate (#326): claiming through its soak, within the grace, or refused, and why.
+  function gateLine(u) {
+    if (!u) return '<span class="muted">its registration has not claimed with a release yet</span>';
+    if (!u.outdated) return '<span class="muted">it runs the pool\'s release</span>';
+    return u.required ? '<span class="hp-blocked">' + esc(u.words || "refused with 426") + "</span>" : esc(u.words || "");
+  }
+  function draw(h, leases, pool, update) {
     document.title = h.name + " · Host · omarchy-pool";
     $("#hp-name").textContent = h.name;
     var p = PILL[h.status] || ["na", h.status];
@@ -207,6 +229,9 @@ const SCRIPT = String.raw`
     if ((h.status === "suspended" || h.status === "retired") && h.status_by) stopped.push(esc(h.status === "suspended" ? "Suspended" : "Retired") + " by " + personLink(h.status_by) + (h.status_at ? " " + when(h.status_at) : "") + (h.status_reason ? ": " + esc(h.status_reason) : "") + (h.status === "suspended" ? ". It claims nothing until " + personLink(h.owner) + " resumes it." : ". A new install enrolls a new host."));
     if (h.claims_stopped_at && h.status !== "retired") stopped.push("Its claims stopped " + when(h.claims_stopped_at) + ": " + esc(NOT_LISTED) + ' (<a href="/docs/governance">factory/MAINTAINERS.toml</a>). Its running tasks finish; listed again, ' + personLink(h.owner) + ' resumes their hosts on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>.');
     $("#hp-stopped").innerHTML = stopped.join("<br>");
+    // Freeze detection (#326): its agent says GitHub has shown a newer release than the pool names for over a day; it acts on nothing.
+    var fz = h.pool_behind_github;
+    $("#hp-freeze").innerHTML = fz ? "Pool behind GitHub: GitHub's latest release has been " + esc(fz.github) + " since " + when(fz.since) + " while the pool names " + esc(fz.pool) + ' — a pool held on an old release (freeze detection). Its agent changes nothing for it: check the pool\'s deploys (the runbook\'s <a href="/docs/runbook#a-new-maintainer-host">A new maintainer host</a>, Freeze detection).' : "";
     var c = h.capacity;
     $("#hp-stats").innerHTML = c ? [
       stat("CPUs", num(c.cpus), "memory " + num(c.mem_gb) + " GB"),
@@ -230,6 +255,9 @@ const SCRIPT = String.raw`
         kv("Pool cap", capWords(h)),
         kv("Reserving", h.reserving_task ? 'for <a href="/build/' + esc(h.reserving_task) + '">#' + esc(h.reserving_task) + '</a> since ' + when(h.reserving_since) + ': it takes nothing else but pool jobs until its units fit it' : '<span class="muted">no</span>'),
         kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + ")" : "")),
+        kv("Soak", soakWords(h)),
+        kv("Claims", gateLine(update)),
+        kv("GitHub", h.soak && h.soak.github_latest ? "its latest release is " + esc(h.soak.github_latest) + ", as its agent read it" : '<span class="muted">not read yet</span>'),
         kv("Last round", round),
         kv("Agent", esc(h.agent_version || "?") + (h.provider ? " · " + esc(h.provider) + (h.model ? " " + esc(h.model) : "") : "")),
         kv("Reported", when(h.reported_at)),
@@ -435,6 +463,19 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.asleep", "host.asleep_since", "leases", "pool.version"] },
       { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.capacity.sandbox", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
       { path: "/api/v1/hosts/h_nobody0000", status: 404 },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    // Its soak and the gate (#326): the soak its owner set and until when, where its registration stands at the 426 gate and why, and —
+    // for anyone — the warning when its agent reports the pool behind GitHub (freeze detection).
+    id: "host.soak",
+    page: `/hosts/${F.host}`,
+    anchor: ['id="hp-freeze"'],
+    script: ["function soakWords(h)", "function gateLine(u)", '"Soak"', '"Claims"', '"GitHub"', "h.pool_behind_github", "Pool behind GitHub", 'href="/docs/runbook#a-new-maintainer-host">A new maintainer host</a>, Freeze detection', "u.required", "u.words"],
+    reads: [
+      { path: `/api/v1/hosts/${F.host}`, fields: ["host.pool_behind_github", "pool.deployed_at"] },
+      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.soak", "update"] },
     ],
     visible: EVERYONE,
   },

@@ -20,9 +20,12 @@
 //!   or is explicitly unreachable. Then `pending` goes and the 3 newest versions stay.
 //! - The agent it rolled back to records the version as skipped until a higher one and
 //!   reports `agent-rollback`.
+//! - The owner's soak (#326, [`super::soak`]) holds the update with its release, unless the
+//!   manifest sets `agent.urgent` (only a security release does): then the agent updates
+//!   itself at once, and the release still waits.
 //!
-//! Seams: soak and `agent.urgent` (P4); the unit file and launchd plist are written by
-//! `install` (#317) — `omarchy-agent.service` beside this file is the unit it writes.
+//! Seams: the unit file and launchd plist are written by `install` (#317) —
+//! `omarchy-agent.service` beside this file is the unit it writes.
 //! The host report (#321) carries `agent-rollback` from the journal (or a sticky field),
 //! not from `state.round`, which the next poll overwrites. The deadline is the old
 //! agent's wall clock (as the issue says): a host suspended through the window rolls a
