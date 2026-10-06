@@ -21,6 +21,21 @@
 #     rootless podman behind pasta, a service of the host's answers through
 #     pasta's guest-mapped address exactly when pasta maps it (podman 5.3 on),
 #     which preflight refuses with containers.conf's setting;
+#   - the probe the way a task runs (#373): on a network made like a task's,
+#     behind its egress sidecar — the worker image's egress role, started as
+#     the dispatcher starts one, with its deny list (the task subnets, this
+#     machine's own addresses) — the metadata address, this machine's router,
+#     LAN and own addresses and the network's gateway are unreachable straight
+#     and refused through the sidecar, and GitHub answers through it, so
+#     preflight's egress check passes on rootful docker and rootless podman
+#     alike; and it still fails where a task could reach what it must not: a
+#     network made without --internal reaches the LAN, and a public address of
+#     the host's the sidecar was not given (a stand-in: GitHub's) answers
+#     through it until the sidecar is given it. The sidecar's image is
+#     WORKER_IMAGE (ci.yml's image job passes the worker image it built), else
+#     a stand-in built here: this commit's `pkg-repo egress` on the Arch base
+#     the worker image is built from, started as its entrypoint starts the
+#     egress role (the worker image itself needs the Arch mirrors to build);
 #   - the dispatcher's own task network on the same engine (pkg-repo's
 #     dispatch::engine test, through the pinned docker CLI the agent's tests
 #     fetched, the version the worker image runs): internal, no gateway
@@ -35,8 +50,10 @@
 # the runbook's host install. Needs a Linux engine: `docker` (rootful,
 # /var/run/docker.sock) or `podman` (rootless, its API socket; started here
 # when it is not); OMARCHY_AGENT_ENGINE_SOCKET names another socket (a
-# podman machine's). CI runs both (ci.yml); by hand:
-# `bash tests/agent-install.sh docker|podman`.
+# podman machine's); and the internet (GitHub, through the egress sidecar).
+# CI runs both (ci.yml), and the image job again with the worker image it
+# built; by hand: `bash tests/agent-install.sh docker|podman`, with
+# WORKER_IMAGE=<image> to use a worker image instead of the stand-in.
 set -euo pipefail
 root="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "$root"
@@ -69,17 +86,50 @@ export OMARCHY_AGENT_ENGINE_SOCKET="$socket"
 # never sees: no drop there.
 ipt() { if [[ $EUID -eq 0 ]]; then iptables -w "$@"; else sudo -n iptables -w "$@"; fi; }
 drop=(INPUT -s 10.197.9.240/28 -j DROP)
+dropped="" standin="" ctx=""
+cleanup() {
+  [[ -z "$dropped" ]] || ipt -D "${drop[@]}" 2>/dev/null || true
+  [[ -z "$standin" ]] || cli rmi -f "$standin" >/dev/null 2>&1 || true
+  [[ -z "$ctx" ]] || rm -rf "$ctx"
+}
+trap cleanup EXIT
 rootful() { ! docker -H "unix://$socket" info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q name=rootless; }
 if [[ "$engine" == docker ]] && rootful && ipt -S INPUT >/dev/null 2>&1; then
   ipt -I "${drop[@]}"
-  trap 'ipt -D "${drop[@]}" 2>/dev/null || true' EXIT
+  dropped=1
   export OMARCHY_TEST_INPUT_DROP=10.197.9.240/28
+fi
+
+# The egress sidecar's image (#373): WORKER_IMAGE, or a stand-in made here from this commit's
+# `pkg-repo egress`, on the Arch base the worker image is built from (its glibc is the newest),
+# started as factory/image/entrypoint.sh starts the egress role. Built with the engine's own CLI,
+# into the store its socket serves.
+cli() { if [[ "$engine" == podman ]]; then podman "$@"; else docker -H "unix://$socket" "$@"; fi; }
+if [[ -n "${WORKER_IMAGE:-}" ]]; then
+  export OMARCHY_EGRESS_IMAGE="$WORKER_IMAGE"
+else
+  cargo build --locked -q -p pkg-repo
+  ctx="$(mktemp -d)"
+  cp target/debug/pkg-repo "$ctx/pkg-repo"
+  strip "$ctx/pkg-repo" 2>/dev/null || true
+  cat > "$ctx/entrypoint" <<'SH'
+#!/bin/sh
+# A stand-in for factory/image/entrypoint.sh, its egress role only (#336).
+[ "$OMARCHY_WORKER_ROLE" = egress ] || { echo "egress stand-in: OMARCHY_WORKER_ROLE=egress only" >&2; exit 2; }
+exec pkg-repo egress "$@"
+SH
+  chmod 755 "$ctx/pkg-repo" "$ctx/entrypoint"
+  printf 'FROM %s\nCOPY pkg-repo entrypoint /usr/local/bin/\nENTRYPOINT ["/usr/local/bin/entrypoint"]\n' "$ARCHLINUX_BASE" > "$ctx/Containerfile"
+  standin="localhost/omarchy-egress-standin:$$"
+  cli build -q -t "$standin" -f "$ctx/Containerfile" "$ctx" >/dev/null
+  export OMARCHY_EGRESS_IMAGE="$standin"
 fi
 
 # One at a time: each probe sweeps every probe container and network it finds.
 cargo test --locked -p omarchy-agent --lib -- --ignored --exact --test-threads=1 --nocapture \
   install::tests::engine_tests::real_engine_egress_probe_and_legacy_project \
-  install::tests::engine_tests::real_engine_a_tasks_gateway_and_the_hosts_loopback
+  install::tests::engine_tests::real_engine_a_tasks_gateway_and_the_hosts_loopback \
+  install::tests::engine_tests::real_engine_the_probe_runs_the_way_a_task_runs_and_fails_where_a_task_could_reach_the_lan
 # The dispatcher's task network on the same engine, through the pinned docker CLI on this socket
 # (#372): made the way the probe above made its own. The CLI is the one the agent's tests above
 # fetched (OMARCHY_AGENT_DOCKER_CLI, or the release's pin for this platform under the temp
