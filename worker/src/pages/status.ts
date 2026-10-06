@@ -95,6 +95,8 @@ const CSS = String.raw`
   .st-mark { width: 14px; height: 14px; flex: none; background: var(--dim); }
   .st-mark.ok { background: var(--green); } .st-mark.warn { background: var(--amber); } .st-mark.fail { background: var(--red); }
   .st-lede { margin: 0; font-size: 13.5px; color: var(--muted); max-width: 72ch; }
+  /* The solo-maintainer exception (#394): a line in the hero while factory/MAINTAINERS.toml's [solo] is in force, for everyone. */
+  .st-solo { margin: 10px 0 0; padding: 8px 12px; border-left: 3px solid var(--amber); background: var(--bg-deep); font-size: 12.5px; color: var(--muted); max-width: 80ch; } .st-solo[hidden] { display: none; } .st-solo a { color: inherit; text-decoration: underline; }
   .st-tiles { flex: 1 1 360px; grid-template-columns: 1fr 1fr; }
   .st-sec { display: grid; gap: 12px; }
   .st-sec-h { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
@@ -210,6 +212,7 @@ const BODY = String.raw`
       <p class="op-eyebrow">Status</p>
       <h1 class="op-hero st-title"><span class="st-mark" id="st-mark" aria-hidden="true"></span><span id="headline">Checking the rings…</span></h1>
       <p class="st-lede" id="st-lede">Every sync, release, check and decision is on the record.</p>
+      <p class="st-solo" id="st-solo" hidden></p>
     </div>
     <div class="op-stats st-tiles">
       <a class="op-stat" href="#sources"><span class="k">Last sync</span><b class="n" id="t-sync-n">—</b><span class="s" id="t-sync-s">&nbsp;</span></a>
@@ -657,6 +660,21 @@ __CHARTS__
       .then(function () { drawRollbackTile(); if (STATS) drawChecks(STATS); });
     api("GET", "/api/v1/events?kind=fast-track&limit=50").then(function (d) { FAST = d.events || []; drawFast(); }).catch(function (e) { if (!FAST) $("#adv-fast").textContent = noAnswer("journal", e); });
   }
+  // The solo-maintainer exception (#394), every five minutes from the governance answer (GET /factory/maintainers' solo, an edge copy of a
+  // minute): while factory/MAINTAINERS.toml's [solo] is in force, one line — who, since when, why, how many decisions were self-reviewed,
+  // the list — and the second opinion beside it (D36, unchanged): with one host and one model, the audits of the project's copies record no
+  // independence, and the line counts them. Without the table, nothing is said.
+  function loadSolo() {
+    api("GET", "/api/v1/factory/maintainers").then(function (d) {
+      var s = d && d.solo, el = $("#st-solo"); if (!el) return;
+      el.hidden = !s;
+      if (!s) { el.innerHTML = ""; return; }
+      var n = Number(s.self_reviewed || 0), au = s.audits || { publish_bound: 0, none: 0 };
+      el.innerHTML = '<b>Solo-maintainer exception</b> since ' + esc(s.since) + ': ' + '<a href="' + userHref(s.maintainer) + '">@' + esc(s.maintainer) + '</a> builds, reviews and approves their own packages — ' + esc(s.reason) + '. '
+        + '<a href="' + esc(s.page || "/docs/governance#solo") + '">' + num(n) + ' decision' + (n === 1 ? '' : 's') + ' self-reviewed</a>, each marked so on the record. '
+        + 'The second opinion is unchanged: ' + (au.publish_bound ? num(au.none) + ' of ' + num(au.publish_bound) + ' audits of the project\'s copies since then recorded <code>independent: none</code>' : 'no audit of the project\'s copies since then') + ' — with one host and one model, an audit is the same model on the same machine.';
+    }).catch(function () { /* the line is said once the answer comes; the rest of the page does not wait for it */ });
+  }
   // The security fixes the fast-track pulled into a ring this week, a fix counted once (payload.fixes: the security layer's; a factory build the trial installed takes the same lane and is no fix).
   function drawFast() {
     var week = Date.now() - 7 * 86400e3, n = (FAST || []).filter(function (e) { return Date.parse(e.created_at) > week && e.payload && Array.isArray(e.payload.fixes); }).reduce(function (s, e) { return s + e.payload.fixes.length; }, 0);
@@ -1067,6 +1085,7 @@ __CHARTS__
   drawChips(); loadJournal(); setInterval(refreshJournal, 60000);
   loadFactory(); setInterval(loadFactory, 60000);
   loadEvidence(); setInterval(loadEvidence, 300000);
+  loadSolo(); setInterval(loadSolo, 300000);
   loadStableTile(); loadAdvisories();
   renderService(); setInterval(renderService, 60000);
   liveStats(render, 60000, statsDown);
@@ -1117,6 +1136,17 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['<p class="op-eyebrow">Status</p>', 'id="st-mark"', 'id="headline"', 'id="st-lede"', "Every sync, release, check and decision is on the record."],
       script: ['"#headline"', "problemsOf(d)", '"All rings healthy"', '" not healthy"', 'latest(d.latest, "health", ring, arch)', "SERVICE.down", "liveStats(render, 60000, statsDown)", '"The pool\'s numbers did not answer"', "reasonLine(e)", '"No ring released yet"', '" sources not on time"', "writableTokens(d)", '"A pool token can start workflows"'],
       reads: [{ path: stats, fields: ["latest", "latest.0.kind", "latest.0.status", "latest.0.ring", "latest.0.source", "latest.0.created_at", "coverage.0.last_sync", "coverage.0.late"] }],
+      visible: EVERYONE,
+    },
+    {
+      // The solo-maintainer exception (#394): while factory/MAINTAINERS.toml's [solo] is in force, a line in the hero — who, since when, why, how
+      // many decisions were self-reviewed, linking to their list — and the second opinion beside it (D36, unchanged): the audits of the project's
+      // copies since then and how many recorded no independence. Nothing without the table.
+      id: "status.solo",
+      page: "/status",
+      anchor: ['<p class="st-solo" id="st-solo" hidden></p>'],
+      script: ["function loadSolo()", '"/api/v1/factory/maintainers"', "d && d.solo", "<b>Solo-maintainer exception</b> since ", "s.self_reviewed", "self-reviewed</a>, each marked so on the record.", "au.publish_bound", "au.none", "<code>independent: none</code>", "with one host and one model", "setInterval(loadSolo, 300000)"],
+      reads: [{ path: "/api/v1/factory/maintainers", fields: ["solo"] }],
       visible: EVERYONE,
     },
     {

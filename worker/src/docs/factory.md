@@ -72,7 +72,10 @@ verify and attest the package faster and approve it with more confidence.
    (`factory/bin/audit-pkgbuild`, `factory/prompts/audit.md`) and attaches
    `audit.json` / `audit.md` to the evidence. The Review page shows the
    verdict (`ok`, `warn`, `block`); nothing acts on it, the maintainer does.
-6. **A maintainer claims it — never their own package.** On the Review
+6. **A maintainer claims it — never their own package** (but the one
+   maintainer the governance file's solo-maintainer exception names while it
+   is in force, on their own packages, each decision marked self-reviewed:
+   #394, [/docs/governance#solo](/docs/governance#solo)). On the Review
    page, a maintainer (`factory/MAINTAINERS.toml`) claims a package that is
    ready (*Build by the project* on a build's page is the same door): the
    project builds it again on a review worker, with the agent the maintainer
@@ -622,7 +625,9 @@ busy, not gone); when only
 the requester's hosts have one, it waits, and Review offers another maintainer *Release to any host* at
 once, with their passkey (`POST /factory/tasks/:id/any-host`,
 `any-host:<task>`), on the task (`params.any_host`), the journal and the
-record. An audit — in a fresh container with its own agent sidecar, by
+record — except for the packages of the maintainer the solo-maintainer
+exception names (#394): their own hosts take that copy, with no release, and
+Review says why. An audit — in a fresh container with its own agent sidecar, by
 construction — leaves the machine that built what it audits (its
 registration, or one of the same owner's the pool cannot tell apart from it:
 two registrations are apart only with different owners, or as two hosts'

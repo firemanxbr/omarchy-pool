@@ -83,7 +83,7 @@ secret). Everything travels in the `Authorization` header over TLS only.
 | Host | the workers: every one is provided by a maintainer — the project's compute is its maintainers' hosts. A maintainer's host is trusted by the same act that makes them a maintainer | enrolled by a maintainer listed in `factory/MAINTAINERS.toml` at the last sync (*Maintainer hosts* below, #321), owned by their GitHub user id, confirmed by fingerprint; a legacy registration (`POST /factory/workers`) keeps claiming until a maintainer revokes it. A removal from the list stops its claims and lets its running tasks finish (*Stopping a host* below, #322) |
 | Community worker | none: the tier ends (#307). The registrations made before #331 — expected to be the maintainers' own, which a one-time query of the last 90 days checks (recorded on #331) — keep their claims (their owner's packages; anyone's when shared) until they retire | no new one |
 | Project worker | pool jobs (sync, render, promote, health, security, gc) and the rebuild of approved packages — never a build without evidence and review | two maintainers' word (`POST /factory/workers/:id/trust`): one proposes, another confirms, never the worker's owner; the trust is a signed record under `workers/<id>/`; one maintainer takes it back. The Review page names the worker and host behind every build |
-| Maintainer | provide the project's hosts, approve the project's staged builds — never their own package — settle categories, block with a reason, vouch for a worker with a second maintainer, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
+| Maintainer | provide the project's hosts, approve the project's staged builds — never their own package, but the one maintainer the file's `[solo]` table names while it is there (#394, *The solo-maintainer exception* below) — settle categories, block with a reason, vouch for a worker with a second maintainer, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
 | Agent key | drafts and corrects PKGBUILDs on a community worker; audits staged builds on a project worker | the worker owner's own key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` or `XAI_API_KEY` — set in the container's environment; the pool and GitHub hold none. The worker reports only the provider and model name (`anthropic/claude-sonnet-5`) for the Workers page. An audit's report is evidence a maintainer reads, never something the pool acts on |
 
 ## Isolation
@@ -1033,6 +1033,50 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   whose agent says it sleeps (#329) has no lane for it until it wakes, so
   the rebuild may be offered for release meanwhile; the release still takes
   another maintainer's passkey, and a sleeping host is never where it runs.
+  The solo-maintainer exception lifts this for the maintainer it names, on
+  their own packages only (#394, below): their own host builds the copy,
+  with no release.
+
+### The solo-maintainer exception (#394)
+
+The two-person rule — nobody decides on a package they brought, and the
+project's copy of it is not built on their host (D35) — **does not hold for
+one named maintainer while `factory/MAINTAINERS.toml` carries a `[solo]`
+table naming them** (a maintainer decision of 2026-10-06: one active
+maintainer and one host, the Studio, until more maintainers are active).
+What that changes, and what it does not:
+
+- **For the named maintainer, on a package they brought**: the review's
+  doors (claim, approve, request changes, reject, release, cancel) and the
+  adoption of their own package let them through where they answer
+  `conflict_of_interest` for anyone else, and their own hosts build the
+  project's copy with no release to any host. Users then get a package one
+  person stood behind — the maintainer who brought it and approved it — built
+  by the project's agent on the project's host, through the gate and the
+  trial as every package. That is the risk the exception accepts in the open.
+- **What still holds**: approve, block and a forced promotion take that
+  maintainer's passkey in the browser (#271), never a token or an agent
+  alone; no contributor's bytes ship (the project's rebuild is what is
+  approved); the second opinion still runs and records its independence
+  (D36) — with one host and one model, `independent: none`, which Status
+  counts; nobody else decides on anybody's package differently: another
+  maintainer's own packages, and their hosts, are under the rule as before,
+  and a contributor's package is decided as it always was.
+- **On the record, every time**: each decision taken under the exception
+  carries `solo_exception` (who, since when, why) in the record the pool
+  signs, its journal line says *self-reviewed (solo-maintainer exception)*,
+  and Review, the build's page, the package's page and Status mark it;
+  `GET /api/v1/factory/self-reviewed` lists them all, and the list outlives
+  the exception.
+- **The switch is the governance file only**: the brain reads `[solo]` on
+  `main` with the list, every ten minutes; no route, setting or database row
+  turns it on (the table it writes, `governance_solo`, is the sync's copy of
+  the file, as `factory_maintainers` is). `check-governance` refuses a table
+  that is not exactly one maintainer of the list, a date and a reason on one
+  line, and the brain applies nothing it refuses — a table that does not
+  parse is no exception. Turning it on or off is a governance pull request,
+  CODEOWNERS-reviewed like any change to the file; deleting the table brings
+  the previous rules back unchanged at the next sync.
 
 ### Where secrets live on a maintainer host
 
@@ -1147,7 +1191,7 @@ passed without the maintainer's passkey.
 
 | Door | What it ships | What guards it |
 |---|---|---|
-| Approve — Review, a build's page, an agent's draft confirmed | the project's build, into edge (rc and stable too when its trial passed) | the maintainer's passkey, in the browser (#257, #271); never their own package, never a contributor's bytes |
+| Approve — Review, a build's page, an agent's draft confirmed | the project's build, into edge (rc and stable too when its trial passed) | the maintainer's passkey, in the browser (#257, #271); never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) —, never a contributor's bytes |
 | The enqueue job — `POST /factory/enqueue` with its job token | a recipe on `main`, built by a project worker and published into edge | a job token, issued only to a project worker at claim (`factory:write`); the recipe is a reviewed commit on `main` |
 | A build queued by hand — `POST /factory/enqueue`, a maintainer's session or `omc_` token | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`, #284); the dry run's job token has no pool and no ring scope, whatever recipe it names |
 | A sync — the scheduler's, or a job by hand | upstream's packages, into edge (the OPR's channels into their rings) | every package verified against its upstream's keyring |

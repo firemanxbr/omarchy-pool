@@ -512,7 +512,7 @@ const PACKAGE_SCRIPT = String.raw`
     var sentBack = function (a) { var k = status(a) === "reviewing" ? claimOf(a) : null; return k ? waitsForNative(k.project) : ""; }, waits = arches.map(sentBack).filter(Boolean)[0] || "";
     var claimAt = waits ? ["warn", "native worker"] : anyT(["reviewing"]) ? ["run", "project rebuilding"] : anyT(["building"]) ? ["run", "new version building"] : ["warn", "rebuild staged"];
     if (b && !approval) { reviewTone = "na"; reviewSum = withdrawn ? "withdrawn by the block" : "never reviewed · blocked"; }
-    else if (approval) { reviewTone = approval.decision === "approved" ? "ok" : "fail"; reviewSum = "@" + approval.by + (approval.decision === "approved" ? " · rebuilt · approved" : " · " + approval.decision); }
+    else if (approval) { reviewTone = approval.decision === "approved" ? "ok" : "fail"; reviewSum = "@" + approval.by + (approval.decision === "approved" ? " · rebuilt · approved" : " · " + approval.decision) + (approval.solo_exception ? " · self-reviewed" : ""); }
     else if (inReview === "in-review") { reviewTone = claimAt[0]; reviewSum = STATE[inReview][1] + " · " + claimAt[1]; reviewWhy = waits; reviewFull = waits ? STATE[inReview][1] + " · " + waits : ""; }
     else if (inReview === "ready") { reviewTone = "wait"; reviewSum = STATE[inReview][1] + " · waiting for a claim"; }
     else if (stood) { reviewTone = "ok"; reviewSum = "@" + stood.by + " · approved " + (stood.version || ""); }
@@ -804,7 +804,8 @@ const PACKAGE_SCRIPT = String.raw`
       if (req.created_at || pk.created_at) ev.push([req.created_at || pk.created_at, "var(--dim)", "requested", pk.owner ? "by @" + pk.owner : ""]);
       ((ST && ST.chains) || []).forEach(function (c) {
         var a = c.approval || c.withdrawn, t = c.project || c.contributor || {}, p = c.publish;
-        if (a) ev.push([a.created_at, a.decision === "approved" ? "var(--green)" : "var(--red)", a.decision, "by @" + a.by + " · " + (a.version || t.version || "") + " · " + (a.arch || t.arch)]);
+        // A decision its requester took under the solo-maintainer exception (#394): said on the record, as the record says it.
+        if (a) ev.push([a.created_at, a.decision === "approved" ? "var(--green)" : "var(--red)", a.decision, "by @" + a.by + (a.solo_exception ? " · self-reviewed (solo-maintainer exception)" : "") + " · " + (a.version || t.version || "") + " · " + (a.arch || t.arch)]);
         if (a && a.withdrawn_at && !b) ev.push([a.withdrawn_at, "var(--dim)", "withdrawn", "by @" + (a.withdrawn_by || "a maintainer")]);
         if (p && p.status === "done") ev.push([p.finished_at || p.created_at, "var(--edge)", "entered edge", "publish job #" + p.id + " · " + p.arch]);
         else if (p && (p.status === "queued" || p.status === "leased")) ev.push([p.created_at, "var(--blue)", "publishing", "publish job #" + p.id + " · " + p.arch]);
@@ -971,7 +972,7 @@ const PACKAGE_SCRIPT = String.raw`
     var abi = inR(promoted) ? ["ok", "passed the ABI check on its way out of edge"] : ["wait", "checked when it is promoted out of edge"];
     var adv = open === null || open === undefined ? ["wait", "not matched yet"] : open ? ["fail", open + " open advisor" + (open > 1 ? "ies" : "y")] : ["ok", "no advisory open on it"];
     var healthy = inR(function (r) { return r === PROMISED_RINGS[0]; }) ? ["ok", "two green health checks in a row before stable"] : ["wait", "stable takes two green health checks in a row"];
-    var ap = c && c.approval, last = fac ? (ap && ap.decision === "approved" && !ap.withdrawn_at ? ["ok", "brought by " + ((ST && ST.package && ST.package.owner) || "its contributor") + ", rebuilt and approved by " + ap.by] : ["wait", "no standing approval on " + a]) : ["ok", "served as " + upstreamName() + " built and signed it"];
+    var ap = c && c.approval, last = fac ? (ap && ap.decision === "approved" && !ap.withdrawn_at ? ["ok", "brought by " + ((ST && ST.package && ST.package.owner) || "its contributor") + ", rebuilt and approved by " + ap.by + (ap.solo_exception ? " — self-reviewed under the solo-maintainer exception (since " + ap.solo_exception.since + ")" : "")] : ["wait", "no standing approval on " + a]) : ["ok", "served as " + upstreamName() + " built and signed it"];
     return [signed, installs, abi, adv, healthy, last];
   }
   function renderSeal() {
@@ -1375,6 +1376,16 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
         { path: pkg, fields: ["arches.x86_64.rings.0.version", "arches.x86_64.rings.0.release_seq", "arches.x86_64.rings.0.sha256", "arches.x86_64.rings.0.source", "arches.x86_64.rings.0.size_download", "seal.indexed_at"] },
         { path: shipped, fields: ["chains.0.publish.finished_at", "chains.0.publish.id", "chains.0.approval.created_at", "request.created_at", "rings.0.ring", "rings.0.arch"] },
       ],
+      visible: EVERYONE,
+    },
+    {
+      // A decision its requester took under the solo-maintainer exception (#394): self-reviewed on the record's line, the review stage's summary
+      // and the gates' word on who approved it — who and since when, as the story's approval carries it.
+      id: "package.self-reviewed",
+      page,
+      anchor: ['id="stage-panel"'],
+      script: ['" · self-reviewed (solo-maintainer exception)"', "approval.solo_exception", '" · self-reviewed"', "ap.solo_exception.since", "self-reviewed under the solo-maintainer exception"],
+      reads: [{ path: shipped, fields: ["chains.0.approval.solo_exception", "chains.0.approval.by"] }],
       visible: EVERYONE,
     },
     {
