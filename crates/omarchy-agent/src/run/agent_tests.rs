@@ -1214,6 +1214,8 @@ mod on_a_mac {
     use crate::run::agent::HostEnv;
     use crate::run::fake::World;
     use crate::run::pool::{HostState, Net};
+    use crate::run::power::tests::{FakePower, Played};
+    use crate::run::power::{Heard, Sleep};
     use crate::run::vm::tests::{saved_for, want, Fake, World as Colima};
     use crate::run::vm::Keeper;
 
@@ -1414,6 +1416,195 @@ mod on_a_mac {
             w.tick(30);
         }
         assert_eq!(*tries.borrow(), 2);
+    }
+
+    /// The Mac's sleep (#329), played: a host running v1.0.0 with its VM and a task.
+    fn sleepy() -> (World, Rc<RefCell<Colima>>, Rc<RefCell<Played>>) {
+        let (mut w, colima) = mac(Colima {
+            running: true,
+            saved: Some(saved_for(&want())),
+            set_holds: true,
+            ..Colima::default()
+        });
+        let played: Rc<RefCell<Played>> = Rc::default();
+        w.agent.power = Some(Sleep::new(Box::new(FakePower(Rc::clone(&played)))));
+        (w, colima, played)
+    }
+
+    #[test]
+    fn a_sleep_is_reported_before_the_mac_is_let_sleep_and_the_wake_after_it() {
+        let (mut w, colima, played) = sleepy();
+        dated(&w);
+        w.tick(3);
+        assert!(w.journal().contains("the Mac's sleep and wake are heard"));
+        assert_eq!(w.last_report()["asleep"], false);
+        // What the pool had heard by the time the Mac was let sleep.
+        let seen: Rc<RefCell<Vec<serde_json::Value>>> = Rc::default();
+        let (remote, log) = (Rc::clone(&w.remote), Rc::clone(&seen));
+        played.borrow_mut().at_let_sleep = Some(Box::new(move || {
+            log.borrow_mut()
+                .push(remote.borrow().reports.last().unwrap()["asleep"].clone());
+        }));
+        // Two seconds after the last report: the sleep's goes at once, whatever the spacing.
+        w.agent.state.poll.next_at = w.now + 600;
+        played.borrow_mut().next.push(Heard::Sleep);
+        w.tick(2);
+        assert_eq!(*seen.borrow(), [serde_json::Value::Bool(true)]);
+        assert_eq!(played.borrow().let_sleeps, 1);
+        assert!(w
+            .journal()
+            .contains("the Mac goes to sleep: the host reports asleep"));
+        // A sleep too short to leave a gap in the ticks: the watcher's wake asks the pool
+        // for its target now, checks the VM's clock and reports the host awake.
+        colima.borrow_mut().skew = -30;
+        dated(&w);
+        let polls = w.remote.borrow().polls;
+        played.borrow_mut().next.push(Heard::Wake);
+        w.tick(30);
+        assert_eq!(w.remote.borrow().polls, polls + 1, "{}", w.journal());
+        assert_eq!(w.last_report()["asleep"], false);
+        assert!(colima.borrow().skew.abs() <= 1, "{}", w.journal());
+        let journal = w.journal();
+        assert!(
+            journal.contains("the Mac woke: the host reports itself awake"),
+            "{journal}"
+        );
+        assert_eq!(
+            journal
+                .matches("the Mac woke: the pool is asked now")
+                .count(),
+            1,
+            "{journal}"
+        );
+    }
+
+    #[test]
+    fn a_long_sleep_is_reported_over_by_the_first_tick_after_it() {
+        let (mut w, _colima, played) = sleepy();
+        dated(&w);
+        w.tick(3);
+        played.borrow_mut().next.push(Heard::Sleep);
+        w.tick(3);
+        assert_eq!(w.last_report()["asleep"], true);
+        // The watcher's wake is not read yet: the gap in the ticks says it.
+        let polls = w.remote.borrow().polls;
+        dated(&w);
+        w.tick(3600);
+        assert_eq!(w.remote.borrow().polls, polls + 1);
+        assert_eq!(w.last_report()["asleep"], false);
+        let journal = w.journal();
+        assert_eq!(
+            journal
+                .matches("the Mac woke: the pool is asked now")
+                .count(),
+            1,
+            "{journal}"
+        );
+    }
+
+    #[test]
+    fn a_running_task_holds_off_the_macs_idle_sleep_and_its_end_lets_it_go() {
+        let (mut w, _colima, played) = sleepy();
+        // running_v1 left a task container running.
+        w.tick(3);
+        assert!(played.borrow().held);
+        for c in &mut w.engine.borrow_mut().containers {
+            if c.project.is_empty() {
+                c.status = "exited".into();
+            }
+        }
+        w.tick(10);
+        assert!(!played.borrow().held);
+        // The engine does not answer: the Mac is left as it was.
+        w.engine.borrow_mut().start_task();
+        w.engine.borrow_mut().down = true;
+        w.tick(10);
+        assert!(!played.borrow().held);
+        w.engine.borrow_mut().down = false;
+        w.tick(10);
+        assert!(played.borrow().held);
+    }
+
+    /// A lease the dispatcher holds with no task container running — its inputs staged, its
+    /// outputs uploaded — holds off the Mac's idle sleep too, until its file goes with its
+    /// report (#329).
+    #[test]
+    fn a_lease_held_with_no_container_running_holds_off_the_macs_idle_sleep() {
+        let (mut w, _colima, played) = sleepy();
+        for c in &mut w.engine.borrow_mut().containers {
+            if c.project.is_empty() {
+                c.status = "exited".into();
+            }
+        }
+        w.tick(3);
+        assert!(!played.borrow().held);
+        // Claimed: the dispatcher prepares it, and no container runs yet.
+        let lease = w.dir.join("work/state/leases/7-g_0123456789abcdef.json");
+        std::fs::create_dir_all(lease.parent().unwrap()).unwrap();
+        std::fs::File::create(&lease)
+            .unwrap()
+            .set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(w.now.unsigned_abs()),
+            )
+            .unwrap();
+        w.tick(10);
+        assert!(played.borrow().held, "{}", w.journal());
+        // Reported: the dispatcher removes its file.
+        std::fs::remove_file(&lease).unwrap();
+        w.tick(10);
+        assert!(!played.borrow().held);
+    }
+
+    /// A Mac whose engine is Docker Desktop's or `OrbStack`'s, no VM the agent keeps, holds
+    /// its sleep the same way: held off under a task, reported before the sleep, the pool
+    /// asked at the wake (#329).
+    #[test]
+    fn a_mac_on_a_vm_it_does_not_keep_holds_and_reports_its_sleep_the_same_way() {
+        let mut w = World::running_v1();
+        let played: Rc<RefCell<Played>> = Rc::default();
+        w.agent.power = Some(Sleep::new(Box::new(FakePower(Rc::clone(&played)))));
+        w.tick(3);
+        assert!(
+            played.borrow().held,
+            "running_v1 left a task container running"
+        );
+        assert_eq!(w.last_report()["asleep"], false);
+        w.agent.state.poll.next_at = w.now + 600;
+        played.borrow_mut().next.push(Heard::Sleep);
+        w.tick(2);
+        assert_eq!(w.last_report()["asleep"], true);
+        assert_eq!(played.borrow().let_sleeps, 1);
+        let polls = w.remote.borrow().polls;
+        played.borrow_mut().next.push(Heard::Wake);
+        w.tick(30);
+        assert_eq!(w.remote.borrow().polls, polls + 1, "{}", w.journal());
+        assert_eq!(w.last_report()["asleep"], false);
+        let journal = w.journal();
+        assert!(
+            journal.contains("the Mac woke: the host reports itself awake"),
+            "{journal}"
+        );
+        assert!(!journal.contains("the VM's clock"), "{journal}");
+    }
+
+    /// A new agent behind its health gate reports nothing, but lets the Mac sleep and keeps
+    /// it awake under a task like any.
+    #[test]
+    fn behind_a_self_updates_gate_the_sleep_is_let_go_unreported() {
+        let (mut w, _colima, played) = sleepy();
+        w.tick(3);
+        let reports = w.remote.borrow().reports.len();
+        w.agent.gate = Some(crate::run::selfupdate::Pending {
+            from: crate::version::Version::parse("0.2.0").unwrap(),
+            to: w.agent.version,
+            tries: 1,
+            deadline: w.now + 600,
+        });
+        played.borrow_mut().next.push(Heard::Sleep);
+        w.tick(3);
+        assert_eq!(played.borrow().let_sleeps, 1);
+        assert_eq!(w.remote.borrow().reports.len(), reports);
+        assert!(played.borrow().held);
     }
 
     /// A restart of the VM stops the dispatcher in it: the brake counts it as one of its

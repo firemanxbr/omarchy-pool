@@ -135,6 +135,10 @@ pub struct Config {
     /// running, sized and on time. `None` on Linux, and for Docker Desktop's or `OrbStack`'s
     /// VM, which the agent uses but never manages.
     pub vm: Option<Vm>,
+    /// agent.toml has `[vm]`, whatever its runtime (Colima, Docker Desktop, `OrbStack`):
+    /// the host is a Mac, whose sleep the agent holds off and reports (#329) and whose
+    /// runtime switch it refuses (#325), as it does on a Mac's build without `[vm]`.
+    pub mac: bool,
 }
 
 /// The `omarchy` VM as agent.toml describes it (#320, design v2 §19.2): its size is the
@@ -419,6 +423,7 @@ impl Config {
             None => socket_cli.clone(),
             some => need_path(some, "set.socket_mount")?,
         };
+        let mac = f.vm.is_some();
         let vm = match f.vm {
             None => None,
             Some(v) => Vm::of(v, &f.envelope)?,
@@ -441,6 +446,7 @@ impl Config {
             runtime,
             policy,
             vm,
+            mac,
         })
     }
 
@@ -524,6 +530,8 @@ max_units = 3
         assert_eq!(c.project.as_deref(), Some("omarchy-host"));
         assert_eq!(c.task_subnets.as_deref(), Some("10.232.0.0/16"));
         assert!(c.envelope.allow_socket);
+        // No `[vm]`: not a Mac, so nothing of its sleep (#329).
+        assert!(!c.mac);
         // The design's budget, for etc/dispatcher.env (#371); the other two keep their defaults.
         assert_eq!(
             c.agent_budget,
@@ -673,10 +681,15 @@ max_units = 3
             .unwrap_err();
             assert!(e.contains(why), "{why}: {e}");
         }
-        // Docker Desktop's VM is used, never managed.
-        let shared = mac.replace("runtime = \"colima\"", "runtime = \"docker-desktop\"");
-        let c = Config::parse(&format!("worker_id = \"w_1\"\n{shared}")).unwrap();
-        assert_eq!(c.vm, None);
+        assert!(c.mac);
+        // Docker Desktop's VM and OrbStack's are used, never managed; the host is a Mac all
+        // the same (#329).
+        for runtime in ["docker-desktop", "orbstack"] {
+            let shared = mac.replace("runtime = \"colima\"", &format!("runtime = {runtime:?}"));
+            let c = Config::parse(&format!("worker_id = \"w_1\"\n{shared}")).unwrap();
+            assert_eq!(c.vm, None, "{runtime}");
+            assert!(c.mac, "{runtime}");
+        }
     }
 
     #[test]

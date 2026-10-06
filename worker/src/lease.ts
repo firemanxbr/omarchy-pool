@@ -35,13 +35,15 @@ export interface LeasedTask { id: number; name: string; arch: string; kind: stri
  * ends a fence passes none: the fenced lease is never renewed, and the
  * claim itself is the proof its processes are gone. Behind its peers
  * (priority + 10); failed when that was its last attempt, with who held it
- * kept on the row. The fence goes with it.
+ * kept on the row. The fence goes with it, and an audit's independence
+ * with the lease that ran it (#339): its next lease writes its own.
  */
 export const REQUEUE_SQL = `UPDATE build_tasks SET
     status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
     finished_at = CASE WHEN attempts >= max_attempts THEN ?1 ELSE NULL END,
     error = ?2,
     lease_owner = CASE WHEN attempts >= max_attempts THEN lease_owner ELSE NULL END,
+    independent = CASE WHEN attempts >= max_attempts THEN independent ELSE NULL END,
     lease_expires_at = NULL, priority = priority + 10, stop_order = NULL
   WHERE id = ?3 AND status = 'leased' AND lease_owner = ?4 AND stop_order IS ?5 AND (?6 IS NULL OR lease_expires_at < ?6)
   RETURNING id, status`;

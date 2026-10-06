@@ -43,7 +43,7 @@ import {
   belowMinimum, enrollMessage, fingerprint, hostLine, installCommand, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf, shortId, signedMessage,
   unitsOf, verifySignature, ENROLL_TTL_MIN, MIN_HOST, HOST_NAME, HOST_REPORT_FRESH_MIN, ISOLATIONS, NONCE_KEEP_MIN, OLD_TOKEN_GRACE_MIN, REPORT_MAX_BYTES, SIGNED_SKEW_S, TOKEN_ROTATE_DAYS,
   hostReason, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
-  agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT,
+  agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT, asleepNow,
   agentTakesSettings, hostSettingsOf, orderArg, reportedBrakeOf, reportedSettingsOf, DIAGNOSTIC_LINE_MAX, DIAGNOSTIC_LINES, DIAGNOSTICS_MAX_BYTES, HOST_ORDER_ID, HOST_SETTINGS_AGENT, SETTINGS_ORDER_KINDS,
   poolBehindOf, reportedSoakOf, soakOf,
   type Capacity, type HostOrderKind, type Isolation, type OrderArg,
@@ -67,6 +67,8 @@ export interface HostRow {
   status_by: string | null; status_at: string | null; status_reason: string | null; owner_removed_at: string | null;
   /** #337: the large task it reserves for, since when (selection.ts). */
   reserving_task: number | null; reserving_since: string | null;
+  /** #329: when its agent's report first said it sleeps; NULL while it is awake. */
+  asleep_at: string | null;
   /** #325: the settings its agent took (its last set-units and set-emulate answered done). */
   settings: string | null;
   /** #326: its soak and freeze detection as its last report says them (migration 0048): what the claims and listings read. */
@@ -148,6 +150,9 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
   const lanes = h.lanes ? (JSON.parse(h.lanes) as Capacity["lanes"]) : [];
   const out: Record<string, unknown> = {
     id: h.id, name: h.name, owner: h.owner_login, status: h.status, arches: lanes.map((l) => l.arch), release_applied: h.release_applied, alive,
+    // Whether it sleeps (#329), public as `alive` is: `asleep` is what the claims hold to (zero free units while its report is
+    // fresh), `asleep_since` what its last report said, fresh or not.
+    asleep: asleepNow(h, now), asleep_since: h.asleep_at,
     worker: h.worker_id, enrolled_at: h.enrolled_at, confirmed_at: h.confirmed_at,
     // Freeze detection (#326): its agent says GitHub has shown a newer release than the pool names for over a day — about the pool, public as Status says it.
     pool_behind_github: poolBehindOf(h.pool_behind_github),
@@ -945,7 +950,8 @@ export async function handleHostToken(s: SignedHost, env: Env): Promise<Response
  * change and at least every five minutes, at most 16 KiB. A report that
  * carries what looks like a secret is refused whole (leak.ts). The pool keeps
  * the last one and the columns its pages read; the units are its own count
- * from the reported totals.
+ * from the reported totals. `asleep: true` (#329) — a Mac about to sleep —
+ * gives the host zero free units until a report says otherwise (asleepNow).
  */
 export async function handleHostReport(s: SignedHost, env: Env): Promise<Response> {
   const h = s.host;
@@ -972,6 +978,9 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   const isolation = runtime && ISOLATIONS.includes(runtime.isolation) ? (runtime.isolation as string) : h.isolation;
   const dedicated = runtime && typeof runtime.dedicated === "boolean" ? (runtime.dedicated ? 1 : 0) : h.dedicated;
   const round = r.round && typeof r.round === "object" ? r.round : null;
+  // A Mac about to sleep, or asleep (#329): from the first report that says so until one that does not (an agent that does not
+  // say is awake).
+  const asleep = r.asleep === true;
   const at = iso(Date.now());
   // The soak and freeze detection (#326), read here and kept in plain columns — the claims, the fleet and the listings read those,
   // never the report parsed by SQL: SQLite's JSON parser refuses nesting V8's accepts, and one report would fail them pool-wide.
@@ -982,7 +991,8 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
     `UPDATE hosts SET report = ?, reported_at = ?, last_seen = ?, agent_version = COALESCE(?, agent_version), release_applied = ?, release_target = ?, rolled_back_from = ?,
        isolation = ?, dedicated = ?, runtime = COALESCE(?, runtime), provider = ?, model = ?,
        capacity = COALESCE(?, capacity), lanes = COALESCE(?, lanes), units = COALESCE(?, units), agent_slots = COALESCE(?, agent_slots), disk_free = COALESCE(?, disk_free),
-       soaking_until = ?, soak_quarantine = ?, pool_behind_github = ?
+       soaking_until = ?, soak_quarantine = ?, pool_behind_github = ?,
+       asleep_at = CASE WHEN ? THEN COALESCE(asleep_at, ?) ELSE NULL END
      WHERE id = ?`,
   )
     .bind(
@@ -990,6 +1000,7 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
       isolation, dedicated, runtime ? JSON.stringify(runtime) : null, str(r.agent?.provider, /^[a-z0-9-]{1,40}$/), str(r.agent?.model, /^[A-Za-z0-9._:-]{1,80}$/),
       cap ? JSON.stringify({ ...cap, below_minimum: belowMinimum(cap) }) : null, cap ? JSON.stringify(cap.lanes) : null, cap ? unitsOf(cap) : null, cap ? cap.agent_slots : null, cap ? JSON.stringify(cap.disk_free_gb) : null,
       soak ? soak.until : null, soak ? JSON.stringify(soak.quarantined) : null, behindNow ? JSON.stringify(behindNow) : null,
+      asleep ? 1 : 0, at,
       h.id,
     )
     .run();
@@ -1017,7 +1028,7 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
     ]));
     closed = results.filter((x, i) => i % 3 === 0 && x.meta.changes).length;
   }
-  return json({ ok: true, at, units: cap ? unitsOf(cap) : h.units, below_minimum: cap ? belowMinimum(cap) : null, orders_closed: closed }, 200, NO_STORE);
+  return json({ ok: true, at, units: cap ? unitsOf(cap) : h.units, below_minimum: cap ? belowMinimum(cap) : null, asleep, orders_closed: closed }, 200, NO_STORE);
 }
 
 /**
