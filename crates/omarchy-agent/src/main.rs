@@ -762,6 +762,11 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
             images: &images,
             emulate: toml.caps.emulate.as_deref(),
         }),
+        // The sandboxed runtime (#330): its smoke run starts the probe image, by digest.
+        sandbox: Some(capacity::sandbox::Probe {
+            setting: &toml.caps.sandbox,
+            local: toml.vm.is_none(),
+        }),
     };
     let facts = match probe::detect(&how) {
         Ok(f) => f,

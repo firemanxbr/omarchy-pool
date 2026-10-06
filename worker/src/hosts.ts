@@ -102,6 +102,14 @@ export interface Lane { arch: Arch; mode: "native" | "emulated"; via?: string; p
 export interface HeldLane { arch: Arch; reason: string }
 /** A held lane's reason is shown as the agent wrote it, cut at this length. */
 export const HELD_REASON_MAX = 300;
+/** The sandboxed runtimes a host's agent finds (#330, design v2 §10.4; D43): gVisor's `runsc`, Kata Containers. */
+export const SANDBOX_KINDS = ["gvisor", "kata"] as const;
+/**
+ * The sandboxed runtime a host's tasks of a contributor's run in on its native lane (#330): the engine's name for it, as `--runtime`
+ * takes it, and which sandbox it is. A container escape of a contributor's recipe then lands in its kernel, not on the host.
+ */
+export interface Sandbox { runtime: string; kind: (typeof SANDBOX_KINDS)[number] }
+const RUNTIME_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** A capacity report (design v2 §7.3, `run/capacity.json`), as the pool keeps it: the totals it can check, nothing it takes on trust. */
 export interface Capacity {
   cpus: number;
@@ -113,6 +121,39 @@ export interface Capacity {
   agent_slots: number | null;
   /** What the host said it runs; the pool's own count is unitsOf(). */
   units: number | null;
+  /**
+   * Its sandboxed runtime for a contributor's tasks (#330): `null` when it has none; absent from an agent, or a dispatcher, before
+   * #330. An agent's report says what it found, for the host page; a claim says what its dispatcher applies, which selection reads
+   * (a sandboxed host's emulated lanes take the project's own recipes only) and hosts.sandbox_applied keeps (sandboxApplied).
+   */
+  sandbox?: Sandbox | null;
+  /**
+   * Why a sandboxed runtime its engine has, or its envelope names, is not used (an agent's report), or why a dispatcher's claims hold
+   * for it (a claim: its runtime refused a start) (#330), cut at HELD_REASON_MAX.
+   */
+  sandbox_held?: string;
+}
+
+/** What a host's dispatcher says, with its claims, of the sandbox it applies (#330, hosts.sandbox_applied): the runtime or none, and why its claims hold for it. */
+export interface SandboxApplied { sandbox: Sandbox | null; held?: string }
+
+/** The claim's word on the sandbox, as hosts.sandbox_applied keeps it: null when its capacity does not say (a dispatcher before #330). */
+export function sandboxApplied(c: Capacity | null): string | null {
+  if (!c || c.sandbox === undefined) return null;
+  return JSON.stringify({ sandbox: c.sandbox, ...(c.sandbox_held ? { held: c.sandbox_held } : {}) });
+}
+
+/** hosts.sandbox_applied read back: null when its dispatcher's claims do not say, or it does not read. */
+export function sandboxAppliedOf(v: string | null | undefined): SandboxApplied | null {
+  if (!v) return null;
+  try {
+    const j = JSON.parse(v) as { sandbox?: unknown; held?: unknown };
+    const c = parseCapacity({ cpus: 1, mem_gb: 0, disk_free_gb: { work: 0, engine: 0 }, lanes: [{ arch: "x86_64", mode: "native" }], sandbox: j.sandbox, sandbox_held: j.held });
+    if (typeof c === "string" || c.sandbox === undefined) return null;
+    return { sandbox: c.sandbox, ...(c.sandbox_held ? { held: c.sandbox_held } : {}) };
+  } catch {
+    return null;
+  }
 }
 
 const num = (v: unknown, min: number, max: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
@@ -146,6 +187,15 @@ export function parseCapacity(v: unknown): Capacity | string {
       held.push({ arch: x.arch as Arch, reason: x.reason.trim().slice(0, HELD_REASON_MAX) });
     }
   }
+  // Its sandbox (#330) — what an agent found, or what a dispatcher applies — one that does not read is left out (as an agent or a
+  // dispatcher before #330 says nothing: no sandbox to select on) rather than refuse the report or the claim it rides on.
+  const sb = c.sandbox as Record<string, unknown> | null | undefined;
+  const sandbox: Sandbox | null | undefined =
+    sb === null ? null
+    : sb && typeof sb === "object" && typeof sb.runtime === "string" && RUNTIME_NAME.test(sb.runtime) && SANDBOX_KINDS.includes(sb.kind as Sandbox["kind"])
+      ? { runtime: sb.runtime, kind: sb.kind as Sandbox["kind"] }
+      : undefined;
+  const sandboxHeld = typeof c.sandbox_held === "string" && c.sandbox_held.trim() ? c.sandbox_held.trim().slice(0, HELD_REASON_MAX) : undefined;
   return {
     cpus: c.cpus,
     mem_gb: c.mem_gb,
@@ -154,6 +204,8 @@ export function parseCapacity(v: unknown): Capacity | string {
     held_lanes: held,
     agent_slots: int(c.agent_slots, 0, 64) ? c.agent_slots : null,
     units: int(c.units, 0, 4096) ? c.units : null,
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(sandboxHeld === undefined ? {} : { sandbox_held: sandboxHeld }),
   };
 }
 
@@ -334,11 +386,17 @@ export interface SoakColumns { soaking_until: unknown; quarantine: unknown }
 
 /**
  * A host as every claim of its registration reads it: one row by the primary key, the owner joined with the maintainer list, its soak
- * (#326), the release it reverted (#342), and whether the maintainers let it take pool jobs yet (#340, by the settings' primary key).
+ * (#326), the release it reverted (#342), the sandbox it applies (#330), and whether the maintainers let it take pool jobs yet (#340, by
+ * the settings' primary key).
  */
-export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed, ${SOAK_COLUMNS("hosts")}, ${REVERTED_COLUMNS("hosts")},
+export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed, ${SOAK_COLUMNS("hosts")}, ${REVERTED_COLUMNS("hosts")}, sandbox_applied,
     (SELECT value FROM settings WHERE key = '${POOL_JOBS_KEY}') AS pool_jobs FROM hosts WHERE id = ?`;
-export interface HostClaimRow extends SoakColumns, RevertedColumns { name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number; pool_jobs: string | null }
+export interface HostClaimRow extends SoakColumns, RevertedColumns {
+  name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number;
+  /** #330: what its dispatcher's last claim said of the sandbox it applies (sandboxApplied), written again only when a claim says something new. */
+  sandbox_applied: string | null;
+  pool_jobs: string | null;
+}
 
 const TAG = /^v\d+\.\d+\.\d+$/;
 const isoOrNull = (v: unknown) => (typeof v === "string" && v.length <= 40 && Number.isFinite(Date.parse(v)) ? v : null);
