@@ -42,7 +42,7 @@ please do not file a public issue for it.
 | Agent token `oma_…` | one agent on one person's machine, granted by that person in their signed-in browser (`omarchy-cli login`: a loopback address and PKCE), kept in `~/.config/omarchy-cli/credentials.toml` (0600) and bound to the origin that granted it | the tools of `omarchy-cli mcp` its scopes hold, as that person: request and follow packages (`contribute`); claim, release, read evidence and draft a verdict (`review`) or a block (`block`) — the two a maintainer's only, read again on every call; twenty calls a minute, five requests, ten claims and thirty drafts a day | decide anything — approve, request changes, reject and block are drafts the person confirms in the browser, approve and block with the person's passkey; every other route (403); give the project's agent a hint; outlive seven days with `review` or `block`, ninety with `contribute` | live; revoked by `omarchy-cli logout`, the person's page, a block of the person, or a reset of their passkeys (#284) |
 | Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered with the browser's session, on their own page or, the first one, in the dialog of the act that needs it (#287); the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
 | Host enrollment token `ome_…` | the maintainer who pressed *Add a host*, for the one command they paste on the machine (in the environment of `sh`, never an argument) | enroll one host, once, within 15 minutes, as that maintainer — while they are still in `factory/MAINTAINERS.toml` and still the same GitHub user id | claim, confirm the host, or enroll a second one | live (#321); stored as its SHA-256; burnt by the enrollment in the same D1 batch that creates the host |
-| Host key (Ed25519) | one maintainer host's agent: `host.ed25519`, mode 0600, made at install, never in a container | sign the host's calls (`Omarchy-Host`: method, path, body hash, time, nonce): read its state, fetch or rotate its worker token, report | claim, change the maintainer list, widen the owner's envelope; be replayed (a nonce table), act from a clock 120 s off; act before its owner confirmed its fingerprint on the site | live (#321); a suspended or retired host's key is refused |
+| Host key (Ed25519) | one maintainer host's agent: `host.ed25519`, mode 0600, made at install, never in a container | sign the host's calls (`Omarchy-Host`: method, path, body hash, time, nonce): read its state, fetch or rotate its worker token, report, post the diagnostics its own order asked for (#325) | claim, change the maintainer list, widen the owner's envelope; be replayed (a nonce table), act from a clock 120 s off; act before its owner confirmed its fingerprint on the site | live (#321); a suspended or retired host's key is refused |
 | Session cookie `oms_…` | one person's browser, after Sign in with GitHub | what that person's contributor token can, from the dashboard's pages | — | live; separate from the CLI token, so signing in never invalidates a worker; *sign out* (in the header of every page) invalidates it on the server, not only in that browser |
 | Signing key (OpenPGP) | the pool's Worker only (`SIGNING_KEY` secret, `worker/src/signing.ts`) | sign the databases it stores and the packages the factory builds (`POST /pool/:sha256/sign`) | — | live; no worker, runner or repository holds it |
 | `CLOUDFLARE_API_TOKEN` | the release workflow on GitHub | deploy the Worker, apply migrations, record the deploy | — | live; all GitHub holds (no hosted worker: Actions runs CI and the release only) |
@@ -519,8 +519,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   SHA-256, the time and the nonce. The pool checks the key, `|ts − now| ≤
   120 s` and that the nonce is new (`host_nonces`, pruned by the cron after
   five minutes), so nothing is replayable. A signed request reads the host's
-  state, fetches or rotates its worker token and reports; it cannot claim,
-  change the maintainer list or widen anything.
+  state, fetches or rotates its worker token, reports, and posts the
+  dispatcher's log lines a `diagnostics` order of that host asked for (#325);
+  it cannot claim, change the maintainer list or widen anything.
 - **The host state and its orders** (#344, design v2 §11, §17.1). From agent
   0.3.0 the release a host rolls out is the one its signed state names —
   still checked against `release.yml`'s signature, the floor, `min_release`,
@@ -551,6 +552,52 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   report, which closes the order (also one the pool expired while the agent
   carried it out); the pool's journal says who gave it and how it ended, in
   the pool's own words.
+- **Settings, the rest of the host orders, and the host-side brake** (#325,
+  design v2 §11.2, §12, §17.1). The pool may only narrow: `set-units` and
+  `set-emulate` (its owner or any maintainer, an agent from 0.4.0) lower the
+  units a host gives and turn its emulated lanes off, and the agent
+  intersects them with the envelope its owner wrote at the host — units
+  above `max_units` or what it detected, a lane its `emulate` excludes, the
+  native lane, are refused on the host with nothing changed, whatever the
+  pool says; the pool's own claim takes the smaller of the units it computes
+  and the units the host declares, and hands an emulated build only to a lane
+  the claim names (#337), so a narrowed host is handed no more. The pool's
+  record of a host's settings, which only an agent that lost its own takes,
+  is narrowed by the envelope the same way, and what of it is above the
+  envelope is reported, never applied. No
+  order widens the envelope, selects a driver or names a path, an image or a
+  command: the closed set is `retire-legacy`, `reconcile-now`, `set-units`,
+  `set-emulate`, `rotate-token` (a new worker token from the same signed
+  `POST /hosts/self/token`, written only in the pool's shapes, for the
+  registration the host already has), `retry-release` (lifts a quarantine;
+  the release is still checked as any target) and `diagnostics` (design v2
+  M10: the dispatcher's last 500 log lines, only when the envelope says
+  `diagnostics = true`, scrubbed on the host of every value in the set's
+  `etc/*.env` and the secrets directory's env files and of anything shaped
+  like a pool token (its job tokens `omj.` and agent tokens `oma_` too),
+  GitHub or model provider token, then checked again by the
+  pool's leak scan, which drops a line that still looks like one; kept a
+  week, for its owner and the maintainers only). Because the pool may be
+  compromised, **the host brakes it**, in its own code and with counters it
+  keeps in `state.json` (a restart loop resets nothing): orders at least 2 s
+  apart and at most 20 an hour; at most 6 dispatcher restarts an hour that
+  the pool caused — a settings order, `rotate-token`, and every recreation
+  a round to another release makes, its replace and its revert's, whether
+  the pool's target, an Update or a `retry-release` that lifted a quarantine
+  started it (the same release tried again included: such a round needs
+  room for two, and an Update or a `retry-release` that would lift a
+  quarantine waits or is refused without it; on a Mac, a restart of its VM
+  by the agent counts among them, never held by the brake but by the VM's
+  own rate limit); at most 4 capacity
+  narrowings an hour; at most one release change every 10 minutes, a
+  rollback under a signed statement exempt (the pool cannot forge one).
+  Beyond that an order is answered `refused: brake`, an Update waits and a
+  release change is held. A pool that is compromised can therefore narrow a
+  host down to one unit and its native lane, rotate its token, ask for
+  scrubbed logs where the owner allowed them, and make it restart its
+  dispatcher at most six times an hour — a slowdown, never a widening,
+  a foreign command or a secret. Changing the runtime is the owner's alone:
+  `omarchy-agent runtime switch` at the host, which the pool cannot ask for.
 - **The host worker token** (`omw_…`) is the dispatcher's only, written
   0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
   id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
@@ -595,7 +642,15 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   own clock agrees with it: a pool's answer never moves the VM's clock more
   than six seconds from the Mac's (a lying pool cannot take the VM's TLS
   checks back to a time whose certificates expired), and a Mac that is off
-  is said, never set.
+  is said, never set. Its sleep (#329) is two unprivileged macOS tools the
+  agent starts and ends — `caffeinate -i -w <the agent's pid>` while a task
+  runs, and an `osascript` watcher of AppKit's sleep and wake notifications
+  that dies with the agent —, not code of the agent's own: its `unsafe`
+  stays forbidden. To know a lease is held with no task container running
+  it reads the names and times of the dispatcher's lease files, never what
+  they hold (a job token). The `asleep` its report carries can only make the pool
+  hand the host less (zero free units), never more, and a stale one (no
+  report for 15 minutes) holds nothing.
 
 ## Stopping a host
 

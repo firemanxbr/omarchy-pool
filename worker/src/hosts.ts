@@ -59,6 +59,26 @@ export const REPORT_MAX_BYTES = 16 * 1024;
 /** A host whose agent reported within this long is one whose agent reports: an Update for its registration is taken (§8.6). */
 export const HOST_REPORT_FRESH_MIN = 15;
 
+/**
+ * Whether a host sleeps now (#329, design v2 §19.2): its last report said `asleep: true` — a Mac's agent says so before the Mac
+ * sleeps and says `asleep: false` after the wake — and that report is fresh (HOST_REPORT_FRESH_MIN). A sleeping host has zero
+ * free units (selection.ts). A stale one says nothing: an agent reports at least every five minutes while its Mac is awake, so a
+ * dispatcher that claims past it is on a host that woke whose agent has not said so, and is handed work as any other.
+ */
+export function asleepNow(h: { asleep_at: string | null; reported_at: string | null }, now: number): boolean {
+  return h.asleep_at !== null && h.reported_at !== null && Date.parse(h.reported_at) > now - HOST_REPORT_FRESH_MIN * 60_000;
+}
+
+/**
+ * The lease's own check that its host does not sleep (#329), asleepNow in SQL: the claim's UPDATE takes a task only while no fresh
+ * report of the host says `asleep`, in the same statement beside HOST_MAY_LEASE_SQL — an asleep report that commits between the
+ * claim's read of its host and its lease leaves it nothing. Two bindings: the host's id, and the time HOST_REPORT_FRESH_MIN before
+ * the claim (ISO, as `reported_at` is written: the strings order as the times do).
+ */
+export const HOST_AWAKE_SQL = "NOT EXISTS (SELECT 1 FROM hosts WHERE id = ? AND asleep_at IS NOT NULL AND reported_at > ?)";
+/** HOST_AWAKE_SQL's second binding: the time HOST_REPORT_FRESH_MIN before `now`. */
+export const freshSince = (now: number): string => new Date(now - HOST_REPORT_FRESH_MIN * 60_000).toISOString();
+
 export const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 export const HOST_ID = /^h_[0-9a-z]{10}$/;
 const ARCHES = ["x86_64", "aarch64"] as const;
@@ -311,17 +331,26 @@ export function hostReason(v: unknown): string | null {
 // ---------- host orders (#344, design v2 §11.1 M4, M5, §17.1, §21.1 step 6) ----------
 
 /**
- * The host orders P3 gives, sent in the signed host state: a closed set,
- * each with an id and a not_after; the agent refuses any other kind, an order
- * past its not_after and an id it took already. retire-legacy stops and
+ * The host orders, sent in the signed host state: a closed set, each with an
+ * id and a not_after; the agent refuses any other kind, an order past its
+ * not_after and an id it took already. P3 (#344): retire-legacy stops and
  * removes the legacy compose project the host recorded (install --legacy)
  * and writes the .omarchy-agent marker into its directory; reconcile-now is a
- * round now, which never skips the owner's soak (P4). P4 (#325) adds the
- * settings and the other kinds.
+ * round now, which never skips the owner's soak. P4 (#325): set-units and
+ * set-emulate narrow the host's units and emulated lanes inside its envelope
+ * (the agent refuses anything above it), rotate-token rotates the host worker
+ * token, retry-release lifts a quarantine, diagnostics brings the
+ * dispatcher's last log lines, scrubbed, when the envelope allows it. The
+ * agent paces and brakes them (two seconds apart, twenty an hour, and its
+ * limits on restarts, release changes and narrowings).
  */
-export const HOST_ORDER_KINDS = ["retire-legacy", "reconcile-now"] as const;
+export const HOST_ORDER_KINDS = ["retire-legacy", "reconcile-now", "set-units", "set-emulate", "rotate-token", "retry-release", "diagnostics"] as const;
 export type HostOrderKind = (typeof HOST_ORDER_KINDS)[number];
 export const isHostOrderKind = (k: unknown): k is HostOrderKind => typeof k === "string" && (HOST_ORDER_KINDS as readonly string[]).includes(k);
+/** P4's kinds (#325): an agent from HOST_SETTINGS_AGENT takes them. */
+export const SETTINGS_ORDER_KINDS: readonly HostOrderKind[] = ["set-units", "set-emulate", "rotate-token", "retry-release", "diagnostics"];
+/** The first agent that takes P4's settings and orders (#325): an older one refuses them as unknown. */
+export const HOST_SETTINGS_AGENT = "0.4.0";
 /** How long an order waits for its agent's poll (60-120 s, hourly while the pool answers 401): past it, it expires. */
 export const HOST_ORDER_TTL_MIN = 60;
 /** The first agent that reads the host state's target and orders (and never follow.latest): an older one would let an order expire unheard. */
@@ -336,13 +365,122 @@ const semver = (v: string | null | undefined): number[] | null => {
   return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
 };
 
-/** Whether an agent of version `v` takes host orders (at or above HOST_ORDERS_AGENT). */
-export function agentTakesOrders(v: string | null | undefined): boolean {
-  const have = semver(v), want = semver(HOST_ORDERS_AGENT)!;
+/** Whether version `v` is at or above `want`. */
+function atLeast(v: string | null | undefined, want: string): boolean {
+  const have = semver(v), w = semver(want)!;
   if (!have) return false;
-  for (let i = 0; i < 3; i++) if (have[i] !== want[i]) return have[i] > want[i];
+  for (let i = 0; i < 3; i++) if (have[i] !== w[i]) return have[i] > w[i];
   return true;
 }
+/** Whether an agent of version `v` takes host orders (at or above HOST_ORDERS_AGENT). */
+export function agentTakesOrders(v: string | null | undefined): boolean {
+  return atLeast(v, HOST_ORDERS_AGENT);
+}
+/** Whether an agent of version `v` takes P4's settings and orders (at or above HOST_SETTINGS_AGENT, #325). */
+export function agentTakesSettings(v: string | null | undefined): boolean {
+  return atLeast(v, HOST_SETTINGS_AGENT);
+}
+
+// ---------- the host's settings (#325, design v2 §12, §17.1) ----------
+
+/** The most units a set-units may name: a host never has more (parseCapacity's bound). */
+export const MAX_SETTING_UNITS = 4096;
+/** A settings order's value, as host_orders.arg keeps it and the host state sends it beside the order. */
+export type OrderArg = { units: number | null } | { emulate: Arch[] | null };
+/**
+ * A settings order's value from a person's request, or why not: set-units
+ * {units: 1..4096 | null}, set-emulate {emulate: [x86_64 | aarch64, ...] | null}
+ * (null: the envelope's own back). Whether it fits the envelope is the
+ * agent's to say — it refuses anything above it, and the answer shows.
+ */
+export function orderArg(kind: HostOrderKind, b: Record<string, unknown>): OrderArg | null | string {
+  if (kind === "set-units") {
+    if (b.units === null) return { units: null };
+    if (!int(b.units, 1, MAX_SETTING_UNITS)) return "units: a whole number of units, at least 1, or null for its envelope's own";
+    return { units: b.units };
+  }
+  if (kind === "set-emulate") {
+    if (b.emulate === null) return { emulate: null };
+    if (!Array.isArray(b.emulate) || b.emulate.length > ARCHES.length || !b.emulate.every((a) => ARCHES.includes(a as Arch))) return "emulate: a list of architectures (x86_64, aarch64) whose emulated lane may run, [] for none, or null for its envelope's own";
+    return { emulate: [...new Set(b.emulate as Arch[])].sort() };
+  }
+  return null;
+}
+
+/** The host's settings as the pool keeps them (hosts.settings), each field checked; null when it has none. */
+export interface HostSettings { units: number | null; emulate: Arch[] | null }
+export function hostSettingsOf(v: string | null): HostSettings | null {
+  if (!v) return null;
+  let s: Record<string, unknown>;
+  try {
+    s = JSON.parse(v);
+  } catch {
+    return null;
+  }
+  if (!s || typeof s !== "object") return null;
+  const units = int(s.units, 1, MAX_SETTING_UNITS) ? s.units : null;
+  const emulate = Array.isArray(s.emulate) && s.emulate.every((a) => ARCHES.includes(a as Arch)) ? (s.emulate as Arch[]) : null;
+  return units === null && emulate === null ? null : { units, emulate };
+}
+
+/**
+ * The settings as the host's last report says them (design v2 §17.2's
+ * `settings`, #325): what the pool narrowed, the envelope it narrows inside
+ * — its most units, the units detected, its emulate, the emulated lanes
+ * detected, whether it allows diagnostics — what applies, and what of the
+ * settings the envelope leaves out. What the host page draws its controls
+ * from: the envelope shown, greyed above it.
+ */
+export interface ReportedSettings {
+  units: number | null;
+  emulate: Arch[] | null;
+  envelope: { max_units: number | null; detected_units: number | null; emulate: Arch[] | null; detected_lanes: Arch[]; diagnostics: boolean | null };
+  effective: { units: number | null; emulated: Arch[] };
+  above: string[];
+}
+export function reportedSettingsOf(report: string | null): ReportedSettings | null {
+  if (!report) return null;
+  let r: { settings?: unknown };
+  try {
+    r = JSON.parse(report);
+  } catch {
+    return null;
+  }
+  const s = r?.settings as Record<string, any> | null | undefined;
+  if (!s || typeof s !== "object") return null;
+  const n = (v: unknown) => (int(v, 0, MAX_SETTING_UNITS) ? (v as number) : null);
+  const arches = (v: unknown): Arch[] | null => (Array.isArray(v) && v.length <= ARCHES.length && v.every((a) => ARCHES.includes(a as Arch)) ? (v as Arch[]) : null);
+  const e = s.envelope && typeof s.envelope === "object" ? s.envelope : {};
+  const f = s.effective && typeof s.effective === "object" ? s.effective : {};
+  return {
+    units: n(s.units),
+    emulate: arches(s.emulate),
+    envelope: { max_units: n(e.max_units), detected_units: n(e.detected_units), emulate: arches(e.emulate), detected_lanes: arches(e.detected_lanes) ?? [], diagnostics: typeof e.diagnostics === "boolean" ? e.diagnostics : null },
+    effective: { units: n(f.units), emulated: arches(f.emulated) ?? [] },
+    above: Array.isArray(s.above) ? s.above.filter((a: unknown): a is string => typeof a === "string" && a.length <= ORDER_DETAIL_MAX && !/[\x00-\x1f\x7f]/.test(a)).slice(0, 4) : [],
+  };
+}
+
+/** The brake as the host's last report says it (#325): how much of each limit the last window spent. */
+export interface ReportedBrake { orders_hour: number | null; restarts_hour: number | null; narrowings_hour: number | null; release_change_at: string | null }
+export function reportedBrakeOf(report: string | null): ReportedBrake | null {
+  if (!report) return null;
+  let r: { brake?: unknown };
+  try {
+    r = JSON.parse(report);
+  } catch {
+    return null;
+  }
+  const b = r?.brake as Record<string, unknown> | null | undefined;
+  if (!b || typeof b !== "object") return null;
+  const n = (v: unknown) => (int(v, 0, 10000) ? (v as number) : null);
+  return { orders_hour: n(b.orders_hour), restarts_hour: n(b.restarts_hour), narrowings_hour: n(b.narrowings_hour), release_change_at: typeof b.release_change_at === "string" && b.release_change_at.length <= 40 ? b.release_change_at : null };
+}
+
+/** The diagnostics order brings at most this many lines (M10), each at most this long, all of them at most this many bytes. */
+export const DIAGNOSTIC_LINES = 500;
+export const DIAGNOSTIC_LINE_MAX = 400;
+export const DIAGNOSTICS_MAX_BYTES = 64 * 1024;
 
 /** The legacy set as the host's last report says it (design v2 §17.2 `legacy`), each field checked; null when it reports none. */
 export interface LegacySet {

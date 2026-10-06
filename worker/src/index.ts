@@ -38,9 +38,12 @@
  *   GET  /api/v1/factory/rollback/:to            the latest rollback statement rollback.yml signed for going back to :to, and its bundle, from R2 (#314)
  *   POST /api/v1/hosts/enrollments · POST /hosts/enroll · GET /hosts[/:id] · POST /hosts/:id/confirm   maintainer hosts: a one-time token, the machine's enrollment, the owner's Confirm (#321, routes/hosts.ts)
  *   GET  /api/v1/hosts/self/state · POST /hosts/self/token · POST /hosts/self/report   a host's calls, signed with its key (Omarchy-Host); the state
- *                                                  carries its release target, its open Updates and its host orders, the report answers them (#344)
+ *                                                  carries its release target, its open Updates and its host orders, the report answers them (#344);
+ *                                                  and its settings (#325)
  *   POST /api/v1/hosts/:id/suspend|resume|retire · POST /hosts/owners/:login/cause|resume   stopping a host, removed for cause, an owner listed again (#322)
- *   POST /api/v1/hosts/:id/orders                 a host order: reconcile-now, retire-legacy with the owner's passkey (#344)
+ *   POST /api/v1/hosts/:id/orders                 a host order: reconcile-now, retire-legacy with the owner's passkey (#344); set-units,
+ *                                                  set-emulate, rotate-token, retry-release, diagnostics (#325)
+ *   POST /api/v1/hosts/self/diagnostics · GET /hosts/:id/diagnostics/:order   a diagnostics order's scrubbed log lines (#325)
  *   POST /api/v1/hosts/:id/cap                    {units | null, reason}: the pool's cap on a host's units, its owner or any maintainer (#337)
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
@@ -83,7 +86,8 @@ import {
 import { handleSourceRead } from "./routes/sources";
 import { handleAnswerOrder, handleCancelOrder, handleFollow, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
 import { handleRollbackStatement } from "./routes/rollback";
-import { handleCapHost, handleConfirmHost, handleEnroll, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSuspendHost, signedHost } from "./routes/hosts";
+import { handleCapHost, handleConfirmHost, handleEnroll, handleHostDiagnostics, handleHostDiagnosticsGet, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSuspendHost, signedHost } from "./routes/hosts";
+import { DIAGNOSTICS_MAX_BYTES } from "./hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
@@ -709,8 +713,11 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/hosts/self/state") { const s = await signedHost(request, env, url); return s instanceof Response ? s : handleHostState(s, env); }
   if (method === "POST" && path === "/hosts/self/token") { const s = await signedHost(request, env, url); return s instanceof Response ? s : handleHostToken(s, env); }
   if (method === "POST" && path === "/hosts/self/report") { const s = await signedHost(request, env, url); return s instanceof Response ? s : handleHostReport(s, env); }
+  // The lines a diagnostics order asked for (#325): signed, up to 64 KiB.
+  if (method === "POST" && path === "/hosts/self/diagnostics") { const s = await signedHost(request, env, url, DIAGNOSTICS_MAX_BYTES); return s instanceof Response ? s : handleHostDiagnostics(s, env); }
   if (method === "GET" && path === "/hosts") return handleHostsList(await contributorOf(request, env), url, env);
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})$/)) && method === "GET") return handleHostGet(await contributorOf(request, env), m[1], env);
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/diagnostics\/(ho_[0-9a-f]{32})$/)) && method === "GET") return handleHostDiagnosticsGet(await contributorOf(request, env), m[1], m[2], env);
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/confirm$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     return c ? handleConfirmHost(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
