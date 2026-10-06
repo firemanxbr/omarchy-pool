@@ -2315,7 +2315,11 @@ names its host, linked to its page; errors come first.
 - **`silent`**: nothing of the host reached the pool for ten minutes (its
   agent reports every five and polls every two). Check the machine, its
   agent (`omarchy-agent status`, `omarchy-agent logs`) and
-  its network. A Mac whose last report said it sleeps is not silent.
+  its network. A Mac whose last report said it sleeps is not silent for a
+  day (`ASLEEP_QUIET_H`): past that it is, the line saying its last report
+  was of its sleep — it lost power, or its agent died asleep. The Workers
+  page says the same host asleep, then silent, and never alive while
+  silent.
 - **`behind`**: 45 minutes after the pool's deploy (the 426 gate's grace)
   the host still runs an older release, with its last round beside it; a
   host its owner's soak holds says nothing. Read the round on its page;
@@ -2330,9 +2334,11 @@ names its host, linked to its page; errors come first.
 - **`disk-low`**: the free disk on its work root or its engine's data root
   is under the signed floor (`capacity.disk.floor_gb`): its dispatcher
   claims no build until there is room. Prune the engine, or grow the disk.
-- **a lane held**: an emulated lane the agent holds off, with its reason —
-  binfmt missing is `factory/host/prep-root.sh`'s to fix; the envelope's own
-  `emulate` (*off: …*) is the owner's choice and no line.
+- **a lane held**: an emulated lane the agent holds off, in the pool's
+  words (Status is public): *binfmt missing* is `factory/host/prep-root.sh`'s
+  to fix; *its smoke run failed* and *not checked* send you to its page,
+  whose box has the agent's own reason (an engine's error, a path); the
+  envelope's own `emulate` (*off: …*) is the owner's choice and no line.
 - **`clamped`**: a task asked a size larger than every host alive runs and
   runs at the largest (D31): the package's page sets its size.
 - **`reserving`**: a host has held its units for one large task for over
@@ -2341,7 +2347,13 @@ names its host, linked to its page; errors come first.
 - **Capacity, per architecture — the prompt to add a host**: *"N tasks
   queued, the oldest waited X; free native units: 0, free emulated units:
   M"* once an architecture's oldest queued build or trial waited 60
-  minutes, and *"tasks waiting for a native <arch> host: K"* while builds
+  minutes (from its creation, a requeued task's run counted) with no free
+  build of it — no host that claims has a build's units free on a lane of
+  it, a native one for the builds an emulated lane sent back. One that
+  waited beside a free build is an info line saying so: its placement (a
+  project's copy kept off its requester's host), a pin or its size holds
+  it, and a new host would not take it sooner. *"Tasks waiting for a
+  native <arch> host: K"* while builds
   an emulated lane sent back (`needs_native`) wait — only a native host of
   that architecture takes those. The table under the lines has the queue,
   the free units native and emulated, and the week's busy ratio per lane
@@ -2367,8 +2379,10 @@ hosting requirement its isolation level does not meet as a new host would
 (`root` is the Studio's recorded exception until P6), the engine refusing
 the agent's user (log out and back in, or reboot, so the docker group
 applies), and what the agent says of itself in its report's
-`needs_person` (linger off — `sudo loginctl enable-linger <user>` —, and
-credentials within its user's reach).
+`needs_person` (from agent 0.5.0, looked at again hourly: linger off —
+`sudo loginctl enable-linger <user>` —, and credentials within its user's
+reach, by path: an SSH private key, a `gh` login, stored git credentials,
+a browser profile; install's preflight says the same once).
 
 The pool writes a host's own row only when its report changed, or once the
 row is five minutes old (`HOST_ROW_TOUCH_MIN`): the state poll every two

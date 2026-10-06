@@ -2,10 +2,12 @@
  * The host page (#324, design v2 §18.1), inside workerd with a real D1: two
  * maintainer hosts enrolled, confirmed and claiming as their agents and
  * dispatchers do, each reporting a recorded report in the agent's own shape
- * (crates/omarchy-agent run/report.rs, agent 0.4.0) — the Studio canary's
- * (aarch64, rootful docker, an emulated x86_64 lane, its legacy set) and the
- * P1 host's (x86_64, rootless podman, a lane held for binfmt, limits not
- * enforced, a round the docker group stopped) —:
+ * (crates/omarchy-agent run/report.rs; every key of its contract fixture) —
+ * the Studio canary's (aarch64, rootful docker, an emulated x86_64 lane, its
+ * legacy set) and the P1 host's (x86_64, rootless podman, a lane held for
+ * binfmt, limits not enforced, a round the docker group stopped, and what its
+ * agent says of itself from 0.5.0, run/needs.rs: linger off, a credential
+ * within its user's reach) —:
  *
  * - its owner and the maintainers see everything §18.1 lists from that
  *   report: the runtime, the isolation level and `dedicated`, the agent's and
@@ -103,6 +105,8 @@ const STUDIO_REPORT = {
   runtime: { driver: "compose/docker", switch: null, switch_last: null },
   owner: OWNER("kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0"),
   asleep: false,
+  // Its agent sees nothing a person must fix of itself (linger on, no credential within its user's reach).
+  needs_person: [],
 };
 /** The P1 host's report: an x86_64 VPS, rootless podman at the subuid level, the aarch64 lane held for binfmt, --pids-limit ignored, a round the docker group stopped. */
 const P1_REPORT = {
@@ -123,8 +127,11 @@ const P1_REPORT = {
   runtime: { driver: "compose/podman", switch: null, switch_last: null },
   owner: OWNER("Fq8MHTVhn3EHJ0P5yCbvJWAjm8ZLy9fKDn0z1cFgDXk"),
   asleep: false,
-  // What only the agent sees of itself, when it says it (fleet.ts needsPersonOf).
-  needs_person: [{ what: "linger", detail: "linger is off for omarchy: the agent does not start at boot — sudo loginctl enable-linger omarchy" }],
+  // What only the agent sees of itself (run/needs.rs, looked at hourly): the contract's linger, and a credential in its words.
+  needs_person: [
+    ...(JSON.parse(settingsFixture).needs_person as { what: string; detail: string }[]),
+    { what: "credentials", detail: "credentials within the agent's reach, move them off this user: a gh login: /home/omarchy/.config/gh/hosts.yml" },
+  ],
 };
 
 // ---------- hosts, from Add a host to claiming ----------
@@ -192,7 +199,7 @@ describe("the host page's read (#324, design v2 §18.1)", () => {
   it("is drawn from reports in the agent's own shape: every key of its contract fixture, nested", () => {
     const keys = (o: Record<string, unknown>, at = ""): string[] => Object.entries(o).flatMap(([k, v]) => (v && typeof v === "object" && !Array.isArray(v) ? [at + k, ...keys(v as Record<string, unknown>, `${at}${k}.`)] : [at + k]));
     const contract = keys(JSON.parse(settingsFixture));
-    expect(contract).toEqual(expect.arrayContaining(["release.floor", "rollout.state", "round.outcome", "capacity.held_lanes", "capacity.job_reserved", "capacity.limits.pids", "runtime.driver", "settings.envelope.max_units"]));
+    expect(contract).toEqual(expect.arrayContaining(["release.floor", "rollout.state", "round.outcome", "capacity.held_lanes", "capacity.job_reserved", "capacity.limits.pids", "runtime.driver", "settings.envelope.max_units", "needs_person"]));
     for (const r of [STUDIO_REPORT, P1_REPORT]) expect(keys(r)).toEqual(expect.arrayContaining(contract));
   });
 
@@ -247,7 +254,7 @@ describe("the host page's read (#324, design v2 §18.1)", () => {
     }
   });
 
-  it("names on the P1 host what needs a person: the lane held for binfmt, the limits not enforced, the docker group, what its agent says (linger)", async () => {
+  it("names on the P1 host what needs a person: the lane held for binfmt, the limits not enforced, the docker group, what its agent says (linger, credentials)", async () => {
     const h = (await call("GET", `/hosts/${p1.host}`, { session: "m2" })).json.host;
     expect(h).toMatchObject({ isolation: "subuid", runtime: { driver: "compose/podman" }, release_applied: "v1.19.2", release_target: "v1.20.0", rollout: { state: "pulling", target: "v1.20.0" } });
     // The pool runs no release here ("test"): the versions are its report's, which names none.
@@ -255,11 +262,16 @@ describe("the host page's read (#324, design v2 §18.1)", () => {
     expect(h.held_lanes).toEqual([{ arch: "aarch64", reason: P1_REPORT.capacity.held_lanes[0].reason }]);
     expect(h.owner_caps).toEqual({ max_units: 7, detected_units: 7, emulate: null });
     const box = Object.fromEntries(h.needs_person.map((n: { what: string; text: string }) => [n.what, n.text]));
-    expect(Object.keys(box).sort()).toEqual(["binfmt", "cgroups", "docker-group", "linger"]);
+    expect(Object.keys(box).sort()).toEqual(["binfmt", "cgroups", "credentials", "docker-group", "linger"]);
     expect(box.binfmt).toContain("its aarch64 lane is held — needs a person: prep-root.sh installs qemu-user-static-binfmt");
     expect(box.cgroups).toBe("limits cannot be enforced: its runtime ignores --pids-limit — a rootless runtime needs systemd to delegate cpu, memory and pids to the agent's user (cgroup v2)");
     expect(box["docker-group"]).toContain("log out and back in, or reboot, so the docker group applies");
+    expect(box.linger).toBe(JSON.parse(settingsFixture).needs_person[0].detail);
     expect(box.linger).toContain("sudo loginctl enable-linger omarchy");
+    expect(box.credentials).toBe("credentials within the agent's reach, move them off this user: a gh login: /home/omarchy/.config/gh/hosts.yml");
+    // The agent's words are its owner's and the maintainers': Status's public lines carry none of them.
+    const fleet = (await call("GET", "/hosts/fleet")).json;
+    expect(JSON.stringify(fleet)).not.toMatch(/loginctl|hosts\.yml|binfmt_misc/);
   });
 
   it("says pending-owner and suspended in the box, and a disk below the floor and below the minimum", async () => {
@@ -390,6 +402,12 @@ describe("the host page's controls (#324)", () => {
     const page = (await call("GET", `/hosts/${p1.host}`, { session: "m1" })).json.host;
     expect(page).toMatchObject({ pool_cap_units: 3, units_effective: 3, units_busy: 2, units_free: 0, owner_caps: { max_units: 7 } });
     expect((await call("POST", `/hosts/${p1.host}/cap`, { session: "m1", body: { units: null, reason: "the canary passed" } })).status).toBe(200);
+    // The page's cap dialog offers none above its units — the door refuses them —, and sixteen while the pool counts none.
+    const { capOptions } = runScript(scriptOf(await served(`/hosts/${p1.host}`)), { pathname: `/hosts/${p1.host}`, functions: ["capOptions"] });
+    const values = (h: unknown) => (capOptions(h) as { value: string }[]).map((o) => o.value);
+    expect(values({ units: 6, pool_cap_units: null })).toEqual(["", "0", "1", "2", "3", "4", "5", "6"]);
+    expect(values({ units: null, pool_cap_units: null })).toHaveLength(18);
+    expect((capOptions({ units: 6, pool_cap_units: 3 }) as { selected: boolean }[]).filter((o) => o.selected)).toHaveLength(1);
   });
 });
 

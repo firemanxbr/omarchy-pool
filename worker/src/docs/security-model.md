@@ -965,9 +965,13 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   Workers page's fleet row its lanes, units busy and free, tasks, release
   and isolation level. The rest — its capacity and disks, its hostname and
   key's fingerprint, its leases and the packages they build, its runtime
-  and versions, its "needs a person" box (which may say credentials were
-  found within the agent's user's reach), its settings, orders and legacy
-  set — is its owner's and the maintainers'. A **Stop** on one of its
+  and versions, its "needs a person" box (which may name, by path,
+  credentials its agent found within its user's reach), its settings,
+  orders and legacy set — is its owner's and the maintainers'. Status's
+  lines about it are public, so they carry the pool's words only: a
+  round's outcome, a verify failure's check, a held lane's class (binfmt
+  missing, its smoke run failed, not checked) — never an agent's own text,
+  which may hold an engine's error or a path of the machine. A **Stop** on one of its
   leases is the worker orders' `stop-task` of that task (#334): its owner
   or a maintainer, capped per login (thirty an hour), fencing that task
   only. The pool's **cap** on its units (#337) lowers what the pool hands it

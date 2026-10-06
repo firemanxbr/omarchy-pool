@@ -3,14 +3,16 @@
  * §18.2, §18.3; fleet.ts, routes/hosts.ts handleFleet):
  *
  * - each line on its own, on a fixed clock (fleet.ts): a host silent for ten
- *   minutes; behind 45 minutes after a deploy; rolled back; a task lost on
- *   it (readopt-failed); its disk under the floor; a lane held for binfmt
- *   (never the envelope's own choice); a task clamped to the largest host; a
- *   host reserving for over an hour; a verify failure as an error naming the
- *   check (a floor's refusal is none); a new host and an agent's
- *   self-rollback as info; errors first;
- * - the scaling signal: an x86_64 backlog whose oldest waited 60 minutes
- *   says how many wait and the free units native and emulated, the
+ *   minutes (one whose last report said it sleeps, only a day on); behind 45
+ *   minutes after a deploy; rolled back; a task lost on it (readopt-failed);
+ *   its disk under the floor; a lane held for binfmt in the pool's words,
+ *   never the agent's (nor the envelope's own choice); a task clamped to the
+ *   largest host; a host reserving for over an hour; a verify failure as an
+ *   error naming the check (a floor's refusal is none); a new host and an
+ *   agent's self-rollback as info; errors first;
+ * - the scaling signal: an x86_64 backlog whose oldest waited 60 minutes with
+ *   no free build of it says how many wait and the free units native and
+ *   emulated — beside a free build, an info line that says so —, the
  *   needs_native waits counted; the week's busy ratio per lane;
  * - the second opinion: the fleet's model mix and the share of last week's
  *   publish-bound audits that were `independent: none`;
@@ -24,7 +26,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
-import { capacityLines, capacityOf, fleetHostOf, hostLines, secondOpinionOf, span, verifyFailureOf, type FleetHostRow, type FleetLease } from "../src/fleet";
+import { capacityLines, capacityOf, fleetHostOf, heldWords, hostLines, secondOpinionOf, span, verifyFailureOf, ASLEEP_QUIET_H, type FleetHostRow, type FleetLease } from "../src/fleet";
 import { selectionRules } from "../src/routes/factory";
 import { AUDITS_7D_SQL, BUSY_7D_SQL, FLEET_EVENTS_SQL, FLEET_LEASES_SQL, HOST_LEASES_SQL, MODEL_MIX_SQL, QUEUE_BY_ARCH_SQL } from "../src/routes/hosts";
 import { DISK_FLOOR_GB } from "../src/hosts";
@@ -52,13 +54,20 @@ const NONE = { lost: [], clamped: [] };
 const kinds = (ls: { kind: string }[]) => ls.map((l) => l.kind);
 
 describe("each host's Status lines (fleet.ts hostLines)", () => {
-  it("a host is silent once nothing of it reached the pool for ten minutes — never one that said it sleeps", () => {
+  it("a host is silent once nothing of it reached the pool for ten minutes — one whose last report said it sleeps only a day on", () => {
     expect(hostLines([row({ reported_at: ago(9.9), last_seen: ago(9.9) })], NONE, POOL, NOW)).toEqual([]);
     // Its state poll counts as much as its report: the later of the two.
     expect(hostLines([row({ reported_at: ago(30), last_seen: ago(2) })], NONE, POOL, NOW)).toEqual([]);
     const silent = hostLines([row({ reported_at: ago(10), last_seen: ago(10) })], NONE, POOL, NOW);
     expect(silent).toEqual([{ level: "warn", kind: "silent", host: { id: "h_studio0001", name: "studio", owner: "m1" }, text: "silent for 10 min: nothing of it reached the pool since 2026-10-06 11:50 UTC — check the machine, its agent and its network" }]);
-    expect(hostLines([row({ reported_at: ago(60), last_seen: ago(60), asleep_at: ago(61) })], NONE, POOL, NOW)).toEqual([]);
+    // Asleep (a Mac, #329): its last report said so — not silent, and its fleet row says asleep and not alive.
+    const asleep = row({ reported_at: ago(60), last_seen: ago(60), asleep_at: ago(61) });
+    expect(hostLines([asleep], NONE, POOL, NOW)).toEqual([]);
+    expect(fleetHostOf(asleep, [], NOW, RULES)).toMatchObject({ state: "asleep", asleep: true, alive: false });
+    // A day on, it is silent like any host (it lost power, or its agent died asleep), on Status and on the Workers page alike.
+    const gone = row({ reported_at: ago(ASLEEP_QUIET_H * 60 + 1), last_seen: ago(ASLEEP_QUIET_H * 60 + 1), asleep_at: ago(ASLEEP_QUIET_H * 60 + 2) });
+    expect(hostLines([gone], NONE, POOL, NOW)).toEqual([expect.objectContaining({ kind: "silent", text: "silent for 24 h 1 min: nothing of it reached the pool since 2026-10-05 11:59 UTC, when its last report said it was going to sleep — check the machine, its agent and its network" })]);
+    expect(fleetHostOf(gone, [], NOW, RULES)).toMatchObject({ state: "silent", asleep: false, alive: false });
     // A suspended, a waiting or a retired host says it elsewhere.
     for (const status of ["suspended", "pending-owner", "retired"]) expect(hostLines([row({ status, reported_at: ago(90), last_seen: ago(90) })], NONE, POOL, NOW)).toEqual([]);
   });
@@ -75,14 +84,21 @@ describe("each host's Status lines (fleet.ts hostLines)", () => {
     expect(back).toEqual([expect.objectContaining({ kind: "rolled-back", text: "rolled-back: its agent's guard reverted v1.21.0 (2026-10-06 11:40 UTC) and runs v1.20.0; v1.21.0 stays in its quarantine" })]);
   });
 
-  it("says a task lost on it (readopt-failed), its disk under the floor, a lane held for binfmt — not one its envelope turns off — and a reservation over an hour", () => {
+  it("says a task lost on it (readopt-failed), its disk under the floor, a lane held for binfmt in the pool's words — not one its envelope turns off — and a reservation over an hour", () => {
     const lost = hostLines([row()], { lost: [{ worker: "m1-studio-ab12", task: 812, at: ago(5) }, { worker: "someone-else", task: 9, at: ago(5) }], clamped: [] }, POOL, NOW);
     expect(lost).toEqual([expect.objectContaining({ kind: "readopt-failed", text: "readopt-failed: 1 task lost in the last hour (#812) — a container gone when its dispatcher came back (a reboot, an engine restart, the disk watcher); each back in the queue, its attempt given back" })]);
     const low = hostLines([row({ capacity: capOf({ disk_free_gb: { work: DISK_FLOOR_GB - 1, engine: 220 } }) })], NONE, POOL, NOW);
     expect(low).toEqual([expect.objectContaining({ kind: "disk-low", text: `disk-low: ${DISK_FLOOR_GB - 1} GB free on the work root and 220 on the engine's data root, below the ${DISK_FLOOR_GB} GB floor — it claims no build until there is room` })]);
     const binfmt = "needs a person: prep-root.sh installs qemu-user-static-binfmt (no qemu-x86_64 handler in /proc/sys/fs/binfmt_misc)";
     const held = hostLines([row({ capacity: capOf({ lanes: [STUDIO_LANES[0]], held_lanes: [{ arch: "x86_64", reason: binfmt }] }) })], NONE, POOL, NOW);
-    expect(held).toEqual([{ level: "warn", kind: "lane-held", arch: "x86_64", host: expect.any(Object), text: `its x86_64 lane is held — ${binfmt}` }]);
+    expect(held).toEqual([{ level: "warn", kind: "lane-held", arch: "x86_64", host: expect.any(Object), text: "its x86_64 lane is held: binfmt missing (prep-root.sh installs it) — its page has why" }]);
+    // Public, as Status is: the class of the agent's reason, never its words (a path of the machine, an engine's error).
+    expect(held[0].text).not.toContain("/proc/sys");
+    const smoke = "the smoke run failed: Error: crun: open `/home/omarchy/.local/share/omarchy-agent/work/emul-probe`: Permission denied";
+    const failed = hostLines([row({ capacity: capOf({ lanes: [STUDIO_LANES[0]], held_lanes: [{ arch: "x86_64", reason: smoke }] }) })], NONE, POOL, NOW);
+    expect(failed.map((l) => l.text)).toEqual(["its x86_64 lane is held: its smoke run failed — its page has why"]);
+    expect(heldWords("not checked: no x86_64 build image to run (a release names one)")).toBe("not checked: no build image to run");
+    expect(heldWords("something its agent says one day")).toBe("its agent holds it");
     expect(hostLines([row({ capacity: capOf({ held_lanes: [{ arch: "x86_64", reason: "off: the envelope's emulate does not list it" }] }) })], NONE, POOL, NOW)).toEqual([]);
     expect(hostLines([row({ reserving_task: 4242, reserving_since: ago(59) })], NONE, POOL, NOW)).toEqual([]);
     expect(hostLines([row({ reserving_task: 4242, reserving_since: ago(75) })], NONE, POOL, NOW)).toEqual([expect.objectContaining({ kind: "reserving", task: 4242, text: "reserving for task #4242 for 1 h 15 min: it takes nothing else but pool jobs until its units fit it" })]);
@@ -121,7 +137,7 @@ describe("the scaling signal (fleet.ts capacityOf, capacityLines)", () => {
   const studioLeases: FleetLease[] = [1, 2, 3, 4, 5].map((id) => ({ id, lease_owner: "m1-studio-ab12", kind: "build", arch: "aarch64", lane: "native", units: 2, size: 1 }));
   const vps = (o: Partial<FleetHostRow> = {}) => row({ id: "h_vps0000001", name: "vps-x86", arch: "x86_64", lanes: JSON.stringify([{ arch: "x86_64", mode: "native" }]), capacity: capOf({ cpus: 8, mem_gb: 16, units: 7, lanes: [{ arch: "x86_64", mode: "native" }] }), units: 7, worker_id: "m2-vps-x86", owner_login: "m2", ...o });
 
-  it("an x86_64 backlog whose oldest waited 60 minutes warns with the free units native and emulated, and counts the native waits", () => {
+  it("an x86_64 backlog whose oldest waited 60 minutes with no free build of it warns with the free units native and emulated, and counts the native waits", () => {
     const rows = [row(), vps({ reported_at: ago(15), last_seen: ago(15), reg_last_seen: ago(15) })];
     const hosts = rows.map((h) => fleetHostOf(h, studioLeases, NOW, RULES));
     expect(hosts.map((h) => [h.name, h.state, h.units_busy, h.units_free])).toEqual([["studio", "full", 10, 0], ["vps-x86", "silent", 0, 0]]);
@@ -137,10 +153,30 @@ describe("the scaling signal (fleet.ts capacityOf, capacityLines)", () => {
     // The Studio with room (three builds): the emulated lane's free units say so, and no native host runs x86_64 now the VPS is gone.
     const room = [row()].map((h) => fleetHostOf(h, studioLeases.slice(0, 3), NOW, RULES));
     expect(room[0]).toMatchObject({ state: "claiming", units_busy: 6, units_free: 4 });
+    // Its one queued task an emulated lane sent back: the emulated lane's free build does not take it, the warning stands.
     expect(capacityLines(capacityOf([{ arch: "x86_64", n: 1, oldest: ago(90), needs_native: 1 }], room, [row()], [], NOW))).toEqual([
-      expect.objectContaining({ text: "x86_64: 1 task queued, the oldest waited 1 h 30 min; free native units: 0, free emulated units: 4 — no host runs x86_64 natively" }),
+      { level: "warn", kind: "capacity", arch: "x86_64", text: "x86_64: 1 task queued, the oldest waited 1 h 30 min; free native units: 0, free emulated units: 4 — no host runs x86_64 natively" },
       expect.objectContaining({ text: "tasks waiting for a native x86_64 host: 1 — none runs it natively: only a native host takes them" }),
     ]);
+  });
+
+  it("a backlog that waits beside a free build of its arch is no prompt to add a host: an info line says what holds it", () => {
+    // The Studio with room for two builds on its emulated x86_64 lane, and an x86_64 build held 90 minutes (a project copy's
+    // placement, a pin): a new host would not take it sooner.
+    const room = [row()].map((h) => fleetHostOf(h, studioLeases.slice(0, 3), NOW, RULES));
+    const emulated = capacityOf([{ arch: "x86_64", n: 1, oldest: ago(90), needs_native: 0 }], room, [row()], [], NOW);
+    expect(emulated[0].build_fits).toEqual({ native: false, emulated: true });
+    expect(capacityLines(emulated)).toEqual([{ level: "info", kind: "capacity", arch: "x86_64", text: "x86_64: 1 task queued, the oldest waited 1 h 30 min, while a free build of it fits on a host that claims (free native units: 0, free emulated units: 4) — what holds them is their placement, a pin or their size, not the fleet's room" }]);
+    // A native x86_64 host that claims with seven units free: the same, whatever the native waits.
+    const vpsRow = vps();
+    const native = capacityOf([{ arch: "x86_64", n: 2, oldest: ago(61), needs_native: 2 }], [fleetHostOf(vpsRow, [], NOW, RULES)], [vpsRow], [], NOW);
+    expect(native[0]).toMatchObject({ free_native: 6, build_fits: { native: true, emulated: false } });
+    expect(capacityLines(native).map((l) => [l.level, l.kind])).toEqual([["info", "capacity"], ["warn", "needs-native"]]);
+    // One unit free on the native host (a build takes two): no free build, the warning.
+    const tight: FleetLease[] = [1, 2, 3].map((id) => ({ id, lease_owner: "m2-vps-x86", kind: "build", arch: "x86_64", lane: "native", units: 2, size: 1 }));
+    const full = capacityOf([{ arch: "x86_64", n: 1, oldest: ago(61), needs_native: 0 }], [fleetHostOf(vpsRow, tight, NOW, RULES)], [vpsRow], [], NOW);
+    expect(full[0]).toMatchObject({ free_native: 0, build_fits: { native: false, emulated: false } });
+    expect(capacityLines(full)).toEqual([expect.objectContaining({ level: "warn", kind: "capacity", text: "x86_64: 1 task queued, the oldest waited 1 h 1 min; free native units: 0, free emulated units: 0" })]);
   });
 
   it("the week's busy ratio per architecture and lane, against the units the hosts that run it have since they were confirmed", () => {
@@ -256,7 +292,8 @@ describe("GET /api/v1/hosts/fleet (#324)", () => {
     const f = r.json;
     expect(f.hosts.map((h: any) => [h.name, h.owner, h.state, h.units, h.units_busy, h.units_free, h.tasks, h.release, h.isolation, h.alive])).toEqual([
       ["studio", "m1", "full", 11, 10, 0, 5, "v1.20.0", "root", true],
-      ["vps-x86", "m2", "silent", 7, 0, 0, 0, "v1.20.0", "subuid", true],
+      // Silent: not alive, whatever its last report's age (never "silent" beside "yes").
+      ["vps-x86", "m2", "silent", 7, 0, 0, 0, "v1.20.0", "subuid", false],
     ]);
     const said = f.lines.map((l: any) => `${l.level} ${l.kind}${l.host ? ` ${l.host.name}` : ""}${l.arch ? ` ${l.arch}` : ""}`);
     expect(said).toEqual([
@@ -329,7 +366,8 @@ describe("the Workers page by host (#324, design v2 §18.2)", () => {
     expect(hosts).toContain('aarch64 <span class="muted">native</span><br>x86_64 <span class="muted">emulated (qemu, 16K pages)</span>');
     expect(hosts).toContain('<td class="num">10 / 0</td><td class="num">5</td><td><span class="mono">v1.20.0</span></td><td><span class="mono">root</span> <span class="muted">dedicated</span></td><td>yes</td>');
     expect(hosts).toContain('<a href="/hosts/h_vpsx860001">vps-x86</a> <span class="pill warn">silent</span>');
-    expect(d.nodes["#hosts-note"].textContent).toBe("2 hosts · 2 alive · 10 of 18 units busy · 5 tasks");
+    expect(hosts).toContain('<td><span class="muted" title="silent: nothing of it reached the pool in the last 10 minutes">no</span></td>');
+    expect(d.nodes["#hosts-note"].textContent).toBe("2 hosts · 1 alive · 10 of 18 units busy · 5 tasks");
     // The legacy tables: the role container, not the hosts' own registrations.
     const legacy = ["#w-project tbody", "#w-review tbody", "#w-community tbody"].map((t) => d.nodes[t]?.innerHTML ?? "").join("");
     expect(legacy).toContain(legacyReg);

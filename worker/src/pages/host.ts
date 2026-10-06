@@ -8,7 +8,8 @@
  *   limits its runtime does not enforce (cgroup delegation), the hosting
  *   requirement its isolation level does not meet, the engine refusing the
  *   agent's user (the docker group), and what its agent says of itself
- *   (linger, credentials within its user's reach) — fleet.ts needsPersonOf.
+ *   (linger, credentials within its user's reach: its report's needs_person,
+ *   crates/omarchy-agent run/needs.rs) — fleet.ts needsPersonOf.
  * - The numbers: CPUs and memory, the units the pool counts from them — busy,
  *   free for a task, the one kept for pool jobs —, free disk on the work root
  *   and the engine's data root, and the agent slots, as its agent last
@@ -398,6 +399,13 @@ const SCRIPT = String.raw`
       + (emulated.length ? "; its emulated " + esc(emulated.join(", ")) + " lane takes the project's own recipes only" : "") + stop + held;
   }
   // The pool's cap (#337): what the pool hands it at most, whatever its envelope says; none lets its count decide.
+  // The cap dialog's choices: none, or 0 up to the units the pool counts on it — the door refuses a cap above them (#324) —, or
+  // sixteen while it counts none.
+  function capOptions(h) {
+    var top = h.units === null || h.units === undefined ? 16 : h.units, opts = [{ value: "", text: "No cap — its count decides", selected: h.pool_cap_units === null || h.pool_cap_units === undefined }];
+    for (var u = 0; u <= top; u++) opts.push({ value: String(u), text: u + " unit" + (u === 1 ? "" : "s") + (u === 0 ? " — it claims nothing" : u === 3 ? " — one build and the pool jobs' unit" : ""), selected: h.pool_cap_units === u });
+    return opts;
+  }
   function capWords(h) { return h.pool_cap_units === null || h.pool_cap_units === undefined ? '<span class="muted">none — its count decides</span>' : esc(String(h.pool_cap_units)) + " unit" + (h.pool_cap_units === 1 ? "" : "s") + (h.units !== null && h.units !== undefined ? " of its " + esc(String(h.units)) : ""); }
   // Stop it (#322): the three buttons as the door answers them for this reader, greyed with its reason; its registration's Drain and
   // Resume as the worker orders' door answers them (#324): the owner rule's words where it says no.
@@ -668,8 +676,7 @@ const SCRIPT = String.raw`
       });
     } else if (act === "cap") {
       // Lowered below what it holds, nothing running ends: it claims nothing until its leases fit.
-      var top = Math.max(16, H.units || 0), opts = [{ value: "", text: "No cap — its count decides", selected: H.pool_cap_units === null || H.pool_cap_units === undefined }];
-      for (var u = 0; u <= top; u++) opts.push({ value: String(u), text: u + " unit" + (u === 1 ? "" : "s") + (u === 0 ? " — it claims nothing" : u === 3 ? " — one build and the pool jobs' unit" : ""), selected: H.pool_cap_units === u });
+      var opts = capOptions(H);
       ask({ title: "The pool's cap on " + H.name, text: "The pool hands it at most this many units, whatever its envelope says. Lowered below what it runs, nothing running ends: it claims nothing until its tasks fit.", select: { label: "Units", options: opts }, input: "required", confirm: "Set the cap" }).then(function (r) {
         if (r === null) return;
         api("POST", BASE + "/cap", { units: r.pick === "" ? null : Number(r.pick), reason: r.note }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });

@@ -179,12 +179,8 @@ fleet=$(curl -fs "$POOL/api/v1/hosts/fleet")
 jq -e --arg h "$HOST" --arg a "$ARCH" '.hosts[] | select(.id == $h) | select(.owner == "e2e" and .units == 7 and .units_free == 6 and .tasks == 0 and .isolation == "root" and .lanes == [{arch: $a, mode: "native"}])' <<<"$fleet" >/dev/null || fail "the fleet: $fleet"
 jq -e '.capacity | map(.arch) == ["x86_64", "aarch64"]' <<<"$fleet" >/dev/null || fail "the capacity rows: $fleet"
 jq -e '.lines | map(.kind) | index("new-host") != null' <<<"$fleet" >/dev/null || fail "no new-host line: $fleet"
-# The pages, as a browser gets them: each with both themes' palettes and the switch, the host page's sections, the Workers page's hosts and Status's card.
-for p in "/hosts/$HOST" /workers /status; do
-  html=$(curl -fs "$POOL$p")
-  grep -q 'id="theme"' <<<"$html" || fail "$p: no theme switch"
-  grep -q '\[data-theme="light"\]' <<<"$html" || fail "$p: no light theme"
-done
+# The pages, as a browser gets them: the host page's sections, the Workers page's hosts and Status's card. (Their themes are the
+# shared frame's, the same on every page; #324's views in both themes are its screenshots, taken from a pool seeded like this one.)
 html=$(curl -fs "$POOL/hosts/$HOST")
 for id in hp-needs hp-facts hp-operate hp-orders hp-leases; do grep -q "id=\"$id\"" <<<"$html" || fail "the host page has no #$id"; done
 grep -q 'id="hosts-table"' <<<"$(curl -fs "$POOL/workers")" || fail "the Workers page has no hosts table"

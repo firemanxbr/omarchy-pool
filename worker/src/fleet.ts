@@ -31,6 +31,11 @@ const HOUR = 60 * MIN;
 
 /** A host is silent once nothing of it reached the pool for this long (§18.3): two of its five-minute reports, and a poll. */
 export const SILENT_MIN = 10;
+/**
+ * A host whose last report said it sleeps (a Mac, #329) is asleep, not silent, for this long after that report: a night, or a
+ * day with the lid closed. Past it, Status says it silent like any host — a Mac that lost power or whose agent died asleep.
+ */
+export const ASLEEP_QUIET_H = 24;
 /** A host still on an older release this long after the pool's deploy is behind (§18.3): the 426 gate's grace (update.ts). */
 export const BEHIND_MIN = UPDATE_GRACE_MINUTES;
 /** The capacity line warns once an architecture's oldest queued task waited this long with no free unit taking it (§18.3). */
@@ -147,7 +152,7 @@ export interface FleetHost {
   /** The tasks it runs: its registration's leases. */
   tasks: number;
   release: string | null; isolation: string | null; dedicated: boolean | null;
-  /** Its agent reports (a report within HOST_REPORT_FRESH_MIN), whether it sleeps, whether its dispatcher claims (within selection's ALIVE_MS) and is handed work. */
+  /** Its agent reports (a report within HOST_REPORT_FRESH_MIN, and not silent), whether it sleeps (asleepOf), whether its dispatcher claims (within selection's ALIVE_MS) and is handed work. */
   alive: boolean; asleep: boolean; claims: boolean;
   /** Its one state, in a word the row and Status say: claiming, full, asleep, silent, drained, suspended, pending-owner, below-minimum, not-claiming, stopped. */
   state: string;
@@ -159,6 +164,11 @@ export function lastSignOf(h: Pick<FleetHostRow, "reported_at" | "last_seen">): 
   return t.length ? Math.max(...t) : null;
 }
 
+/** Whether a host sleeps as the fleet says it (§18.2, §18.3): its last report said so, within ASLEEP_QUIET_H — the Workers page and Status alike. */
+export function asleepOf(h: Pick<FleetHostRow, "asleep_at" | "reported_at">, now: number): boolean {
+  return h.asleep_at !== null && !!h.reported_at && now - Date.parse(h.reported_at) < ASLEEP_QUIET_H * HOUR;
+}
+
 /** A host's fleet row from its row and the fleet's leases. */
 export function fleetHostOf(h: FleetHostRow, leases: FleetLease[], now: number, r: Rules): FleetHost {
   const lanes = json<Lane[]>(h.lanes, []);
@@ -166,14 +176,17 @@ export function fleetHostOf(h: FleetHostRow, leases: FleetLease[], now: number, 
   const mine = h.worker_id ? leases.filter((l) => l.lease_owner === h.worker_id) : [];
   const held = mine.map((l) => ({ kind: l.kind, units: l.units ?? unitsOf(l.kind, l.size, r) }));
   const units = h.units === null ? null : Math.min(h.units, h.pool_cap_units ?? Number.MAX_SAFE_INTEGER);
-  const alive = !!h.reported_at && now - Date.parse(h.reported_at) < HOST_REPORT_FRESH_MIN * MIN;
-  const asleep = h.asleep_at !== null && alive;
+  // Alive: its agent reported within HOST_REPORT_FRESH_MIN and something of it reached the pool within SILENT_MIN — never both
+  // "silent" and alive in one row.
+  const quiet = (lastSignOf(h) ?? 0) <= now - SILENT_MIN * MIN;
+  const alive = !!h.reported_at && now - Date.parse(h.reported_at) < HOST_REPORT_FRESH_MIN * MIN && !quiet;
+  const asleep = asleepOf(h, now);
   const below = !!json<KeptCapacity | null>(h.capacity, null)?.below_minimum;
   const seen = h.reg_last_seen ? Date.parse(h.reg_last_seen) : NaN;
   const claiming = Number.isFinite(seen) && seen > now - ALIVE_MS;
   const state = h.status === "suspended" ? "suspended" : h.status === "retired" ? "retired" : h.status === "pending-owner" ? "pending-owner"
     : h.owner_removed_at ? "stopped" : asleep ? "asleep" : h.drained_at ? "drained" : below ? "below-minimum"
-    : (lastSignOf(h) ?? 0) <= now - SILENT_MIN * MIN ? "silent" : !claiming ? "not-claiming" : "claiming";
+    : quiet ? "silent" : !claiming ? "not-claiming" : "claiming";
   const claims = state === "claiming";
   const job = jobReservedOf(report);
   const room = units === null ? 0 : Math.max(0, roomOf({ units }, held, { job_reserved: job }).task);
@@ -192,7 +205,7 @@ export function fleetHostOf(h: FleetHostRow, leases: FleetLease[], now: number, 
 /** What the box names: one word each, the page's icon and the tests key on it. */
 export type NeedKind = "pending-owner" | "suspended" | "stopped" | "below-minimum" | "disk-low" | "binfmt" | "cgroups" | "hosting" | "docker-group" | "linger" | "credentials" | "round";
 export interface Need { what: NeedKind; text: string }
-/** What an agent may say a person must fix in its report's `needs_person` (only it sees them: linger, the credentials within its user's reach). */
+/** What an agent may say a person must fix in its report's `needs_person` (crates/omarchy-agent run/needs.rs, from 0.5.0: linger, the credentials within its user's reach — only it sees them). */
 const AGENT_NEEDS: readonly NeedKind[] = ["linger", "credentials", "docker-group", "binfmt", "cgroups", "hosting"];
 
 /**
@@ -230,7 +243,7 @@ export function needsPersonOf(h: Pick<FleetHostRow, "status" | "owner_login" | "
     if (/docker group|EACCES/i.test(round.detail)) add("docker-group", "the engine's socket refuses the agent's user (EACCES): log out and back in, or reboot, so the docker group applies");
     else add("round", round.detail.replace(/^.*?needs a person:\s*/i, "").slice(0, 400));
   }
-  // What the agent says of itself (only it can see them).
+  // What the agent says of itself (run/needs.rs, looked at hourly; only it can see them).
   const said = Array.isArray(report?.needs_person) ? (report!.needs_person as unknown[]).slice(0, 8) : [];
   for (const x of said) {
     const o = x && typeof x === "object" ? (x as { what?: unknown; detail?: unknown }) : {};
@@ -254,6 +267,18 @@ export interface FleetEvents {
 const who = (h: Pick<FleetHostRow, "id" | "name" | "owner_login">) => ({ id: h.id, name: h.name, owner: h.owner_login });
 
 /**
+ * A held lane's reason in the pool's words, for Status (public): the class of what its agent said (crates/omarchy-agent
+ * capacity/emulation.rs) — binfmt missing, the smoke run failed, not checked — never the agent's own text, which may carry an
+ * engine's error or a path of the machine; the host's page, its owner's and the maintainers', has that.
+ */
+export function heldWords(reason: string): string {
+  if (/binfmt|prep-root\.sh/i.test(reason)) return "binfmt missing (prep-root.sh installs it)";
+  if (/^the smoke run failed/i.test(reason)) return "its smoke run failed";
+  if (/^not checked/i.test(reason)) return "not checked: no build image to run";
+  return "its agent holds it";
+}
+
+/**
  * The warnings, errors and info lines of each host (design v2 §18.3), errors first, then warnings, then info, each list in the
  * hosts' order. A retired host says nothing; a host waiting for its owner's Confirm or suspended says it on its page and the
  * Workers page, not here.
@@ -265,12 +290,13 @@ export function hostLines(rows: FleetHostRow[], ev: FleetEvents, pool: { version
     if (h.status !== "active") continue;
     const host = who(h), report = reportOf(h.report), round = roundOf(report);
     const sign = lastSignOf(h);
-    const silent = !h.asleep_at && (sign === null || now - sign >= SILENT_MIN * MIN);
+    // A host asleep (its last report said so, within ASLEEP_QUIET_H) is not silent; past that, it is like any other.
+    const silent = !asleepOf(h, now) && (sign === null || now - sign >= SILENT_MIN * MIN);
     // Errors: its agent's verify refused the bundle it was to apply — possible tampering, the failed check named.
     const check = verifyFailureOf(round);
     if (check) out.push({ level: "error", kind: "refused", host, text: `refused: its agent's verify failed the ${check} check${round!.at ? ` (${round!.at.slice(0, 16).replace("T", " ")} UTC)` : ""} — possible tampering: it applied nothing and runs what it ran; its page has the round's words` });
     // Warnings.
-    if (silent) out.push({ level: "warn", kind: "silent", host, text: sign === null ? "silent: its agent never reported" : `silent for ${span(now - sign)}: nothing of it reached the pool since ${new Date(sign).toISOString().slice(0, 16).replace("T", " ")} UTC — check the machine, its agent and its network` });
+    if (silent) out.push({ level: "warn", kind: "silent", host, text: sign === null ? "silent: its agent never reported" : `silent for ${span(now - sign)}: nothing of it reached the pool since ${new Date(sign).toISOString().slice(0, 16).replace("T", " ")} UTC${h.asleep_at ? ", when its last report said it was going to sleep" : ""} — check the machine, its agent and its network` });
     const applied = parseTag(h.release_applied);
     if (h.rolled_back_from) out.push({ level: "warn", kind: "rolled-back", host, text: `rolled-back: its agent's guard reverted ${h.rolled_back_from}${h.rolled_back_at ? ` (${h.rolled_back_at.slice(0, 16).replace("T", " ")} UTC)` : ""} and runs ${h.release_applied ?? "its last-good"}; ${h.rolled_back_from} stays in its quarantine` });
     else if (!silent && p && applied && compareTags(applied, p) < 0 && Number.isFinite(deployed) && now - deployed >= BEHIND_MIN * MIN && !(h.soaking_until && Date.parse(h.soaking_until) > now)) {
@@ -282,8 +308,8 @@ export function hostLines(rows: FleetHostRow[], ev: FleetEvents, pool: { version
     const d = c?.disk_free_gb;
     if (!silent && d && (d.work < DISK_FLOOR_GB || d.engine < DISK_FLOOR_GB)) out.push({ level: "warn", kind: "disk-low", host, text: `disk-low: ${d.work} GB free on the work root and ${d.engine} on the engine's data root, below the ${DISK_FLOOR_GB} GB floor — it claims no build until there is room` });
     for (const l of c?.held_lanes ?? []) {
-      // The envelope's own choice ("off: …") is its owner's, not a warning.
-      if (!/^off\b/.test(l.reason)) out.push({ level: "warn", kind: "lane-held", host, arch: l.arch, text: `its ${l.arch} lane is held — ${l.reason}` });
+      // The envelope's own choice ("off: …") is its owner's, not a warning; the agent's words stay on its page.
+      if (!/^off\b/.test(l.reason)) out.push({ level: "warn", kind: "lane-held", host, arch: l.arch, text: `its ${l.arch} lane is held: ${heldWords(l.reason)} — its page has why` });
     }
     if (h.reserving_task !== null && h.reserving_since && now - Date.parse(h.reserving_since) > RESERVING_WARN_MIN * MIN) {
       out.push({ level: "warn", kind: "reserving", host, task: h.reserving_task, text: `reserving for task #${h.reserving_task} for ${span(now - Date.parse(h.reserving_since))}: it takes nothing else but pool jobs until its units fit it` });
@@ -318,6 +344,8 @@ export interface ArchCapacity {
   needs_native: number;
   /** The free units the hosts that claim now could hand a task of this arch: on a native lane, on an emulated one. */
   free_native: number; free_emulated: number;
+  /** Whether one host that claims has a build's units free (TASK_UNITS.build_per_size) on a lane of it: a native one, an emulated one. */
+  build_fits: { native: boolean; emulated: boolean };
   /** How many hosts run it natively and emulated. */
   hosts_native: number; hosts_emulated: number;
   /** The share of the week's unit-hours its lanes spent busy, against what the hosts that run them have; null with none. */
@@ -351,6 +379,7 @@ export function capacityOf(queue: QueueRow[], hosts: FleetHost[], rows: FleetHos
       queued: q?.n ?? 0, oldest_at: q?.oldest ?? null, oldest_wait_min: q?.oldest ? Math.max(0, Math.floor((now - Date.parse(q.oldest)) / MIN)) : null,
       needs_native: Number(q?.needs_native ?? 0),
       free_native: native.reduce((n, h) => n + h.units_free, 0), free_emulated: emulated.reduce((n, h) => n + h.units_free, 0),
+      build_fits: { native: native.some((h) => h.units_free >= TASK_UNITS.build_per_size), emulated: emulated.some((h) => h.units_free >= TASK_UNITS.build_per_size) },
       hosts_native: native.length, hosts_emulated: emulated.length,
       busy_7d: { all: ratio(used(null), capOf(live.filter((h) => has(h, "native") || has(h, "emulated")))), native: ratio(used("native"), capOf(native)), emulated: ratio(used("emulated"), capOf(emulated)) },
     };
@@ -358,15 +387,23 @@ export function capacityOf(queue: QueueRow[], hosts: FleetHost[], rows: FleetHos
 }
 
 /**
- * The capacity lines (design v2 §18.3): an architecture whose oldest queued task waited CAPACITY_WAIT_MIN — none of the fleet's
- * free units took it — says how many wait and the free units native and emulated, the project's prompt to add a host of it; and
- * the tasks an emulated lane sent back wait for a native host of their arch, counted.
+ * The capacity lines (design v2 §18.3): an architecture whose oldest queued task waited CAPACITY_WAIT_MIN with no free build of
+ * it — no host that claims has a build's units free on a lane of it (a native one for tasks an emulated lane sent back) — says
+ * how many wait and the free units native and emulated, the project's prompt to add a host of it; one that waited beside a free
+ * build is an info line that says so (placement, a pin, a size: not the fleet's room). The wait counts from the task's creation:
+ * a task back in the queue after a lease (lost, stopped, sent back for a native host) counts its run too. And the tasks an
+ * emulated lane sent back wait for a native host of their arch, counted.
  */
 export function capacityLines(caps: ArchCapacity[]): StatusLine[] {
   const out: StatusLine[] = [];
   for (const c of caps) {
     if (c.queued > 0 && c.oldest_wait_min !== null && c.oldest_wait_min >= CAPACITY_WAIT_MIN) {
-      out.push({ level: "warn", kind: "capacity", arch: c.arch, text: `${c.arch}: ${c.queued} task${c.queued === 1 ? "" : "s"} queued, the oldest waited ${span(c.oldest_wait_min * MIN)}; free native units: ${c.free_native}, free emulated units: ${c.free_emulated}${c.hosts_native === 0 ? ` — no host runs ${c.arch} natively` : ""}` });
+      const waited = `${c.arch}: ${c.queued} task${c.queued === 1 ? "" : "s"} queued, the oldest waited ${span(c.oldest_wait_min * MIN)}`;
+      // The prompt to add a host only when no free build of the arch fits on a host that claims: tasks that wait beside one wait
+      // for something else — the placement of a project's copy, a pin, their size — and a new host would not take them sooner.
+      const fits = c.build_fits.native || (c.build_fits.emulated && c.queued > c.needs_native);
+      if (!fits) out.push({ level: "warn", kind: "capacity", arch: c.arch, text: `${waited}; free native units: ${c.free_native}, free emulated units: ${c.free_emulated}${c.hosts_native === 0 ? ` — no host runs ${c.arch} natively` : ""}` });
+      else out.push({ level: "info", kind: "capacity", arch: c.arch, text: `${waited}, while a free build of it fits on a host that claims (free native units: ${c.free_native}, free emulated units: ${c.free_emulated}) — what holds them is their placement, a pin or their size, not the fleet's room` });
     }
     if (c.needs_native > 0) out.push({ level: "warn", kind: "needs-native", arch: c.arch, text: `tasks waiting for a native ${c.arch} host: ${c.needs_native}${c.hosts_native === 0 ? " — none runs it natively: only a native host takes them" : ""}` });
   }

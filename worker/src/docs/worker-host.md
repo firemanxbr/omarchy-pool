@@ -326,7 +326,9 @@ Confirm, a suspension, below the minimum, the disk under the floor, an
 emulated lane held for binfmt, limits the runtime does not enforce
 (cgroup delegation), the hosting requirement its isolation level does not
 meet, the engine refusing the agent's user (the docker group), and what
-the agent says of itself (linger, credentials within its user's reach).
+the agent says of itself, looked at again hourly (linger off, credentials
+within its user's reach — the paths install's preflight named; an agent
+before 0.5.0 says neither).
 Its buttons are there too: Reconcile now (an Update of its registration
 while its agent takes no host order), **Drain** and **Resume claims** —
 your drain is lifted by you only —, Suspend and Retire. Anyone else sees

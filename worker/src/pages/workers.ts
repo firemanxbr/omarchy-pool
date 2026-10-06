@@ -19,6 +19,7 @@
  */
 import { page, workerPanels } from "./layout";
 import { HOST_REPORT_FRESH_MIN } from "../hosts";
+import { SILENT_MIN } from "../fleet";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
@@ -66,6 +67,8 @@ __CHARTS__
   skeletonTiles("#tiles", 4); wtTables(); skeletonRows("#hosts-table", 8, 2);
   // The hosts (#324, design v2 §18.2): the fleet's read — owner, arches and lanes, units busy and free, tasks, release, isolation, alive.
   var FRESH_MIN = ${HOST_REPORT_FRESH_MIN};
+  // A host's row says Alive "no" once it is silent too (#324, fleet.ts fleetHostOf): never "silent" beside "yes".
+  var SILENT_MIN = ${SILENT_MIN};
   function laneWords(h) { return (h.lanes || []).map(function (l) { return esc(l.arch) + ' <span class="muted">' + esc(l.mode + (l.via ? " (" + l.via + (l.page16k ? ", 16K pages" : "") + ")" : "")) + "</span>"; }).join("<br>") || '<span class="muted">—</span>'; }
   var HOST_STATE = { claiming: ["ok", "claiming"], full: ["blue", "full"], asleep: ["none", "asleep"], silent: ["warn", "silent"], drained: ["warn", "drained"], suspended: ["error", "suspended"], "pending-owner": ["warn", "waits for Confirm"], "below-minimum": ["warn", "below the minimum"], "not-claiming": ["warn", "not claiming"], stopped: ["error", "claims stopped"] };
   function drawHosts(f) {
@@ -74,7 +77,7 @@ __CHARTS__
     $("#hosts-note").textContent = hs.length ? num(hs.length) + (hs.length === 1 ? " host · " : " hosts · ") + num(alive) + " alive · " + num(used) + " of " + num(units) + " units busy · " + num(tasks) + (tasks === 1 ? " task" : " tasks") : "";
     $("#hosts-table tbody").innerHTML = hs.map(function (h) {
       var st = HOST_STATE[h.state] || ["none", h.state];
-      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + "</a> " + pillHtml(st[0], st[1]) + "</td><td>" + personLink(h.owner) + "</td><td>" + laneWords(h) + '</td><td class="num">' + (h.units === null || h.units === undefined ? "—" : num(h.units_busy) + " / " + num(h.units_free)) + '</td><td class="num">' + num(h.tasks) + '</td><td><span class="mono">' + esc(h.release || "—") + '</span></td><td><span class="mono">' + esc(h.isolation || "?") + "</span>" + (h.dedicated ? ' <span class="muted">dedicated</span>' : "") + "</td><td>" + (h.alive ? "yes" : '<span class="muted" title="its agent has not reported in the last ' + FRESH_MIN + ' minutes">no</span>') + "</td></tr>";
+      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + "</a> " + pillHtml(st[0], st[1]) + "</td><td>" + personLink(h.owner) + "</td><td>" + laneWords(h) + '</td><td class="num">' + (h.units === null || h.units === undefined ? "—" : num(h.units_busy) + " / " + num(h.units_free)) + '</td><td class="num">' + num(h.tasks) + '</td><td><span class="mono">' + esc(h.release || "—") + '</span></td><td><span class="mono">' + esc(h.isolation || "?") + "</span>" + (h.dedicated ? ' <span class="muted">dedicated</span>' : "") + "</td><td>" + (h.alive ? "yes" : '<span class="muted" title="' + (h.state === "silent" ? "silent: nothing of it reached the pool in the last " + SILENT_MIN + " minutes" : "its agent has not reported in the last " + FRESH_MIN + " minutes") + '">no</span>') + "</td></tr>";
     }).join("") || '<tr><td colspan="8" class="muted">no host yet — a maintainer adds one on their page</td></tr>';
   }
   function loadFleet() { api("GET", "/api/v1/hosts/fleet").then(function (f) { FLEET = f; drawHosts(f); }).catch(function (e) { noAnswer("host listing", e, "#hosts-note"); if (!FLEET) $("#hosts-table tbody").innerHTML = ""; }); }

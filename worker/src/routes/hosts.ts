@@ -227,10 +227,14 @@ async function hostView(h: HostRow, detailed: boolean, now: number, pool: Runnin
     reserving_task: h.reserving_task, reserving_since: h.reserving_since,
     below_minimum: capacity?.below_minimum ?? null,
     runtime, provider: h.provider, model: h.model,
-    // The versions (design v2 §18.1): its agent's; the compose plugin — its report's word, else the one the release it applied pins when
-    // that is the pool's —; the docker CLI that release pins; the engine's, when its report says it.
+    // The versions (design v2 §18.1): its agent's; the compose plugin and the docker CLI — its report's word, else the ones the release
+    // it applied pins when that is the pool's (an agent says neither yet: its state keeps the pins' digests only, so a host behind the
+    // pool shows them unknown) —; the engine's, when its report says it.
     agent_version: h.agent_version,
-    tools: { compose: said(runtime?.compose) ?? (onPool ? pinned?.compose ?? null : null), docker: onPool ? pinned?.docker ?? null : null, engine: said(runtime?.engine), pinned: !said(runtime?.compose) && onPool && !!pinned?.compose },
+    tools: {
+      compose: said(runtime?.compose) ?? (onPool ? pinned?.compose ?? null : null), docker: said(runtime?.docker) ?? (onPool ? pinned?.docker ?? null : null), engine: said(runtime?.engine),
+      pinned: !said(runtime?.compose) && !said(runtime?.docker) && onPool && !!(pinned?.compose || pinned?.docker),
+    },
     release_target: h.release_target, rolled_back_from: h.rolled_back_from, rolled_back_at: h.rolled_back_at,
     release_floor: tagOf(rel.floor), min_release: tagOf(rel.min_release),
     rollout: rollout ? { state: typeof rollout.state === "string" ? rollout.state.slice(0, 40) : null, since: typeof rollout.since === "string" ? rollout.since.slice(0, 40) : null, target: tagOf(rollout.target) } : null,
