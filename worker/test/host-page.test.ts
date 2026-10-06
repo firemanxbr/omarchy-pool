@@ -34,6 +34,7 @@ import { applyGovernance } from "../src/governance";
 import { sha256Hex } from "../src/routes/contributors";
 import { toB64url } from "../src/webauthn";
 import { enrollMessage, signedMessage, HOST_ROW_TOUCH_MIN, PINNED_TOOLS } from "../src/hosts";
+import { handleFleet } from "../src/routes/hosts";
 import { declared, runScript, scriptOf } from "./fixture";
 // The agent's own report, as its tests hold it (crates/omarchy-agent run/orders_tests.rs: the reports keep the shape the pool reads).
 import settingsFixture from "../../crates/omarchy-agent/tests/fixtures/host-api/report-settings.json?raw";
@@ -167,6 +168,19 @@ const hostRow = (id: string) => env.DB.prepare("SELECT * FROM hosts WHERE id = ?
 /** The pool running the release the Studio applied: its pinned tools are the host's. */
 const onRelease = (v: string) => ({ ...env, POOL_VERSION: v, POOL_DEPLOYED_AT: iso(Date.now() - 3 * 60 * MIN) }) as typeof env;
 
+/** The page as a browser draws it for `login` (none: a visitor), from the same reads, once its facts are drawn. */
+async function drawn(host: string, login?: string) {
+  const html = await served(`/hosts/${host}`);
+  const fetch = (path: string, init?: RequestInit) => {
+    const ctx = createExecutionContext();
+    const headers = { ...(init?.headers as Record<string, string> | undefined), ...(login ? { cookie: `omc=oms_${login}` } : {}) };
+    return worker.fetch(new Request(`${ORIGIN}${path}`, { ...init, headers }), onRelease("v1.20.0"), ctx).then(async (r) => { await waitOnExecutionContext(ctx); return r; });
+  };
+  const d = runScript(scriptOf(html), { pathname: `/hosts/${host}`, functions: [], fetch });
+  for (let i = 0; i < 100 && !/<dt>/.test(d.nodes["#hp-kv"]?.innerHTML ?? ""); i++) await new Promise((r) => setTimeout(r, 30));
+  return d;
+}
+
 let studio: Host, p1: Host;
 const leases: { task: number; gen: string }[] = [];
 /** Each lease's job token, as the claim handed it to the dispatcher: what its heartbeat carries. */
@@ -193,7 +207,7 @@ beforeAll(async () => {
 });
 
 /** What anyone sees of a host (design v2 §18.1): its name, its architectures, its release and whether it is alive — with whose it is and who stopped it, as the journal says. */
-const PUBLIC = ["alive", "arches", "asleep", "asleep_since", "claims_stopped_at", "confirmed_at", "enrolled_at", "id", "name", "owner", "pool_behind_github", "release_applied", "status", "status_at", "status_by", "status_reason", "worker"];
+const PUBLIC = ["alive", "arches", "asleep", "asleep_since", "claims_stopped_at", "confirmed_at", "enrolled_at", "id", "name", "owner", "pool_behind_github", "release_applied", "silent", "status", "status_at", "status_by", "status_reason", "worker"];
 
 describe("the host page's read (#324, design v2 §18.1)", () => {
   it("is drawn from reports in the agent's own shape: every key of its contract fixture, nested", () => {
@@ -246,7 +260,7 @@ describe("the host page's read (#324, design v2 §18.1)", () => {
     for (const who of [undefined, "bob"]) {
       const v = await call("GET", `/hosts/${studio.host}`, { session: who });
       expect(Object.keys(v.json.host).sort(), String(who)).toEqual(PUBLIC);
-      expect(v.json.host).toMatchObject({ name: expect.stringMatching(/^box-\d+$/), arches: ["aarch64", "x86_64"], release_applied: "v1.20.0", alive: true });
+      expect(v.json.host).toMatchObject({ name: expect.stringMatching(/^box-\d+$/), arches: ["aarch64", "x86_64"], release_applied: "v1.20.0", alive: true, silent: false });
       expect(v.json.leases, String(who)).toBeUndefined();
       expect(v.json.orders).toBeUndefined();
       expect(v.json.update).toBeUndefined();
@@ -294,17 +308,7 @@ describe("the host page's read (#324, design v2 §18.1)", () => {
 
 describe("the host page's controls (#324)", () => {
   it("draws what the read says: the runtime, the versions, the units, the lanes, the rollout, a Stop per lease, the box — and a visitor's rows", async () => {
-    const html = await served(`/hosts/${studio.host}`);
-    const draw = async (login?: string) => {
-      const fetch = (path: string, init?: RequestInit) => {
-        const ctx = createExecutionContext();
-        const headers = { ...(init?.headers as Record<string, string> | undefined), ...(login ? { cookie: `omc=oms_${login}` } : {}) };
-        return worker.fetch(new Request(`${ORIGIN}${path}`, { ...init, headers }), onRelease("v1.20.0"), ctx).then(async (r) => { await waitOnExecutionContext(ctx); return r; });
-      };
-      const d = runScript(scriptOf(html), { pathname: `/hosts/${studio.host}`, functions: [], fetch });
-      for (let i = 0; i < 100 && !/<dt>/.test(d.nodes["#hp-kv"]?.innerHTML ?? ""); i++) await new Promise((r) => setTimeout(r, 30));
-      return d;
-    };
+    const draw = (login?: string) => drawn(studio.host, login);
     const m1 = await draw("m1");
     const kv = m1.nodes["#hp-kv"].innerHTML as string;
     for (const s of ["<dt>Runtime</dt><dd>compose on docker", "<dt>Isolation</dt><dd>root (dedicated)", `agent 0.4.0 · compose ${PINNED_TOOLS["aarch64-linux"].compose} · docker CLI ${PINNED_TOOLS["aarch64-linux"].docker}`, "11 the pool counts — 4 busy on 2 tasks, 6 free for a task, 1 kept for pool jobs", "x86_64 emulated (qemu, 16K pages)", "<dt>Owner's caps</dt><dd>11 units of the 11 detected · 2 agent slots", "--cpus, --memory and --pids-limit enforced", "floor v1.18.0", "<dt>Rollout</dt><dd>idle"]) expect(kv).toContain(s);
@@ -438,6 +442,54 @@ describe("D1 writes on a change, or once the row is five minutes old (#324)", ()
     await env.DB.prepare("UPDATE hosts SET last_seen = ? WHERE id = ?").bind(old, p1.host).run();
     expect((await signed(p1.k, p1.host, "GET", "/hosts/self/state")).status).toBe(200);
     expect(Date.parse((await hostRow(p1.host)).last_seen)).toBeGreaterThan(Date.now() - MIN);
+  });
+});
+
+describe("alive by the fleet's one rule (#324, design v2 §18.1–§18.3)", () => {
+  it("a host whose last sign is twelve minutes old is silent on every page: not alive on its own, the listing, the Workers page's row, a silent line on Status", async () => {
+    const h = await activeHost("m1", "x86_64", P1_REPORT.capacity);
+    expect((await report(h.k, h.host, { ...P1_REPORT, needs_person: [] })).json).toMatchObject({ ok: true, written: true });
+    /** Its last report and its last poll, minutes ago. */
+    const signs = (reported: number, polled: number) => env.DB.prepare("UPDATE hosts SET reported_at = ?, last_seen = ? WHERE id = ?").bind(iso(Date.now() - reported * MIN), iso(Date.now() - polled * MIN), h.host).run();
+    const views = async () => {
+      // The fleet as its handler reads it now: the URL's answer is kept a minute at the edge.
+      const fleet = (await (await handleFleet(env)).json()) as any;
+      return {
+        owner: (await call("GET", `/hosts/${h.host}`, { session: "m1" })).json.host,
+        visitor: (await call("GET", `/hosts/${h.host}`)).json.host,
+        listed: (await call("GET", "/hosts?owner=m1", { session: "m1" })).json.hosts.find((x: { id: string }) => x.id === h.host),
+        row: fleet.hosts.find((x: { id: string }) => x.id === h.host),
+        silentLine: fleet.lines.find((l: { kind: string; host?: { id: string } }) => l.kind === "silent" && l.host?.id === h.host),
+      };
+    };
+    // Its machine lost power twelve minutes after its last report, its last poll just after it: Status says it silent; so does
+    // every page — the report is younger than HOST_REPORT_FRESH_MIN, but nothing of it came for SILENT_MIN.
+    await signs(12, 12);
+    let v = await views();
+    expect(v.silentLine?.text).toMatch(/^silent for 12 min: nothing of it reached the pool since /);
+    expect(v.row).toMatchObject({ alive: false, state: "silent" });
+    for (const [who, x] of [["owner", v.owner], ["visitor", v.visitor], ["listed", v.listed]] as const) expect(x, who).toMatchObject({ alive: false, silent: true });
+    expect(v.owner.state).toBe("silent");
+    expect(v.listed.fleet).toMatchObject({ alive: false, state: "silent" });
+    // The page says so, its lede and a visitor's Alive row in Status's words — never "Its agent reports.".
+    const owner = await drawn(h.host, "m1");
+    expect(owner.nodes["#hp-lede"].innerHTML).toContain('<span class="muted">Silent: nothing of it reached the pool in the last 10 minutes.</span>');
+    expect(owner.nodes["#hp-lede"].innerHTML).not.toContain("Its agent reports.");
+    const visitor = await drawn(h.host);
+    expect(visitor.nodes["#hp-kv"].innerHTML).toContain('<dt>Alive</dt><dd><span class="muted">silent: nothing of it reached the pool in the last 10 minutes</span></dd>');
+    // Its report twelve minutes old and a poll a minute ago: it reports, everywhere, and Status says nothing.
+    await signs(12, 1);
+    v = await views();
+    expect(v.silentLine).toBeUndefined();
+    for (const [who, x] of [["owner", v.owner], ["visitor", v.visitor], ["listed", v.listed], ["row", v.row]] as const) expect(x, who).toMatchObject({ alive: true });
+    expect((await drawn(h.host)).nodes["#hp-kv"].innerHTML).toContain("<dt>Alive</dt><dd>its agent reports</dd>");
+    // Its polls go on but no report came for HOST_REPORT_FRESH_MIN: not alive, not silent — the page says no report came.
+    await signs(16, 1);
+    v = await views();
+    expect(v.silentLine).toBeUndefined();
+    for (const [who, x] of [["owner", v.owner], ["visitor", v.visitor], ["listed", v.listed]] as const) expect(x, who).toMatchObject({ alive: false, silent: false });
+    expect(v.row.alive).toBe(false);
+    expect((await drawn(h.host, "m1")).nodes["#hp-lede"].innerHTML).toContain('<span class="muted">Its agent has not reported in the last 15 minutes.</span>');
   });
 });
 

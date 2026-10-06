@@ -2319,7 +2319,9 @@ names its host, linked to its page; errors come first.
   day (`ASLEEP_QUIET_H`): past that it is, the line saying its last report
   was of its sleep — it lost power, or its agent died asleep. The Workers
   page says the same host asleep, then silent, and never alive while
-  silent.
+  silent; its own page and its owner's page say it by the same rule
+  (`fleet.ts` `aliveOf`): alive is a report within fifteen minutes and
+  not silent.
 - **`behind`**: 45 minutes after the pool's deploy (the 426 gate's grace)
   the host still runs an older release, with its last round beside it; a
   host its owner's soak holds says nothing. Read the round on its page;

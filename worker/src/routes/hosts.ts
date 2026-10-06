@@ -42,7 +42,7 @@ import { docChallenge, issueChallenge, PASSKEYS_SQL, justNowWords, relyingParty,
 import { toB64url } from "../webauthn";
 import { cancelOrdersOf, openOrdersOf, orderFacts, orderVerdicts, FOLLOW_POLL_S, type HeldTask, type OrderFacts, type OrderWorker } from "../orders";
 import {
-  capacityLines, capacityOf, fleetHostOf, hostLines, jobReservedOf, limitsOf, needsPersonOf, reportOf, roundOf, secondOpinionOf,
+  aliveOf, capacityLines, capacityOf, fleetHostOf, hostLines, jobReservedOf, limitsOf, needsPersonOf, reportOf, roundOf, secondOpinionOf, silentOf,
   CLAMPED_WINDOW_H, LOST_WINDOW_MIN, QUEUED_KINDS, WEEK_DAYS,
   type AuditRow, type BusyRow, type FleetHostRow, type FleetLease, type MixRow, type QueueRow,
 } from "../fleet";
@@ -182,11 +182,13 @@ export const FLEET_LEASES_SQL = "SELECT id, lease_owner, kind, arch, lane, units
  * settings and the soak.
  */
 async function hostView(h: HostRow, detailed: boolean, now: number, pool: RunningVersion, leases: FleetLease[] = []) {
-  const alive = !!h.reported_at && now - Date.parse(h.reported_at) < HOST_REPORT_FRESH_MIN * MIN;
+  // Whether its agent reports by the fleet's one rule (fleet.ts aliveOf): a report within HOST_REPORT_FRESH_MIN and not silent — the
+  // page, the listings and the Workers page's row alike. Silent as Status says it, public as that line is: the page's words for why not.
+  const alive = aliveOf(h, now), silent = silentOf(h, now);
   const capacity = h.capacity ? (JSON.parse(h.capacity) as Capacity & { below_minimum?: string | null }) : null;
   const lanes = h.lanes ? (JSON.parse(h.lanes) as Capacity["lanes"]) : [];
   const out: Record<string, unknown> = {
-    id: h.id, name: h.name, owner: h.owner_login, status: h.status, arches: lanes.map((l) => l.arch), release_applied: h.release_applied, alive,
+    id: h.id, name: h.name, owner: h.owner_login, status: h.status, arches: lanes.map((l) => l.arch), release_applied: h.release_applied, alive, silent,
     // Whether it sleeps (#329), public as `alive` is: `asleep` is what the claims hold to (zero free units while its report is
     // fresh), `asleep_since` what its last report said, fresh or not.
     asleep: asleepNow(h, now), asleep_since: h.asleep_at,

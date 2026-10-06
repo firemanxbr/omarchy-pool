@@ -84,6 +84,7 @@ import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { AGENT_KEY_NAMES, HOST_ORDER_TTL_MIN, HOST_OWNER_AGENT, HOST_REPORT_FRESH_MIN, HOST_SETTINGS_AGENT, OWNER_NOT_MAINTAINER, WIDENABLE } from "../hosts";
+import { SILENT_MIN } from "../fleet";
 import { sealAgentKey } from "../seal";
 import { lucide } from "./kit";
 
@@ -244,6 +245,8 @@ const SCRIPT = String.raw`
   // Its registration's worker orders (#324): Drain, Resume, Stop on a lease, and Update as Reconcile now for an agent that takes no host order.
   var REG_API = "/api/v1/factory/workers/";
   var FRESH_MIN = ${HOST_REPORT_FRESH_MIN};
+  // Silent as Status says it (fleet.ts silentOf): nothing of it — no report, no poll — for these minutes.
+  var SILENT_MIN = ${SILENT_MIN};
   var PILL = { active: ["ok", "active"], "pending-owner": ["warn", "waits for its owner's Confirm"], suspended: ["fail", "suspended"], retired: ["na", "retired"] };
   var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14), reconcile: lucide("refresh-cw", 14), legacy: lucide("file-archive", 14), units: lucide("hard-drive", 14), lanes: lucide("git-fork", 14), retry: lucide("package-check", 14), token: lucide("key-round", 14), diag: lucide("scroll-text", 14), stop: lucide("ban", 14), pin: lucide("shield-check", 14), seal: lucide("lock", 14), widen: lucide("arrow-up-right", 14) })};
   // What the "needs a person" box names (#324, fleet.ts needsPersonOf), one word each.
@@ -293,13 +296,17 @@ const SCRIPT = String.raw`
     if (!u.outdated && !u.revoked) return '<span class="muted">it runs the pool\'s release</span>';
     return u.required ? '<span class="hp-blocked">' + esc(u.words || "refused with 426") + "</span>" : esc(u.words || "");
   }
+  // Why its agent is not alive (fleet.ts aliveOf): silent, as Status's line and the Workers page's row say it, or no report fresh enough.
+  function quietWords(h) {
+    return h.silent ? "silent: nothing of it reached the pool in the last " + SILENT_MIN + " minutes" : "its agent has not reported in the last " + FRESH_MIN + " minutes";
+  }
   function draw(h, leases, pool, update) {
     document.title = h.name + " · Host · omarchy-pool";
     $("#hp-name").textContent = h.name;
     var p = PILL[h.status] || ["na", h.status];
     $("#hp-status").innerHTML = '<span class="op-pill ' + p[0] + '">' + esc(p[1]) + '</span>' + (h.asleep ? ' <span class="op-pill na" title="' + esc(SLEEPS) + '">asleep</span>' : "");
     $("#hp-id").textContent = h.id + (h.worker ? " · registration " + h.worker : "");
-    $("#hp-lede").innerHTML = "A maintainer host of " + personLink(h.owner) + (h.where ? ", " + esc(h.where) : "") + " — " + esc((h.arches || []).join(", ") || "no lane reported") + ". " + (h.status === "pending-owner" ? 'It waits for its owner to compare its fingerprint and press Confirm, on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>; nothing claims before that.' : h.asleep ? "It sleeps (its agent said so " + when(h.asleep_since) + "): " + esc(SLEEPS) : h.alive ? "Its agent reports." : '<span class="muted">Its agent has not reported in the last ' + esc(String(FRESH_MIN)) + ' minutes' + (h.asleep_since ? "; its last report said it was going to sleep, " + when(h.asleep_since) : "") + '.</span>');
+    $("#hp-lede").innerHTML = "A maintainer host of " + personLink(h.owner) + (h.where ? ", " + esc(h.where) : "") + " — " + esc((h.arches || []).join(", ") || "no lane reported") + ". " + (h.status === "pending-owner" ? 'It waits for its owner to compare its fingerprint and press Confirm, on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>; nothing claims before that.' : h.asleep ? "It sleeps (its agent said so " + when(h.asleep_since) + "): " + esc(SLEEPS) : h.alive ? "Its agent reports." : '<span class="muted">' + esc(quietWords(h).charAt(0).toUpperCase() + quietWords(h).slice(1)) + (h.asleep_since ? "; its last report said it was going to sleep, " + when(h.asleep_since) : "") + '.</span>');
     // Who stopped it and why, for anyone (the journal's words): a suspension or a retirement, and the maintainer list's stop.
     var stopped = [];
     if ((h.status === "suspended" || h.status === "retired") && h.status_by) stopped.push(esc(h.status === "suspended" ? "Suspended" : "Retired") + " by " + personLink(h.status_by) + (h.status_at ? " " + when(h.status_at) : "") + (h.status_reason ? ": " + esc(h.status_reason) : "") + (h.status === "suspended" ? ". It claims nothing until " + personLink(h.owner) + " resumes it." : ". A new install enrolls a new host."));
@@ -323,7 +330,7 @@ const SCRIPT = String.raw`
     var round = h.round ? esc(String(h.round.outcome || "?")) + (h.round.from ? " from " + esc(h.round.from) : "") + (h.round.step ? " at " + esc(h.round.step) : "") + (h.round.at ? " " + when(h.round.at) : "") + (h.round.detail ? '<br><span class="muted">' + esc(h.round.detail) + "</span>" : "") : "—";
     var tools = h.tools || {}, caps = h.owner_caps, lim = h.limits;
     $("#hp-kv").innerHTML = h.fingerprint === undefined
-      ? kv("Status", esc(p[1])) + kv("Release", esc(h.release_applied || "—")) + kv("Alive", h.alive ? "its agent reports" : '<span class="muted">its agent has not reported in the last ' + esc(String(FRESH_MIN)) + " minutes</span>") + kv("Details", '<span class="muted">its owner\'s and the maintainers\'</span>')
+      ? kv("Status", esc(p[1])) + kv("Release", esc(h.release_applied || "—")) + kv("Alive", h.alive ? "its agent reports" : '<span class="muted">' + esc(quietWords(h)) + "</span>") + kv("Details", '<span class="muted">its owner\'s and the maintainers\'</span>')
       : [
         kv("Status", esc(p[1]) + (h.status_at && (h.status === "suspended" || h.status === "retired") ? " since " + when(h.status_at) : h.confirmed_at ? " since " + when(h.confirmed_at) : " — enrolled " + when(h.enrolled_at))),
         kv("Host key", '<span class="mono">' + esc(h.fingerprint) + '</span>'),
@@ -786,11 +793,11 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.head-facts",
     page: `/hosts/${F.host}`,
     anchor: ['<p class="op-eyebrow">Host</p>', 'id="hp-name"', 'id="hp-status"', 'id="hp-lede"', 'id="hp-stats"', 'id="hp-kv"'],
-    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Sandbox"', "function sandboxWords(h)", "c.sandbox_held", "h.sandbox_applied", '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS", '"Alive"',
+    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Sandbox"', "function sandboxWords(h)", "c.sandbox_held", "h.sandbox_applied", '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS", '"Alive"', "function quietWords(h)", "h.silent",
       // #324: the runtime and its versions, the units busy and free, the held lanes, the owner's caps, the limits, the floor and the rollout.
       '"Runtime"', "function runtimeWords(h)", '"Versions"', "tools.compose", "tools.docker", "function unitWords(h)", "h.units_busy", "h.units_free", "h.job_reserved", "h.held_lanes", '"Owner\'s caps"', '"Limits"', "h.release_floor", '"Rollout"', "h.rollout.state"],
     reads: [
-      { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.asleep", "host.asleep_since", "pool.version"] },
+      { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.silent", "host.asleep", "host.asleep_since", "pool.version"] },
       {
         path: `/api/v1/hosts/${F.host}`, as: "maintainer",
         fields: ["host.fingerprint", "host.capacity", "host.capacity.sandbox", "host.sandbox_applied", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version",

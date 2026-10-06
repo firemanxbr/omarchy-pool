@@ -173,7 +173,7 @@ jq -e '.host.units == 7 and .host.units_busy == 0 and .host.units_free == 6 and 
 # A rootful daemon on a new host: the hosting requirement, in the box.
 jq -e '.host.needs_person | map(.what) | index("hosting") != null' <<<"$page" >/dev/null || fail "the box: $page"
 visitor=$(curl -fs "$POOL/api/v1/hosts/$HOST")
-[[ $(jq -r '.host | keys | join(",")' <<<"$visitor") == alive,arches,asleep,asleep_since,claims_stopped_at,confirmed_at,enrolled_at,id,name,owner,pool_behind_github,release_applied,status,status_at,status_by,status_reason,worker ]] || fail "a visitor's fields: $visitor"
+[[ $(jq -r '.host | keys | join(",")' <<<"$visitor") == alive,arches,asleep,asleep_since,claims_stopped_at,confirmed_at,enrolled_at,id,name,owner,pool_behind_github,release_applied,silent,status,status_at,status_by,status_reason,worker ]] || fail "a visitor's fields: $visitor"
 [[ $(jq -r '.leases' <<<"$visitor") == null && $(jq -r '.registration' <<<"$visitor") == null ]] || fail "a visitor's leases: $visitor"
 fleet=$(curl -fs "$POOL/api/v1/hosts/fleet")
 jq -e --arg h "$HOST" --arg a "$ARCH" '.hosts[] | select(.id == $h) | select(.owner == "e2e" and .units == 7 and .units_free == 6 and .tasks == 0 and .isolation == "root" and .lanes == [{arch: $a, mode: "native"}])' <<<"$fleet" >/dev/null || fail "the fleet: $fleet"

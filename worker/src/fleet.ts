@@ -174,6 +174,22 @@ export function asleepOf(h: Pick<FleetHostRow, "asleep_at" | "reported_at">, now
   return h.asleep_at !== null && !!h.reported_at && now - Date.parse(h.reported_at) < ASLEEP_QUIET_H * HOUR;
 }
 
+/** Whether nothing of a host reached the pool within SILENT_MIN — no report and no poll —, or nothing ever did. */
+const quietOf = (h: Pick<FleetHostRow, "reported_at" | "last_seen">, now: number): boolean => (lastSignOf(h) ?? 0) <= now - SILENT_MIN * MIN;
+
+/**
+ * Whether a host's agent reports, as every page says it (§18.1, §18.2): a report within HOST_REPORT_FRESH_MIN, and something of it
+ * within SILENT_MIN — the host page, the listings and the fleet's row by one rule, never "silent" on Status and alive on a page.
+ */
+export function aliveOf(h: Pick<FleetHostRow, "reported_at" | "last_seen">, now: number): boolean {
+  return !!h.reported_at && now - Date.parse(h.reported_at) < HOST_REPORT_FRESH_MIN * MIN && !quietOf(h, now);
+}
+
+/** Whether a host is silent, as Status's line says it (§18.3): quiet for SILENT_MIN, unless its last report said it sleeps (asleepOf). */
+export function silentOf(h: Pick<FleetHostRow, "reported_at" | "last_seen" | "asleep_at">, now: number): boolean {
+  return !asleepOf(h, now) && quietOf(h, now);
+}
+
 /** A host's fleet row from its row and the fleet's leases. */
 export function fleetHostOf(h: FleetHostRow, leases: FleetLease[], now: number, r: Rules): FleetHost {
   const lanes = json<Lane[]>(h.lanes, []);
@@ -182,10 +198,9 @@ export function fleetHostOf(h: FleetHostRow, leases: FleetLease[], now: number, 
   // As selection's LEASES_HELD_SQL reads them (routes/factory.ts): a lease's units, else its kind's; its disk budget, else none.
   const held = mine.map((l) => ({ kind: l.kind, units: l.units ?? unitsOf(l.kind, l.size, r), model: false, disk_gb: l.disk_gb ?? 0 }));
   const units = h.units === null ? null : Math.min(h.units, h.pool_cap_units ?? Number.MAX_SAFE_INTEGER);
-  // Alive: its agent reported within HOST_REPORT_FRESH_MIN and something of it reached the pool within SILENT_MIN — never both
-  // "silent" and alive in one row.
-  const quiet = (lastSignOf(h) ?? 0) <= now - SILENT_MIN * MIN;
-  const alive = !!h.reported_at && now - Date.parse(h.reported_at) < HOST_REPORT_FRESH_MIN * MIN && !quiet;
+  // Alive by the one rule (aliveOf) — never both "silent" and alive in one row.
+  const quiet = quietOf(h, now);
+  const alive = aliveOf(h, now);
   const asleep = asleepOf(h, now);
   const below = !!json<KeptCapacity | null>(h.capacity, null)?.below_minimum;
   const seen = h.reg_last_seen ? Date.parse(h.reg_last_seen) : NaN;
@@ -303,7 +318,7 @@ export function hostLines(rows: FleetHostRow[], ev: FleetEvents, pool: { version
     const host = who(h), report = reportOf(h.report), round = roundOf(report);
     const sign = lastSignOf(h);
     // A host asleep (its last report said so, within ASLEEP_QUIET_H) is not silent; past that, it is like any other.
-    const silent = !asleepOf(h, now) && (sign === null || now - sign >= SILENT_MIN * MIN);
+    const silent = silentOf(h, now);
     // Errors: its agent's verify refused the bundle it was to apply — possible tampering, the failed check named.
     const check = verifyFailureOf(round);
     if (check) out.push({ level: "error", kind: "refused", host, text: `refused: its agent's verify failed the ${check} check${round!.at ? ` (${round!.at.slice(0, 16).replace("T", " ")} UTC)` : ""} — possible tampering: it applied nothing and runs what it ran; its page has the round's words` });
