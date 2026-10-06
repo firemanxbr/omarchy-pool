@@ -705,7 +705,7 @@ const CSS = String.raw`
   /* A worker's name and id link to its page (#277), in the text's own colour; the marks beside its state (wtMarks) are small and dashed, a word each. */
   a.wid, a.mono[href^="/worker/"] { color: inherit; text-decoration: none; } a.wid:hover, a.mono[href^="/worker/"]:hover { color: var(--green); text-decoration: underline; }
   .wmark { display: inline-block; margin-left: 4px; padding: 0 5px; border: 1px dashed var(--line); color: var(--dim); font-size: 10.5px; line-height: 1.5; white-space: nowrap; text-decoration: none; vertical-align: middle; } .wmark:hover { color: var(--text); border-color: var(--green); }
-  .ic { display: inline-block; width: 14px; height: 14px; vertical-align: -3px; color: var(--muted); } .ic.emu { color: var(--amber); } .ic.shared { color: var(--lilac); } .ic + .ic { margin-left: 2px; }
+  .ic { display: inline-block; width: 14px; height: 14px; vertical-align: -3px; color: var(--muted); } .ic.emu { color: var(--amber); } .ic + .ic { margin-left: 2px; }
   .agent { display: inline-flex; align-items: center; gap: 6px; } .agent .prov { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 3px; border: 1px solid var(--line); background: var(--panel-2); font-family: Geist, sans-serif; font-size: 9.5px; font-weight: 600; letter-spacing: .04em; } .agent .dot { margin-right: 0; }
   .usage { display: inline-grid; grid-template-columns: repeat(3, 28px); gap: 5px; } .usage .u1 { display: grid; gap: 3px; text-align: center; font-size: 12px; line-height: 1; } .usage .u1 i { display: block; height: 3px; background: var(--panel-2); position: relative; } .usage .u1 i::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: var(--v); background: var(--green); } .usage .u1.warn i::after { background: var(--amber); } .usage .u1.hot i::after { background: var(--red); }
   /* A build's page: the timeline, the evidence read in place. */
@@ -900,12 +900,10 @@ const CSS = String.raw`
   }
 `;
 
-/** The icons the worker tables use instead of a word: a chip for the architecture (dashed when emulated), arrows for a shared worker, one person for an owner's own. */
+/** The icons the worker tables use instead of a word: a chip for the architecture (dashed when emulated), a page for its own log. */
 export const WORKER_ICONS = {
   native: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="native"><rect x="4" y="4" width="8" height="8"/><path d="M6 1v3M10 1v3M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3"/></svg>',
   emu: '<svg class="ic emu" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="emulated"><rect x="4" y="4" width="8" height="8" stroke-dasharray="2 1.5"/><path d="M6 1v3M10 1v3M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3"/></svg>',
-  shared: '<svg class="ic shared" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-label="shared"><path d="M2 5h10M9 2l3 3-3 3M14 11H4M7 8l-3 3 3 3"/></svg>',
-  own: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="own"><circle cx="8" cy="5" r="3"/><path d="M2 15c0-3.3 2.7-6 6-6s6 2.7 6 6"/></svg>',
   log: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-label="log"><path d="M3 2h7l3 3v9H3z"/><path d="M5 7h6M5 9.5h6M5 12h4"/></svg>',
 };
 
@@ -1172,27 +1170,26 @@ export const HELPERS = String.raw`
       d.showModal(); if (ta) ta.focus();
     });
   }
-  // The workers a build may go to, as the choice in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, theirs and the ones the project shares; for the project's build, the project's own that build. The first option leaves it to the rule.
-  // The choice of worker in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, the shared queue (any shared worker, the best idle one first, the asker's own at once) or one of the asker's own workers; for the project's build, one of the project's; queue is where the build already stands, when it does.
+  // The choice of worker in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, the queue (the pool's hosts, contributors' builds in turn by owner) or one of the asker's own community registrations — a maintainer's legacy set, until P3 (#343: every community registration builds any contributor's package, as a host does); for the project's build, one of the project's; queue is where the build already stands, when it does. The first option leaves it to the rule.
   function whereOptions(workers, arch, login, forProject, needsAgent, queue, pinnedTo) {
     if (needsAgent === undefined) needsAgent = true;
-    var can = (workers || []).filter(function (w) { return w.arch === arch && !w.revoked_at && (forProject ? (w.side === "omarchy" && (!w.kinds || w.kinds.indexOf("build") >= 0)) : (w.side !== "omarchy" && (w.owner === login || w.mode === "shared"))); });
+    var can = (workers || []).filter(function (w) { return w.arch === arch && !w.revoked_at && (forProject ? (w.side === "omarchy" && (!w.kinds || w.kinds.indexOf("build") >= 0)) : w.side !== "omarchy"); });
     // A drafted build (the project's always) goes only to a worker whose agent answered: pinned to another it would wait forever.
     // An outdated worker (behind the latest image past the grace) is handed nothing: pinned to it a build would wait until it updates.
     // A drained one (#277) is handed nothing until it is resumed: both doors refuse to pin it, in the words said here.
     var stale = function (w) { return !!(w.update && w.update.required); };
     var fit = function (w) { return w.alive && !stale(w) && !w.drained && (!needsAgent || w.agent_status === "ok"); };
-    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.drained ? "drained by " + (w.drained.by || "?") + (w.drained.reason ? ": " + w.drained.reason : "") + " — pin another worker, or use the shared queue" : w.alive ? (stale(w) ? "outdated — update it" : w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
-    var mine = can.filter(function (w) { return w.owner === login && !forProject; }), shared = can.filter(function (w) { return w.mode === "shared" && !forProject; }), project = forProject ? can : [];
-    var online = shared.filter(fit), idle = online.filter(function (w) { return !w.current_task; }), native = idle.filter(function (w) { return !(w.labels && w.labels.emulated); });
-    var state = idle.length ? idle.length + " idle now, " + native.length + " native" : online.length ? "all " + online.length + " online busy" : shared.length ? "none of " + shared.length + " online" : "no shared worker for " + arch;
+    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.drained ? "drained by " + (w.drained.by || "?") + (w.drained.reason ? ": " + w.drained.reason : "") + " — pin another worker, or use the queue" : w.alive ? (stale(w) ? "outdated — update it" : w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
+    var mine = can.filter(function (w) { return w.owner === login && !forProject; }), community = forProject ? [] : can, project = forProject ? can : [];
+    var online = community.filter(fit), idle = online.filter(function (w) { return !w.current_task; }), native = idle.filter(function (w) { return !(w.labels && w.labels.emulated); });
+    var state = idle.length ? idle.length + " idle now, " + native.length + " native" : online.length ? "all " + online.length + " online busy" : community.length ? "none of " + community.length + " online" : "the pool's hosts for " + arch;
     var opts = [];
     if (forProject) opts.push({ value: "", text: "Any of the project's workers for " + arch + (project.length ? "" : " (none is registered)"), selected: !pinnedTo });
-    else opts.push({ value: "", text: "The queue — the best idle shared worker takes it" + (queue ? " (yours is " + queue.position + " of " + queue.total + ")" : "") + " · " + state, selected: !pinnedTo });
+    else opts.push({ value: "", text: "The queue — the next host or worker of " + arch + " with room takes it" + (queue ? " (yours is " + queue.position + " of " + queue.total + ")" : "") + " · " + state, selected: !pinnedTo });
     // A build already asked for one worker keeps that choice unless changed.
     mine.concat(project).forEach(function (w) { opts.push({ value: w.id, text: word(w), disabled: !fit(w) && w.id !== pinnedTo, selected: w.id === pinnedTo }); });
     if (pinnedTo && !opts.some(function (o) { return o.value === pinnedTo; })) opts.push({ value: pinnedTo, text: wtShort(pinnedTo) + " · as asked", selected: true });
-    return { label: "Worker", options: opts, count: can.length, native: native.length, idle: idle.length, online: online.length, shared: shared.length, mine: mine.length, state: state };
+    return { label: "Worker", options: opts, count: can.length, native: native.length, idle: idle.length, online: online.length, mine: mine.length, state: state };
   }
   function wtShort(id) { var parts = String(id).split("-"); return parts.length > 3 ? parts.slice(-3).join("-") : id; }
 
@@ -1300,7 +1297,6 @@ export const HELPERS = String.raw`
       ask({ title: id, text: d.at ? "its own log, last line " + esc(ago(d.at)) + " — a build's output is on the build's page" : "nothing sent yet — the log arrives with each claim, within the minute", pre: d.log || "", confirm: null, cancel: "Close" });
     }).catch(function () { toast("could not load the log", "error"); });
   });
-  function wtMode(w) { return w.mode === "shared" ? WICON.shared.replace('aria-label', 'title="shared: builds whatever is queued, anyone\'s" aria-label') : WICON.own.replace('aria-label', 'title="' + esc(w.packages && w.packages.length ? "own packages: " + w.packages.join(", ") : "the owner\'s packages only") + '" aria-label'); }
   var WT_PROV = { anthropic: "A", "claude-code": "CC", openai: "OA", gemini: "G", xai: "X" };
   // The agent, and whether it answers: the dot is the last probe (green answered, red did not, grey never asked), the chip the provider, then the model.
   function wtAgent(w) {
@@ -1328,12 +1324,12 @@ export const HELPERS = String.raw`
   var WT_HEAD = {
     project: '<th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last job</th>',
     review: '<th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last reviewed</th>',
-    community: '<th>Worker</th><th>Status</th><th>Owner</th><th>Arch</th><th>Version</th><th title="shared: builds whatever is queued · own: the owner\'s packages only">Mode</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last build</th>'
+    community: '<th>Worker</th><th>Status</th><th>Owner</th><th>Arch</th><th>Version</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last build</th>'
   };
   function workerRow(w, kind, extra) {
     var cells = kind === "project" ? [wtId(w) + wtLog(w), wtStatus(w), wtArch(w, false), wtVersion(w), wtPerson(w.owner), wtUsage(w), wtCounts(w), wtLast(w)]
       : kind === "review" ? [wtId(w) + wtLog(w), wtStatus(w), wtArch(w, true), wtVersion(w), wtPerson(w.owner), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)]
-      : [wtId(w) + wtLog(w), wtStatus(w), wtPerson(w.owner), wtArch(w, true), wtVersion(w), wtMode(w), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)];
+      : [wtId(w) + wtLog(w), wtStatus(w), wtPerson(w.owner), wtArch(w, true), wtVersion(w), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)];
     return '<tr><td>' + cells.join('</td><td>') + '</td>' + (extra ? '<td>' + extra + '</td>' : '') + '</tr>';
   }
   // The three tables a page serves through workerPanels(): the head per kind (one more cell when the page adds one, a person's page its buttons), the skeleton until the rows come, the legend. The page then draws each kind through pager() with workerRow().
@@ -1345,9 +1341,9 @@ export const HELPERS = String.raw`
     });
     var l = document.querySelector("#wt-legend"); if (l) l.innerHTML = WT_LEGEND;
   }
-  // What the pager's filter searches on a worker's row: its id, owner, arch, version, mode, agent, who trusted it, its last task, its labels.
-  function wtText(w) { return [w.id, w.owner, w.arch, w.version, w.mode, w.agent, w.trusted_by, w.last_task && w.last_task.name, JSON.stringify(w.labels || {})].join(" "); }
-  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill warn">drained</span> handed nothing until resumed</span><span><span class="pill none">offline</span> not seen in ' + WORKER_ALIVE_MINUTES + ' minutes</span><span>' + WICON.log + ' its own log (its owner, the maintainers)</span></p>';
+  // What the pager's filter searches on a worker's row: its id, owner, arch, version, agent, who trusted it, its last task, its labels.
+  function wtText(w) { return [w.id, w.owner, w.arch, w.version, w.agent, w.trusted_by, w.last_task && w.last_task.name, JSON.stringify(w.labels || {})].join(" "); }
+  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill warn">drained</span> handed nothing until resumed</span><span><span class="pill none">offline</span> not seen in ' + WORKER_ALIVE_MINUTES + ' minutes</span><span>' + WICON.log + ' its own log (its owner, the maintainers)</span></p>';
   // A person's login as a link to their page, the role on hover from the set (or the caller's word); a pill with a title. Shared by the pages that tell a package's story.
   // The role is the caller's word or the set's; anything else (map's index, when a list maps personLink) is none.
   function personLink(l, role) { if (typeof role !== "string") role = ""; return l ? '<a href="' + userHref(l) + '"' + whoAttr(l, role) + '>' + esc(l) + '</a>' : '<span class="muted">—</span>'; }

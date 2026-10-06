@@ -281,11 +281,12 @@ describe("Confirm: POST /hosts/:id/confirm", () => {
     const records = await env.PACKAGES.list({ prefix: `workers/${ok.json.worker}/trust-` });
     expect(records.objects.filter((o) => o.key.endsWith(".json"))).toHaveLength(1);
     expect(await (await env.PACKAGES.get(records.objects.find((o) => o.key.endsWith(".json"))!.key))!.json()).toMatchObject({ worker: ok.json.worker, trust: "project", host: e.json.host, confirmed_by: "m1", fingerprint: await fingerprint(k.raw) });
-    // The per-worker trust door does not move a host's registration (its trust is MAINTAINERS.toml's).
+    // The per-worker trust door is gone (#343): it moves no registration, a host's least of all (its trust is MAINTAINERS.toml's).
     for (const trust of ["community", "project"]) {
       const t = await call("POST", `/factory/workers/${ok.json.worker}/trust`, { token: "omc_m2", body: { trust } });
-      expect([t.status, t.json.code]).toEqual([409, "host_trust"]);
+      expect([t.status, t.json.code]).toEqual([410, "gone"]);
     }
+    expect(await env.DB.prepare("SELECT trust, trusted_by FROM build_workers WHERE id = ?").bind(ok.json.worker).first()).toEqual({ trust: "project", trusted_by: "m1" });
     // Twice is refused; one registration per host.
     expect((await call("POST", `/hosts/${e.json.host}/confirm`, { session: "m1", body: {} })).status).toBe(409);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM build_workers WHERE host_id = ?").bind(e.json.host).first("n")).toBe(1);

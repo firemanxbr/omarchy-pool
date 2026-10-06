@@ -1,60 +1,24 @@
 /**
- * The shared queue: where a contributor's build waits, which shared worker
- * takes it first, and where it stands. A request lands here the moment its
- * record is written (routes/contributors.ts queueBuilds); the claim
- * (routes/factory.ts handleClaim) hands the newest builds to the best idle
- * shared worker for a few minutes, then to any that qualifies.
+ * The queue: where a contributor's build waits and where it stands. A
+ * request lands here the moment its record is written
+ * (routes/contributors.ts queueBuilds); the claim (routes/factory.ts
+ * handleClaim, selection.ts) hands it to a host that can take it, the
+ * contributors' builds round-robin by owner. Every maintainer host builds
+ * every contributor's packages (design v2 §8.2, §21.4): the community
+ * worker tier, its shared and own-packages modes and the best idle shared
+ * worker's first pick are gone (#343).
  */
 import type { Env } from "./index";
-import { version as running } from "./meta";
-import { updateState } from "./update";
-
-const now = () => new Date().toISOString();
-
-/** How long the best idle shared worker keeps first pick on a queued build before any shared worker may take it. */
-export const FIRST_PICK_MINUTES = 3;
-
-/** The rank of a shared worker for the queue: native before emulated, then cores, then memory. */
-function workerRank(w: { emulated: boolean; cores: number; ram: number }): [number, number, number] {
-  return [w.emulated ? 0 : 1, w.cores, w.ram];
-}
 
 /**
- * Is a better shared worker of this architecture alive and idle right now —
- * one that could draft when the queue needs an agent? Read from what the
- * workers reported with their last claim (labels.emulated, usage.cores,
- * usage.ram_gb, agent_status, current_task).
+ * Where a queued community build stands in the queue of its architecture:
+ * its position among the builds any host may take (not pinned), and how
+ * many there are. A bump queued before #343 for its owner's worker first
+ * waits for nobody now: the claim reads no such delay.
  */
-export async function betterIdleWorker(env: Env, me: string, arch: string, mine: { emulated: boolean; cores: number; ram: number }, myAgentOk: boolean): Promise<boolean> {
-  const rows = await env.DB.prepare(
-    "SELECT id, labels, usage, agent_status, version FROM build_workers WHERE arch = ? AND trust = 'community' AND mode = 'shared' AND revoked_at IS NULL AND drained_at IS NULL AND current_task IS NULL AND last_seen > ? AND id != ?",
-  ).bind(arch, new Date(Date.now() - IDLE_SEEN_MINUTES * 60000).toISOString(), me).all<{ id: string; labels: string | null; usage: string | null; agent_status: string | null; version: string | null }>();
-  const my = workerRank(mine);
-  const pool = running(env);
-  for (const r of rows.results) {
-    // A worker the pool hands nothing to (behind the latest image; drained, #277, in the statement) keeps no first pick either.
-    if (updateState(r.version, pool).required) continue;
-    // A worker whose agent does not answer cannot draft: it is never "better" for a queue of drafted builds when mine can.
-    if (myAgentOk && r.agent_status !== "ok") continue;
-    let labels: Record<string, unknown> = {}, usage: Record<string, unknown> = {};
-    try { labels = r.labels ? (JSON.parse(r.labels) as Record<string, unknown>) : {}; } catch { /* as if none */ }
-    try { usage = r.usage ? (JSON.parse(r.usage) as Record<string, unknown>) : {}; } catch { /* as if none */ }
-    const its = workerRank({ emulated: !!labels.emulated, cores: Number(usage.cores ?? 0), ram: Number(usage.ram_gb ?? 0) });
-    if (its[0] > my[0] || (its[0] === my[0] && (its[1] > my[1] || (its[1] === my[1] && its[2] > my[2])))) return true;
-  }
-  return false;
-}
-/** A worker seen this recently, with no task in hand, counts as idle for the queue's first pick. */
-const IDLE_SEEN_MINUTES = 2;
-
-/**
- * Where a queued community build stands in the shared queue of its
- * architecture: its position among the builds any shared worker may take
- * (not pinned, not waiting for shared_after), and how many there are.
- */
-export async function queuePosition(env: Env, task: { id: number; arch: string; priority?: number; shared_after?: string | null; pinned_to?: string | null }): Promise<{ position: number; total: number } | null> {
-  // Not in the shared queue: asked for one worker, or a bump still the owner's worker's (shared_after ahead).
-  if (task.pinned_to || (task.shared_after && task.shared_after > now())) return null;
+export async function queuePosition(env: Env, task: { id: number; arch: string; priority?: number; pinned_to?: string | null }): Promise<{ position: number; total: number } | null> {
+  // Not in the queue every host takes from: asked for one worker.
+  if (task.pinned_to) return null;
   const pr = task.priority ?? 100;
   // The place counts as selection hands builds out (#337, selection.ts): by priority, then round-robin by owner, then by age. Every
   // more urgent build is ahead; at its priority, its owner's older builds, and from each other owner as many builds as rounds pass
@@ -62,13 +26,13 @@ export async function queuePosition(env: Env, task: { id: number; arch: string; 
   // cap and the emulated share move it a little — a contributor's one package behind another's hundred and fifty is second, not last.
   const r = await env.DB.prepare(
     `WITH q AS (SELECT id, owner, priority FROM build_tasks
-        WHERE status = 'queued' AND kind = 'build' AND trust = 'community' AND arch = ?1 AND pinned_to IS NULL AND (shared_after IS NULL OR shared_after <= ?2)),
-      me AS (SELECT ?3 AS id, ?4 AS pr, (SELECT owner FROM build_tasks WHERE id = ?3) AS owner),
+        WHERE status = 'queued' AND kind = 'build' AND trust = 'community' AND arch = ?1 AND pinned_to IS NULL),
+      me AS (SELECT ?2 AS id, ?3 AS pr, (SELECT owner FROM build_tasks WHERE id = ?2) AS owner),
       k AS (SELECT COUNT(*) AS n FROM q, me WHERE q.owner IS me.owner AND q.priority = me.pr AND q.id < me.id),
       o AS (SELECT q.owner, COUNT(*) AS n, MIN(q.id) AS head FROM q, me WHERE q.priority = me.pr AND q.owner IS NOT me.owner GROUP BY q.owner)
     SELECT (SELECT COUNT(*) FROM q, me WHERE q.priority < me.pr) + (SELECT n FROM k)
         + COALESCE((SELECT SUM(MIN(o.n, k.n) + (o.n > k.n AND o.head < me.id)) FROM o, k, me), 0) AS ahead,
       (SELECT COUNT(*) FROM q) AS total`,
-  ).bind(task.arch, now(), task.id, pr).first<{ ahead: number | null; total: number }>();
+  ).bind(task.arch, task.id, pr).first<{ ahead: number | null; total: number }>();
   return { position: (r?.ahead ?? 0) + 1, total: Math.max(r?.total ?? 0, (r?.ahead ?? 0) + 1) };
 }

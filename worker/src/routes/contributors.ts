@@ -20,16 +20,16 @@ import { revokedRefusal } from "../lease";
 
 /**
  * Contributors: anyone with a GitHub identity. No permission needed to
- * request a package or run a worker for it; the project pays for nothing
- * until a maintainer starts the project's own build.
+ * request a package; it builds on the pool's hosts, which the maintainers
+ * provide (#331, #343: contributors run no worker).
  *
  *   POST /factory/register            {github_token}            → {login, token}   the contributor token (shown once)
- *   GET  /factory/me                  (contributor token)       → who am I, my packages, my workers
+ *   GET  /factory/me                  (contributor token)       → who am I, my packages, my workers (a maintainer's)
  *   POST /factory/packages            {url, name?, description, license, arches?, source?, version?, checklist}
  *                                     the package request: checked, written once to the record (R2, signed), registered
  *   POST /factory/packages/:name/build {arches?, reason?}       → community tasks (results go to staging)
  *   DELETE /factory/packages/:name
- *   POST /factory/workers             {name, arch, mode: shared|dedicated, packages?, labels?} → {worker, token}
+ *   POST /factory/workers             {name, arch, labels?} → {worker, token}   a maintainer's legacy registration (#331)
  *   DELETE /factory/workers/:id       revoke
  *   GET  /factory/packages            the registry (public)
  *
@@ -138,9 +138,33 @@ export const MAINTAINER_DECIDES = "a maintainer decides";
  */
 export const POOL_HOSTS = "your packages build on the pool's hosts";
 
+/** Where a maintainer's host is documented (worker-host.md): the pointer every retired door of the contributor worker path answers with (#343). */
+export const HOST_DOCS = "/docs/worker-host";
+
+/**
+ * The contributor worker path's doors (#343, design v2 §21.4, D56): the one
+ * command that ran a worker and the compose file it wrote (GET
+ * /omarchy-worker), a worker's mode (POST /factory/workers/self/mode,
+ * /factory/workers/:id/mode) and per-worker trust (POST
+ * /factory/workers/:id/trust) are gone — contributors run no worker, every
+ * maintainer host builds every contributor's packages, and a host is trusted
+ * by the pull request that names its owner in factory/MAINTAINERS.toml (S2).
+ * Each answers 410, for every caller, with the pointer to the maintainer-host
+ * docs; nothing is read or written. The signed trust records stay in R2
+ * (workers/<id>/trust-<time>.json) as history.
+ */
+export const GONE = {
+  cli: "omarchy-worker is gone (#343): contributors do not run workers — your packages build on the pool's hosts — and a maintainer's machine joins the pool as a host",
+  mode: "a worker's mode is gone (#343): every maintainer host builds every contributor's packages, in turn by owner, so there is no mode to set",
+  trust: "per-worker trust is gone (#343): a maintainer's host is trusted by the pull request that names its owner in factory/MAINTAINERS.toml; the signed trust records stay on the record",
+} as const;
+export function gone(what: keyof typeof GONE): Response {
+  return json({ error: GONE[what], code: "gone", docs: HOST_DOCS }, 410);
+}
+
 /** The acts on a person's page (pages/user.ts), each a control drawn for every viewer and grey with its reason where the viewer may not press it. Share is not here: the page is public and its link is anyone's to copy — no door, no gate. */
-export type Right = "request" | "register" | "token" | "build" | "dequeue" | "remove" | "revoke" | "withdraw" | "own_only" | "share_worker";
-export const RIGHTS: Right[] = ["request", "register", "token", "build", "dequeue", "remove", "revoke", "withdraw", "own_only", "share_worker"];
+export type Right = "request" | "register" | "token" | "build" | "dequeue" | "remove" | "revoke" | "withdraw";
+export const RIGHTS: Right[] = ["request", "register", "token", "build", "dequeue", "remove", "revoke", "withdraw"];
 
 /** An act allowed, or refused with the status the door answers and the reason a person reads in the control's title. */
 export type Verdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
@@ -148,29 +172,28 @@ export type Verdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409;
 /** A registration as Remove reads it: whose, where it stands, the rings that serve it, the project's build of it in flight. */
 export interface Registration { name: string; owner: string; status: string; served: string[]; reviewing: { id: number; status: string } | null }
 
-/** A worker as its row's buttons read it: whose, of what kind (community: its owner's or shared; project, review: the pool's), and whether it is revoked. */
+/** A worker as its row's button reads it: whose, of what kind (community, project, review), and whether it is revoked. */
 export interface WorkerRow { id: string; owner: string | null; trust: string; revoked_at: string | null }
 
-/** The three acts on a worker's row. */
-export type WorkerRight = "revoke" | "own_only" | "share_worker";
-const WORKER_RIGHTS: WorkerRight[] = ["revoke", "own_only", "share_worker"];
+/** The act on a worker's row: Revoke. A worker's mode, and Share / Own only with it, went with the community worker tier (#343). */
+export type WorkerRight = "revoke";
+const WORKER_RIGHTS: WorkerRight[] = ["revoke"];
 
-/** What the pages read: true where the caller may, else the reason in `why`; `packages` says the same for Remove on each registration, by name, and `workers` for the three acts on each worker, by id. */
+/** What the pages read: true where the caller may, else the reason in `why`; `packages` says the same for Remove on each registration, by name, and `workers` for Revoke on each worker, by id. */
 export interface Rights extends Record<Right, boolean> {
   why: Partial<Record<Right, string>>;
   packages: Record<string, { remove: boolean; why?: string }>;
   workers: Record<string, Record<WorkerRight, boolean> & { why: Partial<Record<WorkerRight, string>> }>;
 }
 
-/** What a worker's own state refuses before whose it is: a revoked one is gone (404, the word the door has always said the second time), a project's or review's worker has no mode to set (409) — the pool's work is not shared or kept. */
+/** What a worker's own state refuses before whose it is: a revoked one is gone (404, the word the door has always said the second time). */
 const revokedAlready = (w: WorkerRow): Verdict | null => (w.revoked_at ? { ok: false, status: 404, why: `${w.id} is revoked already` } : null);
-const noMode = (w: WorkerRow): Verdict | null => (w.trust !== "community" ? { ok: false, status: 409, why: "a project worker takes the project's work; it has no shared or own mode" } : null);
 
 /**
  * What a person may do on a person's page, decided in one place. The page
  * draws the same controls for every viewer — Request, Register, Token,
- * Share, Build and Remove on a registration, Revoke and the mode on a
- * worker, Withdraw on an approval — and greys the ones this viewer may not
+ * Share, Build and Remove on a registration, Revoke on a worker, Withdraw
+ * on an approval — and greys the ones this viewer may not
  * press with the reason in the title (the dashboard's rule: nothing hidden,
  * nothing absent). The reason must be the one the door would answer, so
  * this predicate is what the handlers below refuse with and what
@@ -178,8 +201,8 @@ const noMode = (w: WorkerRow): Verdict | null => (w.trust !== "community" ? { ok
  * read twice, no drift. The order of the reasons is the order a reader
  * wants them: sign in first, then whose page and what role (the difference
  * on the dashboard), then a block, then the registration's state — except
- * on a worker's row, where the state (revoked; a project's, with no mode)
- * is the same grey for every role and so comes before whose it is.
+ * on a worker's row, where the state (revoked) is the same grey for every
+ * role and so comes before whose it is.
  *
  * Whose acts these are: request, register and token are the owner's alone
  * — the doors behind them act on the caller's own account (POST
@@ -192,9 +215,8 @@ const noMode = (w: WorkerRow): Verdict | null => (w.trust !== "community" ? { ok
  * maintainer's to start from Review, never a contributor's registration to
  * build. Remove is the owner's while the registration is theirs to free —
  * not approved or published, not in a ring, not under the project's
- * review — and a maintainer's always. Revoke and "own only" are the
- * owner's or any maintainer's; sharing a worker is the owner's word alone.
- * Withdraw is a maintainer's: the role rides here, and whether a row has
+ * review — and a maintainer's always. Revoke is the owner's or any
+ * maintainer's. Withdraw is a maintainer's: the role rides here, and whether a row has
  * an approval standing to withdraw is the row's own fact (`withdrawn_at`,
  * `rings` on GET /users/:login, which is cached for everyone) — the page
  * greys the button by the role from this answer and draws it where the
@@ -205,10 +227,9 @@ const noMode = (w: WorkerRow): Verdict | null => (w.trust !== "community" ? { ok
  * What differs by registration — Remove — comes back per name in
  * `packages`, from the registrations given (registrationsOf); `remove`
  * itself is the role's answer, the one the page reads where no
- * registration is named. What differs by worker — a revoked one, a
- * project's with no mode to set — comes back per id in `workers`, the
- * state's word before the role's, as the row greys it; the doors behind
- * Revoke and the mode refuse with the same verdict.
+ * registration is named. What differs by worker — a revoked one — comes
+ * back per id in `workers`, the state's word before the role's, as the row
+ * greys it; the door behind Revoke refuses with the same verdict.
  */
 export function workspace(c: Contributor | null, login: string, registrations: Registration[] = [], workers: WorkerRow[] = []): Record<Right, Verdict> & { packages: Record<string, Verdict>; workers: Record<string, Record<WorkerRight, Verdict>> } {
   const allow: Verdict = { ok: true };
@@ -235,14 +256,10 @@ export function workspace(c: Contributor | null, login: string, registrations: R
         ?? allow;
   }
   const revoke = ownerOrMaintainer("revokes a worker here", 404) ?? allow;
-  const ownOnly = ownerOrMaintainer("sets where it builds") ?? allow;
-  // Sharing is the owner's word alone (governance): a maintainer may take a worker out of the queue, never put someone's machine in it.
-  const shareWorker = person ?? (owner ? null : no(403, "sharing is the owner's word alone: a maintainer can set a worker to its owner's packages, not share it")) ?? allow;
   const byWorker: Record<string, Record<WorkerRight, Verdict>> = {};
   for (const w of workers) {
     // The row's own state first — the same grey for every role — then whose it is.
-    const gone = person ?? revokedAlready(w);
-    byWorker[w.id] = { revoke: gone ?? revoke, own_only: gone ?? noMode(w) ?? ownOnly, share_worker: gone ?? noMode(w) ?? shareWorker };
+    byWorker[w.id] = { revoke: person ?? revokedAlready(w) ?? revoke };
   }
   return {
     request: onlyOwner("requests here") ?? blocked ?? allow,
@@ -255,8 +272,6 @@ export function workspace(c: Contributor | null, login: string, registrations: R
     remove: ownerOrMaintainer("removes a registration here") ?? allow,
     revoke,
     withdraw: person ?? (maintainer ? null : no(403, MAINTAINER_DECIDES)) ?? allow,
-    own_only: ownOnly,
-    share_worker: shareWorker,
     packages,
     workers: byWorker,
   };
@@ -318,12 +333,9 @@ export async function registrationsOf(env: Env, by: { owner: string } | { name: 
 export interface WorkerIdentity {
   id: string;
   owner: string | null;
-  mode: string;
-  /** Who set the mode: NULL — the worker's own flag applies at each claim; a login — from the page; 'worker' — through its own token (the command line). */
-  mode_by?: string | null;
   packages: string[];
   arch: string;
-  /** community: its own or shared builds · project: everything, approved by a maintainer. */
+  /** community: contributors' builds, anyone's (#343) · project: everything else, approved by a maintainer. */
   trust: string;
   /** Set when the caller is a job token rather than a registered worker: the job's kind. */
   job?: string;
@@ -346,16 +358,16 @@ export interface WorkerIdentity {
  * recreated with the new one meanwhile, and nothing it runs notices. That
  * second read happens only when the first finds nothing.
  */
-export const WORKER_BY_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, kind, host_id, ${ORDERS_COLUMNS} FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL`;
-export const WORKER_BY_PREV_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, kind, host_id, ${ORDERS_COLUMNS} FROM build_workers
+export const WORKER_BY_TOKEN_SQL = `SELECT id, packages, arch, kind, host_id, ${ORDERS_COLUMNS} FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL`;
+export const WORKER_BY_PREV_TOKEN_SQL = `SELECT id, packages, arch, kind, host_id, ${ORDERS_COLUMNS} FROM build_workers
   WHERE id = (SELECT worker_id FROM hosts WHERE prev_token_hash = ? AND prev_token_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND status = 'active') AND revoked_at IS NULL`;
 export async function workerOf(request: Request, env: Env): Promise<WorkerIdentity | null> {
   const token = bearer(request);
   if (!token.startsWith("omw_")) return null;
-  type Row = OrdersRow & { mode: string; mode_by: string | null; packages: string | null; arch: string; kind: string | null; host_id: string | null };
+  type Row = OrdersRow & { packages: string | null; arch: string; kind: string | null; host_id: string | null };
   const hash = await sha256Hex(token);
   const row = (await env.DB.prepare(WORKER_BY_TOKEN_SQL).bind(hash).first<Row>()) ?? (await env.DB.prepare(WORKER_BY_PREV_TOKEN_SQL).bind(hash).first<Row>());
-  return row ? { id: row.id, owner: row.owner, mode: row.mode, mode_by: row.mode_by, packages: row.packages ? JSON.parse(row.packages) : [], arch: row.arch, trust: row.trust, kind: row.kind, host_id: row.host_id, orders: row } : null;
+  return row ? { id: row.id, owner: row.owner, packages: row.packages ? JSON.parse(row.packages) : [], arch: row.arch, trust: row.trust, kind: row.kind, host_id: row.host_id, orders: row } : null;
 }
 
 /**
@@ -401,7 +413,7 @@ export async function handleNewToken(c: Contributor, env: Env): Promise<Response
 }
 
 /** A person's workers, newest first, through idx_build_workers_owner (owner, last_seen): it read every worker ever registered before (#252). */
-export const ME_WORKERS_SQL = "SELECT id, arch, mode, packages, labels, agent, last_seen, current_task, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC";
+export const ME_WORKERS_SQL = "SELECT id, arch, packages, labels, agent, last_seen, current_task, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC";
 const GRANT_COLS = "id, agent, scopes, created_at, expires_at, revoked_at, revoked_by, last_used, token_hash IS NOT NULL AS swapped";
 /**
  * A person's live agent grants — swapped, not revoked, not expired — by the
@@ -693,7 +705,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
     await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('request', NULL, 'factory', 'ok', ?, ?)")
       .bind(`${name} ${tag} requested by ${c.login}${throughWords(through)} from ${parsed.project} (${license}; ${build.join(", ")}) — record ${req.id}${takeover ? ` — taken over from ${takeover.from}, ${takeover.why}` : ""}`, JSON.stringify({ request: req.id, name, owner: c.login, project: parsed.project, source, version: tag, license, arches: build, skipped: upstream, record: recordUrl(env, record.key), taken_over_from: takeover?.from ?? null, ...(through ? { via: "agent", through } : {}) }))
       .run();
-    // The build starts by itself: into the shared queue, the best idle shared worker first, the contributor's own worker at once. A renewal that keeps the version of a staged build keeps that build: nothing to queue.
+    // The build starts by itself: into the queue, where the next host of its architecture with room takes it (#343). A renewal that keeps the version of a staged build keeps that build: nothing to queue.
     const keepsStaged = byName?.status === "staged" && (byName.release ?? "") === tag;
     const queuedNow = keepsStaged ? { tasks: [], building: [], arches: [], pkgbuild_ref: "", pinned_to: null, lessons: {}, hint: null, queue: {} } as Queued : await queueBuilds(env, c, name, {});
     const targets = (await settleTargets(env, name))[name] ?? {};
@@ -915,20 +927,22 @@ export async function handleDeletePackage(c: Contributor, name: string, env: Env
 }
 
 /**
- * Which workers may build for a contributor, per architecture (the claim's
- * rule, read the other way round): their own, and the ones anyone shares —
- * never the project's, which take the project's builds only.
+ * Which registrations a contributor may name for a build of theirs, per
+ * architecture (the claim's rule, read the other way round): the community
+ * registrations, whoever's — each takes any contributor's build (#343),
+ * and every one left is a maintainer's legacy set until P3 — never the
+ * project's, which take the project's builds only.
  */
-export async function buildersFor(env: Env, login: string, arch: string): Promise<{ id: string; owner: string | null; mode: string | null; arch: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }[]> {
+export async function buildersFor(env: Env, arch: string): Promise<{ id: string; owner: string | null; arch: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }[]> {
   const rows = await env.DB.prepare(
-    "SELECT id, owner, mode, arch, drained_at, drained_by, drain_reason FROM build_workers WHERE revoked_at IS NULL AND trust = 'community' AND arch = ? AND (owner = ? OR mode = 'shared')",
-  ).bind(arch, login).all<{ id: string; owner: string | null; mode: string | null; arch: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
+    "SELECT id, owner, arch, drained_at, drained_by, drain_reason FROM build_workers WHERE revoked_at IS NULL AND trust = 'community' AND arch = ?",
+  ).bind(arch).all<{ id: string; owner: string | null; arch: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
   return rows.results;
 }
 
 /** A drained worker named for a build (#277): the Build door and the project-build door refuse it in one sentence — pinned to it, the build would wait until it is resumed. */
 export const drainedRefusal = (w: { id: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }) =>
-  `${w.id} is drained (by ${w.drained_by ?? "?"}, ${w.drained_at ? `${w.drained_at.slice(11, 16)} UTC` : "?"}${w.drain_reason ? `: ${w.drain_reason}` : ""}) — pin another worker, or use the shared queue`;
+  `${w.id} is drained (by ${w.drained_by ?? "?"}, ${w.drained_at ? `${w.drained_at.slice(11, 16)} UTC` : "?"}${w.drain_reason ? `: ${w.drain_reason}` : ""}) — pin another worker, or use the queue`;
 
 export interface QueueAsk { arches?: string[]; worker?: string | null; hint?: string | null; reason?: string; release?: string }
 export interface Queued { tasks: number[]; building: { task: number; arch: string; on: string | null }[]; arches: string[]; pkgbuild_ref: string; pinned_to: string | null; lessons: Record<string, number>; hint: string | null; queue: Record<string, { position: number; total: number }> }
@@ -936,10 +950,10 @@ export interface Queued { tasks: number[]; building: { task: number; arch: strin
 /**
  * Queue community builds of a registered package — the request does it the
  * moment the record is written, the Build button does it again. Results go
- * to staging, never to the pool. A build lands in the shared queue: any
- * shared worker of the architecture may take it, the best idle one first
- * (handleClaim), the owner's own worker always; `worker` names one of
- * theirs (or one anyone shares) and the build waits for that worker only.
+ * to staging, never to the pool. A build lands in the queue: any host of
+ * the architecture may take it, the contributors' builds round-robin by
+ * owner (handleClaim, selection.ts); `worker` names a community
+ * registration (buildersFor) and the build waits for that worker only.
  * A build that follows an ended one carries it as the lesson
  * (`params.lesson`): the drafter starts from that PKGBUILD and what stopped
  * it; `hint` is the asker's own word to the agent. Asked again while it
@@ -957,13 +971,13 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
   const arches = wanted.filter((a) => isRepoArch(a) && registered.includes(a));
   if (!arches.length) return json({ error: `arches must name one the request has: ${registered.join(", ")}` }, 400);
   const hint = typeof ask.hint === "string" && ask.hint.trim() ? ask.hint.trim().slice(0, 600) : null;
-  // Where it runs: the shared queue, or one worker.
+  // Where it runs: the queue (its old name, "shared", says the same), or one worker.
   const where = typeof ask.worker === "string" && ask.worker.trim() && ask.worker.trim() !== "shared" && ask.worker.trim() !== "queue" ? ask.worker.trim() : null;
   let pinned: string | null = null;
   if (where) {
     if (arches.length !== 1) return json({ error: "a worker builds one architecture: ask for that architecture alone" }, 400);
-    const ok = (await buildersFor(env, c.login, arches[0])).find((w) => w.id === where);
-    if (!ok) return json({ error: `${where} is not a worker of yours for ${arches[0]}, nor one anyone shares` }, 403);
+    const ok = (await buildersFor(env, arches[0])).find((w) => w.id === where);
+    if (!ok) return json({ error: `${where} is not a worker that builds contributors' packages for ${arches[0]}` }, 403);
     if (ok.drained_at) return json({ error: drainedRefusal(ok) }, 409);
     pinned = ok.id;
   }
@@ -986,7 +1000,7 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
         // Asked again while it waits: where it goes, the hint and the lesson are what was asked now — the queue when nothing was named.
         // A build sent back for a native worker (needs_native) still waits for one there; a worker named is the asker's own choice.
         if (!pinned && dup.params && (JSON.parse(dup.params) as { needs_native?: number }).needs_native === 1) params.needs_native = 1;
-        await env.DB.prepare("UPDATE build_tasks SET pinned_to = ?, shared_after = NULL, params = ? WHERE id = ? AND status = 'queued'")
+        await env.DB.prepare("UPDATE build_tasks SET pinned_to = ?, params = ? WHERE id = ? AND status = 'queued'")
           .bind(pinned, Object.keys(params).length ? JSON.stringify(params) : null, dup.id).run();
         ids.push(dup.id);
       } else {
@@ -998,7 +1012,7 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
     const queued = await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE owner = ? AND status IN ('queued', 'leased')").bind(c.login).first<{ n: number }>();
     if ((queued?.n ?? 0) >= QUEUED_QUOTA) return json({ error: `you have ${queued?.n} tasks queued or building; the limit is ${QUEUED_QUOTA}` }, 429);
     const row = await env.DB.prepare(
-      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, shared_after, pinned_to, params) VALUES (?, ?, ?, ?, ?, 100, 0, 'community', ?, NULL, ?, ?) RETURNING id`,
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, pinned_to, params) VALUES (?, ?, ?, ?, ?, 100, 0, 'community', ?, ?, ?) RETURNING id`,
     )
       .bind(name, arch, version, ref, ask.reason ?? "contributor", c.login, pinned, Object.keys(params).length ? JSON.stringify(params) : null)
       .first<{ id: number }>();
@@ -1006,7 +1020,7 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
   }
   const queue: Record<string, { position: number; total: number }> = {};
   for (const id of ids) {
-    const t = await env.DB.prepare("SELECT id, arch, priority, shared_after, pinned_to FROM build_tasks WHERE id = ?").bind(id).first<{ id: number; arch: string; priority: number; shared_after: string | null; pinned_to: string | null }>();
+    const t = await env.DB.prepare("SELECT id, arch, priority, pinned_to FROM build_tasks WHERE id = ?").bind(id).first<{ id: number; arch: string; priority: number; pinned_to: string | null }>();
     const place = t ? await queuePosition(env, t) : null;
     if (t && place) queue[t.arch] = place;
   }
@@ -1015,7 +1029,7 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
   await env.DB.prepare("UPDATE factory_packages SET status = 'waiting', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status != 'building'")
     .bind(`in the queue (${out.arches.join(", ")})${pinned ? ` — for ${pinned}` : ""}`, name).run();
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('enqueue', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${name}${version ? " " + version : ""}: ${ids.length} community build(s) queued by ${c.login} for ${out.arches.join(", ")}${pinned ? ` on ${pinned}` : " — the shared queue"} — results go to staging`, JSON.stringify({ name, owner: c.login, arches: out.arches, tasks: ids, pkgbuild_ref: ref, pinned_to: pinned, lessons, hint, building, queue }))
+    .bind(`${name}${version ? " " + version : ""}: ${ids.length} community build(s) queued by ${c.login} for ${out.arches.join(", ")}${pinned ? ` on ${pinned}` : " — the queue"} — results go to staging`, JSON.stringify({ name, owner: c.login, arches: out.arches, tasks: ids, pkgbuild_ref: ref, pinned_to: pinned, lessons, hint, building, queue }))
     .run();
   await settleTargets(env, name);
   return out;
@@ -1027,7 +1041,7 @@ export async function handleBuildPackage(c: Contributor, name: string, request: 
   const out = await queueBuilds(env, c, name, { arches: Array.isArray(b.arches) ? (b.arches as string[]) : undefined, worker: typeof b.worker === "string" ? b.worker : null, hint: typeof b.hint === "string" ? b.hint : null, reason: b.reason, release: b.release });
   if (out instanceof Response) return out;
   if (!out.tasks.length) return json({ ...out, note: `already building: ${out.building.map((x) => `#${x.task} (${x.arch}${x.on ? ` on ${x.on}` : ""})`).join(", ")} — ask again when it ends` }, 200);
-  return json({ ...out, note: out.pinned_to ? `${out.pinned_to} builds these; nothing else claims them.` : "In the shared queue: the best idle shared worker takes it, or a worker of yours at once." }, 201);
+  return json({ ...out, note: out.pinned_to ? `${out.pinned_to} builds these; nothing else claims them.` : "In the queue: the next host of the architecture with room takes it, contributors' builds in turn." }, 201);
 }
 
 /**
@@ -1060,44 +1074,17 @@ export async function handleRegisterWorker(c: Contributor, request: Request, env
   if (no) return no;
   const b = (await request.json().catch(() => ({}))) as { name?: string; arch?: string; labels?: unknown };
   if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
-  // A worker builds its owner's packages. Donating it to anyone's is decided
-  // where it runs (--shared / WORKER_SHARED=1), never here, so a registration
-  // cannot quietly turn a laptop into everybody's build machine.
+  // A legacy registration, community trust: a maintainer's role container or set, until P3 retires them (#343). It builds any
+  // contributor's package, as a host does; a new machine joins as a host (/docs/worker-host). No mode is written: the column is
+  // history (#343).
   const id = `${c.login}-${(b.name ?? b.arch).replace(/[^a-zA-Z0-9_.-]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
   const token = newToken("omw");
   await env.DB.prepare(
-    `INSERT INTO build_workers (id, arch, hostname, labels, owner, token_hash, mode, packages, last_seen) VALUES (?, ?, NULL, ?, ?, ?, 'dedicated', '[]', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
+    `INSERT INTO build_workers (id, arch, hostname, labels, owner, token_hash, packages, last_seen) VALUES (?, ?, NULL, ?, ?, ?, '[]', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
   )
     .bind(id, b.arch, b.labels ? JSON.stringify(b.labels) : null, c.login, await sha256Hex(token))
     .run();
-  return json({ worker: id, token, arch: b.arch, note: "Run the Omarchy Packaging image with WORKER_ID and OMARCHY_WORKER_TOKEN set to these; the token is shown once. It builds your packages; start it with WORKER_SHARED=1 to build anyone's." }, 201);
-}
-
-/**
- * The mode of a community worker — shared (everyone's queue) or the
- * owner's packages only — set from the brain: its owner or a maintainer
- * from the page, the worker itself through its token (`omarchy-worker
- * share on|off`). From then on the registration's mode is what the claim
- * uses, whatever the container was started with; it takes effect at the
- * worker's next claim, within the minute, nothing restarts.
- */
-export async function handleWorkerMode(by: Contributor | { worker: string }, id: string, request: Request, env: Env): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { mode?: string };
-  if (b.mode !== "shared" && b.mode !== "dedicated") return json({ error: "mode must be shared or dedicated" }, 400);
-  const w = await env.DB.prepare("SELECT id, owner, trust, mode, revoked_at FROM build_workers WHERE id = ?").bind(id).first<WorkerRow & { mode: string }>();
-  if (!w) return json({ error: "no such worker" }, 404);
-  const who = "worker" in by ? "worker" : by.login;
-  if ("worker" in by) {
-    if (by.worker !== w.id) return json({ error: "not yours" }, 403);
-    const no = refused(revokedAlready(w) ?? noMode(w) ?? { ok: true });
-    if (no) return no;
-  } else {
-    // From the page: the row's verdict — revoked already, a project worker's no mode, then its owner or a maintainer sets it to its owner's packages and sharing is the owner's word alone — the one the page greys the button with.
-    const no = refused(workspace(by, w.owner ?? "its owner", [], [w]).workers[w.id][b.mode === "shared" ? "share_worker" : "own_only"]);
-    if (no) return no;
-  }
-  await env.DB.prepare("UPDATE build_workers SET mode = ?, mode_by = ? WHERE id = ?").bind(b.mode, who, id).run();
-  return json({ id, mode: b.mode, by: who, note: b.mode === "shared" ? "from its next claim it builds whatever is queued, anyone's" : "from its next claim it builds its owner's packages only" });
+  return json({ worker: id, token, arch: b.arch, note: `A legacy registration for a set you run (OMARCHY_WORKER_TOKEN in its .env); the token is shown once. It builds contributors' packages. A new machine joins as a host instead: ${HOST_DOCS}.` }, 201);
 }
 
 /** The worker's own log — the lines between tasks, as it sent them with its claims — for its owner and the maintainers. */
@@ -1122,8 +1109,8 @@ export async function handleRevokeWorker(c: Contributor, id: string, env: Env): 
   ]);
   let freed = 0;
   if (res.meta.changes) {
-    // A build asked for this worker would wait for it forever: back to the rule, for the shared workers at once.
-    freed = (await env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL WHERE pinned_to = ? AND status = 'queued'").bind(id).run()).meta.changes ?? 0;
+    // A build asked for this worker would wait for it forever: back to the queue at once.
+    freed = (await env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL WHERE pinned_to = ? AND status = 'queued'").bind(id).run()).meta.changes ?? 0;
     await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('trust', NULL, 'factory', 'warn', ?, ?)")
       .bind(`worker ${id} revoked by ${c.login}${freed ? ` — ${freed} queued build(s) asked for it go to any worker that qualifies` : ""}`, JSON.stringify({ worker: id, by: c.login, freed }))
       .run();
@@ -1427,55 +1414,6 @@ export async function handleSetCategory(c: Contributor, name: string, request: R
 }
 
 /**
- * Project trust on two maintainers' word (/docs/security-model, *Trust levels*). The
- * first maintainer proposes; a second — never the same person, never the
- * worker's owner — confirms, and trusted_by names both. Back to community
- * is one maintainer's call (taking trust away is always easy). Each step is
- * an event, and the trust itself a signed record under
- * workers/<id>/trust-<time>.json, so anyone can read who vouched for the
- * machine that publishes.
- */
-export async function handleTrustWorker(c: Contributor, id: string, request: Request, env: Env): Promise<Response> {
-  if (!isMaintainer(c)) return json({ error: "a maintainer's token is required" }, 403);
-  const b = await readJson<{ trust?: string }>(request);
-  if (b instanceof Response) return b;
-  const trust = b.trust === "project" ? "project" : "community";
-  const w = await env.DB.prepare("SELECT id, owner, trust, trusted_by, trust_proposed_by, kind FROM build_workers WHERE id = ? AND revoked_at IS NULL")
-    .bind(id)
-    .first<{ id: string; owner: string | null; trust: string; trusted_by: string | null; trust_proposed_by: string | null; kind: string | null }>();
-  if (!w) return json({ error: "no such worker (or revoked)" }, 404);
-  // A host's registration is trusted by the pull request that named its owner a maintainer (#321, S2): no per-worker word moves it.
-  if (w.kind === "host") return json({ error: "a host's trust comes from factory/MAINTAINERS.toml, not from this door", code: "host_trust" }, 409);
-  const now = new Date().toISOString();
-  const event = (summary: string, payload: Record<string, unknown>) =>
-    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('trust', NULL, 'factory', 'ok', ?, ?)").bind(summary, JSON.stringify(payload)).run();
-  if (trust === "community") {
-    if (w.trust === "community" && !w.trust_proposed_by) return json({ worker: id, trust: "community", unchanged: true });
-    await env.DB.prepare("UPDATE build_workers SET trust = 'community', trusted_by = NULL, trusted_at = NULL, trust_proposed_by = NULL, trust_proposed_at = NULL WHERE id = ?").bind(id).run();
-    await event(`worker ${id} set to community trust by ${c.login}${w.trust === "project" ? ` (was project, trusted by ${w.trusted_by ?? "?"})` : " (a proposal withdrawn)"}`, { worker: id, trust: "community", by: c.login, was: w.trust, trusted_by: w.trusted_by });
-    await putRecord(env, `workers/${id}/trust-${now}.json`, { schema: "omarchy-pool/worker-trust/1", worker: id, owner: w.owner, trust: "community", by: c.login, was: { trust: w.trust, trusted_by: w.trusted_by }, at: now }).catch(() => null);
-    return json({ worker: id, trust: "community", by: c.login });
-  }
-  if (w.trust === "project") return json({ worker: id, trust: "project", trusted_by: w.trusted_by, unchanged: true });
-  // The owner never gives the first word — someone else vouches for their
-  // machine — but may give the second, once another maintainer has: two
-  // maintainers' word, never the owner's alone. With two maintainers in
-  // the project (2026-09-17), the rule as "two others" left the Studio's
-  // own workers with nobody to trust them.
-  if (w.owner === c.login && !w.trust_proposed_by) return json({ error: "a maintainer does not propose their own worker; another maintainer proposes it, and then the owner (or a third) confirms" }, 403);
-  if (!w.trust_proposed_by || w.trust_proposed_by === c.login) {
-    await env.DB.prepare("UPDATE build_workers SET trust_proposed_by = ?, trust_proposed_at = ? WHERE id = ?").bind(c.login, now, id).run();
-    if (w.trust_proposed_by !== c.login) await event(`worker ${id} proposed for project trust by ${c.login}; a second maintainer confirms`, { worker: id, proposed_by: c.login, owner: w.owner });
-    return json({ worker: id, trust: "community", proposed_by: c.login, awaiting: "a second maintainer's word — the owner's counts, yours again does not" }, 202);
-  }
-  const by = `${w.trust_proposed_by}, ${c.login}`;
-  await env.DB.prepare("UPDATE build_workers SET trust = 'project', trusted_by = ?, trusted_at = ?, trust_proposed_by = NULL, trust_proposed_at = NULL WHERE id = ?").bind(by, now, id).run();
-  await event(`worker ${id} set to project trust on the word of ${by}`, { worker: id, trust: "project", by, owner: w.owner });
-  const record = await putRecord(env, `workers/${id}/trust-${now}.json`, { schema: "omarchy-pool/worker-trust/1", worker: id, owner: w.owner, trust: "project", proposed_by: w.trust_proposed_by, confirmed_by: c.login, at: now }).catch(() => null);
-  return json({ worker: id, trust: "project", trusted_by: by, record: record ? recordUrl(env, record.key) : null });
-}
-
-/**
  * GET /factory/trust — the workers under the project's trust or on their
  * way to it (proposed, or registered before owners existed), and every
  * maintainer's own, whatever its trust: the People page draws the agent a
@@ -1486,7 +1424,7 @@ export async function handleTrustWorker(c: Contributor, id: string, request: Req
  * applied from factory/MAINTAINERS.toml.
  */
 export async function handleTrustList(env: Env): Promise<Response> {
-  const workers = await env.DB.prepare("SELECT id, owner, arch, mode, trust, trusted_by, trusted_at, trust_proposed_by, trust_proposed_at, agent, last_seen, revoked_at FROM build_workers WHERE trust = 'project' OR trust_proposed_by IS NOT NULL OR owner IS NULL OR owner IN (SELECT login FROM factory_maintainers) ORDER BY trust DESC, last_seen DESC LIMIT 100").all();
+  const workers = await env.DB.prepare("SELECT id, owner, arch, trust, trusted_by, trusted_at, trust_proposed_by, trust_proposed_at, agent, last_seen, revoked_at FROM build_workers WHERE trust = 'project' OR trust_proposed_by IS NOT NULL OR owner IS NULL OR owner IN (SELECT login FROM factory_maintainers) ORDER BY trust DESC, last_seen DESC LIMIT 100").all();
   const people = await env.DB.prepare("SELECT login, name, role, last_seen FROM contributors WHERE role = 'maintainer' ORDER BY login").all();
   return json({ workers: workers.results, maintainers: people.results, listed: await maintainersOf(env), source: GOVERNANCE_FILE }, 200, { "cache-control": "public, max-age=30" });
 }

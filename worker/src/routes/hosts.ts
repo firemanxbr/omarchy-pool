@@ -586,7 +586,7 @@ export async function handleRetireHost(c: Contributor, id: string, request: Requ
     env.DB.prepare("UPDATE hosts SET status = 'retired', status_by = ?, status_at = ?, status_reason = ?, prev_token_hash = NULL, prev_token_until = NULL WHERE id = ? AND status != 'retired'").bind(c.login, at, reason, id),
     env.DB.prepare("UPDATE build_workers SET revoked_at = ? WHERE id = ? AND host_id = ? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)").bind(at, worker, id, id, at),
     ...cancelOrdersOf(env, { sql: "SELECT id FROM build_workers WHERE id = ? AND revoked_at = ?", binds: [worker, at] }, c.login, at, `its host was retired by ${c.login}`),
-    env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL WHERE pinned_to = ? AND status = 'queued' AND EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)").bind(worker, id, at),
+    env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL WHERE pinned_to = ? AND status = 'queued' AND EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)").bind(worker, id, at),
     env.DB.prepare("UPDATE host_orders SET state = 'cancelled', answered_at = ?, detail = ? WHERE host_id = ? AND state = 'open' AND EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)")
       .bind(at, `its host was retired by ${c.login}`, id, id, at),
     env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'warn', ?, ? WHERE EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)")

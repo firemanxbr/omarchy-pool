@@ -70,11 +70,16 @@
  * (D50): while H holds no lease of an emulated lane e and no registration
  * alive runs e natively, the oldest candidate of e goes first.
  *
- * Legacy registrations (until #343 and P3 retire them) are selected the
- * same way as a host with one lane — their arch, emulated when their labels
- * say so — and one build: the claim itself is the proof one is idle, so
- * their own leases are not counted, and they have no units, agent slots,
- * disk or reservation of their own.
+ * Legacy registrations (the maintainers' role containers and CLI sets,
+ * until P3 retires them) are selected the same way as a host with one lane
+ * — their arch, emulated when their labels say so — and one build: the
+ * claim itself is the proof one is idle, so their own leases are not
+ * counted, and they have no units, agent slots, disk or reservation of their
+ * own. Their trust is all that is left of their scope (#343, design v2
+ * §8.2, §21.4): a project registration takes no contributor's build, a
+ * community one community builds only — anyone's, as a host does; the
+ * community worker tier's owner's-builds-only scope and its sharing are
+ * gone.
  */
 
 export type Mode = "native" | "emulated";
@@ -98,11 +103,12 @@ export interface Held {
 
 /**
  * What a registration takes besides its kinds: a host takes every trust
- * (§8.2); a legacy one keeps today's scope until #343 deletes it — a
- * project registration no contributor's build, a community one community
- * builds only, its owner's unless it is shared.
+ * (§8.2); a legacy one its registration's trust allows (#343) — a project
+ * registration no contributor's build (it holds no contributor's recipe
+ * beside the project's credentials), a community one community builds
+ * only (its container publishes nothing), whoever's they are.
  */
-export interface Scope { trust: "host" | "project" | "community"; owner: string | null; shared: boolean }
+export interface Scope { trust: "host" | "project" | "community" }
 
 /** A registration of the fleet. */
 export interface Member {
@@ -239,7 +245,7 @@ export interface Choice {
 export const MIN = 60_000;
 /** A registration is alive when it claimed this recently (§8.3). */
 export const ALIVE_MS = 2 * MIN;
-/** T: twice the last native duration, clamped to 3..60 minutes; 3 with no native history (today's first pick). */
+/** T: twice the last native duration, clamped to 3..60 minutes; 3 with no native history (the three minutes the queue's first pick once gave). */
 export const T_MIN_MS = 3 * MIN;
 export const T_MAX_MS = 60 * MIN;
 /** The oldest queued build waits this long before a host reserves for it, and a mark lasts this long at most. */
@@ -248,7 +254,7 @@ export const RESERVE_FOR_MS = 120 * MIN;
 /** D36: a registration with another model counts for a publish-bound audit while it was alive this recently. */
 export const MODEL_WINDOW_MS = 24 * 60 * MIN;
 /**
- * D36: how long an audit is left by the registration that built what it audits to another that can take it now — today's first pick
+ * D36: how long an audit is left by the registration that built what it audits to another that can take it now — three minutes
  * (T's floor): an idle host claims every 30 seconds, so this is time enough for one to, and a preference never idles the builder for
  * longer.
  */
@@ -361,14 +367,14 @@ export function laneFor(m: Pick<Member, "lanes" | "legacy">, c: Pick<Candidate, 
   return { mode: null, byLane: false };
 }
 
-/** Whether a registration takes a candidate at all: its kinds, the pin, the probe for model work, and a legacy one's scope. */
+/** Whether a registration takes a candidate at all: its kinds, the pin, the probe for model work, and a legacy one's trust. */
 export function takes(m: Member, c: Candidate): boolean {
   if (!m.kinds.includes(c.kind)) return false;
   if (c.pinned_to !== null && c.pinned_to !== m.id) return false;
   if (c.model && !m.probe_ok) return false;
   const s = m.scope;
   if (s.trust === "project" && c.kind === "build" && c.trust === "community") return false;
-  if (s.trust === "community" && !(c.trust === "community" && (s.shared || c.owner === s.owner || c.pinned_to === m.id))) return false;
+  if (s.trust === "community" && c.trust !== "community") return false;
   return true;
 }
 
@@ -554,7 +560,7 @@ const anotherModel = (m: Pick<Member, "model">, c: Pick<Candidate, "built_with">
  * different owners, or the registrations of two different hosts. Anything
  * else may be one machine: the legacy role containers of one maintainer —
  * the Studio's `community-*` builds a contributor's package and its
- * `review-*` audits it, until #343 — or a host's registration beside its own
+ * `review-*` audits it, until P3 — or a host's registration beside its own
  * legacy set during the canary (§21.1), or an owner the pool does not know.
  */
 export function apart(a: Machine, b: Machine): boolean {

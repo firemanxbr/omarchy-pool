@@ -31,7 +31,7 @@ async function call(method: string, path: string, auth: { session?: string; toke
   return { status: res.status, json: await res.json().catch(() => null) };
 }
 const register = (as: string, name = "box") => call("POST", "/factory/workers", { session: as }, { name, arch: F.arch });
-const registered = async (id: string) => env.DB.prepare("SELECT owner, trust, mode, revoked_at FROM build_workers WHERE id = ?").bind(id).first<{ owner: string; trust: string; mode: string; revoked_at: string | null }>();
+const registered = async (id: string) => env.DB.prepare("SELECT owner, trust, revoked_at FROM build_workers WHERE id = ?").bind(id).first<{ owner: string; trust: string; revoked_at: string | null }>();
 
 describe("POST /factory/workers is for maintainers only (#331)", () => {
   it("a maintainer registers a worker, as before: 201, the token once, the row under their name", async () => {
@@ -39,7 +39,8 @@ describe("POST /factory/workers is for maintainers only (#331)", () => {
     expect(r.status, JSON.stringify(r.json)).toBe(201);
     expect(r.json.worker).toMatch(new RegExp(`^${F.m1}-studio-`));
     expect(r.json.token).toMatch(/^omw_/);
-    expect(await registered(r.json.worker)).toMatchObject({ owner: F.m1, trust: "community", mode: "dedicated", revoked_at: null });
+    // A legacy registration (#343): community trust, no mode written — the column is history.
+    expect(await registered(r.json.worker)).toEqual({ owner: F.m1, trust: "community", revoked_at: null });
     // Its token claims at once: nothing queued for it, and the claim is the one it always was.
     expect((await call("POST", "/factory/claim", { token: r.json.token }, { arch: F.arch })).status).toBe(204);
   });

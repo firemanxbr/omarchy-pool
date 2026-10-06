@@ -50,6 +50,10 @@ describe("bumps", () => {
     const bumps = (await env.DB.prepare("SELECT name, arch, version, pkgbuild_ref, status, trust, owner FROM build_tasks WHERE reason = 'bump to v2.0.0' ORDER BY name, arch").all<{ name: string; arch: string; version: string; pkgbuild_ref: string; status: string; trust: string; owner: string }>()).results;
     expect(bumps.map((b) => `${b.name} ${b.arch}`)).toEqual(["kept aarch64", "kept x86_64", "twice aarch64", "twice x86_64"]);
     for (const b of bumps) expect(b).toMatchObject({ version: "2.0.0-1", status: "queued", trust: "community", owner: "alice" });
+    // Into the queue at once, for the pool's hosts (#343): the fourteen days a bump waited for its owner's own worker are gone, and
+    // nothing writes shared_after any more.
+    expect((await env.DB.prepare("SELECT shared_after FROM build_tasks WHERE reason = 'bump to v2.0.0'").all()).results).toEqual(bumps.map(() => ({ shared_after: null })));
+    expect(await env.DB.prepare("SELECT detail FROM factory_packages WHERE name = 'kept'").first()).toEqual({ detail: "v2.0.0 released upstream; a build is queued for the pool's hosts" });
     // The recipe a bump starts from is the approval that stands — kept's own, and twice's older one, never the withdrawn newer one.
     expect(bumps.filter((b) => b.name === "kept").map((b) => b.pkgbuild_ref)).toEqual([`bump:${kept}@v2.0.0`, `bump:${kept}@v2.0.0`]);
     expect(bumps.filter((b) => b.name === "twice").map((b) => b.pkgbuild_ref)).toEqual([`bump:${twiceOld}@v2.0.0`, `bump:${twiceOld}@v2.0.0`]);

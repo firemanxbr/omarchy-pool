@@ -605,6 +605,8 @@ describe("a package built for two architectures", () => {
     expect(taken.status, JSON.stringify(taken.json)).toBe(200);
     expect(taken.json.package).toMatchObject({ owner: "bob", status: "registered" });
     expect((await env.DB.prepare("SELECT summary FROM events WHERE kind = 'request' ORDER BY id DESC LIMIT 1").first<{ summary: string }>())!.summary).toMatch(/taken over from alice, whose request was rejected$/);
+    // The build bob's request queued is not this story's: every community registration takes any contributor's build (#343).
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE name = 'solo' AND owner = 'bob' AND status = 'queued'").run();
     // duo is in the pool on x86_64: a new build of it rejected leaves the name and the approved version where they are.
     await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix) VALUES ('duo', 'x86_64', '1.1-1', 'draft:https://duo.example@1.1', 'bump to 1.1', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/duo/1/')").run();
     const bump = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'duo' AND version = '1.1-1'").first<{ id: number }>())!.id;

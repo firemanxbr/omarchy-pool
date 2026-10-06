@@ -1,28 +1,32 @@
 /**
- * Run a worker: the two container images on GitHub Packages and how to run
- * them with Docker Desktop or Podman — on a maintainer's host. Maintainers
- * only (#331, epic #307): contributors do not run workers; their packages
- * build on the pool's hosts, which the maintainers provide.
+ * Run a worker: the legacy role containers a maintainer still runs beside
+ * the hosts until P3 retires them — the image on GitHub Packages, its
+ * roles, the sets already running, what a build can see, updates and
+ * orders. Maintainers only (#331, epic #307): contributors do not run
+ * workers; their packages build on the pool's hosts, which the maintainers
+ * provide. A new machine joins as a host (worker-host.md, /docs/worker-host):
+ * the contributor worker path — the one command the pool served, its
+ * compose file, a worker's mode and per-worker trust — is gone (#343).
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
-import { DASHBOARD_HOST, REPO_URL } from "../meta";
+import { REPO_URL } from "../meta";
 
 const IMG = "ghcr.io/firemanxbr/omarchy-worker";
 
 const BODY = String.raw`
   <h1>Run a worker</h1>
-  <p class="lede" id="maintainers-only"><b>Maintainers only.</b> Contributors do not run workers: the project provides the workers for everyone, and its maintainers are their only providers. A maintainer is vetted by a pull request to <code>factory/MAINTAINERS.toml</code>, and their host is trusted by that same act; <code>POST /factory/workers</code> refuses anyone else, <em>your packages build on the pool's hosts</em> (<a href="/docs/factory#contribute-a-package">how packaging works</a>). What follows is for a maintainer's host.</p>
+  <p class="lede" id="maintainers-only"><b>Maintainers only.</b> Contributors do not run workers: the project provides the workers for everyone, and its maintainers are their only providers. A maintainer is vetted by a pull request to <code>factory/MAINTAINERS.toml</code>, and their host is trusted by that same act; <code>POST /factory/workers</code> refuses anyone else, <em>your packages build on the pool's hosts</em> (<a href="/docs/factory#contribute-a-package">how packaging works</a>). A new machine joins the pool as a host — the signed host bundle and one isolated container per task, enrolled from the owner's page (<a href="/docs/worker-host">a maintainer's host</a>). What follows is for the legacy role containers a maintainer already runs beside the hosts, until P3 retires them (#343).</p>
   <p class="lede">Every build for the pool happens on a worker a maintainer runs, and every worker runs the <b>same image</b>: <code>${IMG}</code>, Arch Linux, built for x86_64 and aarch64 on GitHub Packages and signed. The <b>registration behind the token</b> decides what it may do. Nothing you run holds a key: the pool signs what it publishes, and your token only asks for work.</p>
 
   <section id="registration">
     <h2>What the registration decides</h2>
     <div class="table-wrap"><table><thead><tr><th>Your registration</th><th>What the container does</th><th>What it needs</th></tr></thead><tbody>
-      <tr><td><b>community</b> trust — every registration starts here</td><td>builds <em>your</em> registered packages, one task per container, right inside it, into your staging workspace as evidence for a maintainer. With <code>WORKER_SHARED=1</code> it also builds every contributor's packages — the shared queue their requests land in, with your agent key (<code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code> or <code>XAI_API_KEY</code>) your agent drafts and corrects PKGBUILDs. It never sees a package in review or approved.</td><td>the token</td></tr>
-      <tr><td><b>project</b> trust — two maintainers vouched for the registration, neither its owner</td><td>the project's work: the pool's own jobs (sync, promote, health, security, gc, the PKGBUILD reconcile) and the rebuild of packages maintainers approved — what users actually get. Each build and check runs in a <em>fresh</em> Arch container it starts as a sibling. With an agent key it also <b>audits</b> staged builds for the maintainers (the second agent). Never a contributor's build.</td><td>the token, the runtime's socket, a working directory at the same path on both sides</td></tr>
+      <tr><td><b>community</b> trust — every registration starts here</td><td>builds any contributor's packages from the queue their requests land in, as a host does (#343), one task per container, right inside it, into the contributor's staging workspace as evidence for a maintainer; with your agent key (<code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code> or <code>XAI_API_KEY</code>) your agent drafts and corrects PKGBUILDs. It never sees a package in review or approved.</td><td>the token</td></tr>
+      <tr><td><b>project</b> trust — the registrations two maintainers vouched for before a host's trust came from the maintainer list; none is trusted that way any more (#343)</td><td>the project's work: the pool's own jobs (sync, promote, health, security, gc, the PKGBUILD reconcile) and the rebuild of packages maintainers approved — what users actually get. Each build and check runs in a <em>fresh</em> Arch container it starts as a sibling. With an agent key it also <b>audits</b> staged builds for the maintainers (the second agent). Never a contributor's build.</td><td>the token, the runtime's socket, a working directory at the same path on both sides</td></tr>
     </tbody></table></div>
-    <p class="sub">A maintainer who also contributes packages registers a second worker and leaves it untrusted: one registration per role of a machine. Tags: <code>latest</code> is a multi-architecture manifest (your machine pulls its own), <code>x86_64</code> and <code>aarch64</code> pin one, and every pool release is a tag (<code>v0.0.70</code>). Verify before trusting it:</p>
+    <p class="sub">One registration per role of a machine. Tags: <code>latest</code> is a multi-architecture manifest (your machine pulls its own), <code>x86_64</code> and <code>aarch64</code> pin one, and every pool release is a tag (<code>v0.0.70</code>). Verify before trusting it:</p>
     <div class="steps"><div class="step"><pre>cosign verify ${IMG}:latest \
   --certificate-identity https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com</pre></div></div>
@@ -35,9 +39,9 @@ const BODY = String.raw`
     <div class="table-wrap"><table><thead><tr><th>Role</th><th>Registration</th><th>What it does</th><th>Agent key</th></tr></thead><tbody>
       <tr><td><b>pool</b></td><td>project trust</td><td>the pool's own jobs and nothing else: sync, render, promote, rollback, health, security, enqueue, gc, verify. Never a build, never an audit.</td><td>none</td></tr>
       <tr><td><b>review</b></td><td>project trust</td><td>the maintainers' work and nothing else: the rebuild of approved packages in fresh sibling containers, and the audit of every staged build (the second agent). Never a pool job.</td><td>wanted — without one, audits wait</td></tr>
-      <tr><td><b>community</b></td><td>community registration</td><td>a shared community worker (<code>WORKER_SHARED=1</code> implied): builds anyone's requested packages with its owner's agent, one task per container — the queue every request lands in. Its maintainer shares it; a dedicated worker builds only its owner's.</td><td>required — a worker whose agent does not answer the probe is not ready and gets no build</td></tr>
+      <tr><td><b>community</b></td><td>community registration</td><td>builds any contributor's requested packages with its maintainer's agent, one task per container, from the queue every request lands in.</td><td>required — a worker whose agent does not answer the probe is not ready and gets no build</td></tr>
     </tbody></table></div>
-    <p class="sub">Two of each — one per architecture — is what the project runs on its own host (RUNBOOK, <em>The Studio host</em>): x86_64 pool jobs are only a label and run natively on any machine; x86_64 <em>builds</em> on an aarch64 host run under user-mode emulation, correct but slower. Without a role the trust decides everything: a project worker takes pool jobs, rebuilds and audits alike; a community worker builds its owner's packages.</p>
+    <p class="sub">Two of each — one per architecture — is what the project runs on its own host (RUNBOOK, <em>The Studio host</em>): x86_64 pool jobs are only a label and run natively on any machine; x86_64 <em>builds</em> on an aarch64 host run under user-mode emulation, correct but slower. Without a role the trust decides everything: a project worker takes pool jobs, rebuilds and audits alike; a community worker builds contributors' packages.</p>
   </section>
 
   <section id="before">
@@ -45,36 +49,32 @@ const BODY = String.raw`
     <div class="steps">
       <div class="step"><h3>A container runtime</h3><p><b>Docker Desktop</b> on macOS, Windows or Linux, or <b>Podman</b> — the <code>podman</code> command, or <a href="https://podman-desktop.io/">Podman Desktop</a> with its graphical window. Every command below is shown for both; they differ only in the first word. Give the runtime at least 2 CPUs and 4 GB of memory (Docker Desktop: <em>Settings → Resources</em>; Podman on macOS: <code>podman machine set --cpus 4 --memory 8192</code>); a browser-class package needs far more.</p></div>
       <div class="step"><h3>Which architecture you build</h3><p>A worker builds for its own architecture: an Apple silicon Mac or a Raspberry Pi builds <code>aarch64</code>, an Intel or AMD machine <code>x86_64</code>. Register the worker for the architecture of the machine it will run on; the image refuses a mismatch.</p></div>
-      <div class="step"><h3>An account, a worker registration</h3><p>Sign in with GitHub (top right) as a maintainer: it lands on <b>your own page</b>, the workspace, where a maintainer has the worker form (nobody else does). Register a worker there: a name and its architecture. You get a <b>token</b>, shown once — that machine's identity. Revoke it on the same page if the machine is lost.</p></div>
+      <div class="step"><h3>An account, a worker registration</h3><p>Sign in with GitHub (top right) as a maintainer: it lands on <b>your own page</b>, the workspace, where a maintainer has the worker form (nobody else does). Register a worker there, for a set you already run: a name and its architecture. You get a <b>token</b>, shown once — that set's identity. Revoke it on the same page if the machine is lost. A new machine is added as a host on the same page instead.</p></div>
     </div>
   </section>
 
   <section id="contributor">
-    <h2>A community set, on a maintainer's host</h2>
+    <h2>A community set, on a maintainer's host, until P3</h2>
     <div class="steps">
-      <div class="step"><h3>1. Start it</h3><p>One command, wherever the worker lives — a machine or a VM with Docker or podman (and compose). It writes the compose file and a <code>.env</code> (in <code>~/.config/omarchy-worker</code>, mode 600), pulls the signed image and starts the set: three containers — the broker and the builder on a network of their own, the updater beside them. The <b>broker</b> holds what is yours — the worker token, your agent's key, a GitHub token — and only receives, processes and answers. The <b>builder</b> beside it is born with nothing: it asks the broker for a build of yours, builds it, uploads the package, the PKGBUILD and the log to your staging workspace through the broker, and exits; the restart policy starts the next one. The <b>updater</b> keeps both on the pool's latest image (<a href="#update">every worker follows it</a>).</p>
-<pre>curl -fsSLo omarchy-worker https://${DASHBOARD_HOST}/omarchy-worker &amp;&amp; chmod +x omarchy-worker
-./omarchy-worker start --token &lt;omw_…&gt; --github-token &lt;github_pat_…, no permissions&gt;
+      <div class="step"><h3>1. The set, and its command</h3><p>The pool no longer serves a command that starts a new set, nor its compose file (#343): a new machine joins as a host. A set a maintainer already runs keeps running until P3 retires it, from its own directory (<code>~/.config/omarchy-worker</code> by default) — the compose file and the <code>.env</code> (mode 600) an earlier start wrote there — and <code>omarchy-worker</code>, which now lives in the repository (<a href="${REPO_URL}/blob/main/factory/host/omarchy-worker">factory/host/omarchy-worker</a>), runs it: three containers — the broker and the builder on a network of their own, the updater beside them. The <b>broker</b> holds what is yours — the worker token, your agent's key, a GitHub token — and only receives, processes and answers. The <b>builder</b> beside it is born with nothing: it asks the broker for a build of yours, builds it, uploads the package, the PKGBUILD and the log to your staging workspace through the broker, and exits; the restart policy starts the next one. The <b>updater</b> keeps both on the pool's latest image (<a href="#update">every worker follows it</a>).</p>
+<pre>./omarchy-worker start --github-token &lt;github_pat_…, no permissions&gt;   # in the set's directory: start it again, or apply a changed option
 ./omarchy-worker status        # what runs here, what the pool thinks of it
 ./omarchy-worker logs          # the builder's log (logs broker | updater)
 ./omarchy-worker stop          # a drain: the build in hand finishes first</pre>
-      <p>The same set by hand, with <a href="${REPO_URL}/blob/main/factory/image/compose.yml">compose.yml</a> (also served at <code>/omarchy-worker/compose.yml</code>) and a <code>.env</code> beside it; the updater mounts the directory at the same path, so its absolute path goes in:</p>
+      <p>The same set by hand, with <a href="${REPO_URL}/blob/main/factory/image/compose.yml">compose.yml</a> and a <code>.env</code> beside it; the updater mounts the directory at the same path, so its absolute path goes in:</p>
 <pre>printf 'OMARCHY_WORKER_TOKEN=%s\nGITHUB_TOKEN=%s\nOMARCHY_WORKER_DIR=%s\nCOMPOSE_PROFILES=community\n' omw_… github_pat_… "$PWD" &gt; .env
 docker compose up -d           # podman compose works the same</pre>
       <p><b>--github-token</b> (on the broker): the drafter reads GitHub's API for every package it builds — the release, the files — through the broker. Without a token GitHub allows 60 requests an hour from your address, and a queue of ten builds is ten failures; a <a href="https://github.com/settings/personal-access-tokens/new">fine-grained token</a> with <em>no permissions at all</em> gives 5000. Make one for this — never <code>gh auth token</code>, which is your account with write access to your repositories (see <a href="#secrets">what a build can see</a>). A stop is a drain (compose: <code>stop_grace_period: 3h</code>): the build in hand finishes and reports; killed mid-build, the task waits half an hour for its lease to expire. Change the settings between builds, not during one.</p></div>
-      <div class="step"><h3>2. Give it work</h3><p><a href="/factory#request">Request a package</a> (the project's URL, a description, the licence, the checklist). The build starts by itself, in the shared queue: the best idle shared worker of the architecture takes it — a native worker of your own at once, shared or not. <b>Build</b> on your page names a worker, sends a queued build back to the shared queue or takes it out, and runs it again. The <em>Builds</em> table follows it, and the <em>Workers</em> table shows it alive. When the build is staged, a maintainer sees it on <a href="/review">Review</a>.</p></div>
-      <div class="step"><h3>3. Share it, bring your agent</h3><p>Two switches, both yours to flip — the first on the builder, the second on the broker (options of <code>omarchy-worker start</code>; by hand, the same names in <code>.env</code>). The first is the pool's to keep: <b>Share</b> / <b>Own only</b> on your page (or <code>omarchy-worker share on|off</code>) sets the registration's mode, and from the worker's next claim — within the minute, nothing restarts — that is what counts, whatever the container was started with; the container's flag is only the first word.</p>
-<pre># the builder: also build other contributors' packages (their bumps after 14 days, package requests at once)
-./omarchy-worker start --shared            # or: ./omarchy-worker share on | off, or Share on your page — the pool keeps it (.env's WORKER_SHARED is only the first word)
-
-# the broker: an agent drafts and corrects PKGBUILDs, with your key — the pool never holds one, the builder never sees it;
+      <div class="step"><h3>2. Its work</h3><p>A contributor <a href="/factory#request">requests a package</a> (the project's URL, a description, the licence, the checklist). The build starts by itself, in the queue: the next host or community set of the architecture with room takes it, contributors' builds in turn by owner. <b>Build</b> on the contributor's page names a worker, sends a queued build back to the queue or takes it out, and runs it again. The <em>Builds</em> table follows it, and the <em>Workers</em> table shows it alive. When the build is staged, a maintainer sees it on <a href="/review">Review</a>.</p></div>
+      <div class="step"><h3>3. Bring your agent</h3><p>On the broker (an option of <code>omarchy-worker start</code>; by hand, the same names in <code>.env</code>). There is no mode to set: a community set builds any contributor's packages, as a host does (#343).</p>
+<pre># the broker: an agent drafts and corrects PKGBUILDs, with your key — the pool never holds one, the builder never sees it;
 # one of these is enough (Anthropic, OpenAI, Gemini, xAI), --model picks the model
 ./omarchy-worker start --anthropic-key sk-… --model claude-sonnet-5   # or --openai-key / --gemini-key / --xai-key
                                                                       # (.env: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, FACTORY_MODEL)
 # or your Claude subscription instead of a key (see "A Claude subscription as the agent" below)
 ./omarchy-worker start --claude-token …    # what 'claude setup-token' printed on your machine (.env: CLAUDE_CODE_OAUTH_TOKEN)</pre>
       <p>The <a href="/workers">Workers</a> page shows which agent each worker reported (<code>anthropic/claude-sonnet-5</code>, <code>claude-code/claude-sonnet-5</code>, <code>openai/gpt-5</code>, …); the key itself never leaves the broker.</p>
-      <p>A shared worker with an agent is what turns a <em>package request</em> (the <a href="/factory#request">Factory's request card</a>) into a first PKGBUILD and a first build: the request lands in the shared queue the moment its record is written, and the best idle shared worker of the architecture — native before emulated, then the most cores — takes it first; the others after three minutes, an emulated worker's own builds among them while a native one is idle. Without one, requests wait, and the page says where they stand. A build whose toolchain cannot start under emulation (rustc, on a 16 KB-page host) goes back to the queue for a native worker, the attempt uncounted, and waits there until one is alive. What your agent produces is evidence like any other build: a maintainer reads it before anything reaches users.</p></div>
+      <p>A worker with an agent is what turns a <em>package request</em> (the <a href="/factory#request">Factory's request card</a>) into a first PKGBUILD and a first build: the request lands in the queue the moment its record is written, and the next host or community set of the architecture with room takes it — a native lane first, an emulated one after its wait. Without one, requests wait, and the page says where they stand. A build whose toolchain cannot start under emulation (rustc, on a 16 KB-page host) goes back to the queue for a native worker, the attempt uncounted, and waits there until one is alive. What your agent produces is evidence like any other build: a maintainer reads it before anything reaches users.</p></div>
       <div class="step"><h3>4. Watch it</h3><p><code>./omarchy-worker status</code> says what runs here and what the pool thinks of it; <code>./omarchy-worker logs</code> follows the builder (<code>logs broker</code>, <code>logs updater</code> the others). The worker's own log — the lines between tasks: preparing, the agent's probe, an update required — also reaches the pool with each claim: the log icon beside its id on the <a href="/workers">Workers</a> page and on your page opens the last kilobytes, for its owner and the maintainers (a build's output is on the build's page). In <b>Docker Desktop</b>, <em>Containers</em> lists the three under the <code>omarchy-worker</code> project, each with a <em>Logs</em> tab; in <b>Podman Desktop</b>, the same under <em>Containers</em>. The builder exits after each task (that is by design) and the restart policy brings it back.</p>
       <div class="shot">Screenshot to add: Docker Desktop → Containers, the <code>omarchy-worker</code> project and the builder's Logs tab; Podman Desktop → Containers, the same.</div></div>
     </div>
@@ -82,7 +82,7 @@ docker compose up -d           # podman compose works the same</pre>
 
   <section id="project">
     <h2>As a maintainer: the pool's jobs and approved rebuilds</h2>
-    <p class="sub">Once a maintainer trusts the registration (<code>POST /api/v1/factory/workers/&lt;id&gt;/trust</code>, through the API; who trusted it is in the worker id's tooltip on <a href="/workers">Workers</a>), the same image switches to the project's work. Each build and check runs in a fresh Arch container it starts as a sibling through your runtime — so it needs the runtime's socket, and a working directory that has the <b>same path</b> on your machine and inside the container (the sibling containers mount subdirectories of it).</p>
+    <p class="sub">A registration with project trust — given on two maintainers' word before #343; who trusted it is in the worker id's tooltip on <a href="/workers">Workers</a>, and <code>POST /api/v1/factory/workers/&lt;id&gt;/trust</code> answers <code>410</code> now — switches the same image to the project's work. Each build and check runs in a fresh Arch container it starts as a sibling through your runtime — so it needs the runtime's socket, and a working directory that has the <b>same path</b> on your machine and inside the container (the sibling containers mount subdirectories of it).</p>
     <div class="steps">
       <div class="step"><h3>0. One command</h3><p>The same <code>omarchy-worker</code>, with that registration's token and <code>--project</code> (the updater beside it, as for a community set's):</p>
 <pre>./omarchy-worker start --token &lt;omw_…&gt; --project --role review     # or --role pool; --work-dir for the working directory</pre></div>
@@ -117,7 +117,7 @@ podman run -d --name omarchy-worker --restart unless-stopped --security-opt labe
 --once                    one task, then exit
 --labels '{"where":"…"}'  where it runs; on the Workers page, on the id's hover</pre>
       <p>The worker reports with every claim what its machine uses — CPU, memory and the work directory's disk, an average it keeps over the last hour, from <code>/proc</code> and <code>df</code> — and which release its image is; <a href="/workers">the Workers page</a> shows both per worker, with the last task it finished. Nothing is collected from you: the numbers come from the worker, in the claim it makes anyway.</p>
-      <p>A project worker never builds a contributor's package: those run on the shared community workers of the maintainers' hosts. What it builds is the rebuild a maintainer approved — never one the same maintainer brought — and the pool signs the result.</p></div>
+      <p>A project worker never builds a contributor's package: those run on the maintainers' hosts and their community sets. What it builds is the rebuild a maintainer approved — never one the same maintainer brought — and the pool signs the result.</p></div>
       <div class="step"><h3>5. The second agent</h3><p>Add your agent key — <code>-e ANTHROPIC_API_KEY=sk-…</code>, or <code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>XAI_API_KEY</code>, or a Claude subscription as <code>CLAUDE_CODE_OAUTH_TOKEN</code> (<a href="#claude-code">below</a>); your key, on your machine; <code>-e FACTORY_MODEL=…</code> picks the model — and the worker also takes the <b>audit</b> of every build a contributor stages: it reads the PKGBUILD, the log and the <code>.PKGINFO</code> the maintainer will read, asks the model for a structured review — supply chain, security, packaging practice, licence — and attaches the report to the evidence. Every agent — the drafter and the auditor alike — reads the pool's skills first: what every package must pass and what a desktop app or a prebuilt binary must do besides, the same text as <a href="/docs/what-we-test">What we test</a>. <a href="/review">Review</a> shows the verdict next to the build; the maintainer still decides. No such worker running, and the column says <em>waiting</em>.</p></div>
     </div>
   </section>
@@ -146,7 +146,7 @@ CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…
 FACTORY_PROVIDER=claude-code</pre>
       <p>At start the broker installs Claude Code for its architecture (the official installer, checksum verified, into the container's home — about 200 MB, once per container; the image does not ship it) and reports <code>claude-code/claude-sonnet-5</code> as its agent on the <a href="/workers">Workers</a> page. <code>FACTORY_MODEL</code> picks another model (<code>claude-opus-5</code>); <code>FACTORY_REASONING=low</code> keeps a draft or an audit from thinking longer than it needs. A binary of your own, mounted at <code>/usr/local/bin/claude</code> or named by <code>CLAUDE_CODE_BIN</code>, skips the install.</p></div>
       <div class="step"><h3>3. What it does, exactly</h3><p>Every completion is one process: <code>claude -p --tools "" --max-turns 1 --no-session-persistence --output-format json --model … --system-prompt …</code>, the PKGBUILD and the log on stdin, in an empty directory. No tool is available to the model — it cannot read a file, run a command or reach the network; it answers, and the worker reads the answer. The token goes to the child process; an <code>ANTHROPIC_API_KEY</code> in the same environment is withheld from it, so choosing the subscription means the subscription.</p></div>
-      <div class="step"><h3>4. What it costs, and whose rules</h3><p>Nothing on top of the subscription — and the subscription's limits apply: each draft and each audit is a message in the same five-hour and weekly windows as your own use of Claude, and a worker that hits the limit fails the task (<em>You've hit your limit</em>, back in the queue for the next window; the pool retries an audit three times). Your agreement with Anthropic is what allows this use: read their consumer terms on automated and shared use before you put the token on a shared worker or a project host — the API key (<code>ANTHROPIC_API_KEY</code>, a workspace with a spending limit in the Console) is the plain path, and switching is one variable.</p></div>
+      <div class="step"><h3>4. What it costs, and whose rules</h3><p>Nothing on top of the subscription — and the subscription's limits apply: each draft and each audit is a message in the same five-hour and weekly windows as your own use of Claude, and a worker that hits the limit fails the task (<em>You've hit your limit</em>, back in the queue for the next window; the pool retries an audit three times). Your agreement with Anthropic is what allows this use: read their consumer terms on automated and shared use before you put the token on a community set or a project host — the API key (<code>ANTHROPIC_API_KEY</code>, a workspace with a spending limit in the Console) is the plain path, and switching is one variable.</p></div>
     </div>
   </section>
 
@@ -156,7 +156,7 @@ FACTORY_PROVIDER=claude-code</pre>
     <div class="steps">
       <div class="step"><h3>What the broker holds, and the builder does not</h3><p>The worker's token, your agent's key, your <code>GITHUB_TOKEN</code> live in the broker, a container that runs no build: it passes the pool's calls for the one task it claimed (the job token the pool hands out stays with it), answers the agent in the Anthropic shape over whichever provider you gave it, and reads GitHub. The builder is born with nothing — <code>OMARCHY_BROKER</code> and a label — and dies after a task; a variable of yours set on it by mistake is dropped at start and said so. Inside the builder, the build user starts from an empty environment anyway, and a worker started the old way, with the token on it, keeps the token out of every child's environment and lends the key to the drafter alone. A PKGBUILD that prints <code>env</code> prints <code>PATH</code> and <code>HOME</code>.</p></div>
       <div class="step"><h3>What the pool checks anyway</h3><p>Every log, recipe and report uploaded to staging is read for what looks like a secret — the pool's tokens, agents' keys, GitHub's, a private key, a credential in a URL, a dump of the worker's variables — and refused if it carries one: the build fails with the kind and the line (never the match), and nothing reaches the record. That is for the worker the pool does not run; if it fires on yours, the container has something in its environment the worker did not put there — fix the container, queue the build again.</p></div>
-      <div class="step"><h3>What you decide</h3><p>Give the broker a <code>GITHUB_TOKEN</code> made for it, with no permissions — not your account's. Keep <code>WORKER_SHARED</code> off unless you mean to run strangers' recipes on this machine; on, give the broker no key you would mind losing. Do not mount your home or a directory of yours into the builder: it needs none. Caches, when you mount one, are kept per package inside — a build reads only what an earlier build of the same package wrote.</p></div>
+      <div class="step"><h3>What you decide</h3><p>Give the broker a <code>GITHUB_TOKEN</code> made for it, with no permissions — not your account's. A community set runs strangers' recipes on this machine, each in a fresh container: give the broker no key you would mind losing. Do not mount your home or a directory of yours into the builder: it needs none. Caches, when you mount one, are kept per package inside — a build reads only what an earlier build of the same package wrote.</p></div>
     </div>
   </section>
 
@@ -169,7 +169,7 @@ FACTORY_PROVIDER=claude-code</pre>
       <p><b>Update on the worker's page</b>: its set's updater does it within 2 minutes. Its owner or a maintainer presses it on <code>/worker/&lt;id&gt;</code> for a worker behind the pool's release; the order is never delivered to the worker — the updater sees it in its next poll, runs its round, and the order closes when the worker claims on the pool's release. The page says what rolls a worker's set out (<em>Its set</em>), and Update is greyed, with why, where nothing that follows the pool does: a host that rolls out by a timer of its own, an updater from before this, none at all.</p></div>
       <div class="step"><h3>Stop, remove, revoke</h3><p><code>./omarchy-worker stop</code> drains and stops the set (a build in hand finishes first); <code>./omarchy-worker remove</code> stops it and deletes the files here. The registration stays until you revoke it on your page (or a maintainer does); a revoked token claims nothing, immediately.</p></div>
       <div class="step"><h3>Disk</h3><p>Every task builds in a fresh container that is removed afterwards; images and package caches stay. <code>docker system prune</code> / <code>podman system prune</code> reclaims them. A project worker's working directory holds the upstream keyrings, a checkout of the repository and the last builds — safe to delete when the worker is stopped.</p></div>
-      <div class="step"><h3>Something is off</h3><p><em>the pool did not accept this token</em>: it was revoked, or mistyped. <em>registered for aarch64 but this machine is x86_64</em>: register a worker for this machine. <em>mount its socket</em>: the registration is project-trusted and needs the runtime's socket (above). <em>permission denied … docker.sock</em>: add <code>--security-opt label=disable</code> (Podman) or check the socket path. <em>No task for a while</em>: a community worker only sees its owner's tasks unless started shared; a project worker only claims once trusted. The <a href="/pipeline">Pipeline</a> lists every queued task, the <a href="/workers">Workers</a> page every worker the pool has heard from.</p></div>
+      <div class="step"><h3>Something is off</h3><p><em>the pool did not accept this token</em>: it was revoked, or mistyped. <em>registered for aarch64 but this machine is x86_64</em>: register a worker for this machine. <em>mount its socket</em>: the registration is project-trusted and needs the runtime's socket (above). <em>permission denied … docker.sock</em>: add <code>--security-opt label=disable</code> (Podman) or check the socket path. <em>No task for a while</em>: a community worker takes contributors' builds only, a project worker the project's work only — and the queue may hold none of its kind. The <a href="/pipeline">Pipeline</a> lists every queued task, the <a href="/workers">Workers</a> page every worker the pool has heard from.</p></div>
     </div>
   </section>
 
@@ -180,7 +180,7 @@ FACTORY_PROVIDER=claude-code</pre>
       <tr><td><b>Re-check agent</b></td><td>the worker</td><td>asks its agent now, instead of at its next re-check, and answers with what the agent said</td></tr>
       <tr><td><b>Restart</b></td><td>the worker, then its restart policy</td><td>the worker ends with exit 75 and its restart policy starts it again, a new process with a fresh agent client; "only if its agent is down" makes it ask its agent first and refuse when the agent answers. A builder behind a broker ends with 0, and its broker starts again beside it</td></tr>
       <tr><td><b>Restart agent service</b></td><td>a worker whose agent is a service beside it</td><td>restarts that service on its own engine (the project host's <code>agent-proxy</code>), waits for it, and asks its agent again; one worker of the host does it for all of them</td></tr>
-      <tr><td><b>Drain</b></td><td>the pool</td><td>hands the worker nothing from its next claim until someone resumes it — a task in hand runs to its end; whatever its image, and across its restarts. Its first claim hears it once. Builds asked for it by name go to the shared queue after 3 minutes, and nobody can pin a new one to it</td></tr>
+      <tr><td><b>Drain</b></td><td>the pool</td><td>hands the worker nothing from its next claim until someone resumes it — a task in hand runs to its end; whatever its image, and across its restarts. Its first claim hears it once. Builds asked for it by name go to the queue after 3 minutes, and nobody can pin a new one to it</td></tr>
       <tr><td><b>Resume</b></td><td>the pool</td><td>ends a drain: the worker is handed work again from its next claim</td></tr>
       <tr><td><b>Stop its task</b></td><td>the pool, then the worker</td><td>takes back the task the worker runs, for one that hangs: nothing of it is taken any more, and the worker stops it when its next heartbeat hears so (below); the task goes back to the queue once the worker has stopped it. Nothing is cancelled</td></tr>
       <tr><td><b>Update</b></td><td>its set's updater</td><td>never delivered to the worker: the updater beside it sees the order in its next poll (every two minutes) and replaces every service of the set that runs an older image, the brokers first, each stop a drain; the order is done when the worker claims on the pool's release (<a href="#update">Update</a>)</td></tr>
@@ -263,7 +263,7 @@ export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     anchor: [
       '<section id="registration">', "<h2>What the registration decides</h2>",
       "<th>Your registration</th><th>What the container does</th><th>What it needs</th>",
-      "<td><b>community</b> trust", "<td><b>project</b> trust", "<code>WORKER_SHARED=1</code>",
+      "<td><b>community</b> trust", "<td><b>project</b> trust", "builds any contributor's packages from the queue their requests land in, as a host does (#343)",
     ],
     visible: EVERYONE,
   },
@@ -302,34 +302,28 @@ export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "docs-workers.contributor-start",
     page: "/docs/workers",
     anchor: [
-      '<section id="contributor">', "<h2>A community set, on a maintainer's host</h2>", "<h3>1. Start it</h3>",
-      `<pre>curl -fsSLo omarchy-worker https://${DASHBOARD_HOST}/omarchy-worker &amp;&amp; chmod +x omarchy-worker`,
-      "./omarchy-worker start --token &lt;omw_…&gt; --github-token",
-      `href="${REPO_URL}/blob/main/factory/image/compose.yml"`, "<code>/omarchy-worker/compose.yml</code>",
+      '<section id="contributor">', "<h2>A community set, on a maintainer's host, until P3</h2>", "<h3>1. The set, and its command</h3>",
+      "The pool no longer serves a command that starts a new set, nor its compose file (#343)", `href="${REPO_URL}/blob/main/factory/host/omarchy-worker"`,
+      "./omarchy-worker start --github-token", `href="${REPO_URL}/blob/main/factory/image/compose.yml"`,
       "COMPOSE_PROFILES=community", "docker compose up -d",
       'href="https://github.com/settings/personal-access-tokens/new"', 'href="#secrets"', "<code>stop_grace_period: 3h</code>",
-    ],
-    reads: [
-      { path: "/omarchy-worker", json: false },
-      { path: "/omarchy-worker/compose.yml", json: false },
     ],
     visible: EVERYONE,
   },
   {
     id: "docs-workers.contributor-work",
     page: "/docs/workers",
-    anchor: ["<h3>2. Give it work</h3>", '<a href="/factory#request">Request a package</a>', "The build starts by itself, in the shared queue", "a native worker of your own at once, shared or not", "<b>Build</b> on your page names a worker", '<a href="/review">Review</a>'],
+    anchor: ["<h3>2. Its work</h3>", '<a href="/factory#request">requests a package</a>', "The build starts by itself, in the queue", "contributors' builds in turn by owner", "<b>Build</b> on the contributor's page names a worker", '<a href="/review">Review</a>'],
     visible: EVERYONE,
   },
   {
-    id: "docs-workers.contributor-share-agent",
+    id: "docs-workers.contributor-agent",
     page: "/docs/workers",
     anchor: [
-      "<h3>3. Share it, bring your agent</h3>", "<b>Share</b> / <b>Own only</b> on your page",
-      "./omarchy-worker start --shared", "./omarchy-worker share on | off",
+      "<h3>3. Bring your agent</h3>", "There is no mode to set",
       "./omarchy-worker start --anthropic-key sk-… --model claude-sonnet-5", "ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, FACTORY_MODEL",
       "./omarchy-worker start --claude-token …", "CLAUDE_CODE_OAUTH_TOKEN",
-      'the <a href="/factory#request">Factory\'s request card</a>', "the best idle shared worker of the architecture",
+      'the <a href="/factory#request">Factory\'s request card</a>', "a native lane first, an emulated one after its wait",
     ],
     visible: EVERYONE,
   },
@@ -344,10 +338,11 @@ export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     page: "/docs/workers",
     anchor: [
       '<section id="project">', "<h2>As a maintainer: the pool's jobs and approved rebuilds</h2>",
-      "<code>POST /api/v1/factory/workers/&lt;id&gt;/trust</code>", "the <b>same path</b> on your machine and inside the container",
+      "<code>POST /api/v1/factory/workers/&lt;id&gt;/trust</code> answers <code>410</code> now", "the <b>same path</b> on your machine and inside the container",
     ],
+    // Per-worker trust is gone (#343): its door answers 410 to everyone, a maintainer too.
     acts: [
-      { method: "POST", path: `/api/v1/factory/workers/${F.worker}/trust`, body: { trust: "project" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
+      { method: "POST", path: `/api/v1/factory/workers/${F.worker}/trust`, body: { trust: "project" }, expect: { anonymous: 410, contributor: 410, owner: 410, maintainer: 410 } },
     ],
     visible: EVERYONE,
   },
@@ -443,7 +438,7 @@ export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
       '<section id="secrets">', "<h2>What a build can see</h2>", "<b>the build sees nothing the log cannot show.</b>",
       "<h3>What the broker holds, and the builder does not</h3>", "<code>OMARCHY_BROKER</code> and a label",
       "<h3>What the pool checks anyway</h3>", "the build fails with the kind and the line (never the match)",
-      "<h3>What you decide</h3>", "Keep <code>WORKER_SHARED</code> off",
+      "<h3>What you decide</h3>", "A community set runs strangers' recipes on this machine",
     ],
     visible: EVERYONE,
   },

@@ -182,12 +182,12 @@ const SCRIPT = String.raw`
     document.title = String(w.id) + " · Worker · omarchy-pool";
     $("#wk-name").innerHTML = workerName(w);
     $("#wk-state").innerHTML = '<span class="op-pill ' + (PILL[st] || "na") + '">' + esc(st) + '</span>';
-    $("#wk-kind").innerHTML = '<span class="op-chip">' + esc(kind === "community" ? (w.mode === "shared" ? "contributor's · shared" : "contributor's · own packages") : kind) + '</span>';
+    $("#wk-kind").innerHTML = '<span class="op-chip">' + esc(kind === "community" ? "community · contributors' builds" : kind) + '</span>';
     $("#wk-id").textContent = w.id;
     // What rolls its set out, in the pool's words (#277): its updater, a host timer from before #277, both, one that is not running, nothing.
     $("#wk-set").textContent = w.set_line || "—";
     var emu = w.labels && w.labels.emulated ? "emulated" : "native";
-    $("#wk-lede").innerHTML = (kind === "community" ? "A community builder" : kind === "review" ? "The project's review worker" : "The project's pool worker") + " (" + esc(w.arch) + ", " + emu + ")" + (w.owner ? ", kept by " + personLink(w.owner) : "") + (w.labels && w.labels.where ? ", on " + esc(w.labels.where) : "") + ".";
+    $("#wk-lede").innerHTML = (kind === "community" ? "A legacy community builder" : kind === "review" ? "The project's review worker" : "The project's pool worker") + " (" + esc(w.arch) + ", " + emu + ")" + (w.owner ? ", kept by " + personLink(w.owner) : "") + (w.labels && w.labels.where ? ", on " + esc(w.labels.where) : "") + ".";
     var agent = w.agent ? (w.agent_status === "ok" ? "answers" : w.agent_status === "error" ? "does not answer" : "not probed yet") : "no agent";
     var up = w.up_since ? ago(w.up_since).replace(" ago", "") : "—";
     // A builder runs one task per container: its uptime is its container's, with its last task — a new process per task is not a restart.
@@ -206,7 +206,7 @@ const SCRIPT = String.raw`
     var w = W, L = [];
     if (w.revoked_at) L.push(["na", "Revoked " + ago(w.revoked_at) + ": it can never claim again."]);
     else if (!w.alive) L.push(["warn", "Offline: not seen in " + WORKER_ALIVE_MINUTES + " minutes. An order waits up to " + (RULES ? Math.round(RULES.ttl_person_min / 60) : 6) + " h for it."]);
-    if (w.drained) L.push(["warn", "Drained by " + (byPool(w.drained.by) ? "the pool" : w.drained.by || "?") + " " + ago(w.drained.at) + (w.drained.reason ? ": " + w.drained.reason : "") + " — handed nothing until it is resumed" + (w.current_task ? "; task #" + w.current_task + " runs to its end" : "") + ". Builds asked for it by name go to the shared queue after " + (RULES ? RULES.first_pick_minutes : 3) + " min."]);
+    if (w.drained) L.push(["warn", "Drained by " + (byPool(w.drained.by) ? "the pool" : w.drained.by || "?") + " " + ago(w.drained.at) + (w.drained.reason ? ": " + w.drained.reason : "") + " — handed nothing until it is resumed" + (w.current_task ? "; task #" + w.current_task + " runs to its end" : "") + ". Builds asked for it by name go to the queue after " + (RULES ? RULES.unpin_after_drain_min : 3) + " min."]);
     // Stop its task (#277): the fence holds until this worker has stopped — its next claim — or the lease it can no longer renew ends: that
     // lease's end, as /can reads it from the task, which the button and the stop's dialog say too; the listing's bound until /can answers.
     var until = w.stopping && CAN && CAN.stop && CAN.stop.task === w.stopping.task && CAN.stop.until ? CAN.stop.until : w.stopping && w.stopping.until;
@@ -278,7 +278,7 @@ const SCRIPT = String.raw`
     var text = kind === "recheck-agent" ? "It asks its agent now instead of at its next scheduled check. The answer is on its row with its next claim."
       : kind === "restart" ? "It finishes the task in hand, then exits; its restart policy starts it again, and the pool checks that it came back." + (unless ? " Only if its agent is down: it probes first, and stays up if the agent answers." : "")
       : kind === "stop-task" ? stopText(st)
-      : kind === "drain" ? "The pool hands it nothing from its next claim" + (W && W.current_task ? "; task #" + W.current_task + " runs to its end" : "") + ". Builds asked for it by name go to the shared queue after " + (RULES ? RULES.first_pick_minutes : 3) + " min. It stays drained, restarts included, until someone resumes it."
+      : kind === "drain" ? "The pool hands it nothing from its next claim" + (W && W.current_task ? "; task #" + W.current_task + " runs to its end" : "") + ". Builds asked for it by name go to the queue after " + (RULES ? RULES.unpin_after_drain_min : 3) + " min. It stays drained, restarts included, until someone resumes it."
       : kind === "resume" ? "The pool hands it work again from its next claim." + (W && W.drained && W.drained.by && W.drained.by !== WHO.login ? " " + W.drained.by + " drained it" + (W.drained.reason ? ": " + W.drained.reason : "") + " — the journal puts their words beside yours." : "")
       // Update (#277): what the pool can see of the set, and the rest without a number — the pool does not know a set's builders, brokers or agent service, nor a host's profiles.
       // A builder's set is not visible from the pool: its note says what else may replace it, and when the order gives up.
@@ -383,8 +383,8 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['<ul class="wk-lines" id="wk-lines" aria-label="What the pool sees and does"></ul>'],
     script: ["function drawLines()", '"waiting for its set\'s updater — it replaces what runs an older image there within 2 min, and the order closes when this worker claims on the pool\'s release"', "w.not_ready_since", "w.pool_waits", "w.pool_gave_up", "w.two_processes_since", "w.crash_loop_since", "w.watchdog.n", '"Provider outage suspected since "', "BREAKER.scope", "if (SITE_WORD)", "w.takes_orders === null", "byPool(o.by)",
       // #277, part 2: a drain and a stop are the pool's own, each a line of its own.
-      "if (w.drained)", "RULES.first_pick_minutes", "if (w.stopping)", "w.stopping.task", "CAN.stop.task === w.stopping.task && CAN.stop.until", "hm(until)"],
-    reads: [{ path: `/api/v1/factory/workers/${F.worker}`, fields: ["worker.not_ready_since", "worker.pool_waits", "worker.pool_gave_up", "worker.two_processes_since", "worker.crash_loop_since", "worker.watchdog", "worker.drained", "worker.stopping", "worker.current_task", "breaker", "site_word", "rules.first_pick_minutes", "rules.lease_minutes"] }],
+      "if (w.drained)", "RULES.unpin_after_drain_min", "if (w.stopping)", "w.stopping.task", "CAN.stop.task === w.stopping.task && CAN.stop.until", "hm(until)"],
+    reads: [{ path: `/api/v1/factory/workers/${F.worker}`, fields: ["worker.not_ready_since", "worker.pool_waits", "worker.pool_gave_up", "worker.two_processes_since", "worker.crash_loop_since", "worker.watchdog", "worker.drained", "worker.stopping", "worker.current_task", "breaker", "site_word", "rules.unpin_after_drain_min", "rules.lease_minutes"] }],
     visible: EVERYONE,
   },
   {

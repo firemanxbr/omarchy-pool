@@ -128,7 +128,7 @@ describe("drain and stop on every page (#277, part 2)", () => {
     const o = whereOptions(ws, "aarch64", "m2", true);
     const opt = (id: string) => o.options.find((x: any) => x.value === id);
     expect(opt("rev-a")).toMatchObject({ disabled: true });
-    expect(opt("rev-a").text).toContain("drained by m1: disk — pin another worker, or use the shared queue");
+    expect(opt("rev-a").text).toContain("drained by m1: disk — pin another worker, or use the queue");
     expect(opt("rev-b").disabled).toBe(false);
   });
   it("never lets Review's claim pin its rebuild to a drained worker: agentWorkers leaves it out, and the agents it offers are the others'", async () => {
