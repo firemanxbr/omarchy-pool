@@ -28,7 +28,8 @@ import type { HostSoak, Reverted } from "./update";
 interface Resources { cpus: number; mem_gb: number }
 export interface MinHost extends Resources { work_disk_gb: number; engine_disk_gb: number }
 interface TaskUnits { build_per_size: number; trial: number; audit: number; job: number; job_reserved: number }
-interface SignedCapacity { max_size: number; community_max_size: number; min: MinHost; reserve: Resources; unit: Resources; units: TaskUnits; disk: { build_gb_per_size: number; floor_gb: number }; emulated: { share_when_native_waits: number } }
+interface Sidecar { cpus: number; mem_mb: number }
+interface SignedCapacity { max_size: number; community_max_size: number; min: MinHost; reserve: Resources; unit: Resources; units: TaskUnits; disk: { build_gb_per_size: number; floor_gb: number }; sidecars: { egress: Sidecar; agent: Sidecar }; emulated: { share_when_native_waits: number } }
 
 const MANIFEST = parse(manifestToml) as unknown as { min_release: string; revoked: string[]; capacity: SignedCapacity; tools?: Record<string, Record<string, { url?: string }>> };
 const SIGNED = MANIFEST.capacity;
@@ -44,6 +45,11 @@ export const COMMUNITY_MAX_SIZE = SIGNED.community_max_size;
 export const BUILD_GB_PER_SIZE = SIGNED.disk.build_gb_per_size;
 /** Free disk a host keeps below every build's budget, on the work root and on the engine's data root (D53). */
 export const DISK_FLOOR_GB = SIGNED.disk.floor_gb;
+/**
+ * The memory a task's sidecars take out of its units, in MB (design v2 §7.3): the egress sidecar's, and a model kind's agent sidecar's.
+ * A build's container gets its units' memory less these; size learning (sizing.ts, #330) reads a peak against it.
+ */
+export const SIDECARS_MEM_MB: Readonly<{ egress: number; agent: number }> = Object.freeze({ egress: SIGNED.sidecars.egress.mem_mb, agent: SIGNED.sidecars.agent.mem_mb });
 /** The share of a host's builds its emulated lanes may hold while native work for it is queued (D50: the work-conserving cap). */
 export const EMULATED_SHARE = SIGNED.emulated.share_when_native_waits;
 

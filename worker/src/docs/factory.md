@@ -530,7 +530,10 @@ every trust, trials and audits, and — once the `host-pool-jobs` setting names 
 jobs: the arch-neutral ones whatever their row's arch, a health check or a promotion only with a
 lane of each arch its helpers check; which one comes next is the selection's (below). A Stop is per lease (`task` names it; several open at once, 30 an hour per
 login), and `fail` takes `lost: true` (a host event: the attempt given back, twice per task at
-most) and `oom: true` (the engine's kill: the attempt spent, the reason kept).
+most) and `oom: true` (the engine's kill: the attempt spent, the reason kept). A build's `oom`
+raises the size its package remembers one step, and a build's `complete` carries `ram_peak_mb`,
+its container's memory high-water mark, five of which in a row below what the size under the
+remembered one gives lower it one step (#330, D31; the runbook's *Sizes*).
 
 On the host, the dispatcher (`pkg-repo dispatch`, #335, design v2 §9) holds those leases and runs
 each in one task container it starts through one function (`crates/pkg-repo/src/dispatch/spec.rs`):
@@ -605,7 +608,8 @@ backlog never hides another's package, and a capped contributor's flood
 hides no one's), the first native task whatever its size (it holds the
 emulated lanes to their share), the task the host reserves for, and the
 oldest builds the reservation weighs; then the sizes set for the
-candidates' packages and their last native build; selection orders the
+candidates' packages (and the sizes learned from their builds, #330) and
+their last native build; selection orders the
 candidates — priority, then community builds round-robin by owner (within a
 per-owner cap, the `owner-cap-divisor` setting), then effective age (the
 wait less the lane's penalty: 0 native, T emulated), then id, the
@@ -687,7 +691,7 @@ factory/
   bin/omarchy-rollout             the updater: the compose set follows the pool's latest image, what changed replaced together, itself last
   bin/pkgbuild-meta               PKGBUILD → arches and version, without executing it as you
   sizing/<name>/                  recipes kept for dry runs only (never queued) — the only recipes in the repository
-  sizing/tasks.toml               maintainer-set task sizes, disk budgets (the pool's claims read them, #337) and network exceptions per package
+  sizing/tasks.toml               maintainer-set task sizes, disk budgets (the pool's claims read them, #337, above the sizes it learns, #330) and network exceptions per package
   sets/host/                      the host agent's set (#307): compose.yml with the one dispatcher service, set.toml, files/
   host/prep-root.sh               the root-only steps a new maintainer host needs once (never run by the agent)
   host/prep-mac.sh                a Mac's once, without sudo: Colima and Lima from Homebrew, the omarchy VM's three directories (#320)

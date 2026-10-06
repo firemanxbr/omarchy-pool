@@ -89,7 +89,7 @@ export async function storyRows(env: Env, name: string) {
     env.DB.prepare(`SELECT ${TASK_COLS} FROM build_tasks WHERE name = ? AND kind IN ('build', 'audit', 'trial', 'publish') ORDER BY id DESC LIMIT 120`).bind(name).all<Record<string, unknown>>(),
     // Each row's review by its primary key, for the one word the row does not carry: whether the rejection asked for changes.
     env.DB.prepare("SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.version, a.arch, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, a.review_id, COALESCE(v.changes, 0) AS changes FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id WHERE a.name = ? ORDER BY a.id DESC LIMIT 40").bind(name).all<Omit<Approval, "standing" | "changes"> & { changes: number }>(),
-    env.DB.prepare("SELECT name, owner, url, status, detail, category, request_id, description, license, source, project, arches, targets, detected, created_at, updated_at, blocked_at, blocked_by, blocked_reason, size, disk_gb FROM factory_packages WHERE name = ?").bind(name).first<Record<string, unknown>>(),
+    env.DB.prepare("SELECT name, owner, url, status, detail, category, request_id, description, license, source, project, arches, targets, detected, created_at, updated_at, blocked_at, blocked_by, blocked_reason, size, disk_gb, learned_size, learned_lower, learned_task, learned_why, learned_at FROM factory_packages WHERE name = ?").bind(name).first<Record<string, unknown>>(),
   ]);
   // The request the registration points at: what the contributor confirmed, the version, the record — the checks read it (request.ts).
   const request = pkg?.request_id

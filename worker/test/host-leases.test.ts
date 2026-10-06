@@ -398,6 +398,9 @@ describe("host events and attempts", () => {
     expect(row.error).toBe("out of memory at 4 GB (size 1) — the engine killed it: Killed (exit 137): rustc took 9 GB");
     const line = await env.DB.prepare("SELECT payload FROM events WHERE kind = 'build' AND json_extract(payload, '$.task') = ? ORDER BY id DESC LIMIT 1").bind(t).first<{ payload: string }>();
     expect(JSON.parse(line!.payload)).toMatchObject({ oom: true, lost: false });
+    // The kill taught felix a size (#330, size-learning.test.ts): forgotten here, so the tests after this one size its builds 1 as they say.
+    expect(await env.DB.prepare("SELECT learned_size FROM factory_packages WHERE name = 'felix'").first("learned_size")).toBe(2);
+    await env.DB.prepare("UPDATE factory_packages SET learned_size = NULL, learned_lower = 0, learned_task = NULL, learned_why = NULL, learned_at = NULL WHERE name = 'felix'").run();
 
     // A legacy registration: no generation, a token without one, and `lost` changes nothing.
     await env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES ('legacy-1', 'aarch64', 'm1', ?, 'shared', 'project', 'm1', ?)").bind(await sha256Hex("omw_legacy-1"), new Date().toISOString()).run();

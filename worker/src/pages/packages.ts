@@ -1029,11 +1029,18 @@ const PACKAGE_SCRIPT = String.raw`
     }
     $("#who").innerHTML = rows.join("");
   }
-  function sizeWords(z) { return "size " + esc(String(z.size)) + " · " + esc(String(z.disk_gb)) + " GB of disk" + (z.from === "page" ? " · set on this page" : z.from === "file" ? " · factory/sizing" : z.disk_from ? "" : " · the default"); }
+  // The size learned from its builds (#330, D31), whether it is the one its builds ask or a maintainer's wins over it: raised after the
+  // engine killed one at its memory limit, lowered after builds in a row that peaked below the size under it.
+  function learnedWords(z) {
+    var l = z.learned; if (!l) return "";
+    var task = function (id) { return id ? ' <a href="/build/' + esc(String(id)) + '">#' + esc(String(id)) + '</a>' : ""; };
+    return " · learned" + (z.from === "learned" ? "" : " size " + esc(String(l.size)) + ", under it") + ": " + (l.why === "decay" ? "lowered after " + esc(String(l.of)) + " builds in a row peaked lower, the last" + task(l.task) : "raised after" + (task(l.task) || " a build") + " ran out of memory") + " · " + esc(String(l.lower)) + " of " + esc(String(l.of)) + " builds since peaked lower";
+  }
+  function sizeWords(z) { return "size " + esc(String(z.size)) + " · " + esc(String(z.disk_gb)) + " GB of disk" + (z.from === "page" ? " · set on this page" : z.from === "file" ? " · factory/sizing" : z.from === "learned" || z.disk_from ? "" : " · the default") + learnedWords(z); }
   // A maintainer sets the size (the select) and the disk budget (the line, in GB; empty: factory/sizing's, or 20 per size) — on the journal with who.
   $("#facts").addEventListener("click", function (ev) {
     var t = ev.target.closest ? ev.target.closest("[data-set-size]") : null; if (!t) return;
-    var z = ((ST && ST.package) || {}).sizing || { size: 1 }, opts = [{ value: "", text: "As factory/sizing says, or 1", selected: z.from !== "page" }];
+    var z = ((ST && ST.package) || {}).sizing || { size: 1 }, opts = [{ value: "", text: "As factory/sizing says, or " + (z.learned ? "the size learned from its builds (" + z.learned.size + ")" : "1"), selected: z.from !== "page" }];
     for (var n = 1; n <= SIZES.max; n++) opts.push({ value: String(n), text: "size " + n + " — " + n * SIZES.cpus + " CPUs, " + n * SIZES.mem_gb + " GB" + (n > SIZES.community_max ? " (a contributor's build runs at " + SIZES.community_max + ")" : ""), selected: z.from === "page" && z.size === n });
     ask({ title: "The size of " + name, text: "What its builds ask for: the CPUs and memory of the size, clamped to the largest host alive. The disk budget is in GB.", select: { label: "Size", options: opts }, input: true, placeholder: "disk budget in GB — empty: factory/sizing's, or 20 per size", confirm: "Set" }).then(function (r) {
       if (r === null) return;
@@ -1055,7 +1062,8 @@ const PACKAGE_SCRIPT = String.raw`
       rows.push(fact("scale", "licence", esc(pk.license || (m.licenses || []).join(", ") || "—")));
       rows.push(fact("factory", "origin", "factory · only in the pool"));
       if (pk.category) rows.push(fact("tag", "category", esc(pk.category)));
-      // The size and disk budget its builds ask for (#337): this page's word, factory/sizing's, or the default; a maintainer sets it here.
+      // The size and disk budget its builds ask for (#337): this page's word, factory/sizing's, the size learned from its builds (#330), or
+      // the default; a maintainer sets it here.
       if (pk.sizing) rows.push(fact("cpu", "size", sizeWords(pk.sizing) + (isMaintainer() ? ' <button type="button" class="op-btn" data-set-size>Set</button>' : "")));
       rows.push(fact("calendar", "requested", esc(onDay((ST && ST.request && ST.request.created_at) || pk.created_at))));
     } else if (D) {
@@ -1461,7 +1469,7 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.facts",
       page,
       anchor: ['id="facts-section"', 'id="facts"'],
-      script: ["renderFacts", '"licence"', '"origin"', "D.pool_url", "D.package.has_signature", "pk.category", "sizeWords(pk.sizing)", "data-set-size", '"/size"', "z.from"],
+      script: ["renderFacts", '"licence"', '"origin"', "D.pool_url", "D.package.has_signature", "pk.category", "sizeWords(pk.sizing)", "data-set-size", '"/size"', "z.from", "learnedWords(z)", "l.lower"],
       reads: [
         { path: pkg, fields: ["manifest.url", "manifest.licenses", "manifest.pkginfo.builddate", "pool_url", "package.has_signature", "package.size_download"] },
         { path: shipped, fields: ["package.project", "package.license", "package.category", "package.created_at", "package.sizing.size", "package.sizing.disk_gb", "package.sizing.from"] },
