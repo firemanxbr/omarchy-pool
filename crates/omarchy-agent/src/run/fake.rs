@@ -937,8 +937,9 @@ pub(crate) fn write_token_file(set: &std::path::Path, token: &str) {
     fs::write(&file, format!("{token}\n")).unwrap();
     fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).unwrap();
 }
-/// The registration the token belongs to, as the env file names it.
-pub(crate) const WORKER: &str = "m1-rack-0a9z";
+/// The registration the token belongs to, as the env file names it: the agent's own
+/// (`worker_id` in its agent.toml), which the pool's token answers name.
+pub(crate) const WORKER: &str = "m1-test-0a9z";
 
 pub(crate) struct World {
     pub agent: Agent,

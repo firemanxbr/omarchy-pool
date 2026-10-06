@@ -237,9 +237,9 @@ pub(super) fn rendered(cfg: &Config, paths: &Paths, sources: &Sources) -> Render
     Rendered::now(sources, &paths.data, Some(envelope))
 }
 
-/// The values the journal and the report never carry: those of the set's `etc/*.env` (the
-/// worker token) and of the secrets directory's `*.env` — the agent keys, typed at install
-/// or sealed from the site (#328).
+/// The values the journal and the report never carry: the worker token's file (#327), those
+/// of the set's `etc/*.env` and of the secrets directory's `*.env` — the agent keys, typed at
+/// install or sealed from the site (#328).
 pub(super) fn secrets_of(set_dir: &std::path::Path, secrets_dir: &std::path::Path) -> Vec<String> {
     let mut v = env_secrets(set_dir);
     v.extend(env_values(secrets_dir));
