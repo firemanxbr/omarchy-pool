@@ -156,7 +156,9 @@ secret). Everything travels in the `Authorization` header over TLS only.
   unreachable"; a package that needs one gets a reviewed exception in
   `factory/sizing` (a bridge network of its own), which a host runs only
   where its owner's envelope grants it (`direct_network`, #373): elsewhere the
-  dispatcher hands the task back before anything starts. A task that needs a model
+  dispatcher hands the task back before anything starts, as a lost lease (the
+  attempt given back twice per task, spent after: a package that only
+  non-granting hosts claim fails rather than run on an unprobed bridge). A task that needs a model
   gets an agent sidecar of its own, on its network only, with the keys file
   read-only and its caps (calls, tokens, wall time); the dispatcher refuses to
   start with an agent key or a GitHub token in its own environment and keeps the
@@ -192,7 +194,12 @@ secret). Everything travels in the `Authorization` header over TLS only.
   boot unit for it is not there or not enabled (a reboot would take the drop
   away, and nothing probes again after install), whatever the probe says: the
   second layer under every task network, with the command that puts the INPUT
-  drop in place or back. On a rootless engine what could reach the host is the
+  drop in place. Whether the rule is in effect, rather than installed, only a
+  granted bridge's probe shows (its gateway and the LAN address are the host
+  itself; a rule flushed since the unit ran gets the command that puts it
+  back): without the grant nothing a probe task tries crosses INPUT, since a
+  task's own network has no address of the host's and no route off its subnet,
+  and its sidecar refuses the LAN (#373). On a rootless engine what could reach the host is the
   user-mode stack's host loopback (RootlessKit's, slirp4netns's or pasta's),
   off by default: preflight reads the stack's command line in `/proc` while its
   probe tasks run and refuses one that maps it, with the setting that turns it

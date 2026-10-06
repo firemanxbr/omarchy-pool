@@ -71,9 +71,14 @@
 //! refuses the install with the command that installs it ([`unprepared`],
 //! [`firewall_command`]), whatever the probe says: it is the second layer under every task
 //! network (design v2 §9.4), and a host's own firewall may close the ports probed and leave the
-//! others open. The agent is never root and cannot read the rules in effect: the probe is what
-//! shows they hold (a rule flushed since the unit ran is refused with the command that puts it
-//! back).
+//! others open. The agent is never root and cannot read the rules in effect: where the envelope
+//! grants a signed exception's bridge, whose gateway and the LAN address are the host itself,
+//! that bridge's probe is what shows they hold (a rule flushed since the unit ran is refused with
+//! the command that puts it back). Without the grant no probe target crosses INPUT — a task's
+//! own network has no address of the host's (Docker's isolated gateway mode, libpod's network
+//! with DNS off) and no route off its subnet, and its sidecar refuses the LAN — so preflight
+//! reads the script and the unit only, and the drop is the second layer under task networks
+//! that reach nothing of the host's.
 //!
 //! On a rootless engine there is no such rule, and what could reach the host is the user-mode
 //! network stack's host loopback: while the probe tasks run (the sidecar's bridge starts
@@ -899,7 +904,7 @@ fn unscripted(script: Option<&str>, task: &[Cidr]) -> Option<String> {
 /// Why prep-root.sh's INPUT drop for the task subnets is not installed, if it is not (#367):
 /// its unit's script does not drop every task subnet ([`unscripted`]), or the unit that runs
 /// it at boot is not there, or is not enabled. It says what puts the drop in place at boot,
-/// not what is in effect now: the probe shows that.
+/// not what is in effect now: a granted bridge's probe shows that (#373).
 pub(crate) fn unprepared(fw: Firewall<'_>, task: &[Cidr]) -> Option<String> {
     if task.is_empty() {
         return Some(format!(
@@ -934,7 +939,8 @@ fn sh(s: &str) -> Cow<'_, str> {
 /// The command that puts prep-root.sh's INPUT drop for the task subnets in place (#367).
 /// When its unit's script drops every task subnet ([`unscripted`]) and the unit is there,
 /// the unit puts the rule back: restarted, when the rule was flushed since it ran (a firewall
-/// reload), and enabled first when it is not, or the next reboot takes the rule away again.
+/// reload, which a granted bridge's probe shows, #373), and enabled first when it is not, or the
+/// next reboot takes the rule away again.
 /// Otherwise prep-root.sh, which writes both and enables the unit, with this install's user,
 /// work root and task subnets, and the base of docker's default address pools
 /// `/etc/docker/daemon.json` (`daemon_json`, world-readable) names, since prep-root.sh sets

@@ -1038,7 +1038,9 @@ impl Dispatcher {
         // Its bridge only where the owner's envelope grants it, which install's egress probe
         // then checked (#373): a rootless engine's bridge reaches the LAN through its user-mode
         // network stack. Elsewhere it goes back for a host that runs it. Seam: the claim does not
-        // say yet whether a host runs such packages, so the pool may offer one here again.
+        // say yet whether a host runs such packages, so the pool may offer one here again, and a
+        // lost lease's attempt is given back only for a task's first HOST_LOSSES_MAX losses
+        // (worker/src/routes/factory.ts): where only hosts without the grant claim it, it fails.
         if direct && !self.net.direct {
             let why = format!(
                 "{}'s signed network exception (factory/sizing: network = \"direct\") needs a bridge network, which this host's envelope does not grant (agent.toml's direct_network): handed back",

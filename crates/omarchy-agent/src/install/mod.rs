@@ -42,7 +42,9 @@
 //!
 //! Seams left for later issues, by name: the claim saying whether a host runs a signed
 //! exception's bridge (until then the pool may offer such a package to a host that hands it
-//! back, #373); the `subuid` level for rootless podman, once the
+//! back, #373, as a lost lease: the pool gives the attempt back for a task's first two losses
+//! and spends one for each after, so such a package fails where only hosts without the grant
+//! claim it); the `subuid` level for rootless podman, once the
 //! dispatcher (#335) starts task containers with `--userns=auto` (until then rootless podman
 //! reads as `user`); task containers and sidecars carry `org.omarchy-pool.agent.host=<host>`
 //! (design v2 §9.3), which uninstall removes by.

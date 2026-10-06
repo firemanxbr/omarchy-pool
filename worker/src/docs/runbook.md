@@ -681,10 +681,16 @@ by its sidecar, which refuses the LAN and the router.
 A **signed exception's bridge** — the plain bridge a package with `network =
 "direct"` in `factory/sizing` gets, for builds that open raw sockets — is
 probed too, and only, when the envelope grants it: `--direct-network` (agent.toml's
-`direct_network = true`, kept by a re-run), which the dispatcher reads as
-`OMARCHY_DIRECT_NETWORK=1` in `etc/dispatcher.env`. Without the grant the
-dispatcher hands such a package's task back to the pool before anything starts,
-and the probe says it probed no bridge. With it, a probe task on that bridge must
+`direct_network = true`, kept by a re-run; `--no-direct-network` takes it back),
+which the dispatcher reads as `OMARCHY_DIRECT_NETWORK=1` in `etc/dispatcher.env`.
+Without the grant the dispatcher hands such a package's task back to the pool
+before anything starts, and the probe says it probed no bridge. The hand-back is
+a lost lease: the pool gives the attempt back for the first two of a task's
+losses (`HOST_LOSSES_MAX`), and spends one for each after, so such a package
+fails ("lost too often on its host", then out of attempts) where only hosts
+without the grant claim it. The claim does not say yet whether a host runs such
+packages, which would keep them off the others (a follow-up of #373); no
+package in `factory/sizing/tasks.toml` has the exception today. With it, a probe task on that bridge must
 fail to reach the metadata address, the default gateway, the host's LAN
 address and the bridge's own gateway on the same ports, and must reach GitHub,
 which on a rootful Linux host is what prep-root.sh's `DOCKER-USER` rules and
@@ -705,12 +711,18 @@ task subnet there, and the unit that runs it at boot
 enabled (its link in `/etc/systemd/system/multi-user.target.wants`), whatever
 the probe says — a host whose own firewall drops the ports probed may leave
 its other services open to a task, and a unit that does not run at boot
-leaves the host open after the next reboot, when nothing probes again — and
-the probe must reach neither the gateway nor the LAN address, which shows the
-rule is in effect (the agent is never root and cannot read the firewall
-itself). The command is `sudo systemctl restart
-omarchy-task-firewall.service` when the script and the enabled unit are in
-place, the rule having been flushed since (a firewall reload); `sudo
+leaves the host open after the next reboot, when nothing probes again — and,
+where the envelope grants a signed exception's bridge, that bridge's probe
+must reach neither its gateway nor the LAN address, which shows the rule is in
+effect (the agent is never root and cannot read the firewall itself). Without
+the grant nothing a probe task tries crosses `INPUT`: a task's own network has
+no address of the host's (Docker's isolated gateway mode, libpod's network with
+DNS off) and no route off its subnet, and its sidecar refuses the LAN; so
+preflight checks the script and the unit only, and the drop is the second
+layer under task networks that reach nothing of the host's (#373). The command
+is `sudo systemctl restart omarchy-task-firewall.service` when the script and
+the enabled unit are in place, the rule having been flushed since (a firewall
+reload, which a granted bridge's probe shows); `sudo
 systemctl enable omarchy-task-firewall.service && sudo systemctl restart
 omarchy-task-firewall.service` when the unit is there but not enabled; and
 otherwise `sudo factory/host/prep-root.sh` with this install's `--user`,
@@ -808,9 +820,10 @@ loopback off by default; pasta's guest-mapped address (from podman 5.3, the
 table's third row, below) is on. Whether the loopback is mapped is on the
 stack's command line, which the engine's own user (the agent's, design v2
 §19.3) reads in `/proc/<pid>/cmdline`:
-preflight reads it there while both probe tasks run (rootless podman starts
-its stack with the first container on a bridge network and stops it with the
-last), and refuses the install with the setting to change when any of this
+preflight reads it there while the probe tasks run (rootless podman starts
+its stack with the first container on a bridge network — the probe's egress
+sidecar, on a bridge of its own, and a signed exception's bridge where the
+envelope grants one — and stops it with the last), and refuses the install with the setting to change when any of this
 user's `rootlesskit`, `slirp4netns` or `pasta` processes maps it — or when
 none was seen, since nothing then says it is off. The agent listens on
 nothing (design v2 §11.2), so it reads the setting rather than waiting for a
