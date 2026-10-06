@@ -54,3 +54,10 @@ path = "fuzz_targets/set.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cosignature"
+path = "fuzz_targets/cosignature.rs"
+test = false
+doc = false
+bench = false
