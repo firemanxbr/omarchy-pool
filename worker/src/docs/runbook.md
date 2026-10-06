@@ -828,6 +828,64 @@ router through the user-mode stack, and its gateway (the engine's namespace)
 refuses connections, which counts as reached; #373 runs the probe the way a
 task runs, on an internal network behind its egress sidecar.
 
+#### A sandboxed runtime for community tasks
+
+A host whose engine has gVisor's `runsc` or Kata Containers runs its
+community tasks in it (#330, design v2 §10.4; D43): the dispatcher starts a
+contributor's build on the native lane with `--runtime <it>`, so a container
+escape lands in the sandbox's kernel, not on the host. Its sidecars, the
+project's tasks and an emulated lane's run on the engine's own runtime (an
+emulated lane needs the host kernel's binfmt handler, which a sandbox's
+kernel does not have). The agent looks for one at install and at each
+`omarchy-agent capacity … --write`: a runtime `docker info` lists whose name,
+path or shim type says `runsc` (gVisor, tried first) or `kata`, then a smoke
+run of the release's build image under it, which must print a kernel that is
+not the engine's own (`uname -r`) and answer `pacman --version`. The first
+that passes goes into `run/capacity.json`'s `sandbox`
+(`{"runtime":"runsc","kind":"gvisor"}`), which the dispatcher reads before
+each start and the host report carries to the host page (*Sandbox*); none
+reads `"sandbox": null`, and `sandbox_held` says why one the engine has, or
+the envelope names, is not used. A host without one runs its community tasks
+as before. To give a Linux host gVisor (at the host, as root; its release
+notes name the current release):
+
+```bash
+r=20260928 a="$(uname -m)"   # a gVisor release, the machine's architecture
+cd /tmp && curl -fsSLO "https://storage.googleapis.com/gvisor/releases/release/$r/$a/gvisor.tar.zstd" \
+  && curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/$r/$a/gvisor.tar.zstd.sha512" | sha512sum -c -
+sudo mkdir -p /opt/gvisor && sudo tar --zstd -xf gvisor.tar.zstd -C /opt/gvisor   # runsc and its gvisor-bin/
+sudo /opt/gvisor/runsc install       # "runsc" in /etc/docker/daemon.json's runtimes
+sudo systemctl reload docker         # a reload: running task containers keep running
+docker run --rm --runtime runsc busybox uname -r   # gVisor's kernel, not the host's
+```
+
+then count the host again with the owner's envelope and the applied release
+(the command under *How the pool hands a host work*, *Emulated lanes are
+detected*), or run install again; the run loop sees the file change and the
+recreated dispatcher starts the next community task in it. Check it with
+`jq '.sandbox, .sandbox_held' <set dir>/run/capacity.json`, or without a
+release `omarchy-agent capacity --work-root <dir> --probe-image <the build
+image by digest>`. The envelope's `sandbox` is the owner's: absent or
+`"auto"` takes the first that passes, `"off"` none (nothing is run for it),
+a runtime's name only that one (`sandbox = "kata"`). Where it does not apply:
+
+- **podman**: the dispatcher's docker CLI cannot pass `--runtime` through
+  podman's docker API, which runs podman's default runtime instead; the smoke
+  run sees the host's kernel and the agent names no sandbox (`sandbox_held`
+  says so).
+- **Kata** needs `/dev/kvm`: on a VM, nested virtualisation. Its docker
+  registration is a shim (`"runtimes": {"kata": {"runtimeType":
+  "io.containerd.kata.v2"}}`), which the agent reads the same way.
+- **A rootless engine, or a 16K-page kernel** (the Studio's Asahi): whether
+  gVisor runs there at all is its smoke run's to say; held, the host runs on
+  as before and the reason is on its page.
+- A runtime removed after the count: `docker run --runtime` refuses, and
+  each community task the dispatcher starts fails `lost` (never on the
+  engine's own runtime) until the host is counted again.
+
+CI's `sandboxed-runtime` job runs all of it on docker with gVisor
+(`tests/sandboxed-runtime.sh`).
+
 ### Installing a Mac
 
 A Mac (Apple silicon, macOS 13 or later) is a maintainer host through its own

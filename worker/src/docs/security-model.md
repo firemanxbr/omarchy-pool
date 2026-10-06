@@ -128,6 +128,31 @@ secret). Everything travels in the `Authorization` header over TLS only.
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
   runs the dispatcher on a real engine (`tests/dispatch-engine.sh`).
+- **A community task in a sandbox, where the host has one (#330, D43).**
+  A contributor's recipe is the code most likely to try an escape, and on a
+  host it runs beside the dispatcher's tokens — as root on a rootful engine
+  without remapping (design v2 §10.4, §19.3). When the host's engine has
+  gVisor's `runsc` or Kata Containers, the agent finds it: a smoke run of the
+  release's build image under it must print a kernel that is not the
+  engine's own, so a runtime on the host's kernel — docker's CLI on podman,
+  whose API does not pass `--runtime` on — is never taken for one. The
+  dispatcher then starts every community task on the native lane with
+  `--runtime <it>`, and an escape lands in gVisor's user-space kernel or in
+  Kata's VM, not on the host. Its sidecars run the signed worker image on
+  the engine's own runtime (no recipe runs in them), and so do the project's
+  tasks; an emulated lane runs its architecture through the host kernel's
+  binfmt handler, which a sandbox's kernel does not have, so a community
+  task there runs on the engine's own runtime, as the host page says. The
+  dispatcher never runs a community task outside a sandbox the host says it
+  has: a runtime the engine no longer has fails the start (`lost`), and a
+  capacity file whose sandbox it cannot read claims nothing. The envelope's
+  `sandbox` (`"off"`, or one runtime's name) is the owner's; a host without
+  one runs its community tasks as before, at its isolation level. The host
+  page shows which sandbox (*Sandbox*), and why one the engine has is not
+  used. Stated plainly: a sandbox's kernel is a smaller surface, not none —
+  a bug in gVisor's, or in the gofer that serves the task's mounts, is still
+  an escape — and the task's own mounts (its directories, the release's
+  checkout read-only) are the host's files either way.
 - **Each task on its own network, its own egress, its own agent (#336).**
   A task container is on an internal network of its own (a /28 of
   `OMARCHY_TASK_SUBNETS`) that no other task, the host's LAN, the dispatcher

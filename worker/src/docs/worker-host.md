@@ -217,6 +217,18 @@ slower and shares the host's units; on a 16K-page kernel the lane stays on,
 and a build whose toolchain cannot start under qemu goes back to the queue
 for a native host without spending its attempt.
 
+**Contributors' builds run in a sandbox when your engine has one (#330).**
+Install gVisor (`runsc install` registers it with docker) or Kata Containers
+and count the host again: the agent finds it after a smoke run that must
+show a kernel other than your machine's, and from then on the dispatcher
+starts every contributor's build on your native lane in it, so an escape
+from a recipe lands in the sandbox's kernel rather than on your machine. The
+project's own builds, the sidecars and an emulated lane run on the engine as
+before. `sandbox = "off"` in your envelope turns it off, `sandbox = "kata"`
+picks one; the host page says which runs, or why none does (podman's docker
+API, for one, cannot pass the runtime on). The runbook's *A sandboxed runtime
+for community tasks* has the steps.
+
 **Where the project's copies and their audits go (#339).** The project's
 copy of a package you asked for — its review rebuild, the one that is
 signed and published — is never built on your hosts while another
