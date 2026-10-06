@@ -1,6 +1,8 @@
-//! A Mac that sleeps (#329), against a played power layer: the assertion held while a task
-//! runs and let go when none does (an engine that does not answer changes nothing, a holder
-//! that ended is taken again, a hold that fails is said once); a sleep heard is `asleep`
+//! A Mac that sleeps (#329), against a played power layer: every Mac agent keeps one,
+//! whatever its runtime, and no Linux agent; the assertion held while a task runs and let go
+//! when none does (an engine that does not answer changes nothing for a lease's length, then
+//! lets it go; a holder that ended is taken again, a hold that fails is said once); a lease
+//! the dispatcher holds is a lease file it rewrote within a lease's length; a sleep heard is `asleep`
 //! until the wake the watcher says, a gap in the ticks or two minutes of ticks that went on;
 //! a watcher that does not start or ends is said once and started again ten minutes later.
 //! On a Mac (the `agent` job's macOS runner) the real layer: `caffeinate` holds
@@ -158,7 +160,7 @@ fn a_running_task_holds_off_idle_sleep_and_its_end_lets_it_go() {
 }
 
 #[test]
-fn an_engine_that_does_not_answer_changes_nothing() {
+fn an_engine_that_does_not_answer_changes_nothing_for_a_leases_length() {
     let mut h = Host::new(Played::default());
     h.tasks = Some(true);
     h.tick(3);
@@ -176,6 +178,92 @@ fn an_engine_that_does_not_answer_changes_nothing() {
     h.tick(10);
     assert!(!h.held());
     assert_eq!(h.played.borrow().holds, 1);
+    // A task seen, then an engine that stops answering for good (the VM gone): held for a
+    // lease's length, no longer — the pool requeues what nobody can confirm.
+    h.tasks = Some(true);
+    h.tick(10);
+    assert!(h.held());
+    h.tasks = None;
+    let mut waited = 0;
+    while waited < UNANSWERED_S {
+        h.tick(10);
+        waited += 10;
+        assert!(h.held(), "{waited} s");
+    }
+    h.tick(10);
+    assert!(!h.held());
+    assert_eq!(h.played.borrow().releases, 2);
+    for _ in 0..10 {
+        h.tick(10);
+    }
+    let said =
+        "the engine has not said whether a task runs for 30 minutes: the Mac may idle-sleep again";
+    assert_eq!(h.journal().matches(said).count(), 1, "{}", h.journal());
+    assert_eq!(h.played.borrow().releases, 2, "let go once");
+    // It answers again with a task running: held off again.
+    h.tasks = Some(true);
+    h.tick(10);
+    assert!(h.held());
+    assert_eq!(h.played.borrow().holds, 3);
+    // An engine that answers now and then holds the assertion on.
+    for _ in 0..3 {
+        h.tasks = None;
+        for _ in 0..(UNANSWERED_S / 10 - 1) {
+            h.tick(10);
+        }
+        h.tasks = Some(true);
+        h.tick(10);
+        assert!(h.held());
+    }
+    assert_eq!(h.played.borrow().holds, 3);
+}
+
+/// Every Mac agent keeps a keeper, whatever runtime its engine is in — Colima, which it
+/// manages, or Docker Desktop and `OrbStack`, which it only uses; a Linux agent none.
+#[test]
+fn every_mac_keeps_its_sleep_whatever_its_runtime_and_linux_none() {
+    let mac = include_str!("../../../tests/fixtures/lint/envelope/mac.toml");
+    for runtime in ["colima", "docker-desktop", "orbstack"] {
+        let text = mac.replace("runtime = \"colima\"", &format!("runtime = {runtime:?}"));
+        let cfg = Config::parse(&format!("worker_id = \"w_1\"\n{text}")).unwrap();
+        let k = keeper(&cfg).unwrap_or_else(|| panic!("{runtime}: no keeper"));
+        assert!(!k.asleep());
+    }
+    let dir = tempdir();
+    let linux = crate::run::config::tests::example(
+        &dir.join("set"),
+        &dir.join("work"),
+        &dir.join("secrets"),
+    );
+    let cfg = Config::parse(&linux).unwrap();
+    assert!(keeper(&cfg).is_none());
+}
+
+/// A lease file at `<work root>/state/leases/<name>`, last written at `at`.
+fn lease_file(work: &std::path::Path, name: &str, at: i64) {
+    let dir = work.join("state/leases");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = std::fs::File::create(dir.join(name)).unwrap();
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(at.unsigned_abs()))
+        .unwrap();
+}
+
+/// A lease the dispatcher holds is a lease file it rewrote (at a heartbeat the pool accepted,
+/// every five minutes) within a lease's length; a stale one, a temporary file or no directory
+/// holds nothing.
+#[test]
+fn a_held_lease_is_a_lease_file_rewritten_within_a_leases_length() {
+    let work = tempdir();
+    let now = 1_800_000_000;
+    assert!(!leases_held(&work, now), "no directory");
+    lease_file(&work, "7-g_0123456789abcdef.json.tmp", now);
+    assert!(!leases_held(&work, now), "a temporary file is no lease");
+    lease_file(&work, "7-g_0123456789abcdef.json", now - UNANSWERED_S - 1);
+    assert!(!leases_held(&work, now), "past a lease's length");
+    lease_file(&work, "8-g_1111111111111111.json", now - UNANSWERED_S + 60);
+    assert!(leases_held(&work, now));
+    // Its heartbeats stopped (a dispatcher gone): it holds nothing once a lease went by.
+    assert!(!leases_held(&work, now + 61));
 }
 
 #[test]
@@ -358,12 +446,11 @@ fn the_watcher_observes_appkits_sleep_and_wake_and_waits_for_the_agent() {
     }
 }
 
-/// A stand-in for one of macOS's tools: a shell script in `dir`.
+/// A stand-in for one of macOS's tools: a shell script in `dir`, written from a child so no
+/// write descriptor of it lives in this test process ([`crate::run::exec::write_stub`]).
 fn stand_in(dir: &std::path::Path, name: &str, script: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
     let p = dir.join(name);
-    std::fs::write(&p, script).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::run::exec::write_stub(&p, script);
     p
 }
 

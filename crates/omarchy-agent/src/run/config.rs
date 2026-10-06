@@ -124,6 +124,9 @@ pub struct Config {
     /// running, sized and on time. `None` on Linux, and for Docker Desktop's or `OrbStack`'s
     /// VM, which the agent uses but never manages.
     pub vm: Option<Vm>,
+    /// agent.toml has `[vm]`, whatever its runtime (Colima, Docker Desktop, `OrbStack`):
+    /// the host is a Mac, whose sleep the agent holds off and reports (#329).
+    pub mac: bool,
 }
 
 /// The `omarchy` VM as agent.toml describes it (#320, design v2 §19.2): its size is the
@@ -155,6 +158,36 @@ struct VmPart {
     profile: Option<String>,
     rosetta: Option<bool>,
     disk_gb: Option<u32>,
+}
+
+impl VmPart {
+    /// The `omarchy` Colima VM the agent keeps; `None` for Docker Desktop's or `OrbStack`'s,
+    /// which it uses but never manages.
+    fn colima(self, envelope: &EnvelopePart) -> Result<Option<Vm>, String> {
+        match self.runtime.as_str() {
+            "colima" => {
+                if let Some(p) = self.profile.filter(|p| p != crate::vm::PROFILE) {
+                    return Err(format!(
+                        "agent.toml: vm.profile {p:?}: the agent's VM is the {} profile",
+                        crate::vm::PROFILE
+                    ));
+                }
+                let (Some(cpus), Some(mem_gb)) = (envelope.max_cpus, envelope.max_mem_gb) else {
+                    return Err("agent.toml: [vm] runtime colima takes its size from envelope.max_cpus and envelope.max_mem_gb (install writes them)".into());
+                };
+                Ok(Some(Vm {
+                    cpus,
+                    mem_gb,
+                    disk_gb: self.disk_gb.unwrap_or(crate::vm::DISK_GB),
+                    rosetta: self.rosetta.unwrap_or(false),
+                }))
+            }
+            "docker-desktop" | "orbstack" => Ok(None),
+            other => Err(format!(
+                "agent.toml: vm.runtime {other:?} is none of colima, docker-desktop, orbstack"
+            )),
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -255,34 +288,10 @@ impl Config {
             None => socket_cli.clone(),
             some => need_path(some, "set.socket_mount")?,
         };
+        let mac = f.vm.is_some();
         let vm = match f.vm {
             None => None,
-            Some(v) => match v.runtime.as_str() {
-                "colima" => {
-                    if let Some(p) = v.profile.filter(|p| p != crate::vm::PROFILE) {
-                        return Err(format!(
-                            "agent.toml: vm.profile {p:?}: the agent's VM is the {} profile",
-                            crate::vm::PROFILE
-                        ));
-                    }
-                    let (Some(cpus), Some(mem_gb)) = (f.envelope.max_cpus, f.envelope.max_mem_gb)
-                    else {
-                        return Err("agent.toml: [vm] runtime colima takes its size from envelope.max_cpus and envelope.max_mem_gb (install writes them)".into());
-                    };
-                    Some(Vm {
-                        cpus,
-                        mem_gb,
-                        disk_gb: v.disk_gb.unwrap_or(crate::vm::DISK_GB),
-                        rosetta: v.rosetta.unwrap_or(false),
-                    })
-                }
-                "docker-desktop" | "orbstack" => None,
-                other => {
-                    return Err(format!(
-                    "agent.toml: vm.runtime {other:?} is none of colima, docker-desktop, orbstack"
-                ))
-                }
-            },
+            Some(v) => v.colima(&f.envelope)?,
         };
         Ok(Config {
             pool,
@@ -300,6 +309,7 @@ impl Config {
             envelope,
             engine,
             vm,
+            mac,
         })
     }
 
@@ -383,6 +393,8 @@ max_units = 3
         assert_eq!(c.project.as_deref(), Some("omarchy-host"));
         assert_eq!(c.task_subnets.as_deref(), Some("10.232.0.0/16"));
         assert!(c.envelope.allow_socket);
+        // No `[vm]`: not a Mac, so nothing of its sleep (#329).
+        assert!(!c.mac);
         // The design's budget, for etc/dispatcher.env (#371); the other two keep their defaults.
         assert_eq!(
             c.agent_budget,
@@ -455,10 +467,15 @@ max_units = 3
             .unwrap_err();
             assert!(e.contains(why), "{why}: {e}");
         }
-        // Docker Desktop's VM is used, never managed.
-        let shared = mac.replace("runtime = \"colima\"", "runtime = \"docker-desktop\"");
-        let c = Config::parse(&format!("worker_id = \"w_1\"\n{shared}")).unwrap();
-        assert_eq!(c.vm, None);
+        assert!(c.mac);
+        // Docker Desktop's VM and OrbStack's are used, never managed; the host is a Mac all
+        // the same (#329).
+        for runtime in ["docker-desktop", "orbstack"] {
+            let shared = mac.replace("runtime = \"colima\"", &format!("runtime = {runtime:?}"));
+            let c = Config::parse(&format!("worker_id = \"w_1\"\n{shared}")).unwrap();
+            assert_eq!(c.vm, None, "{runtime}");
+            assert!(c.mac, "{runtime}");
+        }
     }
 
     #[test]

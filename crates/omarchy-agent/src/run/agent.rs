@@ -445,16 +445,23 @@ impl Agent {
         }
     }
 
-    /// A Mac kept awake while a task runs, and let idle-sleep once none does (#329): the
+    /// A Mac kept awake while a task runs, and let idle-sleep once none does (#329). A task
+    /// runs from its claim to its report: while the dispatcher holds its lease (a lease file,
+    /// read first: no engine call while one is held), and while its container runs, the
     /// engine asked through the pinned CLI, as the VM's keeper asks it before a resize.
     fn keep_awake(&mut self, now: i64) {
         let Some(p) = self.power.as_mut() else {
             return;
         };
-        let driver = &mut self.driver;
-        let mut tasks = || match driver.as_deref_mut().map(Driver::tasks_running) {
-            Some(Answer::Yes(b)) => Some(b),
-            _ => None,
+        let (driver, work_root) = (&mut self.driver, &self.cfg.work_root);
+        let mut tasks = || {
+            if super::power::leases_held(work_root, now) {
+                return Some(true);
+            }
+            match driver.as_deref_mut().map(Driver::tasks_running) {
+                Some(Answer::Yes(b)) => Some(b),
+                _ => None,
+            }
         };
         p.keep(now, &mut tasks, &self.journal);
     }

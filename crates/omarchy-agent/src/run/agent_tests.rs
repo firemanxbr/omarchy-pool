@@ -1511,6 +1511,68 @@ mod on_a_mac {
         assert!(played.borrow().held);
     }
 
+    /// A lease the dispatcher holds with no task container running — its inputs staged, its
+    /// outputs uploaded — holds off the Mac's idle sleep too, until its file goes with its
+    /// report (#329).
+    #[test]
+    fn a_lease_held_with_no_container_running_holds_off_the_macs_idle_sleep() {
+        let (mut w, _colima, played) = sleepy();
+        for c in &mut w.engine.borrow_mut().containers {
+            if c.project.is_empty() {
+                c.status = "exited".into();
+            }
+        }
+        w.tick(3);
+        assert!(!played.borrow().held);
+        // Claimed: the dispatcher prepares it, and no container runs yet.
+        let lease = w.dir.join("work/state/leases/7-g_0123456789abcdef.json");
+        std::fs::create_dir_all(lease.parent().unwrap()).unwrap();
+        std::fs::File::create(&lease)
+            .unwrap()
+            .set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(w.now.unsigned_abs()),
+            )
+            .unwrap();
+        w.tick(10);
+        assert!(played.borrow().held, "{}", w.journal());
+        // Reported: the dispatcher removes its file.
+        std::fs::remove_file(&lease).unwrap();
+        w.tick(10);
+        assert!(!played.borrow().held);
+    }
+
+    /// A Mac whose engine is Docker Desktop's or `OrbStack`'s, no VM the agent keeps, holds
+    /// its sleep the same way: held off under a task, reported before the sleep, the pool
+    /// asked at the wake (#329).
+    #[test]
+    fn a_mac_on_a_vm_it_does_not_keep_holds_and_reports_its_sleep_the_same_way() {
+        let mut w = World::running_v1();
+        let played: Rc<RefCell<Played>> = Rc::default();
+        w.agent.power = Some(Sleep::new(Box::new(FakePower(Rc::clone(&played)))));
+        w.tick(3);
+        assert!(
+            played.borrow().held,
+            "running_v1 left a task container running"
+        );
+        assert_eq!(w.last_report()["asleep"], false);
+        w.agent.state.poll.next_at = w.now + 600;
+        played.borrow_mut().next.push(Heard::Sleep);
+        w.tick(2);
+        assert_eq!(w.last_report()["asleep"], true);
+        assert_eq!(played.borrow().let_sleeps, 1);
+        let polls = w.remote.borrow().polls;
+        played.borrow_mut().next.push(Heard::Wake);
+        w.tick(30);
+        assert_eq!(w.remote.borrow().polls, polls + 1, "{}", w.journal());
+        assert_eq!(w.last_report()["asleep"], false);
+        let journal = w.journal();
+        assert!(
+            journal.contains("the Mac woke: the host reports itself awake"),
+            "{journal}"
+        );
+        assert!(!journal.contains("the VM's clock"), "{journal}");
+    }
+
     /// A new agent behind its health gate reports nothing, but lets the Mac sleep and keeps
     /// it awake under a task like any.
     #[test]

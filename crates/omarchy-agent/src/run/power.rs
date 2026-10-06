@@ -1,11 +1,16 @@
 //! A Mac host that sleeps (#329; design v2 §19.2, P5): a sleeping host has zero free
-//! units. While a container labelled `com.omarchy.task` runs ([`super::driver::TASK_LABEL`])
-//! the agent holds a `PreventUserIdleSystemSleep` assertion, so the Mac does not idle into
-//! sleep under a task, and lets it go once none runs. When the Mac goes to sleep anyway —
-//! idle with no task, the lid, the Apple menu — the agent hears it first, reports
-//! `asleep: true` and only then lets it sleep: the pool hands the host's dispatcher nothing
-//! more. After the wake it reports `asleep: false`, asks the pool for its target at once and
-//! checks the VM's clock ([`super::vm`]); the dispatcher claims again with nobody's action.
+//! units. Every Mac agent has this keeper ([`keeper`]), whatever runtime its engine is in —
+//! the `omarchy` Colima VM it manages, or Docker Desktop's or `OrbStack`'s, which it only
+//! uses. While a task runs the agent holds a `PreventUserIdleSystemSleep` assertion, so the
+//! Mac does not idle into sleep under it, and lets it go once none runs. A task runs from its
+//! claim to its report: while a container labelled `com.omarchy.task` runs
+//! ([`super::driver::TASK_LABEL`]), and while the dispatcher holds its lease with no container
+//! running yet or any more — staging its inputs, uploading its outputs ([`leases_held`]).
+//! When the Mac goes to sleep anyway — idle with no task, the lid, the Apple menu — the
+//! agent hears it first, reports `asleep: true` and only then lets it sleep: the pool hands
+//! the host's dispatcher nothing more. After the wake it reports `asleep: false`, asks the
+//! pool for its target at once and, where it keeps the VM, checks the VM's clock
+//! ([`super::vm`]); the dispatcher claims again with nobody's action.
 //! A task the sleep caught is the pool's to requeue when its lease expires, as on any host
 //! that goes away.
 //!
@@ -25,6 +30,10 @@
 //!   ends is said and started again ten minutes later: the assertion does not need it, and a
 //!   sleep it misses costs what it costs today, the leases.
 //!
+//! An engine that stops answering keeps the assertion for a lease's length at most
+//! ([`UNANSWERED_S`]): past it a task the agent cannot confirm is the pool's to requeue, and a
+//! laptop is not kept awake on its battery for one.
+//!
 //! What the agent reports as `asleep` mends itself: a gap in the loop's ticks
 //! ([`crate::vm::WAKE_GAP_S`]) is a wake the watcher did not say, and two minutes of ticks
 //! with no gap after a sleep was heard is a sleep that did not happen. It is never saved: a
@@ -36,6 +45,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 
+use super::config::Config;
+use super::exec::retry_busy;
 use super::journal::Journal;
 
 /// macOS's own tool for an assertion: `-i` is `PreventUserIdleSystemSleep`.
@@ -47,6 +58,10 @@ const LOOK_S: i64 = 10;
 const LISTEN_AGAIN_S: i64 = 600;
 /// A sleep heard this long ago with the loop ticking on and no wake: none happened.
 const AWAKE_S: i64 = 120;
+/// A lease's length (the pool's `LEASE_MINUTES`): an assertion held while the engine has not
+/// answered for this long is let go, and a lease file the dispatcher has not rewritten for
+/// this long ([`leases_held`]) holds nothing — either way the pool has requeued the task.
+pub(crate) const UNANSWERED_S: i64 = 30 * 60;
 
 /// The sleep watcher (`osascript -l JavaScript -e`): one line on stdout per event —
 /// `ready` once its observers are in place, `sleep` before the Mac sleeps, `wake` after it
@@ -170,12 +185,12 @@ impl Power for Mac {
         }
         // `-w`: the assertion ends with the agent, even one the watchdog aborted.
         let pid = std::process::id().to_string();
-        let child = Command::new(&self.caffeinate_bin)
-            .args(["-i", "-w", &pid])
+        let mut cmd = Command::new(&self.caffeinate_bin);
+        cmd.args(["-i", "-w", &pid])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+            .stderr(Stdio::null());
+        let child = retry_busy(|| cmd.spawn())
             .map_err(|e| format!("could not start {}: {e}", self.caffeinate_bin.display()))?;
         self.caffeinate = Some(child);
         Ok(())
@@ -202,12 +217,12 @@ impl Power for Mac {
 
     fn listen(&mut self) -> Result<(), String> {
         self.reap();
-        let mut child = Command::new(&self.osascript_bin)
-            .args(["-l", "JavaScript", "-e", WATCHER])
+        let mut cmd = Command::new(&self.osascript_bin);
+        cmd.args(["-l", "JavaScript", "-e", WATCHER])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        let mut child = retry_busy(|| cmd.spawn())
             .map_err(|e| format!("could not start {}: {e}", self.osascript_bin.display()))?;
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
         let (tx, rx) = mpsc::channel();
@@ -292,6 +307,36 @@ impl Drop for Mac {
     }
 }
 
+/// The keeper of a Mac agent's sleep, `None` on Linux: agent.toml has `[vm]`, whatever
+/// runtime its engine is in ([`Config::mac`]). The VM's clock is checked after a wake only
+/// where the agent keeps the VM (Colima); the rest is the same on every Mac.
+pub(crate) fn keeper(cfg: &Config) -> Option<Sleep> {
+    cfg.mac.then(|| Sleep::new(Box::<Mac>::default()))
+}
+
+/// Whether the dispatcher holds a lease: a lease file in `<work root>/state/leases/` (one
+/// per lease, from its claim to its report, design v2 §9.8; the work root is the same path
+/// on the Mac and in the VM) rewritten within a lease's length of `now`. The dispatcher
+/// rewrites it at every heartbeat the pool accepts (every five minutes), so one older than
+/// [`UNANSWERED_S`] is a lease the pool has requeued, or a dispatcher gone, and holds nothing.
+/// Only the names and times are read, never what the files hold (a job token). A directory
+/// that cannot be read holds nothing either: the engine's answer still counts.
+pub(crate) fn leases_held(work_root: &Path, now: i64) -> bool {
+    let Ok(dir) = std::fs::read_dir(work_root.join("state").join("leases")) else {
+        return false;
+    };
+    dir.filter_map(Result::ok).any(|e| {
+        let name = e.file_name();
+        Path::new(&name).extension().is_some_and(|x| x == "json")
+            && e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|d| i64::try_from(d.as_secs()).ok())
+                .is_some_and(|at| (now - at).abs() <= UNANSWERED_S)
+    })
+}
+
 /// What the keeper heard this tick.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Hears {
@@ -309,6 +354,8 @@ pub(crate) struct Sleep {
     asleep: Option<i64>,
     /// A task ran at the last look: the assertion is meant to stand.
     holding: bool,
+    /// When the engine last said whether a task runs.
+    answered: i64,
     listening: bool,
     listen_at: i64,
     next_look: i64,
@@ -323,6 +370,7 @@ impl Sleep {
             power,
             asleep: None,
             holding: false,
+            answered: 0,
             listening: false,
             listen_at: 0,
             next_look: 0,
@@ -409,7 +457,7 @@ impl Sleep {
             journal.write(
                 now,
                 "sleep",
-                serde_json::json!({"detail": "the Mac woke: the host reports itself awake, the pool is asked for its target now and the VM's clock is checked; the dispatcher claims again"}),
+                serde_json::json!({"detail": "the Mac woke: the host reports itself awake and the pool is asked for its target now; the dispatcher claims again"}),
             );
         }
         h
@@ -421,7 +469,9 @@ impl Sleep {
     }
 
     /// The assertion held while a task runs and let go when none does, looked at every
-    /// [`LOOK_S`]. An engine that does not answer changes nothing: a task may run in it.
+    /// [`LOOK_S`]. An engine that does not answer changes nothing, a task may run in it — for
+    /// [`UNANSWERED_S`] at most: past that the assertion is let go, and taken again once a
+    /// task is seen running.
     pub fn keep(
         &mut self,
         now: i64,
@@ -432,7 +482,11 @@ impl Sleep {
             return;
         }
         self.next_look = now + LOOK_S;
-        match tasks_running() {
+        let answer = tasks_running();
+        if answer.is_some() {
+            self.answered = now;
+        }
+        match answer {
             Some(true) if !self.holding || !self.power.held() => match self.power.hold() {
                 Ok(()) => {
                     let detail = if self.holding {
@@ -455,6 +509,18 @@ impl Sleep {
                     now,
                     "sleep",
                     serde_json::json!({"detail": "no task runs: the Mac may idle-sleep again"}),
+                );
+            }
+            None if self.holding && now - self.answered > UNANSWERED_S => {
+                self.power.release();
+                self.holding = false;
+                journal.write(
+                    now,
+                    "sleep",
+                    serde_json::json!({"detail": format!(
+                        "the engine has not said whether a task runs for {} minutes: the Mac may idle-sleep again, and a task it cannot confirm is the pool's to requeue; held off again once a task is seen running",
+                        UNANSWERED_S / 60
+                    )}),
                 );
             }
             _ => {}
