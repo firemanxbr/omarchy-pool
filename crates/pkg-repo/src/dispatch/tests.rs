@@ -382,6 +382,13 @@ struct FakePool {
     refuse_uploads: Mutex<Option<u16>>,
     /// Each heartbeat takes this long (a pool that holds the connection open).
     slow_beat: Mutex<Duration>,
+    /// The pool's public files by URL (#341: its signed databases); every other is a 404.
+    public: Mutex<HashMap<String, Vec<u8>>>,
+    /// The public files asked for.
+    public_asked: Mutex<Vec<String>>,
+    /// Public files are held, once asked for, until this is cleared (a pool slow to answer):
+    /// a pass of the caches' upkeep waits in its thread meanwhile.
+    hold_public: AtomicBool,
     /// Fetches fail as a pool that does not answer them, while claims go on: a preparation
     /// that fetches tries again later.
     deaf_fetch: AtomicBool,
@@ -559,6 +566,22 @@ impl Pool for FakePool {
     fn api_url(&self) -> &'static str {
         "http://127.0.0.1:1"
     }
+    fn public_file(&self, url: &str, dest: &Path) -> Result<bool, RepoError> {
+        self.public_asked.lock().unwrap().push(url.into());
+        while self.hold_public.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if self.down.load(Ordering::SeqCst) {
+            return Err(down());
+        }
+        match self.public.lock().unwrap().get(url) {
+            Some(b) => {
+                std::fs::write(dest, b).unwrap();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 // ---------- pool jobs' children (#340) ----------
@@ -704,6 +727,7 @@ impl H {
             pool_url: "https://pool.example".into(),
             checkout: Some(self.checkout.clone()),
             constants: Constants::signed(),
+            pool_key: Some(super::cache::tests::fixture_dir().join("pool.pub.asc")),
         };
         let mut d = Dispatcher::new(
             ctx,
@@ -737,6 +761,7 @@ impl H {
             pool_url: "https://pool.example".into(),
             checkout: Some(self.checkout.clone()),
             constants: Constants::signed(),
+            pool_key: Some(super::cache::tests::fixture_dir().join("pool.pub.asc")),
         };
         let mut d = Dispatcher::new(
             ctx,
@@ -791,6 +816,21 @@ impl H {
     fn leases(&self) -> Vec<Lease> {
         Store::open(&self.work).unwrap().load().unwrap().leases
     }
+
+    /// The pool serves the fixture databases (#341) for `arch`, signed by the key the harness's dispatchers verify with.
+    fn serve_fixture_dbs(&self, arch: &str) {
+        serve_dbs(&self.pool, arch, &["core", "packages"]);
+    }
+
+    /// The `-v` mounts a lease's task container was started with.
+    fn mounts(&self, id: u64, gen: &str) -> Vec<String> {
+        self.engine
+            .args(id, gen)
+            .windows(2)
+            .filter(|w| w[0] == "-v")
+            .map(|w| w[1].clone())
+            .collect()
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)] // the call sites read better with json!(…) inline
@@ -821,6 +861,35 @@ fn community(id: u64, gen: &str) -> Value {
         json!({}),
         gen,
     )
+}
+
+/// `pool` serves these sources' fixture databases (#341) for `arch` at `https://pool.example`,
+/// and no other: a snapshot of the pool's signed databases.
+fn serve_dbs(pool: &FakePool, arch: &str, sources: &[&str]) {
+    let dir = super::cache::tests::fixture_dir();
+    let mut public = pool.public.lock().unwrap();
+    public.retain(|url, _| !url.contains(&format!("/{arch}/")));
+    for source in sources {
+        for f in [
+            format!("omarchy-{source}-edge.db"),
+            format!("omarchy-{source}-edge.db.sig"),
+        ] {
+            public.insert(
+                format!("https://pool.example/{source}/{arch}/{f}"),
+                std::fs::read(dir.join(&f)).unwrap(),
+            );
+        }
+    }
+}
+
+/// A file's time set back by `secs`: a stamp as old as that.
+fn age(path: &Path, secs: u64) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(secs))
+        .unwrap();
 }
 
 /// A package as makepkg writes one, enough for pkg-extract: a tar with its .PKGINFO.
@@ -918,6 +987,539 @@ fn a_community_build_runs_staged_in_and_out_and_its_container_holds_nothing() {
     assert!(
         h.leases().is_empty() && !h.engine.has(7, GEN) && !h.tdir(7, GEN).exists(),
         "cleaned up"
+    );
+}
+
+/// The task caches (#341, design v2 §9.3, D52): two builds at once, of two packages that need
+/// the same dependency, on the two sides — each mounts its own package's build cache on its own
+/// side and the shared pacman cache read-only, and downloads into a cache of its own. After them
+/// only the bytes the pool's signed databases list are merged into the shared cache, once, with
+/// the dependency's signature as the pool keeps it beside it; a planted file, one with other
+/// bytes and a forged signature are discarded; the next build mounts what was merged.
+#[test]
+#[allow(clippy::too_many_lines)] // two leases from their start to the merge-back of what they downloaded, then the next
+fn two_builds_at_once_download_into_their_own_caches_and_only_the_signed_bytes_are_merged_back() {
+    use super::cache::tests::fixture_bytes;
+    let h = H::new();
+    h.serve_fixture_dbs("aarch64");
+    let mut d = h.dispatcher();
+    let gen2 = "g_00000000000000c3";
+    h.give(task(
+        1,
+        "build",
+        "alpha",
+        "https://github.com/a/alpha@v1:PKGBUILD",
+        "community",
+        json!({}),
+        GEN,
+    ));
+    h.give(task(
+        2,
+        "build",
+        "beta",
+        "https://github.com/b/beta@v1:PKGBUILD",
+        "project",
+        json!({}),
+        gen2,
+    ));
+    h.ticks(&mut d, 4);
+    assert!(
+        h.engine.has(1, GEN) && h.engine.has(2, gen2),
+        "both run at once"
+    );
+    let cache = h.work.join("cache");
+    let shared = format!(
+        "{}:/var/cache/pacman/shared:ro",
+        cache.join("pacman/aarch64").display()
+    );
+    let (m1, m2) = (h.mounts(1, GEN), h.mounts(2, gen2));
+    assert!(m1.contains(&shared) && m2.contains(&shared), "{m1:?}");
+    assert!(m1.contains(&format!(
+        "{}:/build/cache",
+        cache.join("build/community/aarch64/alpha").display()
+    )));
+    assert!(m2.contains(&format!(
+        "{}:/build/cache",
+        cache.join("build/project/aarch64/beta").display()
+    )));
+    for (m, id, gen) in [(&m1, 1, GEN), (&m2, 2, gen2)] {
+        assert!(m.contains(&format!(
+            "{}:/var/cache/pacman/pkg",
+            h.tdir(id, gen).join("pkgcache").display()
+        )));
+        // Nothing else of the cache tree: its lane's pacman cache and its own package's build cache.
+        assert_eq!(
+            m.iter()
+                .filter(|x| x.starts_with(&cache.display().to_string()))
+                .count(),
+            2,
+            "{m:?}"
+        );
+    }
+    assert!(cache.join("build/community/aarch64/alpha").is_dir());
+    assert!(!cache.join("build/project/aarch64/alpha").exists());
+
+    // What their pacman downloaded, each into its own cache: the dependency both need with its
+    // signature (a repository whose SigLevel checks packages: the image's own), and in alpha's
+    // a signature its recipe forged for it, a file it planted under a listed name and one no
+    // database lists. The pool keeps the upstream signature beside the package, in core's
+    // directory: the source whose database lists it.
+    let lib = fixture_bytes("libfixture", "libfixture", "aarch64");
+    let libname = "libfixture-1.0-1-aarch64.pkg.tar.zst";
+    let sig_name = format!("{libname}.sig");
+    let upstream = b"libfixture's upstream signature".to_vec();
+    h.pool.public.lock().unwrap().insert(
+        format!("https://pool.example/core/aarch64/{sig_name}"),
+        upstream.clone(),
+    );
+    for (id, gen, sig) in [
+        (1, GEN, &b"forged by alpha's recipe"[..]),
+        (2, gen2, &upstream[..]),
+    ] {
+        let own = h.tdir(id, gen).join("pkgcache");
+        std::fs::write(own.join(libname), &lib).unwrap();
+        std::fs::write(own.join(&sig_name), sig).unwrap();
+    }
+    std::fs::write(
+        h.tdir(1, GEN)
+            .join("pkgcache/evil-1.0-1-aarch64.pkg.tar.zst"),
+        b"planted by alpha's recipe",
+    )
+    .unwrap();
+    std::fs::write(
+        h.tdir(1, GEN)
+            .join("pkgcache/stranger-1.0-1-aarch64.pkg.tar.zst"),
+        b"x",
+    )
+    .unwrap();
+    for (id, gen) in [(1, GEN), (2, gen2)] {
+        h.leave(id, gen, &built_ok(), "==> Finished making\n");
+        h.engine.exit(id, gen, 0, false);
+    }
+    h.ticks(&mut d, 3);
+    assert!(h.leases().is_empty(), "both ended");
+    let mut merged: Vec<String> = std::fs::read_dir(cache.join("pacman/aarch64"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    merged.sort();
+    assert_eq!(
+        merged,
+        [libname.to_owned(), sig_name.clone()],
+        "only the bytes the signed databases list, and the signature the pool keeps"
+    );
+    assert_eq!(
+        std::fs::read(cache.join("pacman/aarch64").join(libname)).unwrap(),
+        lib
+    );
+    assert_eq!(
+        std::fs::read(cache.join("pacman/aarch64").join(&sig_name)).unwrap(),
+        upstream
+    );
+    assert_eq!(
+        std::fs::read_dir(cache.join("incoming/aarch64"))
+            .unwrap()
+            .count(),
+        0,
+        "both leases' downloads were taken or discarded"
+    );
+    assert!(
+        h.pool
+            .public_asked
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| u == "https://pool.example/core/aarch64/omarchy-core-edge.db"),
+        "the databases were asked of the pool's repositories"
+    );
+    assert!(
+        h.pool
+            .public_asked
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| *u == format!("https://pool.example/core/aarch64/{sig_name}")),
+        "the signature was compared with the pool's copy"
+    );
+    // The next build mounts it, read-only, beside a cache of its own.
+    h.give(community(3, GEN2));
+    h.ticks(&mut d, 12);
+    assert!(h.mounts(3, GEN2).contains(&shared));
+}
+
+/// Two builds that end a tick apart (#341), as CI's engine test saw them: the first one's
+/// downloads go aside and a pass of the caches' upkeep starts in its thread, which lists what
+/// is aside before it asks the pool anything; the second ends while that pass runs (held here
+/// at the pool's databases). Its downloads go aside beside the first's and wait: the running
+/// pass merges only what it listed, and the next — one pass at a time, started once the loop
+/// has taken the one that ran, a tick after it — takes them. Nothing is lost or left aside, and
+/// the dependency both downloaded is merged once, with the pool's copy of its `.sig`. How long
+/// that takes is the loop's ticks and the passes, never a fixed time: the engine test waits for
+/// the passes to have said both leases.
+#[test]
+#[allow(clippy::too_many_lines)] // two leases ending on either side of a pass's start, then the pass after it
+fn a_lease_that_ends_while_a_merge_back_runs_is_merged_by_the_pass_after_it() {
+    use super::cache::tests::fixture_bytes;
+    let h = H::new();
+    h.serve_fixture_dbs("aarch64");
+    let mut d = h.dispatcher();
+    let gen2 = "g_00000000000000c3";
+    for (id, name, gen) in [(1, "alpha", GEN), (2, "beta", gen2)] {
+        h.give(task(
+            id,
+            "build",
+            name,
+            &format!("https://github.com/{name}/{name}@v1:PKGBUILD"),
+            "community",
+            json!({}),
+            gen,
+        ));
+    }
+    h.ticks(&mut d, 4);
+    assert!(
+        h.engine.has(1, GEN) && h.engine.has(2, gen2),
+        "both run at once"
+    );
+    let lib = fixture_bytes("libfixture", "libfixture", "aarch64");
+    let libname = "libfixture-1.0-1-aarch64.pkg.tar.zst";
+    let sig_name = format!("{libname}.sig");
+    let upstream = b"libfixture's upstream signature".to_vec();
+    h.pool.public.lock().unwrap().insert(
+        format!("https://pool.example/core/aarch64/{sig_name}"),
+        upstream.clone(),
+    );
+    // The first to end downloaded the dependency with its upstream signature, and a file two
+    // databases list at odds; the second the dependency with a signature its recipe forged, a
+    // file planted under a listed name and one no database lists.
+    let (one, two) = (
+        h.tdir(1, GEN).join("pkgcache"),
+        h.tdir(2, gen2).join("pkgcache"),
+    );
+    for (dir, sig) in [
+        (&one, &upstream[..]),
+        (&two, &b"forged by beta's recipe"[..]),
+    ] {
+        std::fs::write(dir.join(libname), &lib).unwrap();
+        std::fs::write(dir.join(&sig_name), sig).unwrap();
+    }
+    std::fs::write(
+        one.join("twin-1.0-1-aarch64.pkg.tar.zst"),
+        fixture_bytes("twin", "core", "aarch64"),
+    )
+    .unwrap();
+    std::fs::write(
+        two.join("evil-1.0-1-aarch64.pkg.tar.zst"),
+        b"planted by beta's recipe",
+    )
+    .unwrap();
+    std::fs::write(two.join("stranger-1.0-1-aarch64.pkg.tar.zst"), b"x").unwrap();
+    let incoming = h.work.join("cache/incoming/aarch64");
+    let aside = || -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(&incoming)
+            .map(|d| {
+                d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    let shared = h.work.join("cache/pacman/aarch64");
+    let in_shared = || -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(&shared)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+
+    // The first ends, its finish and its pass in threads of their own as in the dispatcher (not
+    // inline); the pass lists what is aside, then waits for the pool's databases.
+    h.pool.public_asked.lock().unwrap().clear();
+    h.pool.hold_public.store(true, Ordering::SeqCst);
+    d.inline = false;
+    h.leave(1, GEN, &built_ok(), "==> Finished making\n");
+    h.engine.exit(1, GEN, 0, false);
+    let mut asked = false;
+    for _ in 0..2000 {
+        d.tick();
+        if !h.pool.public_asked.lock().unwrap().is_empty() {
+            asked = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        asked,
+        "the first lease's pass asks the pool for its databases"
+    );
+    assert!(super::busy(d.caches.job.as_ref()), "its pass runs");
+    assert_eq!(aside(), [format!("1-{GEN}")]);
+
+    // The second ends while that pass runs: its downloads go aside beside the first's.
+    d.inline = true;
+    h.leave(2, gen2, &built_ok(), "==> Finished making\n");
+    h.engine.exit(2, gen2, 0, false);
+    h.ticks(&mut d, 1);
+    assert!(h.leases().is_empty(), "both ended");
+    assert!(
+        super::busy(d.caches.job.as_ref()),
+        "the first pass still runs: no second one beside it"
+    );
+    assert_eq!(aside(), [format!("1-{GEN}"), format!("2-{gen2}")]);
+
+    // The pool answers: the running pass merges what it listed when it began, the first's alone.
+    h.pool.hold_public.store(false, Ordering::SeqCst);
+    for _ in 0..2000 {
+        if !super::busy(d.caches.job.as_ref()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!super::busy(d.caches.job.as_ref()), "the first pass ended");
+    assert_eq!(
+        aside(),
+        [format!("2-{gen2}")],
+        "the second's downloads wait for the next pass"
+    );
+    assert_eq!(in_shared(), [libname.to_owned(), sig_name.clone()]);
+
+    // The loop takes the pass that ran (a tick), then starts the next, which takes the second's.
+    h.ticks(&mut d, 2);
+    assert!(aside().is_empty(), "nothing is left aside");
+    assert_eq!(
+        in_shared(),
+        [libname.to_owned(), sig_name.clone()],
+        "the dependency once with the pool's copy of its signature; the forged one, the planted, \
+         the unlisted and the ambiguous files discarded"
+    );
+    assert_eq!(std::fs::read(shared.join(libname)).unwrap(), lib);
+    assert_eq!(std::fs::read(shared.join(&sig_name)).unwrap(), upstream);
+}
+
+/// The caches stay under the envelope's caps (#341): the pacman cache keeps the two newest
+/// versions of each package and drops an older one first; the build caches go least recently
+/// used first, and the cache of a build that runs stays whatever the cap.
+#[test]
+fn the_caches_stay_under_their_caps_and_a_running_builds_cache_is_kept() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    d.cache_caps = super::cache::Caps {
+        pacman: 2500,
+        build: 1,
+    };
+    let pacman = h.work.join("cache/pacman/aarch64");
+    std::fs::create_dir_all(&pacman).unwrap();
+    for v in ["1.0-1", "1.1-1", "1.2-1"] {
+        std::fs::write(
+            pacman.join(format!("zlib-{v}-aarch64.pkg.tar.zst")),
+            vec![0u8; 1000],
+        )
+        .unwrap();
+    }
+    std::fs::write(pacman.join("felix-1.0-1-any.pkg.tar.zst"), vec![0u8; 1000]).unwrap();
+    let old = h.work.join("cache/build/community/aarch64/old");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("ccache"), vec![1u8; 8192]).unwrap();
+    // A build of felix starts (its cache made then); the first pass ran before it.
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(7, GEN));
+    let felix = h.work.join("cache/build/community/aarch64/felix");
+    std::fs::write(felix.join("ccache"), vec![1u8; 8192]).unwrap();
+    h.advance(super::cache::EVERY);
+    h.ticks(&mut d, 1);
+    let mut left: Vec<String> = std::fs::read_dir(&pacman)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            "felix-1.0-1-any.pkg.tar.zst",
+            "zlib-1.2-1-aarch64.pkg.tar.zst"
+        ],
+        "two versions at most, then the older one first under the cap"
+    );
+    assert!(!old.exists(), "the least recently used build cache went");
+    assert!(felix.join("ccache").is_file(), "the running build's stays");
+}
+
+/// The shared pacman cache is checked again by every later snapshot of the pool's signed
+/// databases (#341): a file merged when core alone listed its name goes from the shared cache
+/// once the pool's databases list that name twice with different bytes — a task resolving it
+/// from the other repository would find bytes its pacman refuses and cannot delete.
+#[test]
+fn a_merged_file_whose_name_the_databases_list_otherwise_later_leaves_the_shared_cache() {
+    use super::cache::tests::fixture_bytes;
+    let h = H::new();
+    serve_dbs(&h.pool, "aarch64", &["core"]);
+    let mut d = h.dispatcher();
+    h.give(community(1, GEN));
+    h.ticks(&mut d, 4);
+    assert!(h.engine.has(1, GEN));
+    let twin = "twin-1.0-1-aarch64.pkg.tar.zst";
+    std::fs::write(
+        h.tdir(1, GEN).join("pkgcache").join(twin),
+        fixture_bytes("twin", "core", "aarch64"),
+    )
+    .unwrap();
+    h.leave(1, GEN, &built_ok(), "==> Finished making\n");
+    h.engine.exit(1, GEN, 0, false);
+    h.ticks(&mut d, 3);
+    let shared = h.work.join("cache/pacman/aarch64");
+    assert!(shared.join(twin).is_file(), "merged by core's listing");
+    // The pool's next snapshot lists twin in packages too, with other bytes; an hour on, a pass reads it.
+    serve_dbs(&h.pool, "aarch64", &["core", "packages"]);
+    h.advance(super::cache::EVERY);
+    h.ticks(&mut d, 1);
+    assert!(
+        shared.join(twin).is_file(),
+        "the databases here are fresh for an hour"
+    );
+    age(&h.work.join("cache/syncdb/aarch64/.fetched"), 2 * 3600);
+    h.advance(super::cache::EVERY);
+    h.ticks(&mut d, 1);
+    assert!(
+        !shared.join(twin).exists(),
+        "listed twice at odds now: no task can trust it"
+    );
+    assert!(!h.work.join("cache/merged/aarch64").join(twin).exists());
+}
+
+/// The pool's signed databases fetched again (#341): not within the hour; a database whose
+/// signature does not verify is not put in place and the copy here is kept; a pool that does
+/// not answer is asked once, not for every database, the copies are kept and the next pass
+/// asks again; a database the pool serves no longer (404) is removed.
+#[test]
+#[allow(clippy::too_many_lines)] // the refresh's every path, one after another on one copy
+fn the_databases_are_fetched_again_when_stale_only_into_place_once_verified() {
+    use super::cache::{refresh, tests::fixture_dir};
+    let pool = FakePool::default();
+    serve_dbs(&pool, "x86_64", &["core", "packages"]);
+    let t = tempfile::tempdir().unwrap();
+    let work = t.path();
+    let key = fixture_dir().join("pool.pub.asc");
+    let url = "https://pool.example";
+    let dir = work.join("cache/syncdb/x86_64");
+    let (core, packages) = ("omarchy-core-edge.db", "omarchy-packages-edge.db");
+    let fixture = |f: &str| std::fs::read(fixture_dir().join(f)).unwrap();
+    let asked = || std::mem::take(&mut *pool.public_asked.lock().unwrap());
+    // The first: every source asked, the two the pool serves in place with their signatures.
+    let notes = refresh(&pool, url, work, "x86_64", &key);
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(asked().len(), 9 + 2);
+    assert_eq!(std::fs::read(dir.join(core)).unwrap(), fixture(core));
+    assert_eq!(
+        std::fs::read(dir.join(packages)).unwrap(),
+        fixture(packages)
+    );
+    assert!(dir.join(format!("{packages}.sig")).is_file());
+    // Within the hour: nothing is asked.
+    assert!(refresh(&pool, url, work, "x86_64", &key).is_empty());
+    assert!(asked().is_empty());
+    // Stale, and core's URL serves another database under core's signature: not put in place.
+    age(&dir.join(".fetched"), 2 * 3600);
+    pool.public
+        .lock()
+        .unwrap()
+        .insert(format!("{url}/core/x86_64/{core}"), fixture(packages));
+    let notes = refresh(&pool, url, work, "x86_64", &key);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains(&format!("{core} (x86_64): its signature does not verify"))),
+        "{notes:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.join(core)).unwrap(),
+        fixture(core),
+        "the copy here is kept"
+    );
+    assert!(!dir.join(".new").exists());
+    // Stale, and the pool does not answer: asked once, said, the copies kept, the stamp not renewed.
+    serve_dbs(&pool, "x86_64", &["core", "packages"]);
+    age(&dir.join(".fetched"), 2 * 3600);
+    asked();
+    pool.down.store(true, Ordering::SeqCst);
+    let notes = refresh(&pool, url, work, "x86_64", &key);
+    assert_eq!(asked().len(), 1, "one timeout a pass, not one per database");
+    assert!(
+        notes.len() == 1 && notes[0].contains("the copies here are kept"),
+        "{notes:?}"
+    );
+    assert_eq!(std::fs::read(dir.join(core)).unwrap(), fixture(core));
+    assert_eq!(
+        std::fs::read(dir.join(packages)).unwrap(),
+        fixture(packages)
+    );
+    let stamp_age = |p: &Path| {
+        std::time::SystemTime::now()
+            .duration_since(std::fs::metadata(p).unwrap().modified().unwrap())
+            .unwrap()
+    };
+    assert!(stamp_age(&dir.join(".fetched")) > super::cache::DB_FRESH);
+    refresh(&pool, url, work, "x86_64", &key);
+    assert_eq!(asked().len(), 1, "the next pass asks again");
+    // Up again, and packages is no longer served: its database and signature go, core's stays.
+    pool.down.store(false, Ordering::SeqCst);
+    serve_dbs(&pool, "x86_64", &["core"]);
+    assert!(refresh(&pool, url, work, "x86_64", &key).is_empty());
+    assert!(!dir.join(packages).exists() && !dir.join(format!("{packages}.sig")).exists());
+    assert_eq!(std::fs::read(dir.join(core)).unwrap(), fixture(core));
+    assert!(stamp_age(&dir.join(".fetched")) < super::cache::DB_FRESH);
+}
+
+/// The pool's copies of the packages' upstream signatures (#341), asked for while a pass
+/// merges: beside the package in the source's directory, as the pool lays them out; one it
+/// keeps none of is none; past 16 KiB it is no signature; a pool that does not answer is
+/// asked once, not for every signature of the pass.
+#[test]
+fn the_pools_copy_of_a_signature_is_asked_beside_its_package_once_a_pass_when_down() {
+    use super::cache::Signatures;
+    let pool = FakePool::default();
+    let t = tempfile::tempdir().unwrap();
+    let file = "libfixture-1.0-1-x86_64.pkg.tar.zst";
+    pool.public.lock().unwrap().extend([
+        (
+            format!("https://pool.example/extra/x86_64/{file}.sig"),
+            b"upstream".to_vec(),
+        ),
+        (
+            "https://pool.example/extra/x86_64/big-1-1-x86_64.pkg.tar.zst.sig".to_owned(),
+            vec![0u8; 16 * 1024 + 1],
+        ),
+    ]);
+    let mut sigs = Signatures {
+        pool: &pool,
+        pool_url: "https://pool.example/",
+        arch: "x86_64",
+        tmp: t.path().join("tmp"),
+        unanswered: None,
+    };
+    assert_eq!(sigs.of("extra", file), Ok(Some(b"upstream".to_vec())));
+    assert_eq!(sigs.of("core", file), Ok(None));
+    assert_eq!(sigs.of("extra", "big-1-1-x86_64.pkg.tar.zst"), Ok(None));
+    assert_eq!(
+        std::fs::read_dir(t.path().join("tmp")).unwrap().count(),
+        0,
+        "nothing left aside"
+    );
+    pool.down.store(true, Ordering::SeqCst);
+    assert!(sigs.of("extra", file).is_err());
+    assert!(sigs.of("core", file).is_err());
+    assert!(sigs.unanswered.is_some());
+    assert_eq!(
+        *pool.public_asked.lock().unwrap(),
+        [
+            format!("https://pool.example/extra/x86_64/{file}.sig"),
+            format!("https://pool.example/core/x86_64/{file}.sig"),
+            "https://pool.example/extra/x86_64/big-1-1-x86_64.pkg.tar.zst.sig".to_owned(),
+            format!("https://pool.example/extra/x86_64/{file}.sig"),
+        ],
+        "asked once while down"
     );
 }
 
