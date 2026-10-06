@@ -126,6 +126,20 @@ secret). Everything travels in the `Authorization` header over TLS only.
   emulated lane, so a recipe on a native lane cannot buy its attempts back
   with it, and one that says it on an emulated lane never runs emulated
   again.
+  Its caches are the host's to fence, not the script's (#341, D52; design
+  v2 §10.2 invariant 9): a build mounts only its own package's build cache
+  on its own side (`cache/build/<trust>/<arch>/<package>` at `/build/cache`,
+  cut by the dispatcher from the lease), never the tree, another package's
+  or, from a community task, a project cache; an audit and a trial mount
+  none. Every task mounts the host's pacman cache of its lane read-only, its
+  pacman's first `CacheDir`, and downloads into a writable cache of its own,
+  so no recipe plants a package another build installs and two builds never
+  write one file. What a task downloaded enters the shared cache only when
+  its SHA-256 is the one the pool's signed databases list for that file name
+  (each database's `.sig` verified with the pool's key the dispatcher
+  carries; a name two databases list with different bytes is never merged);
+  everything else is discarded. The caches stay within the envelope's
+  `cache_caps`.
   The dispatcher refuses to start with a package signing key in its
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and

@@ -1970,6 +1970,54 @@ so a size-4 build waits for memory rather than run smaller.
   fresh (15 minutes): a dispatcher that claims after that is on a Mac that
   woke. The host's page says *asleep*.
 
+### A host's task caches
+
+A host's dispatcher keeps its tasks' caches under `<work root>/cache/`
+(#341, design v2 §9.3, D52), 0700, never mounted whole into a task:
+
+- `build/<community|project>/<arch>/<package>/` — one package's cargo, Go
+  and ccache caches on one side: a build mounts its own at `/build/cache`
+  and nothing else of the tree (an audit and a trial none);
+- `pacman/<arch>/` — the shared pacman cache, read-only in every task (its
+  pacman's first `CacheDir`); each task downloads into its own
+  `tasks/<id>-<gen>/pkgcache/`;
+- `incoming/<arch>/<id>-<gen>/` — a lease's downloads set aside when it
+  ends, until the next pass of the upkeep merges or discards them;
+- `syncdb/<arch>/` — the pool's signed `edge` databases of every source,
+  fetched again when an hour old, each read only once its `.sig` verifies
+  with the pool's key built into the dispatcher (`pool-key.asc` beside them);
+- `used/` — when a lease last mounted each build cache: the order the build
+  caches are pruned in.
+
+A download enters `pacman/<arch>/` only when its SHA-256 and size are what
+those databases list for its file name; a file they do not list (a recipe's,
+a `.part`), one with other bytes and one two databases list with different
+bytes are discarded. Each pass — after a lease ends, and every 15 minutes —
+then prunes: the pacman cache to the two newest versions of each package,
+then within `OMARCHY_CACHE_PACMAN_GB` (older versions first, then the oldest
+merged); the build caches least recently used first within
+`OMARCHY_CACHE_BUILD_GB`, never one a lease of the host mounts. Both caps
+are the envelope's `cache_caps` (`agent.toml`: `cache_caps = { pacman_gb =
+40, build_gb = 120 }` on the Studio; 10 and 20 GB when it sets none), which
+the agent writes into `etc/dispatcher.env`. The dispatcher's log says what a
+pass did:
+
+```
+caches: the downloads of 2 lease(s): 14 merged into the shared pacman cache (310 MB), 3 there already, 2 discarded (…); 6 file(s) of the pacman cache pruned (…)
+```
+
+- **Nothing is ever merged** (`no signed database of <arch> could be read`):
+  the pool's databases did not come (the pool or the network: the last copies
+  verified are used meanwhile) or do not verify with the dispatcher's key (a
+  release whose key is not the pool's). Builds go on, each downloading what it
+  needs.
+- **A cache to clear**: stop nothing; remove the package's directory under
+  `cache/build/…` (or a file of `cache/pacman/<arch>/`) between its builds;
+  the next build starts it again. A build cache a running lease mounts is
+  never pruned, and should not be removed by hand while it runs.
+- **Disk**: the caches count against the work root's free space like
+  everything else under it; lower `cache_caps` rather than the disk floor.
+
 ### A host reverted a release
 
 One bundle runs on every host, so a release that fails its guard on one

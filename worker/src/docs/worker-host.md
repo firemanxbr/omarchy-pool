@@ -200,6 +200,25 @@ needs a host that grants it among those that claim its tasks. A rootless host ca
 the engine's user-mode network stack, while its tasks, behind their egress
 sidecars, never do.
 
+**Its caches are fenced in too (#341).** A build mounts its own package's
+build cache only — cargo's registry, Go's caches and ccache's objects under
+`<work root>/cache/build/<community|project>/<arch>/<package>` — so a
+contributor's recipe never reaches a project cache or another package's.
+Every task reads the host's pacman cache of its architecture
+(`<work root>/cache/pacman/<arch>`) read-only and downloads into one of its
+own; after the task, the dispatcher copies a download into the shared cache
+only when its SHA-256 is the one the pool's signed `edge` databases list for
+it (fetched hourly into `cache/syncdb/`, each verified with the pool's key),
+and discards everything else. The pacman cache keeps the two newest versions
+of each package within `OMARCHY_CACHE_PACMAN_GB` (10 GB), and the build
+caches go least recently used first, a package at a time, within
+`OMARCHY_CACHE_BUILD_GB` (20 GB), never one a running build mounts. To set
+them, give `agent.toml`'s envelope a `cache_caps` (`pacman_gb`, `build_gb`,
+each a whole number of GB from 1; the Studio's `{ pacman_gb = 40, build_gb =
+120 }`): the agent writes them into `etc/dispatcher.env` within a minute and
+the dispatcher is recreated with them. The dispatcher's log says what each
+pass merged, discarded and pruned (`caches: …`).
+
 **A host runs as many tasks at once as its units hold (#337).** The pool
 hands it one task per claim and its dispatcher claims again at once while
 units are free: a build takes 2 units per size, a trial 2, an audit 1, and
