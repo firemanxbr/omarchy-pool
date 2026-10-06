@@ -3,7 +3,7 @@
 #
 # Contributors do not run workers (#331, #343): their packages build on the
 # pool's hosts, and a maintainer's new machine joins the pool as a host
-# (https://omarchy-pool.org/docs/worker-host: install.sh with an enrollment
+# (https://omarchy-pool.org/docs/worker-host#maintainer-hosts: install.sh with an enrollment
 # token). The pool no longer serves this command nor its compose file; it
 # stays in the repository (factory/host/omarchy-worker) for the sets a
 # maintainer already runs with it, until they switch to a host and retire
@@ -94,7 +94,7 @@ env_set() { # key value — replace or append, the file stays 600
 # The set's own compose file, as an earlier start wrote it: the pool serves none any more (#343), and a directory without one is
 # no set — a new machine joins the pool as a host.
 need_compose() {
-  [[ -f "$DIR/compose.yml" ]] || die "no worker set here ($DIR/compose.yml): the pool no longer starts new worker sets (#343) — contributors run no worker, and a maintainer's machine joins the pool as a host: https://omarchy-pool.org/docs/worker-host"
+  [[ -f "$DIR/compose.yml" ]] || die "no worker set here ($DIR/compose.yml): the pool no longer starts new worker sets (#343) — contributors run no worker, and a maintainer's machine joins the pool as a host: https://omarchy-pool.org/docs/worker-host#maintainer-hosts"
 }
 
 # ------------------------------------------------------------------- start --

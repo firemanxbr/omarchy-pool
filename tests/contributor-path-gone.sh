@@ -19,7 +19,8 @@ GONE=(
   shared_after          # the bump's days for its owner's worker (build_tasks.shared_after)
   mode_by               # who set a worker's mode (build_workers.mode_by)
   betterIdleWorker      # the best idle shared worker's first pick
-  FIRST_PICK_MINUTES first_pick_minutes
+  FIRST_PICK_MINUTES first_pick_minutes firstPick IDLE_SEEN_MINUTES workerRank
+  SHARED_AFTER_DAYS     # the bump's fourteen days
   handleWorkerMode      # POST /factory/workers/self/mode, /factory/workers/:id/mode (410 now)
   handleTrustWorker     # POST /factory/workers/:id/trust (410 now)
   share_worker own_only # the person's page's Share / Own only on a worker's row
@@ -31,6 +32,11 @@ for word in "${GONE[@]}"; do
 done
 # A worker's mode compared or written as the community tier's word — whatever the quoting or the operator.
 if hits="$(grep -rnE "mode ?(===?|!==?|=) ?[\"'](shared|dedicated)[\"']" "$src")"; then say "a worker's shared or dedicated mode is back in worker/src:"; printf '%s\n' "$hits" >&2; fi
+# The column written at all, bound or literal: an UPDATE that sets it, an INSERT into build_workers that names it.
+if hits="$(grep -rnE "SET[^;\`]*[ ,]mode ?=|INSERT INTO build_workers \([^)]*\bmode\b" "$src")"; then say "build_workers.mode is written again in worker/src (history since #343):"; printf '%s\n' "$hits" >&2; fi
+# The claim's own scope: its \`shared\` read from the body (b.shared) or carried in a scope (s.shared, lg.shared), typed in, or the
+# owner's-builds-only test — a spread (...shared) is no field read.
+if hits="$(grep -rnE "[A-Za-z0-9_)]\.shared\b|\bshared\??: (boolean|unknown)|c\.owner === s\.owner" "$src")"; then say "the claim's shared scope is back in worker/src:"; printf '%s\n' "$hits" >&2; fi
 # The command and the compose file the pool served: not bundled into the Worker any more.
 [[ ! -e "$src/omarchy-worker.sh" ]] || say "worker/src/omarchy-worker.sh is back: the pool serves no command (factory/host/omarchy-worker is a maintainer's legacy set's)"
 if hits="$(grep -rnE "from [\"'][^\"']*(omarchy-worker(\.sh)?|image/compose\.yml)[\"']" "$src")"; then say "the Worker bundles the command or its compose file again:"; printf '%s\n' "$hits" >&2; fi

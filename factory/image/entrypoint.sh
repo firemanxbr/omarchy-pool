@@ -181,7 +181,7 @@ mode="${OMARCHY_WORKER_MODE:-$([[ "$trust" == project ]] && echo project || echo
 # trust must allow it, or the container says so and stops rather than
 # quietly doing something else.
 case "$role" in
-  pool|review) [[ "$trust" == project ]] || { echo "omarchy-worker: $id is a $trust registration; the $role role needs a project-trusted one (a maintainer trusts it on Review)" >&2; exit 2; }; mode=project ;;
+  pool|review) [[ "$trust" == project ]] || { echo "omarchy-worker: $id is a $trust registration; the $role role needs a project-trusted one, given before #343 (per-worker trust is gone: a host takes this work, /docs/worker-host#maintainer-hosts)" >&2; exit 2; }; mode=project ;;
   community) [[ "$trust" == community ]] || { echo "omarchy-worker: $id is project-trusted; the community role wants a community registration (never mix the project's work with contributors' builds)" >&2; exit 2; }; mode=community; export WORKER_SHARED=1 ;;
 esac
 # A community worker builds inside this container, so it must be the

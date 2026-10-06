@@ -56,7 +56,7 @@ export PATH="$tmp/bin:$PATH"
 # A directory no earlier start set up: refused with the pointer — no file, no runtime, no pool asked; the pool starts no new set.
 d="$HOME/.config/omarchy-worker"
 if out="$("$tmp/omarchy-worker" start --token omw_test123 2>&1)"; then echo "start in a directory with no set must be refused: $out"; exit 1; fi
-grep -qF "omarchy-worker: no worker set here ($(cd "$d" && pwd -P)/compose.yml): the pool no longer starts new worker sets (#343) — contributors run no worker, and a maintainer's machine joins the pool as a host: https://omarchy-pool.org/docs/worker-host" <<<"$out" || { echo "the refusal points at the maintainer-host docs: $out"; exit 1; }
+grep -qF "omarchy-worker: no worker set here ($(cd "$d" && pwd -P)/compose.yml): the pool no longer starts new worker sets (#343) — contributors run no worker, and a maintainer's machine joins the pool as a host: https://omarchy-pool.org/docs/worker-host#maintainer-hosts" <<<"$out" || { echo "the refusal points at the maintainer-host docs: $out"; exit 1; }
 [[ ! -e "$d/.env" && ! -e "$d/compose.yml" && ! -s "$STUB_LOG" ]] || { echo "a refused start writes nothing and calls nothing: $(ls -A "$d") $(cat "$STUB_LOG")"; exit 1; }
 if out="$("$tmp/omarchy-worker" update 2>&1)"; then echo "update with no set must be refused: $out"; exit 1; fi
 grep -q "no worker set here" <<<"$out" && [[ ! -s "$STUB_LOG" ]] || { echo "update with no set is refused the same way: $out / $(cat "$STUB_LOG")"; exit 1; }
