@@ -769,9 +769,11 @@ slirp4netns for rootless podman). prep-root.sh installs no firewall there
 network's gateway is the engine's namespace, not the host. What can still
 reach the host from a bridge is the stack's **host loopback**: an address in
 the namespace that the stack forwards to the host's `127.0.0.1`, where
-services that trust local callers listen. Every engine below has it off by
-default. Whether it is on is on the stack's command line, which the engine's
-own user (the agent's, design v2 §19.3) reads in `/proc/<pid>/cmdline`:
+services that trust local callers listen. Every engine below keeps the host's
+loopback off by default; pasta's guest-mapped address (from podman 5.3, the
+table's third row, below) is on. Whether the loopback is mapped is on the
+stack's command line, which the engine's own user (the agent's, design v2
+§19.3) reads in `/proc/<pid>/cmdline`:
 preflight reads it there while both probe tasks run (rootless podman starts
 its stack with the first container on a bridge network and stops it with the
 last), and refuses the install with the setting to change when any of this
@@ -788,13 +790,14 @@ every service of the host that listens on its interfaces: its guest-mapped
 address (`--map-guest-addr`), which rootless podman passes as `169.254.1.2`
 (what `host.containers.internal` names) from podman 5.3 on, unless
 `pasta_options` names one. On rootless podman behind pasta (libpod's `/info`
-says which stack it runs) both probe tasks try `169.254.1.2` on 22, 53 and
-the pool's ports, and preflight refuses the install when anything answers
-there, with the setting to change; an address that pasta's command line maps
-and the probe did not try (one an owner set) is refused as it is. A task's
-own network is internal and has no route to it; a signed exception's bridge
-has one, and so does the shared `omarchy-egress` bridge, whose sidecars refuse
-link-local addresses.
+says which stack it runs) the probe task on a bridge tries `169.254.1.2` on
+22, 53 and the pool's ports, and preflight refuses the install when anything
+answers there, with the setting to change; an address that pasta's command
+line maps and the probe did not try (one an owner set) is refused as it is. A
+task's own network is internal and has no route to it, so the probe task on
+one does not try it (an unreachable address that fails at once reads as a
+refusal to `nc -z`); a signed exception's bridge has one, and so does the
+shared `omarchy-egress` bridge, whose sidecars refuse link-local addresses.
 
 | Engine | What maps the host into its networks, where, when on | Default | What turns it off |
 |---|---|---|---|
@@ -809,8 +812,13 @@ off (its docker-compatible API would turn DNS on and keep a gateway at `.1`,
 where aardvark-dns answers on 53 and the namespace refuses every other
 port), and on Docker with its isolated gateway mode (#372); preflight's
 second probe task, on a network made the same way, passes with the defaults
-above. A rootless host still fails the first probe task until #373 lands,
-and preflight says so: a signed exception's bridge reaches the LAN and the
+above. podman 4's docker-compatible API shows such a network with
+`"Gateway": "<nil>"`, which docker's CLI from 29 on cannot read: on a podman 4
+host (rootful too) with a task running, an owner's own docker CLI 29 or newer
+on podman's socket fails `docker network ls` and `docker network inspect` with
+`ParseAddr("<nil>")`; podman's own CLI, or the docker CLI the worker image and
+the agent pin (27.5.1), lists them. A rootless host still fails the first
+probe task until #373 lands, and preflight says so: a signed exception's bridge reaches the LAN and the
 router through the user-mode stack, and its gateway (the engine's namespace)
 refuses connections, which counts as reached; #373 runs the probe the way a
 task runs, on an internal network behind its egress sidecar.

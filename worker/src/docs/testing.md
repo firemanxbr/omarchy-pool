@@ -737,29 +737,38 @@ by what the dispatcher asks of the engine alone (#336, #372), and both task
 networks are read back as the engine keeps them — internal, with docker's
 isolated gateway mode, or on podman with DNS off and no gateway in their
 subnet; a stop removes only that task's container, sidecars and network. CI
-runs it on docker; `RUNTIME=podman` runs it on podman by hand, the
+runs it on docker only. `RUNTIME=podman` runs it on podman, by hand, the
 dispatcher then taking docker's CLI on podman's API socket as the worker image
 does on a podman host (`PODMAN_SOCKET`, or a `podman system service` of the
 run's own; `DISPATCH_DOCKER` names the CLI, such as the image's pinned
 27.5.1: docker's CLI 29 cannot read podman 4's `"<nil>"` gateway of such a
-network), which makes its task networks through libpod's own API (#372), or
-podman's own CLI with `DISPATCH_CLI=podman`. The install's preflight probe
+network, and `tests/host-bundle.py` holds the pin below 29), which makes its
+task networks through libpod's own API (#372), or podman's own CLI with
+`DISPATCH_CLI=podman`. In CI a task network the dispatcher makes on podman is
+covered only by `tests/agent-install.sh`'s `pkg-repo` test below, on
+rootless podman. The install's preflight probe
 tries the same gateways on a real engine in `tests/agent-install.sh`
 (rootful docker and rootless podman in CI; the runbook's *Installing a
 host*): a task's own network made as the dispatcher makes it (on podman
 through libpod's API, internal with DNS off, read back from libpod) has no
 gateway a task reaches on either engine; the same script runs
 `pkg-repo`'s `dispatch::engine` real-engine test, which makes a task network
-with the dispatcher's own code through docker's CLI on that socket and finds
-nothing at its `.1`; on rootless podman behind pasta (podman 5.3 on) a
-listener of the host's on every address answers through pasta's guest-mapped
-address `169.254.1.2` exactly when pasta's command line maps it, and the
-verdict names containers.conf's `--map-guest-addr none`. It reads rootless
-podman's network stack in `/proc` as preflight does; preflight's reading of
-prep-root.sh's firewall script and its boot unit (not there, or not enabled),
-of a rootless stack's command line (each engine's flags, a stack seen only
-while the probe runs, a guest address pasta maps that the probe did not
-try), of libpod's `/info` (rootless and pasta, or a podman 4 that names no
+with the dispatcher's own code through the pinned docker CLI (the one the
+agent's tests just fetched, the worker image's version) on that socket and
+finds nothing at its `.1`; on rootless podman behind pasta (podman 5.3 on) a
+listener of the host's on every address answers, from a bridge, through
+pasta's guest-mapped address `169.254.1.2` exactly when pasta's command line
+maps it, and the verdict names containers.conf's `--map-guest-addr none`.
+CI's podman (ubuntu-latest's 4.9) neither maps that address nor names its
+network stack in libpod's `/info`, so there that part prints a note and is
+skipped: it runs only by hand on a host with podman 5.3 or newer (`bash
+tests/agent-install.sh podman`), and in CI the unit tests below cover its
+verdict. The script reads rootless podman's network stack in `/proc` as
+preflight does; preflight's reading of prep-root.sh's firewall script and its
+boot unit (not there, or not enabled), of a rootless stack's command line
+(each engine's flags, a stack seen only while the probe runs, a guest address
+pasta maps that the probe did not try; pasta's own tried by the bridge's probe
+task, never on a task's own network, which has no route to it), of libpod's `/info` (rootless and pasta, or a podman 4 that names no
 network command) and of libpod's answers (whole, cut short, chunked, not
 libpod's, silent) is unit-tested in `omarchy-agent`, against a stand-in
 libpod on the preflight's socket that records each request (the probe's

@@ -190,9 +190,10 @@ secret). Everything travels in the `Authorization` header over TLS only.
   agent listens on nothing (design v2 §11.2). pasta can also forward an
   address to the host's own (`--map-guest-addr`, `169.254.1.2` by rootless
   podman's default from 5.3 on), which a bridge reaches: on rootless podman
-  behind pasta both probe tasks try it, and an answer there, or an address
-  pasta maps that the probe did not try, refuses the install with
-  containers.conf's `--map-guest-addr none` (#372).
+  behind pasta the probe task on a bridge tries it (a task's own network,
+  internal, has no route to it), and an answer there, or an address pasta
+  maps that the probe did not try, refuses the install with containers.conf's
+  `--map-guest-addr none` (#372).
   A signed `factory/sizing` exception is per package:
   it also covers a contributor's recipe of that package, so its reviewer
   approves exactly that.

@@ -20,12 +20,14 @@
 //!    neither does podman for a network made through libpod's own API, internal with DNS off,
 //!    as the dispatcher makes it (#372; its docker API would turn DNS on and keep a gateway).
 //!
-//! On rootless podman behind pasta (libpod's `/info` says which stack it runs), both also try
-//! pasta's guest-mapped address ([`PASTA_GUEST`], podman's `--map-guest-addr` from 5.3 on),
-//! which pasta forwards to the host's own address, where its services listen: anything there
-//! fails the install, with the containers.conf setting that turns the mapping off
-//! ([`GUEST_SETTING`]). An address pasta's command line maps that the probe did not try (one
-//! an owner set) is refused the same way ([`loopback::guest_verdict`]).
+//! On rootless podman behind pasta (libpod's `/info` says which stack it runs), the first also
+//! tries pasta's guest-mapped address ([`PASTA_GUEST`], podman's `--map-guest-addr` from 5.3
+//! on), which pasta forwards to the host's own address, where its services listen: anything
+//! there fails the install, with the containers.conf setting that turns the mapping off
+//! ([`GUEST_SETTING`]). The second does not: a task's own network is internal, with no route
+//! off its subnet, so the address is unreachable there, which `nc -z` (a probe image without
+//! bash) cannot tell from a refusal. An address pasta's command line maps that the probe did
+//! not try (one an owner set) is refused the same way ([`loopback::guest_verdict`]).
 //!
 //! On a Mac (#320) the probe runs in the `omarchy` VM, whose task firewall the agent puts
 //! there itself (`crate::vm::firewall`, before the probe), and the first probe task has one
@@ -221,7 +223,7 @@ impl Targets {
     }
 
     /// pasta's guest-mapped address too, on every port of [`GATEWAY_PORTS`], when the engine is
-    /// rootless podman behind pasta (#372).
+    /// rootless podman behind pasta (#372): on a bridge only, which has a route to it.
     pub fn guest(mut self, guest: Option<Ipv4Addr>) -> Self {
         if let Some(g) = guest {
             self.forbidden.extend(
@@ -644,7 +646,8 @@ pub(crate) struct Host<'a> {
     pub pool: Option<&'a str>,
     /// Which engine answers, for a task network's options.
     pub server: Result<Server, String>,
-    /// pasta's guest-mapped address, tried on rootless podman behind pasta ([`PASTA_GUEST`]).
+    /// pasta's guest-mapped address, tried on rootless podman behind pasta by the bridge's probe
+    /// task ([`PASTA_GUEST`]).
     pub guest: Option<Ipv4Addr>,
     pub advice: Advice,
     /// Why prep-root.sh's INPUT drop is not installed, when it is not ([`unprepared`]):
@@ -694,7 +697,7 @@ pub(crate) fn check(
         out
     };
     let mut public = None;
-    // What a probe that passed tried besides its network's gateway.
+    // What the bridge's probe tried besides its network's gateway, when it passed.
     let guest = h
         .guest
         .map(|g| format!(", nor pasta's guest-mapped address {g}"))
@@ -727,14 +730,16 @@ pub(crate) fn check(
     }
     match h.server.clone().and_then(engine::task_network) {
         Ok(create) => {
-            let t = Targets::of_task(subnet, create).guest(h.guest);
+            // Not pasta's guest-mapped address: an internal network has no route to it, and
+            // `nc -z` reads an unreachable address that fails at once as a refusal.
+            let t = Targets::of_task(subnet, create);
             match run(&t) {
                 Ok(out) => {
                     let b = verdict(&out, &t, &h.advice);
                     if b.is_empty() {
-                        r.notes.push(format!(
-                            "egress: a task's own network has no gateway the task reaches{guest}"
-                        ));
+                        r.notes.push(
+                            "egress: a task's own network has no gateway the task reaches".into(),
+                        );
                     }
                     r.blockers.extend(b);
                 }

@@ -497,7 +497,7 @@ fn a_task_that_reaches_its_networks_gateway_on_any_port_fails_the_probe_with_wha
 }
 
 #[test]
-fn pasta_s_guest_mapped_address_is_tried_on_every_network_and_refused_when_it_answers() {
+fn pasta_s_guest_mapped_address_is_tried_on_a_bridge_and_refused_when_it_answers() {
     let net = Cidr::parse(PROBE_NET).unwrap();
     let guest = Some(egress::PASTA_GUEST);
     // Tried only where asked: rootless podman behind pasta.
@@ -505,52 +505,48 @@ fn pasta_s_guest_mapped_address_is_tried_on_every_network_and_refused_when_it_an
         egress::Targets::of_host(None, None, net).guest(None),
         egress::Targets::of_host(None, None, net)
     );
-    for t in [
-        egress::Targets::of_host(None, None, net).guest(guest),
-        egress::Targets::of_task(net, engine::TaskNetwork::Libpod).guest(guest),
-    ] {
-        let g: Vec<String> = t
-            .forbidden
-            .iter()
-            .filter(|x| x.what == egress::What::Guest)
-            .map(|x| format!("{} {}:{}", x.name(), x.host, x.port))
-            .collect();
-        assert_eq!(
-            g,
-            [
-                "guest-22 169.254.1.2:22",
-                "guest-53 169.254.1.2:53",
-                "guest-3128 169.254.1.2:3128",
-                "guest-8790 169.254.1.2:8790",
-                "guest-8791 169.254.1.2:8791"
-            ]
-        );
-        let ok = format!("{}egress public open\n", all_blocked(&t));
-        assert!(egress::verdict(&ok, &t, &advice(false, true)).is_empty());
-        // Every port that answered, one blocker, with containers.conf's setting.
-        let out = ok
-            .replace("guest-53 blocked", "guest-53 refused")
-            .replace("guest-22 blocked", "guest-22 open");
-        let b = egress::verdict(&out, &t, &advice(false, true));
-        assert_eq!(b.len(), 1, "{b:?}");
-        assert!(
-            b[0].contains("reaches pasta's guest-mapped address 169.254.1.2 (port 22: open, port 53: refused), which pasta forwards to this host's own address")
-                && b[0].contains(r#""--map-guest-addr", "none""#)
-                && b[0].contains("pasta_options under [network]"),
-            "{b:?}"
-        );
-        // No answer is no pass.
-        let b = egress::verdict(
-            &ok.replace("egress guest-3128 blocked\n", ""),
-            &t,
-            &advice(false, true),
-        );
-        assert!(
-            b.len() == 1
-                && b[0].contains("no answer for pasta's guest-mapped address 169.254.1.2:3128"),
-            "{b:?}"
-        );
-    }
+    let t = egress::Targets::of_host(None, None, net).guest(guest);
+    let g: Vec<String> = t
+        .forbidden
+        .iter()
+        .filter(|x| x.what == egress::What::Guest)
+        .map(|x| format!("{} {}:{}", x.name(), x.host, x.port))
+        .collect();
+    assert_eq!(
+        g,
+        [
+            "guest-22 169.254.1.2:22",
+            "guest-53 169.254.1.2:53",
+            "guest-3128 169.254.1.2:3128",
+            "guest-8790 169.254.1.2:8790",
+            "guest-8791 169.254.1.2:8791"
+        ]
+    );
+    let ok = format!("{}egress public open\n", all_blocked(&t));
+    assert!(egress::verdict(&ok, &t, &advice(false, true)).is_empty());
+    // Every port that answered, one blocker, with containers.conf's setting.
+    let out = ok
+        .replace("guest-53 blocked", "guest-53 refused")
+        .replace("guest-22 blocked", "guest-22 open");
+    let b = egress::verdict(&out, &t, &advice(false, true));
+    assert_eq!(b.len(), 1, "{b:?}");
+    assert!(
+        b[0].contains("reaches pasta's guest-mapped address 169.254.1.2 (port 22: open, port 53: refused), which pasta forwards to this host's own address")
+            && b[0].contains(r#""--map-guest-addr", "none""#)
+            && b[0].contains("pasta_options under [network]"),
+        "{b:?}"
+    );
+    // No answer is no pass.
+    let b = egress::verdict(
+        &ok.replace("egress guest-3128 blocked\n", ""),
+        &t,
+        &advice(false, true),
+    );
+    assert!(
+        b.len() == 1
+            && b[0].contains("no answer for pasta's guest-mapped address 169.254.1.2:3128"),
+        "{b:?}"
+    );
 
     // pasta's command line: the address it maps, if any; one the probe did not try is refused.
     let parse = |argv: &[&str]| {
@@ -2249,20 +2245,29 @@ fn rootless_podman_behind_pasta_is_refused_when_its_guest_address_reaches_the_ho
         process(&h.root.join("proc"), 88, PASTA);
         fs::write(h.root.join("version"), PODMAN).unwrap();
         fs::write(h.root.join("libpod-info"), PASTA_INFO).unwrap();
-        fs::write(h.root.join("task-egress"), with_guest(TASK_EGRESS_OK)).unwrap();
         h
     };
-    // podman's defaults (5.3 on): pasta maps 169.254.1.2, which both probe tasks try on 22, 53
-    // and the pool's ports; nothing answers there, so it passes, and says so.
+    // podman's defaults (5.3 on): pasta maps 169.254.1.2, which the bridge's probe task tries on
+    // 22, 53 and the pool's ports; nothing answers there, so it passes, and says so. A task's own
+    // network does not try it: internal, it has no route there, and `nc -z` reads an address
+    // that fails at once as a refusal.
     let h = pasta_host();
     let (r, ready) = measure_on(&h, &mut Fake::default());
     assert!(r.ok() && ready.is_some(), "{}", r.screen());
     let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
-    assert_eq!(log.matches("guest-22 169.254.1.2 22").count(), 2, "{log}");
+    assert_eq!(log.matches("guest-22 169.254.1.2 22").count(), 1, "{log}");
     assert!(log.contains("guest-8791 169.254.1.2 8791"), "{log}");
+    let task_probe = log
+        .split("--network omarchy-egress-probe-")
+        .find(|r| r.split_once(' ').is_some_and(|(n, _)| n.ends_with("-task")))
+        .unwrap_or_else(|| panic!("no task network's probe: {log}"));
+    assert!(
+        task_probe.contains("gateway-22 ") && !task_probe.contains("guest-"),
+        "{task_probe}"
+    );
     for note in [
         "egress: a task reaches public addresses only, not its network's gateway, nor pasta's guest-mapped address 169.254.1.2",
-        "egress: a task's own network has no gateway the task reaches, nor pasta's guest-mapped address 169.254.1.2",
+        "egress: a task's own network has no gateway the task reaches",
         "egress: the rootless engine's network stack maps nothing to the host's loopback (pasta (pid 88))",
     ] {
         assert!(r.notes.iter().any(|n| n == note), "{note}: {:?}", r.notes);

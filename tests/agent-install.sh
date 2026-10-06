@@ -22,9 +22,10 @@
 #     pasta's guest-mapped address exactly when pasta maps it (podman 5.3 on),
 #     which preflight refuses with containers.conf's setting;
 #   - the dispatcher's own task network on the same engine (pkg-repo's
-#     dispatch::engine test, through docker's CLI as the worker image runs
-#     it): internal, no gateway (docker's isolated mode; on podman made
-#     through libpod's API with DNS off), nothing at its .1 for a task;
+#     dispatch::engine test, through the pinned docker CLI the agent's tests
+#     fetched, the version the worker image runs): internal, no gateway
+#     (docker's isolated mode; on podman made through libpod's API with DNS
+#     off), nothing at its .1 for a task;
 #   - a stand-in legacy compose project (two containers, a network, a bind
 #     mount) is read as preflight reads it, and uninstall's removal takes the
 #     new host's task container but leaves every legacy container running,
@@ -79,7 +80,14 @@ fi
 cargo test --locked -p omarchy-agent --lib -- --ignored --exact --test-threads=1 --nocapture \
   install::tests::engine_tests::real_engine_egress_probe_and_legacy_project \
   install::tests::engine_tests::real_engine_a_tasks_gateway_and_the_hosts_loopback
-# The dispatcher's task network on the same engine, through the docker CLI on this socket (#372):
-# made the way the probe above made its own.
-DOCKER_HOST="unix://$socket" cargo test --locked -p pkg-repo --lib -- --ignored --exact --nocapture \
+# The dispatcher's task network on the same engine, through the pinned docker CLI on this socket
+# (#372): made the way the probe above made its own. The CLI is the one the agent's tests above
+# fetched (OMARCHY_AGENT_DOCKER_CLI, or the release's pin for this platform under the temp
+# directory), the version the worker image runs: on podman 4 docker's CLI from 29 on cannot read
+# such a network's "<nil>" gateway, so the runner's own docker is not what the dispatcher runs.
+platform="$(uname -m)-linux"
+pin="$(sed -n "/^\[tools\.$platform\.docker\]/,/^sha256/s/^sha256 = \"\([0-9a-f]\{64\}\)\"$/\1/p" factory/bundle/manifest.toml)"
+cli="${OMARCHY_AGENT_DOCKER_CLI:-${TMPDIR:-/tmp}/omarchy-agent-install-tools/$pin/docker}"
+[[ -x "$cli" ]] || { echo "agent-install.sh: no pinned docker CLI at $cli" >&2; exit 1; }
+OMARCHY_DISPATCH_CLI="$cli" DOCKER_HOST="unix://$socket" cargo test --locked -p pkg-repo --lib -- --ignored --exact --nocapture \
   dispatch::engine::tests::real_engine_a_task_network_made_here_has_no_gateway
