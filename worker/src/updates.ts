@@ -1,6 +1,6 @@
 /**
  * New upstream releases of approved packages, built the way the first
- * version was: by the owner's worker, as evidence for a maintainer. Once a
+ * version was: on the pool's hosts, as evidence for a maintainer. Once a
  * day the brain asks GitHub for each approved package's latest release
  * (one request per package, the scheduler's token when there is one) and,
  * for a tag newer than what was approved, queues a community build from
@@ -11,16 +11,18 @@
  * approval was taken back gets no bump and no bump starts from a
  * withdrawn recipe. Before 2026-09-18 this read `decision` alone.
  *
- * The owner's worker has fourteen days; after that a donated (--shared)
- * worker may build it. Thirty days without a build and the package is
- * unmaintained: no more bumps until its owner (or a maintainer, by removing
- * the registration for someone else) takes it up again.
+ * The build goes to the queue at once, as a request's does: every
+ * maintainer host builds every contributor's packages (#343, design v2
+ * §8.2) — the fourteen days a bump once waited for its owner's own worker
+ * are gone with the community worker tier. Thirty days without a build
+ * and the package is unmaintained: no more bumps until its owner (or a
+ * maintainer, by removing the registration for someone else) takes it up
+ * again.
  */
 import type { Env } from "./index";
 import { standsSql } from "./routes/story";
 import { settleTargets } from "./targets";
 
-const SHARED_AFTER_DAYS = 14;
 const UNMAINTAINED_AFTER_DAYS = 30;
 
 interface Pkg {
@@ -97,15 +99,14 @@ export async function checkUpdates(env: Env, now = new Date(), fetcher: typeof f
     // Queued, running or staged already — or taken out of the queue by its owner, which stands until the next release.
     const pending = await env.DB.prepare("SELECT id FROM build_tasks WHERE name = ? AND reason = ? AND (status IN ('queued', 'leased', 'staged') OR (status = 'cancelled' AND error LIKE 'taken out of the queue%'))").bind(p.name, `bump to ${tag}`).first();
     if (pending) continue;
-    const sharedAfter = new Date(now.getTime() + SHARED_AFTER_DAYS * 86400000).toISOString();
     const arches = (JSON.parse(p.arches || "[]") as string[]).filter((a) => a === "x86_64" || a === "aarch64");
     await env.DB.batch([
       ...arches.map((arch) =>
-        env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, shared_after) VALUES (?, ?, ?, ?, ?, 100, 0, 'community', ?, 'build', ?)`)
-          .bind(p.name, arch, `${want}-1`, `bump:${approved.task_id}@${tag}`, `bump to ${tag}`, p.owner, sharedAfter),
+        env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES (?, ?, ?, ?, ?, 100, 0, 'community', ?, 'build')`)
+          .bind(p.name, arch, `${want}-1`, `bump:${approved.task_id}@${tag}`, `bump to ${tag}`, p.owner),
       ),
-      env.DB.prepare("UPDATE factory_packages SET status = 'waiting', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`${tag} released upstream; a build is queued for ${p.owner}'s worker (anyone's after ${SHARED_AFTER_DAYS} days)`, p.name),
-      env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('bump', NULL, 'factory', 'ok', ?, ?)").bind(`${p.name}: upstream ${tag} (approved ${approved.version ?? "?"}); build queued for ${p.owner}'s worker on ${arches.join(", ")}`, JSON.stringify({ name: p.name, tag, approved: approved.version, arches, owner: p.owner, shared_after: sharedAfter })),
+      env.DB.prepare("UPDATE factory_packages SET status = 'waiting', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`${tag} released upstream; a build is queued for the pool's hosts`, p.name),
+      env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('bump', NULL, 'factory', 'ok', ?, ?)").bind(`${p.name}: upstream ${tag} (approved ${approved.version ?? "?"}); build queued on ${arches.join(", ")}`, JSON.stringify({ name: p.name, tag, approved: approved.version, arches, owner: p.owner })),
     ]);
     await settleTargets(env, p.name);
     log.push(`${p.name}: ${tag} queued`);

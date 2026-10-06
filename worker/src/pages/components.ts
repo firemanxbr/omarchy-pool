@@ -142,8 +142,10 @@ export interface Fixture {
   publishedPkg: string;
   /** "w1", the project's worker (m1's): built the project's build, wrote the audit. */
   worker: string;
-  /** "w3", alice's community worker: built her evidence. */
+  /** "w3", m1's community registration — a maintainer's legacy set, as the Studio's pair is: built alice's evidence (#343). */
   communityWorker: string;
+  /** alice's own registration from before #331 closed the door to maintainers: hers to read and revoke, and it claims nothing (#343). */
+  ownerWorker: string;
   /** alice's staged build of `mine` with its evidence (PKGBUILD, log, PKGINFO, tests, vet.json) and a finished audit; the project built it again. */
   contributorTask: number;
   /** The project's build of it, staged with its evidence and gate, its trial done, approved by m2 — the one `/build/<id>` and `/factory/tasks/<id>?whole=1` show whole. */
@@ -364,7 +366,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     reads: [
       { path: `/api/v1/factory/workers/${F.worker}/log`, status: 401 },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "contributor", status: 403 },
-      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.ownerWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
     ],
     visible: EVERYONE,

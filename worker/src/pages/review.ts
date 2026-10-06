@@ -916,7 +916,7 @@ const SCRIPT = String.raw`
     });
   }
   function adopt(name) {
-    ask({ title: "Adopt " + name + "?", text: "You become its maintainer in the pool, and its registration becomes yours: its bumps come to your workers, and another maintainer reviews them. On the record with your name.", input: "optional", placeholder: "a note for the record (optional)", confirm: "Adopt" }).then(function (why) {
+    ask({ title: "Adopt " + name + "?", text: "You become its maintainer in the pool, and its registration becomes yours: its bumps build in your name on the pool's hosts, and another maintainer reviews them. On the record with your name.", input: "optional", placeholder: "a note for the record (optional)", confirm: "Adopt" }).then(function (why) {
       if (why === null) return;
       api("POST", API + "/packages/" + encodeURIComponent(name) + "/adopt", { reason: why || undefined }).then(function (d) { if (d.error) toast(esc(d.error), "error"); else toast("You now maintain " + esc(name) + " in the pool."); load(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     });

@@ -2,7 +2,7 @@
 # Every parser the agent runs on a signed bundle, a statement, an owner's
 # files or its own state, fuzzed for a short budget (design v2 §11.3): the
 # manifest, the statement, the bundle archive, the set template with its
-# override, state.json with the pool's host state and the follow answer
+# override (linted, and rendered for the Quadlet driver, #330), state.json with the pool's host state and the follow answer
 # of a pool from before it (#315, #344), run/capacity.json narrowed to the
 # pool's settings (#325), GitHub's unauthenticated answer for its latest
 # release, the tag freeze detection reads (#326), the maintainers'

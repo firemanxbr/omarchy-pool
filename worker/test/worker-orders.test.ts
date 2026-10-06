@@ -10,7 +10,8 @@
  *
  * The workers are the Studio's default set (#277's design, P10): four
  * project workers on one host — two pool workers and two review workers
- * behind agent-proxy — and a contributor's builder. The emulated profile's
+ * behind agent-proxy — and a maintainer's community builder (a contributor's
+ * registration claims nothing since #343). The emulated profile's
  * host, four review workers behind agent-proxy, is in
  * worker-orders-bounds.test.ts, with the breaker's whole matrix, the
  * budget's shares and the races. Their tokens are omw_<id>; the people's
@@ -82,13 +83,14 @@ async function seedWorker(id: string, arch: string, owner: string | null, trust:
 beforeAll(async () => {
   const h = (t: string) => sha256Hex(t);
   await env.DB.batch([
-    env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m4')`),
-    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('m3', ?, ?, 'maintainer'), ('m4', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor')`)
-      .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_m3"), await h("oms_m3"), await h("omc_m4"), await h("oms_m4"), await h("omc_alice"), await h("oms_alice"), await h("omc_bob"), await h("oms_bob")),
+    env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m4'), ('m5')`),
+    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('m3', ?, ?, 'maintainer'), ('m4', ?, ?, 'maintainer'), ('m5', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor')`)
+      .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_m3"), await h("oms_m3"), await h("omc_m4"), await h("oms_m4"), await h("omc_m5"), await h("oms_m5"), await h("omc_alice"), await h("oms_alice"), await h("omc_bob"), await h("oms_bob")),
   ]);
-  // The Studio's default set: four project workers on one host, two of them review workers behind agent-proxy; a contributor's builder.
+  // The Studio's default set: four project workers on one host, two of them review workers behind agent-proxy; a community builder —
+  // a maintainer's, m5's: a contributor's registration claims nothing since #343.
   for (const [id, arch] of [["studio-pool-x86_64", "x86_64"], ["studio-pool-aarch64", "aarch64"], ["studio-review-aarch64", "aarch64"], ["studio-review2-aarch64", "aarch64"]]) await seedWorker(id, arch, "m1", "project");
-  await seedWorker("alice-box-aarch64-1f2e", "aarch64", "alice", "community");
+  await seedWorker("m5-box-aarch64-1f2e", "aarch64", "m5", "community");
 });
 
 afterEach(() => {
@@ -97,18 +99,18 @@ afterEach(() => {
 
 describe("the doors: who gives a worker an order", () => {
   it("its owner and every maintainer, from the page or with a token; anyone else is refused server-side, in the words /can greys the button with", async () => {
-    const id = "alice-box-aarch64-1f2e";
+    const id = "m5-box-aarch64-1f2e";
     expect((await claim(id, { instance: 1 })).status).toBe(204);
     expect((await issue(id, { kind: "recheck-agent" }, { origin: ORIGIN })).status).toBe(401);
     const stranger = await issue(id, { kind: "recheck-agent" }, page("bob"));
-    expect(stranger).toMatchObject({ status: 403, json: { error: "only alice or a maintainer gives it orders" } });
+    expect(stranger).toMatchObject({ status: 403, json: { error: "only m5 or a maintainer gives it orders" } });
     const can = await call("GET", `/factory/workers/${id}/can`, undefined, page("bob"));
     expect(can.json.can.recheck).toBe(false);
     expect(can.json.why.recheck).toBe(stranger.json.error);
     // The owner, from the page: 201, the note says when it arrives.
-    const mine = await issue(id, { kind: "recheck-agent", reason: "stuck since v1.0.1" }, page("alice"));
+    const mine = await issue(id, { kind: "recheck-agent", reason: "stuck since v1.0.1" }, page("m5"));
     expect(mine.status).toBe(201);
-    expect(mine.json.order).toMatchObject({ kind: "recheck-agent", issued_by: "alice", via: "web", state: "pending", reason: "stuck since v1.0.1" });
+    expect(mine.json.order).toMatchObject({ kind: "recheck-agent", issued_by: "m5", via: "web", state: "pending", reason: "stuck since v1.0.1" });
     expect(mine.json.note).toContain("delivered with its next claim");
     // One waiting per kind: the second is refused with the first's words.
     const again = await issue(id, { kind: "recheck-agent" }, cli("m2"));
@@ -198,7 +200,7 @@ describe("the claim carries the order, and the worker answers", () => {
     // Another process of the same token cannot answer it; a job token cannot at all.
     expect((await answer(id, o.id, { instance: hex(81), outcome: "accepted", code: "exiting" })).status).toBe(409);
     expect((await call("POST", `/factory/workers/self/orders/${o.id}`, { instance: hex(80), outcome: "accepted" }, { token: next.json.token })).status).toBe(401);
-    expect((await answer("alice-box-aarch64-1f2e", o.id, { instance: hex(80), outcome: "accepted" })).status).toBe(404);
+    expect((await answer("m5-box-aarch64-1f2e", o.id, { instance: hex(80), outcome: "accepted" })).status).toBe(404);
     expect((await answer(id, o.id, { instance: hex(80), outcome: "maybe" })).status).toBe(400);
     // Accepted, once; then the new process claims and the pool sees it back: done by observation, no clock compared.
     expect((await answer(id, o.id, { instance: hex(80), outcome: "accepted", code: "exiting", detail: "exit 75 in a moment" })).status).toBe(200);
@@ -319,7 +321,7 @@ describe("the claim carries the order, and the worker answers", () => {
   });
 
   it("a finished task marks its process as one that finished something, in the write the pool makes anyway", async () => {
-    const id = "alice-box-aarch64-1f2e";
+    const id = "m5-box-aarch64-1f2e";
     await claim(id, { instance: 130, orders: ["drain", "recheck-agent", "restart"] });
     const t = await env.DB.prepare("INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, lease_owner, lease_expires_at) VALUES ('felix', 'aarch64', 'draft:x', 'test', 10, 0, 'community', 'alice', 'build', 'leased', ?, ?) RETURNING id").bind(id, new Date(Date.now() + 30 * MIN).toISOString()).first<{ id: number }>();
     expect((await call("POST", `/factory/tasks/${t!.id}/fail`, { error: "boom", final: true }, { token: `omw_${id}` })).status).toBe(200);
@@ -416,7 +418,7 @@ describe("the pool's rules, on a fake clock", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const t0 = Date.now();
     for (const [id, pair] of [["rules-builder-a", false], ["rules-builder-b", true]] as const) {
-      await seedWorker(id, "aarch64", "alice", "community");
+      await seedWorker(id, "aarch64", "m5", "community");
       const got = await run(id, { provider: `p-broker-${pair ? "pair" : "old"}`, from: t0, minutes: 14, instance: () => (pair ? 980 : 990), via: "broker", agent: () => ({ status: "error", error: "the broker at http://broker:8790 did not answer" }), headers: pair ? { "x-omarchy-broker-takes": "pair-restart" } : undefined });
       expect(got.filter((g) => g.kind === "restart").length, id).toBe(pair ? 1 : 0);
     }
@@ -680,14 +682,14 @@ describe("Update through the set's updater (#277, part 3)", () => {
 
   it("on an outdated builder: its owner and a maintainer may; follow lists it; no claim answer carries it; a claim on the pool's release closes it done, with one final line", async () => {
     const id = "upd-builder-aarch64-9a1b";
-    await seedWorker(id, "aarch64", "alice", "community");
+    await seedWorker(id, "aarch64", "m5", "community");
     // A builder from before orders: its image takes none — Update is its set's updater's, never the worker's.
     const old = await claim(id, { instance: null, orders: null, version: "v1.0.2", via: "broker" }, undefined, REL);
     expect(old.status).toBe(426);
     expect((await up(id, { kind: "update" }, page("bob"))).status).toBe(403);
-    const mine = await up(id, { kind: "update", reason: "ten releases behind" }, page("alice"));
+    const mine = await up(id, { kind: "update", reason: "ten releases behind" }, page("m5"));
     expect(mine.status).toBe(201);
-    expect(mine.json.order).toMatchObject({ kind: "update", state: "pending", issued_by: "alice" });
+    expect(mine.json.order).toMatchObject({ kind: "update", state: "pending", issued_by: "m5" });
     expect(mine.json.note).toContain("its set's updater replaces it within 2 min");
     expect((await up(id, { kind: "update" }, cli("m2")))).toMatchObject({ status: 409, json: { error: expect.stringContaining("update is waiting already") } });
     const o = mine.json.order;
@@ -708,7 +710,7 @@ describe("Update through the set's updater (#277, part 3)", () => {
     expect((await linesOf(o.id)).map((l) => JSON.parse(l.payload).state)).toEqual(["pending", "done"]);
     expect((await follow(`ids=${id}`)).json.workers).toEqual([{ id, version: "v1.0.3", outdated: false, update: null }]);
     // On the release now: Update is refused, and says why.
-    expect((await up(id, { kind: "update" }, page("alice")))).toMatchObject({ status: 409, json: { error: "runs v1.0.3, the latest — its updater follows each release within 2 min" } });
+    expect((await up(id, { kind: "update" }, page("m5")))).toMatchObject({ status: 409, json: { error: "runs v1.0.3, the latest — its updater follows each release within 2 min" } });
   });
 
   it("on a project worker, only where an updater from #277 on rolls its set out — every other set refused with its reason; the report written only when it changes", async () => {
@@ -763,9 +765,9 @@ describe("Update through the set's updater (#277, part 3)", () => {
   it("an Update nothing carries out expires after six hours, with the words of why and one final line", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const id = "upd-builder-lonely-5c6d";
-    await seedWorker(id, "aarch64", "alice", "community");
+    await seedWorker(id, "aarch64", "m5", "community");
     await claim(id, { instance: 7300, version: "v1.0.1", via: "broker" }, undefined, REL);
-    const o = (await up(id, { kind: "update" }, cli("alice"))).json.order;
+    const o = (await up(id, { kind: "update" }, cli("m5"))).json.order;
     await sweepOrders(REL, Date.now() + 5 * 60 * MIN);
     expect((await orderOf(o.id)).state).toBe("pending");
     await sweepOrders(REL, Date.now() + 6 * 60 * MIN + 1000);
@@ -788,7 +790,7 @@ describe("Update through the set's updater (#277, part 3)", () => {
     const named = async (id: string, who: Who) => { const c = (await can(id, who)).json; return [id, ...c.update_with].sort(); };
     expect(await named("set-review-aarch64", page("m1"))).toEqual([...def].sort());
     expect(await named("emu-review2-x86_64", page("m2"))).toEqual([...emu].sort());
-    const b = (await can("upd-builder-lonely-5c6d", page("alice"))).json;
+    const b = (await can("upd-builder-lonely-5c6d", page("m5"))).json;
     expect(b.update_with).toEqual([]);
     expect(b.update_note).toContain("an updater from before #277 replaces it at its own 15-min round");
     const stranger = (await can("set-review-aarch64", page("bob"))).json;
@@ -802,7 +804,7 @@ describe("Update through the set's updater (#277, part 3)", () => {
     expect((await follow(`ids=${Array.from({ length: 17 }, (_, i) => `w${i}`).join(",")}`)).status).toBe(400);
     expect((await follow(`ids=${Array.from({ length: 16 }, (_, i) => `w${i}`).join(",")}`)).status).toBe(200);
     for (const bad of ["a%20b", "..%2Fx", "a;b", "%3Cscript%3E"]) expect((await follow(`ids=${bad}`)).status, bad).toBe(400);
-    await seedWorker("upd-revoked-1", "aarch64", "alice", "community", { revoked_at: new Date().toISOString(), version: "v1.0.2" });
+    await seedWorker("upd-revoked-1", "aarch64", "m5", "community", { revoked_at: new Date().toISOString(), version: "v1.0.2" });
     expect((await follow("ids=upd-revoked-1,nobody-here,upd-p-follows")).json.workers.map((w: any) => w.id)).toEqual(["upd-p-follows"]);
     const version = await call("GET", "/version", undefined, {}, REL);
     const f = await follow("ids=upd-p-follows");

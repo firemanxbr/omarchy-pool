@@ -98,7 +98,7 @@ ${sourceRows()}
       <div class="step"><h3>The broker</h3><p>One process per host holds the credentials — the worker's token, the agent's key, a GitHub token — and only receives, processes and answers: the pool's calls for the one task it claimed, the agent, GitHub read-only. It runs no build. The project's review builds reach the agent the same way, through a proxy. <a href="/docs/workers#secrets">What the broker holds →</a></p></div>
       <div class="step"><h3>The builder</h3><p>Born with nothing but the broker's address, builds one task and dies. Inside it the build user starts from an empty environment; a variable set on it by mistake is dropped at start and said so. <code>env</code> in a PKGBUILD prints <code>PATH</code> and <code>HOME</code>. <a href="/docs/workers">Run a worker (maintainers only) →</a></p></div>
       <div class="step"><h3>The pool's check</h3><p>For the worker the pool does not run: every log, recipe and report uploaded is read for what looks like a secret — the pool's tokens, agents' keys, GitHub's, a private key, a credential in a URL — and refused at the door with the kind and the line, never the match. The record never receives one. <a href="/docs/security-model">the security model →</a></p></div>
-      <div class="step"><h3>Two words on a worker, a tombstone on a record</h3><p>A worker becomes the project's on two maintainers' word, never its owner's alone; the Review page names the worker and host behind every build. A record is written once and can be withdrawn by a maintainer with a reason — a signed tombstone takes its place. The signing key itself lives inside the pool's Worker; no worker, runner or repository holds it. <a href="/workers">Workers →</a></p></div>
+      <div class="step"><h3>The maintainer list, a tombstone on a record</h3><p>A host is the project's because the pull request that named its owner in <code>factory/MAINTAINERS.toml</code> was reviewed and merged — no worker is trusted one by one any more (#343); the Review page names the worker and host behind every build. A record is written once and can be withdrawn by a maintainer with a reason — a signed tombstone takes its place. The signing key itself lives inside the pool's Worker; no worker, runner or repository holds it. <a href="/workers">Workers →</a></p></div>
     </div>
   </section>
 
@@ -342,7 +342,7 @@ export const HOW_IT_WORKS_COMPONENTS = (_F: Fixture): Component[] => {
         "<h3>The broker</h3>",
         "<h3>The builder</h3>",
         "<h3>The pool's check</h3>",
-        "<h3>Two words on a worker, a tombstone on a record</h3>",
+        "<h3>The maintainer list, a tombstone on a record</h3>",
         'href="/docs/workers#secrets"',
         'href="/docs/workers"',
         'href="/docs/security-model"',

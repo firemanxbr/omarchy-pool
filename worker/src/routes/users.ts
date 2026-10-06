@@ -86,7 +86,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
     env.DB.prepare(`SELECT name, category, url, arches, targets, status, detail, updated_at FROM factory_packages WHERE owner = ? ORDER BY name`).bind(login).all(),
     env.DB.prepare(
       // needs_native: sent back by an emulated worker (#281) — the page says the native worker it waits for; the same rows, one field of each.
-      `SELECT id, name, arch, version, status, reason, created_at, finished_at, duration_ms, lease_owner, pinned_to, priority, shared_after, trust, json_extract(params, '$.needs_native') AS needs_native FROM build_tasks
+      `SELECT id, name, arch, version, status, reason, created_at, finished_at, duration_ms, lease_owner, pinned_to, priority, trust, json_extract(params, '$.needs_native') AS needs_native FROM build_tasks
         WHERE owner = ? AND kind = 'build' ORDER BY id DESC LIMIT 50`,
     )
       .bind(login)
@@ -138,7 +138,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       last_seen: person.last_seen,
       // A registration is one package: where each of its architectures stands rides with it (targets.ts), and whether it landed, the registry's own flag (landed(), as GET /factory/packages says it) — the People page tells a signed-in viewer they may apply from it.
       packages: packages.results.map((p) => ({ ...p, targets: parseTargets(p.targets), landed: landed(p.status as string) })),
-      builds: await Promise.all(builds.results.map(async (b) => (b.status === "queued" && b.trust === "community" ? { ...b, queue: await queuePosition(env, b as { id: number; arch: string; priority?: number; shared_after?: string | null; pinned_to?: string | null }) } : b))),
+      builds: await Promise.all(builds.results.map(async (b) => (b.status === "queued" && b.trust === "community" ? { ...b, queue: await queuePosition(env, b as { id: number; arch: string; priority?: number; pinned_to?: string | null }) } : b))),
       build_counts: counts ?? { staged: 0, published: 0, failed: 0, total: 0 },
       // Every decision as the review it is (one per package, its architectures in `arches` and `targets`), saying whether it stands (`standing`, as GET /factory/approvals says it), and a standing one where the package is today: the rings that serve it.
       approvals: asReviews(decided, (name, arch) => sortRings(served.get(`${name}\t${arch}`) ?? [])),
@@ -157,7 +157,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
  * for everyone). The predicate is workspace() in routes/contributors.ts,
  * the one the doors refuse with; Remove is answered per registration in
  * `can.packages`, from the person's registrations as they stand now, and
- * Revoke and the mode per worker in `can.workers`, revoked ones included.
+ * Revoke per worker in `can.workers`, revoked ones included.
  */
 export async function handleUserCan(c: Contributor | null, login: string, env: Env): Promise<Response> {
   const person = await env.DB.prepare("SELECT login FROM contributors WHERE login = ?").bind(login).first<{ login: string }>();

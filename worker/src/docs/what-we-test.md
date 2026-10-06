@@ -44,8 +44,8 @@ the other's part.
 **The contributor** — anyone signed in, a maintainer included — requests
 the package on the record (the project, the licence, the source) from the
 dashboard or through the API, and brings **a build that passes the gate**
-— built in the shared queue, on the pool's hosts, which the maintainers
-provide (a contributor runs no worker, #331): the recipe, the log, the manifest, the gate's verdict
+— built in the queue, on the pool's hosts, which the maintainers
+provide (a contributor runs no worker, #331, #343): the recipe, the log, the manifest, the gate's verdict
 and the second agent's audit are the evidence, staged in their workspace.
 A build that fails, or fails the gate, is the contributor's to fix; it
 never reaches a maintainer's queue. When the evidence is complete the
@@ -92,13 +92,13 @@ can be ready while the other failed). The tools, in the order to try them:
    agent gets three attempts, each from the last log. (A package whose
    repository ships its own PKGBUILD is built as it is, with no drafting:
    the fix is made there, tagged, and the request renewed with the tag.)
-3. **Choose the worker.** A request lands in the **shared queue** the
-   moment its record is written — the shared workers, on the hosts the
-   maintainers provide, take from it, the best idle one of the architecture first (native before
-   emulated, then the most cores), the others after three minutes; the
-   page says where a build stands ("3 of 7"). The Build dialog offers the
-   queue, or a legacy community worker registered under the contributor's
-   name before #331, which takes it at once;
+3. **Choose the worker.** A request lands in the **queue** the moment its
+   record is written — every host the maintainers provide takes from it,
+   the contributors' builds in turn by owner, a native lane first and an
+   emulated one after its wait (#337, #343); the page says where a build
+   stands ("3 of 7"). The Build dialog offers the queue, or a legacy
+   community set registered under the asker's name, which then waits for
+   that set alone;
    a queued build can be taken out and put back from the same dialog —
    nothing puts it back by itself. A build that ran *emulated* (x86_64
    under qemu on an aarch64 host) may need nothing but a native worker: a
@@ -211,8 +211,8 @@ maintainer merges it like any other change to the process.
   segment"). gcc, python, git, bsdtar and cargo itself start; rustc and
   rustup's own toolchain do not. Two things followed: an emulated worker
   now probes every toolchain a recipe installs and fails the build at once
-  when one cannot start, and the shared queue hands a build to a native
-  worker first whenever one is idle.
+  when one cannot start, and the queue hands a build to a native
+  worker first whenever one is idle (a native lane first since #337).
 - **2026-09-17 — the request predates the form.** The first packages were
   registered before the request form existed; the pool wrote their
   records from what it had, with an empty checklist and often an unknown
@@ -298,7 +298,9 @@ maintainer merges it like any other change to the process.
   at once) — and a build a toolchain cannot start on the worker is the
   worker's failure, not the recipe's: it goes back to the queue marked for
   a native worker, the attempt given back, and waits there until one is
-  alive — the page says so.
+  alive — the page says so. (The first pick, and the shared workers it
+  ranked, went with the community worker tier in #343; the native lane's
+  preference is selection's since #337.)
 - **2026-09-29 — the project's own emulated worker.** The x86_64 capacity
   evaluation found omarchy-cli's own x86_64 review build failed for good
   on the Studio's review-x86_64: rustc under qemu again, three attempts,

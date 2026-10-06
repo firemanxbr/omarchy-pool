@@ -89,9 +89,9 @@ impl Agent {
         let short = |t: &str| -> String { t.chars().take(RUNTIME_WORDS_MAX).collect() };
         body["runtime"] = serde_json::json!({
             // `null` until the engine said which it is (agent.toml without `set.runtime`).
-            "driver": self.cfg.runtime.map(super::config::Runtime::driver),
+            "driver": self.cfg.driver_name(),
             "switch": self.state.switch.as_ref().map(|w| serde_json::json!({
-                "to": format!("compose/{}", w.to.runtime), "since": iso(w.started), "step": w.step,
+                "to": w.to.name(), "since": iso(w.started), "step": w.step,
                 "why": w.why.as_deref().map(short),
             })),
             "switch_last": self.state.switch_last.as_ref().map(|e| serde_json::json!({

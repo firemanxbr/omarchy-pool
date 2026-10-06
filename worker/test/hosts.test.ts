@@ -109,14 +109,15 @@ describe("what a machine keeps", () => {
       expect(setup, `${origin}/setup`).toContain(`API="https://${API_HOST}/api/v1"`);
       expect(setup, `${origin}/setup`).toContain(`curl -fsSL https://${API_HOST}/setup | sudo bash -s -- --ring stable`);
       expect(setup, `${origin}/setup`).not.toContain(`${DASHBOARD}/`);
-      const cli = await (await fetchAt(origin, "/omarchy-worker")).text();
-      expect(cli, `${origin}/omarchy-worker`).toContain(`API="https://${API_HOST}"`);
-      expect(cli, `${origin}/omarchy-worker`).not.toContain("__API__");
+      // The one command that ran a contributor's worker is gone (#343): 410, pointing at the dashboard's maintainer-host docs.
+      const cli = await fetchAt(origin, "/omarchy-worker");
+      expect(cli.status, `${origin}/omarchy-worker`).toBe(410);
+      expect(await cli.text(), `${origin}/omarchy-worker`).toContain(`${DASHBOARD}/docs/worker-host#maintainer-hosts`);
     }
     const local = await (await fetchAt("http://pool.test", "/setup")).text();
     expect(local).toContain('API="http://pool.test/api/v1"');
     expect(local).not.toContain(API_HOST);
-    expect(await (await fetchAt("http://pool.test", "/omarchy-worker")).text()).toContain('API="http://pool.test"');
+    expect(await (await fetchAt("http://pool.test", "/omarchy-worker")).text()).toContain("http://pool.test/docs/worker-host#maintainer-hosts");
   });
 
   it("writes the API host into the include's own comment, and keys one edge answer for every name", async () => {

@@ -159,8 +159,9 @@ export function isDue(rule: Rule, runs: RunSummary[], now: Date): { due: boolean
 }
 
 /**
- * The factory queue lives in D1; workers can run anywhere — the project's
- * own host (RUNBOOK, *The Studio host*) or a machine somebody donates.
+ * The factory queue lives in D1; workers run on the maintainers' machines —
+ * the project's own host (RUNBOOK, *The Studio host*) or a maintainer's
+ * host (#343: contributors run no worker).
  * Per architecture: what is queued for a project worker, and how many are
  * alive and idle. Nothing starts a worker: GitHub runs CI and the release
  * only, so when no project worker is alive the jobs wait and the log says

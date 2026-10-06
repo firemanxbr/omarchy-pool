@@ -65,7 +65,7 @@
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
  *   GET  /setup                                    the one-command setup script (curl … | sudo bash -s -- --ring stable)
- *   GET  /omarchy-worker · /omarchy-worker/compose.yml   one command to run a worker (src/omarchy-worker.sh) and the compose file it writes
+ *   GET  /omarchy-worker · /omarchy-worker/compose.yml   410 (#343): contributors run no worker; the pointer to the maintainer-host docs
  *   GET  /api/v1/pacman.conf?ring=&arch=&with=     the pacman.d include a ring serves right now
  */
 
@@ -94,7 +94,7 @@ import { handleCapHost, handleConfirmHost, handleEnroll, handleHostDiagnostics, 
 import { DIAGNOSTICS_MAX_BYTES } from "./hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
-import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
+import { gone, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerLog, GONE, HOST_DOCS, SIGN_IN } from "./routes/contributors";
 import { maintainersOf, GOVERNANCE_FILE, handleSelfReviewed, soloView } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
@@ -145,7 +145,7 @@ import { notFoundHtml } from "./pages/not-found";
 import { secured } from "./headers";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, isProductionHost, machineOrigin, version } from "./meta";
 import { handleStatic } from "./routes/static";
-import { pacmanInclude, setupScript, workerCli, workerCompose } from "./routes/setup";
+import { pacmanInclude, setupScript } from "./routes/setup";
 import { runScheduler } from "./scheduler";
 
 export interface Env {
@@ -282,9 +282,11 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     }
     // One command to join a ring: the script, read by people before they pipe it into sudo.
     if (path === "/setup" || path === "/setup.sh") return new Response(setupScript(machineOrigin(url), env.POOL_URL.replace(/\/$/, "")), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
-    // One command to run a worker: the script (read before it is run) and the compose file it writes.
-    if (path === "/omarchy-worker" || path === "/omarchy-worker.sh") return new Response(workerCli(machineOrigin(url)), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
-    if (path === "/omarchy-worker/compose.yml") return new Response(workerCompose(), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+    // The one command that ran a contributor's worker, and the compose file it wrote, are gone (#343, design v2 §21.4): 410, with
+    // where a maintainer's machine joins the pool instead — text, as the script was, for the curl that fetched it.
+    if (path === "/omarchy-worker" || path === "/omarchy-worker.sh" || path === "/omarchy-worker/compose.yml") {
+      return new Response(`${GONE.cli}: ${dashboardOrigin(url)}${HOST_DOCS}\n`, { status: 410, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+    }
     // Sign in with GitHub: cookie session for the dashboard's pages.
     if (path === "/auth/github" && method === "GET") return handleAuthStart(url, env);
     if (path === "/auth/github/callback" && method === "GET") return handleAuthCallback(url, request, env);
@@ -448,11 +450,11 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (!c) return nobody();
     return handleStagingDelete(c, Number(m[1]), env);
   }
-  // A worker sets its own mode through its token (omarchy-worker share on|off): the brain keeps it from then on.
-  if (method === "POST" && path === "/factory/workers/self/mode") {
-    const w = await workerOf(request, env);
-    return w ? handleWorkerMode({ worker: w.id }, w.id, request, env) : json({ error: "a worker token is required" }, 401);
-  }
+  // A worker's mode and per-worker trust are gone (#343, design v2 §21.4): 410 with the pointer to the maintainer-host docs, for every
+  // caller, before any credential is read.
+  if (path === "/factory/workers/self/mode" && method === "POST") return gone("mode");
+  if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/mode$/)) && method === "POST") return gone("mode");
+  if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/trust$/)) && method === "POST") return gone("trust");
   // A worker answers an order it was handed (#277): its own token, never a job's — the process that took it says how it went.
   if ((m = path.match(/^\/factory\/workers\/self\/orders\/([A-Za-z0-9_]{1,40})$/)) && method === "POST") {
     const w = await workerOf(request, env);
@@ -461,7 +463,6 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   if (path === "/factory/packages" || path.startsWith("/factory/packages/") || path === "/factory/workers" || path.startsWith("/factory/workers/")) {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
-    if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/mode$/)) && method === "POST") return handleWorkerMode(c, m[1], request, env);
     // Its owner or any maintainer gives a worker an order, or takes back one still waiting (#277, routes/orders.ts).
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/orders$/)) && method === "POST") return handleIssueOrder(c, m[1], request, env, url);
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/orders\/([A-Za-z0-9_]{1,40})$/)) && method === "DELETE") return handleCancelOrder(c, m[1], m[2], request, env, url);
@@ -474,7 +475,6 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (method === "POST" && path === "/factory/workers") return handleRegisterWorker(c, request, env);
     if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/builds\/(\d+)$/)) && method === "DELETE") return handleDequeueBuild(c, m[1], Number(m[2]), env);
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "DELETE") return handleRevokeWorker(c, m[1], env);
-    if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/trust$/)) && method === "POST") return handleTrustWorker(c, m[1], request, env);
     return null;
   }
   // Roles are not set here: factory/MAINTAINERS.toml on main names the
@@ -529,7 +529,7 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (w) return w;
     const job = await jobOf(request, env);
     // The job's own task rides along (#277): an audit's or a trial's report names the staged build, and is taken only while the job's own task is still its worker's.
-    return job && job.s.includes(`staging:${taskId}`) ? { id: job.w, owner: null, mode: "", packages: [], arch: "", trust: "community", job: job.k, job_task: job.t, job_gen: job.g ?? null } : null;
+    return job && job.s.includes(`staging:${taskId}`) ? { id: job.w, owner: null, packages: [], arch: "", trust: "community", job: job.k, job_task: job.t, job_gen: job.g ?? null } : null;
   };
   if (method === "POST" && path === "/factory/claim") { const a = await workerActor(); return a instanceof Response ? a : handleClaim(request, env, a); }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/heartbeat$/)) && method === "POST") { const a = await workerActor(); return a instanceof Response ? a : handleHeartbeat(Number(m[1]), env, a); }
@@ -686,7 +686,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
   // No-store: each row says what the caller may do on it.
   if (method === "GET" && path === "/factory/review") return handleReviewList(env, request);
   if (method === "GET" && path === "/factory/approvals") return handleApprovals(env);
-  // A worker asks what its registration is (the image decides its mode from this).
+  // A worker asks what its registration is (the image decides its role's trust from this).
   // A worker's own log: its owner's and the maintainers' to read (a contributor token, or the dashboard's session).
   if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/log$/)) && method === "GET") {
     const c = await contributorOf(request, env);
@@ -694,7 +694,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
   }
   if (method === "GET" && path === "/factory/workers/self") {
     const w = await workerOf(request, env);
-    return w ? json({ id: w.id, arch: w.arch, trust: w.trust, owner: w.owner, mode: w.mode, mode_by: w.mode_by ?? null }, 200, { "cache-control": "no-store" }) : json({ error: "a worker token is required" }, 401);
+    return w ? json({ id: w.id, arch: w.arch, trust: w.trust, owner: w.owner }, 200, { "cache-control": "no-store" }) : json({ error: "a worker token is required" }, 401);
   }
   // A worker's page (#277): its view and last orders, public and cached; the worker's own words with them for its owner and the maintainers; what the caller may press.
   if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "GET") return handleWorkerPublic(m[1], url, env);

@@ -1019,7 +1019,7 @@ const PACKAGE_SCRIPT = String.raw`
       // own requester adopted back under the solo-maintainer exception (#394) is said as it is: they requested it, and adopted it themselves.
       if (pk.owner && !(mt && mt.adopted && mt.login === pk.owner && !mt.solo_exception)) rows.push(person("requested by", atLink(pk.owner), "", avatar(pk.owner)));
       if (sb && sb.agent) rows.push(person("drafted & built by", esc(sb.agent), built ? wtShort(built) : "", glyph(sb.agent, "agent")));
-      else if (built || !rebuilt) rows.push(person("built on", built ? esc(wtShort(built)) : "not yet", built ? "its contributor's worker" : "", glyph("W", "", "W")));
+      else if (built || !rebuilt) rows.push(person("built on", built ? esc(wtShort(built)) : "not yet", built ? "the contributor's build" : "", glyph("W", "", "W")));
       rows.push(ap ? person("reviewed by", atLink(ap.by), (ap.decision === "approved" ? "rebuilt from scratch" : ap.decision) + (ap.solo_exception ? " · " + SELF_WORDS : ""), avatar(ap.by)) : person("reviewed by", rv ? STATE[rv][1] : "not yet", "", nobody));
       if (au) rows.push(person("audit agent", esc(au), "second opinion", glyph(au, "agent")));
       if (rebuilt) rows.push(person("rebuilt on", esc(wtShort(rebuilt)), "a project worker", glyph("▣", "pool", "▣")));
@@ -1094,7 +1094,7 @@ const PACKAGE_SCRIPT = String.raw`
       var took = mt && mt.adopted && mt.login === login;
       icon = "user"; who = "@" + login + (took ? " · maintainer" : " · requester");
       var req = (ST && ST.request) || {}, why = b ? "blocked: another maintainer lifts the block first" : req.busy ? "a build of it is running (#" + req.busy + "); ask again when it ends" : ["approved", "published"].indexOf(pk.status) >= 0 ? "approved: a new upstream release is built as a bump, by itself" : "not while it is " + (pk.status || "in the factory");
-      text = took ? "You adopted this package: its registration is yours, and its bumps come to your workers." : "You requested this package.";
+      text = took ? "You adopted this package: its registration is yours, and its bumps build in your name on the pool's hosts." : "You requested this package.";
       // Under the solo-maintainer exception (#394) the maintainer it names reviews their own package and adopts it back once they left it
       // unmaintained, as Review's No maintainer tab offers — each self-reviewed, on the record; the lock is not theirs while it holds.
       var mine = selfReviewer();

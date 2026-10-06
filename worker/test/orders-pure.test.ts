@@ -570,7 +570,7 @@ describe("who may press what", () => {
     // A contributor's worker its owner drained: its owner only.
     const own = { ...cw, drained_at: at(-20), drained_by: "alice", drain_reason: "my laptop's fans" };
     expect(orderVerdicts(alice, own, f).resume.ok).toBe(true);
-    expect(orderVerdicts(m1, own, f).resume).toMatchObject({ status: 403, why: "alice drained it (11:40 UTC: my laptop's fans): putting their machine back to work is theirs — to keep it out, revoke it or set it to its owner's packages only" });
+    expect(orderVerdicts(m1, own, f).resume).toMatchObject({ status: 403, why: "alice drained it (11:40 UTC: my laptop's fans): putting their machine back to work is theirs — to keep it out, revoke it" });
     // A contributor's worker a maintainer drained: its owner, or any maintainer.
     const theirs = { ...cw, drained_at: at(-20), drained_by: "m2", drain_reason: "breaks every build" };
     expect(orderVerdicts(alice, theirs, f).resume.ok).toBe(true);

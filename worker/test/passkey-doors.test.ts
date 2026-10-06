@@ -100,7 +100,7 @@ beforeAll(async () => {
     env.DB.prepare("INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m5'), ('m7'), ('m8')"),
     ...(await Promise.all(people.map(async ([l, role]) => env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role) VALUES (?, ?, ?, ?)").bind(l, await h(`omc_${l}`), await h(`oms_${l}`), role)))),
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES
-      ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
+      ('cx', 'x86_64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
       ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`).bind(await h("omw_cx"), await h("omw_px"), AGENT),
   ]);
   for (const m of ["m1", "m2", "m5", "m7", "m8"]) await registerFor(m);
@@ -164,7 +164,7 @@ describe("a build queued by hand (#284)", () => {
   });
 
   it("an approval still publishes: the project's build approved with the maintainer's passkey queues its publish job", async () => {
-    // alice's request, built by her worker; claimed by m1 and rebuilt by the project; approved by m2 in the browser.
+    // alice's request, built by m1's community registration; claimed by m1 and rebuilt by the project; approved by m2 in the browser.
     const claimAs = async (token: string) => {
       const c = await call("POST", "/factory/claim", { arch: "x86_64", agent: token === "omw_px" ? AGENT : "openai/gpt-5", agent_status: "ok", kinds: ["build"] }, token);
       expect(c.status, JSON.stringify(c.json)).toBe(200);

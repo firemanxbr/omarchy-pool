@@ -80,20 +80,22 @@ w5_is() { [[ "$(w5_field "$1" "$2")" == "$3" ]]; }
 w5_task_is() { [[ "$(curl -s "$OMARCHY_API/api/v1/factory/tasks/$1?fresh=$(date +%s%N)" | jq -r .task.status)" == "$2" ]]; }
 w5_has() { (( $(w5_count "$1" "$2" "${3:-}") >= ${4:-1} )); }
 
-# Every scenario's worker, registered at once (a community registration of a login with nothing queued: it is handed no task), and
-# D's two other failing sites: rows whose spell opened an hour ago and whose last claim is now, of D's provider (anthropic, as its
-# worker reports it while its agent does not answer). One statement: the local database takes one writer beside wrangler dev.
+# Every scenario's worker, registered at once (a community registration of the maintainer's — a contributor's claims nothing since
+# #343 — with no contributor's build left queued: it takes anyone's, so it is handed no task), and D's two other failing sites: rows
+# whose spell opened an hour ago and whose last claim is now, of D's provider (anthropic, as its worker reports it while its agent
+# does not answer). One command: the local database takes one writer beside wrangler dev.
 w5_seed_all() {
   local id values=()
   for id in w5a w5a2 w5b w5c w5d w5e w5f w5h; do
-    values+=("('$id', '$W5_ARCH', 'e2e-w5', '$(printf %s "omw_e2e_$id" | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, NULL, NULL, NULL, NULL, NULL, '2000-01-01T00:00:00Z', NULL)")
+    values+=("('$id', '$W5_ARCH', 'e2e', '$(printf %s "omw_e2e_$id" | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, NULL, NULL, NULL, NULL, NULL, '2000-01-01T00:00:00Z', NULL)")
   done
   # G's worker is the project's: it runs pool jobs, the check that hangs among them.
   values+=("('w5g', '$W5_ARCH', 'e2e', '$(printf %s "omw_e2e_w5g" | sha256sum | cut -d' ' -f1)', 'shared', 'project', 'e2e', NULL, NULL, NULL, NULL, NULL, '2000-01-01T00:00:00Z', NULL)")
   for id in 1 2; do
-    values+=("('w5d$id', '$W5_ARCH', 'e2e-w5', NULL, 'dedicated', 'community', NULL, 'anthropic/claude-sonnet-5', 'error', 'URLError: <urlopen error [Errno 111] Connection refused>', 'refused', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'e2e-d$id')")
+    values+=("('w5d$id', '$W5_ARCH', 'e2e', NULL, 'dedicated', 'community', NULL, 'anthropic/claude-sonnet-5', 'error', 'URLError: <urlopen error [Errno 111] Connection refused>', 'refused', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'e2e-d$id')")
   done
-  w5_d1 "INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, agent, agent_status, agent_error, agent_error_class, agent_error_since, last_seen, site) VALUES $(IFS=,; echo "${values[*]}")"
+  w5_d1 "UPDATE build_tasks SET status = 'cancelled', error = 'e2e: not the orders scenarios' WHERE status = 'queued' AND trust = 'community' AND kind = 'build';
+    INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, agent, agent_status, agent_error, agent_error_class, agent_error_since, last_seen, site) VALUES $(IFS=,; echo "${values[*]}")"
 }
 w5_agent() { # id mode — the stub's word: down, up, credit
   printf %s "$2" > "$W5/$1/agent"

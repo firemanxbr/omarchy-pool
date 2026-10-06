@@ -234,7 +234,7 @@ const stage = async (c: { task: { id: number; name: string }; token: string }, w
   const done = await call("POST", `/factory/tasks/${c.task.id}/complete`, { sha256: (who === "the project" ? "d" : "c").repeat(64), filename: file, version: "1.0-1" }, c.token);
   expect(done.json).toMatchObject({ status: "staged" });
 };
-/** alice's request, built by her worker: the contributor's build, staged — a package in review. */
+/** alice's request, built by m1's community registration: the contributor's build, staged — a package in review. */
 const ready = async (name: string) => {
   expect((await call("POST", "/factory/packages", { name, url: `https://${name}.example`, source: `https://${name}.example/${name}-1.0.tar.gz`, version: "1.0", description: `${name}, a tool for the guided passkey's tests`, license: "MIT", arches: ["x86_64"], checklist }, "omc_alice")).status).toBe(201);
   const c = await claimAs("omw_cx", name);
@@ -261,7 +261,7 @@ beforeAll(async () => {
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ${NEW.map(() => "(?)").join(", ")}`).bind(...NEW),
     ...(await Promise.all([...NEW.map((l) => [l, "maintainer"]), ["carl", "contributor"]].map(async ([l, role]) => env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role) VALUES (?, ?, ?, ?)").bind(l, await h(`omc_${l}`), await h(`oms_${l}`), role)))),
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES
-      ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
+      ('cx', 'x86_64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
       ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`).bind(await h("omw_cx"), await h("omw_px"), AGENT),
   ]);
 });
@@ -830,7 +830,7 @@ describe("registered at the moment of need (#287)", () => {
 });
 
 describe("everything else stays free (#287)", () => {
-  it("pins the list: a maintainer with no passkey claims, reviews, requests changes, rejects, adopts, lifts a block, sets a category, withdraws, vouches for and revokes a worker, gives a worker an order of every kind and takes one back, queues and cancels — and only approve, block, a forced promotion and a reset ask for one", async () => {
+  it("pins the list: a maintainer with no passkey claims, reviews, requests changes, rejects, adopts, lifts a block, sets a category, withdraws, revokes a worker, gives a worker an order of every kind and takes one back, queues and cancels — and only approve, block, a forced promotion and a reset ask for one", async () => {
     const who = "m3b";
     const h = (t: string) => sha256Hex(t);
     await env.DB.batch([
@@ -839,7 +839,7 @@ describe("everything else stays free (#287)", () => {
     ]);
     expect(await passkeysOf(who)).toEqual([]);
     const { decide } = decider(env);
-    // What the acts land on: packages in review, one approved (by m2, with their passkey), one blocked and a contributor blocked by m1, a worker to vouch for and one to revoke.
+    // What the acts land on: packages in review, one approved (by m2, with their passkey), one blocked and a contributor blocked by m1, a worker to revoke (vouching for one is gone, #343).
     const inReview = await ready("freeclaim");
     const forChanges = await ready("freechanges");
     const forReject = await ready("freereject");
@@ -883,7 +883,6 @@ describe("everything else stays free (#287)", () => {
       ["lift a contributor's block", () => act("POST", "/api/v1/factory/contributors/dana/unblock", { reason: "lifted by the tests" }), 200],
       ["set a package's category", () => act("POST", "/api/v1/factory/packages/freeclaim/category", { category: CATEGORIES[0] }), 200],
       ["withdraw an approval", () => act("POST", `/api/v1/factory/tasks/${approved.project}/withdraw`, { note: "approved before the trial was read" }), 200],
-      ["vouch for a worker (a worker order): the first word, a second maintainer's to follow", () => act("POST", "/api/v1/factory/workers/cx/trust", { trust: "project" }), 202],
       ["revoke a worker (a worker order)", () => act("DELETE", `/api/v1/factory/workers/${revokeMe.json.worker}`), 200],
       // Every order kind (#277) rides the same door, the session alone (the maintainer's decision: no passkey for an order of any kind).
       ["give a worker an order from its page: re-check its agent (#277)", async () => {

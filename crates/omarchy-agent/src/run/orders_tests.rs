@@ -551,7 +551,8 @@ fn run(cmd: &mut Command) -> (Option<i32>, String) {
 
 /// What each of #313's four guards answers in `dir`: rollout.sh (from the directory, as
 /// setup.sh installs it), setup.sh (`with_setup`: its root check lifted in a copy, as
-/// tests/host-setup.sh does; it runs as root on a host), `omarchy-worker update` and the
+/// tests/host-setup.sh does; it runs as root on a host), `omarchy-worker update` (a
+/// maintainer's legacy set's command, factory/host/omarchy-worker since #343) and the
 /// updater's `--self-test`. `true`: it refused because of the marker.
 fn guards(dir: &Path, scratch: &Path, with_setup: bool) -> Vec<(bool, String)> {
     let bash = real("bash");
@@ -581,7 +582,7 @@ fn guards(dir: &Path, scratch: &Path, with_setup: bool) -> Vec<(bool, String)> {
         out.push((refused(&r, 4), r.1));
     }
     let r = run(Command::new(&bash)
-        .arg(repo("worker/src/omarchy-worker.sh"))
+        .arg(repo("factory/host/omarchy-worker"))
         .arg("update")
         .env("OMARCHY_WORKER_DIR", dir)
         .env("HOME", scratch)
