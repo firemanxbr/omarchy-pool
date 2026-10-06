@@ -13,7 +13,8 @@
 //! - [`run`]: the run loop (P1, #315): the host bundle rolled out by a state machine with
 //!   a guard, revert, quarantine and preemption, on the pinned compose driver.
 //!
-//! And the host's identity (#321): [`host`] (its Ed25519 key and the signed request),
+//! And the host's identity (#321): [`host`] (its key — Ed25519 in a file, or ECDSA P-256
+//! made in the machine's TPM, #330 — and the signed request),
 //! [`pool`] (HTTPS to the pool) and [`enroll`] (the one-time token, the owner's Confirm,
 //! the host worker token).
 //!
@@ -76,6 +77,8 @@ pub mod fuzz {
         }
         // The owner's signed documents, pins, COSE keys and assertions (#328).
         crate::owner::fuzz(data);
+        // The host key's public area and the TPM's signatures (#330).
+        crate::host::tpm::fuzz(data);
     }
 
     /// The bundle archive, then its manifest, as `verify --bundle` reads them once signed.

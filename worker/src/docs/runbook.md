@@ -537,7 +537,12 @@ sudo factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-pool/host
 
 It installs the runtime, qemu's binfmt handlers (with the `F` flag, for the
 emulated lane), btrfs-progs and jq; puts the user in the docker group
-(rootful); sets docker's default address pools and, on a daemon with no
+(rootful); where the machine has a TPM (`/dev/tpmrm0`), installs tpm2-tools
+and puts the user in the tss group, for the host key (#330, *Where the host
+key lives*, below) — before linger starts the user's manager, which keeps the
+groups it started with, and saying under *needs a person* when that manager
+already runs without the group (restart it, or reboot), on every run until
+its main process has it; sets docker's default address pools and, on a daemon with no
 container or image yet, `userns-remap`; makes the work root (a btrfs
 subvolume where it can); turns on linger; delegates cgroup v2 controllers to
 the user's systemd (rootless); and installs `DOCKER-USER` drop rules from
@@ -782,6 +787,73 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--max-units`, `--max-cpus`, `--max-mem-gb` | the owner's caps, lower than detected only |
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
 | `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory (it must be the one install.sh put the agent in, `omarchy-agent` under `XDG_DATA_HOME` or `~/.local/share`: the unit starts `<data>/current/omarchy-agent`); how long to wait for your Confirm |
+
+**Where the host key lives** (#330, design v2 §14). On a machine with a TPM
+2.0, the enrollment makes the host key inside it (ECDSA P-256, made by the
+TPM and never let out of it) when the agent's user may open the kernel's
+resource manager, `/dev/tpmrm0`, and the distribution's tpm2-tools are in
+`/usr/bin`; otherwise the key is `host.ed25519` as before, and preflight and
+the enrollment say why. prep-root.sh does both on a machine with a TPM; by
+hand, before the install, as root:
+
+```bash
+pacman -S tpm2-tools            # Arch; apt-get install tpm2-tools on Ubuntu
+usermod -aG tss omarchy         # the agent's user
+systemctl restart user@$(id -u omarchy).service   # or reboot: its user manager, which runs the agent's service, keeps the groups it started with
+ls -l /dev/tpmrm0               # crw-rw---- tss tss: the group may open it
+```
+
+then log in as it again (the install's shell needs the group too). Linger
+starts the user's manager at once and keeps it running, so a `usermod` alone
+reaches a new login but never the agent's service: preflight checks the
+running manager's groups too, and a manager without the group is a TPM out
+of the agent's reach (the key is then a file, and preflight says to restart
+the manager). The tss group opens the whole TPM, not the agent's key alone:
+the agent's user, and anything running as it (a task that escaped its
+container where it lands as that user, the `user` isolation level, among
+them), may send it any command the
+TPM's authorizations allow. With the lockout authorization empty, as on most
+machines, that includes `tpm2_clear`, which ends every key the TPM holds
+(systemd-cryptenroll's or clevis's LUKS bindings among them). On a machine
+whose TPM seals other secrets, set the lockout authorization first
+(`tpm2_changeauth -c lockout`, which takes `TPM2_Clear` through lockout away
+from that user; the owner hierarchy's must stay empty for the agent), or keep
+the user out of tss and the key a file (`OMARCHY_HOST_KEY=file`).
+
+Preflight's screen says where the key will live: a note for the TPM, a note
+for a machine with none (a VPS often has none; a VM's TPM is its
+hypervisor's), a warning when one is there but out of the agent's reach (no
+tpm2-tools, the user or its running manager not in tss).
+Two variables, in install.sh's environment beside `OMARCHY_ENROLL`, change
+it: `OMARCHY_HOST_KEY=tpm` makes a TPM out of reach a blocker (nothing is
+enrolled without it), `OMARCHY_HOST_KEY=file` keeps the file whatever the
+machine has; `OMARCHY_TPM_TCTI` names another resource manager
+(`tabrmd` for tpm2-abrmd; never the raw `/dev/tpm0`). The owner hierarchy's
+password must be empty, as it is unless someone took ownership of the TPM;
+with one, the key is a file and the enrollment says so. The host's page shows
+where its key lives beside its fingerprint, and `omarchy-agent status` says
+it at the host. A host keeps the key it enrolled with: to move a host whose
+key is a file into its TPM, Retire it on its page and install again (it
+enrolls as a new host, with a new key). Clearing the TPM — `tpm2_clear`, the
+firmware's *Clear TPM*, some firmware updates — ends a key made in it: the
+agent's signed calls then go unsent, its rounds say `pool-unreachable` with
+*the host key in the TPM did not sign: … the TPM does not load the host key:
+was it cleared* (`omarchy-agent status` and `logs`; `omarchy-agent token`
+says the same), its set keeps running, and the pool hears nothing from it.
+Retire the host on its page, add it again and paste the command it prints:
+the agent sees the TPM refuse the old key before it sends anything, keeps the
+old identity beside (`state/host.json.lost-<host>`) and enrolls the machine
+as a new host with a new key in the TPM (`enroll` without a new command says
+these steps and stops at once). Only the TPM's own refusal of the key's blob
+counts — its integrity check,
+`Esys_Load(0x1DF) - tpm:parameter(1):integrity check failed`, which is what a
+cleared TPM, or another machine's, answers. A
+TPM it cannot ask at all — the device out of the user's reach, tpm2-abrmd
+stopped — or one whose load fails any other way (a run that does not answer,
+a TPM out of memory or busy, a full disk) is no verdict: the identity and the
+key are kept, and the install stops at once saying why; run it again once
+the TPM answers. A Mac's key stays a file until the agent is signed with
+a Developer ID and notarised for the Secure Enclave (still open in #330).
 
 It verifies the release bundle and that it is the agent that release ships,
 fetches the release's pinned docker CLI and compose plugin into `tools/`,

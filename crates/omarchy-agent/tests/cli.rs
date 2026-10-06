@@ -16,16 +16,77 @@ fn run(args: &[&str]) -> Output {
 }
 
 /// The binary with its data directory under `data` (`XDG_DATA_HOME`) and, when given, an
-/// enrollment token in its environment.
+/// enrollment token in its environment. Its host key is a file (`OMARCHY_HOST_KEY=file`):
+/// a test never makes one in the TPM of the machine it runs on (#330).
 fn run_env(args: &[&str], data: &Path, enroll: Option<&str>) -> Output {
+    run_with(args, data, enroll, &[("OMARCHY_HOST_KEY", "file")])
+}
+
+/// [`run_env`] with `vars` as the owner's environment for the host key.
+fn run_with(args: &[&str], data: &Path, enroll: Option<&str>, vars: &[(&str, &str)]) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_omarchy-agent"));
     c.args(args)
         .env("XDG_DATA_HOME", data)
-        .env_remove("OMARCHY_ENROLL");
+        .env_remove("OMARCHY_ENROLL")
+        .env_remove("OMARCHY_HOST_KEY")
+        .env_remove("OMARCHY_TPM_TCTI")
+        .envs(vars.iter().copied());
     if let Some(t) = enroll {
         c.env("OMARCHY_ENROLL", t);
     }
     c.output().unwrap()
+}
+
+/// The owner asks for the host key in the TPM (#330): with none in reach the enrollment
+/// stops before anything is sent or made, and says why; words the agent does not take are
+/// refused as they are.
+#[test]
+fn a_host_key_asked_in_a_tpm_out_of_reach_stops_the_enrollment_before_anything_is_made() {
+    let data = std::env::temp_dir().join(format!("omarchy-agent-tpm-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let token = format!("ome_{}", "ab".repeat(24));
+    let o = run_with(
+        &["enroll", "--pool", "http://127.0.0.1:9"],
+        &data,
+        Some(&token),
+        &[
+            ("OMARCHY_HOST_KEY", "tpm"),
+            ("OMARCHY_TPM_TCTI", "device:/dev/tpmrm97"),
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("OMARCHY_HOST_KEY=tpm, but the TPM holds no host key"),
+        "{}",
+        text(&o)
+    );
+    let state = data.join("omarchy-agent/state");
+    for f in ["host.ed25519", "host.tpm.pub", "host.tpm.json", "host.json"] {
+        assert!(!state.join(f).exists(), "{f}");
+    }
+    for (k, v, says) in [
+        (
+            "OMARCHY_HOST_KEY",
+            "enclave",
+            "OMARCHY_HOST_KEY=\"enclave\"",
+        ),
+        (
+            "OMARCHY_TPM_TCTI",
+            "device:/dev/tpm0",
+            "OMARCHY_TPM_TCTI=\"device:/dev/tpm0\"",
+        ),
+        ("OMARCHY_TPM_TCTI", "swtpm:port=2321", "a resource manager"),
+    ] {
+        let o = run_with(
+            &["enroll", "--pool", "http://127.0.0.1:9"],
+            &data,
+            Some(&token),
+            &[(k, v)],
+        );
+        assert_ne!(o.status.code(), Some(0), "{}", text(&o));
+        assert!(text(&o).contains(says), "{says}: {}", text(&o));
+    }
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 #[test]

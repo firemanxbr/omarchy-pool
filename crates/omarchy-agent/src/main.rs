@@ -77,6 +77,7 @@ use std::time::Duration;
 use omarchy_agent::capacity::{self, probe, AgentToml, Capacity, Written};
 use omarchy_agent::dispatcher_env::{self, Sources};
 use omarchy_agent::enroll::{self, Failure, Options, Paths};
+use omarchy_agent::host::KeyChoice;
 use omarchy_agent::install;
 use omarchy_agent::lint::{self, Engine, Envelope};
 use omarchy_agent::run;
@@ -110,7 +111,9 @@ const USAGE: &str = "usage:
   omarchy-agent envelope pin-passkey [<pin> | -] [--data-dir <dir>]
   omarchy-agent envelope unpin-passkey [--data-dir <dir>]
   omarchy-agent --version
-The enrollment token is read from OMARCHY_ENROLL, never from an argument.";
+The enrollment token is read from OMARCHY_ENROLL, never from an argument.
+Where enroll and install make the host key: OMARCHY_HOST_KEY=auto|tpm|file,
+OMARCHY_TPM_TCTI=device:/dev/tpmrm<N>|tabrmd[:<options>] (#330).";
 
 const REFUSED: u8 = 1;
 const USAGE_ERROR: u8 = 2;
@@ -413,6 +416,8 @@ fn enroll_options(args: &[String]) -> Result<Options, String> {
         wait: Duration::from_secs(wait * 60),
         poll: Duration::from_secs(5),
         sources: Sources::system(),
+        // From the environment as install.sh passes it on: OMARCHY_HOST_KEY, OMARCHY_TPM_TCTI.
+        key: KeyChoice::from_env()?,
     })
 }
 
@@ -548,6 +553,8 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
         token: std::env::var("OMARCHY_ENROLL")
             .ok()
             .filter(|t| !t.is_empty()),
+        // Where the enrollment makes the host key (#330): OMARCHY_HOST_KEY, OMARCHY_TPM_TCTI.
+        key: KeyChoice::from_env()?,
         wait: Duration::from_secs(u64::from(num("--wait-minutes")?.unwrap_or(30)) * 60),
         poll: Duration::from_secs(5),
         exe: None,
@@ -683,6 +690,8 @@ fn token_cmd(args: &[String]) -> Result<u8, String> {
         wait: Duration::ZERO,
         poll: Duration::ZERO,
         sources: Sources::system(),
+        // A rotation makes no key: it signs with the one the enrollment made.
+        key: KeyChoice::file(),
     };
     match enroll::rotate(&o, &mut std::io::stdout()) {
         Ok(()) => Ok(0),

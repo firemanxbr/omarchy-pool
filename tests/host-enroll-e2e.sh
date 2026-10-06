@@ -53,7 +53,10 @@ cleanup() {
     [[ -f "$E2E/wrangler.log" ]] && { printf '\n==> the local pool (wrangler dev), last 60 lines:\n' >&2; tail -n 60 "$E2E/wrangler.log" >&2; }
   fi
   [[ -n "${AGENT_PID:-}" ]] && kill "$AGENT_PID" 2>/dev/null || true
-  [[ -n "${WRANGLER_PID:-}" ]] && kill "$WRANGLER_PID" 2>/dev/null || true
+  # wrangler dev and its workerd: their own process group where setsid is (Linux), so none outlives the script.
+  if [[ -n "${WRANGLER_PID:-}" ]]; then
+    if [[ -n "${WRANGLER_GROUP:-}" ]]; then kill -- -"$WRANGLER_PID" 2>/dev/null || true; else kill "$WRANGLER_PID" 2>/dev/null || true; fi
+  fi
 }
 trap cleanup EXIT
 
@@ -72,7 +75,12 @@ npx wrangler d1 migrations apply omarchy-repo --local --persist-to "$STATE" >/de
 npx wrangler d1 execute omarchy-repo --local --persist-to "$STATE" --command \
   "INSERT INTO factory_maintainers (login) VALUES ('e2e');
    INSERT INTO contributors (login, token_hash, session_hash, role, github_id) VALUES ('e2e', '$(sha256 omc_e2e)', '$(sha256 oms_e2e)', 'maintainer', 4242);" >/dev/null
-npx wrangler dev --ip 127.0.0.1 --port "$PORT" --persist-to "$STATE" --env-file "$E2E/.dev.vars" --var "SOURCE_CHECK:off" > "$E2E/wrangler.log" 2>&1 &
+if command -v setsid >/dev/null; then
+  setsid npx wrangler dev --ip 127.0.0.1 --port "$PORT" --persist-to "$STATE" --env-file "$E2E/.dev.vars" --var "SOURCE_CHECK:off" > "$E2E/wrangler.log" 2>&1 &
+  WRANGLER_GROUP=1
+else
+  npx wrangler dev --ip 127.0.0.1 --port "$PORT" --persist-to "$STATE" --env-file "$E2E/.dev.vars" --var "SOURCE_CHECK:off" > "$E2E/wrangler.log" 2>&1 &
+fi
 WRANGLER_PID=$!
 for _ in $(seq 1 60); do curl -fs "$POOL/api/v1/version" >/dev/null 2>&1 && break; sleep 1; done
 curl -fs "$POOL/api/v1/version" >/dev/null || fail "the local pool did not start"
@@ -98,6 +106,8 @@ cat > "$DATA/omarchy-agent/sets/host/run/capacity.json" <<JSON
 {"schema":2,"cpus":8,"mem_gb":16,"page_kb":4,"disk_free_gb":{"work":120,"engine":80},"units":7,"job_reserved":1,"agent_slots":2,
  "lanes":[{"arch":"$ARCH","mode":"native"}],"isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}
 JSON
+# The file key (host.ed25519) whatever the runner has: the key in a TPM is tests/host-key-tpm.sh's (#330).
+export OMARCHY_HOST_KEY=file
 XDG_DATA_HOME="$DATA" OMARCHY_ENROLL="$TOKEN" "$AGENT" enroll --pool "$POOL" --wait-minutes 3 > "$E2E/agent.log" 2>&1 &
 AGENT_PID=$!
 for _ in $(seq 1 60); do grep -q "host key fingerprint:" "$E2E/agent.log" && grep -q "waiting for e2e" "$E2E/agent.log" && break; sleep 1; done
@@ -114,6 +124,8 @@ hosts=$(curl -fs "$POOL/api/v1/hosts?owner=e2e" -H "cookie: $SESSION")
 HOST=$(jq -r '.hosts[0].id' <<<"$hosts")
 [[ $(jq -r '.hosts[0].status' <<<"$hosts") == pending-owner ]] || fail "not pending: $hosts"
 [[ $(jq -r '.hosts[0].fingerprint' <<<"$hosts") == "$FP" ]] || fail "the page's fingerprint is not the agent's: $hosts"
+# Where the key lives (#330): a file, as asked, and the page says so.
+[[ $(jq -c '.hosts[0].host_key' <<<"$hosts") == '{"store":"file","alg":"ed25519","held":"the owner asked for a file (OMARCHY_HOST_KEY=file)"}' ]] || fail "host_key: $hosts"
 [[ $(jq -r '.hosts[0].units' <<<"$hosts") == 7 ]] || fail "units: $hosts"
 [[ $(curl -fs "$POOL/api/v1/factory?limit=50" | jq '[.workers[] | select(.kind == "host")] | length') == 0 ]] || fail "a registration before Confirm"
 # No envelope either: install writes agent.toml only after Confirm, and enrollment never does.

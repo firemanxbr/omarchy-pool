@@ -136,12 +136,17 @@ to copy.
 2. On the machine, as the user the agent runs as: `install.sh` installs the
    agent, which runs its preflight first (one screen of everything to fix,
    nothing written until it passes; the runbook's *Installing a host* has the
-   options, `--dedicated` and `--work-root` above all), then makes the host key (`host.ed25519`, mode 0600, never in a
-   container), checks the machine against the release's signed minimum (4
+   options, `--dedicated` and `--work-root` above all), then makes the host key (never in a
+   container): in the machine's TPM where its user may open one (#330 — an
+   ECDSA P-256 key made inside the TPM with tpm2-tools, which never lets it
+   out), else `host.ed25519` (Ed25519, mode 0600); preflight says which, and
+   why not the TPM. It checks the machine against the release's signed minimum (4
    CPUs, 8 GB, 60 GB free on the work root, 40 GB on the engine's data
    root) and enrolls with the token, its public key, a proof it holds the
-   key and its capacity report. It prints the key's fingerprint and waits.
-3. Your page shows the host with the same fingerprint and **Confirm**.
+   key, where the key lives and its capacity report. It prints the key's
+   fingerprint and where it lives, and waits.
+3. Your page shows the host with the same fingerprint, where its key lives
+   (in its TPM, or a file and why), and **Confirm**.
    Compare the two, then confirm: the host gets its one worker registration
    (`<login>-<name>-<4 base36>`, project trust from the maintainer list), the
    journal and Status get an info line, and the other maintainers see a
