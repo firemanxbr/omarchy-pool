@@ -514,3 +514,31 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+#[test]
+fn an_agent_env_that_is_a_link_is_refused_and_not_followed() {
+    let c = cases();
+    let mut w = owned(2);
+    let elsewhere = w.dir.join("elsewhere.env");
+    fs::write(&elsewhere, "KEEP=1\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, w.dir.join("secrets/agent.env")).unwrap();
+    send(
+        &w,
+        &[("ho_link", OrderKind::SetAgentKeys(Some(signed(&c["keys"]))))],
+    );
+    w.poll();
+    let (outcome, detail) = answer(&w, "ho_link");
+    assert_eq!(outcome, "refused");
+    assert!(
+        detail.ends_with("agent.env: a symbolic link; refused, not followed"),
+        "{detail}"
+    );
+    assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "KEEP=1\n");
+    // Nothing taken: the owner signs it again once the link is gone.
+    assert_eq!(
+        crate::owner::Record::load(&w.agent.paths.data.join("state"))
+            .unwrap()
+            .version,
+        2
+    );
+}

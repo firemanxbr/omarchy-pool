@@ -14,9 +14,11 @@
 #   budget → the journal has the new-host line → running it again keeps the
 #   identity and the worker token → (#322) a suspension refuses its claims,
 #   its follow and the agent's token call, changing nothing on the machine,
-#   and the owner's Resume with a passkey brings the same token back → Retire
-#   burns it, and a new enrollment with a new token enrolls the machine as a
-#   new host, with a new key.
+#   and the owner's Resume with a passkey brings the same token back → (#328)
+#   no widening is signed before a passkey is pinned at the host; the host's
+#   page makes a pin of the owner's passkey and the real agent pins it, a pin
+#   changed on the way refused → Retire burns it, and a new enrollment with a
+#   new token enrolls the machine as a new host, with a new key.
 #
 # The agent runs `omarchy-agent enroll`, the enrollment step `install` runs
 # after its preflight and the envelope's confirm (#317): the same code
@@ -208,6 +210,46 @@ res=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/resume" "${WEB[@]}" -d "$(jq -n
 [[ $(host_claim "$NEW") == 204 ]] || fail "the same token after the resume"
 [[ $(curl -s -o /dev/null -w '%{http_code}' "$POOL/api/v1/factory/follow?ids=$WORKER") == 200 ]] || fail "the follow after the resume"
 
+step "Owner control without a visit (#328): the owner's passkey pinned at the host, from a pin its page made"
+# Nothing is signed for a host before its agent says a passkey is pinned there.
+code=$(curl -s -o "$E2E/unpinned.json" -w '%{http_code}' -X POST "$POOL/api/v1/hosts/$HOST/owner/challenge" "${WEB[@]}" -d '{"act":"widen-envelope","envelope":{"max_units":8}}')
+[[ $code == 409 && $(jq -r .code "$E2E/unpinned.json") == not_pinned ]] || fail "a widening before a pin: $code $(cat "$E2E/unpinned.json")"
+# The page asks the pool for the pin's document, the owner's passkey signs it, the pool checks that and prints the pin.
+pinopts=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/owner/challenge" "${WEB[@]}" -d '{"act":"pin-passkey"}')
+pinsig=$(node "$ROOT/tests/passkey.mjs" assert "$E2E/passkey.json" "$RP_ORIGIN" json <<<"$pinopts")
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/hosts/$HOST/owner/pin" "${WEB[@]}" -d "$(jq -nc --arg d "$(jq -r .doc <<<"$pinopts" | sed 's/"by":"e2e"/"by":"e2f"/')" --argjson a "$pinsig" '{doc: $d, assertion: $a}')")
+[[ $code == 400 ]] || fail "a pin of a document the page was not given: $code"
+pinres=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/owner/pin" "${WEB[@]}" -d "$(jq -nc --arg d "$(jq -r .doc <<<"$pinopts")" --argjson a "$pinsig" '{doc: $d, assertion: $a}')")
+PIN=$(jq -r .pin <<<"$pinres")
+[[ $(jq -r .command <<<"$pinres") == "omarchy-agent envelope pin-passkey $PIN" ]] || fail "the pin: $pinres"
+# At the host, as the agent's user: the agent.toml install writes after the Confirm (the pool by its
+# production name, which wrangler dev answers as, so the pin's relying party is this host's pool's),
+# the one the token step wrote kept aside for the re-install below.
+cp "$DATA/omarchy-agent/agent.toml" "$E2E/agent.toml.kept"
+cat > "$DATA/omarchy-agent/agent.toml" <<TOML
+pool = "https://pkgs.omarchy-pool.org"
+host_id = "$HOST"
+worker_id = "$WORKER"
+[set]
+dir = "$DATA/omarchy-agent/sets/host"
+work_root = "$E2E/work"
+secrets_dir = "$DATA/omarchy-agent/secrets"
+socket_cli = "$E2E/no-engine.sock"
+TOML
+chmod 600 "$DATA/omarchy-agent/agent.toml"
+# A pin someone changed on the way (another document under the same signature) is refused, nothing pinned.
+unb64url() { local b; b=$(tr '_-' '/+' <<<"$1"); while (( ${#b} % 4 )); do b+="="; done; base64 -d <<<"$b"; }
+forged=$(unb64url "$PIN" | jq -c '.doc |= sub("\"by\":\"e2e\""; "\"by\":\"e2f\"")' | base64 | tr -d '\n=' | tr '/+' '_-')
+[[ $(unb64url "$forged" | jq -r .doc) == *'"by":"e2f"'* ]] || fail "the changed pin"
+XDG_DATA_HOME="$DATA" "$AGENT" envelope pin-passkey "$forged" > "$E2E/pin.log" 2>&1 && fail "the agent pinned a changed pin"
+[[ ! -e "$DATA/omarchy-agent/state/owner.json" ]] || fail "a changed pin left a record"
+XDG_DATA_HOME="$DATA" "$AGENT" envelope pin-passkey "$PIN" > "$E2E/pin.log" 2>&1 || { cat "$E2E/pin.log"; fail "the agent refused the pin"; }
+grep -q "^pinned e2e's passkey (ES256, credential $(jq -r .credentialId "$E2E/passkey.json" | cut -c1-12)…) for omarchy-pool.org on https://omarchy-pool.org" "$E2E/pin.log" || { cat "$E2E/pin.log"; fail "the agent's words"; }
+[[ $(stat -c %a "$DATA/omarchy-agent/state/owner.json" 2>/dev/null || stat -f %Lp "$DATA/omarchy-agent/state/owner.json") == 600 ]] || fail "owner.json is not 0600"
+[[ $(jq -r .passkey.credential "$DATA/omarchy-agent/state/owner.json") == $(jq -r .credentialId "$E2E/passkey.json") ]] || fail "the pinned credential is not the owner's passkey"
+XDG_DATA_HOME="$DATA" "$AGENT" envelope unpin-passkey | grep -q "^unpinned e2e's passkey" || fail "unpin"
+mv "$E2E/agent.toml.kept" "$DATA/omarchy-agent/agent.toml"
+
 step "Retire (#322): the key and the token burnt; a new enrollment enrolls the machine as a new host, with a new key"
 ret=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/retire" "${WEB[@]}" -d '{"reason":"e2e: moving it"}')
 [[ $(jq -r .status <<<"$ret") == retired ]] || fail "retire: $ret"
@@ -226,4 +268,4 @@ wait "$AGENT_PID" || { cat "$E2E/reinstall.log"; fail "the re-install did not fi
 AGENT_PID=
 [[ $(host_claim "$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")") == 204 ]] || fail "the new host's token"
 
-printf '\n\033[1;32mhost enrollment: ok\033[0m (%s, %s, %s; suspended, resumed, retired, then %s)\n' "$HOST" "$WORKER" "$FP" "$HOST2"
+printf '\n\033[1;32mhost enrollment: ok\033[0m (%s, %s, %s; suspended, resumed, a passkey pinned, retired, then %s)\n' "$HOST" "$WORKER" "$FP" "$HOST2"

@@ -305,6 +305,7 @@ fn check_with(rec: &Record, case: &Value, a: &Assertion) -> String {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one widening, each key's bounds and the file it lands in
 fn a_widening_sets_only_the_keys_it_may_and_keeps_the_owners_lines() {
     let env = |v: Value| Widening::read(v.as_object().unwrap());
     let text = "# The agent's envelope: written by install and by a person at this host.\npool = \"https://pkgs.omarchy-pool.org\"\nhost_id = \"h_0123456789\"\nworker_id = \"m1-test-0a9z\"\n[set]\ndir = \"/srv/set\"\nwork_root = \"/srv/work\"\nsecrets_dir = \"/srv/secrets\"\nsocket_cli = \"/var/run/docker.sock\"\n[envelope]\n# three units while the canary runs (the owner's note)\nmax_units = 3\nallow_socket = true\nrootful_ack = true\ndedicated = true\nemulate = []\ndiagnostics = false\n";
@@ -423,6 +424,7 @@ fn a_widening_sets_only_the_keys_it_may_and_keeps_the_owners_lines() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one sealed key, each way it is refused, and the file it lands in
 fn sealed_keys_open_only_for_this_host_and_name_and_merge_into_agent_env() {
     let c = cases();
     let state = crate::run::state::tempdir().join("state");
@@ -578,4 +580,224 @@ fn the_seal_key_is_made_once_and_kept_in_the_keychain_on_a_mac() {
         SealKey::load_or_create_in(&mac, &mut k, &account).unwrap_err(),
         "the keychain is locked"
     );
+}
+
+/// A virtual authenticator in the agent's own tests (an Ed25519 passkey, which keeps no
+/// counter, as synced passkeys do): what the owner's browser answers, made at the test's
+/// own time — the real-engine test (`run::engine_tests`) runs on the wall clock, which the
+/// recorded fixtures (made for 2027) are not.
+pub(crate) struct Authenticator {
+    pair: aws_lc_rs::signature::Ed25519KeyPair,
+    pub credential: String,
+}
+
+impl Authenticator {
+    pub fn new() -> Self {
+        use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+        let doc =
+            aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let mut id = [0u8; 16];
+        SystemRandom::new().fill(&mut id).unwrap();
+        Self {
+            pair: aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(doc.as_ref()).unwrap(),
+            credential: webauthn::b64(&id),
+        }
+    }
+
+    /// Its COSE public key, base64url, as the pool stored it at registration.
+    pub fn cose(&self) -> String {
+        use aws_lc_rs::signature::KeyPair;
+        let x = self.pair.public_key().as_ref().to_vec();
+        webauthn::b64(&webauthn::tests::cose(&[
+            (1, Ok(1)),
+            (3, Ok(webauthn::EDDSA)),
+            (-1, Ok(6)),
+            (-2, Err(&x)),
+        ]))
+    }
+
+    /// Its answer to `doc` on `origin` for `rp_id`, the user present and verified.
+    pub fn assert(&self, doc: &str, rp_id: &str, origin: &str) -> Assertion {
+        self.assert_at(doc, rp_id, origin, 0)
+    }
+
+    /// The same, with its signature counter at `counter` (a synced passkey keeps 0).
+    pub fn assert_at(&self, doc: &str, rp_id: &str, origin: &str, counter: u32) -> Assertion {
+        use sha2::{Digest, Sha256};
+        let cd = serde_json::json!({"type": "webauthn.get", "challenge": webauthn::challenge_of(doc.as_bytes()), "origin": origin, "crossOrigin": false}).to_string();
+        let mut auth = Sha256::digest(rp_id.as_bytes()).to_vec();
+        auth.push(0x05);
+        auth.extend_from_slice(&counter.to_be_bytes());
+        let mut signed = auth.clone();
+        signed.extend_from_slice(&Sha256::digest(cd.as_bytes()));
+        Assertion {
+            credential: self.credential.clone(),
+            client_data: webauthn::b64(cd.as_bytes()),
+            authenticator_data: webauthn::b64(&auth),
+            signature: webauthn::b64(self.pair.sign(&signed).as_ref()),
+            user_handle: None,
+        }
+    }
+
+    /// A document as the pool writes one, issued at `now` and holding an hour.
+    pub fn doc(act: &str, host: &str, version: Option<u64>, now: i64, rest: &Value) -> String {
+        let mut d = serde_json::json!({
+            "schema": SCHEMA, "act": act, "host": host,
+            "issued_at": crate::capacity::utc(u64::try_from(now - 60).unwrap()),
+            "not_after": crate::capacity::utc(u64::try_from(now + 3600).unwrap()),
+            "by": "m1",
+        });
+        if let Some(v) = version {
+            d["version"] = v.into();
+        }
+        for (k, v) in rest.as_object().unwrap() {
+            d[k] = v.clone();
+        }
+        d.to_string()
+    }
+
+    /// The pin the site prints for `host`, made at `now`.
+    pub fn pin(&self, host: &str, now: i64) -> String {
+        let doc = Self::doc(
+            "pin-passkey",
+            host,
+            None,
+            now,
+            &serde_json::json!({"rp_id": "omarchy-pool.org", "origin": "https://omarchy-pool.org"}),
+        );
+        let a = self.assert(&doc, "omarchy-pool.org", "https://omarchy-pool.org");
+        webauthn::b64(
+            serde_json::json!({"doc": doc, "assertion": a, "public_key": self.cose(), "alg": webauthn::EDDSA})
+                .to_string()
+                .as_bytes(),
+        )
+    }
+
+    /// Its signed widening or agent keys: (the document, the assertion).
+    pub fn sign(
+        &self,
+        act: &str,
+        host: &str,
+        version: u64,
+        now: i64,
+        rest: &Value,
+    ) -> (String, Assertion) {
+        let doc = Self::doc(act, host, Some(version), now, rest);
+        let a = self.assert(&doc, "omarchy-pool.org", "https://omarchy-pool.org");
+        (doc, a)
+    }
+}
+
+#[test]
+fn a_virtual_authenticator_pins_and_signs_at_any_time() {
+    let now = 1_900_000_000;
+    let state = crate::run::state::tempdir().join("state");
+    let owner = Authenticator::new();
+    assert!(pin(&state, HOST, POOL, &owner.pin(HOST, now), now)
+        .unwrap()
+        .contains("EdDSA"));
+    let rec = Record::load(&state).unwrap();
+    let (doc, a) = owner.sign(
+        "widen-envelope",
+        HOST,
+        1,
+        now,
+        &serde_json::json!({"envelope": {"max_units": 4}}),
+    );
+    let (d, counter) =
+        verify_signed(&rec, doc.as_bytes(), &a, Act::WidenEnvelope, HOST, now).unwrap();
+    assert_eq!((d.version, counter), (Some(1), 0));
+    // Another of the owner's passkeys, not the one pinned.
+    let other = Authenticator::new();
+    let (doc, a) = other.sign(
+        "widen-envelope",
+        HOST,
+        1,
+        now,
+        &serde_json::json!({"envelope": {"max_units": 4}}),
+    );
+    assert!(
+        verify_signed(&rec, doc.as_bytes(), &a, Act::WidenEnvelope, HOST, now)
+            .unwrap_err()
+            .contains("signed with another passkey")
+    );
+}
+
+#[test]
+fn a_document_living_over_two_hours_or_a_counter_gone_back_is_refused() {
+    let now = 1_900_000_000;
+    let state = crate::run::state::tempdir().join("state");
+    let owner = Authenticator::new();
+    pin(&state, HOST, POOL, &owner.pin(HOST, now), now).unwrap();
+    let mut rec = Record::load(&state).unwrap();
+    let rp = ("omarchy-pool.org", "https://omarchy-pool.org");
+    // Three hours to live: a document the pool should never write.
+    let mut long: Value = serde_json::from_str(&Authenticator::doc(
+        "widen-envelope",
+        HOST,
+        Some(1),
+        now,
+        &serde_json::json!({"envelope": {"max_units": 4}}),
+    ))
+    .unwrap();
+    long["not_after"] = crate::capacity::utc(u64::try_from(now + 3 * 3600).unwrap()).into();
+    let long = long.to_string();
+    let a = owner.assert(&long, rp.0, rp.1);
+    assert!(
+        verify_signed(&rec, long.as_bytes(), &a, Act::WidenEnvelope, HOST, now)
+            .unwrap_err()
+            .contains("longer than two hours")
+    );
+    // A passkey that counts: 5, then 3 — a copy of the key answering.
+    let w = |v: u64| {
+        Authenticator::doc(
+            "widen-envelope",
+            HOST,
+            Some(v),
+            now,
+            &serde_json::json!({"envelope": {"max_units": 4}}),
+        )
+    };
+    let d1 = w(1);
+    let (_, counter) = verify_signed(
+        &rec,
+        d1.as_bytes(),
+        &owner.assert_at(&d1, rp.0, rp.1, 5),
+        Act::WidenEnvelope,
+        HOST,
+        now,
+    )
+    .unwrap();
+    assert_eq!(counter, 5);
+    rec.version = 1;
+    rec.passkey.as_mut().unwrap().counter = counter;
+    let d2 = w(2);
+    let e = verify_signed(
+        &rec,
+        d2.as_bytes(),
+        &owner.assert_at(&d2, rp.0, rp.1, 3),
+        Act::WidenEnvelope,
+        HOST,
+        now,
+    )
+    .unwrap_err();
+    assert!(e.contains("counter went from 5 to 3"), "{e}");
+    // Ahead of the host's clock by more than five minutes.
+    let ahead = Authenticator::doc(
+        "widen-envelope",
+        HOST,
+        Some(2),
+        now + 900,
+        &serde_json::json!({"envelope": {"max_units": 4}}),
+    );
+    let e = verify_signed(
+        &rec,
+        ahead.as_bytes(),
+        &owner.assert_at(&ahead, rp.0, rp.1, 6),
+        Act::WidenEnvelope,
+        HOST,
+        now,
+    )
+    .unwrap_err();
+    assert!(e.contains("ahead of this host's clock"), "{e}");
 }
