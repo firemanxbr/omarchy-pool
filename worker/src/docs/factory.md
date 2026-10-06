@@ -589,8 +589,9 @@ construction — leaves the registration that built what it audits to another
 that can take it now (for 3 minutes, so the builder never idles for it); an
 audit of the project's copy takes a model (the claim's `agent`: provider and
 model) other than the one that built it whenever a registration taking
-audits with another model was seen in the last 24 hours, and runs on the
-same model otherwise. Each audit's lease records `build_tasks.independent`
+audits with another model answered in the last 24 hours (its last claim
+while its probe passes, the start of its failing spell while it fails), and
+runs on the same model otherwise. Each audit's lease records `build_tasks.independent`
 — `model`, `host` (the same model on another host, for an audit that does
 not ship) or `none` — and Review shows it beside the verdict. The runbook's
 *How the pool hands a host work* has the rules. Only the lease

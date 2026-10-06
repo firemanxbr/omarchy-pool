@@ -189,9 +189,9 @@ export interface Rules {
 /**
  * The fleet: the registrations alive, every lease the pool holds and — for
  * the second opinion (D36) — the models of the registrations that take
- * audits, as their claims said them, with when each was last seen (the
- * route reads the last MODEL_WINDOW_MS of them only when a publish-bound
- * audit is among the candidates).
+ * audits, as their claims said them, with when each last answered (the
+ * route reads the last MODEL_WINDOW_MS of them, routes/factory.ts
+ * modelsAlive, only when a publish-bound audit is among the candidates).
  */
 export interface Fleet { members: Member[]; leases: Held[]; models?: { id: string; model: string; at: number }[] }
 

@@ -882,16 +882,17 @@ so a size-4 build waits for memory rather than run smaller.
   to another that can take it now, for 3 minutes. An audit of the project's
   copy takes another model (the claim's `agent`: provider and model) than
   the one that built it whenever a registration that takes audits with
-  another model was seen in the last 24 hours — however long that host is
-  busy, and for a day after it went quiet; otherwise it runs on the same
-  model. Each audit says how independent it was beside its verdict on
+  another model answered in the last 24 hours — however long that host is
+  busy, and for a day after it went quiet or its agent began failing (a host
+  whose agent has failed for a day holds nothing, however often it claims);
+  otherwise it runs on the same model. Each audit says how independent it was beside its verdict on
   Review (`independent: model`, `host` or `none`). Audits held for a host
   that is gone for good: retire it, or drain its registration, and the next
   claim hands them to the model alive. What counts, and how the last week
   went:
 
   ```bash
-  npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, agent, last_seen, drained_at FROM build_workers WHERE last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') AND revoked_at IS NULL AND agent IS NOT NULL"
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, agent, agent_status, agent_error_since, last_seen, drained_at FROM build_workers WHERE last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') AND revoked_at IS NULL AND agent IS NOT NULL"
   npx wrangler d1 execute omarchy-repo --remote --command "SELECT independent, COUNT(*) AS n FROM build_tasks WHERE kind = 'audit' AND started_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') GROUP BY independent"
   ```
 - **Contributors take turns.** Community builds are handed round-robin by

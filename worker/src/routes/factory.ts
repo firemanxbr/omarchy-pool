@@ -854,20 +854,22 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
 }
 
 /**
- * The registrations that take audits, with the model their last claim said, seen in the last 24 hours (D36, #339): the registrations
- * — a few dozen rows, as the fleet's — with their hosts by the primary key. Read at a claim only when a publish-bound audit is among
- * its candidates.
+ * The registrations that take audits, with the model their last claim said and whether it answers, seen in the last 24 hours (D36,
+ * #339): the registrations — a few dozen rows, as the fleet's — with their hosts by the primary key. Read at a claim only when a
+ * publish-bound audit is among its candidates.
  */
-export const MODELS_SQL = `SELECT w.id, w.kind, w.kinds, w.trust, w.agent, w.drained_at, w.last_seen, h.id AS host_id, h.status AS host_status, h.owner_removed_at
+export const MODELS_SQL = `SELECT w.id, w.kind, w.kinds, w.trust, w.agent, w.agent_status, w.agent_error_since, w.drained_at, w.last_seen, h.id AS host_id, h.status AS host_status, h.owner_removed_at
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL AND w.agent IS NOT NULL`;
-interface ModelRow { id: string; kind: string | null; kinds: string | null; trust: string; agent: string; drained_at: string | null; last_seen: string; host_id: string | null; host_status: string | null; owner_removed_at: string | null }
+interface ModelRow { id: string; kind: string | null; kinds: string | null; trust: string; agent: string; agent_status: string | null; agent_error_since: string | null; drained_at: string | null; last_seen: string; host_id: string | null; host_status: string | null; owner_removed_at: string | null }
 
 /**
- * The models a publish-bound audit weighs (D36): every registration seen in the last 24 hours that takes audits and may claim — a host
- * active with its owner listed, a legacy project registration — and is not drained (a drained host never holds an audit back), with
- * the model it said; the claimer with the one this claim says.
+ * The models a publish-bound audit weighs (D36): every registration that takes audits and may claim — a host active with its owner
+ * listed, a legacy project registration — and is not drained (a drained host never holds an audit back), with the model it said and
+ * when that model last answered: its last claim while its probe passes, the start of its failing spell while it fails — so a host
+ * whose agent has not answered for a day holds nothing, however often it claims, and one that failed an hour ago still does. The
+ * claimer with the one this claim says.
  */
-async function modelsAlive(env: Env, nowMs: number, me: { id: string; model: string | null; kinds: string[] }): Promise<NonNullable<Fleet["models"]>> {
+async function modelsAlive(env: Env, nowMs: number, me: { id: string; model: string | null; kinds: string[]; probeOk: boolean }): Promise<NonNullable<Fleet["models"]>> {
   const rows = (await env.DB.prepare(MODELS_SQL).bind(new Date(nowMs - MODEL_WINDOW_MS).toISOString()).all<ModelRow>()).results;
   const out: NonNullable<Fleet["models"]> = [];
   for (const r of rows) {
@@ -875,9 +877,10 @@ async function modelsAlive(env: Env, nowMs: number, me: { id: string; model: str
     const host = r.kind === "host" && r.host_id !== null;
     if (host ? r.host_status !== "active" || r.owner_removed_at !== null : r.trust !== "project") continue;
     const kinds = jsonOr<string[] | null>(r.kinds, null) ?? (host ? HOST_KINDS : ALL_KINDS);
-    if (kinds.includes("audit")) out.push({ id: r.id, model: r.agent, at: Date.parse(r.last_seen) });
+    const answered = r.agent_status === "ok" ? Date.parse(r.last_seen) : r.agent_status === "error" && r.agent_error_since ? Date.parse(r.agent_error_since) : NaN;
+    if (kinds.includes("audit") && Number.isFinite(answered)) out.push({ id: r.id, model: r.agent, at: answered });
   }
-  if (me.model && me.kinds.includes("audit")) out.push({ id: me.id, model: me.model, at: nowMs });
+  if (me.model && me.probeOk && me.kinds.includes("audit")) out.push({ id: me.id, model: me.model, at: nowMs });
   return out;
 }
 
@@ -1162,7 +1165,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   const all = [...rows.values()].map((r) => candidateOf(r, sizes, nativeMs));
   const oldest = oldestRows.map((r) => candidateOf(r, sizes, nativeMs));
   // The second opinion (D36): a publish-bound audit among them weighs the models alive in the last 24 hours — read only then.
-  if (all.some((c) => c.kind === "audit" && c.publish_bound)) fleet.models = await modelsAlive(env, nowMs, { id: me.id, model: me.model ?? null, kinds: k.kinds });
+  if (all.some((c) => c.kind === "audit" && c.publish_bound)) fleet.models = await modelsAlive(env, nowMs, { id: me.id, model: me.model ?? null, kinds: k.kinds, probeOk: k.probeOk });
   // The reservation for large tasks, decided at a host's claim; the marks it moves are written compare-and-set.
   if (host) {
     // A mark holds while its task still waits in the queue: one cancelled or leased elsewhere frees its host at once.

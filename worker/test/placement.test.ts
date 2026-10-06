@@ -18,7 +18,8 @@
  *   contributor build's `host`; with two providers a publish-bound audit is
  *   handed only to the other model, however long, and records `model`; a host
  *   with another model last seen 23 hours ago still holds it, 25 hours ago no
- *   longer;
+ *   longer, and one whose agent has failed for a day holds nothing however
+ *   often it claims;
  * - Review's view (the page's own script): the release line and its button
  *   for each viewer, the audit's independence beside its verdict on both
  *   panes;
@@ -328,6 +329,21 @@ describe("the second opinion (D36): elsewhere, with another model when one exist
     vi.setSystemTime(t0 + 25 * HOUR);
     const d = await claim("m1-c");
     expect(d.json.task).toMatchObject({ id: later.audit, lease_owner: "m1-c", independent: "none" });
+  });
+});
+
+describe("the models a publish-bound audit weighs (D36)", () => {
+  it("a host with another model counts while its agent answered in the last 24 hours: one failing for an hour still holds the audit, one failing for a day — however often it claims — no longer", async () => {
+    await seedHost("m1-w", "m1", ARM, CLAUDE);
+    await seedHost("m3-g", "m3", ARM, GPT);
+    const copy = await seedAudit("m2-x", { publish: true, builtWith: CLAUDE });
+    // m3's host is alive, its GPT agent failing for an hour: it took nothing since, and the audit waits for it.
+    await env.DB.prepare("UPDATE build_workers SET agent_status = 'error', agent_error_since = ? WHERE id = 'm3-g'").bind(new Date(Date.now() - HOUR).toISOString()).run();
+    expect((await claim("m1-w")).status).toBe(204);
+    // Failing for a day and an hour: no model of it answered in the window — the audit runs on the one alive, and says none.
+    await env.DB.prepare("UPDATE build_workers SET agent_error_since = ?, last_seen = ? WHERE id = 'm3-g'").bind(new Date(Date.now() - 25 * HOUR).toISOString(), new Date().toISOString()).run();
+    const c = await claim("m1-w");
+    expect(c.json.task).toMatchObject({ id: copy.audit, independent: "none" });
   });
 });
 
