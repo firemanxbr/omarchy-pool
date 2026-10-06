@@ -18,7 +18,9 @@
  *   these.
  *
  * Each line is plain text with the host it is about beside it: the page
- * escapes the words and links the host.
+ * escapes the words and links the host. The lines are public, as Status is:
+ * they say a round's outcome and a verify failure's check, never an agent's
+ * own words — those stay on the host's page, its owner's and the maintainers'.
  */
 import { DISK_FLOOR_GB, HOST_REPORT_FRESH_MIN, TASK_UNITS, hostLine, type Arch, type Capacity, type Lane } from "./hosts";
 import { ALIVE_MS, LANE_KINDS, roomOf, unitsOf, type Rules } from "./selection";
@@ -266,13 +268,13 @@ export function hostLines(rows: FleetHostRow[], ev: FleetEvents, pool: { version
     const silent = !h.asleep_at && (sign === null || now - sign >= SILENT_MIN * MIN);
     // Errors: its agent's verify refused the bundle it was to apply — possible tampering, the failed check named.
     const check = verifyFailureOf(round);
-    if (check) out.push({ level: "error", kind: "refused", host, text: `refused: its agent's verify failed the ${check} check${round!.at ? ` (${round!.at.slice(0, 16).replace("T", " ")} UTC)` : ""} — possible tampering: it applied nothing and runs what it ran; ${round!.detail.slice(0, 300)}` });
+    if (check) out.push({ level: "error", kind: "refused", host, text: `refused: its agent's verify failed the ${check} check${round!.at ? ` (${round!.at.slice(0, 16).replace("T", " ")} UTC)` : ""} — possible tampering: it applied nothing and runs what it ran; its page has the round's words` });
     // Warnings.
     if (silent) out.push({ level: "warn", kind: "silent", host, text: sign === null ? "silent: its agent never reported" : `silent for ${span(now - sign)}: nothing of it reached the pool since ${new Date(sign).toISOString().slice(0, 16).replace("T", " ")} UTC — check the machine, its agent and its network` });
     const applied = parseTag(h.release_applied);
     if (h.rolled_back_from) out.push({ level: "warn", kind: "rolled-back", host, text: `rolled-back: its agent's guard reverted ${h.rolled_back_from}${h.rolled_back_at ? ` (${h.rolled_back_at.slice(0, 16).replace("T", " ")} UTC)` : ""} and runs ${h.release_applied ?? "its last-good"}; ${h.rolled_back_from} stays in its quarantine` });
     else if (!silent && p && applied && compareTags(applied, p) < 0 && Number.isFinite(deployed) && now - deployed >= BEHIND_MIN * MIN && !(h.soaking_until && Date.parse(h.soaking_until) > now)) {
-      out.push({ level: "warn", kind: "behind", host, text: `behind: it runs ${h.release_applied}, ${span(now - deployed)} after the deploy of ${pool.version} — its last round: ${round ? `${round.outcome}${round.detail ? `, ${round.detail.slice(0, 200)}` : ""}` : "none reported"}` });
+      out.push({ level: "warn", kind: "behind", host, text: `behind: it runs ${h.release_applied}, ${span(now - deployed)} after the deploy of ${pool.version} — its last round: ${round ? round.outcome : "none reported"} (its page has why)` });
     }
     const lost = ev.lost.filter((l) => l.worker === h.worker_id);
     if (lost.length) out.push({ level: "warn", kind: "readopt-failed", host, text: `readopt-failed: ${lost.length} task${lost.length === 1 ? "" : "s"} lost in the last ${LOST_WINDOW_MIN === 60 ? "hour" : span(LOST_WINDOW_MIN * MIN)} (${lost.map((l) => `#${l.task}`).join(", ")}) — a container gone when its dispatcher came back (a reboot, an engine restart, the disk watcher); each back in the queue, its attempt given back` });
@@ -288,7 +290,7 @@ export function hostLines(rows: FleetHostRow[], ev: FleetEvents, pool: { version
     }
     // Info: an agent self-rollback, while its agent skips the version that did not pass its health gate.
     const skip = typeof report?.agent?.skip === "string" && /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(report.agent.skip) ? (report.agent.skip as string) : null;
-    if (round?.outcome === "agent-rollback" || skip) out.push({ level: "info", kind: "agent-rollback", host, text: `an agent self-rollback: ${round?.outcome === "agent-rollback" ? round.detail : `agent ${skip} is skipped here until a higher one`}` });
+    if (round?.outcome === "agent-rollback" || skip) out.push({ level: "info", kind: "agent-rollback", host, text: `an agent self-rollback: ${skip ? `agent ${skip} did not pass its health gate and is skipped here until a higher one` : "its last round rolled its agent back (its page has why)"}` });
   }
   // A new host, confirmed this week (D40's notice, for everyone).
   for (const h of rows) {

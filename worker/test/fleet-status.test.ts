@@ -68,7 +68,7 @@ describe("each host's Status lines (fleet.ts hostLines)", () => {
     expect(hostLines([row()], NONE, pool(44), NOW)).toEqual([]);
     const behind = hostLines([row({ report: JSON.stringify({ round: { outcome: "held", detail: "v1.21.0 waits: its brake" } }) })], NONE, pool(46), NOW);
     expect(behind).toHaveLength(1);
-    expect(behind[0]).toMatchObject({ level: "warn", kind: "behind", text: "behind: it runs v1.20.0, 46 min after the deploy of v1.21.0 — its last round: held, v1.21.0 waits: its brake" });
+    expect(behind[0]).toMatchObject({ level: "warn", kind: "behind", text: "behind: it runs v1.20.0, 46 min after the deploy of v1.21.0 — its last round: held (its page has why)" });
     expect(hostLines([row({ soaking_until: ago(-30) })], NONE, pool(46), NOW)).toEqual([]);
     expect(kinds(hostLines([row({ reported_at: ago(20), last_seen: ago(20) })], NONE, pool(46), NOW))).toEqual(["silent"]);
     const back = hostLines([row({ rolled_back_from: "v1.21.0", rolled_back_at: ago(20) })], NONE, pool(46), NOW);
@@ -92,7 +92,9 @@ describe("each host's Status lines (fleet.ts hostLines)", () => {
     const refused = (detail: string) => JSON.stringify({ round: { at: "2026-10-06T11:58:00Z", outcome: "refused", from: null, step: "verify", detail } });
     const sig = "refused (signature): verify refused (signature): signature: the transparency log's entry does not hold up";
     const err = hostLines([row({ report: refused(sig) })], NONE, POOL, NOW);
-    expect(err).toEqual([{ level: "error", kind: "refused", host: expect.any(Object), text: `refused: its agent's verify failed the signature check (2026-10-06 11:58 UTC) — possible tampering: it applied nothing and runs what it ran; ${sig}` }]);
+    expect(err).toEqual([{ level: "error", kind: "refused", host: expect.any(Object), text: "refused: its agent's verify failed the signature check (2026-10-06 11:58 UTC) — possible tampering: it applied nothing and runs what it ran; its page has the round's words" }]);
+    // Public, as Status is: the check, never the agent's own words.
+    expect(err[0].text).not.toContain("transparency log");
     expect(verifyFailureOf({ at: null, outcome: "refused", from: null, step: null, detail: "refused (repository): verify refused (repository): signed by another repository" })).toBe("repository");
     expect(hostLines([row({ report: refused("refused (below-floor): v1.10.0 is below the floor v1.18.0") })], NONE, POOL, NOW)).toEqual([]);
     expect(verifyFailureOf({ at: null, outcome: "pull-failed", from: null, step: null, detail: "verify refused (signature): …" })).toBeNull();
@@ -107,7 +109,7 @@ describe("each host's Status lines (fleet.ts hostLines)", () => {
     ], { lost: [], clamped: [{ task: 77, summary: "chromium for aarch64 (task 77) asked size 4; the largest host alive runs size 3: it runs clamped on m1-studio-ab12", at: ago(60) }] }, POOL, NOW);
     expect(lines.map((l) => [l.level, l.kind])).toEqual([["error", "refused"], ["warn", "clamped"], ["info", "agent-rollback"], ["info", "new-host"]]);
     expect(lines[1].text).toBe("clamped: chromium for aarch64 (task 77) asked size 4; the largest host alive runs size 3: it runs clamped on m1-studio-ab12");
-    expect(lines[2].text).toBe("an agent self-rollback: agent 0.5.0 was rolled back to 0.4.0 after its health gate failed; 0.5.0 is skipped until a higher agent");
+    expect(lines[2].text).toBe("an agent self-rollback: agent 0.5.0 did not pass its health gate and is skipped here until a higher one");
     expect(lines[3]).toMatchObject({ host: { name: "vps-1", owner: "m2" }, text: "a new host, confirmed 2 d ago: 12 cores, 32 GB, aarch64 native, x86_64 emulated, isolation root (dedicated)" });
     // A month-old host is no new one.
     expect(kinds(hostLines([row()], NONE, POOL, NOW))).toEqual([]);
