@@ -59,7 +59,9 @@ jobs:
     # ship it for (#311): two builds of this commit give one binary, and its
     # Sigstore check holds against the conformance suite at a pinned commit (not
     # copied here: that repository carries no license file). Its unit tests run
-    # in the rust job.
+    # in the rust job on Linux, and here on macOS (#320): a Mac runs the same
+    # agent, so its tests — the LaunchAgent's plist through plutil among them —
+    # run on the platform it ships for.
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -95,6 +97,9 @@ jobs:
         run: cargo test --locked -p omarchy-agent --lib -- --ignored conformance
         env:
           OMARCHY_SIGSTORE_CONFORMANCE: ${{ github.workspace }}/sigstore-conformance
+      - name: The agent's tests on macOS — the plist plutil reads, the omarchy VM's size, mounts, clock and rate limit, install and uninstall on a played Mac
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p omarchy-agent
 
   agent-run-loop:
     name: Host agent run loop on a real engine (${{ matrix.engine }})
@@ -170,6 +175,10 @@ jobs:
     # address fails it, one that reaches only the public stand-in passes —
     # and a stand-in legacy compose project left running with the same
     # container ids while uninstall removes the new host's task container;
+    # #367: a task network's gateway (the host itself on rootful docker, out
+    # of reach behind an INPUT drop for a test /28, as prep-root.sh's
+    # OMARCHY-TASKS-HOST holds one, which the script adds with sudo) and
+    # rootless podman's network stack, read in /proc as preflight reads it;
     # with the pinned docker CLI, on rootful docker and rootless podman's API
     # socket.
     runs-on: ubuntu-latest
@@ -184,8 +193,36 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The egress probe and a legacy project on ${{ matrix.engine }}
+      - name: The egress probe (a task network's gateway and the host's loopback too) and a legacy project on ${{ matrix.engine }}
         run: bash tests/agent-install.sh ${{ matrix.engine }}
+
+  emulated-lane:
+    name: Emulated lane on a real engine (${{ matrix.os }})
+    # #338 (design v2 §7.5; D33): each runner emulates the other architecture
+    # through qemu-user-static's binfmt handler (the F flag), as
+    # factory/host/prep-root.sh installs it on a host — the agent's smoke run
+    # turns the lane on, the envelope's `emulate = []` and a disabled handler
+    # hold it off with the native lane kept, and one build of the other
+    # architecture runs emulated through the dispatcher, built, uploaded and
+    # completed.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: qemu-user-static's binfmt handlers, with the F flag containers need
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-user-static
+          head -n 3 /proc/sys/fs/binfmt_misc/qemu-x86_64 /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || true
+      - name: The other architecture's lane — the agent's smoke run, the envelope, a disabled handler — and one emulated build through the dispatcher
+        run: bash tests/emulated-lane.sh
 
   agent-self-update:
     name: Host agent self-update under systemd --user
@@ -336,6 +373,12 @@ jobs:
       - name: shellcheck of prep-root.sh
         working-directory: .
         run: shellcheck factory/host/prep-root.sh
+      - name: A Mac's one-time steps — prep-mac.sh installs Colima and Lima only and makes the omarchy VM's three directories outside the home directory, no sudo — against stubs, under dash
+        working-directory: .
+        run: bash tests/prep-mac.sh
+      - name: shellcheck of prep-mac.sh
+        working-directory: .
+        run: shellcheck factory/host/prep-mac.sh
       - name: The rollback — images and Worker back to a tag — against stubbed buildx and wrangler
         working-directory: .
         run: bash tests/rollback-workflow.sh
@@ -389,7 +432,7 @@ jobs:
       # The agent renders the dispatcher's etc/dispatcher.env there (#371); built on its own, so the
       # image's binaries above are built with their own features.
       - run: cargo build --release -p omarchy-agent
-      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge; a stop removes only its own
+      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own
         run: bash tests/task-networks.sh
         env:
           WORKER_IMAGE: omarchy-worker:ci

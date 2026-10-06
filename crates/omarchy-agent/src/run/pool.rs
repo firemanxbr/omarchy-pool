@@ -8,7 +8,8 @@
 //! the release assets on GitHub, and (#326's freeze detection) the tag of GitHub's latest
 //! release, nothing more of it. Answers are read leniently and sorted three ways; none of
 //! them ever stops the agent: no answer, a 5xx or a malformed body changes nothing; a
-//! 401/403 changes nothing and slows the polls to hourly.
+//! 401/403 changes nothing and slows the polls to hourly. The host state's answer, whatever
+//! its status, also gives the pool's clock (its `Date`), which a Mac's VM is held to (#320).
 //!
 //! From this agent on the target is the host state's, never `follow.latest`: the pool's
 //! public `GET /factory/follow` is read by the legacy sets' updaters and the agents before
@@ -183,6 +184,12 @@ pub(crate) struct Relayed {
 pub(crate) trait Pool {
     /// The host state, signed with the host key.
     fn state(&mut self) -> Net<HostState>;
+    /// The `Date` header of the pool's last answer to [`Pool::state`], Unix seconds, whatever
+    /// its status: the pool's clock, which a Mac's VM is held to after a wake (#320). A 401
+    /// for a signature whose time is too far from the pool's carries one too, and a Mac
+    /// whose own clock is that far off is the case the clock rule must still see. `None`
+    /// when no answer came.
+    fn date(&self) -> Option<i64>;
     /// The pool's public `follow` for `worker_id`: asked only of a pool from before #344.
     fn follow(&mut self, worker_id: &str) -> Net<Follow>;
     /// Posts the host report (signed); the pool keeps it and closes the orders it answers.
@@ -406,6 +413,8 @@ pub(crate) struct Https {
     /// GitHub's API, for the latest release's tag (#326): a short deadline, so a GitHub
     /// that does not answer holds one tick for seconds, not a minute.
     api: ureq::Agent,
+    /// The `Date` of the host state's last answer ([`Pool::date`]).
+    date: Option<i64>,
     /// The watchdog's clock, moved on as a body's bytes arrive: a long download is
     /// progress, a stalled one is not.
     progress: Option<Arc<AtomicI64>>,
@@ -437,6 +446,7 @@ impl Https {
                 .build()
                 .into(),
             api: config(Duration::from_secs(20), 3).build().into(),
+            date: None,
             progress: None,
         }
     }
@@ -458,22 +468,32 @@ impl Https {
         res: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
         max: u64,
     ) -> Net<(u16, Vec<u8>)> {
+        self.read_dated(res, max).0
+    }
+
+    /// [`Https::read`], with the answer's `Date` header, whatever its status.
+    fn read_dated(
+        &self,
+        res: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+        max: u64,
+    ) -> (Net<(u16, Vec<u8>)>, Option<i64>) {
         let mut res = match res {
             Ok(r) => r,
-            Err(e) => return Net::NoAnswer(e.to_string()),
+            Err(e) => return (Net::NoAnswer(e.to_string()), None),
         };
+        let date = date_of(res.headers());
         let status = res.status().as_u16();
         if let Net::Unauthorized(s) = classify(status) {
-            return Net::Unauthorized(s);
+            return (Net::Unauthorized(s), date);
         }
         let mut reader = res.body_mut().with_config().limit(max).reader();
         let mut body = Vec::new();
         let mut chunk = vec![0u8; 64 << 10];
         loop {
             match reader.read(&mut chunk) {
-                Ok(0) => return Net::Ok((status, body)),
+                Ok(0) => return (Net::Ok((status, body)), date),
                 Ok(n) => body.extend_from_slice(&chunk[..n]),
-                Err(e) => return Net::NoAnswer(format!("HTTP {status}: {e}")),
+                Err(e) => return (Net::NoAnswer(format!("HTTP {status}: {e}")), date),
             }
             if let Some(p) = &self.progress {
                 p.store(super::now(), Ordering::Relaxed);
@@ -501,9 +521,22 @@ impl Https {
 
     /// A call signed with the host key: a GET, or a POST of `body` as JSON.
     fn signed_call(&self, method: &str, path: &str, body: Option<&[u8]>) -> Net<Vec<u8>> {
+        self.signed_call_dated(method, path, body).0
+    }
+
+    /// [`Https::signed_call`], with the answer's `Date` header, whatever its status.
+    fn signed_call_dated(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+    ) -> (Net<Vec<u8>>, Option<i64>) {
         let Some((url, header)) = self.signed_request(method, path, body.unwrap_or_default())
         else {
-            return Net::NoAnswer("no host key on this machine to sign with".into());
+            return (
+                Net::NoAnswer("no host key on this machine to sign with".into()),
+                None,
+            );
         };
         let res = match body {
             None => self
@@ -518,8 +551,18 @@ impl Https {
                 .header("content-type", "application/json")
                 .send(b),
         };
-        ok_body(self.read(res, STATE_MAX))
+        let (answer, date) = self.read_dated(res, STATE_MAX);
+        (ok_body(answer), date)
     }
+}
+
+/// An answer's `Date` header as Unix seconds: the pool's clock, which a Mac's VM is held to
+/// after a wake (#320). `None` when it is missing or is no IMF-fixdate.
+fn date_of(headers: &ureq::http::HeaderMap) -> Option<i64> {
+    headers
+        .get(ureq::http::header::DATE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::vm::parse_http_date)
 }
 
 /// The body of a 2xx answer; any other status sorted as [`classify`] does.
@@ -537,7 +580,9 @@ fn ok_body(answer: Net<(u16, Vec<u8>)>) -> Net<Vec<u8>> {
 
 impl Pool for Https {
     fn state(&mut self) -> Net<HostState> {
-        match self.signed_call("GET", STATE_PATH, None) {
+        let (answer, date) = self.signed_call_dated("GET", STATE_PATH, None);
+        self.date = date;
+        match answer {
             Net::Ok(body) => match parse_state(&body) {
                 Ok(s) => Net::Ok(s),
                 Err(e) => Net::NoAnswer(e),
@@ -545,6 +590,10 @@ impl Pool for Https {
             Net::NoAnswer(e) => Net::NoAnswer(e),
             Net::Unauthorized(s) => Net::Unauthorized(s),
         }
+    }
+
+    fn date(&self) -> Option<i64> {
+        self.date
     }
 
     fn follow(&mut self, worker_id: &str) -> Net<Follow> {
@@ -641,6 +690,19 @@ impl Pool for Https {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_answers_date_is_the_pools_clock() {
+        let mut h = ureq::http::HeaderMap::new();
+        assert_eq!(date_of(&h), None);
+        h.insert(
+            ureq::http::header::DATE,
+            "Thu, 14 Jan 2027 08:00:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(date_of(&h), Some(1_799_913_600));
+        h.insert(ureq::http::header::DATE, "yesterday".parse().unwrap());
+        assert_eq!(date_of(&h), None);
+    }
 
     #[test]
     fn the_host_state_is_read_leniently() {

@@ -25,6 +25,9 @@
 //!    is stopped and removed, the old engine named again, and a round brings the dispatcher
 //!    back there (`return`); the round's outcome says the switch was rolled back and why.
 //!    agent.toml was never changed.
+//!
+//! On a Mac (#320) the switch is refused: the bundle runs in the VM's engine, which the
+//! agent keeps ([`super::vm`]), and the drivers here are a Linux host's.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -455,6 +458,13 @@ impl Agent {
 
     /// What refuses a request before any engine is asked.
     fn switch_check(&self, req: &Request) -> Result<(), String> {
+        // A Mac's bundle runs in a VM's engine (#320): the agent keeps the omarchy Colima
+        // VM — its three mounts, its task firewall, its clock — around the docker engine
+        // inside it, and Docker Desktop's or OrbStack's is the person's. The drivers this
+        // binary carries move between a Linux host's engines only.
+        if self.cfg.vm.is_some() || cfg!(target_os = "macos") {
+            return Err("this host's bundle runs in a Mac's VM (#320), whose engine the agent keeps: the runtime switch moves between a Linux host's engines only".into());
+        }
         let r = Runtime::parse(&req.driver).ok_or_else(|| {
             format!(
                 "{:?} is not a driver this agent carries (compose/docker, compose/podman)",

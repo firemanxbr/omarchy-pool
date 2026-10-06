@@ -43,6 +43,8 @@ const MAX_BACKOFF_S: i64 = 600;
 pub(super) const UNAUTHORIZED_S: i64 = 3600;
 /// The safety timer: the running set is checked against `last-good/` at least this often.
 const DRIFT_S: i64 = 900;
+/// A count of a Mac's capacity that did not happen after a start of the VM, tried again.
+const RECOUNT_AGAIN_S: i64 = 3600;
 /// How often the host's own addresses are read again for `etc/dispatcher.env` (#371).
 pub(crate) const ADDRESSES_S: i64 = 60;
 /// How often the pool's edge is asked which public address the host leaves from (#371).
@@ -113,6 +115,21 @@ pub(crate) struct Agent {
     pub(super) retry: Option<(Version, i64)>,
     /// The applied release whose agent was checked and needs no update (once per start).
     pub(super) upward_checked: Option<Release>,
+    /// A Mac's `omarchy` VM (#320), kept running, sized, walled and on time.
+    pub vm: Option<super::vm::Keeper>,
+    /// The `Date` of the host state's last answer, whatever its status, and when it came
+    /// (the Mac's clock): the VM's is held to it.
+    pool_date: Option<(i64, i64)>,
+    /// The applied release whose signed minimum the keeper holds the VM's size to.
+    vm_release: Option<Release>,
+    /// A start of the VM ended: the host's capacity is counted again from then, once the
+    /// gate is open; a count that did not happen (an image the VM lacks, which the loop does
+    /// not pull) is tried again an hour later.
+    vm_recount_at: Option<i64>,
+    /// The pinned docker CLI the driver runs, for that count.
+    docker_cli: Option<PathBuf>,
+    /// How the host's capacity is counted (a test plays it).
+    pub count: Box<Count>,
     /// Order ids refused as seen already, said once per process (#344).
     pub(super) repeated: BTreeSet<String>,
     /// The legacy set as last looked at, for the report, and when.
@@ -163,6 +180,9 @@ impl HostEnv {
         }
     }
 }
+
+/// [`super::vm::count`], or a test's stand-in.
+pub(crate) type Count = dyn FnMut(&super::vm::Counting<'_>) -> Result<String, String>;
 
 enum Fetched {
     Bundle(Box<VerifiedBundle>),
@@ -224,6 +244,12 @@ impl Agent {
             gate_next: 0,
             retry: None,
             upward_checked: None,
+            vm: None,
+            pool_date: None,
+            vm_release: None,
+            vm_recount_at: None,
+            docker_cli: None,
+            count: Box::new(super::vm::count),
             repeated: BTreeSet::new(),
             legacy_seen: None,
             reported: Reported::default(),
@@ -287,6 +313,11 @@ impl Agent {
 
     fn use_tools(&mut self, t: tools::Tools) {
         self.state.tools = Some(t.pins.clone());
+        // Colima wants a docker client on the Mac to start the VM: the release's (#320).
+        if let Some(k) = self.vm.as_mut() {
+            k.use_docker(&t.docker);
+        }
+        self.docker_cli = Some(t.docker.clone());
         self.driver = Some(Box::new(Compose::new(
             t,
             &self.cfg.socket_cli,
@@ -341,11 +372,25 @@ impl Agent {
         // A new agent touches nothing until its health gate passed; once a self-update
         // swapped `current`, the state is saved and the agent exits before anything
         // else (#316).
+        let asks = self
+            .vm
+            .as_mut()
+            .map(|k| k.before_poll(now, &self.journal))
+            .unwrap_or_default();
+        if asks.poll_now {
+            // A Mac that woke may be on another network: its addresses, and the public one
+            // its tasks leave from, are read again at once, not at the hour (#371).
+            if let Some(h) = self.host_env.as_mut() {
+                h.next_at = now;
+                h.public_at = now;
+            }
+        }
         if self.gate.is_some() {
+            self.keep_vm(now, true);
             self.gate_step(now);
         } else if self.exit.is_none() {
             self.dispatcher_env(now);
-            if round_now || now >= self.state.poll.next_at {
+            if round_now || asks.poll_now || now >= self.state.poll.next_at {
                 self.poll(now, round_now);
             } else if !self.queue.is_empty() {
                 // The orders the brake paced: the next one, two seconds after the last.
@@ -354,6 +399,9 @@ impl Agent {
                     self.after_orders(taken, self.state.target, None, now);
                 }
             }
+            // A recount after the VM started rewrites detection's file: the settings narrow
+            // it again in the same tick, before drift looks at the set's inputs.
+            self.keep_vm(now, false);
             self.narrow(now);
             // Never while the owner's runtime switch moves the dispatcher (#325): it stops
             // the old one on purpose.
@@ -381,6 +429,89 @@ impl Agent {
             self.saved = Some(self.state.clone());
         }
         Ok(())
+    }
+
+    /// A Mac's VM, one step: started when it is not running, restarted when it differs
+    /// from agent.toml (a size or mount change only while no task runs, never below the
+    /// applied release's signed minimum), walled, its clock held to the pool's; once a
+    /// start ended, the host's capacity counted again (#320).
+    fn keep_vm(&mut self, now: i64, gate: bool) {
+        if self.vm.is_none() {
+            return;
+        }
+        // The applied release's signed minimum, read once per release.
+        if let Some(r) = self.state.applied.filter(|r| self.vm_release != Some(*r)) {
+            self.vm_release = Some(r);
+            if let Some(b) = self.cached(r) {
+                let c = b.manifest().capacity().constants();
+                let min = (c.min.cpus, c.min.mem_gb);
+                if let Some(k) = self.vm.as_mut() {
+                    k.minimum(min);
+                }
+            }
+        }
+        let Some(k) = self.vm.as_mut() else {
+            return;
+        };
+        let driver = &mut self.driver;
+        let mut tasks = || match driver.as_deref_mut().map(Driver::tasks_running) {
+            Some(Answer::Yes(b)) => Some(b),
+            _ => None,
+        };
+        if k.step(now, self.pool_date, &mut tasks, gate, &self.journal) {
+            self.vm_recount_at = Some(now);
+        }
+        // A restart of the VM recreated the dispatcher: one of the brake's restarts (#325),
+        // never held by it.
+        for _ in 0..k.take_restarts() {
+            self.state.brake.record(now, &[Ask::Restart]);
+        }
+        // A new agent's health gate touches nothing but the VM's start.
+        if !gate && self.vm_recount_at.is_some_and(|t| now >= t) {
+            self.vm_recount_at = (!self.recount(now)).then_some(now + RECOUNT_AGAIN_S);
+        }
+    }
+
+    /// The host's capacity counted again after a start of the VM, as `omarchy-agent
+    /// capacity --write` counts it ([`super::vm::count`]): a new size or Rosetta lane
+    /// reaches `run/capacity.json`, whose change reloads the dispatcher (an input of the
+    /// set) and reaches the pool with its next report. Whether it was counted.
+    fn recount(&mut self, now: i64) -> bool {
+        // The probe container may take a while (the engine just up; it pulls nothing): the
+        // watchdog counts from here.
+        if let Some(p) = &self.progress {
+            p.store(super::now(), Ordering::Relaxed);
+        }
+        let said = match (self.docker_cli.clone(), self.state.applied) {
+            (Some(docker), Some(r)) => match self.cached(r) {
+                Some(b) => {
+                    let toml = fs::read_to_string(self.paths.agent_toml()).unwrap_or_default();
+                    let meminfo = self.vm.as_mut().and_then(super::vm::Keeper::meminfo);
+                    let c = super::vm::Counting {
+                        docker: &docker,
+                        socket: &self.cfg.socket_cli,
+                        work_root: &self.cfg.work_root,
+                        set_dir: &self.cfg.set_dir,
+                        manifest: b.manifest(),
+                        agent_toml: &toml,
+                        meminfo: meminfo.as_deref(),
+                    };
+                    (self.count)(&c)
+                }
+                None => Err(format!("release {r}'s bundle is not in the cache")),
+            },
+            _ => Err("no release applied yet, or no pinned docker CLI".into()),
+        };
+        let counted = said.is_ok();
+        let detail = match said {
+            Ok(s) => s,
+            Err(e) => format!(
+                "the host's capacity was not counted again after the VM started ({e}); the loop tries again in an hour, `omarchy-agent capacity --write` counts it now"
+            ),
+        };
+        self.journal
+            .write(now, "capacity", serde_json::json!({ "detail": detail }));
+        counted
     }
 
     fn step(&mut self, now: i64) -> Result<(), String> {
@@ -452,7 +583,13 @@ impl Agent {
     }
 
     fn poll(&mut self, now: i64, round_now: bool) {
-        let answer = match self.pool.state() {
+        let answer = self.pool.state();
+        // The pool's clock, from any answer it gave: a 401 for a Mac whose clock is too far
+        // off to sign is the answer the VM's clock rule needs most (#320).
+        if let Some(d) = self.pool.date() {
+            self.pool_date = Some((d, super::now()));
+        }
+        let answer = match answer {
             Net::Ok(s) if s.older_pool => self.target_by_follow(s, now),
             other => other,
         };

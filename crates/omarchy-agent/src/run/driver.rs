@@ -8,7 +8,11 @@
 //! (#344, design v2 §11.1 M4). It reads the dispatcher's last log lines for the
 //! `diagnostics` order, says which engine answers on its socket and counts the host's task
 //! containers there for the owner's runtime switch (#325). Capacity (`capacity()`, #333)
-//! and emulation (P2) join this trait in their own issues.
+//! and fingerprinting (#317) join this trait in their own issues; the emulated lane's
+//! smoke run (§15's `emulation(arch, image)`, #338) is `capacity::emulation::Smoke` on the
+//! probe's engine CLI until then, and joins it with `capacity()` when the run loop detects
+//! — then as a start and a poll, like a pull: its first run may pull the foreign build
+//! image, longer than one engine call may block here.
 
 use std::path::PathBuf;
 
@@ -160,4 +164,14 @@ pub(crate) trait Driver {
     /// How many running containers carry the agent's host label `host` outside any compose
     /// project: the dispatcher's task containers and their sidecars (#325's runtime switch).
     fn host_tasks(&mut self, host: &str) -> Answer<usize>;
+    /// Whether a task container runs on the engine ([`TASK_LABEL`]): what holds back a
+    /// resize of a Mac's VM (#320), which would end it. The driver lists it; it never acts
+    /// on one.
+    fn tasks_running(&mut self) -> Answer<bool>;
 }
+
+/// The label the dispatcher gives every task container and every sidecar of one
+/// (`com.omarchy.task=<id>`, pkg-repo's `stop::TASK_LABEL`); the role label
+/// (`org.omarchy-pool.task.role`) is a sidecar's only, and a task with the signed `direct`
+/// exception has none.
+pub(crate) const TASK_LABEL: &str = "com.omarchy.task";

@@ -531,8 +531,8 @@ fn stub_path(dir: &Path) -> PathBuf {
         }
     }
     for stub in ["docker", "curl", "jq"] {
-        fs::write(bin.join(stub), "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(bin.join(stub), fs::Permissions::from_mode(0o755)).unwrap();
+        // Started by the guards' shells: written where no fork of this process can hold it.
+        crate::run::exec::write_stub(&bin.join(stub), "#!/bin/sh\nexit 0\n");
     }
     bin
 }

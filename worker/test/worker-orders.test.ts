@@ -524,6 +524,13 @@ describe("the caps and the budget", () => {
 
   it("the pool's sixty-first order in a day and its eleventh restart in an hour are not issued, each journaled once; a person's order still passes", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
+    // The spent budget is journaled once per UTC day, and the claims below walk 15 minutes on:
+    // started in the day's last 20 minutes, the refusals fall on both sides of midnight and are
+    // journaled twice. Such a run starts just after midnight instead; what earlier tests wrote
+    // stays in the past, as if the run had begun a few minutes later.
+    const DAY = 1440 * MIN;
+    const now = Date.now();
+    vi.setSystemTime(now % DAY > DAY - 20 * MIN ? now - (now % DAY) + DAY + MIN : now);
     const t0 = Date.now();
     const at = (m: number) => new Date(t0 - m * MIN).toISOString();
     // The pool's day: 59 orders already (the tests above gave some), none a restart within the hour.

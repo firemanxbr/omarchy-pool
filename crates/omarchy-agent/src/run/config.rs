@@ -131,6 +131,21 @@ pub struct Config {
     pub runtime: Option<Runtime>,
     /// The envelope's bounds on what the pool may narrow and ask (#325).
     pub policy: Policy,
+    /// A Mac's `omarchy` Colima VM (#320, `[vm] runtime = "colima"`), which the loop keeps
+    /// running, sized and on time. `None` on Linux, and for Docker Desktop's or `OrbStack`'s
+    /// VM, which the agent uses but never manages.
+    pub vm: Option<Vm>,
+}
+
+/// The `omarchy` VM as agent.toml describes it (#320, design v2 §19.2): its size is the
+/// envelope's `max_cpus` and `max_mem_gb` (install writes half the Mac's), its mounts the
+/// set's three directories (`crate::vm::mounts`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Vm {
+    pub cpus: u32,
+    pub mem_gb: u32,
+    pub disk_gb: u32,
+    pub rosetta: bool,
 }
 
 /// The container engine behind the compose driver's socket: the drivers this binary
@@ -184,34 +199,6 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// The envelope's bounds as `agent.toml` says them: an architecture `emulate` cannot
-    /// run, or a soak longer than the pool's grace, is refused.
-    fn of(e: EnvelopePart) -> Result<Self, String> {
-        if let Some(bad) = e
-            .emulate
-            .iter()
-            .flatten()
-            .find(|a| !ARCHES.contains(&a.as_str()))
-        {
-            return Err(format!(
-                "agent.toml: envelope.emulate names {bad:?}, which is neither x86_64 nor aarch64"
-            ));
-        }
-        if e.soak_minutes > MAX_SOAK_MINUTES {
-            return Err(format!(
-                "agent.toml: envelope.soak_minutes {}: at most {MAX_SOAK_MINUTES} (the pool's claim grace for a soaking host ends two hours after a deploy)",
-                e.soak_minutes
-            ));
-        }
-        Ok(Policy {
-            max_units: e.max_units,
-            emulate: e.emulate,
-            diagnostics: e.diagnostics,
-            drivers: e.drivers.unwrap_or_else(|| vec!["compose".to_owned()]),
-            soak_minutes: e.soak_minutes,
-        })
-    }
-
     /// Whether the envelope lets the bundle run on `r`'s driver.
     pub fn allows_driver(&self, r: Runtime) -> bool {
         self.drivers
@@ -221,9 +208,7 @@ impl Policy {
 
     /// Whether the envelope lets an emulated lane of `arch` run.
     pub fn allows_lane(&self, arch: &str) -> bool {
-        self.emulate
-            .as_ref()
-            .is_none_or(|e| e.iter().any(|a| a == arch))
+        crate::capacity::emulation::allowed(self.emulate.as_deref(), arch)
     }
 }
 
@@ -236,6 +221,15 @@ struct File {
     set: SetPart,
     #[serde(default)]
     envelope: EnvelopePart,
+    vm: Option<VmPart>,
+}
+
+#[derive(Deserialize)]
+struct VmPart {
+    runtime: String,
+    profile: Option<String>,
+    rosetta: Option<bool>,
+    disk_gb: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -255,6 +249,8 @@ struct SetPart {
 #[derive(Deserialize, Default)]
 struct EnvelopePart {
     task_subnets: Option<String>,
+    max_cpus: Option<u32>,
+    max_mem_gb: Option<u32>,
     agent_budget: Option<toml::Value>,
     max_units: Option<u32>,
     emulate: Option<Vec<String>>,
@@ -265,8 +261,8 @@ struct EnvelopePart {
     soak_minutes: u32,
 }
 
-/// The architectures a lane may be (design v2 §7.4).
-pub(crate) const ARCHES: [&str; 2] = ["x86_64", "aarch64"];
+/// The architectures a lane may be (design v2 §7.4): detection's own list (#338).
+pub(crate) use crate::capacity::emulation::ARCHES;
 
 /// The longest soak an owner may set (#326): the pool's claim grace for a soaking host ends
 /// two hours after a deploy, so a longer one would idle the host it meant to protect.
@@ -292,6 +288,69 @@ fn is_https_origin(s: &str) -> bool {
             && h.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
     })
+}
+
+impl Policy {
+    /// The envelope's bounds as agent.toml says them; an architecture the pool does not
+    /// build, or a soak longer than the pool's grace for one (#326), is refused.
+    fn of(e: &EnvelopePart) -> Result<Self, String> {
+        if let Some(bad) = e
+            .emulate
+            .iter()
+            .flatten()
+            .find(|a| !ARCHES.contains(&a.as_str()))
+        {
+            return Err(format!(
+                "agent.toml: envelope.emulate names {bad:?}, which is neither x86_64 nor aarch64"
+            ));
+        }
+        if e.soak_minutes > MAX_SOAK_MINUTES {
+            return Err(format!(
+                "agent.toml: envelope.soak_minutes {}: at most {MAX_SOAK_MINUTES} (the pool's claim grace for a soaking host ends two hours after a deploy)",
+                e.soak_minutes
+            ));
+        }
+        Ok(Policy {
+            max_units: e.max_units,
+            emulate: e.emulate.clone(),
+            diagnostics: e.diagnostics,
+            drivers: e
+                .drivers
+                .clone()
+                .unwrap_or_else(|| vec!["compose".to_owned()]),
+            soak_minutes: e.soak_minutes,
+        })
+    }
+}
+
+impl Vm {
+    /// `[vm]`: the `omarchy` Colima profile, sized by the envelope; `None` for a VM the
+    /// agent uses but never manages (Docker Desktop's, `OrbStack`'s).
+    fn of(v: VmPart, e: &EnvelopePart) -> Result<Option<Self>, String> {
+        match v.runtime.as_str() {
+            "colima" => {
+                if let Some(p) = v.profile.filter(|p| p != crate::vm::PROFILE) {
+                    return Err(format!(
+                        "agent.toml: vm.profile {p:?}: the agent's VM is the {} profile",
+                        crate::vm::PROFILE
+                    ));
+                }
+                let (Some(cpus), Some(mem_gb)) = (e.max_cpus, e.max_mem_gb) else {
+                    return Err("agent.toml: [vm] runtime colima takes its size from envelope.max_cpus and envelope.max_mem_gb (install writes them)".into());
+                };
+                Ok(Some(Vm {
+                    cpus,
+                    mem_gb,
+                    disk_gb: v.disk_gb.unwrap_or(crate::vm::DISK_GB),
+                    rosetta: v.rosetta.unwrap_or(false),
+                }))
+            }
+            "docker-desktop" | "orbstack" => Ok(None),
+            other => Err(format!(
+                "agent.toml: vm.runtime {other:?} is none of colima, docker-desktop, orbstack"
+            )),
+        }
+    }
 }
 
 impl Config {
@@ -350,13 +409,15 @@ impl Config {
                 format!("agent.toml: set.runtime {r:?} is neither \"docker\" nor \"podman\"")
             })?),
         };
-        let task_subnets = f.envelope.task_subnets.clone();
-        let agent_budget = Budget::from_envelope(f.envelope.agent_budget.as_ref())?;
-        let policy = Policy::of(f.envelope)?;
+        let policy = Policy::of(&f.envelope)?;
         let socket_cli = need_path(f.set.socket_cli, "set.socket_cli")?;
         let socket_mount = match f.set.socket_mount {
             None => socket_cli.clone(),
             some => need_path(some, "set.socket_mount")?,
+        };
+        let vm = match f.vm {
+            None => None,
+            Some(v) => Vm::of(v, &f.envelope)?,
         };
         Ok(Config {
             pool,
@@ -369,12 +430,13 @@ impl Config {
             project: f.set.project,
             socket_cli,
             socket_mount,
-            task_subnets,
-            agent_budget,
+            task_subnets: f.envelope.task_subnets,
+            agent_budget: Budget::from_envelope(f.envelope.agent_budget.as_ref())?,
             envelope,
             engine,
             runtime,
             policy,
+            vm,
         })
     }
 
@@ -568,6 +630,47 @@ max_units = 3
         ))
         .unwrap();
         assert_eq!(podman.runtime, Some(Runtime::Podman));
+    }
+
+    #[test]
+    fn a_macs_vm_takes_its_size_from_the_envelope() {
+        let mac = include_str!("../../tests/fixtures/lint/envelope/mac.toml");
+        let c = Config::parse(&format!("worker_id = \"w_1\"\n{mac}")).unwrap();
+        assert_eq!(
+            c.vm,
+            Some(Vm {
+                cpus: 8,
+                mem_gb: 32,
+                disk_gb: 100,
+                rosetta: true
+            })
+        );
+        assert_eq!(c.socket_mount, Path::new("/var/run/docker.sock"));
+        assert_eq!(c.envelope.vm_mounts.as_ref().map(Vec::len), Some(3));
+        for (from, to, why) in [
+            ("max_cpus     = 8\n", "", "takes its size"),
+            (
+                "profile = \"omarchy\"",
+                "profile = \"default\"",
+                "the omarchy profile",
+            ),
+            (
+                "runtime = \"colima\"",
+                "runtime = \"podman\"",
+                "none of colima",
+            ),
+        ] {
+            let e = Config::parse(&format!(
+                "worker_id = \"w_1\"\n{}",
+                mac.replacen(from, to, 1)
+            ))
+            .unwrap_err();
+            assert!(e.contains(why), "{why}: {e}");
+        }
+        // Docker Desktop's VM is used, never managed.
+        let shared = mac.replace("runtime = \"colima\"", "runtime = \"docker-desktop\"");
+        let c = Config::parse(&format!("worker_id = \"w_1\"\n{shared}")).unwrap();
+        assert_eq!(c.vm, None);
     }
 
     #[test]

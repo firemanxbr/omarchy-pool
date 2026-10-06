@@ -23,8 +23,11 @@
 //!
 //! Beyond that the order is answered `refused` with `brake: …`, a release change is held
 //! (`held`, the next poll asks again), and an Update waits, unconsumed. What the agent does on its own — a changed
-//! input, drift, a person's `round` at the host — is never braked. The counters live in
-//! `state.json`, so a restart loop resets nothing.
+//! input, drift, a person's `round` at the host — is never braked. On a Mac (#320), a
+//! restart of the `omarchy` VM by the loop's keeper stops the dispatcher in it: it is
+//! recorded as one of the restarts, so the pool's orders and rounds get only the room left,
+//! but never held — M7's own rate limit (one action per ten minutes, six a day) governs the
+//! VM. The counters live in `state.json`, so a restart loop resets nothing.
 
 use serde::{Deserialize, Serialize};
 

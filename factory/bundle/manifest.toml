@@ -72,8 +72,8 @@ share_when_native_waits = 0.5
 # platform, by URL and SHA-256. The same versions and sums the worker image
 # pins (factory/image/Containerfile, DOCKER_CLI and COMPOSE; the writer's
 # test holds them equal), and release.yml downloads each one and checks its
-# sum before it signs. aarch64-darwin joins with macOS hosts (design v2 §22,
-# P3): no host runs the agent there before then.
+# sum before it signs. aarch64-darwin is a Mac's (#320, design v2 §19.2): the
+# same versions, built for Darwin, so Homebrew is needed for Colima and Lima only.
 [tools.x86_64-linux.docker]
 url = "https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz"
 sha256 = "4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640"
@@ -89,3 +89,11 @@ sha256 = "e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817"
 [tools.aarch64-linux.docker-compose]
 url = "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-linux-aarch64"
 sha256 = "732e3a84c1a0f67256ce80bc2598a24546b10ca05f9faa97efceb1171ece2ef7"
+
+[tools.aarch64-darwin.docker]
+url = "https://download.docker.com/mac/static/stable/aarch64/docker-27.5.1.tgz"
+sha256 = "b0366bf473b9b97b0c5556c4c2fd6d92ea63e4848af2f869c93a98d2e2e1d3fa"
+
+[tools.aarch64-darwin.docker-compose]
+url = "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-darwin-aarch64"
+sha256 = "998735c9b6fe68a4f05895e6ea73d71ad06f9fc7046383ad89e47346781b6af5"

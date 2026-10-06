@@ -389,6 +389,17 @@ fn what_refuses_a_switch_changes_nothing() {
     w.agent.cfg.policy.drivers = vec!["compose/docker".into()];
     assert!(refused(&mut w, "compose/podman", PODMAN)
         .starts_with("the envelope's drivers (compose/docker) do not name compose/podman"));
+    w.agent.cfg.policy.drivers = vec!["compose".into()];
+    // A Mac's bundle runs in the omarchy VM the agent keeps (#320): never moved off it.
+    w.agent.cfg.vm = Some(crate::run::config::Vm {
+        cpus: 8,
+        mem_gb: 32,
+        disk_gb: 100,
+        rosetta: true,
+    });
+    assert!(refused(&mut w, "compose/podman", PODMAN)
+        .starts_with("this host's bundle runs in a Mac's VM (#320)"));
+    w.agent.cfg.vm = None;
     // The pool cannot ask for one: nothing it sends names a driver, and the request is the
     // agent's own file.
     assert!(!w.agent.paths.data.join(REQUEST).exists());

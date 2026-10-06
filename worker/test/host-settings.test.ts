@@ -340,6 +340,8 @@ describe("the contract with the agent (report-settings.json)", () => {
     expect(page.host.brake).toEqual(fixture.brake);
     expect(page.host.units).toBe(4);
     expect(page.host.lanes).toEqual([{ arch: "aarch64", mode: "native" }]);
+    // The lane the settings turned off is held with why, as detection holds one (#338).
+    expect(page.host.capacity.held_lanes).toEqual([{ arch: "x86_64", reason: "off: the pool's settings turn it off (set-emulate)" }]);
     expect(page.host.pool_settings).toEqual({ units: 4, emulate: [] });
     expect(page.can).toMatchObject({ settings: true, rotate_token: true, diagnostics: true });
     expect(page.orders.map((o: { kind: string; arg: unknown }) => [o.kind, o.arg])).toEqual(expect.arrayContaining([["set-units", { units: 4 }], ["set-emulate", { emulate: [] }]]));

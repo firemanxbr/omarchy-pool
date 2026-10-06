@@ -382,7 +382,13 @@ attempt with exit 96, before any drafter turn. `pkg-repo work` and the
 community worker report it with `needs_native`, and the build goes back to
 the queue for a native worker of its architecture, the attempt given back.
 No emulated worker takes it again. Every page that follows the build says
-what it waits for.
+what it waits for. On a maintainer host the word is its lease's lane
+(#338): the dispatcher tells only a container on an emulated lane
+`WORKER_LABELS={"emulated":true}`, and the pool takes `needs_native` from a
+lease whose `lane` is `emulated` — the attempt given back, no emulated lane
+again — and refuses it from a native lane (a failure like any other),
+whatever the registration's labels say. A legacy worker's lease carries the
+lane its claim wrote from its labels.
 
 `--idle-exit 300` makes a worker exit after five minutes without work;
 `--once` makes it one-shot; SIGTERM (`docker stop`) drains it — the task in
@@ -526,7 +532,9 @@ out        /task/out: the kind's closed list under its caps (a build: packages, 
            SIGTERM or SIGKILL, fails `lost` (a reboot, a shutdown): the attempt is given back
 exit 75    a restart order, or a loop without progress for 15 min: task containers run on, the next dispatcher re-adopts them
 network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a /28 of OMARCHY_TASK_SUBNETS, its gateway
-           off the host (docker ≥ 28: gateway_mode_ipv4=isolated; podman's CLI: --disable-dns); its egress
+           off the host (docker ≥ 28: gateway_mode_ipv4=isolated; podman's CLI: --disable-dns; behind podman's
+           docker API it stays, closed by prep-root.sh's INPUT drop, and install's preflight refuses a host where
+           a task reaches a network's gateway, #367); its egress
            sidecar <network>-egress (pkg-repo egress: CONNECT, GET, HEAD to public addresses only, judged by the
            resolved address) on the shared omarchy-egress bridge and on the task's network, the task's HTTP(S)_PROXY;
            a model kind's agent sidecar <network>-agent (the broker, agent.env read-only, its caps in BROKER_AGENT_*,
@@ -563,7 +571,11 @@ guaranteed emulated share first — and the first is leased with one
 another claim took it first); D1
 serialises writes, so two workers never receive the same task. A host's
 lease records its `lane`, `size`, `units` and `disk_gb`, and the statement
-itself checks the host's units again. A legacy registration is selected as a
+itself checks the host's units again. A host's lanes are its agent's (`run/capacity.json`, #338): the native one
+and each emulated one it detected. Builds and trials run on a lane of their
+arch; a job with helper containers needs a lane of each ring architecture
+they check (`health` its own, `promote` each it promotes, `security` both),
+native or emulated, with no wait; every other kind is arch-neutral. A legacy registration is selected as a
 host with one lane (its arch, emulated when its labels say so) and one
 build, its own scope (project or community, shared or its owner's) kept
 until #343. The runbook's *How the pool hands a host work* has the rules. Only the lease
@@ -597,6 +609,7 @@ factory/
   sizing/tasks.toml               maintainer-set task sizes, disk budgets (the pool's claims read them, #337) and network exceptions per package
   sets/host/                      the host agent's set (#307): compose.yml with the one dispatcher service, set.toml, files/
   host/prep-root.sh               the root-only steps a new maintainer host needs once (never run by the agent)
+  host/prep-mac.sh                a Mac's once, without sudo: Colima and Lima from Homebrew, the omarchy VM's three directories (#320)
   bin/agent.py                    the owner's agent, whichever provider: Anthropic, OpenAI, Gemini, xAI (by the key set)
   bin/draft-pkgbuild              project URL → PKGBUILD (the agent, or a template), checksums left to updpkgsums
   prompts/pkgbuild.md             the packaging rules the drafter follows

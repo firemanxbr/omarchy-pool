@@ -495,6 +495,7 @@ impl Driver for FakeDriver {
         e.networks.retain(|n| n.0 != id);
         Answer::Yes(())
     }
+
     fn logs(&mut self, id: &str, lines: u32) -> Answer<String> {
         let e = self.0.borrow();
         if e.down {
@@ -535,6 +536,14 @@ impl Driver for FakeDriver {
             return Answer::NoAnswer("down".into());
         }
         Answer::Yes(e.tasks().iter().filter(|c| c.status == "running").count())
+    }
+
+    fn tasks_running(&mut self) -> Answer<bool> {
+        let e = self.0.borrow();
+        if e.down {
+            return Answer::NoAnswer("down".into());
+        }
+        Answer::Yes(e.tasks().iter().any(|c| c.status == "running"))
     }
 }
 
@@ -577,6 +586,8 @@ pub(crate) struct PoolState {
     /// times it was read.
     pub github: Option<Net<Release>>,
     pub github_reads: u32,
+    /// The `Date` the host state's answer carries, whatever its status (#320).
+    pub date: Option<i64>,
 }
 
 pub(crate) type Remote = Rc<RefCell<PoolState>>;
@@ -588,6 +599,10 @@ impl Pool for FakePool {
         let mut s = self.0.borrow_mut();
         s.polls += 1;
         s.state.clone().unwrap_or(Net::NoAnswer("no pool".into()))
+    }
+
+    fn date(&self) -> Option<i64> {
+        self.0.borrow().date
     }
 
     fn follow(&mut self, worker_id: &str) -> Net<Follow> {
