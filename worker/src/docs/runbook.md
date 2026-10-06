@@ -2045,7 +2045,13 @@ so a size-4 build waits for memory rather than run smaller.
   without a release. A claim never pins a rebuild to the requester's host:
   naming one is refused (`requester_host`), and another architecture's
   same-agent pick goes to another maintainer's worker with that agent, or
-  unpinned when there is none.
+  unpinned when there is none. While the solo-maintainer exception names a
+  maintainer (#394, *The solo-maintainer exception*), none of this holds for
+  that maintainer's own packages: their own hosts take the copy at their next
+  claim, Review's pane says *@m1's own hosts may build it … no release
+  needed*, a claim may pin it to their worker, and *Release to any host* is
+  refused as nothing to release. Another requester's hosts are still kept off
+  it.
 - **The second opinion (#339, D36).** An audit runs in a fresh container
   with its own agent sidecar. It leaves the machine that built what it
   audits to another that can take it now, for 3 minutes. The pool tells
@@ -2870,7 +2876,10 @@ decides on their own package, and never on a contributor's bytes:
   request changes, a rejection and a release with `code:
   "conflict_of_interest"` when they are a maintainer (`maintainer_only`, as
   anyone who is not, otherwise); an adoption of your own package is refused
-  the same way (`conflict_of_interest`).
+  the same way (`conflict_of_interest`) — except for the one maintainer
+  `factory/MAINTAINERS.toml`'s `[solo]` table names while it is there, whose
+  decisions on their own packages are taken and marked self-reviewed (*The
+  solo-maintainer exception* below, #394).
 - **Withdraw a record** (`POST /api/v1/factory/record/withdraw {key,
   reason}`) when a log or a report must leave the public bucket: a signed
   tombstone takes its place, the staging copy goes with it.
@@ -2893,7 +2902,7 @@ a ring, and the one thing that must hold for it to open:
 
 | Door | What it ships | What guards it |
 |---|---|---|
-| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package |
+| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
 | **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
 | **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
 | **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |
@@ -2970,6 +2979,75 @@ agree). See [Governance](GOVERNANCE.md). `GET /api/v1/factory/maintainers`
 and `/factory/approvals` are the public record. What a package is about is
 its *category*, proposed by the project's agent at audit and settled by a
 maintainer (`POST /factory/packages/<name>/category`).
+
+### The solo-maintainer exception
+
+A maintainer decision of 2026-10-06 (#394): while one maintainer is active
+and the Studio is the only host, that maintainer builds, reviews and approves
+their own packages, in the open. The switch is one table in
+`factory/MAINTAINERS.toml`, nothing else — no setting, no route, no database
+write by hand:
+
+```toml
+[solo]
+maintainer = "firemanxbr"
+since = "2026-10-06"
+reason = "maralcbr has no time or machines for the pool (#332): one active maintainer and one host until more maintainers join"
+```
+
+**Turning it on** is a governance pull request adding the table, like any
+change to the file: `factory/bin/check-governance` (CI) refuses a table that
+is not exactly one maintainer of `maintainers` (never a list), a `since`
+written `"YYYY-MM-DD"`, and a `reason` on one line of 300 characters at most
+(no tab, control or format character; counted as the brain counts them, so a
+table CI takes is one the brain applies), and nothing else in it; it changes
+neither `.github/CODEOWNERS` nor the host agent's pin (`check-governance
+--write` says so). Within ten minutes of the
+merge the brain applies it (`worker/src/governance.ts`, the table
+`governance_solo` is its copy) and writes one `role` line, *… under the
+solo-maintainer exception since …*; `GET /api/v1/factory/maintainers` says
+`solo`, and Status and Review say it is in force.
+
+**While it is on**, for the named maintainer, and only on their own packages:
+
+- Review's doors let them through — **Claim** (labelled *Claim ·
+  self-review* on their row), **Approve** with their passkey as always,
+  **Request changes**, **Reject**, **Release claim**; the cancel door sends
+  them to the release, as it sends anyone; the *No maintainer* tab's
+  **Adopt** on a package of their own, and the package page's (*Adopt ·
+  self-review*, where its You card says they decide on their own package
+  instead of the lock). An agent's draft of their own verdict
+  is taken too, and confirmed in the browser as any draft.
+- Their own host builds the project's copy (D35 above): nothing waits for
+  *Release to any host*.
+- Each such decision says *self-reviewed (solo-maintainer exception)* on its
+  journal line, carries `solo_exception` (who, since, why) in its signed
+  record and its answer, and is marked *self-reviewed* on Review (the claim,
+  the workspace, the decision), the build's page and the package's page —
+  an adoption on its maintainer row, with its requester still named, for as
+  long as it stands.
+  Status's line counts them and links the list on `/docs/governance#solo`
+  (`GET /api/v1/factory/self-reviewed`).
+- Everyone else is under the rule as before: another maintainer is refused
+  their own package (`conflict_of_interest`) and their hosts are kept off its
+  copy; a contributor's package is decided as it always was.
+- The second opinion is unchanged: with one host and one model each audit of
+  the project's copy records `independent: none`, and Status's line counts
+  them beside the exception.
+
+A sync that reads a `[solo]` the brain refuses (it cannot get past CI, but a
+hand edit on `main` could) applies the list and no exception, and its log line
+says `[solo] not applied: …`; the rules then hold for everyone.
+
+**Turning it off** — once a second maintainer is active, with a host — is a
+pull request deleting the table, reviewed by that maintainer. Within ten
+minutes the brain clears it, writes the `role` line *… ended …*, and every
+door and placement is the two-person rule again, unchanged: a claim of their
+own package answers `conflict_of_interest`, its copy waits for another
+maintainer's host or release. Nothing decided meanwhile is undone, and its
+marks stay on the record and in the list; a self-reviewed approval another
+maintainer does not stand behind is withdrawn like any other (*Withdraw*
+above), with a reason.
 
 ## Adding a repository
 

@@ -24,10 +24,20 @@ refused (factory/bin/co-sign reads it) — and so is a threshold one lost key
 would leave out of reach (as many maintainers required as hold a key, one of
 them with a single key): no release could be co-signed under the old pin
 again, and every host would need a reinstall.
+
+The file's `[solo]` table (#394) is the solo-maintainer exception, a
+maintainer decision in the open: while it is there, the one maintainer it
+names builds, reviews and approves their own packages, each such decision
+marked self-reviewed on the record (the pool reads it on main, as it reads
+the list). It is refused unless it is exactly that: `maintainer`, one login
+of `maintainers` (never a list); `since`, a date written "YYYY-MM-DD";
+`reason`, one line — and nothing else. Removing the table ends the exception.
 """
+import datetime
 import importlib.machinery
 import importlib.util
 import re
+import unicodedata
 import sys
 import tomllib
 from pathlib import Path
@@ -39,6 +49,53 @@ GOV = ROOT / "factory" / "MAINTAINERS.toml"
 CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 PINNED = ROOT / "crates" / "omarchy-agent" / "src" / "verify" / "maintainers.toml"
 LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
+DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# The longest reason [solo] may give: one line, read on Status (worker/src/governance.ts SOLO_REASON_MAX).
+REASON_MAX = 300
+
+
+def solo(doc, maintainers):
+    """The `[solo]` table — {maintainer, since, reason} — or None without one; raises ValueError for a table the pool would not
+    apply (worker/src/governance.ts parseSolo checks it the same way and applies nothing it refuses)."""
+    table = doc.get("solo")
+    if table is None:
+        return None
+    if not isinstance(table, dict):
+        raise ValueError("[solo] must be a table")
+    unknown = sorted(set(table) - {"maintainer", "since", "reason"})
+    if unknown:
+        raise ValueError(f"[solo] has unknown field(s) {', '.join(unknown)}")
+    who = table.get("maintainer")
+    if isinstance(who, list):
+        raise ValueError("[solo] maintainer names one maintainer, never a list")
+    if not isinstance(who, str) or not LOGIN.match(who):
+        raise ValueError("[solo] maintainer must be a GitHub login")
+    if who not in maintainers:
+        raise ValueError(f"[solo] maintainer {who} is not in `maintainers`")
+    since = table.get("since")
+    if not isinstance(since, str) or not DATE.match(since):
+        raise ValueError('[solo] since must be a date, written "YYYY-MM-DD"')
+    try:
+        datetime.date.fromisoformat(since)
+    except ValueError:
+        raise ValueError('[solo] since must be a date, written "YYYY-MM-DD"') from None
+    # One line, the same on both sides (parseSolo counts and trims what this counts and trims): no control, format or line separator
+    # character anywhere — whose trimming Python and JavaScript disagree on — then the spaces around it (Zs, the same set for both once
+    # those are refused) off, and at most REASON_MAX code points, never UTF-16 units.
+    raw = table.get("reason")
+    raw = raw if isinstance(raw, str) else ""
+    reason = raw.strip()
+    if not reason:
+        raise ValueError("[solo] reason is required: why, in one line")
+    if not_one_line(raw) or len(reason) > REASON_MAX:
+        raise ValueError(f"[solo] reason is one line of {REASON_MAX} characters at most")
+    return {"maintainer": who, "since": since, "reason": reason}
+
+
+def not_one_line(text):
+    """Whether a reason holds what one line never does (worker/src/governance.ts NOT_ONE_LINE): a control, format, line or
+    paragraph separator character."""
+    return any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") for ch in text)
 
 
 def co_sign():
@@ -65,7 +122,11 @@ def load():
     why = cs.stranded(threshold, keys)
     if why:
         sys.exit(f"{GOV.name}: {why}")
-    return sorted(dict.fromkeys(ms), key=str.lower), cs.pinned_toml(threshold, keys), threshold, keys
+    try:
+        exception = solo(doc, ms)
+    except ValueError as e:
+        sys.exit(f"{GOV.name}: {e}")
+    return sorted(dict.fromkeys(ms), key=str.lower), cs.pinned_toml(threshold, keys), threshold, keys, exception
 
 
 def expected(maintainers):
@@ -94,7 +155,7 @@ def expected(maintainers):
 
 
 def main():
-    maintainers, pinned, threshold, keys = load()
+    maintainers, pinned, threshold, keys, exception = load()
     want = expected(maintainers)
     have = CODEOWNERS.read_text() if CODEOWNERS.exists() else ""
     have_pinned = PINNED.read_text() if PINNED.exists() else ""
@@ -110,7 +171,8 @@ def main():
     if have_pinned != pinned:
         sys.exit(f"{PINNED.relative_to(ROOT)} does not match {GOV.relative_to(ROOT)}'s [cosignature]; run factory/bin/check-governance --write (and raise the agent's version)")
     held = ", ".join(f"{login}: {len(theirs)} keys" if len(theirs) > 1 else login for login, theirs in keys.items())
-    print(f"governance ok: {len(maintainers)} maintainer(s): {', '.join(maintainers)}; co-signature: {threshold} of {len(keys)} maintainer(s) with a key ({held or 'none yet'})")
+    said = f"; solo-maintainer exception: {exception['maintainer']} since {exception['since']}" if exception else ""
+    print(f"governance ok: {len(maintainers)} maintainer(s): {', '.join(maintainers)}; co-signature: {threshold} of {len(keys)} maintainer(s) with a key ({held or 'none yet'}){said}")
 
 
 if __name__ == "__main__":

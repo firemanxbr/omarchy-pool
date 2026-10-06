@@ -22,8 +22,8 @@ const BODY = String.raw`
   <div id="acts" class="acts"></div>
 
   <section id="who-section" hidden>
-    <div class="h2row"><h2>Who does what</h2><span class="hint">two people behind every package the factory ships</span></div>
-    <p class="sub">The contributor brings the request and a build that passes the gate; only then is a maintainer's time well spent. The maintainer has the project build it again, reads the evidence, tries it and decides — never on their own package. Each half is fifty points; the class is the score today, the projection is with the maintainer's half green. <a href="/docs/what-we-test#the-score">The rules →</a></p>
+    <div class="h2row"><h2>Who does what</h2><span class="hint">two people behind every package the factory ships — the solo-maintainer exception aside, marked</span></div>
+    <p class="sub">The contributor brings the request and a build that passes the gate; only then is a maintainer's time well spent. The maintainer has the project build it again, reads the evidence, tries it and decides — never on their own package, but for the one maintainer the solo-maintainer exception names, each such decision marked self-reviewed (<a href="/docs/governance#solo">#394</a>). Each half is fifty points; the class is the score today, the projection is with the maintainer's half green. <a href="/docs/what-we-test#the-score">The rules →</a></p>
     <div id="ckreq"></div>
     <div class="cklist" id="cklist"></div>
   </section>
@@ -83,6 +83,8 @@ const SCRIPT = String.raw`
   function ownerOf() { return (T.package || {}).owner || T.task.owner; }
 
   // ---- the head: what it is, in a line and five tiles
+  // A claim or a decision its requester took under the solo-maintainer exception (#394, the governance file's [solo]): marked, for every reader.
+  function selfMark(m) { return m ? pillHtml("warn", "self-reviewed", "taken by its requester, " + m.maintainer + ", under the solo-maintainer exception (since " + m.since + ")") : ""; }
   function render() {
     var t = T.task, isBuild = t.kind === "build", project = isBuild && t.trust === "project", p = t.params || {};
     document.title = (isBuild ? t.name + " " + (t.version || "") + " · build #" + t.id : t.kind + " #" + t.id) + " · omarchy-pool";
@@ -91,6 +93,7 @@ const SCRIPT = String.raw`
     // The package's one address (the shell's pkgHref) with the ring this build is about (the shell's ringOfBuild): the most stable ring that serves the package — T.rings is the server's list — the lab for a staged build nobody decided yet, as Review and a person's builds link it, the shell's default for a build in no ring; the timeline's "the package →" is the same link.
     $("#title").innerHTML = isBuild ? '<a href="' + pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch) + '" title="the package, as Packages shows it — with where it came from">' + esc(t.name) + '</a> <span class="mono muted" style="font-size:.7em">' + esc(t.version || "") + '</span>' : esc(t.kind) + ' <span class="mono muted" style="font-size:.7em">#' + t.id + '</span>';
     $("#badges").innerHTML = pillHtml("none", t.arch) + taskPill(t.status) + nativePill(t) + (isBuild ? pillHtml(project ? "ok" : "lilac", project ? "the project" : "evidence", project ? "built by the project on a trusted worker, from a contributor's evidence" : "a contributor's build: evidence for a maintainer, never what users get") : "")
+      + selfMark((T.approval && T.approval.solo_exception) || (project && p.solo_exception))
       + (isBuild && sc ? (sc.ready ? pillHtml("ok", "ready for a maintainer", "the contributor's half is complete: a build that passed the gate, audited") : t.status === "staged" || t.status === "leased" || t.status === "queued" ? pillHtml("warn", "not ready", "the contributor's half is not complete yet") : "") : "");
     // The worker as every table names it — the shell's wtId, its owner the shell's person — so the lede and the kv below read the same machine; a lease the record no longer lists is the bare id, whole, as the Pipeline and a person's builds draw it.
     var built = T.worker ? (T.worker.owner ? personLink(T.worker.owner) + "'s worker " : "worker ") + wtId(T.worker) : t.lease_owner ? "worker " + wtId(t.lease_owner) : esc(t.finished_at ? "a worker the record no longer names" : "no worker yet");
@@ -104,7 +107,7 @@ const SCRIPT = String.raw`
       ["Gate", vet ? (vet.verdict === "pass" ? "pass" : "fail") : "—", vet ? (vet.fails ? vet.fails + " failing" : (vet.warnings ? vet.warnings + " warning" + (vet.warnings === 1 ? "" : "s") : "clean")) : "built before the gate", vet ? (vet.verdict === "pass" ? "ok" : "bad") : ""],
       ["Audit", audit && audit.status === "done" && audit.result ? String(audit.result.verdict || "done") : audit ? audit.status : "—", audit && audit.result ? num((audit.result.findings || []).length) + " finding(s)" + (audit.result.model ? " · " + audit.result.model : "") : audit ? "the second agent" : project ? "audited on the contributor's build" : "no audit yet", audit && audit.result ? ({ ok: "ok", warn: "warn", block: "bad" }[audit.result.verdict] || "") : ""],
       ["Trial", trial && trial.status === "done" && trial.result ? (trial.result.verdict === "ok" ? "installs" : String(trial.result.verdict)) : trial ? trial.status : "—", trial ? "a real pacman, from the lab" : project ? "not tried yet" : "only the project's build is tried", trial && trial.result ? (trial.result.verdict === "ok" ? "ok" : "bad") : ""],
-      ["Decision", a ? a.decision : wd ? "withdrawn" : (t.status === "staged" ? "waiting" : "—"), a ? "by " + a.by + " · " + ago(a.created_at) : wd ? "the approval by " + wd.by + " taken back by " + wd.withdrawn_by : t.status === "staged" ? "a maintainer, never the owner" : "nothing to decide", a ? (a.decision === "approved" ? "ok" : "bad") : wd ? "warn" : (t.status === "staged" ? "warn" : "")],
+      ["Decision", a ? a.decision : wd ? "withdrawn" : (t.status === "staged" ? "waiting" : "—"), a ? "by " + a.by + " · " + ago(a.created_at) + (a.solo_exception ? " · self-reviewed" : "") : wd ? "the approval by " + wd.by + " taken back by " + wd.withdrawn_by : t.status === "staged" ? "a maintainer — the owner only under the solo-maintainer exception" : "nothing to decide", a ? (a.decision === "approved" ? "ok" : "bad") : wd ? "warn" : (t.status === "staged" ? "warn" : "")],
       ["Class", sc ? sc.class + ' <span class="dim" style="font-size:.5em">' + sc.points + '/' + sc.max + '</span>' : "—", sc ? (sc.class === sc.projected ? "with the maintainer's half green: the same" : "with the maintainer's half green: " + sc.projected) : "no chain", sc ? CLASS_CLS[sc.class] : ""],
       ["In the rings", T.rings.length ? T.rings.join(" · ") : "—", T.rings.length ? (T.rings.length === 1 && T.rings[0] === "lab" ? "the lab: not promised, not promoted" : "what users get") : "not in the pool", T.rings.length ? (T.rings.length === 1 && T.rings[0] === "lab" ? "warn" : "ok") : ""]
     ]); else setTiles("#tiles", [
@@ -135,7 +138,7 @@ const SCRIPT = String.raw`
     var t = T.task, el = $("#acts"), a = T.approval;
     if (t.kind !== "build") { el.innerHTML = ""; return; }
     var standing = !!(a && a.standing), pb = T.project_builds[0], sc = T.score, beside = [];
-    if (standing) beside.push('<span class="muted">Approved by ' + personLink(a.by) + ' ' + ago(a.created_at) + '.</span>');
+    if (standing) beside.push('<span class="muted">Approved by ' + personLink(a.by) + ' ' + ago(a.created_at) + '.</span>' + (a.solo_exception ? " " + selfMark(a.solo_exception) : ""));
     else if (t.status === "staged") {
       if (pb && (pb.status === "queued" || pb.status === "leased")) beside.push('<span class="muted">the project is building it (<a href="/build/' + pb.id + '">#' + pb.id + '</a>)</span>');
       else if (pb && pb.status === "staged") beside.push('<span class="muted">the project\'s build <a href="/build/' + pb.id + '">#' + pb.id + '</a> is what gets approved</span>');
@@ -151,7 +154,7 @@ const SCRIPT = String.raw`
     var t = T.task, p = t.params || {}, steps = [], isBuild = t.kind === "build";
     var add = function (cls, title, detail, at) { steps.push({ cls: cls, title: title, detail: detail, at: at }); };
     if (isBuild && T.package && T.package.request_id) add("ok", "Requested", personLink(T.package.owner) + ' asked for <b>' + esc(t.name) + '</b> — request #' + T.package.request_id + (T.package.project ? ' from <a href="' + esc(T.package.project) + '">' + esc(T.package.project.replace(/^https?:\/\/(www\.)?/, "")) + '</a>' : ''), T.package.created_at);
-    if (T.from && p.review !== undefined) add("ok", "Evidence", personLink(T.from.owner) + '\'s build <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> was staged; a maintainer asked the project to build it again', T.from.finished_at);
+    if (T.from && p.review !== undefined) add("ok", "Evidence", personLink(T.from.owner) + '\'s build <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> was staged; a maintainer asked the project to build it again' + (p.solo_exception ? ' — ' + personLink(p.solo_exception.maintainer) + ', their own package: ' + selfMark(p.solo_exception) + ' under the solo-maintainer exception' : ''), T.from.finished_at);
     if (T.from && p.task !== undefined) add("ok", "Of build", 'this ' + esc(t.kind) + ' is of build <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + esc(T.from.name || t.name) + ' ' + esc(T.from.version || '') + ')', T.from.finished_at);
     // Asked for a worker that was drained (#277): the sweep sent it to the queue, and the step says so.
     var unpinned = p.unpinned && p.unpinned.from ? ' · asked for ' + wtId(p.unpinned.from) + ', which was drained: in the queue since ' + esc(clockOf(p.unpinned.at)) : '';
@@ -170,7 +173,7 @@ const SCRIPT = String.raw`
     T.trial.slice().reverse().forEach(function (a) { add(a.status === "done" ? (a.result && a.result.verdict === "ok" ? "ok" : "error") : a.status === "failed" ? "error" : "dim", "Trial " + (a.status === "done" ? (a.result && a.result.verdict === "ok" ? "installs" : (a.result && a.result.verdict) || "done") : a.status), '<a href="/build/' + a.id + '">#' + a.id + '</a> — a real pacman, from the lab' + (a.error ? ' — ' + esc(a.error) : ''), a.finished_at || a.started_at); });
     T.project_builds.slice().reverse().forEach(function (b) { add(b.status === "staged" || b.status === "done" ? "ok" : b.status === "failed" ? "error" : "blue", "The project's build " + (b.status === "leased" ? "running" : b.status), '<a href="/build/' + b.id + '">#' + b.id + '</a>' + (b.error ? ' — ' + esc(b.error.slice(0, 160)) : ''), b.finished_at || b.started_at); });
     var a = T.approval;
-    if (a) add(a.withdrawn_at ? "dim" : a.decision === "approved" ? "ok" : a.changes ? "warn" : "error", a.decision === "approved" ? "Approved" : a.changes ? "Changes requested" : "Rejected", 'by ' + personLink(a.by) + (a.note ? ' — ' + esc(a.note) : '') + (a.rebuild_task && a.rebuild_task !== t.id ? ' · the project\'s build <a href="/build/' + a.rebuild_task + '">#' + a.rebuild_task + '</a> ' + esc(a.rebuild_status || '') : ''), a.created_at);
+    if (a) add(a.withdrawn_at ? "dim" : a.decision === "approved" ? "ok" : a.changes ? "warn" : "error", a.decision === "approved" ? "Approved" : a.changes ? "Changes requested" : "Rejected", 'by ' + personLink(a.by) + (a.solo_exception ? ' ' + selfMark(a.solo_exception) + ' (solo-maintainer exception, since ' + esc(a.solo_exception.since) + ')' : '') + (a.note ? ' — ' + esc(a.note) : '') + (a.rebuild_task && a.rebuild_task !== t.id ? ' · the project\'s build <a href="/build/' + a.rebuild_task + '">#' + a.rebuild_task + '</a> ' + esc(a.rebuild_status || '') : ''), a.created_at);
     if (a && a.withdrawn_at) add("warn", "Approval withdrawn", 'by ' + personLink(a.withdrawn_by) + ' — ' + esc(a.withdrawn_reason || '') + ' · the package left the rings; another maintainer decides', a.withdrawn_at);
     T.publish.slice().reverse().forEach(function (b) { add(b.status === "done" ? "ok" : b.status === "failed" ? "error" : "blue", "Published " + (b.status === "done" ? "" : b.status), '<a href="/build/' + b.id + '">#' + b.id + '</a> — into the pool, signed' + (b.error ? ' — ' + esc(b.error) : ''), b.finished_at || b.started_at); });
     if (T.rings.length) add("ok", "In the rings", T.rings.join(" · ") + ' — <a href="' + pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch) + '">the package →</a>', null);
@@ -333,6 +336,16 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // A claim or a decision its requester took under the solo-maintainer exception (#394): a self-reviewed mark in the head, on the
+      // Decision tile, beside the decision cell and on the timeline's claim and decision — who, and since when, on hover.
+      id: "build.self-reviewed",
+      page,
+      anchor: ['id="badges"', 'id="tiles"', 'id="timeline"'],
+      script: ["function selfMark(m)", '"self-reviewed"', "T.approval.solo_exception", "project && p.solo_exception", '" · self-reviewed"', "a.solo_exception.since", "p.solo_exception.maintainer", "under the solo-maintainer exception"],
+      reads: [{ path: task, fields: ["approval.solo_exception", "approval.by", "task.params"] }],
+      visible: EVERYONE,
+    },
+    {
       id: "build.tiles",
       page,
       anchor: ['id="tiles"', 'class="tiles six"'],
@@ -390,7 +403,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "build.who-section",
       page,
-      anchor: ['id="who-section"', "two people behind every package the factory ships", 'href="/docs/what-we-test#the-score"'],
+      anchor: ['id="who-section"', "two people behind every package the factory ships — the solo-maintainer exception aside, marked", 'href="/docs/what-we-test#the-score"'],
       script: ['$("#who-section")', "if (!sc) { el.hidden = true; return; }"],
       reads: [{ path: task, fields: ["score"] }],
       visible: EVERYONE,

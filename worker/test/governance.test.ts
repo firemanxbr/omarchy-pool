@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { APPLY_URL, parseGovernance } from "../src/governance";
+import { APPLY_URL, parseGovernance, parseSolo, SOLO_REASON_MAX } from "../src/governance";
 import { REPO_ARCHES } from "../src/meta";
 // The repository's own files, as text (Vite's ?raw): the tests run inside workerd, which has no filesystem.
 import repositoryFile from "../../factory/MAINTAINERS.toml?raw";
@@ -31,6 +31,70 @@ describe("governance file", () => {
     // A maintainer's backup key beside their own: a list (#330).
     const key = withKeys.split('"')[5];
     expect(parseGovernance(`${withKeys}maralcbr = ["${key.replace("AAAAII", "AAAAIJ")}", "${key}"]\n`)).toEqual(["firemanxbr", "maralcbr"]);
+  });
+});
+
+// The solo-maintainer exception's switch (#394): the [solo] table, read by the brain as check-governance holds it (tests/governance-solo.sh).
+describe("the [solo] table", () => {
+  const LIST = ["alice", "bob"];
+  const file = (solo: string) => `maintainers = ["alice", "bob"]\n\n${solo}\n[cosignature]\nthreshold = 0\n`;
+  const table = (o: Record<string, string>) => `[solo]\n${Object.entries(o).map(([k, v]) => `${k} = ${v}`).join("\n")}\n`;
+  const ok = { maintainer: '"alice"', since: '"2026-10-06"', reason: '"bob has no time or machines for the pool"' };
+
+  it("is no exception without the table: the rules as they are", () => {
+    expect(parseSolo(file(""), LIST)).toBeNull();
+    expect(parseSolo(`maintainers = ["alice"]`, ["alice"])).toBeNull();
+  });
+
+  it("names one maintainer of the list, since a date, with a reason on one line", () => {
+    expect(parseSolo(file(table(ok)), LIST)).toEqual({ maintainer: "alice", since: "2026-10-06", reason: "bob has no time or machines for the pool" });
+    expect(parseSolo(file(table({ ...ok, maintainer: '"bob"', since: '"2028-02-29"', reason: '"  spaces around it  "' })), LIST)).toEqual({ maintainer: "bob", since: "2028-02-29", reason: "spaces around it" });
+    // Counted in characters as check-governance counts them, code points: 200 outside the BMP are 200 (400 UTF-16 units), and taken.
+    const emoji = "\u{1F600}".repeat(200);
+    expect(parseSolo(file(table({ ...ok, reason: `"${emoji}"` })), LIST)).toEqual({ maintainer: "alice", since: "2026-10-06", reason: emoji });
+    // The list beside it still parses as it did (D39: a list that parses is applied).
+    expect(parseGovernance(file(table(ok)))).toEqual(LIST);
+  });
+
+  it("refuses an unknown or unlisted login, more than one maintainer, no reason, a date that does not parse, a field it does not know", () => {
+    const refused: [Record<string, string | undefined>, RegExp][] = [
+      [{ maintainer: '"carol"' }, /carol is not in `maintainers`/],
+      [{ maintainer: '"not a login!"' }, /must be a GitHub login/],
+      [{ maintainer: undefined }, /must be a GitHub login/],
+      [{ maintainer: '["alice", "bob"]' }, /one maintainer, never a list/],
+      [{ maintainer: '["alice"]' }, /one maintainer, never a list/],
+      [{ reason: undefined }, /reason is required/],
+      [{ reason: '"   "' }, /reason is required/],
+      [{ reason: '"""\ntwo\nlines"""' }, /one line of 300 characters at most/],
+      [{ reason: `"${"x".repeat(SOLO_REASON_MAX + 1)}"` }, /one line of 300 characters at most/],
+      // As check-governance counts and trims (tests/governance-solo.sh holds the same cases): 301 characters outside the BMP are 301, and a
+      // control or format character anywhere — a tab, a byte-order mark JavaScript's trim() would take away and Python's strip() keeps — is
+      // never one line.
+      [{ reason: `"${"\u{1F600}".repeat(SOLO_REASON_MAX + 1)}"` }, /one line of 300 characters at most/],
+      [{ reason: '"a\\ttab inside"' }, /one line of 300 characters at most/],
+      [{ reason: '"\\uFEFFa byte-order mark first"' }, /one line of 300 characters at most/],
+      [{ since: '"2026-02-30"' }, /since must be a date/],
+      [{ since: '"06/10/2026"' }, /since must be a date/],
+      [{ since: '"soon"' }, /since must be a date/],
+      [{ since: undefined }, /since must be a date/],
+      [{ since: "2026-10-06" }, /since must be a date/],
+      [{ maintainers: '["bob"]' }, /unknown field\(s\) maintainers/],
+    ];
+    for (const [change, why] of refused) {
+      const o = Object.fromEntries(Object.entries({ ...ok, ...change }).filter(([, v]) => v !== undefined)) as Record<string, string>;
+      expect(() => parseSolo(file(table(o)), LIST), JSON.stringify(change)).toThrow(why);
+    }
+    expect(() => parseSolo(`maintainers = ["alice"]\nsolo = "alice"\n`, ["alice"])).toThrow(/must be a table/);
+  });
+
+  it("reads the repository's own file: a table there names a maintainer of its list", () => {
+    const list = parseGovernance(repositoryFile);
+    const solo = parseSolo(repositoryFile, list);
+    if (solo) {
+      expect(list).toContain(solo.maintainer);
+      expect(solo.since).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(solo.reason.length).toBeGreaterThan(0);
+    }
   });
 });
 

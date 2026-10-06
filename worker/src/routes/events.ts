@@ -12,10 +12,23 @@ interface EventIn {
 }
 
 /**
+ * The journal's kinds only the Worker's own doors write, never a job: a
+ * claim and a release of a review (`review`), a decision (`approve`), an
+ * adoption (`adopt`), a role or the governance file's exception taken up or
+ * ended (`role`). Pages and the API read these lines as decisions people
+ * took — the self-reviewed list and Status's count of it (#394), the
+ * governance chapter's role changes — so a job's token that could post one
+ * would forge a decision nobody took. No job posts them (pkg-repo's events
+ * are health, abi, trial, promote, sync and the like).
+ */
+export const RESERVED_KINDS: readonly string[] = ["review", "approve", "adopt", "role"];
+
+/**
  * POST /events — a line of the journal. A job's token posts what the job
  * did: a health check, an ABI check, a promotion, a sync — the rows the
  * promotion gate reads as evidence (a health row's soak, an abi row's
- * verdict) and Status draws as the rings' state. A maintainer by hand
+ * verdict) and Status draws as the rings' state — never a line of a kind
+ * the Worker's doors write (RESERVED_KINDS). A maintainer by hand
  * (`hand`: the session or an `omc_` token) writes a `note` and nothing
  * else (#284): a health or abi row from a token would fill a soak or stand
  * for an ABI check no job ran, and the gate would promote past evidence
@@ -26,6 +39,7 @@ export async function handlePostEvent(request: Request, env: Env, hand: Contribu
   if (e instanceof Response) return e;
   if (!e?.kind || !e.summary) return json({ error: "kind and summary are required" }, 400);
   if (hand && e.kind !== "note") return json({ error: `a maintainer writes a note to the journal (kind "note"); a ${e.kind} line is a job's — what the gate and Status read as evidence; nothing was written`, code: "note_only" }, 403);
+  if (RESERVED_KINDS.includes(e.kind)) return json({ error: `a ${e.kind} line is written by the pool's own doors — a decision, an adoption or a role a person took — never by a job; nothing was written`, code: "reserved_kind" }, 403);
   const status = e.status ?? "ok";
   if (!["ok", "warn", "error"].includes(status)) return json({ error: "bad status" }, 400);
   // The two payload fields the pages write into an address: a run's link must be an https URL and a release an id — any job token may post here, and Status's journal draws the payload for every reader.
