@@ -126,6 +126,16 @@ impl Range {
         }
     }
 
+    /// The one address it is, when it is one (a /32, a /128).
+    pub(crate) fn address(&self) -> Option<IpAddr> {
+        (self.prefix == self.full()).then_some(self.net)
+    }
+
+    /// Whether `ip` lies inside it, an IPv4 address in its v4-mapped form too.
+    pub(crate) fn contains(&self, ip: IpAddr) -> bool {
+        self.covers(&Range::host(ip.to_canonical()))
+    }
+
     /// Whether `other` lies inside this range (itself included).
     fn covers(&self, other: &Range) -> bool {
         self.net.is_ipv4() == other.net.is_ipv4()

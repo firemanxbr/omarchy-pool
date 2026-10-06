@@ -221,7 +221,8 @@ impl AgentToml {
     }
 }
 
-/// Every key of `agent.toml`'s `[envelope]` (design v2 §12).
+/// Every key of `agent.toml`'s `[envelope]` (design v2 §12), and `direct_network`, the grant
+/// of a signed exception's bridge network (#373).
 const ENVELOPE_KEYS: &[&str] = &[
     "max_units",
     "max_cpus",
@@ -234,6 +235,7 @@ const ENVELOPE_KEYS: &[&str] = &[
     "allow_socket",
     "rootful_ack",
     "dedicated",
+    "direct_network",
     "userns_remap",
     "drivers",
     "paths",

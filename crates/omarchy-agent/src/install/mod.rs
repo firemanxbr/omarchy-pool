@@ -36,9 +36,15 @@
 //! Docker Desktop's or `OrbStack`'s VM when one is here and its home mount is removed; the
 //! envelope records the VM (`[vm]`) and the two sockets; the plist replaces the unit.
 //!
-//! Seams left for later issues, by name: the egress probe behind the egress sidecar on a
-//! task's internal network (#373), until which a rootless host fails the probe on a signed
-//! exception's bridge ([`egress`]); the `subuid` level for rootless podman, once the
+//! Preflight's egress probe runs the way a task runs, behind an egress sidecar from the
+//! release's worker image on a network made like a task's, and probes a signed exception's
+//! bridge only where the envelope grants one (`--direct-network`, #373; [`egress`]).
+//!
+//! Seams left for later issues, by name: the claim saying whether a host runs a signed
+//! exception's bridge (until then the pool may offer such a package to a host that hands it
+//! back, #373, as a lost lease: the pool gives the attempt back for a task's first two losses
+//! and spends one for each after, so such a package fails where only hosts without the grant
+//! claim it); the `subuid` level for rootless podman, once the
 //! dispatcher (#335) starts task containers with `--userns=auto` (until then rootless podman
 //! reads as `user`); task containers and sidecars carry `org.omarchy-pool.agent.host=<host>`
 //! (design v2 §9.3), which uninstall removes by.
@@ -260,6 +266,11 @@ pub struct Options {
     pub task_subnets: Option<String>,
     /// The person says this is a machine or VM used only as a pool host (design v2 §19.1).
     pub dedicated: bool,
+    /// The person grants a signed exception's bridge network (`--direct-network`, the
+    /// envelope's `direct_network`, #373): its probe runs, and the dispatcher runs a package
+    /// with that exception instead of handing it back. `--no-direct-network` takes a recorded
+    /// grant back; neither keeps what agent.toml says.
+    pub direct_network: Option<bool>,
     pub legacy: Option<String>,
     pub agent_env_from: Option<PathBuf>,
     pub max_units: Option<u32>,
@@ -688,6 +699,11 @@ pub(crate) fn measure_as(
     };
     let mut dedicated = o.dedicated
         || envelope::envelope_value(ex, "dedicated").and_then(|v| v.as_bool()) == Some(true);
+    // A grant an earlier install recorded, or the owner wrote, stays unless taken back with
+    // `--no-direct-network` (#373).
+    let direct_network = o.direct_network.unwrap_or_else(|| {
+        envelope::envelope_value(ex, "direct_network").and_then(|v| v.as_bool()) == Some(true)
+    });
     let project = envelope::set_str(ex, "project").unwrap_or_else(|| envelope::PROJECT.to_owned());
     // The legacy project: `--legacy`, or the one an earlier install recorded, so running
     // install again repairs it without the flag (legacy.json's owner is checked below).
@@ -1007,8 +1023,11 @@ pub(crate) fn measure_as(
                 Err(e) => r.blockers.push(format!("legacy: {e}")),
             }
         }
-        match (task.first().and_then(|t| t.last_28()), &image) {
-            (Some(subnet), Some(img)) => {
+        let worker = manifest
+            .as_ref()
+            .map(|m| m.worker_image().index().to_string());
+        match (task.first().and_then(|t| t.last_28()), &image, worker) {
+            (Some(subnet), Some(img), Some(worker)) => {
                 let rootful = facts.as_ref().is_none_or(|f| !f.rootless());
                 let server = d.server();
                 let vm = found.as_ref().and_then(|f| f.kind);
@@ -1049,6 +1068,12 @@ pub(crate) fn measure_as(
                     router: gateway,
                     lan: net::lan_address(),
                     pool: pool.as_deref(),
+                    worker: &worker,
+                    task: &task,
+                    // What the agent renders for the dispatcher's sidecars now (#371): the
+                    // interfaces' addresses and the public one an earlier probe or run loop saw.
+                    own: addresses::detect(&p.sources(), &p.data, &task),
+                    direct: direct_network,
                     advice: egress::Advice {
                         rootful,
                         podman,
@@ -1128,6 +1153,7 @@ pub(crate) fn measure_as(
                     && facts.inner_isolation() == capacity::Isolation::Subuid
                     && facts.vm().is_none(),
                 dedicated,
+                direct_network,
                 max_units: o.max_units,
                 // The omarchy VM's size is the envelope's: written so the owner sees it.
                 max_cpus: vm
