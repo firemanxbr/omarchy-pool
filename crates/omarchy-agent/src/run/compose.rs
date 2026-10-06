@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::driver::{Answer, Driver, Exit, Foreign, Project, PullState, Unit};
+use super::config::Runtime;
+use super::driver::{Answer, Driver, EngineId, Exit, Foreign, Project, PullState, Unit};
 use super::exec::{self, Background, Progress};
 use super::tools::Tools;
 
@@ -599,6 +600,67 @@ impl Driver for Compose {
         }
     }
 
+    fn logs(&mut self, id: &str, lines: u32) -> Answer<String> {
+        if !is_container_id(id) {
+            return Answer::NoAnswer(format!("{id:?} is not a container id"));
+        }
+        let mut c = self.docker();
+        c.args(["logs", "--timestamps", "--tail", &lines.to_string(), id]);
+        match Self::call(Ok(c)) {
+            Answer::Yes(o) => Answer::Yes(merge_logs(&o.stdout, &o.stderr, lines)),
+            Answer::NotFound => Answer::NotFound,
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
+
+    fn engine(&mut self) -> Answer<EngineId> {
+        let mut c = self.docker();
+        c.args(["version", "--format", "{{json .Server}}"]);
+        let server = match Self::call(Ok(c)) {
+            Answer::Yes(o) => o.stdout,
+            Answer::NotFound => return Answer::NotFound,
+            Answer::NoAnswer(e) => return Answer::NoAnswer(e),
+        };
+        let mut c = self.docker();
+        c.args(["info", "--format", "{{json .SecurityOptions}}"]);
+        let security = match Self::call(Ok(c)) {
+            Answer::Yes(o) => o.stdout,
+            Answer::NotFound => return Answer::NotFound,
+            Answer::NoAnswer(e) => return Answer::NoAnswer(e),
+        };
+        parse_engine(&server, &security).map_or_else(Answer::NoAnswer, Answer::Yes)
+    }
+
+    fn host_tasks(&mut self, host: &str) -> Answer<usize> {
+        if !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            || host.is_empty()
+        {
+            return Answer::NoAnswer(format!("{host:?} is not a host id"));
+        }
+        let mut c = self.docker();
+        c.args([
+            "ps",
+            "--no-trunc",
+            "--format",
+            "{{.ID}}\t{{.Label \"com.docker.compose.project\"}}",
+            "--filter",
+        ])
+        .arg(format!("label=org.omarchy-pool.agent.host={host}"));
+        match Self::call(Ok(c)) {
+            Answer::Yes(o) => Answer::Yes(
+                o.stdout
+                    .lines()
+                    .filter_map(|l| l.trim_end().split_once('\t').or(Some((l.trim(), ""))))
+                    .filter(|(id, project)| is_container_id(id.trim()) && project.trim().is_empty())
+                    .count(),
+            ),
+            Answer::NotFound => Answer::Yes(0),
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
+
     fn tasks_running(&mut self) -> Answer<bool> {
         let mut c = self.docker();
         let filter = format!("label={}", super::driver::TASK_LABEL);
@@ -609,6 +671,65 @@ impl Driver for Compose {
             Answer::NoAnswer(e) => Answer::NoAnswer(e),
         }
     }
+}
+
+/// The two streams of `docker logs --timestamps`, merged by their timestamps (RFC 3339 with
+/// nanoseconds, so they sort as text) into the order the container wrote them; the last
+/// `lines` of them.
+fn merge_logs(stdout: &str, stderr: &str, lines: u32) -> String {
+    let mut all: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
+    all.sort_by_key(|l| l.split_once(' ').map_or(*l, |(t, _)| t));
+    let skip = all.len().saturating_sub(lines as usize);
+    let mut out = String::new();
+    for l in &all[skip..] {
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
+/// `docker version`'s server (its components: docker's `Engine`, podman's `Podman Engine`)
+/// and `docker info`'s security options (`name=rootless` on a rootless engine).
+fn parse_engine(server: &str, security: &str) -> Result<EngineId, String> {
+    #[derive(Deserialize)]
+    struct Server {
+        #[serde(rename = "Components", default)]
+        components: Vec<Component>,
+        #[serde(rename = "Version", default)]
+        version: String,
+    }
+    #[derive(Deserialize)]
+    struct Component {
+        #[serde(rename = "Name")]
+        name: String,
+        #[serde(rename = "Version", default)]
+        version: String,
+    }
+    let s: Server = serde_json::from_str(server.trim()).map_err(|e| format!("version: {e}"))?;
+    let podman = s.components.iter().find(|c| c.name == "Podman Engine");
+    let (runtime, version) = match podman {
+        Some(p) => (Runtime::Podman, p.version.clone()),
+        None => (
+            Runtime::Docker,
+            s.components
+                .iter()
+                .find(|c| c.name == "Engine")
+                .map_or(s.version, |c| c.version.clone()),
+        ),
+    };
+    let options: Vec<String> = serde_json::from_str(security.trim()).unwrap_or_default();
+    let version: String = version
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        .take(40)
+        .collect();
+    Ok(EngineId {
+        runtime,
+        version,
+        rootless: options
+            .iter()
+            .any(|o| o.split(',').any(|p| p == "name=rootless")),
+    })
 }
 
 /// Whether the probe is not in the image: 126/127 and "not found in $PATH". Podman says
@@ -938,5 +1059,43 @@ mod tests {
             })
         );
         assert_eq!(parse_die("not json"), None);
+    }
+    #[test]
+    fn tells_docker_from_podman_and_rootless_from_rootful() {
+        let docker = r#"{"Version":"29.6.2","Components":[{"Name":"Engine","Version":"29.6.2"},{"Name":"containerd","Version":"v2.2.6"}]}"#;
+        let podman = r#"{"Version":"4.9.3","Components":[{"Name":"Podman Engine","Version":"4.9.3"},{"Name":"Conmon","Version":"conmon version 2.1.10"},{"Name":"Engine","Version":"4.9.3"}]}"#;
+        assert_eq!(
+            parse_engine(docker, r#"["name=seccomp,profile=builtin"]"#).unwrap(),
+            EngineId {
+                runtime: Runtime::Docker,
+                version: "29.6.2".into(),
+                rootless: false
+            }
+        );
+        assert_eq!(
+            parse_engine(
+                podman,
+                r#"["name=seccomp,profile=default","name=rootless"]"#
+            )
+            .unwrap(),
+            EngineId {
+                runtime: Runtime::Podman,
+                version: "4.9.3".into(),
+                rootless: true
+            }
+        );
+        assert!(parse_engine("<html>", "[]").is_err());
+    }
+
+    #[test]
+    fn merges_the_two_log_streams_by_their_timestamps_and_keeps_the_last_lines() {
+        let out =
+            "2027-01-15T08:00:01.000000001Z claimed 1\n2027-01-15T08:00:03.000000000Z claimed 2\n";
+        let err = "2027-01-15T08:00:02.000000000Z warn a\n2027-01-15T08:00:04.000000000Z warn b\n";
+        assert_eq!(
+            merge_logs(out, err, 3),
+            "2027-01-15T08:00:02.000000000Z warn a\n2027-01-15T08:00:03.000000000Z claimed 2\n2027-01-15T08:00:04.000000000Z warn b\n"
+        );
+        assert_eq!(merge_logs("", "", 500), "");
     }
 }

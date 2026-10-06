@@ -9,13 +9,14 @@
  *   busy (its disk filled by its builds, below the minimum for that alone,
  *   its builds held back for disk), an emulated lane included; when only
  *   m1's hosts have one (a single maintainer's hosts, `needs_native` with
- *   m2's lane emulated, m2's host too small for the size its page asks or
- *   capped at 0) it is held, Review says so at once with Release to any
- *   host for another maintainer (the server's reason for anyone else), and
- *   after m2 releases it with their passkey — on the task, the journal and
- *   the record — m1's host takes it at its next claim; a claim never pins a
- *   rebuild to its requester's host, and another architecture's same-agent
- *   pick is another maintainer's worker whichever claimed last;
+ *   m2's lane emulated, m2's host too small for the size its page asks,
+ *   capped at 0, or asleep, #329) it is held, Review says so at once with
+ *   Release to any host for another maintainer (the server's reason for
+ *   anyone else), and after m2 releases it with their passkey — on the
+ *   task, the journal and the record — m1's host takes it at its next
+ *   claim; a claim never pins a rebuild to its requester's host, and
+ *   another architecture's same-agent pick is another maintainer's worker
+ *   whichever claimed last;
  * - the second opinion: with one provider an audit goes to a host other than
  *   its builder's and a publish-bound one records `independent: none`, a
  *   contributor build's `host`; the Studio's legacy role containers are one
@@ -265,6 +266,28 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
     expect((await claim("m1-vps86")).status).toBe(204);
     const row = await reviewRow(sent.contributor, "m3");
     expect(row.project_build.placement).toMatchObject({ held: true, others: [], mine: ["m1-vps86"], any_host: { ok: true, why: null } });
+  });
+
+  it("another maintainer's host whose agent says it sleeps (#329) is none to wait for: held at once, the release offered, no audit left to it; awake again, it takes the copy at its next claim", async () => {
+    await seedHost("m1-desk", "m1", STUDIO);
+    await seedHost("m2-mac", "m2", ARM);
+    const { contributor, copy } = await seedCopy("m1");
+    // m2's Mac is awake: the copy waits for it.
+    expect((await reviewRow(contributor, "m3")).project_build.placement).toMatchObject({ held: false, others: ["m2-mac"], mine: ["m1-desk"] });
+    // Its agent's report says it sleeps (as POST /hosts/self/report writes it): zero free units — its dispatcher's last claim is handed
+    // nothing, and the copy is held at once, with the release offered.
+    const asleep = (at: string | null) => env.DB.prepare("UPDATE hosts SET asleep_at = ?, reported_at = ? WHERE worker_id = 'm2-mac'").bind(at, new Date().toISOString()).run();
+    await asleep(new Date().toISOString());
+    expect((await claim("m2-mac")).status).toBe(204);
+    expect((await claim("m1-desk")).status).toBe(204);
+    expect((await reviewRow(contributor, "m3")).project_build.placement).toMatchObject({ held: true, others: [], mine: ["m1-desk"], any_host: { ok: true, why: null } });
+    // Nor is it a machine an audit is left to: the builder takes a contributor build's audit at once.
+    const { audit } = await seedAudit("m1-desk", { publish: false });
+    expect((await claim("m1-desk")).json.task).toMatchObject({ id: audit, lease_owner: "m1-desk", independent: "none" });
+    // Its agent says it woke: not held any more, and its next claim takes the copy.
+    await asleep(null);
+    expect((await reviewRow(contributor, "m3")).project_build.placement).toMatchObject({ held: false, others: ["m2-mac"] });
+    expect((await claim("m2-mac")).json.task).toMatchObject({ id: copy, lease_owner: "m2-mac", lane: "native" });
   });
 
   it("a single maintainer's hosts: held at once, Review offers m2 the release (the reason to anyone else); released with m2's passkey — on the task, the journal and the record — m1's host takes it", async () => {

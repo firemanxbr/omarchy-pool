@@ -949,6 +949,44 @@ work after its threshold, or at once with no native x86_64 host eligible,
 #337, and the dispatcher runs it with `--platform linux/amd64`); and over SSH
 with nobody logged in at the Mac, the Terminal instruction.
 
+**Sleep (#329).** A sleeping Mac has zero free units, whatever runtime its
+engine is in (Colima, Docker Desktop, OrbStack): the agent holds off idle
+sleep while a task runs — from its claim to its report, a task container
+running or the dispatcher holding its lease file — and tells the pool before
+the Mac sleeps and after it wakes ([A Mac as a maintainer host](/docs/worker-host#a-mac-as-a-maintainer-host)).
+What the journal (`omarchy-agent logs`, event `sleep`) says: "the Mac's sleep
+and wake are heard" once after each start (or why not: then the Mac sleeps as
+before, and the agent tries again every ten minutes); "a task runs: the Mac
+does not idle-sleep until none runs" and "no task runs: the Mac may idle-sleep
+again" as tasks start and end; "the engine has not said whether a task
+runs for 30 minutes" when the engine stopped answering under a task (the
+assertion is let go: the pool requeues what nobody can confirm); "the Mac
+goes to sleep: the host reports asleep" before a sleep and "the Mac woke:
+the host reports itself awake" after it. While a task runs, `pmset -g assertions` lists
+`caffeinate` holding `PreventUserIdleSystemSleep`; with none, it does not.
+The host's page says *asleep* while the Mac sleeps (its *Units* stat: none
+free until it wakes). A Mac that reports asleep is handed nothing; a lease the
+sleep caught is requeued by the pool when it expires, and the woken
+dispatcher removes that task's containers itself — nothing to do at the Mac.
+
+What needs the laptop, by hand, before #329 is called done (with the Mac's
+idle sleep set short, `sudo pmset -a sleep 2`, and set back after):
+1. A task running across an idle period: queue a build the Mac takes (its
+   host page lists the lease), leave the Mac untouched past its idle-sleep
+   time — it stays awake, and the build finishes; once no task runs the Mac
+   idle-sleeps within its idle time, and the host's page says *asleep* until
+   you wake it.
+2. A lid close mid-task: with a build running, close the lid for at least 35
+   minutes. The journal says the Mac went to sleep before it did; the host's
+   page says *asleep* and the pool hands it nothing; once the lease expires
+   the build is requeued (its line on the build's page) and another host, or
+   this one after the wake, runs it.
+3. A wake: open the lid. Within a minute the journal says the Mac woke and the
+   VM's clock is within five seconds of the pool's, the host's page no longer
+   says *asleep*, the dispatcher claims again with nobody's action, and no
+   container of the requeued task is left in the VM (`docker ps` against the
+   Mac's `socket_cli`).
+
 ### The run loop
 
 `omarchy-agent run` (#315; design v2 §16) keeps the host on the pool's
@@ -1009,7 +1047,8 @@ guard then samples it for `guard_s`: a restart streak, two restarts that
 were not ordered, an exit other than 0 and 75 (#277's ordered restart) or a
 lost `/ready` revert to `last-good/` and quarantine the release for an hour
 (one retry, then until a newer release); an Update order on the host's
-worker lifts every quarantine and starts a round. A changed
+worker, or the host order `retry-release`, lifts every quarantine and starts
+a round. A changed
 `compose.override.yml`, `etc/` file or `run/capacity.json` starts a round
 too, and the running set is compared with `last-good/` every 15 minutes.
 Two known gaps: a round preempted during its replace leaves the dispatcher
@@ -1020,13 +1059,14 @@ engine leave the round at `engine-unreachable` until a newer release.
 | The last round says | What it means |
 |---|---|
 | `ok`, `no-change` | the set runs the target |
-| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined |
+| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again) |
 | `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
 | `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep`, `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
 | `engine-unreachable`, `pull-failed` | nothing changes; the step or the next poll tries again |
 | `needs-newer-agent` | the release needs an agent this one is not and the update to it did not happen (why is in `detail`; *Self-update*, below) |
 | `agent-rollback` | a self-update's new agent did not pass its health gate: the agent named in `detail` is back, and the one it left is skipped until a higher one |
+| `rolled-back` after `runtime switch` | the owner's switch to another driver failed on the new engine (#325): `detail` says why, and the dispatcher is back on the engine it ran on; the release is not quarantined for it |
 
 **Host orders** (#344; design v2 §17.1) ride the same host state: a closed
 set, each with an id and a `not_after` an hour after it was given. The agent
@@ -1037,9 +1077,9 @@ given on the host's page:
 
 - **Reconcile now** (`reconcile-now`), its owner or any maintainer: a round
   now, as `omarchy-agent round` starts one — the release the pool names,
-  checked and rolled out as any round, no quarantine lifted (an Update does;
-  P4's `retry-release` will), and never past the owner's soak once P4 brings
-  one. It waits while a commit or a revert finishes.
+  checked and rolled out as any round, no quarantine lifted (an Update or
+  `retry-release` does), and never past the owner's soak once its issue
+  brings one. It waits while a commit or a revert finishes.
 - **Retire legacy set** (`retire-legacy`), its owner only, with a passkey:
   the agent reads `legacy.json` (the project `install --legacy` recorded)
   and finds the project's directory — the one recorded, or the one compose's
@@ -1059,10 +1099,126 @@ given on the host's page:
   agent's words, while its report says it would refuse (the directory above;
   the report after the fix, within five minutes, lifts it).
 
+P4 (#325; design v2 §12, §17.1) adds the host's **settings** and the rest of
+the closed set, each its owner's or any maintainer's on the host's page, for
+an agent from 0.4.0 (an older one is given none and the page says why):
+
+- **Narrow units** (`set-units <n>`, or its envelope's own back) and **Set
+  emulated lanes** (`set-emulate <archs>`): the agent keeps the setting in
+  `state.json` and writes `run/capacity.json` through it — the units become
+  the smallest of what detection found, the envelope's `max_units` and the
+  setting; an emulated lane stays only while both the envelope's `emulate`
+  and the setting name it (detection's values ride the file under
+  `detected`, so a later, wider setting starts from them). The changed file
+  recreates the dispatcher, which claims by it from its next claim: a host
+  holding more units than the new count claims nothing until its leases fit,
+  and no running task is stopped for it. Anything above the envelope — more
+  units than it allows, a lane its `emulate` excludes, the native lane, no
+  `run/capacity.json` yet — is refused on the host with why, and nothing
+  changes; the page greys those values from the last report. When the owner
+  lowers the envelope below a setting taken earlier, the envelope wins and
+  the report says which part of the setting it leaves out (`above`). The
+  pool keeps the last setting answered done and sends it back in the host
+  state, which only an agent that lost its own (`state.json` gone) takes, as
+  the pool says it: the envelope narrows it like any setting, and what of it
+  is above the envelope is journaled and reported (`above`) — a pool record
+  that should not have been sent, shown on the page. The lanes left in
+  `run/capacity.json` ride every claim, and the pool's selection (#337)
+  hands an emulated build only to a lane the claim names, so a lane turned
+  off takes no new emulated build from the dispatcher's next claim. A lane
+  turned off moves to `held_lanes` with why ("off: the pool's settings turn
+  it off (set-emulate)"), beside the ones detection holds (#338), and the
+  dispatcher starts an emulated lease only on a lane the file lists, read
+  again when it starts one: a lease taken before the narrowing that has not
+  started is handed back with its attempt, and a running one finishes. On a
+  Mac the lane is the VM's Rosetta one (#320); a count after a start of the
+  VM keeps it as detected, and the setting narrows the new file again.
+- **Rotate token** (`rotate-token`): a new host worker token from the pool
+  (`POST /hosts/self/token`, signed), written to `etc/dispatcher.env` as
+  enrollment writes it — the rest of the file rendered as the run loop
+  renders it (#371), so the host's addresses, the secrets directory, the
+  agent budget and the owner's own lines stay; the changed `etc/` recreates
+  the dispatcher within the ten minutes the old one still works. A token the
+  pool does not give, or one for another registration, is refused with
+  nothing written. (`*_FILE` secrets, #327, move where the token is written:
+  `enroll::write_worker_token` is the one place.)
+- **Retry release** (`retry-release`): lifts every quarantine and starts a
+  round, as an Update does; the page greys it while the report says nothing
+  is quarantined. Without room on the brake for that round's restarts (its
+  own and a revert's) it is refused and the quarantine kept.
+- **Diagnostics** (`diagnostics`, design v2 M10): only when the envelope says
+  `diagnostics = true`, the dispatcher's last 500 log lines, each cut to 300
+  characters, scrubbed of every value (8 characters or more) of the set's
+  `etc/*.env` and the secrets directory's `*.env`, and of anything shaped like a pool
+  token (`omj.` job tokens and `oma_` agent tokens among them), GitHub, Anthropic or
+  OpenAI token; the newest that fit 56 KiB as the JSON body carries them, posted to the
+  pool (`POST /hosts/self/diagnostics`, signed, at most 64 KiB), which drops a
+  line that still looks like a secret and keeps them a week for the page's
+  *Its lines*. Refused otherwise, saying so.
+
+**The host-side brake** (#325, design v2 §17.1) holds even against a pool
+that is compromised: at least 2 s between host orders (the agent paces a
+burst, taking the next one a tick later); at most 20 host orders an hour, 6
+dispatcher restarts the pool caused, 4 capacity narrowings and one release
+change every 10 minutes — the first release a host applies and a rollback
+under a signed statement are exempt, and a round tried again to the release
+the last change went to is no new change. The restarts are a settings order,
+`rotate-token`, and every recreation a round to another release makes — its
+replace and its revert's — whether the pool's target, an Update or a
+`retry-release` that lifted a quarantine started it, the same release tried
+again included: such a round starts only with room for two, and an Update
+or a `retry-release` that would lift a quarantine waits (the Update stays
+open, the quarantine kept, and the next poll asks again) or is refused
+without it, so a pool that keeps lifting the quarantine of a release this
+host's guard reverts recreates its dispatcher at most six times an hour. An
+order beyond them is answered `refused` with `brake: …` and when the next
+would fit; a release change beyond them is `held` and asked again at the
+next poll. What the agent
+does on its own — a changed input, drift, `omarchy-agent round` — is never
+braked. On a Mac (#320) a restart of the `omarchy` VM by the run loop (a
+size or mount change, an exposure, a clock that would not hold) stops the
+dispatcher in it: it counts as one of the six restarts, so the pool's orders
+and rounds get only the room left, but the brake never holds it — the VM's
+own rate limit (one action per 10 minutes, six a day) does. A start of a
+stopped VM is not one. The counters are in `state.json`, so restarting the
+agent resets nothing; `omarchy-agent status` and the host page show the last
+window.
+
+**Changing the runtime is the owner's, at the host** (#325): `omarchy-agent
+runtime switch compose/podman` (or `compose/docker`; `--socket <path>` when
+it is not the engine's usual one — rootless first, then rootful) moves the
+bundle to the other driver this binary carries. Nothing the pool sends names
+a driver. The running agent takes the request between rounds and refuses it,
+with nothing changed, unless the envelope's `drivers` name the new one
+(`compose` names both), its socket answers as that engine and is not the
+one the bundle runs on already (one socket is one engine, by any path to
+it), a release runs, and no task container runs on the old engine — task
+containers, named volumes and caches do not move between engines, so
+drain the host's registration first and let its tasks finish. Then it stops
+the dispatcher on the old engine, brings the release that runs up on the new
+one through a whole round — lint (a rootful engine still needs `rootful_ack` and
+`dedicated`), pull, replace, guard — and only once that round is `ok` writes
+the new socket, runtime and engine into `agent.toml`, changing only those
+`[set]` lines (the owner's comments and layout stay). A guard or ready wait
+that fails, a refusal, an `agent.toml` it cannot write (a restart would bring
+a second dispatcher up on the old engine), a task claimed on the old engine
+before its dispatcher stopped (only a dispatcher there re-adopts it) or no
+end within 20 minutes stops the new dispatcher and brings it back on the old
+engine (`rolled-back`, with why; the release is not quarantined for the
+engine's fault, and `agent.toml` was never changed).
+A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
+and `logs` follow it. Install writes no runtime into `agent.toml` (it finds
+a socket, and podman's speaks docker's API): until a switch names one there,
+the agent asks the engine behind the socket which it is, and its report says
+that one (`null` until the engine answers). On a Mac (#320) the switch is
+refused with nothing changed: the bundle runs in the VM's engine, which the
+agent keeps, and the drivers it carries are a Linux host's.
+
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the
 release applied, targeted and its floor, the rollout and the last round, the
-legacy set and the last answers), which closes the order on the site — one
+legacy set, the last answers and whether the Mac sleeps, `asleep`, #329),
+which closes the order on the site — one
 the site expired meanwhile too (a retire-legacy answers only at its end); an
 order its agent does not take within its hour expires there. A report that
 does not get through is sent again a minute later, or hourly while the pool
@@ -1070,9 +1226,10 @@ answers 401/403, as the polls go then.
 
 On the host: `omarchy-agent status` (from `state.json` and
 `run/capacity.json`, with the pool and the engine down; a `retire-legacy`
-in flight and the last order answers too), `omarchy-agent
-round` (a round now: SIGUSR1 to the running agent) and `omarchy-agent logs
-[-n N]`. Exit 78 means a local configuration error at start — `agent.toml`,
+in flight and the last order answers too, and the settings, the brake's
+last window and a runtime switch in flight or its end), `omarchy-agent
+round` (a round now: SIGUSR1 to the running agent), `omarchy-agent logs
+[-n N]` and `omarchy-agent runtime switch <driver>`. Exit 78 means a local configuration error at start — `agent.toml`,
 a data directory others may write, an unreadable `state.json`, another agent
 running on the same data directory — that stops the agent until a person
 fixes it; no network answer ever does, and a write that fails while it runs
@@ -1115,8 +1272,12 @@ does not hold. A Mac whose own clock is more than six seconds off the pool's
 is said ("needs a person"), never set; the VM is then held to the Mac's
 clock, so the pool's answer never moves it further than that from the
 Mac's own. The clock is checked whatever else waits (a resize held back by a
-task, a `colima.yaml` that cannot be read). The journal's `vm`, `vm-clock`
-and `capacity` lines say what it did. The memory check before every claim is
+task, a `colima.yaml` that cannot be read). It also keeps the Mac awake
+while a task runs and reports `asleep` around a sleep (#329, *Sleep*
+under *Installing a Mac*): a wake macOS announces after a sleep too short to
+leave a gap in the ticks asks the pool and checks the clock the same way.
+The journal's `vm`, `vm-clock`, `capacity` and `sleep` lines say what it
+did. The memory check before every claim is
 the dispatcher's, which runs inside the VM: the `/proc/meminfo` it reads
 there is the VM's own.
 
@@ -1253,8 +1414,9 @@ so a size-4 build waits for memory rather than run smaller.
   idle: the disk its running builds fill (their budgets count as free again,
   a report below the minimum for its disk alone included) and the builds its
   dispatcher leaves out of its claims during a disk hold do not make it
-  none to wait for; a host short of disk with nothing running, or below the
-  minimum for its CPUs or memory, is. When only the
+  none to wait for; a host short of disk with nothing running, below the
+  minimum for its CPUs or memory, or whose agent says it sleeps (#329: a
+  Mac with its lid shut, until it reports itself awake), is. When only the
   requester's hosts have one (a single maintainer's hosts, a `needs_native`
   rebuild with the other host's lane emulated, or a size only the
   requester's host holds — the rebuild is never run smaller there), Review's
@@ -1344,6 +1506,16 @@ so a size-4 build waits for memory rather than run smaller.
   sets it on the host's page, with a reason — the Studio canary runs at 3
   units, one build (§21.1). Lowered below what the host runs, nothing ends;
   it claims nothing until its leases fit. Lifted, the host's count decides.
+- **A sleeping host has zero free units** (#329). A Mac's agent reports
+  `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
+  meanwhile its claims are handed nothing, it makes no emulated lane wait,
+  is not the other maintainer's host a project's copy waits for (Review
+  offers the release if only the requester's hosts are left) nor a machine
+  an audit is left to, holds no reservation mark and counts in no size
+  alive; its leases stay
+  its own until they expire. The pool holds it only while that report is
+  fresh (15 minutes): a dispatcher that claims after that is on a Mac that
+  woke. The host's page says *asleep*.
 
 ### A host reverted a release
 
@@ -1522,6 +1694,18 @@ two minutes the order says `done`, `docker compose -p omarchy-rehearsal ps
 -a` is empty, `~/legacy-rehearsal/.omarchy-agent` is there, the dispatcher
 and any task kept running, and `omarchy-agent status` shows the answer. A
 copy of `factory/host/rollout.sh` in that directory now exits 4.
+
+**Rehearse a narrowing on the P1 host** (#325) once its agent reports 0.4.0
+(`tests/agent-host-orders.sh` does the same against a stand-in in CI): on
+the host's page, *Settings* shows the units and lanes its agent reports
+inside its envelope, every value above it greyed. Narrow units to one less
+than it gives; within two minutes the order says `done`, `jq .units
+run/capacity.json` in the set directory says the new count (and
+`.detected.units` the old), the dispatcher was recreated (`docker ps`: a new
+start time), a task that was running finishes, and the page's units say the
+new count after the agent's next report. Give its envelope's units back (the first entry of the
+list), then ask Diagnostics while `agent.toml` says `diagnostics = false`:
+refused, saying so.
 
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,

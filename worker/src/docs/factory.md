@@ -617,8 +617,15 @@ fails), and runs on the same model otherwise; a claim reads those audits
 apart, so a head of them never hides another. Each audit's lease records
 `build_tasks.independent` — `model`, `host` (the same model on another
 machine, for an audit that does not ship) or `none` — cleared when the
-lease goes back to the queue, and Review shows it beside the verdict. The runbook's
-*How the pool hands a host work* has the rules. Only the lease
+lease goes back to the queue, and Review shows it beside the verdict. A host
+whose agent reports `asleep` (#329: a Mac about to sleep, or asleep, while
+that report is fresh) has zero free units: its claims are handed nothing
+(the lease's own statement checks it again, as it checks a suspension), and
+it is no native capacity an emulated lane waits for, neither the other
+maintainer's host the project's copy waits for nor another machine an audit
+is left to, holds no reservation mark and counts in no size alive until a
+report says it woke. The runbook's *How the pool hands a host work* has the
+rules. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron
 requeues leases past `lease_expires_at` — the way out for a worker that
 vanished, not the way a worker reports: the community worker's shell has

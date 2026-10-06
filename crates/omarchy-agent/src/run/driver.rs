@@ -5,14 +5,18 @@
 //! The driver never learns about tasks: it sees only the set's compose project, and task
 //! containers are the dispatcher's. The one other project it ever lists, stops and removes
 //! is the legacy compose project `legacy.json` records, at the `retire-legacy` host order
-//! (#344, design v2 §11.1 M4). Capacity (`capacity()`, #333) and fingerprinting (#317)
-//! join this trait in their own issues; the emulated lane's smoke run (§15's
-//! `emulation(arch, image)`, #338) is `capacity::emulation::Smoke` on the probe's engine
-//! CLI until then, and joins it with `capacity()` when the run loop detects — then as a
-//! start and a poll, like a pull: its first run may pull the foreign build image, longer
-//! than one engine call may block here.
+//! (#344, design v2 §11.1 M4). It reads the dispatcher's last log lines for the
+//! `diagnostics` order, says which engine answers on its socket and counts the host's task
+//! containers there for the owner's runtime switch (#325). Capacity (`capacity()`, #333)
+//! and fingerprinting (#317) join this trait in their own issues; the emulated lane's
+//! smoke run (§15's `emulation(arch, image)`, #338) is `capacity::emulation::Smoke` on the
+//! probe's engine CLI until then, and joins it with `capacity()` when the run loop detects
+//! — then as a start and a poll, like a pull: its first run may pull the foreign build
+//! image, longer than one engine call may block here.
 
 use std::path::PathBuf;
+
+use super::config::Runtime;
 
 /// An engine answer. `NoAnswer` means "change nothing": the caller stays where it is.
 /// (The design's names, kept.)
@@ -105,6 +109,15 @@ pub(crate) struct Exit {
     pub code: i64,
 }
 
+/// Which engine answers on a socket (`docker version`'s server components: podman's API
+/// socket names its `Podman Engine`), its version, and whether it runs rootless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EngineId {
+    pub runtime: Runtime,
+    pub version: String,
+    pub rootless: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PullState {
     Running,
@@ -143,6 +156,14 @@ pub(crate) trait Driver {
     fn project_networks(&mut self, project: &str) -> Answer<Vec<String>>;
     /// Removes a network; the engine refuses one a container still uses.
     fn remove_network(&mut self, id: &str) -> Answer<()>;
+    /// The last `lines` lines a container wrote, stdout and stderr in the order written,
+    /// each with the engine's timestamp (#325's `diagnostics`; the caller scrubs them).
+    fn logs(&mut self, id: &str, lines: u32) -> Answer<String>;
+    /// Which engine answers on the driver's socket (#325's runtime switch).
+    fn engine(&mut self) -> Answer<EngineId>;
+    /// How many running containers carry the agent's host label `host` outside any compose
+    /// project: the dispatcher's task containers and their sidecars (#325's runtime switch).
+    fn host_tasks(&mut self, host: &str) -> Answer<usize>;
     /// Whether a task container runs on the engine ([`TASK_LABEL`]): what holds back a
     /// resize of a Mac's VM (#320), which would end it. The driver lists it; it never acts
     /// on one.

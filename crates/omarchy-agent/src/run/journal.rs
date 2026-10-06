@@ -89,7 +89,13 @@ impl Journal {
 /// the keys the agent renders into `etc/dispatcher.env` that hold none (#371: the host's
 /// addresses, the secrets directory's path, the budget), which an engine's error may name.
 pub(crate) fn env_secrets(set_dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(set_dir.join("etc")) else {
+    env_values(&set_dir.join("etc"))
+}
+
+/// The values of `dir/*.env`, as [`env_secrets`] reads them: the set's `etc/`, or (#325's
+/// `diagnostics`) the secrets directory's `agent.env`, longest first.
+pub(crate) fn env_values(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut out = Vec::new();
