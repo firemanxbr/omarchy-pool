@@ -69,7 +69,8 @@ def expected(maintainers):
         "# this one, the sizing recipes and what the hosts' trust relies on (#308):",
         "# the workflows that sign, the host agent, the dispatcher that starts task",
         "# containers, the host sets, and the host bundle's capacity constants, pins,",
-        "# install.sh and writer. With main requiring a code-owner review,",
+        "# install.sh and writer, and the check of the maintainers' co-signature",
+        "# a release is published with (#330). With main requiring a code-owner review,",
         "# a change here is a decision another maintainer approves.",
         f"factory/MAINTAINERS.toml          {owners}",
         f".github/CODEOWNERS                {owners}",
@@ -80,6 +81,7 @@ def expected(maintainers):
         f"factory/sets/                     {owners}",
         f"factory/bundle/                   {owners}",
         f"factory/bin/host-bundle           {owners}",
+        f"factory/bin/co-sign               {owners}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -93,7 +95,8 @@ def main():
         CODEOWNERS.write_text(want)
         PINNED.write_text(pinned)
         print(f"{CODEOWNERS.relative_to(ROOT)} written for {len(maintainers)} maintainer(s)")
-        print(f"{PINNED.relative_to(ROOT)} written: {threshold} of {len(keys)} key(s); the agent changed, raise its version")
+        changed = "; the agent changed: raise its version (crates/omarchy-agent/Cargo.toml)" if have_pinned != pinned else ", unchanged"
+        print(f"{PINNED.relative_to(ROOT)} written: {threshold} of {len(keys)} key(s){changed}")
         return
     if have != want:
         sys.exit(f"{CODEOWNERS.relative_to(ROOT)} does not match {GOV.relative_to(ROOT)}; run factory/bin/check-governance --write")
