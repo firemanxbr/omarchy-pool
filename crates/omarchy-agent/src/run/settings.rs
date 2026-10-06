@@ -381,6 +381,7 @@ mod tests {
             emulate: emulate.map(|e| e.iter().map(|a| (*a).to_owned()).collect()),
             diagnostics: false,
             drivers: vec!["compose".into()],
+            soak_minutes: 0,
         }
     }
 

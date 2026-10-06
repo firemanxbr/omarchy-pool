@@ -52,12 +52,14 @@ pub mod fuzz {
     }
 
     /// `state.json` as the run loop reads it, the pool's host state (#344, with P4's settings
-    /// and orders, #325), the `follow` answer of a pool from before it, and
-    /// `run/capacity.json` narrowed to settings (#325).
+    /// and orders, #325), the `follow` answer of a pool from before it,
+    /// `run/capacity.json` narrowed to settings (#325), and GitHub's unauthenticated answer
+    /// for its latest release, which freeze detection reads (#326).
     pub fn state(data: &[u8]) {
         let _ = crate::run::state::parse(data);
         let _ = crate::run::pool::parse_state(data);
         let _ = crate::run::pool::parse_follow(data, "w_fuzz");
+        let _ = crate::run::pool::parse_latest(data);
         if let Ok(b) = crate::run::settings::Base::parse(data) {
             let s = crate::run::settings::Settings {
                 units: Some(3),

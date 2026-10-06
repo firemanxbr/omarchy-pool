@@ -30,10 +30,15 @@
 //!   ([`settings`]: units and emulated lanes, applied to `run/capacity.json`), the other
 //!   host orders (`set-units`, `set-emulate`, `rotate-token`, `retry-release`,
 //!   `diagnostics`), all behind the host-side brake ([`brake`]), and the owner's runtime
-//!   switch at the host ([`switch`]). Seams: soak and freeze detection, and the `*_FILE`
-//!   secrets, are their own issues; `rotate-token` writes the token where enrollment does
-//!   (`enroll::write_worker_token`, through #371's `dispatcher_env`, the rest of the file
-//!   rendered as the loop renders it), which #327 moves.
+//!   switch at the host ([`switch`]). Seams: the `*_FILE` secrets are their own issue;
+//!   `rotate-token` writes the token where enrollment does (`enroll::write_worker_token`,
+//!   through #371's `dispatcher_env`, the rest of the file rendered as the loop renders
+//!   it), which #327 moves;
+//! - the owner's soak (#326, [`soak`]): a new release waits `soak_minutes` (self-updates
+//!   too, unless `agent.urgent`), a rollback statement skips it, and the report's
+//!   `soaking_until` lets the pool keep the host out of its 426 gate meanwhile; freeze
+//!   detection (#326, [`freeze`]): GitHub's latest release tag every six hours, and
+//!   `pool-behind-github` when the pool has named an older one for more than a day.
 //!
 //! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
 //! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
@@ -47,7 +52,9 @@
 
 pub mod brake;
 pub mod config;
+pub mod freeze;
 pub mod settings;
+pub mod soak;
 pub mod state;
 pub mod switch;
 
