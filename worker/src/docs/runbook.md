@@ -1301,8 +1301,13 @@ host of that engine (#372): on podman through libpod's own API on the socket
 it mounts, internal with DNS off; where libpod does not answer there, the
 dispatcher does not start, so the round's guard fails and the switch goes
 back. The switch runs none of install's preflight probes on the new engine
-(the gateway, the host loopback, pasta's guest-mapped address: *Rootless
-engines*, above).
+(the egress probe behind its sidecar, a granted bridge's probe, the gateway,
+the host loopback, pasta's guest-mapped address: *Rootless engines*, above).
+A grant of a signed exception's bridge (`direct_network`, #373) goes with
+it, unprobed there as one written by hand is: run `omarchy-agent preflight`
+again after the switch (its socket is the one `agent.toml` now names), which
+reads the grant and probes that engine's bridge, or take the grant back with
+install's `--no-direct-network`.
 A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
 and `logs` follow it. Install writes no runtime into `agent.toml` (it finds
 a socket, and podman's speaks docker's API): until a switch names one there,
