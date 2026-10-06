@@ -495,7 +495,11 @@ whichever token sends it, and a claim on it is refused (`426`). Its host's
 dispatcher kills its containers on the merged set it keeps (the signed
 lists of every dispatcher release it ran, never the pool's word), or on the
 pool's `409 {stop, state: "revoked"}` for that lease alone, which gives the
-pool no more than a Stop already does and is not kept. A Worker rolled back
+pool no more than a Stop already does and is not kept. The agent's own
+union (§5.2, every manifest it verified, applied or not) is not handed to
+the dispatcher: a revocation only the agent has seen — its release's
+dispatcher never ran on this host — is acted on at the lease's next
+heartbeat, by the pool's word. A Worker rolled back
 to a release before the revocation forgets it (its manifest did not have
 it): the hosts do not, and their dispatchers still kill such tasks, which
 that Worker then requeues as `lost`.

@@ -60,32 +60,65 @@ fn file(work_root: &Path) -> std::path::PathBuf {
 }
 
 /// This host's merged set: `signed` with every list a dispatcher of this host kept, written
-/// back when it grew. A file that does not read is said and replaced by what this binary
-/// knows: it only ever held signed lists, and the next one adds this release's.
+/// back when it grew. The file is written as the leases are (0600, synced, renamed over the old
+/// one), so a power loss leaves the old set or the new one, never a cut one. A file that does
+/// not read is said, kept aside as `revoked.json.bad` and replaced by what this binary knows: it
+/// only ever held signed lists, and the next one adds this release's. A file that is there but
+/// cannot be read now (permissions, I/O, no descriptor left) is said and left alone: this run
+/// goes on with `signed`, and the next one reads the set whole again.
 pub fn merged(work_root: &Path, signed: &BTreeSet<String>) -> BTreeSet<String> {
     let path = file(work_root);
     let kept: BTreeSet<String> = match std::fs::read(&path) {
         Ok(b) => match serde_json::from_slice::<Vec<String>>(&b) {
             Ok(v) => v.into_iter().filter(|r| spec::name_ok(r)).collect(),
             Err(e) => {
+                let bad = path.with_extension("json.bad");
                 say(format!(
-                    "{}: does not read ({e}); the revoked releases of this release stand",
-                    path.display()
+                    "{}: does not read ({e}); kept as {}, and the revoked releases of this release stand",
+                    path.display(),
+                    bad.display()
                 ));
+                if let Err(e) = std::fs::rename(&path, &bad) {
+                    say(format!("{}: not kept aside: {e}", path.display()));
+                }
                 BTreeSet::new()
             }
         },
-        Err(_) => BTreeSet::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+        Err(e) => {
+            say(format!(
+                "{}: not read ({e}); it is left as it is, and this run knows only the revoked releases of this release",
+                path.display()
+            ));
+            return signed.clone();
+        }
     };
     let all: BTreeSet<String> = kept.union(signed).cloned().collect();
     if all != kept {
-        let tmp = path.with_extension("json.tmp");
-        let body = serde_json::to_vec(&all.iter().collect::<Vec<_>>()).unwrap_or_default();
-        if let Err(e) = std::fs::write(&tmp, body).and_then(|()| std::fs::rename(&tmp, &path)) {
+        if let Err(e) = write(&path, &all) {
             say(format!("{}: not written: {e}", path.display()));
         }
     }
     all
+}
+
+/// Writes the set whole: 0600, synced, renamed over the old file (as `lease::Store::save`).
+fn write(path: &Path, all: &BTreeSet<String>) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let tmp = path.with_extension("json.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(
+        &serde_json::to_vec(&all.iter().collect::<Vec<_>>()).map_err(std::io::Error::other)?,
+    )?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
@@ -122,9 +155,13 @@ mod tests {
             merged(t.path(), &later),
             BTreeSet::from(["v1.2.3".to_owned(), "v1.2.4".to_owned()])
         );
-        // A file that does not read: this release's list stands, and is written again.
+        // A file that does not read: kept aside, this release's list stands, and is written again.
         std::fs::write(t.path().join("state/revoked.json"), "not json").unwrap();
         assert_eq!(merged(t.path(), &later), later);
+        assert_eq!(
+            std::fs::read_to_string(t.path().join("state/revoked.json.bad")).unwrap(),
+            "not json"
+        );
         assert_eq!(merged(t.path(), &BTreeSet::new()), later);
         // A name outside the grammar in the file is not a release.
         std::fs::write(
@@ -133,5 +170,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(merged(t.path(), &BTreeSet::new()), later);
+    }
+
+    #[test]
+    fn the_kept_set_is_written_private_and_a_file_that_cannot_be_read_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("state")).unwrap();
+        let newer = BTreeSet::from(["v1.2.3".to_owned()]);
+        assert_eq!(merged(t.path(), &newer), newer);
+        let file = t.path().join("state/revoked.json");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!t.path().join("state/revoked.json.tmp").exists());
+        // Not a missing file but one that is there and cannot be read now (here a directory, as
+        // root reads every file): this run knows its own list, and nothing is written over it.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let later = BTreeSet::from(["v1.2.4".to_owned()]);
+        assert_eq!(merged(t.path(), &later), later);
+        assert!(file.is_dir(), "left as it was");
+        assert!(
+            !t.path().join("state/revoked.json.tmp").exists(),
+            "no write tried"
+        );
     }
 }

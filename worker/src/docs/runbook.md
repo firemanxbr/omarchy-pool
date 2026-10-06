@@ -1566,8 +1566,10 @@ of every list they verified (design v2 §5.2). From that release's deploy on:
   (and `lost`, for a pool from before #342); a dispatcher still on an older
   release kills them at the next heartbeat, on the pool's `409`. A
   dispatcher keeps every signed list it ran with in
-  `<work root>/state/revoked.json`, so one of an older release after a
-  rollback kills them too;
+  `<work root>/state/revoked.json` (written synced, 0600), so one of an
+  older release after a rollback kills them too; a file there that does not
+  read is said in the dispatcher's journal and kept aside as
+  `revoked.json.bad`, and one that cannot be read now is left alone;
 - the pool requeues each such task at its place, its attempt given back
   and no host loss counted, the packages it staged reclaimed (its text
   evidence is replaced by its next run's). A host that dropped one without
