@@ -20,7 +20,16 @@
 //!    podman's docker API there is one, the host's own on a rootful engine (prep-root.sh's
 //!    INPUT drop closes it there) and rootless podman's namespace otherwise.
 //!
-//! On a rootful engine preflight also reads prep-root.sh's firewall script and its boot unit,
+//! On a Mac (#320) the probe runs in the `omarchy` VM, whose task firewall the agent puts
+//! there itself (`crate::vm::firewall`, before the probe), and the first probe task has one
+//! more target: the Mac as the VM reaches it (Lima's `host.lima.internal`). Colima's NAT
+//! would carry a task's connection to the Mac's router and LAN otherwise. A bridge's gateway
+//! there is the VM itself, which that firewall's INPUT drop closes as prep-root.sh's does on
+//! a Linux host ([`Advice::vm`]); preflight reads neither prep-root.sh's files nor a network
+//! stack's command line on a Mac. The agent puts nothing in Docker Desktop's or `OrbStack`'s
+//! VM: such a host is judged on the probe's answers like any other.
+//!
+//! On a rootful engine on Linux preflight also reads prep-root.sh's firewall script and its boot unit,
 //! which are world-readable: a script that does not drop every task subnet, or none, or a unit
 //! that is not there or not enabled (a reboot would take the drop away), refuses the install
 //! with the command that installs it ([`unprepared`], [`firewall_command`]), whatever the
@@ -53,6 +62,8 @@ use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
+use crate::capacity::VmKind;
+
 use super::checks::Report;
 use super::engine::{self, Docker, Server};
 use super::loopback;
@@ -74,6 +85,8 @@ pub(crate) enum What {
     Lan,
     /// The probe network's own gateway, its `.1` (#367).
     Gateway,
+    /// The Mac as the `omarchy` VM reaches it ([`crate::vm::VM_HOST`], #320).
+    VmHost,
 }
 
 /// One address and port a probe task tries.
@@ -100,6 +113,7 @@ impl Target {
             What::Router => "router".into(),
             What::Lan => "lan".into(),
             What::Gateway => format!("gateway-{}", self.port),
+            What::VmHost => "vm-host".into(),
         }
     }
 
@@ -109,6 +123,7 @@ impl Target {
             What::Router => "the default gateway",
             What::Lan => "the host's LAN address",
             What::Gateway => "its network's gateway",
+            What::VmHost => "the Mac as its VM reaches it",
         }
     }
 }
@@ -340,8 +355,9 @@ pub(crate) fn verdict(out: &str, t: &Targets, advice: &Advice) -> Vec<String> {
                 x.port
             )),
             Some(r) if x.what == What::Gateway => gateway.push(format!("port {}: {r}", x.port)),
-            // The host's own address is reached through INPUT, which DOCKER-USER never sees.
-            Some(r) if x.what == What::Lan && advice.rootful => blockers.push(format!(
+            // The host's own address is reached through INPUT, which DOCKER-USER never sees;
+            // a Mac's is past its VM's NAT, as the router is.
+            Some(r) if x.what == What::Lan && advice.rootful && advice.vm.is_none() => blockers.push(format!(
                 "egress: a task reaches {} {} (port {}: {r}); {}",
                 x.describe(),
                 x.host,
@@ -389,17 +405,32 @@ pub(crate) struct Advice {
     pub rootful: bool,
     /// podman behind its docker API (pasta or slirp4netns when rootless), not Docker.
     pub podman: bool,
-    /// The command that puts prep-root.sh's INPUT drop in place ([`firewall_command`]).
+    /// The command that puts prep-root.sh's INPUT drop in place ([`firewall_command`]);
+    /// none on a Mac, where nothing of prep-root.sh's is.
     pub firewall: String,
+    /// The Mac's VM the engine runs in (#320): there a bridge's gateway is the VM itself,
+    /// walled by the agent's own task firewall in the `omarchy` one ([`crate::vm::firewall`])
+    /// and by nothing of the agent's in Docker Desktop's or `OrbStack`'s.
+    pub vm: Option<VmKind>,
 }
 
 impl Advice {
-    /// On a rootful engine, for an address that is the host itself.
+    /// On a rootful engine, for an address that is the host itself (the VM, on a Mac).
     fn host_itself(&self) -> String {
-        format!(
-            "on a rootful engine that is this host itself, which only prep-root.sh's INPUT drop for the task subnets (OMARCHY-TASKS-HOST) keeps from a task, and it is not in effect: run {}",
-            self.firewall
-        )
+        match self.vm {
+            None => format!(
+                "on a rootful engine that is this host itself, which only prep-root.sh's INPUT drop for the task subnets (OMARCHY-TASKS-HOST) keeps from a task, and it is not in effect: run {}",
+                self.firewall
+            ),
+            Some(VmKind::Dedicated) => format!(
+                "that is the {p} VM itself, which only the INPUT drop of the task firewall the agent keeps there (OMARCHY-TASKS-HOST) keeps from a task, and it is not in effect although preflight applies it before the probe: `colima ssh --profile {p} -- sudo iptables -S INPUT` shows what holds, and install again applies it",
+                p = crate::vm::PROFILE
+            ),
+            Some(VmKind::Shared) => format!(
+                "that is Docker Desktop's or OrbStack's VM itself, in which the agent puts no firewall: use the {} Colima VM instead (factory/host/prep-mac.sh), whose task firewall the agent keeps",
+                crate::vm::PROFILE
+            ),
+        }
     }
 
     fn gateway(&self, on: &Network) -> String {
@@ -569,7 +600,7 @@ pub(crate) struct Host<'a> {
     pub server: Result<Server, String>,
     pub advice: Advice,
     /// Why prep-root.sh's INPUT drop is not installed, when it is not ([`unprepared`]):
-    /// judged on a rootful engine only.
+    /// judged on a rootful engine only, and never on a Mac.
     pub unprepared: Option<String>,
     /// Where processes are read (`/proc`), and whose: a rootless engine's network stack runs
     /// as the agent's own user ([`loopback`]).
@@ -595,12 +626,12 @@ pub(crate) fn check(
     }
     // A rootless engine's network stack, seen while the probe tasks run (rootless podman's
     // runs only while a container on a bridge network does).
+    // A Mac's engine runs in its VM, whose processes the agent does not see.
+    let watch = !h.advice.rootful && h.advice.vm.is_none();
     let mut stacks: Vec<loopback::Stack> = Vec::new();
     let mut probed = false;
     let mut run = |t: &Targets| {
-        let out = if h.advice.rootful {
-            probe(docker, image, subnet, t)
-        } else {
+        let out = if watch {
             let (out, seen) = loopback::watching(h.proc, h.uid, || probe(docker, image, subnet, t));
             for s in seen {
                 if !stacks.contains(&s) {
@@ -608,12 +639,19 @@ pub(crate) fn check(
                 }
             }
             out
+        } else {
+            probe(docker, image, subnet, t)
         };
         probed |= out.is_ok();
         out
     };
     let mut public = None;
-    let t = Targets::of_host(h.router, h.lan, subnet).asking(h.pool);
+    let mut t = Targets::of_host(h.router, h.lan, subnet).asking(h.pool);
+    if h.advice.vm == Some(VmKind::Dedicated) {
+        // The Mac as the omarchy VM reaches it, past Colima's NAT (#320).
+        t.forbidden
+            .push(Target::new(What::VmHost, crate::vm::VM_HOST, 22));
+    }
     match run(&t) {
         Ok(out) => {
             let b = verdict(&out, &t, &h.advice);
@@ -651,7 +689,7 @@ pub(crate) fn check(
         }
         Err(e) => r.blockers.push(format!("egress: {e}")),
     }
-    if !h.advice.rootful && probed {
+    if watch && probed {
         match loopback::verdict(&stacks, &h.advice.loopback()) {
             Ok(note) => r.notes.push(note),
             Err(b) => r.blockers.push(b),

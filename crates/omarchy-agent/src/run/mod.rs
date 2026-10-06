@@ -21,7 +21,16 @@
 //! - self-update (#316, [`selfupdate`]): a bundle with a higher agent updates the agent
 //!   first, upward only, behind a health gate. A release's pinned docker and compose
 //!   roll forward only: they are switched before its round and not reverted with it;
-//! - the host state (#344) replaces `follow.latest` as the target.
+//! - the host state (#344, [`pool`]) is the target, signed with the host key: from this
+//!   agent on `follow.latest` is read only from a pool from before #344, whose state
+//!   names no release (a rollback below it). It carries the open Updates and the host
+//!   orders ([`orders`]: `retire-legacy` and `reconcile-now`; P4 adds the rest and the
+//!   settings), whose answers ride the host report ([`report`]).
+//!
+//! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
+//! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
+//! agent only when it exits, so the progress watchdog ([`cli`]) also ends a self-update's
+//! candidate that hangs past its health gate's deadline.
 
 pub mod config;
 pub mod state;
@@ -30,15 +39,18 @@ pub(crate) mod compose;
 pub(crate) mod driver;
 pub(crate) mod exec;
 pub(crate) mod journal;
+pub(crate) mod orders;
 pub(crate) mod pool;
+pub(crate) mod report;
 pub(crate) mod rollout;
 pub(crate) mod selfupdate;
 pub(crate) mod target;
 pub(crate) mod tools;
 pub(crate) mod trust;
+pub(crate) mod vm;
 
 mod agent;
-mod cli;
+pub(crate) mod cli;
 
 pub use cli::{logs, round, run, self_test, status};
 

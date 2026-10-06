@@ -14,13 +14,17 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::{DiskFree, Isolation, Limits};
+use super::emulation::{self, Emulated, Lanes, Smoke};
+use super::{DiskFree, Isolation, Limits, VmKind};
 
 const GB: u64 = 1 << 30;
 /// One engine call (design v2 §10: no call blocks longer than this).
-const ENGINE_TIMEOUT: Duration = Duration::from_secs(60);
-/// The probe container may pull its image first (install only).
+pub const ENGINE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The probe container may pull its image first (install only); so may each smoke run of
+/// an emulated lane (the foreign architecture's build image).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Where the kernel's binfmt handlers are (design v2 §7.5).
+pub const BINFMT: &str = "/proc/sys/fs/binfmt_misc";
 
 /// The limits the probe container is started with, and what its cgroup must then show.
 const PROBE_CPU_MAX: &str = "50000 100000";
@@ -62,6 +66,11 @@ pub struct Facts {
     pub(super) page_size: u64,
     pub(super) disk_free: (u64, u64),
     pub(super) limits: Limits,
+    /// The VM the engine runs in on macOS (#320); `None` on Linux.
+    pub(super) vm: Option<VmKind>,
+    /// The foreign architecture's lane, when detection looked (design v2 §7.5), or a Mac's
+    /// Rosetta lane once its smoke run passed (#320, [`in_mac_vm`]).
+    pub(super) emulation: Option<Lanes>,
 }
 
 impl Facts {
@@ -107,7 +116,17 @@ impl Facts {
         &self.engine.arch
     }
 
+    /// The level the host page shows (design v2 §19.3): the VM on macOS, else the engine's.
     pub fn isolation(&self) -> Isolation {
+        match self.vm {
+            Some(VmKind::Dedicated) => Isolation::Vm,
+            Some(VmKind::Shared) => Isolation::VmShared,
+            None => self.inner_isolation(),
+        }
+    }
+
+    /// The engine's own level: inside the VM on macOS (`vm`, inside `root`).
+    pub fn inner_isolation(&self) -> Isolation {
         if self.engine.userns {
             Isolation::Subuid
         } else if self.engine.rootless {
@@ -115,6 +134,49 @@ impl Facts {
         } else {
             Isolation::Root
         }
+    }
+
+    /// The facts of an engine install found in a VM on macOS (#320): its level is the VM's,
+    /// and this process's own cgroup and `MemAvailable` say nothing of the VM's (it has its
+    /// own kernel): the engine's view and the VM's `/proc/meminfo` ([`Facts::with_meminfo`])
+    /// stand.
+    #[must_use]
+    pub fn in_vm(mut self, kind: VmKind) -> Self {
+        self.vm = Some(kind);
+        self.cgroup = CgroupLimits::default();
+        self.mem_available = None;
+        self
+    }
+
+    /// An emulated lane `via` something, once its smoke run passed ([`rosetta_lane`]): one
+    /// lane like detection's (#338), `page16k` from the engine's kernel (a Colima VM's 4K).
+    #[must_use]
+    pub fn with_lane(mut self, arch: &str, via: &'static str) -> Self {
+        let page16k = self.page_kb() >= 16;
+        let lanes = self.emulation.get_or_insert_with(Lanes::default);
+        if arch != self.engine.arch && !lanes.on.iter().any(|l| l.arch == arch) {
+            lanes.held.retain(|h| h.arch != arch);
+            lanes.on.push(Emulated {
+                arch: arch.to_owned(),
+                via,
+                page16k,
+            });
+        }
+        self
+    }
+
+    pub fn vm(&self) -> Option<VmKind> {
+        self.vm
+    }
+
+    /// `MemAvailable` from the VM's own `/proc/meminfo` on macOS (M7: the agent reads it
+    /// inside the `omarchy` profile), where this process has none to read.
+    #[must_use]
+    pub fn with_meminfo(mut self, meminfo: &str) -> Self {
+        if let Some(m) = mem_available(meminfo) {
+            self.mem_available = Some(m);
+        }
+        self
     }
 
     pub fn limits(&self) -> Limits {
@@ -126,9 +188,18 @@ impl Facts {
         self.engine.rootless
     }
 
+    /// The emulated lanes detection turned on and the ones it holds, when it looked.
+    pub fn emulation(&self) -> Option<&Lanes> {
+        self.emulation.as_ref()
+    }
+
     /// The facts as `omarchy-agent capacity` prints them without a release.
     pub fn report(&self) -> serde_json::Value {
         let (cpus, mem_gb) = self.totals();
+        let lanes = self
+            .emulation
+            .as_ref()
+            .map(|e| serde_json::json!({ "emulated": e.on, "held_lanes": e.held }));
         serde_json::json!({
             "cpus": cpus,
             "mem_gb": mem_gb,
@@ -148,6 +219,7 @@ impl Facts {
                 "cpus": self.cgroup.cpus,
                 "mem_gb": self.cgroup.mem_bytes.map(|m| gb(m / GB)),
             },
+            "emulation": lanes,
         })
     }
 }
@@ -170,6 +242,10 @@ pub struct Probe<'a> {
     /// VM). `None` trusts `docker info`'s own answer for the limits, which podman's API
     /// gets wrong for `--cpus`: install and the run loop pass the release's build image.
     pub image: Option<&'a str>,
+    /// The emulated lane's detection (design v2 §7.5): the binfmt table, the foreign
+    /// architecture's build image and the envelope's `emulate`. `None` looks at none (a
+    /// Mac's VM: [`in_mac_vm`]).
+    pub emulation: Option<emulation::Probe<'a>>,
 }
 
 impl Probe<'_> {
@@ -252,14 +328,145 @@ pub fn detect(p: &Probe<'_>) -> Result<Facts, String> {
                 engine.root_dir
             )
         })?;
+    let page_size = page_size.unwrap_or(rustix::param::page_size() as u64);
+    // The binfmt table is this kernel's, the engine's on Linux (a Mac's engine is in a VM
+    // whose table the agent does not read: its callers pass no `emulation`, and
+    // [`in_mac_vm`] adds the Rosetta lane); the smoke run is the engine's own word on
+    // whether the lane works.
+    let emulation = p.emulation.as_ref().map(|e| {
+        let page_kb = u32::try_from(page_size / 1024).unwrap_or(u32::MAX);
+        emulation::detect(&engine.arch, page_kb, e, p)
+    });
     Ok(Facts {
         engine,
         cgroup,
         mem_available,
-        page_size: page_size.unwrap_or(rustix::param::page_size() as u64),
+        page_size,
         disk_free: (work, engine_free),
         limits,
+        vm: None,
+        emulation,
     })
+}
+
+/// The smoke run of an emulated lane through the engine's CLI (design v2 §15's
+/// `emulation(arch, image)`, which the driver trait wraps with `capacity()` once the run
+/// loop detects, #315): `docker run --rm --network none --platform linux/<arch>
+/// --entrypoint /usr/bin/true <image by digest>`, then `pacman --version` the same way.
+/// The architecture and the image are checked against a closed grammar before they reach
+/// the argv.
+impl Smoke for Probe<'_> {
+    fn emulation(&self, arch: &str, image: &str) -> Result<(), String> {
+        let platform = emulation::platform_of(arch)
+            .ok_or_else(|| format!("{arch:?} is not an architecture the pool builds"))?;
+        if !emulation::image_ok(image) {
+            return Err(format!("{image:?} is not an image by digest"));
+        }
+        for (entry, args, says) in emulation::STEPS {
+            let mut c = self.docker();
+            c.args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--platform",
+                platform,
+                "--entrypoint",
+                entry,
+                image,
+            ])
+            .args(args);
+            let out = run(c, PROBE_TIMEOUT).map_err(|e| format!("{entry}: {e}"))?;
+            if !out.contains(says) {
+                return Err(format!(
+                    "{entry} {}: printed {:?}, not {says:?}",
+                    args.join(" "),
+                    out.trim().chars().take(120).collect::<String>()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The smoke run of an `x86_64` lane through Rosetta (design v2 §7.5 step 2, §19.2; #320):
+/// the emulated lane's own ([`Smoke`], #338) on `linux/amd64` — the release's `x86_64`
+/// build image, by digest, starts `/usr/bin/true` and answers `pacman --version`. In a
+/// Colima VM started with `--vz-rosetta` the engine runs it through Rosetta, on the VM's
+/// 4K pages.
+pub fn rosetta_lane(p: &Probe<'_>, image_x86_64: &str) -> Result<(), String> {
+    p.emulation("x86_64", image_x86_64)
+        .map_err(|e| format!("the x86_64 smoke run: {e}"))
+}
+
+/// Whether `image` is in the engine's image store (`docker image inspect`), so a run of it
+/// pulls nothing: the run loop's count never pulls (#320).
+pub fn image_here(p: &Probe<'_>, image: &str) -> Result<(), String> {
+    let mut c = p.docker();
+    c.args(["image", "inspect", "--format", "{{.Id}}", image]);
+    run(c, ENGINE_TIMEOUT)
+        .map(drop)
+        .map_err(|e| format!("docker image inspect: {e}"))
+}
+
+/// What a Mac's VM adds to the engine's facts (#320; design v2 §19.2, §19.3): one way for
+/// install, `omarchy-agent capacity` and the run loop's count after a start of the VM.
+#[derive(Debug, Clone, Copy)]
+pub struct MacVm<'a> {
+    pub kind: VmKind,
+    /// The `omarchy` VM's own `/proc/meminfo` (M7), when it was read.
+    pub meminfo: Option<&'a str>,
+    /// The VM runs `x86_64` through Rosetta (`--vz-rosetta`, `[vm] rosetta`).
+    pub rosetta: bool,
+    /// The envelope's `emulate`: the emulated lanes the owner allows; absent, every one.
+    pub emulate: Option<&'a [String]>,
+    /// The release's `x86_64` build image, by digest.
+    pub x86_64_image: Option<&'a str>,
+}
+
+/// What became of the `x86_64` lane, for the screen or the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneSaid {
+    Note(String),
+    Warning(String),
+}
+
+/// The facts of an engine in a Mac's VM: the VM's level; in the `omarchy` VM its own
+/// `MemAvailable` and, with Rosetta, the `x86_64` lane once `smoke` ([`rosetta_lane`])
+/// passed on the release's image — unless the envelope's `emulate` leaves it out, which
+/// no count may widen.
+pub fn in_mac_vm(
+    facts: Facts,
+    vm: &MacVm<'_>,
+    smoke: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> (Facts, Option<LaneSaid>) {
+    let mut f = facts.in_vm(vm.kind);
+    if vm.kind != VmKind::Dedicated {
+        return (f, None);
+    }
+    if let Some(m) = vm.meminfo {
+        f = f.with_meminfo(m);
+    }
+    let allowed = emulation::allowed(vm.emulate, "x86_64");
+    let said = match (vm.rosetta, allowed, vm.x86_64_image) {
+        (false, _, _) => None,
+        (true, false, _) => Some(LaneSaid::Note(
+            "the x86_64 lane is off: the envelope's emulate leaves it out".into(),
+        )),
+        (true, true, None) => Some(LaneSaid::Warning(
+            "no x86_64 lane through Rosetta: the release names no x86_64 build image".into(),
+        )),
+        (true, true, Some(img)) => match smoke(img) {
+            Ok(()) => {
+                f = f.with_lane("x86_64", "rosetta");
+                None
+            }
+            Err(e) => Some(LaneSaid::Warning(format!(
+                "no x86_64 lane through Rosetta: {e}"
+            ))),
+        },
+    };
+    (f, said)
 }
 
 /// `docker info` (the driver's `capacity()` once the driver trait exists, #315).
@@ -371,7 +578,7 @@ fn cpu_max(s: &str) -> Option<u32> {
     (period > 0).then(|| gb(quota / period))
 }
 
-pub(super) fn mem_available(meminfo: &str) -> Option<u64> {
+pub(crate) fn mem_available(meminfo: &str) -> Option<u64> {
     let line = meminfo.lines().find(|l| l.starts_with("MemAvailable:"))?;
     let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kb * 1024)
@@ -433,12 +640,10 @@ pub(super) fn df_free(out: &str) -> Option<u64> {
 /// Runs a command with a deadline, killing it when the deadline passes; its stdout.
 /// Install's engine calls (#317) go through it too.
 pub(crate) fn run(mut c: Command, timeout: Duration) -> Result<String, String> {
-    let mut child = c
-        .stdin(Stdio::null())
+    c.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .stderr(Stdio::piped());
+    let mut child = crate::run::exec::retry_busy(|| c.spawn()).map_err(|e| e.to_string())?;
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let out = std::thread::spawn(move || {
@@ -496,6 +701,15 @@ impl Facts {
             page_size: 4096,
             disk_free: (disk_free_gb.0 * GB, disk_free_gb.1 * GB),
             limits,
+            vm: None,
+            emulation: None,
         }
+    }
+
+    /// The same facts on a kernel of `page_kb` pages, with what emulation detection found.
+    pub(super) fn with_emulation(mut self, page_kb: u64, lanes: Lanes) -> Self {
+        self.page_size = page_kb * 1024;
+        self.emulation = Some(lanes);
+        self
     }
 }

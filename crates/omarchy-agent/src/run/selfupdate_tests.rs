@@ -8,7 +8,7 @@ use std::path::Path;
 
 use super::{count_start, Pending, Start, DEADLINE_S, MAX_TRIES};
 use crate::run::fake::{publish_agent, relay_statement_agent, Ships, World};
-use crate::run::pool::{Follow, Net};
+use crate::run::pool::{HostState, Net};
 use crate::run::state::State;
 use crate::version::{self, Release, Version};
 
@@ -55,7 +55,7 @@ fn host_with(ships: Version, min_agent: &str, bin: &[u8]) -> World {
             binary: bin,
         },
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w
 }
 
@@ -167,12 +167,12 @@ fn a_release_with_a_higher_agent_updates_the_agent_first_and_the_same_one_does_n
     assert_eq!(count_start(&data, new, w.now), Start::Run);
     w.restart_as(new);
     assert!(w.agent.gate.is_some());
-    let follows = w.remote.borrow().follows;
+    let polls = w.remote.borrow().polls;
     w.tick(1);
     assert!(w.agent.gate.is_none(), "{}", w.journal());
     assert!(!data.join("pending").exists());
     assert!(w.journal().contains("\"event\":\"agent-updated\""));
-    assert_eq!(w.remote.borrow().follows, follows + 1, "the gate's report");
+    assert_eq!(w.remote.borrow().polls, polls + 1, "the gate's report");
     assert_eq!(w.changes().len(), changes, "the gate touched nothing");
 
     // Then the round: v1.1.0 ships this agent's version, so nothing restarts it.
@@ -196,7 +196,7 @@ fn a_release_with_a_higher_agent_updates_the_agent_first_and_the_same_one_does_n
             binary: &binary(true),
         },
     );
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
     assert_eq!(w.agent.exit, None);
@@ -272,7 +272,7 @@ fn a_wrong_hash_or_a_failing_self_test_changes_nothing_and_this_agent_applies_th
             binary: &binary(true),
         };
         publish_agent(&w.remote, "v1.2.0", &ships);
-        w.follow("v1.2.0", None);
+        w.target("v1.2.0", None);
         w.round();
         assert_eq!(
             w.journal().matches("not updated").count(),
@@ -284,7 +284,7 @@ fn a_wrong_hash_or_a_failing_self_test_changes_nothing_and_this_agent_applies_th
             (Some("v1.2.0"), None)
         );
         publish_agent(&w.remote, "v1.3.0", &ships);
-        w.follow("v1.3.0", None);
+        w.target("v1.3.0", None);
         w.tick(3600);
         assert_eq!(w.agent.exit, Some(0), "{what}: {}", w.journal());
     }
@@ -422,7 +422,7 @@ fn a_new_agent_that_fails_its_gate_is_rolled_back_skipped_and_reported() {
             binary: &binary(true),
         },
     );
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.tick(200);
     assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
     assert_eq!(link(&data.join("current")), format!("versions/{higher}"));
@@ -474,13 +474,13 @@ fn a_rollback_keeps_the_running_agent_and_only_agent_to_moves_it_down() {
             binary: &binary(true),
         },
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
 
     // A rollback statement without agent_to: the release goes down, the agent stays.
     relay_statement_agent(&w.remote, 1, "v1.0.0", "v1.1.0", b"signed", None);
-    w.follow("v1.0.0", None);
+    w.target("v1.0.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.0.0"), "{:?}", w.outcome());
     assert_eq!(w.agent.exit, None);
@@ -488,7 +488,7 @@ fn a_rollback_keeps_the_running_agent_and_only_agent_to_moves_it_down() {
 
     // Forward again, then a statement with agent_to: the agent moves down to the agent
     // the release ships, through the same steps, and the statement is accepted with it.
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
     let old = Version(0, 1, 0);
@@ -503,7 +503,7 @@ fn a_rollback_keeps_the_running_agent_and_only_agent_to_moves_it_down() {
         },
     );
     relay_statement_agent(&w.remote, 2, "v1.0.1", "v1.1.0", b"signed", Some("0.1.0"));
-    w.follow("v1.0.1", None);
+    w.target("v1.0.1", None);
     let changes = w.changes().len();
     w.round_now();
     assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
@@ -529,11 +529,11 @@ fn an_agent_to_the_release_does_not_ship_waits_and_changes_nothing() {
             binary: &binary(true),
         },
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     // v1.0.0 ships agent 0.1.0; the statement says 0.0.9.
     relay_statement_agent(&w.remote, 1, "v1.0.0", "v1.1.0", b"signed", Some("0.0.9"));
-    w.follow("v1.0.0", None);
+    w.target("v1.0.0", None);
     w.round_now();
     assert_eq!(w.agent.exit, None);
     assert_eq!(w.agent.state.statement_seq, None, "not accepted");
@@ -606,7 +606,95 @@ fn the_pool_not_answering_does_not_keep_the_gate_shut() {
     w.pool_answers(Net::NoAnswer("connection refused".into()));
     w.tick(1);
     assert!(w.agent.gate.is_none(), "{}", w.journal());
-    w.pool_answers(Net::Ok(Follow::default()));
+    w.pool_answers(Net::Ok(HostState::default()));
+}
+
+#[test]
+fn a_new_agent_that_hangs_is_ended_past_its_gates_deadline_and_its_next_start_rolls_it_back() {
+    // launchd restarts the agent only when it exits (#320): the progress watchdog ends a
+    // candidate whose loop hangs with its gate shut, and the start that follows flips back.
+    use crate::run::cli::{watchdog_look, watchdog_verdict, Look};
+    let new = above(1);
+    let mut w = host_with(new, "0.1.0", &binary(true));
+    w.tick(200);
+    let data = w.agent.paths.data.clone();
+    let start = w.now;
+    assert_eq!(count_start(&data, new, start), Start::Run);
+    let p = super::candidate(&data, new).unwrap();
+    assert!(p.deadline > start && p.deadline <= start + DEADLINE_S);
+    // The loop moves (a download, a tick): nothing until the gate's deadline and its grace.
+    assert_eq!(
+        watchdog_verdict(p.deadline, p.deadline, Some(p.deadline)),
+        None
+    );
+    assert_eq!(
+        watchdog_verdict(p.deadline + 30, p.deadline + 30, Some(p.deadline)),
+        None
+    );
+    let why = watchdog_verdict(p.deadline + 31, p.deadline + 31, Some(p.deadline)).unwrap();
+    assert!(
+        why.contains("health gate is still shut 31 s past its deadline"),
+        "{why}"
+    );
+    // Without a gate: fifteen minutes without progress, as before.
+    assert_eq!(watchdog_verdict(start + 900, start, None), None);
+    assert!(watchdog_verdict(start + 901, start, None)
+        .unwrap()
+        .contains("no progress for 901 s"));
+    // A Mac that slept an hour: the first look after the wake sees the loop's progress an
+    // hour old, and starts the count again instead of ending it; the looks after it judge.
+    let woke = start + 3600;
+    assert_eq!(watchdog_look(woke, start + 10, start, None), Look::Woke);
+    assert_eq!(watchdog_look(woke + 10, woke, woke, None), Look::Fine);
+    assert!(matches!(
+        watchdog_look(woke + 910, woke + 900, woke, None),
+        Look::Abort(_)
+    ));
+    // Looks that come on time judge as before.
+    assert!(matches!(
+        watchdog_look(start + 901, start + 891, start, None),
+        Look::Abort(_)
+    ));
+    // launchd starts it again: past the deadline, `current` points back.
+    match count_start(&data, new, p.deadline + 41) {
+        Start::RolledBack(why) => assert!(why.contains("did not pass within 10 minutes"), "{why}"),
+        Start::Run => panic!("not rolled back"),
+    }
+    assert_eq!(link(&data.join("current")), format!("versions/{}", me()));
+}
+
+#[test]
+fn under_launchd_a_refused_configuration_waits_for_agent_toml_to_change() {
+    // launchd's KeepAlive starts the agent again 10 s after any exit (#320); a refused
+    // agent.toml is waited on instead, not said every 10 s.
+    use crate::run::cli::{under_launchd, wait_for_change};
+    use std::time::{Duration, Instant};
+    assert!(under_launchd(Some("org.omarchy-pool.agent")));
+    assert!(!under_launchd(Some("application.com.apple.Terminal.1234")));
+    assert!(!under_launchd(None));
+    let dir = crate::run::state::tempdir();
+    let toml = dir.join("agent.toml");
+    fs::write(&toml, "pool = \"x\"\n").unwrap();
+    let t = Instant::now();
+    assert!(!wait_for_change(
+        &toml,
+        Duration::from_millis(20),
+        Duration::from_millis(100)
+    ));
+    assert!(t.elapsed() >= Duration::from_millis(100));
+    let edit = {
+        let toml = toml.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            fs::write(&toml, "pool = \"https://pkgs.omarchy-pool.org\"\n").unwrap();
+        })
+    };
+    assert!(wait_for_change(
+        &toml,
+        Duration::from_millis(20),
+        Duration::from_secs(30)
+    ));
+    edit.join().unwrap();
 }
 
 #[test]
