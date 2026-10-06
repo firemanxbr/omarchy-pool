@@ -37,6 +37,80 @@ impl Docker {
             .args(args);
         crate::capacity::probe::run(c, CALL)
     }
+
+    /// Which engine answers on the socket ([`parse_server`]).
+    pub fn server(&self) -> Result<Server, String> {
+        parse_server(&self.run(&["version", "--format", "{{json .Server}}"])?)
+    }
+}
+
+/// The engine behind the socket, as the dispatcher tells it apart (#367): podman behind its
+/// docker-compatible API (whose task networks are made through libpod's, #372), or Docker and
+/// its major version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Server {
+    Podman,
+    Docker(u32),
+}
+
+/// `version --format '{{json .Server}}'`, read the way the dispatcher reads it (pkg-repo's
+/// `dispatch::engine::gateway_of`): podman names itself among the components.
+pub(crate) fn parse_server(json: &str) -> Result<Server, String> {
+    #[derive(serde::Deserialize)]
+    struct Component {
+        #[serde(rename = "Name", default)]
+        name: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        #[serde(rename = "Version", default)]
+        version: String,
+        #[serde(rename = "Components", default)]
+        components: Option<Vec<Component>>,
+    }
+    let s: Raw = serde_json::from_str(json.trim())
+        .map_err(|_| format!("the engine's version does not read: {:?}", json.trim()))?;
+    if s.components
+        .unwrap_or_default()
+        .iter()
+        .any(|c| c.name.contains("Podman"))
+    {
+        return Ok(Server::Podman);
+    }
+    s.version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse().ok())
+        .map(Server::Docker)
+        .ok_or_else(|| format!("the engine's version does not read: {:?}", s.version))
+}
+
+/// How a task's own network is made on this engine, as the dispatcher makes it (#336, #372;
+/// pkg-repo's `dispatch::spec::Gateway`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TaskNetwork {
+    /// Docker 28 or newer, by the CLI with these `network create` options: internal, with the
+    /// isolated gateway mode, so no address of the host is on its bridge.
+    Cli(Vec<&'static str>),
+    /// podman, through libpod's own API ([`super::libpod`]): internal with DNS off, so it has
+    /// no gateway. Its docker API would turn DNS on and drop docker's option.
+    Libpod,
+}
+
+/// How a task's own network is made on this engine ([`TaskNetwork`]). An older Docker is
+/// refused, as the dispatcher refuses it.
+pub(crate) fn task_network(s: Server) -> Result<TaskNetwork, String> {
+    match s {
+        Server::Podman => Ok(TaskNetwork::Libpod),
+        Server::Docker(m) if m >= 28 => Ok(TaskNetwork::Cli(vec![
+            "--internal",
+            "-o",
+            "com.docker.network.bridge.gateway_mode_ipv4=isolated",
+        ])),
+        Server::Docker(m) => Err(format!(
+            "docker {m} cannot keep a task network's gateway off the host (com.docker.network.bridge.gateway_mode_ipv4=isolated needs Docker 28 or newer), and the dispatcher refuses it: upgrade the engine"
+        )),
+    }
 }
 
 /// What connecting to a socket said.

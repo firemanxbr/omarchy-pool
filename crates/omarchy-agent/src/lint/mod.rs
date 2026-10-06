@@ -20,7 +20,7 @@
 //! since a rollback may name it.
 
 mod set_toml;
-mod yaml;
+pub(crate) mod yaml;
 
 pub use set_toml::{
     lint_set_toml, parse_set_toml, service_names, Needs, Ready, SetToml, SET_SCHEMA,
@@ -67,6 +67,12 @@ pub struct Envelope {
     pub set_dir: Option<PathBuf>,
     /// `OMARCHY_SECRETS_DIR`, when known: never mounted, nor any directory holding it.
     pub secrets_dir: Option<PathBuf>,
+    /// `OMARCHY_WORK_ROOT`, when known: what `${OMARCHY_WORK_ROOT}` names on the host.
+    pub work_root: Option<PathBuf>,
+    /// On a Mac (#320): the directories the `omarchy` VM mounts at their own paths. Every
+    /// bind source but the socket (the VM's own) must lie under one, or the engine in the
+    /// VM would bind an empty directory of its own in its place.
+    pub vm_mounts: Option<Vec<PathBuf>>,
 }
 
 impl Envelope {
@@ -83,6 +89,8 @@ impl Envelope {
             paths: Vec::new(),
             set_dir: None,
             secrets_dir: None,
+            work_root: None,
+            vm_mounts: None,
         }
     }
 
@@ -96,6 +104,11 @@ impl Envelope {
             set: SetPart,
             #[serde(default)]
             envelope: EnvelopePart,
+            vm: Option<VmPart>,
+        }
+        #[derive(Deserialize)]
+        struct VmPart {
+            runtime: Option<String>,
         }
         #[derive(Deserialize, Default)]
         struct SetPart {
@@ -147,6 +160,24 @@ impl Envelope {
                 }
             }
         }
+        // The omarchy VM's mounts follow the set's paths (crate::vm::mounts): what the
+        // agent starts the profile with is what the lint holds the binds to.
+        let vm_mounts = match f.vm.and_then(|v| v.runtime).as_deref() {
+            Some("colima") => {
+                let (Some(w), Some(s), Some(d)) =
+                    (&f.set.work_root, &f.set.secrets_dir, &f.set.dir)
+                else {
+                    return Err("agent.toml: [vm] runtime colima needs set.dir, set.work_root and set.secrets_dir, the directories its VM mounts".into());
+                };
+                Some(
+                    crate::vm::mounts(w, s, d)
+                        .into_iter()
+                        .map(|m| m.path)
+                        .collect(),
+                )
+            }
+            _ => None,
+        };
         Ok(Envelope {
             allow_socket: f.envelope.allow_socket,
             rootful_ack: f.envelope.rootful_ack,
@@ -155,6 +186,8 @@ impl Envelope {
             paths: f.envelope.paths,
             set_dir: f.set.dir,
             secrets_dir: f.set.secrets_dir,
+            work_root: f.set.work_root,
+            vm_mounts,
         })
     }
 }
@@ -827,11 +860,17 @@ fn check_bind(
             && (refs[0].name == SOCKET_VAR || refs[0].name == WORK_ROOT_VAR);
         let whole =
             source == format!("${{{}}}", refs[0].name) || source == format!("${}", refs[0].name);
-        let under = source
-            .strip_prefix(&format!("${{{WORK_ROOT_VAR}}}/"))
-            .is_some_and(|rest| is_relative_inside(Path::new(rest)));
+        let rest = source.strip_prefix(&format!("${{{WORK_ROOT_VAR}}}/"));
+        let under = rest.is_some_and(|rest| is_relative_inside(Path::new(rest)));
         if !(single && (whole || under)) {
             out.push(violation("bind_path", format!("{name}: {source:?}: a bind source may only be ${{{SOCKET_VAR}}}, ${{{WORK_ROOT_VAR}}} or a path under it")));
+        } else if refs[0].name == WORK_ROOT_VAR {
+            // The socket is the VM's own; the work root is a path on the Mac.
+            let host = envelope
+                .work_root
+                .as_ref()
+                .map(|w| rest.map_or_else(|| w.clone(), |r| w.join(r)));
+            check_vm_mount(name, source, host.as_deref(), envelope, out);
         }
         return;
     }
@@ -879,12 +918,53 @@ fn check_bind(
         if !allowed {
             out.push(violation("bind_path", format!("{name}: {source:?} is neither in the set directory nor under a path the envelope lists")));
         }
+        check_vm_mount(name, source, Some(path), envelope, out);
     } else if let Some(rel) = normalized(path) {
-        check_secret_file(name, source, &rel, read_only, out);
+        // Inside the set directory: its secret files first (#327), then the VM's mounts
+        // (#320), as an absolute path in it goes.
+        if !check_secret_file(name, source, &rel, read_only, out) {
+            let host = envelope.set_dir.as_ref().map(|d| d.join(path));
+            check_vm_mount(name, source, host.as_deref(), envelope, out);
+        }
     } else {
         out.push(violation(
             "bind_path",
             format!("{name}: {source:?} leaves the set directory"),
+        ));
+    }
+}
+
+/// On a Mac (#320): a bind source must lie under a directory the `omarchy` VM mounts at
+/// its own path, or the engine in the VM binds an empty directory of its own instead.
+fn check_vm_mount(
+    name: &str,
+    source: &str,
+    host: Option<&Path>,
+    envelope: &Envelope,
+    out: &mut Vec<Violation>,
+) {
+    let Some(mounts) = &envelope.vm_mounts else {
+        return;
+    };
+    let under = host.is_some_and(|h| {
+        let h: PathBuf = h
+            .components()
+            .filter(|c| !matches!(c, Component::CurDir))
+            .collect();
+        mounts.iter().any(|m| h.starts_with(m))
+    });
+    if !under {
+        out.push(violation(
+            "vm_mount",
+            format!(
+                "{name}: {source:?}{} lies under no directory the omarchy VM mounts ({})",
+                host.map_or_else(String::new, |h| format!(" ({})", h.display())),
+                mounts
+                    .iter()
+                    .map(|m| m.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         ));
     }
 }

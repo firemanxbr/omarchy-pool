@@ -22,26 +22,66 @@
 //! - self-update (#316, [`selfupdate`]): a bundle with a higher agent updates the agent
 //!   first, upward only, behind a health gate. A release's pinned docker and compose
 //!   roll forward only: they are switched before its round and not reverted with it;
-//! - the host state (#344) replaces `follow.latest` as the target.
+//! - the host state (#344, [`pool`]) is the target, signed with the host key: from this
+//!   agent on `follow.latest` is read only from a pool from before #344, whose state
+//!   names no release (a rollback below it). It carries the open Updates and the host
+//!   orders ([`orders`]: `retire-legacy` and `reconcile-now`), whose answers ride the host
+//!   report ([`report`]);
+//! - P4's host state (#325): the settings the pool may narrow inside the envelope
+//!   ([`settings`]: units and emulated lanes, applied to `run/capacity.json`), the other
+//!   host orders (`set-units`, `set-emulate`, `rotate-token`, `retry-release`,
+//!   `diagnostics`), all behind the host-side brake ([`brake`]), and the owner's runtime
+//!   switch at the host ([`switch`]). Seams: the `*_FILE` secrets are their own issue;
+//!   `rotate-token` writes the token where enrollment does (`enroll::write_worker_token`,
+//!   through #371's `dispatcher_env`, the rest of the file rendered as the loop renders
+//!   it), which #327 moves;
+//! - the owner's soak (#326, [`soak`]): a new release waits `soak_minutes` (self-updates
+//!   too, unless `agent.urgent`), a rollback statement skips it, and the report's
+//!   `soaking_until` lets the pool keep the host out of its 426 gate meanwhile; freeze
+//!   detection (#326, [`freeze`]): GitHub's latest release tag every six hours, and
+//!   `pool-behind-github` when the pool has named an older one for more than a day;
+//! - the owner's control without a visit (#328, [`owner`]): `widen-envelope` and
+//!   `set-agent-keys`, taken only when the passkey pinned at the host signed them
+//!   (`crate::owner`), and the host's seal key in the report.
+//!
+//! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
+//! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
+//! agent only when it exits, so the progress watchdog ([`cli`]) also ends a self-update's
+//! candidate that hangs past its health gate's deadline. A restart of the VM recreates the
+//! dispatcher, so the brake counts it as one of its restarts (it never holds the keeper,
+//! whose own rate limit governs it), and the runtime switch, which moves between Linux
+//! engines, is refused there. It keeps the Mac awake while a task runs, and reports
+//! `asleep` before the Mac sleeps and again after it woke (#329, [`power`]): a sleeping
+//! host has zero free units.
 
+pub mod brake;
 pub mod config;
+pub mod freeze;
+pub mod settings;
+pub mod soak;
 pub mod state;
+pub mod switch;
 
 pub(crate) mod compose;
 pub(crate) mod driver;
 pub(crate) mod exec;
 pub(crate) mod journal;
+pub(crate) mod orders;
+pub(crate) mod owner;
 pub(crate) mod pool;
+pub(crate) mod power;
+pub(crate) mod report;
 pub(crate) mod rollout;
 pub(crate) mod selfupdate;
 pub(crate) mod target;
 pub(crate) mod tools;
 pub(crate) mod trust;
+pub(crate) mod vm;
 
 mod agent;
-mod cli;
+pub(crate) mod cli;
 
-pub use cli::{logs, round, run, self_test, status};
+pub use cli::{envelope, logs, round, run, runtime_switch, self_test, status};
 
 // What install (#317) shares with the loop: the verifier, the release assets' names and
 // where they are, and the pinned tools.
@@ -59,3 +99,5 @@ pub(crate) fn now() -> i64 {
 mod engine_tests;
 #[cfg(test)]
 pub(crate) mod fake;
+#[cfg(test)]
+mod settings_tests;

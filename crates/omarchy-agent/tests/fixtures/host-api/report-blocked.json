@@ -1,0 +1,86 @@
+{
+  "agent": {
+    "skip": null,
+    "version": "0.4.0"
+  },
+  "asleep": false,
+  "brake": {
+    "narrowings_hour": 0,
+    "orders_hour": 0,
+    "release_change_at": null,
+    "restarts_hour": 0
+  },
+  "legacy": {
+    "blocked": "the marker cannot be written: /srv/omarchy-pool: group- or world-writable (mode 775)",
+    "containers": 3,
+    "dir": "/srv/omarchy-pool",
+    "project": "omarchy-pool",
+    "running": 3,
+    "since": "2027-01-01T08:00:00Z",
+    "state": "running"
+  },
+  "orders": [],
+  "owner": {
+    "agent_keys": [],
+    "envelope": {
+      "agent_budget": null,
+      "agent_slots": null,
+      "diagnostics": null,
+      "emulate": null,
+      "max_cpus": null,
+      "max_mem_gb": null,
+      "max_units": null,
+      "paths": null
+    },
+    "passkey": null,
+    "seal": {
+      "fingerprint": "SHA256:wIwZGH0JYi29ol7KfewxDD04AEppH3Sn1BWJ8Ci2GsI",
+      "key": "kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0"
+    },
+    "version": 0
+  },
+  "quarantine": [],
+  "release": {
+    "applied": "v1.0.0",
+    "floor": "v1.0.0",
+    "github_latest": null,
+    "min_release": "v1.0.0",
+    "pool_behind_github": null,
+    "soak_minutes": 0,
+    "soaking_until": null,
+    "target": "v1.0.0"
+  },
+  "rollout": {
+    "since": "2027-01-15T08:01:55Z",
+    "state": "idle",
+    "target": null
+  },
+  "round": {
+    "at": "2027-01-15T08:01:55Z",
+    "detail": "host runs v1.0.0",
+    "from": null,
+    "outcome": "ok",
+    "step": "commit"
+  },
+  "runtime": {
+    "driver": "compose/docker",
+    "switch": null,
+    "switch_last": null
+  },
+  "settings": {
+    "above": [],
+    "effective": {
+      "emulated": [],
+      "units": 3
+    },
+    "emulate": null,
+    "envelope": {
+      "detected_lanes": [],
+      "detected_units": 3,
+      "diagnostics": false,
+      "emulate": null,
+      "max_units": 3
+    },
+    "units": null
+  }
+}

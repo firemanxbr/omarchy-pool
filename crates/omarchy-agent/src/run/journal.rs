@@ -90,16 +90,25 @@ impl Journal {
 /// addresses, the secrets directory's path, the budget), which an engine's error may name;
 /// and the host worker token from its own file (#327).
 pub(crate) fn env_secrets(set_dir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out = env_values(&set_dir.join("etc"));
     if let Ok(t) = fs::read_to_string(crate::dispatcher_env::token_path_in(set_dir)) {
         let t = t.trim();
         if t.len() >= 8 {
             out.push(t.to_owned());
         }
     }
-    let Ok(entries) = fs::read_dir(set_dir.join("etc")) else {
-        return out;
+    out.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    out.dedup();
+    out
+}
+
+/// The values of `dir/*.env`, as [`env_secrets`] reads them: the set's `etc/`, or (#325's
+/// `diagnostics`) the secrets directory's `agent.env`, longest first.
+pub(crate) fn env_values(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
     };
+    let mut out = Vec::new();
     for e in entries.flatten() {
         if e.path().extension().is_some_and(|x| x == "env") {
             if let Ok(text) = fs::read_to_string(e.path()) {
@@ -115,7 +124,6 @@ pub(crate) fn env_secrets(set_dir: &Path) -> Vec<String> {
         }
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    out.dedup();
     out
 }
 

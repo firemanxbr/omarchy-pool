@@ -20,9 +20,12 @@
 //!   or is explicitly unreachable. Then `pending` goes and the 3 newest versions stay.
 //! - The agent it rolled back to records the version as skipped until a higher one and
 //!   reports `agent-rollback`.
+//! - The owner's soak (#326, [`super::soak`]) holds the update with its release, unless the
+//!   manifest sets `agent.urgent` (only a security release does): then the agent updates
+//!   itself at once, and the release still waits.
 //!
-//! Seams: soak and `agent.urgent` (P4); the unit file and launchd plist are written by
-//! `install` (#317) — `omarchy-agent.service` beside this file is the unit it writes.
+//! Seams: the unit file and launchd plist are written by `install` (#317) —
+//! `omarchy-agent.service` beside this file is the unit it writes.
 //! The host report (#321) carries `agent-rollback` from the journal (or a sticky field),
 //! not from `state.round`, which the next poll overwrites. The deadline is the old
 //! agent's wall clock (as the issue says): a host suspended through the window rolls a
@@ -368,7 +371,7 @@ impl Agent {
                 return Err(format!("the engine does not answer: {e}"));
             }
         }
-        let last = match self.pool.follow(&self.cfg.worker_id) {
+        let last = match self.pool.state() {
             Net::Ok(_) => "ok",
             Net::NoAnswer(_) => "no-answer",
             Net::Unauthorized(_) => "unauthorized",
@@ -451,6 +454,28 @@ impl Agent {
             return false;
         };
         let ships = b.manifest().outer().agent().clone();
+        // An agent not above this one is never taken: nothing to ask GitHub for (a release
+        // from before the co-signature threshold rose, which a co-signed rollback went back
+        // to, carries none).
+        if ships.version() <= self.version {
+            self.upward_checked = Some(applied);
+            return false;
+        }
+        // Its agent is taken only under this agent's co-signature requirement (#330), as at
+        // go_to: an agent never moves on a bundle its own policy did not accept.
+        match self.cosigned_cached(applied, now) {
+            Some(Ok(())) => {}
+            Some(Err(why)) => {
+                self.upward_checked = Some(applied);
+                self.journal.write(
+                    now,
+                    "agent-update",
+                    serde_json::json!({"release": applied.to_string(), "detail": format!("its agent is not taken: {why}")}),
+                );
+                return false;
+            }
+            None => return false,
+        }
         match self.upgrade(applied, &ships, now) {
             Ok(true) => true,
             Ok(false) => {

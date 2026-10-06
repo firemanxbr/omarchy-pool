@@ -5,7 +5,8 @@
 //!
 //! The planner reads compose's hashes and image lists only; `compose config` output with
 //! the variables filled in is never asked for, so it is never written anywhere. The driver
-//! never learns about tasks: everything it lists is filtered to the set's compose project.
+//! never learns about tasks: everything it lists is filtered to the set's compose project,
+//! or (`retire-legacy`, #344) to the legacy project, by its exact label.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +14,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::driver::{Answer, Driver, Exit, Project, PullState, Unit};
+use super::config::Runtime;
+use super::driver::{Answer, Driver, EngineId, Exit, Foreign, Project, PullState, Unit};
 use super::exec::{self, Background, Progress};
 use super::tools::Tools;
 
@@ -134,6 +136,42 @@ const INSPECT: &str = concat!(
     r#""release":{{json (index .Config.Labels "org.omarchy-pool.agent.release")}}}"#
 );
 
+/// What `project_containers` reads of a container of another project: its labels that
+/// name the project, its directory and an agent host, never `.Config.Env`.
+const FOREIGN: &str = concat!(
+    r#"{"id":{{json .Id}},"status":{{json .State.Status}},"#,
+    r#""project":{{json (index .Config.Labels "com.docker.compose.project")}},"#,
+    r#""working_dir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"#,
+    r#""agent_host":{{json (index .Config.Labels "org.omarchy-pool.agent.host")}}}"#
+);
+
+#[derive(Deserialize)]
+struct ForeignLine {
+    id: String,
+    status: String,
+    project: Option<String>,
+    working_dir: Option<String>,
+    agent_host: Option<String>,
+}
+
+/// The containers of `project` among `lines`: a label that is not exactly it is dropped.
+fn parse_foreign(stdout: &str, project: &str) -> Result<Vec<Foreign>, String> {
+    let mut out = Vec::new();
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let f: ForeignLine = serde_json::from_str(line).map_err(|e| format!("inspect: {e}"))?;
+        if f.project.as_deref() != Some(project) {
+            continue;
+        }
+        out.push(Foreign {
+            id: f.id,
+            status: f.status,
+            working_dir: f.working_dir.unwrap_or_default(),
+            agent_host: f.agent_host.unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
 #[derive(Deserialize)]
 struct Inspected {
     id: String,
@@ -183,6 +221,11 @@ fn failed(o: &exec::Output) -> String {
 
 fn is_container_id(s: &str) -> bool {
     (12..=64).contains(&s.len()) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A network id as docker and podman's compatible API print one: hex, like a container's.
+fn is_network_id(s: &str) -> bool {
+    is_container_id(s)
 }
 
 /// A compose service name as the set may write one.
@@ -475,6 +518,218 @@ impl Driver for Compose {
         c.args(["image", "rm", image]);
         Self::call(Ok(c)).map_none()
     }
+
+    fn project_containers(&mut self, project: &str) -> Answer<Vec<Foreign>> {
+        if !is_project(project) {
+            return Answer::NoAnswer(format!("{project:?} is not a compose project name"));
+        }
+        let mut c = self.docker();
+        c.args([
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--format",
+            "{{.ID}}",
+            "--filter",
+        ])
+        .arg(format!("label=com.docker.compose.project={project}"));
+        let ids = match Self::call(Ok(c)) {
+            Answer::Yes(o) => o.stdout,
+            Answer::NotFound => String::new(),
+            Answer::NoAnswer(e) => return Answer::NoAnswer(e),
+        };
+        let ids: Vec<&str> = ids.split_whitespace().collect();
+        if let Some(bad) = ids.iter().find(|i| !is_container_id(i)) {
+            return Answer::NoAnswer(format!("{bad:?} is not a container id"));
+        }
+        if ids.is_empty() {
+            return Answer::Yes(Vec::new());
+        }
+        let mut c = self.docker();
+        c.args(["inspect", "--type", "container", "--format", FOREIGN])
+            .args(&ids);
+        match Self::call(Ok(c)) {
+            Answer::Yes(o) => {
+                parse_foreign(&o.stdout, project).map_or_else(Answer::NoAnswer, Answer::Yes)
+            }
+            // One went away between the list and the look: ask again next tick.
+            Answer::NotFound => Answer::NoAnswer("a container went away while listed".into()),
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
+
+    fn project_networks(&mut self, project: &str) -> Answer<Vec<String>> {
+        if !is_project(project) {
+            return Answer::NoAnswer(format!("{project:?} is not a compose project name"));
+        }
+        let mut c = self.docker();
+        c.args([
+            "network",
+            "ls",
+            "--no-trunc",
+            "--format",
+            "{{.ID}}\t{{.Label \"com.docker.compose.project\"}}",
+            "--filter",
+        ])
+        .arg(format!("label=com.docker.compose.project={project}"));
+        match Self::call(Ok(c)) {
+            Answer::Yes(o) => Answer::Yes(
+                o.stdout
+                    .lines()
+                    .filter_map(|l| {
+                        let (id, p) = l.trim().split_once('\t')?;
+                        (p.trim() == project && is_network_id(id.trim()))
+                            .then(|| id.trim().to_owned())
+                    })
+                    .collect(),
+            ),
+            Answer::NotFound => Answer::Yes(Vec::new()),
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
+
+    fn remove_network(&mut self, id: &str) -> Answer<()> {
+        if !is_network_id(id) {
+            return Answer::NoAnswer(format!("{id:?} is not a network id"));
+        }
+        let mut c = self.docker();
+        c.args(["network", "rm", id]);
+        match Self::call(Ok(c)) {
+            Answer::Yes(_) | Answer::NotFound => Answer::Yes(()),
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
+
+    fn logs(&mut self, id: &str, lines: u32) -> Answer<String> {
+        if !is_container_id(id) {
+            return Answer::NoAnswer(format!("{id:?} is not a container id"));
+        }
+        let mut c = self.docker();
+        c.args(["logs", "--timestamps", "--tail", &lines.to_string(), id]);
+        match Self::call(Ok(c)) {
+            Answer::Yes(o) => Answer::Yes(merge_logs(&o.stdout, &o.stderr, lines)),
+            Answer::NotFound => Answer::NotFound,
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
+
+    fn engine(&mut self) -> Answer<EngineId> {
+        let mut c = self.docker();
+        c.args(["version", "--format", "{{json .Server}}"]);
+        let server = match Self::call(Ok(c)) {
+            Answer::Yes(o) => o.stdout,
+            Answer::NotFound => return Answer::NotFound,
+            Answer::NoAnswer(e) => return Answer::NoAnswer(e),
+        };
+        let mut c = self.docker();
+        c.args(["info", "--format", "{{json .SecurityOptions}}"]);
+        let security = match Self::call(Ok(c)) {
+            Answer::Yes(o) => o.stdout,
+            Answer::NotFound => return Answer::NotFound,
+            Answer::NoAnswer(e) => return Answer::NoAnswer(e),
+        };
+        parse_engine(&server, &security).map_or_else(Answer::NoAnswer, Answer::Yes)
+    }
+
+    fn host_tasks(&mut self, host: &str) -> Answer<usize> {
+        if !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            || host.is_empty()
+        {
+            return Answer::NoAnswer(format!("{host:?} is not a host id"));
+        }
+        let mut c = self.docker();
+        c.args([
+            "ps",
+            "--no-trunc",
+            "--format",
+            "{{.ID}}\t{{.Label \"com.docker.compose.project\"}}",
+            "--filter",
+        ])
+        .arg(format!("label=org.omarchy-pool.agent.host={host}"));
+        match Self::call(Ok(c)) {
+            Answer::Yes(o) => Answer::Yes(
+                o.stdout
+                    .lines()
+                    .filter_map(|l| l.trim_end().split_once('\t').or(Some((l.trim(), ""))))
+                    .filter(|(id, project)| is_container_id(id.trim()) && project.trim().is_empty())
+                    .count(),
+            ),
+            Answer::NotFound => Answer::Yes(0),
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
+
+    fn tasks_running(&mut self) -> Answer<bool> {
+        let mut c = self.docker();
+        let filter = format!("label={}", super::driver::TASK_LABEL);
+        c.args(["ps", "-q", "--filter", &filter]);
+        match Self::call(Ok(c)) {
+            Answer::Yes(o) => Answer::Yes(!o.stdout.trim().is_empty()),
+            Answer::NotFound => Answer::Yes(false),
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
+}
+
+/// The two streams of `docker logs --timestamps`, merged by their timestamps (RFC 3339 with
+/// nanoseconds, so they sort as text) into the order the container wrote them; the last
+/// `lines` of them.
+fn merge_logs(stdout: &str, stderr: &str, lines: u32) -> String {
+    let mut all: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
+    all.sort_by_key(|l| l.split_once(' ').map_or(*l, |(t, _)| t));
+    let skip = all.len().saturating_sub(lines as usize);
+    let mut out = String::new();
+    for l in &all[skip..] {
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
+/// `docker version`'s server (its components: docker's `Engine`, podman's `Podman Engine`)
+/// and `docker info`'s security options (`name=rootless` on a rootless engine).
+fn parse_engine(server: &str, security: &str) -> Result<EngineId, String> {
+    #[derive(Deserialize)]
+    struct Server {
+        #[serde(rename = "Components", default)]
+        components: Vec<Component>,
+        #[serde(rename = "Version", default)]
+        version: String,
+    }
+    #[derive(Deserialize)]
+    struct Component {
+        #[serde(rename = "Name")]
+        name: String,
+        #[serde(rename = "Version", default)]
+        version: String,
+    }
+    let s: Server = serde_json::from_str(server.trim()).map_err(|e| format!("version: {e}"))?;
+    let podman = s.components.iter().find(|c| c.name == "Podman Engine");
+    let (runtime, version) = match podman {
+        Some(p) => (Runtime::Podman, p.version.clone()),
+        None => (
+            Runtime::Docker,
+            s.components
+                .iter()
+                .find(|c| c.name == "Engine")
+                .map_or(s.version, |c| c.version.clone()),
+        ),
+    };
+    let options: Vec<String> = serde_json::from_str(security.trim()).unwrap_or_default();
+    let version: String = version
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        .take(40)
+        .collect();
+    Ok(EngineId {
+        runtime,
+        version,
+        rootless: options
+            .iter()
+            .any(|o| o.split(',').any(|p| p == "name=rootless")),
+    })
 }
 
 /// Whether the probe is not in the image: 126/127 and "not found in $PATH". Podman says
@@ -625,6 +880,30 @@ mod tests {
         let p = d.tools().docker.clone();
         fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         d
+    }
+
+    #[test]
+    fn a_running_task_is_any_container_with_the_task_label_sidecar_or_not() {
+        // A task with the signed `direct` exception has no sidecar, so no role label: the
+        // label every task container carries decides (#320: a resize waits for it).
+        let (mut d, log) = recording();
+        assert_eq!(d.tasks_running(), Answer::Yes(false));
+        let argv = fs::read_to_string(&log).unwrap();
+        assert!(
+            argv.lines()
+                .next()
+                .unwrap()
+                .ends_with(" ps -q --filter label=com.omarchy.task"),
+            "{argv}"
+        );
+        assert_eq!(
+            docker_doing("echo 0a1b2c3d4e5f").tasks_running(),
+            Answer::Yes(true)
+        );
+        assert!(matches!(
+            docker_doing("echo 'Cannot connect to the Docker daemon' >&2; exit 1").tasks_running(),
+            Answer::NoAnswer(_)
+        ));
     }
 
     #[test]
@@ -780,5 +1059,43 @@ mod tests {
             })
         );
         assert_eq!(parse_die("not json"), None);
+    }
+    #[test]
+    fn tells_docker_from_podman_and_rootless_from_rootful() {
+        let docker = r#"{"Version":"29.6.2","Components":[{"Name":"Engine","Version":"29.6.2"},{"Name":"containerd","Version":"v2.2.6"}]}"#;
+        let podman = r#"{"Version":"4.9.3","Components":[{"Name":"Podman Engine","Version":"4.9.3"},{"Name":"Conmon","Version":"conmon version 2.1.10"},{"Name":"Engine","Version":"4.9.3"}]}"#;
+        assert_eq!(
+            parse_engine(docker, r#"["name=seccomp,profile=builtin"]"#).unwrap(),
+            EngineId {
+                runtime: Runtime::Docker,
+                version: "29.6.2".into(),
+                rootless: false
+            }
+        );
+        assert_eq!(
+            parse_engine(
+                podman,
+                r#"["name=seccomp,profile=default","name=rootless"]"#
+            )
+            .unwrap(),
+            EngineId {
+                runtime: Runtime::Podman,
+                version: "4.9.3".into(),
+                rootless: true
+            }
+        );
+        assert!(parse_engine("<html>", "[]").is_err());
+    }
+
+    #[test]
+    fn merges_the_two_log_streams_by_their_timestamps_and_keeps_the_last_lines() {
+        let out =
+            "2027-01-15T08:00:01.000000001Z claimed 1\n2027-01-15T08:00:03.000000000Z claimed 2\n";
+        let err = "2027-01-15T08:00:02.000000000Z warn a\n2027-01-15T08:00:04.000000000Z warn b\n";
+        assert_eq!(
+            merge_logs(out, err, 3),
+            "2027-01-15T08:00:02.000000000Z warn a\n2027-01-15T08:00:03.000000000Z claimed 2\n2027-01-15T08:00:04.000000000Z warn b\n"
+        );
+        assert_eq!(merge_logs("", "", 500), "");
     }
 }

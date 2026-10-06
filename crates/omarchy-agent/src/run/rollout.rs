@@ -32,6 +32,7 @@ use crate::dispatcher_env;
 use crate::lint::{self, SetToml};
 use crate::version::Release;
 
+use super::brake::Ask;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver, Exit, Project, PullState, Unit};
 use super::journal::Journal;
@@ -199,6 +200,7 @@ pub(crate) fn start(
         why: why.to_owned(),
         services: Vec::new(),
         reverting: None,
+        braked: false,
     };
     j.write(
         now,
@@ -809,7 +811,15 @@ fn replace(state: &mut State, ctx: &mut Ctx, files: Files, phase: &Phase) -> Res
         },
     };
     match then {
-        Then::Go(step) => go(state, ctx, step),
+        Then::Go(step) => {
+            // The old dispatcher was sent its stop: one recreation of it, once per replace
+            // (the step is saved past it). A round the pool's target started toward another
+            // release counts it on the brake, and its revert's too (#325).
+            if *phase == Phase::Stop && state.rollout.braked {
+                state.brake.record(now, &[Ask::Restart]);
+            }
+            go(state, ctx, step);
+        }
         Then::Stay => {}
         Then::Wait(e) => engine_wait(state, ctx, "replace", &e),
         Then::Fail(why) => fail_replace(state, ctx, files, &why)?,
@@ -1056,6 +1066,10 @@ fn commit(state: &mut State, ctx: &mut Ctx) -> Result<(), String> {
         // The statement set the floor to `to`; nothing above it stays the floor.
         state.floor = Some(target);
     }
+    // What a co-signed statement vouched for holds only while the floor stands there (#330).
+    if state.vouched != state.floor {
+        state.vouched = None;
+    }
     state.applied = Some(target);
     state.quarantine.remove(&target);
     prune(state, ctx, target, from);
@@ -1096,6 +1110,19 @@ fn prune(state: &mut State, ctx: &mut Ctx, target: Release, from: Option<Release
         }
         for ext in ["tar.gz", "tar.gz.sigstore.json"] {
             let _ = fs::remove_file(ctx.paths.bundles().join(format!("omarchy-host-{r}.{ext}")));
+        }
+        // And its maintainers' co-signatures (#330), one file each.
+        let cosigned = format!("omarchy-host-{r}.tar.gz.");
+        for e in fs::read_dir(ctx.paths.bundles())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            if n.starts_with(&cosigned) && n.ends_with(".sshsig") {
+                let _ = fs::remove_file(e.path());
+            }
         }
         ctx.journal.write(
             ctx.now,

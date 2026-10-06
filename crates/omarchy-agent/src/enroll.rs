@@ -4,8 +4,9 @@
 //! owner's Confirm, and the host worker token written for the dispatcher.
 //!
 //! What comes before it at install — the verified bundle, preflight, the runtime and
-//! the capacity detection that writes `run/capacity.json` — is #317's and #333's; the
-//! rotation every 30 days is called from the run loop (#315) through [`fetch_token`].
+//! the capacity detection that writes `run/capacity.json` — is #317's and #333's; a
+//! rotation is `omarchy-agent token` or the pool's `rotate-token` host order (#325), both
+//! through [`write_worker_token`].
 //! Re-running it keeps the identity: a machine that enrolled goes straight to the wait
 //! or the token — and keeps the worker token it holds, since every fetch rotates it
 //! (the one it replaces works ten more minutes only, so two fetches in a row would cut
@@ -46,6 +47,23 @@ impl Paths {
             data: data.to_path_buf(),
             state: data.join("state"),
             set: data.join("sets").join("host"),
+        }
+    }
+    /// As installed: the set directory agent.toml names (a Mac's is outside the data
+    /// directory, #320), else the default one.
+    pub fn installed(data: &Path) -> Self {
+        let set = std::fs::read_to_string(data.join("agent.toml"))
+            .ok()
+            .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+            .and_then(|t| t.get("set")?.get("dir")?.as_str().map(PathBuf::from))
+            .filter(|d| crate::lint::is_plain_absolute(d));
+        match set {
+            Some(set) => Self {
+                data: data.to_path_buf(),
+                state: data.join("state"),
+                set,
+            },
+            None => Self::under(data),
         }
     }
     pub fn capacity(&self) -> PathBuf {
@@ -525,10 +543,19 @@ pub fn write_worker_token(
 
 /// The machine's name as the pool takes it: a DNS label's characters, at most 63.
 fn hostname() -> String {
+    // A Mac has neither file and exports no HOSTNAME: uname's node name (#320).
     let raw = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .or_else(|_| std::fs::read_to_string("/etc/hostname"))
         .ok()
         .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| {
+            Some(
+                rustix::system::uname()
+                    .nodename()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        })
         .unwrap_or_default();
     let name: String = raw
         .trim()
@@ -552,7 +579,30 @@ mod tests {
     fn fixture() -> Sources {
         Sources {
             proc_net: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home"),
+            ifconfig: None,
         }
+    }
+
+    #[test]
+    fn the_installed_set_directory_is_the_one_agent_toml_names() {
+        // A Mac's set directory is outside the data directory (#320): `token` and `enroll`
+        // write dispatcher.env there, where the VM mounts it.
+        let data = crate::run::state::tempdir();
+        assert_eq!(Paths::installed(&data).set, data.join("sets/host"));
+        std::fs::write(
+            data.join("agent.toml"),
+            "[set]\ndir = \"/Users/Shared/omarchy-pool/set\"\n",
+        )
+        .unwrap();
+        let p = Paths::installed(&data);
+        assert_eq!(
+            p.dispatcher_env(),
+            Path::new("/Users/Shared/omarchy-pool/set/etc/dispatcher.env")
+        );
+        assert_eq!(p.state, data.join("state"));
+        // One that is not a plain absolute path is not followed.
+        std::fs::write(data.join("agent.toml"), "[set]\ndir = \"../elsewhere\"\n").unwrap();
+        assert_eq!(Paths::installed(&data).set, data.join("sets/host"));
     }
 
     #[test]

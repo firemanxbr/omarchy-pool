@@ -1,0 +1,8 @@
+# Generated from factory/MAINTAINERS.toml by factory/bin/check-governance --write; CI fails
+# when the two disagree. The maintainers' co-signature this agent requires (#330, design v2
+# D1 b): `threshold` of these FIDO keys over every host bundle it takes (0 asks nothing),
+# and at least one over a rollback statement deeper than 14 days (D25). A change here is a
+# change of the agent: its version rises (factory/bin/agent-version-check).
+threshold = 0
+
+[keys]

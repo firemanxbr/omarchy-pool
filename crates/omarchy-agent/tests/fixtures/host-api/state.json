@@ -1,0 +1,20 @@
+{
+  "host": "h_0123456789",
+  "status": "active",
+  "name": "studio",
+  "owner": "m1",
+  "worker": "w_0123456789abcdef",
+  "fingerprint": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+  "token": null,
+  "report_every_s": 300,
+  "poll_s": 120,
+  "release": { "target": "v1.21.0", "deployed_at": "2027-01-15T08:00:00Z" },
+  "updates": ["wo_0123456789abcdef0123456789abcdef"],
+  "orders": [
+    { "id": "ho_11111111111111111111111111111111", "kind": "retire-legacy", "not_after": "2027-01-15T09:00:00.000Z" },
+    { "id": "ho_22222222222222222222222222222222", "kind": "reconcile-now", "not_after": "2027-01-15T09:05:00.000Z" },
+    { "id": "ho_33333333333333333333333333333333", "kind": "set-units", "not_after": "2027-01-15T09:06:00.000Z", "units": 4 },
+    { "id": "ho_44444444444444444444444444444444", "kind": "set-emulate", "not_after": "2027-01-15T09:07:00.000Z", "emulate": [] }
+  ],
+  "settings": { "units": 6, "emulate": ["x86_64"] }
+}

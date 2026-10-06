@@ -37,6 +37,23 @@ pub enum Ending {
     Expired,
     /// A host event (the disk watcher, a container the engine lost): killed, reported `lost`.
     Lost(String),
+    /// Its release is revoked (#342): killed, reported `revoked` (and `lost`, which a pool from
+    /// before #342 reads as a host event); the pool takes nothing of it and requeues it. A
+    /// dispatcher from before #342 cannot read a lease file that says so: it removes the
+    /// container, which was being killed anyway, and the pool requeues the lease.
+    Revoked(String),
+}
+
+/// The lane a lease runs on (#338, design v2 §7.4, §7.5): the architecture of its
+/// container (`--platform linux/<arch>`), and whether this host runs it emulated — then,
+/// and only then, the container is told so (`WORKER_LABELS={"emulated":true}`), and its
+/// build probes the toolchains a recipe installs. A build or a trial runs the task's
+/// architecture on the lane the pool leased; an audit, which reads its build as data, the
+/// host's own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lane {
+    pub arch: String,
+    pub emulated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,11 +87,24 @@ pub struct Lease {
     /// The calls its agent sidecar may make, set aside from the day's budget while it runs (#336, D45).
     #[serde(default)]
     pub agent_calls: Option<u32>,
+    /// Its lane (#338); a lease file from before lanes runs the task's architecture, natively.
+    #[serde(default)]
+    pub lane: Option<Lane>,
 }
 
 impl Lease {
     pub fn key(&self) -> (u64, String) {
         (self.task.id, self.gen.clone())
+    }
+
+    /// The architecture its container runs.
+    pub fn arch(&self) -> &str {
+        self.lane.as_ref().map_or(&self.task.arch, |l| &l.arch)
+    }
+
+    /// Whether it runs on an emulated lane.
+    pub fn emulated(&self) -> bool {
+        self.lane.as_ref().is_some_and(|l| l.emulated)
     }
 }
 
@@ -194,7 +224,31 @@ mod tests {
             notes: serde_json::Value::Null,
             net_slot: None,
             agent_calls: None,
+            lane: None,
         }
+    }
+
+    #[test]
+    fn a_lease_keeps_its_lane_and_one_from_before_lanes_runs_its_task_natively() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut emulated = lease(7, "g_0123456789abcdef");
+        emulated.task.arch = "x86_64".into();
+        emulated.lane = Some(Lane {
+            arch: "x86_64".into(),
+            emulated: true,
+        });
+        store.save(&emulated).unwrap();
+        let back = &store.load().unwrap().leases[0];
+        assert_eq!((back.arch(), back.emulated()), ("x86_64", true));
+        // A P1 dispatcher's lease file has no lane: its task's architecture, natively.
+        let file = dir.path().join("state/leases/7-g_0123456789abcdef.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("lane");
+        std::fs::write(&file, json.to_string()).unwrap();
+        let back = &store.load().unwrap().leases[0];
+        assert_eq!((back.arch(), back.emulated()), ("x86_64", false));
     }
 
     #[test]

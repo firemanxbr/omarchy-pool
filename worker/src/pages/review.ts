@@ -128,7 +128,7 @@ const BODY = String.raw`
       <div class="rv-pane rv-yours" id="rv-yours">
         <div class="rv-pane-h"><span>${lucide("refresh-cw", 15)}<b id="rv-y-title">The rebuild</b><span class="rv-tag ok">review worker</span></span><span class="rv-agents" id="rv-agents"></span></div>
         <div class="rv-pane-b">
-          <div class="rv-block"><div class="rv-bh"><span class="op-label">Steps</span><span class="rv-pct" id="rv-pct"></span></div><div class="rv-checks" id="rv-steps"></div><div class="rv-progress"><i id="rv-progress"></i></div><div class="rv-claimbar" id="rv-claimbar"></div></div>
+          <div class="rv-block"><div class="rv-bh"><span class="op-label">Steps</span><span class="rv-pct" id="rv-pct"></span></div><div class="rv-checks" id="rv-steps"></div><div class="rv-progress"><i id="rv-progress"></i></div><div class="rv-claimbar" id="rv-claimbar"></div><div class="rv-place" id="rv-place"></div></div>
           <div class="rv-block"><div class="rv-bh"><span class="op-label">PKGBUILD</span><span class="rv-diffnote" id="rv-diffnote"></span></div><div class="rv-code" id="rv-y-pkgbuild"></div></div>
           <div class="rv-block"><span class="op-label">Rebuild log</span><div class="rv-code log" id="rv-y-log"></div><div class="rv-evid" id="rv-y-evid"></div></div>
           <p class="rv-foot">${lucide("package-check", 13)}If approved, this build is the one that ships.</p>
@@ -243,6 +243,8 @@ const CSS = String.raw`
   .rv-check .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rv-check.dim .t { color: var(--dim); } .rv-check .w { color: var(--dim); font-size: 11.5px; white-space: nowrap; }
   .rv-progress { height: 2px; background: var(--line); } .rv-progress i { display: block; width: 0; height: 2px; background: var(--green); transition: width 1s linear; }
   .rv-claimbar { display: flex; flex-wrap: wrap; gap: 8px; } .rv-claimbar:empty { display: none; }
+  .rv-place { display: grid; gap: 6px; } .rv-place:empty { display: none; }
+  .rv-placed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: 12.5px; color: var(--muted); } .rv-placed.warn { color: var(--amber); }
   .rv-code { min-height: 120px; max-height: 420px; overflow: auto; border: 1px solid var(--line); background: var(--bg-deep); font: 12px/1.7 var(--font-mono); }
   .rv-l { display: grid; grid-template-columns: 30px minmax(0, 1fr); } .rv-l .n { padding-right: 8px; text-align: right; color: var(--dim); opacity: .7; user-select: none; } .rv-l .t { padding-right: 10px; white-space: pre; color: var(--muted); }
   .rv-code:not(.log) .rv-l .t { color: var(--text); }
@@ -482,7 +484,7 @@ const SCRIPT = String.raw`
       var t = targets[a] || { status: "waiting", task: null }, chains = s.chains || [];
       var c = chains.filter(function (ch) { return (ch.contributor && ch.contributor.id === t.task) || (ch.project && ch.project.id === t.task); })[0] || chains.filter(function (ch) { return ch.contributor && ch.contributor.arch === a; })[0] || null;
       var p = c && c.project && ["queued", "leased", "staged", "failed", "done"].indexOf(c.project.status) >= 0 ? c.project : null;
-      return { arch: a, target: t, asked: asked.indexOf(a) >= 0, factory: c && c.contributor, rebuild: p, audit: c && c.audit, trial: p && c.trial, approval: c && c.approval };
+      return { arch: a, target: t, asked: asked.indexOf(a) >= 0, factory: c && c.contributor, rebuild: p, audit: c && c.audit, paudit: p && c.project_audit, trial: p && c.trial, approval: c && c.approval };
     });
   }
   function workPkg() { return pkgs().filter(function (p) { return p.name === OPEN; })[0] || null; }
@@ -641,13 +643,13 @@ const SCRIPT = String.raw`
     });
     if (mine && mine.factory) textOf(mine.factory.id, "log").then(function (t) { if (current(gen)) tail($("#rv-f-log"), t !== null ? numbered(t, null, 40) : elsewhere(mine.factory.id, mine.factory.error ? mine.factory.error + " — the log is" : "Its log is")); });
     else $("#rv-f-log").innerHTML = empty(mine ? LOGARCH + ": " + String(mine.target.status).replace("_", " ") : "nothing built yet");
-    // The evidence under the log, each verdict named: the gate's, the audit's, then the build and where it ran.
+    // The evidence under the log, each verdict named: the gate's, the audit's with how independent it was of the build (#339), then the build and where it ran.
     var fev = mine && mine.factory ? evidenceOf(mine.factory.id) || {} : null;
-    $("#rv-f-evid").innerHTML = fev ? '<span>gate ' + gatePill(vetOf(mine.factory), fev.tests) + '</span> <span>audit ' + auditPill(auditOf(mine.audit), mine.audit ? fev.audit : "") + '</span> <a href="/build/' + mine.factory.id + '">build #' + mine.factory.id + '</a> ' + builtOn(mine.factory.id) : '';
+    $("#rv-f-evid").innerHTML = fev ? '<span>gate ' + gatePill(vetOf(mine.factory), fev.tests) + '</span> <span>audit ' + auditPill(auditOf(mine.audit), mine.audit ? fev.audit : "") + independentPill(mine.audit) + '</span> <a href="/build/' + mine.factory.id + '">build #' + mine.factory.id + '</a> ' + builtOn(mine.factory.id) : '';
   }
   var DIFFED = null;
   function vetOf(t) { return (t && t.result && t.result.vet) || null; }
-  function auditOf(a) { if (!a) return null; var r = a.result || {}; return a.status === "done" ? { status: "done", verdict: r.verdict, summary: r.summary, findings: (r.findings || []).length } : { status: a.status, error: a.error }; }
+  function auditOf(a) { if (!a) return null; var r = a.result || {}; return a.status === "done" ? { status: "done", verdict: r.verdict, summary: r.summary, findings: (r.findings || []).length, independent: a.independent || null } : { status: a.status, error: a.error, independent: a.independent || null }; }
 
   // ---- right: the rebuild — its steps (the request checked again, the recipe drafted from scratch, a build per architecture, a real pacman installing it, the comparison), its log, the claim to start it.
   function renderSteps(R) {
@@ -659,7 +661,7 @@ const SCRIPT = String.raw`
       var r = R.filter(function (x) { return x.arch === a; })[0], b = r && r.rebuild;
       if (!r || !r.asked) steps.push(S("Build " + a, "na", "not requested"));
       else if (!b) steps.push(S("Build " + a, r.target.status === "not_supported" ? "na" : "wait", r.target.status === "not_supported" ? "not supported" : ""));
-      else if (b.status === "queued") steps.push(waitsForNative(b) ? S("Build " + a, "wait", "native worker", waitsForNative(b) + ": it could not run emulated") : S("Build " + a, "wait", "queued"));
+      else if (b.status === "queued") steps.push(waitsForNative(b) ? S("Build " + a, "wait", "native worker", waitsForNative(b) + ": it could not run emulated") : heldOf(b) ? S("Build " + a, "wait", "a release", HELD_WORDS) : S("Build " + a, "wait", "queued"));
       else if (b.status === "leased") steps.push(S("Build " + a, "run", "now"));
       else if (built(b)) steps.push(S("Build " + a, vetOk(b) === false ? "fail" : "ok", b.duration_ms ? dur(b.duration_ms) : "", vetOk(b) === false ? "the gate did not pass" : ""));
       else steps.push(S("Build " + a, "fail", "failed", b.error || ""));
@@ -696,11 +698,40 @@ const SCRIPT = String.raw`
     else if (built(b) || b.status === "failed") textOf(b.id, "log").then(function (t) { if (current(gen)) tail(log, t !== null ? numbered(t, null, 40) : elsewhere(b.id, b.error ? b.error + " — the log is" : "Its log is")); });
     else if (b.status === "leased" && WLOG && WLOG.id === b.id) tail(log, WLOG.log ? numbered(WLOG.log, null, 40) : empty("building on " + WLOG.worker + "; nothing logged yet"));
     // Sent back by an emulated worker (#281): no review worker of that kind takes it again, so the words are the shell's.
-    else log.innerHTML = empty(b.status === "leased" ? "building on " + (b.lease_owner || "a review worker") + (isMaintainer() ? "" : " — its log is here once it built") : waitsForNative(b) ? waitsForNative(b) + ": it could not run emulated" : "queued for a review worker");
+    else log.innerHTML = empty(b.status === "leased" ? "building on " + (b.lease_owner || "a review worker") + (isMaintainer() ? "" : " — its log is here once it built") : waitsForNative(b) ? waitsForNative(b) + ": it could not run emulated" : heldOf(b) ? "waiting for a host: " + HELD_WORDS : "queued for a review worker");
     var yev = b ? evidenceOf(b.id) || {} : {};
     // Out of memory (#337): the engine's words — queued again, at the size it waits at — and a maintainer's Retry at size.
     var oom = b && oomSize(b) ? '<span>' + pillHtml("error", b.error.split(" — ")[0] + (b.status === "queued" ? "; " + requeuedAt(b) : ""), b.error) + '</span> ' + retryAtSize(b) + ' ' : '';
-    $("#rv-y-evid").innerHTML = b ? oom + (built(b) ? '<span>gate ' + gatePill(vetOf(b), yev.tests) + '</span> <span>trial ' + trialPill(shown.trial ? { status: shown.trial.status, verdict: shown.trial.result && shown.trial.result.verdict } : null, shown.trial ? yev.trial : "") + '</span> ' : '') + '<a href="/build/' + b.id + '">build #' + b.id + '</a> ' + builtOn(b.id) : '';
+    // Once it built: the gate, its audit — the second opinion, with how independent it was of the rebuild (#339, D36) — and the trial.
+    $("#rv-y-evid").innerHTML = b ? oom + (built(b) ? '<span>gate ' + gatePill(vetOf(b), yev.tests) + '</span> <span>audit ' + auditPill(auditOf(shown.paudit), shown.paudit ? yev.audit : "") + independentPill(shown.paudit) + '</span> <span>trial ' + trialPill(shown.trial ? { status: shown.trial.status, verdict: shown.trial.result && shown.trial.result.verdict } : null, shown.trial ? yev.trial : "") + '</span> ' : '') + '<a href="/build/' + b.id + '">build #' + b.id + '</a> ' + builtOn(b.id) : '';
+    // The project's copy kept off its requester's hosts (#339, D35): while only theirs can build an architecture of it, it waits, and
+    // another maintainer releases it to any host with their passkey — at once, never after a timeout. The review list's word on each
+    // queued rebuild (placement), its button grey with the server's reason where the viewer may not; once released, who did.
+    $("#rv-place").innerHTML = R.map(function (r) {
+      var pl = r.rebuild ? placeOf(r.rebuild) : null; if (!pl) return "";
+      if (pl.released) return '<p class="rv-placed">' + esc(r.arch) + ': released to any host by ' + at(pl.released.by) + '</p>';
+      if (!pl.held) return "";
+      var whose = (pl.requesters || []).map(at).join(", ") || "its requester";
+      return '<p class="rv-placed warn">' + esc(r.arch) + ': waits for a host — only ' + whose + "'s can build it, and the project's copy is not built on its requester's host while another maintainer's can. " + gate('<button type="button" class="op-btn sm" data-anyhost="' + r.rebuild.id + '">Release to any host</button>', !!(pl.any_host && pl.any_host.ok), (pl.any_host && pl.any_host.why) || "not now") + '</p>';
+    }).join("");
+  }
+  // A queued rebuild's placement (#339, D35), as the review list says it: the contributor's row whose project build it is.
+  function placeOf(b) {
+    if (!b || b.status !== "queued" || !REVIEW) return null;
+    var row = (REVIEW.staged || []).filter(function (x) { return x.project_build && x.project_build.id === b.id; })[0];
+    return (row && row.project_build.placement) || null;
+  }
+  function heldOf(b) { var pl = placeOf(b); return !!(pl && pl.held); }
+  var HELD_WORDS = "only its requester's hosts can build it, and the project's copy is not built on its requester's host while another maintainer's can: another maintainer releases it to any host";
+  // The release to any host (D35): asked, then the maintainer's passkey for exactly this rebuild (any-host:<task>); on the journal and the record.
+  function anyHost(id) {
+    ask({ title: "Release " + OPEN + "'s rebuild to any host?", text: "Only its requester's hosts can build it now. Released, any host takes it — its requester's included. The journal and the record keep who released it.", held: "Your passkey confirms it.", confirm: "Release with your passkey", first: "Register a passkey and release" }).then(function (go) {
+      if (go === null) return;
+      passkeyed("any-host:" + id, function (assertion) { return api("POST", API + "/tasks/" + id + "/any-host", { assertion: assertion }); }).then(function (d) {
+        if (d.error) { toast(refusalHtml(d), "error"); return; }
+        toast("Released — any host builds it now."); FRESH = "?after=" + Date.now(); load(); loadWork();
+      }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    });
   }
 
   // ---- below: the checklist, the verdict with the agent's draft, and the three decisions — each confirmed before it is posted. Each line of the checklist is what the pool checks, nothing it cannot.
@@ -794,7 +825,7 @@ const SCRIPT = String.raw`
     }).catch(function (e) { err.textContent = "failed: " + errorText(e); });
   }
 
-  // ---- the page's clicks, one handler: a tab, a claim, an open, a lift, an adopt, an agent, a log's architecture, the draft, a decision and its confirmation, the release.
+  // ---- the page's clicks, one handler: a tab, a claim, an open, a lift, an adopt, an agent, a log's architecture, the draft, a decision and its confirmation, the release, the release to any host.
   function chooseTab(id, focus) {
     TAB = id; if (typeof history !== "undefined" && history.replaceState) history.replaceState({}, "", TAB === TABS[0][0] ? "/review" : "/review?tab=" + TAB); renderQueue();
     var b = focus ? $("#rv-tab-" + id) : null; if (b && b.focus) b.focus();
@@ -823,7 +854,9 @@ const SCRIPT = String.raw`
     var go = t.closest("#rv-confirm-go");
     if (go && CONFIRM) { if (CONFIRM.what === "approve" && needsPasskey()) { registerFirst(go); return; } go.disabled = true; decide(CONFIRM.what, CONFIRM.id); setTimeout(function () { go.disabled = false; }, 1500); return; }
     var rl = t.closest("#rv-release");
-    if (rl && !rl.disabled) askRelease(Number(rl.getAttribute("data-task")));
+    if (rl && !rl.disabled) { askRelease(Number(rl.getAttribute("data-task"))); return; }
+    var ah = t.closest("button[data-anyhost]");
+    if (ah && !ah.disabled) anyHost(Number(ah.getAttribute("data-anyhost")));
   });
   // The keyboard: the queue's tabs move with the arrows, Home and End (one tab stop for the four); Escape closes an open confirmation.
   document.addEventListener("keydown", function (ev) {
@@ -1034,7 +1067,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="rv-work"', 'id="rv-back"', 'id="rv-w-claim"', 'id="rv-w-release"', 'id="rv-w-name"', 'id="rv-w-state"', 'id="rv-w-chips"', 'id="rv-w-fields"'],
     script: ["'claimed by ' + (mine ? \"you\" : at(cl.by))", '>Release claim</button>', "c.why.release", "approvalWhere(a)", "'requested by '", "select data-category=", 'orSignIn("a maintainer sets the category")', '"/category"', '"/release"', '"/story"'],
     reads: [
-      { path: `/api/v1/factory/packages/${F.factoryPkg}/story`, fields: ["package.owner", "package.arches", "package.license", "package.project", "package.category", "targets", "request.checks", "request.complete", "request.version", "chains", "chains.0.contributor", "chains.0.project", "chains.0.audit", "chains.0.trial"] },
+      { path: `/api/v1/factory/packages/${F.factoryPkg}/story`, fields: ["package.owner", "package.arches", "package.license", "package.project", "package.category", "targets", "request.checks", "request.complete", "request.version", "chains", "chains.0.contributor", "chains.0.project", "chains.0.audit", "chains.0.project_audit", "chains.0.trial"] },
       { path: "/api/v1/factory/review", fields: ["staged.0.can.release", "staged.0.can.changes"] },
     ],
     acts: [
@@ -1048,7 +1081,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.factory-pane",
     page: "/review",
     anchor: ['id="rv-factory"', "Request, as checked", 'id="rv-f-pkgbuild"', 'id="rv-f-log"', 'id="rv-f-tabs"', "Learn from it. Its packages are never reused."],
-    script: ["function evidenceOf(id)", "function evidenceUrl(id, which)", "x.public", "function builtOn(id)", "b.trusted_by", 'textOf(f.factory.id, "pkgbuild")', 'textOf(mine.factory.id, "log")', "gatePill(vetOf(mine.factory), fev.tests)", "auditPill(auditOf(mine.audit)", "evidenceLink({ id: id }", "data-logarch="],
+    script: ["function evidenceOf(id)", "function evidenceUrl(id, which)", "x.public", "function builtOn(id)", "b.trusted_by", 'textOf(f.factory.id, "pkgbuild")', 'textOf(mine.factory.id, "log")', "gatePill(vetOf(mine.factory), fev.tests)", "auditPill(auditOf(mine.audit)", "independentPill(mine.audit)", "evidenceLink({ id: id }", "data-logarch="],
     reads: [
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGBUILD`, json: false },
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
@@ -1060,15 +1093,17 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Right, the rebuild — "Your rebuild" to the maintainer who claimed it, the claimant's to anyone else: the agents a maintainer's claim may choose (the project's workers, read when a claim or the workspace first needs them), the steps with their progress, the rebuilt PKGBUILD with the lines that differ from the factory's lit, the log — the worker's own while it runs (a maintainer's read, with the story), the build's once it built — and Claim with a hint where nobody claimed it. A rebuild an emulated worker sent back says, in its step, its recipe's note and its log, the native worker it waits for (the shell's waitsForNative, #281).
+    // Right, the rebuild — "Your rebuild" to the maintainer who claimed it, the claimant's to anyone else: the agents a maintainer's claim may choose (the project's workers, read when a claim or the workspace first needs them), the steps with their progress, the rebuilt PKGBUILD with the lines that differ from the factory's lit, the log — the worker's own while it runs (a maintainer's read, with the story), the build's once it built — and Claim with a hint where nobody claimed it. A rebuild an emulated worker sent back says, in its step, its recipe's note and its log, the native worker it waits for (the shell's waitsForNative, #281). Once built, its audit says how independent it was of the rebuild (#339, D36); while only its requester's hosts can build it, it says so, with Release to any host — the review list's placement and the server's reason where the viewer may not, a passkey for exactly that rebuild (#339, D35). The act's probe is the fixture's project build, staged: nothing to release.
     id: "review.rebuild-pane",
     page: "/review",
-    anchor: ['id="rv-yours"', '<b id="rv-y-title">The rebuild</b>', 'id="rv-agents"', 'id="rv-steps"', 'id="rv-progress"', 'id="rv-y-pkgbuild"', 'id="rv-diffnote"', 'id="rv-y-log"', "If approved, this build is the one that ships."],
+    anchor: ['id="rv-yours"', '<b id="rv-y-title">The rebuild</b>', 'id="rv-agents"', 'id="rv-steps"', 'id="rv-progress"', 'id="rv-place"', 'id="rv-y-pkgbuild"', 'id="rv-diffnote"', 'id="rv-y-log"', "If approved, this build is the one that ships."],
     script: ["function diff(a, b)", '"s differ"', '" from the factory\'s"', '"Your rebuild"', "\"'s rebuild\"", '"Re-check the request"', '"Derive the recipe from scratch"', '"Install with a real pacman"', '"Compare with the factory"', ">Claim and rebuild</button>", "data-agent=", '"/workers/"', '"/log"', "localStorage.getItem(AGENT_KEY)", "function needWorkers()", "RECIPE_LINES = 1000", '"native worker"', "waitsForNative(b)", "waitsForNative(r.rebuild)",
       // The claim never pins its rebuild to a drained worker (#277): the door refuses one, and the page never offers it.
       "function agentWorkers(arch)", "!w.drained",
       // A rebuild that ran out of memory (#337) says it in the engine's words, with a maintainer's Retry at size (layout.ts).
-      "oomSize(b)", "retryAtSize(b)", "requeuedAt(b)"],
+      "oomSize(b)", "retryAtSize(b)", "requeuedAt(b)",
+      // The second opinion's independence (#339, D36), and the project's copy held off its requester's hosts with its release (D35).
+      "independentPill(shown.paudit)", "c.project_audit", "function placeOf(b)", "project_build.placement", "data-anyhost=", ">Release to any host</button>", "pl.any_host.why", 'passkeyed("any-host:" + id', '"/any-host"'],
     reads: [
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.kinds", "workers.0.alive", "workers.0.agent", "workers.0.agent_status", "workers.0.drained"] },
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/PKGBUILD`, json: false },
@@ -1076,8 +1111,11 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/trial.log`, json: false },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log"] },
     ],
-    // Retry at size (#337): a maintainer only; the probe's task never ran out of memory, so nothing is queued.
-    acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/retry`, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } }],
+    // Retry at size (#337): a maintainer only; the probe's task never ran out of memory, so nothing is queued. Release to any host (#339): a maintainer only, never its requester; the probe's task is staged, so nothing is released.
+    acts: [
+      { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/retry`, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } },
+      { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/any-host`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } },
+    ],
     visible: EVERYONE,
   },
   {

@@ -23,11 +23,19 @@ agent.
 `run/capacity.json` (schema 2, design v2 §7.3) is the agent's, never the
 release's: it detects the host's CPUs, memory, both free disks and limits,
 turns them into units with the release's signed constants and the owner's
-caps, and rewrites the file only when something in it changed (#333). The
-dispatcher reads it read-only; `below_minimum` (with `units` 0) means it
-claims nothing. `omarchy-agent capacity --work-root <dir>` prints what the
-probes see on a host; with `--bundle`/`--sig` of a release, the units, the
-preflight blockers and, with `--write <set dir>`, the file.
+caps, and rewrites the file only when something in it changed (#333). Its
+`lanes` are the native one and each emulated one the agent turned on (#338,
+design v2 §7.5: the envelope's `emulate`, then binfmt — checked always, the
+only host need `set.toml`'s `[needs]` may name for an emulated lane — then a
+smoke run of the release's build image of that architecture), with `via` and
+`page16k`; `held_lanes` says why another is not. The dispatcher reads it
+read-only; `below_minimum` (with `units` 0) means it claims nothing, and it
+starts a lease of an emulated lane only while that lane is listed (when it
+takes the lease, and again before its container starts). `omarchy-agent
+capacity --work-root <dir>` prints what the probes see on a host (with
+`--emulate-image <image by digest>`, the emulated lane's smoke run); with
+`--bundle`/`--sig` of a release, the units, the preflight blockers and, with
+`--write <set dir>`, the file.
 
 `etc/dispatcher.env` and `run/host/dispatcher/token` are the agent's too,
 written once the owner confirmed the host (#321): the env file names the

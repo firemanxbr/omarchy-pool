@@ -409,6 +409,36 @@ describe("the host worker token", () => {
   });
 });
 
+describe("a Mac as a maintainer host (#320)", () => {
+  it("enrolls at the vm level with half the Mac in its omarchy VM and an x86_64 lane through Rosetta, which the host's page shows; a shared VM reports vm-shared", async () => {
+    // A 16-core, 64 GB Mac gives its VM 8 CPUs and 32 GB: 7 units, 3 builds and the job unit.
+    const MAC = { cpus: 8, mem_gb: 32, disk_free_gb: { work: 400, engine: 90 }, units: 7, agent_slots: 2, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "rosetta" }] };
+    const m = await mint("m1", "laptop", "the maintainer's Mac");
+    const k = await newKey();
+    const e = await enroll(m.json.token, k, { os: "macos", page_kb: 4, isolation: "vm", hostname: "mac-1", runtime: { driver: "compose/docker", vm: "colima" }, capacity: MAC });
+    expect(e.status, JSON.stringify(e.json)).toBe(201);
+    expect(e.json.units).toBe(7);
+    const row = await env.DB.prepare("SELECT os, isolation, units, page_kb, lanes FROM hosts WHERE id = ?").bind(e.json.host).first<{ lanes: string }>();
+    expect(row).toMatchObject({ os: "macos", isolation: "vm", units: 7, page_kb: 4 });
+    expect(JSON.parse(row!.lanes)).toEqual(MAC.lanes);
+    const c = await call("POST", `/hosts/${e.json.host}/confirm`, { session: "m1", body: {} });
+    expect(c.status, JSON.stringify(c.json)).toBe(200);
+    const page = (await call("GET", `/hosts/${e.json.host}`, { session: "m1" })).json.host;
+    expect(page).toMatchObject({ isolation: "vm", units: 7, arches: ["aarch64", "x86_64"] });
+    expect(page.lanes[1]).toEqual({ arch: "x86_64", mode: "emulated", via: "rosetta" });
+    expect(page.summary).toBe("8 cores, 32 GB, aarch64 native, x86_64 emulated, isolation vm (dedicated)");
+    // Docker Desktop's VM, reported: vm-shared is kept; a level nobody defined is not.
+    const r = await signed(k, e.json.host, "POST", "/hosts/self/report", JSON.stringify({ runtime: { driver: "compose/docker", isolation: "vm-shared", dedicated: true } }));
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect((await env.DB.prepare("SELECT isolation FROM hosts WHERE id = ?").bind(e.json.host).first("isolation"))).toBe("vm-shared");
+    await signed(k, e.json.host, "POST", "/hosts/self/report", JSON.stringify({ runtime: { driver: "compose/docker", isolation: "vm-ish" } }));
+    expect((await env.DB.prepare("SELECT isolation FROM hosts WHERE id = ?").bind(e.json.host).first("isolation"))).toBe("vm-shared");
+    const bad = await enroll((await mint("m1", "other-mac")).json.token, await newKey(), { os: "macos", isolation: "mac" });
+    expect(bad.status).toBe(400);
+    expect(bad.json.error).toContain("isolation root | user | subuid | vm | vm-shared");
+  });
+});
+
 describe("the host report", () => {
   it("is kept with the columns the host page reads; the units are the pool's count; a report over 16 KiB or with a secret is refused", async () => {
     const { k, host } = await activeHost("m1", "reporting");

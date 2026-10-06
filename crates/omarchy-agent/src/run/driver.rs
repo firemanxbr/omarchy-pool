@@ -3,10 +3,20 @@
 //! long (a pull, a stop) is started and then polled.
 //!
 //! The driver never learns about tasks: it sees only the set's compose project, and task
-//! containers are the dispatcher's. Capacity (`capacity()`, #333), fingerprinting (#317)
-//! and emulation (P2) join this trait in their own issues.
+//! containers are the dispatcher's. The one other project it ever lists, stops and removes
+//! is the legacy compose project `legacy.json` records, at the `retire-legacy` host order
+//! (#344, design v2 §11.1 M4). It reads the dispatcher's last log lines for the
+//! `diagnostics` order, says which engine answers on its socket and counts the host's task
+//! containers there for the owner's runtime switch (#325). Capacity (`capacity()`, #333)
+//! and fingerprinting (#317) join this trait in their own issues; the emulated lane's
+//! smoke run (§15's `emulation(arch, image)`, #338) is `capacity::emulation::Smoke` on the
+//! probe's engine CLI until then, and joins it with `capacity()` when the run loop detects
+//! — then as a start and a poll, like a pull: its first run may pull the foreign build
+//! image, longer than one engine call may block here.
 
 use std::path::PathBuf;
+
+use super::config::Runtime;
 
 /// An engine answer. `NoAnswer` means "change nothing": the caller stays where it is.
 /// (The design's names, kept.)
@@ -56,11 +66,56 @@ impl Unit {
     }
 }
 
+/// A container of another compose project, as `retire-legacy` reads it (#344): never its
+/// environment, only what the order needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Foreign {
+    pub id: String,
+    pub status: String,
+    /// compose's `com.docker.compose.project.working_dir` label: the project's directory.
+    pub working_dir: String,
+    /// The agent's `org.omarchy-pool.agent.host` label: a container of a host's bundle or
+    /// one of its tasks, which `retire-legacy` never touches whatever project it names.
+    pub agent_host: String,
+}
+
+impl Foreign {
+    pub fn stopped(&self) -> bool {
+        matches!(self.status.as_str(), "exited" | "dead" | "created")
+    }
+
+    pub fn running(&self) -> bool {
+        matches!(self.status.as_str(), "running" | "restarting")
+    }
+
+    /// The container as `begin_drain`, `drained` and `remove` take one.
+    pub fn unit(&self) -> Unit {
+        Unit {
+            id: self.id.clone(),
+            service: String::new(),
+            status: self.status.clone(),
+            restarts: 0,
+            exit_code: 0,
+            config_hash: String::new(),
+            release: String::new(),
+        }
+    }
+}
+
 /// An exit of a container: when (unix seconds) and with what code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Exit {
     pub at: i64,
     pub code: i64,
+}
+
+/// Which engine answers on a socket (`docker version`'s server components: podman's API
+/// socket names its `Podman Engine`), its version, and whether it runs rootless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EngineId {
+    pub runtime: Runtime,
+    pub version: String,
+    pub rootless: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,4 +149,29 @@ pub(crate) trait Driver {
     fn ready(&mut self, id: &str, http: &str) -> Answer<bool>;
     /// Removes an image no container uses; the engine refuses one in use.
     fn remove_image(&mut self, image: &str) -> Answer<()>;
+    /// The containers labelled with compose project `project`, exactly (#344: only ever
+    /// the legacy project `legacy.json` records).
+    fn project_containers(&mut self, project: &str) -> Answer<Vec<Foreign>>;
+    /// The ids of the networks labelled with compose project `project`, exactly.
+    fn project_networks(&mut self, project: &str) -> Answer<Vec<String>>;
+    /// Removes a network; the engine refuses one a container still uses.
+    fn remove_network(&mut self, id: &str) -> Answer<()>;
+    /// The last `lines` lines a container wrote, stdout and stderr in the order written,
+    /// each with the engine's timestamp (#325's `diagnostics`; the caller scrubs them).
+    fn logs(&mut self, id: &str, lines: u32) -> Answer<String>;
+    /// Which engine answers on the driver's socket (#325's runtime switch).
+    fn engine(&mut self) -> Answer<EngineId>;
+    /// How many running containers carry the agent's host label `host` outside any compose
+    /// project: the dispatcher's task containers and their sidecars (#325's runtime switch).
+    fn host_tasks(&mut self, host: &str) -> Answer<usize>;
+    /// Whether a task container runs on the engine ([`TASK_LABEL`]): what holds back a
+    /// resize of a Mac's VM (#320), which would end it. The driver lists it; it never acts
+    /// on one.
+    fn tasks_running(&mut self) -> Answer<bool>;
 }
+
+/// The label the dispatcher gives every task container and every sidecar of one
+/// (`com.omarchy.task=<id>`, pkg-repo's `stop::TASK_LABEL`); the role label
+/// (`org.omarchy-pool.task.role`) is a sidecar's only, and a task with the signed `direct`
+/// exception has none.
+pub(crate) const TASK_LABEL: &str = "com.omarchy.task";

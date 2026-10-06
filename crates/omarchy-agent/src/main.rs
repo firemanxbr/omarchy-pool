@@ -4,23 +4,31 @@
 //! ```text
 //! omarchy-agent verify --bundle <omarchy-host-vX.Y.Z.tar.gz> --sig <bundle.sigstore.json>
 //! omarchy-agent verify --statement <statement.json> --sig <bundle.sigstore.json>
+//!     (and the maintainers' co-signatures found beside the file, `<file>.<login>.sshsig`
+//!     for each maintainer this agent pins, #330: said, never a refusal by hand)
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
 //!     (<dir>/compose.yml and <dir>/set.toml)
 //! omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
-//!     [--probe-image <image>] [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
-//!     (what the host has; with a verified release, its units, the preflight blockers, and
+//!     [--probe-image <image>] [--emulate-image <image>]
+//!     [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
+//!     (what the host has, the foreign architecture's lane included (#338: binfmt, then a
+//!     smoke run of the release's build image of that architecture, or --emulate-image);
+//!     with a verified release, its units, the preflight blockers, and
 //!     <set dir>/run/capacity.json rewritten when it changed)
 //! omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
 //!     [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
-//!     [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated] [--legacy <project>]
-//!     [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>]
+//!     [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
+//!     [--direct-network | --no-direct-network] [--legacy <project>] [--agent-env-from <file>]
+//!     [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta]
 //!     [--wait-minutes <n>] [--yes]
 //!     (#317, what install.sh runs once the binary is in place: preflight, the envelope,
-//!     the enrollment below, agent.toml, the agent keys, the unit and linger, the service)
+//!     the enrollment below, agent.toml, the agent keys, the unit and linger, the service;
+//!     on a Mac, #320, the omarchy Colima VM and the LaunchAgent)
 //! omarchy-agent preflight <the same options>
 //!     (one screen of everything that stops an install; changes nothing)
 //! omarchy-agent uninstall [--data-dir <dir>]
-//!     (the unit, the bundle, task containers and sidecars; never the legacy project)
+//!     (the unit or the LaunchAgent, the bundle, task containers and sidecars; never the
+//!     legacy project; on a Mac the omarchy VM is stopped, not deleted)
 //! omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
 //!     (#321: the one-time token from OMARCHY_ENROLL — never an argument — the host key,
 //!     the owner's Confirm, the host worker token in sets/host/run/host/dispatcher/token,
@@ -39,6 +47,14 @@
 //! omarchy-agent logs [--data-dir <dir>] [-n <lines>]
 //! omarchy-agent self-test --release <vX.Y.Z> [--data-dir <dir>]
 //!     (what a self-update asks of the new agent before it hands over: prints `ok`)
+//! omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
+//!     (#325: the owner moves the bundle to another driver this binary carries, with the
+//!     same guard and revert; never the pool's to choose)
+//! omarchy-agent envelope pin-passkey [<pin> | -] [--data-dir <dir>]
+//! omarchy-agent envelope unpin-passkey [--data-dir <dir>]
+//!     (#328: the owner's passkey pinned at the host, from the pin the site prints — read
+//!     from stdin without one —, so a widening of the envelope and the agent keys signed
+//!     with it on the site are taken here; or no passkey pinned any more)
 //!
 //! Every command's data directory is `--data-dir`, `$OMARCHY_AGENT_DATA`,
 //! `$XDG_DATA_HOME/omarchy-agent` or `~/.local/share/omarchy-agent` (install.sh's).
@@ -61,6 +77,7 @@ use omarchy_agent::enroll::{self, Failure, Options, Paths};
 use omarchy_agent::install;
 use omarchy_agent::lint::{self, Engine, Envelope};
 use omarchy_agent::run;
+use omarchy_agent::verify::cosignature::{self, Policy};
 use omarchy_agent::verify::{self, BundleOutcome, StatementOutcome};
 
 const USAGE: &str = "usage:
@@ -68,11 +85,13 @@ const USAGE: &str = "usage:
   omarchy-agent verify --statement <json> --sig <sigstore.json>
   omarchy-agent lint-set <dir> [--override <file>] [--envelope <agent.toml>]
   omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
-      [--probe-image <image>] [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
+      [--probe-image <image>] [--emulate-image <image>]
+      [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
   omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
       [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
-      [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated] [--legacy <project>]
-      [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>]
+      [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
+      [--direct-network | --no-direct-network] [--legacy <project>] [--agent-env-from <file>]
+      [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta]
       [--wait-minutes <n>] [--yes]
   omarchy-agent preflight <install's options>
   omarchy-agent uninstall [--data-dir <dir>]
@@ -84,6 +103,9 @@ const USAGE: &str = "usage:
   omarchy-agent round [--data-dir <dir>]
   omarchy-agent logs [--data-dir <dir>] [-n <lines>]
   omarchy-agent self-test --release <vX.Y.Z> [--data-dir <dir>]
+  omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
+  omarchy-agent envelope pin-passkey [<pin> | -] [--data-dir <dir>]
+  omarchy-agent envelope unpin-passkey [--data-dir <dir>]
   omarchy-agent --version
 The enrollment token is read from OMARCHY_ENROLL, never from an argument.";
 
@@ -103,6 +125,8 @@ fn main() -> ExitCode {
         Some("uninstall") => uninstall_cmd(&args[1..]),
         Some("enroll") => enroll_cmd(&args[1..]),
         Some("token") => token_cmd(&args[1..]),
+        Some("runtime") => runtime_cmd(&args[1..]),
+        Some("envelope") => envelope_cmd(&args[1..]),
         Some("dispatcher-env") => dispatcher_env_cmd(&args[1..]),
         Some("--version" | "version") => {
             println!("omarchy-agent {}", omarchy_agent::AGENT_VERSION);
@@ -153,6 +177,25 @@ fn read(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{path}: {e}"))
 }
 
+/// The maintainers' co-signatures of `path` this agent pins, from the files beside it
+/// (`<path>.<login>.sshsig`: `ssh-keygen -Y sign`'s `<path>.sig`, renamed for its
+/// signer), checked over the file in `namespace` (#330).
+fn cosignatures_beside(path: &str, namespace: &str) -> Result<cosignature::Cosigned, String> {
+    let policy = Policy::pinned();
+    if policy.logins().next().is_none() {
+        return Ok(cosignature::Cosigned::default());
+    }
+    let message = read(path)?;
+    let found = policy
+        .logins()
+        .filter_map(|login| {
+            let sig = std::fs::read(cosignature::file_name(path, login)).ok()?;
+            Some((login.to_owned(), sig))
+        })
+        .collect();
+    Ok(policy.check(namespace, &message, &found))
+}
+
 fn verify_cmd(args: &[String]) -> Result<u8, String> {
     let mut rest = Vec::new();
     let f = flags(args, &["--bundle", "--statement", "--sig"], &mut rest)?;
@@ -165,6 +208,11 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
         (Some(path), None) => match verify::bundle(&read(path)?, &sig) {
             Ok(BundleOutcome::Current(b)) => {
                 let m = b.manifest();
+                let need = Policy::pinned().threshold();
+                let c = cosignatures_beside(path, cosignature::BUNDLE_NAMESPACE)?;
+                if let Err(why) = c.require(need, "this bundle") {
+                    eprintln!("not yet what a host takes: {why}");
+                }
                 let line = serde_json::json!({
                     "verified": "bundle",
                     "sha256": b.sha256(),
@@ -174,6 +222,7 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
                     "min_agent": m.outer().min_agent().to_string(),
                     "signer": b.signer().identity(),
                     "signed_at": b.signer().signed_at(),
+                    "cosignatures": {"required": need, "by": c.by(), "refused": c.refused()},
                 });
                 println!("{line}");
                 Ok(0)
@@ -191,6 +240,7 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
         (None, Some(path)) => match verify::statement(&read(path)?, &sig) {
             Ok(StatementOutcome::Current(s)) => {
                 let st = s.statement();
+                let c = cosignatures_beside(path, cosignature::ROLLBACK_NAMESPACE)?;
                 let line = serde_json::json!({
                     "verified": "statement",
                     "seq": st.seq(),
@@ -199,6 +249,7 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
                     "agent_to": st.agent_to().map(|v| v.to_string()),
                     "signer": s.signer().identity(),
                     "signed_at": s.signer().signed_at(),
+                    "cosignatures": {"deeper_than_14_days_needs": Policy::pinned().deep_rollback(), "by": c.by(), "refused": c.refused()},
                 });
                 println!("{line}");
                 Ok(0)
@@ -244,6 +295,34 @@ fn run_cmd(cmd: &str, args: &[String]) -> Result<u8, String> {
             run::logs(data, n)
         }
     })
+}
+
+/// `runtime switch <driver> [--socket <path>] [--data-dir <dir>]` (#325).
+fn runtime_cmd(args: &[String]) -> Result<u8, String> {
+    let mut rest = Vec::new();
+    let f = flags(args, &["--data-dir", "--socket"], &mut rest)?;
+    let ["switch", driver] = rest.as_slice() else {
+        return Err(USAGE.to_owned());
+    };
+    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    Ok(run::runtime_switch(
+        get("--data-dir"),
+        driver,
+        get("--socket"),
+    ))
+}
+
+/// `envelope pin-passkey [<pin> | -]` and `envelope unpin-passkey` (#328).
+fn envelope_cmd(args: &[String]) -> Result<u8, String> {
+    let mut rest = Vec::new();
+    let f = flags(args, &["--data-dir"], &mut rest)?;
+    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    match rest.as_slice() {
+        ["pin-passkey"] => Ok(run::envelope(get("--data-dir"), "pin-passkey", None)),
+        ["pin-passkey", pin] => Ok(run::envelope(get("--data-dir"), "pin-passkey", Some(pin))),
+        ["unpin-passkey"] => Ok(run::envelope(get("--data-dir"), "unpin-passkey", None)),
+        _ => Err(USAGE.to_owned()),
+    }
 }
 
 fn refused(r: &verify::Rejection) -> u8 {
@@ -302,7 +381,7 @@ fn enroll_options(args: &[String]) -> Result<Options, String> {
     };
     Ok(Options {
         pool: get("--pool").map(str::to_owned),
-        paths: Paths::under(&run::config::data_dir(get("--data-dir"))?),
+        paths: Paths::installed(&run::config::data_dir(get("--data-dir"))?),
         // From the environment only: an argument would show in `ps` (design v2 §13.1).
         token: std::env::var("OMARCHY_ENROLL")
             .ok()
@@ -342,8 +421,31 @@ fn switches(args: &[String], known: &[&'static str]) -> (Vec<String>, Vec<&'stat
     (rest, on)
 }
 
+/// A switch and its opposite among `on`: `Some(true)`, `Some(false)`, or `None` for neither,
+/// which keeps what agent.toml says; both is a usage error.
+fn either(on: &[&str], yes: &str, no: &str) -> Result<Option<bool>, String> {
+    match (on.contains(&yes), on.contains(&no)) {
+        (true, true) => Err(format!("{yes} or {no}, not both\n{USAGE}")),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    }
+}
+
 fn install_options(args: &[String]) -> Result<install::Options, String> {
-    let (args, on) = switches(args, &["--yes", "--dedicated"]);
+    let (args, on) = switches(
+        args,
+        &[
+            "--yes",
+            "--dedicated",
+            "--direct-network",
+            "--no-direct-network",
+            "--rosetta",
+            "--no-rosetta",
+        ],
+    );
+    let direct_network = either(&on, "--direct-network", "--no-direct-network")?;
+    let rosetta = either(&on, "--rosetta", "--no-rosetta")?;
     let mut rest = Vec::new();
     let f = flags(
         &args,
@@ -356,6 +458,7 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
             "--wait-minutes",
             "--work-root",
             "--secrets-dir",
+            "--set-dir",
             "--socket",
             "--task-subnets",
             "--legacy",
@@ -397,9 +500,12 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
         pool: get("--pool").map(str::to_owned),
         work_root: path("--work-root"),
         secrets_dir: path("--secrets-dir"),
+        set_dir: path("--set-dir"),
         socket: path("--socket"),
+        rosetta,
         task_subnets: get("--task-subnets").map(str::to_owned),
         dedicated: on.contains(&"--dedicated"),
+        direct_network,
         legacy: get("--legacy").map(str::to_owned),
         agent_env_from: path("--agent-env-from"),
         max_units: num("--max-units")?,
@@ -450,6 +556,60 @@ fn install_failure(e: &install::Failure) -> u8 {
     }
 }
 
+/// A Mac's engine (#320, [`probe::in_mac_vm`], as install and the run loop count it): the
+/// VM's level, the omarchy VM's own `MemAvailable` (M7, read inside it with a deadline),
+/// and the `x86_64` lane through Rosetta once its smoke run passed, unless the envelope's
+/// `emulate` leaves it out.
+fn mac_facts(
+    facts: capacity::Facts,
+    toml: &AgentToml,
+    how: &probe::Probe<'_>,
+    manifest: Option<&omarchy_agent::manifest::Manifest>,
+) -> capacity::Facts {
+    let Some((runtime, rosetta)) = &toml.vm else {
+        return facts;
+    };
+    let kind = if runtime == "colima" {
+        capacity::VmKind::Dedicated
+    } else {
+        capacity::VmKind::Shared
+    };
+    let meminfo = (kind == capacity::VmKind::Dedicated)
+        .then(|| {
+            omarchy_agent::vm::colima(
+                &[
+                    "ssh",
+                    "--profile",
+                    omarchy_agent::vm::PROFILE,
+                    "--",
+                    "cat",
+                    "/proc/meminfo",
+                ],
+                &[],
+                probe::ENGINE_TIMEOUT,
+            )
+            .map_err(|e| eprintln!("capacity: the VM's /proc/meminfo: {e}"))
+            .ok()
+        })
+        .flatten();
+    let x86 = manifest
+        .and_then(|m| m.build_image("x86_64"))
+        .map(ToString::to_string);
+    let vm = probe::MacVm {
+        kind,
+        meminfo: meminfo.as_deref(),
+        rosetta: *rosetta,
+        emulate: toml.caps.emulate.as_deref(),
+        x86_64_image: x86.as_deref(),
+    };
+    let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img| probe::rosetta_lane(how, img));
+    match said {
+        Some(probe::LaneSaid::Note(s) | probe::LaneSaid::Warning(s)) => eprintln!("capacity: {s}"),
+        None => {}
+    }
+    facts
+}
+
 fn uninstall_cmd(args: &[String]) -> Result<u8, String> {
     let mut rest = Vec::new();
     let f = flags(args, &["--data-dir"], &mut rest)?;
@@ -486,7 +646,7 @@ fn token_cmd(args: &[String]) -> Result<u8, String> {
     let dir = run::config::data_dir(f.iter().find(|(k, _)| *k == "--data-dir").map(|(_, v)| *v))?;
     let o = Options {
         pool: None,
-        paths: Paths::under(&dir),
+        paths: Paths::installed(&dir),
         token: None,
         wait: Duration::ZERO,
         poll: Duration::ZERO,
@@ -550,6 +710,7 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
             "--work-root",
             "--docker",
             "--probe-image",
+            "--emulate-image",
             "--bundle",
             "--sig",
             "--write",
@@ -593,11 +754,20 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
         .as_ref()
         .and_then(|m| m.build_image(std::env::consts::ARCH))
         .map(ToString::to_string);
+    // The build images the emulated lane's smoke run may start (#338): detection picks the
+    // engine's foreign architecture's.
+    let images = capacity::emulation::images(get("--emulate-image"), manifest.as_ref());
     let how = probe::Probe {
         docker: get("--docker").unwrap_or("docker"),
         host: host.as_deref(),
         work_root: Path::new(&work_root),
         image: get("--probe-image").or(build_image.as_deref()),
+        // A Mac's VM (`[vm]`) has its own binfmt table: its lane is Rosetta's (`mac_facts`).
+        emulation: toml.vm.is_none().then_some(capacity::emulation::Probe {
+            binfmt: Path::new(probe::BINFMT),
+            images: &images,
+            emulate: toml.caps.emulate.as_deref(),
+        }),
     };
     let facts = match probe::detect(&how) {
         Ok(f) => f,
@@ -606,6 +776,7 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
             return Ok(REFUSED);
         }
     };
+    let facts = mac_facts(facts, &toml, &how, manifest.as_ref());
     let Some(manifest) = manifest else {
         println!("{}", facts.report());
         return Ok(0);

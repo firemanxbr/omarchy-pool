@@ -1,6 +1,8 @@
 //! The commands: `run` (the loop), `status` (works with the pool down), `round`
-//! (SIGUSR1 to the running agent), `logs` (the journal's tail) and `self-test` (what a
-//! self-update asks of a new agent before it hands over, #316).
+//! (SIGUSR1 to the running agent), `logs` (the journal's tail), `self-test` (what a
+//! self-update asks of a new agent before it hands over, #316), `runtime switch` (the
+//! owner's move of the bundle to another driver, #325) and `envelope pin-passkey` (the
+//! owner's passkey pinned at the host, #328).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -27,9 +29,19 @@ const TICK: Duration = Duration::from_secs(3);
 /// The watchdog aborts a loop that made no progress for this long. A download moves the
 /// progress on as its bytes arrive.
 const WATCHDOG_S: i64 = 15 * 60;
+/// A self-update's candidate is ended this long after its health gate's deadline, when
+/// its loop did not give up by itself (it hangs): the start that follows rolls it back.
+const GATE_GRACE_S: i64 = 30;
 /// How often the watchdog thread looks; it pings systemd's watchdog (`WatchdogSec=300`)
 /// only when the loop made progress since its last look.
 const WATCHDOG_LOOK: Duration = Duration::from_secs(10);
+/// Two of the watchdog's looks this much further apart than [`WATCHDOG_LOOK`] on the wall
+/// clock: the machine slept (a Mac's lid, #320), and the loop with it.
+const WATCHDOG_WAKE_S: i64 = 60;
+/// Under launchd, a configuration the agent refuses is read again this often, and the
+/// agent exits after this long at most (`KeepAlive` starts it again at once otherwise).
+const CONFIG_LOOK: Duration = Duration::from_secs(5);
+const CONFIG_WAIT: Duration = Duration::from_secs(600);
 
 fn paths(data: Option<&str>) -> Result<Paths, String> {
     Ok(Paths {
@@ -71,7 +83,7 @@ pub fn run(data: Option<&str>) -> u8 {
         }
     }
     let progress = Arc::new(AtomicI64::new(super::now()));
-    watchdog(Arc::clone(&progress));
+    watchdog(Arc::clone(&progress), data_dir(data).ok(), me);
     match setup(data, &progress) {
         Ok((mut agent, usr1)) => {
             fault("hang-before-ready");
@@ -96,31 +108,131 @@ pub fn run(data: Option<&str>) -> u8 {
                     return 0;
                 }
             }
+            // systemd stops on 78 (`RestartPreventExitStatus`); launchd's `KeepAlive` has
+            // no such thing and would start the agent every 10 s, each start saying the
+            // same: the agent waits for agent.toml to change instead (#320).
+            if under_launchd(std::env::var("XPC_SERVICE_NAME").ok().as_deref()) {
+                let toml = Paths { data: dir }.agent_toml();
+                eprintln!(
+                    "omarchy-agent run: waiting for {} to change (at most {} minutes) before launchd starts the agent again",
+                    toml.display(),
+                    CONFIG_WAIT.as_secs() / 60
+                );
+                wait_for_change(&toml, CONFIG_LOOK, CONFIG_WAIT);
+            }
             CONFIG_ERROR
         }
     }
 }
 
+/// Whether launchd started this process as the agent's `LaunchAgent` (it names the job in
+/// `XPC_SERVICE_NAME`); a person running `omarchy-agent run` by hand is not.
+pub(crate) fn under_launchd(xpc_service_name: Option<&str>) -> bool {
+    xpc_service_name == Some(crate::install::launchd::LABEL)
+}
+
+/// Waits until `path` changes (its size, its modification time, or it appears or goes),
+/// looking every `look`, and at most `limit`.
+pub(crate) fn wait_for_change(path: &Path, look: Duration, limit: Duration) -> bool {
+    let stamp = || {
+        fs::metadata(path)
+            .ok()
+            .map(|m| (m.len(), m.modified().ok()))
+    };
+    let before = stamp();
+    let mut waited = Duration::ZERO;
+    while waited < limit {
+        thread::sleep(look);
+        waited += look;
+        if stamp() != before {
+            return true;
+        }
+    }
+    false
+}
+
 /// The progress watchdog (both OSes): aborts a loop that made no progress for
 /// [`WATCHDOG_S`], so the service manager starts the agent again (a counted start
-/// during a self-update), and pings systemd's watchdog while the loop moves.
-fn watchdog(progress: Arc<AtomicI64>) {
+/// during a self-update), and pings systemd's watchdog while the loop moves. launchd
+/// restarts only on exit and has no watchdog of its own (#320): a self-update's candidate
+/// whose loop hangs past its health gate's deadline is aborted too, and the next start
+/// points `current` back. A Mac that slept stopped the loop and this thread alike: the
+/// look after a wake starts the count again ([`watchdog_look`]) rather than end a loop
+/// whose first tick after the wake is a slow one (the pool, the VM's clock).
+fn watchdog(progress: Arc<AtomicI64>, data: Option<std::path::PathBuf>, me: version::Version) {
     thread::spawn(move || {
         let mut pinged = progress.load(Ordering::Relaxed);
+        let mut last_look = super::now();
         loop {
             thread::sleep(WATCHDOG_LOOK);
+            let now = super::now();
             let seen = progress.load(Ordering::Relaxed);
-            let idle = super::now() - seen;
-            if idle > WATCHDOG_S {
-                eprintln!("omarchy-agent: the loop made no progress for {idle} s; aborting so the service manager restarts it");
-                std::process::abort();
+            let gate = data
+                .as_deref()
+                .and_then(|d| selfupdate::candidate(d, me))
+                .map(|p| p.deadline);
+            match watchdog_look(now, last_look, seen, gate) {
+                Look::Woke => {
+                    progress.fetch_max(now, Ordering::Relaxed);
+                }
+                Look::Abort(why) => {
+                    eprintln!("omarchy-agent: {why}; aborting so the service manager restarts it");
+                    std::process::abort();
+                }
+                Look::Fine => {}
             }
+            last_look = now;
             if seen != pinged {
                 notify("WATCHDOG=1");
                 pinged = seen;
             }
         }
     });
+}
+
+/// What the watchdog does at one look.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Look {
+    Fine,
+    /// The wall clock jumped since the last look ([`WATCHDOG_WAKE_S`]): the machine slept.
+    /// The loop's idleness counts from now; nothing is judged at this look.
+    Woke,
+    Abort(String),
+}
+
+/// One look of the watchdog at `now`, the last one at `last_look`.
+pub(crate) fn watchdog_look(
+    now: i64,
+    last_look: i64,
+    progress: i64,
+    gate_deadline: Option<i64>,
+) -> Look {
+    #[allow(clippy::cast_possible_wrap)] // ten seconds
+    let every = WATCHDOG_LOOK.as_secs() as i64;
+    if now - last_look > every + WATCHDOG_WAKE_S {
+        return Look::Woke;
+    }
+    watchdog_verdict(now, progress, gate_deadline).map_or(Look::Fine, Look::Abort)
+}
+
+/// Why the watchdog ends the loop now, if it does: no progress for [`WATCHDOG_S`], or a
+/// self-update's health gate whose deadline passed [`GATE_GRACE_S`] ago with the gate
+/// still shut (a running loop gives up by itself at the deadline; one that hangs does not).
+pub(crate) fn watchdog_verdict(
+    now: i64,
+    progress: i64,
+    gate_deadline: Option<i64>,
+) -> Option<String> {
+    let idle = now - progress;
+    if idle > WATCHDOG_S {
+        return Some(format!("the loop made no progress for {idle} s"));
+    }
+    gate_deadline.filter(|d| now > d + GATE_GRACE_S).map(|d| {
+        format!(
+            "this agent's health gate is still shut {} s past its deadline",
+            now - d
+        )
+    })
 }
 
 fn setup(
@@ -163,11 +275,43 @@ fn setup(
     let usr1 = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&usr1))
         .map_err(|e| format!("SIGUSR1: {e}"))?;
-    let pool = Box::new(Https::new(&cfg.pool).with_progress(Arc::clone(progress)));
+    // The host state and the report are signed with the key the enrollment made (#344).
+    // Without it they answer "no answer" (the agent keeps running and says why); a missing
+    // key is no reason to stop.
+    let mut https = Https::new(&cfg.pool).with_progress(Arc::clone(progress));
+    let key_error = match crate::host::HostKey::load(&paths.host_key()) {
+        Ok(k) => {
+            https = https.with_host(k, &cfg.host_id);
+            None
+        }
+        Err(e) => Some(e),
+    };
+    let pool = Box::new(https);
+    let vm = cfg
+        .vm
+        .as_ref()
+        .map(|v| keeper(&cfg, v, &paths))
+        .transpose()?;
     let mut agent = Agent::new(cfg, paths, state, pool, Box::new(Sigstore), Drivers::Pinned);
+    agent.vm = vm;
+    // A Mac's sleep (#329) is the agent's to hold off and report, whatever runtime its
+    // engine is in.
+    agent.power = super::power::keeper(&agent.cfg, agent.mac);
+    if let Some(e) = key_error {
+        agent.journal.write(
+            super::now(),
+            "host-key",
+            serde_json::json!({"detail": format!("{e}: the host state and the report cannot be signed; the agent keeps the set running")}),
+        );
+    }
     agent.progress = Some(Arc::clone(progress));
     agent.exe = std::env::current_exe().ok();
     agent.host_env = Some(HostEnv::new(Sources::system()));
+    // The seal key (#328): made at the first start that has none, its fingerprint on the
+    // journal, kept in the login keychain on a Mac. One that cannot be loaded now is no
+    // reason to stop: the loop tries again, and takes no sealed key meanwhile.
+    agent.keychain = super::owner::keychain();
+    let _ = agent.seal_key(super::now());
     agent.resume(super::now());
     agent.journal.write(
         super::now(),
@@ -176,6 +320,43 @@ fn setup(
     );
     agent.settle(super::now())?;
     Ok((agent, usr1))
+}
+
+/// A Mac's VM keeper (#320): the `omarchy` profile as agent.toml describes it, walled by
+/// the task firewall for agent.toml's task subnets. Colima gets the pinned docker CLI once
+/// the loop has its tools ([`Agent::open_tools`]), and the agent's own `DOCKER_CONFIG`.
+fn keeper(cfg: &Config, v: &super::config::Vm, paths: &Paths) -> Result<super::vm::Keeper, String> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let colima_home = crate::vm::colima_home(&home, std::env::var_os("COLIMA_HOME").as_deref());
+    let want = crate::vm::Want {
+        size: crate::vm::Size {
+            cpus: v.cpus,
+            mem_gb: v.mem_gb,
+        },
+        disk_gb: v.disk_gb,
+        mounts: crate::vm::mounts(&cfg.work_root, &cfg.secrets_dir, &cfg.set_dir),
+        rosetta: v.rosetta,
+    };
+    let subnets = crate::install::net::parse_list(
+        cfg.task_subnets
+            .as_deref()
+            .unwrap_or(crate::install::TASK_SUBNETS),
+    )
+    .map_err(|e| format!("agent.toml: envelope.task_subnets: {e}"))?;
+    Ok(super::vm::Keeper::new(
+        Box::new(super::vm::Cli {
+            colima_home,
+            docker_config: paths.docker_config(),
+            docker: None,
+            start: None,
+        }),
+        want,
+        crate::vm::firewall(&subnets),
+        &home,
+        &paths.data,
+    ))
 }
 
 fn loop_forever(agent: &mut Agent, usr1: &AtomicBool, progress: &AtomicI64) -> u8 {
@@ -203,6 +384,59 @@ fn loop_forever(agent: &mut Agent, usr1: &AtomicBool, progress: &AtomicI64) -> u
         while slept < TICK && !usr1.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(250));
             slept += Duration::from_millis(250);
+        }
+    }
+}
+
+/// `omarchy-agent envelope pin-passkey [<pin> | -]` and `envelope unpin-passkey` (#328), at
+/// the host, as the agent's user: the owner's passkey pinned from the pin the site printed
+/// (read from stdin when it is not given), or no passkey pinned any more. The running agent
+/// reads the pin at the next signed order; nothing needs restarting.
+pub fn envelope(data: Option<&str>, cmd: &str, pin: Option<&str>) -> u8 {
+    let paths = match paths(data) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("omarchy-agent envelope: {e}");
+            return 2;
+        }
+    };
+    let state = paths.data.join("state");
+    let said = match cmd {
+        "pin-passkey" => {
+            let uid = rustix::process::geteuid().as_raw();
+            match Config::load(&paths.agent_toml(), uid) {
+                Err(e) => Err(format!(
+                    "{e}: a passkey is pinned on a host that is installed and confirmed"
+                )),
+                Ok(cfg) => {
+                    let text = match pin {
+                        Some(t) if t != "-" => Ok(t.to_owned()),
+                        _ => {
+                            use std::io::Read as _;
+                            let mut t = String::new();
+                            std::io::stdin()
+                                .take(64 << 10)
+                                .read_to_string(&mut t)
+                                .map(|_| t)
+                                .map_err(|e| format!("stdin: {e}"))
+                        }
+                    };
+                    text.and_then(|t| {
+                        crate::owner::pin(&state, &cfg.host_id, &cfg.pool, &t, super::now())
+                    })
+                }
+            }
+        }
+        _ => crate::owner::unpin(&state),
+    };
+    match said {
+        Ok(s) => {
+            println!("{s}");
+            0
+        }
+        Err(e) => {
+            eprintln!("omarchy-agent envelope {cmd}: {e}");
+            1
         }
     }
 }
@@ -264,7 +498,52 @@ pub fn status(data: Option<&str>) -> u8 {
         Some((Err(_), p)) => println!("capacity:  {} is missing", p.display()),
         None => println!("capacity:  agent.toml does not name the set directory"),
     }
+    print!("{}", owner_lines(&paths.data.join("state")));
     0
+}
+
+/// `status`'s lines for #328: the passkey pinned at this host and the last signed version
+/// it took, and the seal key's fingerprint, which its owner compares on the site once.
+fn owner_lines(state: &Path) -> String {
+    let mut out = String::new();
+    match crate::owner::Record::load(state) {
+        Ok(r) => match &r.passkey {
+            Some(p) => {
+                let _ = writeln!(
+                    out,
+                    "{:<10} {}'s passkey pinned ({}, credential {}…) for {} on {} since {}; last signed version {}",
+                    "owner:",
+                    p.by,
+                    crate::owner::webauthn::alg_name(p.alg),
+                    p.credential.chars().take(12).collect::<String>(),
+                    p.rp_id,
+                    p.origin,
+                    p.pinned_at,
+                    r.version
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "{:<10} no passkey pinned: the site widens nothing and sets no agent key here (`omarchy-agent envelope pin-passkey`)",
+                    "owner:"
+                );
+            }
+        },
+        Err(e) => {
+            let _ = writeln!(out, "{:<10} {e}", "owner:");
+        }
+    }
+    if let Some(k) = crate::owner::seal::read_public(state) {
+        let raw = crate::owner::webauthn::unb64(&k, "", 64).unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{:<10} {} (the host's page shows the same before its owner confirms it)",
+            "seal key:",
+            crate::owner::seal::fingerprint_of(&raw)
+        );
+    }
+    out
 }
 
 /// A self-update in flight (#316), from `pending`.
@@ -372,6 +651,207 @@ pub(crate) fn summary(s: &State, now: i64) -> String {
             (s.poll.next_at - now).max(0)
         ),
     );
+    out.push_str(&orders_lines(s, now));
+    out.push_str(&p4_lines(s, now));
+    out.push_str(&soak_lines(s, now));
+    out
+}
+
+/// `status`'s lines for #326: the owner's soak of the release the pool names, and what
+/// GitHub showed last (freeze detection).
+fn soak_lines(s: &State, now: i64) -> String {
+    let mut out = String::new();
+    let mut line = |k: &str, v: String| {
+        let _ = writeln!(out, "{k:<10} {v}");
+    };
+    if let Some(k) = s
+        .soak
+        .as_ref()
+        .filter(|k| s.target == Some(k.release) && s.applied.is_some_and(|a| a < k.release))
+    {
+        line(
+            "soak:",
+            if k.until > now {
+                format!(
+                    "{} waits {} s more (named {} s ago; a rollback statement skips it)",
+                    k.release,
+                    k.until - now,
+                    (now - k.seen).max(0)
+                )
+            } else {
+                format!("{} soaked: its round goes", k.release)
+            },
+        );
+    }
+    let g = &s.github;
+    if let Some(latest) = g.latest {
+        let behind = if g.behind {
+            format!(
+                "; pool-behind-github: the pool names {} since {} s",
+                opt(s.target),
+                g.ahead_since.map_or(0, |a| (now - a).max(0))
+            )
+        } else {
+            String::new()
+        };
+        line(
+            "github:",
+            format!(
+                "latest release {latest}, read {} s ago; next in {} s{behind}",
+                (now - g.read_at).max(0),
+                (g.next_at - now).max(0)
+            ),
+        );
+    }
+    out
+}
+
+/// `status`'s lines for P4 (#325): the settings the pool narrowed, the brake, and the
+/// owner's runtime switch.
+fn p4_lines(s: &State, now: i64) -> String {
+    use super::brake::Ask;
+    let mut out = String::new();
+    let mut line = |k: &str, v: String| {
+        let _ = writeln!(out, "{k:<10} {v}");
+    };
+    if let Some(set) = &s.settings {
+        line(
+            "settings:",
+            format!(
+                "units {}, emulated lanes {} (the pool's narrowing, inside the envelope)",
+                set.units
+                    .map_or_else(|| "as the envelope".to_owned(), |u| u.to_string()),
+                set.emulate.as_ref().map_or_else(
+                    || "as the envelope".to_owned(),
+                    |e| if e.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        e.join(", ")
+                    }
+                )
+            ),
+        );
+    }
+    let brake = &s.brake;
+    let (orders, restarts, narrowings, releases) = (
+        brake.count(Ask::Order, now),
+        brake.count(Ask::Restart, now),
+        brake.count(Ask::Narrowing, now),
+        brake.count(Ask::Release, now),
+    );
+    if orders + restarts + narrowings + releases > 0 {
+        line(
+            "brake:",
+            format!(
+                "{orders}/{} host orders, {restarts}/{} dispatcher restarts, {narrowings}/{} narrowings in the last hour; {releases}/1 release change in the last 10 min",
+                super::brake::ORDERS_PER_HOUR,
+                super::brake::RESTARTS_PER_HOUR,
+                super::brake::NARROWINGS_PER_HOUR
+            ),
+        );
+    }
+    if let Some(sw) = &s.switch {
+        line(
+            "switching:",
+            format!(
+                "to compose/{} at {} from compose/{}, at its {} step for {} s{}",
+                sw.to.runtime,
+                sw.to.socket_cli.display(),
+                sw.from.runtime,
+                match sw.step {
+                    super::switch::SwitchStep::Stop => "stop",
+                    super::switch::SwitchStep::Up => "up",
+                    super::switch::SwitchStep::Back => "back",
+                    super::switch::SwitchStep::Return => "return",
+                },
+                (now - sw.since).max(0),
+                sw.why
+                    .as_ref()
+                    .map_or_else(String::new, |w| format!(": {w}"))
+            ),
+        );
+    }
+    if let Some(e) = &s.switch_last {
+        line(
+            "switch:",
+            format!(
+                "to {} {} {} s ago: {}",
+                e.to,
+                e.outcome,
+                (now - e.at).max(0),
+                e.detail
+            ),
+        );
+    }
+    out
+}
+
+/// `omarchy-agent runtime switch <driver> [--socket <path>] [--data-dir <dir>]` (#325): the
+/// request for the running agent, which it takes between rounds; SIGUSR1 wakes it.
+pub fn runtime_switch(data: Option<&str>, driver: &str, socket: Option<&str>) -> u8 {
+    let result = paths(data).and_then(|p| {
+        let said = super::switch::request(&p.data, driver, socket.map(Path::new))?;
+        if let Some(pid) = running_agent(&p) {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-USR1", &pid])
+                .status();
+            Ok(said)
+        } else {
+            Ok(format!(
+                "{said}\nno agent runs on {} now: it takes the request when it starts",
+                p.data.display()
+            ))
+        }
+    });
+    match result {
+        Ok(said) => {
+            println!("omarchy-agent: {said}");
+            0
+        }
+        Err(e) => {
+            eprintln!("omarchy-agent runtime switch: {e}");
+            1
+        }
+    }
+}
+
+/// `status`'s lines for the host orders (#344): a `retire-legacy` in flight, and the
+/// last answers.
+fn orders_lines(s: &State, now: i64) -> String {
+    let mut out = String::new();
+    let mut line = |k: &str, v: String| {
+        let _ = writeln!(out, "{k:<10} {v}");
+    };
+    if let Some(r) = &s.orders.retire {
+        line(
+            "retiring:",
+            format!(
+                "legacy project {} ({}) for {} s, at its {} step (order {})",
+                r.project,
+                r.dir.display(),
+                (now - r.since).max(0),
+                if r.step == super::state::RetireStep::Stop {
+                    "stop"
+                } else {
+                    "remove"
+                },
+                r.order
+            ),
+        );
+    }
+    for a in &s.orders.answers {
+        line(
+            "order:",
+            format!(
+                "{} {} {} {} s ago: {}",
+                a.id,
+                a.kind,
+                a.outcome,
+                (now - a.at).max(0),
+                a.detail
+            ),
+        );
+    }
     out
 }
 

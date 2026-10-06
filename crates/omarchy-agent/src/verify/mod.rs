@@ -4,9 +4,16 @@
 //! pins ([`identity`]) before `serde` sees them. Only then is the bundle unpacked and its
 //! manifest read; [`VerifiedBundle`] and [`VerifiedStatement`] have no other constructor,
 //! so later code that takes them can only ever see signed content.
+//!
+//! [`cosignature`] is the second signature (#330, design v2 D1 b): the maintainers' FIDO
+//! keys over a bundle or a statement, against the requirement this binary pins. It is
+//! checked where a host decides to take one (the run loop, install), since `verify
+//! --bundle` also runs on a release before anyone co-signed it.
 
+pub mod cosignature;
 pub mod identity;
 mod sigstore;
+mod sshsig;
 
 use std::collections::BTreeMap;
 use std::fmt;

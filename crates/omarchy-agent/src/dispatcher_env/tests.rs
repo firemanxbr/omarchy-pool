@@ -16,6 +16,7 @@ fn fixture(name: &str) -> Sources {
         proc_net: Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/addresses")
             .join(name),
+        ifconfig: None,
     }
 }
 
@@ -62,6 +63,7 @@ fn every_address_of_the_host_s_interfaces_but_loopback_and_container_bridges() {
     // No lists at all (macOS, or a kernel without IPv6): nothing, and no key.
     let empty = Sources {
         proc_net: none.join("absent"),
+        ifconfig: None,
     };
     assert_eq!(joined(&empty, &none), "");
     let r = Rendered {
@@ -128,6 +130,71 @@ fn the_kernel_s_lists_parse_as_the_kernel_writes_them() {
         &task(),
     );
     assert_eq!(addresses::joined(&got), "100.64.7.7");
+}
+
+/// A Mac has no `/proc` (#320): its interfaces' addresses are `ifconfig -a`'s, by the same
+/// rules. The fixture: loopback, Apple's link-local-only interfaces, Wi-Fi with a LAN
+/// address and a stable and a temporary IPv6 address, the vmnet bridge the `omarchy` VM's
+/// NAT sits on (`bridge100`: a private address and a ULA, the VMs' and refused anyway), and
+/// a VPN tunnel (a point-to-point CGNAT address and a ULA /48).
+#[test]
+fn on_a_mac_the_addresses_are_ifconfig_s_by_the_same_rules() {
+    let none = tempdir();
+    let listing =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/mac/ifconfig");
+    let text = fs::read_to_string(&listing).unwrap();
+    let (v4, v6) = addresses::parse_ifconfig(&text);
+    assert_eq!(
+        v4.iter()
+            .map(|(a, i)| format!("{a} {i}"))
+            .collect::<Vec<_>>(),
+        [
+            "127.0.0.1 lo0",
+            "192.168.1.23 en0",
+            "192.168.64.1 bridge100",
+            "100.101.102.103 utun4"
+        ]
+    );
+    assert_eq!(v6.len(), 12);
+    assert_eq!(
+        (v6[1].addr.to_string(), v6[1].prefix, v6[1].iface.as_str()),
+        ("fe80::1".into(), 64, "lo0")
+    );
+    let expected = "100.101.102.103,192.168.1.23,2001:db8:1:2::/64,fd7a:115c:a1e0::/64,fe80::/64";
+    // Each once, as `detect` keeps them.
+    let mut got = addresses::of_ifconfig(&text, &task());
+    got.sort();
+    got.dedup();
+    assert_eq!(addresses::joined(&got), expected);
+    // Asked of the system's ifconfig with `-a`, beside lists that are not there.
+    let ifconfig = none.join("ifconfig");
+    fs::write(
+        &ifconfig,
+        format!(
+            "#!/bin/sh\n[ \"$*\" = -a ] || exit 2\ncat '{}'\n",
+            listing.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&ifconfig, fs::Permissions::from_mode(0o755)).unwrap();
+    let mac = Sources {
+        proc_net: none.join("absent"),
+        ifconfig: Some(ifconfig.clone()),
+    };
+    assert_eq!(joined(&mac, &none), expected);
+    // An ifconfig that fails, or none at all, gives nothing.
+    fs::write(&ifconfig, "#!/bin/sh\nexit 1\n").unwrap();
+    assert_eq!(joined(&mac, &none), "");
+    let gone = Sources {
+        ifconfig: Some(none.join("no-ifconfig")),
+        ..mac
+    };
+    assert_eq!(joined(&gone, &none), "");
+    // macOS's own, where it runs.
+    assert_eq!(
+        Sources::system().ifconfig.is_some(),
+        cfg!(target_os = "macos")
+    );
 }
 
 #[test]
@@ -284,6 +351,7 @@ fn envelope(secrets: &str, budget: Budget) -> Envelope {
     Envelope {
         secrets_dir: PathBuf::from(secrets),
         budget,
+        direct_network: false,
         task_subnets: task(),
     }
 }
@@ -722,6 +790,59 @@ fn a_refresh_waits_for_another_writer_and_never_puts_back_the_token_it_replaced(
     let none = path_in(&d.join("elsewhere"));
     assert_eq!(refresh(&none, &r).unwrap(), Refresh::NoFile);
     assert!(!none.exists());
+}
+
+#[test]
+fn a_granted_signed_exception_s_bridge_reaches_the_dispatcher_and_a_withdrawn_one_leaves_it() {
+    // agent.toml's `direct_network` (#373): absent is no grant, and only a boolean is read.
+    let of = |extra: &str| {
+        Envelope::from_agent_toml(&format!(
+            "[set]\nsecrets_dir = \"/srv/s\"\n[envelope]\n{extra}\n"
+        ))
+    };
+    assert!(!of("").unwrap().direct_network);
+    assert!(of("direct_network = true").unwrap().direct_network);
+    assert!(!of("direct_network = false").unwrap().direct_network);
+    let e = of("direct_network = \"yes\"").unwrap_err();
+    assert!(
+        e.contains("envelope.direct_network is neither true nor false"),
+        "{e}"
+    );
+    // Granted: one line after the budget's, which the dispatcher reads as the grant.
+    let granted = Envelope {
+        direct_network: true,
+        ..envelope("/srv/s", Budget::default())
+    };
+    let r = Rendered {
+        addresses: Vec::new(),
+        envelope: Some(granted.clone()),
+        plain: false,
+    };
+    assert_eq!(
+        r.lines().unwrap(),
+        ["OMARCHY_SECRETS_DIR=/srv/s", "OMARCHY_DIRECT_NETWORK=1"]
+    );
+    let base = format!("# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={OMW}\n");
+    let text = render(&base, None, None, Some(&r)).unwrap();
+    assert!(text.contains("\nOMARCHY_DIRECT_NETWORK=1\n"), "{text}");
+    // Withdrawn in agent.toml: the line goes with the next render.
+    let withdrawn = Rendered {
+        envelope: Some(envelope("/srv/s", Budget::default())),
+        ..r.clone()
+    };
+    assert!(!render(&text, None, None, Some(&withdrawn))
+        .unwrap()
+        .contains("OMARCHY_DIRECT_NETWORK"));
+    // Before agent.toml (a first enrollment): the file's own line stays, as the budget's does.
+    let early = Rendered {
+        addresses: Vec::new(),
+        envelope: None,
+        plain: false,
+    };
+    assert!(render(&text, None, None, Some(&early))
+        .unwrap()
+        .contains("\nOMARCHY_DIRECT_NETWORK=1\n"));
+    assert!(not_secret(DIRECT_NETWORK));
 }
 
 #[test]

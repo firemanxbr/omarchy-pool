@@ -25,7 +25,10 @@
 //!   same path from agent.toml);
 //! - `OMARCHY_AGENT_CALLS_PER_TASK`, `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK` and
 //!   `…_CALLS_PER_DAY`: the envelope's `agent_budget`, each only when agent.toml sets it,
-//!   so an envelope without one leaves the dispatcher's defaults.
+//!   so an envelope without one leaves the dispatcher's defaults;
+//! - `OMARCHY_DIRECT_NETWORK=1`, only when the envelope grants a signed exception's bridge
+//!   network (`direct_network`, #373), which install's egress probe then checked: without
+//!   it the dispatcher hands a package with `network = "direct"` in `factory/sizing` back.
 //!
 //! It is written on install, on enrollment, on every rotation, and by the run loop when the
 //! host's addresses or agent.toml changed (it reads both every minute, agent.toml only when
@@ -72,6 +75,8 @@ pub const TOKEN_FILE: &str = "run/host/dispatcher/token";
 pub const ADDRESSES: &str = "OMARCHY_HOST_ADDRESSES";
 /// The secrets directory: a path only.
 pub const SECRETS_DIR: &str = "OMARCHY_SECRETS_DIR";
+/// `1` when the envelope grants a signed exception's bridge network (#373); absent otherwise.
+pub const DIRECT_NETWORK: &str = "OMARCHY_DIRECT_NETWORK";
 /// `[envelope].agent_budget`'s keys, and the variables the dispatcher reads them from (D45).
 pub const BUDGET: [(&str, &str); 4] = [
     ("calls_per_task", "OMARCHY_AGENT_CALLS_PER_TASK"),
@@ -94,11 +99,11 @@ const MAX_LEN: u64 = 64 << 10;
 
 /// A key the agent renders whose value is no secret: the journal need not scrub it.
 pub(crate) fn not_secret(key: &str) -> bool {
-    key == ADDRESSES || key == SECRETS_DIR || BUDGET.iter().any(|(_, k)| *k == key)
+    key == ADDRESSES || owned_by_envelope(key)
 }
 
 fn owned_by_envelope(key: &str) -> bool {
-    key == SECRETS_DIR || BUDGET.iter().any(|(_, k)| *k == key)
+    key == SECRETS_DIR || key == DIRECT_NETWORK || BUDGET.iter().any(|(_, k)| *k == key)
 }
 
 /// The envelope's agent budget (design v2 §12, D45); `None` leaves the dispatcher's default.
@@ -166,13 +171,27 @@ impl Budget {
     }
 }
 
-/// What agent.toml gives the file: the secrets directory and the agent budget, and the
-/// task subnets, whose container bridges' addresses are not the host's own to refuse.
+/// What agent.toml gives the file: the secrets directory, the agent budget and the grant of
+/// a signed exception's bridge, and the task subnets, whose container bridges' addresses are
+/// not the host's own to refuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
     pub secrets_dir: PathBuf,
     pub budget: Budget,
+    /// `[envelope].direct_network` (#373): absent is no grant.
+    pub direct_network: bool,
     pub(crate) task_subnets: Vec<Cidr>,
+}
+
+/// `[envelope].direct_network`: true or false, absent as false; anything else is refused, as
+/// a value the owner did not mean.
+fn direct_network(envelope: Option<&toml::Value>) -> Result<bool, String> {
+    match envelope.and_then(|e| e.get("direct_network")) {
+        None => Ok(false),
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "agent.toml: envelope.direct_network is neither true nor false".into()),
+    }
 }
 
 /// The task subnets agent.toml names (install's default when it names none); a value that
@@ -183,9 +202,9 @@ fn task_subnets(value: Option<&str>) -> Vec<Cidr> {
 }
 
 impl Envelope {
-    /// From agent.toml's text: `set.secrets_dir`, `envelope.agent_budget` and
-    /// `envelope.task_subnets`, nothing else (the enrollment reads it where the run loop's
-    /// stricter configuration does not apply).
+    /// From agent.toml's text: `set.secrets_dir`, `envelope.agent_budget`,
+    /// `envelope.direct_network` and `envelope.task_subnets`, nothing else (the enrollment
+    /// reads it where the run loop's stricter configuration does not apply).
     pub fn from_agent_toml(text: &str) -> Result<Self, String> {
         let t: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
         let secrets_dir = t
@@ -199,6 +218,7 @@ impl Envelope {
         Ok(Self {
             secrets_dir,
             budget,
+            direct_network: direct_network(envelope)?,
             task_subnets: task_subnets(
                 envelope
                     .and_then(|e| e.get("task_subnets"))
@@ -212,6 +232,7 @@ impl Envelope {
         Self {
             secrets_dir: cfg.secrets_dir.clone(),
             budget: cfg.agent_budget,
+            direct_network: cfg.direct_network,
             task_subnets: task_subnets(cfg.task_subnets.as_deref()),
         }
     }
@@ -286,6 +307,9 @@ impl Rendered {
             }
             out.push(format!("{SECRETS_DIR}={}", e.secrets_dir.display()));
             out.extend(e.budget.lines());
+            if e.direct_network {
+                out.push(format!("{DIRECT_NETWORK}=1"));
+            }
         }
         Ok(out)
     }

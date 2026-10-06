@@ -6,7 +6,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::capacity::Isolation;
+use crate::capacity::{Capacity, Isolation};
 
 use super::net::{self, Cidr, Route};
 
@@ -57,6 +57,11 @@ impl Report {
 /// existing compose project named with `--legacy` grants it: it is meant for the Studio's
 /// recorded set only, the warning and `rootful_exception` in `legacy.json` record it, and
 /// P6 removes it.
+///
+/// On macOS (#320) the escape lands in a VM, not in the person's account: the `omarchy`
+/// Colima VM is dedicated (`vm`, whatever runs inside it); Docker Desktop's or `OrbStack`'s
+/// VM (`vm-shared`) qualifies only with the home mount removed — the caller probes that —
+/// and `--dedicated`, the person's word that nothing else runs in it.
 pub(crate) fn hosting(
     isolation: Isolation,
     rootful: bool,
@@ -64,6 +69,25 @@ pub(crate) fn hosting(
     legacy: bool,
     r: &mut Report,
 ) {
+    match isolation {
+        Isolation::Vm => {
+            r.notes.push(
+                "isolation: vm (the dedicated omarchy VM; the Mac's files are not mounted into it)"
+                    .into(),
+            );
+            return;
+        }
+        Isolation::VmShared => {
+            if !dedicated {
+                r.blockers.push(
+                    "hosting: Docker Desktop's or OrbStack's VM is shared with your own containers: it qualifies only with the home mount removed and --dedicated, your word that nothing else runs in it (the omarchy Colima profile needs neither: factory/host/prep-mac.sh)".into(),
+                );
+            }
+            r.notes.push("isolation: vm-shared (Docker Desktop's or OrbStack's VM, used because it is here; never installed)".into());
+            return;
+        }
+        Isolation::Root | Isolation::User | Isolation::Subuid => {}
+    }
     // Each requirement on its own, so a fresh rootful VM sees both of its blockers at once.
     if rootful && !dedicated {
         r.blockers.push(
@@ -100,6 +124,8 @@ pub(crate) fn level(i: Isolation) -> &'static str {
         Isolation::Root => "root",
         Isolation::User => "user",
         Isolation::Subuid => "subuid",
+        Isolation::Vm => "vm",
+        Isolation::VmShared => "vm-shared",
     }
 }
 
@@ -207,36 +233,26 @@ pub(crate) fn subnets(
     }
 }
 
-/// The other architecture, reported only in P1 (its lane turns on in P2, #338).
-pub(crate) fn emulation(native: &str, page_kb: Option<u32>, binfmt_dir: &Path, r: &mut Report) {
-    let foreign = if native == "aarch64" {
-        "x86_64"
-    } else {
-        "aarch64"
-    };
-    let handler = binfmt_dir.join(format!("qemu-{foreign}"));
-    let state = match std::fs::read_to_string(&handler) {
-        Ok(t) if t.lines().next() == Some("enabled") => {
-            let fix = t
-                .lines()
-                .find_map(|l| l.strip_prefix("flags: "))
-                .is_some_and(|f| f.contains('F'));
-            if fix {
-                "binfmt handler on (F flag)"
-            } else {
-                "binfmt handler on, without the F flag containers need"
-            }
-        }
-        Ok(_) => "binfmt handler disabled",
-        Err(_) => "no binfmt handler (prep-root.sh installs it)",
-    };
-    let pages = match page_kb {
-        Some(16) => ", 16K pages",
-        _ => "",
-    };
-    r.notes.push(format!(
-        "emulation {foreign}: {state}{pages}; reported only, the lane comes in P2"
-    ));
+/// The emulated lanes detection found (#338, design v2 §7.5), reported only: a lane held
+/// for binfmt, the envelope or a smoke run that failed never stops an install, and the
+/// native lane never depends on it.
+pub(crate) fn emulation(c: &Capacity, r: &mut Report) {
+    for l in c.lanes().iter().filter(|l| l.mode == "emulated") {
+        let pages = if l.page16k == Some(true) {
+            ", on pages larger than the guest's: a toolchain that cannot start here sends its build back for a native host (D33)"
+        } else {
+            ""
+        };
+        r.notes.push(format!(
+            "emulation {}: on, through {}{pages}",
+            l.arch,
+            l.via.unwrap_or("?")
+        ));
+    }
+    for h in c.held_lanes() {
+        r.notes
+            .push(format!("emulation {}: held — {}", h.arch, h.reason));
+    }
 }
 
 /// Linger and the user manager (design v2 §13.3): linger is enabled at install when polkit

@@ -1,0 +1,20 @@
+{
+  "schema": 2,
+  "at": "2026-10-01T00:00:00Z",
+  "cpus": 12,
+  "mem_gb": 31,
+  "page_kb": 16,
+  "disk_free_gb": { "work": 410, "engine": 220 },
+  "units": 11,
+  "job_reserved": 1,
+  "agent_slots": 2,
+  "lanes": [
+    { "arch": "aarch64", "mode": "native" },
+    { "arch": "x86_64", "mode": "emulated", "via": "qemu", "page16k": true }
+  ],
+  "held_lanes": [],
+  "isolation": "root",
+  "dedicated": true,
+  "limits": { "cpus_hard": true, "memory_hard": true, "pids": true },
+  "below_minimum": false
+}
