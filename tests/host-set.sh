@@ -82,7 +82,10 @@ check(vols == {("/var/run/docker.sock", "/var/run/docker.sock", False),
                (f"{setdir}/run/host/dispatcher/token", "/run/omarchy/worker-token", True)},
       f"the volumes: the socket, the work root at its own path, capacity.json and the token file read-only (got {vols})")
 token = next(v for v in d["volumes"] if v["target"] == "/run/omarchy/worker-token")
-check(token["type"] == "bind" and token.get("bind", {}).get("create_host_path") is False,
+# compose writes the default create_host_path: true out for a bind that does not set it (the
+# capacity.json line above); a set false is written out by some compose versions and left out as
+# a zero value by others ("bind": {}), so an absent key under a present "bind" is the false we set.
+check(token["type"] == "bind" and "bind" in token and token["bind"].get("create_host_path", False) is False,
       f"the token file is a bind compose never makes a directory for (got {token})")
 check(not any("host-secrets" in v["source"] for v in d["volumes"]), "the secrets directory is not mounted")
 check("ports" not in d and not d.get("privileged") and "cap_add" not in d and "network_mode" not in d, "no port, privilege, capability or host network")
