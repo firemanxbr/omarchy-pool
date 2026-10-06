@@ -284,11 +284,13 @@ Until then, moving the pool moves them too:
   client id in
   `wrangler.toml` (`GITHUB_OAUTH_CLIENT_ID`), secret with
   `npx wrangler secret put GITHUB_OAUTH_CLIENT_SECRET`.
-- Workers: register one per architecture for the hosted fallback (`POST
-  /factory/workers` with your maintainer token — registration is maintainers
-  only, #331 — then trust it as a maintainer) and store their tokens as the GitHub secrets
-  `POOL_WORKER_TOKEN_X86_64` / `POOL_WORKER_TOKEN_AARCH64`. Workers you run
-  elsewhere are registered the same way; `JOB_TOKEN_SECRET` (any random
+- Workers: the pool's compute is its maintainers' hosts — each enrolled
+  from its owner's page (*Add a host*, /docs/worker-host), trusted by the
+  maintainer list; no registration is trusted one at a time any more (#343:
+  `POST /factory/workers/:id/trust` answers 410). A legacy registration
+  (`POST /factory/workers` with a maintainer's token, #331) that already
+  holds project trust keeps its token as the GitHub secrets
+  `POOL_WORKER_TOKEN_X86_64` / `POOL_WORKER_TOKEN_AARCH64` until P3; `JOB_TOKEN_SECRET` (any random
   string, `npx wrangler secret put JOB_TOKEN_SECRET`) signs the per-job
   tokens.
 - `REPO_URL` in `factory/worker/omarchy-build-worker.sh` and `repo` in

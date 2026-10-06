@@ -402,8 +402,8 @@ describe("a package built for two architectures", () => {
       // The queue is this story's alone: what the migration's rows left queued (zed's build, mise's rebuild) waits for no worker here.
       env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE status = 'queued'"),
       env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
-        ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
-        ('ca', 'aarch64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
+        ('cx', 'x86_64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z'),
+        ('ca', 'aarch64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z'),
         ('px', 'x86_64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'),
         ('pa', 'aarch64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z')`).bind(await h("omw_cx"), await h("omw_ca"), await h("omw_px"), await h("omw_pa")),
     ]);
@@ -607,6 +607,8 @@ describe("a package built for two architectures", () => {
     expect(taken.status, JSON.stringify(taken.json)).toBe(200);
     expect(taken.json.package).toMatchObject({ owner: "bob", status: "registered" });
     expect((await env.DB.prepare("SELECT summary FROM events WHERE kind = 'request' ORDER BY id DESC LIMIT 1").first<{ summary: string }>())!.summary).toMatch(/taken over from alice, whose request was rejected$/);
+    // The build bob's request queued is not this story's: every community registration takes any contributor's build (#343).
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE name = 'solo' AND owner = 'bob' AND status = 'queued'").run();
     // duo is in the pool on x86_64: a new build of it rejected leaves the name and the approved version where they are.
     await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix) VALUES ('duo', 'x86_64', '1.1-1', 'draft:https://duo.example@1.1', 'bump to 1.1', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/duo/1/')").run();
     const bump = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'duo' AND version = '1.1-1'").first<{ id: number }>())!.id;

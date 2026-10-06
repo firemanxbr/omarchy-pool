@@ -55,11 +55,11 @@ beforeAll(async () => {
     env.DB.prepare("INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2')"),
     env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, NULL, 'contributor'), ('bob', ?, NULL, 'contributor'), ('dave', ?, NULL, 'contributor')")
       .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_alice"), await h("omc_bob"), await h("omc_dave")),
-    // alice's worker builds her requests; the project's review worker, whose agent answers, takes the rebuilds a claim pins to it.
+    // m1's community registration (a maintainer's legacy set: contributors run no worker, #343) builds alice's requests; the project's review worker, whose agent answers, takes the rebuilds a claim pins to it.
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES
-      ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
+      ('cx', 'x86_64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
       ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]'),
-      ('ca', 'aarch64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
+      ('ca', 'aarch64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
       ('pa', 'aarch64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`).bind(await h("omw_cx"), await h("omw_px"), AGENT, await h("omw_ca"), await h("omw_pa"), AGENT),
   ]);
 });
@@ -83,7 +83,7 @@ const stage = async (c: { task: { id: number; name: string; arch?: string }; tok
   const done = await call("POST", `/factory/tasks/${c.task.id}/complete`, { sha256: (who === "the project" ? "d" : "c").repeat(64), filename: file, version: "1.0-1" }, c.token);
   expect(done.json, JSON.stringify(done.json)).toMatchObject({ status: "staged" });
 };
-/** alice's request, built and staged by her worker: the build a maintainer claims. */
+/** alice's request, built and staged by m1's community registration: the build a maintainer claims. */
 const ready = async (name: string) => {
   expect((await request(name)).status).toBe(201);
   const c = await claimAs("omw_cx", name);

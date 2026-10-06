@@ -42,6 +42,41 @@ impl Docker {
     pub fn server(&self) -> Result<Server, String> {
         parse_server(&self.run(&["version", "--format", "{{json .Server}}"])?)
     }
+
+    /// podman's own version where podman answers on the socket ([`parse_podman`]).
+    pub fn podman(&self) -> Result<Option<String>, String> {
+        parse_podman(&self.run(&["version", "--format", "{{json .Server}}"])?)
+    }
+}
+
+/// `version --format '{{json .Server}}'`'s `Podman Engine` component's version (the Quadlet
+/// driver's keys need a podman recent enough, #330), or `None` where another engine answers.
+pub(crate) fn parse_podman(json: &str) -> Result<Option<String>, String> {
+    #[derive(serde::Deserialize)]
+    struct Component {
+        #[serde(rename = "Name", default)]
+        name: String,
+        #[serde(rename = "Version", default)]
+        version: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        #[serde(rename = "Components", default)]
+        components: Option<Vec<Component>>,
+    }
+    let s: Raw = serde_json::from_str(json.trim())
+        .map_err(|_| format!("the engine's version does not read: {:?}", json.trim()))?;
+    Ok(s.components
+        .unwrap_or_default()
+        .into_iter()
+        .find(|c| c.name == "Podman Engine")
+        .map(|c| {
+            c.version
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+                .take(40)
+                .collect()
+        }))
 }
 
 /// The engine behind the socket, as the dispatcher tells it apart (#367): podman behind its

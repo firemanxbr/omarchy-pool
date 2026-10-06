@@ -230,7 +230,7 @@ describe("a job with helper containers on a host's lanes (#338, design v2 §7.4,
   /** A host of the fleet, alive and idle, taking the pool jobs #340 gives hosts. */
   const member = (id: string, lanes: SelLane[], now: number): Member => ({
     id, legacy: false, lanes, units: 11, agent_slots: 2, disk: { work: 400, engine: 200 }, kinds: [...HOST_KINDS, "health", "promote"], probe_ok: true,
-    drained: false, below_minimum: false, may_claim: true, behind: false, seen_at: now, reserving: null, scope: { trust: "host", owner: null, shared: false },
+    drained: false, below_minimum: false, may_claim: true, behind: false, seen_at: now, reserving: null, scope: { trust: "host" },
   });
 
   it("the claim's reads bring a health check to the head of its ring's arch and a promotion with the arch it names; the Studio's emulated lane takes the x86_64 health check at once, a host with no x86_64 lane neither", async () => {

@@ -233,6 +233,56 @@ fn lint_set_is_clean_on_the_host_set_and_names_each_violation() {
     assert!(text(&o).contains("socket:"), "{}", text(&o));
 }
 
+/// #330: the same bundle serves both drivers, so `lint-set` renders the set for Quadlet
+/// too — an override with it when the host is a Quadlet one (no envelope given, or one
+/// naming the driver); a compose host's override is compose's lint's alone.
+#[test]
+fn lint_set_holds_the_set_to_what_the_quadlet_driver_renders() {
+    let o = run(&[
+        "lint-set",
+        &fx("lint/host"),
+        "--override",
+        &fx("lint/override/set-network.yml"),
+    ]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("quadlet: dispatcher: networks is not rendered for Quadlet"),
+        "{}",
+        text(&o)
+    );
+    let o = run(&[
+        "lint-set",
+        &fx("lint/host"),
+        "--override",
+        &fx("lint/override/set-network.yml"),
+        "--envelope",
+        &fx("lint/envelope/studio.toml"),
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let quadlet = std::env::temp_dir().join(format!(
+        "omarchy-agent-cli-quadlet-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(
+        &quadlet,
+        std::fs::read_to_string(fixtures().join("lint/envelope/studio.toml"))
+            .unwrap()
+            .replace("driver       = \"compose\"", "driver       = \"quadlet\""),
+    )
+    .unwrap();
+    let o = run(&[
+        "lint-set",
+        &fx("lint/host"),
+        "--override",
+        &fx("lint/override/set-network.yml"),
+        "--envelope",
+        &quadlet.to_string_lossy(),
+    ]);
+    std::fs::remove_file(&quadlet).unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("quadlet: "), "{}", text(&o));
+}
+
 #[test]
 fn lint_set_is_clean_on_the_real_host_set_and_reads_its_set_toml() {
     let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../factory/sets/host");
@@ -381,15 +431,27 @@ fn usage_errors_exit_2() {
     );
 }
 
-/// `runtime switch` (#325): a driver this binary does not carry, or a socket nothing
-/// answers on, is refused at the host with nothing asked of the running agent.
+/// `runtime switch` (#325, #330): a driver this binary does not carry, a socket nothing
+/// answers on, or Quadlet's with no `XDG_RUNTIME_DIR` to find it by, is refused at the host
+/// with nothing asked of the running agent.
 #[test]
 fn a_runtime_switch_the_host_cannot_make_is_refused_and_asks_nothing() {
     let data = scratch("runtime-switch");
     for (args, why) in [
         (
-            &["runtime", "switch", "quadlet"][..],
-            "\"quadlet\" is not a driver this agent carries: compose/docker or compose/podman",
+            &["runtime", "switch", "kube"][..],
+            "\"kube\" is not a driver this agent carries: compose/docker, compose/podman or quadlet",
+        ),
+        // #330: Quadlet is carried; its socket must answer all the same.
+        (
+            &[
+                "runtime",
+                "switch",
+                "quadlet",
+                "--socket",
+                "/nonexistent/podman.sock",
+            ],
+            "nothing answers on /nonexistent/podman.sock",
         ),
         (
             &[
@@ -416,6 +478,22 @@ fn a_runtime_switch_the_host_cannot_make_is_refused_and_asks_nothing() {
         assert_eq!(o.status.code(), Some(1), "{args:?}: {}", text(&o));
         assert!(text(&o).contains(why), "{args:?}: {}", text(&o));
     }
+    // #330: Quadlet with no --socket outside the user's login session (an `su` shell, no
+    // XDG_RUNTIME_DIR) says where its socket is looked up, not an empty list.
+    let o = Command::new(env!("CARGO_BIN_EXE_omarchy-agent"))
+        .args(["runtime", "switch", "quadlet"])
+        .env("XDG_DATA_HOME", &data)
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains(
+            "XDG_RUNTIME_DIR is not set: the Quadlet driver runs this user's rootless podman"
+        ),
+        "{}",
+        text(&o)
+    );
     assert!(
         !data.join("omarchy-agent/runtime-switch.json").exists(),
         "nothing was asked of the agent"
@@ -534,6 +612,63 @@ fn status_logs_and_round_read_the_data_directory() {
     let o = run(&["round", "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));
     assert!(text(&o).contains("is the agent running?"), "{}", text(&o));
+}
+
+#[test]
+fn status_names_the_driver_and_where_a_quadlet_host_s_units_are() {
+    let data = scratch("driver");
+    let d = data.to_string_lossy().into_owned();
+    std::fs::write(data.join("state.json"), "{}").unwrap();
+    let config = data.join("config");
+    let driver = |set: &str| {
+        std::fs::write(
+            data.join("agent.toml"),
+            format!(
+                "pool = \"https://pkgs.omarchy-pool.org\"\nhost_id = \"h_1\"\nworker_id = \"w_1\"\n[set]\ndir = \"{0}/set\"\nwork_root = \"{0}/work\"\nsecrets_dir = \"{0}/secrets\"\n{set}[envelope]\nallow_socket = true\nrootful_ack = true\ndedicated = true\n",
+                data.display()
+            ),
+        )
+        .unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_omarchy-agent"))
+            .args(["status", "--data-dir", &d])
+            .env("XDG_CONFIG_HOME", &config)
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .find(|l| l.starts_with("driver:"))
+            .unwrap_or_else(|| panic!("no driver line: {}", text(&o)))
+            .to_owned()
+    };
+    // Compose, before the engine said which it is, and once agent.toml says.
+    assert_eq!(
+        driver("socket_cli = \"/var/run/docker.sock\"\n"),
+        "driver:    compose on /var/run/docker.sock (the engine says which at the agent's start)"
+    );
+    assert_eq!(
+        driver("socket_cli = \"/run/podman/podman.sock\"\nruntime = \"podman\"\n"),
+        "driver:    compose/podman on /run/podman/podman.sock"
+    );
+    // Quadlet (#330): its units where podman's generator reads the user's, or `set.unit_dir`.
+    let socket = "socket_cli = \"/run/user/1000/podman/podman.sock\"\ndriver = \"quadlet\"\n";
+    assert_eq!(
+        driver(socket),
+        format!(
+            "driver:    quadlet on /run/user/1000/podman/podman.sock, its units in {}",
+            config.join("containers/systemd").display()
+        )
+    );
+    assert_eq!(
+        driver(&format!(
+            "{socket}unit_dir = \"{}\"\n",
+            data.join("units").display()
+        )),
+        format!(
+            "driver:    quadlet on /run/user/1000/podman/podman.sock, its units in {}",
+            data.join("units").display()
+        )
+    );
 }
 
 #[test]

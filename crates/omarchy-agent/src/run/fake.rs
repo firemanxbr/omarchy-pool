@@ -915,7 +915,7 @@ pub(crate) fn cosign_statement(remote: &Remote, to: &str, key: &TestKey) {
 // ---------------------------------------------------------------------------------------
 // A host: the agent with its set directory, a fake engine and a fake pool.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::agent::{Agent, Drivers};
 use super::config::{Config, Paths};
@@ -953,15 +953,64 @@ pub(crate) struct World {
     /// The engines by socket (#325's runtime switch): the agent's driver is the one its
     /// agent.toml names, and a switch reaches another through here.
     pub sockets: Sockets,
+    /// The rootless podmans under the user's systemd the Quadlet driver runs on (#330), by
+    /// their API socket.
+    pub quadlets: Quadlets,
 }
 
 pub(crate) type Sockets = Rc<RefCell<BTreeMap<PathBuf, Engine>>>;
+pub(crate) type Quadlets = Rc<RefCell<BTreeMap<PathBuf, super::fake_quadlet::QHost>>>;
 
 /// 2027-01-15T08:00:00Z.
 pub(crate) const T0: i64 = 1_800_000_000;
 
+/// Rootless podman's API socket on the Quadlet worlds (#330).
+pub(crate) const QUADLET_SOCKET: &str = "/run/user/1000/podman/podman.sock";
+
 impl World {
     pub fn new() -> Self {
+        Self::from_toml(|t, _| t)
+    }
+
+    /// A rootless podman host on the Quadlet driver (#330): the user's systemd runs the set,
+    /// its units in the test's own `config/containers/systemd`.
+    pub fn quadlet() -> Self {
+        Self::from_toml(|t, dir| {
+            t.replacen(
+                "socket_cli = \"/var/run/docker.sock\"\n",
+                &format!(
+                    "socket_cli = \"{QUADLET_SOCKET}\"\ndriver = \"quadlet\"\nengine = \"rootless\"\nunit_dir = \"{}\"\n",
+                    dir.join("config/containers/systemd").display()
+                ),
+                1,
+            )
+        })
+    }
+
+    /// The host's Quadlet podman and user systemd (#330).
+    pub fn quadlet_host(&self) -> super::fake_quadlet::QHost {
+        Rc::clone(
+            self.quadlets
+                .borrow()
+                .get(Path::new(QUADLET_SOCKET))
+                .expect("a Quadlet world"),
+        )
+    }
+
+    /// [`World::running_v1`] on the Quadlet driver.
+    pub fn quadlet_running_v1() -> Self {
+        let mut w = World::quadlet();
+        w.release("v1.0.0");
+        w.target("v1.0.0", None);
+        w.round();
+        assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+        w.quadlet_host().borrow_mut().start_task();
+        w
+    }
+
+    /// A host whose agent.toml is the example's as `edit` makes it, given the test's own
+    /// directory.
+    fn from_toml(edit: impl FnOnce(String, &Path) -> String) -> Self {
         let dir = super::state::tempdir();
         let set = dir.join("set");
         fs::create_dir_all(set.join("etc")).unwrap();
@@ -983,10 +1032,12 @@ impl World {
         }
         write_token_file(&set, TOKEN);
         fs::write(set.join("run/capacity.json"), r#"{"schema":2,"units":3}"#).unwrap();
-        let cfg = Config::parse(&super::config::tests::example(
-            &set,
-            &dir.join("work"),
-            &dir.join("secrets"),
+        // The work root, as install makes it: the dispatcher binds it, and podman (the
+        // Quadlet driver's, #330) binds only a source that is there.
+        fs::create_dir_all(dir.join("work")).unwrap();
+        let cfg = Config::parse(&edit(
+            super::config::tests::example(&set, &dir.join("work"), &dir.join("secrets")),
+            &dir,
         ))
         .unwrap();
         let paths = Paths {
@@ -1004,11 +1055,18 @@ impl World {
             cfg.socket_cli.clone(),
             Rc::clone(&engine),
         )])));
+        let quadlets: Quadlets = Rc::default();
+        if cfg.driver == super::config::DriverKind::Quadlet {
+            quadlets.borrow_mut().insert(
+                cfg.socket_cli.clone(),
+                super::fake_quadlet::host(cfg.quadlet_dir().unwrap(), T0),
+            );
+        }
         let agent = Self::agent(
             cfg,
             paths,
             State::default(),
-            &sockets,
+            (&sockets, &quadlets),
             &remote,
             &signed_at,
             &cosign,
@@ -1022,6 +1080,7 @@ impl World {
             dir,
             now: T0,
             sockets,
+            quadlets,
         }
     }
 
@@ -1029,7 +1088,7 @@ impl World {
         cfg: Config,
         paths: Paths,
         state: State,
-        sockets: &Sockets,
+        (sockets, quadlets): (&Sockets, &Quadlets),
         remote: &Remote,
         signed_at: &Rc<RefCell<i64>>,
         cosign: &Rc<RefCell<Policy>>,
@@ -1045,25 +1104,51 @@ impl World {
         // A Linux host's agent, whichever OS runs the tests: a Mac (#320) is played with
         // `mac` and agent.toml's `[vm]`.
         a.mac = false;
-        let by_socket = Rc::clone(sockets);
-        a.drivers_on = Some(Box::new(move |socket| {
+        let (by_socket, by_quadlet) = (Rc::clone(sockets), Rc::clone(quadlets));
+        a.drivers_on = Some(Box::new(move |p: &super::switch::Place| {
+            if p.driver == "quadlet" {
+                return by_quadlet
+                    .borrow()
+                    .get(&p.socket_cli)
+                    .map(super::fake_quadlet::driver);
+            }
             by_socket
                 .borrow()
-                .get(socket)
+                .get(&p.socket_cli)
                 .map(|e| Box::new(FakeDriver(Rc::clone(e))) as Box<dyn Driver>)
         }));
-        Self::drive(&mut a, sockets);
+        Self::drive(&mut a, (sockets, quadlets));
         a
     }
 
-    /// The agent's driver: the engine its configuration names now.
-    fn drive(a: &mut Agent, sockets: &Sockets) {
+    /// The agent's driver: the engine its configuration names now, through the driver it
+    /// names (#330: Quadlet's on a rootless podman under the user's systemd).
+    fn drive(a: &mut Agent, (sockets, quadlets): (&Sockets, &Quadlets)) {
+        if a.cfg.driver == super::config::DriverKind::Quadlet {
+            let q = quadlets
+                .borrow()
+                .get(&a.cfg.socket_cli)
+                .cloned()
+                .expect("a user systemd and podman on the configured socket");
+            a.driver = Some(super::fake_quadlet::driver(&q));
+            return;
+        }
         let e = sockets
             .borrow()
             .get(&a.cfg.socket_cli)
             .cloned()
             .expect("an engine on the configured socket");
         a.driver = Some(Box::new(FakeDriver(e)));
+    }
+
+    /// A rootless podman under the user's systemd on `socket` (#330), its Quadlet
+    /// directory under the test's own.
+    pub fn add_quadlet(&self, socket: &str) -> super::fake_quadlet::QHost {
+        let q = super::fake_quadlet::host(self.dir.join("config/containers/systemd"), self.now);
+        self.quadlets
+            .borrow_mut()
+            .insert(PathBuf::from(socket), Rc::clone(&q));
+        q
     }
 
     /// Another engine on `socket` (#325): podman's API socket, say.
@@ -1099,17 +1184,20 @@ impl World {
         for e in self.sockets.borrow().values() {
             e.borrow_mut().forget_pull();
         }
+        for q in self.quadlets.borrow().values() {
+            q.borrow_mut().forget_pull();
+        }
         self.agent = Self::agent(
             cfg,
             paths,
             state,
-            &self.sockets,
+            (&self.sockets, &self.quadlets),
             &self.remote,
             &self.signed_at,
             &self.cosign,
         );
         self.agent.resume(self.now);
-        Self::drive(&mut self.agent, &self.sockets);
+        Self::drive(&mut self.agent, (&self.sockets, &self.quadlets));
     }
 
     /// The running agent installed as install.sh installs it (#316):
@@ -1206,6 +1294,9 @@ impl World {
         self.engine.borrow_mut().clock = self.now;
         for e in self.sockets.borrow().values() {
             e.borrow_mut().clock = self.now;
+        }
+        for q in self.quadlets.borrow().values() {
+            q.borrow_mut().clock = self.now;
         }
     }
 

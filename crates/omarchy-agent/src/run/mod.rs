@@ -70,6 +70,7 @@ pub(crate) mod orders;
 pub(crate) mod owner;
 pub(crate) mod pool;
 pub(crate) mod power;
+pub(crate) mod quadlet;
 pub(crate) mod report;
 pub(crate) mod rollout;
 pub(crate) mod selfupdate;
@@ -99,5 +100,7 @@ pub(crate) fn now() -> i64 {
 mod engine_tests;
 #[cfg(test)]
 pub(crate) mod fake;
+#[cfg(test)]
+pub(crate) mod fake_quadlet;
 #[cfg(test)]
 mod settings_tests;

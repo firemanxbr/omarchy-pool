@@ -769,7 +769,8 @@ describe("three more facts, one source each", () => {
     for (const login of [F.owner, F.m1]) {
       const mine = (await call("GET", `/users/${login}?after=heartbeat`)).json.workers as Record<string, unknown>[];
       expect(mine.length, login).toBeGreaterThan(0);
-      if (login === F.m1) expect(mine.map((w) => [w.id, w.alive]).sort(), "one side of the threshold each").toEqual([["w1", true], ["w1-idle", false]]);
+      // m1's community registration, w3, claimed while the fixture was made: its own clock, not this test's.
+      if (login === F.m1) expect(mine.filter((w) => w.id !== F.communityWorker).map((w) => [w.id, w.alive]).sort(), "one side of the threshold each").toEqual([["w1", true], ["w1-idle", false]]);
       for (const w of mine) {
         // The same words on the row: alive, ready and side are the listing's, computed by workerView; nothing the listing withholds rides here.
         for (const k of ["alive", "ready", "side", "update", "labels", "kinds"]) expect(w, `${login}'s ${w.id} carries ${k}`).toHaveProperty(k);

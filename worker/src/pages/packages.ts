@@ -1015,7 +1015,7 @@ const PACKAGE_SCRIPT = String.raw`
       // A registration a maintainer adopted is theirs (#247): the maintainer row below names them, adopted — they did not request it.
       if (pk.owner && !(mt && mt.adopted && mt.login === pk.owner)) rows.push(person("requested by", atLink(pk.owner), "", avatar(pk.owner)));
       if (sb && sb.agent) rows.push(person("drafted & built by", esc(sb.agent), built ? wtShort(built) : "", glyph(sb.agent, "agent")));
-      else if (built || !rebuilt) rows.push(person("built on", built ? esc(wtShort(built)) : "not yet", built ? "its contributor's worker" : "", glyph("W", "", "W")));
+      else if (built || !rebuilt) rows.push(person("built on", built ? esc(wtShort(built)) : "not yet", built ? "the contributor's build" : "", glyph("W", "", "W")));
       rows.push(ap ? person("reviewed by", atLink(ap.by), ap.decision === "approved" ? "rebuilt from scratch" : ap.decision, avatar(ap.by)) : person("reviewed by", rv ? STATE[rv][1] : "not yet", "", nobody));
       if (au) rows.push(person("audit agent", esc(au), "second opinion", glyph(au, "agent")));
       if (rebuilt) rows.push(person("rebuilt on", esc(wtShort(rebuilt)), "a project worker", glyph("▣", "pool", "▣")));
@@ -1087,7 +1087,7 @@ const PACKAGE_SCRIPT = String.raw`
       var took = mt && mt.adopted && mt.login === login;
       icon = "user"; who = "@" + login + (took ? " · maintainer" : " · requester");
       var req = (ST && ST.request) || {}, why = b ? "blocked: another maintainer lifts the block first" : req.busy ? "a build of it is running (#" + req.busy + "); ask again when it ends" : ["approved", "published"].indexOf(pk.status) >= 0 ? "approved: a new upstream release is built as a bump, by itself" : "not while it is " + (pk.status || "in the factory");
-      text = took ? "You adopted this package: its registration is yours, and its bumps come to your workers." : "You requested this package.";
+      text = took ? "You adopted this package: its registration is yours, and its bumps build in your name on the pool's hosts." : "You requested this package.";
       // A block is refused by the server before anything else (routes/contributors.ts): the renewal is grey while it holds, whatever the registration's status says.
       btns.push(gate(btn("Request an update", 'href="/factory?renew=' + encodeURIComponent(name) + '#request"', "primary"), !!req.renewable && !b, why));
       btns.push(btn("Your requests", 'href="' + userHref(login) + '"'));

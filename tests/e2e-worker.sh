@@ -74,7 +74,8 @@ printf 'JOB_TOKEN_SECRET=%s\nSIGNING_KEY="%s"\n' "$JOB_SECRET" "$SIGNING_KEY" > 
 npx wrangler d1 migrations apply omarchy-repo --local --persist-to "$WRANGLER_STATE" >/dev/null
 # Two registered project workers (what POST /factory/workers + a maintainer's
 # trust produce), seeded straight into the local index: their tokens are
-# omw_e2e_w1 and omw_e2e_w2.
+# omw_e2e_w1 and omw_e2e_w2; and w3 (omw_e2e_w3), the maintainer's community
+# registration — a legacy set: a contributor's claims nothing since #343.
 W1_HASH=$(printf %s omw_e2e_w1 | sha256sum | cut -d' ' -f1); W2_HASH=$(printf %s omw_e2e_w2 | sha256sum | cut -d' ' -f1); W3_HASH=$(printf %s omw_e2e_w3 | sha256sum | cut -d' ' -f1)
 # …and the governance the brain would have applied from factory/MAINTAINERS.toml:
 # one maintainer, the contributor 'e2e' (token omc_e2e).
@@ -83,7 +84,7 @@ npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --co
   "INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
      ('w1', 'aarch64', 'e2e', '$W1_HASH', 'shared', 'project', 'e2e', '2000-01-01T00:00:00Z'),
      ('w2', 'aarch64', 'e2e', '$W2_HASH', 'shared', 'project', 'e2e', '2000-01-01T00:00:00Z'),
-     ('w3', 'aarch64', 'e2e-contributor', '$W3_HASH', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z');
+     ('w3', 'aarch64', 'e2e', '$W3_HASH', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z');
    INSERT INTO factory_maintainers (login) VALUES ('e2e');
    INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('e2e', '$C_HASH', '$(printf %s oms_e2e | sha256sum | cut -d' ' -f1)', 'maintainer'),
      ('e2e-contributor', '$(printf %s omc_e2e_contributor | sha256sum | cut -d' ' -f1)', NULL, 'contributor')" >/dev/null
@@ -298,22 +299,24 @@ reg=$(curl -s "$OMARCHY_API/api/v1/factory/packages"); grep -q '"packages"' <<<"
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/packages" -H "content-type: application/json" -d '{"url":"https://github.com/x/y"}')" == 401 ]] || { echo "registering without a contributor token must be refused"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/factory/tasks/$tid/artifacts/x.log" "${auth[@]}" --data 'x')" == 401 ]] || { echo "the publish token must not write to staging"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$tid/approve" "${auth[@]}" -d '{}')" == 401 ]] || { echo "approving needs a maintainer's contributor token"; exit 1; }
-# Community tasks are their owner's first: a donated (--shared) worker sees
-# someone else's only from shared_after on; without --shared, never.
+# A community registration takes any contributor's build (#343): the mode its row once held, a legacy image's `shared` and a
+# bump's days for its owner's own worker (a row from before #343) decide nothing — the older build first.
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command \
   "INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, publish, trust, owner, kind, shared_after) VALUES
      ('later', 'aarch64', 'draft:https://github.com/x/later@latest', 'bump to v2', 100, 0, 'community', 'someone-else', 'build', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+14 days')),
      ('nowish', 'aarch64', 'draft:https://github.com/x/nowish@latest', 'package-request #1', 100, 0, 'community', 'someone-else', 'build', NULL)" >/dev/null)
 w3=(-H "authorization: Bearer omw_e2e_w3" -H "content-type: application/json")
-[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","agent":"openai/gpt-5","agent_status":"ok"}')" == 204 ]] || { echo "a worker not started --shared must only see its owner's tasks"; exit 1; }
-# Sharing is the owner's word alone (2026-09-17): a contributor's --shared worker builds anyone's queued request — once its agent answers.
 # A draft is the agent's work: a worker whose agent did not answer the probe gets nothing; one whose agent did gets it.
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","shared":true,"agent":"openai/gpt-5","agent_status":"error","agent_error":"HTTP 402"}')" == 204 ]] || { echo "a worker whose agent is down must not be handed a draft"; exit 1; }
-c3=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","shared":true,"agent":"openai/gpt-5","agent_status":"ok"}')
-grep -q '"name":"nowish"' <<<"$c3" || { echo "a shared worker — any contributor's — must get the task that is shareable now: $c3"; exit 1; }
-(cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command "UPDATE build_workers SET owner = 'e2e' WHERE id = 'w3'" >/dev/null)
-[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","shared":true,"agent":"openai/gpt-5","agent_status":"ok"}')" == 204 ]] || { echo "a shared worker must not get a task before its shared_after"; exit 1; }
-fac3=$(curl -s "$OMARCHY_API/api/v1/factory?limit=50"); grep -q '"id":"w3","arch":"aarch64"' <<<"$fac3" && grep -q '"mode":"shared"' <<<"$fac3" && grep -q '"agent_status":"ok"' <<<"$fac3" && grep -q '"ready":true' <<<"$fac3" || { echo "the claim did not record the worker as shared and ready: $fac3"; exit 1; }
+cl=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","shared":false,"agent":"openai/gpt-5","agent_status":"ok"}')
+grep -q '"name":"later"' <<<"$cl" || { echo "a community registration — its row dedicated, its claim not shared — must get a stranger's bump at once: $cl"; exit 1; }
+curl -sf -X POST "$OMARCHY_API/api/v1/factory/tasks/$(jq -r .task.id <<<"$cl")/fail" -H "authorization: Bearer $(jq -r .token <<<"$cl")" -H "content-type: application/json" -d '{"error":"e2e: not this story","final":true}' >/dev/null || { echo "the bump's lease must end"; exit 1; }
+c3=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","agent":"openai/gpt-5","agent_status":"ok"}')
+grep -q '"name":"nowish"' <<<"$c3" || { echo "a community registration must get any contributor's queued request: $c3"; exit 1; }
+fac3=$(curl -s "$OMARCHY_API/api/v1/factory?limit=50"); grep -q '"id":"w3","arch":"aarch64"' <<<"$fac3" && grep -q '"agent_status":"ok"' <<<"$fac3" && grep -q '"ready":true' <<<"$fac3" || { echo "the claim did not record the worker as ready: $fac3"; exit 1; }
+# A worker's mode is gone: its door answers 410 with the pointer to the maintainer-host docs, and the claims wrote no mode.
+[[ "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/workers/self/mode" "${w3[@]}" -d '{"mode":"shared"}' -w '%{http_code}' -o /dev/null)" == 410 ]] || { echo "a worker's mode door must answer 410"; exit 1; }
+[[ "$(cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --json --command "SELECT mode, mode_by FROM build_workers WHERE id = 'w3'" | jq -c '.[0].results[0]')" == '{"mode":"dedicated","mode_by":null}' ]] || { echo "a claim must write no mode"; exit 1; }
 # The community build's evidence goes to staging with the job token; the
 # builder cannot write the audit files. Staging it queues the second agent.
 c3_id=$(jq -r .task.id <<<"$c3"); c3_tok=$(jq -r .token <<<"$c3"); c3j=(-H "authorization: Bearer $c3_tok")
@@ -349,8 +352,8 @@ sme=$(curl -s "$OMARCHY_API/auth/me" -H "cookie: omc=oms_e2e"); grep -q '"login"
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/auth/logout" -H "cookie: omc=oms_e2e")" == 302 ]] || { echo "logout must redirect"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/auth/me" -H "cookie: omc=oms_e2e")" == 401 ]] || { echo "a signed-out session must stop working"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/factory/me" -H "authorization: Bearer omc_e2e")" == 200 ]] || { echo "signing out of the browser must not revoke the CLI token"; exit 1; }
-# A worker learns what its registration is (the image decides its mode from this).
-wself=$(curl -s "$OMARCHY_API/api/v1/factory/workers/self" -H "authorization: Bearer omw_e2e_w3"); grep -q '"trust":"community"' <<<"$wself" && grep -q '"owner":"e2e"' <<<"$wself" || { echo "workers/self did not describe the registration: $wself"; exit 1; }
+# A worker learns what its registration is (the image checks its role against its trust): no mode any more (#343).
+wself=$(curl -s "$OMARCHY_API/api/v1/factory/workers/self" -H "authorization: Bearer omw_e2e_w3"); grep -q '"trust":"community"' <<<"$wself" && grep -q '"owner":"e2e"' <<<"$wself" && ! grep -q '"mode"' <<<"$wself" || { echo "workers/self did not describe the registration: $wself"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/factory/workers/self")" == 401 ]] || { echo "workers/self must need a worker token"; exit 1; }
 upage=$(curl -s "$OMARCHY_API/api/v1/users/e2e"); grep -q '"role":"maintainer"' <<<"$upage" && grep -q '"github":"https://github.com/e2e"' <<<"$upage" || { echo "the profile API did not describe the seeded maintainer: $upage"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/users/nobody-here")" == 404 ]] || { echo "an unknown login must be 404"; exit 1; }
@@ -427,20 +430,22 @@ echo "factory queue, lease, requeue, guard and completion OK"
 
 step "Factory: one name, one package — built on x86_64, not on aarch64, reviewed once, published on x86_64 alone"
 # A package is its name (#242): x86_64 and aarch64 are two targets of one
-# package. A contributor requests it for both; their x86_64 worker builds
-# it, their aarch64 worker gives up on it (the recipe's fault, final): that
-# architecture is not supported and x86_64 goes on to the review alone. A
-# maintainer who did not request it has the project build it again — the
-# project's x86_64 worker, nothing for aarch64 — and approves it once; the
-# publish job is x86_64's only, and what it carries into edge is the
-# project's build, published here with the job's own token as work.rs does.
+# package. A contributor requests it for both; a maintainer's legacy
+# community registration builds it on x86_64 (contributors run no worker,
+# #343), the maintainer's aarch64 one gives up on it (the recipe's fault,
+# final): that architecture is not supported and x86_64 goes on to the
+# review alone. A maintainer who did not request it has the project build
+# it again — the project's x86_64 worker, nothing for aarch64 — and
+# approves it once; the publish job is x86_64's only, and what it carries
+# into edge is the project's build, published here with the job's own token
+# as work.rs does.
 command -v zstd >/dev/null || { echo "zstd is needed to make the package the project builds"; exit 1; }
 REQ_HASH=$(printf %s omc_e2e_req | sha256sum | cut -d' ' -f1)
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command \
   "INSERT INTO contributors (login, token_hash, role) VALUES ('e2e-req', '$REQ_HASH', 'contributor');
    INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
-     ('wrx', 'x86_64', 'e2e-req', '$(printf %s omw_e2e_wrx | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
-     ('wra', 'aarch64', 'e2e-req', '$(printf %s omw_e2e_wra | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
+     ('wrx', 'x86_64', 'e2e', '$(printf %s omw_e2e_wrx | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
+     ('wra', 'aarch64', 'e2e', '$(printf %s omw_e2e_wra | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
      ('wpx', 'x86_64', 'e2e', '$(printf %s omw_e2e_wpx | sha256sum | cut -d' ' -f1)', 'shared', 'project', 'e2e', '2000-01-01T00:00:00Z')" >/dev/null)
 d1n() { (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --json --command "$1") | jq -r '.[0].results[0].n'; }
 reqauth=(-H "authorization: Bearer omc_e2e_req" -H "content-type: application/json")
@@ -457,7 +462,7 @@ taken=$(curl -s -w '\n%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/package
 # The Factory's live check says the same, in the same words: reserved, whose, and why.
 named=$(curl -s "$OMARCHY_API/api/v1/factory/names/e2e-ident?arches=x86_64,aarch64")
 [[ "$(jq -r '.state + " " + .owner + " " + .why' <<<"$named")" == "reserved e2e-req e2e-ident is waiting, requested by e2e-req" ]] || { echo "the live check must call e2e-ident reserved, in the request's words: $named"; exit 1; }
-# x86_64: the requester's worker builds it and hands the evidence in; staged.
+# x86_64: a maintainer's community registration builds the requester's package and hands the evidence in; staged.
 cx=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wrx[@]}" -d "{\"arch\":\"x86_64\",$agent}")
 [[ "$(jq -r '.task.name + " " + .task.arch' <<<"$cx")" == "e2e-ident x86_64" ]] || { echo "the x86_64 worker did not get the x86_64 build: $cx"; exit 1; }
 x86=$(jq -r .task.id <<<"$cx"); cxj=(-H "authorization: Bearer $(jq -r .token <<<"$cx")")
@@ -465,7 +470,7 @@ x86=$(jq -r .task.id <<<"$cx"); cxj=(-H "authorization: Bearer $(jq -r .token <<
 live=$(curl -s "$OMARCHY_API/api/v1/factory?live=1&limit=20&t=$x86")
 [[ "$(jq -r --argjson id "$x86" '[.tasks[] | select(.id == $id) | .status] | join(",")' <<<"$live") $(jq -r '[.tasks[].status | select(. != "leased" and . != "queued")] | length' <<<"$live") $(jq -r '.counts | length' <<<"$live")" == "leased 0 0" ]] || { echo "the live read must show the x86_64 build leased, and nothing but tasks in flight: $live"; exit 1; }
 for f in PKGBUILD build.log PKGINFO e2e-ident-1.0-1-x86_64.pkg.tar.zst; do
-  [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/factory/tasks/$x86/artifacts/$f" "${cxj[@]}" --data-binary "the contributor's $f")" == 201 ]] || { echo "the contributor's build could not stage $f"; exit 1; }
+  [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/factory/tasks/$x86/artifacts/$f" "${cxj[@]}" --data-binary "the community build's $f")" == 201 ]] || { echo "the community build could not stage $f"; exit 1; }
 done
 curl -s -o /dev/null -X PUT "$OMARCHY_API/api/v1/factory/tasks/$x86/artifacts/vet.json" "${cxj[@]}" --data-binary '{"schema":"omarchy-pool/vet/1","verdict":"pass","checks":[{"name":"smoke","status":"pass","detail":""}]}'
 st=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/complete" "${cxj[@]}" -H "content-type: application/json" -d '{"sha256":"2222","filename":"e2e-ident-1.0-1-x86_64.pkg.tar.zst","version":"1.0-1"}')
@@ -473,7 +478,7 @@ st=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/complete" "${cxj[@]
 # One review covers every architecture: none starts while aarch64 still builds.
 early=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/build" "${mauth[@]}" -d '{}')
 [[ "$(jq -r .error <<<"$early")" == "aarch64 is still building (task "*"): one review covers every architecture — it starts once each is built or not supported" ]] || { echo "the review must wait for aarch64: $early"; exit 1; }
-# aarch64: the requester's other worker gives up on the recipe (final) — not supported.
+# aarch64: the maintainer's other community registration gives up on the recipe (final) — not supported.
 ca=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wra[@]}" -d "{\"arch\":\"aarch64\",$agent}")
 [[ "$(jq -r '.task.name + " " + .task.arch' <<<"$ca")" == "e2e-ident aarch64" ]] || { echo "the aarch64 worker did not get the aarch64 build: $ca"; exit 1; }
 arm=$(jq -r .task.id <<<"$ca")
