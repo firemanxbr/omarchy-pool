@@ -36,12 +36,12 @@
 //! Docker Desktop's or `OrbStack`'s VM when one is here and its home mount is removed; the
 //! envelope records the VM (`[vm]`) and the two sockets; the plist replaces the unit.
 //!
-//! Seams left for later issues, by name: the egress probe
-//! behind the egress sidecar on an internal network, once the worker image has it
-//! ([`egress`]); the `subuid` level for rootless podman, once the dispatcher (#335) starts
-//! task containers with `--userns=auto` (until then rootless podman reads as `user`); task
-//! containers and sidecars carry `org.omarchy-pool.agent.host=<host>` (design v2 §9.3),
-//! which uninstall removes by.
+//! Seams left for later issues, by name: the egress probe behind the egress sidecar on a
+//! task's internal network (#373), and on podman the task network made through libpod's own
+//! API with DNS off (#372), until which a rootless host fails the probe ([`egress`]); the
+//! `subuid` level for rootless podman, once the dispatcher (#335) starts task containers with
+//! `--userns=auto` (until then rootless podman reads as `user`); task containers and sidecars
+//! carry `org.omarchy-pool.agent.host=<host>` (design v2 §9.3), which uninstall removes by.
 
 pub mod checks;
 
@@ -51,6 +51,7 @@ pub(crate) mod envelope;
 pub(crate) mod files;
 pub(crate) mod launchd;
 pub(crate) mod legacy;
+pub(crate) mod loopback;
 pub(crate) mod mac;
 pub(crate) mod net;
 pub(crate) mod secrets;
@@ -114,6 +115,16 @@ pub struct Places {
     /// (#320).
     pub proc_net: PathBuf,
     pub ifconfig: Option<PathBuf>,
+    /// prep-root.sh's firewall script (world-readable): whether its INPUT drop for the task
+    /// subnets is installed, and which command a rootful host without it is told to run (#367).
+    pub task_firewall: PathBuf,
+    /// `/etc/systemd/system` (world-readable): whether the unit that runs that script at boot
+    /// is there and enabled, or a reboot takes the drop away (#367).
+    pub systemd_system: PathBuf,
+    /// Docker's `daemon.json` (world-readable): the address pool that command carries (#367).
+    pub docker_daemon: PathBuf,
+    /// Where processes are read (`/proc`): a rootless engine's network stack (#367).
+    pub proc: PathBuf,
 }
 
 impl Places {
@@ -153,6 +164,10 @@ impl Places {
             home,
             proc_net: sources.proc_net,
             ifconfig: sources.ifconfig,
+            task_firewall: PathBuf::from("/usr/local/libexec/omarchy-task-firewall"),
+            systemd_system: PathBuf::from("/etc/systemd/system"),
+            docker_daemon: PathBuf::from("/etc/docker/daemon.json"),
+            proc: PathBuf::from("/proc"),
         })
     }
 
@@ -944,30 +959,44 @@ pub(crate) fn measure_as(
         }
         match (task.first().and_then(|t| t.last_28()), &image) {
             (Some(subnet), Some(img)) => {
-                let mut t =
-                    egress::Targets::of_host(gateway, net::lan_address()).asking(pool.as_deref());
-                if found.as_ref().and_then(|f| f.kind) == Some(VmKind::Dedicated) {
-                    // The Mac as the omarchy VM reaches it, past Colima's NAT.
-                    t.forbidden
-                        .push(("vm-host", crate::vm::VM_HOST.to_owned(), 22));
-                }
-                match egress::probe(d, img, subnet, &t) {
-                    Ok(out) => {
-                        let b = egress::verdict(&out, &t);
-                        if b.is_empty() {
-                            r.notes
-                                .push("egress: a task reaches public addresses only".into());
-                        }
-                        r.blockers.extend(b);
-                        public = egress::seen(&out);
-                        r.notes.push(match (public, &t.seen) {
-                            (Some(ip), _) => format!("egress: tasks leave from {ip}, which every task's egress refuses with the host's own addresses"),
-                            (None, Some(url)) => format!("egress: the address tasks leave from was not seen ({url} gave none); every task's egress refuses the interfaces' addresses"),
-                            (None, None) => "egress: the address tasks leave from was not asked (the pool is not HTTPS)".into(),
-                        });
-                    }
-                    Err(e) => r.blockers.push(format!("egress: {e}")),
-                }
+                let rootful = facts.as_ref().is_none_or(|f| !f.rootless());
+                let server = d.server();
+                let vm = found.as_ref().and_then(|f| f.kind);
+                // prep-root.sh's firewall is a Linux host's; a Mac's VM gets the agent's own
+                // ([`mac`], before this probe), and none of prep-root.sh's files is on a Mac.
+                let (firewall, unprepared) = if mac {
+                    (String::new(), None)
+                } else {
+                    let script = std::fs::read_to_string(&p.task_firewall).ok();
+                    let fw = egress::Firewall::read(script.as_deref(), &p.systemd_system);
+                    (
+                        egress::firewall_command(
+                            fw,
+                            std::fs::read_to_string(&p.docker_daemon).ok().as_deref(),
+                            &task,
+                            &p.user,
+                            &work_root,
+                            &task_subnets,
+                        ),
+                        egress::unprepared(fw, &task),
+                    )
+                };
+                let host = egress::Host {
+                    router: gateway,
+                    lan: net::lan_address(),
+                    pool: pool.as_deref(),
+                    advice: egress::Advice {
+                        rootful,
+                        podman: server == Ok(engine::Server::Podman),
+                        firewall,
+                        vm,
+                    },
+                    server,
+                    unprepared,
+                    proc: &p.proc,
+                    uid: rustix::process::getuid().as_raw(),
+                };
+                public = egress::check(d, img, subnet, &host, &mut r);
             }
             _ => r
                 .blockers
