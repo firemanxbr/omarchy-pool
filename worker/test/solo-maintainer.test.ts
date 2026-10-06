@@ -120,10 +120,13 @@ const stage = async (c: { task: { id: number; name: string }; token: string }, w
   const done = await call("POST", `/factory/tasks/${c.task.id}/complete`, { sha256: (who === "the project" ? "d" : "c").repeat(64), filename: file, version: "1.0-1" }, c.token);
   expect(done.json, JSON.stringify(done.json)).toMatchObject({ status: "staged" });
 };
-/** `who`'s request, built and staged by their community worker: the build a maintainer claims. */
+/**
+ * `who`'s request, built and staged on a maintainer's legacy community registration: the build a maintainer claims. A maintainer's
+ * own builds it; alice's, a contributor's, m2's — contributors run no worker, and a maintainer's takes anyone's (#343).
+ */
 const ready = async (name: string, who: "m1" | "m2" | "alice") => {
   expect((await request(name, `omc_${who}`)).status).toBe(201);
-  const c = await claimAs(`omw_c${who}`, name);
+  const c = await claimAs(`omw_c${who === "alice" ? "m2" : who}`, name);
   await stage(c, who);
   return c.task.id;
 };
@@ -159,13 +162,13 @@ beforeAll(async () => {
   const h = (t: string) => sha256Hex(t);
   await env.DB.batch(await Promise.all(Object.entries(GITHUB).map(async ([l, g]) =>
     env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role, github_id) VALUES (?, ?, ?, ?, ?)").bind(l, await h(`omc_${l}`), await h(`oms_${l}`), l === "alice" ? "contributor" : "maintainer", g))));
-  // Each requester's community worker builds their requests; the project's review worker — m2's, trusted on m1's word — takes the rebuilds a claim pins to it.
+  // Each maintainer's legacy community registration builds the requests (alice's on m2's: a contributor runs none, #343); the project's
+  // review worker — m2's, trusted on m1's word before #343 — takes the rebuilds a claim pins to it.
   await env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES
       ('cm1', 'x86_64', 'm1', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
       ('cm2', 'x86_64', 'm2', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
-      ('calice', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
       ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`)
-    .bind(await h("omw_cm1"), await h("omw_cm2"), await h("omw_calice"), await h("omw_px"), AGENT).run();
+    .bind(await h("omw_cm1"), await h("omw_cm2"), await h("omw_px"), AGENT).run();
 });
 
 describe("the switch is the file: applied by the sync beside the list, ended by taking the table away", () => {
