@@ -1031,8 +1031,11 @@ contributor wrote in it (#330, design v2 §10.4; D43): the dispatcher starts a
 contributor's build, the project's review rebuild of one, its trial and its
 audit — everything but the project's own recipe on main or a maintainer's
 dry run — on the native lane with `--runtime <it>`, so a container escape
-lands in the sandbox's kernel, not on the host. Its sidecars and the
-project's own recipes run on the engine's own runtime. An emulated lane needs
+lands in the sandbox's kernel, not on the host. Its sidecars, the
+project's own recipes and the check containers of the pool's jobs (#340:
+the release's scripts over what a ring serves, on any lane) run on the
+engine's own runtime. A package's signed network exception (#373) changes
+its task's network, never its runtime. An emulated lane needs
 the host kernel's binfmt handler, which a sandbox's kernel does not have: the
 pool hands a host whose dispatcher applies a sandbox only the project's own
 recipes for its emulated lanes, and a contributor's x86_64 work waits for a
@@ -1070,7 +1073,8 @@ detected*), or run install again; the run loop sees the file change and the
 recreated dispatcher starts the next community task in it. Check it with
 `jq '.sandbox, .sandbox_held' <set dir>/run/capacity.json`, or without a
 release `omarchy-agent capacity --work-root <dir> --probe-image <the build
-image by digest>`. The envelope's `sandbox` is the owner's: absent or
+image by digest>`. The envelope's `sandbox` is the owner's, set at the
+host (a widening signed on the host page never sets it, #328): absent or
 `"auto"` takes the first that passes, `"off"` none (nothing is run for it),
 a runtime's name only that one (`sandbox = "kata"`). Where it does not apply:
 
@@ -1089,7 +1093,8 @@ a runtime's name only that one (`sandbox = "kata"`). Where it does not apply:
   `docker run --runtime` refuses, and the task it was to start fails `lost`
   — never on the engine's own runtime. Its attempt is given back, but the
   pool spends one from a task's third loss on a host (`HOST_LOSSES_MAX`), so
-  the dispatcher holds its claims (`want: 0`) for 30 minutes after a first
+  the dispatcher holds its claims (`want: 0`, its pool jobs' unit with
+  them, #340) for 30 minutes after a first
   refusal, twice as long after each further one in a row (1, 2, 4 … hours,
   a day at most), and claims again when the hold is over — the leases it
   claimed before a hold and refused while it holds are lost with it, and
@@ -2034,7 +2039,10 @@ so a size-4 build waits for memory rather than run smaller.
   <scratch dir>:/repo[:ro] <image pinned in tests/images.env> bash
   /repo/<script>.sh`; anything else a job's script asks of the engine it
   refuses with 125 (`omarchy-task-run: refused — …` in the dispatcher's
-  log). The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
+  log). On a host with a sandboxed runtime (#330) they run on the engine's
+  own runtime all the same, its emulated lanes included, and a sandbox hold
+  (*A sandboxed runtime for community tasks*) holds its pool jobs with its
+  tasks until it ends or the dispatcher restarts. The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
   ABI gate's cached Omarchy reference), as a legacy pool worker's work
   directory. On the host, while one runs:
 

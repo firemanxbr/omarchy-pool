@@ -193,7 +193,14 @@ secret). Everything travels in the `Authorization` header over TLS only.
   bridge, whatever the owner's envelope grants: `direct_network` is a
   package build's, #373), with the job's unit, the task container's
   capabilities, that one directory and no token; any other shape, verb or
-  flag is refused before the engine is asked. The spec's CI test renders
+  flag is refused before the engine is asked. They run on the engine's own
+  runtime on a host with a sandboxed runtime too (#330): what they run is the
+  project's own — the release's scripts in its pinned images, over what a
+  ring serves (signed, after the maintainers' approval) and the recipes on
+  `main` — as the project's own recipe does, and on any lane of their
+  architecture, an emulated one included, which a sandbox's kernel cannot
+  run. A sandbox hold holds a host's pool jobs with its tasks: they share
+  its claim. The spec's CI test renders
   every helper the scripts start, and the shim's tests every shape refused.
   Hosts take pool jobs only once the maintainers' `host-pool-jobs` setting
   names them.

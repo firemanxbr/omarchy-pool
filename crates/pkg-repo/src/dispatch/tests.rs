@@ -4261,6 +4261,46 @@ fn a_job_holds_the_job_unit_never_a_tasks_and_a_second_job_handed_meanwhile_is_g
     assert!(gone(&pid));
 }
 
+/// A pool job is the project's own (#340): on a sandboxed host (#330) its helpers run on the
+/// engine's own runtime, on its emulated lane too — the `x86_64` ring's health check on the
+/// Studio's, which a sandbox's kernel could not run — and the shim's context names no runtime.
+/// A sandbox hold holds the job unit with the rest: one claim says `want` for both.
+#[test]
+fn a_pool_jobs_helpers_on_a_sandboxed_host_run_on_the_engines_own_runtime_and_a_sandbox_hold_holds_it_too(
+) {
+    let h = H::new();
+    sandboxed_file(&h);
+    let mut d = h.dispatcher();
+    let ctx = h.out("helper-50.json");
+    h.launch.set(
+        50,
+        &format!("cp \"$JOB_DIR/helper.json\" {}; {JOB_DONE}", ctx.display()),
+    );
+    h.give(job(
+        50,
+        "health",
+        "x86_64",
+        json!({ "ring": "rc", "arch": "x86_64" }),
+        GEN,
+    ));
+    h.until(&mut d, "the health check's report", |h| {
+        !h.pool.completes_of(50).is_empty()
+    });
+    let c: Value = serde_json::from_slice(&std::fs::read(&ctx).unwrap()).unwrap();
+    assert_eq!(c["arches"], json!(["aarch64", "x86_64"]));
+    assert!(c.get("runtime").is_none(), "{c}");
+    // The runtime breaks: a contributor's build is refused, and the claims hold, the pool's
+    // kinds with them, though the job unit is free.
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
+    h.give(on_lane(community(7, GEN2), "aarch64", Some("native")));
+    h.advance(31);
+    h.ticks(&mut d, 4);
+    assert_eq!(h.pool.fails_of(7)[0]["lost"], true);
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], 0, "{c}");
+    assert!(c["capacity"]["sandbox_held"].is_string(), "{c}");
+}
+
 #[test]
 fn a_health_check_gets_the_shims_context_on_a_lane_of_its_ring_and_one_without_such_a_lane_is_given_back(
 ) {

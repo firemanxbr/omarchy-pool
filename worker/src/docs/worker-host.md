@@ -258,8 +258,8 @@ show a kernel other than your machine's, and from then on the dispatcher
 starts everything a contributor wrote on your native lane in it — their
 builds, the project's review rebuilds of them, trials and audits — so an
 escape from a recipe lands in the sandbox's kernel rather than on your
-machine. The project's own recipes and the sidecars run on the engine as
-before. A sandbox does not cover an emulated lane (its kernel has no binfmt
+machine. The project's own recipes, the sidecars and the check containers
+of the pool's jobs (#340) run on the engine as before. A sandbox does not cover an emulated lane (its kernel has no binfmt
 handler), so the pool then hands your emulated lanes the project's own
 recipes only. `sandbox = "off"` in your envelope turns it off,
 `sandbox = "kata"` picks one — at the host: a widening signed from the

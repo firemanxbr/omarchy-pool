@@ -1890,6 +1890,7 @@ impl Dispatcher {
                 && c.engine_free_gb >= self.floor_gb
                 && spec::digest_ok(self.images.of(&c.arch))
         }) && !self.disk_low
+            // A sandbox hold (#330) holds the pool jobs' unit too (#340): one claim, one `want`.
             && sandbox_held.is_none()
             && !self.revoked.contains(pkg_manifest::BUILD_VERSION);
         // What a task, and a pool job, may take: the units this claim offered, none when it said `want: 0`.

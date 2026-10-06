@@ -563,6 +563,15 @@ describe("emulated lanes per lane (#338, design v2 §7.4, §8.6)", () => {
     expect(HELPER_KINDS).toEqual(["health"]);
   });
 
+  it("a sandboxed host's emulated lane takes the pool's jobs with helpers as any host's does: they run the project's own scripts on the engine's own runtime (#330, #340)", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"], sandbox: true, kinds: JOBS });
+    const fleet: Fleet = { members: [studio], leases: [] };
+    const health = task({ arch: "x86_64", kind: "health", queued_at: T0 });
+    const promote = task({ arch: "x86_64", kind: "promote" });
+    const theirs = task({ arch: "x86_64", trust: "community", owner: "alice", queued_at: T0 - 120 * MIN });
+    expect(select(studio, fleet, [health, promote, theirs], T0, R).map((c) => [c.id, c.lane])).toEqual([[health.id, "emulated"], [promote.id, null]]);
+  });
+
   it("a promotion's ABI gates and health checks need a lane of every architecture it promotes, a security job's fast-track both; the job itself has no lane", () => {
     const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"], kinds: JOBS });
     const plain = host("plain", "aarch64", 7, { kinds: JOBS });

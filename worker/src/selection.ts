@@ -377,8 +377,8 @@ export function laneFor(m: Pick<Member, "lanes" | "legacy" | "sandbox">, c: Pick
     if (lanes.length) return { mode: lanes[0].mode, byLane: false };
     return r.legacy_any_arch.includes(c.kind) ? { mode: null, byLane: false } : null;
   }
-  // Seam (#340): a helper's containers run packages too — once hosts claim these jobs, the dispatcher sandboxes them as it does any
-  // kind it does not know (spec::sandboxed), and a sandboxed host's emulated lane takes none of them either.
+  // A helper's containers run the project's own scripts over what a ring serves, on the engine's own runtime on a sandboxed host too
+  // (#330, #340: crates/pkg-repo dispatch spec::helper_plan), so a sandboxed host's emulated lane takes them as any host's does.
   if (HELPER_KINDS.includes(c.kind)) return lanes.length ? { mode: native ? "native" : "emulated", byLane: false } : null;
   // A ring job's helpers: a lane of every architecture they run, whichever mode; the job itself runs in the dispatcher's own process.
   const helpers = helperArches(c);

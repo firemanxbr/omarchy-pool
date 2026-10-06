@@ -61,7 +61,8 @@
 //! [`helper_plan`] for the rest — the job's own internal network and egress
 //! sidecar, the job's share less the sidecar's, the task container's
 //! capabilities and flags, one of the job's scratch directories at `/repo`
-//! and nothing else: no token, no socket, no other mount.
+//! and nothing else: no token, no socket, no other mount. It runs on the
+//! engine's own runtime, a sandboxed host's included (#330, [`helper_plan`]).
 //!
 //! Seams left for later issues, by name: P2's task caches child issue
 //! mounts the read-only shared pacman cache and the per-package build
@@ -802,7 +803,13 @@ pub struct Helper<'a> {
 /// `--rm`: the shim removes it with the rest of the lease's (an engine
 /// `--rm` would race the removal), and the dispatcher removes what a killed
 /// shim left when the job ends. Every value is checked against the closed
-/// grammar first; a value outside it runs nothing.
+/// grammar first; a value outside it runs nothing. Its runtime is the
+/// engine's own, on a sandboxed host too (#330): what it runs is the
+/// project's own — the release's scripts in its pinned images, over what a
+/// ring serves (signed, after the maintainers' approval) and the recipes on
+/// main, as the project's own recipe runs outside the sandbox
+/// ([`sandboxed`]) — and on any lane of its arch, an emulated one included,
+/// which a sandbox's kernel cannot run.
 #[allow(clippy::too_many_lines)] // every check of a value, then every flag, mount and variable, in the spec's order
 pub fn helper_plan(h: &Helper<'_>) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
     if h.task == 0 || !gen_ok(h.gen) || !host_ok(h.host) {
@@ -1422,6 +1429,13 @@ mod tests {
     /// keyring and its proxy only, a script of that directory run by bash.
     fn check_helper(r: &Read<'_>, work: &Path, slot: Slot) -> Result<(), String> {
         check_side_labels(r, "helper")?;
+        // On the engine's own runtime, on a sandboxed host too (#330): see helper_plan.
+        if let Some(rt) = flag(r, "--runtime") {
+            return Err(format!(
+                "{}: a helper runs on the engine's own runtime, not {rt}",
+                r.name
+            ));
+        }
         if r.verb != "run" || !r.bare.is_empty() {
             return Err(format!(
                 "{}: a helper is an attached `run`: {} {:?}",
@@ -2568,6 +2582,29 @@ mod tests {
                 "one mount: {run:?}"
             );
         }
+    }
+
+    /// A pool job's helper runs on the engine's own runtime, on a sandboxed host too (#330,
+    /// #340): the project's own scripts in the release's pinned images, over what a ring serves
+    /// (signed, after the maintainers' approval) and the recipes on main, on whichever lane of its
+    /// arch the host runs — a sandbox's kernel has no binfmt handler for an emulated one. One under
+    /// a runtime is outside the spec.
+    #[test]
+    fn a_helper_runs_on_the_engines_own_runtime_and_one_under_another_is_outside_the_spec() {
+        let (tdir, _, work) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        let p = helper_calls(&helper(&dir, &scratch, "check.sh", true));
+        check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
+        assert!(
+            p.iter().all(|c| !c.iter().any(|x| x == "--runtime")),
+            "{p:#?}"
+        );
+        let mut under = p.clone();
+        let last = under.len() - 1;
+        under[last].splice(1..1, ["--runtime".to_owned(), "runsc".to_owned()]);
+        assert!(check_plan(&under, &work, false).is_err());
+        assert!(check_plan_in(&under, &work, false, Some("runsc")).is_err());
     }
 
     fn value<'a>(a: &'a [String], f: &str) -> Option<&'a str> {
