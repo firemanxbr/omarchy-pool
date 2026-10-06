@@ -1620,9 +1620,23 @@ passes runs on both drivers, and on a Quadlet host a round lints the owner's
 override the same way: a service network, `depends_on`, `profiles`, a string
 command or entrypoint with quotes or backslashes (give a list), an
 entrypoint whose first word starts with `[`, a `restart: on-failure:N`, a
-named volume not declared at the top level, a home-relative bind or a
+named volume not declared at the top level, a home-relative bind, a bind
+whose `create_host_path` is `true` (a directory a unit cannot make) or a
 variable `agent.toml` does not set (compose would use a blank) is `refused`
-with `quadlet: …`, and the host keeps what it ran. The env files are
+with `quadlet: …`, and the host keeps what it ran; compose's own lint runs
+there too, so a mount of a secret file not the service's own is `refused`
+with `secret_file: …` as on compose. The host worker token (#327) is
+`run/host/dispatcher/token`, which the unit mounts read-only
+(`Volume=<set>/run/host/dispatcher/token:/run/omarchy/worker-token:ro`, with
+`OMARCHY_WORKER_TOKEN_FILE` in its environment); `etc/dispatcher.env` carries
+the token too only while a release from before #327 is on the host, as on
+compose, and the unit file never does. podman never creates a mount's missing
+source — `podman run` stops with `statfs …: no such file or directory` (exit
+125) and systemd tries again each second — so a unit started without the token
+file makes no directory in its place, and a round holds the dispatcher
+(`awaiting the owner's Confirm: run/host/dispatcher/token is missing`) until
+the agent wrote it. A rotation changes the file, an input of the set: the next
+round restarts the dispatcher's unit alone, its tasks running on. The env files are
 podman's `--env-file`: in an owner's own line of `etc/dispatcher.env`, `$`
 is not expanded, a ` #` after the value stays in it and podman 4 keeps
 quotes, where compose expands `$VAR`, drops the comment and strips the

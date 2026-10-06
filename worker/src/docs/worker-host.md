@@ -424,8 +424,14 @@ and starts it at boot (linger, which install enables). podman's
 `AutoUpdate=` is never written: only the agent moves the host to a release,
 and only to one release.yml signed. Task containers stay the dispatcher's,
 on podman's API socket, which the dispatcher mounts as on any rootless
-podman host. The unit holds `agent.toml`'s paths and variables, and names
-`etc/dispatcher.env` by path: the worker token is never copied into it.
+podman host. The unit holds `agent.toml`'s paths and variables and names
+files by path, never a secret: the worker token's own file,
+`run/host/dispatcher/token`, is a read-only mount the dispatcher reads
+through `OMARCHY_WORKER_TOKEN_FILE`, as on compose (#327), and
+`etc/dispatcher.env` its env file. podman never makes a mount's missing
+source, so without the token file the unit does not start (the agent holds
+the dispatcher until it wrote the file); a rotation (`omarchy-agent token`)
+restarts the dispatcher's unit alone, its tasks running on.
 
 - **Choose it at install**: `install.sh … | OMARCHY_ENROLL=… sh -s --
   --driver quadlet` (or `omarchy-agent install --driver quadlet`). It needs
@@ -457,7 +463,8 @@ podman host. The unit holds `agent.toml`'s paths and variables, and names
   dispatcher through `compose.override.yml`, never the unit file: the next
   round writes it again. An override the driver cannot render as compose
   would run it — a service network, `depends_on`, `profiles`, a string
-  command with quotes, a variable `agent.toml` does not set — is refused at
+  command with quotes, a variable `agent.toml` does not set, a bind with
+  `create_host_path: true` — is refused at
   the round's lint (`quadlet: …`) and the host keeps running what it ran. A
   unit you stop by hand is started again within 15 minutes, as a stopped
   compose container is. Uninstall stops the unit and removes its file.
