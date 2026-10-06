@@ -29,7 +29,7 @@
 import { json, readJson, type Env } from "../index";
 import { roleFor } from "../governance";
 import { findLeak } from "../leak";
-import { machineOrigin, version, API_HOST } from "../meta";
+import { machineOrigin, version, API_HOST, type RunningVersion } from "../meta";
 import { putRecord } from "../record";
 import { writeGate } from "./orders";
 import { sha256Hex, viaOf, workspace, SIGN_IN, type Contributor } from "./contributors";
@@ -39,11 +39,11 @@ import { cancelOrdersOf, openOrdersOf, FOLLOW_POLL_S } from "../orders";
 import {
   belowMinimum, enrollMessage, fingerprint, hostLine, installCommand, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf, shortId, signedMessage,
   unitsOf, verifySignature, ENROLL_TTL_MIN, MIN_HOST, HOST_NAME, HOST_REPORT_FRESH_MIN, ISOLATIONS, NONCE_KEEP_MIN, OLD_TOKEN_GRACE_MIN, REPORT_MAX_BYTES, SIGNED_SKEW_S, TOKEN_ROTATE_DAYS,
-  hostReason, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
+  hostReason, revertedOf, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
   agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT,
   type Capacity, type HostOrderKind, type Isolation,
 } from "../hosts";
-import { parseTag } from "../update";
+import { lastGoodMessage, parseTag, revertAfter, updateState } from "../update";
 
 const NO_STORE = { "cache-control": "no-store" };
 const MIN = 60000;
@@ -57,6 +57,8 @@ export interface HostRow {
   hostname: string | null; os: string | null; arch: string | null; page_kb: number | null; runtime: string | null; isolation: string | null; dedicated: number | null;
   capacity: string | null; lanes: string | null; units: number | null; agent_slots: number | null; disk_free: string | null; pool_cap_units: number | null;
   provider: string | null; model: string | null; agent_version: string | null; release_applied: string | null; release_target: string | null; rolled_back_from: string | null;
+  /** #342: when the pool first heard its agent revert rolled_back_from. */
+  rolled_back_at: string | null;
   report: string | null; reported_at: string | null; last_seen: string | null; enrolled_at: string; confirmed_at: string | null; worker_id: string | null; token_issued_at: string | null;
   /** #322: who suspended, resumed or retired it last, when and why; when the sync found its owner gone from the list. */
   status_by: string | null; status_at: string | null; status_reason: string | null; owner_removed_at: string | null;
@@ -133,7 +135,7 @@ export async function handleMintEnrollment(c: Contributor, request: Request, env
 }
 
 /** What anyone sees of a host, and what its owner and the maintainers see besides (design v2 §18.1). */
-async function hostView(h: HostRow, detailed: boolean, now: number) {
+async function hostView(h: HostRow, detailed: boolean, now: number, pool: RunningVersion) {
   const alive = !!h.reported_at && now - Date.parse(h.reported_at) < HOST_REPORT_FRESH_MIN * MIN;
   const capacity = h.capacity ? (JSON.parse(h.capacity) as Capacity & { below_minimum?: string | null }) : null;
   const lanes = h.lanes ? (JSON.parse(h.lanes) as Capacity["lanes"]) : [];
@@ -153,7 +155,10 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
     reserving_task: h.reserving_task, reserving_since: h.reserving_since,
     below_minimum: capacity?.below_minimum ?? null,
     runtime: h.runtime ? JSON.parse(h.runtime) : null, provider: h.provider, model: h.model,
-    agent_version: h.agent_version, release_target: h.release_target, rolled_back_from: h.rolled_back_from,
+    agent_version: h.agent_version, release_target: h.release_target, rolled_back_from: h.rolled_back_from, rolled_back_at: h.rolled_back_at,
+    // Its registration claims on its last-good after its agent reverted the pool's release, until then (#342): the gate's own word,
+    // on the release its agent applied — its dispatcher runs it.
+    last_good: lastGoodMessage(updateState(h.release_applied, pool, now, revertedOf(h))),
     round: h.report ? ((JSON.parse(h.report) as { round?: unknown }).round ?? null) : null,
     // The legacy set its agent reports (#344): the project, its state and directory, what a retire-legacy would be refused for.
     legacy: legacyOf(h.report),
@@ -177,7 +182,8 @@ export async function handleHostsList(c: Contributor | null, url: URL, env: Env)
     : env.DB.prepare("SELECT * FROM hosts WHERE status != 'retired' ORDER BY enrolled_at DESC LIMIT 100")
   ).all<HostRow>()).results;
   const now = Date.now();
-  const hosts = await Promise.all(rows.map((h) => hostView(h, mayDetail(c, h), now)));
+  const pool = version(env);
+  const hosts = await Promise.all(rows.map((h) => hostView(h, mayDetail(c, h), now, pool)));
   let notices: { host: string; owner: string; line: string; at: string }[] = [];
   if (c && c.role === "maintainer") {
     const recent = (await env.DB.prepare("SELECT * FROM hosts WHERE confirmed_at > ? AND owner_login != ? ORDER BY confirmed_at DESC LIMIT 10").bind(iso(now - 7 * 24 * 60 * MIN), c.login).all<HostRow>()).results;
@@ -206,7 +212,7 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
   const detailed = mayDetail(c, h);
   const orders = detailed ? (await env.DB.prepare(HOST_ORDERS_SQL).bind(h.id).all()).results : undefined;
   return json(
-    { host: await hostView(h, detailed, Date.now()), leases, orders, pool: { version: version(env).version }, can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h), retire_legacy: true } },
+    { host: await hostView(h, detailed, Date.now(), version(env)), leases, orders, pool: { version: version(env).version }, can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h), retire_legacy: true } },
     200,
     NO_STORE,
   );
@@ -856,16 +862,18 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   if (runtime && JSON.stringify(runtime).length > 2048) return json({ error: "runtime: an object of at most 2 KiB" }, 400, NO_STORE);
   const isolation = runtime && ISOLATIONS.includes(runtime.isolation) ? (runtime.isolation as string) : h.isolation;
   const dedicated = runtime && typeof runtime.dedicated === "boolean" ? (runtime.dedicated ? 1 : 0) : h.dedicated;
-  const round = r.round && typeof r.round === "object" ? r.round : null;
   const at = iso(Date.now());
+  // The release its guard reverted, kept while its reports hold it back, and since when the pool knows it (#342): the 426 gate lets
+  // its registration claim on its last-good for six hours from then.
+  const reverted = revertAfter({ from: h.rolled_back_from, at: h.rolled_back_at }, r, at);
   await env.DB.prepare(
-    `UPDATE hosts SET report = ?, reported_at = ?, last_seen = ?, agent_version = COALESCE(?, agent_version), release_applied = ?, release_target = ?, rolled_back_from = ?,
+    `UPDATE hosts SET report = ?, reported_at = ?, last_seen = ?, agent_version = COALESCE(?, agent_version), release_applied = ?, release_target = ?, rolled_back_from = ?, rolled_back_at = ?,
        isolation = ?, dedicated = ?, runtime = COALESCE(?, runtime), provider = ?, model = ?,
        capacity = COALESCE(?, capacity), lanes = COALESCE(?, lanes), units = COALESCE(?, units), agent_slots = COALESCE(?, agent_slots), disk_free = COALESCE(?, disk_free)
      WHERE id = ?`,
   )
     .bind(
-      text, at, at, str(r.agent?.version, /^\d{1,4}\.\d{1,4}\.\d{1,6}$/), str(r.release?.applied, tag), str(r.release?.target, tag), round?.outcome === "rolled-back" ? str(round.from, tag) : null,
+      text, at, at, str(r.agent?.version, /^\d{1,4}\.\d{1,4}\.\d{1,6}$/), str(r.release?.applied, tag), str(r.release?.target, tag), reverted.from, reverted.at,
       isolation, dedicated, runtime ? JSON.stringify(runtime) : null, str(r.agent?.provider, /^[a-z0-9-]{1,40}$/), str(r.agent?.model, /^[A-Za-z0-9._:-]{1,80}$/),
       cap ? JSON.stringify({ ...cap, below_minimum: belowMinimum(cap) }) : null, cap ? JSON.stringify(cap.lanes) : null, cap ? unitsOf(cap) : null, cap ? cap.agent_slots : null, cap ? JSON.stringify(cap.disk_free_gb) : null,
       h.id,

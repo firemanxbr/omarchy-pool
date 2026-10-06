@@ -17,6 +17,7 @@
 import type { Env } from "./index";
 import { reclaimStagingPackages } from "./staging";
 import { settleTargets } from "./targets";
+import { isRevoked } from "./update";
 
 /** How long a lease runs without a heartbeat: the claim and every heartbeat set it; a job token lives as long. */
 export const LEASE_MINUTES = 30;
@@ -126,5 +127,51 @@ export async function requeueLease(env: Env, t: LeasedTask, error: string, stopO
   const row = await requeueStatement(env, t, error, stopOrder, at, expiredBefore).first<{ id: number; status: string }>();
   if (!row) return false;
   await afterRequeue(env, t, row.status === "failed", error, stopOrder !== null);
+  return true;
+}
+
+/**
+ * A lease of a revoked release, given back (#342, design v2 §8.6, §9.1;
+ * D55): its host's dispatcher killed it — on its own revoked set, or on the
+ * pool's word at its heartbeat — and reported it, or its host's claims
+ * stopped listing it. Nothing it sent on that release is taken. Back in the
+ * queue at its place, its attempt given back and no host's loss counted:
+ * neither the recipe nor the host failed, the release did. A revoked
+ * release leases nothing (the 426 gate, update.ts), so a task comes back
+ * this way once per revocation at most. Only while the lease is still the
+ * one read, and not fenced (a Stop's end is the orders path's).
+ */
+export const REVOKED_REQUEUE_SQL = `UPDATE build_tasks SET status = 'queued', finished_at = NULL, error = ?1, lease_owner = NULL, lease_expires_at = NULL,
+    attempts = MAX(attempts - 1, 0), independent = NULL, lease_missed = 0
+  WHERE id = ?2 AND status = 'leased' AND lease_owner = ?3 AND lease_gen IS ?4 AND stop_order IS NULL RETURNING id, status, attempts`;
+
+/**
+ * The refusal every heartbeat, upload, pool write and completion of a lease
+ * claimed on a revoked release gets (#342), with `stop`: its host kills it —
+ * a dispatcher from before #342 on that very word, as a Stop — and reports
+ * it, which requeues it. Null when its release is not revoked.
+ */
+export function revokedRefusal(task: { id: number; release: string | null }, pool: string): { error: string; stop: true; state: "revoked" } | null {
+  if (!isRevoked(task.release)) return null;
+  return { error: `task ${task.id} was leased on ${task.release}, which the pool's release ${pool} revokes: nothing of it is taken — its host kills it, and it goes back to the queue with its attempt`, stop: true, state: "revoked" };
+}
+
+/** What a revoked lease's requeue says, on its row and in the journal. */
+export function revokedError(release: string, pool: string): string {
+  return `leased on ${release}, which the pool's release ${pool} revokes: nothing it sent on that release is taken; the attempt is given back`;
+}
+
+/**
+ * The requeue of a revoked lease, and what follows it: the packages a build
+ * staged on that release reclaimed (its next lease stages anew), its
+ * package back to waiting, the targets settled, the build's line. False
+ * when the lease had moved.
+ */
+export async function requeueRevoked(env: Env, t: LeasedTask & { lease_gen: string | null }, release: string, pool: string): Promise<boolean> {
+  const error = revokedError(release, pool);
+  const row = await env.DB.prepare(REVOKED_REQUEUE_SQL).bind(error, t.id, t.lease_owner, t.lease_gen).first<{ id: number; status: string; attempts: number }>();
+  if (!row) return false;
+  if (t.kind === "build") await reclaimStagingPackages(env, [t.id]);
+  await afterRequeue(env, { ...t, attempts: row.attempts }, false, error, false);
   return true;
 }

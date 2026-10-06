@@ -188,7 +188,7 @@ const SCRIPT = String.raw`
         kv("Capacity", h.below_minimum ? esc(h.below_minimum) : c ? "meets the minimum to join" : "—"),
         kv("Pool cap", capWords(h)),
         kv("Reserving", h.reserving_task ? 'for <a href="/build/' + esc(h.reserving_task) + '">#' + esc(h.reserving_task) + '</a> since ' + when(h.reserving_since) + ': it takes nothing else but pool jobs until its units fit it' : '<span class="muted">no</span>'),
-        kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + ")" : "")),
+        kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + (h.rolled_back_at ? " " + when(h.rolled_back_at) : "") + ")" : "") + (h.last_good ? "<br>" + pillHtml("warn", "last-good", "its registration claims on its last-good; past this the pool hands it nothing until it runs the pool's release") + " " + esc(h.last_good) : "")),
         kv("Last round", round),
         kv("Agent", esc(h.agent_version || "?") + (h.provider ? " · " + esc(h.provider) + (h.model ? " " + esc(h.model) : "") : "")),
         kv("Reported", when(h.reported_at)),

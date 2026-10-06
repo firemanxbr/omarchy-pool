@@ -9,11 +9,11 @@ import { isTextEvidence, reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../
 import { findLeak } from "../leak";
 import { chains, chainOf, storyRows, requestView, placeInQueue, stands, type Chain } from "./story";
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
-import { updateMessage, updateState } from "../update";
+import { isRevoked, lastGoodMessage, updateMessage, updateState, type UpdateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
-import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
-import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, MIN_HOST, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
+import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, requeueRevoked, revokedRefusal, stopError } from "../lease";
+import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, MIN_HOST, REVERTED_COLUMNS, revertedOf, TASK_UNITS, type Capacity, type HostClaimRow, type RevertedColumns } from "../hosts";
 import { largestSize, ownerCap, ownersLeased, placementOf, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
@@ -88,6 +88,8 @@ interface TaskRow {
   host_losses: number;
   /** #339: an audit's independence of what it audits (model | host | none), written at its lease; NULL for every other kind. */
   independent: string | null;
+  /** The release the lease was claimed on (the claim's version; #334 for a host's lease, every lease from #342): one its pool's release revokes takes nothing. */
+  release: string | null;
 }
 
 /** Who is calling a worker endpoint: a registered worker (own token) or a job (its per-task token). */
@@ -631,7 +633,7 @@ function hostAgent(b: Record<string, unknown>): void {
 }
 
 /** The leases a host registration holds, by the pool's own rows (the lease index, status = 'leased'). */
-export const HOST_LEASES_SQL = "SELECT id, name, arch, kind, trust, lease_owner, attempts, max_attempts, lease_gen, stop_order, started_at, lease_missed FROM build_tasks WHERE status = 'leased' AND lease_owner = ?";
+export const HOST_LEASES_SQL = "SELECT id, name, arch, kind, trust, lease_owner, attempts, max_attempts, lease_gen, stop_order, started_at, lease_missed, release FROM build_tasks WHERE status = 'leased' AND lease_owner = ?";
 /**
  * An unfenced lease its host lost, only while it is still that lease: back
  * in the queue with its attempt, counted in host_losses as a `lost` report
@@ -665,7 +667,7 @@ export const LOST_LEASE_SQL = `UPDATE build_tasks SET
  * container is gone, or at the lease's end.
  */
 export async function reconcileHost(env: Env, worker: string, leases: HostClaim["leases"], at: string): Promise<number> {
-  type Held = { id: number; name: string; arch: string; kind: string; trust: string; lease_owner: string; attempts: number; max_attempts: number; lease_gen: string | null; stop_order: string | null; started_at: string | null; lease_missed: number };
+  type Held = { id: number; name: string; arch: string; kind: string; trust: string; lease_owner: string; attempts: number; max_attempts: number; lease_gen: string | null; stop_order: string | null; started_at: string | null; lease_missed: number; release: string | null };
   const held = (await env.DB.prepare(HOST_LEASES_SQL).bind(worker).all<Held>()).results;
   if (!held.length) return 0;
   const listed = new Set(leases.map((l) => `${l.task}:${l.gen}`));
@@ -677,6 +679,12 @@ export async function reconcileHost(env: Env, worker: string, leases: HostClaim[
     const seen = listed.has(`${t.id}:${t.lease_gen}`);
     const missed = seen ? 0 : t.lease_missed + 1;
     if (!seen && missed >= 2 && Date.parse(t.started_at ?? at) <= old) {
+      // A lease of a revoked release its host dropped (#342): its dispatcher killed it, and its report did not land — or one from
+      // before #342 was refused its completion and moved on. Requeued as its report would have: no host's loss.
+      if (t.release !== null && isRevoked(t.release)) {
+        if (await requeueRevoked(env, t, t.release, running(env).version)) requeued++;
+        continue;
+      }
       const error = `lease by ${worker} lost: two claims of its host did not list it`;
       const back = await env.DB.prepare(LOST_LEASE_SQL).bind(error, t.id, worker, t.lease_gen, at).first<{ id: number; status: string; attempts: number; error: string }>();
       if (back) {
@@ -808,9 +816,11 @@ export const SAME_MODEL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols(
 
 /** The registrations alive (§8.3: claimed in the last 2 minutes; a legacy one, LEGACY_ALIVE_MS) with their host's capacity, as the fleet. */
 export const FLEET_SQL = `SELECT w.id, w.kind, w.arch, w.labels, w.kinds, w.agent, w.agent_status, w.drained_at, w.trust, w.owner, w.mode, w.version, w.last_seen, w.current_task,
-    h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since
+    h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since,
+    ${REVERTED_COLUMNS("h")}
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL`;
-interface FleetRow {
+/** #342: its host's revert, which keeps it out of the update gate on its last-good as the claim's own (REVERTED_COLUMNS). */
+interface FleetRow extends RevertedColumns {
   id: string; kind: string | null; arch: string; labels: string | null; kinds: string | null; agent: string | null; agent_status: string | null; drained_at: string | null; trust: string; owner: string | null; mode: string | null; version: string | null; last_seen: string; current_task: number | null;
   host_id: string | null; host_status: string | null; owner_removed_at: string | null; units: number | null; lanes: string | null; agent_slots: number | null; disk_free: string | null; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null;
 }
@@ -878,7 +888,7 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
   return {
     id: r.id, legacy: !host, lanes, units: Math.min(r.units ?? 0, r.pool_cap_units ?? Number.MAX_SAFE_INTEGER), agent_slots: r.agent_slots ?? 0,
     disk: jsonOr<{ work: number; engine: number } | null>(r.disk_free, null), kinds, probe_ok: r.agent_status === "ok", drained: r.drained_at !== null,
-    below_minimum: reportedBelow(r.capacity), below_disk: host ? belowOnDisk(r.capacity) : null, may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool).required,
+    below_minimum: reportedBelow(r.capacity), below_disk: host ? belowOnDisk(r.capacity) : null, may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool, Date.now(), host ? revertedOf(r) : null).required,
     seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
     scope: host ? { trust: "host", owner: null, shared: false } : r.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: r.owner, shared: r.mode === "shared" },
     busy: !host && r.current_task !== null, owner: r.owner, model: r.agent, host_id: host ? r.host_id : null,
@@ -890,9 +900,10 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
  * #339): the registrations — a few dozen rows, as the fleet's — with their hosts by the primary key. Read at a claim only when a
  * publish-bound audit is among its candidates.
  */
-export const MODELS_SQL = `SELECT w.id, w.kind, w.kinds, w.trust, w.agent, w.agent_status, w.agent_error_since, w.drained_at, w.version, w.last_seen, h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.capacity
+export const MODELS_SQL = `SELECT w.id, w.kind, w.kinds, w.trust, w.agent, w.agent_status, w.agent_error_since, w.drained_at, w.version, w.last_seen, h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.capacity,
+    ${REVERTED_COLUMNS("h")}
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL AND w.agent IS NOT NULL`;
-interface ModelRow { id: string; kind: string | null; kinds: string | null; trust: string; agent: string; agent_status: string | null; agent_error_since: string | null; drained_at: string | null; version: string | null; last_seen: string; host_id: string | null; host_status: string | null; owner_removed_at: string | null; capacity: string | null }
+interface ModelRow extends RevertedColumns { id: string; kind: string | null; kinds: string | null; trust: string; agent: string; agent_status: string | null; agent_error_since: string | null; drained_at: string | null; version: string | null; last_seen: string; host_id: string | null; host_status: string | null; owner_removed_at: string | null; capacity: string | null }
 
 /**
  * The models a publish-bound audit weighs (D36): every registration that takes audits and may be handed one — a host active with its
@@ -907,8 +918,8 @@ async function modelsAlive(env: Env, nowMs: number, me: { id: string; model: str
   const pool = running(env);
   const out: NonNullable<Fleet["models"]> = [];
   for (const r of rows) {
-    if (r.id === me.id || r.drained_at || updateState(r.version ?? undefined, pool).required) continue;
     const host = r.kind === "host" && r.host_id !== null;
+    if (r.id === me.id || r.drained_at || updateState(r.version ?? undefined, pool, nowMs, host ? revertedOf(r) : null).required) continue;
     if (host ? r.host_status !== "active" || r.owner_removed_at !== null || reportedBelow(r.capacity) : r.trust !== "project") continue;
     const kinds = jsonOr<string[] | null>(r.kinds, null) ?? (host ? HOST_KINDS : ALL_KINDS);
     const answered = r.agent_status === "ok" ? Date.parse(r.last_seen) : r.agent_status === "error" && r.agent_error_since ? Date.parse(r.agent_error_since) : NaN;
@@ -1258,8 +1269,9 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     // One statement leases it: D1 serialises writes, so two claims never get the same task. A fence belongs to one lease (#277): a
     // queued task never carries one — the requeue clears it — but one a Worker from before the fence requeued would stop the new
     // lease on a worker nobody stopped, so the lease starts without it. A host's lease (#334) carries a new generation, its lane,
-    // size, units and disk budget, the release it was claimed on and the claim that took it; a legacy one no generation — the
-    // column is cleared, so a host's stale one never outlives its lease — and its one lane. A host's registration leases only
+    // size, units and disk budget and the claim that took it; a legacy one no generation — the column is cleared, so a host's
+    // stale one never outlives its lease — and its one lane. Every lease keeps the release it was claimed on (#342): one that
+    // release's revocation catches is refused what it sends. A host's registration leases only
     // while its host may claim, checked by this very statement (#322): a suspension that commits meanwhile leaves it nothing. A
     // reservation's window ends with the lease: queued again, the task may be reserved for anew.
     const task = await env.DB.prepare(
@@ -1268,7 +1280,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
        WHERE id = ? AND status = 'queued'${hostOk}${guard} RETURNING *`,
     )
       .bind(
-        k.workerId, plusMinutes(LEASE_MINUTES), at, host ? leaseGen() : null, c.lane, c.size, c.units, c.disk_gb, host ? k.version : null, host ? k.hc!.claimId : null, c.independent, c.id,
+        k.workerId, plusMinutes(LEASE_MINUTES), at, host ? leaseGen() : null, c.lane, c.size, c.units, c.disk_gb, k.version, host ? k.hc!.claimId : null, c.independent, c.id,
         ...(hostOk ? [k.hostId] : []), ...(guard ? [k.workerId, c.units, limit] : []),
       )
       .first<TaskRow>();
@@ -1317,10 +1329,13 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // A host's registration (#322, design v2 §6.2, §6.4): its host suspended or retired, or its owner no longer a maintainer — the owner's id
   // joined with the list at this very claim, between two syncs too — claims nothing, and is told why. Its running leases are not this
   // door's: a suspension fenced them; a removal lets them finish and upload. One read by the primary key, for host registrations only.
+  // What its host's reports say of a release it reverted rides the same read (#342): the update gate below weighs it.
+  let reverted: ReturnType<typeof revertedOf> = null;
   if (actor.w.host_id) {
     const h = await env.DB.prepare(HOST_CLAIM_SQL).bind(actor.w.host_id).first<HostClaimRow>();
     const no = h ? hostClaimRefusal(h) : { code: "host_status", error: "its host is gone" };
     if (no) return json(no, 403);
+    reverted = revertedOf(h);
   }
   const trust = actor.w.trust === "project" ? "project" : "community";
   // What this worker may claim. Project trust takes any kind it declares,
@@ -1380,9 +1395,12 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     }
   }
   // Every worker follows the latest image (update.ts): one behind past the
-  // rollout's grace is touched — alive, and the Workers page says why it
-  // idles — told once per release in the journal, and handed nothing.
-  const update = updateState(b.version, running(env));
+  // rollout's grace, or on a revoked release (#342), is touched — alive, and
+  // the Workers page says why it idles — told once per release in the
+  // journal, and handed nothing. A host whose agent reverted the pool's
+  // release claims on its last-good for six hours (#342), told once too.
+  const update = updateState(b.version, running(env), Date.now(), reverted);
+  if (update.last_good_until) await toldLastGood(env, workerId, actor.w.owner ?? null, update);
   if (update.required) {
     // Handed nothing, but an order waiting for it rides the refusal: a restart or a re-check does not need the latest image.
     const orders = after ? await ordersSafely(() => takeOrders(env, after, Date.parse(at))) : [];
@@ -1392,10 +1410,10 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
       await env.DB.batch([
         env.DB.prepare("UPDATE build_workers SET told_update = ? WHERE id = ?").bind(update.latest, workerId),
         env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('worker', NULL, 'factory', 'warn', ?, ?)")
-          .bind(`${workerId}: handed nothing — ${updateMessage(update)}`, JSON.stringify({ worker: workerId, owner: actor.w.owner, yours: update.yours, latest: update.latest, behind: update.behind })),
+          .bind(`${workerId}: handed nothing — ${updateMessage(update)}`, JSON.stringify({ worker: workerId, owner: actor.w.owner, yours: update.yours, latest: update.latest, behind: update.behind, ...(update.revoked ? { revoked: true } : {}) })),
       ]);
     }
-    return json({ error: updateMessage(update), latest: update.latest, yours: update.yours, behind: update.behind, update: "/docs/workers#update", ...(orders.length ? { orders } : {}) }, 426);
+    return json({ error: updateMessage(update), latest: update.latest, yours: update.yours, behind: update.behind, update: "/docs/workers#update", ...(update.revoked ? { revoked: true } : {}), ...(orders.length ? { orders } : {}) }, 426);
   }
   // A retry of a claim whose answer was lost: the same lease, a fresh token (§8.1).
   if (hc?.want === 1) {
@@ -1464,6 +1482,22 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   return taskAnswer(env, task, workerId);
 }
 
+/**
+ * A host's registration claiming on its last-good (#342, design v2 §18.3): said once in the journal per release it reverted, as a
+ * warning — told_update keeps `<release>+last-good`, so the 426 that follows the six hours is told once too. One read of the row by
+ * its primary key, only while the exception holds.
+ */
+async function toldLastGood(env: Env, workerId: string, owner: string | null, u: UpdateState): Promise<void> {
+  const mark = `${u.latest}+last-good`;
+  const told = await env.DB.prepare("SELECT told_update FROM build_workers WHERE id = ?").bind(workerId).first<{ told_update: string | null }>();
+  if (told?.told_update === mark) return;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE build_workers SET told_update = ? WHERE id = ?").bind(mark, workerId),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('worker', NULL, 'factory', 'warn', ?, ?)")
+      .bind(`${workerId}: ${lastGoodMessage(u)}`, JSON.stringify({ worker: workerId, owner, yours: u.yours, latest: u.latest, last_good_until: u.last_good_until })),
+  ]);
+}
+
 async function owned(env: Env, id: number, actor: Actor): Promise<TaskRow | Response> {
   if (actor.kind === "job" && !actor.job.s.includes(`task:${id}`)) return json({ error: `this job token is for task ${actor.job.t}` }, 403);
   const who = actor.kind === "worker" ? actor.w.id : actor.job.w;
@@ -1511,6 +1545,9 @@ async function emulated(env: Env, workerId: string): Promise<boolean> {
 export async function handleHeartbeat(id: number, env: Env, actor: Actor): Promise<Response> {
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
+  // A lease of a revoked release is not renewed (#342): `stop` — its host kills it and reports it, which requeues it.
+  const revoked = revokedRefusal(task, running(env).version);
+  if (revoked) return json(revoked, 409);
   const who = workerName(actor);
   const until = plusMinutes(LEASE_MINUTES);
   const renewed = await env.DB.prepare(`UPDATE build_tasks SET lease_expires_at = ? WHERE id = ? AND ${LEASE_HELD}`).bind(until, id, who, task.lease_gen).run();
@@ -1546,6 +1583,9 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   if (b instanceof Response) return b;
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
+  // Nothing a revoked release's lease sends is taken (#342, design v2 §8.6): its host kills it and reports it, which requeues it.
+  const revoked = revokedRefusal(task, running(env).version);
+  if (revoked) return json(revoked, 409);
   const who = workerName(actor);
   const tail = (await withheld(env, id, "log_tail", b.log_tail)).slice(-4000);
   if (task.kind !== "build") {
@@ -1740,6 +1780,14 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
   const who = workerName(actor);
+  // A lease of a revoked release (#342, design v2 §8.6, §9.1): its host killed it — on its own revoked set or the pool's word at its
+  // heartbeat — and says so with whatever words; the pool's own list decides. Nothing of it is taken: not its evidence, not a
+  // failure — back in the queue at its place, its attempt given back.
+  if (task.release !== null && isRevoked(task.release)) {
+    const back = await requeueRevoked(env, task as TaskRow & { lease_owner: string }, task.release, running(env).version);
+    if (!back) return leaseMoved(env, id, actor);
+    return json({ task: id, status: "queued", attempts: Math.max(task.attempts - 1, 0), revoked: task.release });
+  }
   const tail = (await withheld(env, id, "log_tail", b.log_tail)).slice(-4000);
   // Two words of a host's lease (#334, D54): `oom`, the engine's out-of-memory kill — a failure like any other, its reason on the row —
   // and `lost`, a host event (a reboot, an engine restart, the disk watcher's kill), which gives the attempt back like needs_native,
@@ -1933,6 +1981,8 @@ export interface WorkerRow {
   drained_at?: string | null; drained_by?: string | null; drain_reason?: string | null; auto_orders?: string | null;
   // #321: a host's registration.
   kind?: string | null; host_id?: string | null;
+  // #342: its host's revert, where the listing joins it (REVERTED_COLUMNS): the 426 gate's own view of it.
+  rolled_back_from?: string | null; rolled_back_at?: string | null; release_applied?: string | null;
 }
 
 /**
@@ -2016,8 +2066,11 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
     alive: Date.parse(w.last_seen) > since,
     // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
     ready: workerReady(w, since),
-    // Where its image stands against the pool's release (update.ts): behind past the grace, it is handed nothing.
-    update: updateState(w.version, pool),
+    // Where its image stands against the pool's release (update.ts): behind past the grace, or on a revoked release, it is handed
+    // nothing — a host's registration on its last-good after its agent reverted the pool's release claims until `last_good_until`
+    // (#342), which Status warns of. Its host's columns are the gate's input, not the listing's.
+    update: updateState(w.version, pool, Date.now(), w.kind === "host" ? revertedOf(w) : null),
+    rolled_back_from: undefined, rolled_back_at: undefined, release_applied: undefined,
     kinds: w.kinds ? JSON.parse(w.kinds) : null,
     // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).
     usage: w.usage ? JSON.parse(w.usage) : null,
@@ -2031,6 +2084,10 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
 function parseJson(text: string | null): unknown {
   try { return text ? JSON.parse(text) : null; } catch { return null; }
 }
+
+/** The workers every listing serves (workerView), with a host registration's revert beside it (#342): the 426 gate's own view of it. */
+export const WORKERS_LISTING_SQL = `SELECT w.*, ${REVERTED_COLUMNS("h")} FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id
+  WHERE w.revoked_at IS NULL ORDER BY (w.last_seen > ?) DESC, w.last_seen DESC LIMIT 200`;
 
 /**
  * GET /factory — the workers and the queue. `?live=1` is the read a page
@@ -2047,9 +2104,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   const alive = aliveSince();
   // Every worker belongs to someone: the project (trust project, granted by
   // a maintainer) or a contributor.
-  const workers = await env.DB.prepare(
-    "SELECT * FROM build_workers WHERE revoked_at IS NULL ORDER BY (last_seen > ?) DESC, last_seen DESC LIMIT 200",
-  )
+  const workers = await env.DB.prepare(WORKERS_LISTING_SQL)
     .bind(new Date(alive).toISOString())
     .all<WorkerRow>();
   const tasks = await env.DB.prepare(`SELECT * FROM build_tasks ${live ? "WHERE status IN ('leased', 'queued') " : ""}ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?`).bind(limit).all<TaskRow>();
