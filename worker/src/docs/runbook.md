@@ -759,8 +759,12 @@ exits, the new one reads the new file and re-adopts every task, which runs
 on (the old token works ten more minutes, more than the round takes). The
 journal scrubs the token from its file as it does `etc/*.env` values.
 
-**A host from before #327** had the token in `etc/dispatcher.env`. The agent
-moves it to its file at its first start (`dispatcher-env` in the journal:
+**A host from before #327** had the token in `etc/dispatcher.env`. Its agent
+updates itself first: the bundle's `min_agent` is the first agent that writes
+the token file (0.3.0), since an older one refuses the template that mounts it
+and would report its lint, so a host whose self-update fails reports
+`needs-newer-agent` and stays on its release. The new agent
+moves the token to its file at its first start (`dispatcher-env` in the journal:
 "the host worker token moved …"), losing nothing; a token line there is
 always taken as the newest one (an older agent wrote it). While a release
 from before #327 runs or is being rolled out — its dispatcher reads only

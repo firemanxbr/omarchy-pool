@@ -7,8 +7,11 @@
 # tests/host-bundle.py runs it on what the writer makes of this file.
 
 # The oldest agent that may apply a bundle of this layout; an older agent
-# updates itself first (outer layer, frozen).
-min_agent = "0.1.0"
+# updates itself first (outer layer, frozen). 0.3.0 writes the dispatcher's
+# token file and lints the template that mounts it (#327): an older agent
+# refuses that template's OMARCHY_WORKER_TOKEN_FILE and never writes the file,
+# so it says needs-newer-agent rather than a lint refusal.
+min_agent = "0.3.0"
 # The anti-downgrade floor every host merges in (design v2 §5.2): a target
 # below it is refused even with a rollback statement. Raise it to retire
 # releases for good; never above the release being cut (the writer refuses).
