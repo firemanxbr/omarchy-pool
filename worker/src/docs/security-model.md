@@ -174,8 +174,8 @@ secret). Everything travels in the `Authorization` header over TLS only.
   subnets) closes it; and a signed exception's bridge always has its gateway,
   the host itself on a rootful engine, where the `DOCKER-USER` rules (in
   `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
-  preflight checks it rather than trusting it (#367): on a rootful engine it
-  refuses a host whose prep-root.sh firewall script (world-readable) does
+  preflight checks it rather than trusting it (#367): on a rootful Linux
+  engine it refuses a host whose prep-root.sh firewall script (world-readable) does
   not drop every task subnet in INPUT, or whose boot unit for it is not
   there or not enabled (a reboot would take the drop away, and nothing
   probes again after install), and a probe task on a bridge and one
@@ -577,7 +577,8 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   of the VM (a login, a resize, a clock restart) applies it as soon as
   dockerd is up, as on a Linux host, not when the agent next looks; it runs
   it again after every start, hourly and after a wake. A task reaches
-  neither your LAN nor the Mac through Colima's NAT, and the egress probe
+  neither your LAN nor the Mac through Colima's NAT, nor the VM itself at a
+  bridge's gateway (the firewall's INPUT drop, #367), and the egress probe
   checks it before install goes on; every task's egress sidecar also refuses
   the Mac's own addresses (`/sbin/ifconfig -a`'s, a Mac having no `/proc`,
   and the public one it leaves from, #371). Docker Desktop's or OrbStack's VM

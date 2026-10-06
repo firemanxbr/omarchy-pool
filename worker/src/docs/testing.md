@@ -746,7 +746,9 @@ The install's preflight probe tries the same gateways on a real engine in
 runbook's *Installing a host*), and reads rootless podman's network stack in
 `/proc` as preflight does; preflight's reading of prep-root.sh's firewall
 script and its boot unit (not there, or not enabled) and of a rootless stack's command line (each engine's flags, a stack
-seen only while the probe runs) is unit-tested in `omarchy-agent`. The agent's side of that file is
+seen only while the probe runs) is unit-tested in `omarchy-agent`, as is a
+Mac's verdict (a bridge's gateway is its VM, the Mac's LAN address is past
+the VM's NAT, nothing of prep-root.sh's asked). The agent's side of that file is
 unit-tested on interface lists (`crates/omarchy-agent/tests/fixtures/addresses/`:
 a home LAN host with docker's bridges and IPv6, a VPS with a public /32, and
 a Mac's `ifconfig -a` listing with its vmnet bridge and a VPN tunnel, read
@@ -867,8 +869,10 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   played Colima refuses to start without it, as on a Mac with only Colima
   and Lima from Homebrew) and the agent's `DOCKER_CONFIG`, the task firewall
   put in after the start and before the probe (one that does not apply:
-  blocked, and the probe shows a task reaching the Mac's router and the Mac
-  at `192.168.5.2`), `MemAvailable` read inside it, isolation `vm`, the
+  blocked, and the probe shows a task reaching the Mac's router, the Mac
+  at `192.168.5.2` and the VM's sshd at its bridge's gateway, told as the
+  omarchy VM's firewall and never as prep-root.sh's, #367), `MemAvailable`
+  read inside it, isolation `vm`, the
   envelope's `[vm]` and two sockets read back by the run loop and the lint;
   a Mac below the minimum or a directory under `~` starting no VM; the three
   directories missing (Colima installed by hand): preflight says install
@@ -885,7 +889,8 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   another VM type refused; the home directory visible in the VM refused;
   Rosetta's lane after its smoke run, off when it fails; Docker Desktop
   taken as `vm-shared` only with `--dedicated`, no firewall put in it (its
-  probe decides), a shared `~/.ssh` refused though `~` is not, and a given
+  probe decides, a bridge's gateway there told as that VM's own), a shared
+  `~/.ssh` refused though `~` is not, and a given
   socket that does not answer told to start Docker Desktop or OrbStack or
   drop `--socket`; install making the set directory it was given, never the
   default (Linux and a Mac); the LaunchAgent written and bootstrapped in

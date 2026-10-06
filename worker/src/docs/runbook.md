@@ -883,7 +883,10 @@ Preflight, before it starts any VM:
   directories visible in the VM at their own paths and your home directory
   not, the x86_64 smoke run through Rosetta, and the egress probe, which the
   firewall must pass (the Mac's default gateway from `route -n get default`,
-  its LAN address, and the Mac as the VM reaches it, `192.168.5.2`).
+  its LAN address, and the Mac as the VM reaches it, `192.168.5.2`; and, as
+  on Linux, the probe network's gateway on 22, 53 and the pool's ports,
+  #367, which is the VM itself and which the firewall's `INPUT` drop
+  closes). prep-root.sh's files are not looked for on a Mac.
 
 `agent.toml` records the VM (`[vm] runtime = "colima"`, `rosetta`,
 `disk_gb`) and the two sockets: `socket_cli` (the Mac's
