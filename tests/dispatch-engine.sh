@@ -8,7 +8,9 @@
 #
 #   1. a task container holds no token, key or socket: its environment, its
 #      mounts and its flags, read back from the engine, and what the stub saw
-#      inside; a build completes through staging, `verdict.json` read
+#      inside; a build completes through staging, `verdict.json` read, the
+#      memory peak its container measured (`resources.json`) with its
+#      completion (#330)
 #   2. a build that fails reports its verdict; one killed by its memory limit
 #      fails `oom` although its script said `final`; an output outside the list
 #      is not uploaded and fails the task; one that exited 0 without a verdict
@@ -104,7 +106,10 @@ exec > /task/log/task.log 2>&1
 arch="$(uname -m)"; [[ "$arch" == arm64 ]] && arch=aarch64
 # What it was born with, for the test to read: its environment and whether anything of the host is here.
 { echo "== env"; env | sort; echo "== socket: $(ls /var/run/docker.sock /run/docker.sock /run/podman/podman.sock 2>&1 | tr '\n' ' ')"; echo "== meta"; cat /task/in/meta.sh; } >> /task/log/task.log
-ok() { cp "/pool/fixtures/$name-1.0-1-$arch.pkg.tar.zst" /task/out/; echo 'pkgname=x' > /task/out/PKGBUILD; echo '{"status":0,"final":false,"needs_native":false,"error":""}' > /task/out/verdict.json; echo "built $name"; exit 0; }
+# resources.json as the real script's resources_end writes it: its own cgroup's memory high-water mark in MB (cgroup v2's
+# memory.peak, else v1's memory.max_usage_in_bytes, else 0).
+ok() { cp "/pool/fixtures/$name-1.0-1-$arch.pkg.tar.zst" /task/out/; echo 'pkgname=x' > /task/out/PKGBUILD; echo '{"status":0,"final":false,"needs_native":false,"error":""}' > /task/out/verdict.json
+  printf '{"schema":"omarchy-pool/resources/1","ram_peak_mb":%s}\n' "$(( $(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0) / 1048576 ))" > /task/out/resources.json; echo "built $name"; exit 0; }
 case "$name" in
   ok) ok ;;
   fails) echo '{"status":4,"final":true,"needs_native":false,"error":"the recipe failed"}' > /task/out/verdict.json; echo "==> ERROR: the recipe failed"; exit 4 ;;
@@ -276,12 +281,24 @@ echo "ok: a task container holds no token, key or socket — environment, mounts
 echo "ok: the task's own internal network, the task alone on it, its egress sidecar on it and on omarchy-egress"
 finish 1
 until_ 30 "task 1 completed" reported 1 complete
-[[ "$(jq -r 'select(.path | test("/factory/tasks/1/artifacts/")) | .path' "$tmp/requests.jsonl" | sed 's#.*/##' | tr '\n' ' ')" == "PKGBUILD build.log PKGINFO slow-1.0-1-$arch.pkg.tar.zst " ]] \
+[[ "$(jq -r 'select(.path | test("/factory/tasks/1/artifacts/")) | .path' "$tmp/requests.jsonl" | sed 's#.*/##' | tr '\n' ' ')" == "PKGBUILD build.log resources.json PKGINFO slow-1.0-1-$arch.pkg.tar.zst " ]] \
   || fail "task 1's uploads: $(jq -r 'select(.path | test("/artifacts/")) | .path' "$tmp/requests.jsonl")"
 jq -e 'select(.path | test("/factory/tasks/1/")) | .auth == "Bearer omj.secret-of-1" or .auth == "Bearer omj.renewed-1"' "$tmp/requests.jsonl" | grep -qv true && fail "a call for task 1 without its own job token"
 until_ 10 "task 1's container removed" gone 1
 until_ 10 "task 1's sidecar and network removed" side_gone 1
 echo "ok: a build staged in and out, completed with its job token, its container, its sidecar and its network removed"
+# Its memory high-water mark (#330): what its resources.json measured from inside its own cgroup goes with its completion, for the
+# pool's size learning — measured wherever the engine's containers see cgroup v2's memory.peak (a kernel from 5.19) or cgroup v1's
+# memory controller, and a 0 (none there) is never sent.
+measured="$(jq -r 'select(.path == "/api/v1/factory/tasks/1/artifacts/resources.json") | .body.ram_peak_mb' "$tmp/requests.jsonl" | tail -n1)"
+sent="$(report 1 complete | jq -r '.ram_peak_mb // "none"')"
+kernel="$(uname -r)"; kmaj="${kernel%%.*}"; kmin="${kernel#*.}"; kmin="${kmin%%[!0-9]*}"
+if { [[ -e /sys/fs/cgroup/cgroup.controllers ]] && (( kmaj > 5 || (kmaj == 5 && kmin >= 19) )); } || [[ -e /sys/fs/cgroup/memory/memory.max_usage_in_bytes ]]; then
+  if ! [[ "$measured" =~ ^[0-9]+$ ]] || (( measured < 1 )); then fail "task 1 measured no memory peak on kernel $kernel ($(stat -fc %T /sys/fs/cgroup)): $measured"; fi
+fi
+if [[ "$measured" =~ ^[0-9]+$ ]] && (( measured >= 1 )); then [[ "$sent" == "$measured" ]] || fail "task 1's completion says ram_peak_mb $sent, its resources.json $measured"
+else [[ "$sent" == none ]] || fail "task 1's completion says ram_peak_mb $sent with no peak measured"; fi
+echo "ok: a build's completion says the memory peak it measured ($sent MB)"
 
 # ---------- 2. a failure, an out-of-memory kill, an output outside the list ----------
 give 2 fails 2; give 3 oom 1; give 4 evil 2; give 11 quiet 1

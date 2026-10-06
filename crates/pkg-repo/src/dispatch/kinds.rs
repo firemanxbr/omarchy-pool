@@ -10,7 +10,9 @@
 //!   log in `/task/log`. A contributor's build and the project's review
 //!   rebuild go to the task's staging; the project's recipe on main is
 //!   published into edge with the lease's `pool:write`, as `pkg-repo work`
-//!   does; a dry run stays on the host (#284).
+//!   does; a dry run stays on the host (#284). Its completion carries the
+//!   memory high-water mark its `resources.json` measured (`ram_peak_mb`),
+//!   which the pool's size learning counts (#330).
 //! - an **audit**: the staged PKGBUILD, log, gate and `.PKGINFO` in
 //!   `/task/in`, read as data; `audit.json` and `audit.md` attached to the
 //!   staged build.
@@ -684,11 +686,28 @@ fn report_done(
     took: u64,
     log: &Path,
 ) -> Result<String, Retry> {
+    report_done_with(ctx, l, summary, result, took, log, None)
+}
+
+/// [`report_done`] for a build: with its container's memory high-water mark beside the result
+/// (`ram_peak_mb`, [`peak_of`]), which the pool's size learning counts (#330, design v2 §7.4; D31).
+fn report_done_with(
+    ctx: &Ctx,
+    l: &Lease,
+    summary: &str,
+    result: &Value,
+    took: u64,
+    log: &Path,
+    peak: Option<u64>,
+) -> Result<String, Retry> {
     let field = |k: &str, d: Value| result.get(k).cloned().unwrap_or(d);
-    let body = json!({
+    let mut body = json!({
         "summary": summary, "result": result, "duration_ms": took, "log_tail": tail(log, 80),
         "sha256": field("sha256", json!("-")), "filename": field("filename", json!("-")), "version": field("version", Value::Null),
     });
+    if let Some(mb) = peak {
+        body["ram_peak_mb"] = json!(mb);
+    }
     sent(
         "completion",
         l,
@@ -881,6 +900,18 @@ fn dry_run_kept(ctx: &Ctx, l: &Lease) -> Option<PathBuf> {
     })
 }
 
+/// The memory high-water mark of a build's container, in MB: what its `resources.json` says
+/// (the build script reads its own cgroup's `memory.peak`, or cgroup v1's
+/// `memory.max_usage_in_bytes`, omarchy-build-worker.sh `resources_end`), for the pool's size
+/// learning (#330, D31). None when the file is missing or does not read, or says 0 — a cgroup
+/// that measures no peak — never a guess. It is the task's own word: a recipe can only lower its
+/// own package's remembered size with it, never raise any.
+fn peak_of(files: &[(String, PathBuf)]) -> Option<u64> {
+    let (_, p) = files.iter().find(|(n, _)| n == "resources.json")?;
+    let v: Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;
+    v.get("ram_peak_mb")?.as_u64().filter(|&mb| mb > 0)
+}
+
 /// Where a build's evidence goes: the task's own staging, for a contributor's build and the project's review rebuild.
 fn staging_of(l: &Lease) -> Option<u64> {
     (l.task.kind == "build"
@@ -928,6 +959,7 @@ fn finish_build(
     .filter_map(|(n, p)| p.map(|p| (n, p)))
     .collect();
     let ok = state.exit_code == 0 && verdict.as_ref().is_none_or(|v| v.status == 0);
+    let peak = peak_of(files);
     if !ok {
         // What there is goes on the record — the log, the gate, the recipe that failed — then the report.
         if let Some(to) = staging {
@@ -1038,7 +1070,7 @@ fn finish_build(
                 manifest.name, manifest.version, t.arch
             )
         };
-        return report_done(ctx, l, &summary, &result, took, log);
+        return report_done_with(ctx, l, &summary, &result, took, log, peak);
     }
     if let Some(kept) = dry_run_kept(ctx, l) {
         // A dry run (#284): built and measured, kept on this host, never published nor rendered.
@@ -1059,7 +1091,7 @@ fn finish_build(
             t.arch,
             kept.display()
         );
-        return report_done(ctx, l, &summary, &result, took, log);
+        return report_done_with(ctx, l, &summary, &result, took, log, peak);
     }
     // The project's recipe on main: published into edge with the lease's pool:write (the pool signs), both arches rendered.
     let rendered = ctx.pool.publish(
@@ -1087,7 +1119,7 @@ fn finish_build(
         t.arch,
         rendered.join(", ")
     );
-    report_done(ctx, l, &summary, &result, took, log)
+    report_done_with(ctx, l, &summary, &result, took, log, peak)
 }
 
 fn finish_audit(

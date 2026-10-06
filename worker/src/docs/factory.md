@@ -565,7 +565,9 @@ jobs       a pool job (#340): one at a time, in a child process of its own (pkg-
            refused (125); the job holds the unit kept for pool jobs, never a task's (a build starts beside it)
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
 out        /task/out: the kind's closed list under its caps (a build: packages, PKGBUILD, vet.json, tests.log,
-           resources.json, verdict.json), uploaded by the dispatcher with the job token; /task/log/task.log, ≤ 64 MiB
+           resources.json, verdict.json), uploaded by the dispatcher with the job token — a build's completion
+           says the ram_peak_mb its resources.json measured, none when it says 0 or does not read (#330);
+           /task/log/task.log, ≤ 64 MiB
            (the engine keeps no log of a task container); exited with no verdict.json, or a verdict of a
            SIGTERM or SIGKILL, fails `lost` (a reboot, a shutdown): the attempt is given back
 exit 75    a restart order, or a loop without progress for 15 min: task containers run on, the next dispatcher re-adopts them

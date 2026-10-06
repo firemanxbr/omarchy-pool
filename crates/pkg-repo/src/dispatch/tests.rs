@@ -2657,6 +2657,66 @@ fn a_review_rebuild_learns_from_staged_evidence_and_stages_for_a_maintainer() {
 }
 
 #[test]
+fn a_builds_completion_says_the_memory_peak_its_resources_json_measured_and_nothing_it_cannot_read()
+{
+    // #330: the pool's size learning counts the peak; 0 (a kernel with no memory.peak), a file that
+    // does not read, or none at all says nothing — never a guess.
+    let measured = br#"{"schema":"omarchy-pool/resources/1","wall_s":42,"cpu_s":80,"ram_peak_mb":3100,"disk_mb":300,"cores":4}"#;
+    let cases: [(Option<&[u8]>, Option<u64>); 4] = [
+        (Some(measured), Some(3100)),
+        (
+            Some(br#"{"schema":"omarchy-pool/resources/1","ram_peak_mb":0}"#),
+            None,
+        ),
+        (Some(b"not json"), None),
+        (None, None),
+    ];
+    for (resources, peak) in cases {
+        let h = H::new();
+        let mut d = h.dispatcher();
+        h.give(community(7, GEN));
+        h.ticks(&mut d, 3);
+        let mut files = built_ok();
+        if let Some(r) = resources {
+            files.push(("resources.json", r.to_vec()));
+        }
+        h.leave(7, GEN, &files, "log\n");
+        h.engine.exit(7, GEN, 0, false);
+        h.ticks(&mut d, 2);
+        let done = &h.pool.completes_of(7)[0];
+        assert_eq!(
+            done.get("ram_peak_mb").and_then(Value::as_u64),
+            peak,
+            "{resources:?}: {done}"
+        );
+        assert_eq!(
+            h.pool.staged_of(7).contains(&"resources.json".to_owned()),
+            resources.is_some(),
+            "the file goes on the record as it is"
+        );
+    }
+    // The project's recipe on main says it too, published into edge.
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(task(
+        7,
+        "build",
+        "felix",
+        "0123abcd",
+        "project",
+        json!({}),
+        GEN,
+    ));
+    h.ticks(&mut d, 3);
+    let mut files = built_ok();
+    files.push(("resources.json", measured.to_vec()));
+    h.leave(7, GEN, &files, "log\n");
+    h.engine.exit(7, GEN, 0, false);
+    h.ticks(&mut d, 2);
+    assert_eq!(h.pool.completes_of(7)[0]["ram_peak_mb"], 3100);
+}
+
+#[test]
 fn the_projects_recipe_on_main_is_published_into_edge_with_both_arches_rendered() {
     let h = H::new();
     let mut d = h.dispatcher();
