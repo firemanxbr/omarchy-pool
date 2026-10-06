@@ -230,8 +230,11 @@ handler), so the pool then hands your emulated lanes the project's own
 recipes only. `sandbox = "off"` in your envelope turns it off,
 `sandbox = "kata"` picks one; the host page says which your dispatcher
 applies, or why none does (podman's docker API, for one, cannot pass the
-runtime on), and why its claims hold if the runtime refuses a start. The
-runbook's *A sandboxed runtime for community tasks* has the steps.
+runtime on), and why its claims hold if the runtime refuses a start — for 30
+minutes, doubled with each further refusal in a row, a day at most: fix the
+runtime, then **Restart** on the dispatcher's worker page claims again at
+once. The runbook's *A sandboxed runtime for community tasks* has the
+steps.
 
 **Where the project's copies and their audits go (#339).** The project's
 copy of a package you asked for — its review rebuild, the one that is

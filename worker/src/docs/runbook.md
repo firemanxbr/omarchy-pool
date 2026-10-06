@@ -1035,12 +1035,21 @@ a runtime's name only that one (`sandbox = "kata"`). Where it does not apply:
   — never on the engine's own runtime. Its attempt is given back, but the
   pool spends one from a task's third loss on a host (`HOST_LOSSES_MAX`), so
   the dispatcher holds its claims (`want: 0`) for 30 minutes after a first
-  refusal and, after a second in a row, until the host is counted again; the
-  host page says why under *Sandbox* ("its claims hold: runsc refused task
-  … 's start …") and the dispatcher's log says it once. Fix or remove the
-  runtime, then count the host again (above): a new count is a new
-  `run/capacity.json`, which recreates the dispatcher, and it claims again —
-  in the sandbox, or with `"sandbox": null` on the engine's own runtime.
+  refusal, twice as long after each further one in a row (1, 2, 4 … hours,
+  a day at most), and claims again when the hold is over; the host page
+  says why under *Sandbox* ("its claims hold: runsc refused task … 's start
+  …: no claim for 1 hour (2 refusals in a row) …") and the dispatcher's log
+  says it once. Only the runtime's own error holds the claims (docker's
+  "unknown or invalid runtime name", an OCI runtime's or its shim's): a
+  start that fails for a pull or an engine that did not answer is lost as on
+  any host. Fix or remove the runtime, then press **Restart** on the
+  dispatcher's worker page (the host page's *Drain or resume its claims*
+  leads there): a new dispatcher has no hold, and claims again at once — in
+  the sandbox, or with `"sandbox": null` on the engine's own runtime once
+  the host is counted again without it (a count that finds something
+  changed writes a new `run/capacity.json`, which recreates the dispatcher
+  too). A count that finds the host as it was writes nothing (`capacity:
+  … unchanged`) and leaves the hold to run out.
 
 CI's `sandboxed-runtime` job runs all of it on docker with gVisor
 (`tests/sandboxed-runtime.sh`).

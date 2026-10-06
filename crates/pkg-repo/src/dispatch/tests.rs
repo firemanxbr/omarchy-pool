@@ -60,6 +60,8 @@ struct FakeEngine {
     stuck: AtomicBool,
     /// The engine refuses to start the container whose name ends with this.
     refuse: Mutex<Option<String>>,
+    /// What it says then: `the engine refused <name>` when unset.
+    refuse_why: Mutex<Option<String>>,
     /// The runtimes the engine has besides its own: a container that names another
     /// (`--runtime`) is refused, as docker refuses it. `None`: whatever it names.
     runtimes: Mutex<Option<Vec<String>>>,
@@ -144,7 +146,12 @@ impl FakeEngine {
             .as_ref()
             .is_some_and(|r| name.ends_with(r.as_str()))
         {
-            return Err(format!("the engine refused {name}"));
+            return Err(self
+                .refuse_why
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| format!("the engine refused {name}")));
         }
         if let Some(r) = value_of(args, "--runtime") {
             if self
@@ -1759,57 +1766,178 @@ fn a_runtime_the_engine_refuses_fails_the_start_and_holds_the_claims_nothing_run
     assert!(h.engine.runs.lock().unwrap().is_empty(), "nothing started");
     assert!(!h.engine.has(7, GEN));
     // The claims hold, and say why: the pool would hand it task after task, each lost.
-    let c = h.pool.last_claim();
-    assert_eq!(c["want"], json!(0), "{c}");
+    let held = |h: &H| {
+        let c = h.pool.last_claim();
+        (c["want"] == json!(0)).then(|| c["capacity"]["sandbox_held"].as_str().unwrap().to_owned())
+    };
+    let why = held(&h).expect("held");
+    assert!(why.starts_with("runsc refused task 7's start"), "{why}");
     assert!(
-        c["capacity"]["sandbox_held"]
-            .as_str()
-            .unwrap()
-            .starts_with("runsc refused task 7's start"),
-        "{c}"
+        why.ends_with("no claim for 30 minutes; the dispatcher's Restart ends it sooner"),
+        "{why}"
     );
     h.advance(SANDBOX_HOLD - 60);
     h.ticks(&mut d, 1);
-    assert_eq!(h.pool.last_claim()["want"], json!(0));
-    // Its hold over, it claims again; refused a second time in a row, it holds until the
-    // agent counts the host again.
+    assert!(held(&h).is_some());
+    // Its hold over, it claims again; refused a second time in a row, it holds twice as long.
     h.advance(60);
     h.give(community(8, GEN2));
     h.ticks(&mut d, 4);
     assert_eq!(h.pool.fails_of(8)[0]["lost"], json!(true));
     assert_eq!(runtimes_of(&h, 8, GEN2), [Some("runsc".to_owned())]);
-    h.advance(4 * SANDBOX_HOLD);
-    h.ticks(&mut d, 2);
-    let c = h.pool.last_claim();
-    assert_eq!(c["want"], json!(0), "{c}");
+    let why = held(&h).expect("held");
     assert!(
-        c["capacity"]["sandbox_held"]
-            .as_str()
-            .unwrap()
-            .contains("until the agent counts the host again"),
-        "{c}"
+        why.starts_with("runsc refused task 8's start")
+            && why.contains("no claim for 1 hour (2 refusals in a row)"),
+        "{why}"
     );
-    // Two tasks lost, not every one the pool had for it.
+    h.advance(2 * SANDBOX_HOLD - 60);
+    h.ticks(&mut d, 1);
+    assert!(held(&h).is_some());
+    // A hold ends by itself, however the runtime was fixed (a count that finds the host as it
+    // was writes nothing): with nobody at the host it claims again.
+    h.advance(60);
+    h.ticks(&mut d, 1);
+    assert_eq!(h.pool.last_claim()["want"], json!(1));
+    assert!(h.pool.last_claim()["capacity"]
+        .get("sandbox_held")
+        .is_none());
+    // Two tasks lost in an hour and a half, not every one the pool had for it.
     assert_eq!(h.pool.fails.lock().unwrap().len(), 2);
-    // The owner fixed the runtime and counted the host again: a new count, claims again.
-    *h.engine.runtimes.lock().unwrap() = Some(vec!["runsc".to_owned()]);
-    let text = std::fs::read_to_string(&h.capacity).unwrap();
-    std::fs::write(
-        &h.capacity,
-        text.replace("2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z"),
-    )
-    .unwrap();
+    // Still refused: a third in a row, twice as long again.
     h.give(community(9, "g_00000000000000c3"));
     h.advance(30);
     h.ticks(&mut d, 3);
-    assert!(h.engine.has(9, "g_00000000000000c3"));
+    assert!(
+        held(&h)
+            .expect("held")
+            .contains("no claim for 2 hours (3 refusals in a row)"),
+        "{:?}",
+        held(&h)
+    );
+    // The owner fixed the runtime; the agent's count found the host as it was and left
+    // `run/capacity.json` as it is, so the hold stays …
+    *h.engine.runtimes.lock().unwrap() = Some(vec!["runsc".to_owned()]);
+    h.advance(30 * 60);
+    h.ticks(&mut d, 2);
+    assert!(held(&h).is_some());
+    // … until the dispatcher restarts (Restart on its worker page): it claims at once, in the sandbox.
+    drop(d);
+    let mut d = h.dispatcher();
+    h.give(community(10, "g_00000000000000c4"));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(10, "g_00000000000000c4"));
     assert_eq!(
-        runtimes_of(&h, 9, "g_00000000000000c3"),
+        runtimes_of(&h, 10, "g_00000000000000c4"),
         [Some("runsc".to_owned())]
     );
     assert!(h.pool.last_claim()["capacity"]
         .get("sandbox_held")
         .is_none());
+    assert_eq!(h.pool.fails.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn a_count_that_finds_the_host_changed_ends_a_sandbox_hold_at_once() {
+    let h = H::new();
+    sandboxed_file(&h);
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 4);
+    assert_eq!(h.pool.last_claim()["want"], json!(0));
+    // The owner removed the runtime and counted the host again: the agent found no sandbox,
+    // so it wrote a new file (a new `at`) saying so. The dispatcher claims at once — the run
+    // loop's round would recreate it too — and runs the next one on the engine's own runtime.
+    let text = std::fs::read_to_string(&h.capacity).unwrap();
+    std::fs::write(
+        &h.capacity,
+        text.replace("2026-10-01T00:00:00Z", "2026-10-01T00:05:00Z")
+            .replace(
+                r#""sandbox": { "runtime": "runsc", "kind": "gvisor" }"#,
+                r#""sandbox": null, "sandbox_held": "none of the engine's runtimes starts a kernel of its own""#,
+            ),
+    )
+    .unwrap();
+    h.give(community(8, GEN2));
+    h.advance(30);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(8, GEN2));
+    assert_eq!(runtimes_of(&h, 8, GEN2), [None]);
+    let c = h.pool.last_claim();
+    assert_eq!(c["capacity"]["sandbox"], Value::Null, "{c}");
+    assert_eq!(c["want"], json!(1), "{c}");
+    assert!(c["capacity"].get("sandbox_held").is_none(), "{c}");
+}
+
+#[test]
+fn a_sandboxed_start_that_fails_for_another_reason_than_its_runtime_holds_no_claim() {
+    let h = H::new();
+    sandboxed_file(&h);
+    // A release's new build image, pulled within `run` (the spec does not pull ahead), meets
+    // the registry's rate limit: the start is lost, as on any host, but the runtime refused nothing.
+    *h.engine.refuse.lock().unwrap() = Some(spec::container_name(7, GEN));
+    *h.engine.refuse_why.lock().unwrap() = Some(format!(
+        "docker run: Unable to find image '{IMAGE}' locally\ndocker: Error response from daemon: toomanyrequests: You have reached your pull rate limit."
+    ));
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 4);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(f["lost"], json!(true), "{f}");
+    assert!(
+        f["error"].as_str().unwrap().contains("toomanyrequests"),
+        "{f}"
+    );
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], json!(1), "{c}");
+    assert!(c["capacity"].get("sandbox_held").is_none(), "{c}");
+    // The next one starts in the sandbox at once.
+    *h.engine.refuse.lock().unwrap() = None;
+    h.give(community(8, GEN2));
+    h.advance(30);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(8, GEN2));
+    assert_eq!(runtimes_of(&h, 8, GEN2), [Some("runsc".to_owned())]);
+}
+
+#[test]
+fn each_refused_sandboxed_start_in_a_row_doubles_the_hold_to_a_day_at_most() {
+    let minutes: Vec<u64> = (1..=9).map(|n| super::sandbox_hold_for(n) / 60).collect();
+    assert_eq!(minutes, [30, 60, 120, 240, 480, 960, 1440, 1440, 1440]);
+    assert_eq!(super::sandbox_hold_for(u32::MAX), super::SANDBOX_HOLD_MAX);
+    assert_eq!(super::span(SANDBOX_HOLD), "30 minutes");
+    assert_eq!(super::span(3600), "1 hour");
+    assert_eq!(super::span(super::SANDBOX_HOLD_MAX), "24 hours");
+}
+
+#[test]
+fn only_the_runtimes_own_errors_are_a_refusal_of_the_sandbox() {
+    let refused = [
+        // docker 29, a runtime daemon.json no longer has (its own words)
+        "docker run: docker: Error response from daemon: unknown or invalid runtime name: runsc",
+        // runsc registered by its path, the binary gone (containerd's runc shim runs it)
+        "docker run: docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: unable to retrieve OCI runtime error (open /run/containerd/io.containerd.runtime.v2.task/moby/x/log.json: no such file or directory): fork/exec /usr/local/bin/runsc: no such file or directory: unknown.",
+        // Kata's shim on a VM that lost /dev/kvm
+        "docker run: docker: Error response from daemon: failed to create task for container: failed to create shim task: Could not access KVM kernel module: No such file or directory: unknown.",
+        // podman's own CLI
+        "podman run: Error: default OCI runtime \"runsc\" not found: invalid argument",
+    ];
+    for e in refused {
+        assert!(super::runtime_refused("runsc", e), "{e}");
+    }
+    let not = [
+        "docker run: Unable to find image 'ghcr.io/x/build@sha256:00' locally\ndocker: Error response from daemon: toomanyrequests: You have reached your pull rate limit.",
+        "docker run: docker: Error response from daemon: manifest unknown.",
+        // docker 29's own words for a pull that cannot reach the registry
+        "docker run: Unable to find image 'nonexistent@sha256:00' locally\ndocker: Error response from daemon: failed to resolve reference \"docker.io/library/nonexistent@sha256:00\": failed to do request: Head \"https://registry-1.docker.io/v2/library/nonexistent/manifests/sha256:00\": proxyconnect tcp: dial tcp 127.0.0.1:37605: connect: connection refused",
+        "docker run did not answer",
+        "docker run: docker: Error response from daemon: Conflict. The container name \"/omarchy-task-7-g_0\" is already in use by container \"ab\".",
+        "docker run: docker: Error response from daemon: network omarchy-t-7 not found.",
+    ];
+    for e in not {
+        assert!(!super::runtime_refused("runsc", e), "{e}");
+    }
 }
 
 #[test]

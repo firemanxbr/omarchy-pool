@@ -152,13 +152,13 @@ secret). Everything travels in the `Authorization` header over TLS only.
   only the project's own recipes — and the dispatcher hands back one that
   reaches them anyway, before anything runs. The dispatcher never runs such a
   task outside a sandbox the host says it has: a runtime the engine refuses
-  fails the start (`lost`) and holds its claims (30 minutes, then until the
-  agent counts the host again after a second refusal in a row), and a
-  capacity file whose sandbox it cannot read claims nothing. Each claim says
-  the sandbox the dispatcher applies; the pool selects on that and the host
-  page (*Sandbox*) shows it — not merely what the agent found, which a
-  dispatcher from before #330 ignores — with why one the engine has is not
-  used and why the claims hold. The envelope's `sandbox` (`"off"`, or one
+  fails the start (`lost`) and holds its claims (30 minutes, doubled after
+  each further refusal in a row, a day at most; a restart of the dispatcher
+  ends it), and a capacity file whose sandbox it cannot read claims
+  nothing. Each claim says the sandbox the dispatcher applies; the pool
+  selects on that and the host page (*Sandbox*) shows it — not merely what
+  the agent found, which a dispatcher from before #330 ignores — with why
+  one the engine has is not used and why the claims hold. The envelope's `sandbox` (`"off"`, or one
   runtime's name) is the owner's; a host without one runs these tasks as
   before, at its isolation level. Stated plainly: a sandbox's kernel is a
   smaller surface, not none — a bug in gVisor's, or in the gofer that serves

@@ -65,10 +65,15 @@
 //! handed back `lost` before anything runs. A start the runtime refuses fails
 //! `lost` — nothing runs outside the sandbox the file says the host has —
 //! and holds the claims (`want: 0`, the reason in the claim's
-//! `capacity.sandbox_held`) for [`SANDBOX_HOLD`], and after a second refusal
-//! in a row until the agent counts the host again (a new `at` in the file):
-//! a runtime gone or broken since the count loses one or two tasks, not
-//! every one the pool hands the host.
+//! `capacity.sandbox_held`) for [`SANDBOX_HOLD`], twice as long after each
+//! further refusal in a row and [`SANDBOX_HOLD_MAX`] at most: a runtime gone
+//! or broken since the count loses a task now and then, not every one the
+//! pool hands the host, and a host whose runtime was fixed claims again by
+//! itself. A restart of the dispatcher (the `restart` order, or the round a
+//! changed `run/capacity.json` starts) ends the hold at once, and so does a
+//! new count in the file (`at`) this dispatcher reads. Only an error that is
+//! the runtime's ([`runtime_refused`]) holds: a pull or an engine that did
+//! not answer fails that one start, as on any host.
 //!
 //! **Lanes** (#338, design v2 §7.4, §7.5): a build or a trial runs on the
 //! lane the pool leased it on — its architecture's `--platform`, natively
@@ -162,9 +167,13 @@ const CLAIM_RETRY: u64 = 60;
 pub const DISK_HOLD: u64 = 30 * 60;
 /// What a host claims while a disk hold keeps builds out.
 const KINDS_HELD: [&str; 2] = ["trial", "audit"];
-/// After a first start its sandbox's runtime refused, no claim for this long (#330); a
-/// second refusal in a row holds the claims until the agent counts the host again.
+/// After a first start its sandbox's runtime refused, no claim for this long (#330); each
+/// further refusal in a row doubles it, up to [`SANDBOX_HOLD_MAX`].
 pub const SANDBOX_HOLD: u64 = 30 * 60;
+/// The longest a run of refused sandboxed starts holds the claims: a host whose runtime was
+/// fixed, or whose start failed for a reason the dispatcher took for the runtime's, claims
+/// again within a day with nobody at it.
+pub const SANDBOX_HOLD_MAX: u64 = 24 * 3600;
 /// How long after its container starts a lease's memory share still counts as promised before a
 /// claim (#337, design v2 §7.6): a container just started has not grown to its share, so
 /// `MemAvailable` does not show it yet, and claims that follow each other at once would each offer
@@ -411,7 +420,7 @@ pub struct Dispatcher {
     hold_until: u64,
     /// The sandbox's runtime refused a task container's start (#330): no claim while it holds.
     sandbox_hold: Option<SandboxHold>,
-    /// The sandboxed starts refused in a row: a second holds until the next count.
+    /// The sandboxed starts refused in a row: each doubles the next hold.
     sandbox_refusals: u32,
     /// The capacity file's `at` when the watcher last killed on the engine's value: once per probe.
     engine_kill_at: Option<String>,
@@ -433,11 +442,11 @@ pub struct Dispatcher {
 }
 
 /// A hold on the claims after the sandbox's runtime refused a start (#330): the count it was
-/// refused under (the capacity file's `at`), until when (`None`: until the next count) and why.
+/// refused under (the capacity file's `at`), until when and why.
 #[derive(Debug, Clone)]
 struct SandboxHold {
     at: Option<String>,
-    until: Option<u64>,
+    until: u64,
     why: String,
 }
 
@@ -1167,21 +1176,28 @@ impl Dispatcher {
             .iter()
             .position(|c| c[0] == "start" && c.get(1).is_some_and(|n| n.ends_with("-agent")));
         let failed = bridge
-            .map_err(|e| (0, format!("the egress bridge: {e}")))
+            .map_err(|e| (0, format!("the egress bridge: {e}"), false))
             .and_then(|()| {
                 plan.iter().enumerate().try_for_each(|(i, c)| {
-                    self.engine
-                        .run(c)
-                        .map_err(|e| (i, format!("{} did not start: {}", what(c), clean_line(&e))))
+                    self.engine.run(c).map_err(|e| {
+                        // The task container's own start, refused by the sandbox's runtime (#330).
+                        let refused = c[0] == "run"
+                            && runtime.as_deref().is_some_and(|r| runtime_refused(r, &e));
+                        (
+                            i,
+                            format!("{} did not start: {}", what(c), clean_line(&e)),
+                            refused,
+                        )
+                    })
                 })
             });
-        if let Err((i, why)) = failed {
+        if let Err((i, why, refused)) = failed {
             // A sidecar that never started spent nothing of the day.
             if agent_start.is_none_or(|a| i <= a) {
                 live.lease.agent_calls = None;
             }
-            // The task container's own start, in the sandbox's runtime: the claims hold (#330).
-            if let Some(r) = runtime.as_deref().filter(|_| plan[i][0] == "run") {
+            // The sandbox's runtime refused the task: the claims hold (#330).
+            if let Some(r) = runtime.as_deref().filter(|_| refused) {
                 self.hold_sandbox(now, r, live.lease.task.id, &why);
             }
             // A `run` that did not answer may still have made the container: the ending removes it, its sidecars and network.
@@ -1213,36 +1229,39 @@ impl Dispatcher {
     }
 
     /// The sandbox's runtime refused a task container (#330): no claim for [`SANDBOX_HOLD`],
-    /// or after a second refusal in a row until the agent counts the host again — the pool
-    /// would hand it task after task, each lost, each loss of the same task past the second
-    /// spending its attempt (worker/src/routes/factory.ts `HOST_LOSSES_MAX`).
+    /// twice as long after each further refusal in a row, [`SANDBOX_HOLD_MAX`] at most — the
+    /// pool would hand it task after task, each lost, each loss of the same task past the
+    /// second spending its attempt (worker/src/routes/factory.ts `HOST_LOSSES_MAX`). Bounded in
+    /// time, so that a runtime fixed since claims again without a recount, which writes nothing
+    /// when it finds the host as it was.
     fn hold_sandbox(&mut self, now: u64, runtime: &str, task: u64, why: &str) {
-        self.sandbox_refusals += 1;
-        let until = (self.sandbox_refusals < 2).then_some(now + SANDBOX_HOLD);
+        self.sandbox_refusals = self.sandbox_refusals.saturating_add(1);
+        let hold = sandbox_hold_for(self.sandbox_refusals);
         let why = format!(
-            "{runtime} refused task {task}'s start ({}): no claim {}",
+            "{runtime} refused task {task}'s start ({}): no claim for {}{}; the dispatcher's Restart ends it sooner",
             why.chars().take(160).collect::<String>(),
-            if until.is_some() {
-                format!("for {} minutes", SANDBOX_HOLD / 60)
-            } else {
-                "until the agent counts the host again (`omarchy-agent capacity --write`)".into()
+            span(hold),
+            match self.sandbox_refusals {
+                1 => String::new(),
+                n => format!(" ({n} refusals in a row)"),
             }
         );
         say(format!("the sandbox: {why}"));
         self.sandbox_hold = Some(SandboxHold {
             at: capacity::read(&self.capacity_file).map(|c| c.at),
-            until,
+            until: now + hold,
             why,
         });
     }
 
     /// Whether the claims hold for the sandbox now: until its time, or until the capacity
-    /// file says another count than the one it was refused under.
+    /// file says another count than the one it was refused under (one that found something
+    /// changed: a count that finds the host as it was writes nothing).
     fn sandbox_held(&mut self, now: u64, at: Option<&str>) -> Option<String> {
         let h = self.sandbox_hold.as_ref()?;
         // A file that does not read now is no new count: the claims wait for it anyway.
         let counted = at.is_some() && h.at.as_deref() != at;
-        if !counted && h.until.is_none_or(|u| now < u) {
+        if !counted && now < h.until {
             return Some(h.why.clone());
         }
         say(format!(
@@ -1740,6 +1759,31 @@ impl Dispatcher {
                 );
             }
         }
+    }
+}
+
+/// Whether a failed `run` of a task container is its sandbox's runtime refusing it (#330):
+/// docker's "unknown or invalid runtime name", an OCI runtime's or its containerd shim's error
+/// (runsc's, Kata's: `/dev/kvm` gone), or one that names the runtime — not a pull that failed
+/// (the spec does not pull ahead: a missing image is pulled within `run`), a name in use or an
+/// engine that did not answer, which any start can meet and which hold nothing.
+fn runtime_refused(runtime: &str, err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("runtime") || e.contains("shim") || e.contains(&runtime.to_ascii_lowercase())
+}
+
+/// How long the `n`th refused sandboxed start in a row holds the claims (#330): 30 minutes,
+/// 1, 2, 4, 8, 16 hours, then a day (the shift stops at 8, past the day: it never overflows).
+fn sandbox_hold_for(n: u32) -> u64 {
+    (SANDBOX_HOLD << n.clamp(1, 8).saturating_sub(1)).min(SANDBOX_HOLD_MAX)
+}
+
+/// A hold's length as the host page says it: minutes below an hour, else hours.
+fn span(s: u64) -> String {
+    match s / 3600 {
+        0 => format!("{} minutes", s / 60),
+        1 => "1 hour".to_owned(),
+        h => format!("{h} hours"),
     }
 }
 
