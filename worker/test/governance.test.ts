@@ -49,6 +49,9 @@ describe("the [solo] table", () => {
   it("names one maintainer of the list, since a date, with a reason on one line", () => {
     expect(parseSolo(file(table(ok)), LIST)).toEqual({ maintainer: "alice", since: "2026-10-06", reason: "bob has no time or machines for the pool" });
     expect(parseSolo(file(table({ ...ok, maintainer: '"bob"', since: '"2028-02-29"', reason: '"  spaces around it  "' })), LIST)).toEqual({ maintainer: "bob", since: "2028-02-29", reason: "spaces around it" });
+    // Counted in characters as check-governance counts them, code points: 200 outside the BMP are 200 (400 UTF-16 units), and taken.
+    const emoji = "\u{1F600}".repeat(200);
+    expect(parseSolo(file(table({ ...ok, reason: `"${emoji}"` })), LIST)).toEqual({ maintainer: "alice", since: "2026-10-06", reason: emoji });
     // The list beside it still parses as it did (D39: a list that parses is applied).
     expect(parseGovernance(file(table(ok)))).toEqual(LIST);
   });
@@ -64,6 +67,12 @@ describe("the [solo] table", () => {
       [{ reason: '"   "' }, /reason is required/],
       [{ reason: '"""\ntwo\nlines"""' }, /one line of 300 characters at most/],
       [{ reason: `"${"x".repeat(SOLO_REASON_MAX + 1)}"` }, /one line of 300 characters at most/],
+      // As check-governance counts and trims (tests/governance-solo.sh holds the same cases): 301 characters outside the BMP are 301, and a
+      // control or format character anywhere — a tab, a byte-order mark JavaScript's trim() would take away and Python's strip() keeps — is
+      // never one line.
+      [{ reason: `"${"\u{1F600}".repeat(SOLO_REASON_MAX + 1)}"` }, /one line of 300 characters at most/],
+      [{ reason: '"a\\ttab inside"' }, /one line of 300 characters at most/],
+      [{ reason: '"\\uFEFFa byte-order mark first"' }, /one line of 300 characters at most/],
       [{ since: '"2026-02-30"' }, /since must be a date/],
       [{ since: '"06/10/2026"' }, /since must be a date/],
       [{ since: '"soon"' }, /since must be a date/],

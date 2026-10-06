@@ -37,6 +37,7 @@ import datetime
 import importlib.machinery
 import importlib.util
 import re
+import unicodedata
 import sys
 import tomllib
 from pathlib import Path
@@ -78,13 +79,23 @@ def solo(doc, maintainers):
         datetime.date.fromisoformat(since)
     except ValueError:
         raise ValueError('[solo] since must be a date, written "YYYY-MM-DD"') from None
-    reason = table.get("reason")
-    reason = reason.strip() if isinstance(reason, str) else ""
+    # One line, the same on both sides (parseSolo counts and trims what this counts and trims): no control, format or line separator
+    # character anywhere — whose trimming Python and JavaScript disagree on — then the spaces around it (Zs, the same set for both once
+    # those are refused) off, and at most REASON_MAX code points, never UTF-16 units.
+    raw = table.get("reason")
+    raw = raw if isinstance(raw, str) else ""
+    reason = raw.strip()
     if not reason:
         raise ValueError("[solo] reason is required: why, in one line")
-    if "\n" in reason or "\r" in reason or len(reason) > REASON_MAX:
+    if not_one_line(raw) or len(reason) > REASON_MAX:
         raise ValueError(f"[solo] reason is one line of {REASON_MAX} characters at most")
     return {"maintainer": who, "since": since, "reason": reason}
+
+
+def not_one_line(text):
+    """Whether a reason holds what one line never does (worker/src/governance.ts NOT_ONE_LINE): a control, format, line or
+    paragraph separator character."""
+    return any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") for ch in text)
 
 
 def co_sign():

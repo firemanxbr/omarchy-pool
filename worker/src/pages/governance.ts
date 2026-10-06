@@ -139,8 +139,10 @@ const SCRIPT = String.raw`
   busy(fetch("/api/v1/factory/self-reviewed?limit=200")).then(function (r) { return r.json(); }).then(function (d) {
     var s = d.solo;
     $("#solo-now").innerHTML = s ? '<b>In force since ' + esc(s.since) + '</b>: <a href="' + userHref(s.maintainer) + '">@' + esc(s.maintainer) + '</a> — ' + esc(s.reason) + '. ' + num(d.count || 0) + ' decision' + (d.count === 1 ? '' : 's') + ' self-reviewed so far, every one below.' : 'Not in force: the file has no <code>[solo]</code> table, and nobody decides on their own package.' + (d.count ? ' ' + num(d.count) + ' decision' + (d.count === 1 ? ' was' : 's were') + ' self-reviewed while it was, every one below.' : '');
+    // A record is linked only as an https address: the server passes on the pool's own records alone, and the page holds to it as well.
     pager("#solo-table", d.decisions || [], function (x) {
-      return '<tr><td class="when">' + ago(x.at) + '</td><td>' + esc(x.decision) + ' · <span title="' + esc(x.summary) + '">self-reviewed</span></td><td>' + (x.name ? '<a href="' + pkgHref(x.name, null, null) + '">' + esc(x.name) + '</a>' : '—') + '</td><td>' + (x.record ? '<a href="' + esc(x.record) + '">signed record</a>' : '<span class="muted">' + esc(x.summary) + '</span>') + '</td></tr>';
+      var rec = typeof x.record === "string" && /^https:\/\//i.test(x.record) ? x.record : null;
+      return '<tr><td class="when">' + ago(x.at) + '</td><td>' + esc(x.decision) + ' · <span title="' + esc(x.summary) + '">self-reviewed</span></td><td>' + (x.name ? '<a href="' + pkgHref(x.name, null, null) + '">' + esc(x.name) + '</a>' : '—') + '</td><td>' + (rec ? '<a href="' + esc(rec) + '">signed record</a>' : '<span class="muted">' + esc(x.summary) + '</span>') + '</td></tr>';
     }, { empty: "no decision self-reviewed" });
   }).catch(function () { endSkeleton(); });
   busy(fetch("/api/v1/events?kind=role&limit=50")).then(function (r) { return r.json(); }).then(function (d) {
@@ -241,7 +243,7 @@ export const GOVERNANCE_COMPONENTS = (_F: Fixture): Component[] => {
       id: "governance.solo",
       page,
       anchor: ['id="solo"', "<h2>The solo-maintainer exception</h2>", 'id="solo-now"', "<h3>What it lets through, for one maintainer</h3>", "<b>with their passkey</b>", "<h3>Recorded, every time</h3>", "<em>self-reviewed (solo-maintainer exception)</em>", "<code>independent: none</code>", "<h3>How it ends</h3>", 'id="solo-table"', "<th>When</th><th>Decision</th><th>Package</th><th>On the record</th>", 'href="#solo"'],
-      script: ['"/api/v1/factory/self-reviewed?limit=200"', '"#solo-now"', '"#solo-table"', "d.solo", "d.decisions", "x.decision", "x.record", '"no decision self-reviewed"', "Not in force: the file has no <code>[solo]</code> table"],
+      script: ['"/api/v1/factory/self-reviewed?limit=200"', '"#solo-now"', '"#solo-table"', "d.solo", "d.decisions", "x.decision", "x.record", "/^https:\\/\\//i.test(x.record)", '"no decision self-reviewed"', "Not in force: the file has no <code>[solo]</code> table"],
       reads: [{ path: "/api/v1/factory/self-reviewed?limit=200", fields: ["solo", "count", "decisions"] }],
       visible: EVERYONE,
     },

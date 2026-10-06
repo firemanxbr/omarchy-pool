@@ -2244,6 +2244,9 @@ export async function handleBuilt(env: Env): Promise<Response> {
   return json({ built: rows.results }, 200, { "cache-control": "no-store" });
 }
 
+/** A decision's mark (#394): taken by its requester under the solo-maintainer exception — who and since when — or null. */
+const soloOfApproval = (a: { by: string; solo_since: string | null }) => (a.solo_since ? { maintainer: a.by, since: a.solo_since } : null);
+
 /**
  * One task, whole — what a build's page shows and what an agent reads in
  * one call: the row with the log's tail it kept (a pool job has no other
@@ -2255,9 +2258,6 @@ export async function handleBuilt(env: Env): Promise<Response> {
  * space (the text ones public). The related tasks share the name and the
  * architecture, so each lookup walks the (name, arch) index, not the table.
  */
-/** A decision's mark (#394): taken by its requester under the solo-maintainer exception — who and since when — or null. */
-const soloOfApproval = (a: { by: string; solo_since: string | null }) => (a.solo_since ? { maintainer: a.by, since: a.solo_since } : null);
-
 export async function handleTask(id: number, env: Env): Promise<Response> {
   const task = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<TaskRow>();
   if (!task) return json({ error: "no such task" }, 404);

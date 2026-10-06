@@ -77,11 +77,18 @@ export function parseSolo(text: string, maintainers: string[]): Solo | null {
   if (typeof m !== "string" || !LOGIN.test(m)) throw new Error("[solo] maintainer must be a GitHub login");
   if (!maintainers.includes(m)) throw new Error(`[solo] maintainer ${m} is not in \`maintainers\``);
   if (typeof t.since !== "string" || !isDate(t.since)) throw new Error('[solo] since must be a date, written "YYYY-MM-DD"');
-  const reason = typeof t.reason === "string" ? t.reason.trim() : "";
+  // One line, the same on both sides (check-governance counts and trims what this counts and trims): no control, format or line
+  // separator character anywhere — whose trimming Python and JavaScript disagree on — then the spaces around it (Zs, the same set for
+  // both once those are refused) off, and at most SOLO_REASON_MAX characters as Python counts them, code points, never UTF-16 units.
+  const raw = typeof t.reason === "string" ? t.reason : "";
+  const reason = raw.trim();
   if (!reason) throw new Error("[solo] reason is required: why, in one line");
-  if (/[\r\n]/.test(reason) || reason.length > SOLO_REASON_MAX) throw new Error(`[solo] reason is one line of ${SOLO_REASON_MAX} characters at most`);
+  if (NOT_ONE_LINE.test(raw) || [...reason].length > SOLO_REASON_MAX) throw new Error(`[solo] reason is one line of ${SOLO_REASON_MAX} characters at most`);
   return { maintainer: m, since: t.since, reason };
 }
+
+/** What a reason on one line never holds (check-governance's NOT_ONE_LINE): a control, format, line or paragraph separator character. */
+const NOT_ONE_LINE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /** The exception in force, as the last sync wrote it beside the list (governance_solo: one row, or none). */
 export const SOLO_SQL = "SELECT maintainer, since, reason FROM governance_solo WHERE id = 1";
@@ -99,6 +106,12 @@ export const SELF_REVIEWED = "self-reviewed (solo-maintainer exception)";
 export type SoloMark = { maintainer: string; since: string };
 export function soloMark(s: Solo): SoloMark {
   return { maintainer: s.maintainer, since: s.since };
+}
+
+/** A task's or a payload's `solo_exception`, as written by a door (soloMark), or null for anything else. */
+export function soloMarkOf(v: unknown): SoloMark | null {
+  const m = v as Partial<SoloMark> | null | undefined;
+  return m && typeof m === "object" && typeof m.maintainer === "string" && typeof m.since === "string" ? { maintainer: m.maintainer, since: m.since } : null;
 }
 
 /**
@@ -140,11 +153,6 @@ export async function roleFor(env: Env, login: string): Promise<"maintainer" | "
 }
 
 /**
- * Reads the file on main and applies it when it changed: the list replaced,
- * every registered contributor's role recomputed, each change a `role` line
- * in the journal. Returns a one-line log.
- */
-/**
  * What this brain reads of the file, beside its text, in the hash it keeps:
  * a brain that reads more of it (the [solo] table, #394) applies a file it
  * has seen before once more, so a table merged while an older brain synced —
@@ -153,6 +161,11 @@ export async function roleFor(env: Env, login: string): Promise<"maintainer" | "
  */
 const GOVERNANCE_READS = "maintainers+solo";
 
+/**
+ * Reads the file on main and applies it when it changed: the list replaced,
+ * every registered contributor's role recomputed, each change a `role` line
+ * in the journal. Returns a one-line log.
+ */
 export async function syncGovernance(env: Env, fetcher: typeof fetch = fetch): Promise<string> {
   const res = await fetcher(RAW, { headers: { "user-agent": "omarchy-pool" }, cf: { cacheTtl: 120 } } as RequestInit);
   if (!res.ok) throw new Error(`${GOVERNANCE_FILE}: HTTP ${res.status}`);
@@ -256,9 +269,11 @@ function soloLine(was: Solo | null, now: Solo | null): string | null {
 /**
  * The journal lines of the decisions taken under the exception (#394): every door that let its maintainer through writes
  * `solo_exception` into its line's payload — a claim, a release (`review`), an approval, a rejection, changes asked for (`approve`)
- * and an adoption (`adopt`) — and only those kinds hold them. Through the journal's (kind, id) index, newest first.
+ * and an adoption (`adopt`) — and only those kinds hold them. Only the Worker's own doors write these kinds: POST /events refuses
+ * them to every job token (routes/events.ts RESERVED_KINDS), so no job's line is counted as a decision. A mark is who and since
+ * when, both text, as soloMarkOf reads it. Through the journal's (kind, id) index, newest first.
  */
-const SELF_REVIEWED_WHERE = "kind IN ('review', 'approve', 'adopt') AND json_extract(payload, '$.solo_exception') IS NOT NULL";
+const SELF_REVIEWED_WHERE = "kind IN ('review', 'approve', 'adopt') AND json_type(payload, '$.solo_exception.maintainer') = 'text' AND json_type(payload, '$.solo_exception.since') = 'text'";
 export const SELF_REVIEWED_SQL = `SELECT id, kind, status, summary, payload, created_at FROM events WHERE ${SELF_REVIEWED_WHERE} ORDER BY id DESC LIMIT ?`;
 export const SELF_REVIEWED_COUNT_SQL = `SELECT COUNT(*) AS n FROM events WHERE ${SELF_REVIEWED_WHERE}`;
 /**
@@ -312,17 +327,21 @@ function decisionWord(kind: string, status: string, p: Record<string, unknown>):
  * Public: the record is everyone's.
  */
 export async function handleSelfReviewed(env: Env, url: URL): Promise<Response> {
-  const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? 100) || 100, 200));
+  // A whole number of rows: SQLite refuses a LIMIT that is not one (1.5 is "datatype mismatch").
+  const limit = Math.max(1, Math.min(Math.trunc(Number(url.searchParams.get("limit") ?? 100)) || 100, 200));
+  // The signed record a line names is the pool's own (decisionRecord's recordUrl), or none: the page links it for every reader.
+  const records = `${env.POOL_URL}/`;
   const [rows, count, solo] = await Promise.all([
     env.DB.prepare(SELF_REVIEWED_SQL).bind(limit).all<{ id: number; kind: string; status: string; summary: string; payload: string | null; created_at: string }>(),
     env.DB.prepare(SELF_REVIEWED_COUNT_SQL).first<{ n: number }>(),
     soloOf(env),
   ]);
-  const decisions: SelfReviewed[] = rows.results.map((r) => {
+  const decisions: SelfReviewed[] = rows.results.map((r): SelfReviewed | null => {
     let p: Record<string, unknown> = {};
     try { p = r.payload ? (JSON.parse(r.payload) as Record<string, unknown>) : {}; } catch { p = {}; }
-    const mark = p.solo_exception as { maintainer: string; since: string };
-    return { id: r.id, kind: r.kind, at: r.created_at, summary: r.summary, name: typeof p.name === "string" ? p.name : null, by: typeof p.by === "string" ? p.by : null, decision: decisionWord(r.kind, r.status, p), record: typeof p.record === "string" ? p.record : null, solo_exception: { maintainer: mark.maintainer, since: mark.since } };
-  });
+    const mark = soloMarkOf(p.solo_exception);
+    if (!mark) return null;
+    return { id: r.id, kind: r.kind, at: r.created_at, summary: r.summary, name: typeof p.name === "string" ? p.name : null, by: typeof p.by === "string" ? p.by : null, decision: decisionWord(r.kind, r.status, p), record: typeof p.record === "string" && p.record.startsWith(records) ? p.record : null, solo_exception: mark };
+  }).filter((d): d is SelfReviewed => d !== null);
   return json({ solo, count: count?.n ?? 0, decisions }, 200, { "cache-control": "public, max-age=60" });
 }

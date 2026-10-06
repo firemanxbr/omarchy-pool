@@ -7,9 +7,11 @@
 #   says it is in force;
 # - one that is not is refused, with its reason: an unknown login, a login
 #   that is not a maintainer, more than one maintainer (a list), no reason, a
-#   reason over more than one line, a date that does not parse (or is no
-#   date at all, or a TOML date not written as a string), a field it does not
-#   know, a value that is no table;
+#   reason over more than one line (or holding a control or format
+#   character) or over 300 characters — counted as the Worker counts them,
+#   code points — a date that does not parse (or is no date at all, or a TOML
+#   date not written as a string), a field it does not know, a value that is
+#   no table;
 # - the table changes neither CODEOWNERS nor the host agent's pin of the
 #   co-signature (crates/omarchy-agent/src/verify/maintainers.toml): turning
 #   the exception on or off is a governance pull request, never a new agent;
@@ -64,6 +66,9 @@ cmp -s "$tree/crates/omarchy-agent/src/verify/maintainers.toml" "$tmp/pin" || fa
 file "$(printf '[solo]\nmaintainer = "bob"\nsince = "2028-02-29"\nreason = "  leap day, one line  "')"
 gov || fail "a leap day: $(cat "$tmp/out")"
 grep -qF "solo-maintainer exception: bob since 2028-02-29" "$tmp/out" || fail "bob, since a leap day: $(cat "$tmp/out")"
+# A reason counted as the Worker counts it (parseSolo): code points, never UTF-16 units — 200 characters outside the BMP are 200.
+file "$(printf '[solo]\nmaintainer = "alice"\nsince = "2026-10-06"\nreason = "%s"' "$(printf '\360\237\230\200%.0s' {1..200})")"
+gov || fail "200 emoji are 200 characters, as parseSolo counts them: $(cat "$tmp/out")"
 echo "ok: a [solo] table that is exactly the exception is taken and said, and changes neither CODEOWNERS nor the agent's pin"
 
 # 3. Anything else is refused, with why.
@@ -105,6 +110,17 @@ reason = """
 two
 lines"""'
 refuses "[solo] reason is one line of 300 characters at most" "$(printf '[solo]\nmaintainer = "alice"\nsince = "2026-10-06"\nreason = "%s"' "$(printf 'x%.0s' {1..301})")"
+# The Worker refuses these as well (worker/test/governance.test.ts): 301 characters outside the BMP, and a control or format character
+# anywhere — a tab, a byte-order mark, which Python's strip() keeps and JavaScript's trim() takes away.
+refuses "[solo] reason is one line of 300 characters at most" "$(printf '[solo]\nmaintainer = "alice"\nsince = "2026-10-06"\nreason = "%s"' "$(printf '\360\237\230\200%.0s' {1..301})")"
+refuses "[solo] reason is one line of 300 characters at most" '[solo]
+maintainer = "alice"
+since = "2026-10-06"
+reason = "a\ttab inside"'
+refuses "[solo] reason is one line of 300 characters at most" '[solo]
+maintainer = "alice"
+since = "2026-10-06"
+reason = "\uFEFFa byte-order mark first"'
 refuses '[solo] since must be a date, written "YYYY-MM-DD"' '[solo]
 maintainer = "alice"
 since = "2026-02-30"

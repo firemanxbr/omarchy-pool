@@ -12,7 +12,7 @@ import { packageRows, parseTargets, settleTargets, targetsOf, type PackageRows, 
 import { throughWords, type Through } from "../agents";
 import { decidedWith, justNowWords, type PasskeyGate } from "./passkeys";
 import { placements, type PlacementView } from "./factory";
-import { SELF_REVIEWED, soloMark, soloOf, type Solo, type SoloMark } from "../governance";
+import { SELF_REVIEWED, soloMark, soloMarkOf, soloOf, type Solo, type SoloMark } from "../governance";
 
 /**
  * Review: what maintainers do with staged builds (docs/GOVERNANCE.md). A
@@ -631,12 +631,6 @@ export function claimOf(p: Pick<PackageBuilds, "project" | "staged">): number[] 
   if (!p.project.some(live)) return [];
   const undecided = new Set(p.staged.map((s) => s.id));
   return p.project.filter((b) => live(b) || (b.status === "staged" && undecided.has(b.review))).map((b) => b.id);
-}
-
-/** A task's or a payload's `solo_exception`, as written by a door (soloMark), or null for anything else. */
-export function soloMarkOf(v: unknown): SoloMark | null {
-  const m = v as Partial<SoloMark> | null | undefined;
-  return m && typeof m === "object" && typeof m.maintainer === "string" && typeof m.since === "string" ? { maintainer: m.maintainer, since: m.since } : null;
 }
 
 /** The contributor's build a project's rebuild answers (its params' `review`), or null for any other task. */
