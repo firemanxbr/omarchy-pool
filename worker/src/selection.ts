@@ -377,13 +377,28 @@ function heldBy(fleet: Fleet, m: Member): Held[] {
   return m.legacy ? [] : fleet.leases.filter((l) => l.by === m.id);
 }
 
+/**
+ * A host's free units (§7.3): for a task — a build, a trial, an audit — and for a pool job. One unit is kept for pool jobs and nothing
+ * else takes it, so the tasks share the units less that one, or less what the pool jobs hold when they hold more; a pool job takes
+ * whatever is free, the kept unit first. A pool job running holds the kept unit, never a task's (#340): the minimum host runs its one
+ * build beside a sync, the Studio its five beside one, whichever was leased first.
+ */
+export function roomOf(m: Pick<Member, "units">, held: Pick<Held, "kind" | "units">[], r: Pick<Rules, "job_reserved">): { task: number; job: number } {
+  let tasks = 0;
+  let jobs = 0;
+  for (const l of held) {
+    if (TASK_KINDS.includes(l.kind)) tasks += l.units;
+    else jobs += l.units;
+  }
+  return { task: m.units - Math.max(r.job_reserved, jobs) - tasks, job: m.units - tasks - jobs };
+}
+
 /** Why a candidate does not fit a host's free capacity now, or null: units (the reserved one for pool jobs only), agent slots, disk. */
 export function noRoom(m: Member, held: Held[], c: Pick<Candidate, "kind" | "model">, units: number, disk: number | null, r: Rules): string | null {
   // A legacy registration is one build: any one task of a build's units or fewer.
   if (m.legacy) return units > r.build_per_size ? "units" : null;
-  const used = held.reduce((n, l) => n + l.units, 0);
-  const limit = TASK_KINDS.includes(c.kind) ? m.units - r.job_reserved : m.units;
-  if (used + units > limit) return "units";
+  const room = roomOf(m, held, r);
+  if (units > (TASK_KINDS.includes(c.kind) ? room.task : room.job)) return "units";
   // The memory available holds fewer than the free units: this claim takes only what still fits (§7.6).
   if (m.offer !== undefined && units > m.offer) return "memory";
   if (c.model && held.filter((l) => l.model).length >= m.agent_slots) return "agent slot";
@@ -630,7 +645,7 @@ export function select(H: Member, fleet: Fleet, candidates: Candidate[], now: nu
   // and holding for it would idle H until the mark's two hours are up. A mark set at this very claim, after the reads, comes with its
   // task (routes/factory.ts selectAndLease adds it): it fits no host now, so it holds while H's free units are below it.
   const marked = mark ? candidates.find((c) => c.id === mark.task) : undefined;
-  const free = H.units - r.job_reserved - held.reduce((n, l) => n + l.units, 0);
+  const free = roomOf(H, held, r).task;
   const holding = mark !== null && marked !== undefined && free < unitsOf(marked.kind, sizeOf(marked, largest, r)?.size ?? null, r);
   const pool = holding ? candidates.filter((c) => c.id === mark.task || !TASK_KINDS.includes(c.kind)) : candidates;
   // A native-lane task for H is queued: the emulated lanes keep to their share while it waits.
@@ -725,7 +740,7 @@ export function reserve(fleet: Fleet, oldest: Candidate[], queued: (task: number
   const leased = ownersLeased(fleet);
   // No valid mark stands (kept is false): every registration is weighed as not reserving, and without a claim's memory offer.
   const claiming = fleet.members.filter((m) => counts(m, now) && !m.drained && !m.behind).map((m) => ({ ...m, reserving: null, offer: undefined }));
-  const free = (m: Member) => m.units - r.job_reserved - heldBy(fleet, m).reduce((n, l) => n + l.units, 0);
+  const free = (m: Member) => roomOf(m, heldBy(fleet, m), r).task;
   for (const c of oldest) {
     if (c.kind !== "build" || now - c.queued_at <= RESERVE_AFTER_MS) continue;
     if (cooling(c.reserved_at, now)) continue;

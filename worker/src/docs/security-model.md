@@ -136,8 +136,9 @@ secret). Everything travels in the `Authorization` header over TLS only.
   legacy pool worker runs them, under a 2 GB memory limit and a time limit,
   killed whole when it overruns; it never holds the host's worker token, and
   it reaches no task network. The containers its scripts start run package
-  code (a health check's pacman, an ABI gate's install of a ring), so they
-  go through the one spec: the job's only engine is `omarchy-task-run`
+  code (a health check's pacman, an ABI gate's install of a ring, the
+  enqueue's reader, which sources the recipes on `main`), so they go
+  through the one spec: the job's only engine is `omarchy-task-run`
   (`RUNTIME`, and `docker` and `podman` first on its `PATH`), which takes the
   one shape the scripts use — `run --rm --platform … [-e KEYRING=…] -v
   <the job's scratch dir>:/repo[:ro] <an image the release pins> bash

@@ -33,7 +33,10 @@
 //! native aarch64 image registered for `x86_64`). Only the helper containers
 //! of `health`, `promote` and `security` run a ring's architecture: through
 //! the `omarchy-task-run` shim ([`super::shim`]) on a lane of it, native or
-//! emulated, and only those kinds get a /28 for them.
+//! emulated. `enqueue` reads the PKGBUILDs on `main` in a helper too
+//! (`reconcile.rs`: their recipes are package code), on the host's own native
+//! arch, a lane every host has. Only those kinds get a /28 for them; every
+//! other kind's engine calls are refused.
 //!
 //! **Across a restart** the child does not survive its dispatcher (it lives
 //! in the dispatcher's container): a job that was running is failed `lost`
@@ -56,9 +59,11 @@ pub const POOL_KINDS: [&str; 11] = [
     "sync", "render", "promote", "rollback", "security", "gc", "verify", "relayout", "enqueue",
     "publish", "health",
 ];
-/// The pool jobs whose scripts start helper containers of a ring's architecture (selection.ts
-/// `helperArches`): the health check, a promotion's ABI gates and health checks, the fast-track's.
-pub const HELPER_KINDS: [&str; 3] = ["health", "promote", "security"];
+/// The pool jobs that start helper containers: of a ring's architecture (selection.ts
+/// `helperArches`) — the health check, a promotion's ABI gates and health checks, the fast-track's —
+/// and the enqueue's PKGBUILD reader, on the host's native arch (which the pool needs no lane
+/// for: every host runs its own).
+pub const HELPER_KINDS: [&str; 4] = ["health", "promote", "security", "enqueue"];
 /// A job's data rlimit: its heap, and its scripts' (design v2 §9.2).
 pub const MEM_LIMIT: u64 = 2 << 30;
 /// The architectures a ring serves.
@@ -96,9 +101,10 @@ pub fn timeout(kind: &str) -> Duration {
 }
 
 /// The architectures a job's helper containers run (selection.ts `helperArches`): a health
-/// check's ring arch, a promotion's (`params.arch`, or both), the fast-track's both; none for
-/// every other kind.
-pub fn helper_arches(task: &Task) -> Vec<String> {
+/// check's ring arch, a promotion's (`params.arch`, or both), the fast-track's both, the
+/// enqueue's reader the host's `native` one (it runs `pkg-repo work`'s arch, the job's process's);
+/// none for every other kind.
+pub fn helper_arches(task: &Task, native: &str) -> Vec<String> {
     let named = task
         .params
         .get("arch")
@@ -109,6 +115,7 @@ pub fn helper_arches(task: &Task) -> Vec<String> {
         "health" => vec![named.unwrap_or(&task.arch).to_owned()],
         "promote" => named.map_or_else(both, |a| vec![a.to_owned()]),
         "security" => both(),
+        "enqueue" => vec![native.to_owned()],
         _ => Vec::new(),
     }
 }
@@ -413,8 +420,9 @@ mod tests {
 
     #[test]
     fn helpers_run_the_arches_a_job_checks_and_every_other_kind_none() {
+        let arches = |t: &Task| helper_arches(t, "aarch64");
         assert_eq!(
-            helper_arches(&task(
+            arches(&task(
                 "health",
                 "x86_64",
                 json!({ "ring": "rc", "arch": "x86_64" })
@@ -422,11 +430,11 @@ mod tests {
             ["x86_64"]
         );
         assert_eq!(
-            helper_arches(&task("health", "aarch64", json!({ "ring": "rc" }))),
+            arches(&task("health", "aarch64", json!({ "ring": "rc" }))),
             ["aarch64"]
         );
         assert_eq!(
-            helper_arches(&task(
+            arches(&task(
                 "promote",
                 "x86_64",
                 json!({ "from": "rc", "to": "stable" })
@@ -434,18 +442,22 @@ mod tests {
             ["x86_64", "aarch64"]
         );
         assert_eq!(
-            helper_arches(&task("promote", "x86_64", json!({ "arch": "aarch64" }))),
+            arches(&task("promote", "x86_64", json!({ "arch": "aarch64" }))),
             ["aarch64"]
         );
         assert_eq!(
-            helper_arches(&task("security", "x86_64", json!({}))),
+            arches(&task("security", "x86_64", json!({}))),
             ["x86_64", "aarch64"]
         );
+        // The enqueue's PKGBUILD reader: the host's native arch, whatever its row's.
+        assert!(has_helpers("enqueue"));
+        assert_eq!(arches(&task("enqueue", "x86_64", json!({}))), ["aarch64"]);
+        assert_eq!(
+            helper_arches(&task("enqueue", "aarch64", json!({})), "x86_64"),
+            ["x86_64"]
+        );
         for k in POOL_KINDS.iter().filter(|k| !has_helpers(k)) {
-            assert!(
-                helper_arches(&task(k, "x86_64", json!({}))).is_empty(),
-                "{k}"
-            );
+            assert!(arches(&task(k, "x86_64", json!({}))).is_empty(), "{k}");
         }
         // A pool job is none of the task kinds, and the pool's own metrics is not one.
         for k in ["build", "trial", "audit", "metrics"] {

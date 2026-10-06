@@ -2310,13 +2310,18 @@ mod tests {
         let (tdir, _, work) = dirs();
         let scratch = tdir.join("tmp");
         let dir = scratch.join("tmp.Ab3dE5gH9k");
-        // The health check's (and a trial's), read-only; the ABI gate's references, writable.
-        for (script, ro) in [
-            ("check.sh", true),
-            ("export.sh", false),
-            ("build.sh", false),
+        // The health check's (and a trial's), read-only; the ABI gate's references, writable; the
+        // enqueue's PKGBUILD reader (reconcile.rs: it sources recipes, package code), read-only, no keyring.
+        for (script, ro, keyring) in [
+            ("check.sh", true, Some("archlinux")),
+            ("export.sh", false, None),
+            ("build.sh", false, None),
+            ("meta.sh", true, None),
         ] {
-            let p = helper_calls(&helper(&dir, &scratch, script, ro));
+            let p = helper_calls(&Helper {
+                keyring,
+                ..helper(&dir, &scratch, script, ro)
+            });
             check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{script}: {e}\n{p:#?}"));
             let run = p.last().unwrap();
             let has = |s: &str| run.iter().any(|x| x == s);

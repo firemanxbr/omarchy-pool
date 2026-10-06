@@ -14,7 +14,7 @@ import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALI
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, requeueRevoked, revokedRefusal, stopError } from "../lease";
 import { asleepNow, freshSince, parseCapacity, poolJobsOn, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, HOST_REPORT_FRESH_MIN, hostClaimRefusal, MAX_SIZE, MIN_HOST, poolBehindOf, REVERTED_COLUMNS, revertedOf, SOAK_COLUMNS, soakOf, TASK_UNITS, type Capacity, type HostClaimRow, type PoolBehind, type RevertedColumns } from "../hosts";
-import { largestSize, ownerCap, ownersLeased, placementOf, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules } from "../selection";
+import { largestSize, ownerCap, ownersLeased, placementOf, reserve, roomOf, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
@@ -1093,10 +1093,11 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
 
   // The claimer's room now, as selection.ts counts it (noRoom), for the statements: a legacy registration is one build.
   const held = host ? leases.filter((l) => l.by === me.id) : [];
-  const used = held.reduce((n, l) => n + l.units, 0);
   const offer = me.offer ?? Number.POSITIVE_INFINITY;
-  const roomTask = host ? Math.min(me.units - rules.job_reserved - used, offer) : rules.build_per_size;
-  const roomJob = host ? Math.min(me.units - used, offer) : rules.build_per_size;
+  // A pool job it holds takes the unit kept for them, never a task's (#340, roomOf).
+  const room = roomOf(me, held, rules);
+  const roomTask = host ? Math.min(room.task, offer) : rules.build_per_size;
+  const roomJob = host ? Math.min(room.job, offer) : rules.build_per_size;
   const slotFree = !host || held.filter((l) => l.model).length < me.agent_slots;
   const diskFree = host && me.disk ? Math.min(me.disk.work, me.disk.engine) - held.reduce((n, l) => n + (l.kind === "build" ? l.disk_gb : 0), 0) - rules.floor_gb : null;
   const largest = largestSize(fleet, nowMs, rules);
@@ -1285,10 +1286,15 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   }
   const choices = select(me, fleet, all, nowMs, rules);
   const hostOk = k.hostId ? ` AND ${HOST_MAY_LEASE_SQL} AND ${HOST_AWAKE_SQL}` : "";
-  // A host's units, again in the statement itself: what it holds plus this task within its count (the reserved unit for pool jobs only).
-  const guard = host ? " AND (SELECT COALESCE(SUM(l.units), 0) FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ?) + ? <= ?" : "";
+  // A host's units, again in the statement itself, as roomOf counts them: the tasks it holds, plus the unit kept for pool jobs or what
+  // its pool jobs hold when they hold more, plus this one, within its count — for a pool job, nothing kept (the kept unit is its own).
+  const tasksIn = TASK_KINDS.map((x) => `'${x}'`).join(", ");
+  const guard = host
+    ? ` AND (SELECT COALESCE(SUM(CASE WHEN l.kind IN (${tasksIn}) THEN l.units END), 0) + MAX(?, COALESCE(SUM(CASE WHEN l.kind IN (${tasksIn}) THEN NULL ELSE l.units END), 0))
+         FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ?) + ? <= ?`
+    : "";
   for (const c of choices.slice(0, LEASE_TRIES)) {
-    const limit = TASK_KINDS.includes(all.find((x) => x.id === c.id)!.kind) ? me.units - rules.job_reserved : me.units;
+    const kept = TASK_KINDS.includes(all.find((x) => x.id === c.id)!.kind) ? rules.job_reserved : 0;
     // One statement leases it: D1 serialises writes, so two claims never get the same task. A fence belongs to one lease (#277): a
     // queued task never carries one — the requeue clears it — but one a Worker from before the fence requeued would stop the new
     // lease on a worker nobody stopped, so the lease starts without it. A host's lease (#334) carries a new generation, its lane,
@@ -1304,7 +1310,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     )
       .bind(
         k.workerId, plusMinutes(LEASE_MINUTES), at, host ? leaseGen() : null, c.lane, c.size, c.units, c.disk_gb, k.version, host ? k.hc!.claimId : null, c.independent, c.id,
-        ...(hostOk ? [k.hostId, k.hostId, freshSince(nowMs)] : []), ...(guard ? [k.workerId, c.units, limit] : []),
+        ...(hostOk ? [k.hostId, k.hostId, freshSince(nowMs)] : []), ...(guard ? [kept, k.workerId, c.units, me.units] : []),
       )
       .first<TaskRow>();
     if (!task) continue;

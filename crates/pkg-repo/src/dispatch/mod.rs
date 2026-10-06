@@ -1408,7 +1408,8 @@ impl Dispatcher {
         let rdir = self.ctx.release_dir(&live.lease.release);
         let scratch = tdir.join("tmp");
         let lanes = self.lanes_now();
-        let missing: Vec<String> = jobs::helper_arches(&live.lease.task)
+        let native = capacity::read(&self.capacity_file).map_or_else(native_arch, |c| c.arch);
+        let missing: Vec<String> = jobs::helper_arches(&live.lease.task, &native)
             .into_iter()
             .filter(|a| !lanes.contains(a))
             .collect();
@@ -1433,12 +1434,11 @@ impl Dispatcher {
         } else {
             None
         };
-        let native = capacity::read(&self.capacity_file).map_or_else(native_arch, |c| c.arch);
         let spec = jobs::Spec {
             task: live.lease.task.clone(),
             api: self.ctx.pool.api_url().to_owned(),
             pool: self.ctx.pool_url.clone(),
-            arch: native,
+            arch: native.clone(),
             work_dir: self.ctx.work_root.join("jobs"),
             repo_dir: rdir.clone(),
             scratch: scratch.clone(),
@@ -1523,7 +1523,7 @@ impl Dispatcher {
             slot.and_then(|s| self.net.subnets.slot(s))
                 .map(|s| format!(
                     "; its helpers on {} through {}, network {}",
-                    jobs::helper_arches(&live.lease.task).join(" and "),
+                    jobs::helper_arches(&live.lease.task, &native).join(" and "),
                     shim::NAME,
                     s.cidr()
                 ))
@@ -1647,12 +1647,22 @@ impl Dispatcher {
         }
         let cap = capacity::read(&self.capacity_file);
         let used: u32 = self.leases.values().map(|v| v.lease.units).sum();
+        let jobs_used: u32 = self
+            .leases
+            .values()
+            .filter(|v| v.is_job())
+            .map(|v| v.lease.units)
+            .sum();
         // What a task may take now (§7.6, #337): the units beside its leases and the job unit — none when
         // fewer units than leases remain (a cap lowered: nothing running is killed, it claims nothing until
         // they fit) — and, when MemAvailable is below the largest task it could receive, only what the memory
         // still holds: another workload on the machine leaves it what still fits, or nothing this round.
+        // A pool job running holds the job unit, never a task's (#340, design v2 §7.3: the minimum host runs
+        // its one build beside it), as the pool counts it (selection.ts roomOf).
         let free = cap.as_ref().map_or(0, |c| {
-            c.units.saturating_sub(c.job_reserved).saturating_sub(used)
+            c.units
+                .saturating_sub(c.job_reserved.max(jobs_used))
+                .saturating_sub(used - jobs_used)
         });
         // What the leases just started still owe the memory: their whole share, from their claim until
         // MEM_RAMP after their container started — a burst of claims never offers the same memory twice.
@@ -1918,7 +1928,8 @@ impl Dispatcher {
                         .collect()
                 })
                 .unwrap_or_default();
-            let missing: Vec<String> = jobs::helper_arches(&task)
+            let native = cap.map_or_else(native_arch, |c| c.arch.clone());
+            let missing: Vec<String> = jobs::helper_arches(&task, &native)
                 .into_iter()
                 .filter(|a| !lanes.contains(a))
                 .collect();

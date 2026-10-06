@@ -69,7 +69,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  alive, apart, auditElsewhere, buildsOf, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, otherModels, ownerCap, ownersLeased, placementOf, requesterHost, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
+  alive, apart, auditElsewhere, buildsOf, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, otherModels, ownerCap, ownersLeased, placementOf, requesterHost, reserve, roomOf, select, sizeOf, takes, thresholdMs, unitsOf,
   ALIVE_MS, ELSEWHERE_MS, HELPER_KINDS, LANE_KINDS, MIN, MODEL_WINDOW_MS, RING_ARCHES, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
   type Candidate, type Fleet, type Held, type Independence, type Machine, type Member, type Mode,
 } from "../src/selection";
@@ -339,6 +339,34 @@ describe("native only", () => {
     // A host whose probe fails takes no model work at all.
     const mute = host("mute", "aarch64", 11, { probe_ok: false });
     expect(select(mute, { members: [mute], leases: [] }, [task({ arch: "aarch64", kind: "audit", model: true })], T0, R)).toEqual([]);
+  });
+
+  it("a pool job leased first holds the kept unit, never a task's: the minimum host runs its build beside a sync, the Studio its five, whichever came first (#340)", () => {
+    const lease = (by: string, kind: string, units: number, n: number): Held => ({ task: 7000 + n, by, kind, arch: "aarch64", lane: kind === "build" ? "native" : null, units, model: false, trust: "project", owner: null, disk_gb: kind === "build" ? 20 : 0 });
+    // 4 cores, 8 GB: 3 units, one build and the kept unit (design v2 §7.3).
+    const min = host("min", "aarch64", 3);
+    const build = task({ arch: "aarch64" });
+    expect(roomOf(min, [lease("min", "sync", 1, 1)], R)).toEqual({ task: 2, job: 2 });
+    expect(noRoom(min, [lease("min", "sync", 1, 1)], build, 2, 20, R)).toBeNull();
+    expect(select(min, { members: [min], leases: [lease("min", "sync", 1, 1)] }, [build], T0, R)).toHaveLength(1);
+    // The other order, as before: a build held, the sync takes the kept unit — and once both run, nothing more of either.
+    expect(noRoom(min, [lease("min", "build", 2, 2)], { kind: "sync", model: false }, 1, null, R)).toBeNull();
+    const both = [lease("min", "sync", 1, 1), lease("min", "build", 2, 2)];
+    expect(noRoom(min, both, build, 2, 20, R)).toBe("units");
+    expect(noRoom(min, both, { kind: "audit", model: false }, 1, null, R)).toBe("units");
+    expect(noRoom(min, both, { kind: "render", model: false }, 1, null, R)).toBe("units");
+    // The Studio: a sync first, then five builds beside it, the sixth waits.
+    const studio = host("studio", "aarch64", 11);
+    const s = new Sim([studio], () => 600);
+    s.add({ arch: "aarch64", kind: "sync", priority: 10 });
+    s.run(1);
+    expect(s.held("studio").map((l) => l.kind)).toEqual(["sync"]);
+    s.add({ arch: "aarch64" }, 6);
+    s.run(1);
+    expect(s.held("studio", (l) => l.kind === "build")).toHaveLength(5);
+    expect(s.held("studio").reduce((n, l) => n + l.units, 0)).toBe(11);
+    // The reservation counts the same free units: a host that holds a pool job has the task units it would have without it.
+    expect(roomOf(studio, [lease("studio", "sync", 1, 1)], R).task).toBe(roomOf(studio, [], R).task);
   });
 
   it("never more units than the host's count: a pool cap or a smaller declaration holds the rest in the queue", () => {

@@ -3614,6 +3614,72 @@ fn a_sync_runs_while_every_build_unit_and_every_other_unit_holds_model_work() {
 }
 
 #[test]
+fn a_job_holds_the_job_unit_never_a_tasks_and_a_second_job_handed_meanwhile_is_given_back() {
+    // The minimum host (design v2 §7.3): 3 units, one build and the job unit. A sync leased first
+    // holds the job unit; the build still starts beside it, whichever came first.
+    let h = H::new();
+    h.units(3);
+    let mut d = h.dispatcher();
+    let pid = h.out("sync-min.pid");
+    h.launch
+        .set(64, &format!("echo $$ > {}; sleep 600", pid.display()));
+    h.give(job(
+        64,
+        "sync",
+        "x86_64",
+        json!({ "arch": "x86_64", "sources": "[]" }),
+        &gen_of(0),
+    ));
+    h.until(&mut d, "the sync started", |_| alive(&pid));
+    // The claim offers a build's two units, and none of the pool's kinds (one job at a time).
+    h.advance(31);
+    d.tick();
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], 1);
+    assert!(c.get("offer").is_none(), "every task unit offered: {c}");
+    assert!(!c["kinds"].as_array().unwrap().contains(&json!("render")));
+    // A second job handed anyway (a stale answer, a pool that did not read `kinds`): given back with
+    // its attempt, never started — the jobs share one work directory.
+    let second = h.out("render-66.started");
+    h.launch
+        .set(66, &format!("touch {}; {JOB_DONE}", second.display()));
+    h.give(job(
+        66,
+        "render",
+        "x86_64",
+        json!({ "ring": "edge", "arch": "x86_64" }),
+        &gen_of(1),
+    ));
+    h.advance(31);
+    h.ticks(&mut d, 2);
+    let f = h.pool.fails_of(66);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0]["lost"], true);
+    assert!(h.leases().iter().all(|l| l.task.id != 66));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!second.exists(), "the second job never ran");
+    // The build: started beside the sync.
+    h.give(community(65, &gen_of(2)));
+    h.advance(31);
+    h.ticks(&mut d, 4);
+    assert!(h.pool.fails_of(65).is_empty(), "{:?}", h.pool.fails_of(65));
+    assert!(
+        h.engine.has(65, &gen_of(2)),
+        "the build runs beside the sync"
+    );
+    let mut held: Vec<(u64, u32)> = h.leases().iter().map(|l| (l.task.id, l.units)).collect();
+    held.sort_unstable();
+    assert_eq!(held, [(64, 1), (65, 2)]);
+    assert!(alive(&pid), "the sync goes on");
+    // Every unit held now: want 0.
+    h.advance(31);
+    d.tick();
+    assert_eq!(h.pool.last_claim()["want"], 0);
+    d.kill_jobs();
+    assert!(gone(&pid));
+}
+
+#[test]
 fn a_health_check_gets_the_shims_context_on_a_lane_of_its_ring_and_one_without_such_a_lane_is_given_back(
 ) {
     let h = H::new();
@@ -3698,6 +3764,43 @@ fn a_health_check_gets_the_shims_context_on_a_lane_of_its_ring_and_one_without_s
         );
     }
     assert!(h.leases().is_empty());
+}
+
+#[test]
+fn an_enqueue_reads_its_recipes_through_the_shim_on_the_hosts_own_arch() {
+    // Its PKGBUILD reader sources recipes — package code — so it is a helper through the spec
+    // (reconcile.rs), on the dispatcher's native arch: an x86_64 row's enqueue on this aarch64-only
+    // host gets the shim's context, never a refusal for want of one.
+    let h = H::new();
+    let mut d = h.dispatcher();
+    let (env, ctx) = (h.out("env-80"), h.out("helper-80.json"));
+    h.launch.set(
+        80,
+        &format!(
+            "env > {}; cp \"$JOB_DIR/helper.json\" {}; {JOB_DONE}",
+            env.display(),
+            ctx.display()
+        ),
+    );
+    h.give(job(80, "enqueue", "x86_64", json!({}), GEN));
+    h.until(&mut d, "the enqueue's report", |h| {
+        !h.pool.completes_of(80).is_empty()
+    });
+    let c: shim::Context = serde_json::from_slice(&std::fs::read(&ctx).unwrap()).unwrap();
+    assert_eq!((c.task, c.gen.as_str()), (80, GEN));
+    assert_eq!(c.arches, ["aarch64"]);
+    assert_eq!(c.scratch, h.tdir(80, GEN).join("tmp"));
+    let env = std::fs::read_to_string(&env).unwrap();
+    assert!(env.lines().any(|l| l
+        == format!(
+            "OMARCHY_TASK_RUN={}",
+            h.tdir(80, GEN).join("helper.json").display()
+        )));
+    assert!(env.lines().any(|l| l
+        == format!(
+            "RUNTIME={}",
+            h.work.join("state/bin/omarchy-task-run").display()
+        )));
 }
 
 #[test]

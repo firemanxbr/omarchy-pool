@@ -13,8 +13,9 @@
 //! run --rm --platform linux/<amd64|arm64> [-e KEYRING=<keyring>] -v <dir>:/repo[:ro] <image@sha256:…> bash /repo/<script>.sh
 //! ```
 //!
-//! — the shape `tests/health-check.sh`, `tests/trial.sh`, `tests/abi-gate.sh`
-//! and `tests/omarchy-rootfs.sh` use, its flags in any order, each once — and
+//! — the shape `tests/health-check.sh`, `tests/trial.sh`, `tests/abi-gate.sh`,
+//! `tests/omarchy-rootfs.sh` and the enqueue's PKGBUILD reader (`reconcile.rs`)
+//! use, its flags in any order, each once — and
 //! refuses anything else (another verb, flag, mount, variable or command)
 //! before any engine call, with the engine CLI's own code for a `run` it
 //! could not start (125). What it accepts must also fit the job: an
@@ -374,6 +375,12 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(export.arch, "aarch64");
+        // The enqueue's PKGBUILD reader (reconcile.rs): its staged recipes read-only, no keyring.
+        let meta = parse(&argv(&format!(
+            "run --rm --platform linux/arm64 -v /w/tasks/9-g_0123456789abcdef/tmp/meta.123.456:/repo:ro {ALARM_BASE} bash /repo/meta.sh"
+        )))
+        .unwrap();
+        assert!(meta.read_only && meta.keyring.is_none() && meta.script == "meta.sh");
         // Its flags in any order.
         assert!(parse(&argv(&format!(
             "run -v /w/t/tmp/x:/repo:ro --platform linux/arm64 --rm -e KEYRING=archlinuxarm {ALARM_BASE} bash /repo/check.sh"

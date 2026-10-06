@@ -1641,7 +1641,10 @@ so a size-4 build waits for memory rather than run smaller.
 
   The next claim of each host reads it. Its dispatcher runs one pool job at
   a time, in the unit kept for them — so a sync starts while every other
-  unit holds builds and model work —, each in a process of its own
+  unit holds builds and model work, and a build starts beside a running
+  sync: the job holds the kept unit, never a task's (the minimum host's 3
+  units run one build and one job, whichever came first) —, each in a
+  process of its own
   (`pkg-repo pool-job`, its directory `<work root>/tasks/<id>-<gen>/` with
   `job.json`, its `token` renewed at every heartbeat, `result.json`) with a
   2 GB memory limit and a time limit of its kind: 30 min a render, a
@@ -1656,7 +1659,8 @@ so a size-4 build waits for memory rather than run smaller.
   Arch-neutral jobs run in the dispatcher's own native process whatever
   their row's arch; a health check, a promotion's ABI gates and health
   checks and a fast-track's need a lane of each ring arch they check,
-  native or emulated, and their check containers start through
+  native or emulated, and their check containers — and the enqueue's
+  reader of the recipes on `main`, on the host's native arch — start through
   `omarchy-task-run` — the job's own internal network and egress sidecar,
   its unit, the job's scratch directory at `/repo` and nothing else, no
   token. The shim takes only `run --rm --platform … [-e KEYRING=…] -v

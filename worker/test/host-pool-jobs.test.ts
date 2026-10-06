@@ -13,7 +13,9 @@
  *   and a promotion only on a host with a lane of each arch their helpers
  *   check, native or emulated, with no wait;
  * - the reserved job unit: a sync runs while every build unit and every
- *   other unit holds model work, and nothing else may take that unit;
+ *   other unit holds model work, and nothing else may take that unit; a
+ *   pool job leased first holds that unit, never a task's — the minimum
+ *   host still runs its one build beside it, the Studio its five;
  * - the automatic rules on a host row (`autoOrder`): an agent fault leads
  *   only to `recheck-agent` — a fresh probe sidecar —, never `restart`,
  *   whatever the spell's length, where a legacy project worker is
@@ -223,6 +225,50 @@ describe("the reserved job unit", () => {
     expect((await call("POST", `/factory/tasks/${sync}/complete`, { summary: "synced", result: {} }, c.json.token)).status).toBe(200);
     expect((await claim("pj-full", { capacity: cap, leases: held.slice(0, 2) })).status).toBe(204);
     expect((await taskOf(build)).status).toBe("queued");
+  });
+});
+
+describe("a pool job holds the kept unit, never a task's (#340, design v2 §7.3)", () => {
+  /** What its dispatcher lists while it holds a pool job: its tasks, none of the pool's kinds (one job at a time). */
+  const TASKS_ONLY = ["build", "trial", "audit"];
+
+  it("the minimum host (3 units) still starts its one build beside a sync leased first, and nothing more", async () => {
+    await seedHost("pj-min");
+    const cap = capacityOf(4, 8, 3, ARM);
+    const sync = await seedJob("sync", "x86_64", { arch: "x86_64", sources: "[]" }, "pj-min");
+    const build = await seedBuild("ivy", "fay", "pj-min", "https://github.com/fay/ivy@v1:PKGBUILD");
+    const c1 = await claim("pj-min", { capacity: cap });
+    expect(c1.json?.task?.id, JSON.stringify(c1.json)).toBe(sync);
+    // The sync runs for up to 150 min: the build does not wait for it — its claim's room, selection and the lease's own statement agree.
+    const c2 = await claim("pj-min", { capacity: cap, leases: [lease(c1)], kinds: TASKS_ONLY });
+    expect(c2.status, JSON.stringify(c2.json)).toBe(200);
+    expect(c2.json.task.id).toBe(build);
+    expect((await leasedTo("pj-min")).map((t) => [t.kind, t.units])).toEqual([["sync", 1], ["build", 2]]);
+    // Every unit held: another build and an audit wait.
+    const more = await seedBuild("jay", "gil", "pj-min", "https://github.com/gil/jay@v1:PKGBUILD");
+    expect((await claim("pj-min", { capacity: cap, leases: [lease(c1), lease(c2)], kinds: TASKS_ONLY })).status).toBe(204);
+    expect((await taskOf(more)).status).toBe("queued");
+  });
+
+  it("the Studio (11 units) starts five builds beside a job leased first; the sixth waits", async () => {
+    await seedHost("pj-five");
+    const cap = capacityOf(12, 32, 11, ARM);
+    const verify = await seedJob("verify", "x86_64", {}, "pj-five");
+    const builds: number[] = [];
+    for (const n of ["a", "b", "c", "d", "e", "f"]) builds.push(await seedBuild(`k${n}`, `owner-${n}`, "pj-five", `https://github.com/owner-${n}/k${n}@v1:PKGBUILD`));
+    const c = await claim("pj-five", { capacity: cap });
+    expect(c.json?.task?.id, JSON.stringify(c.json)).toBe(verify);
+    const held = [lease(c)];
+    for (let i = 0; i < 5; i++) {
+      const b = await claim("pj-five", { capacity: cap, leases: held, kinds: TASKS_ONLY });
+      expect(b.status, `build ${i + 1}: ${JSON.stringify(b.json)}`).toBe(200);
+      expect(b.json.task.kind).toBe("build");
+      held.push(lease(b));
+    }
+    expect((await claim("pj-five", { capacity: cap, leases: held, kinds: TASKS_ONLY })).status).toBe(204);
+    const leased = await leasedTo("pj-five");
+    expect(leased.filter((t) => t.kind === "build")).toHaveLength(5);
+    expect(leased.reduce((n, t) => n + t.units, 0)).toBe(11);
   });
 });
 

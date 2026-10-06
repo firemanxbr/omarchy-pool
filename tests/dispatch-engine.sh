@@ -24,7 +24,8 @@
 #   5. the disk watcher: below the floor, the youngest build is killed `lost`
 #      and the claims say want 0
 #   6. pool jobs (#340): a health check runs in a child process of the
-#      dispatcher, and its check container goes through omarchy-task-run — on
+#      dispatcher under its 2 GB data rlimit, which its script inherits, and
+#      its check container goes through omarchy-task-run — on
 #      the job's own internal network with its egress sidecar, its scratch
 #      directory read-only, no token, no socket — while any other engine call
 #      of the job is refused; a job that hangs is killed at its timeout and
@@ -141,6 +142,7 @@ code=$?
 "$RUNTIME" run --rm --privileged --platform "$PLATFORM" -v "$WORK:/repo:ro" "$STUB_BASE" bash /repo/check.sh >/dev/null 2>&1; echo "== privileged: $?" >> "$out"
 docker ps >/dev/null 2>&1; echo "== docker ps: $?" >> "$out"
 echo "== runtime: $RUNTIME" >> "$out"
+echo "== data: $(ulimit -d) $(ulimit -H -d)" >> "$out"
 exit "$code"
 STUB
 chmod +x "$tmp/checkout/tests/health-check.sh"
@@ -374,6 +376,8 @@ grep -q '== repo: .*Read-only' "$out" || fail "the check's /repo is writable: $(
 grep -q '== socket: ls: cannot access' "$out" || fail "a socket in the check container: $(grep '== socket' "$out")"
 grep -qx '== privileged: 125' "$out" && grep -qx '== docker ps: 125' "$out" || fail "the shim took a shape it must refuse: $(grep '^== [pd]' "$out")"
 grep -qx "== runtime: $tmp/work/state/bin/omarchy-task-run" "$out" || fail "the job's RUNTIME: $(grep '== runtime' "$out")"
+# The job's 2 GB data rlimit, which pkg-repo pool-job set on itself before anything ran: its script inherits it, soft and hard.
+grep -qx '== data: 2097152 2097152' "$out" || fail "the job's memory limit: $(grep '== data' "$out")"
 until_ 10 "task 20's helper, sidecar and network removed" side_gone 20
 "$RT" inspect --type container "$helper" >/dev/null 2>&1 && fail "task 20's helper survived it"
 claims_jobs() { jq -c 'select(.path == "/api/v1/factory/claim") | .body.kinds' "$tmp/requests.jsonl" | tail -n1 | grep -q '"health"'; }
