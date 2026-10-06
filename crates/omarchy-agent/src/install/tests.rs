@@ -47,6 +47,13 @@ pub(crate) struct Fake {
     pub docker_at: Option<PathBuf>,
     /// The environment of each `colima` call, in order.
     pub colima_env: Vec<Vec<(&'static str, String)>>,
+    /// What the played GitHub serves, by URL; anything else is no network (a download) or
+    /// a 404 (an asset the release may not carry).
+    pub served: BTreeMap<String, Vec<u8>>,
+    /// Every URL downloaded, in order.
+    pub downloaded: Vec<String>,
+    /// GitHub does not answer for an asset the release may not carry.
+    pub assets_unanswered: bool,
 }
 
 impl Default for Fake {
@@ -70,6 +77,9 @@ impl Default for Fake {
             firewall_fails: false,
             docker_at: None,
             colima_env: Vec::new(),
+            served: BTreeMap::new(),
+            downloaded: Vec::new(),
+            assets_unanswered: false,
         }
     }
 }
@@ -211,7 +221,18 @@ impl Sys for Fake {
         self.scopes.clone()
     }
     fn download(&mut self, url: &str) -> Result<Vec<u8>, String> {
-        Err(format!("{url}: no network in this test"))
+        self.downloaded.push(url.to_owned());
+        self.served
+            .get(url)
+            .cloned()
+            .ok_or_else(|| format!("{url}: no network in this test"))
+    }
+    fn download_if_any(&mut self, url: &str) -> Result<Option<Vec<u8>>, String> {
+        self.downloaded.push(url.to_owned());
+        if self.assets_unanswered {
+            return Err(format!("{url}: github.com did not answer"));
+        }
+        Ok(self.served.get(url).cloned())
     }
 }
 
@@ -1627,7 +1648,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
 }
 
 fn verifier() -> TestVerifier {
-    TestVerifier(Rc::new(RefCell::new(T0)))
+    TestVerifier(Rc::new(RefCell::new(T0)), Rc::default())
 }
 
 fn measure_on(h: &Host, sys: &mut Fake) -> (Report, Option<Ready>) {
@@ -1710,6 +1731,113 @@ fn preflight_lists_every_missing_prerequisite_on_one_screen_and_changes_nothing(
         .map_err(|e| e.to_string())
         .unwrap();
     assert!(r.screen().contains("no unit is left"), "{}", r.screen());
+}
+
+#[test]
+fn a_release_without_the_maintainers_co_signature_is_a_blocker_once_the_agent_requires_it() {
+    use crate::verify::cosignature::tests_support::{policy, TestKey};
+    use crate::verify::cosignature::{self, BUNDLE_NAMESPACE};
+    // #330: this agent pins 1-of-1 (Alice); the bundle beside it carries nothing.
+    let h = host(INFO, EGRESS_OK);
+    let alice = TestKey::ed25519("alice", 1);
+    let carol = TestKey::ed25519("carol", 3);
+    let v = TestVerifier(
+        Rc::new(RefCell::new(T0)),
+        Rc::new(RefCell::new(policy(1, &[&alice]))),
+    );
+    let screen = |h: &Host| {
+        let (r, _) = measure(&h.options, &mut Fake::default(), &v, Some(&h.docker))
+            .map_err(|e| e.to_string())
+            .unwrap();
+        (r.ok(), r.screen())
+    };
+    let (ok, s) = screen(&h);
+    assert!(!ok, "{s}");
+    assert!(
+        s.contains("the release bundle is refused (cosignature): the release bundle needs 1 maintainer co-signature(s) (factory/MAINTAINERS.toml); 0 verify"),
+        "{s}"
+    );
+    // Carol's signature where Alice's goes does not count.
+    let archive = fs::read(h.root.join("bundle.tar.gz")).unwrap();
+    let beside = h
+        .root
+        .join(cosignature::file_name("bundle.tar.gz", "alice"));
+    fs::write(&beside, carol.sign(BUNDLE_NAMESPACE, &archive)).unwrap();
+    let (ok, s) = screen(&h);
+    assert!(!ok && s.contains("alice: signed by another key"), "{s}");
+    // Alice's, beside the bundle: nothing blocks.
+    fs::write(&beside, alice.sign(BUNDLE_NAMESPACE, &archive)).unwrap();
+    let (ok, s) = screen(&h);
+    assert!(ok, "{s}");
+}
+
+#[test]
+fn install_from_a_release_asks_github_for_each_pinned_maintainer_s_co_signature() {
+    use crate::verify::cosignature::tests_support::{policy, TestKey};
+    use crate::verify::cosignature::BUNDLE_NAMESPACE;
+    // install.sh's way (`install --release vX.Y.Z`, #330): the bundle, its signature and the
+    // co-signatures are the release's assets. This agent pins 1-of-1 (Alice).
+    let mut h = host(INFO, EGRESS_OK);
+    h.options.source = Some(Source::Release(Release::parse("v1.20.0").unwrap()));
+    let alice = TestKey::ed25519("alice", 1);
+    let carol = TestKey::ed25519("carol", 3);
+    let v = TestVerifier(
+        Rc::new(RefCell::new(T0)),
+        Rc::new(RefCell::new(policy(1, &[&alice]))),
+    );
+    let at = |name: &str| format!("{}/v1.20.0/{name}", crate::run::RELEASES);
+    let archive = fs::read(h.root.join("bundle.tar.gz")).unwrap();
+    let mut sys = Fake::default();
+    sys.served
+        .insert(at("omarchy-host-v1.20.0.tar.gz"), archive.clone());
+    sys.served.insert(
+        at("omarchy-host-v1.20.0.tar.gz.sigstore.json"),
+        fs::read(h.root.join("bundle.sigstore.json")).unwrap(),
+    );
+    let cosignature = at("omarchy-host-v1.20.0.tar.gz.alice.sshsig");
+    let screen = |sys: &mut Fake| {
+        sys.downloaded.clear();
+        let (r, _) = measure(&h.options, sys, &v, Some(&h.docker))
+            .map_err(|e| e.to_string())
+            .unwrap();
+        (r.ok(), r.screen())
+    };
+    // The release carries none (GitHub answers 404): a blocker that says what it lacks.
+    let (ok, s) = screen(&mut sys);
+    assert!(!ok, "{s}");
+    assert!(
+        s.contains("the release bundle is refused (cosignature): the release bundle needs 1 maintainer co-signature(s) (factory/MAINTAINERS.toml); 0 verify"),
+        "{s}"
+    );
+    assert_eq!(
+        sys.downloaded,
+        [
+            cosignature.clone(),
+            at("omarchy-host-v1.20.0.tar.gz"),
+            at("omarchy-host-v1.20.0.tar.gz.sigstore.json"),
+        ]
+    );
+    // Carol's signature where Alice's goes is another key's.
+    sys.served
+        .insert(cosignature.clone(), carol.sign(BUNDLE_NAMESPACE, &archive));
+    let (ok, s) = screen(&mut sys);
+    assert!(!ok && s.contains("alice: signed by another key"), "{s}");
+    // GitHub not answering is said as that, never as a release without its co-signature.
+    sys.assets_unanswered = true;
+    let (ok, s) = screen(&mut sys);
+    assert!(!ok, "{s}");
+    assert!(
+        s.contains(&format!(
+            "GitHub did not answer for the maintainers' co-signature {cosignature}"
+        )) && !s.contains("(cosignature)"),
+        "{s}"
+    );
+    sys.assets_unanswered = false;
+    // Alice's, on the release: nothing blocks.
+    sys.served
+        .insert(cosignature, alice.sign(BUNDLE_NAMESPACE, &archive));
+    let (ok, s) = screen(&mut sys);
+    assert!(ok, "{s}");
 }
 
 #[test]

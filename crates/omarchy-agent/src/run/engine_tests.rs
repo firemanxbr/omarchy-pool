@@ -329,7 +329,7 @@ dedicated = true
         paths,
         State::default(),
         Box::new(FakePool(Rc::clone(&remote))),
-        Box::new(TestVerifier(signed)),
+        Box::new(TestVerifier(signed, Rc::default())),
         Drivers::Fixed,
     );
     agent.driver = Some(Box::new(Compose::new(

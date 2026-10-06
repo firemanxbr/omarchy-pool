@@ -489,19 +489,37 @@ it is:
 6. **Depth bound (D25):** the signed `created` of `to`'s manifest is at most
    14 days before the statement's Rekor integrated time — both signed
    times, never the host's clock and never a count of releases. A deeper
-   rollback is a forward-fix release built from the old code (or, from P5, a
-   maintainer co-signature).
-7. `to`'s own host bundle verifies (`verify --bundle`).
+   statement is taken only with the maintainers' co-signature over its
+   bytes (#330, *The maintainers' co-signature* below): at least one pinned
+   maintainer's, or as many as the agent's threshold when that is higher.
+   Without it, the way back further is a forward-fix release built from the
+   old code.
+7. `to`'s own host bundle verifies (`verify --bundle`), and carries the
+   maintainers' co-signature the agent requires — or the statement does,
+   which then vouches for its target (a release published before the
+   threshold rose has none, and an immutable release takes none later).
 
 It then sets `floor = to`, preempts an in-flight rollout and skips soak and
 the brake. Going forward again needs nothing special.
+
+**Co-signatures travel with it.** A maintainer co-signs a statement once
+`rollback.yml` stored it (`factory/bin/co-sign rollback vX.Y.Z`: the
+statement fetched from the relay, its keyless signature checked, signed
+offline with their security key in the namespace `rollback@omarchy-pool.org`)
+and hands the signature to the pool with their token, at
+`PUT /api/v1/factory/rollback/:to/cosignature`. The pool keeps it in R2 under
+the statement's SHA-256 and the maintainer's login, journals it, and relays
+every one beside the statement as `cosignatures`; a statement signed again
+travels with none of the older ones. The pool checks their shape only: each
+host verifies them against the keys its own agent pins, so a pool can
+withhold a co-signature (the host then stays where it is) and never make one.
 
 **What bounds it.** A statement is only as strong as the run that signed
 it: the `pool` environment admits `main` only and waits for a maintainer's
 approval (#308), and the daily token probe checks that no token the pool
 holds can dispatch `rollback.yml`. One wrongly approved dispatch can send
 hosts back at most 14 days, to a release that is neither revoked nor below
-`min_release`. A pool that withholds a statement keeps hosts where they are;
+`min_release`; further only with a maintainer's security key, offline. A pool that withholds a statement keeps hosts where they are;
 one that serves an older one gains nothing a genuine statement did not
 already allow (its `retracts_through` was at most the highest release then,
 below a host's floor since), and a host that took a newer one refuses it
@@ -513,6 +531,79 @@ images or the deploy fail, and everything is put back) leaves a valid
 signature in Rekor over bytes anyone can rebuild; a pool could serve that
 statement although that rollback never took effect, but a maintainer
 approved that dispatch and every rule above still applies to it.
+
+## The maintainers' co-signature
+
+From #330 (design v2 D1 b, P6), what a maintainer's host takes can be held
+to two signatures: `release.yml`'s keyless one, and an offline signature by
+maintainers' FIDO security keys. A compromised GitHub admin, a malicious
+change merged into `release.yml`, or a stolen signing environment can then
+publish a bundle that verifies, and no host takes it.
+
+- **Why SSH-FIDO, not minisign** (D1 b left the two open): the private key
+  stays on a hardware token and every signature needs a touch, where a
+  minisign key is a file; `ssh-keygen` is already on every maintainer's
+  machine; and the agent verifies the format with the crypto it already
+  carries (aws-lc-rs, sha2), so the co-signature adds no dependency to it.
+- **The keys and the threshold** are `factory/MAINTAINERS.toml`'s
+  `[cosignature]` table: a key per maintainer under their login, or a list
+  of them (a backup security key beside their own; either is that
+  maintainer's one co-signature, never two) — an
+  `sk-ssh-ed25519@openssh.com` key (`ssh-keygen -t ed25519-sk`) or an
+  `sk-ecdsa-sha2-nistp256@openssh.com` one, whose private half never leaves
+  the security key — and `threshold`, counted in maintainers: 0 asks
+  nothing, 1 is 1-of-N, 2 is 2-of-N. A key in a file (`ssh-ed25519`) is
+  refused: it is not offline. Changing the table is a governance pull
+  request another maintainer approves, like any change to the file.
+- **A lost key never strands the hosts.** Each agent requires its own pinned
+  policy of the next release, so the release that drops a key is co-signed
+  under the policy that still lists it. With as many maintainers required as
+  hold a key and one of them holding a single key, losing it would leave
+  that requirement out of reach for good: every host would refuse every later
+  release until it is reinstalled. `factory/bin/check-governance` refuses
+  such a table (keep the threshold below the number of maintainers with a
+  key, or give each a backup key), and a key changes in two releases, one
+  change each (the runbook, *Co-signing a release*).
+- **Where the requirement lives.** `factory/bin/check-governance --write`
+  pins the table into the host agent
+  (`crates/omarchy-agent/src/verify/maintainers.toml`), and CI fails when the
+  two differ. An agent requires what the release it shipped in pinned:
+  nothing the pool says and nothing a manifest says lowers it, and the pool
+  cannot turn it off. An agent moves only to an agent its own requirement
+  accepted — self-update is upward only and needs the co-signed bundle; a
+  rollback's `agent_to` needs a co-signed target or a co-signed statement —
+  so a new key, a removed one or a lower threshold is a new agent, taken
+  under the old one's requirement. A bundle the agent refuses for want of
+  its co-signature does not raise `min_release` or add to `revoked` either,
+  so a release signed by `release.yml` alone cannot shut every host out.
+- **What is signed.** The host bundle's bytes — the archive `release.yml`
+  signs — in the namespace `host-bundle@omarchy-pool.org`, as a release
+  asset `omarchy-host-vX.Y.Z.tar.gz.<login>.sshsig` uploaded to the draft
+  (`factory/bin/co-sign release vX.Y.Z`); a rollback statement's bytes in
+  `rollback@omarchy-pool.org` (above), which the pool keeps beside that
+  statement only (`co-sign` names it by SHA-256; another is 409), and which
+  vouch for the target's bundle when it was published before the threshold
+  rose — on the round that accepts the statement and on its retries, while
+  the floor stands at that target. A signature counts only with the
+  security key's user-presence flag (a touch): software on the maintainer's
+  computer cannot sign without their hand on the key.
+- **Checked twice.** `factory/bin/publish-release` publishes a release only
+  once its co-signatures meet the threshold of this release's
+  `MAINTAINERS.toml`, of the latest published release's however old, and of
+  every release of the last 30 days (their agents verify the new bundle
+  before they update themselves), with `ssh-keygen -Y verify` and the touch
+  flag (which `ssh-keygen` itself does not check); the release stays a draft
+  until then. Each
+  host's agent verifies them again, in Rust, before it applies a bundle or
+  takes its agent, and during install.
+- **What it does not cover, stated plainly.** A host installed from nothing
+  trusts the agent `install.sh` fetched, which `release.yml`'s signature
+  vouches for (the runbook's verifying install); the requirement holds from
+  that agent on. A maintainer who co-signs a bundle they did not read
+  vouches for it: `co-sign release` shows the manifest and checks the keyless
+  signature before it asks for the touch. With a threshold of 1, one
+  maintainer's key and `release.yml` together are enough; 2 asks a second
+  person.
 
 ## Maintainer hosts
 
@@ -658,9 +749,12 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   compromised pool skip the soak; the agent's own update waits with it
   unless the signed manifest sets `agent.urgent` (only a security release
   does). Nothing the pool sends skips it (`reconcile-now`, an Update); a
-  rollback statement does, since only `rollback.yml` signs one, and the
-  soaking host still learns each verified release's `revoked` and
-  `min_release` while it waits. The pool keeps a soaking host's
+  rollback statement does, since only `rollback.yml` signs one — under the
+  rollback rules above as ever, so one deeper than 14 days still needs the
+  maintainers' co-signature (#330) — and the soaking host still learns each
+  verified release's `revoked` and `min_release` while it waits. The soak
+  only delays: a release without the co-signature the agent requires is
+  refused, soaking or not, and moves neither. The pool keeps a soaking host's
   registration out of the 426 gate until the soak its agent reports ends,
   15 minutes more for the round, never more than two hours after the
   deploy and not at all while the host holds the pool's release in
@@ -911,6 +1005,8 @@ instead of stopping them.
 | a maintainer's signed-in browser, driven by an agent | what the session decides alone: request changes, reject, withdraw, a lift, a claim, a pool job by hand other than a forced promotion, a dry run by hand, and orders to any worker (20 an hour). Approve, block and a forced promotion need the person's passkey (#257, #271, #284), and so do adding a second passkey and removing one; only a login that holds none yet registers its first with the session | sign out (the session ends on the server); a first passkey registered meanwhile is on the public journal (`passkey`), and another maintainer resets it |
 | a maintainer's authenticator, lost or stolen | nothing without its user verification (a PIN or a biometric on the device); with it, what the person decides — approve, block and a forced promotion | another maintainer resets the login's passkeys with a reason (#271), after confirming the request out of band: every one removed, the login signed out, its `omc_` token and its agents' live grants revoked (#284), the journal — a line each — and a signed record say who and why; the person ends the device's GitHub sessions and revokes the GitHub tokens it held (the GitHub CLI's authorization, personal access tokens) — until they make a new token on their page, `POST /factory/register` mints the login none (`token_reset`) —, signs in again, registers a new one, makes a new token and grants their agents again (RUNBOOK, *A lost passkey*) |
 | the signing key | signatures on bad content — only through the Worker's own routes, since the key is a secret of the service | rotate: `wrangler secret put SIGNING_KEY`, re-render every ring, users import the new public key (RUNBOOK) |
+| `release.yml`'s or `rollback.yml`'s signing identity (a GitHub admin, a malicious merged change, a stolen environment) | before a co-signature threshold: a host bundle or a rollback statement every host takes; from one (#330): a bundle or a statement no host takes without the maintainers' security keys, and a statement at most 14 days deep | `revoked` and `min_release` in a later release, a rollback statement; the co-signature threshold in `factory/MAINTAINERS.toml` (*The maintainers' co-signature*) |
+| a maintainer's security key (co-signature), stolen or lost | stolen, with a threshold of 1 and `release.yml`'s identity together, a bundle hosts take; alone, nothing (a bundle also needs `release.yml`'s signature). Lost, nothing: `check-governance` refuses a threshold one lost key would leave out of reach | a governance pull request removes the key: a new agent, under the old requirement, so it is co-signed by another key the agents pin — the maintainer's backup key, or another maintainer's under 1-of-N; a replacement key is added in one release and the old one dropped in the next (the runbook, *Co-signing a release*); 2-of-N needs a second person |
 
 ## Roadmap
 
