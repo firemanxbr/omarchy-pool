@@ -98,6 +98,8 @@ cat > "$DATA/omarchy-agent/sets/host/run/capacity.json" <<JSON
 {"schema":2,"cpus":8,"mem_gb":16,"page_kb":4,"disk_free_gb":{"work":120,"engine":80},"units":7,"job_reserved":1,"agent_slots":2,
  "lanes":[{"arch":"$ARCH","mode":"native"}],"isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}
 JSON
+# The file key (host.ed25519) whatever the runner has: the key in a TPM is tests/host-key-tpm.sh's (#330).
+export OMARCHY_HOST_KEY=file
 XDG_DATA_HOME="$DATA" OMARCHY_ENROLL="$TOKEN" "$AGENT" enroll --pool "$POOL" --wait-minutes 3 > "$E2E/agent.log" 2>&1 &
 AGENT_PID=$!
 for _ in $(seq 1 60); do grep -q "host key fingerprint:" "$E2E/agent.log" && grep -q "waiting for e2e" "$E2E/agent.log" && break; sleep 1; done
@@ -114,6 +116,8 @@ hosts=$(curl -fs "$POOL/api/v1/hosts?owner=e2e" -H "cookie: $SESSION")
 HOST=$(jq -r '.hosts[0].id' <<<"$hosts")
 [[ $(jq -r '.hosts[0].status' <<<"$hosts") == pending-owner ]] || fail "not pending: $hosts"
 [[ $(jq -r '.hosts[0].fingerprint' <<<"$hosts") == "$FP" ]] || fail "the page's fingerprint is not the agent's: $hosts"
+# Where the key lives (#330): a file, as asked, and the page says so.
+[[ $(jq -c '.hosts[0].host_key' <<<"$hosts") == '{"store":"file","alg":"ed25519","held":"the owner asked for a file (OMARCHY_HOST_KEY=file)"}' ]] || fail "host_key: $hosts"
 [[ $(jq -r '.hosts[0].units' <<<"$hosts") == 7 ]] || fail "units: $hosts"
 [[ $(curl -fs "$POOL/api/v1/factory?limit=50" | jq '[.workers[] | select(.kind == "host")] | length') == 0 ]] || fail "a registration before Confirm"
 # No envelope either: install writes agent.toml only after Confirm, and enrollment never does.

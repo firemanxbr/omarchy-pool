@@ -781,6 +781,41 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
 | `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory (it must be the one install.sh put the agent in, `omarchy-agent` under `XDG_DATA_HOME` or `~/.local/share`: the unit starts `<data>/current/omarchy-agent`); how long to wait for your Confirm |
 
+**Where the host key lives** (#330, design v2 §14). On a machine with a TPM
+2.0, the enrollment makes the host key inside it (ECDSA P-256, made by the
+TPM and never let out of it) when the agent's user may open the kernel's
+resource manager, `/dev/tpmrm0`, and the distribution's tpm2-tools are in
+`/usr/bin`; otherwise the key is `host.ed25519` as before, and preflight and
+the enrollment say why. So, before the install, as root:
+
+```bash
+pacman -S tpm2-tools            # Arch; apt-get install tpm2-tools on Ubuntu
+usermod -aG tss omarchy         # the agent's user; it takes effect at its next login
+ls -l /dev/tpmrm0               # crw-rw---- tss tss: the group may open it
+```
+
+Preflight's screen says where the key will live: a note for the TPM, a note
+for a machine with none (a VPS often has none; a VM's TPM is its
+hypervisor's), a warning when one is there but out of the agent's reach.
+Two variables, in install.sh's environment beside `OMARCHY_ENROLL`, change
+it: `OMARCHY_HOST_KEY=tpm` makes a TPM out of reach a blocker (nothing is
+enrolled without it), `OMARCHY_HOST_KEY=file` keeps the file whatever the
+machine has; `OMARCHY_TPM_TCTI` names another resource manager
+(`tabrmd` for tpm2-abrmd; never the raw `/dev/tpm0`). The owner hierarchy's
+password must be empty, as it is unless someone took ownership of the TPM;
+with one, the key is a file and the enrollment says so. The host's page shows
+where its key lives beside its fingerprint, and `omarchy-agent status` says
+it at the host. A host keeps the key it enrolled with: to move a host whose
+key is a file into its TPM, Retire it on its page and install again (it
+enrolls as a new host, with a new key). Clearing the TPM — `tpm2_clear`, the
+firmware's *Clear TPM*, some firmware updates — ends a key made in it: the
+agent's signed calls then go unsent, its rounds say `pool-unreachable` with
+*the host key in the TPM did not sign: … the TPM does not load the host key:
+was it cleared* (`omarchy-agent status` and `logs`; `omarchy-agent token`
+says the same), its set keeps running, and the pool hears nothing from it;
+Retire the host and install again. A Mac's key stays a file until the agent is signed with
+a Developer ID and notarised for the Secure Enclave (still open in #330).
+
 It verifies the release bundle and that it is the agent that release ships,
 fetches the release's pinned docker CLI and compose plugin into `tools/`,
 then runs **preflight** — `omarchy-agent preflight` with the same options
