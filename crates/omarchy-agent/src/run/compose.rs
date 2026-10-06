@@ -660,6 +660,17 @@ impl Driver for Compose {
             Answer::NoAnswer(e) => Answer::NoAnswer(e),
         }
     }
+
+    fn tasks_running(&mut self) -> Answer<bool> {
+        let mut c = self.docker();
+        let filter = format!("label={}", super::driver::TASK_LABEL);
+        c.args(["ps", "-q", "--filter", &filter]);
+        match Self::call(Ok(c)) {
+            Answer::Yes(o) => Answer::Yes(!o.stdout.trim().is_empty()),
+            Answer::NotFound => Answer::Yes(false),
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
 }
 
 /// The two streams of `docker logs --timestamps`, merged by their timestamps (RFC 3339 with
@@ -869,6 +880,30 @@ mod tests {
         let p = d.tools().docker.clone();
         fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         d
+    }
+
+    #[test]
+    fn a_running_task_is_any_container_with_the_task_label_sidecar_or_not() {
+        // A task with the signed `direct` exception has no sidecar, so no role label: the
+        // label every task container carries decides (#320: a resize waits for it).
+        let (mut d, log) = recording();
+        assert_eq!(d.tasks_running(), Answer::Yes(false));
+        let argv = fs::read_to_string(&log).unwrap();
+        assert!(
+            argv.lines()
+                .next()
+                .unwrap()
+                .ends_with(" ps -q --filter label=com.omarchy.task"),
+            "{argv}"
+        );
+        assert_eq!(
+            docker_doing("echo 0a1b2c3d4e5f").tasks_running(),
+            Answer::Yes(true)
+        );
+        assert!(matches!(
+            docker_doing("echo 'Cannot connect to the Docker daemon' >&2; exit 1").tasks_running(),
+            Answer::NoAnswer(_)
+        ));
     }
 
     #[test]

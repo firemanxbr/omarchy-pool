@@ -34,6 +34,11 @@
 //!   secrets, are their own issues; `rotate-token` writes the token where enrollment does
 //!   (`enroll::write_worker_token`, through #371's `dispatcher_env`, the rest of the file
 //!   rendered as the loop renders it), which #327 moves.
+//!
+//! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
+//! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
+//! agent only when it exits, so the progress watchdog ([`cli`]) also ends a self-update's
+//! candidate that hangs past its health gate's deadline.
 
 pub mod brake;
 pub mod config;
@@ -53,9 +58,10 @@ pub(crate) mod selfupdate;
 pub(crate) mod target;
 pub(crate) mod tools;
 pub(crate) mod trust;
+pub(crate) mod vm;
 
 mod agent;
-mod cli;
+pub(crate) mod cli;
 
 pub use cli::{logs, round, run, runtime_switch, self_test, status};
 

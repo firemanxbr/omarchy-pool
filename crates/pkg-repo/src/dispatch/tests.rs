@@ -1343,6 +1343,203 @@ fn a_failed_build_reports_its_verdict_with_its_evidence() {
     assert!(f["log_tail"].as_str().unwrap().contains("The gate: FAIL"));
 }
 
+/// The Studio's file (#338): `aarch64` native, `x86_64` emulated through qemu on 16K pages.
+fn emulated_lanes(h: &H) {
+    std::fs::write(&h.capacity, json!({"schema":2,"at":"2026-10-01T00:00:00Z","cpus":12,"mem_gb":32,"page_kb":16,"disk_free_gb":{"work":200,"engine":150},"units":11,"job_reserved":1,"agent_slots":1,"lanes":[{"arch":"aarch64","mode":"native"},{"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true}],"held_lanes":[],"isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}).to_string()).unwrap();
+}
+
+/// A task of `arch` leased on `lane` (as the pool's claim answer carries `build_tasks.lane`).
+fn on_lane(mut t: Value, arch: &str, lane: Option<&str>) -> Value {
+    t["task"]["arch"] = json!(arch);
+    t["task"]["lane"] = json!(lane);
+    t
+}
+
+#[test]
+fn only_a_task_on_an_emulated_lane_is_told_so_and_each_runs_its_lanes_platform() {
+    let h = H::new();
+    emulated_lanes(&h);
+    let mut d = h.dispatcher();
+    let gen3 = "g_00000000000000c3";
+    // An x86_64 build on the emulated lane, an aarch64 one on the native lane, and an audit of
+    // an x86_64 build (no lane: it reads its build as data, natively).
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
+    h.give(on_lane(community(8, GEN2), "aarch64", Some("native")));
+    for name in ["PKGBUILD", "build.log"] {
+        h.pool
+            .artifacts
+            .lock()
+            .unwrap()
+            .insert((5, name.into()), b"x".to_vec());
+    }
+    h.give(on_lane(
+        task(
+            9,
+            "audit",
+            "felix",
+            "",
+            "community",
+            json!({"task": 5}),
+            gen3,
+        ),
+        "x86_64",
+        None,
+    ));
+    h.ticks(&mut d, 6);
+    let labels = |a: &[String]| -> Vec<String> {
+        a.windows(2)
+            .filter(|w| w[0] == "-e" && w[1].starts_with("WORKER_LABELS="))
+            .map(|w| w[1].clone())
+            .collect()
+    };
+    let a = h.engine.args(7, GEN);
+    assert_eq!(value_of(&a, "--platform"), Some("linux/amd64"));
+    assert_eq!(labels(&a), [r#"WORKER_LABELS={"emulated":true}"#]);
+    let a = h.engine.args(8, GEN2);
+    assert_eq!(value_of(&a, "--platform"), Some("linux/arm64"));
+    assert!(
+        labels(&a).is_empty(),
+        "a native lane's container is told nothing: {a:?}"
+    );
+    let a = h.engine.args(9, gen3);
+    assert_eq!(value_of(&a, "--platform"), Some("linux/arm64"));
+    assert!(labels(&a).is_empty(), "an audit runs natively: {a:?}");
+    // The lease files keep each lane, so a restarted dispatcher starts the same container.
+    let lanes: BTreeMap<u64, (String, bool)> = h
+        .leases()
+        .iter()
+        .map(|l| (l.task.id, (l.arch().to_owned(), l.emulated())))
+        .collect();
+    assert_eq!(lanes[&7], ("x86_64".to_owned(), true));
+    assert_eq!(lanes[&8], ("aarch64".to_owned(), false));
+    assert_eq!(lanes[&9], ("aarch64".to_owned(), false));
+    // A toolchain that could not start under qemu: the script's verdict goes to the pool as it said.
+    h.leave(
+        7,
+        GEN,
+        &[(
+            "verdict.json",
+            br#"{"status":96,"final":false,"needs_native":true,"error":"rustc cannot start on this worker"}"#.to_vec(),
+        )],
+        "==> rustc cannot start on this worker: emulated x86_64 under qemu\n",
+    );
+    h.engine.exit(7, GEN, 96, false);
+    h.ticks(&mut d, 2);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(
+        (f["needs_native"].clone(), f["final"].clone()),
+        (json!(true), json!(false))
+    );
+}
+
+#[test]
+fn a_lease_on_a_lane_this_host_does_not_run_is_given_back_its_attempt_with_it() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    // The agent turned the x86_64 lane off (or never had it): the pool's emulated lease is handed back.
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
+    // A native lease of an architecture that is not this host's.
+    h.give(on_lane(community(8, GEN2), "x86_64", Some("native")));
+    // A lane word this dispatcher does not know.
+    h.give(on_lane(
+        community(9, "g_00000000000000c3"),
+        "aarch64",
+        Some("sideways"),
+    ));
+    h.ticks(&mut d, 5);
+    for id in [7, 8, 9] {
+        let f = &h.pool.fails_of(id)[0];
+        assert_eq!(
+            (f["lost"].clone(), f["final"].clone()),
+            (json!(true), json!(false)),
+            "{id}: {f}"
+        );
+        assert!(
+            f["error"].as_str().unwrap().contains("this host runs no"),
+            "{f}"
+        );
+    }
+    assert!(
+        h.engine.runs.lock().unwrap().is_empty(),
+        "nothing was started"
+    );
+    assert!(h.leases().is_empty());
+    // Its emulated lane on, but no x86_64 build image by digest: not offered, and not started.
+    emulated_lanes(&h);
+    let mut d = h.dispatcher_with(
+        Timing::default(),
+        Images {
+            aarch64: IMAGE.into(),
+            x86_64: "archlinux:latest".into(),
+        },
+    );
+    h.advance(120);
+    h.ticks(&mut d, 2);
+    let lanes = h.pool.last_claim()["capacity"]["lanes"].clone();
+    assert_eq!(
+        lanes,
+        json!([{"arch":"aarch64","mode":"native"}]),
+        "{lanes}"
+    );
+    h.give(on_lane(community(10, GEN), "x86_64", Some("emulated")));
+    h.advance(120);
+    h.ticks(&mut d, 2);
+    assert_eq!(h.pool.fails_of(10)[0]["lost"], true);
+    // With the image: offered, as the agent wrote it.
+    let mut d = h.dispatcher();
+    h.advance(120);
+    h.ticks(&mut d, 2);
+    assert_eq!(
+        h.pool.last_claim()["capacity"]["lanes"][1],
+        json!({"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true})
+    );
+}
+
+#[test]
+fn a_lease_prepared_again_after_a_restart_is_given_back_when_its_emulated_lane_went_off() {
+    let h = H::new();
+    emulated_lanes(&h);
+    let mut d = h.dispatcher();
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
+    d.tick(); // claimed on the emulated lane, Preparing
+    drop(d);
+    // The owner's `emulate = []` (or binfmt gone): the agent rewrote the file without the lane,
+    // and the run loop started a new dispatcher, which prepares the lease again.
+    h.capacity_file(11, 150, "2026-10-01T01:00:00Z");
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 3);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(
+        (f["lost"].clone(), f["final"].clone()),
+        (json!(true), json!(false)),
+        "{f}"
+    );
+    assert!(
+        f["error"]
+            .as_str()
+            .unwrap()
+            .contains("no emulated lane of x86_64 now"),
+        "{f}"
+    );
+    assert!(
+        h.engine.runs.lock().unwrap().is_empty(),
+        "nothing was started"
+    );
+    assert!(h.leases().is_empty());
+    // With the lane still on, the same restart starts it on that lane.
+    emulated_lanes(&h);
+    let mut d = h.dispatcher();
+    h.give(on_lane(community(8, GEN2), "x86_64", Some("emulated")));
+    d.tick();
+    drop(d);
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 3);
+    assert_eq!(
+        value_of(&h.engine.args(8, GEN2), "--platform"),
+        Some("linux/amd64")
+    );
+}
+
 #[test]
 fn an_output_outside_the_kinds_list_or_above_its_cap_is_not_uploaded_and_fails_the_task() {
     let h = H::new();
@@ -1785,6 +1982,7 @@ fn a_value_outside_the_grammar_fails_the_task_before_docker() {
 #[test]
 fn a_build_image_that_is_not_a_digest_fails_the_task_before_docker() {
     let h = H::new();
+    emulated_lanes(&h);
     let mut d = h.dispatcher_with(
         Timing::default(),
         Images {
@@ -1792,9 +1990,7 @@ fn a_build_image_that_is_not_a_digest_fails_the_task_before_docker() {
             x86_64: "docker.io/library/archlinux:base-devel".into(),
         },
     );
-    let mut emulated = community(7, GEN);
-    emulated["task"]["arch"] = json!("x86_64");
-    h.give(emulated);
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
     h.ticks(&mut d, 3);
     assert!(h.engine.runs.lock().unwrap().is_empty());
     let f = &h.pool.fails_of(7)[0];

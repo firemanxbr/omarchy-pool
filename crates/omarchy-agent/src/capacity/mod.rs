@@ -21,15 +21,25 @@
 //! install runs [`preflight`] with the limit probe and prints its blockers (#317); the
 //! dispatcher reads the file, claims nothing while `below_minimum` or while its leases
 //! exceed `units`, and gives each task `--cpus` and the job counts of its share (#335,
-//! #337); emulated lanes (#338) add to `lanes`; the driver trait (#315) wraps
-//! [`probe::engine`] as its `capacity()` and runs the engine CLI under a cleared
-//! environment. Also for #315: one `agent.toml` reader in place of [`AgentToml`] and
-//! `lint::Envelope::from_agent_toml`, with one closed `[envelope]` schema (until then
-//! [`AgentToml::parse`] refuses a key design v2 §12 does not name); whether a change of
-//! free disk alone (in `DISK_STEP_GB` steps, at most hourly) is worth a whole round; and
-//! the set directory's files opened with `openat` and `O_NOFOLLOW` (until then
-//! [`write_if_changed`] refuses a linked `run/` or `capacity.json`).
+//! #337); the driver trait (#315) wraps [`probe::engine`] as its `capacity()` and the
+//! smoke run ([`emulation::Smoke`] on [`probe::Probe`]) as its `emulation()`, and runs the
+//! engine CLI under a cleared environment. Also for #315: one `agent.toml` reader in
+//! place of [`AgentToml`] and `lint::Envelope::from_agent_toml`, with one closed
+//! `[envelope]` schema (until then [`AgentToml::parse`] refuses a key design v2 §12 does
+//! not name); whether a change of free disk alone (in `DISK_STEP_GB` steps, at most
+//! hourly) is worth a whole round; and the set directory's files opened with `openat` and
+//! `O_NOFOLLOW` (until then [`write_if_changed`] refuses a linked `run/` or
+//! `capacity.json`).
+//!
+//! [`emulation`] (#338, design v2 §7.5) adds the foreign architecture's lane to `lanes`
+//! when the envelope allows it, binfmt is there and the smoke run passes — on 16K pages
+//! too (D33) — and says why it is held otherwise (`held_lanes`); the native lane never
+//! depends on it. On a Mac (#320) the binfmt table is the VM's, which the agent does not
+//! read: [`probe::in_mac_vm`] puts the `x86_64` lane through Rosetta into the same lanes
+//! after the same smoke run, and says why it is off in install's notes and the run loop's
+//! journal rather than in `held_lanes`.
 
+pub mod emulation;
 pub mod probe;
 
 use std::fmt;
@@ -60,6 +70,22 @@ pub enum Isolation {
     User,
     /// Task root mapped away from the daemon's user (`userns-remap`).
     Subuid,
+    /// macOS: the dedicated `omarchy` Colima VM, which mounts only the work root, the
+    /// secrets directory and the set directory (#320): an escape lands in the VM.
+    Vm,
+    /// macOS: Docker Desktop's or `OrbStack`'s VM, shared with the person's own containers
+    /// and mounting the home directory by default; used if present, never installed.
+    #[serde(rename = "vm-shared")]
+    VmShared,
+}
+
+/// The VM a macOS engine runs in (#320, design v2 §19.2, §19.3), as install found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmKind {
+    /// The `omarchy` Colima profile the agent starts, stops and sizes (M7).
+    Dedicated,
+    /// Docker Desktop or `OrbStack`.
+    Shared,
 }
 
 /// Whether the runtime enforces the hard limits every task gets (D32).
@@ -89,6 +115,9 @@ pub struct Caps {
     /// How many tasks that need a model may be leased at once (default 2).
     pub agent_slots: u32,
     pub dedicated: bool,
+    /// The foreign architectures that may run emulated (`emulate`): `None` when the
+    /// envelope does not say (every one detection turns on), `Some([])` keeps them off.
+    pub emulate: Option<Vec<String>>,
 }
 
 impl Default for Caps {
@@ -99,6 +128,7 @@ impl Default for Caps {
             max_mem_gb: None,
             agent_slots: 2,
             dedicated: false,
+            emulate: None,
         }
     }
 }
@@ -112,6 +142,9 @@ pub struct AgentToml {
     pub caps: Caps,
     pub work_root: Option<String>,
     pub socket_cli: Option<String>,
+    /// A Mac's VM (#320, `[vm]`): its runtime (`colima`, `docker-desktop`, `orbstack`) and
+    /// whether it runs `x86_64` through Rosetta. The envelope's `emulate` is `caps.emulate`.
+    pub vm: Option<(String, bool)>,
 }
 
 impl AgentToml {
@@ -122,6 +155,13 @@ impl AgentToml {
             set: SetPart,
             #[serde(default)]
             envelope: EnvelopePart,
+            vm: Option<VmPart>,
+        }
+        #[derive(Deserialize)]
+        struct VmPart {
+            runtime: String,
+            #[serde(default)]
+            rosetta: bool,
         }
         #[derive(Deserialize, Default)]
         struct SetPart {
@@ -136,6 +176,7 @@ impl AgentToml {
             agent_slots: Option<u32>,
             #[serde(default)]
             dedicated: bool,
+            emulate: Option<Vec<String>>,
         }
         let raw: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
         if let Some(env) = raw.get("envelope").and_then(toml::Value::as_table) {
@@ -152,6 +193,18 @@ impl AgentToml {
             }
         }
         let e = f.envelope;
+        if let Some(bad) = e
+            .emulate
+            .iter()
+            .flatten()
+            .find(|a| !emulation::ARCHES.contains(&a.as_str()))
+        {
+            return Err(format!(
+                "agent.toml: [envelope] emulate lists {bad:?}, not an architecture the pool builds \
+                 ({})",
+                emulation::ARCHES.join(", ")
+            ));
+        }
         Ok(AgentToml {
             caps: Caps {
                 max_units: e.max_units,
@@ -159,9 +212,11 @@ impl AgentToml {
                 max_mem_gb: e.max_mem_gb,
                 agent_slots: e.agent_slots.unwrap_or(2),
                 dedicated: e.dedicated,
+                emulate: e.emulate,
             },
             work_root: f.set.work_root,
             socket_cli: f.set.socket_cli,
+            vm: f.vm.map(|v| (v.runtime, v.rosetta)),
         })
     }
 }
@@ -217,6 +272,8 @@ pub struct Capacity {
     job_reserved: u32,
     agent_slots: u32,
     arch: String,
+    emulated: Vec<emulation::Emulated>,
+    held: Vec<emulation::Held>,
     isolation: Isolation,
     dedicated: bool,
     limits: Limits,
@@ -272,6 +329,19 @@ impl Capacity {
         if !shortfalls.is_empty() {
             units = 0;
         }
+        // The emulated lanes detection turned on, within the owner's envelope: one it leaves
+        // out is held, whatever the probe that found it was told (design v2 §7.5, §12).
+        let (mut emulated, mut held) = facts
+            .emulation()
+            .map(|l| (l.on.clone(), l.held.clone()))
+            .unwrap_or_default();
+        emulated.retain(|l| {
+            let ok = emulation::allowed(caps.emulate.as_deref(), &l.arch);
+            if !ok {
+                held.push(emulation::off_in_envelope(&l.arch));
+            }
+            ok
+        });
         Capacity {
             cpus,
             mem_gb,
@@ -282,6 +352,8 @@ impl Capacity {
             job_reserved: c.units.job_reserved.min(units),
             agent_slots: caps.agent_slots,
             arch: facts.arch().to_owned(),
+            emulated,
+            held,
             isolation: facts.isolation(),
             dedicated: caps.dedicated,
             limits: facts.limits(),
@@ -307,8 +379,32 @@ impl Capacity {
     pub fn isolation(&self) -> Isolation {
         self.isolation
     }
+    /// The emulated lanes, after the native one (#338; a Mac's Rosetta lane, #320).
+    pub fn emulated(&self) -> &[emulation::Emulated] {
+        &self.emulated
+    }
     pub fn limits(&self) -> Limits {
         self.limits
+    }
+    /// The lanes this host runs: the native one first, then each emulated one.
+    pub fn lanes(&self) -> Vec<Lane> {
+        let mut out = vec![Lane {
+            arch: self.arch.clone(),
+            mode: "native",
+            via: None,
+            page16k: None,
+        }];
+        out.extend(self.emulated.iter().map(|e| Lane {
+            arch: e.arch.clone(),
+            mode: "emulated",
+            via: Some(e.via),
+            page16k: Some(e.page16k),
+        }));
+        out
+    }
+    /// The lanes detection holds off, and why.
+    pub fn held_lanes(&self) -> &[emulation::Held] {
+        &self.held
     }
     /// Below the signed minimum (D44): the host keeps its bundle, claims nothing.
     pub fn below_minimum(&self) -> bool {
@@ -339,10 +435,8 @@ impl Capacity {
             units: self.units,
             job_reserved: self.job_reserved,
             agent_slots: self.agent_slots,
-            lanes: vec![Lane {
-                arch: self.arch.clone(),
-                mode: "native",
-            }],
+            lanes: self.lanes(),
+            held_lanes: self.held.clone(),
             isolation: self.isolation,
             dedicated: self.dedicated,
             limits: self.limits,
@@ -351,12 +445,18 @@ impl Capacity {
     }
 }
 
-/// One architecture the host runs. P1 has the native lane only; emulated lanes come with
-/// #338.
+/// One architecture the host runs: `native`, or `emulated` with how (`via`: `qemu`, or
+/// `rosetta` — a Linux VM's binfmt handler, or a Mac's Colima VM started with
+/// `--vz-rosetta`, #320) and whether the kernel's pages are larger than the guest's
+/// (`page16k`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Lane {
     pub arch: String,
     pub mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page16k: Option<bool>,
 }
 
 /// `run/capacity.json`, schema 2 (design v2 §7.3).
@@ -372,6 +472,8 @@ pub struct CapacityFile {
     pub job_reserved: u32,
     pub agent_slots: u32,
     pub lanes: Vec<Lane>,
+    /// The foreign architectures this host does not run, and why (design v2 §17.2).
+    pub held_lanes: Vec<emulation::Held>,
     pub isolation: Isolation,
     pub dedicated: bool,
     pub limits: Limits,

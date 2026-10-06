@@ -525,7 +525,10 @@ fn rotate_token_writes_a_new_token_for_the_dispatcher_which_is_recreated_with_it
     for f in ["fib_trie", "if_inet6", "route"] {
         fs::copy(fixture.join(f), net.join(f)).unwrap();
     }
-    w.agent.host_env = Some(HostEnv::new(Sources { proc_net: net }));
+    w.agent.host_env = Some(HostEnv::new(Sources {
+        proc_net: net,
+        ifconfig: None,
+    }));
     w.agent.cfg.agent_budget = Budget {
         calls_per_task: Some(40),
         ..Budget::default()

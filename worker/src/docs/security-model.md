@@ -117,7 +117,13 @@ secret). Everything travels in the `Authorization` header over TLS only.
   it exits, uploads only the files its kind may upload, under a size cap, and
   walks a package it wrote for an extension member the archive reader would
   buffer whole before it reads one; the engine's out-of-memory kill is the
-  engine's word, whatever the script said.
+  engine's word, whatever the script said. A task on an emulated lane runs
+  its architecture under the host's binfmt handler and is told only
+  `WORKER_LABELS={"emulated":true}` (#338); the `needs_native` that gives a
+  build its attempt back counts only from a lease the pool itself put on an
+  emulated lane, so a recipe on a native lane cannot buy its attempts back
+  with it, and one that says it on an emulated lane never runs emulated
+  again.
   The dispatcher refuses to start with a package signing key in its
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
@@ -165,7 +171,25 @@ secret). Everything travels in the `Authorization` header over TLS only.
   cannot be asked (it forces DNS on and drops docker's option), so there a
   service of the host listening on all addresses is reachable from a task
   unless the host's firewall (`prep-root.sh`'s INPUT drop for the task
-  subnets) closes it. A signed `factory/sizing` exception is per package:
+  subnets) closes it; and a signed exception's bridge always has its gateway,
+  the host itself on a rootful engine, where the `DOCKER-USER` rules (in
+  `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
+  preflight checks it rather than trusting it (#367): on a rootful Linux
+  engine it refuses a host whose prep-root.sh firewall script (world-readable) does
+  not drop every task subnet in INPUT, or whose boot unit for it is not
+  there or not enabled (a reboot would take the drop away, and nothing
+  probes again after install), and a probe task on a bridge and one
+  on a network made as a task's try their gateway on 22, 53 and the pool's
+  ports, and the bridge's the host's LAN address: a connection made or
+  refused there fails the install, with the command that puts the INPUT drop
+  in place or back. On a rootless engine the gateway is the engine's own
+  namespace, and what could reach the host is the user-mode stack's host
+  loopback (RootlessKit's, slirp4netns's or pasta's), off by default: preflight
+  reads the stack's command line in `/proc` while its probe tasks run and
+  refuses one that maps it, with the setting that turns it off (the runbook's
+  *Rootless engines*). It reads rather than listening for a connection: the
+  agent listens on nothing (design v2 §11.2).
+  A signed `factory/sizing` exception is per package:
   it also covers a contributor's recipe of that package, so its reviewer
   approves exactly that.
 - **A log that carries a secret is refused.** Text evidence uploaded to
@@ -585,6 +609,33 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
   the host declared.
+- **A Mac** (#320, design v2 §19.2, §19.3) runs its tasks in the agent's own
+  `omarchy` Colima VM (isolation `vm`): a container escape lands in the VM,
+  which mounts only the work root (writable), the secrets directory and the
+  set directory (read-only, so nothing in the VM can plant a link the agent
+  would write through), each at its own path and none under the home
+  directory — no `~/.ssh`, no Keychain files, no forwarded SSH agent; preflight
+  checks from a container that the VM sees those three and not the home
+  directory, and the lint refuses a bind outside them. Inside the VM the
+  agent is root (Colima's passwordless sudo) and keeps prep-root.sh's task
+  firewall there with the same unit, after `docker.service`, so every boot
+  of the VM (a login, a resize, a clock restart) applies it as soon as
+  dockerd is up, as on a Linux host, not when the agent next looks; it runs
+  it again after every start, hourly and after a wake. A task reaches
+  neither your LAN nor the Mac through Colima's NAT, nor the VM itself at a
+  bridge's gateway (the firewall's INPUT drop, #367), and the egress probe
+  checks it before install goes on; every task's egress sidecar also refuses
+  the Mac's own addresses (`/sbin/ifconfig -a`'s, a Mac having no `/proc`,
+  and the public one it leaves from, #371). Docker Desktop's or OrbStack's VM
+  (`vm-shared`) is used only if it is already there, with nothing of the
+  home directory shared with it and `--dedicated`; the agent puts nothing in
+  it, and its egress probe decides. After a wake the agent holds the VM's
+  clock within five seconds of the pool's `Date` (the signed host state's
+  answer, a refusal's included), but only while the Mac's
+  own clock agrees with it: a pool's answer never moves the VM's clock more
+  than six seconds from the Mac's (a lying pool cannot take the VM's TLS
+  checks back to a time whose certificates expired), and a Mac that is off
+  is said, never set.
 
 ## Stopping a host
 
