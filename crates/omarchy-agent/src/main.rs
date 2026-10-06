@@ -31,13 +31,16 @@
 //!     legacy project; on a Mac the omarchy VM is stopped, not deleted)
 //! omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
 //!     (#321: the one-time token from OMARCHY_ENROLL — never an argument — the host key,
-//!     the owner's Confirm, the host worker token in sets/host/etc/dispatcher.env)
+//!     the owner's Confirm, the host worker token in sets/host/run/host/dispatcher/token,
+//!     0400, its registration in sets/host/etc/dispatcher.env, #327)
 //! omarchy-agent token [--data-dir <dir>]
-//!     (a new host worker token: the rotation every 30 days, #321)
+//!     (a new host worker token: the rotation every 30 days, #321; the run loop then
+//!     recreates the dispatcher, and only it)
 //! omarchy-agent dispatcher-env [--data-dir <dir>] [--write]
-//!     (#371: what sets/host/etc/dispatcher.env holds beside the worker token, as the agent
-//!     renders it now — the host's own addresses, the secrets directory, the agent budget;
-//!     --write writes it, the token and the owner's own lines kept, as the run loop does)
+//!     (#371: what sets/host/etc/dispatcher.env holds beside the token's registration, as the
+//!     agent renders it now — the host's own addresses, the secrets directory, the agent
+//!     budget; --write writes it, the token and the owner's own lines kept, as the run loop
+//!     does, moving a token an older agent wrote there into its file, #327)
 //! omarchy-agent run [--data-dir <dir>]       the loop (systemd --user / launchd run it)
 //! omarchy-agent status [--data-dir <dir>]    state.json and capacity.json; works with the pool down
 //! omarchy-agent round [--data-dir <dir>]     a round now (SIGUSR1 to the running agent)
@@ -676,6 +679,9 @@ fn dispatcher_env_cmd(args: &[String]) -> Result<u8, String> {
             match written {
                 Some(dispatcher_env::Refresh::Written) => {
                     eprintln!("omarchy-agent: wrote etc/dispatcher.env (0600), the worker token and the owner's own lines kept");
+                }
+                Some(dispatcher_env::Refresh::TokenMoved) => {
+                    eprintln!("omarchy-agent: wrote etc/dispatcher.env (0600) and moved the worker token it held to run/host/dispatcher/token (0400, #327), the owner's own lines kept");
                 }
                 Some(dispatcher_env::Refresh::Unchanged) => {
                     eprintln!("omarchy-agent: etc/dispatcher.env already says this");

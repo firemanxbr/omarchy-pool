@@ -5,6 +5,12 @@
 //! rollout. The pool and GitHub are in-process fakes; signatures vouch (the real check is
 //! `verify`'s own tests).
 //!
+//! The host worker token (#327): the host starts as #371's agent left it, the token in
+//! `etc/dispatcher.env`; the first round moves it to `run/host/dispatcher/token`, and
+//! `docker inspect` then shows it in no container's environment — the dispatcher's, the
+//! task's — while the stand-in reads it through its read-only mount; a rotation rewrites
+//! the file and recreates the dispatcher alone, the task running on.
+//!
 //! `tests/agent-run-loop.sh` runs it (CI: rootful docker, and rootless podman's API
 //! socket); it needs `OMARCHY_AGENT_ENGINE_SOCKET` and `OMARCHY_STANDIN_IMAGE`.
 //!
@@ -45,12 +51,20 @@ const TOKEN: &str = "omw_engine_test_token_0123456789";
 const STANDIN: &str = r#"set -eu
 root="$${OMARCHY_WORK_ROOT}"
 me="$$(hostname)"
-# A careless dispatcher: its token in its log, for #325's diagnostics to scrub.
-echo "stand-in: up as $$me with worker token $${OMARCHY_WORKER_TOKEN:-none}"
+# A careless dispatcher: its token in its log, for #325's diagnostics to scrub — read from
+# its file (#327), or the plain variable an older release's template gives.
+tok="$${OMARCHY_WORKER_TOKEN:-none}"
+if [ -n "$${OMARCHY_WORKER_TOKEN_FILE:-}" ]; then tok="$$(cat "$$OMARCHY_WORKER_TOKEN_FILE" || echo unreadable)"; fi
+echo "stand-in: up as $$me with worker token $$tok"
 if [ "$${1:-ok}" = broken ]; then echo "stand-in: a broken release" >&2; exit 1; fi
 n=0
 for f in "$$root"/leases/*; do [ -e "$$f" ] && n=$$((n + 1)); done
 echo "$$n" > "$$root/readopted.$$me"
+tf="$${OMARCHY_WORKER_TOKEN_FILE:-}"
+if [ -n "$$tf" ]; then
+  sha256sum < "$$tf" | cut -c1-16 > "$$root/token.$$me"
+  if (echo x >> "$$tf") 2>/dev/null; then echo writable >> "$$root/token.$$me"; fi
+fi
 mkdir -p /tmp/www
 echo ok > /tmp/www/ready
 httpd -p 127.0.0.1:8791 -h /tmp/www
@@ -282,9 +296,15 @@ fn host() -> Host {
     }
     // Rootful engines write as root into the work root; let the test clean up after it.
     fs::set_permissions(dir.join("work"), fs::Permissions::from_mode(0o777)).unwrap();
+    // As #371's agent left the host: the token in the env file, no token file yet (#327).
     fs::write(
         set.join("etc/dispatcher.env"),
-        format!("OMARCHY_WORKER_TOKEN={TOKEN}\n"),
+        format!("# worker: w-engine-test\nOMARCHY_WORKER_TOKEN={TOKEN}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(
+        set.join("etc/dispatcher.env"),
+        fs::Permissions::from_mode(0o600),
     )
     .unwrap();
     fs::write(set.join("run/capacity.json"), r#"{"schema":2,"units":3}"#).unwrap();
@@ -392,6 +412,10 @@ fn real_engine_rollouts_keep_the_task_running() {
     let task0 = h.task_state();
     releases_with_ordered_restarts(&mut h);
     assert_eq!(h.task_state(), task0, "the task container kept running");
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, TOKEN);
+    let rotated = a_rotation_recreates_the_dispatcher_alone(&mut h);
+    assert_eq!(h.task_state(), task0, "the task container kept running");
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, &rotated);
     a_broken_release_is_reverted(&mut h);
     assert_eq!(h.task_state(), task0);
     a_statement_preempts_and_goes_down(&mut h);
@@ -400,7 +424,103 @@ fn real_engine_rollouts_keep_the_task_running() {
         task0,
         "the task container survived every rollout"
     );
-    nothing_but_the_pinned_tools_and_no_secret_on_disk(&h, &decoys);
+    nothing_but_the_pinned_tools_and_no_secret_on_disk(&h, &decoys, &rotated);
+}
+
+/// The first 16 hex digits of the SHA-256 of a token file holding `token`, as the stand-in
+/// writes what it read.
+fn token_sha(token: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    hex::encode(Sha256::digest(format!("{token}\n")))[..16].to_owned()
+}
+
+/// #327's acceptance: `docker inspect` of the dispatcher and of the task shows no token in
+/// their environment; the dispatcher reads `token` from its file through a read-only mount,
+/// and could not write it; the env file holds it no more, the file 0400 does.
+fn the_token_is_a_read_only_file_in_no_container_s_environment(h: &Host, token: &str) {
+    let (d, _) = h.dispatcher();
+    for id in [d.as_str(), h.task.as_str()] {
+        let env = h.docker(&["inspect", "-f", "{{json .Config.Env}}", id]);
+        assert!(
+            !env.contains(token) && !env.contains("OMARCHY_WORKER_TOKEN="),
+            "{id}'s environment: {env}"
+        );
+    }
+    let env = h.docker(&["inspect", "-f", "{{json .Config.Env}}", &d]);
+    assert!(
+        env.contains("\"OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token\""),
+        "{env}"
+    );
+    let mounts: serde_json::Value =
+        serde_json::from_str(&h.docker(&["inspect", "-f", "{{json .Mounts}}", &d])).unwrap();
+    let file = crate::dispatcher_env::token_path_in(&h.dir.join("set"));
+    let m = mounts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["Destination"] == "/run/omarchy/worker-token")
+        .unwrap_or_else(|| panic!("no token mount: {mounts}"));
+    assert_eq!(
+        (m["Source"].as_str(), m["RW"].as_bool()),
+        (file.to_str(), Some(false)),
+        "{m}"
+    );
+    let read = fs::read_to_string(h.work().join(format!("token.{}", &d[..12]))).unwrap();
+    assert_eq!(
+        read,
+        format!("{}\n", token_sha(token)),
+        "what the dispatcher read"
+    );
+    assert_eq!(
+        crate::dispatcher_env::read_token(&file).unwrap(),
+        Some((token.to_owned(), 0o400))
+    );
+    let text = fs::read_to_string(h.dir.join("set/etc/dispatcher.env")).unwrap();
+    assert!(
+        !text.contains(token) && text.contains("# worker: w-engine-test\n"),
+        "{text}"
+    );
+}
+
+/// A rotation (`omarchy-agent token`, or #325's order, through `write_worker_token`): the
+/// file rewritten, and the next round recreates the dispatcher, and nothing else.
+fn a_rotation_recreates_the_dispatcher_alone(h: &mut Host) -> String {
+    let (before, release) = h.dispatcher();
+    let new = format!("omw_{}", "7a".repeat(24));
+    let r = crate::dispatcher_env::Rendered {
+        addresses: Vec::new(),
+        envelope: None,
+        plain: false,
+    };
+    crate::enroll::write_worker_token(
+        &h.dir.join("set/etc/dispatcher.env"),
+        &serde_json::json!({"worker": "w-engine-test", "token": new}),
+        &r,
+    )
+    .unwrap();
+    h.tick(false);
+    assert_ne!(
+        h.agent.state.rollout.step,
+        Step::Idle,
+        "the new token starts a round"
+    );
+    h.until("the rotation's round", Duration::from_secs(300), |h| {
+        h.agent.state.rollout.step == Step::Idle
+    });
+    assert_eq!(
+        h.agent.state.round.outcome, "ok",
+        "{:?}",
+        h.agent.state.round
+    );
+    let (after, same) = h.dispatcher();
+    assert_ne!(before, after, "the dispatcher was recreated");
+    assert_eq!(same, release, "on the same release");
+    // The old dispatcher saved its leases; the new one re-adopted the task.
+    assert!(h.work().join(format!("saved.{}", &before[..12])).exists());
+    let readopted =
+        fs::read_to_string(h.work().join(format!("readopted.{}", &after[..12]))).unwrap();
+    assert_eq!(readopted.trim(), "1");
+    new
 }
 
 /// The first release reaches the host with no human action; a second one survives two
@@ -500,8 +620,9 @@ fn a_statement_preempts_and_goes_down(h: &mut Host) {
     assert_eq!(h.dispatcher().1, "v1.0.0");
 }
 
-/// Only the pinned binaries ran, and no file holds the token or interpolated output.
-fn nothing_but_the_pinned_tools_and_no_secret_on_disk(h: &Host, decoys: &Path) {
+/// Only the pinned binaries ran, and no file holds a token (but the token's own file) or
+/// interpolated output.
+fn nothing_but_the_pinned_tools_and_no_secret_on_disk(h: &Host, decoys: &Path, rotated: &str) {
     let ran: Vec<_> = fs::read_dir(decoys)
         .unwrap()
         .flatten()
@@ -521,9 +642,13 @@ fn nothing_but_the_pinned_tools_and_no_secret_on_disk(h: &Host, decoys: &Path) {
             }
             if p.is_dir() {
                 stack.push(p);
-            } else if !p.ends_with("etc/dispatcher.env") {
+            } else if !p.ends_with(crate::dispatcher_env::TOKEN_FILE) {
                 let text = String::from_utf8_lossy(&fs::read(&p).unwrap()).into_owned();
-                assert!(!text.contains(TOKEN), "{} holds the token", p.display());
+                assert!(
+                    !text.contains(TOKEN) && !text.contains(rotated),
+                    "{} holds a token",
+                    p.display()
+                );
                 assert!(
                     !text.contains(&format!("{work}:{work}")),
                     "{} holds interpolated output",

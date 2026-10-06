@@ -892,9 +892,14 @@ Then it prints the envelope (`agent.toml`) to confirm, writes
 `run/capacity.json`, enrolls ([Maintainer hosts](/docs/worker-host#maintainer-hosts):
 the fingerprint, your Confirm on the site, the host worker token) and only then writes `agent.toml` with
 the `host_id` and `worker_id` the enrollment gave — before your Confirm
-there is no run loop, no dispatcher and nothing that claims. Then
-`etc/dispatcher.env` (0600) holds, beside the worker token, what the
-dispatcher takes from the agent (#371): `OMARCHY_HOST_ADDRESSES` (every
+there is no run loop, no dispatcher and nothing that claims. The host worker
+token is `run/host/dispatcher/token` in the set directory (0400, its
+directories 0700, #327), the one secret file the host set mounts, read-only,
+into the dispatcher (`OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token`):
+`docker inspect` of the dispatcher, a sidecar or a task shows no token or
+key in its environment. Then `etc/dispatcher.env` (0600) holds the token's
+registration (`# worker:`) and what the dispatcher takes from the agent
+(#371): `OMARCHY_HOST_ADDRESSES` (every
 address of the host's interfaces but loopback's and a container bridge's the
 egress refuses anyway — private, link-local, unique local or in the task
 subnets —, an IPv6 one as its /64, and the public address the probe saw, which
@@ -1214,8 +1219,10 @@ Preflight, before it starts any VM:
 (`/var/run/docker.sock`, inside the VM, which the dispatcher mounts). The
 lint then refuses any bind of the set (the owner's override included) whose
 source lies under none of the VM's three mounts. `etc/dispatcher.env` is in
-the set directory (`<root>/set/etc/dispatcher.env`, read-only in the VM), and
-its `OMARCHY_HOST_ADDRESSES` are the Mac's own: a Mac has no `/proc`, so they
+the set directory (`<root>/set/etc/dispatcher.env`, read-only in the VM), as
+is the host worker token's file (`<root>/set/run/host/dispatcher/token`,
+0400, #327), which the dispatcher in the VM mounts read-only; and the env
+file's `OMARCHY_HOST_ADDRESSES` are the Mac's own: a Mac has no `/proc`, so they
 are `/sbin/ifconfig -a`'s, by the same rules as on Linux (a vmnet bridge such
 as `bridge100`, the VMs' NAT, counts as a container bridge), and the public
 address the probe task in the VM saw. A task leaves through the Mac, so an
@@ -1347,6 +1354,39 @@ keeps the list its egress sidecar was started with); the journal says
 rename, so none puts back what another just wrote. `omarchy-agent
 dispatcher-env` prints what it would write; `--write` writes it now.
 
+**Rotating the host worker token** (#327): `omarchy-agent token` fetches a
+new one with a request signed by the host key and rewrites
+`run/host/dispatcher/token` (every rotation writes there alone: the 30-day
+rotation, and the pool's `rotate-token` host order once it lands, #325).
+The token file is an input of the set, so the next tick starts a round that
+recreates the dispatcher, and only it: the old one saves its leases and
+exits, the new one reads the new file and re-adopts every task, which runs
+on (the old token works ten more minutes, more than the round takes). The
+journal scrubs the token from its file as it does `etc/*.env` values.
+
+**A host from before #327** had the token in `etc/dispatcher.env`. Its agent
+updates itself first: the bundle's `min_agent` is the first agent that writes
+the token file (0.3.0), since an older one refuses the template that mounts it
+and would report its lint, so a host whose self-update fails reports
+`needs-newer-agent` and stays on its release. The new agent
+moves the token to its file at its first start (`dispatcher-env` in the journal:
+"the host worker token moved …"), losing nothing; a token line there is
+always taken as the newest one (an older agent wrote it). While a release
+from before #327 runs or is being rolled out — its dispatcher reads only
+`OMARCHY_WORKER_TOKEN` — the agent keeps the token in `etc/dispatcher.env`
+too, and a round that rolls back to such a release puts it back before it
+creates that dispatcher. A rollback statement whose `agent_to` moves the agent
+down hands that round to the agent below, which may be from before #327 and
+keep a token line without writing one, so the agent puts the line back before
+it moves when the target's template reads the token there: a line it cannot
+write holds the statement (`held`, "the dispatcher's token: …"), and a move
+that fails takes the line out again. Once no such release is left the next
+minute's refresh takes it out, which recreates the dispatcher once more. A
+token line the agent cannot move (not one word) stops it with a
+`dispatcher-env` line in the journal until you fix or remove the line. The
+image reads `OMARCHY_WORKER_TOKEN_FILE` before `OMARCHY_WORKER_TOKEN`, and a
+file it names but cannot read stops the container instead of falling back.
+
 Each round goes `render → lint → plan → pull → replace → guard → commit`,
 or `revert`, each step written to `state.json` before it acts, so a restart
 anywhere resumes it (a ready wait or a guard in flight starts its clock again:
@@ -1362,7 +1402,8 @@ origin must be in its `pools`, and the target must be at or above the floor
 merged from every verified manifest and never lowered) — or covered by a
 rollback statement (*Rollback statements* in the security model), which
 preempts a round in flight, as a newer release does, at any step before
-`commit` (an older release waits for the round to end). The dispatcher alone is replaced: stopped (it saves its leases
+`commit` (an older release waits for the round to end). Before it hashes the set's inputs, a round puts the token into
+`etc/dispatcher.env` or takes it out as the releases staged and applied need (#327). The dispatcher alone is replaced: stopped (it saves its leases
 and exits within 60 s), created from the new files and waited for on
 `/ready`; task containers are never part of a plan and keep running. The
 guard then samples it for `guard_s`: a restart streak, two restarts that
@@ -1371,8 +1412,9 @@ lost `/ready` revert to `last-good/` and quarantine the release for an hour
 (one retry, then until a newer release); an Update order on the host's
 worker, or the host order `retry-release`, lifts every quarantine and starts
 a round. A changed
-`compose.override.yml`, `etc/` file or `run/capacity.json` starts a round
-too, and the running set is compared with `last-good/` every 15 minutes.
+`compose.override.yml`, `etc/` file, `run/capacity.json` or the token file
+starts a round too, and the running set is compared with `last-good/` every
+15 minutes.
 Two known gaps: a round preempted during its replace leaves the dispatcher
 stopped (its leases saved) until the new round's replace, and a release's
 pinned docker and compose roll forward only — tools that cannot talk to the
@@ -1381,7 +1423,7 @@ engine leave the round at `engine-unreachable` until a newer release.
 | The last round says | What it means |
 |---|---|
 | `ok`, `no-change` | the set runs the target |
-| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again); or the release waits for the owner's soak (`… waits for the owner's soak until …`, #326, *Soak* below) |
+| `held` | the dispatcher waits for a file: `etc/dispatcher.env` and `run/host/dispatcher/token` until the owner confirms the host (#321, #327), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again); or the release waits for the owner's soak (`… waits for the owner's soak until …`, #326, *Soak* below) |
 | `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
 | `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep` (deeper than 14 days without the maintainers' co-signature over the statement), `cosignature` (the bundle lacks the co-signatures this agent pins, #330), `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
@@ -1457,22 +1499,24 @@ an agent from 0.4.0 (an older one is given none and the page says why):
   Mac the lane is the VM's Rosetta one (#320); a count after a start of the
   VM keeps it as detected, and the setting narrows the new file again.
 - **Rotate token** (`rotate-token`): a new host worker token from the pool
-  (`POST /hosts/self/token`, signed), written to `etc/dispatcher.env` as
-  enrollment writes it — the rest of the file rendered as the run loop
-  renders it (#371), so the host's addresses, the secrets directory, the
-  agent budget and the owner's own lines stay; the changed `etc/` recreates
-  the dispatcher within the ten minutes the old one still works. A token the
-  pool does not give, or one for another registration, is refused with
-  nothing written. (`*_FILE` secrets, #327, move where the token is written:
-  `enroll::write_worker_token` is the one place.)
+  (`POST /hosts/self/token`, signed), written as enrollment writes it
+  (`enroll::write_worker_token`, the one place): to its file,
+  `run/host/dispatcher/token` (0400, #327), with `etc/dispatcher.env` naming
+  its registration and rendered as the run loop renders it (#371), so the
+  host's addresses, the secrets directory, the agent budget and the owner's
+  own lines stay (and the token goes there too only while a release from
+  before #327 is here); the changed file recreates the dispatcher within the
+  ten minutes the old one still works. A token the pool does not give, or one
+  for another registration, is refused with nothing written.
 - **Retry release** (`retry-release`): lifts every quarantine and starts a
   round, as an Update does; the page greys it while the report says nothing
   is quarantined. Without room on the brake for that round's restarts (its
   own and a revert's) it is refused and the quarantine kept.
 - **Diagnostics** (`diagnostics`, design v2 M10): only when the envelope says
   `diagnostics = true`, the dispatcher's last 500 log lines, each cut to 300
-  characters, scrubbed of every value (8 characters or more) of the set's
-  `etc/*.env` and the secrets directory's `*.env`, and of anything shaped like a pool
+  characters, scrubbed of the host worker token's file (#327), of every value (8
+  characters or more) of the set's `etc/*.env` and the secrets directory's
+  `*.env`, and of anything shaped like a pool
   token (`omj.` job tokens and `oma_` agent tokens among them), GitHub, Anthropic or
   OpenAI token; the newest that fit 56 KiB as the JSON body carries them, posted to the
   pool (`POST /hosts/self/diagnostics`, signed, at most 64 KiB), which drops a

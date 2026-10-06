@@ -3428,18 +3428,30 @@ fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_
     let text = fs::read_to_string(&env).unwrap();
     let secrets = h.root.join("secrets");
     for want in [
-        format!("\nOMARCHY_WORKER_TOKEN=omw_{}\n", "0f".repeat(24)),
+        "\n# worker: m1-rack-0a9z\n".to_owned(),
         "\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,198.51.100.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n".into(),
         format!("\nOMARCHY_SECRETS_DIR={}\n", secrets.display()),
     ] {
         assert!(text.contains(&want), "{want:?} in:\n{text}");
     }
+    // The token in its own file, read-only to the dispatcher (#327), not in its environment.
+    let token = format!("omw_{}", "0f".repeat(24));
+    assert!(
+        !text.contains(&token) && !text.contains("OMARCHY_WORKER_TOKEN"),
+        "{text}"
+    );
+    let file = p.set_dir().join("run/host/dispatcher/token");
+    assert_eq!(fs::read_to_string(&file).unwrap(), format!("{token}\n"));
+    assert_eq!(mode(&file), 0o400);
+    assert_eq!(mode(file.parent().unwrap()), 0o700);
     // No agent_budget in the envelope: the dispatcher's defaults.
     assert!(!text.contains("OMARCHY_AGENT_"), "{text}");
     assert_eq!(mode(&env), 0o600);
     let said = String::from_utf8_lossy(&out).into_owned();
     assert!(
-        said.contains("dispatcher.env (0600): the worker token, OMARCHY_HOST_ADDRESSES=10.8.0.2,"),
+        said.contains("dispatcher.env (0600): the registration, OMARCHY_HOST_ADDRESSES=10.8.0.2,")
+            && said.contains("; the worker token in ")
+            && said.contains("run/host/dispatcher/token (0400)"),
         "{said}"
     );
     let seen: crate::dispatcher_env::addresses::Seen =
@@ -4595,15 +4607,25 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
     let _ = fs::remove_dir_all(&home);
 }
 
-/// `etc/dispatcher.env` in the Mac's set directory, which the VM mounts: the token, the
-/// Mac's own addresses (`ifconfig`'s and the public one the probe task in the VM saw) and
-/// the secrets directory (#371).
+/// `etc/dispatcher.env` in the Mac's set directory, which the VM mounts: the token's
+/// registration, the Mac's own addresses (`ifconfig`'s and the public one the probe task in
+/// the VM saw) and the secrets directory (#371); the token in its own file there, 0400,
+/// which the dispatcher in the VM mounts read-only, and not in the env file (#327).
 fn holds_the_macs_dispatcher_env(h: &Host) {
+    use std::os::unix::fs::PermissionsExt as _;
     let set = h.root.join("shared/set");
     let p = &h.options.places;
     let env = fs::read_to_string(set.join("etc/dispatcher.env")).unwrap();
+    let token = format!("omw_{}", "0f".repeat(24));
+    let file = crate::dispatcher_env::token_path_in(&set);
+    assert_eq!(fs::read_to_string(&file).unwrap().trim(), token);
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
+    assert!(!env.contains(&token), "the token in the env file:\n{env}");
     for want in [
-        format!("\nOMARCHY_WORKER_TOKEN=omw_{}\n", "0f".repeat(24)),
+        "\n# worker: m1-rack-0a9z\n".to_owned(),
         "\nOMARCHY_HOST_ADDRESSES=100.101.102.103,192.168.1.23,203.0.113.7,2001:db8:1:2::/64,fd7a:115c:a1e0::/64,fe80::/64\n".into(),
         format!("\nOMARCHY_SECRETS_DIR={}\n", h.root.join("shared/secrets").display()),
     ] {

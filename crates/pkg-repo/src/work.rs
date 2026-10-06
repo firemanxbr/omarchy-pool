@@ -1966,12 +1966,10 @@ pub(crate) fn keyrings_in(dir: &Path, repo: &Path, required: &[String]) -> Resul
         return Ok(dir);
     }
     std::fs::create_dir_all(&dir)?;
-    let status = Command::new("bash")
-        .arg(repo.join("tests/fetch-keyrings.sh"))
-        .arg(&dir)
-        // It fetches public files: no token of this process reaches it.
-        .env_remove("OMARCHY_TOKEN")
-        .env_remove("OMARCHY_WORKER_TOKEN")
+    let mut fetch = Command::new("bash");
+    fetch.arg(repo.join("tests/fetch-keyrings.sh")).arg(&dir);
+    // It fetches public files: no token of this process reaches it.
+    let status = crate::worker_token::withhold(&mut fetch)
         .status()
         .context("fetch-keyrings.sh")?;
     if !status.success() {

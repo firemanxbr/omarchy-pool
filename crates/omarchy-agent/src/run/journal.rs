@@ -87,9 +87,20 @@ impl Journal {
 /// Reads `etc/*.env` of the set directory: each `KEY=value` value of 8 or more
 /// characters is a secret to scrub (shorter ones would scrub ordinary words), but those of
 /// the keys the agent renders into `etc/dispatcher.env` that hold none (#371: the host's
-/// addresses, the secrets directory's path, the budget), which an engine's error may name.
+/// addresses, the secrets directory's path, the budget), which an engine's error may name;
+/// and the host worker token from its own file (#327).
 pub(crate) fn env_secrets(set_dir: &Path) -> Vec<String> {
-    env_values(&set_dir.join("etc"))
+    let mut out = Vec::new();
+    if let Ok(t) = fs::read_to_string(crate::dispatcher_env::token_path_in(set_dir)) {
+        let t = t.trim();
+        if t.len() >= 8 {
+            out.push(t.to_owned());
+        }
+    }
+    out.extend(env_values(&set_dir.join("etc")));
+    out.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    out.dedup();
+    out
 }
 
 /// The values of `dir/*.env`, as [`env_secrets`] reads them: the set's `etc/`, or (#325's
