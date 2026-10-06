@@ -403,6 +403,9 @@ pub(crate) struct Https {
     host: Option<(HostKey, String)>,
     /// IPv4 only and never through a proxy: the way a task's egress leaves the host.
     direct_v4: ureq::Agent,
+    /// GitHub's API, for the latest release's tag (#326): a short deadline, so a GitHub
+    /// that does not answer holds one tick for seconds, not a minute.
+    api: ureq::Agent,
     /// The watchdog's clock, moved on as a body's bytes arrive: a long download is
     /// progress, a stalled one is not.
     progress: Option<Arc<AtomicI64>>,
@@ -433,6 +436,7 @@ impl Https {
                 .proxy(None)
                 .build()
                 .into(),
+            api: config(Duration::from_secs(20), 3).build().into(),
             progress: None,
         }
     }
@@ -621,7 +625,7 @@ impl Pool for Https {
 
     fn github_latest(&mut self) -> Net<Release> {
         let res = self
-            .agent
+            .api
             .get(LATEST_RELEASE)
             .header("accept", "application/vnd.github+json")
             .header("x-github-api-version", "2022-11-28")
