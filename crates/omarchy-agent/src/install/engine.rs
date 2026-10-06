@@ -45,7 +45,8 @@ impl Docker {
 }
 
 /// The engine behind the socket, as the dispatcher tells it apart (#367): podman behind its
-/// docker-compatible API, or Docker and its major version.
+/// docker-compatible API (whose task networks are made through libpod's, #372), or Docker and
+/// its major version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Server {
     Podman,
@@ -84,20 +85,28 @@ pub(crate) fn parse_server(json: &str) -> Result<Server, String> {
         .ok_or_else(|| format!("the engine's version does not read: {:?}", s.version))
 }
 
-/// `network create`'s options for a task's own network, as the dispatcher asks this engine for
-/// it (#336; pkg-repo's `dispatch::spec::Gateway`): internal and, from Docker 28 on, with the
-/// isolated gateway mode, so no address of the host is on its bridge. Behind podman's docker
-/// API there is nothing more to ask: it turns DNS on and drops docker's option, so the network
-/// keeps a gateway (seam: #372 makes it through libpod's own API). An older Docker is refused,
-/// as the dispatcher refuses it.
-pub(crate) fn task_network(s: Server) -> Result<Vec<&'static str>, String> {
+/// How a task's own network is made on this engine, as the dispatcher makes it (#336, #372;
+/// pkg-repo's `dispatch::spec::Gateway`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TaskNetwork {
+    /// Docker 28 or newer, by the CLI with these `network create` options: internal, with the
+    /// isolated gateway mode, so no address of the host is on its bridge.
+    Cli(Vec<&'static str>),
+    /// podman, through libpod's own API ([`super::libpod`]): internal with DNS off, so it has
+    /// no gateway. Its docker API would turn DNS on and drop docker's option.
+    Libpod,
+}
+
+/// How a task's own network is made on this engine ([`TaskNetwork`]). An older Docker is
+/// refused, as the dispatcher refuses it.
+pub(crate) fn task_network(s: Server) -> Result<TaskNetwork, String> {
     match s {
-        Server::Podman => Ok(vec!["--internal"]),
-        Server::Docker(m) if m >= 28 => Ok(vec![
+        Server::Podman => Ok(TaskNetwork::Libpod),
+        Server::Docker(m) if m >= 28 => Ok(TaskNetwork::Cli(vec![
             "--internal",
             "-o",
             "com.docker.network.bridge.gateway_mode_ipv4=isolated",
-        ]),
+        ])),
         Server::Docker(m) => Err(format!(
             "docker {m} cannot keep a task network's gateway off the host (com.docker.network.bridge.gateway_mode_ipv4=isolated needs Docker 28 or newer), and the dispatcher refuses it: upgrade the engine"
         )),

@@ -750,10 +750,13 @@ gateway is reached on a plain bridge (the host itself on rootful docker, the
 engine's namespace on rootless podman) and not behind an `INPUT` drop for
 one test /28 (the rule prep-root.sh's `OMARCHY-TASKS-HOST` holds for each
 task subnet), which the script adds on a rootful engine where it may (root,
-or `sudo -n`); a task's own network has no gateway a task reaches on docker,
-and keeps one behind podman's docker API; rootless podman's network stack is
-seen in `/proc` while the probe tasks run, and maps nothing to the host's
-loopback. What needs a VM, by hand on Ubuntu LTS, Fedora and
+or `sudo -n`); a task's own network, made as the dispatcher makes it (on
+podman through libpod's own API, internal with DNS off, #372), has no gateway
+a task reaches on either engine, and the dispatcher's own code makes the same
+network there through docker's CLI; rootless podman's network stack is seen
+in `/proc` while the probe tasks run, and maps nothing to the host's loopback;
+on rootless podman behind pasta a service of the host's answers through
+pasta's guest-mapped address exactly when pasta maps it. What needs a VM, by hand on Ubuntu LTS, Fedora and
 Arch (Asahi on the Studio's hardware) before P1 is called done: install
 from nothing with the pasted command and confirm on the site, then
 `sudo reboot` and check `systemctl --user status omarchy-agent` and
@@ -771,9 +774,11 @@ slirp4netns for rootless podman). prep-root.sh installs no firewall there
 network's gateway is the engine's namespace, not the host. What can still
 reach the host from a bridge is the stack's **host loopback**: an address in
 the namespace that the stack forwards to the host's `127.0.0.1`, where
-services that trust local callers listen. Every engine below has it off by
-default. Whether it is on is on the stack's command line, which the engine's
-own user (the agent's, design v2 §19.3) reads in `/proc/<pid>/cmdline`:
+services that trust local callers listen. Every engine below keeps the host's
+loopback off by default; pasta's guest-mapped address (from podman 5.3, the
+table's third row, below) is on. Whether the loopback is mapped is on the
+stack's command line, which the engine's own user (the agent's, design v2
+§19.3) reads in `/proc/<pid>/cmdline`:
 preflight reads it there while both probe tasks run (rootless podman starts
 its stack with the first container on a bridge network and stops it with the
 last), and refuses the install with the setting to change when any of this
@@ -785,23 +790,43 @@ own network; the latter is internal, with no route to these addresses, and
 so is reached only through the former and the shared `omarchy-egress`
 bridge, whose sidecars refuse private addresses by what a name resolves to.
 
-| Engine | Where the host's loopback appears, when on | Default | What turns it off |
-|---|---|---|---|
-| rootless Docker (`dockerd-rootless.sh`, RootlessKit) | by RootlessKit's `--net` (its docs/network.md): `10.0.2.2` (slirp4netns, the default), `192.168.65.2` (vpnkit), `10.0.2.1` (gvisor-tap-vsock), the namespace's gateway (pasta) | off: RootlessKit runs with `--disable-host-loopback` | remove `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` from `docker.service`'s environment (`systemctl --user edit docker.service`), and any `--disable-host-loopback=false` from `DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS`, then `systemctl --user restart docker.service` |
-| rootless podman, pasta (podman 5's default) | the namespace's gateway (podman's `--map-gw`), or the address given to `--map-host-loopback` | off: podman passes `--no-map-gw` | in `containers.conf` (`~/.config/containers/containers.conf`, `/etc/containers/containers.conf`, or a file in their `containers.conf.d`), remove `--map-gw` and any `--map-host-loopback` from `pasta_options` under `[network]`; then stop every container of the user, so its namespace starts again without them |
-| rootless podman, slirp4netns (podman 4's default) | `10.0.2.2` | off: podman passes `--disable-host-loopback` (`allow_host_loopback=false`) | in `containers.conf`, remove `allow_host_loopback=true` from `network_cmd_options` under `[engine]`; then stop every container of the user |
+pasta can also map an address to the host's **own** address, which reaches
+every service of the host that listens on its interfaces: its guest-mapped
+address (`--map-guest-addr`), which rootless podman passes as `169.254.1.2`
+(what `host.containers.internal` names) from podman 5.3 on, unless
+`pasta_options` names one. On rootless podman behind pasta (libpod's `/info`
+says which stack it runs) the probe task on a bridge tries `169.254.1.2` on
+22, 53 and the pool's ports, and preflight refuses the install when anything
+answers there, with the setting to change; an address that pasta's command
+line maps and the probe did not try (one an owner set) is refused as it is. A
+task's own network is internal and has no route to it, so the probe task on
+one does not try it (an unreachable address that fails at once reads as a
+refusal to `nc -z`); a signed exception's bridge has one, and so does the
+shared `omarchy-egress` bridge, whose sidecars refuse link-local addresses.
 
-With the host loopback off, a rootless host still fails the probe until two
-follow-ups land, and preflight says which:
-- a signed exception's bridge reaches the LAN and the router through the
-  user-mode stack, and its gateway (the engine's namespace) refuses
-  connections, which counts as reached: #373 runs the probe the way a task
-  runs, on an internal network behind its egress sidecar;
-- behind rootless podman's docker API a task network keeps a gateway, where
-  aardvark-dns answers on 53 and the namespace refuses every other port:
-  #372 makes the dispatcher's task networks through libpod's own API with DNS
-  off, and checks pasta's guest-mapped address (`--map-guest-addr`,
-  `169.254.1.2` by default) too.
+| Engine | What maps the host into its networks, where, when on | Default | What turns it off |
+|---|---|---|---|
+| rootless Docker (`dockerd-rootless.sh`, RootlessKit) | the host's loopback, by RootlessKit's `--net` (its docs/network.md): `10.0.2.2` (slirp4netns, the default), `192.168.65.2` (vpnkit), `10.0.2.1` (gvisor-tap-vsock), the namespace's gateway (pasta) | off: RootlessKit runs with `--disable-host-loopback` | remove `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` from `docker.service`'s environment (`systemctl --user edit docker.service`), and any `--disable-host-loopback=false` from `DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS`, then `systemctl --user restart docker.service` |
+| rootless podman, pasta (podman 5's default) | the host's loopback at the namespace's gateway (podman's `--map-gw`), or at the address given to `--map-host-loopback` | off: podman passes `--no-map-gw` | in `containers.conf` (`~/.config/containers/containers.conf`, `/etc/containers/containers.conf`, or a file in their `containers.conf.d`), remove `--map-gw` and any `--map-host-loopback` from `pasta_options` under `[network]`; then stop every container of the user, so its namespace starts again without them |
+| rootless podman, pasta, from podman 5.3 | the host's own address at pasta's guest-mapped address, `169.254.1.2` (`--map-guest-addr`), or the one `pasta_options` names | **on**: podman passes `--map-guest-addr 169.254.1.2`; preflight refuses the install only when the host answers there on a port it tries (sshd on 22, a resolver on 53, …) | in `containers.conf`, `pasta_options = ["--map-guest-addr", "none"]` under `[network]` (beside any other option there); then stop every container of the user |
+| rootless podman, slirp4netns (podman 4's default) | the host's loopback at `10.0.2.2` | off: podman passes `--disable-host-loopback` (`allow_host_loopback=false`) | in `containers.conf`, remove `allow_host_loopback=true` from `network_cmd_options` under `[engine]`; then stop every container of the user |
+
+On every rootless engine above, a task's own network has no gateway: the
+dispatcher makes it on podman through libpod's own API, internal with DNS
+off (its docker-compatible API would turn DNS on and keep a gateway at `.1`,
+where aardvark-dns answers on 53 and the namespace refuses every other
+port), and on Docker with its isolated gateway mode (#372); preflight's
+second probe task, on a network made the same way, passes with the defaults
+above. podman 4's docker-compatible API shows such a network with
+`"Gateway": "<nil>"`, which docker's CLI from 29 on cannot read: on a podman 4
+host (rootful too) with a task running, an owner's own docker CLI 29 or newer
+on podman's socket fails `docker network ls` and `docker network inspect` with
+`ParseAddr("<nil>")`; podman's own CLI, or the docker CLI the worker image and
+the agent pin (27.5.1), lists them. A rootless host still fails the first
+probe task until #373 lands, and preflight says so: a signed exception's bridge reaches the LAN and the
+router through the user-mode stack, and its gateway (the engine's namespace)
+refuses connections, which counts as reached; #373 runs the probe the way a
+task runs, on an internal network behind its egress sidecar.
 
 ### Installing a Mac
 
@@ -1212,6 +1237,13 @@ before its dispatcher stopped (only a dispatcher there re-adopts it) or no
 end within 20 minutes stops the new dispatcher and brings it back on the old
 engine (`rolled-back`, with why; the release is not quarantined for the
 engine's fault, and `agent.toml` was never changed).
+On the new engine the dispatcher makes its task networks as it does on any
+host of that engine (#372): on podman through libpod's own API on the socket
+it mounts, internal with DNS off; where libpod does not answer there, the
+dispatcher does not start, so the round's guard fails and the switch goes
+back. The switch runs none of install's preflight probes on the new engine
+(the gateway, the host loopback, pasta's guest-mapped address: *Rootless
+engines*, above).
 A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
 and `logs` follow it. Install writes no runtime into `agent.toml` (it finds
 a socket, and podman's speaks docker's API): until a switch names one there,

@@ -28,6 +28,10 @@ ARG POOL_RELEASE
 # Where the release's binaries are fetched from: the GitHub release by default; CI's smoke start of a local build serves this
 # commit's own from the runner (tests/image-smoke.sh, the ci.yml job that builds the image).
 ARG TOOLS_URL=https://github.com/firemanxbr/omarchy-pool/releases/download/${POOL_RELEASE}
+# Below 29 while podman 4 hosts are served (#372): podman 4's docker API shows a task network the dispatcher makes through
+# libpod (no gateway) with "Gateway": "<nil>", which docker's CLI from 29 on fails to parse (`network ls`, `network
+# inspect`: ParseAddr("<nil>")), and the dispatcher lists its networks with it. A bump needs a podman that omits that
+# gateway, or the dispatcher listing networks another way; tests/host-bundle.py holds the pin below 29 until then.
 ARG DOCKER_CLI=27.5.1
 # com.omarchy.updater.follows: this image's updater follows the pool (#277) — it asks GET /factory/follow every two minutes and
 # takes Update. A project worker reports it with its set's rollout, so the pool knows what rolls the set out.

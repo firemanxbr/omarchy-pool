@@ -178,13 +178,12 @@ secret). Everything travels in the `Authorization` header over TLS only.
   machine, say `none`.
   An internal network's bridge address is otherwise the host itself, so
   the dispatcher asks the engine to leave it off: Docker's isolated gateway
-  mode (Docker 28 or newer; an older daemon is refused) or, on podman's own
-  CLI, a network without DNS. Stated plainly: podman behind docker's API
-  cannot be asked (it forces DNS on and drops docker's option), so there a
-  service of the host listening on all addresses is reachable from a task
-  unless the host's firewall (`prep-root.sh`'s INPUT drop for the task
-  subnets) closes it; and a signed exception's bridge always has its gateway,
-  the host itself on a rootful engine, where the `DOCKER-USER` rules (in
+  mode (Docker 28 or newer; an older daemon is refused) or, on podman, a
+  network without DNS, which has no gateway — by podman's own CLI, or behind
+  docker's CLI (whose podman API forces DNS on and drops docker's option)
+  through libpod's own API on the socket that CLI talks to, which must answer
+  as podman (#372). Stated plainly: a signed exception's bridge always has
+  its gateway, the host itself on a rootful engine, where the `DOCKER-USER` rules (in
   `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
   preflight checks it rather than trusting it (#367): on a rootful Linux
   engine it refuses a host whose prep-root.sh firewall script (world-readable) does
@@ -200,7 +199,13 @@ secret). Everything travels in the `Authorization` header over TLS only.
   reads the stack's command line in `/proc` while its probe tasks run and
   refuses one that maps it, with the setting that turns it off (the runbook's
   *Rootless engines*). It reads rather than listening for a connection: the
-  agent listens on nothing (design v2 §11.2).
+  agent listens on nothing (design v2 §11.2). pasta can also forward an
+  address to the host's own (`--map-guest-addr`, `169.254.1.2` by rootless
+  podman's default from 5.3 on), which a bridge reaches: on rootless podman
+  behind pasta the probe task on a bridge tries it (a task's own network,
+  internal, has no route to it), and an answer there, or an address pasta
+  maps that the probe did not try, refuses the install with containers.conf's
+  `--map-guest-addr none` (#372).
   A signed `factory/sizing` exception is per package:
   it also covers a contributor's recipe of that package, so its reviewer
   approves exactly that.
