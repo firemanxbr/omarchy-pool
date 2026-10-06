@@ -194,8 +194,16 @@ try:
                            "sha256": docker_sums[arch]}, f"{arch}-linux docker: the Containerfile's version and sum")
         ok(t["docker-compose"] == {"url": f"https://github.com/docker/compose/releases/download/{compose_v}/docker-compose-linux-{arch}",
                                    "sha256": compose_sums[arch]}, f"{arch}-linux compose: the Containerfile's version and sum")
+    # A Mac's (#320): the same versions, built for Darwin (their sums are pinned in the
+    # manifest alone; `host-bundle check-tools` downloads and checks every one).
+    t = inner["tools"]["aarch64-darwin"]
+    ok(t["docker"]["url"] == f"https://download.docker.com/mac/static/stable/aarch64/docker-{docker_v}.tgz"
+       and re.fullmatch(r"[0-9a-f]{64}", t["docker"]["sha256"]), "aarch64-darwin docker: the Containerfile's version")
+    ok(t["docker-compose"]["url"] == f"https://github.com/docker/compose/releases/download/{compose_v}/docker-compose-darwin-aarch64"
+       and re.fullmatch(r"[0-9a-f]{64}", t["docker-compose"]["sha256"]), "aarch64-darwin compose: the Containerfile's version")
+    ok(sorted(inner["tools"]) == ["aarch64-darwin", "aarch64-linux", "x86_64-linux"], f"tools for every platform an agent ships for: {sorted(inner['tools'])}")
     ok(inner["tools"] == policy["tools"], "the tools as factory/bundle/manifest.toml pins them")
-    print(f"ok: the tools: docker {docker_v} and compose {compose_v}, the worker image's pins")
+    print(f"ok: the tools: docker {docker_v} and compose {compose_v}, the worker image's pins, and the same versions for a Mac")
 
     # The host set, rendered, each file by hash.
     compose = files["sets/host/compose.yml"].decode()

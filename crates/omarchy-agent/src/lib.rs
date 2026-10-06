@@ -17,7 +17,8 @@
 //! the host worker token).
 //!
 //! Self-update (#316) is part of [`run`]; [`install`] (#317) puts a Linux host together:
-//! preflight, the envelope, enrollment, the agent keys, the unit and linger.
+//! preflight, the envelope, enrollment, the agent keys, the unit and linger; and a Mac
+//! (#320): the `LaunchAgent` and the `omarchy` Colima VM [`vm`] sizes and keeps.
 //! [`dispatcher_env`] (#371) renders the dispatcher's `etc/dispatcher.env` beside its
 //! worker token: the host's own addresses, the secrets directory and the agent budget.
 
@@ -33,6 +34,7 @@ pub mod run;
 pub mod statement;
 pub mod verify;
 pub mod version;
+pub mod vm;
 
 mod archive;
 

@@ -1,0 +1,30 @@
+# A Mac's agent.toml (#320, design v2 §19.2): the omarchy Colima VM mounts the work root,
+# the secrets and the set directories, at their own paths, outside the home directory.
+pool    = "https://pkgs.omarchy-pool.org"
+host_id = "h_0123456789"
+
+[set]
+name         = "host"
+dir          = "/Users/Shared/omarchy-pool/set"
+work_root    = "/Users/Shared/omarchy-pool/work"
+secrets_dir  = "/Users/Shared/omarchy-pool/secrets"
+project      = "omarchy-host"
+driver       = "compose"
+socket_cli   = "/Users/maintainer/.colima/omarchy/docker.sock"
+socket_mount = "/var/run/docker.sock"
+engine       = "rootful"
+
+[envelope]
+max_cpus     = 8
+max_mem_gb   = 32
+task_subnets = "10.231.0.0/16"
+allow_socket = true
+rootful_ack  = true
+dedicated    = true
+paths        = ["/Users/Shared/omarchy-pool/cache"]
+
+[vm]
+runtime = "colima"
+profile = "omarchy"
+rosetta = true
+disk_gb = 100

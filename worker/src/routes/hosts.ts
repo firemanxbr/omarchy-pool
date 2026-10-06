@@ -700,7 +700,7 @@ export async function handleEnroll(request: Request, env: Env, url: URL): Promis
   const isolation = ISOLATIONS.includes(b.isolation as Isolation) ? (b.isolation as Isolation) : null;
   const agent = typeof b.agent_version === "string" && /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(b.agent_version) ? b.agent_version : null;
   const pageKb = Number.isInteger(b.page_kb) && (b.page_kb as number) >= 4 && (b.page_kb as number) <= 64 ? (b.page_kb as number) : null;
-  if (!hostname || !os || !arch || !isolation || !agent || !pageKb) return json({ error: `${ENROLL_FIELDS} are required (hostname a DNS label, os linux | macos, arch x86_64 | aarch64, isolation root | user | subuid)` }, 400);
+  if (!hostname || !os || !arch || !isolation || !agent || !pageKb) return json({ error: `${ENROLL_FIELDS} are required (hostname a DNS label, os linux | macos, arch x86_64 | aarch64, isolation root | user | subuid | vm | vm-shared)` }, 400);
   if (!cap.lanes.some((l) => l.mode === "native" && l.arch === arch)) return json({ error: `capacity.lanes: the native lane is not ${arch}` }, 400);
   const runtime = b.runtime === undefined || b.runtime === null ? null : JSON.stringify(b.runtime);
   if (runtime !== null && (typeof b.runtime !== "object" || runtime.length > 2048)) return json({ error: "runtime: an object of at most 2 KiB" }, 400);

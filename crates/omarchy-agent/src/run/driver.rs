@@ -143,4 +143,14 @@ pub(crate) trait Driver {
     fn project_networks(&mut self, project: &str) -> Answer<Vec<String>>;
     /// Removes a network; the engine refuses one a container still uses.
     fn remove_network(&mut self, id: &str) -> Answer<()>;
+    /// Whether a task container runs on the engine ([`TASK_LABEL`]): what holds back a
+    /// resize of a Mac's VM (#320), which would end it. The driver lists it; it never acts
+    /// on one.
+    fn tasks_running(&mut self) -> Answer<bool>;
 }
+
+/// The label the dispatcher gives every task container and every sidecar of one
+/// (`com.omarchy.task=<id>`, pkg-repo's `stop::TASK_LABEL`); the role label
+/// (`org.omarchy-pool.task.role`) is a sidecar's only, and a task with the signed `direct`
+/// exception has none.
+pub(crate) const TASK_LABEL: &str = "com.omarchy.task";

@@ -546,6 +546,32 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
   the host declared.
+- **A Mac** (#320, design v2 §19.2, §19.3) runs its tasks in the agent's own
+  `omarchy` Colima VM (isolation `vm`): a container escape lands in the VM,
+  which mounts only the work root (writable), the secrets directory and the
+  set directory (read-only, so nothing in the VM can plant a link the agent
+  would write through), each at its own path and none under the home
+  directory — no `~/.ssh`, no Keychain files, no forwarded SSH agent; preflight
+  checks from a container that the VM sees those three and not the home
+  directory, and the lint refuses a bind outside them. Inside the VM the
+  agent is root (Colima's passwordless sudo) and keeps prep-root.sh's task
+  firewall there with the same unit, after `docker.service`, so every boot
+  of the VM (a login, a resize, a clock restart) applies it as soon as
+  dockerd is up, as on a Linux host, not when the agent next looks; it runs
+  it again after every start, hourly and after a wake. A task reaches
+  neither your LAN nor the Mac through Colima's NAT, and the egress probe
+  checks it before install goes on; every task's egress sidecar also refuses
+  the Mac's own addresses (`/sbin/ifconfig -a`'s, a Mac having no `/proc`,
+  and the public one it leaves from, #371). Docker Desktop's or OrbStack's VM
+  (`vm-shared`) is used only if it is already there, with nothing of the
+  home directory shared with it and `--dedicated`; the agent puts nothing in
+  it, and its egress probe decides. After a wake the agent holds the VM's
+  clock within five seconds of the pool's `Date` (the signed host state's
+  answer, a refusal's included), but only while the Mac's
+  own clock agrees with it: a pool's answer never moves the VM's clock more
+  than six seconds from the Mac's (a lying pool cannot take the VM's TLS
+  checks back to a time whose certificates expired), and a Mac that is off
+  is said, never set.
 
 ## Stopping a host
 
