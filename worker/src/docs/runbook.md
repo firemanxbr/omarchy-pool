@@ -1231,6 +1231,13 @@ before its dispatcher stopped (only a dispatcher there re-adopts it) or no
 end within 20 minutes stops the new dispatcher and brings it back on the old
 engine (`rolled-back`, with why; the release is not quarantined for the
 engine's fault, and `agent.toml` was never changed).
+On the new engine the dispatcher makes its task networks as it does on any
+host of that engine (#372): on podman through libpod's own API on the socket
+it mounts, internal with DNS off; where libpod does not answer there, the
+dispatcher does not start, so the round's guard fails and the switch goes
+back. The switch runs none of install's preflight probes on the new engine
+(the gateway, the host loopback, pasta's guest-mapped address: *Rootless
+engines*, above).
 A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
 and `logs` follow it. Install writes no runtime into `agent.toml` (it finds
 a socket, and podman's speaks docker's API): until a switch names one there,
