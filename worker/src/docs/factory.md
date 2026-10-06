@@ -72,7 +72,10 @@ verify and attest the package faster and approve it with more confidence.
    (`factory/bin/audit-pkgbuild`, `factory/prompts/audit.md`) and attaches
    `audit.json` / `audit.md` to the evidence. The Review page shows the
    verdict (`ok`, `warn`, `block`); nothing acts on it, the maintainer does.
-6. **A maintainer claims it — never their own package.** On the Review
+6. **A maintainer claims it — never their own package** (but the one
+   maintainer the governance file's solo-maintainer exception names while it
+   is in force, on their own packages, each decision marked self-reviewed:
+   #394, [/docs/governance#solo](/docs/governance#solo)). On the Review
    page, a maintainer (`factory/MAINTAINERS.toml`) claims a package that is
    ready (*Build by the project* on a build's page is the same door): the
    project builds it again on a review worker, with the agent the maintainer
@@ -451,7 +454,7 @@ The factory touches the pool through four things, all versioned in the API:
 | The factory uses | Meaning |
 |---|---|
 | `GET /api/v1/package/:name` | who ships a name already (the guard) |
-| `POST /api/v1/factory/{requests,enqueue}` · `/requests/:id/{approve,reject}` · `/tasks/:id/cancel` (a maintainer's token — by hand, a dry run only (#284) — or the enqueue job's) · `/tasks/:id/{build,approve,reject}` (a maintainer, never the owner) · `POST /factory/workers` (a maintainer's token; 403 for anyone else, #331) · `/{contributors,packages}/:x/{block,unblock}` (a maintainer — a block, like an approval, in the browser with their passkey; lifting by another) · `POST /factory/jobs` (a maintainer queues a pool job; one that forces a promotion past its evidence in the browser with their passkey, #284) · `GET /factory/built`, `/factory/maintainers`, `/factory/review`, `/factory/blocks` | maintainers and the enqueue job |
+| `POST /api/v1/factory/{requests,enqueue}` · `/requests/:id/{approve,reject}` · `/tasks/:id/cancel` (a maintainer's token — by hand, a dry run only (#284) — or the enqueue job's) · `/tasks/:id/{build,approve,reject}` (a maintainer, never the owner — but the one maintainer the solo-maintainer exception names, on their own package, self-reviewed, #394) · `POST /factory/workers` (a maintainer's token; 403 for anyone else, #331) · `/{contributors,packages}/:x/{block,unblock}` (a maintainer — a block, like an approval, in the browser with their passkey; lifting by another) · `POST /factory/jobs` (a maintainer queues a pool job; one that forces a promotion past its evidence in the browser with their passkey, #284) · `GET /factory/built`, `/factory/maintainers`, `/factory/review`, `/factory/blocks` | maintainers and the enqueue job |
 | `POST /api/v1/factory/claim` (a registered worker's token) · `/tasks/:id/{heartbeat,complete,fail}` (the claim's job token) | the worker protocol |
 | `POST /api/v1/factory/register` · `/factory/packages[/:name/build]` · `PUT /factory/tasks/:id/artifacts/:file` (worker token) · `GET /factory/packages`, `/factory/me` | contributors: registry, staging uploads |
 | `pkg-repo publish --source factory --ring edge --arch …` · `pkg-repo render` | how a result enters the pool: as a source like any other |
@@ -632,7 +635,9 @@ busy, not gone); when only
 the requester's hosts have one, it waits, and Review offers another maintainer *Release to any host* at
 once, with their passkey (`POST /factory/tasks/:id/any-host`,
 `any-host:<task>`), on the task (`params.any_host`), the journal and the
-record. An audit — in a fresh container with its own agent sidecar, by
+record — except for the packages of the maintainer the solo-maintainer
+exception names (#394): their own hosts take that copy, with no release, and
+Review says why. An audit — in a fresh container with its own agent sidecar, by
 construction — leaves the machine that built what it audits (its
 registration, or one of the same owner's the pool cannot tell apart from it:
 two registrations are apart only with different owners, or as two hosts'

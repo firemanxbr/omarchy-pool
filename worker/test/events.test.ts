@@ -51,6 +51,16 @@ describe("the journal's door", () => {
     expect(health.events.some((e) => e.summary === forged.summary)).toBe(false);
   });
 
+  // A claim, a decision, an adoption, a role: lines the pages read as what a person took (#394, the self-reviewed list and Status's count) — the pool's own doors write them, a job's token never does.
+  it("refuses a job's token the kinds the pool's own doors write", async () => {
+    for (const kind of ["review", "approve", "adopt", "role"]) {
+      const r = await post("/events", { kind, summary: `forged ${kind}`, payload: { name: "x", solo_exception: { maintainer: "m1", since: "2026-10-06" } } }, token);
+      expect([r.status, r.json?.code], kind).toEqual([403, "reserved_kind"]);
+    }
+    const rows = JSON.parse(await get("/api/v1/events?limit=200")) as { events: { summary: string }[] };
+    expect(rows.events.some((e) => e.summary.startsWith("forged "))).toBe(false);
+  });
+
   it("takes a job's event with an https run link and a release id, and refuses any other link or id", async () => {
     expect((await post("/events", { kind: "build", summary: "built", payload: { ci: { run_url: "https://github.com/o/r/actions/runs/1" }, release_id: 7 } }, token)).status).toBe(201);
     expect((await post("/events", { kind: "build", summary: "built", payload: { note: "no link at all" } }, token)).status).toBe(201);
