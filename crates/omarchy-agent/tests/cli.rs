@@ -921,8 +921,10 @@ fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the
 }
 
 /// `envelope pin-passkey` and `unpin-passkey` (#328): a pin needs the installed host's
-/// agent.toml, is checked here (a recorded one, made for 2027, is ahead of this machine's
-/// clock), and is read from stdin when it is not given; `status` says what is pinned.
+/// agent.toml, is checked here (a recorded one made for another host is refused for its
+/// host, which is read before any time: the refusal is the same at every date; the time
+/// window is the unit tests', with a fixed clock), and is read from stdin when it is not
+/// given; `status` says what is pinned.
 #[test]
 fn envelope_pin_passkey_checks_the_pin_at_the_host_and_status_says_what_is_pinned() {
     let data = scratch("envelope");
@@ -930,7 +932,7 @@ fn envelope_pin_passkey_checks_the_pin_at_the_host_and_status_says_what_is_pinne
     let cases: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixtures().join("owner/cases.json")).unwrap())
             .unwrap();
-    let pin = cases["pins"]["es256"].as_str().unwrap();
+    let pin = cases["pins"]["other_host"].as_str().unwrap();
     // No agent.toml yet: a host is pinned once it is installed and confirmed.
     let o = run(&["envelope", "pin-passkey", pin, "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));
@@ -948,7 +950,7 @@ fn envelope_pin_passkey_checks_the_pin_at_the_host_and_status_says_what_is_pinne
     let o = run(&["envelope", "pin-passkey", pin, "--data-dir", &d]);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));
     assert!(
-        text(&o).contains("ahead of this host's clock"),
+        text(&o).contains("is for host h_9999999999, not this one (h_0123456789)"),
         "{}",
         text(&o)
     );

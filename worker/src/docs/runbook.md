@@ -1387,8 +1387,8 @@ Two things are done at the host, once:
   ```
 
   The agent refuses a pin for another host, for a relying party that is not
-  its pool's, one whose signature does not check, or one past its ten
-  minutes; it then keeps the passkey's public key in `state/owner.json`
+  its pool's (`localhost` only when its pool is on the same machine), one
+  whose signature does not check, or one past its ten minutes; it then keeps the passkey's public key in `state/owner.json`
   (0600), and the page shows it pinned after its next report (within its
   poll). Pinning another passkey replaces it; `omarchy-agent envelope
   unpin-passkey` removes it, and the site then widens nothing and sets no
@@ -1422,11 +1422,23 @@ orders; the agent's answer says why when it refuses:
 | `the passkey's answer was made on …` / `the passkey signed for another relying party` / `the authenticator did not verify the user` | not signed on the pool's page, or without verifying you: sign again there |
 | `the keys were sealed to another seal key` | confirm the host's seal key on the page, then seal again |
 | `GITHUB_TOKEN carries the scopes …` | a `GITHUB_TOKEN` is public read only: make one with no scope |
+| `done`: `… was taken already: nothing changed again` | the agent stopped after making the change and before its answer reached the pool; the change is in place |
+| `done`, ending `; but …` | the change is in `agent.toml` or `agent.env`, and what failed after it is said — for `run/capacity.json was not counted again`, run `omarchy-agent capacity --write` at the host |
 
-A widening's `emulate` turns a lane on at the host's next count
-(`omarchy-agent capacity --write`; on a Mac, a restart of its VM); a Mac's
-VM takes a new `max_cpus` or `max_mem_gb` with a restart once no task runs.
-Narrowing (*Settings*) needs no signature.
+The page refuses a second document signed at the same version (two tabs,
+or a widening and keys signed at once) with `409`, `version`: press again,
+and the passkey signs the next one. The page also refuses, before your
+passkey is asked, a document the pool answered that is not the one it
+asked for (another envelope, other keys, another seal key, a challenge
+that is not its SHA-256): that is a pool to look into, not a retry.
+
+A widening's `emulate` turns a lane on at the host's next count, which the
+loop does not run on Linux — **decision**: the loop never runs a capacity
+probe or an emulation smoke test on its own there, so on Linux it takes
+`omarchy-agent capacity --write` at the host, as the page's dialog says
+(on a Mac, the next start of its VM counts it); a Mac's VM takes a new
+`max_cpus` or `max_mem_gb` with a restart once no task runs. Narrowing
+(*Settings*) needs no signature.
 
 ### Soak
 

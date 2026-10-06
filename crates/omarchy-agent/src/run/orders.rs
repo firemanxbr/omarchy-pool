@@ -394,8 +394,8 @@ impl Agent {
             OrderKind::SetEmulate(_) => self.narrow_to(&Narrow::Emulate(None), now),
             OrderKind::RotateToken => self.rotate_token(now),
             OrderKind::Diagnostics => self.diagnostics(&o.id, now),
-            OrderKind::WidenEnvelope(Some(s)) => self.widen_envelope(&s, now),
-            OrderKind::SetAgentKeys(Some(s)) => self.set_agent_keys(&s, now),
+            OrderKind::WidenEnvelope(Some(s)) => self.widen_envelope(&o.id, &s, now),
+            OrderKind::SetAgentKeys(Some(s)) => self.set_agent_keys(&o.id, &s, now),
             OrderKind::WidenEnvelope(None)
             | OrderKind::SetAgentKeys(None)
             | OrderKind::Unknown(_) => return,

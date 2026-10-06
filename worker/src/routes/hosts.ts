@@ -183,8 +183,8 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
     // Its owner's soak (#326): the minutes its envelope sets, when the soak of the release it is to take ends, and GitHub's latest tag as its agent read it.
     soak: reportedSoakOf(h.report),
     // The owner's control without a visit (#328): the passkey pinned at the host, the envelope a widening starts from, the agent keys' names —
-    // and its seal key, whether its owner confirmed it, and whether it changed since.
-    owner: reportedOwnerOf(h.report), seal: await sealView(h),
+    // and its seal key, whether its owner confirmed it, and whether it changed since. A key of its own: `owner` stays the owner's login.
+    owner_control: reportedOwnerOf(h.report), seal: await sealView(h),
     reported_at: h.reported_at, last_seen: h.last_seen, token_issued_at: h.token_issued_at,
     summary: capacity ? hostLine(capacity, h.isolation, h.dedicated === null ? null : !!h.dedicated) : null,
   };
@@ -786,6 +786,11 @@ export async function handleHostOrder(c: Contributor, id: string, request: Reque
   // P5's (#328): the document the owner's passkey signed, as this host's page asked for it, relayed whole — the host checks it again.
   const owner = OWNER_ORDER_KINDS.includes(kind) ? ownerOrder(kind, h, c.login, p.b) : null;
   if (owner instanceof Response) return owner;
+  // Two documents signed from challenges in flight (two tabs, a slow passkey) carry the same version: the host would take the first and
+  // refuse the other as a replay. Said here instead, before it is relayed — and the insert below holds to it too.
+  if (owner && owner.view.version < (await nextOwnerVersion(env, h))) {
+    return json({ error: `another signed document took version ${owner.view.version} of ${h.name} first: press again, and your passkey signs the next version`, code: "version" }, 409, NO_STORE);
+  }
   const ok = kind === "retire-legacy" ? await webGate(request, url, env, c.login, `host:retire-legacy:${id}`)(p.b.assertion)
     : owner ? await webGate(request, url, env, c.login, `host:${kind}:${id}`, owner.doc)(p.b.assertion)
     : null;
@@ -800,8 +805,8 @@ export async function handleHostOrder(c: Contributor, id: string, request: Reque
   try {
     await env.DB.batch([
       env.DB.prepare(EXPIRE_HOST_ORDERS_SQL).bind(at, id),
-      env.DB.prepare("INSERT INTO host_orders (id, host_id, kind, issued_by, via, confirmed_with, issued_at, not_after, arg) SELECT ?, id, ?, ?, 'web', ?, ?, ?, ? FROM hosts WHERE id = ? AND status = 'active'")
-        .bind(oid, kind, c.login, ok ? ok.passkey : null, at, notAfter, stored ? JSON.stringify(stored) : null, id),
+      env.DB.prepare(`INSERT INTO host_orders (id, host_id, kind, issued_by, via, confirmed_with, issued_at, not_after, arg) SELECT ?, id, ?, ?, 'web', ?, ?, ?, ? FROM hosts WHERE id = ? AND status = 'active' AND NOT EXISTS (${OWNER_VERSION_TAKEN_SQL})`)
+        .bind(oid, kind, c.login, ok ? ok.passkey : null, at, notAfter, stored ? JSON.stringify(stored) : null, id, id, owner ? owner.view.version : null),
       env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', ?, ?, ? WHERE EXISTS (SELECT 1 FROM host_orders WHERE id = ?)")
         .bind(kind === "retire-legacy" || owner ? "warn" : "ok", line, JSON.stringify({ host: id, owner: h.owner_login, by: c.login, via: "web", action: "order", order: oid, kind, not_after: notAfter, ...(shown ?? {}), ...(ok ? { confirmed_with: ok.passkey } : {}) }), oid),
     ]);
@@ -840,6 +845,8 @@ function argView(kind: string, arg: Record<string, unknown> | null): unknown {
 
 /** The highest version the host's owner orders and its last report name: the next document is one above both, so the host never takes one twice. Through (host_id, issued_at). */
 export const OWNER_VERSION_SQL = "SELECT MAX(json_extract(arg, '$.version')) AS v FROM host_orders WHERE host_id = ? AND kind IN ('widen-envelope', 'set-agent-keys')";
+/** An owner order of the host at this version or above (host id, version): the insert of another holds to it. NULL, any other kind: none. */
+const OWNER_VERSION_TAKEN_SQL = "SELECT 1 FROM host_orders WHERE host_id = ? AND kind IN ('widen-envelope', 'set-agent-keys') AND json_extract(arg, '$.version') >= ?";
 async function nextOwnerVersion(env: Env, h: HostRow): Promise<number> {
   const r = await env.DB.prepare(OWNER_VERSION_SQL).bind(h.id).first<{ v: number | null }>();
   return Math.max(r?.v ?? 0, reportedOwnerOf(h.report)?.version ?? 0) + 1;

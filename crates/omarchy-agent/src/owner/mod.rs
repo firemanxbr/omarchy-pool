@@ -1,7 +1,8 @@
 //! The owner's control without a visit (#328, design v2 §12, §14, decision D6 b): a
 //! widening of the envelope and the agent keys, given from the site and taken on the host
-//! only when the owner's own passkey signed them. The pool relays both; it can forge
-//! neither, nor read a key.
+//! only when the owner's own passkey signed them. The pool relays both; its database and
+//! its relay can forge neither, nor read a key. (The page the owner signs on is the pool's:
+//! worker/src/docs/security-model.md says what compromised code serving it could do.)
 //!
 //! - **The pin.** Once, at the host, `omarchy-agent envelope pin-passkey <pin>` takes the
 //!   owner's passkey: the pin the site made (an assertion of that passkey over a document
@@ -156,9 +157,45 @@ pub struct Record {
     pub version: u64,
     #[serde(default)]
     pub passkey: Option<Pinned>,
+    /// The last signed document whose change was made, and the order that carried it: that
+    /// same order seen again — the agent stopped after the change, before its answer
+    /// reached the pool — is answered as taken already, never as a replay. The same
+    /// document under any other order is a replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken: Option<Taken>,
+}
+
+/// A document taken: its order's id and its SHA-256 (base64url).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Taken {
+    pub order: String,
+    pub doc: String,
 }
 
 impl Record {
+    /// Whether `order` carrying `doc` is the last one this host took and made its change
+    /// for, byte for byte: what to answer then (nothing is changed again).
+    pub fn taken_already(&self, order: &str, doc: &[u8]) -> Option<String> {
+        self.taken
+            .as_ref()
+            .is_some_and(|t| t.order == order && t.doc == challenge_of(doc))
+            .then(|| {
+                format!(
+                    "this signed document (version {}) was taken already: nothing changed again",
+                    self.version
+                )
+            })
+    }
+
+    /// Records that `order`'s `doc` made its change (after it did, its version being
+    /// recorded before).
+    pub fn took(&mut self, order: &str, doc: &[u8]) {
+        self.taken = Some(Taken {
+            order: order.to_owned(),
+            doc: challenge_of(doc),
+        });
+    }
+
     /// The record in `state`; an empty one when there is none. One that does not read is
     /// refused: a signed document is then taken by nobody until a person fixes it.
     pub fn load(state: &Path) -> Result<Self, String> {
@@ -330,22 +367,27 @@ struct PinText {
 /// Whether `rp_id` and `origin` can be the pool's relying party: the RP id is the pool's
 /// own host or a domain it is under (the dashboard's name, `omarchy-pool.org`, for the
 /// API's `pkgs.omarchy-pool.org`), and the origin is that RP id over https. `localhost`
-/// (wrangler dev, the tests) on any port, over http too.
+/// (wrangler dev, the tests) on any port, over http too — only for a pool on this machine
+/// (`localhost`, `127.0.0.1`, `[::1]`): a host of any other pool never pins a passkey
+/// registered on a page served from localhost.
 fn relying_party_ok(pool: &str, rp_id: &str, origin: &str) -> bool {
-    let host = pool
+    let rest = pool
         .strip_prefix("https://")
         .or_else(|| pool.strip_prefix("http://"))
-        .unwrap_or(pool)
-        .split([':', '/'])
-        .next()
-        .unwrap_or("");
+        .unwrap_or(pool);
+    let host = match rest.strip_prefix('[') {
+        // An IPv6 literal keeps its brackets: `[::1]`.
+        Some(v6) => v6.split_once(']').map_or("", |(a, _)| &rest[..a.len() + 2]),
+        None => rest.split([':', '/']).next().unwrap_or(""),
+    };
     if rp_id == "localhost" {
-        return origin == "http://localhost"
-            || origin == "https://localhost"
-            || origin
-                .strip_prefix("http://localhost:")
-                .or_else(|| origin.strip_prefix("https://localhost:"))
-                .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        return matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+            && (origin == "http://localhost"
+                || origin == "https://localhost"
+                || origin
+                    .strip_prefix("http://localhost:")
+                    .or_else(|| origin.strip_prefix("https://localhost:"))
+                    .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())));
     }
     let name_ok = !rp_id.is_empty()
         && rp_id.len() <= 253
@@ -359,11 +401,36 @@ fn relying_party_ok(pool: &str, rp_id: &str, origin: &str) -> bool {
 }
 
 /// `omarchy-agent envelope pin-passkey <pin>` (#328): the owner's passkey pinned at this
-/// host, from the pin the site made — checked here: the passkey's signature with the key the
-/// pin carries, over a document naming this host and a relying party of this host's pool,
-/// with the user present and verified, not expired. `host` and `pool` are agent.toml's. What
-/// was pinned, for the terminal.
+/// host, from the pin the site made — checked here ([`check_pin`]) and kept in
+/// `state/owner.json`. `host` and `pool` are agent.toml's. What was pinned, for the
+/// terminal.
 pub fn pin(state: &Path, host: &str, pool: &str, text: &str, now: i64) -> Result<String, String> {
+    let pinned = check_pin(host, pool, text, now)?;
+    let mut rec = Record::load(state)?;
+    let said = format!(
+        "pinned {}'s passkey ({}, credential {}…) for {} on {}: from now on this host takes a widening of its envelope and its agent keys from the site only when this passkey signed them{}",
+        pinned.by,
+        webauthn::alg_name(pinned.alg),
+        pinned.credential.chars().take(12).collect::<String>(),
+        pinned.rp_id,
+        pinned.origin,
+        match &rec.passkey {
+            Some(old) if old.credential != pinned.credential => format!(
+                " (it replaces {}…; what that one signed is refused from now on)",
+                old.credential.chars().take(12).collect::<String>()
+            ),
+            _ => String::new(),
+        }
+    );
+    rec.passkey = Some(pinned);
+    rec.save(state)?;
+    Ok(said)
+}
+
+/// The pin the site made, checked, with nothing written: the passkey's signature with the
+/// key the pin carries, over a document naming this host and a relying party of this
+/// host's pool, with the user present and verified, not expired. The passkey to pin.
+fn check_pin(host: &str, pool: &str, text: &str, now: i64) -> Result<Pinned, String> {
     let raw = webauthn::unb64(text.trim(), "the pin", 64 << 10).map_err(|_| {
         "the pin is not what the site printed (base64url): copy it again".to_owned()
     })?;
@@ -393,36 +460,17 @@ pub fn pin(state: &Path, host: &str, pool: &str, text: &str, now: i64) -> Result
             rp_id: &rp_id,
         },
     )?;
-    let mut rec = Record::load(state)?;
-    let pinned = Pinned {
+    Ok(Pinned {
         host: host.to_owned(),
-        credential: p.assertion.credential.clone(),
+        credential: p.assertion.credential,
         alg: key.alg(),
         public_key: p.public_key,
         rp_id,
         origin,
-        by: doc.by.clone(),
+        by: doc.by,
         pinned_at: crate::capacity::utc(u64::try_from(now).unwrap_or(0)),
         counter,
-    };
-    let said = format!(
-        "pinned {}'s passkey ({}, credential {}…) for {} on {}: from now on this host takes a widening of its envelope and its agent keys from the site only when this passkey signed them{}",
-        pinned.by,
-        key.alg_name(),
-        pinned.credential.chars().take(12).collect::<String>(),
-        pinned.rp_id,
-        pinned.origin,
-        match &rec.passkey {
-            Some(old) if old.credential != pinned.credential => format!(
-                " (it replaces {}…; what that one signed is refused from now on)",
-                old.credential.chars().take(12).collect::<String>()
-            ),
-            _ => String::new(),
-        }
-    );
-    rec.passkey = Some(pinned);
-    rec.save(state)?;
-    Ok(said)
+    })
 }
 
 /// `omarchy-agent envelope unpin-passkey`: no passkey is pinned from now on, so the site
@@ -752,9 +800,8 @@ pub fn fuzz(data: &[u8]) {
     let _ = Key::from_cose(data);
     let _ = read_doc(data, Act::WidenEnvelope, "h_0123456789", 1_800_000_000);
     if let Ok(text) = std::str::from_utf8(data) {
-        let dir = std::env::temp_dir();
-        let _ = pin(
-            &dir.join("omarchy-agent-fuzz-none"),
+        // The check alone: the fuzz target writes no file, and keeps no state between inputs.
+        let _ = check_pin(
             "h_0123456789",
             "https://pkgs.omarchy-pool.org",
             text,

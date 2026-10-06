@@ -179,6 +179,71 @@ fn an_owner_raises_the_unit_cap_from_the_browser_and_a_forged_or_replayed_wideni
     assert_eq!(capacity(&w)["units"], 8);
 }
 
+/// The agent stopped after a widening's change, before its answer reached the pool: the
+/// same order comes back unremembered, and is answered as taken already — not as a replay
+/// of a change that took effect —, nothing changed again. The same document under another
+/// order stays a replay.
+#[test]
+fn the_same_order_seen_again_after_its_change_is_taken_already_not_a_replay() {
+    let c = cases();
+    let mut w = owned(1);
+    send(&w, &[("ho_w1", widen(&c["widen"]))]);
+    w.poll();
+    assert_eq!(answer(&w, "ho_w1").0, "done");
+    let toml = fs::read_to_string(w.agent.paths.agent_toml()).unwrap();
+    // As after a restart from a state.json saved before the answer.
+    w.agent.state.orders.seen.clear();
+    w.agent.state.orders.answers.clear();
+    w.tick(3);
+    send(&w, &[("ho_w1", widen(&c["widen"]))]);
+    w.poll();
+    let (outcome, detail) = answer(&w, "ho_w1");
+    assert_eq!(outcome, "done", "{detail}");
+    assert!(
+        detail.contains("(version 2) was taken already: nothing changed again"),
+        "{detail}"
+    );
+    assert_eq!(
+        fs::read_to_string(w.agent.paths.agent_toml()).unwrap(),
+        toml
+    );
+    w.tick(3);
+    send(&w, &[("ho_w9", widen(&c["widen"]))]);
+    w.poll();
+    let (outcome, detail) = answer(&w, "ho_w9");
+    assert_eq!(outcome, "refused");
+    assert!(detail.contains("a replay"), "{detail}");
+}
+
+/// What can refuse a widening is checked before anything changes: a `run/capacity.json`
+/// that does not read (a link, never followed) refuses it with agent.toml and the
+/// version as they were, so the owner's next document is taken.
+#[test]
+fn a_capacity_file_that_does_not_read_refuses_the_widening_before_anything_changes() {
+    let c = cases();
+    let mut w = owned(1);
+    let toml = fs::read_to_string(w.agent.paths.agent_toml()).unwrap();
+    let file = w.set_dir().join("run/capacity.json");
+    let aside = w.dir.join("capacity.json");
+    fs::rename(&file, &aside).unwrap();
+    std::os::unix::fs::symlink(&aside, &file).unwrap();
+    send(&w, &[("ho_w1", widen(&c["widen"]))]);
+    w.poll();
+    let (outcome, detail) = answer(&w, "ho_w1");
+    assert_eq!(outcome, "refused");
+    assert!(
+        detail.contains("is a symbolic link; not followed"),
+        "{detail}"
+    );
+    assert_eq!(
+        fs::read_to_string(w.agent.paths.agent_toml()).unwrap(),
+        toml
+    );
+    assert_eq!(w.agent.cfg.policy.max_units, Some(3));
+    let r = crate::owner::Record::load(&w.agent.paths.data.join("state")).unwrap();
+    assert_eq!((r.version, r.taken), (1, None));
+}
+
 #[test]
 fn every_widening_the_pool_could_forge_is_refused_and_reported() {
     let c = cases();
@@ -257,13 +322,22 @@ fn a_widening_never_gives_more_units_than_the_constants_and_the_hardware() {
         ..crate::capacity::Caps::default()
     };
     let b = w.agent.cached(w.agent.state.applied.unwrap()).unwrap();
-    let base = crate::run::settings::Base::read(&w.set_dir())
-        .unwrap()
+    // Counted again with no envelope and no setting narrowing it: what the caps give alone.
+    let open = crate::run::config::Policy::default();
+    let rewrite = |caps: &crate::capacity::Caps, s: &crate::run::settings::Settings| {
+        let r = crate::run::settings::recount(
+            &w.set_dir(),
+            caps,
+            b.manifest().capacity().constants(),
+            s,
+            &open,
+        )
         .unwrap();
-    let (more, _) = base
-        .recapped(&caps, b.manifest().capacity().constants())
-        .unwrap();
-    more.write(&w.set_dir()).unwrap();
+        r.write(&w.set_dir()).unwrap();
+        r.changes
+    };
+    let none = crate::run::settings::Settings::default();
+    rewrite(&caps, &none);
     assert_eq!(capacity(&w)["units"], 11);
     // max_cpus above what detection found counts no CPU that is not there.
     let caps = crate::capacity::Caps {
@@ -282,10 +356,7 @@ fn a_widening_never_gives_more_units_than_the_constants_and_the_hardware() {
         max_cpus: Some(6),
         ..caps
     };
-    let (less, changes) = base
-        .recapped(&caps, b.manifest().capacity().constants())
-        .unwrap();
-    less.write(&w.set_dir()).unwrap();
+    let changes = rewrite(&caps, &none);
     assert_eq!(changes, ["cpus 12 → 6", "units 11 → 5"]);
     let f = capacity(&w);
     assert_eq!(
@@ -297,19 +368,34 @@ fn a_widening_never_gives_more_units_than_the_constants_and_the_hardware() {
         max_cpus: None,
         ..caps
     };
-    let base = crate::run::settings::Base::read(&w.set_dir())
-        .unwrap()
-        .unwrap();
-    let (back, _) = base
-        .recapped(&caps, b.manifest().capacity().constants())
-        .unwrap();
-    back.write(&w.set_dir()).unwrap();
+    rewrite(&caps, &none);
     let f = capacity(&w);
     assert_eq!(
         (f["cpus"].as_u64(), f["units"].as_u64()),
         (Some(12), Some(11))
     );
     assert!(f.get("hardware").is_none());
+    // Under a setting, the count is written narrowed at once — the file the dispatcher reads
+    // never holds the recounted units above the pool's narrowing, even for a moment — with
+    // detection's own count beside it, for a later setting to start from.
+    let caps = crate::capacity::Caps {
+        max_cpus: Some(6),
+        ..caps
+    };
+    let changes = rewrite(
+        &caps,
+        &crate::run::settings::Settings {
+            units: Some(3),
+            emulate: None,
+        },
+    );
+    assert_eq!(changes, ["cpus 12 → 6", "units 11 → 5"]);
+    let f = capacity(&w);
+    assert_eq!(
+        (f["cpus"].as_u64(), f["units"].as_u64()),
+        (Some(6), Some(3))
+    );
+    assert_eq!(f["detected"]["units"], 5);
 }
 
 #[test]

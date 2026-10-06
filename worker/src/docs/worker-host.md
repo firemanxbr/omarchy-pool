@@ -341,7 +341,8 @@ button with why.
    ten minutes. Paste it at the host as the agent's user. The agent checks
    the signature itself, with the public key the pin carries, and that the
    pin names this host and its pool's relying party (`omarchy-pool.org` on
-   `https://omarchy-pool.org`), then keeps that key in
+   `https://omarchy-pool.org`; `localhost` only for a pool on the same
+   machine), then keeps that key in
    `state/owner.json` (0600); its next report shows it pinned. A new pin
    replaces the old one (what the old one signed is refused from then on);
    `omarchy-agent envelope unpin-passkey` removes it, and the site widens
@@ -352,7 +353,8 @@ button with why.
    on a Mac) and reports its public half. Compare the fingerprint on the
    page with the `seal key:` line of `omarchy-agent status`, then
    **Confirm the seal key** with your passkey. A seal key made again shows
-   as changed and is confirmed again before anything is sealed to it.
+   as changed and is confirmed again before anything is sealed to it; so
+   does one other than the key you confirmed in this browser.
 3. **Widen the envelope.** `max_units`, `max_cpus`, `max_mem_gb`,
    `emulate`, `agent_slots`, `agent_budget`, `diagnostics` and `paths`:
    **Review and sign** sends what you changed to the pool, which writes the
@@ -369,8 +371,11 @@ button with why.
    and claims by it; a running task is never stopped. A Mac's VM is
    restarted with a new `max_cpus`/`max_mem_gb` as for any change of its
    size — once no task runs, within the brake — and an emulated lane its
-   detection never checked comes on at its next count (`omarchy-agent
-   capacity --write`).
+   detection never checked comes on at its next count: on Linux, which the
+   loop never runs on its own, `omarchy-agent capacity --write` at the
+   host; on a Mac, the next start of its VM. Before your passkey is asked,
+   the page checks that the pool's document is the one it showed you (this
+   host, the envelope you changed, its challenge the document's SHA-256).
 4. **Set agent keys.** `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
    `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY` and `GITHUB_TOKEN`
    (the keys a task's agent sidecar reads): **Seal and sign** seals the
@@ -387,7 +392,10 @@ button with why.
 
 Each order and the agent's answer — `done` with what changed, or `refused`
 with why (nothing pinned, another passkey, a replay, an expired document,
-another host or origin) — are on the page's journal of orders. A setting
+another host or origin) — are on the page's journal of orders. Whatever
+can refuse a widening is checked before anything changes; once `agent.toml`
+or `agent.env` holds it, the answer is `done`, with anything that failed
+after it said. A setting
 that narrows (above) needs no signature
 ([Security model](/docs/security-model#maintainer-hosts), *Owner control without a visit*;
 [Runbook](/docs/runbook#a-new-maintainer-host), *Owner control*).

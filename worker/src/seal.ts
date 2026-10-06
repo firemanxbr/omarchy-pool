@@ -10,10 +10,12 @@
  *
  * and {name, epk, nonce, ct}, each base64url without padding. The host's seal key is the
  * one its agent reports and its owner confirmed on the host page; `info` binds the
- * ciphertext to that host and that key's name, so the pool can neither read it nor
- * present it as another key or to another host. Sealing is not signing — anyone may seal
- * to a public key — so a sealed key reaches the host only inside a document the owner's
- * passkey signed, which the host checks against the passkey pinned there.
+ * ciphertext to that host and that key's name, so the pool's database and relay can
+ * neither read it nor present it as another key or to another host (the page that runs
+ * this is the pool's own: docs/security-model.md says what that leaves). Sealing is not
+ * signing — anyone may seal to a public key — so a sealed key reaches the host only
+ * inside a document the owner's passkey signed, which the host checks against the passkey
+ * pinned there.
  *
  * The host page inlines this function's own source (pages/host.ts:
  * `sealAgentKey.toString()`), so the browser seals with exactly the code the tests run.

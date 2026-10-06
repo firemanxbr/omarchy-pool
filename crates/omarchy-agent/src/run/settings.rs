@@ -308,36 +308,48 @@ impl Base {
             .collect();
         (file != self.file).then_some((Base { file }, changes))
     }
-
-    /// Writes this base as detection's own file (no narrowing on it): the loop narrows it
-    /// to the settings again at once ([`apply`]).
-    pub(crate) fn write(&self, set_dir: &Path) -> Result<(), String> {
-        let mut bytes =
-            serde_json::to_vec(&Value::Object(self.file.clone())).map_err(|e| e.to_string())?;
-        bytes.push(b'\n');
-        super::state::write_atomic(&file(set_dir), &bytes)
-    }
 }
 
-/// `run/capacity.json` counted again after a signed widening (#328): [`Base::recapped`]
-/// written, then narrowed to the settings and the new envelope again. What changed.
-pub(crate) fn recap(
+/// `run/capacity.json` counted again for a signed widening (#328), not written yet.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Recount {
+    /// The narrowed file to write; `None`: there is no file (nothing detected yet).
+    file: Option<Value>,
+    /// What changed (`units 3 → 8`).
+    pub changes: Vec<String>,
+}
+
+/// `run/capacity.json` counted again for a signed widening (#328): [`Base::recapped`] under
+/// the new caps, then narrowed to the settings and the new envelope — in memory, so a file
+/// that does not read refuses the widening before anything changed, and the dispatcher,
+/// which reads the file before every claim, never reads the count un-narrowed
+/// ([`Recount::write`] writes it once).
+pub(crate) fn recount(
     set_dir: &Path,
     caps: &crate::capacity::Caps,
     c: &crate::manifest::CapacityConstants,
     s: &Settings,
     p: &Policy,
-) -> Result<Vec<String>, String> {
+) -> Result<Recount, String> {
     let Some(base) = Base::read(set_dir)? else {
-        return Ok(Vec::new());
+        return Ok(Recount::default());
     };
-    let Some((new, changes)) = base.recapped(caps, c) else {
-        apply(set_dir, s, p)?;
-        return Ok(Vec::new());
-    };
-    new.write(set_dir)?;
-    apply(set_dir, s, p)?;
-    Ok(changes)
+    let (base, changes) = base
+        .recapped(caps, c)
+        .unwrap_or_else(|| (base.clone(), Vec::new()));
+    Ok(Recount {
+        file: Some(Value::Object(base.narrowed(s, p).0)),
+        changes,
+    })
+}
+
+impl Recount {
+    /// Writes the narrowed file, once, when it differs from what is there.
+    pub(crate) fn write(&self, set_dir: &Path) -> Result<bool, String> {
+        self.file
+            .as_ref()
+            .map_or(Ok(false), |f| write_if_changed(&file(set_dir), f))
+    }
 }
 
 /// What the settings give now.
@@ -366,18 +378,22 @@ pub(crate) fn apply(
         return Ok(None);
     };
     let (narrowed, effect) = base.narrowed(s, p);
-    let path = file(set_dir);
-    let now: Option<Value> = fs::read(&path)
+    let changed = write_if_changed(&file(set_dir), &Value::Object(narrowed))?;
+    Ok(Some((changed, effect)))
+}
+
+/// Writes `v` at `path` (atomically) unless the file holds it already; whether it wrote.
+fn write_if_changed(path: &Path, v: &Value) -> Result<bool, String> {
+    let now: Option<Value> = fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
-    let narrowed = Value::Object(narrowed);
-    if now.as_ref() == Some(&narrowed) {
-        return Ok(Some((false, effect)));
+    if now.as_ref() == Some(v) {
+        return Ok(false);
     }
-    let mut bytes = serde_json::to_vec(&narrowed).map_err(|e| e.to_string())?;
+    let mut bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
-    super::state::write_atomic(&path, &bytes)?;
-    Ok(Some((true, effect)))
+    super::state::write_atomic(path, &bytes)?;
+    Ok(true)
 }
 
 /// Checks a `set-units` against the envelope: `Err` with why it is refused.

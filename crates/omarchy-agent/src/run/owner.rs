@@ -16,8 +16,11 @@
 //!   and the diagnostics scrub every value the file holds.
 //!
 //! The version a document carries is recorded before anything changes, so a document is
-//! taken once; whatever fails after it answers `refused` with why, and the owner signs
-//! again.
+//! taken once; whatever fails before the change answers `refused` with why, and the owner
+//! signs again. Once the change is made (agent.toml or agent.env written), the answer is
+//! `done`, with what failed after it said; and the document is recorded as taken, so the
+//! same order seen again — the agent stopped before its answer reached the pool — is
+//! answered as taken already, not as a replay.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -95,9 +98,20 @@ impl Agent {
     }
 
     /// `widen-envelope` (#328): the signed document's keys set in agent.toml's `[envelope]`.
-    pub(super) fn widen_envelope(&mut self, s: &Signed, now: i64) -> Result<String, String> {
+    /// Everything that can refuse it — the signature, the widening, agent.toml and
+    /// `run/capacity.json` read under it — is checked before anything changes; once
+    /// agent.toml holds it, the answer is `done`, with any later problem said in it.
+    pub(super) fn widen_envelope(
+        &mut self,
+        order: &str,
+        s: &Signed,
+        now: i64,
+    ) -> Result<String, String> {
         let state = self.state_dir();
         let mut rec = Record::load(&state)?;
+        if let Some(said) = rec.taken_already(order, s.doc.as_bytes()) {
+            return Ok(said);
+        }
         let (doc, counter) = owner::verify_signed(
             &rec,
             s.doc.as_bytes(),
@@ -120,6 +134,7 @@ impl Agent {
             & 0o777;
         let (new, changes) = w.apply(&text)?;
         let fresh = Config::parse(&new)?;
+        let count = self.count_under(&new, &fresh.policy)?;
         // A document is good once: its version is recorded before anything changes.
         let version = doc.version.unwrap_or(rec.version);
         rec.version = version;
@@ -128,8 +143,18 @@ impl Agent {
         }
         rec.save(&state)?;
         super::state::write_atomic(&path, new.as_bytes())?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode))
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        // agent.toml holds the widening from here: what fails after it is said, not refused.
+        let mut problems = Vec::new();
+        rec.took(order, s.doc.as_bytes());
+        if let Err(e) = rec.save(&state) {
+            problems.push(format!("the document was not recorded as taken ({e})"));
+        }
+        if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(mode)) {
+            problems.push(format!(
+                "{}'s mode {mode:o} was not kept ({e})",
+                path.display()
+            ));
+        }
         // The loop takes the new envelope at once: what the pool may narrow inside, the
         // budget the dispatcher's env carries, the lint's paths and a Mac's VM size.
         self.cfg.policy = fresh.policy;
@@ -145,7 +170,15 @@ impl Agent {
         if let Some(h) = self.host_env.as_mut() {
             h.next_at = now;
         }
-        let counted = self.recap(&new)?;
+        let counted = match count.write(&self.cfg.set_dir) {
+            Ok(_) => count.changes,
+            Err(e) => {
+                problems.push(format!(
+                    "run/capacity.json was not counted again ({e}): `omarchy-agent capacity --write` at the host counts it"
+                ));
+                Vec::new()
+            }
+        };
         if !changes.is_empty() {
             self.state.brake.record(now, &[Ask::Restart]);
         }
@@ -169,34 +202,49 @@ impl Agent {
             );
         }
         if w.0.iter().any(|(k, _)| k == "emulate") {
-            said.push_str("; an emulated lane its detection never smoke-tested comes on at its next count (`omarchy-agent capacity --write`, or a restart of a Mac's VM)");
+            said.push_str("; an emulated lane its detection never smoke-tested comes on at its next count (`omarchy-agent capacity --write` at the host, or a restart of a Mac's VM)");
+        }
+        for p in problems {
+            let _ = write!(said, "; but {p}");
         }
         Ok(said)
     }
 
-    /// `run/capacity.json` counted again under the envelope agent.toml now says (`text`), with
-    /// the applied release's signed constants: what changed. No release applied (nothing
-    /// runs yet) or none cached counts nothing.
-    fn recap(&mut self, text: &str) -> Result<Vec<String>, String> {
+    /// `run/capacity.json` counted again under the envelope agent.toml is to say (`text`,
+    /// whose policy is `p`), with the applied release's signed constants, not written yet.
+    /// No release applied (nothing runs yet) or none cached counts nothing.
+    fn count_under(
+        &self,
+        text: &str,
+        p: &super::config::Policy,
+    ) -> Result<settings::Recount, String> {
         let Some(b) = self.state.applied.and_then(|r| self.cached(r)) else {
-            return Ok(Vec::new());
+            return Ok(settings::Recount::default());
         };
         let caps = crate::capacity::AgentToml::parse(text)?.caps;
         let s = self.state.settings.clone().unwrap_or_default();
-        settings::recap(
+        settings::recount(
             &self.cfg.set_dir,
             &caps,
             b.manifest().capacity().constants(),
             &s,
-            &self.cfg.policy,
+            p,
         )
     }
 
     /// `set-agent-keys` (#328): the signed document's sealed keys opened with this host's
     /// seal key and written to `OMARCHY_SECRETS_DIR/agent.env`.
-    pub(super) fn set_agent_keys(&mut self, s: &Signed, now: i64) -> Result<String, String> {
+    pub(super) fn set_agent_keys(
+        &mut self,
+        order: &str,
+        s: &Signed,
+        now: i64,
+    ) -> Result<String, String> {
         let state = self.state_dir();
         let mut rec = Record::load(&state)?;
+        if let Some(said) = rec.taken_already(order, s.doc.as_bytes()) {
+            return Ok(said);
+        }
         let (doc, counter) = owner::verify_signed(
             &rec,
             s.doc.as_bytes(),
@@ -252,6 +300,8 @@ impl Agent {
         rec.save(&state)?;
         crate::install::files::make_dir(&dir)?;
         crate::install::files::write(&dir, "agent.env", new.as_bytes(), mode.max(0o600))?;
+        rec.took(order, s.doc.as_bytes());
+        let recorded = rec.save(&state);
         // From now on the journal, the report and the diagnostics scrub these values too.
         self.journal
             .set_secrets(super::agent::secrets_of(&self.cfg.set_dir, &dir));
@@ -275,6 +325,9 @@ impl Agent {
             parts.join(", "),
             path.display()
         );
+        if let Err(e) = recorded {
+            let _ = write!(said, "; but the document was not recorded as taken ({e})");
+        }
         Ok(said)
     }
 

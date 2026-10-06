@@ -352,15 +352,20 @@ const SCRIPT = String.raw`
   // Owner control (#328): the passkey pinned at the host, its seal key, the envelope a widening starts from and the agent keys' names, as
   // its agent reports them; Make a pin, Confirm the seal key, Widen the envelope and Set agent keys — its owner's, greyed with the door's reason.
   function envText(v) { return v === null || v === undefined ? "—" : typeof v === "object" && !Array.isArray(v) ? Object.keys(v).map(function (k) { return k + "=" + v[k]; }).join(" ") : Array.isArray(v) ? (v.length ? v.join(", ") : "none") : String(v); }
+  // The seal key its owner confirmed in this browser, kept here (#328): the pool's record of the confirmation is the pool's, so a key the
+  // pool's database says is confirmed but this browser confirmed another is confirmed again before anything is sealed to it.
+  function sealHere(id) { try { return localStorage.getItem("op-seal:" + id) || ""; } catch (e) { return ""; } }
+  function keepSeal(id, key) { try { localStorage.setItem("op-seal:" + id, key); } catch (e) {} }
   function drawOwner(h, can) {
     $("#hp-owner").hidden = h.fingerprint === undefined;
     if (h.fingerprint === undefined) return;
-    var o = h.owner, s = h.seal, why = can.why || {}, ok = can.owner === true, w = why.owner || "";
+    var o = h.owner_control, s = h.seal, why = can.why || {}, ok = can.owner === true, w = why.owner || "";
     var pk = o && o.passkey, env = (o && o.envelope) || {};
-    var sealed = !!(s && s.key && s.confirmed && s.confirmed.current);
+    var here = sealHere(h.id), other = !!(s && s.key && here && here !== s.key);
+    var sealed = !!(s && s.key && s.confirmed && s.confirmed.current) && !other;
     $("#hp-owner-kv").innerHTML = !o ? kv("Owner control", '<span class="muted">its agent reports none yet: agent ' + esc(OWNER_AGENT) + ' or later does</span>') : [
       kv("Passkey at the host", pk ? esc(pk.by) + "'s " + esc(pk.alg) + ' passkey <span class="mono">' + esc(pk.credential.slice(0, 12)) + "…</span> for " + esc(pk.rp_id) + ", pinned " + when(pk.pinned_at) + (o.version ? "; it took signed version " + num(o.version) + " last" : "") : '<span class="muted">none pinned yet: Make a pin, then paste it at the host</span>'),
-      kv("Seal key", s && s.fingerprint ? '<span class="mono">' + esc(s.fingerprint) + "</span> " + (sealed ? pillHtml("ok", "confirmed", "by " + s.confirmed.by + ", " + s.confirmed.at) : s.confirmed ? pillHtml("warn", "changed since it was confirmed", "a key made again: compare and confirm it again") : pillHtml("warn", "not confirmed yet", "compare it with omarchy-agent status at the host")) : '<span class="muted">its agent reports none yet</span>'),
+      kv("Seal key", s && s.fingerprint ? '<span class="mono">' + esc(s.fingerprint) + "</span> " + (sealed ? pillHtml("ok", "confirmed", "by " + s.confirmed.by + ", " + s.confirmed.at) : other ? pillHtml("warn", "not the key you confirmed in this browser", "compare it with omarchy-agent status at the host and confirm it again") : s.confirmed ? pillHtml("warn", "changed since it was confirmed", "a key made again: compare and confirm it again") : pillHtml("warn", "not confirmed yet", "compare it with omarchy-agent status at the host")) : '<span class="muted">its agent reports none yet</span>'),
       kv("Envelope", WIDENABLE.map(function (k) { return '<span class="mono">' + esc(k) + " " + esc(envText(env[k])) + "</span>"; }).join(", ")),
       kv("Agent keys", o.agent_keys.length ? o.agent_keys.map(esc).join(", ") : '<span class="muted">none</span>'),
     ].join("");
@@ -371,28 +376,49 @@ const SCRIPT = String.raw`
       gate('<button type="button" class="op-btn" data-host-act="agent-keys">' + ICON.token + "Set agent keys</button>", ok && !!pk && sealed, !ok ? w : !pk ? "no passkey is pinned at the host yet: Make a pin first" : "confirm its seal key first"),
     ].join("");
   }
+  // Whether the document the pool answered says what this page asked for and showed (#328), or why not: its challenge is the document's
+  // SHA-256, and it names this host, the act, the envelope or the keys as sealed here, the seal key they were sealed to, a version above
+  // the last its agent took — and for a pin, this page's origin. Checked before the passkey is asked: a pool database or API that
+  // answered another document gets nothing signed. (The page itself is the pool's: security-model.md says what that leaves.)
+  function docSaysWhy(body, o) {
+    var d;
+    try { d = JSON.parse(o.doc); } catch (e) { return "it does not read"; }
+    var same = function (a, b) { return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b); };
+    if (!d || d.schema !== "omarchy-agent/owner/1" || d.act !== body.act || d.host !== ID) return "it is not for " + body.act + " on this host";
+    if (body.act === "pin-passkey") return d.origin === location.origin && d.rp_id === o.publicKey.rpId ? "" : "it names another page than this one";
+    if (!Number.isSafeInteger(d.version) || d.version <= (((H || {}).owner_control || {}).version || 0)) return "its version is not above the last its agent took";
+    if (body.act === "widen-envelope") return same(d.envelope, body.envelope) ? "" : "its envelope is not the one shown here";
+    return same(d.keys, body.keys) && d.seal_key === ((H || {}).seal || {}).key ? "" : "its keys are not the ones sealed here";
+  }
   // A document the pool writes for this host, signed with the owner's passkey (#328): the pool's document and challenge (its SHA-256),
-  // navigator.credentials.get() with user verification, then post(doc, assertion). Refused before it — a prompt cancelled, a browser
-  // without passkeys — with an answer of its own, { error, code }, as api() gives one.
+  // both checked here (docSaysWhy), navigator.credentials.get() with user verification, then post(doc, assertion). Refused before it — a
+  // prompt cancelled, a browser without passkeys, a document that is not the one asked for — with an answer of its own, { error, code },
+  // as api() gives one.
   function signDoc(body, post) {
     var no = function (text) { return { error: text + " Nothing changed.", code: "no_answer" }; };
     if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) return Promise.resolve(no("This browser cannot use a passkey on this page: it needs a secure address (https, or localhost) and passkey support."));
     return api("POST", BASE + "/owner/challenge", body).then(function (o) {
       if (o.error) return o;
       var k = o.publicKey;
-      return navigator.credentials.get({ publicKey: { challenge: webBytes(k.challenge), rpId: k.rpId, timeout: k.timeout, userVerification: k.userVerification, allowCredentials: k.allowCredentials.map(function (c) { return { type: c.type, id: webBytes(c.id) }; }) } }).then(function (cred) {
-        if (!cred) return no("No passkey answered.");
-        var r = cred.response;
-        return post(o.doc, { credential: webB64(cred.rawId), client_data: webB64(r.clientDataJSON), authenticator_data: webB64(r.authenticatorData), signature: webB64(r.signature), user_handle: r.userHandle ? webB64(r.userHandle) : "" });
-      }, function (e) {
-        var n = e && e.name;
-        return no(n === "NotAllowedError" || n === "AbortError" ? "No passkey answered: the request was cancelled or timed out — or this is not the passkey pinned at the host." : "Your passkey could not be asked: " + errorText(e).replace(/[.\s]+$/, "") + ".");
+      return crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(o.doc))).then(function (h) {
+        var why = webB64(h) !== k.challenge ? "its challenge is not the document's SHA-256" : docSaysWhy(body, o);
+        return why ? no("The pool answered a document other than the one this page asked for (" + why + "): your passkey was not asked.") : null;
+      }).then(function (refused) {
+        if (refused) return refused;
+        return navigator.credentials.get({ publicKey: { challenge: webBytes(k.challenge), rpId: k.rpId, timeout: k.timeout, userVerification: k.userVerification, allowCredentials: k.allowCredentials.map(function (c) { return { type: c.type, id: webBytes(c.id) }; }) } }).then(function (cred) {
+          if (!cred) return no("No passkey answered.");
+          var r = cred.response;
+          return post(o.doc, { credential: webB64(cred.rawId), client_data: webB64(r.clientDataJSON), authenticator_data: webB64(r.authenticatorData), signature: webB64(r.signature), user_handle: r.userHandle ? webB64(r.userHandle) : "" });
+        }, function (e) {
+          var n = e && e.name;
+          return no(n === "NotAllowedError" || n === "AbortError" ? "No passkey answered: the request was cancelled or timed out — or this is not the passkey pinned at the host." : "Your passkey could not be asked: " + errorText(e).replace(/[.\s]+$/, "") + ".");
+        });
       });
     });
   }
   // The widening's form: the envelope's keys as its agent reports them, each changed one sent; empty is none (no cap, the default budget).
   function widenForm() {
-    var env = ((H.owner || {}).envelope) || {}, b = env.agent_budget || {};
+    var env = ((H.owner_control || {}).envelope) || {}, b = env.agent_budget || {};
     var n = function (k, label, v) { return '<label>' + esc(label) + '<input type="number" min="0" data-env="' + k + '" value="' + (v === null || v === undefined ? "" : esc(v)) + '" placeholder="none"></label>'; };
     // The emulated lanes: none set (detection's), none, each architecture the pool builds (the shell's ARCHES), or all of them.
     var em = env.emulate === null || env.emulate === undefined ? "" : env.emulate.length ? env.emulate.slice().sort().join(",") : "none";
@@ -407,7 +433,7 @@ const SCRIPT = String.raw`
   }
   // What the form asks for that the envelope does not say: {key: value}, each as a widening sets it.
   function widenAsked() {
-    var env = ((H.owner || {}).envelope) || {}, out = {};
+    var env = ((H.owner_control || {}).envelope) || {}, out = {};
     document.querySelectorAll("#hp-owner-form [data-env]").forEach(function (el) {
       var k = el.getAttribute("data-env"), v;
       if (k === "emulate") v = el.value === "" ? null : el.value === "none" ? [] : el.value.split(",");
@@ -540,14 +566,14 @@ const SCRIPT = String.raw`
       var sk = H.seal || {};
       ask({ title: "Confirm the seal key of " + H.name, text: "At the host, <code>omarchy-agent status</code> prints its seal key: it must be <code>" + esc(sk.fingerprint || "?") + "</code>. Your agent keys are sealed to this key in your browser, and only the host opens them.", held: "Your passkey confirms it.", confirm: "It is the same: confirm", nothing: "Nothing was confirmed." }).then(function (go) {
         if (go === null) return;
-        passkeyed("host:seal-key:" + ID, function (a) { return api("POST", BASE + "/seal-key", { key: sk.key, assertion: a }); }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+        passkeyed("host:seal-key:" + ID, function (a) { return api("POST", BASE + "/seal-key", { key: sk.key, assertion: a }); }).then(function (d) { if (!d.error) keepSeal(ID, sk.key); done(d); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     } else if (act === "widen") {
       widenForm();
     } else if (act === "widen-send") {
-      var asked = widenAsked(), env0 = ((H.owner || {}).envelope) || {}, keys0 = Object.keys(asked);
+      var asked = widenAsked(), env0 = ((H.owner_control || {}).envelope) || {}, keys0 = Object.keys(asked);
       if (!keys0.length) { toast("Nothing to change: the form says what its envelope says."); return; }
-      ask({ title: "Widen the envelope of " + H.name, text: "Its agent sets, in agent.toml at the host: " + keys0.map(function (k) { return "<code>" + esc(k) + "</code> " + esc(envText(env0[k])) + " → " + esc(envText(asked[k])); }).join(", ") + ". Units never rise above what the release's signed constants and its detected hardware give.", held: "The passkey pinned at the host signs it.", confirm: "Sign with your passkey" }).then(function (go) {
+      ask({ title: "Widen the envelope of " + H.name, text: "Its agent sets, in agent.toml at the host: " + keys0.map(function (k) { return "<code>" + esc(k) + "</code> " + esc(envText(env0[k])) + " → " + esc(envText(asked[k])); }).join(", ") + ". Units never rise above what the release's signed constants and its detected hardware give." + ("emulate" in asked ? " An emulated lane its detection never smoke-tested comes on at its next count, which the loop does not run on its own on Linux: there it takes <code>omarchy-agent capacity --write</code> at the host (on a Mac, the next start of its VM counts it)." : ""), held: "The passkey pinned at the host signs it.", confirm: "Sign with your passkey" }).then(function (go) {
         if (go === null) return;
         signDoc({ act: "widen-envelope", envelope: asked }, function (doc, a) { return api("POST", BASE + "/orders", { kind: "widen-envelope", doc: doc, assertion: a }); }).then(function (d) { if (!d.error) $("#hp-owner-form").innerHTML = ""; done(d); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
@@ -555,13 +581,16 @@ const SCRIPT = String.raw`
       keysForm();
     } else if (act === "keys-send") {
       var name = $("#hp-owner-form [data-key-name]").value, input = $("#hp-owner-form [data-key-value]"), remove = $("#hp-owner-form [data-key-remove]").value === "remove";
-      var sealing = remove ? Promise.resolve({ name: name, remove: true }) : sealAgentKey((H.seal || {}).key, ID, name, input.value);
+      var to = (H.seal || {}).key, here = sealHere(ID);
+      // Sealed only to the key this browser confirmed; one it never confirmed is the pool's record's, and kept from then on.
+      if (here && here !== to) { toast("Its seal key is not the one you confirmed in this browser: compare it with <code>omarchy-agent status</code> at the host and confirm it again. Nothing was sealed.", "error"); return; }
+      var sealing = remove ? Promise.resolve({ name: name, remove: true }) : sealAgentKey(to, ID, name, input.value);
       sealing.then(function (k) {
         // The value is gone from the page once it is sealed: only its ciphertext is left to send.
         input.value = "";
         return ask({ title: (remove ? "Take " : "Set ") + name + (remove ? " out of " : " on ") + H.name, text: remove ? "Its agent takes it out of agent.env at the host." : "Sealed in this browser to its seal key " + esc((H.seal || {}).fingerprint || "") + ": the pool relays only ciphertext, and its agent writes it to agent.env alone, which only agent sidecars read.", held: "The passkey pinned at the host signs it.", confirm: "Sign with your passkey" }).then(function (go) {
           if (go === null) return;
-          return signDoc({ act: "set-agent-keys", keys: [k] }, function (doc, a) { return api("POST", BASE + "/orders", { kind: "set-agent-keys", doc: doc, assertion: a }); }).then(function (d) { if (!d.error) $("#hp-owner-form").innerHTML = ""; done(d); });
+          return signDoc({ act: "set-agent-keys", keys: [k] }, function (doc, a) { return api("POST", BASE + "/orders", { kind: "set-agent-keys", doc: doc, assertion: a }); }).then(function (d) { if (!d.error) { $("#hp-owner-form").innerHTML = ""; if (!here) keepSeal(ID, to); } done(d); });
         });
       }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     } else if (act === "retire-legacy") {
@@ -675,8 +704,8 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.owner",
     page: `/hosts/${F.host}`,
     anchor: ['id="hp-owner"', 'id="hp-owner-kv"', 'id="hp-owner-ops"', 'id="hp-owner-form"', 'id="hp-pin"', 'href="/docs/worker-host#owner-control-without-a-visit"'],
-    script: ["function drawOwner(h, can)", "can.owner === true", "function signDoc(body, post)", 'BASE + "/owner/challenge"', 'BASE + "/owner/pin"', 'BASE + "/seal-key"', 'kind: "widen-envelope"', 'kind: "set-agent-keys"', 'passkeyed("host:seal-key:" + ID', "async function sealAgentKey(", '"Passkey at the host"', '"Seal key"', '"Agent keys"', "OWNER_AGENT", "WIDENABLE", "AGENT_KEYS"],
-    reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.owner", "host.seal", "can.owner", "can.why"] }],
+    script: ["function drawOwner(h, can)", "can.owner === true", "function signDoc(body, post)", "function docSaysWhy(body, o)", "its challenge is not the document's SHA-256", 'keepSeal(ID, sk.key)', 'BASE + "/owner/challenge"', 'BASE + "/owner/pin"', 'BASE + "/seal-key"', 'kind: "widen-envelope"', 'kind: "set-agent-keys"', 'passkeyed("host:seal-key:" + ID', "async function sealAgentKey(", '"Passkey at the host"', '"Seal key"', '"Agent keys"', "OWNER_AGENT", "WIDENABLE", "AGENT_KEYS"],
+    reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.owner", "host.owner_control", "host.seal", "can.owner", "can.why"] }],
     acts: [
       { method: "POST", path: `/api/v1/hosts/${F.host}/owner/challenge`, body: { act: "pin-passkey" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
       { method: "POST", path: `/api/v1/hosts/${F.host}/owner/pin`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },

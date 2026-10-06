@@ -37,7 +37,8 @@ import { OWNER_VERSION_SQL, hostVerdicts } from "../src/routes/hosts";
 import { SUBJECT } from "../src/routes/passkeys";
 import { sealAgentKey, type SealedKey } from "../src/seal";
 import { hostHtml } from "../src/pages/host";
-import { assert as answer, createAuthenticator, register, UP, UV } from "./soft-authenticator.mjs";
+import { assert as answer, b64url, createAuthenticator, register, unb64url, UP, UV } from "./soft-authenticator.mjs";
+import { runScript, scriptOf } from "./fixture";
 import casesFixture from "../../crates/omarchy-agent/tests/fixtures/owner/cases.json?raw";
 import ownerReport from "../../crates/omarchy-agent/tests/fixtures/host-api/report-owner.json?raw";
 
@@ -184,9 +185,13 @@ describe("the documents, the widening and the sealed keys (pure)", () => {
       [{}, "at least one key"], [{ allow_socket: true }, "allow_socket is no key"], [{ soak_minutes: 0 }, "soak_minutes is no key"], [{ max_units: 0 }, "1 to 4096"],
       [{ max_units: 5000 }, "1 to 4096"], [{ emulate: ["riscv64"] }, "distinct architectures"], [{ diagnostics: null }, "null is not"],
       [{ agent_budget: { calls_per_hour: 1 } }, "calls_per_hour"], [{ paths: ["/"] }, "plain absolute"], [{ paths: ["/srv/../etc"] }, "plain absolute"], [[], "an object"],
+      // The agent's own bounds per budget key: the calls a u32 (dispatcher_env Budget::from_envelope), the tokens and minutes at most 1e12.
+      [{ agent_budget: { calls_per_day: 4294967296 } }, "from 1 to 4294967295"], [{ agent_budget: { calls_per_task: 5e9 } }, "from 1 to 4294967295"],
+      [{ agent_budget: { tokens_per_task: 1e12 + 1 } }, "from 1 to 1000000000000"], [{ agent_budget: { minutes_per_task: 0 } }, "from 1 to"],
     ] as [unknown, string][]) {
       expect(widening(v), JSON.stringify(v)).toContain(says);
     }
+    expect(widening({ agent_budget: { calls_per_day: 4294967295, calls_per_task: 1, tokens_per_task: 1e12, minutes_per_task: 1e12 } })).toEqual({ agent_budget: { calls_per_day: 4294967295, calls_per_task: 1, tokens_per_task: 1e12, minutes_per_task: 1e12 } });
     expect(WIDENABLE).toEqual(["max_units", "max_cpus", "max_mem_gb", "emulate", "agent_slots", "agent_budget", "diagnostics", "paths"]);
   });
 
@@ -280,7 +285,9 @@ describe("an owner widens the envelope and sets agent keys from the browser", ()
     expect(conf.status, JSON.stringify(conf.json)).toBe(200);
     g = await call("GET", `/hosts/${h.host}`, { session: "m1" });
     expect(g.json.host.seal.confirmed).toMatchObject({ by: "m1", current: true });
-    expect(g.json.host.owner.passkey.credential).toBe(stored!.credential_id);
+    expect(g.json.host.owner_control.passkey.credential).toBe(stored!.credential_id);
+    // `owner` stays the owner's login in the detailed view too: the Confirm button and every owner link read it.
+    expect(g.json.host.owner).toBe("m1");
 
     // Widen: the document names the host, the proposed envelope and a version above every one; the pinned passkey alone may answer.
     const w = await signDoc("m1", h.host, { act: "widen-envelope", envelope: { max_units: 8, agent_budget: { calls_per_day: 9000 } } });
@@ -333,6 +340,117 @@ describe("an owner widens the envelope and sets agent keys from the browser", ()
     // The next document is above the version the host reports taking.
     const next = await signDoc("m1", h.host, { act: "widen-envelope", envelope: { max_units: 4 } });
     expect(JSON.parse(next.doc).version).toBe(3);
+  });
+
+  it("keeps `owner` the owner's login for everyone, pending or active, in the list and the detailed view", async () => {
+    const h = await activeHost("m1", "box-login");
+    const seal = await sealPair();
+    await report(h.k, h.host, ownerPart(null, seal.pub));
+    // A host that waits for its owner's Confirm: what the owner's page gates Confirm on.
+    const m = await call("POST", "/hosts/enrollments", { session: "m1", body: { name: "box-pending" } });
+    const k = await newKey();
+    const e = await call("POST", "/hosts/enroll", { body: { token: m.json.token, pubkey: k.pub, sig: await sign(k, enrollMessage(m.json.token, k.pub)), hostname: "box-2", os: "linux", arch: "aarch64", page_kb: 16, isolation: "root", dedicated: true, agent_version: "0.4.0", capacity: STUDIO } });
+    expect(e.status, JSON.stringify(e.json)).toBe(201);
+    for (const who of [undefined, "m1", "m2"]) {
+      for (const id of [h.host, e.json.host]) {
+        const g = await call("GET", `/hosts/${id}`, { session: who });
+        expect(g.json.host.owner, `${who} ${id}`).toBe("m1");
+      }
+      const list = await call("GET", "/hosts?owner=m1", { session: who });
+      expect(list.json.hosts.length, String(who)).toBeGreaterThanOrEqual(2);
+      for (const x of list.json.hosts) expect(x.owner, `${who} ${x.id}`).toBe("m1");
+    }
+    // The owner's control is its own key, for the owner and the maintainers only.
+    expect((await call("GET", `/hosts/${h.host}`, { session: "m1" })).json.host.owner_control).toMatchObject({ passkey: null, agent_keys: ["GEMINI_API_KEY"] });
+    expect((await call("GET", `/hosts/${h.host}`)).json.host.owner_control).toBeUndefined();
+  });
+
+  it("refuses a second document signed at the same version before it is relayed, which the host would refuse as a replay", async () => {
+    const h = await activeHost("m1", "box-version");
+    const seal = await sealPair();
+    const cred = (await env.DB.prepare("SELECT credential_id FROM passkeys WHERE login = 'm1'").first<{ credential_id: string }>())!.credential_id;
+    await report(h.k, h.host, ownerPart(cred, seal.pub));
+    expect((await call("POST", `/hosts/${h.host}/seal-key`, { session: "m1", body: { key: seal.pub, assertion: await actAssertion("m1", `host:seal-key:${h.host}`) } })).status).toBe(200);
+    // Two challenges in flight (two tabs): both documents carry version 1.
+    const w = await signDoc("m1", h.host, { act: "widen-envelope", envelope: { max_units: 8 } });
+    const k = await signDoc("m1", h.host, { act: "set-agent-keys", keys: [await sealAgentKey(seal.pub, h.host, "GEMINI_API_KEY", "gm-x")] });
+    expect([JSON.parse(w.doc).version, JSON.parse(k.doc).version]).toEqual([1, 1]);
+    expect((await call("POST", `/hosts/${h.host}/orders`, { session: "m1", body: { kind: "widen-envelope", doc: w.doc, assertion: w.assertion } })).status).toBe(201);
+    const second = await call("POST", `/hosts/${h.host}/orders`, { session: "m1", body: { kind: "set-agent-keys", doc: k.doc, assertion: k.assertion } });
+    expect([second.status, second.json.code]).toEqual([409, "version"]);
+    expect(second.json.error).toContain("took version 1");
+    // Signed again, it carries the next version and is relayed.
+    const k2 = await signDoc("m1", h.host, { act: "set-agent-keys", keys: [await sealAgentKey(seal.pub, h.host, "GEMINI_API_KEY", "gm-x")] });
+    expect(JSON.parse(k2.doc).version).toBe(2);
+    expect((await call("POST", `/hosts/${h.host}/orders`, { session: "m1", body: { kind: "set-agent-keys", doc: k2.doc, assertion: k2.assertion } })).status).toBe(201);
+    expect((await state(h.k, h.host)).json.orders.map((o: { version: number }) => o.version).sort()).toEqual([1, 2]);
+  });
+
+  it("the page signs only the document it asked for: another envelope, keys or challenge from the pool's API never reaches the passkey", async () => {
+    const h = await activeHost("m1", "box-page");
+    const seal = await sealPair();
+    const cred = (await env.DB.prepare("SELECT credential_id FROM passkeys WHERE login = 'm1'").first<{ credential_id: string }>())!.credential_id;
+    await report(h.k, h.host, ownerPart(cred, seal.pub));
+    expect((await call("POST", `/hosts/${h.host}/seal-key`, { session: "m1", body: { key: seal.pub, assertion: await actAssertion("m1", `host:seal-key:${h.host}`) } })).status).toBe(200);
+    // The host page's own script as a browser runs it: the software authenticator as navigator.credentials, the Worker behind its fetch —
+    // whose answer to the challenge the test may change, as a pool whose API was taken over would.
+    let change: ((o: any) => Promise<any>) | null = null;
+    const asked: unknown[] = [];
+    const buf = (v: string) => unb64url(v).buffer;
+    (globalThis as any).__ownerPageNavigator = {
+      credentials: {
+        get: async (options: any) => {
+          asked.push(options.publicKey);
+          const k = options.publicKey, x = await answer(keys.m1, { challenge: b64url(k.challenge), origin: ORIGIN, rpId: k.rpId });
+          return { rawId: buf(x.credential), response: { clientDataJSON: buf(x.client_data), authenticatorData: buf(x.authenticator_data), signature: buf(x.signature), userHandle: null } };
+        },
+      },
+    };
+    const page = async (p: string, init?: RequestInit) => {
+      const { cache: _cache, ...rest } = init ?? {};
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request(ORIGIN + p, { ...rest, headers: { ...(rest.headers as Record<string, string>), cookie: "omc=oms_m1", origin: ORIGIN } }), env, ctx);
+      await waitOnExecutionContext(ctx);
+      if (!change || !p.endsWith("/owner/challenge")) return res;
+      return new Response(JSON.stringify(await change(await res.json())), { status: res.status, headers: { "content-type": "application/json" } });
+    };
+    const html = await (await page(`/hosts/${h.host}`)).text();
+    const browser = "window.PublicKeyCredential = function () {}; window.isSecureContext = true; var navigator = globalThis.__ownerPageNavigator;";
+    const ran = runScript(scriptOf(html).trim().replace(/^\(function \(\) \{/, `(function () {${browser}`), { pathname: `/hosts/${h.host}`, functions: ["signDoc"], variables: ["H"], fetch: page });
+    const view = (await call("GET", `/hosts/${h.host}`, { session: "m1" })).json.host;
+    ran.setH(view);
+    const relay = (kind: string) => (doc: string, a: Record<string, string>) => call("POST", `/hosts/${h.host}/orders`, { session: "m1", body: { kind, doc, assertion: a } }).then((r) => r.json);
+    const challengeOf = async (doc: string) => toB64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(doc))));
+    const widenBody = { act: "widen-envelope", envelope: { max_units: 8 } };
+
+    // Another envelope than the one shown, with its own challenge: refused before the passkey is asked.
+    change = async (o) => { const doc = o.doc.replace('"max_units":8', '"max_units":64'); return { ...o, doc, publicKey: { ...o.publicKey, challenge: await challengeOf(doc) } }; };
+    let r = await ran.signDoc(widenBody, relay("widen-envelope"));
+    expect(r.code).toBe("no_answer");
+    expect(r.error).toContain("its envelope is not the one shown here");
+    // The document shown, but a challenge that is not its SHA-256 (another document's): refused too.
+    change = async (o) => ({ ...o, publicKey: { ...o.publicKey, challenge: await challengeOf(o.doc.replace('"max_units":8', '"max_units":64')) } });
+    r = await ran.signDoc(widenBody, relay("widen-envelope"));
+    expect(r.error).toContain("its challenge is not the document's SHA-256");
+    // Another host's document: refused.
+    change = async (o) => { const doc = o.doc.replace(h.host, "h_9999999999"); return { ...o, doc, publicKey: { ...o.publicKey, challenge: await challengeOf(doc) } }; };
+    r = await ran.signDoc(widenBody, relay("widen-envelope"));
+    expect(r.error).toContain("it is not for widen-envelope on this host");
+    // Keys sealed to another seal key than the one confirmed: refused.
+    const other = await sealPair();
+    const sealed = await sealAgentKey(seal.pub, h.host, "GEMINI_API_KEY", "gm-x");
+    change = async (o) => { const doc = o.doc.replace(seal.pub, other.pub); return { ...o, doc, publicKey: { ...o.publicKey, challenge: await challengeOf(doc) } }; };
+    r = await ran.signDoc({ act: "set-agent-keys", keys: [sealed] }, relay("set-agent-keys"));
+    expect(r.error).toContain("its keys are not the ones sealed here");
+    expect(asked).toHaveLength(0);
+    expect((await state(h.k, h.host)).json.orders).toEqual([]);
+
+    // The pool's own answer: the passkey is asked once, and the order is relayed.
+    change = null;
+    r = await ran.signDoc(widenBody, relay("widen-envelope"));
+    expect(r.error, JSON.stringify(r)).toBeUndefined();
+    expect(r.order.kind).toBe("widen-envelope");
+    expect(asked).toHaveLength(1);
   });
 
   it("refuses a widening the pool or anyone else could forge, before the host refuses it too", async () => {

@@ -648,6 +648,8 @@ export const WIDENABLE = ["max_units", "max_cpus", "max_mem_gb", "emulate", "age
 /** The agent keys a sealed document may set: the ones agent sidecars read and the dispatcher refuses to hold (owner::AGENT_KEYS). */
 export const AGENT_KEY_NAMES = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "GITHUB_TOKEN"] as const;
 const BUDGET_KEYS = ["calls_per_task", "tokens_per_task", "minutes_per_task", "calls_per_day"];
+/** Each budget key's top as the agent reads it (dispatcher_env `Budget::from_envelope`: the calls a u32; owner::Widening at most 2^40). */
+const BUDGET_MAX: Record<string, number> = { calls_per_task: 4294967295, tokens_per_task: 1e12, minutes_per_task: 1e12, calls_per_day: 4294967295 };
 const B64U = /^[A-Za-z0-9_-]+$/;
 
 export interface SealedKeyArg { name: string; epk?: string; nonce?: string; ct?: string; remove?: true }
@@ -721,7 +723,8 @@ export function widening(v: unknown): Record<string, unknown> | string {
     } else if (k === "agent_budget") {
       if (!x || typeof x !== "object" || Array.isArray(x)) return "envelope.agent_budget: a table of calls_per_task, tokens_per_task, minutes_per_task, calls_per_day";
       for (const [bk, bv] of Object.entries(x as Record<string, unknown>)) {
-        if (!BUDGET_KEYS.includes(bk) || !whole(bv, 1, 1e12)) return `envelope.agent_budget.${bk}: one of ${BUDGET_KEYS.join(", ")}, a whole number from 1`;
+        if (!BUDGET_KEYS.includes(bk)) return `envelope.agent_budget.${bk}: one of ${BUDGET_KEYS.join(", ")}`;
+        if (!whole(bv, 1, BUDGET_MAX[bk])) return `envelope.agent_budget.${bk}: a whole number from 1 to ${BUDGET_MAX[bk]}`;
       }
     } else {
       if (!Array.isArray(x) || x.length > 16 || new Set(x).size !== x.length || x.some((p) => typeof p !== "string" || p.length > 4096 || p === "/" || !p.startsWith("/") || p.split("/").slice(1).some((c) => c === "" || c === "." || c === ".."))) return "envelope.paths: at most 16 plain absolute paths below /, each once";

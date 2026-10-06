@@ -616,11 +616,13 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   orders — `widen-envelope` and `set-agent-keys`, its owner's only, an agent
   from 0.4.0 — carry a document the owner's passkey signed, and the agent
   takes one only when **the passkey its owner pinned at the host** signed it:
-  the pool can relay them, never make one. The pin is made on the host's
+  the pool's database and its relay can relay them, never make one (what a
+  pool whose code is compromised can do is said at the end of this item). The pin is made on the host's
   page (the owner's passkey signs a ten-minute pin document for that host)
   and pasted at the host (`omarchy-agent envelope pin-passkey`), where the
   agent checks the signature with the public key the pin carries and that
-  the relying party is its own pool's before it keeps that key. From then on
+  the relying party is its own pool's before it keeps that key (`localhost`
+  only for a pool on the same machine, as wrangler dev's). From then on
   it checks each document itself: the pinned credential and its signature
   (ES256, EdDSA or RS256) over the authenticator data and the client data,
   the client data's type, challenge (the document's SHA-256) and origin, the
@@ -652,12 +654,36 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   owner's own lines kept), which only agent sidecars mount, read-only: the
   dispatcher never does (the lint), never has them in its environment, and
   the journal, the report and the diagnostics scrub every value the file
-  holds. What it does not cover: the pin trusts the page that made it, once
-  — a pool compromised at the moment its owner makes the pin, or confirms
-  the seal key, could show them its own document or key, which is why the
-  agent prints what it pinned and `omarchy-agent status` the seal key's
-  fingerprint, to compare; on a Mac the Keychain holds the seal key only
-  (the host key stays a 0600 file there).
+  holds. The owner's browser checks what the pool answers before it asks
+  the passkey: the challenge is the SHA-256 of the document, and the
+  document names this host, the act, the envelope or the keys the page
+  showed and sealed, the seal key they were sealed to and a version above
+  the last the host took — so the pool's database or its API answering
+  another document gets nothing signed. The browser also remembers the seal
+  key its owner confirmed in it, and asks for the confirmation again before
+  it seals to another.
+
+  What it does not cover, stated plainly (as design v2 §10.4 does for the
+  invariants): **every ceremony trusts the page and the code the pool
+  serves at that moment.** The guarantee is against a pool whose data or
+  relay is compromised — its D1 rows, the orders it relays, the documents
+  its API answers —, not against compromised Worker code serving the host
+  page when the owner uses the passkey or types a key. The authenticator
+  shows its owner nothing of the challenge it signs, so such code can show
+  one envelope and have the pinned passkey sign another widening of its
+  choosing — at any later ceremony on the pool's origin, not only on the
+  host page (approve, block, retire-legacy, a seal-key confirmation) — and
+  it reads an agent key as it is typed, before it is sealed. A widening it
+  made that way is still held to the host's own bounds: the eight widenable
+  keys, the signed capacity constants and the detected hardware, the six
+  agent keys' names. The seal key's confirmation (`hosts.seal_confirmed`)
+  is the pool's own record, which the browser trusts only where it has not
+  confirmed another key itself. That is why the agent prints what it
+  pinned and `omarchy-agent status` the seal key's fingerprint, to compare,
+  and why the journal shows every widening and key set with who signed it.
+  On a Mac the Keychain holds the seal key only (the host key stays a 0600
+  file there; hardware-bound host keys are P6), and agent.env stays a 0600
+  file, which agent sidecars in the VM mount.
 - **The host worker token** (`omw_…`) is the dispatcher's only, written
   0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
   id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,

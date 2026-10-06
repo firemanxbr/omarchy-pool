@@ -185,6 +185,33 @@ fn the_relying_party_is_the_pools_own_domain_or_localhost() {
             "http://localhost:x",
             false,
         ),
+        (
+            "http://localhost:8787",
+            "localhost",
+            "http://localhost:8787",
+            true,
+        ),
+        (
+            "http://[::1]:8787",
+            "localhost",
+            "http://localhost:8787",
+            true,
+        ),
+        // A pool not on this machine never takes a localhost relying party.
+        (POOL, "localhost", "http://localhost:8787", false),
+        (POOL, "localhost", "https://localhost", false),
+        (
+            "http://[::2]:8787",
+            "localhost",
+            "http://localhost:8787",
+            false,
+        ),
+        (
+            "http://localhost.evil.example",
+            "localhost",
+            "http://localhost",
+            false,
+        ),
     ] {
         assert_eq!(
             relying_party_ok(pool, rp, origin),
