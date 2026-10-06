@@ -1,15 +1,22 @@
 //! OpenSSH signatures (`ssh-keygen -Y sign`, OpenSSH's `PROTOCOL.sshsig`) by FIDO security
 //! keys (`PROTOCOL.u2f`): the format of the maintainers' co-signature (#330, design v2 D1 b).
 //!
+//! Why SSH-FIDO and not minisign (D1 b left the two open): the private key stays on a
+//! hardware token and every signature needs a touch, while a minisign key is a file;
+//! `ssh-keygen` is already on every maintainer's machine; and the verification below adds
+//! no dependency to the agent.
+//!
 //! Verified here with the crypto the agent already carries (aws-lc-rs's Ed25519 and P-256,
 //! sha2), so the co-signature adds no dependency (`tests/agent-deps.sh`). Two FIDO key types
 //! are read, `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com` (security
 //! keys that predate Ed25519 support only the second), and a signature counts only with the
-//! authenticator's user-presence flag: a touch, as `ssh-keygen -Y verify` requires by
-//! default. A plain `ssh-ed25519` key is read too, only so a signature OpenSSH itself made
-//! checks this framing (`tests/fixtures/cosignature/`); [`super::cosignature`] pins FIDO
-//! keys only, since a key in a file is not offline. The webauthn signature variant, other
-//! key types, a namespace other than the one asked for, and trailing bytes are refused.
+//! authenticator's user-presence flag: a touch. The agent checks that flag itself, because
+//! `ssh-keygen -Y verify` does not (`tests/cosignature.sh` shows it taking a signature made
+//! without one; `factory/bin/co-sign` reads the flag too). A plain `ssh-ed25519` key is read
+//! as well, only so a signature OpenSSH itself made checks this framing
+//! (`tests/fixtures/cosignature/`); [`super::cosignature`] pins FIDO keys only, since a key
+//! in a file is not offline. The webauthn signature variant, other key types, a namespace
+//! other than the one asked for, and trailing bytes are refused.
 
 use std::fmt;
 
@@ -28,6 +35,8 @@ const END: &str = "-----END SSH SIGNATURE-----";
 const USER_PRESENT: u8 = 0x01;
 /// An armored signature is a few hundred bytes; nothing near this is one.
 pub(crate) const MAX_ARMORED: usize = 8 << 10;
+/// Why a signature by another key than the one asked for does not verify.
+pub(crate) const ANOTHER_KEY: &str = "signed by another key";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -162,7 +171,7 @@ pub fn verify(
     let signature = r.string()?;
     r.end()?;
     if signer != key.blob.as_slice() {
-        return Err("signed by another key".into());
+        return Err(ANOTHER_KEY.into());
     }
     if signed_namespace != namespace.as_bytes() {
         return Err(format!(

@@ -26,6 +26,13 @@
 //!   the threshold rose (an immutable release takes no asset later).
 //!
 //! A namespace per kind keeps a signature over a bundle from counting for a statement.
+//!
+//! **A key per login, or several.** A maintainer may pin a backup security key beside their
+//! own (`login = ["<key>", "<key>"]`): a signature by any of them is that maintainer's one
+//! co-signature. It is what lets a key be rotated or lost when the threshold equals the
+//! number of maintainers: the release that drops a key is co-signed by a key both the old
+//! and the new agent pin (`factory/bin/check-governance` refuses a threshold one lost key
+//! would leave out of reach; the runbook, *Co-signing a release*).
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -52,14 +59,22 @@ const MAX_KEYS: usize = 64;
 struct PolicyRaw {
     threshold: usize,
     #[serde(default)]
-    keys: BTreeMap<String, String>,
+    keys: BTreeMap<String, KeyLines>,
 }
 
-/// Which maintainers' keys count, and how many must sign.
+/// A maintainer's key, or their keys (a backup security key beside their own).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum KeyLines {
+    One(String),
+    Several(Vec<String>),
+}
+
+/// Which maintainers' keys count, and how many maintainers must sign.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Policy {
     threshold: usize,
-    keys: BTreeMap<String, PublicKey>,
+    keys: BTreeMap<String, Vec<PublicKey>>,
 }
 
 /// A GitHub login, as `factory/bin/check-governance` reads one.
@@ -85,39 +100,58 @@ impl Policy {
             .clone()
     }
 
-    /// Reads `threshold` and `[keys]` (`login = "<type> <base64> [comment]"`): every key a
-    /// FIDO key, no key under two logins, and a threshold the keys can meet.
+    /// Reads `threshold` and `[keys]` (`login = "<type> <base64> [comment]"`, or a list of
+    /// such lines): every key a FIDO key, no key listed twice, and a threshold the
+    /// maintainers with a key can meet.
     pub fn parse(text: &str) -> Result<Policy, String> {
         let raw: PolicyRaw =
             toml::from_str(text).map_err(|e| format!("co-signature policy: {e}"))?;
-        if raw.keys.len() > MAX_KEYS {
-            return Err(format!("co-signature policy: more than {MAX_KEYS} keys"));
-        }
-        let mut keys = BTreeMap::new();
-        for (login, line) in raw.keys {
+        let mut keys: BTreeMap<String, Vec<PublicKey>> = BTreeMap::new();
+        let mut count = 0;
+        for (login, lines) in raw.keys {
             if !is_login(&login) {
                 return Err(format!("co-signature policy: {login:?} is not a login"));
             }
-            let key = PublicKey::parse(&line)
-                .map_err(|e| format!("co-signature policy: {login}'s key: {e}"))?;
-            if !key.is_fido() {
-                return Err(format!(
-                    "co-signature policy: {login}'s key is a {}, not a FIDO key ({} or {}): a key in a file is not offline",
-                    key.kind(),
-                    sshsig::ED25519_SK,
-                    sshsig::ECDSA_SK
-                ));
+            let lines = match lines {
+                KeyLines::One(line) => vec![line],
+                KeyLines::Several(lines) if !lines.is_empty() => lines,
+                KeyLines::Several(_) => {
+                    return Err(format!("co-signature policy: {login} lists no key"))
+                }
+            };
+            count += lines.len();
+            if count > MAX_KEYS {
+                return Err(format!("co-signature policy: more than {MAX_KEYS} keys"));
             }
-            if let Some((other, _)) = keys.iter().find(|(_, k)| *k == &key) {
-                return Err(format!(
-                    "co-signature policy: {login} and {other} have the same key: one person, one co-signature"
-                ));
+            let mut theirs: Vec<PublicKey> = Vec::new();
+            for line in lines {
+                let key = PublicKey::parse(&line)
+                    .map_err(|e| format!("co-signature policy: {login}'s key: {e}"))?;
+                if !key.is_fido() {
+                    return Err(format!(
+                        "co-signature policy: {login}'s key is a {}, not a FIDO key ({} or {}): a key in a file is not offline",
+                        key.kind(),
+                        sshsig::ED25519_SK,
+                        sshsig::ECDSA_SK
+                    ));
+                }
+                if theirs.contains(&key) {
+                    return Err(format!(
+                        "co-signature policy: {login} lists the same key twice"
+                    ));
+                }
+                if let Some((other, _)) = keys.iter().find(|(_, ks)| ks.contains(&key)) {
+                    return Err(format!(
+                        "co-signature policy: {login} and {other} have the same key: one person, one co-signature"
+                    ));
+                }
+                theirs.push(key);
             }
-            keys.insert(login, key);
+            keys.insert(login, theirs);
         }
         if raw.threshold > keys.len() {
             return Err(format!(
-                "co-signature policy: a threshold of {} with {} key(s) is never met",
+                "co-signature policy: a threshold of {} with {} maintainer(s) holding a key is never met",
                 raw.threshold,
                 keys.len()
             ));
@@ -145,9 +179,9 @@ impl Policy {
     }
 
     /// Which of `signatures` (login → `ssh-keygen -Y sign` output) are the pinned
-    /// maintainers' over `message` in `namespace`. A login with no pinned key, another key's
-    /// signature, a signature made without a touch or over other bytes counts for nothing,
-    /// and says why.
+    /// maintainers' over `message` in `namespace`: one per login, by any of the keys pinned
+    /// for it. A login with no pinned key, another key's signature, a signature made without
+    /// a touch or over other bytes counts for nothing, and says why.
     pub fn check(
         &self,
         namespace: &str,
@@ -156,14 +190,30 @@ impl Policy {
     ) -> Cosigned {
         let mut out = Cosigned::default();
         for (login, armored) in signatures {
-            match self.keys.get(login) {
-                None => out.refused.push(format!(
+            let Some(theirs) = self.keys.get(login) else {
+                out.refused.push(format!(
                     "{login}: no key of theirs is pinned (factory/MAINTAINERS.toml)"
-                )),
-                Some(key) => match sshsig::verify(key, namespace, message, armored) {
-                    Ok(()) => out.by.push(login.clone()),
-                    Err(e) => out.refused.push(format!("{login}: {e}")),
-                },
+                ));
+                continue;
+            };
+            // The signature names its key: when one of theirs is its signer, that key says why
+            // it fails; otherwise it is another key's.
+            let mut why = sshsig::ANOTHER_KEY.to_owned();
+            let mut verified = false;
+            for key in theirs {
+                match sshsig::verify(key, namespace, message, armored) {
+                    Ok(()) => {
+                        verified = true;
+                        break;
+                    }
+                    Err(e) if e != sshsig::ANOTHER_KEY => why = e,
+                    Err(_) => {}
+                }
+            }
+            if verified {
+                out.by.push(login.clone());
+            } else {
+                out.refused.push(format!("{login}: {why}"));
             }
         }
         out
@@ -198,18 +248,26 @@ impl Cosigned {
         if self.count() >= need {
             return Ok(());
         }
-        let mut why = format!(
-            "{what} needs {need} maintainer co-signature(s) (factory/MAINTAINERS.toml); {} verif{}",
+        Err(format!(
+            "{what} needs {need} maintainer co-signature(s) (factory/MAINTAINERS.toml); {}",
+            self.summary()
+        ))
+    }
+
+    /// `k verify (who)`, then why each signature that did not count did not.
+    pub fn summary(&self) -> String {
+        let mut out = format!(
+            "{} verif{}",
             self.count(),
             if self.count() == 1 { "ies" } else { "y" }
         );
         if !self.by.is_empty() {
-            why = format!("{why} ({})", self.by.join(", "));
+            out = format!("{out} ({})", self.by.join(", "));
         }
         if !self.refused.is_empty() {
-            why = format!("{why}; {}", self.refused.join("; "));
+            out = format!("{out}; {}", self.refused.join("; "));
         }
-        Err(why)
+        out
     }
 }
 

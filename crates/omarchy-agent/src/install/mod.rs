@@ -294,6 +294,9 @@ pub trait Sys {
     fn github_scopes(&mut self, token: &str) -> Result<Option<String>, String>;
     /// A release asset or a pinned tool, over HTTPS.
     fn download(&mut self, url: &str) -> Result<Vec<u8>, String>;
+    /// The same for an asset the release may not carry (a maintainer's co-signature,
+    /// #330): `Ok(None)` when the server answers 404, an error when it does not answer.
+    fn download_if_any(&mut self, url: &str) -> Result<Option<Vec<u8>>, String>;
 }
 
 #[derive(Debug)]
@@ -371,10 +374,20 @@ fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Ma
             let (name, sig) = crate::run::bundle_names(*r);
             let url = |n: &str| format!("{}/{r}/{n}", crate::run::RELEASES);
             if policy.threshold() > 0 {
-                // One a maintainer did not make answers 404, which counts as none.
+                // One a maintainer did not make answers 404, which counts as none; GitHub not
+                // answering is said as that, never as a release without its co-signature.
                 for login in policy.logins() {
-                    if let Ok(found) = sys.download(&url(&cosignature::file_name(&name, login))) {
-                        cosignatures.insert(login.to_owned(), found);
+                    let asset = url(&cosignature::file_name(&name, login));
+                    match sys.download_if_any(&asset) {
+                        Ok(Some(found)) => {
+                            cosignatures.insert(login.to_owned(), found);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            return Err(Failure::Refused(format!(
+                                "GitHub did not answer for the maintainers' co-signature {asset}: {e}; run it again"
+                            )))
+                        }
                     }
                 }
             }

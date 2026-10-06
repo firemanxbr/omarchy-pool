@@ -198,7 +198,9 @@ pub fn admit_rollback(
 /// The maintainers' co-signature a bundle needs before this agent applies it or takes its
 /// agent (#330, D1 b): `need` of the pinned maintainers over the bundle, or, for the target
 /// of a rollback statement, over that statement (a co-signed statement vouches for its
-/// target, whose release may be from before the threshold rose).
+/// target, whose release may be from before the threshold rose). The refusal says which
+/// can still be co-signed: a published release takes no asset, a statement takes more
+/// co-signatures through the pool.
 pub fn cosigned(
     target: Release,
     need: usize,
@@ -208,15 +210,35 @@ pub fn cosigned(
     if statement.is_some_and(|s| s.count() >= need) {
         return Ok(());
     }
-    bundle
-        .require(need, &format!("{target}'s bundle"))
-        .map_err(Refusal::Cosignature)
+    let Err(why) = bundle.require(need, &format!("{target}'s bundle")) else {
+        return Ok(());
+    };
+    Err(Refusal::Cosignature(match statement {
+        None => why,
+        Some(st) => format!(
+            "{target}'s bundle needs {need} maintainer co-signature(s) (factory/MAINTAINERS.toml), or the rollback statement to it does (factory/bin/co-sign rollback {target}); bundle: {}; statement: {}",
+            bundle.summary(),
+            st.summary()
+        ),
+    }))
 }
 
-/// Records an accepted statement: the floor goes to `to`.
-pub fn accept_rollback(state: &mut State, st: &Statement) {
+/// Whether `target` is the release a co-signed rollback statement vouched for when it was
+/// accepted, and the floor still stands there: the round to it is that rollback, tried
+/// again after a first attempt that did not finish (a pull, the tools, a quarantine). The
+/// statement no longer reads as one (its `to` is the floor now), so its vouching is what
+/// was kept (#330).
+pub fn vouched(state: &State, target: Release) -> bool {
+    state.vouched == Some(target) && state.floor == Some(target)
+}
+
+/// Records an accepted statement: the floor goes to `to`, and whether the statement's
+/// co-signatures vouched for `to`'s bundle (see [`vouched`]).
+pub fn accept_rollback(state: &mut State, st: &Statement, vouches: bool) {
+    let to = Release(st.to());
     state.statement_seq = Some(st.seq());
-    state.floor = Some(Release(st.to()));
+    state.floor = Some(to);
+    state.vouched = vouches.then_some(to);
 }
 
 /// Seconds since the epoch of `YYYY-MM-DDTHH:MM:SS[.f]Z` (the manifest's `created`).

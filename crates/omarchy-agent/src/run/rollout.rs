@@ -1036,6 +1036,10 @@ fn commit(state: &mut State, ctx: &mut Ctx) -> Result<(), String> {
         // The statement set the floor to `to`; nothing above it stays the floor.
         state.floor = Some(target);
     }
+    // What a co-signed statement vouched for holds only while the floor stands there (#330).
+    if state.vouched != state.floor {
+        state.vouched = None;
+    }
     state.applied = Some(target);
     state.quarantine.remove(&target);
     prune(state, ctx, target, from);

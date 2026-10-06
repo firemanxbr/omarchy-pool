@@ -272,6 +272,77 @@ fn the_policy_refuses_a_threshold_its_keys_cannot_meet_a_shared_key_and_a_key_in
 }
 
 #[test]
+fn a_backup_key_is_the_same_maintainer_so_a_key_can_be_rotated_or_lost_under_n_of_n() {
+    let alice = TestKey::ed25519("alice", 1);
+    let spare = TestKey::ed25519("alice", 9);
+    let bob = TestKey::ecdsa("bob");
+    let carol = TestKey::ed25519("carol", 3);
+    let toml = |threshold: usize, alices: &[&TestKey]| {
+        let lines: Vec<String> = alices
+            .iter()
+            .map(|k| format!("\"{}\"", k.public_line()))
+            .collect();
+        format!(
+            "threshold = {threshold}\n[keys]\nalice = [{}]\nbob = \"{}\"\n",
+            lines.join(", "),
+            bob.public_line()
+        )
+    };
+    // 2-of-2, Alice with a backup key: either of hers is her one co-signature.
+    let both = Policy::parse(&toml(2, &[&alice, &spare])).unwrap();
+    assert_eq!(both.logins().collect::<Vec<_>>(), ["alice", "bob"]);
+    let by = |p: &Policy, a: &TestKey| {
+        p.check(
+            BUNDLE_NAMESPACE,
+            BUNDLE,
+            &sigs(&[
+                ("alice", a.sign(BUNDLE_NAMESPACE, BUNDLE)),
+                ("bob", bob.sign(BUNDLE_NAMESPACE, BUNDLE)),
+            ]),
+        )
+        .require(p.threshold(), "the bundle")
+    };
+    assert_eq!(by(&both, &alice), Ok(()));
+    assert_eq!(by(&both, &spare), Ok(()));
+    // Carol's at Alice's name is another key's; Alice's backup without a touch says that.
+    let e = by(&both, &carol).unwrap_err();
+    assert!(e.contains("alice: signed by another key"), "{e}");
+    let untouched = sigs(&[(
+        "alice",
+        spare.sign_with(BUNDLE_NAMESPACE, BUNDLE, 0x00, "sha512"),
+    )]);
+    let c = both.check(BUNDLE_NAMESPACE, BUNDLE, &untouched);
+    assert_eq!(
+        c.refused(),
+        ["alice: made without a touch (the security key's user-presence flag is off)"]
+    );
+    // Rotation under 2-of-2: the agent that pins only the old key takes the release that
+    // adds the new one beside it, co-signed with the old; that release's agent takes the
+    // next, which drops the old key, co-signed with the new.
+    let old = Policy::parse(&toml(2, &[&alice])).unwrap();
+    let overlap = Policy::parse(&toml(2, &[&alice, &spare])).unwrap();
+    let new = Policy::parse(&toml(2, &[&spare])).unwrap();
+    assert_eq!(by(&old, &alice), Ok(()));
+    assert_eq!(by(&overlap, &alice), Ok(()));
+    assert_eq!(by(&overlap, &spare), Ok(()));
+    assert_eq!(by(&new, &spare), Ok(()));
+    assert!(by(&new, &alice).is_err());
+    // A list that is empty, a key listed twice, or one key under two logins: refused.
+    let err = |t: &str| Policy::parse(t).unwrap_err();
+    assert!(err("threshold = 0\n[keys]\nalice = []\n").contains("alice lists no key"));
+    assert!(err(&toml(1, &[&alice, &alice])).contains("alice lists the same key twice"));
+    let shared = format!(
+        "threshold = 1\n[keys]\nalice = [\"{}\", \"{}\"]\nbob = \"{}\"\n",
+        alice.public_line(),
+        spare.public_line(),
+        spare.public_line()
+    );
+    assert!(err(&shared).contains("have the same key"));
+    // The threshold counts maintainers, not keys.
+    assert!(err(&toml(3, &[&alice, &spare])).contains("never met"));
+}
+
+#[test]
 fn the_pinned_policy_reads_and_can_be_met() {
     let p = Policy::parse(PINNED).expect("the pinned maintainers.toml reads");
     assert!(p.threshold() <= p.logins().count());

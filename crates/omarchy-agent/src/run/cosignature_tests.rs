@@ -315,8 +315,15 @@ fn under_2_of_n_a_co_signed_statement_vouches_for_a_target_published_before_the_
     relay_statement(&w.remote, 1, "v1.0.1", "v1.2.0", b"signed");
     let detail = refused(&mut w, "v1.0.1", "cosignature");
     assert!(detail.contains("v1.0.1's bundle needs 2"), "{detail}");
+    // The refusal says what can still be co-signed: the statement (a published release
+    // takes no asset).
+    assert!(
+        detail.contains("or the rollback statement to it does (factory/bin/co-sign rollback v1.0.1); bundle: 0 verify; statement: 0 verify"),
+        "{detail}"
+    );
     cosign_statement(&w.remote, "v1.0.1", &alice);
-    refused(&mut w, "v1.0.1", "cosignature");
+    let detail = refused(&mut w, "v1.0.1", "cosignature");
+    assert!(detail.contains("statement: 1 verifies (alice)"), "{detail}");
     assert_eq!(w.agent.state.statement_seq, None);
     cosign_statement(&w.remote, "v1.0.1", &bob);
     w.round();
@@ -324,4 +331,73 @@ fn under_2_of_n_a_co_signed_statement_vouches_for_a_target_published_before_the_
     assert_eq!(w.agent.state.floor, r("v1.0.1"));
     // Forward again needs the bundle's own co-signatures: v1.2.0 has none.
     refused(&mut w, "v1.2.0", "cosignature");
+}
+
+#[test]
+fn a_co_signed_rollback_whose_first_round_fails_is_tried_again_under_its_statement() {
+    let mut w = World::running_v1();
+    let alice = TestKey::ed25519("alice", 1);
+    // v1.0.1 was published before the threshold rose: no co-signature asset.
+    publish(
+        &w.remote,
+        "v1.0.1",
+        "2027-01-14T08:00:00Z",
+        "v1.0.0",
+        &[],
+        "",
+    );
+    w.release("v1.2.0");
+    w.target("v1.2.0", None);
+    w.round();
+    assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
+    *w.cosign.borrow_mut() = policy(1, &[&alice]);
+    relay_statement(&w.remote, 1, "v1.0.1", "v1.2.0", b"signed");
+    cosign_statement(&w.remote, "v1.0.1", &alice);
+
+    // The rollback's first round fails (a pull): the statement is accepted, the floor is
+    // its target, and what it vouched for is kept.
+    w.engine.borrow_mut().pull_fails = true;
+    w.target("v1.0.1", None);
+    w.round();
+    assert_eq!(w.outcome().0, "pull-failed", "{:?}", w.outcome());
+    assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
+    assert_eq!(w.agent.state.floor, r("v1.0.1"));
+    assert_eq!(w.agent.state.vouched, r("v1.0.1"));
+
+    // A later poll tries it again: the statement no longer reads as one (its target is the
+    // floor), and its co-signature still stands in for the bundle's.
+    w.engine.borrow_mut().pull_fails = false;
+    w.tick(601);
+    w.poll();
+    for _ in 0..400 {
+        if w.step() == "idle" {
+            break;
+        }
+        w.tick(3);
+    }
+    assert_eq!(w.applied().as_deref(), Some("v1.0.1"), "{:?}", w.outcome());
+    assert_eq!(w.outcome().0, "ok");
+
+    // v1.0.1 ships no higher agent: later polls ask GitHub for none of its co-signatures and
+    // journal nothing about its agent.
+    let asked = w.remote.borrow().asked_if_any.len();
+    w.tick(crate::run::selfupdate::RETRY_S + 1);
+    w.poll();
+    w.poll();
+    assert_eq!(w.remote.borrow().asked_if_any.len(), asked);
+    assert!(
+        !w.journal().contains("its agent is not taken"),
+        "{}",
+        w.journal()
+    );
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+
+    // A release above it moves the floor: the vouching ends with it.
+    w.release("v1.3.0");
+    cosign(&w.remote, "v1.3.0", &alice);
+    w.target("v1.3.0", None);
+    w.tick(601);
+    w.round();
+    assert_eq!(w.applied().as_deref(), Some("v1.3.0"), "{:?}", w.outcome());
+    assert_eq!(w.agent.state.vouched, None);
 }

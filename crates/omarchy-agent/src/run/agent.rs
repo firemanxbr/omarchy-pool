@@ -1004,8 +1004,12 @@ impl Agent {
         }
         let rollback = match trust::admit(&self.state, target) {
             Ok(()) => {
-                if let Err(r) = trust::cosigned(target, need, &cosigned, None) {
-                    return self.refuse(now, &r);
+                // A co-signed rollback whose first round did not finish: the floor stands at
+                // its target now, and what its statement vouched for is what was kept (#330).
+                if !trust::vouched(&self.state, target) {
+                    if let Err(r) = trust::cosigned(target, need, &cosigned, None) {
+                        return self.refuse(now, &r);
+                    }
                 }
                 false
             }
@@ -1014,6 +1018,7 @@ impl Agent {
                     if let Err(r) = trust::cosigned(target, need, &cosigned, Some(&st_cosigned)) {
                         return self.refuse(now, &r);
                     }
+                    let vouches = cosigned.count() < need;
                     // A statement with `agent_to` moves the agent down first, through the
                     // same steps; the statement is accepted only once the swap is done
                     // (the agent below then applies the release), or with no move.
@@ -1034,7 +1039,7 @@ impl Agent {
                             return self.say(now, Outcome::Held, &detail);
                         }
                     }
-                    self.accept(target, &st, &st_cosigned, now);
+                    self.accept(target, &st, &st_cosigned, vouches, now);
                     if self.exit.is_some() {
                         return;
                     }
@@ -1293,14 +1298,22 @@ impl Agent {
         )
     }
 
-    /// Records an admitted rollback statement: the floor goes to its `to`.
-    fn accept(&mut self, target: Release, st: &Statement, cosigned: &Cosigned, now: i64) {
+    /// Records an admitted rollback statement: the floor goes to its `to`. `vouches`: its
+    /// co-signatures stand in for the target bundle's (#330).
+    fn accept(
+        &mut self,
+        target: Release,
+        st: &Statement,
+        cosigned: &Cosigned,
+        vouches: bool,
+        now: i64,
+    ) {
         self.journal.write(
             now,
             "rollback-accepted",
             serde_json::json!({"seq": st.seq(), "to": target.to_string(), "retracts_through": format!("v{}", st.retracts_through()), "run": st.run(), "agent_to": st.agent_to().map(|v| v.to_string()), "cosigned_by": cosigned.by()}),
         );
-        trust::accept_rollback(&mut self.state, st);
+        trust::accept_rollback(&mut self.state, st, vouches);
     }
 
     /// Starts (or preempts) a round, with the env files' values read again so the journal

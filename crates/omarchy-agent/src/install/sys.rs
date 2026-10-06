@@ -120,12 +120,20 @@ impl Sys for Machine {
     }
 
     fn download(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        self.download_if_any(url)?
+            .ok_or_else(|| format!("{url}: HTTP 404"))
+    }
+
+    fn download_if_any(&mut self, url: &str) -> Result<Option<Vec<u8>>, String> {
         let mut res = self
             .agent
             .get(url)
             .call()
             .map_err(|e| format!("{url}: {e}"))?;
         let status = res.status().as_u16();
+        if status == 404 {
+            return Ok(None);
+        }
         if status != 200 {
             return Err(format!("{url}: HTTP {status}"));
         }
@@ -136,6 +144,6 @@ impl Sys for Machine {
             .reader()
             .read_to_end(&mut body)
             .map_err(|e| format!("{url}: {e}"))?;
-        Ok(body)
+        Ok(Some(body))
     }
 }
