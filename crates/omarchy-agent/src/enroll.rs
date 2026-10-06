@@ -1,7 +1,9 @@
 //! Enrollment, the agent's half (#321, design v2 §6.1 steps 1-5, §13.2 step 6): the
-//! host key, `POST /api/v1/hosts/enroll` with the one-time token from the environment
-//! (never argv), the fingerprint printed for the owner to compare, the wait for the
-//! owner's Confirm, and the host worker token written for the dispatcher.
+//! host key — made in the machine's TPM where its user may open one, else a file, as the
+//! owner's `OMARCHY_HOST_KEY` asks (#330, [`crate::host`]) —, `POST /api/v1/hosts/enroll`
+//! with the one-time token from the environment (never argv) and where the key lives, the
+//! fingerprint printed for the owner to compare, the wait for the owner's Confirm, and the
+//! host worker token written for the dispatcher.
 //!
 //! What comes before it at install — the verified bundle, preflight, the runtime and
 //! the capacity detection that writes `run/capacity.json` — is #317's and #333's; a
