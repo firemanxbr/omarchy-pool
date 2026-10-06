@@ -212,7 +212,7 @@ const SCRIPT = String.raw`
     var until = w.stopping && CAN && CAN.stop && CAN.stop.task === w.stopping.task && CAN.stop.until ? CAN.stop.until : w.stopping && w.stopping.until;
     if (w.stopping) L.push(["warn", "Stopping task #" + w.stopping.task + " (by " + (w.stopping.by || "?") + ", " + hm(w.stopping.since) + "): its worker hears it at its next heartbeat; the task goes back to the queue once it has stopped, by " + hm(until) + " at the latest."]);
     if (w.alive && w.agent_status === "error") L.push(["fail", "Not ready" + (w.not_ready_since ? " since " + ago(w.not_ready_since).replace(" ago", "") + " ago" : "") + ": " + wtNotReady(w) + "."]);
-    if (BREAKER) L.push(["warn", "Provider outage suspected since " + ago(BREAKER.since) + " (up to " + BREAKER.peak + " " + BREAKER.provider + " sites " + (BREAKER.scope === "project" ? "of the project's own " : "") + "with an open agent error at once): the pool restarts none of this provider's " + (BREAKER.scope === "project" ? "project workers" : "contributors' workers") + " until fewer than 2 sites have had one for 15 min."]);
+    if (BREAKER) L.push(["warn", "Provider outage suspected since " + ago(BREAKER.since) + " (up to " + BREAKER.peak + " " + BREAKER.provider + " sites " + (BREAKER.scope === "project" ? "of the project's own " : "") + "with an open agent error at once): the pool restarts none of this provider's " + (BREAKER.scope === "project" ? "project workers" : "community registrations") + " until fewer than 2 sites have had one for 15 min."]);
     if (SITE_WORD) L.push(["info", SITE_WORD.charAt(0).toUpperCase() + SITE_WORD.slice(1) + "."]);
     if (w.pool_waits) L.push(["info", w.pool_waits.charAt(0).toUpperCase() + w.pool_waits.slice(1) + "."]);
     if (w.pool_gave_up) L.push(["warn", "The pool gave up " + ago(w.pool_gave_up) + " after its restarts in this spell: a person looks — its log below has why."]);
@@ -422,8 +422,9 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
     reads: [
       { path: `/api/v1/factory/workers/${F.communityWorker}/orders`, status: 401 },
       { path: `/api/v1/factory/workers/${F.communityWorker}/orders`, as: "contributor", status: 403 },
-      { path: `/api/v1/factory/workers/${F.communityWorker}/orders`, as: "owner", fields: ["id", "orders", "orders.0.worker_detail", "orders.0.detail", "orders.0.state"] },
-      { path: `/api/v1/factory/workers/${F.communityWorker}/orders`, as: "maintainer", fields: ["orders.0.worker_detail"] },
+      // w3 is m1's (a maintainer's legacy set, #343): the fixture's owner, alice, is neither its owner nor a maintainer.
+      { path: `/api/v1/factory/workers/${F.communityWorker}/orders`, as: "owner", status: 403 },
+      { path: `/api/v1/factory/workers/${F.communityWorker}/orders`, as: "maintainer", fields: ["id", "orders", "orders.0.worker_detail", "orders.0.detail", "orders.0.state"] },
     ],
     acts: [
       { method: "DELETE", path: `/api/v1/factory/workers/${F.communityWorker}/orders/wo_${"0".repeat(32)}`, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
@@ -437,7 +438,8 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="wk-log"', 'id="wk-log-body"'],
     script: ['fetch(BASE + "/log", { cache: "no-store" })', "function drawLog(d, why)", "pre.textContent = d.log"],
     reads: [
-      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.ownerWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
       { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "contributor", status: 403 },
     ],
     visible: EVERYONE,

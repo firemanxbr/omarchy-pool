@@ -237,16 +237,17 @@ describe("the fleet breaker's matrix", () => {
     }
   });
 
-  it("holds a project worker only for the project's own spells: a contributor's three registrations saying the same error hold contributors' workers, never the project's", async () => {
+  it("holds a project worker only for the project's own spells: three community registrations saying the same error hold the community ones, never the project's", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const t0 = Date.now();
     const provider = "mx-mal";
-    for (const i of [1, 2, 3]) await seedWorker(`mallory-fake-${i}`, "mallory", "community");
+    // A maintainer's legacy set (#343: a contributor's registration claims nothing): what it says of its agent is still its own word.
+    for (const i of [1, 2, 3]) await seedWorker(`comm-fake-${i}`, "m2", "community");
     await seedWorker("mx-studio-review", "m1", "project");
     const agent = () => ({ status: "error" as const, error: REFUSED });
     const got: Record<string, string[]> = {};
     for (let s = 0; s <= 24; s++) {
-      for (const id of ["mallory-fake-1", "mallory-fake-2", "mallory-fake-3", "mx-studio-review"]) {
+      for (const id of ["comm-fake-1", "comm-fake-2", "comm-fake-3", "mx-studio-review"]) {
         const t = t0 + s * 30000 + (id.endsWith("review") ? 20000 : Number(id.slice(-1)) * 1000);
         vi.setSystemTime(t);
         const res = await claim(id, { instance: 7, status: "error", error: agent().error, checked: "c1", agent: `${provider}/model-1` });
@@ -256,15 +257,15 @@ describe("the fleet breaker's matrix", () => {
         }
       }
     }
-    // The contributor's three trip the breaker of their scope, and get nothing but their re-check.
+    // The community three trip the breaker of their scope, and get nothing but their re-check.
     expect(await key(provider, "all")).not.toBeNull();
-    for (const i of [1, 2, 3]) expect(got[`mallory-fake-${i}`]).toEqual(["recheck-agent"]);
+    for (const i of [1, 2, 3]) expect(got[`comm-fake-${i}`]).toEqual(["recheck-agent"]);
     // The project's worker gets its restart: its scope counts the project's own spells, one site.
     expect(await key(provider, "project")).toBeNull();
     expect(got["mx-studio-review"]).toEqual(["recheck-agent", "restart"]);
     // Its page says nothing of a breaker; theirs do.
     expect((await view("mx-studio-review")).json.breaker).toBeNull();
-    expect((await view("mallory-fake-1")).json.breaker).toMatchObject({ provider, scope: "all" });
+    expect((await view("comm-fake-1")).json.breaker).toMatchObject({ provider, scope: "all" });
   });
 
   it("clears with hysteresis only: a count back at two starts the wait again; one below for fifteen minutes clears it, once; alternating one and three never does", async () => {
@@ -435,8 +436,8 @@ describe("a host's shared agent service", () => {
 describe("the pool's own names, and the community's share of its budget", () => {
   it("a person whose login is \"pool\" is a person: their cap, their TTL, their name on the page — never the pool's budget", async () => {
     const id = "pool-person-box";
-    await seedWorker(id, "pool", "community");
-    await claim(id, { instance: 1 });
+    // A contributor's registration from before #331 claims nothing (#343): the orders it takes are its row's, as a claim once wrote them.
+    await seedWorker(id, "pool", "community", { order_kinds: '["drain","recheck-agent","restart"]' });
     const pools = () => count("SELECT COUNT(*) AS n FROM worker_orders WHERE issued_by IN (?, ?)", POOL_PROJECT, POOL_COMMUNITY);
     const before = await pools();
     const o = (await issue(id, { kind: "restart" }, cli("pool"))).json.order;
@@ -454,7 +455,7 @@ describe("the pool's own names, and the community's share of its budget", () => 
     await env.DB.prepare("DELETE FROM worker_orders WHERE worker_id = 'pool-seeded'").run();
   });
 
-  it("contributors' workers spend at most their share of the day and of the hour; the project's keep the rest", async () => {
+  it("community registrations spend at most their share of the day and of the hour; the project's keep the rest", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     // A minute into the next hour: the run spans 42 minutes of it, and the once-per-hour and once-per-day lines it counts are keyed by
     // the hour and the day — started at the wall clock's minute, a run near the hour crossed into the next one and wrote a second line.
@@ -467,7 +468,7 @@ describe("the pool's own names, and the community's share of its budget", () => 
     // The community's forty of the day are spent (none of them restarts within the hour).
     const seed = (n: number, by: string, kind: string, ago: (i: number) => number) => env.DB.prepare(`INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, issued_at, expires_at, state) VALUES ${Array.from({ length: n }, (_, i) => `('wo_${by === POOL_COMMUNITY ? "c" : "p"}${kind[3]}${String(i).padStart(29, "0")}', 'share-seeded', '${kind}', 'seeded', '${by}', '${iso(ago(i))}', '${iso(0)}', 'done')`).join(", ")}`).run();
     await seed(MAX_POOL_COMMUNITY_ORDERS_PER_DAY, POOL_COMMUNITY, "recheck-agent", (i) => 120 + i);
-    await seedWorker("share-contrib", "mallory", "community");
+    await seedWorker("share-contrib", "m2", "community");
     await seedWorker("share-project", "m1", "project");
     const kinds: Record<string, string[]> = { "share-contrib": [], "share-project": [] };
     for (let s = 0; s <= 24; s++) {
@@ -480,11 +481,11 @@ describe("the pool's own names, and the community's share of its budget", () => 
     expect(kinds["share-contrib"]).toEqual([]);
     expect(kinds["share-project"]).toEqual(["recheck-agent", "restart"]);
     expect(await linesStarting("the community's share of the pool's daily budget")).toBe(1);
-    // The hour: six restarts of contributors' workers already; the next one's waits, the project's passes.
+    // The hour: six restarts of community registrations already; the next one's waits, the project's passes.
     await env.DB.prepare("DELETE FROM worker_orders WHERE worker_id = 'share-seeded'").run();
     await aside();
     await seed(MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR, POOL_COMMUNITY, "restart", (i) => 10 + i);
-    await seedWorker("share-contrib-2", "mallory", "community");
+    await seedWorker("share-contrib-2", "m2", "community");
     const t1 = t0 + 30 * MIN;
     const more: string[] = [];
     for (let s = 0; s <= 24; s++) {
@@ -493,7 +494,7 @@ describe("the pool's own names, and the community's share of its budget", () => 
       for (const o of r.json?.orders ?? []) { more.push(o.kind); await answer("share-contrib-2", o.id, { instance: hex(9), outcome: "done", code: "probed" }); }
     }
     expect(more).toEqual(["recheck-agent"]);
-    expect(await linesStarting("the pool gave contributors' workers 6 restart-type orders")).toBe(1);
+    expect(await linesStarting("the pool gave community registrations 6 restart-type orders")).toBe(1);
     await env.DB.prepare("DELETE FROM worker_orders WHERE worker_id = 'share-seeded'").run();
   });
 });

@@ -138,8 +138,8 @@ export const MAINTAINER_DECIDES = "a maintainer decides";
  */
 export const POOL_HOSTS = "your packages build on the pool's hosts";
 
-/** Where a maintainer's host is documented (worker-host.md): the pointer every retired door of the contributor worker path answers with (#343). */
-export const HOST_DOCS = "/docs/worker-host";
+/** Where a maintainer's host is documented (worker-host.md, *Maintainer hosts*): the pointer every retired door of the contributor worker path answers with (#343). */
+export const HOST_DOCS = "/docs/worker-host#maintainer-hosts";
 
 /**
  * The contributor worker path's doors (#343, design v2 §21.4, D56): the one
@@ -929,13 +929,14 @@ export async function handleDeletePackage(c: Contributor, name: string, env: Env
 /**
  * Which registrations a contributor may name for a build of theirs, per
  * architecture (the claim's rule, read the other way round): the community
- * registrations, whoever's — each takes any contributor's build (#343),
- * and every one left is a maintainer's legacy set until P3 — never the
- * project's, which take the project's builds only.
+ * registrations of a maintainer, whoever's — each takes any contributor's
+ * build (#343), a maintainer's legacy set until P3 — never the project's,
+ * which take the project's builds only, nor one whose owner is no
+ * maintainer, which claims nothing (handleClaim).
  */
 export async function buildersFor(env: Env, arch: string): Promise<{ id: string; owner: string | null; arch: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }[]> {
   const rows = await env.DB.prepare(
-    "SELECT id, owner, arch, drained_at, drained_by, drain_reason FROM build_workers WHERE revoked_at IS NULL AND trust = 'community' AND arch = ?",
+    "SELECT id, owner, arch, drained_at, drained_by, drain_reason FROM build_workers WHERE revoked_at IS NULL AND trust = 'community' AND arch = ? AND owner IN (SELECT login FROM factory_maintainers)",
   ).bind(arch).all<{ id: string; owner: string | null; arch: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
   return rows.results;
 }

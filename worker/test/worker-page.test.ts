@@ -164,8 +164,9 @@ describe("the worker's page", () => {
     expect(pub.worker).not.toHaveProperty("site");
     expect(pub.worker).not.toHaveProperty("auto_orders");
     expect(pub.worker.takes_orders).toEqual(["drain", "recheck-agent", "restart"]);
-    // Its owner reads them.
-    const mine = JSON.parse((await get(`/api/v1/factory/workers/${F.communityWorker}/orders`, `omc=${F.sessions.owner}`)).text);
+    // A maintainer reads them (w3 is m1's, a maintainer's legacy set: #343); the fixture's owner, alice, is not its owner.
+    expect((await get(`/api/v1/factory/workers/${F.communityWorker}/orders`, `omc=${F.sessions.owner}`)).status).toBe(403);
+    const mine = JSON.parse((await get(`/api/v1/factory/workers/${F.communityWorker}/orders`, `omc=${F.sessions.maintainer}`)).text);
     expect(mine.orders.find((o: any) => o.kind === "recheck-agent").worker_detail).toContain("812 ms");
     // The listing every page reads carries no process, site or rules' state either.
     const listing = JSON.parse((await get("/api/v1/factory?live=1")).text);
@@ -178,15 +179,16 @@ describe("the worker's page", () => {
     const nobody = await can();
     expect(nobody.can).toMatchObject({ recheck: false, restart: false, restart_agent: false });
     expect(nobody.why.restart).toBe("sign in with GitHub");
-    const stranger = await can(`omc=${F.sessions.contributor}`);
-    expect(stranger.why.restart).toBe(`only ${F.owner} or a maintainer gives it orders`);
-    expect(stranger.details).toBe(false);
-    const owner = await can(`omc=${F.sessions.owner}`);
+    // w3 is m1's (a maintainer's legacy set, #343): a contributor — the fixture's owner, alice, too — may not order it.
+    for (const who of [F.sessions.contributor, F.sessions.owner]) {
+      const stranger = await can(`omc=${who}`);
+      expect(stranger.why.restart, who).toBe(`only ${F.m1} or a maintainer gives it orders`);
+      expect(stranger.details, who).toBe(false);
+    }
+    const owner = await can(`omc=${F.sessions.maintainer}`);
     expect(owner.can).toMatchObject({ recheck: true, restart: true, restart_agent: false });
     expect(owner.why.restart_agent).toContain("it calls no agent service of its own host");
     expect(owner.details).toBe(true);
-    const maintainer = await can(`omc=${F.sessions.maintainer}`);
-    expect(maintainer.can.restart).toBe(true);
     // m1's project worker has never said it takes orders: its image takes none, for everyone.
     const old = JSON.parse((await get(`/api/v1/factory/workers/${F.worker}/can`, `omc=${F.sessions.maintainer}`)).text);
     expect(old.why.restart).toContain("takes no orders");
@@ -224,7 +226,7 @@ describe("the worker's page", () => {
     const visitor = (await drawn(F.communityWorker))["#wk-note"].innerHTML;
     // One sentence, the sign-in: when an order arrives is for a reader who may press.
     expect(visitor).toBe(`<a href="/auth/github?next=/worker/${F.communityWorker}" rel="nofollow">Sign in</a> to order this worker.`);
-    const owner = (await drawn(F.communityWorker, `omc=${F.sessions.owner}`))["#wk-note"].innerHTML;
+    const owner = (await drawn(F.communityWorker, `omc=${F.sessions.maintainer}`))["#wk-note"].innerHTML;
     expect(owner).toMatch(/^delivered with its next claim — /);
     expect(owner).not.toContain("Sign in");
   });

@@ -101,9 +101,10 @@ export const BREAKER_CLEAR_MIN = 15;
  * Who the pool is on its own orders: a value no GitHub login can be (a login
  * is letters, digits and single hyphens), so nobody signs in as the pool and
  * spends its budget or skips a person's cap. One per trust: what the rules
- * order a contributor's worker is counted apart, so a contributor's own
+ * order a community registration is counted apart, so the community
  * registrations can spend the community's share of the budget and never
- * the project's.
+ * the project's. Since #343 those are the maintainers' legacy sets, and the
+ * share stays with them until P3 (routes/factory.ts autoOrder).
  */
 export const POOL_PROJECT = "pool:project";
 export const POOL_COMMUNITY = "pool:community";
@@ -875,8 +876,8 @@ export function stopWay(kind: string, orderKinds: string | null | undefined): St
  * - who resumes (§1.10's table): a project worker, any maintainer — its
  *   owner, when not a maintainer, only a drain of their own: project trust
  *   is the maintainers' word, and so is keeping such a worker out; a
- *   contributor's worker its owner always — putting a machine back to work
- *   is its owner's word, the rule of sharing (0032) — and a maintainer only
+ *   community registration its owner always — putting a machine back to
+ *   work is its owner's word (0032) — and a maintainer only
  *   when a maintainer drained it; a maintainer who must keep it out revokes
  *   it;
  * - Stop its task needs a task in hand, not stopped already; it counts in
@@ -1274,7 +1275,7 @@ export async function capRefusal(env: Env, a: Pick<IssueAsk, "worker" | "kind" |
     }
     if (community && (mine?.n ?? 0) >= MAX_POOL_COMMUNITY_ORDERS_PER_DAY) {
       const from = mine?.oldest ? clock(Date.parse(mine.oldest) + DAY) : "tomorrow";
-      const why = `the community's share of the pool's daily budget (${MAX_POOL_COMMUNITY_ORDERS_PER_DAY} of ${MAX_POOL_ORDERS_PER_DAY}) is spent: the pool orders contributors' workers again from ${from} tomorrow; the project's keep the rest, and people's orders still work`;
+      const why = `the community's share of the pool's daily budget (${MAX_POOL_COMMUNITY_ORDERS_PER_DAY} of ${MAX_POOL_ORDERS_PER_DAY}) is spent: the pool orders community registrations again from ${from} tomorrow; the project's keep the rest, and people's orders still work`;
       await capLine(env, `order-budget:community:${iso(a.now).slice(0, 10)}`, "warn", why, { cap: MAX_POOL_COMMUNITY_ORDERS_PER_DAY });
       return why;
     }
@@ -1289,7 +1290,7 @@ export async function capRefusal(env: Env, a: Pick<IssueAsk, "worker" | "kind" |
         return why;
       }
       if (community && (theirs?.n ?? 0) >= MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR) {
-        const why = `the pool gave contributors' workers ${MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR} restart-type orders in the last hour, their share of ${MAX_POOL_RESTARTS_PER_HOUR}: it waits for the hour to pass`;
+        const why = `the pool gave community registrations ${MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR} restart-type orders in the last hour, their share of ${MAX_POOL_RESTARTS_PER_HOUR}: it waits for the hour to pass`;
         await capLine(env, `order-cap:pool:community:${iso(a.now).slice(0, 13)}`, "warn", why, { cap: MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR });
         return why;
       }
@@ -1567,11 +1568,11 @@ export function breakerOf(v: string | null | undefined): Breaker | null {
 
 /**
  * Whose spells a worker's breaker counts. A worker's error is its own word:
- * a contributor's registrations could say an outage that is not there. So
- * the project's workers are held only by the project's own spells (the
- * scope "project"), and a contributor's by every worker's ("all") — a
- * contributor can hold the pool's restarts of contributors' workers, never
- * of the project's. Each scope has its key: `worker-breaker:<provider>`,
+ * a community registration could say an outage that is not there. So the
+ * project's workers are held only by the project's own spells (the scope
+ * "project"), and a community one by every worker's ("all") — a community
+ * registration can hold the pool's restarts of community registrations,
+ * never of the project's. Each scope has its key: `worker-breaker:<provider>`,
  * and `worker-breaker:<provider>:project`.
  */
 export type BreakerScope = "project" | "all";
@@ -1583,7 +1584,7 @@ export function breakerOfKey(key: string): { provider: string; scope: BreakerSco
 }
 const SCOPE_WORDS: Record<BreakerScope, { sites: string; workers: string }> = {
   project: { sites: "sites of the project's own", workers: "none of the project's workers of this provider" },
-  all: { sites: "sites", workers: "no contributor's worker of this provider" },
+  all: { sites: "sites", workers: "no community registration of this provider" },
 };
 
 /** Sites with an open spell, per provider, in a scope: a worker's site, or its own id when it has none. */

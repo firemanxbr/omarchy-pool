@@ -344,8 +344,11 @@ anyone else (403, *your packages build on the pool's hosts*), and the
 worker form is on a maintainer's page only. What follows is for a
 maintainer's host.
 
-Anything with `podman` or `docker` and `curl` is a project worker: a
-laptop, a VM, a Droplet. **Every task builds in a fresh Arch container**
+A new machine joins as a host ([a maintainer's host](/docs/worker-host#maintainer-hosts));
+what follows is also how a legacy project registration — one that already
+holds project trust, given before #343 on two maintainers' word — keeps
+running until P3 retires it, on a laptop, a VM or a Droplet with `podman`
+or `docker` and `curl`. **Every task builds in a fresh Arch container**
 (`archlinux:base-devel` for x86_64, `menci/archlinuxarm:base-devel` for
 aarch64; on a host the agent runs, by the digest the release pinned: see
 [the security model](/docs/security-model)) that sees the PKGBUILD and the network and nothing else; the worker
@@ -435,7 +438,8 @@ contributor's packages, in turn by owner. The community worker tier, its
 shared and own-packages modes and the command that ran a contributor's
 worker are gone (#343); the community registrations left are the
 maintainers' own legacy sets, selected as hosts with one lane and one build
-until they retire with the move to the host agent (P3). No GitHub runner ever builds a package: the project's compute is
+until they retire with the move to the host agent (P3); one whose owner is
+no maintainer claims nothing (`403`, with why and the pointer). No GitHub runner ever builds a package: the project's compute is
 not for building everyone's software, and GitHub Actions runs CI and the
 release only — no worker, not even for the pool's own jobs: when the
 project's host is down they wait, and the Workers page says so.

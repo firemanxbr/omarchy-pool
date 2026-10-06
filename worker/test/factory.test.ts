@@ -34,18 +34,19 @@ async function call(method: string, path: string, body?: unknown, token?: string
   return { status: res.status, json: await res.json().catch(() => null) };
 }
 
-// Two project workers (aarch64) and one community worker owned by a
-// contributor; one group whose maintainer is 'm1' — exactly what
-// POST /factory/workers, a maintainer's trust and MAINTAINERS.toml produce.
+// Two project workers (aarch64) and one community worker, m3's — a
+// maintainer's legacy set: a contributor's registration claims nothing since
+// #343; one group whose maintainer is 'm1' — exactly what POST
+// /factory/workers, a maintainer's trust and MAINTAINERS.toml produce.
 beforeAll(async () => {
   const h = (t: string) => sha256Hex(t);
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
       ('w1', 'aarch64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'),
       ('w2', 'aarch64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'),
-      ('w3', 'aarch64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z')`).bind(await h("omw_w1"), await h("omw_w2"), await h("omw_w3")),
-    env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1')`),
-    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, NULL, 'contributor')`).bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_alice")),
+      ('w3', 'aarch64', 'm3', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z')`).bind(await h("omw_w1"), await h("omw_w2"), await h("omw_w3")),
+    env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m3')`),
+    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('m3', ?, ?, 'maintainer'), ('alice', ?, NULL, 'contributor')`).bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_m3"), await h("oms_m3"), await h("omc_alice")),
   ]);
 });
 
@@ -56,7 +57,7 @@ describe("claims and leases", () => {
     expect((await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w1")).status).toBe(204);
     const self = await call("GET", "/factory/workers/self", undefined, "omw_w3");
     // What the registration is: no mode any more (#343), the column history only.
-    expect(self.json).toEqual({ id: "w3", arch: "aarch64", trust: "community", owner: "alice" });
+    expect(self.json).toEqual({ id: "w3", arch: "aarch64", trust: "community", owner: "m3" });
   });
 
   it("the enqueue job enqueues a project build; a project worker takes it with a lease and a job token; a failure requeues it", async () => {
@@ -123,7 +124,7 @@ describe("a community build, its audit and the review", () => {
   let jobToken: string;
   let req: number;
 
-  it("the owner's worker stages the evidence with its job token; the builder cannot write the audit", async () => {
+  it("a community registration stages the evidence of the owner's build with its job token; the builder cannot write the audit", async () => {
     await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('mine', 'aarch64', '1.0-1', 'draft:https://github.com/alice/mine@latest', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
     // Project workers never build a contributor's package.
     expect((await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w1")).status).toBe(204);
@@ -216,7 +217,7 @@ describe("a community build, its audit and the review", () => {
   });
 
   it("a newer build of the same package supersedes the staged one before it", async () => {
-    // alice's worker builds mine again (a fix): the earlier staged row is cancelled with its pending audit, and the review queue shows one.
+    // w3 builds alice's mine again (a fix): the earlier staged row is cancelled with its pending audit, and the review queue shows one.
     await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('mine', 'aarch64', '1.0-2', 'draft:https://github.com/alice/mine@latest', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
     const c = await call("POST", "/factory/claim", { arch: "aarch64", agent: "openai/gpt-5", agent_status: "ok" }, "omw_w3");
     expect(c.status).toBe(200);
@@ -504,7 +505,7 @@ describe("a recipe's failure", () => {
     // gave up at 03:59, and the registry row said `registered` while Review
     // counted the staged build as waiting — two words for one package.
     await env.DB.batch([
-      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('wx86', 'x86_64', 'alice', ?, 'dedicated', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_wx86")),
+      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('wx86', 'x86_64', 'm3', ?, 'dedicated', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_wx86")),
       env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status, detail) VALUES ('twoarch', 'alice', 'https://github.com/alice/twoarch', '["aarch64","x86_64"]', 'staged', '1.0-1 built for aarch64 by w3; waiting for a maintainer')`),
       env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix, finished_at) VALUES ('twoarch', 'aarch64', '1.0-1', 'https://github.com/alice/twoarch@HEAD:PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/twoarch/1/', '2026-09-18T03:50:46Z')`),
       env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, max_attempts) VALUES ('twoarch', 'x86_64', '1.0-1', 'https://github.com/alice/twoarch@HEAD:PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build', 1)`),
@@ -676,10 +677,10 @@ describe("where a build runs", () => {
   const checklist = { official: true, license: true, unshipped: true, evidence: true };
   const req = (name: string) => ({ name, url: `https://${name}.example`, source: `https://${name}.example/${name}-1.tar.gz`, version: "1", description: "A tool for the test", license: "MIT", arches: ["aarch64"], checklist });
   it("a request lands in the queue at once — any community registration takes it, whoever's, whatever mode its row still holds (#343) — and says where it stands; the owner takes it out and puts it back", async () => {
-    // carol has no worker; w5 is dave's community registration, its row from before #343 saying shared — history, read by nothing.
+    // carol has no worker; w5 is m3's community registration, its row from before #343 saying shared — history, read by nothing.
     await env.DB.batch([
       env.DB.prepare("INSERT INTO contributors (login, token_hash, role) VALUES ('carol', ?, 'contributor'), ('dave', ?, 'contributor')").bind(await sha256Hex("omc_carol"), await sha256Hex("omc_dave")),
-      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('w5', 'aarch64', 'dave', ?, 'shared', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_w5")),
+      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('w5', 'aarch64', 'm3', ?, 'shared', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_w5")),
     ]);
     const made = await call("POST", "/factory/packages", req("noworker"), "omc_carol");
     expect(made.status).toBe(201);
@@ -699,13 +700,13 @@ describe("where a build runs", () => {
     expect(back.status).toBe(201);
     expect(back.json.tasks[0]).toBeGreaterThan(first);
     expect(back.json.queue.aarch64).toEqual({ position: expect.any(Number), total: expect.any(Number) });
-    // alice's registration (w3, its row saying dedicated) takes carol's build: a community registration builds any contributor's
+    // m3's registration (w3, its row saying dedicated) takes carol's build: a community registration builds any contributor's
     // package, as a host does — the row's mode and a claim's `shared` are read by nothing.
     const c = await call("POST", "/factory/claim", { arch: "aarch64", shared: false, agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w3");
     expect(c.status, JSON.stringify(c.json)).toBe(200);
     expect(c.json.task.id).toBe(back.json.tasks[0]);
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'noworker' AND status IN ('queued', 'leased')").run();
-    // alice's own request: dave's w5 takes it as well — no owner's first word.
+    // alice's own request: m3's w5 takes it as well — no owner's first word.
     const mine = await call("POST", "/factory/packages", req("hasworker"), "omc_alice");
     expect(mine.status).toBe(201);
     const c5 = await call("POST", "/factory/claim", { arch: "aarch64", shared: true, agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w5");
@@ -714,7 +715,7 @@ describe("where a build runs", () => {
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'hasworker' AND status IN ('queued', 'leased')").run();
   });
   it("a build asked for one worker is claimed by that worker only; a registration that builds no contributor's package is refused; a hint and the last failed build travel with it", async () => {
-    // alice's failed build of hasworker is the lesson for the next one; she asks for w5 (dave's community registration), with a hint.
+    // alice's failed build of hasworker is the lesson for the next one; she asks for w5 (m3's community registration), with a hint.
     await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, error) VALUES ('hasworker', 'aarch64', '1', 'draft:https://hasworker.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'failed', 'exit 4: no')").run();
     const failed = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'hasworker' AND status = 'failed'").first<{ id: number }>())!.id;
     expect((await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"], worker: "w1" }, "omc_alice")).status).toBe(403); // the project's, never a contributor's build
@@ -751,8 +752,8 @@ describe("where a build runs", () => {
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'hasworker' AND status IN ('queued', 'leased')").run();
   });
   it("a build a toolchain cannot start on the worker goes back to the queue for a native one: the attempt given back, its pin dropped, the package and the journal say what it waits for, no emulated worker is handed it again — asked again it still waits for one; the same word from a native worker is a plain failure, and a final one fails as before", async () => {
-    // dave's request; w7, his native community registration, idle and just seen; w5 claims as an emulated one.
-    await env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, trust, last_seen, labels, usage, agent_status, current_task) VALUES ('w7', 'aarch64', 'dave', ?, 'community', ?, '{\"where\":\"big\"}', '{\"cpu\":1,\"ram\":1,\"disk\":1,\"cores\":12,\"ram_gb\":32}', 'ok', NULL)").bind(await sha256Hex("omw_w7"), new Date().toISOString()).run();
+    // dave's request; w7, m3's native community registration, idle and just seen; w5 claims as an emulated one.
+    await env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, trust, last_seen, labels, usage, agent_status, current_task) VALUES ('w7', 'aarch64', 'm3', ?, 'community', ?, '{\"where\":\"big\"}', '{\"cpu\":1,\"ram\":1,\"disk\":1,\"cores\":12,\"ram_gb\":32}', 'ok', NULL)").bind(await sha256Hex("omw_w7"), new Date().toISOString()).run();
     await env.DB.prepare("UPDATE build_workers SET revoked_at = NULL WHERE id = 'w5'").run();
     const made = await call("POST", "/factory/packages", req("rusty"), "omc_dave");
     expect(made.status).toBe(201);
@@ -1127,7 +1128,7 @@ describe("who trusts whom", () => {
     for (const [id, body] of [["w3", { trust: "project" }], ["w1", { trust: "community" }]] as const) {
       for (const who of [undefined, "omc_alice", "omc_m1", "omc_m2"]) {
         const r = await call("POST", `/factory/workers/${id}/trust`, body, who);
-        expect([r.status, r.json], `${id} as ${who ?? "nobody"}`).toEqual([410, { error: expect.stringMatching(/^per-worker trust is gone \(#343\)/), code: "gone", docs: "/docs/worker-host" }]);
+        expect([r.status, r.json], `${id} as ${who ?? "nobody"}`).toEqual([410, { error: expect.stringMatching(/^per-worker trust is gone \(#343\)/), code: "gone", docs: "/docs/worker-host#maintainer-hosts" }]);
       }
     }
     expect((await env.DB.prepare("SELECT id, trust, trusted_by, trust_proposed_by FROM build_workers WHERE id IN ('w1', 'w3') ORDER BY id").all()).results).toEqual(before.results);
@@ -1139,8 +1140,8 @@ describe("who trusts whom", () => {
   });
 
   it("the Review page names the worker behind every staged build; a record can be withdrawn by a maintainer, with a signed tombstone in its place", async () => {
-    // A build staged by alice's worker w3 (registered "where": "her laptop") keeps who built it.
-    await env.DB.prepare("UPDATE build_workers SET labels = '{\"where\":\"her laptop\"}' WHERE id = 'w3'").run();
+    // A build staged by m3's worker w3 (registered "where": "the studio") keeps who built it.
+    await env.DB.prepare("UPDATE build_workers SET labels = '{\"where\":\"the studio\"}' WHERE id = 'w3'").run();
     await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('whence', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:whence/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
     const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
     expect(c.status).toBe(200);
@@ -1149,7 +1150,7 @@ describe("who trusts whom", () => {
     const staged = (await call("GET", "/factory/review")).json.staged as any[];
     const withWorker = staged.filter((t) => t.built_by);
     expect(withWorker.map((t) => t.id)).toEqual([c.json.task.id]);
-    expect(withWorker[0].built_by).toEqual({ worker: "w3", owner: "alice", where: "her laptop", trusted_by: null });
+    expect(withWorker[0].built_by).toEqual({ worker: "w3", owner: "m3", where: "the studio", trusted_by: null });
     for (const t of staged) expect(t).not.toHaveProperty("worker_labels");
     // A record that should not be public: withdrawn, its signature and staging copy with it.
     const task = withWorker[0].id as number;
@@ -1330,9 +1331,9 @@ describe("workers follow the brain", () => {
   it("a worker's mode is gone (#343): its doors answer 410 with the pointer, nothing reads or writes the row's mode, and a claim's `shared` changes nothing", async () => {
     const row = () => env.DB.prepare("SELECT mode, mode_by FROM build_workers WHERE id = 'w3'").first();
     const was = await row();
-    for (const [path, who] of [["/factory/workers/w3/mode", "omc_alice"], ["/factory/workers/w3/mode", "omc_m2"], ["/factory/workers/w3/mode", undefined], ["/factory/workers/self/mode", "omw_w3"], ["/factory/workers/self/mode", undefined]] as const) {
+    for (const [path, who] of [["/factory/workers/w3/mode", "omc_m3"], ["/factory/workers/w3/mode", "omc_m2"], ["/factory/workers/w3/mode", undefined], ["/factory/workers/self/mode", "omw_w3"], ["/factory/workers/self/mode", undefined]] as const) {
       const r = await call("POST", path, { mode: "shared" }, who);
-      expect([r.status, r.json], `${path} as ${who ?? "nobody"}`).toEqual([410, { error: expect.stringMatching(/^a worker's mode is gone \(#343\)/), code: "gone", docs: "/docs/worker-host" }]);
+      expect([r.status, r.json], `${path} as ${who ?? "nobody"}`).toEqual([410, { error: expect.stringMatching(/^a worker's mode is gone \(#343\)/), code: "gone", docs: "/docs/worker-host#maintainer-hosts" }]);
     }
     // The container's flag, either way, writes nothing and decides nothing: a stranger's queued build is w3's to take.
     await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, created_at) VALUES ('theirs', 'aarch64', '1', 'abc123', 'contributor', 100, 0, 'community', 'bob', 'build', 'queued', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes'))").run();
@@ -1341,14 +1342,14 @@ describe("workers follow the brain", () => {
     expect(c.json.task.name).toBe("theirs");
     await call("POST", "/factory/claim", { arch: "aarch64", shared: true }, "omw_w3");
     expect(await row()).toEqual(was);
-    expect((await call("GET", "/factory/workers/self", undefined, "omw_w3")).json).toEqual({ id: "w3", arch: "aarch64", trust: "community", owner: "alice" });
+    expect((await call("GET", "/factory/workers/self", undefined, "omw_w3")).json).toEqual({ id: "w3", arch: "aarch64", trust: "community", owner: "m3" });
     await call("POST", `/factory/tasks/${c.json.task.id}/fail`, { error: "test over", final: true }, "omw_w3");
   });
   it("the worker's own log rides with the claim — kept to the last kilobytes, a line that looks like a secret dropped — and is read by its owner and the maintainers only", async () => {
     await call("POST", "/factory/claim", { arch: "aarch64", log: "[10:00:00] container worker w3 (aarch64) preparing\n[10:00:02] agent ok\n" }, "omw_w3");
     await call("POST", "/factory/claim", { arch: "aarch64", log: "[10:00:32] update required: this worker runs v0.0.1\n" }, "omw_w3");
     await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3"); // nothing new: the tail stays
-    const mine = await call("GET", "/factory/workers/w3/log", undefined, "omc_alice");
+    const mine = await call("GET", "/factory/workers/w3/log", undefined, "omc_m3");
     expect(mine.status).toBe(200);
     expect(mine.json.log).toBe("[10:00:00] container worker w3 (aarch64) preparing\n[10:00:02] agent ok\n[10:00:32] update required: this worker runs v0.0.1\n");
     expect(mine.json.at).toBeTruthy();
@@ -1360,15 +1361,16 @@ describe("workers follow the brain", () => {
     expect((await call("GET", "/factory/workers/w3/log", undefined, "omc_nobody")).status).toBe(401);
     await env.DB.prepare("INSERT OR IGNORE INTO contributors (login, token_hash, role) VALUES ('carol', ?, 'contributor')").bind(await sha256Hex("omc_carol")).run();
     expect((await call("GET", "/factory/workers/w3/log", undefined, "omc_carol")).status).toBe(403);
+    expect((await call("GET", "/factory/workers/w3/log", undefined, "omc_alice")).status).toBe(403);
     // A secret in a line: the chunk is not kept, a word about it is.
     await call("POST", "/factory/claim", { arch: "aarch64", log: "[10:01:00] env: OMARCHY_WORKER_TOKEN=omw_abcdefghijklmnopqrstuvwxyz0123456789abcdef\n" }, "omw_w3");
-    const after = (await call("GET", "/factory/workers/w3/log", undefined, "omc_alice")).json.log;
+    const after = (await call("GET", "/factory/workers/w3/log", undefined, "omc_m3")).json.log;
     expect(after).not.toContain("omw_abcdefghij");
     expect(after).toMatch(/dropped: one looked like/);
     // Bounded: a chunk is its last 4 KB, the history its last 8 KB.
     await call("POST", "/factory/claim", { arch: "aarch64", log: "x".repeat(5000) + "\n" }, "omw_w3");
     await call("POST", "/factory/claim", { arch: "aarch64", log: "y".repeat(5000) + "\n" }, "omw_w3");
-    const bounded = (await call("GET", "/factory/workers/w3/log", undefined, "omc_alice")).json.log;
+    const bounded = (await call("GET", "/factory/workers/w3/log", undefined, "omc_m3")).json.log;
     expect(bounded.length).toBeLessThanOrEqual(8192);
     expect(bounded.endsWith("y".repeat(4095) + "\n")).toBe(true);
     expect(bounded).toContain("x".repeat(4095) + "\n");

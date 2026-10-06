@@ -312,9 +312,10 @@ export async function handleConfirmHost(c: Contributor, id: string, request: Req
   const [res] = await env.DB.batch([
     env.DB.prepare("UPDATE hosts SET status = 'active', confirmed_at = ?, worker_id = ? WHERE id = ? AND status = 'pending-owner' AND owner_login IN (SELECT login FROM factory_maintainers)").bind(at, worker, id),
     // The registration, only if this batch confirmed the host: its owner's, project trust on the owner's word as a maintainer (S2), no token until the agent's signed fetch.
+    // No mode: the column is history since the community tier ended (#343).
     env.DB.prepare(
-      `INSERT INTO build_workers (id, arch, hostname, labels, owner, token_hash, mode, packages, last_seen, trust, trusted_by, trusted_at, host_id, kind)
-       SELECT ?, arch, hostname, json_object('where', name), owner_login, NULL, 'dedicated', '[]', ?, 'project', owner_login, ?, id, 'host' FROM hosts WHERE id = ? AND worker_id = ? AND confirmed_at = ?`,
+      `INSERT INTO build_workers (id, arch, hostname, labels, owner, token_hash, packages, last_seen, trust, trusted_by, trusted_at, host_id, kind)
+       SELECT ?, arch, hostname, json_object('where', name), owner_login, NULL, '[]', ?, 'project', owner_login, ?, id, 'host' FROM hosts WHERE id = ? AND worker_id = ? AND confirmed_at = ?`,
     ).bind(worker, at, at, id, worker, at),
     env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'ok', ?, ? WHERE (SELECT worker_id FROM hosts WHERE id = ?) = ?")
       .bind(line, JSON.stringify({ host: id, worker, owner: h.owner_login, by: c.login }), id, worker),

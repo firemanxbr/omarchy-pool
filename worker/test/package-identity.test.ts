@@ -400,8 +400,8 @@ describe("a package built for two architectures", () => {
       // The queue is this story's alone: what the migration's rows left queued (zed's build, mise's rebuild) waits for no worker here.
       env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE status = 'queued'"),
       env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
-        ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
-        ('ca', 'aarch64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
+        ('cx', 'x86_64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z'),
+        ('ca', 'aarch64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z'),
         ('px', 'x86_64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'),
         ('pa', 'aarch64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z')`).bind(await h("omw_cx"), await h("omw_ca"), await h("omw_px"), await h("omw_pa")),
     ]);

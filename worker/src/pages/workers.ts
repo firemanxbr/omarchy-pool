@@ -107,7 +107,7 @@ __CHARTS__
     };
     $("#kinds").innerHTML =
       card("project", "Project", kinds.project, "The pool's own jobs, on the host a maintainer keeps.") +
-      card("review", "Review", kinds.review, "Rebuilds, publishes and audits, on two maintainers' word.") +
+      card("review", "Review", kinds.review, "Rebuilds, publishes and audits, on the project's trust.") +
       card("community", "Community", kinds.community, "Legacy community sets, until they retire: any contributor's packages, as a host builds them.");
     // The load per worker, the busiest first: the name with the kind and the architecture, the bar in the kind's colour, and what it did in the tooltip.
     var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
@@ -268,7 +268,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/factory/workers/${F.worker}/log`, status: 401 },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "contributor", status: 403 },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "owner", status: 403 },
-      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.ownerWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
       { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
     ],

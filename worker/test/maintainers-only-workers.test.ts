@@ -4,14 +4,17 @@
  * synced factory/MAINTAINERS.toml, as governance.ts applies it — and refuses
  * everyone else with 403 and the page's sentence, "your packages build on
  * the pool's hosts". A login the last sync removed from the list is refused
- * from then on. Nothing else changes in P0: registrations made before keep
- * claiming, and their owner or a maintainer still revokes them.
+ * from then on. Nothing else changed in P0: registrations made before kept
+ * claiming, and their owner or a maintainer still revokes them. Since #343 a
+ * community registration claims only while its owner is a maintainer: one a
+ * contributor made before, or one whose owner left the list, is refused at
+ * the claim (403, with why and the pointer to the maintainer-host docs).
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { applyGovernance } from "../src/governance";
-import { POOL_HOSTS } from "../src/routes/contributors";
+import { HOST_DOCS, POOL_HOSTS } from "../src/routes/contributors";
 import { legacyWorker, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
@@ -62,20 +65,24 @@ describe("POST /factory/workers is for maintainers only (#331)", () => {
     expect((await call("POST", "/factory/workers", {}, { arch: F.arch })).status).toBe(401);
   });
 
-  it("a registration made before keeps working: its owner's contributor worker claims, and its owner revokes it", async () => {
+  it("a registration a contributor made before claims nothing since #343 — 403, with why and the pointer — and its owner still revokes it", async () => {
     const id = await legacyWorker(env, F.owner, "old", F.arch);
-    expect((await call("POST", "/factory/claim", { token: `omw_${id}` }, { arch: F.arch })).status).toBe(204);
+    const c = await call("POST", "/factory/claim", { token: `omw_${id}` }, { arch: F.arch });
+    expect([c.status, c.json.code, c.json.docs]).toEqual([403, "owner_not_maintainer", HOST_DOCS]);
+    expect(c.json.error).toBe(`${id}: its owner (${F.owner}) is no maintainer (factory/MAINTAINERS.toml) — contributors do not run workers (#343), ${POOL_HOSTS}: it claims nothing; revoke it on its page`);
     expect((await call("DELETE", `/factory/workers/${id}`, { session: F.owner })).json).toMatchObject({ revoked: id });
   });
 
-  it("a login removed from MAINTAINERS.toml at the last sync is refused from then on; the maintainers still listed are not — and the worker it registered before still claims", async () => {
+  it("a login removed from MAINTAINERS.toml at the last sync is refused from then on; the maintainers still listed are not — and the worker it registered before claims nothing until the list names it again", async () => {
     const before = await register(F.m2, "rack");
     expect(before.status, JSON.stringify(before.json)).toBe(201);
     await applyGovernance(env, [F.m1], "sha-without-m2");
     const after = await register(F.m2, "rack2");
     expect([after.status, after.json.error]).toEqual([403, POOL_HOSTS]);
     expect((await register(F.m1, "again")).status).toBe(201);
-    // Claims are unchanged in P0 (§21.4): a removed maintainer's host stops with the host agent's enrollment (P1), not here.
+    // Since #343 a community registration claims only while its owner is a maintainer, as a host's registration does (#322).
+    expect((await call("POST", "/factory/claim", { token: before.json.token }, { arch: F.arch })).json).toMatchObject({ code: "owner_not_maintainer" });
+    await applyGovernance(env, [F.m1, F.m2], "sha-with-m2-again");
     expect((await call("POST", "/factory/claim", { token: before.json.token }, { arch: F.arch })).status).toBe(204);
   });
 });

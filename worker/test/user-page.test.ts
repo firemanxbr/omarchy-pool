@@ -88,17 +88,18 @@ const LOG_WORD = "the worker's log is its owner's and the maintainers' to read";
 
 describe("a person's page draws every control for every viewer, grey with the server's reason where the viewer may not press it", () => {
   let d: Drawn;
-  let w3: any;
+  let laptop: any;
   let gone: any;
   let approval: any;
   beforeAll(async () => {
     d = await drawn();
-    w3 = (await get("/api/v1/factory?limit=10", "")).json.workers.find((w: any) => w.id === F.communityWorker);
-    expect(w3.owner).toBe(F.owner);
+    // alice's own registration from before #331 (it claims nothing since #343): its row as the listing serves it.
+    laptop = (await get("/api/v1/factory?limit=50", "")).json.workers.find((w: any) => w.id === F.ownerWorker);
+    expect(laptop.owner).toBe(F.owner);
     // A worker alice registered before #331 and revoked: its row stays on her page, its buttons grey with the state's word for everyone.
     const box = await legacyWorker(env, "alice", "box", F.arch);
     expect((await call("DELETE", `/api/v1/factory/workers/${box}`, "alice")).status).toBe(200);
-    gone = { ...w3, id: box, revoked_at: "2026-09-17T00:00:00Z" };
+    gone = { ...laptop, id: box, revoked_at: "2026-09-17T00:00:00Z" };
     // The one standing approval of the fixture: m2's, of the project's build of alice's package, on m2's page.
     approval = (await get(`/api/v1/users/${F.m2}`, "")).json.approvals.find((a: any) => a.task_id === F.projectTask);
     expect(approval.decision).toBe("approved");
@@ -119,8 +120,8 @@ describe("a person's page draws every control for every viewer, grey with the se
       "Remove mine": one(d.removeBtn(F.factoryPkg)),
       "Remove ours": one(d.removeBtn(F.publishedPkg)),
       // A worker's row carries Revoke alone: its mode, and Share / Own only with it, are gone (#343).
-      "Revoke w3": one(d.workerActs(w3)),
-      "log w3": one(d.wtLog(w3)),
+      "Revoke laptop": one(d.workerActs(laptop)),
+      "log laptop": one(d.wtLog(laptop)),
       "Revoke box (revoked)": one(d.workerActs(gone)),
       Withdraw: one(d.withdrawBtn(approval, true)),
       "Withdraw (nothing standing)": one(d.withdrawBtn({ ...approval, withdrawn_at: "2026-09-17T00:00:00Z" }, false)),
@@ -147,8 +148,8 @@ describe("a person's page draws every control for every viewer, grey with the se
       "Build all (a build in flight)": grey("a build is in flight"),
       "Remove mine": grey("only alice removes it, or a maintainer"),
       "Remove ours": grey("only alice removes it, or a maintainer"),
-      "Revoke w3": grey("only alice or a maintainer revokes a worker here"),
-      "log w3": grey(LOG_WORD),
+      "Revoke laptop": grey("only alice or a maintainer revokes a worker here"),
+      "log laptop": grey(LOG_WORD),
       "Revoke box (revoked)": revoked(),
       Withdraw: grey("a maintainer decides"),
       "Withdraw (nothing standing)": grey("a maintainer decides"),
@@ -162,7 +163,7 @@ describe("a person's page draws every control for every viewer, grey with the se
       "Build all (a build in flight)": grey("a build is in flight"),
       "Remove mine": grey("mine is approved: a maintainer removes it"),
       "Remove ours": grey("ours is published: a maintainer removes it"),
-      "Revoke w3": live, "log w3": live,
+      "Revoke laptop": live, "log laptop": live,
       "Revoke box (revoked)": revoked(),
       Withdraw: grey("a maintainer decides"),
       "Withdraw (nothing standing)": grey("a maintainer decides"),
@@ -181,13 +182,13 @@ describe("a person's page draws every control for every viewer, grey with the se
       [`Build ${F.arch}`]: grey("only alice builds here — yours is on /user/m1"),
       "Build all (a build in flight)": grey("a build is in flight"),
       "Remove mine": live, "Remove ours": live,
-      "Revoke w3": live, "log w3": live,
+      "Revoke laptop": live, "log laptop": live,
       "Revoke box (revoked)": revoked(),
       Withdraw: live,
       "Withdraw (nothing standing)": grey("nothing standing to withdraw"),
     });
     // The row as m1 has it: Revoke live with its own title, and no mode button (#343); Withdraw live on the standing approval.
-    expect(d.workerActs(w3)).toBe(`<button type="button" class="small-btn" data-revoke="${F.communityWorker}" title="revoke this worker's token">Revoke</button>`);
+    expect(d.workerActs(laptop)).toBe(`<button type="button" class="small-btn" data-revoke="${F.ownerWorker}" title="revoke this worker's token">Revoke</button>`);
     expect(d.withdrawBtn(approval, true)).toBe(`<button type="button" class="small-btn" data-withdraw="${F.projectTask}" data-name="${F.factoryPkg} ${approval.version}" title="take the approval back: the package leaves every ring, another maintainer decides — the reason goes on the record">Withdraw</button>`);
   });
 

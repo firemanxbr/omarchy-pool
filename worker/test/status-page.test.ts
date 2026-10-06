@@ -305,9 +305,9 @@ describe("the Status page", () => {
     const audit = d.whoOf({ kind: "job", payload: { worker: F.worker, kind: "audit" } });
     expect(audit).toContain("the pool");
     expect(audit).toContain('aria-label="Claude Code · Claude Sonnet 5"');
-    // A build on alice's worker: hers, with the agent that drafted its recipe.
+    // A build on m1's community registration (a maintainer's legacy set, #343): its owner's, with the agent that drafted its recipe.
     const build = d.whoOf({ kind: "build", payload: { worker: F.communityWorker } });
-    expect(build).toContain(`href="/user/${F.owner}"`);
+    expect(build).toContain(`href="/user/${F.m1}"`);
     expect(build).toContain('aria-label="OpenAI · GPT 5"');
     // A trust proposal is the maintainer's who proposed it — not the worker's owner, and no agent's.
     const proposed = d.whoOf({ kind: "trust", payload: { worker: F.communityWorker, proposed_by: F.m1, owner: F.owner } });

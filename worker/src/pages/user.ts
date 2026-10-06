@@ -7,15 +7,15 @@
  * is the public API (`/api/v1/factory/*`) with the browser session.
  *
  * The page is the same for every role: Share and Token, the way to request
- * and to register, Build, Remove and Renew on a package, Revoke and the
- * mode on a worker, Withdraw on an approval, the evidence of every build —
+ * and to register, Build, Remove and Renew on a package, Revoke on a
+ * worker, Withdraw on an approval, the evidence of every build —
  * drawn for everyone. What this viewer may not do is the same control grey
  * with the reason in its title (the shell's gate()), never hidden and never
  * a sentence in its place; the reason is the server's own word
  * (GET /users/<login>/can, no-store: the profile is cached for everyone,
  * the rights are the caller's), so a grey button is one the door would
  * refuse in the same words. A maintainer keeps what is theirs on anyone's
- * page — revoke, own only, remove, withdraw.
+ * page — revoke, remove, withdraw.
  */
 import { page, servedGrey, workerPanels } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -184,7 +184,7 @@ const SCRIPT = String.raw`
   function reason(right) { return CAN.why[right] || "sign in with GitHub"; }
   // Remove is answered per registration (an approved one is a maintainer's to remove, one in a ring nobody's): the row's answer where the server gave one, the page's otherwise.
   function removeOf(name) { var p = CAN.packages[name]; return p ? { ok: p.remove === true, why: p.why || "" } : { ok: may("remove"), why: reason("remove") }; }
-  // Revoke and the mode are answered per worker (a revoked one is gone, a project's has no mode: the state's word first, the door's own): the row's answer where the server gave one, the role's otherwise.
+  // Revoke is answered per worker (a revoked one is gone: the state's word first, the door's own): the row's answer where the server gave one, the role's otherwise.
   function workerCan(w, right) { var x = CAN.workers[w.id]; return x ? { ok: x[right] === true, why: (x.why && x.why[right]) || "" } : { ok: may(right), why: reason(right) }; }
   var SHARE_BTN = ${JSON.stringify(SHARE_BTN)}, TOKEN_BTN = ${JSON.stringify(TOKEN_BTN)}, REQUEST_LINK = ${JSON.stringify(REQUEST_LINK)}, WORKER_FORM = ${JSON.stringify(WORKER_FORM)}, REGISTER_TOGGLE = ${JSON.stringify(REGISTER_TOGGLE)}, WORKER_OWN = ${JSON.stringify(WORKER_OWN)};
   var HOST_TOGGLE = ${JSON.stringify(HOST_TOGGLE)}, HOST_FORM = ${JSON.stringify(HOST_FORM)}, HOST_OWN = ${JSON.stringify(HOST_OWN)};
@@ -822,10 +822,10 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: [],
       script: ['"/can"', "function may(", "function reason(", "function removeOf(", "CAN.packages[name]", "function workerCan(", "CAN.workers[w.id]", '"sign in with GitHub"', "function loadCan(", "function acted(", "tick % 4 === 0) loadCan()"],
       reads: [
-        { path: `${profile}/can`, fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.dequeue", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.communityWorker}.revoke`, `can.workers.${F.communityWorker}.why.revoke`] },
+        { path: `${profile}/can`, fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.dequeue", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.ownerWorker}.revoke`, `can.workers.${F.ownerWorker}.why.revoke`] },
         { path: `${profile}/can`, as: "contributor", fields: ["login", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.why`] },
-        { path: `${profile}/can`, as: "owner", fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.communityWorker}.revoke`] },
-        { path: `${profile}/can`, as: "maintainer", fields: ["login", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.build", `can.packages.${F.factoryPkg}.remove`, `can.workers.${F.communityWorker}.revoke`] },
+        { path: `${profile}/can`, as: "owner", fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.ownerWorker}.revoke`] },
+        { path: `${profile}/can`, as: "maintainer", fields: ["login", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.build", `can.packages.${F.factoryPkg}.remove`, `can.workers.${F.ownerWorker}.revoke`] },
         // A maintainer's own page lists the project's worker: Revoke on its row, the maintainer's.
         { path: `/api/v1/users/${F.m1}/can`, as: "maintainer", fields: [`can.workers.${F.worker}.revoke`] },
       ],
@@ -1103,7 +1103,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, "revoke")', "data-revoke", 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"'],
       reads: [{ path: factory, fields: ["workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.arch", "workers.0.alive", "workers.0.revoked_at", "workers.0.labels", "workers.0.agent_status", "workers.0.update"] }],
       acts: [
-        { method: "DELETE", path: `/api/v1/factory/workers/${F.communityWorker}`, expect: { anonymous: 401, contributor: 404, owner: 200 } },
+        { method: "DELETE", path: `/api/v1/factory/workers/${F.ownerWorker}`, expect: { anonymous: 401, contributor: 404, owner: 200 } },
       ],
       visible: EVERYONE,
     },

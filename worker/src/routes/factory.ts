@@ -1,7 +1,8 @@
 import { json, readJson, type Env } from "../index";
 import { writeAttestation, recipesDir } from "./seal";
 import { isRepoArch } from "../r2";
-import { isMaintainer, viaOf, type Contributor, type WorkerIdentity } from "./contributors";
+import { isMaintainer, viaOf, HOST_DOCS, POOL_HOSTS, type Contributor, type WorkerIdentity } from "./contributors";
+import { roleFor } from "../governance";
 import { issueJobToken, scopesFor, type JobClaims } from "../jobtoken";
 import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
@@ -521,7 +522,9 @@ async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell
   }
   // A host's agent fault is answered by a re-check only (design v2 §8.6, #340): decideAuto proposes nothing else for it, and the
   // site's pacing and election (siblingsAnswering, siteVerdict) are a legacy set's — a host's agent is a fresh probe sidecar, shared
-  // with no other registration.
+  // with no other registration. They stay, with the community share of the pool's order budget (orders.ts POOL_COMMUNITY), for the
+  // legacy sets alone until P3 (#343 keeps them, against design v2 §21.4's P2 row): the Studio's pairs and maralcbr's set still share
+  // an agent service — the broker, agent-proxy — and a restart of one is paced by its siblings; they leave with those sets (#346).
   if (o.host && d.kind !== "recheck-agent") return null;
   let reason = d.reason;
   if (d.kind !== "recheck-agent") {
@@ -821,14 +824,17 @@ export const NEUTRAL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols("c"
 /** The head of the audits a claimer's model cannot count as another (`filters` on alias c, from ` AND`; #339, D36): read apart, so they hide no other audit. */
 export const SAME_MODEL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols("c")} FROM build_tasks c WHERE c.status = 'queued' AND c.kind = 'audit'${filters} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`;
 
-/** The registrations alive (§8.3: claimed in the last 2 minutes; a legacy one, LEGACY_ALIVE_MS) with their host's capacity, as the fleet. */
+/** The registrations alive (§8.3: claimed in the last 2 minutes; a legacy one, LEGACY_ALIVE_MS) with their host's capacity, as the fleet; whether a legacy one's owner is a maintainer (#343). */
 export const FLEET_SQL = `SELECT w.id, w.kind, w.arch, w.labels, w.kinds, w.agent, w.agent_status, w.drained_at, w.trust, w.owner, w.version, w.last_seen, w.current_task,
+    w.owner IN (SELECT login FROM factory_maintainers) AS owner_listed,
     h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since,
     h.asleep_at, h.reported_at, ${SOAK_COLUMNS("h")}, ${REVERTED_COLUMNS("h")}
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL`;
 /** #342: its host's revert, which keeps it out of the update gate on its last-good as the claim's own (REVERTED_COLUMNS). */
 interface FleetRow extends RevertedColumns {
   id: string; kind: string | null; arch: string; labels: string | null; kinds: string | null; agent: string | null; agent_status: string | null; drained_at: string | null; trust: string; owner: string | null; version: string | null; last_seen: string; current_task: number | null;
+  /** #343: its owner is on the synced maintainers' list — a legacy community registration claims only then (handleClaim), so only then is it the fleet's. */
+  owner_listed: number | null;
   host_id: string | null; host_status: string | null; owner_removed_at: string | null; units: number | null; lanes: string | null; agent_slots: number | null; disk_free: string | null; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null;
   asleep_at: string | null; reported_at: string | null;
   /** #326: its host's soak, which keeps it out of the update gate as the claim's own (SOAK_COLUMNS). */
@@ -901,7 +907,7 @@ function memberOf(r: FleetRow, pool: RunningVersion, nowMs = Date.now()): Member
   return {
     id: r.id, legacy: !host, lanes, units: Math.min(r.units ?? 0, r.pool_cap_units ?? Number.MAX_SAFE_INTEGER), agent_slots: r.agent_slots ?? 0,
     disk: jsonOr<{ work: number; engine: number } | null>(r.disk_free, null), kinds, probe_ok: r.agent_status === "ok", drained: r.drained_at !== null,
-    below_minimum: reportedBelow(r.capacity), below_disk: host ? belowOnDisk(r.capacity) : null, may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool, nowMs, host ? soakOf(r) : null, host ? revertedOf(r) : null).required,
+    below_minimum: reportedBelow(r.capacity), below_disk: host ? belowOnDisk(r.capacity) : null, may_claim: host ? r.host_status === "active" && r.owner_removed_at === null : r.trust === "project" || r.owner_listed === 1, behind: updateState(r.version ?? undefined, pool, nowMs, host ? soakOf(r) : null, host ? revertedOf(r) : null).required,
     seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
     scope: scopeOfRow(host, r.trust),
     busy: !host && r.current_task !== null, owner: r.owner, model: r.agent, host_id: host ? r.host_id : null,
@@ -1312,6 +1318,14 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
 
 /** A lease's units when its row has none (a legacy one from before #337): by the signed constants. */
 const unitsOfKind = (kind: string, size: number | null, r: Rules) => (kind === "build" ? r.build_per_size * (size ?? 1) : kind === "trial" ? r.trial : kind === "audit" ? r.audit : r.job);
+
+/**
+ * Why a legacy community registration claims nothing (#343, D56): its owner is not a maintainer — a contributor's from before #331, or
+ * a maintainer's who left factory/MAINTAINERS.toml. The pointer is the maintainer-host docs, as every retired door's.
+ */
+export const legacyOwnerRefusal = (id: string, owner: string | null) =>
+  `${id}: its owner (${owner ?? "none"}) is no maintainer (factory/MAINTAINERS.toml) — contributors do not run workers (#343), ${POOL_HOSTS}: it claims nothing; revoke it on its page`;
+
 /** The size a build runs at in this fleet. */
 const sizeOfTask = (t: Candidate, fleet: Fleet, now: number, r: Rules) => sizeOf(t, largestSize(fleet, now, r), r)?.size ?? null;
 
@@ -1352,6 +1366,14 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     soak = soakOf(h);
     reverted = revertedOf(h);
     poolJobs = poolJobsOn(h!.pool_jobs, { worker: workerId, name: h!.name });
+  }
+  // A legacy community registration (#343, design v2 §8.2, D56): with the community tier gone it takes any contributor's build, as a
+  // host does, so it claims only while its owner is a maintainer — the synced list, as a host's owner — and is told why otherwise.
+  // Contributors run no worker: one a contributor registered before #331 closed the door builds nobody's packages, not even its
+  // owner's (those build on the pool's hosts). One read by the primary key, for community legacy registrations only; a project one
+  // takes no contributor's build, and two maintainers' word made it.
+  if (!host && actor.w.trust !== "project" && !(actor.w.owner && (await roleFor(env, actor.w.owner)) === "maintainer")) {
+    return json({ error: legacyOwnerRefusal(workerId, actor.w.owner), code: "owner_not_maintainer", docs: HOST_DOCS }, 403);
   }
   const trust = actor.w.trust === "project" ? "project" : "community";
   // What this worker may claim. Project trust takes any kind it declares,
@@ -2045,6 +2067,10 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
     instance: undefined, instance_prev: undefined, instance_since: undefined, instance_conflict_at: undefined, instance_other_at: undefined, instance_churn: undefined, instance_finished: undefined,
     site: undefined, auto_orders: undefined, agent_error_class: undefined, agent_probed_at: undefined, rollout: undefined, order_kinds: undefined, watchdog_exits: undefined,
     drained_at: undefined, drained_by: undefined, drain_reason: undefined, agent_error_since: undefined,
+    // A worker's mode is history since the community tier ended (#343): read by nothing, served to nobody — a row registered since
+    // holds only the column's default ('project', whatever its trust), which would say something false of it. Who set it stays, as
+    // the history it is: nothing has written it since.
+    mode: undefined,
     // Up since: the pool's clock, from the process's first claim; started_at is the worker's own word, for the title.
     up_since: w.instance_since ?? null,
     started_at: w.started_at ?? null,

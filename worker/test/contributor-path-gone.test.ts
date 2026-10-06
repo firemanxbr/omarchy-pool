@@ -19,8 +19,12 @@
  *   their scope — a project one takes no contributor's build, a community
  *   one no project build; a bump queued before #343 for its owner's worker
  *   first waits for nobody;
+ * - a community registration claims only while its owner is a maintainer:
+ *   one a contributor made before #331 is refused at the claim (403, with
+ *   why and the pointer), counts as nobody's capacity and is never pinned —
+ *   it does not become a build machine for everyone's packages;
  * - nothing writes `mode`, `mode_by` or `shared_after` any more: the
- *   columns are history;
+ *   columns are history, and the listing serves no mode;
  * - the site's pages and the served docs no longer describe a
  *   contributor-run worker, its shared or dedicated mode, or the command.
  *
@@ -29,7 +33,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
-import { GONE, HOST_DOCS, sha256Hex } from "../src/routes/contributors";
+import { GONE, HOST_DOCS, POOL_HOSTS, sha256Hex } from "../src/routes/contributors";
 import { queuePosition } from "../src/queue";
 
 const ORIGIN = "http://pool.test";
@@ -211,14 +215,69 @@ describe("the maintainers' legacy registrations claim through the host selection
   });
 });
 
+describe("a contributor's registration from before #331 claims nothing: it does not become a build machine for everyone's packages (#343)", () => {
+  it("refused at the claim with why and the pointer — before #343 it built its owner's packages only, and a community registration now takes anyone's — and nothing is touched or leased", async () => {
+    await seedLegacy("carol-laptop", "x86_64", { owner: "carol", trust: "community", mode: "dedicated", modeBy: "carol" });
+    const daves = await seedTask({ arch: "x86_64", owner: "dave" });
+    const carols = await seedTask({ arch: "x86_64", owner: "carol" });
+    const seen = (await env.DB.prepare("SELECT last_seen FROM build_workers WHERE id = 'carol-laptop'").first<{ last_seen: string }>())!.last_seen;
+    for (const shared of [false, true]) {
+      const c = await claim("carol-laptop", "x86_64", { shared });
+      expect([c.status, c.json], `shared: ${shared}`).toEqual([403, {
+        error: `carol-laptop: its owner (carol) is no maintainer (factory/MAINTAINERS.toml) — contributors do not run workers (#343), ${POOL_HOSTS}: it claims nothing; revoke it on its page`,
+        code: "owner_not_maintainer", docs: HOST_DOCS,
+      }]);
+    }
+    expect((await env.DB.prepare("SELECT status FROM build_tasks WHERE id IN (?, ?) ORDER BY id").bind(daves, carols).all()).results).toEqual([{ status: "queued" }, { status: "queued" }]);
+    expect((await env.DB.prepare("SELECT last_seen, current_task FROM build_workers WHERE id = 'carol-laptop'").first())).toEqual({ last_seen: seen, current_task: null });
+    // A maintainer's registration takes them, as before.
+    await seedLegacy("maralcbr-box", "x86_64", { owner: "maralcbr", trust: "community" });
+    expect((await claim("maralcbr-box", "x86_64")).json.task.id).toBe(daves);
+  });
+
+  it("counts as nobody's native capacity: the Studio's emulated registration does not wait its T for it", async () => {
+    await seedLegacy("carol-laptop", "x86_64", { owner: "carol", trust: "community" });
+    await seedLegacy("studio-community-x86_64", "x86_64", { owner: "m1", trust: "community", emulated: true });
+    const t = await seedTask({ arch: "x86_64", owner: "dave" });
+    // carol's row says it is alive, idle and native; it claims nothing, so the emulated lane takes the build at once.
+    expect((await claim("studio-community-x86_64", "x86_64", { emulated: true })).json.task).toMatchObject({ id: t, lane: "emulated" });
+  });
+
+  it("is never pinned: a build asked for it is refused, one asked for a maintainer's registration is queued for that one", async () => {
+    await seedLegacy("carol-laptop", "x86_64", { owner: "carol", trust: "community" });
+    await seedLegacy("maralcbr-box", "x86_64", { owner: "maralcbr", trust: "community" });
+    await env.DB.prepare("INSERT OR IGNORE INTO factory_packages (name, owner, url, arches, status, pkgbuild_path) VALUES ('carols', 'carol', 'https://github.com/carol/carols', '[\"x86_64\"]', 'registered', 'PKGBUILD')").run();
+    const mine = await api("POST", "/factory/packages/carols/build", { token: "omc_carol", body: { arches: ["x86_64"], worker: "carol-laptop" } });
+    expect([mine.status, mine.json.error]).toEqual([403, "carol-laptop is not a worker that builds contributors' packages for x86_64"]);
+    const theirs = await api("POST", "/factory/packages/carols/build", { token: "omc_carol", body: { arches: ["x86_64"], worker: "maralcbr-box" } });
+    expect([theirs.status, theirs.json.pinned_to]).toEqual([201, "maralcbr-box"]);
+  });
+
+  it("a legacy registration made now and a confirmed host's write no mode, and the listing serves none: the column is history", async () => {
+    const r = await api("POST", "/factory/workers", { session: "m1", body: { name: "studio-community", arch: "aarch64" } });
+    expect(r.status, JSON.stringify(r.json)).toBe(201);
+    const row = (await env.DB.prepare("SELECT mode, mode_by FROM build_workers WHERE id = ?").bind(r.json.worker).first<{ mode: string; mode_by: string | null }>())!;
+    expect(["shared", "dedicated"]).not.toContain(row.mode);
+    expect(row.mode_by).toBeNull();
+    const listed = (await api("GET", `/factory?limit=50&fresh=${Date.now()}`)).json.workers as Record<string, unknown>[];
+    expect(listed.length).toBeGreaterThan(0);
+    for (const w of listed) expect(w, String(w.id)).not.toHaveProperty("mode");
+  });
+});
+
 describe("the site and the docs no longer describe a contributor-run worker, its mode or the command (#343)", () => {
   // The words of the community worker tier, each on a page it was on: none may come back.
   const GONE_WORDS = [
     "WORKER_SHARED", "--shared", "share on|off", "share on | off", "Own only", "own packages only", "best idle shared worker",
     "a dedicated worker", "a shared worker", "shared workers", "/omarchy-worker/compose.yml", "curl -fsSLo omarchy-worker", "vouch for a worker",
+    // What the review of #343 found left over: a build's caption, an adopted package's bumps, the cost of a community token, a contributor's token's rights.
+    "its contributor's worker", "bumps come to your workers", "claims of that owner's tasks", "register and revoke their workers", "contributors' workers",
+    "the mode per worker", "awaiting a second maintainer's word",
   ];
-  it("the docs pages, the Workers page, Governance, How it works and the API page carry none of them", async () => {
-    for (const path of ["/docs/workers", "/docs/factory", "/docs/security-model", "/docs/governance", "/docs/how-it-works", "/docs/worker-host", "/docs/architecture", "/docs/runbook", "/workers", "/api"]) {
+  it("the docs pages, the Workers page, Governance, How it works, the API page, a package's page, Review, Status and a worker's page carry none of them", async () => {
+    // The package page and Review draw their words in their scripts: the served page carries them.
+    await env.DB.prepare("INSERT OR IGNORE INTO factory_packages (name, owner, url, arches, status) VALUES ('gone-words', 'carol', 'https://github.com/carol/gone-words', '[\"x86_64\"]', 'registered')").run();
+    for (const path of ["/docs/workers", "/docs/factory", "/docs/security-model", "/docs/governance", "/docs/how-it-works", "/docs/worker-host", "/docs/architecture", "/docs/runbook", "/workers", "/api", "/package/gone-words", "/review", "/status", "/worker/maralcbr-box"]) {
       const r = await fetchAt("GET", path);
       expect(r.status, path).toBe(200);
       for (const w of GONE_WORDS) expect(r.text, `${path}: ${w}`).not.toContain(w);

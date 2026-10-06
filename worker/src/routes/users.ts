@@ -157,7 +157,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
  * for everyone). The predicate is workspace() in routes/contributors.ts,
  * the one the doors refuse with; Remove is answered per registration in
  * `can.packages`, from the person's registrations as they stand now, and
- * Revoke and the mode per worker in `can.workers`, revoked ones included.
+ * Revoke per worker in `can.workers`, revoked ones included.
  */
 export async function handleUserCan(c: Contributor | null, login: string, env: Env): Promise<Response> {
   const person = await env.DB.prepare("SELECT login FROM contributors WHERE login = ?").bind(login).first<{ login: string }>();

@@ -1219,7 +1219,7 @@ export const HELPERS = String.raw`
   function wtId(w) {
     if (typeof w === "string") w = { id: w };
     var names = (w.trusted_by || "").split(",").map(function (n) { return n.trim(); }).filter(Boolean);
-    var tip = [w.labels && w.labels.where ? "on " + w.labels.where : "", w.hostname && w.hostname !== "?" ? "host " + w.hostname : "", w.kinds && w.kinds.length ? "takes: " + w.kinds.join(", ") : "", names.length ? "trusted by " + names.join(", ") : w.trust_proposed_by ? "proposed for project trust by " + w.trust_proposed_by + ", awaiting a second maintainer's word" : ""].filter(Boolean).join(" · ");
+    var tip = [w.labels && w.labels.where ? "on " + w.labels.where : "", w.hostname && w.hostname !== "?" ? "host " + w.hostname : "", w.kinds && w.kinds.length ? "takes: " + w.kinds.join(", ") : "", names.length ? "trusted by " + names.join(", ") : w.trust_proposed_by ? "proposed for project trust by " + w.trust_proposed_by + " before #343, never confirmed (per-worker trust is gone)" : ""].filter(Boolean).join(" · ");
     var id = String(w.id || ""), shown = w.owner && id.indexOf(w.owner + "-") === 0 ? id.slice(w.owner.length + 1) : id, parts = shown.split("-");
     while (shown.length > 32 && parts.length > 3) { parts.splice(1, 1); shown = parts[0] + "-…-" + parts.slice(1).join("-"); }
     if (shown.length > 32) shown = shown.slice(0, 18) + "…" + shown.slice(-13);

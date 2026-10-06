@@ -297,14 +297,17 @@ while three sites have an open spell on it, and releases when fewer than two
 have had one for 15 minutes: an outage of a provider is not the workers' to
 fix. A worker's error is its own word, so the breaker has two scopes: the
 project's workers are held only by the project's own spells
-(`worker-breaker:<provider>:project`), contributors' workers by everyone's
-(`worker-breaker:<provider>`). A host's shared agent service is restarted
+(`worker-breaker:<provider>:project`), community registrations — the
+maintainers' legacy sets since #343 — by everyone's
+(`worker-breaker:<provider>`). A legacy set's shared agent service is restarted
 once, through its elected worker; the others wait, give up with it, or —
-when the service answers another of them — are restarted themselves. Every
+when the service answers another of them — are restarted themselves (this
+site pacing, and the community share below, stay for the legacy sets alone
+until P3: a host's agent is a probe sidecar of its own). Every
 cap sits inside the `INSERT` that issues the order — six restarts and six
 re-checks an hour per worker, twenty orders an hour per login, ten automatic
 restarts an hour and sixty automatic orders a day for the pool, of which
-contributors' workers take six and forty — so two claims at once cannot pass
+community registrations take six and forty — so two claims at once cannot pass
 one together. The pool signs its own orders `pool:project` or
 `pool:community`, which no GitHub login can be. The journal has exactly one
 line when an order is issued and one when it ends, whichever path closed it:

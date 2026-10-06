@@ -287,6 +287,10 @@ describe("Confirm: POST /hosts/:id/confirm", () => {
       expect([t.status, t.json.code]).toEqual([410, "gone"]);
     }
     expect(await env.DB.prepare("SELECT trust, trusted_by FROM build_workers WHERE id = ?").bind(ok.json.worker).first()).toEqual({ trust: "project", trusted_by: "m1" });
+    // No mode is written for it (#343): the column is history, its default all the row holds.
+    const { mode, mode_by } = (await env.DB.prepare("SELECT mode, mode_by FROM build_workers WHERE id = ?").bind(ok.json.worker).first<{ mode: string; mode_by: string | null }>())!;
+    expect(["shared", "dedicated"]).not.toContain(mode);
+    expect(mode_by).toBeNull();
     // Twice is refused; one registration per host.
     expect((await call("POST", `/hosts/${e.json.host}/confirm`, { session: "m1", body: {} })).status).toBe(409);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM build_workers WHERE host_id = ?").bind(e.json.host).first("n")).toBe(1);

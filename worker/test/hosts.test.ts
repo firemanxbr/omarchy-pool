@@ -112,12 +112,12 @@ describe("what a machine keeps", () => {
       // The one command that ran a contributor's worker is gone (#343): 410, pointing at the dashboard's maintainer-host docs.
       const cli = await fetchAt(origin, "/omarchy-worker");
       expect(cli.status, `${origin}/omarchy-worker`).toBe(410);
-      expect(await cli.text(), `${origin}/omarchy-worker`).toContain(`${DASHBOARD}/docs/worker-host`);
+      expect(await cli.text(), `${origin}/omarchy-worker`).toContain(`${DASHBOARD}/docs/worker-host#maintainer-hosts`);
     }
     const local = await (await fetchAt("http://pool.test", "/setup")).text();
     expect(local).toContain('API="http://pool.test/api/v1"');
     expect(local).not.toContain(API_HOST);
-    expect(await (await fetchAt("http://pool.test", "/omarchy-worker")).text()).toContain("http://pool.test/docs/worker-host");
+    expect(await (await fetchAt("http://pool.test", "/omarchy-worker")).text()).toContain("http://pool.test/docs/worker-host#maintainer-hosts");
   });
 
   it("writes the API host into the include's own comment, and keys one edge answer for every name", async () => {

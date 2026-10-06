@@ -74,7 +74,8 @@ printf 'JOB_TOKEN_SECRET=%s\nSIGNING_KEY="%s"\n' "$JOB_SECRET" "$SIGNING_KEY" > 
 npx wrangler d1 migrations apply omarchy-repo --local --persist-to "$WRANGLER_STATE" >/dev/null
 # Two registered project workers (what POST /factory/workers + a maintainer's
 # trust produce), seeded straight into the local index: their tokens are
-# omw_e2e_w1 and omw_e2e_w2.
+# omw_e2e_w1 and omw_e2e_w2; and w3 (omw_e2e_w3), the maintainer's community
+# registration — a legacy set: a contributor's claims nothing since #343.
 W1_HASH=$(printf %s omw_e2e_w1 | sha256sum | cut -d' ' -f1); W2_HASH=$(printf %s omw_e2e_w2 | sha256sum | cut -d' ' -f1); W3_HASH=$(printf %s omw_e2e_w3 | sha256sum | cut -d' ' -f1)
 # …and the governance the brain would have applied from factory/MAINTAINERS.toml:
 # one maintainer, the contributor 'e2e' (token omc_e2e).
@@ -83,7 +84,7 @@ npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --co
   "INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
      ('w1', 'aarch64', 'e2e', '$W1_HASH', 'shared', 'project', 'e2e', '2000-01-01T00:00:00Z'),
      ('w2', 'aarch64', 'e2e', '$W2_HASH', 'shared', 'project', 'e2e', '2000-01-01T00:00:00Z'),
-     ('w3', 'aarch64', 'e2e-contributor', '$W3_HASH', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z');
+     ('w3', 'aarch64', 'e2e', '$W3_HASH', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z');
    INSERT INTO factory_maintainers (login) VALUES ('e2e');
    INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('e2e', '$C_HASH', '$(printf %s oms_e2e | sha256sum | cut -d' ' -f1)', 'maintainer'),
      ('e2e-contributor', '$(printf %s omc_e2e_contributor | sha256sum | cut -d' ' -f1)', NULL, 'contributor')" >/dev/null
@@ -352,7 +353,7 @@ sme=$(curl -s "$OMARCHY_API/auth/me" -H "cookie: omc=oms_e2e"); grep -q '"login"
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/auth/me" -H "cookie: omc=oms_e2e")" == 401 ]] || { echo "a signed-out session must stop working"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/factory/me" -H "authorization: Bearer omc_e2e")" == 200 ]] || { echo "signing out of the browser must not revoke the CLI token"; exit 1; }
 # A worker learns what its registration is (the image checks its role against its trust): no mode any more (#343).
-wself=$(curl -s "$OMARCHY_API/api/v1/factory/workers/self" -H "authorization: Bearer omw_e2e_w3"); grep -q '"trust":"community"' <<<"$wself" && grep -q '"owner":"e2e-contributor"' <<<"$wself" && ! grep -q '"mode"' <<<"$wself" || { echo "workers/self did not describe the registration: $wself"; exit 1; }
+wself=$(curl -s "$OMARCHY_API/api/v1/factory/workers/self" -H "authorization: Bearer omw_e2e_w3"); grep -q '"trust":"community"' <<<"$wself" && grep -q '"owner":"e2e"' <<<"$wself" && ! grep -q '"mode"' <<<"$wself" || { echo "workers/self did not describe the registration: $wself"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/factory/workers/self")" == 401 ]] || { echo "workers/self must need a worker token"; exit 1; }
 upage=$(curl -s "$OMARCHY_API/api/v1/users/e2e"); grep -q '"role":"maintainer"' <<<"$upage" && grep -q '"github":"https://github.com/e2e"' <<<"$upage" || { echo "the profile API did not describe the seeded maintainer: $upage"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/users/nobody-here")" == 404 ]] || { echo "an unknown login must be 404"; exit 1; }

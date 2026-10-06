@@ -234,7 +234,7 @@ const stage = async (c: { task: { id: number; name: string }; token: string }, w
   const done = await call("POST", `/factory/tasks/${c.task.id}/complete`, { sha256: (who === "the project" ? "d" : "c").repeat(64), filename: file, version: "1.0-1" }, c.token);
   expect(done.json).toMatchObject({ status: "staged" });
 };
-/** alice's request, built by her worker: the contributor's build, staged — a package in review. */
+/** alice's request, built by m1's community registration: the contributor's build, staged — a package in review. */
 const ready = async (name: string) => {
   expect((await call("POST", "/factory/packages", { name, url: `https://${name}.example`, source: `https://${name}.example/${name}-1.0.tar.gz`, version: "1.0", description: `${name}, a tool for the guided passkey's tests`, license: "MIT", arches: ["x86_64"], checklist }, "omc_alice")).status).toBe(201);
   const c = await claimAs("omw_cx", name);
@@ -261,7 +261,7 @@ beforeAll(async () => {
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ${NEW.map(() => "(?)").join(", ")}`).bind(...NEW),
     ...(await Promise.all([...NEW.map((l) => [l, "maintainer"]), ["carl", "contributor"]].map(async ([l, role]) => env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role) VALUES (?, ?, ?, ?)").bind(l, await h(`omc_${l}`), await h(`oms_${l}`), role)))),
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES
-      ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
+      ('cx', 'x86_64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
       ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`).bind(await h("omw_cx"), await h("omw_px"), AGENT),
   ]);
 });

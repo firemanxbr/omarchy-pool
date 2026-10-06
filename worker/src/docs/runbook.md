@@ -1450,8 +1450,9 @@ anything else, and treat it as an incident (the security model's
 ### How the pool hands a host work
 
 Every claim of a host — and of a legacy registration, selected as a host
-with one lane and one build until it retires — goes through the pool's
-selection (#337, design v2 §8.3; `worker/src/selection.ts`). A host is
+with one lane and one build until it retires; a community one only while
+its owner is a maintainer, else `403 owner_not_maintainer` (#343) — goes
+through the pool's selection (#337, design v2 §8.3; `worker/src/selection.ts`). A host is
 handed as many tasks as its units hold: a build 2 units per size, a trial 2,
 an audit 1, one unit kept for pool jobs, model work within its agent slots,
 each lease its own container; what does not fit waits in the pool's queue
@@ -1680,7 +1681,11 @@ so a size-4 build waits for memory rather than run smaller.
 
   An agent fault on a host row leads the pool's rules to `recheck-agent`
   only (a fresh probe sidecar), never `restart`: its page says so, and the
-  site's pacing and election are a legacy set's.
+  site's pacing and election are a legacy set's. They stay for the legacy
+  sets alone until P3, with the community share of the pool's order budget
+  (#343 keeps them: the Studio's pairs and maralcbr's set still share an
+  agent service — the broker, `agent-proxy` — whose restart its siblings
+  pace), and leave with those sets (#346).
 - **A sleeping host has zero free units** (#329). A Mac's agent reports
   `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
   meanwhile its claims are handed nothing, it makes no emulated lane wait,
@@ -1770,7 +1775,7 @@ worker containers of the image: two pool, four review (two pairs, since
 pool's jobs), two community, one per architecture each (four of them run
 by default: the x86_64 review and community services are behind the
 `emulated` profile, and the second review pair behind its own `review2`
-profile, off until `register.sh` has registered it)
+profile, off unless it was registered and trusted before #343)
 ([factory/host/](../factory/host/README.md); the roles:
 [factory/README.md](../factory/README.md) *Three roles*):
 
@@ -1793,11 +1798,14 @@ machine with docker becomes one in minutes (factory/host/README.md,
 `COMPOSE_PROFILES=emulated` in `.env` turns them on here anyway
 (`community-x86_64`, `review-x86_64`, labeled `"emulated":true`), for
 C-only packages. The second review pair has a profile of its own,
-`review2` (#295): until it is registered, a worker with no token would
-exit at start and restart, and the updater holds back a set where one
-restarts. To turn it on, run `./register.sh` (it registers only the
-services whose env file has no token yet), then set
-`COMPOSE_PROFILES=emulated,review2` in `.env`, then run `./rollout.sh`.
+`review2` (#295): a worker with no token, or whose registration holds no
+project trust, exits at start and restarts, and the updater holds back a
+set where one restarts. A pair registered and trusted before #343 is
+turned on by setting `COMPOSE_PROFILES=emulated,review2` in `.env`, then
+running `./rollout.sh`. One that is not registered yet can no longer be
+added: per-worker trust is gone (#343, its door answers 410), so
+`register.sh` registers no project service any more, and the maintainer's
+host takes that work ([Maintainer hosts](/docs/worker-host#maintainer-hosts)).
 `review2-x86_64` is labeled `"emulated":true` too. A build that dies of emulation
 there goes back to the queue for a native x86_64 worker, not retried and
 not failed: a toolchain that cannot start, or a library qemu cannot map.
@@ -1985,7 +1993,7 @@ cd /srv/omarchy-pool
 docker ps -a --filter label=com.docker.compose.project=omarchy-pool   # what runs now: a container that restarts is fixed or removed first
 pgrep -af rollout.sh                              # nothing, or the timer's own rollout (setup.sh waits for that one); setup.sh refuses while one started by hand runs
 ls -l etc/                                        # the env files there; review2-*.env may be missing (setup.sh writes them)
-grep COMPOSE_PROFILES .env                        # emulated on the Studio; review2 stays off until it is registered
+grep COMPOSE_PROFILES .env                        # emulated on the Studio; review2 stays off unless registered and trusted before #343
 grep -l '^OMARCHY_WORKER_TOKEN=omw_' etc/review2-*.env   # a review2 registered already: add review2 to COMPOSE_PROFILES first
 tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
 curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/compose.yml" | diff -u compose.yml -
@@ -2674,8 +2682,8 @@ What keeps the bill down:
   advisory)` matches it posts), not by `updated_at` — a run that changed
   nothing writes nothing, where it wrote 290 k rows a day (2026-09-19). A
   prune without the keys (an older `pkg-repo`) is refused with a `security`
-  warn line and deletes nothing: a contributor's worker on an old image
-  leaves a stale match in place until a current worker runs the job.
+  warn line and deletes nothing: a worker on an old image leaves a stale
+  match in place until a current worker runs the job.
 
 **Watching it.** The brain estimates the month's bill <!-- estimate-cadence -->
 from Cloudflare's own analytics — what was used so far, priced, plus the

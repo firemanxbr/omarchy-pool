@@ -128,7 +128,7 @@ export interface Member {
    * its engine's data root. Placement judges such a host by its disk once idle (`mayRun`): the builds it runs fill it for a while.
    */
   below_disk?: { work: number; engine: number } | null;
-  /** A host active with its owner listed; a legacy registration not revoked. */
+  /** A host active with its owner listed; a legacy registration not revoked — a community one only while its owner is a maintainer (#343). */
   may_claim: boolean;
   /** Behind the pool's release past the grace: handed nothing (426). */
   behind: boolean;
