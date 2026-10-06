@@ -168,6 +168,34 @@ jobs:
       - name: The egress probe and a legacy project on ${{ matrix.engine }}
         run: bash tests/agent-install.sh ${{ matrix.engine }}
 
+  emulated-lane:
+    name: Emulated lane on a real engine (${{ matrix.os }})
+    # #338 (design v2 §7.5; D33): each runner emulates the other architecture
+    # through qemu-user-static's binfmt handler (the F flag), as
+    # factory/host/prep-root.sh installs it on a host — the agent's smoke run
+    # turns the lane on, the envelope's `emulate = []` and a disabled handler
+    # hold it off with the native lane kept, and one build of the other
+    # architecture runs emulated through the dispatcher, built, uploaded and
+    # completed.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: qemu-user-static's binfmt handlers, with the F flag containers need
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-user-static
+          head -n 3 /proc/sys/fs/binfmt_misc/qemu-x86_64 /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || true
+      - name: The other architecture's lane — the agent's smoke run, the envelope, a disabled handler — and one emulated build through the dispatcher
+        run: bash tests/emulated-lane.sh
+
   agent-self-update:
     name: Host agent self-update under systemd --user
     # #316: deliberately broken builds of a higher agent — a panic while it

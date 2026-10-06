@@ -34,6 +34,11 @@ pub(crate) struct Values {
     pub max_units: Option<u32>,
     pub max_cpus: Option<u32>,
     pub max_mem_gb: Option<u32>,
+    /// The emulated lanes the envelope allows (#338, design v2 §12), from detection: the
+    /// engine's foreign architecture, so the owner confirming the envelope sees the switch
+    /// (`[]` turns emulated lanes off; absent reads as allowed). Written only where the
+    /// file has none: an owner's own value, `[]` above all, is never replaced.
+    pub emulate: Option<Vec<String>>,
     /// A Mac's VM (#320): `[vm]`.
     pub vm: Option<Vm>,
 }
@@ -116,6 +121,10 @@ pub(crate) fn render(
         if let Some(c) = cap {
             env.insert(k.into(), Value::Integer(i64::from(c)));
         }
+    }
+    if let Some(e) = &v.emulate {
+        env.entry("emulate")
+            .or_insert_with(|| Value::Array(e.iter().map(|a| Value::String(a.clone())).collect()));
     }
     match &v.vm {
         Some(vm) => {

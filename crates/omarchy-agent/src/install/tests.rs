@@ -6,6 +6,7 @@
 #![allow(clippy::many_single_char_names, clippy::struct_excessive_bools)]
 
 use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -326,28 +327,8 @@ fn the_task_subnets_must_not_collide_with_routes_or_other_projects_networks() {
 }
 
 #[test]
-fn emulation_linger_and_the_user_manager_are_reported() {
+fn linger_and_the_user_manager_are_reported() {
     let d = tempdir();
-    fs::write(
-        d.join("qemu-x86_64"),
-        "enabled\ninterpreter /usr/bin/qemu-x86_64\nflags: POCF\n",
-    )
-    .unwrap();
-    let mut r = Report::default();
-    checks::emulation("aarch64", Some(16), &d, &mut r);
-    checks::emulation("x86_64", Some(4), &d, &mut r);
-    assert!(
-        r.notes[0].contains("x86_64: binfmt handler on (F flag), 16K pages"),
-        "{:?}",
-        r.notes
-    );
-    assert!(
-        r.notes[1].contains("aarch64: no binfmt handler"),
-        "{:?}",
-        r.notes
-    );
-    assert!(r.ok());
-
     let mut r = Report::default();
     checks::user_manager("omarchy", &d, None, &mut r);
     assert!(r.blockers[0].contains("XDG_RUNTIME_DIR"));
@@ -652,13 +633,29 @@ fn the_envelope_keeps_the_owners_keys_and_takes_the_ids_after_the_confirm() {
     );
     assert_eq!(c.task_subnets.as_deref(), Some(TASK_SUBNETS));
     assert!(c.envelope.allow_socket && c.envelope.dedicated && !c.envelope.rootful_ack);
-    crate::capacity::AgentToml::parse(&with).unwrap();
+    // The emulated lane's switch, shown to the owner who confirms (#338): the foreign
+    // architecture detection found.
+    assert_eq!(
+        crate::capacity::AgentToml::parse(&with)
+            .unwrap()
+            .caps
+            .emulate,
+        Some(vec!["x86_64".to_owned()])
+    );
     // The owner narrowed it by hand; a re-run keeps that and refreshes the ids.
-    let edited = with.replace("[envelope]\n", "[envelope]\nmax_units = 3\nemulate = []\n");
+    let edited = with
+        .replace("emulate = [\"x86_64\"]\n", "emulate = []\n")
+        .replace("[envelope]\n", "[envelope]\nmax_units = 3\n");
+    assert_ne!(edited, with);
     let again =
         envelope::render(Some(&edited), &v, Some(("h_0123456789", "m1-rack-1b2c"))).unwrap();
     let t: toml::Table = toml::from_str(&again).unwrap();
     assert_eq!(t["envelope"]["max_units"].as_integer(), Some(3));
+    assert_eq!(
+        t["envelope"]["emulate"].as_array().map(Vec::len),
+        Some(0),
+        "an owner's emulate = [] stays"
+    );
     assert_eq!(t["worker_id"].as_str(), Some("m1-rack-1b2c"));
     assert_eq!(
         crate::capacity::AgentToml::parse(&again)
@@ -735,6 +732,7 @@ fn values(root: &Path) -> envelope::Values {
         max_units: None,
         max_cpus: None,
         max_mem_gb: None,
+        emulate: Some(vec!["x86_64".into()]),
         vm: None,
     }
 }
@@ -805,7 +803,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
     fs::write(
         &docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" --entrypoint pacman \"*) cat {r}/pacman 2>/dev/null || exit 125 ;;\n  *\" --entrypoint /usr/bin/true \"*) test -e {r}/pacman || exit 125 ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = root.display()
         ),
     )
@@ -949,6 +947,109 @@ fn preflight_lists_every_missing_prerequisite_on_one_screen_and_changes_nothing(
         .map_err(|e| e.to_string())
         .unwrap();
     assert!(r.screen().contains("no unit is left"), "{}", r.screen());
+}
+
+#[test]
+fn preflight_reports_the_emulated_lane_and_never_stops_on_a_held_one() {
+    // An aarch64 host without binfmt: the x86_64 lane is held for a person, the install goes on.
+    let h = host(INFO, EGRESS_OK);
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    let ready = ready.expect("ready");
+    assert!(
+        r.notes.iter().any(|n| n.starts_with("emulation x86_64: held — needs a person: prep-root.sh installs qemu-user-static-binfmt")),
+        "{:?}",
+        r.notes
+    );
+    let lanes: Vec<_> = ready
+        .capacity
+        .lanes()
+        .iter()
+        .map(|l| (l.arch.clone(), l.mode))
+        .collect();
+    assert_eq!(lanes, [("aarch64".to_owned(), "native")]);
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(
+        !log.contains("--platform"),
+        "no smoke run without binfmt: {log}"
+    );
+
+    // With qemu's handler (the F flag) and an engine that runs the release's x86_64 image: on.
+    let h = host(INFO, EGRESS_OK);
+    fs::write(
+        h.root.join("binfmt/qemu-x86_64"),
+        "enabled\ninterpreter /usr/bin/qemu-x86_64-static\nflags: POCF\n",
+    )
+    .unwrap();
+    fs::write(h.root.join("pacman"), "Pacman v7.0.0 - libalpm v15.0.0\n").unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n == "emulation x86_64: on, through qemu"),
+        "{:?}",
+        r.notes
+    );
+    let lanes: Vec<_> = ready
+        .unwrap()
+        .capacity
+        .lanes()
+        .iter()
+        .map(|l| (l.arch.clone(), l.mode))
+        .collect();
+    assert_eq!(
+        lanes,
+        [
+            ("aarch64".to_owned(), "native"),
+            ("x86_64".to_owned(), "emulated")
+        ]
+    );
+    // The release's x86_64 build image, by digest: the engine's foreign architecture picks it,
+    // whatever this test binary's own architecture is.
+    let x86_image = tests_support::manifest("v1.20.0", "v1.0.0", &[])
+        .build_image("x86_64")
+        .unwrap()
+        .to_string();
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(
+        log.contains(&format!(
+            "run --rm --network none --platform linux/amd64 --entrypoint /usr/bin/true {x86_image}"
+        )),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "--platform linux/amd64 --entrypoint pacman {x86_image} --version"
+        )),
+        "{log}"
+    );
+
+    // The owner's envelope from an earlier install keeps it off: nothing is run for it.
+    let h = host(INFO, EGRESS_OK);
+    fs::write(
+        h.root.join("binfmt/qemu-x86_64"),
+        "enabled\ninterpreter /usr/bin/qemu-x86_64-static\nflags: POCF\n",
+    )
+    .unwrap();
+    fs::write(h.root.join("pacman"), "Pacman v7.0.0\n").unwrap();
+    fs::create_dir_all(h.root.join("data")).unwrap();
+    fs::write(h.root.join("data/agent.toml"), "[envelope]\nemulate = []\n").unwrap();
+    fs::set_permissions(
+        h.root.join("data/agent.toml"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n == "emulation x86_64: held — off: the envelope's emulate does not list it"),
+        "{}",
+        r.screen()
+    );
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(!log.contains("--platform"), "{log}");
 }
 
 #[test]
@@ -1700,7 +1801,7 @@ fn mac_host(min_cpus: u32) -> Host {
     fs::write(
         &h.docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\"source=$(cat {r}/home-path),\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"source=$(cat {r}/home-path)/\"*) case \" $* \" in *\"source=$(cat {r}/part-visible 2>/dev/null),\"*) exit 0 ;; esac; echo 'path is not shared' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; exit 0 ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" ps -q --filter label=com.omarchy.task \"*) cat {r}/tasks 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) if [ -e {r}/walled ]; then cat {r}/egress; else cat {r}/egress-nat; fi ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\"source=$(cat {r}/home-path),\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"source=$(cat {r}/home-path)/\"*) case \" $* \" in *\"source=$(cat {r}/part-visible 2>/dev/null),\"*) exit 0 ;; esac; echo 'path is not shared' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; echo 'Pacman v7.0.0 - libalpm v15.0.0' ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" ps -q --filter label=com.omarchy.task \"*) cat {r}/tasks 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) if [ -e {r}/walled ]; then cat {r}/egress; else cat {r}/egress-nat; fi ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = r.display()
         ),
     )
@@ -2283,15 +2384,33 @@ fn the_home_directory_visible_in_the_vm_is_refused_and_rosetta_gives_an_x86_64_l
     let lanes = serde_json::to_value(ready.capacity.file("t").lanes).unwrap();
     assert_eq!(
         lanes,
-        serde_json::json!([{"arch": "aarch64", "mode": "native"}, {"arch": "x86_64", "mode": "emulated", "via": "rosetta"}])
+        serde_json::json!([{"arch": "aarch64", "mode": "native"}, {"arch": "x86_64", "mode": "emulated", "via": "rosetta", "page16k": false}])
     );
     assert!(
         r.screen().contains("the x86_64 lane through rosetta"),
         "{}",
         r.screen()
     );
+    // The emulated lane's own smoke run (#338), by digest; no binfmt table is read on a Mac.
     let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
-    assert!(log.contains("--platform linux/amd64"), "{log}");
+    let x86_image = tests_support::manifest("v1.20.0", "v1.0.0", &[])
+        .build_image("x86_64")
+        .unwrap()
+        .to_string();
+    assert!(
+        log.contains(&format!(
+            "--platform linux/amd64 --entrypoint /usr/bin/true {x86_image}"
+        )) && log.contains(&format!(
+            "--platform linux/amd64 --entrypoint pacman {x86_image} --version"
+        )),
+        "{log}"
+    );
+    assert!(
+        r.screen().contains("emulation x86_64: on, through rosetta"),
+        "{}",
+        r.screen()
+    );
+    assert!(!r.screen().contains("held"), "{}", r.screen());
     // A smoke run that fails leaves the lane off, with a warning; nothing else blocks.
     let h = mac_host(1);
     fs::write(h.root.join("rosetta"), "").unwrap();

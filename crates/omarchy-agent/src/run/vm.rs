@@ -181,6 +181,8 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         host: Some(&host),
         work_root: c.work_root,
         image: image.as_deref(),
+        // The VM's lane is Rosetta's ([`probe::in_mac_vm`]), not the binfmt table's.
+        emulation: None,
     };
     // The loop pulls nothing: a pull of a multi-GB build image would hold the tick far past
     // one engine call (and the watchdog's patience). A native build image the VM's store
@@ -199,7 +201,7 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         kind: VmKind::Dedicated,
         meminfo: c.meminfo,
         rosetta: toml.vm.as_ref().is_some_and(|v| v.1),
-        emulate: toml.emulate.as_deref(),
+        emulate: toml.caps.emulate.as_deref(),
         x86_64_image: x86.as_deref(),
     };
     // Only an x86_64 task on the Rosetta lane pulls a release's x86_64 image (the loop pulls
@@ -238,7 +240,7 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         cap.mem_gb(),
         cap.units(),
         std::iter::once(facts.arch().to_owned())
-            .chain(cap.emulated().iter().map(|l| format!("{} via {}", l.arch, l.via.unwrap_or("emulation"))))
+            .chain(cap.emulated().iter().map(|l| format!("{} via {}", l.arch, l.via)))
             .collect::<Vec<_>>()
             .join(", "),
         match w {

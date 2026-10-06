@@ -5,8 +5,12 @@
 //! The driver never learns about tasks: it sees only the set's compose project, and task
 //! containers are the dispatcher's. The one other project it ever lists, stops and removes
 //! is the legacy compose project `legacy.json` records, at the `retire-legacy` host order
-//! (#344, design v2 §11.1 M4). Capacity (`capacity()`, #333), fingerprinting (#317) and
-//! emulation (P2) join this trait in their own issues.
+//! (#344, design v2 §11.1 M4). Capacity (`capacity()`, #333) and fingerprinting (#317)
+//! join this trait in their own issues; the emulated lane's smoke run (§15's
+//! `emulation(arch, image)`, #338) is `capacity::emulation::Smoke` on the probe's engine
+//! CLI until then, and joins it with `capacity()` when the run loop detects — then as a
+//! start and a poll, like a pull: its first run may pull the foreign build image, longer
+//! than one engine call may block here.
 
 use std::path::PathBuf;
 

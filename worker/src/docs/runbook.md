@@ -1108,6 +1108,51 @@ so a size-4 build waits for memory rather than run smaller.
   backlog (the guaranteed share). Emulated lanes hold at most half a host's
   builds while native work for it waits, all but one otherwise; nothing
   running is ended for that.
+- **Emulated lanes are detected (#338).** At install and at each
+  `omarchy-agent capacity … --write` (below) the agent looks at the other
+  architecture: the envelope's `emulate` (absent: allowed; `emulate = []`:
+  off), then the binfmt handler (`/proc/sys/fs/binfmt_misc/qemu-<arch>`,
+  enabled with the `F` flag — `factory/host/prep-root.sh` installs
+  `qemu-user-static-binfmt`), then a smoke run of the release's build image
+  of that architecture (`/usr/bin/true`, then `pacman --version`). Passing,
+  the lane goes into `run/capacity.json`'s `lanes` with `via` and
+  `page16k`; otherwise into `held_lanes` with the reason, and the native lane
+  runs on. On a Mac (#320) the x86_64 lane is the omarchy VM's Rosetta one:
+  `[vm] rosetta` and `emulate` decide it, the same smoke run turns it on
+  (`via: rosetta`, `page16k: false` on the VM's 4K pages), and why it is off
+  is in install's notes and the run loop's journal, not in `held_lanes`.
+  Check it on the host with
+  `jq '.lanes, .held_lanes' <set dir>/run/capacity.json` (or
+  `omarchy-agent capacity --work-root <dir> --emulate-image <image by digest>`
+  without a release); a lane held with *needs a person* wants prep-root.sh
+  run once as root, then detection again with the owner's envelope and the
+  release the host applied (`omarchy-agent status`, *release: applied*),
+  whose bundle the agent keeps under its data directory:
+
+  ```bash
+  d=~/.local/share/omarchy-agent r=vX.Y.Z   # the data directory, the applied release
+  "$d/current/omarchy-agent" capacity --envelope "$d/agent.toml" \
+    --bundle "$d/bundles/omarchy-host-$r.tar.gz" \
+    --sig "$d/bundles/omarchy-host-$r.tar.gz.sigstore.json" --write "$d/sets/host"
+  ```
+
+  Leave out `--envelope` and the owner's `emulate` and caps are not
+  applied: the file could turn on a lane the envelope keeps off. The run
+  loop sees `run/capacity.json` change and starts a round (re-running
+  install does the same). Install writes `emulate` into the envelope with
+  the architecture it found, for the owner to confirm; `emulate = []` there
+  keeps it off. On 16K pages the x86_64 lane stays on (D33): a build whose
+  toolchain cannot start under qemu fails at once with `needs_native` (the
+  build script's probe; only a
+  container on an emulated lane is told it is one,
+  `WORKER_LABELS={"emulated":true}`), goes back to the queue with its attempt
+  given back and never runs emulated again — it waits for a native host,
+  which its package page says. The pool takes `needs_native` only from a
+  lease on an emulated lane; from a native lane it is a failure like any
+  other, journaled *its needs_native refused*. Jobs with helper containers
+  need a lane of each ring architecture they check, native or emulated, with
+  no wait: a health check its own, a promotion (its ABI gates and health
+  checks) each it promotes, a security job's fast-track both.
 - **Contributors take turns.** Community builds are handed round-robin by
   owner (fewest leased first), and a contributor holds at most
   ceil(the alive fleet's builds / 4) at once. The divisor is a setting: 0

@@ -205,6 +205,18 @@ the **pool cap** on its page — the Studio canary runs at one build that way
 — and raise it again; nothing running ends when you lower it. The
 runbook's *How the pool hands a host work* has the rules.
 
+**The other architecture runs emulated when the host can (#338).** The
+agent turns on an emulated lane for it when your envelope allows it
+(`emulate` in `agent.toml`: absent allows it, `emulate = []` keeps it off),
+the kernel has qemu's binfmt handler with the `F` flag (`prep-root.sh`
+installs it) and the release's build image of that architecture starts
+there; otherwise it says why the lane is held (`held_lanes` in
+`run/capacity.json`) and the native lane runs on (a Mac's x86_64 lane is
+Rosetta's in its VM, below). An emulated build is
+slower and shares the host's units; on a 16K-page kernel the lane stays on,
+and a build whose toolchain cannot start under qemu goes back to the queue
+for a native host without spending its attempt.
+
 The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
 isolation level, the release it applied, the pool cap, the large task it
 reserves for when it does, and its leases with their lane and units. Every later call of

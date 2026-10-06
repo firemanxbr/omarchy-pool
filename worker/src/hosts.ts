@@ -68,12 +68,18 @@ export const ISOLATIONS = ["root", "user", "subuid", "vm", "vm-shared"] as const
 export type Isolation = (typeof ISOLATIONS)[number];
 
 export interface Lane { arch: Arch; mode: "native" | "emulated"; via?: string; page16k?: boolean }
+/** A foreign architecture the host does not run, and why (#338, design v2 §7.5): binfmt missing ("needs a person: …"), the envelope, a smoke run that failed. */
+export interface HeldLane { arch: Arch; reason: string }
+/** A held lane's reason is shown as the agent wrote it, cut at this length. */
+export const HELD_REASON_MAX = 300;
 /** A capacity report (design v2 §7.3, `run/capacity.json`), as the pool keeps it: the totals it can check, nothing it takes on trust. */
 export interface Capacity {
   cpus: number;
   mem_gb: number;
   disk_free_gb: { work: number; engine: number };
   lanes: Lane[];
+  /** The lanes the agent holds off, with their reasons, for the host page (#324): kept, never selected on. */
+  held_lanes?: HeldLane[];
   agent_slots: number | null;
   /** What the host said it runs; the pool's own count is unitsOf(). */
   units: number | null;
@@ -101,11 +107,21 @@ export function parseCapacity(v: unknown): Capacity | string {
     lanes.push(lane);
   }
   if (lanes.filter((l) => l.mode === "native").length !== 1) return "capacity.lanes must have exactly one native lane";
+  // What it holds off and why (#338): shown on the host page, never selected on — so an entry that does not read is left out
+  // rather than refuse the claim it rides on.
+  const held: HeldLane[] = [];
+  for (const h of Array.isArray(c.held_lanes) ? (c.held_lanes as unknown[]).slice(0, 4) : []) {
+    const x = h as Record<string, unknown> | null;
+    if (x && typeof x === "object" && ARCHES.includes(x.arch as Arch) && typeof x.reason === "string" && x.reason.trim()) {
+      held.push({ arch: x.arch as Arch, reason: x.reason.trim().slice(0, HELD_REASON_MAX) });
+    }
+  }
   return {
     cpus: c.cpus,
     mem_gb: c.mem_gb,
     disk_free_gb: { work: d.work as number, engine: d.engine as number },
     lanes,
+    held_lanes: held,
     agent_slots: int(c.agent_slots, 0, 64) ? c.agent_slots : null,
     units: int(c.units, 0, 4096) ? c.units : null,
   };

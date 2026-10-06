@@ -713,7 +713,7 @@ case " $* " in
   case "$*" in *"${{m:-//none//}}"*) echo "Error response from daemon: No such image: $m" >&2; exit 1 ;; esac
   echo sha256:0a ;;
 *" info "*) cat '{d}/info.json' ;;
-*" --platform linux/amd64 "*) exit 0 ;;
+*" --platform linux/amd64 "*) echo 'Pacman v7.0.0 - libalpm v15.0.0' ;;
 *" run "*) printf 'cpu.max=50000 100000\nmemory.max=67108864\npids.max=32\npagesize=4096\noverlay 1 1 104857600 1%% /\n' ;;
 *) exit 2 ;;
 esac
