@@ -264,6 +264,7 @@ pub(crate) fn request(
     };
     let mut s = UnixStream::connect(socket).map_err(at)?;
     s.set_write_timeout(Some(left()?)).map_err(at)?;
+    s.set_read_timeout(Some(left()?)).map_err(at)?;
     let mut req = format!("{method} {path} HTTP/1.0\r\nHost: libpod\r\n");
     if let Some(b) = body {
         let _ = write!(
@@ -280,7 +281,12 @@ pub(crate) fn request(
     let mut raw = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
-        s.set_read_timeout(Some(left()?)).map_err(at)?;
+        // macOS refuses a socket option with EINVAL once the engine has closed its end, which it
+        // does as soon as it has answered; a read then never blocks, so the timeout set above holds.
+        match s.set_read_timeout(Some(left()?)) {
+            Err(e) if e.kind() != std::io::ErrorKind::InvalidInput => return Err(at(e)),
+            _ => {}
+        }
         match s.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
