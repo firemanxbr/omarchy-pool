@@ -13,11 +13,29 @@
 
 use std::io::Read as _;
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{bail, Context as _, Result};
 
 /// No token file is longer; one that is holds something else.
 const MAX_LEN: u64 = 4096;
+
+/// Every variable that carries a token of this process's, or names the file that holds one.
+const CARRIERS: [&str; 3] = [
+    "OMARCHY_TOKEN",
+    "OMARCHY_WORKER_TOKEN",
+    "OMARCHY_WORKER_TOKEN_FILE",
+];
+
+/// `cmd` without any of this process's tokens in its environment: a helper that fetches
+/// public files or stages a trial's inputs holds none. The file's name goes too (#327): a
+/// `pkg-repo` call in the helper would read the host worker token through it.
+pub fn withhold(cmd: &mut Command) -> &mut Command {
+    for k in CARRIERS {
+        cmd.env_remove(k);
+    }
+    cmd
+}
 
 /// The worker token: the file's when `file` names one (an empty path names none), else the
 /// plain variable's.
@@ -79,6 +97,22 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn a_helper_gets_neither_a_token_nor_the_token_file_s_name() {
+        let mut cmd = Command::new("true");
+        cmd.env("OMARCHY_WORKER_TOKEN_FILE", "/run/omarchy/worker-token")
+            .env("OMARCHY_API", "https://pkgs.omarchy-pool.org");
+        withhold(&mut cmd);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        for k in CARRIERS {
+            assert!(envs.contains(&(k.as_ref(), None)), "{k} in {envs:?}");
+        }
+        assert!(envs.contains(&(
+            "OMARCHY_API".as_ref(),
+            Some("https://pkgs.omarchy-pool.org".as_ref())
+        )));
     }
 
     #[test]
