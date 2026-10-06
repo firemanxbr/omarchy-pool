@@ -385,7 +385,8 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
   const h = await env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM ${HOST_VIEW_FROM} WHERE hosts.id = ?`).bind(id).first<HostRow>();
   if (!h) return json({ error: "no such host" }, 404, NO_STORE);
   const detailed = mayDetail(c, h);
-  const held = h.worker_id ? ((await env.DB.prepare(HOST_LEASES_SQL).bind(h.worker_id).all<HostLease>()).results) : [];
+  // Its leases are its owner's and the maintainers' (§18.1): read for them only.
+  const held = detailed && h.worker_id ? ((await env.DB.prepare(HOST_LEASES_SQL).bind(h.worker_id).all<HostLease>()).results) : [];
   const viewer = c ? await viewerOf(env, c) : null;
   const orders = detailed
     ? (await env.DB.prepare(HOST_ORDERS_SQL).bind(h.id).all<Record<string, unknown>>()).results.map((o) => ({ ...o, arg: o.arg ? JSON.parse(o.arg as string) : null, lines: !!o.lines }))

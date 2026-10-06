@@ -26,6 +26,7 @@ import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { capacityLines, capacityOf, fleetHostOf, hostLines, secondOpinionOf, span, verifyFailureOf, type FleetHostRow, type FleetLease } from "../src/fleet";
 import { selectionRules } from "../src/routes/factory";
+import { AUDITS_7D_SQL, BUSY_7D_SQL, FLEET_EVENTS_SQL, FLEET_LEASES_SQL, HOST_LEASES_SQL, MODEL_MIX_SQL, QUEUE_BY_ARCH_SQL } from "../src/routes/hosts";
 import { DISK_FLOOR_GB } from "../src/hosts";
 import { runScript, scriptOf } from "./fixture";
 import { toB64url } from "../src/webauthn";
@@ -319,5 +320,26 @@ describe("the Workers page by host (#324, design v2 §18.2)", () => {
     const legacy = ["#w-project tbody", "#w-review tbody", "#w-community tbody"].map((t) => d.nodes[t]?.innerHTML ?? "").join("");
     expect(legacy).toContain(legacyReg);
     expect(legacy).not.toContain(studioReg);
+  });
+});
+
+describe("the fleet's statements (#324)", () => {
+  it("read through the indexes, the week's sums a pass over the tasks as the stats' weekly series", async () => {
+    const plan = async (sql: string, args: unknown[] = []) => (await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...args).all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
+    const now = new Date().toISOString();
+    // The queue per architecture: the queued rows of the queue index, no other.
+    expect(await plan(QUEUE_BY_ARCH_SQL)).toMatch(/USING (COVERING )?INDEX idx_build_tasks_queue \(status=\?\)/);
+    // A host's leases, and the fleet's: the leased rows by the status-led indexes, never the whole table.
+    for (const [sql, args] of [[HOST_LEASES_SQL, ["m1-studio-0001"]], [FLEET_LEASES_SQL, []]] as const) expect(await plan(sql, [...args]), sql).toMatch(/build_tasks USING INDEX idx_build_tasks_(lease|queue) \(status=\?/);
+    // The journal's last day of build lines: the kind index, from the time on.
+    expect(await plan(FLEET_EVENTS_SQL, [now])).toMatch(/USING INDEX idx_events_kind \(kind=\? AND created_at>\?\)/);
+    // Last week's audits: the kind index, each audited build by its primary key.
+    const audits = await plan(AUDITS_7D_SQL, [now]);
+    expect(audits).toMatch(/a USING INDEX idx_build_tasks_kind \(kind=\? AND status=\?\)/);
+    expect(audits).toMatch(/b EXISTS USING INTEGER PRIMARY KEY \(rowid=\?\)/);
+    // The registrations alive: their table, a few dozen rows.
+    expect(await plan(MODEL_MIX_SQL, [now])).toMatch(/build_workers/);
+    // The week's busy hours: one pass over the tasks — the fleet's read is a minute at the edge, as the stats' are.
+    expect(await plan(BUSY_7D_SQL, [now, now])).toMatch(/build_tasks/);
   });
 });
