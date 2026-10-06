@@ -44,6 +44,18 @@ impl Cidr {
     pub fn last_28(self) -> Option<Cidr> {
         (self.len <= 28).then(|| Cidr::new(self.addr | !Self::mask(self.len), 28))
     }
+
+    /// Its first address: where an engine puts a network's gateway, a task network's `.1`.
+    pub fn first_host(self) -> Ipv4Addr {
+        Ipv4Addr::from(self.addr.wrapping_add(1))
+    }
+
+    /// Its last address before the broadcast one: where a probe task sits (#367), away from
+    /// `.1`, which an engine that puts no gateway there (Docker's isolated mode) would
+    /// otherwise give the first container, so the probe would be trying itself.
+    pub fn last_host(self) -> Ipv4Addr {
+        Ipv4Addr::from((self.addr | !Self::mask(self.len)).wrapping_sub(1))
+    }
 }
 
 impl std::fmt::Display for Cidr {

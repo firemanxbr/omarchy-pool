@@ -10,12 +10,15 @@ use std::rc::Rc;
 
 use sha2::{Digest as _, Sha256};
 
+use crate::verify::cosignature::tests_support::TestKey;
+use crate::verify::cosignature::{self, Policy};
 use crate::verify::tests_support;
 use crate::verify::{BundleOutcome, Rejection, StatementOutcome};
 use crate::version::Release;
 
 use super::agent::Verifier;
-use super::driver::{Answer, Driver, Exit, Foreign, Project, PullState, Unit};
+use super::config::Runtime;
+use super::driver::{Answer, Driver, EngineId, Exit, Foreign, Project, PullState, Unit};
 use super::pool::{Follow, HostState, Net, Order, OrderKind, Pool, Relayed};
 
 // ---------------------------------------------------------------------------------------
@@ -53,6 +56,7 @@ pub(crate) struct Container {
 }
 
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // an engine's switches, each a test's to flip
 pub(crate) struct EngineState {
     pub clock: i64,
     pub containers: Vec<Container>,
@@ -66,6 +70,14 @@ pub(crate) struct EngineState {
     /// Networks: (id, compose project, used by a container that stays).
     pub networks: Vec<(String, String, bool)>,
     next: u64,
+    /// Which engine this is (#325's runtime switch): docker unless a test says podman.
+    pub runtime: Option<Runtime>,
+    pub rootless: bool,
+    /// What the dispatcher wrote, a line each (#325's `diagnostics`).
+    pub log: Vec<String>,
+    /// Every container this engine creates is broken (#325: a runtime that cannot run the
+    /// release, which the switch's guard catches).
+    pub broken: bool,
 }
 
 impl EngineState {
@@ -342,10 +354,10 @@ impl Driver for FakeDriver {
         if e.down {
             return Answer::NoAnswer("down".into());
         }
-        let broken = p
-            .files
-            .iter()
-            .any(|f| fs::read_to_string(f).is_ok_and(|t| t.contains("command: [broken]")));
+        let broken = e.broken
+            || p.files
+                .iter()
+                .any(|f| fs::read_to_string(f).is_ok_and(|t| t.contains("command: [broken]")));
         let release = label(p, "org.omarchy-pool.agent.release");
         for s in services {
             let hash = hash_of(p, s);
@@ -486,16 +498,54 @@ impl Driver for FakeDriver {
         Answer::Yes(())
     }
 
+    fn logs(&mut self, id: &str, lines: u32) -> Answer<String> {
+        let e = self.0.borrow();
+        if e.down {
+            return Answer::NoAnswer("down".into());
+        }
+        if !e.containers.iter().any(|c| c.id == id) {
+            return Answer::NotFound;
+        }
+        let skip = e.log.len().saturating_sub(lines as usize);
+        Answer::Yes(e.log[skip..].iter().fold(String::new(), |mut out, l| {
+            out.push_str(l);
+            out.push('\n');
+            out
+        }))
+    }
+
+    fn engine(&mut self) -> Answer<EngineId> {
+        let e = self.0.borrow();
+        if e.down {
+            return Answer::NoAnswer("Cannot connect to the Docker daemon".into());
+        }
+        let runtime = e.runtime.unwrap_or(Runtime::Docker);
+        Answer::Yes(EngineId {
+            runtime,
+            version: if runtime == Runtime::Podman {
+                "4.9.3"
+            } else {
+                "29.6.2"
+            }
+            .into(),
+            rootless: e.rootless,
+        })
+    }
+
+    fn host_tasks(&mut self, _host: &str) -> Answer<usize> {
+        let e = self.0.borrow();
+        if e.down {
+            return Answer::NoAnswer("down".into());
+        }
+        Answer::Yes(e.tasks().iter().filter(|c| c.status == "running").count())
+    }
+
     fn tasks_running(&mut self) -> Answer<bool> {
         let e = self.0.borrow();
         if e.down {
             return Answer::NoAnswer("down".into());
         }
-        Answer::Yes(
-            e.containers
-                .iter()
-                .any(|c| c.project.is_empty() && c.status == "running"),
-        )
+        Answer::Yes(e.tasks().iter().any(|c| c.status == "running"))
     }
 }
 
@@ -527,8 +577,27 @@ pub(crate) struct PoolState {
     /// The public `follow` a pool from before #344 answers, and the workers it was asked for.
     pub follow: Option<Net<Follow>>,
     pub follows: Vec<String>,
+    /// What `POST /hosts/self/token` answers (#325): a new token each time unless a test
+    /// says otherwise; how many were asked for.
+    pub token_answer: Option<Net<serde_json::Value>>,
+    pub tokens: u32,
+    /// The diagnostics posted (#325), as JSON, and what posting answers.
+    pub diagnostics: Vec<serde_json::Value>,
+    pub diagnostics_answer: Option<Net<()>>,
+    /// What GitHub says its latest release is (#326); `None` answers nothing. How many
+    /// times it was read.
+    pub github: Option<Net<Release>>,
+    pub github_reads: u32,
     /// The `Date` the host state's answer carries, whatever its status (#320).
     pub date: Option<i64>,
+    /// What GitHub says a token may do (#328's sealed `GITHUB_TOKEN`): none (no scope)
+    /// unless a test says otherwise; how many tokens were asked about.
+    pub scopes: Option<Net<Option<String>>>,
+    pub scopes_asked: u32,
+    /// GitHub does not answer for release assets (#330: a co-signature that may exist).
+    pub assets_unanswered: bool,
+    /// The release assets asked for that may not exist, by name.
+    pub asked_if_any: Vec<String>,
 }
 
 pub(crate) type Remote = Rc<RefCell<PoolState>>;
@@ -568,16 +637,52 @@ impl Pool for FakePool {
     }
 
     fn release_asset(&mut self, r: Release, name: &str) -> Net<Vec<u8>> {
-        self.0
-            .borrow()
-            .assets
+        let s = self.0.borrow();
+        if s.assets_unanswered {
+            return Net::NoAnswer("github.com did not answer".into());
+        }
+        s.assets
             .get(&format!("{r}/{name}"))
             .cloned()
             .map_or_else(|| Net::NoAnswer("HTTP 404".into()), Net::Ok)
     }
 
+    fn release_asset_if_any(&mut self, r: Release, name: &str) -> Net<Option<Vec<u8>>> {
+        let mut s = self.0.borrow_mut();
+        s.asked_if_any.push(name.to_owned());
+        if s.assets_unanswered {
+            return Net::NoAnswer(format!("{name}: github.com did not answer"));
+        }
+        Net::Ok(s.assets.get(&format!("{r}/{name}")).cloned())
+    }
+
     fn download(&mut self, url: &str) -> Net<Vec<u8>> {
         Net::NoAnswer(format!("{url}: no downloads in tests"))
+    }
+
+    fn token(&mut self) -> Net<serde_json::Value> {
+        let mut s = self.0.borrow_mut();
+        s.tokens += 1;
+        let n = s.tokens;
+        s.token_answer.clone().unwrap_or_else(|| {
+            Net::Ok(serde_json::json!({
+                "worker": "m1-test-0a9z",
+                "token": format!("omw_{n:048x}"),
+                "issued_at": "2027-01-15T08:00:00.000Z",
+                "rotate_after": "2027-02-14T08:00:00.000Z",
+                "previous_valid_until": "2027-01-15T08:10:00.000Z",
+            }))
+        })
+    }
+
+    fn diagnostics(&mut self, body: &[u8]) -> Net<()> {
+        let mut s = self.0.borrow_mut();
+        let answer = s.diagnostics_answer.clone().unwrap_or(Net::Ok(()));
+        if answer == Net::Ok(()) {
+            s.diagnostics
+                .push(serde_json::from_slice(body).expect("diagnostics are JSON"));
+        }
+        answer
     }
 
     fn public_address(&mut self) -> Net<std::net::IpAddr> {
@@ -585,13 +690,29 @@ impl Pool for FakePool {
         s.publics += 1;
         s.public.clone().unwrap_or(Net::NoAnswer("no pool".into()))
     }
+
+    fn github_scopes(&mut self, _token: &str) -> Net<Option<String>> {
+        let mut s = self.0.borrow_mut();
+        s.scopes_asked += 1;
+        s.scopes.clone().unwrap_or(Net::Ok(Some(String::new())))
+    }
+
+    fn github_latest(&mut self) -> Net<Release> {
+        let mut s = self.0.borrow_mut();
+        s.github_reads += 1;
+        s.github
+            .clone()
+            .unwrap_or(Net::NoAnswer("no GitHub".into()))
+    }
 }
 
 // ---------------------------------------------------------------------------------------
 // Signed content.
 
-/// Verifies for real but for the cryptographic check, which vouches at `signed_at`.
-pub(crate) struct TestVerifier(pub Rc<RefCell<i64>>);
+/// Verifies for real but for the cryptographic check, which vouches at `signed_at`; the
+/// maintainers' co-signature policy is the test's (none unless it pins one, #330), never
+/// the one this build pins.
+pub(crate) struct TestVerifier(pub Rc<RefCell<i64>>, pub Rc<RefCell<Policy>>);
 
 impl Verifier for TestVerifier {
     fn bundle(&self, archive: &[u8], sig: &[u8]) -> Result<BundleOutcome, Rejection> {
@@ -599,6 +720,9 @@ impl Verifier for TestVerifier {
     }
     fn statement(&self, json: &[u8], sig: &[u8]) -> Result<StatementOutcome, Rejection> {
         tests_support::verify_statement(json, sig, *self.0.borrow())
+    }
+    fn cosignature(&self) -> Policy {
+        self.1.borrow().clone()
     }
 }
 
@@ -652,8 +776,15 @@ pub(crate) struct Ships<'a> {
 
 /// Publishes `r` (created a day before T0) shipping `agent`.
 pub(crate) fn publish_agent(remote: &Remote, r: &str, agent: &Ships) {
+    publish_agent_as(remote, r, agent, false);
+}
+
+/// The same, its manifest's `agent.urgent` as given (#326: only a security release sets
+/// it, and its agent does not wait for the owner's soak).
+pub(crate) fn publish_agent_as(remote: &Remote, r: &str, agent: &Ships, urgent: bool) {
     let mut m = tests_support::manifest_json(r, "v1.0.0", &[]);
     m["agent"]["version"] = agent.version.into();
+    m["agent"]["urgent"] = urgent.into();
     m["min_agent"] = agent.min_agent.into();
     let platform = super::tools::platform().expect("a platform with an agent build");
     m["agent"][platform]["sha256"] = super::tools::sha256_hex(agent.binary).into();
@@ -714,8 +845,29 @@ pub(crate) fn relay_statement_agent(
         Relayed {
             statement: json.into_bytes(),
             bundle: sig.to_vec(),
+            cosignatures: BTreeMap::new(),
         },
     );
+}
+
+/// A maintainer co-signs release `r`'s bundle as published: the asset
+/// `omarchy-host-<r>.tar.gz.<login>.sshsig` beside it (#330).
+pub(crate) fn cosign(remote: &Remote, r: &str, key: &TestKey) {
+    let name = format!("omarchy-host-{r}.tar.gz");
+    let mut s = remote.borrow_mut();
+    let archive = s.assets[&format!("{r}/{name}")].clone();
+    s.assets.insert(
+        format!("{r}/{}", cosignature::file_name(&name, &key.login)),
+        key.sign(cosignature::BUNDLE_NAMESPACE, &archive),
+    );
+}
+
+/// A maintainer co-signs the statement the pool relays for going back to `to` (#330).
+pub(crate) fn cosign_statement(remote: &Remote, to: &str, key: &TestKey) {
+    let mut s = remote.borrow_mut();
+    let relayed = s.statements.get_mut(&Release::parse(to).unwrap()).unwrap();
+    let sig = key.sign(cosignature::ROLLBACK_NAMESPACE, &relayed.statement);
+    relayed.cosignatures.insert(key.login.clone(), sig);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -734,9 +886,16 @@ pub(crate) struct World {
     pub engine: Engine,
     pub remote: Remote,
     pub signed_at: Rc<RefCell<i64>>,
+    /// The maintainers' co-signature the agent requires (#330): none unless a test pins one.
+    pub cosign: Rc<RefCell<Policy>>,
     pub dir: PathBuf,
     pub now: i64,
+    /// The engines by socket (#325's runtime switch): the agent's driver is the one its
+    /// agent.toml names, and a switch reaches another through here.
+    pub sockets: Sockets,
 }
+
+pub(crate) type Sockets = Rc<RefCell<BTreeMap<PathBuf, Engine>>>;
 
 /// 2027-01-15T08:00:00Z.
 pub(crate) const T0: i64 = 1_800_000_000;
@@ -769,14 +928,29 @@ impl World {
         }));
         let remote: Remote = Rc::new(RefCell::new(PoolState::default()));
         let signed_at = Rc::new(RefCell::new(T0));
-        let agent = Self::agent(cfg, paths, State::default(), &engine, &remote, &signed_at);
+        let cosign = Rc::new(RefCell::new(Policy::default()));
+        let sockets: Sockets = Rc::new(RefCell::new(BTreeMap::from([(
+            cfg.socket_cli.clone(),
+            Rc::clone(&engine),
+        )])));
+        let agent = Self::agent(
+            cfg,
+            paths,
+            State::default(),
+            &sockets,
+            &remote,
+            &signed_at,
+            &cosign,
+        );
         World {
             agent,
             engine,
             remote,
             signed_at,
+            cosign,
             dir,
             now: T0,
+            sockets,
         }
     }
 
@@ -784,36 +958,87 @@ impl World {
         cfg: Config,
         paths: Paths,
         state: State,
-        engine: &Engine,
+        sockets: &Sockets,
         remote: &Remote,
         signed_at: &Rc<RefCell<i64>>,
+        cosign: &Rc<RefCell<Policy>>,
     ) -> Agent {
         let mut a = Agent::new(
             cfg,
             paths,
             state,
             Box::new(FakePool(Rc::clone(remote))),
-            Box::new(TestVerifier(Rc::clone(signed_at))),
+            Box::new(TestVerifier(Rc::clone(signed_at), Rc::clone(cosign))),
             Drivers::Fixed,
         );
-        a.driver = Some(Box::new(FakeDriver(Rc::clone(engine))));
+        // A Linux host's agent, whichever OS runs the tests: a Mac (#320) is played with
+        // `mac` and agent.toml's `[vm]`.
+        a.mac = false;
+        let by_socket = Rc::clone(sockets);
+        a.drivers_on = Some(Box::new(move |socket| {
+            by_socket
+                .borrow()
+                .get(socket)
+                .map(|e| Box::new(FakeDriver(Rc::clone(e))) as Box<dyn Driver>)
+        }));
+        Self::drive(&mut a, sockets);
         a
+    }
+
+    /// The agent's driver: the engine its configuration names now.
+    fn drive(a: &mut Agent, sockets: &Sockets) {
+        let e = sockets
+            .borrow()
+            .get(&a.cfg.socket_cli)
+            .cloned()
+            .expect("an engine on the configured socket");
+        a.driver = Some(Box::new(FakeDriver(e)));
+    }
+
+    /// Another engine on `socket` (#325): podman's API socket, say.
+    pub fn add_engine(&self, socket: &str, runtime: Runtime, rootless: bool) -> Engine {
+        let e: Engine = Rc::new(RefCell::new(EngineState {
+            clock: self.now,
+            runtime: Some(runtime),
+            rootless,
+            ..EngineState::default()
+        }));
+        self.sockets
+            .borrow_mut()
+            .insert(PathBuf::from(socket), Rc::clone(&e));
+        e
     }
 
     /// The agent process ends and starts again: only what is on disk survives.
     pub fn restart(&mut self) {
+        let cfg = self.agent.cfg.clone();
+        self.restart_with(cfg);
+    }
+
+    /// A restart that reads agent.toml again, as `run` does (#325's runtime switch: the
+    /// in-memory engine is the switch's, the file's the one it began on).
+    pub fn restart_reading_agent_toml(&mut self) {
+        let text = fs::read_to_string(self.agent.paths.agent_toml()).expect("agent.toml");
+        self.restart_with(Config::parse(&text).unwrap());
+    }
+
+    fn restart_with(&mut self, cfg: Config) {
         let paths = self.agent.paths.clone();
         let state = state::load(&paths.state()).unwrap().unwrap_or_default();
-        self.engine.borrow_mut().forget_pull();
+        for e in self.sockets.borrow().values() {
+            e.borrow_mut().forget_pull();
+        }
         self.agent = Self::agent(
-            self.agent.cfg.clone(),
+            cfg,
             paths,
             state,
-            &self.engine,
+            &self.sockets,
             &self.remote,
             &self.signed_at,
+            &self.cosign,
         );
         self.agent.resume(self.now);
+        Self::drive(&mut self.agent, &self.sockets);
     }
 
     /// The running agent installed as install.sh installs it (#316):
@@ -851,6 +1076,7 @@ impl World {
             orders: Vec::new(),
             poll_s: Some(120),
             older_pool: false,
+            settings: None,
         }));
     }
 
@@ -891,8 +1117,15 @@ impl World {
     /// `secs` later, one tick.
     pub fn tick(&mut self, secs: i64) {
         self.now += secs;
-        self.engine.borrow_mut().clock = self.now;
+        self.clocks();
         self.agent.tick(self.now, false).unwrap();
+    }
+
+    fn clocks(&self) {
+        self.engine.borrow_mut().clock = self.now;
+        for e in self.sockets.borrow().values() {
+            e.borrow_mut().clock = self.now;
+        }
     }
 
     /// The pool asked now, as when a poll falls due (no SIGUSR1: nothing forces a round).
@@ -904,7 +1137,7 @@ impl World {
     /// A round asked for now (SIGUSR1).
     pub fn round_now(&mut self) {
         self.now += 1;
-        self.engine.borrow_mut().clock = self.now;
+        self.clocks();
         self.agent.tick(self.now, true).unwrap();
     }
 

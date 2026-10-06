@@ -28,7 +28,11 @@
 #                            # prep-root.sh's DOCKER-USER rules are in; the
 #                            # rules are IPv4 only, so IPv6 stays off on it);
 #                            # it covers every task of the package, a
-#                            # contributor's build or draft included
+#                            # contributor's build or draft included, and a
+#                            # host runs it only where its owner's envelope
+#                            # grants it (direct_network, which install's
+#                            # egress probe then checks; #373): any other
+#                            # host hands the task back
 #   reason   = "…"           # why, required with `network`; shown on the package page
 schema = 1
 

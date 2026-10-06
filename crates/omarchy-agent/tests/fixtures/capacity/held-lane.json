@@ -1,0 +1,23 @@
+{
+  "schema": 2,
+  "at": "2026-10-01T00:00:00Z",
+  "cpus": 8,
+  "mem_gb": 16,
+  "page_kb": 4,
+  "disk_free_gb": { "work": 410, "engine": 220 },
+  "units": 7,
+  "job_reserved": 1,
+  "agent_slots": 2,
+  "lanes": [{ "arch": "x86_64", "mode": "native" }],
+  "held_lanes": [
+    {
+      "arch": "aarch64",
+      "reason": "needs a person: prep-root.sh installs qemu-user-static-binfmt (qemu-aarch64 is disabled)"
+    }
+  ],
+  "isolation": "user",
+  "dedicated": true,
+  "limits": { "cpus_hard": true, "memory_hard": true, "pids": true },
+  "below_minimum": false,
+  "sandbox": null
+}

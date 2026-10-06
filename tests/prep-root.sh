@@ -10,6 +10,7 @@
 #   (RFC 1918 and link-local dropped, the subnet itself returned first, the
 #   host dropped in INPUT) in a script a boot unit runs. No delegation file.
 # - Run again: nothing changes — no file, no group, no subvolume, no restart.
+#   The firewall unit disabled or stopped since: enabled and restarted (#367).
 # - Ubuntu, rootless, x86_64, ext4: apt-get with podman, a plain directory,
 #   linger, cgroup v2 delegation; no docker group, daemon.json or firewall.
 #   Again: nothing changes.
@@ -59,7 +60,11 @@ stub docker 'echo "docker $*" >> "$STUB_LOG.read"; case "$1" in info) echo "$STU
 stub systemctl "$log"'
 case "$1" in
   is-active) [[ -e "$STATE/active-${3%.service}" ]] ;;
-  restart|enable) [[ "$*" == *omarchy-task-firewall* && "$*" != "enable omarchy-task-firewall.service" ]] && touch "$STATE/active-omarchy-task-firewall"; true ;;
+  is-enabled) [[ -e "$STATE/enabled-${3%.service}" ]] ;;
+  restart|enable)
+    [[ "$*" == *omarchy-task-firewall* && "$*" != "enable omarchy-task-firewall.service" ]] && touch "$STATE/active-omarchy-task-firewall"
+    [[ "$1" == enable && "$*" == *omarchy-task-firewall* ]] && touch "$STATE/enabled-omarchy-task-firewall"
+    true ;;
 esac'
 
 # A fresh host: os-release, the binfmt handler with the F flag (the packages put it there), cgroup v2.
@@ -132,6 +137,24 @@ prep --user omarchy --work-root "$wr" --task-subnets 10.231.0.0/16
 [[ "$(tree)" == "$before" ]] || fail "a second run changed files"
 for c in usermod btrfs chown chmod loginctl "systemctl restart docker" "systemctl daemon-reload" "systemctl enable omarchy-task-firewall" "systemctl restart omarchy-task-firewall"; do not_logged "$c"; done
 grep -q "in place" "$tmp/out" || fail "the firewall not said in place"
+
+# --- The firewall unit running but disabled since (a reboot would take the drop away), then
+# stopped: enabled and restarted, files unchanged; in place once more after.
+rm "$STATE/enabled-omarchy-task-firewall"
+prep --user omarchy --work-root "$wr" --task-subnets 10.231.0.0/16
+[[ $status -eq 0 ]] || fail "arch rootful, unit disabled: exit $status"
+[[ "$(tree)" == "$before" ]] || fail "a disabled unit changed files"
+logged "systemctl enable omarchy-task-firewall.service"
+logged "systemctl restart omarchy-task-firewall.service"
+! grep -q "in place" "$tmp/out" || fail "a disabled firewall unit said in place"
+rm "$STATE/active-omarchy-task-firewall"
+prep --user omarchy --work-root "$wr" --task-subnets 10.231.0.0/16
+[[ $status -eq 0 ]] || fail "arch rootful, unit stopped: exit $status"
+logged "systemctl enable omarchy-task-firewall.service"
+logged "systemctl restart omarchy-task-firewall.service"
+prep --user omarchy --work-root "$wr" --task-subnets 10.231.0.0/16
+grep -q "in place" "$tmp/out" || fail "the firewall not said in place after it was enabled"
+not_logged "systemctl enable omarchy-task-firewall"
 
 # --- Ubuntu, rootless, x86_64, ext4.
 fresh ubuntu x86_64 ext4

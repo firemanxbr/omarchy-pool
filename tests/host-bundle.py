@@ -182,6 +182,10 @@ try:
     # The tools: the versions and sums the worker image pins.
     cf = (ROOT / "factory/image/Containerfile").read_text()
     docker_v = re.search(r"^ARG DOCKER_CLI=(\S+)$", cf, re.M).group(1)
+    # podman 4's "<nil>" gateway of a task network made through libpod (#372): docker's CLI
+    # from 29 on cannot list or inspect it (the Containerfile's note at DOCKER_CLI).
+    ok(int(docker_v.split(".")[0]) < 29,
+       f"the docker CLI {docker_v} is below 29: from 29 on it cannot read podman 4's \"<nil>\" gateway of a task network (#372)")
     compose_v = re.search(r"^ARG COMPOSE=(\S+)$", cf, re.M).group(1)
     runs = [r for r in re.split(r"\n(?=RUN |ARG |COPY |ENV |LABEL )", cf) if r.startswith("RUN ")]
     def sums_in(marker):
@@ -249,6 +253,13 @@ try:
     refused(lambda: hb.build(args("x", policy=policy_with(min_release="v1.2.4"))), "above the release being cut", "a min_release above the release")
     refused(lambda: hb.build(args("x", policy=policy_with(revoked=["v1.2.3"]))), "revokes itself", "a release that revokes itself")
     refused(lambda: hb.build(args("x", policy=policy_with(min_agent="99.0.0"))), "above the agent this release ships", "a min_agent above the agent")
+    # agent.urgent (#326): set only for the agent version the policy marks — a security
+    # release's —, lapsed for any other, refused above the agent shipped.
+    refused(lambda: hb.build(args("x", policy=policy_with(urgent_agent="99.0.0"))), "urgent_agent 99.0.0 is above the agent", "an urgent_agent above the agent")
+    hb.build(args("urgent", policy=policy_with(urgent_agent=agent_version)))
+    ok(json.loads((tmp / "urgent/manifest.json").read_text())["agent"]["urgent"] is True, "agent.urgent for the agent version the policy marks")
+    hb.build(args("lapsed", policy=policy_with(urgent_agent="0.0.1")))
+    ok(json.loads((tmp / "lapsed/manifest.json").read_text())["agent"]["urgent"] is False, "agent.urgent lapsed with a later agent")
     bad = tmp / "policy-typo.toml"
     bad.write_text(hb.POLICY.read_text().replace("min_agent =", "min_agents ="))
     refused(lambda: hb.build(args("x", policy=bad)), "keys must be exactly", "a misspelt policy key")
@@ -263,7 +274,7 @@ try:
     refused(lambda: hb.build(args("x", sets=sets)), "does not name the worker image as @RELEASE@", "a host set off the release image")
     (agents / hb.AGENTS["aarch64-darwin"]).unlink()
     refused(lambda: hb.build(args("x")), "the agent for aarch64-darwin is missing", "a missing agent binary")
-    print("ok: refused: min_release or min_agent above, self-revoked, a misspelt key, a build image by tag, a stray placeholder, a missing agent")
+    print("ok: refused: min_release, min_agent or urgent_agent above, self-revoked, a misspelt key, a build image by tag, a stray placeholder, a missing agent; agent.urgent only for the agent marked")
 
     # --- the tools' downloads ----------------------------------------------------------
     blobs = {"https://x/a": b"a", "https://x/b": b"b"}

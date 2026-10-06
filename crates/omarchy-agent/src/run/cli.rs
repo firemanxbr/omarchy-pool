@@ -1,6 +1,8 @@
 //! The commands: `run` (the loop), `status` (works with the pool down), `round`
-//! (SIGUSR1 to the running agent), `logs` (the journal's tail) and `self-test` (what a
-//! self-update asks of a new agent before it hands over, #316).
+//! (SIGUSR1 to the running agent), `logs` (the journal's tail), `self-test` (what a
+//! self-update asks of a new agent before it hands over, #316), `runtime switch` (the
+//! owner's move of the bundle to another driver, #325) and `envelope pin-passkey` (the
+//! owner's passkey pinned at the host, #328).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -292,6 +294,9 @@ fn setup(
         .transpose()?;
     let mut agent = Agent::new(cfg, paths, state, pool, Box::new(Sigstore), Drivers::Pinned);
     agent.vm = vm;
+    // A Mac's sleep (#329) is the agent's to hold off and report, whatever runtime its
+    // engine is in.
+    agent.power = super::power::keeper(&agent.cfg, agent.mac);
     if let Some(e) = key_error {
         agent.journal.write(
             super::now(),
@@ -302,6 +307,11 @@ fn setup(
     agent.progress = Some(Arc::clone(progress));
     agent.exe = std::env::current_exe().ok();
     agent.host_env = Some(HostEnv::new(Sources::system()));
+    // The seal key (#328): made at the first start that has none, its fingerprint on the
+    // journal, kept in the login keychain on a Mac. One that cannot be loaded now is no
+    // reason to stop: the loop tries again, and takes no sealed key meanwhile.
+    agent.keychain = super::owner::keychain();
+    let _ = agent.seal_key(super::now());
     agent.resume(super::now());
     agent.journal.write(
         super::now(),
@@ -378,6 +388,59 @@ fn loop_forever(agent: &mut Agent, usr1: &AtomicBool, progress: &AtomicI64) -> u
     }
 }
 
+/// `omarchy-agent envelope pin-passkey [<pin> | -]` and `envelope unpin-passkey` (#328), at
+/// the host, as the agent's user: the owner's passkey pinned from the pin the site printed
+/// (read from stdin when it is not given), or no passkey pinned any more. The running agent
+/// reads the pin at the next signed order; nothing needs restarting.
+pub fn envelope(data: Option<&str>, cmd: &str, pin: Option<&str>) -> u8 {
+    let paths = match paths(data) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("omarchy-agent envelope: {e}");
+            return 2;
+        }
+    };
+    let state = paths.data.join("state");
+    let said = match cmd {
+        "pin-passkey" => {
+            let uid = rustix::process::geteuid().as_raw();
+            match Config::load(&paths.agent_toml(), uid) {
+                Err(e) => Err(format!(
+                    "{e}: a passkey is pinned on a host that is installed and confirmed"
+                )),
+                Ok(cfg) => {
+                    let text = match pin {
+                        Some(t) if t != "-" => Ok(t.to_owned()),
+                        _ => {
+                            use std::io::Read as _;
+                            let mut t = String::new();
+                            std::io::stdin()
+                                .take(64 << 10)
+                                .read_to_string(&mut t)
+                                .map(|_| t)
+                                .map_err(|e| format!("stdin: {e}"))
+                        }
+                    };
+                    text.and_then(|t| {
+                        crate::owner::pin(&state, &cfg.host_id, &cfg.pool, &t, super::now())
+                    })
+                }
+            }
+        }
+        _ => crate::owner::unpin(&state),
+    };
+    match said {
+        Ok(s) => {
+            println!("{s}");
+            0
+        }
+        Err(e) => {
+            eprintln!("omarchy-agent envelope {cmd}: {e}");
+            1
+        }
+    }
+}
+
 /// `omarchy-agent self-test --release vX.Y.Z [--data-dir <dir>]`: prints `ok`, or why not.
 pub fn self_test(data: Option<&str>, release: &str) -> u8 {
     let result = Release::parse(release)
@@ -435,7 +498,52 @@ pub fn status(data: Option<&str>) -> u8 {
         Some((Err(_), p)) => println!("capacity:  {} is missing", p.display()),
         None => println!("capacity:  agent.toml does not name the set directory"),
     }
+    print!("{}", owner_lines(&paths.data.join("state")));
     0
+}
+
+/// `status`'s lines for #328: the passkey pinned at this host and the last signed version
+/// it took, and the seal key's fingerprint, which its owner compares on the site once.
+fn owner_lines(state: &Path) -> String {
+    let mut out = String::new();
+    match crate::owner::Record::load(state) {
+        Ok(r) => match &r.passkey {
+            Some(p) => {
+                let _ = writeln!(
+                    out,
+                    "{:<10} {}'s passkey pinned ({}, credential {}…) for {} on {} since {}; last signed version {}",
+                    "owner:",
+                    p.by,
+                    crate::owner::webauthn::alg_name(p.alg),
+                    p.credential.chars().take(12).collect::<String>(),
+                    p.rp_id,
+                    p.origin,
+                    p.pinned_at,
+                    r.version
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "{:<10} no passkey pinned: the site widens nothing and sets no agent key here (`omarchy-agent envelope pin-passkey`)",
+                    "owner:"
+                );
+            }
+        },
+        Err(e) => {
+            let _ = writeln!(out, "{:<10} {e}", "owner:");
+        }
+    }
+    if let Some(k) = crate::owner::seal::read_public(state) {
+        let raw = crate::owner::webauthn::unb64(&k, "", 64).unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{:<10} {} (the host's page shows the same before its owner confirms it)",
+            "seal key:",
+            crate::owner::seal::fingerprint_of(&raw)
+        );
+    }
+    out
 }
 
 /// A self-update in flight (#316), from `pending`.
@@ -544,7 +652,167 @@ pub(crate) fn summary(s: &State, now: i64) -> String {
         ),
     );
     out.push_str(&orders_lines(s, now));
+    out.push_str(&p4_lines(s, now));
+    out.push_str(&soak_lines(s, now));
     out
+}
+
+/// `status`'s lines for #326: the owner's soak of the release the pool names, and what
+/// GitHub showed last (freeze detection).
+fn soak_lines(s: &State, now: i64) -> String {
+    let mut out = String::new();
+    let mut line = |k: &str, v: String| {
+        let _ = writeln!(out, "{k:<10} {v}");
+    };
+    if let Some(k) = s
+        .soak
+        .as_ref()
+        .filter(|k| s.target == Some(k.release) && s.applied.is_some_and(|a| a < k.release))
+    {
+        line(
+            "soak:",
+            if k.until > now {
+                format!(
+                    "{} waits {} s more (named {} s ago; a rollback statement skips it)",
+                    k.release,
+                    k.until - now,
+                    (now - k.seen).max(0)
+                )
+            } else {
+                format!("{} soaked: its round goes", k.release)
+            },
+        );
+    }
+    let g = &s.github;
+    if let Some(latest) = g.latest {
+        let behind = if g.behind {
+            format!(
+                "; pool-behind-github: the pool names {} since {} s",
+                opt(s.target),
+                g.ahead_since.map_or(0, |a| (now - a).max(0))
+            )
+        } else {
+            String::new()
+        };
+        line(
+            "github:",
+            format!(
+                "latest release {latest}, read {} s ago; next in {} s{behind}",
+                (now - g.read_at).max(0),
+                (g.next_at - now).max(0)
+            ),
+        );
+    }
+    out
+}
+
+/// `status`'s lines for P4 (#325): the settings the pool narrowed, the brake, and the
+/// owner's runtime switch.
+fn p4_lines(s: &State, now: i64) -> String {
+    use super::brake::Ask;
+    let mut out = String::new();
+    let mut line = |k: &str, v: String| {
+        let _ = writeln!(out, "{k:<10} {v}");
+    };
+    if let Some(set) = &s.settings {
+        line(
+            "settings:",
+            format!(
+                "units {}, emulated lanes {} (the pool's narrowing, inside the envelope)",
+                set.units
+                    .map_or_else(|| "as the envelope".to_owned(), |u| u.to_string()),
+                set.emulate.as_ref().map_or_else(
+                    || "as the envelope".to_owned(),
+                    |e| if e.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        e.join(", ")
+                    }
+                )
+            ),
+        );
+    }
+    let brake = &s.brake;
+    let (orders, restarts, narrowings, releases) = (
+        brake.count(Ask::Order, now),
+        brake.count(Ask::Restart, now),
+        brake.count(Ask::Narrowing, now),
+        brake.count(Ask::Release, now),
+    );
+    if orders + restarts + narrowings + releases > 0 {
+        line(
+            "brake:",
+            format!(
+                "{orders}/{} host orders, {restarts}/{} dispatcher restarts, {narrowings}/{} narrowings in the last hour; {releases}/1 release change in the last 10 min",
+                super::brake::ORDERS_PER_HOUR,
+                super::brake::RESTARTS_PER_HOUR,
+                super::brake::NARROWINGS_PER_HOUR
+            ),
+        );
+    }
+    if let Some(sw) = &s.switch {
+        line(
+            "switching:",
+            format!(
+                "to compose/{} at {} from compose/{}, at its {} step for {} s{}",
+                sw.to.runtime,
+                sw.to.socket_cli.display(),
+                sw.from.runtime,
+                match sw.step {
+                    super::switch::SwitchStep::Stop => "stop",
+                    super::switch::SwitchStep::Up => "up",
+                    super::switch::SwitchStep::Back => "back",
+                    super::switch::SwitchStep::Return => "return",
+                },
+                (now - sw.since).max(0),
+                sw.why
+                    .as_ref()
+                    .map_or_else(String::new, |w| format!(": {w}"))
+            ),
+        );
+    }
+    if let Some(e) = &s.switch_last {
+        line(
+            "switch:",
+            format!(
+                "to {} {} {} s ago: {}",
+                e.to,
+                e.outcome,
+                (now - e.at).max(0),
+                e.detail
+            ),
+        );
+    }
+    out
+}
+
+/// `omarchy-agent runtime switch <driver> [--socket <path>] [--data-dir <dir>]` (#325): the
+/// request for the running agent, which it takes between rounds; SIGUSR1 wakes it.
+pub fn runtime_switch(data: Option<&str>, driver: &str, socket: Option<&str>) -> u8 {
+    let result = paths(data).and_then(|p| {
+        let said = super::switch::request(&p.data, driver, socket.map(Path::new))?;
+        if let Some(pid) = running_agent(&p) {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-USR1", &pid])
+                .status();
+            Ok(said)
+        } else {
+            Ok(format!(
+                "{said}\nno agent runs on {} now: it takes the request when it starts",
+                p.data.display()
+            ))
+        }
+    });
+    match result {
+        Ok(said) => {
+            println!("omarchy-agent: {said}");
+            0
+        }
+        Err(e) => {
+            eprintln!("omarchy-agent runtime switch: {e}");
+            1
+        }
+    }
 }
 
 /// `status`'s lines for the host orders (#344): a `retire-legacy` in flight, and the

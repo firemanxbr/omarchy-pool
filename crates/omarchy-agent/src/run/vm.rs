@@ -28,6 +28,12 @@
 //! then. Running tasks keep their job tokens valid that way; a task a restart ended is the
 //! pool's to requeue when its lease expires. The clock is checked whatever else the profile
 //! waits for (a resize held back by a running task, a `colima.yaml` that cannot be read).
+//!
+//! A restart of the running profile stops the dispatcher in it, so the loop records each
+//! as one of the dispatcher's restarts on the host-side brake (#325,
+//! [`Keeper::take_restarts`]): the pool's orders and rounds get only the room left. The
+//! brake never holds the keeper — M7's rate limit governs it, and an exposure must not
+//! wait — just as it never holds what the agent does on its own.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -181,6 +187,14 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         host: Some(&host),
         work_root: c.work_root,
         image: image.as_deref(),
+        // The VM's lane is Rosetta's ([`probe::in_mac_vm`]), not the binfmt table's.
+        emulation: None,
+        // A sandboxed runtime in the VM's engine (#330): the VM's files are not this
+        // machine's, so its smoke run alone decides.
+        sandbox: Some(crate::capacity::sandbox::Probe {
+            setting: &toml.caps.sandbox,
+            local: false,
+        }),
     };
     // The loop pulls nothing: a pull of a multi-GB build image would hold the tick far past
     // one engine call (and the watchdog's patience). A native build image the VM's store
@@ -199,7 +213,7 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         kind: VmKind::Dedicated,
         meminfo: c.meminfo,
         rosetta: toml.vm.as_ref().is_some_and(|v| v.1),
-        emulate: toml.emulate.as_deref(),
+        emulate: toml.caps.emulate.as_deref(),
         x86_64_image: x86.as_deref(),
     };
     // Only an x86_64 task on the Rosetta lane pulls a release's x86_64 image (the loop pulls
@@ -238,7 +252,7 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         cap.mem_gb(),
         cap.units(),
         std::iter::once(facts.arch().to_owned())
-            .chain(cap.emulated().iter().map(|l| format!("{} via {}", l.arch, l.via.unwrap_or("emulation"))))
+            .chain(cap.emulated().iter().map(|l| format!("{} via {}", l.arch, l.via)))
             .collect::<Vec<_>>()
             .join(", "),
         match w {
@@ -249,14 +263,14 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
 }
 
 /// Whether `run/capacity.json` holds the `x86_64` lane through Rosetta: a count before
-/// this one (install's, the loop's) passed its smoke run in this VM.
+/// this one (install's, the loop's) passed its smoke run in this VM. Read through a
+/// narrowing the pool's settings made (#325): a lane they turned off was still counted.
 fn rosetta_counted(set_dir: &Path) -> bool {
-    std::fs::read(set_dir.join("run").join("capacity.json"))
+    super::settings::Base::read(set_dir)
         .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.get("lanes").and_then(|l| l.as_array()).cloned())
-        .is_some_and(|lanes| {
-            lanes
+        .flatten()
+        .is_some_and(|b| {
+            b.lanes()
                 .iter()
                 .any(|l| l["arch"] == "x86_64" && l["via"] == "rosetta")
         })
@@ -295,6 +309,9 @@ pub(crate) struct Keeper {
     next_firewall: i64,
     /// What was last said, so each state is journalled once.
     said: Option<String>,
+    /// Restarts of a running profile since the loop last asked: each recreated the
+    /// dispatcher, which the brake counts (#325).
+    restarted: u32,
 }
 
 impl Keeper {
@@ -324,13 +341,31 @@ impl Keeper {
             next_clock: 0,
             next_firewall: 0,
             said: None,
+            restarted: 0,
         }
+    }
+
+    /// How many times a running profile was stopped for a restart since the last ask: the
+    /// dispatcher in it stopped with it, so the brake counts each as one of its restarts.
+    /// A start of a stopped profile is not one (nothing ran to restart).
+    pub fn take_restarts(&mut self) -> u32 {
+        std::mem::take(&mut self.restarted)
     }
 
     /// The pinned docker CLI (the loop's tools, whenever they open or change).
     pub fn use_docker(&mut self, cli: &Path) {
         self.colima.use_docker(cli);
         self.docker = true;
+    }
+
+    /// A new size from agent.toml, as a signed widening of `max_cpus` or `max_mem_gb` wrote
+    /// it (#328): held to the same bounds as at start, and the VM restarted with it as any
+    /// size change is — at once only when no task runs, within the rate limit.
+    pub fn resize(&mut self, size: vm::Size) {
+        if self.want.size != size {
+            self.want.size = size;
+            self.next_look = 0;
+        }
     }
 
     /// The applied release's signed minimum (CPUs, GB): a size below it is refused.
@@ -409,16 +444,23 @@ impl Keeper {
             .is_some_and(|last| now - last > vm::WAKE_GAP_S);
         self.last_tick = Some(now);
         if woke {
-            journal.write(
-                now,
-                "vm",
-                serde_json::json!({"detail": "the Mac woke: the pool is asked now and the VM's clock checked"}),
-            );
-            self.clock_due = true;
-            self.next_look = now;
-            self.next_firewall = now;
+            self.woke(now, journal);
         }
         Asks { poll_now: woke }
+    }
+
+    /// The Mac woke: a gap in the ticks, or a wake macOS announced after a sleep too short
+    /// to leave one (#329). The VM is looked at, walled and its clock checked now; the
+    /// caller asks the pool at once, for a fresh `Date`.
+    pub fn woke(&mut self, now: i64, journal: &Journal) {
+        journal.write(
+            now,
+            "vm",
+            serde_json::json!({"detail": "the Mac woke: the pool is asked now and the VM's clock checked"}),
+        );
+        self.clock_due = true;
+        self.next_look = now;
+        self.next_firewall = now;
     }
 
     /// After the poll: the profile kept running, sized and walled, and its clock checked
@@ -682,6 +724,7 @@ impl Keeper {
             self.say(journal, now, "vm", &format!("colima stop: {e}"));
             return false;
         }
+        self.restarted += 1;
         self.start(now, journal, want, why, true);
         true
     }

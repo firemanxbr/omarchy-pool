@@ -1,12 +1,16 @@
 //! One tick of the run loop (design v2 §16.1): ask the pool for the host state when a poll
-//! is due (#344: the release target, the open Updates and the host orders), check the
-//! target against the trust rules, start or preempt a round, and take one step of it; one
-//! step of a `retire-legacy` in flight; the host report when it is due. Network answers
-//! never stop the agent (§16.4): no answer, a 5xx or a malformed body changes nothing and
-//! backs off to 10 minutes; a 401/403 changes nothing and polls hourly; both recover by
-//! themselves at the next answer.
+//! is due (#344: the release target, the open Updates and the host orders; #325: the
+//! settings), check the target against the trust rules and the brake, start or preempt a
+//! round, and take one step of it; the next queued host order the brake lets through;
+//! `run/capacity.json` kept as the settings say; one step of a `retire-legacy` in flight
+//! and of the owner's runtime switch; GitHub's latest release read when it is time (#326's
+//! freeze detection, [`super::freeze`]); the host report when it is due. A new release
+//! waits for the owner's soak (#326, [`super::soak`]) unless a rollback statement brings
+//! it. Network answers never stop the agent (§16.4): no answer, a 5xx or a malformed body
+//! changes nothing and backs off to 10 minutes; a 401/403 changes nothing and polls hourly;
+//! both recover by themselves at the next answer.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -15,14 +19,17 @@ use std::sync::Arc;
 use crate::dispatcher_env::{self, addresses, Envelope, Refresh, Rendered, Sources};
 use crate::manifest::{Manifest, Outer};
 use crate::statement::Statement;
+use crate::verify::cosignature::{self, Cosigned, Policy};
 use crate::verify::{self, BundleOutcome, Rejection, StatementOutcome, VerifiedBundle};
 use crate::version::{self, Release, Version};
 
+use super::brake::{Ask, ROUND_RESTARTS};
 use super::compose::Compose;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver};
-use super::journal::{env_secrets, Journal};
-use super::pool::{HostState, Net, Pool};
+use super::journal::{env_secrets, env_values, Journal};
+use super::orders::Taken;
+use super::pool::{HostState, Net, Order, Pool};
 use super::report::Reported;
 use super::rollout::{self, Ctx, Outcome};
 use super::selfupdate::Pending;
@@ -52,9 +59,13 @@ pub(crate) const PUBLIC_RETRY_S: i64 = 300;
 pub(crate) trait Verifier {
     fn bundle(&self, archive: &[u8], sig: &[u8]) -> Result<BundleOutcome, Rejection>;
     fn statement(&self, json: &[u8], sig: &[u8]) -> Result<StatementOutcome, Rejection>;
+    /// The maintainers' co-signature this agent requires (#330, D1 b): the policy pinned
+    /// in this binary, which nothing the pool or a manifest says can lower.
+    fn cosignature(&self) -> Policy;
 }
 
-/// Sigstore, pinned to release.yml and rollback.yml on main.
+/// Sigstore, pinned to release.yml and rollback.yml on main, and the maintainers'
+/// co-signature this binary pins.
 pub(crate) struct Sigstore;
 
 impl Verifier for Sigstore {
@@ -63,6 +74,9 @@ impl Verifier for Sigstore {
     }
     fn statement(&self, json: &[u8], sig: &[u8]) -> Result<StatementOutcome, Rejection> {
         verify::statement(json, sig)
+    }
+    fn cosignature(&self) -> Policy {
+        Policy::pinned()
     }
 }
 
@@ -97,6 +111,9 @@ pub(crate) struct Agent {
     pub progress: Option<Arc<AtomicI64>>,
     /// This agent's own version (a test plays another).
     pub version: Version,
+    /// Built for a Mac (#320): `cfg!(target_os = "macos")`. Read where a Linux host and a
+    /// Mac part, so a test plays either on any OS.
+    pub mac: bool,
     /// The binary that runs (`current_exe`): a self-update starts only from the one
     /// install.sh installed, so the way back is there.
     pub exe: Option<PathBuf>,
@@ -111,6 +128,9 @@ pub(crate) struct Agent {
     pub(super) upward_checked: Option<Release>,
     /// A Mac's `omarchy` VM (#320), kept running, sized, walled and on time.
     pub vm: Option<super::vm::Keeper>,
+    /// A Mac's sleep (#329): held off while a task runs, reported before it happens and
+    /// after the wake.
+    pub power: Option<super::power::Sleep>,
     /// The `Date` of the host state's last answer, whatever its status, and when it came
     /// (the Mac's clock): the VM's is held to it.
     pool_date: Option<(i64, i64)>,
@@ -133,9 +153,25 @@ pub(crate) struct Agent {
     /// Said once per process: the pool predates the host state's release (#344), so its
     /// `follow` names the target.
     older_pool_said: bool,
+    /// The host orders of the last host state not taken yet: the brake paces them (#325).
+    pub(super) queue: VecDeque<Order>,
+    /// What was said once per process (#325: a narrowing that could not be written, the
+    /// pool's settings held by the brake).
+    pub(super) said: BTreeSet<String>,
+    /// Tests: the fake engine behind another socket (the runtime switch, #325).
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub drivers_on: Option<Box<dyn FnMut(&std::path::Path) -> Option<Box<dyn Driver>>>>,
     /// `etc/dispatcher.env` rendered again from the host and agent.toml (#371); `None`
     /// leaves the file alone (the tests that play other parts).
     pub host_env: Option<HostEnv>,
+    /// The host's seal key (#328), loaded (made the first time) when first needed, and when
+    /// it was last tried and failed (a locked keychain: tried again ten minutes on).
+    pub(super) seal: Option<crate::owner::seal::SealKey>,
+    pub(super) seal_tried: Option<(i64, String)>,
+    /// A Mac's login keychain, where the seal key's private half lives (#328); `None` on
+    /// Linux, where it is a 0600 file beside the host key.
+    pub keychain: Option<Box<dyn crate::owner::keychain::Security>>,
 }
 
 /// The run loop's half of `etc/dispatcher.env` (#371): at its start, then every
@@ -146,7 +182,7 @@ pub(crate) struct Agent {
 /// file that changed starts a round (an input of the set), which recreates the dispatcher.
 pub(crate) struct HostEnv {
     pub sources: Sources,
-    next_at: i64,
+    pub(super) next_at: i64,
     public_at: i64,
     /// The wait after the next ask the edge does not answer.
     public_retry: i64,
@@ -169,11 +205,47 @@ impl HostEnv {
 /// [`super::vm::count`], or a test's stand-in.
 pub(crate) type Count = dyn FnMut(&super::vm::Counting<'_>) -> Result<String, String>;
 
+/// A target's bundle, verified, with the maintainers' co-signatures over it (#330).
 enum Fetched {
-    Bundle(Box<VerifiedBundle>),
+    Bundle(Box<VerifiedBundle>, Cosignatures),
     /// Signed for this host, but only an agent above this one reads it: its outer layer.
-    NewerAgent(Box<Outer>, String),
+    NewerAgent(Box<Outer>, String, Cosignatures),
     Stop,
+}
+
+/// A bundle's co-signatures as far as GitHub answered (#330): those that verified, and,
+/// when they fall short of the threshold, why GitHub did not answer for one that could
+/// still count. The round waits for GitHub only where the bundle's own co-signatures
+/// decide: a co-signed rollback statement, or the one a retried rollback was accepted
+/// under, stands in for them, and a release from before the threshold rose has none to
+/// wait for.
+pub(super) struct Cosignatures {
+    pub(super) cosigned: Cosigned,
+    pub(super) unanswered: Option<String>,
+}
+
+/// What `etc/dispatcher.env` gets beside the token now (#371): the host's own addresses
+/// from `sources`, and agent.toml as it is now, as `omarchy-agent token` and
+/// `dispatcher-env --write` read it, so the loop never puts back what they wrote; one that
+/// does not read now (an edit half done) leaves what the loop started with. The run loop's
+/// refresh and its `rotate-token` (#325) both render it so.
+pub(super) fn rendered(cfg: &Config, paths: &Paths, sources: &Sources) -> Rendered {
+    let envelope = match Envelope::of_data_dir(&paths.data) {
+        Some(Ok(e)) if dispatcher_env::dispatcher_path(&e.secrets_dir) => e,
+        _ => Envelope::of_config(cfg),
+    };
+    Rendered::now(sources, &paths.data, Some(envelope))
+}
+
+/// The values the journal and the report never carry: those of the set's `etc/*.env` (the
+/// worker token) and of the secrets directory's `*.env` — the agent keys, typed at install
+/// or sealed from the site (#328).
+pub(super) fn secrets_of(set_dir: &std::path::Path, secrets_dir: &std::path::Path) -> Vec<String> {
+    let mut v = env_secrets(set_dir);
+    v.extend(env_values(secrets_dir));
+    v.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    v.dedup();
+    v
 }
 
 /// The cached names of release `r`'s bundle and its signature.
@@ -193,7 +265,7 @@ impl Agent {
         drivers: Drivers,
     ) -> Self {
         let mut journal = Journal::new(&paths.journal());
-        journal.set_secrets(env_secrets(&cfg.set_dir));
+        journal.set_secrets(secrets_of(&cfg.set_dir, &cfg.secrets_dir));
         Agent {
             cfg,
             paths,
@@ -210,6 +282,7 @@ impl Agent {
             announced: None,
             progress: None,
             version: version::agent(),
+            mac: cfg!(target_os = "macos"),
             exe: None,
             exit: None,
             gate: None,
@@ -217,6 +290,7 @@ impl Agent {
             retry: None,
             upward_checked: None,
             vm: None,
+            power: None,
             pool_date: None,
             vm_release: None,
             vm_recount_at: None,
@@ -226,7 +300,14 @@ impl Agent {
             legacy_seen: None,
             reported: Reported::default(),
             older_pool_said: false,
+            queue: VecDeque::new(),
+            said: BTreeSet::new(),
+            #[cfg(test)]
+            drivers_on: None,
             host_env: None,
+            seal: None,
+            seal_tried: None,
+            keychain: None,
         }
     }
 
@@ -236,6 +317,8 @@ impl Agent {
     /// a good release. The guard begins again at the ready wait, so its evidence (exits,
     /// `RestartCount`) counts from when the agent is back to watch.
     pub fn resume(&mut self, now: i64) {
+        // A runtime switch in flight goes on with the engine it was on (#325).
+        self.resume_switch();
         let step = &mut self.state.rollout.step;
         match step {
             Step::Replace {
@@ -338,11 +421,34 @@ impl Agent {
         // A new agent touches nothing until its health gate passed; once a self-update
         // swapped `current`, the state is saved and the agent exits before anything
         // else (#316).
-        let asks = self
+        let mut asks = self
             .vm
             .as_mut()
             .map(|k| k.before_poll(now, &self.journal))
             .unwrap_or_default();
+        // A Mac's sleep (#329): one heard is reported before anything else, and only then let
+        // happen; a wake asks the pool for the target now and the VM's clock is checked, even
+        // after a sleep too short to leave a gap in the ticks.
+        let hears = self
+            .power
+            .as_mut()
+            .map(|p| p.hear(now, &self.journal))
+            .unwrap_or_default();
+        if hears.woke && !asks.poll_now {
+            if let Some(k) = self.vm.as_mut() {
+                k.woke(now, &self.journal);
+            }
+            asks.poll_now = true;
+        }
+        if hears.slept {
+            // A new agent behind its health gate reports nothing: the Mac sleeps as today.
+            if self.gate.is_none() && self.exit.is_none() {
+                self.report_now(now);
+            }
+            if let Some(p) = self.power.as_mut() {
+                p.let_sleep();
+            }
+        }
         if asks.poll_now {
             // A Mac that woke may be on another network: its addresses, and the public one
             // its tasks leave from, are read again at once, not at the hour (#371).
@@ -353,22 +459,41 @@ impl Agent {
         }
         if self.gate.is_some() {
             self.keep_vm(now, true);
+            self.keep_awake(now);
             self.gate_step(now);
         } else if self.exit.is_none() {
             self.dispatcher_env(now);
             if round_now || asks.poll_now || now >= self.state.poll.next_at {
                 self.poll(now, round_now);
+            } else if !self.queue.is_empty() {
+                // The orders the brake paced: the next one, two seconds after the last.
+                let taken = self.take_orders(now, self.busy());
+                if !taken.rounds.is_empty() {
+                    self.after_orders(taken, self.state.target, None, now);
+                }
             }
+            // A recount after the VM started rewrites detection's file: the settings narrow
+            // it again in the same tick, before drift looks at the set's inputs.
             self.keep_vm(now, false);
-            if self.state.rollout.step == Step::Idle && self.exit.is_none() {
+            self.narrow(now);
+            self.keep_awake(now);
+            // Never while the owner's runtime switch moves the dispatcher (#325): it stops
+            // the old one on purpose.
+            if self.state.rollout.step == Step::Idle
+                && self.exit.is_none()
+                && self.state.switch.is_none()
+            {
                 self.drift(now);
             }
             if self.exit.is_none() {
                 // A step that cannot write (a set directory, a full disk) is retried every
                 // tick; a retire-legacy in flight goes on meanwhile, and the report still
                 // says what the host knows, its answers above all.
+                self.identify_runtime();
                 let stepped = self.step(now);
+                self.switch_step(now);
                 self.retire_step(now);
+                self.freeze(now);
                 self.report(now);
                 stepped?;
             }
@@ -410,10 +535,36 @@ impl Agent {
         if k.step(now, self.pool_date, &mut tasks, gate, &self.journal) {
             self.vm_recount_at = Some(now);
         }
+        // A restart of the VM recreated the dispatcher: one of the brake's restarts (#325),
+        // never held by it.
+        for _ in 0..k.take_restarts() {
+            self.state.brake.record(now, &[Ask::Restart]);
+        }
         // A new agent's health gate touches nothing but the VM's start.
         if !gate && self.vm_recount_at.is_some_and(|t| now >= t) {
             self.vm_recount_at = (!self.recount(now)).then_some(now + RECOUNT_AGAIN_S);
         }
+    }
+
+    /// A Mac kept awake while a task runs, and let idle-sleep once none does (#329). A task
+    /// runs from its claim to its report: while the dispatcher holds its lease (a lease file,
+    /// read first: no engine call while one is held), and while its container runs, the
+    /// engine asked through the pinned CLI, as the VM's keeper asks it before a resize.
+    fn keep_awake(&mut self, now: i64) {
+        let Some(p) = self.power.as_mut() else {
+            return;
+        };
+        let (driver, work_root) = (&mut self.driver, &self.cfg.work_root);
+        let mut tasks = || {
+            if super::power::leases_held(work_root, now) {
+                return Some(true);
+            }
+            match driver.as_deref_mut().map(Driver::tasks_running) {
+                Some(Answer::Yes(b)) => Some(b),
+                _ => None,
+            }
+        };
+        p.keep(now, &mut tasks, &self.journal);
     }
 
     /// The host's capacity counted again after a start of the VM, as `omarchy-agent
@@ -490,8 +641,8 @@ impl Agent {
         }
     }
 
-    /// Release `r`'s bundle from the cache, verified again.
-    fn cached_outcome(&self, r: Release) -> Option<BundleOutcome> {
+    /// Release `r`'s bundle from the cache, verified again, and the archive's bytes.
+    fn cached_archive(&self, r: Release) -> Option<(Vec<u8>, BundleOutcome)> {
         let (name, sig) = bundle_names(r);
         let dir = self.paths.bundles();
         let (a, s) = (
@@ -503,18 +654,109 @@ impl Agent {
             BundleOutcome::Current(b) => b.manifest().outer().release(),
             BundleOutcome::NeedsNewerAgent { outer, .. } => outer.release(),
         };
-        (Release(release) == r).then_some(outcome)
+        (Release(release) == r).then_some((a, outcome))
     }
 
     pub(super) fn cached(&self, r: Release) -> Option<Box<VerifiedBundle>> {
-        match self.cached_outcome(r)? {
+        match self.cached_archive(r)?.1 {
             BundleOutcome::Current(b) => Some(b),
             BundleOutcome::NeedsNewerAgent { .. } => None,
         }
     }
 
+    /// Whether release `r`'s cached bundle carries the co-signatures this agent requires
+    /// (#330). `None`: no bundle, or GitHub did not answer: no decision now.
+    pub(super) fn cosigned_cached(&mut self, r: Release, now: i64) -> Option<Result<(), String>> {
+        let need = self.verifier.cosignature().threshold();
+        if need == 0 {
+            return Some(Ok(()));
+        }
+        let (archive, _) = self.cached_archive(r)?;
+        let found = self.cosignatures(r, &archive, now);
+        if !self.answered(r, &found, now) {
+            return None;
+        }
+        Some(found.cosigned.require(need, &format!("{r}'s bundle")))
+    }
+
+    /// Release `r`'s co-signatures (#330, D1 b), when this agent requires any: those kept
+    /// beside its bundle, then the pinned maintainers' others asked of GitHub
+    /// (`omarchy-host-<r>.tar.gz.<login>.sshsig`, which may not exist) and kept too. GitHub
+    /// not answering for one that could still count is carried, not said: only where the
+    /// bundle's own co-signatures decide is it the round's answer ([`Agent::answered`]).
+    pub(super) fn cosignatures(&mut self, r: Release, archive: &[u8], now: i64) -> Cosignatures {
+        let policy = self.verifier.cosignature();
+        if policy.threshold() == 0 {
+            return Cosignatures {
+                cosigned: Cosigned::default(),
+                unanswered: None,
+            };
+        }
+        let (name, _) = bundle_names(r);
+        let dir = self.paths.bundles();
+        let mut sigs: BTreeMap<String, Vec<u8>> = policy
+            .logins()
+            .filter_map(|l| {
+                let kept = fs::read(dir.join(cosignature::file_name(&name, l))).ok()?;
+                Some((l.to_owned(), kept))
+            })
+            .collect();
+        let cosigned = policy.check(cosignature::BUNDLE_NAMESPACE, archive, &sigs);
+        if cosigned.count() >= policy.threshold() {
+            return Cosignatures {
+                cosigned,
+                unanswered: None,
+            };
+        }
+        let others: Vec<String> = policy
+            .logins()
+            .filter(|l| !cosigned.by().iter().any(|by| by == l))
+            .map(str::to_owned)
+            .collect();
+        let mut unanswered = None;
+        for login in others {
+            let asset = cosignature::file_name(&name, &login);
+            match self.pool.release_asset_if_any(r, &asset) {
+                Net::Ok(Some(sig)) => {
+                    let kept = fs::create_dir_all(&dir)
+                        .map_err(|e| e.to_string())
+                        .and_then(|()| state::write_atomic(&dir.join(&asset), &sig));
+                    if let Err(e) = kept {
+                        self.journal
+                            .write(now, "cache", serde_json::json!({"detail": e}));
+                    }
+                    sigs.insert(login, sig);
+                }
+                Net::Ok(None) => {
+                    let _ = fs::remove_file(dir.join(&asset));
+                    sigs.remove(&login);
+                }
+                Net::NoAnswer(e) => unanswered = Some(e),
+                Net::Unauthorized(s) => unanswered = Some(format!("{asset}: HTTP {s}")),
+            }
+        }
+        let cosigned = policy.check(cosignature::BUNDLE_NAMESPACE, archive, &sigs);
+        let unanswered = unanswered.filter(|_| cosigned.count() < policy.threshold());
+        Cosignatures {
+            cosigned,
+            unanswered,
+        }
+    }
+
+    /// Whether release `r`'s bundle co-signatures can decide now: not when they fall short
+    /// and GitHub did not answer for one that could still count, which is said as the
+    /// pool's (no decision now, nothing refused).
+    fn answered(&mut self, r: Release, found: &Cosignatures, now: i64) -> bool {
+        let Some(e) = &found.unanswered else {
+            return true;
+        };
+        let detail = format!("{r}'s co-signatures: {e}");
+        self.say(now, Outcome::PoolUnreachable, &detail);
+        false
+    }
+
     /// Says what a poll found when no round is in flight; a round's own report is kept.
-    fn say(&mut self, now: i64, outcome: Outcome, detail: &str) {
+    pub(super) fn say(&mut self, now: i64, outcome: Outcome, detail: &str) {
         if self.state.rollout.step == Step::Idle {
             rollout::report(&mut self.state, &self.journal, now, outcome, None, detail);
         } else {
@@ -613,14 +855,21 @@ impl Agent {
         Net::Ok(s)
     }
 
-    /// The host state (#344): its Update orders, its host orders, then its target.
+    /// Whether a round cannot start now: a commit or a revert is finishing (a revert
+    /// quarantines again), or the owner's runtime switch is in flight (#325).
+    fn busy(&self) -> bool {
+        (self.state.rollout.step != Step::Idle && !rollout::preemptible(&self.state.rollout.step))
+            || self.state.switch.is_some()
+    }
+
+    /// The host state (#344): its Update orders, its settings (#325), its host orders, then
+    /// its target.
     fn on_state(&mut self, s: HostState, now: i64, round_now: bool) {
         let mut force: Option<String> =
             round_now.then(|| "a round was asked for (SIGUSR1)".to_owned());
         // An Update order waits while commit or a revert finishes (a revert quarantines
-        // again): the next poll sees it unconsumed.
-        let busy = self.state.rollout.step != Step::Idle
-            && !rollout::preemptible(&self.state.rollout.step);
+        // again), or the owner's runtime switch: the next poll sees it unconsumed.
+        let busy = self.busy();
         // The last Update an agent before 0.3.0 took (`update_seen`) counts as seen.
         if let Some(id) = s
             .updates
@@ -632,25 +881,58 @@ impl Agent {
             })
             .cloned()
         {
-            if !self.state.quarantine.is_empty() {
-                self.journal.write(
-                    now,
-                    "quarantine-lifted",
-                    serde_json::json!({"by": id, "releases": self.state.quarantine.keys().map(ToString::to_string).collect::<Vec<_>>()}),
-                );
+            // An Update lifts every quarantine, and the round it gives the release the guard
+            // reverted recreates the dispatcher, and again if it reverts: without the room
+            // for both on the brake (#325) the Update waits, unconsumed and the quarantine
+            // kept, for a poll that has it — so a pool that keeps sending Updates for a
+            // release this host reverts gets no more restarts than the brake's.
+            let room = if self.state.quarantine.is_empty() {
+                Ok(())
+            } else {
+                self.state
+                    .brake
+                    .check_room(now, &[Ask::Restart], ROUND_RESTARTS)
+            };
+            match room {
+                Ok(()) => {
+                    self.lift_quarantine(&id, now);
+                    force = Some(format!("Update order {id}"));
+                    self.state.orders.remember(&id);
+                    self.state.update_seen = Some(id);
+                }
+                Err(why) => {
+                    if self.said.insert(format!("update:{id}:{why}")) {
+                        self.journal.write(
+                            now,
+                            "update",
+                            serde_json::json!({"id": id, "detail": format!("waits, the quarantine kept: {why}")}),
+                        );
+                    }
+                }
             }
-            self.state.quarantine.clear();
-            force = Some(format!("Update order {id}"));
-            self.state.orders.remember(&id);
-            self.state.update_seen = Some(id);
         }
-        let taken = self.take_orders(s.orders, now, busy);
-        if let (None, Some(id)) = (&force, taken.reconcile.first()) {
-            force = Some(format!("host order {id} (reconcile-now)"));
+        self.restore_settings(s.settings, now);
+        self.queue_orders(s.orders);
+        let taken = self.take_orders(now, busy);
+        self.after_orders(taken, s.target, force, now);
+    }
+
+    /// The round the orders taken ask for (`reconcile-now`, `retry-release`), or the one
+    /// `force` says why, toward `target`; then their answers, which say what the round is.
+    fn after_orders(
+        &mut self,
+        taken: Taken,
+        target: Option<Release>,
+        force: Option<String>,
+        now: i64,
+    ) {
+        let mut force = force;
+        if let (None, Some((id, kind, _))) = (&force, taken.rounds.first()) {
+            force = Some(format!("host order {id} ({kind})"));
         }
-        let named = s.target.is_some();
-        self.follow_target(s.target, force, now);
-        for id in taken.reconcile {
+        let named = target.is_some();
+        self.follow_target(target, force, now);
+        for (id, kind, said) in taken.rounds {
             let detail = if self.state.rollout.step != Step::Idle {
                 format!(
                     "a round now: {} ({})",
@@ -670,7 +952,7 @@ impl Agent {
                     self.state.round.outcome, self.state.round.detail
                 )
             };
-            self.answer(&id, "reconcile-now", "done", &detail, now);
+            self.answer(&id, kind, "done", &format!("{said}{detail}"), now);
         }
     }
 
@@ -681,6 +963,13 @@ impl Agent {
             return;
         };
         self.state.target = Some(target);
+        // The owner's soak (#326) counts from the first poll that names a new release.
+        self.note_soak(target, now);
+        // The owner's runtime switch moves the dispatcher: the pool's target waits for it
+        // to end (the next poll names it again).
+        if self.state.switch.is_some() {
+            return;
+        }
         let step = self.state.rollout.step.clone();
         let in_flight = (step != Step::Idle)
             .then_some(self.state.rollout.target)
@@ -738,17 +1027,23 @@ impl Agent {
         self.go_to(target, now, &why);
     }
 
-    /// A new target: its bundle verified, the trust rules, the agent (#316), the tools,
-    /// then a round.
+    /// A new target: its bundle verified, the trust rules and the maintainers'
+    /// co-signature (#330), the agent (#316), the tools, then a round.
     fn go_to(&mut self, target: Release, now: i64, why: &str) {
-        let b = match self.fetch(target, now) {
-            Fetched::Bundle(b) => b,
-            Fetched::NewerAgent(outer, why) => {
-                return self.needs_newer_agent(target, &outer, &why, now)
+        let (b, cosigned) = match self.fetch(target, now) {
+            Fetched::Bundle(b, cosigned) => (b, cosigned),
+            Fetched::NewerAgent(outer, why, cosigned) => {
+                return self.needs_newer_agent(target, &outer, &why, &cosigned, now)
             }
             Fetched::Stop => return,
         };
-        trust::merge(&mut self.state, b.manifest());
+        // The floor's values never go down, so a bundle this agent would refuse for want of
+        // its co-signature moves them neither: a release signed by release.yml alone cannot
+        // raise min_release past every release to come (#330).
+        let need = self.verifier.cosignature().threshold();
+        if cosigned.cosigned.count() >= need {
+            trust::merge(&mut self.state, b.manifest());
+        }
         let ours = self.cfg.pool.trim_end_matches('/');
         if !b
             .manifest()
@@ -759,46 +1054,49 @@ impl Agent {
             return self.refuse(now, &Refusal::PoolNotListed(self.cfg.pool.clone()));
         }
         let rollback = match trust::admit(&self.state, target) {
-            Ok(()) => false,
-            Err(Refusal::BelowFloor { .. }) => match self.statement(target, &b, now) {
-                Some(Ok(st)) => {
-                    // A statement with `agent_to` moves the agent down first, through the
-                    // same steps; the statement is accepted only once the swap is done
-                    // (the agent below then applies the release), or with no move.
-                    if let Some(down) = st.agent_to().filter(|v| *v < self.version) {
-                        let ships = b.manifest().outer().agent();
-                        let moved = if ships.version() == down {
-                            self.move_agent(target, ships, now)
-                        } else {
-                            Err(format!(
-                                "agent_to {down}, but {target} ships agent {}",
-                                ships.version()
-                            ))
-                        };
-                        if let Err(e) = moved {
-                            let detail = format!(
-                                "the rollback statement to {target} moves the agent down to {down}: {e}; the statement waits"
-                            );
-                            return self.say(now, Outcome::Held, &detail);
-                        }
-                    }
-                    self.accept(target, &st, now);
-                    if self.exit.is_some() {
+            Ok(()) => {
+                // A co-signed rollback whose first round did not finish: the floor stands at
+                // its target now, and what its statement vouched for is what was kept, so
+                // GitHub not answering for the bundle's holds nothing (#330).
+                if !trust::vouched(&self.state, target) {
+                    if !self.answered(target, &cosigned, now) {
                         return;
                     }
-                    true
+                    if let Err(r) = trust::cosigned(target, need, &cosigned.cosigned, None) {
+                        return self.refuse(now, &r);
+                    }
                 }
-                Some(Err(r)) => return self.refuse(now, &r),
-                None => return,
-            },
+                false
+            }
+            Err(Refusal::BelowFloor { .. }) => {
+                if !self.roll_back(target, &b, &cosigned, now) {
+                    return;
+                }
+                true
+            }
             Err(r) => return self.refuse(now, &r),
+        };
+        // The owner's soak (#326): a new release waits, its verified bundle's revocations
+        // learnt meanwhile; a rollback statement skips it.
+        let soak = if rollback {
+            None
+        } else {
+            self.soaking(target, now)
         };
         // Only upward (D8): a higher agent first, before the round touches anything. One
         // that cannot be had now leaves this agent to apply the release (its min_agent
-        // admits it) and is tried again later.
+        // admits it) and is tried again later. It waits for the soak with its release,
+        // unless the manifest sets agent.urgent (a security release).
         let ships = b.manifest().outer().agent().clone();
-        if let Ok(true) = self.upgrade(target, &ships, now) {
-            return;
+        if soak.is_none() || ships.urgent() {
+            if let Ok(true) = self.upgrade(target, &ships, now) {
+                return;
+            }
+        }
+        if let Some(until) = soak {
+            let waits =
+                (ships.version() > self.version && !ships.urgent()).then(|| ships.version());
+            return self.soak_held(target, until, waits, now);
         }
         if let Err(e) = self.ensure_tools(b.manifest(), now) {
             let detail = format!("the pinned tools: {e}");
@@ -806,18 +1104,124 @@ impl Agent {
         }
         match Target::from_bundle(&b, &self.cfg.set_name) {
             Ok(t) => {
+                // The brake (#325): another release than the one that runs at most every ten
+                // minutes, and within the dispatcher's restarts; a rollback under a signed
+                // statement is exempt (the pool cannot forge one), and so is the first
+                // release a host applies (nothing ran before it). A round to the release the
+                // last change went to (a pull that failed, a quarantine lifted) is that change
+                // tried again: no new release change, but it recreates the dispatcher like
+                // any, so it needs room for its restarts too — which its replace and its
+                // revert's count as they happen (`Rollout::braked`).
+                let braked = !rollback && self.state.applied.is_some_and(|a| a != target);
+                if braked {
+                    let again =
+                        self.state.brake.last_release.as_deref() == Some(&target.to_string());
+                    let asks: &[Ask] = if again {
+                        &[Ask::Restart]
+                    } else {
+                        &[Ask::Release, Ask::Restart]
+                    };
+                    if let Err(why) = self.state.brake.check_room(now, asks, ROUND_RESTARTS) {
+                        let detail = format!("{target} waits: {why}");
+                        return self.say(now, Outcome::Held, &detail);
+                    }
+                    if !again {
+                        self.state.brake.record(now, &[Ask::Release]);
+                        self.state.brake.last_release = Some(target.to_string());
+                    }
+                }
                 self.start(now, target, rollback, why);
+                self.state.rollout.braked = braked;
                 self.pending = Some(t);
             }
             Err(e) => self.say(now, Outcome::Refused, &format!("{target}: {e}")),
         }
     }
 
-    /// A bundle only a higher agent reads: the agent updates itself from its (signed)
-    /// outer layer, or says why it cannot.
-    fn needs_newer_agent(&mut self, target: Release, outer: &Outer, why: &str, now: i64) {
+    /// A target below the floor, under the rollback statement the pool relays (design v2
+    /// §5.3) and the maintainers' co-signatures (#330): `true` once the statement is
+    /// accepted and the round may start; otherwise said why not.
+    fn roll_back(
+        &mut self,
+        target: Release,
+        b: &VerifiedBundle,
+        cosigned: &Cosignatures,
+        now: i64,
+    ) -> bool {
+        let (st, st_cosigned) = match self.statement(target, b, now) {
+            Some(Ok(found)) => found,
+            Some(Err(r)) => {
+                self.refuse(now, &r);
+                return false;
+            }
+            None => return false,
+        };
+        // The bundle's co-signatures decide only when the statement's fall short: a
+        // co-signed rollback to a release from before the threshold rose waits for nothing
+        // GitHub has.
+        let need = self.verifier.cosignature().threshold();
+        if st_cosigned.count() < need && !self.answered(target, cosigned, now) {
+            return false;
+        }
+        let bundle = &cosigned.cosigned;
+        if let Err(r) = trust::cosigned(target, need, bundle, Some(&st_cosigned)) {
+            self.refuse(now, &r);
+            return false;
+        }
+        let vouches = bundle.count() < need;
+        // A statement with `agent_to` moves the agent down first, through the same steps;
+        // the statement is accepted only once the swap is done (the agent below then
+        // applies the release), or with no move.
+        if let Some(down) = st.agent_to().filter(|v| *v < self.version) {
+            let ships = b.manifest().outer().agent();
+            let moved = if ships.version() == down {
+                self.move_agent(target, ships, now)
+            } else {
+                Err(format!(
+                    "agent_to {down}, but {target} ships agent {}",
+                    ships.version()
+                ))
+            };
+            if let Err(e) = moved {
+                let detail = format!(
+                    "the rollback statement to {target} moves the agent down to {down}: {e}; the statement waits"
+                );
+                self.say(now, Outcome::Held, &detail);
+                return false;
+            }
+        }
+        self.accept(target, &st, &st_cosigned, vouches, now);
+        self.exit.is_none()
+    }
+
+    /// A bundle only a higher agent reads: the agent updates itself from its (signed and,
+    /// where this agent requires it, co-signed) outer layer, or says why it cannot.
+    fn needs_newer_agent(
+        &mut self,
+        target: Release,
+        outer: &Outer,
+        why: &str,
+        cosigned: &Cosignatures,
+        now: i64,
+    ) {
         if let Err(r) = trust::admit(&self.state, target) {
             return self.refuse(now, &r);
+        }
+        if !self.answered(target, cosigned, now) {
+            return;
+        }
+        let need = self.verifier.cosignature().threshold();
+        if let Err(r) = trust::cosigned(target, need, &cosigned.cosigned, None) {
+            return self.refuse(now, &r);
+        }
+        // The agent it needs waits for the owner's soak with its release (#326), unless the
+        // manifest sets agent.urgent.
+        if let Some(until) = self
+            .soaking(target, now)
+            .filter(|_| !outer.agent().urgent())
+        {
+            let waits = (outer.agent().version() > self.version).then(|| outer.agent().version());
+            return self.soak_held(target, until, waits, now);
         }
         let detail = match self.upgrade(target, outer.agent(), now) {
             Ok(true) => return,
@@ -845,15 +1249,28 @@ impl Agent {
         );
     }
 
-    /// The target's bundle: from the cache, or GitHub, verified either way.
+    /// The target's bundle: from the cache, or GitHub, verified either way; then its
+    /// co-signatures (#330), as far as GitHub answers: whether the round waits for the
+    /// rest is `go_to`'s to say, after the trust rules and any rollback statement.
     fn fetch(&mut self, target: Release, now: i64) -> Fetched {
-        match self.cached_outcome(target) {
-            Some(BundleOutcome::Current(b)) => return Fetched::Bundle(b),
-            Some(BundleOutcome::NeedsNewerAgent { outer, why, .. }) => {
-                return Fetched::NewerAgent(Box::new(outer), why)
+        let Some((archive, outcome)) = self
+            .cached_archive(target)
+            .or_else(|| self.download(target, now))
+        else {
+            return Fetched::Stop;
+        };
+        let cosigned = self.cosignatures(target, &archive, now);
+        match outcome {
+            BundleOutcome::Current(b) => Fetched::Bundle(b, cosigned),
+            BundleOutcome::NeedsNewerAgent { outer, why, .. } => {
+                Fetched::NewerAgent(Box::new(outer), why, cosigned)
             }
-            None => {}
         }
+    }
+
+    /// The target's bundle from GitHub, verified and kept. `None`: refused or not had, and
+    /// said.
+    fn download(&mut self, target: Release, now: i64) -> Option<(Vec<u8>, BundleOutcome)> {
         let (name, sig) = bundle_names(target);
         let get = |pool: &mut Box<dyn Pool>, n: &str| pool.release_asset(target, n);
         let (archive, signature) = match (get(&mut self.pool, &name), get(&mut self.pool, &sig)) {
@@ -864,7 +1281,7 @@ impl Agent {
                     Outcome::PoolUnreachable,
                     &format!("{target}'s bundle: HTTP {s}"),
                 );
-                return Fetched::Stop;
+                return None;
             }
             (Net::NoAnswer(e), _) | (_, Net::NoAnswer(e)) => {
                 self.say(
@@ -872,7 +1289,7 @@ impl Agent {
                     Outcome::PoolUnreachable,
                     &format!("{target}'s bundle: {e}"),
                 );
-                return Fetched::Stop;
+                return None;
             }
         };
         let outcome = self.verifier.bundle(&archive, &signature);
@@ -887,7 +1304,7 @@ impl Agent {
                         detail: r.to_string(),
                     },
                 );
-                return Fetched::Stop;
+                return None;
             }
         };
         if release != target {
@@ -898,7 +1315,7 @@ impl Agent {
                     detail: format!("asked for {target}, the bundle is {release}"),
                 },
             );
-            return Fetched::Stop;
+            return None;
         }
         // Kept for the next poll, and for the new agent's self-test and health gate.
         let dir = self.paths.bundles();
@@ -910,23 +1327,19 @@ impl Agent {
             self.journal
                 .write(now, "cache", serde_json::json!({"detail": e}));
         }
-        match outcome {
-            Ok(BundleOutcome::Current(b)) => Fetched::Bundle(b),
-            Ok(BundleOutcome::NeedsNewerAgent { outer, why, .. }) => {
-                Fetched::NewerAgent(Box::new(outer), why)
-            }
-            Err(_) => Fetched::Stop,
-        }
+        outcome.ok().map(|o| (archive, o))
     }
 
     /// A target below the floor: only under a rollback statement rollback.yml signed on
     /// main that covers this host. `None`: no decision now (the pool did not answer).
+    /// With it, the maintainers' co-signatures over it (#330), which a statement deeper than
+    /// 14 days needs and which vouch for its target's bundle.
     fn statement(
         &mut self,
         target: Release,
         b: &VerifiedBundle,
         now: i64,
-    ) -> Option<Result<Statement, Refusal>> {
+    ) -> Option<Result<(Statement, Cosigned), Refusal>> {
         let floor = self.state.floor.unwrap_or(target);
         let relayed = match self.pool.rollback(target) {
             Net::Ok(Some(r)) => r,
@@ -973,26 +1386,49 @@ impl Agent {
         };
         let st = vs.statement();
         let created = b.manifest().outer().created();
+        let policy = self.verifier.cosignature();
+        let cosigned = policy.check(
+            cosignature::ROLLBACK_NAMESPACE,
+            &relayed.statement,
+            &relayed.cosignatures,
+        );
         Some(
-            trust::admit_rollback(&self.state, target, st, vs.signer().signed_at(), created)
-                .map(|()| st.clone()),
+            trust::admit_rollback(
+                &self.state,
+                target,
+                st,
+                vs.signer().signed_at(),
+                created,
+                cosigned.count(),
+                policy.deep_rollback(),
+            )
+            .map(|()| (st.clone(), cosigned)),
         )
     }
 
-    /// Records an admitted rollback statement: the floor goes to its `to`.
-    fn accept(&mut self, target: Release, st: &Statement, now: i64) {
+    /// Records an admitted rollback statement: the floor goes to its `to`. `vouches`: its
+    /// co-signatures stand in for the target bundle's (#330).
+    fn accept(
+        &mut self,
+        target: Release,
+        st: &Statement,
+        cosigned: &Cosigned,
+        vouches: bool,
+        now: i64,
+    ) {
         self.journal.write(
             now,
             "rollback-accepted",
-            serde_json::json!({"seq": st.seq(), "to": target.to_string(), "retracts_through": format!("v{}", st.retracts_through()), "run": st.run(), "agent_to": st.agent_to().map(|v| v.to_string())}),
+            serde_json::json!({"seq": st.seq(), "to": target.to_string(), "retracts_through": format!("v{}", st.retracts_through()), "run": st.run(), "agent_to": st.agent_to().map(|v| v.to_string()), "cosigned_by": cosigned.by()}),
         );
-        trust::accept_rollback(&mut self.state, st);
+        trust::accept_rollback(&mut self.state, st, vouches);
     }
 
     /// Starts (or preempts) a round, with the env files' values read again so the journal
     /// scrubs a token written since (the owner's Confirm, a rotation).
     fn start(&mut self, now: i64, target: Release, rollback: bool, why: &str) {
-        self.journal.set_secrets(env_secrets(&self.cfg.set_dir));
+        self.journal
+            .set_secrets(secrets_of(&self.cfg.set_dir, &self.cfg.secrets_dir));
         rollout::start(&mut self.state, &self.journal, now, target, rollback, why);
     }
 
@@ -1027,14 +1463,7 @@ impl Agent {
                 h.public_retry = (h.public_retry * 2).min(PUBLIC_RETRY_S);
             }
         }
-        // agent.toml as it is now, as `omarchy-agent token` and `dispatcher-env --write`
-        // read it, so the loop never puts back what they wrote; one that does not read now
-        // (an edit half done) leaves what the loop started with.
-        let envelope = match Envelope::of_data_dir(&self.paths.data) {
-            Some(Ok(e)) if dispatcher_env::dispatcher_path(&e.secrets_dir) => e,
-            _ => Envelope::of_config(&self.cfg),
-        };
-        let r = Rendered::now(&h.sources, &self.paths.data, Some(envelope));
+        let r = rendered(&self.cfg, &self.paths, &h.sources);
         let path = dispatcher_env::path_in(&self.cfg.set_dir);
         match dispatcher_env::refresh(&path, &r) {
             Ok(done) => {
@@ -1148,3 +1577,7 @@ fn jitter(base: i64, now: i64) -> i64 {
 #[cfg(test)]
 #[path = "agent_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cosignature_tests.rs"]
+mod cosignature_tests;

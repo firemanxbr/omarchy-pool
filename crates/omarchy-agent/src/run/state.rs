@@ -1,7 +1,9 @@
 //! `state.json` (design v2 §16.1, §16.2): what the agent knows across restarts — the trust
 //! floor, the merged `min_release` and `revoked`, the last accepted rollback statement, the
-//! rollout in flight, quarantines, the last round, the poll schedule, and the host orders
-//! (#344): the ids taken, their answers and a `retire-legacy` in flight.
+//! rollout in flight, quarantines, the last round, the poll schedule, the host orders
+//! (#344): the ids taken, their answers and a `retire-legacy` in flight —, (#325) the
+//! settings the pool narrowed, the brake's counters, and the owner's runtime switch, and
+//! (#326) the owner's soak of the release the pool names and what GitHub last showed.
 //!
 //! Written before each step acts, atomically (a temporary file, fsync, rename), so a
 //! restart anywhere resumes where it was. Read leniently (#316): unknown fields are
@@ -41,6 +43,11 @@ pub struct State {
     pub revoked: BTreeSet<Release>,
     /// `seq` of the last accepted rollback statement.
     pub statement_seq: Option<u64>,
+    /// The `to` of that statement when its maintainers' co-signatures vouched for `to`'s
+    /// bundle (#330): a round to it that did not finish the first time is tried again under
+    /// them while the floor stands there (`trust::vouched`). Lenient: an unreadable one is
+    /// none, which asks the bundle's own co-signatures again.
+    pub vouched: Option<Release>,
     /// The release whose set the host runs (`last-good/`).
     pub applied: Option<Release>,
     /// What the pool named last.
@@ -60,6 +67,19 @@ pub struct State {
     pub agent_skip: Option<Version>,
     /// The host orders (#344, design v2 §17.1).
     pub orders: Orders,
+    /// The settings the pool narrowed (#325); `None` until it gave one.
+    pub settings: Option<super::settings::Settings>,
+    /// The host-side brake's counters (#325): kept here so a restart resets nothing.
+    pub brake: super::brake::Brake,
+    /// The owner's runtime switch in flight (#325), and how the last one ended.
+    pub switch: Option<super::switch::Switch>,
+    pub switch_last: Option<super::switch::SwitchEnd>,
+    /// The owner's soak of the release the pool names (#326): kept here so a restart does
+    /// not start it again.
+    pub soak: Option<super::soak::Soak>,
+    /// Freeze detection (#326): GitHub's latest release as last read, and since when the
+    /// pool names an older one.
+    pub github: super::freeze::GitHub,
 }
 
 impl Default for State {
@@ -71,6 +91,7 @@ impl Default for State {
             min_release: None,
             revoked: BTreeSet::new(),
             statement_seq: None,
+            vouched: None,
             applied: None,
             target: None,
             quarantine: BTreeMap::new(),
@@ -82,6 +103,12 @@ impl Default for State {
             poll: Poll::default(),
             agent_skip: None,
             orders: Orders::default(),
+            settings: None,
+            brake: super::brake::Brake::default(),
+            switch: None,
+            switch_last: None,
+            soak: None,
+            github: super::freeze::GitHub::default(),
         }
     }
 }
@@ -120,6 +147,10 @@ pub struct Rollout {
     pub services: Vec<String>,
     /// Set while `last-good/` is applied after a failed guard: why it failed.
     pub reverting: Option<String>,
+    /// The pool's target started this round toward another release than the one that ran
+    /// (#325): each recreation of the dispatcher it makes — its replace, and its revert's —
+    /// is one of the pool's restarts on the brake.
+    pub braked: bool,
 }
 
 impl Default for Rollout {
@@ -133,6 +164,7 @@ impl Default for Rollout {
             why: String::new(),
             services: Vec::new(),
             reverting: None,
+            braked: false,
         }
     }
 }
@@ -338,6 +370,13 @@ const LENIENT: &[&str] = &[
     "poll",
     "agent_skip",
     "orders",
+    "settings",
+    "brake",
+    "switch",
+    "switch_last",
+    "vouched",
+    "soak",
+    "github",
 ];
 
 /// The lenient parser `load` uses (and the fuzz target).
@@ -533,7 +572,20 @@ mod tests {
             .keys()
             .filter(|k| !previous.contains(&k.as_str()))
             .collect();
-        assert_eq!(added, ["agent_skip", "orders"]);
+        assert_eq!(
+            added,
+            [
+                "agent_skip",
+                "brake",
+                "github",
+                "orders",
+                "settings",
+                "soak",
+                "switch",
+                "switch_last",
+                "vouched"
+            ]
+        );
     }
 
     #[test]

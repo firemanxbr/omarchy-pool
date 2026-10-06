@@ -3,6 +3,13 @@
 //! the same file: worker/src/hosts.ts) and the agent's `run/capacity.json`
 //! (schema 2, #333), read read-only before every claim.
 //!
+//! Its `sandbox` (#330, D43) is the sandboxed runtime the agent found — gVisor's `runsc` or
+//! Kata Containers, after a smoke run on a kernel that is not the engine's — which the
+//! dispatcher starts what a contributor wrote in on the native lane, and which the claim's
+//! `capacity.sandbox` says it applies (`null`: none), for the pool's selection and the host
+//! page. One it cannot read makes the whole file unread (no claim): a contributor's task
+//! never runs outside a sandbox the host may have.
+//!
 //! Seams: the agent's run loop (#315) refreshes the file; its free engine
 //! disk is the agent's last probe, in 10 GB steps, so the disk watcher's
 //! engine value is only as fresh as that: it kills on it once per probe (the
@@ -15,7 +22,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// The signed release's manifest, as built into this binary.
-const MANIFEST: &str = include_str!("../../../../factory/bundle/manifest.toml");
+pub(crate) const MANIFEST: &str = include_str!("../../../../factory/bundle/manifest.toml");
 
 /// The constants the dispatcher needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,9 +112,46 @@ pub struct File {
     pub below_minimum: bool,
     /// The native lane's architecture.
     pub arch: String,
+    /// The architectures this host runs emulated (#338, design v2 §7.5): the agent turned
+    /// each on after binfmt and a smoke run, within the owner's envelope.
+    pub emulated: Vec<String>,
     pub engine_free_gb: u64,
-    /// The claim's `capacity`, as the pool reads it (worker/src/hosts.ts parseCapacity).
+    /// The sandboxed runtime a contributor's tasks on the native lane run in (#330); `None` when
+    /// the host has none (`null`, or a file from an agent before #330).
+    pub sandbox: Option<Sandbox>,
+    /// The claim's `capacity`, as the pool reads it (worker/src/hosts.ts parseCapacity), with
+    /// the `sandbox` this dispatcher applies: the pool keeps a sandboxed host's emulated lanes
+    /// to the project's own recipes, and the host page says what is applied, not only found.
     pub claim: Value,
+}
+
+/// The host's sandboxed runtime, as the agent wrote it: the engine's name for it (what
+/// `--runtime` takes, in the spec's grammar) and which sandbox it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sandbox {
+    pub runtime: String,
+    /// `gvisor` or `kata`.
+    pub kind: String,
+}
+
+/// The file's `sandbox`: `Ok(None)` when it has none, `Err` when it says one that does not read.
+fn sandbox_of(v: Option<&Value>) -> Result<Option<Sandbox>, String> {
+    let s = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(s) => s,
+    };
+    let field = |k: &str| s.get(k).and_then(Value::as_str);
+    match (field("runtime"), field("kind")) {
+        (Some(runtime), Some(kind))
+            if super::spec::runtime_ok(runtime) && matches!(kind, "gvisor" | "kata") =>
+        {
+            Ok(Some(Sandbox {
+                runtime: runtime.to_owned(),
+                kind: kind.to_owned(),
+            }))
+        }
+        _ => Err(format!("a sandbox that does not read: {s}")),
+    }
 }
 
 /// Reads the agent's file; `None` when it is missing or not schema 2 (the dispatcher then claims nothing).
@@ -120,19 +164,30 @@ pub fn read(path: &Path) -> Option<File> {
     let units = u32::try_from(n("units")?).ok()?;
     let job_reserved = u32::try_from(n("job_reserved").unwrap_or(0)).ok()?;
     let lanes = v.get("lanes")?.as_array()?;
+    let mode = |l: &Value, m: &str| l.get("mode").and_then(Value::as_str) == Some(m);
     let arch = lanes
         .iter()
-        .find(|l| l.get("mode").and_then(Value::as_str) == Some("native"))?
+        .find(|l| mode(l, "native"))?
         .get("arch")?
         .as_str()?
         .to_owned();
+    let emulated = lanes
+        .iter()
+        .filter(|l| mode(l, "emulated"))
+        .filter_map(|l| l.get("arch")?.as_str())
+        .filter(|a| *a != arch)
+        .map(str::to_owned)
+        .collect();
     let disk = v.get("disk_free_gb")?;
+    let sandbox = sandbox_of(v.get("sandbox")).ok()?;
     let claim = serde_json::json!({
         "cpus": v.get("cpus")?, "mem_gb": v.get("mem_gb")?,
         "disk_free_gb": { "work": disk.get("work")?, "engine": disk.get("engine")? },
         "units": units, "job_reserved": job_reserved,
         "agent_slots": v.get("agent_slots").cloned().unwrap_or(Value::from(0)),
         "lanes": lanes,
+        "held_lanes": v.get("held_lanes").cloned().unwrap_or(Value::Array(Vec::new())),
+        "sandbox": sandbox.as_ref().map(|s| serde_json::json!({ "runtime": s.runtime, "kind": s.kind })),
     });
     Some(File {
         at: v
@@ -147,7 +202,9 @@ pub fn read(path: &Path) -> Option<File> {
             .and_then(Value::as_bool)
             .unwrap_or(true),
         arch,
+        emulated,
         engine_free_gb: disk.get("engine")?.as_u64()?,
+        sandbox,
         claim,
     })
 }
@@ -227,7 +284,120 @@ mod tests {
         );
         assert_eq!(f.claim["disk_free_gb"]["work"], 200);
         assert_eq!(f.claim["lanes"][0]["mode"], "native");
+        assert!(f.emulated.is_empty());
+        // An emulated lane (#338) goes with the claim as the agent wrote it, and so does a held one.
+        std::fs::write(&p, r#"{"schema":2,"at":"2026-10-01T00:00:00Z","cpus":12,"mem_gb":32,"page_kb":16,"disk_free_gb":{"work":200,"engine":150},"units":11,"job_reserved":1,"agent_slots":1,"lanes":[{"arch":"aarch64","mode":"native"},{"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true}],"held_lanes":[],"below_minimum":false}"#).unwrap();
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (f.arch.as_str(), f.emulated.as_slice()),
+            ("aarch64", &["x86_64".to_owned()][..])
+        );
+        assert_eq!(
+            f.claim["lanes"][1],
+            serde_json::json!({"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true})
+        );
+        std::fs::write(&p, r#"{"schema":2,"cpus":12,"mem_gb":32,"disk_free_gb":{"work":200,"engine":150},"units":11,"lanes":[{"arch":"x86_64","mode":"native"}],"held_lanes":[{"arch":"aarch64","reason":"needs a person: prep-root.sh installs qemu-user-static-binfmt"}]}"#).unwrap();
+        let f = read(&p).unwrap();
+        assert!(f.emulated.is_empty());
+        assert_eq!(f.claim["held_lanes"][0]["arch"], "aarch64");
         std::fs::write(&p, r#"{"schema":1,"units":3}"#).unwrap();
         assert!(read(&p).is_none(), "another schema: nothing is guessed");
+    }
+
+    /// The agent's own files (#338): its capacity tests write exactly these, so a field
+    /// renamed on either side fails one of the two crates.
+    #[test]
+    fn the_files_the_agent_writes_with_its_lanes_read_whole() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("capacity.json");
+        let agent = |name: &str| -> Value {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../omarchy-agent/tests/fixtures/capacity")
+                .join(name);
+            let text = std::fs::read_to_string(path).unwrap();
+            std::fs::write(&p, &text).unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        let wrote = agent("emulated-lane.json");
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (
+                f.arch.as_str(),
+                f.emulated.as_slice(),
+                f.units,
+                f.below_minimum
+            ),
+            ("aarch64", &["x86_64".to_owned()][..], 11, false)
+        );
+        assert_eq!(f.claim["lanes"], wrote["lanes"]);
+        assert_eq!(f.claim["held_lanes"], serde_json::json!([]));
+        let wrote = agent("held-lane.json");
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (f.arch.as_str(), f.emulated.len(), f.units),
+            ("x86_64", 0, 7)
+        );
+        assert_eq!(f.claim["lanes"], wrote["lanes"]);
+        assert_eq!(f.claim["held_lanes"], wrote["held_lanes"]);
+        assert!(f.claim["held_lanes"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("needs a person: prep-root.sh installs qemu-user-static-binfmt"));
+        assert_eq!(f.sandbox, None, "`sandbox: null`: none");
+        assert_eq!(
+            f.claim["sandbox"],
+            Value::Null,
+            "the claim says it applies none"
+        );
+        // The Studio with gVisor (#330): the runtime its community tasks start in.
+        agent("sandboxed.json");
+        let f = read(&p).unwrap();
+        assert_eq!(
+            f.sandbox,
+            Some(Sandbox {
+                runtime: "runsc".into(),
+                kind: "gvisor".into()
+            })
+        );
+        assert_eq!(
+            f.claim["sandbox"],
+            serde_json::json!({ "runtime": "runsc", "kind": "gvisor" }),
+            "the claim says the runtime this dispatcher applies"
+        );
+    }
+
+    /// A sandbox that does not read stops the claims: never a community task outside it.
+    #[test]
+    fn a_sandbox_the_dispatcher_cannot_read_leaves_the_whole_file_unread() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("capacity.json");
+        let with = |sandbox: &str| {
+            std::fs::write(&p, format!(r#"{{"schema":2,"at":"t","cpus":12,"mem_gb":32,"disk_free_gb":{{"work":200,"engine":150}},"units":11,"lanes":[{{"arch":"aarch64","mode":"native"}}],"below_minimum":false{sandbox}}}"#)).unwrap();
+            read(&p)
+        };
+        let older = with("").unwrap();
+        assert_eq!(older.sandbox, None, "an agent before #330");
+        assert_eq!(
+            older.claim["sandbox"],
+            Value::Null,
+            "none applied, and said"
+        );
+        assert_eq!(with(r#","sandbox":null"#).unwrap().sandbox, None);
+        assert_eq!(
+            with(r#","sandbox":{"runtime":"kata-qemu","kind":"kata"}"#)
+                .unwrap()
+                .sandbox
+                .unwrap()
+                .runtime,
+            "kata-qemu"
+        );
+        for bad in [
+            r#","sandbox":{"runtime":"--privileged","kind":"gvisor"}"#,
+            r#","sandbox":{"runtime":"runsc","kind":"runc"}"#,
+            r#","sandbox":{"runtime":"runsc"}"#,
+            r#","sandbox":"runsc""#,
+        ] {
+            assert!(with(bad).is_none(), "{bad}");
+        }
     }
 }

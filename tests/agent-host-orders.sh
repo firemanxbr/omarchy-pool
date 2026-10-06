@@ -13,7 +13,20 @@
 #     its network removed — exactly that project's: the other project, the
 #     task container and the dispatcher run on as they were, and the legacy
 #     directory's files stay; legacy.json records the retirement and the
-#     order is answered done.
+#     order is answered done;
+#   - #325's settings, a narrowing of units end to end: set-units 2 and
+#     set-emulate [] two seconds apart (the brake's pace), the dispatcher
+#     recreated with the narrowed run/capacity.json it mounts while the task
+#     container runs on; set-units 5, above what the host detected, refused
+#     with nothing changed; diagnostics refused while the envelope does not
+#     allow them, then the stand-in dispatcher's own log lines, the worker
+#     token it printed scrubbed;
+#   - #328's owner control without a visit: a passkey pinned at the host
+#     (a virtual authenticator) signs a widening of max_units 2 → 6, counted
+#     into the run/capacity.json the recreated dispatcher mounts while the
+#     task runs on; the same document again refused as a replay; an agent
+#     key sealed to the host's seal key written to the secrets directory's
+#     agent.env and found in neither the dispatcher's env nor its mounts.
 #
 # The switch guards that then refuse in that directory (rollout.sh, setup.sh,
 # omarchy-worker, the updater) run against the marker the agent writes in the
@@ -46,5 +59,8 @@ esac
 image="${BUSYBOX%%@*}"
 export OMARCHY_STANDIN_IMAGE="${image%:*}@${BUSYBOX#*@}"
 export OMARCHY_AGENT_ENGINE_SOCKET="$socket"
-cargo test --locked -p omarchy-agent --lib -- --ignored --exact \
-  run::engine_tests::real_engine_host_orders_reconcile_and_retire_the_legacy_set --nocapture
+cargo test --locked -p omarchy-agent --lib -- --ignored --exact --test-threads 1 \
+  run::engine_tests::real_engine_host_orders_reconcile_and_retire_the_legacy_set \
+  run::engine_tests::real_engine_settings_narrow_the_mounted_capacity_and_diagnostics_are_scrubbed \
+  run::engine_tests::real_engine_owner_widens_the_mounted_capacity_and_seals_keys_the_dispatcher_never_sees \
+  --nocapture

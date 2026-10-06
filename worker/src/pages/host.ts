@@ -8,8 +8,12 @@
  * - The numbers: CPUs and memory, the units the pool counts from them, free
  *   disk on the work root and the engine's data root, and the agent slots —
  *   as its agent last reported them; its lanes (native, emulated); its
- *   isolation level; the release it applied against the pool's, and the last
- *   round's outcome.
+ *   isolation level and its sandboxed runtime (#330, design v2 §10.4; D43:
+ *   gVisor or Kata, as its dispatcher's claims say it applies it — what a
+ *   contributor wrote runs in it on the native lane, and its emulated lanes
+ *   take the project's own recipes only — or none, with why one its engine
+ *   has is not used or why its claims hold); the release it applied against
+ *   the pool's, and the last round's outcome.
  * - Its leases: what its registration holds now, each with its lane and
  *   units (#337).
  * - The pool's cap on its units (#337, design v2 §7.2): its owner or any
@@ -20,11 +24,41 @@
  *   registration's page, where Drain and Resume are.
  * - Its host orders (#344, design v2 §17.1): Reconcile now (a round now, its
  *   owner or any maintainer) and the last orders with their agent's answers.
+ * - Whether it sleeps (#329, design v2 §19.2): a Mac's agent reports
+ *   `asleep` before the Mac sleeps and after it woke; a sleeping host has
+ *   zero free units — the pool hands it nothing until it wakes, and a task
+ *   the sleep caught (the lid closed under it) goes back to the queue when
+ *   its lease expires. Its head says so, for anyone.
  * - Its legacy set (#344, design v2 §21.1 step 6): the compose project its
  *   install recorded beside the bundle, its state and directory as its agent
  *   reports them, and Retire legacy set — its owner's, with a passkey: the
  *   agent stops and removes that project and leaves the .omarchy-agent
  *   marker in its directory.
+ * - Its settings (#325, design v2 §12, §17.1, §18.1): the units it gives and
+ *   its emulated lanes, narrowed from the site inside the envelope its owner
+ *   wrote at the host — the envelope shown, every value above it greyed (the
+ *   agent refuses one anyway, and the answer shows) —, whether the envelope
+ *   allows diagnostics, and the brake's last hour; P4's orders beside
+ *   Reconcile now — Retry release, Rotate token, Diagnostics — and each
+ *   order's value and answer on the journal, a diagnostics order's lines
+ *   read in place.
+ * - Its soak and the gate (#326, design v2 D16, §5.5, §18.1): the soak its
+ *   owner set and until when the release the pool names waits on it; where
+ *   its registration stands at the pool's 426 gate and why — claiming through
+ *   its soak, within the rollout's grace, or refused, with what ended the
+ *   grace (the soak over, the two hours after the deploy, a quarantine) —;
+ *   and, for anyone, a warning when its agent reports the pool behind GitHub
+ *   (freeze detection): GitHub has shown a newer release for over a day.
+ *
+ * - Owner control (#328, design v2 §12, §14, D6 b): the passkey pinned at
+ *   the host, its seal key with its fingerprint, the envelope's keys a
+ *   widening may set and the names of its agent keys; Make a pin (pasted at
+ *   the host once, `omarchy-agent envelope pin-passkey`), Confirm the seal key
+ *   (compared with `omarchy-agent status`), Widen the envelope — the proposed
+ *   values shown, then signed with the pinned passkey — and Set agent keys:
+ *   each value sealed to the host's seal key in this browser
+ *   (sealAgentKey, whose own source is inlined here), so the pool relays
+ *   only ciphertext. Its owner's; the host checks every signature again.
  *
  * Anyone sees the name, the owner, the status, the architectures and the
  * release; the capacity, the hostname and the host key's fingerprint are its
@@ -34,7 +68,8 @@
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
-import { HOST_ORDER_TTL_MIN, HOST_REPORT_FRESH_MIN, OWNER_NOT_MAINTAINER } from "../hosts";
+import { AGENT_KEY_NAMES, HOST_ORDER_TTL_MIN, HOST_OWNER_AGENT, HOST_REPORT_FRESH_MIN, HOST_SETTINGS_AGENT, OWNER_NOT_MAINTAINER, WIDENABLE } from "../hosts";
+import { sealAgentKey } from "../seal";
 import { lucide } from "./kit";
 
 const CSS = String.raw`
@@ -59,11 +94,25 @@ const CSS = String.raw`
   .hp-note { margin: 12px 0 0; font-size: 12.5px; color: var(--dim); max-width: 760px; }
   .hp-stopped { margin: 0; padding: 10px 12px; border: 1px solid var(--red); font-size: 13px; max-width: 760px; overflow-wrap: anywhere; }
   .hp-stopped:empty { display: none; }
+  .hp-freeze { margin: 0; padding: 10px 12px; border: 1px solid var(--status-warn); font-size: 13px; max-width: 760px; overflow-wrap: anywhere; }
+  .hp-freeze:empty { display: none; }
   .hp-blocked { color: var(--red); }
   .hp .mono { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
   .hp-cap { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
   .hp-cap:empty { display: none; }
-  @media (max-width: 520px) { .hp-ops .op-btn { flex: 1 1 100%; justify-content: center; } }
+  .hp-field { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .hp-field select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 0; background: var(--bg-deep); color: var(--text); font: 13px var(--font-mono); }
+  .hp-lanes { display: inline-flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+  .hp-lanes label { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); }
+  .hp-diag { margin: 0; padding: 12px 16px; max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.5 var(--font-mono); border-top: 1px solid var(--line); }
+  .hp-diag:empty { display: none; }
+  .hp-pin { margin: 12px 0 0; padding: 10px 12px; max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.5 var(--font-mono); border: 1px solid var(--line); }
+  .hp-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px 16px; margin: 12px 0 0; }
+  .hp-form:empty { display: none; }
+  .hp-form label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+  .hp-form input, .hp-form select, .hp-form textarea { padding: 5px 8px; border: 1px solid var(--line); border-radius: 0; background: var(--bg-deep); color: var(--text); font: 13px var(--font-mono); }
+  .hp-form .wide { grid-column: 1 / -1; }
+  @media (max-width: 520px) { .hp-ops .op-btn { flex: 1 1 100%; justify-content: center; } .hp-field { flex: 1 1 100%; } }
   @media (max-width: 520px) { .hp-kv { grid-template-columns: 1fr; gap: 2px 0; } .hp-kv dd { margin-bottom: 8px; } }
 `;
 
@@ -75,6 +124,7 @@ const BODY = String.raw`
       <p class="hp-id" id="hp-id"></p>
       <p class="hp-lede" id="hp-lede"></p>
       <p class="hp-stopped" id="hp-stopped" role="status"></p>
+      <p class="hp-freeze" id="hp-freeze" role="status"></p>
     </section>
 
     <div class="op-stats" id="hp-stats"></div>
@@ -98,15 +148,41 @@ const BODY = String.raw`
       <div class="op-card-f"><a href="/docs/security-model#stopping-a-host">Suspend, retire, drain →</a></div>
     </section>
 
+    <section class="op-card" id="hp-settings" aria-labelledby="hp-settings-h" hidden>
+      <div class="op-card-h"><b id="hp-settings-h">Settings</b><small>narrowed from the site, inside the envelope its owner wrote at the host</small></div>
+      <dl class="hp-kv" id="hp-settings-kv"></dl>
+      <div class="op-card-b">
+        <div class="hp-ops" id="hp-settings-ops"></div>
+        <p class="hp-note">The pool only narrows: fewer units, an emulated lane off. Its agent takes the setting at its next poll and the dispatcher claims by it from its next claim; a task already running above it finishes. Anything above the envelope — greyed here — its agent refuses: only its owner widens the envelope, at the host. The host brakes how fast it changes: four narrowings, six dispatcher restarts and twenty orders an hour, one release change every ten minutes.</p>
+      </div>
+      <div class="op-card-f"><a href="/docs/worker-host#settings-and-host-orders">Settings, host orders and the brake →</a></div>
+    </section>
+
+    <section class="op-card" id="hp-owner" aria-labelledby="hp-owner-h" hidden>
+      <div class="op-card-h"><b id="hp-owner-h">Owner control</b><small>its envelope widened and its agent keys set from here, signed with the passkey pinned at the host</small></div>
+      <dl class="hp-kv" id="hp-owner-kv"></dl>
+      <div class="op-card-b">
+        <div class="hp-ops" id="hp-owner-ops"></div>
+        <div class="hp-form" id="hp-owner-form"></div>
+        <pre class="hp-pin" id="hp-pin" hidden></pre>
+        <p class="hp-note">Its owner pins a passkey at the host once: Make a pin, then paste the command at the host as the agent's user. From then on the host takes a widening of its envelope, and its agent keys, only when that passkey signed them: the page shows the proposed values, your passkey signs them, the pool relays them, and the host checks the passkey, the page's origin, your presence and verification, and that nothing was taken twice. Agent keys are sealed to the host's seal key in this browser — confirm its fingerprint against <code>omarchy-agent status</code> once — so the pool holds only ciphertext, and the host writes them to its agent.env alone. Narrowing needs none of this: Settings, above.</p>
+      </div>
+      <div class="op-card-f"><a href="/docs/worker-host#owner-control-without-a-visit">Owner control without a visit →</a></div>
+    </section>
+
     <section class="op-card" id="hp-orders" aria-labelledby="hp-orders-h">
       <div class="op-card-h"><b id="hp-orders-h">Host orders</b><small>what only its agent can do, each with its answer</small></div>
       <div class="op-card-b">
         <div class="hp-ops" id="hp-order-ops">
           <button type="button" class="op-btn" data-host-act="reconcile" disabled>${lucide("refresh-cw", 14)}Reconcile now</button>
+          <button type="button" class="op-btn" data-host-act="retry-release" disabled>${lucide("package-check", 14)}Retry release</button>
+          <button type="button" class="op-btn" data-host-act="rotate-token" disabled>${lucide("key-round", 14)}Rotate token</button>
+          <button type="button" class="op-btn" data-host-act="diagnostics" disabled>${lucide("scroll-text", 14)}Diagnostics</button>
         </div>
-        <p class="hp-note">Reconcile now: its agent runs a round at its next poll — the release the pool names, checked and rolled out as any round — and answers. An order its agent has not taken within ${HOST_ORDER_TTL_MIN} minutes expires.</p>
+        <p class="hp-note">Reconcile now: its agent runs a round at its next poll — the release the pool names, checked and rolled out as any round — and answers. Retry release lifts the quarantine of a release its guard reverted and tries it again. Rotate token: a new worker token for its dispatcher, recreated with it; the old one works ten more minutes. Diagnostics: the dispatcher's last 500 log lines, scrubbed of its secrets, when its envelope allows them. An order its agent has not taken within ${HOST_ORDER_TTL_MIN} minutes expires.</p>
       </div>
       <div class="hp-table"><table class="op-table"><thead><tr><th>Order</th><th>By</th><th>Given</th><th>State</th><th>Its agent's answer</th></tr></thead><tbody id="hp-order-rows"></tbody></table></div>
+      <pre class="hp-diag" id="hp-diag" aria-live="polite"></pre>
     </section>
 
     <section class="op-card" id="hp-legacy" aria-labelledby="hp-legacy-h" hidden>
@@ -135,10 +211,20 @@ const SCRIPT = String.raw`
   var BASE = "/api/v1/hosts/" + encodeURIComponent(ID);
   var FRESH_MIN = ${HOST_REPORT_FRESH_MIN};
   var PILL = { active: ["ok", "active"], "pending-owner": ["warn", "waits for its owner's Confirm"], suspended: ["fail", "suspended"], retired: ["na", "retired"] };
-  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14), reconcile: lucide("refresh-cw", 14), legacy: lucide("file-archive", 14) })};
+  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14), reconcile: lucide("refresh-cw", 14), legacy: lucide("file-archive", 14), units: lucide("hard-drive", 14), lanes: lucide("git-fork", 14), retry: lucide("package-check", 14), token: lucide("key-round", 14), diag: lucide("scroll-text", 14), pin: lucide("shield-check", 14), seal: lucide("lock", 14), widen: lucide("arrow-up-right", 14) })};
+  var SETTINGS_AGENT = ${JSON.stringify(HOST_SETTINGS_AGENT)};
+  var OWNER_AGENT = ${JSON.stringify(HOST_OWNER_AGENT)};
+  var WIDENABLE = ${JSON.stringify(WIDENABLE)};
+  var AGENT_KEYS = ${JSON.stringify(AGENT_KEY_NAMES)};
+  // The owner's agent keys are sealed in this browser to the host's seal key (#328): this is worker/src/seal.ts's own function, its source
+  // inlined, so the page seals with exactly the code the tests run.
+  ${sealAgentKey.toString()}
   var ORDER_PILL = { open: ["warn", "waits for its agent"], done: ["ok", "done"], refused: ["fail", "refused"], failed: ["fail", "failed"], expired: ["na", "expired"], cancelled: ["na", "cancelled"] };
   var LEGACY_PILL = { running: ["warn", "running"], stopped: ["na", "stopped"], gone: ["na", "no container left"], retiring: ["warn", "being retired"], retired: ["ok", "retired"], unknown: ["na", "not seen"] };
   var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)};
+  var SANDBOX_KINDS = { gvisor: "gVisor", kata: "Kata Containers" };
+  // A sleeping host (#329): what its sleep means for the pool, in the head's words.
+  var SLEEPS = "the pool hands it nothing until it wakes, and a task the sleep caught goes back to the queue when its lease expires.";
   var H = null, PK = {}, TIMER = 0;
   function stat(k, n, s) { return '<div class="op-stat"><span class="k">' + esc(k) + '</span><span class="n">' + n + '</span><span class="s">' + (s || "") + '</span></div>'; }
   function kv(k, v) { return '<dt>' + esc(k) + '</dt><dd>' + v + '</dd>'; }
@@ -148,29 +234,47 @@ const SCRIPT = String.raw`
     api("GET", BASE).then(function (d) {
       if (d.__status === 404) { $("#hp-name").textContent = ID; $("#hp-lede").textContent = "no such host: it was never enrolled"; endSkeleton(); return; }
       H = d.host; PK = d.passkey || {};
-      draw(d.host, d.leases || [], d.pool || {});
+      draw(d.host, d.leases || [], d.pool || {}, d.update || null);
       drawOps(d.host, d.can || { why: {} });
+      drawSettings(d.host, d.can || { why: {} });
       drawOrders(d.host, d.orders, d.can || { why: {} });
+      drawOwner(d.host, d.can || { why: {} });
       drawLegacy(d.host, d.can || { why: {} });
       TIMER = setTimeout(function () { if (!document.hidden) load(); }, 30000);
     }).catch(function (e) { noAnswer("host", e, "#hp-lede"); });
   }
-  function draw(h, leases, pool) {
+  // Its soak (#326): the minutes its owner set at the host, and until when the release the pool names waits on it.
+  function soakWords(h) {
+    var k = h.soak;
+    if (!k || !k.minutes) return '<span class="muted">none — a new release goes at its next poll</span>';
+    return esc(String(k.minutes)) + " minutes" + (k.until ? (Date.parse(k.until) > Date.now() ? " — " + esc(h.release_target || "the pool's release") + " waits until " + when(k.until) : " — over " + when(k.until) + ": its round brings " + esc(h.release_target || "the release")) : "") + '; a rollback statement skips it, Reconcile now does not';
+  }
+  // Where its registration stands at the 426 gate (#326): claiming through its soak, on its last-good after a revert (#342), within the
+  // grace, or refused — on a revoked release too, whatever it runs against the pool's — and why.
+  function gateLine(u) {
+    if (!u) return '<span class="muted">its registration has not claimed with a release yet</span>';
+    if (!u.outdated && !u.revoked) return '<span class="muted">it runs the pool\'s release</span>';
+    return u.required ? '<span class="hp-blocked">' + esc(u.words || "refused with 426") + "</span>" : esc(u.words || "");
+  }
+  function draw(h, leases, pool, update) {
     document.title = h.name + " · Host · omarchy-pool";
     $("#hp-name").textContent = h.name;
     var p = PILL[h.status] || ["na", h.status];
-    $("#hp-status").innerHTML = '<span class="op-pill ' + p[0] + '">' + esc(p[1]) + '</span>';
+    $("#hp-status").innerHTML = '<span class="op-pill ' + p[0] + '">' + esc(p[1]) + '</span>' + (h.asleep ? ' <span class="op-pill na" title="' + esc(SLEEPS) + '">asleep</span>' : "");
     $("#hp-id").textContent = h.id + (h.worker ? " · registration " + h.worker : "");
-    $("#hp-lede").innerHTML = "A maintainer host of " + personLink(h.owner) + (h.where ? ", " + esc(h.where) : "") + " — " + esc((h.arches || []).join(", ") || "no lane reported") + ". " + (h.status === "pending-owner" ? 'It waits for its owner to compare its fingerprint and press Confirm, on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>; nothing claims before that.' : h.alive ? "Its agent reports." : '<span class="muted">Its agent has not reported in the last ' + esc(String(FRESH_MIN)) + ' minutes.</span>');
+    $("#hp-lede").innerHTML = "A maintainer host of " + personLink(h.owner) + (h.where ? ", " + esc(h.where) : "") + " — " + esc((h.arches || []).join(", ") || "no lane reported") + ". " + (h.status === "pending-owner" ? 'It waits for its owner to compare its fingerprint and press Confirm, on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>; nothing claims before that.' : h.asleep ? "It sleeps (its agent said so " + when(h.asleep_since) + "): " + esc(SLEEPS) : h.alive ? "Its agent reports." : '<span class="muted">Its agent has not reported in the last ' + esc(String(FRESH_MIN)) + ' minutes' + (h.asleep_since ? "; its last report said it was going to sleep, " + when(h.asleep_since) : "") + '.</span>');
     // Who stopped it and why, for anyone (the journal's words): a suspension or a retirement, and the maintainer list's stop.
     var stopped = [];
     if ((h.status === "suspended" || h.status === "retired") && h.status_by) stopped.push(esc(h.status === "suspended" ? "Suspended" : "Retired") + " by " + personLink(h.status_by) + (h.status_at ? " " + when(h.status_at) : "") + (h.status_reason ? ": " + esc(h.status_reason) : "") + (h.status === "suspended" ? ". It claims nothing until " + personLink(h.owner) + " resumes it." : ". A new install enrolls a new host."));
     if (h.claims_stopped_at && h.status !== "retired") stopped.push("Its claims stopped " + when(h.claims_stopped_at) + ": " + esc(NOT_LISTED) + ' (<a href="/docs/governance">factory/MAINTAINERS.toml</a>). Its running tasks finish; listed again, ' + personLink(h.owner) + ' resumes their hosts on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>.');
     $("#hp-stopped").innerHTML = stopped.join("<br>");
+    // Freeze detection (#326): its agent says GitHub has shown a newer release than the pool names for over a day; it acts on nothing.
+    var fz = h.pool_behind_github;
+    $("#hp-freeze").innerHTML = fz ? "Pool behind GitHub: GitHub's latest release has been " + esc(fz.github) + " since " + when(fz.since) + " while the pool names " + esc(fz.pool) + ' — a pool held on an old release (freeze detection). Its agent changes nothing for it: check the pool\'s deploys (the runbook\'s <a href="/docs/runbook#a-new-maintainer-host">A new maintainer host</a>, Freeze detection).' : "";
     var c = h.capacity;
     $("#hp-stats").innerHTML = c ? [
       stat("CPUs", num(c.cpus), "memory " + num(c.mem_gb) + " GB"),
-      stat("Units", h.units === null || h.units === undefined ? "—" : num(h.units), h.pool_cap_units !== null && h.pool_cap_units !== undefined ? "capped at " + num(h.pool_cap_units) + " by the pool" : "1 CPU and 2 GB each, one kept for pool jobs"),
+      stat("Units", h.units === null || h.units === undefined ? "—" : num(h.units), h.asleep ? "asleep: none free until it wakes" : h.pool_cap_units !== null && h.pool_cap_units !== undefined ? "capped at " + num(h.pool_cap_units) + " by the pool" : "1 CPU and 2 GB each, one kept for pool jobs"),
       stat("Disk free", num(c.disk_free_gb.work) + " GB", "work root · engine " + num(c.disk_free_gb.engine) + " GB"),
       stat("Agent slots", c.agent_slots === null || c.agent_slots === undefined ? "—" : num(c.agent_slots), "model tasks at once"),
       stat("Release", esc(h.release_applied || "—"), pool.version ? "the pool runs " + esc(pool.version) : ""),
@@ -184,17 +288,42 @@ const SCRIPT = String.raw`
         kv("Host key", '<span class="mono">' + esc(h.fingerprint) + '</span>'),
         kv("Machine", esc((h.hostname || "?") + " · " + (h.os || "?") + " " + (h.arch || "?") + (h.page_kb ? ", " + h.page_kb + "K pages" : ""))),
         kv("Isolation", esc(h.isolation || "?") + (h.dedicated ? " (dedicated)" : "")),
+        kv("Sandbox", sandboxWords(h)),
         kv("Lanes", lanes || "—"),
         kv("Capacity", h.below_minimum ? esc(h.below_minimum) : c ? "meets the minimum to join" : "—"),
         kv("Pool cap", capWords(h)),
         kv("Reserving", h.reserving_task ? 'for <a href="/build/' + esc(h.reserving_task) + '">#' + esc(h.reserving_task) + '</a> since ' + when(h.reserving_since) + ': it takes nothing else but pool jobs until its units fit it' : '<span class="muted">no</span>'),
-        kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + ")" : "")),
+        kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + (h.rolled_back_at ? " " + when(h.rolled_back_at) : "") + ")" : "") + (h.last_good ? "<br>" + pillHtml("warn", "last-good", "its registration claims on its last-good; past this the pool hands it nothing until it runs the pool's release") + " " + esc(h.last_good) : "")),
+        kv("Soak", soakWords(h)),
+        kv("Claims", gateLine(update)),
+        kv("GitHub", h.soak && h.soak.github_latest ? "its latest release is " + esc(h.soak.github_latest) + ", as its agent read it" : '<span class="muted">not read yet</span>'),
         kv("Last round", round),
         kv("Agent", esc(h.agent_version || "?") + (h.provider ? " · " + esc(h.provider) + (h.model ? " " + esc(h.model) : "") : "")),
         kv("Reported", when(h.reported_at)),
       ].join("");
     $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + (t.size > 1 ? " · size " + esc(t.size) : "") + '</td><td>' + esc(t.name) + (t.fenced ? ' ' + pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : '') + '</td><td>' + esc(t.arch) + '</td><td>' + esc(t.lane || "—") + '</td><td>' + esc(t.units === null || t.units === undefined ? "—" : t.units) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="7" class="muted">no lease — nothing runs on it now</td></tr>';
     endSkeleton();
+  }
+  // Its sandboxed runtime (#330, D43): the one its dispatcher applies, as its last claim said — what a contributor wrote (their builds,
+  // the project's review rebuilds of them, trials, audits) runs in it on the native lane, so a container escape lands in the sandbox's
+  // kernel, not on the host, and its emulated lanes take the project's own recipes only — beside what its agent found and why one is
+  // not used. Only what the dispatcher says is claimed: one before #330 ignores what its agent found.
+  function sandboxWords(h) {
+    var c = h.capacity || {}, found = c.sandbox, a = h.sandbox_applied;
+    var named = function (s) { return esc((SANDBOX_KINDS[s.kind] || s.kind) + " (" + s.runtime + ")"); };
+    var held = c.sandbox_held ? '<br><span class="muted">' + esc(c.sandbox_held) + '</span>' : "";
+    var none = "none — what its contributors wrote runs on the engine's own runtime, at its isolation level";
+    if (!a) {
+      if (found) return '<span class="muted">its agent found ' + named(found) + ", but its dispatcher does not say it applies it (one before #330): what its contributors wrote may run on the engine's own runtime</span>" + held;
+      if (found === null) return none + held;
+      return '<span class="muted">its agent does not say (one before the sandbox, #330)</span>' + held;
+    }
+    var stop = a.held ? '<br><span class="muted">its claims hold: ' + esc(a.held) + '</span>' : "";
+    if (!a.sandbox) return none + stop + held;
+    var lanes = h.lanes || [], native = lanes.filter(function (l) { return l.mode === "native"; }).map(function (l) { return l.arch; });
+    var emulated = lanes.filter(function (l) { return l.mode === "emulated"; }).map(function (l) { return l.arch; });
+    return named(a.sandbox) + " — what its contributors wrote (their builds, the project's review rebuilds, trials, audits) runs in it on the " + esc(native.join(", ") || "native") + " lane: a container escape lands in its kernel, not on the host"
+      + (emulated.length ? "; its emulated " + esc(emulated.join(", ")) + " lane takes the project's own recipes only" : "") + stop + held;
   }
   // The pool's cap (#337): what the pool hands it at most, whatever its envelope says; none lets its count decide.
   function capWords(h) { return h.pool_cap_units === null || h.pool_cap_units === undefined ? '<span class="muted">none — its count decides</span>' : esc(String(h.pool_cap_units)) + " unit" + (h.pool_cap_units === 1 ? "" : "s") + (h.units !== null && h.units !== undefined ? " of its " + esc(String(h.units)) : ""); }
@@ -209,14 +338,194 @@ const SCRIPT = String.raw`
       gate('<button type="button" class="op-btn danger" data-host-act="retire">' + ICON.retire + 'Retire</button>', can.retire === true, why.retire || ""),
     ].join("") + (h.worker && h.status !== "retired" ? '<a class="op-btn" href="/worker/' + encodeURIComponent(h.worker) + '#wk-operate">' + ICON.drain + 'Drain or resume its claims</a>' : "");
   }
-  // Host orders (#344): Reconcile now as the door answers it for this reader, and the last orders with their agent's answers.
+  function lanesText(a) { return a && a.length ? a.map(esc).join(", ") : "none"; }
+  // Its settings (#325): what its agent reports — the units it gives and its emulated lanes, the envelope they narrow inside, what of
+  // them the envelope leaves out — and the controls: the units up to what it detected, greyed above its envelope; a lane per detected
+  // or allowed architecture, greyed where its envelope excludes it; the brake's last hour.
+  function drawSettings(h, can) {
+    var why = can.why || {}, s = h.settings;
+    $("#hp-settings").hidden = h.fingerprint === undefined;
+    if (h.fingerprint === undefined) return;
+    if (!s) {
+      $("#hp-settings-kv").innerHTML = kv("Settings", '<span class="muted">its agent reports none yet: agent ' + esc(SETTINGS_AGENT) + ' or later does</span>');
+      $("#hp-settings-ops").innerHTML = "";
+      return;
+    }
+    var env = s.envelope || {}, eff = s.effective || {}, max = env.max_units, det = env.detected_units, b = h.brake;
+    $("#hp-settings-kv").innerHTML = [
+      kv("Units", (eff.units === null || eff.units === undefined ? "—" : num(eff.units)) + (s.units === null || s.units === undefined ? " — its envelope's" : " — narrowed from the site") + (max === null || max === undefined ? "" : "; its envelope gives " + num(max) + (det !== null && det !== undefined && det !== max ? " of the " + num(det) + " detected" : ""))),
+      kv("Emulated lanes", lanesText(eff.emulated) + (s.emulate === null || s.emulate === undefined ? " — its envelope's" : " — set from the site") + "; detected " + lanesText(env.detected_lanes) + (env.emulate === null || env.emulate === undefined ? "" : "; its envelope allows " + lanesText(env.emulate))),
+      kv("Diagnostics", env.diagnostics === true ? "its envelope allows them" : env.diagnostics === false ? '<span class="muted">its envelope does not allow them: diagnostics = true in agent.toml, at the host</span>' : "—"),
+    ].concat((s.above || []).length ? [kv("Above its envelope", '<span class="hp-blocked">' + s.above.map(esc).join("; ") + "</span>")] : [])
+      .concat(b ? [kv("Brake", num(b.orders_hour) + " of 20 orders, " + num(b.restarts_hour) + " of 6 dispatcher restarts, " + num(b.narrowings_hour) + " of 4 narrowings in the last hour" + (b.release_change_at ? "; a release change " + when(b.release_change_at) : ""))] : [])
+      .join("");
+    var ok = can.settings === true, w = why.settings || "";
+    var top = det !== null && det !== undefined ? det : max !== null && max !== undefined ? max : 0;
+    var opts = '<option value="">its envelope\'s' + (max === null || max === undefined ? "" : " (" + max + ")") + "</option>";
+    for (var i = 1; i <= top; i++) {
+      var over = max !== null && max !== undefined && i > max;
+      opts += '<option value="' + i + '"' + (over ? ' disabled title="above its envelope (' + max + '): only its owner widens that, at the host"' : "") + (s.units === i ? " selected" : "") + ">" + i + (over ? " — above its envelope" : "") + "</option>";
+    }
+    var lanes = [];
+    (env.detected_lanes || []).concat(env.emulate || [], s.emulate || []).forEach(function (a) { if (lanes.indexOf(a) < 0) lanes.push(a); });
+    var boxes = lanes.map(function (a) {
+      var excluded = env.emulate !== null && env.emulate !== undefined && env.emulate.indexOf(a) < 0;
+      var on = (eff.emulated || []).indexOf(a) >= 0;
+      return "<label" + (excluded ? ' class="muted" title="its envelope excludes it: only its owner widens that, at the host"' : "") + '><input type="checkbox" data-lane="' + esc(a) + '"' + (on ? " checked" : "") + (excluded ? " disabled" : "") + "> " + esc(a) + "</label>";
+    }).join("");
+    $("#hp-settings-ops").innerHTML = gate('<label class="hp-field">Units <select id="hp-units">' + opts + "</select></label>", ok, w)
+      + gate('<button type="button" class="op-btn" data-host-act="set-units">' + ICON.units + "Narrow units</button>", ok, w)
+      + (lanes.length ? gate('<span class="hp-lanes">' + boxes + "</span>", ok, w) + gate('<button type="button" class="op-btn" data-host-act="set-emulate">' + ICON.lanes + "Set emulated lanes</button>", ok, w) : '<span class="muted">no emulated lane detected</span>');
+  }
+  // Owner control (#328): the passkey pinned at the host, its seal key, the envelope a widening starts from and the agent keys' names, as
+  // its agent reports them; Make a pin, Confirm the seal key, Widen the envelope and Set agent keys — its owner's, greyed with the door's reason.
+  function envText(v) { return v === null || v === undefined ? "—" : typeof v === "object" && !Array.isArray(v) ? Object.keys(v).map(function (k) { return k + "=" + v[k]; }).join(" ") : Array.isArray(v) ? (v.length ? v.join(", ") : "none") : String(v); }
+  // The seal key its owner confirmed in this browser, kept here (#328): the pool's record of the confirmation is the pool's, so a key the
+  // pool's database says is confirmed but this browser confirmed another is confirmed again before anything is sealed to it, and one
+  // this browser never confirmed is compared with omarchy-agent status before the first seal to it (sealCompared): the pool's record
+  // never decides on its own which key a value is sealed to.
+  function sealHere(id) { try { return localStorage.getItem("op-seal:" + id) || ""; } catch (e) { return ""; } }
+  function keepSeal(id, key) { try { localStorage.setItem("op-seal:" + id, key); } catch (e) {} }
+  // Whether a value may be sealed to the key its agent reports (true), its owner having compared it in this browser — now, or before.
+  function sealCompared(key, fp) {
+    var here = sealHere(ID);
+    if (here === key) return Promise.resolve(true);
+    if (here) { toast("Its seal key is not the one you confirmed in this browser: compare it with <code>omarchy-agent status</code> at the host and confirm it again. Nothing was sealed.", "error"); return Promise.resolve(false); }
+    return ask({ title: "Compare the seal key of " + H.name, text: "This browser has not confirmed it yet. At the host, <code>omarchy-agent status</code> prints its seal key: it must be <code>" + esc(fp || "?") + "</code>. Your agent keys are sealed to this key in your browser, and only the host opens them.", confirm: "It is the same: seal to it", nothing: "Nothing was sealed." }).then(function (go) {
+      if (go === null) return false;
+      keepSeal(ID, key);
+      return true;
+    });
+  }
+  function drawOwner(h, can) {
+    $("#hp-owner").hidden = h.fingerprint === undefined;
+    if (h.fingerprint === undefined) return;
+    var o = h.owner_control, s = h.seal, why = can.why || {}, ok = can.owner === true, w = why.owner || "";
+    var pk = o && o.passkey, env = (o && o.envelope) || {};
+    var here = sealHere(h.id), other = !!(s && s.key && here && here !== s.key);
+    var sealed = !!(s && s.key && s.confirmed && s.confirmed.current) && !other;
+    $("#hp-owner-kv").innerHTML = !o ? kv("Owner control", '<span class="muted">its agent reports none yet: agent ' + esc(OWNER_AGENT) + ' or later does</span>') : [
+      kv("Passkey at the host", pk ? esc(pk.by) + "'s " + esc(pk.alg) + ' passkey <span class="mono">' + esc(pk.credential.slice(0, 12)) + "…</span> for " + esc(pk.rp_id) + ", pinned " + when(pk.pinned_at) + (o.version ? "; it took signed version " + num(o.version) + " last" : "") : '<span class="muted">none pinned yet: Make a pin, then paste it at the host</span>'),
+      kv("Seal key", s && s.fingerprint ? '<span class="mono">' + esc(s.fingerprint) + "</span> " + (sealed ? pillHtml("ok", "confirmed", "by " + s.confirmed.by + ", " + s.confirmed.at + (here ? "" : "; this browser has you compare it with omarchy-agent status before it seals anything to it")) : other ? pillHtml("warn", "not the key you confirmed in this browser", "compare it with omarchy-agent status at the host and confirm it again") : s.confirmed ? pillHtml("warn", "changed since it was confirmed", "a key made again: compare and confirm it again") : pillHtml("warn", "not confirmed yet", "compare it with omarchy-agent status at the host")) : '<span class="muted">its agent reports none yet</span>'),
+      kv("Envelope", WIDENABLE.map(function (k) { return '<span class="mono">' + esc(k) + " " + esc(envText(env[k])) + "</span>"; }).join(", ")),
+      kv("Agent keys", o.agent_keys.length ? o.agent_keys.map(esc).join(", ") : '<span class="muted">none</span>'),
+    ].join("");
+    $("#hp-owner-ops").innerHTML = [
+      gate('<button type="button" class="op-btn" data-host-act="pin">' + ICON.pin + "Make a pin</button>", ok, w),
+      gate('<button type="button" class="op-btn" data-host-act="seal-key">' + ICON.seal + "Confirm the seal key</button>", ok && !!(s && s.key) && !sealed, !ok ? w : sealed ? "confirmed already" : "its agent reports no seal key yet"),
+      gate('<button type="button" class="op-btn" data-host-act="widen">' + ICON.widen + "Widen the envelope</button>", ok && !!pk, !ok ? w : "no passkey is pinned at the host yet: Make a pin first"),
+      gate('<button type="button" class="op-btn" data-host-act="agent-keys">' + ICON.token + "Set agent keys</button>", ok && !!pk && sealed, !ok ? w : !pk ? "no passkey is pinned at the host yet: Make a pin first" : "confirm its seal key first"),
+    ].join("");
+  }
+  // Whether the document the pool answered says what this page asked for and showed (#328), or why not: its challenge is the document's
+  // SHA-256, and it names this host, the act, the envelope or the keys as sealed here, the seal key they were sealed to, a version above
+  // the last its agent took — and for a pin, this page's origin. Checked before the passkey is asked: a pool database or API that
+  // answered another document gets nothing signed. (The page itself is the pool's: security-model.md says what that leaves.)
+  function docSaysWhy(body, o) {
+    var d;
+    try { d = JSON.parse(o.doc); } catch (e) { return "it does not read"; }
+    var same = function (a, b) { return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b); };
+    if (!d || d.schema !== "omarchy-agent/owner/1" || d.act !== body.act || d.host !== ID) return "it is not for " + body.act + " on this host";
+    if (body.act === "pin-passkey") return d.origin === location.origin && d.rp_id === o.publicKey.rpId ? "" : "it names another page than this one";
+    if (!Number.isSafeInteger(d.version) || d.version <= (((H || {}).owner_control || {}).version || 0)) return "its version is not above the last its agent took";
+    if (body.act === "widen-envelope") return same(d.envelope, body.envelope) ? "" : "its envelope is not the one shown here";
+    return same(d.keys, body.keys) && d.seal_key === ((H || {}).seal || {}).key ? "" : "its keys are not the ones sealed here";
+  }
+  // A document the pool writes for this host, signed with the owner's passkey (#328): the pool's document and challenge (its SHA-256),
+  // both checked here (docSaysWhy), navigator.credentials.get() with user verification, then post(doc, assertion). Refused before it — a
+  // prompt cancelled, a browser without passkeys, a document that is not the one asked for — with an answer of its own, { error, code },
+  // as api() gives one.
+  function signDoc(body, post) {
+    var no = function (text) { return { error: text + " Nothing changed.", code: "no_answer" }; };
+    if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) return Promise.resolve(no("This browser cannot use a passkey on this page: it needs a secure address (https, or localhost) and passkey support."));
+    return api("POST", BASE + "/owner/challenge", body).then(function (o) {
+      if (o.error) return o;
+      var k = o.publicKey;
+      return crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(o.doc))).then(function (h) {
+        var why = webB64(h) !== k.challenge ? "its challenge is not the document's SHA-256" : docSaysWhy(body, o);
+        return why ? no("The pool answered a document other than the one this page asked for (" + why + "): your passkey was not asked.") : null;
+      }).then(function (refused) {
+        if (refused) return refused;
+        return navigator.credentials.get({ publicKey: { challenge: webBytes(k.challenge), rpId: k.rpId, timeout: k.timeout, userVerification: k.userVerification, allowCredentials: k.allowCredentials.map(function (c) { return { type: c.type, id: webBytes(c.id) }; }) } }).then(function (cred) {
+          if (!cred) return no("No passkey answered.");
+          var r = cred.response;
+          return post(o.doc, { credential: webB64(cred.rawId), client_data: webB64(r.clientDataJSON), authenticator_data: webB64(r.authenticatorData), signature: webB64(r.signature), user_handle: r.userHandle ? webB64(r.userHandle) : "" });
+        }, function (e) {
+          var n = e && e.name;
+          return no(n === "NotAllowedError" || n === "AbortError" ? "No passkey answered: the request was cancelled or timed out — or this is not the passkey pinned at the host." : "Your passkey could not be asked: " + errorText(e).replace(/[.\s]+$/, "") + ".");
+        });
+      });
+    });
+  }
+  // The widening's form: the envelope's keys as its agent reports them, each changed one sent; empty is none (no cap, the default budget).
+  function widenForm() {
+    var env = ((H.owner_control || {}).envelope) || {}, b = env.agent_budget || {};
+    var n = function (k, label, v) { return '<label>' + esc(label) + '<input type="number" min="0" data-env="' + k + '" value="' + (v === null || v === undefined ? "" : esc(v)) + '" placeholder="none"></label>'; };
+    // The emulated lanes: none set (detection's), none, each architecture the pool builds (the shell's ARCHES), or all of them.
+    var em = env.emulate === null || env.emulate === undefined ? "" : env.emulate.length ? env.emulate.slice().sort().join(",") : "none";
+    var all = ARCHES.slice().sort();
+    var opts = [["", "detection's (no key)"], ["none", "none"]].concat(ARCHES.map(function (a) { return [a, a]; }), [[all.join(","), all.join(", ")]]).map(function (x) { return '<option value="' + x[0] + '"' + (x[0] === em ? " selected" : "") + ">" + x[1] + "</option>"; }).join("");
+    $("#hp-owner-form").innerHTML = n("max_units", "max_units", env.max_units) + n("max_cpus", "max_cpus", env.max_cpus) + n("max_mem_gb", "max_mem_gb", env.max_mem_gb) + n("agent_slots", "agent_slots", env.agent_slots)
+      + '<label>emulate<select data-env="emulate">' + opts + "</select></label>"
+      + '<label>diagnostics<select data-env="diagnostics"><option value="false"' + (env.diagnostics ? "" : " selected") + '>false</option><option value="true"' + (env.diagnostics ? " selected" : "") + ">true</option></select></label>"
+      + ["calls_per_task", "tokens_per_task", "minutes_per_task", "calls_per_day"].map(function (k) { return '<label>agent_budget.' + k + '<input type="number" min="1" data-budget="' + k + '" value="' + (b[k] ? esc(b[k]) : "") + '" placeholder="default"></label>'; }).join("")
+      + '<label class="wide">paths, one a line<textarea rows="2" data-env="paths">' + esc((env.paths || []).join("\n")) + "</textarea></label>"
+      + '<div class="hp-ops wide"><button type="button" class="op-btn" data-host-act="widen-send">' + ICON.widen + "Review and sign</button></div>";
+  }
+  // The value a key of the envelope takes where agent.toml does not set it, which its agent reports as null: agent_slots 2 and
+  // diagnostics false (install writes neither), so a form left as it was asks for neither.
+  var ENV_DEFAULT = { agent_slots: 2, diagnostics: false };
+  function envWas(env, k) { return env[k] === null || env[k] === undefined ? (k in ENV_DEFAULT ? ENV_DEFAULT[k] : null) : env[k]; }
+  // What the form asks for that the envelope does not say: {key: value}, each as a widening sets it.
+  function widenAsked() {
+    var env = ((H.owner_control || {}).envelope) || {}, out = {};
+    document.querySelectorAll("#hp-owner-form [data-env]").forEach(function (el) {
+      var k = el.getAttribute("data-env"), v, was = envWas(env, k);
+      if (k === "emulate") v = el.value === "" ? null : el.value === "none" ? [] : el.value.split(",");
+      else if (k === "diagnostics") v = el.value === "true";
+      else if (k === "paths") v = el.value.split("\n").map(function (x) { return x.trim(); }).filter(Boolean);
+      else v = el.value === "" ? (k in ENV_DEFAULT ? ENV_DEFAULT[k] : null) : Number(el.value);
+      if (k === "paths" && !v.length && was === null) return;
+      if (JSON.stringify(v) !== JSON.stringify(was)) out[k] = v;
+    });
+    var budget = {}, any = false;
+    document.querySelectorAll("#hp-owner-form [data-budget]").forEach(function (el) { if (el.value !== "") { budget[el.getAttribute("data-budget")] = Number(el.value); any = true; } });
+    var was = env.agent_budget === undefined ? null : env.agent_budget;
+    if (JSON.stringify(any ? budget : null) !== JSON.stringify(was)) out.agent_budget = any ? budget : null;
+    return out;
+  }
+  // The agent keys' form: a key's name and its value, sealed here; or the key taken out.
+  function keysForm() {
+    $("#hp-owner-form").innerHTML = '<label>Key<select data-key-name>' + AGENT_KEYS.map(function (k) { return '<option value="' + k + '">' + k + "</option>"; }).join("") + "</select></label>"
+      + '<label>Value (sealed in this browser; never sent as it is)<input type="password" autocomplete="off" spellcheck="false" data-key-value></label>'
+      + '<label>Or<select data-key-remove><option value="">set it</option><option value="remove">take it out of agent.env</option></select></label>'
+      + '<div class="hp-ops wide"><button type="button" class="op-btn" data-host-act="keys-send">' + ICON.token + "Seal and sign</button></div>";
+  }
+  // An order's value, as the journal row says it: "set-units 4", "set-emulate none", "widen-envelope version 3: max_units".
+  function argText(o) {
+    var a = o.arg;
+    if (!a) return "";
+    if ("envelope" in a) return " version " + a.version + ": " + Object.keys(a.envelope).join(", ");
+    if ("keys" in a) return " version " + a.version + ": " + a.keys.join(", ");
+    if ("units" in a) return " " + (a.units === null ? "(its envelope's)" : a.units);
+    if ("emulate" in a) return " " + (a.emulate === null ? "(its envelope's)" : lanesText(a.emulate));
+    return "";
+  }
+  // Host orders (#344, #325): Reconcile now and P4's orders as the door answers them for this reader — Retry release greyed while its
+  // agent reports nothing quarantined, Diagnostics while its envelope does not allow them — and the last orders with their answers.
   function drawOrders(h, orders, can) {
-    var why = can.why || {};
-    $("#hp-order-ops").innerHTML = gate('<button type="button" class="op-btn" data-host-act="reconcile">' + ICON.reconcile + 'Reconcile now</button>', can.reconcile === true, why.reconcile || "");
+    var why = can.why || {}, q = h.quarantine || [], env = (h.settings || {}).envelope || {};
+    $("#hp-order-ops").innerHTML = [
+      gate('<button type="button" class="op-btn" data-host-act="reconcile">' + ICON.reconcile + "Reconcile now</button>", can.reconcile === true, why.reconcile || ""),
+      gate('<button type="button" class="op-btn" data-host-act="retry-release">' + ICON.retry + "Retry release</button>", can.retry_release === true && q.length > 0, why.retry_release || "its agent reports no release in quarantine: there is nothing to lift"),
+      gate('<button type="button" class="op-btn" data-host-act="rotate-token">' + ICON.token + "Rotate token</button>", can.rotate_token === true, why.rotate_token || ""),
+      gate('<button type="button" class="op-btn" data-host-act="diagnostics">' + ICON.diag + "Diagnostics</button>", can.diagnostics === true && env.diagnostics !== false, why.diagnostics || "its envelope does not allow diagnostics: diagnostics = true in agent.toml, at the host"),
+    ].join("");
     if (orders === undefined) { $("#hp-order-rows").innerHTML = '<tr><td colspan="5" class="muted">its owner\'s and the maintainers\'</td></tr>'; return; }
     $("#hp-order-rows").innerHTML = orders.map(function (o) {
       var p = ORDER_PILL[o.state] || ["na", o.state];
-      return '<tr><td><span class="mono">' + esc(o.kind) + '</span></td><td>' + personLink(o.issued_by) + '</td><td>' + when(o.issued_at) + '</td><td>' + pillHtml(p[0], p[1], o.state === "open" ? "until " + o.not_after : o.answered_at || "") + '</td><td>' + (o.detail ? esc(o.detail) : '<span class="muted">—</span>') + '</td></tr>';
+      var lines = o.lines ? ' <button type="button" class="op-btn sm" data-diag="' + esc(o.id) + '">' + ICON.diag + "Its lines</button>" : "";
+      return '<tr><td><span class="mono">' + esc(o.kind) + esc(argText(o)) + "</span></td><td>" + personLink(o.issued_by) + "</td><td>" + when(o.issued_at) + "</td><td>" + pillHtml(p[0], p[1], o.state === "open" ? "until " + o.not_after : o.answered_at || "") + "</td><td>" + (o.detail ? esc(o.detail) : '<span class="muted">—</span>') + lines + "</td></tr>";
     }).join("") || '<tr><td colspan="5" class="muted">no host order yet</td></tr>';
   }
   // The legacy set (#344): what its agent reports of it, and Retire legacy set — the owner's, with a passkey.
@@ -237,6 +546,15 @@ const SCRIPT = String.raw`
     if (d.error) { toast(esc(d.error), "error"); return; }
     toast(esc(d.line || "done")); load();
   }
+  // A diagnostics order's lines (#325), read in place: its owner's and the maintainers'.
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("button[data-diag]") : null;
+    if (!b || b.disabled) return;
+    api("GET", BASE + "/diagnostics/" + encodeURIComponent(b.getAttribute("data-diag"))).then(function (d) {
+      if (d.error) { toast(esc(d.error), "error"); return; }
+      $("#hp-diag").textContent = "# " + d.order + ", " + d.at + (d.dropped ? " — " + d.dropped + " line(s) left out: they looked like a secret" : "") + "\n" + (d.lines || []).join("\n");
+    }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+  });
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-host-act]") : null;
     if (!b || b.disabled || !H) return;
@@ -267,6 +585,61 @@ const SCRIPT = String.raw`
       });
     } else if (act === "reconcile") {
       api("POST", BASE + "/orders", { kind: "reconcile-now" }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "set-units") {
+      var u = $("#hp-units") ? $("#hp-units").value : "";
+      api("POST", BASE + "/orders", { kind: "set-units", units: u === "" ? null : Number(u) }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "set-emulate") {
+      var on = [].slice.call(document.querySelectorAll("#hp-settings-ops input[data-lane]")).filter(function (c) { return c.checked; }).map(function (c) { return c.getAttribute("data-lane"); });
+      api("POST", BASE + "/orders", { kind: "set-emulate", emulate: on }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "retry-release") {
+      api("POST", BASE + "/orders", { kind: "retry-release" }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "rotate-token") {
+      ask({ title: "Rotate the worker token of " + H.name, text: "Its agent fetches a new worker token and recreates its dispatcher with it; the one it replaces works ten more minutes. Its running tasks never notice.", confirm: "Rotate token" }).then(function (go) {
+        if (go === null) return;
+        api("POST", BASE + "/orders", { kind: "rotate-token" }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+    } else if (act === "diagnostics") {
+      api("POST", BASE + "/orders", { kind: "diagnostics" }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "pin") {
+      // Make a pin (#328): any of your passkeys signs a document naming this host and this page; the host checks it when you paste it there.
+      signDoc({ act: "pin-passkey" }, function (doc, a) { return api("POST", BASE + "/owner/pin", { doc: doc, assertion: a }); }).then(function (d) {
+        if (d.error) { toast(esc(d.error), "error"); return; }
+        var p = $("#hp-pin"); p.hidden = false; p.textContent = d.command;
+        ask({ title: "Paste this at " + H.name, text: "As the agent's user at the host, before " + esc(d.not_after) + ". The agent checks it there and keeps this passkey's public key: from then on it takes a widening of its envelope and its agent keys only when this passkey signed them.", value: d.command, copy: "Copy the command", confirm: "Done", sticky: true });
+      }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "seal-key") {
+      var sk = H.seal || {};
+      ask({ title: "Confirm the seal key of " + H.name, text: "At the host, <code>omarchy-agent status</code> prints its seal key: it must be <code>" + esc(sk.fingerprint || "?") + "</code>. Your agent keys are sealed to this key in your browser, and only the host opens them.", held: "Your passkey confirms it.", confirm: "It is the same: confirm", nothing: "Nothing was confirmed." }).then(function (go) {
+        if (go === null) return;
+        passkeyed("host:seal-key:" + ID, function (a) { return api("POST", BASE + "/seal-key", { key: sk.key, assertion: a }); }).then(function (d) { if (!d.error) keepSeal(ID, sk.key); done(d); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+    } else if (act === "widen") {
+      widenForm();
+    } else if (act === "widen-send") {
+      var asked = widenAsked(), env0 = ((H.owner_control || {}).envelope) || {}, keys0 = Object.keys(asked);
+      if (!keys0.length) { toast("Nothing to change: the form says what its envelope says."); return; }
+      ask({ title: "Widen the envelope of " + H.name, text: "Its agent sets, in agent.toml at the host: " + keys0.map(function (k) { return "<code>" + esc(k) + "</code> " + esc(envText(envWas(env0, k))) + " → " + esc(envText(asked[k])); }).join(", ") + ". Units never rise above what the release's signed constants and its detected hardware give." + ("emulate" in asked ? " An emulated lane its detection never smoke-tested comes on at its next count, which the loop does not run on its own on Linux: there it takes <code>omarchy-agent capacity --write</code> at the host (on a Mac, the next start of its VM counts it)." : ""), held: "The passkey pinned at the host signs it.", confirm: "Sign with your passkey" }).then(function (go) {
+        if (go === null) return;
+        signDoc({ act: "widen-envelope", envelope: asked }, function (doc, a) { return api("POST", BASE + "/orders", { kind: "widen-envelope", doc: doc, assertion: a }); }).then(function (d) { if (!d.error) $("#hp-owner-form").innerHTML = ""; done(d); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+    } else if (act === "agent-keys") {
+      keysForm();
+    } else if (act === "keys-send") {
+      var name = $("#hp-owner-form [data-key-name]").value, input = $("#hp-owner-form [data-key-value]"), remove = $("#hp-owner-form [data-key-remove]").value === "remove";
+      var to = (H.seal || {}).key, fp = (H.seal || {}).fingerprint;
+      // Sealed only to the key this browser confirmed, or its owner compares it here first: never to the pool's record's alone.
+      sealCompared(to, fp).then(function (same) {
+        if (!same) return null;
+        return remove ? { name: name, remove: true } : sealAgentKey(to, ID, name, input.value);
+      }).then(function (k) {
+        if (!k) return;
+        // The value is gone from the page once it is sealed: only its ciphertext is left to send.
+        input.value = "";
+        return ask({ title: (remove ? "Take " : "Set ") + name + (remove ? " out of " : " on ") + H.name, text: remove ? "Its agent takes it out of agent.env at the host." : "Sealed in this browser to its seal key " + esc((H.seal || {}).fingerprint || "") + ": the pool relays only ciphertext, and its agent writes it to agent.env alone, which only agent sidecars read.", held: "The passkey pinned at the host signs it.", confirm: "Sign with your passkey" }).then(function (go) {
+          if (go === null) return;
+          return signDoc({ act: "set-agent-keys", keys: [k] }, function (doc, a) { return api("POST", BASE + "/orders", { kind: "set-agent-keys", doc: doc, assertion: a }); }).then(function (d) { if (!d.error) $("#hp-owner-form").innerHTML = ""; done(d); });
+        });
+      }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     } else if (act === "retire-legacy") {
       var l = H.legacy || {};
       ask({ title: "Retire the legacy set of " + H.name, text: "Its agent writes the .omarchy-agent marker into " + esc(l.dir || "the legacy set's directory") + ", then stops and removes the compose project " + esc(l.project || "") + " — its containers and networks, nothing else. From then on rollout.sh, setup.sh, omarchy-worker and the updater refuse there: the way back through the legacy set is over.", held: "Your passkey confirms it.", confirm: "Retire legacy set", first: "Register a passkey and retire the legacy set", nothing: "Nothing was retired.", danger: true }).then(function (go) {
@@ -282,7 +655,7 @@ export function hostHtml(id: string, poolUrl: string, version: RunningVersion): 
   return page({
     path: `/hosts/${id}`,
     title: "Host · omarchy-pool",
-    description: "One maintainer host of the pool: its status, its capacity and units, its lanes and isolation level, the release it applied, its host orders, its legacy set and its leases.",
+    description: "One maintainer host of the pool: its status and whether it sleeps, its capacity and units, its lanes, isolation level and sandbox, the release it applied, its settings inside its envelope, its host orders, its legacy set and its leases.",
     active: "factory",
     body: BODY,
     script: SCRIPT,
@@ -299,11 +672,24 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.head-facts",
     page: `/hosts/${F.host}`,
     anchor: ['<p class="op-eyebrow">Host</p>', 'id="hp-name"', 'id="hp-status"', 'id="hp-lede"', 'id="hp-stats"', 'id="hp-kv"'],
-    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)"],
+    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Sandbox"', "function sandboxWords(h)", "c.sandbox_held", "h.sandbox_applied", '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS"],
     reads: [
-      { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "leases", "pool.version"] },
-      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
+      { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.asleep", "host.asleep_since", "leases", "pool.version"] },
+      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.capacity.sandbox", "host.sandbox_applied", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
       { path: "/api/v1/hosts/h_nobody0000", status: 404 },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    // Its soak and the gate (#326): the soak its owner set and until when, where its registration stands at the 426 gate and why, and —
+    // for anyone — the warning when its agent reports the pool behind GitHub (freeze detection).
+    id: "host.soak",
+    page: `/hosts/${F.host}`,
+    anchor: ['id="hp-freeze"'],
+    script: ["function soakWords(h)", "function gateLine(u)", '"Soak"', '"Claims"', '"GitHub"', "h.pool_behind_github", "Pool behind GitHub", 'href="/docs/runbook#a-new-maintainer-host">A new maintainer host</a>, Freeze detection', "u.required", "u.words"],
+    reads: [
+      { path: `/api/v1/hosts/${F.host}`, fields: ["host.pool_behind_github", "pool.deployed_at"] },
+      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.soak", "update"] },
     ],
     visible: EVERYONE,
   },
@@ -328,15 +714,52 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.orders",
     page: `/hosts/${F.host}`,
     anchor: ['id="hp-orders"', 'id="hp-order-ops"', 'data-host-act="reconcile"', 'id="hp-order-rows"'],
-    script: ["function drawOrders(h, orders, can)", "can.reconcile === true", 'kind: "reconcile-now"', 'BASE + "/orders"', "ORDER_PILL", "o.detail", "no host order yet"],
+    script: ["function drawOrders(h, orders, can)", "can.reconcile === true", 'kind: "reconcile-now"', 'BASE + "/orders"', "ORDER_PILL", "o.detail", "no host order yet", "can.retry_release === true", "can.rotate_token === true", "can.diagnostics === true", 'kind: "retry-release"', 'kind: "rotate-token"', 'kind: "diagnostics"', "argText(o)", 'BASE + "/diagnostics/"', "data-diag"],
     reads: [
-      { path: `/api/v1/hosts/${F.host}`, fields: ["can.reconcile", "can.why"] },
+      { path: `/api/v1/hosts/${F.host}`, fields: ["can.reconcile", "can.retry_release", "can.rotate_token", "can.diagnostics", "can.why"] },
       { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["orders", "can.reconcile"] },
+      // A diagnostics order's lines (#325): none for this order — its owner's and the maintainers' to read.
+      { path: `/api/v1/hosts/${F.host}/diagnostics/ho_00000000000000000000000000000000`, as: "maintainer", status: 404 },
     ],
     acts: [
       { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "reconcile-now" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "rotate-token" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "retry-release" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "diagnostics" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
     ],
     visible: EVERYONE,
+  },
+  {
+    // Its settings (#325): the units and emulated lanes its agent reports, inside its envelope, greyed above it; the narrowing orders.
+    // Its owner's and the maintainers' (the details); the door refuses everyone else server-side, and a session's write without the
+    // page's own Origin for every role.
+    id: "host.settings",
+    page: `/hosts/${F.host}`,
+    anchor: ['id="hp-settings"', 'id="hp-settings-kv"', 'id="hp-settings-ops"', 'href="/docs/worker-host#settings-and-host-orders"'],
+    script: ["function drawSettings(h, can)", "can.settings === true", '"Units"', '"Emulated lanes"', '"Diagnostics"', '"Above its envelope"', '"Brake"', 'kind: "set-units"', 'kind: "set-emulate"', "above its envelope", "its envelope excludes it", "SETTINGS_AGENT"],
+    reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.settings", "host.pool_settings", "host.brake", "host.quarantine", "can.settings", "can.why"] }],
+    acts: [
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "set-units", units: 2 }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "set-emulate", emulate: [] }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+    ],
+    visible: ["maintainer"],
+  },
+  {
+    // Owner control (#328): the passkey pinned at the host, its seal key, the envelope a widening starts from and the agent keys' names; Make
+    // a pin, Confirm the seal key, Widen the envelope and Set agent keys — its owner's, each signed with a passkey; the keys sealed in the
+    // browser by sealAgentKey, inlined. The doors refuse everyone else server-side, and a session's write without the page's own Origin.
+    id: "host.owner",
+    page: `/hosts/${F.host}`,
+    anchor: ['id="hp-owner"', 'id="hp-owner-kv"', 'id="hp-owner-ops"', 'id="hp-owner-form"', 'id="hp-pin"', 'href="/docs/worker-host#owner-control-without-a-visit"'],
+    script: ["function drawOwner(h, can)", "can.owner === true", "function signDoc(body, post)", "function docSaysWhy(body, o)", "its challenge is not the document's SHA-256", 'keepSeal(ID, sk.key)', "function sealCompared(key, fp)", "function widenAsked()", 'BASE + "/owner/challenge"', 'BASE + "/owner/pin"', 'BASE + "/seal-key"', 'kind: "widen-envelope"', 'kind: "set-agent-keys"', 'passkeyed("host:seal-key:" + ID', "async function sealAgentKey(", '"Passkey at the host"', '"Seal key"', '"Agent keys"', "OWNER_AGENT", "WIDENABLE", "AGENT_KEYS"],
+    reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.owner", "host.owner_control", "host.seal", "can.owner", "can.why"] }],
+    acts: [
+      { method: "POST", path: `/api/v1/hosts/${F.host}/owner/challenge`, body: { act: "pin-passkey" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/owner/pin`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/seal-key`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "widen-envelope" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+    ],
+    visible: ["maintainer"],
   },
   {
     // The legacy set (#344): what the agent reports of it, and Retire legacy set — its owner's, with a passkey.

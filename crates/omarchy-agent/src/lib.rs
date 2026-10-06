@@ -4,7 +4,8 @@
 //!
 //! - [`verify`]: check a signed host bundle or rollback statement against the pinned
 //!   `release.yml` / `rollback.yml` identity, then parse it: the manifest's outer layer
-//!   leniently, `inner` strictly, into types nothing unverified can build.
+//!   leniently, `inner` strictly, into types nothing unverified can build; and the
+//!   maintainers' co-signature this binary pins (#330, [`verify::cosignature`]).
 //! - [`lint`]: check the host set template (and the owner's override) against its
 //!   invariants, on variable references, before any interpolation.
 //! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
@@ -21,6 +22,8 @@
 //! (#320): the `LaunchAgent` and the `omarchy` Colima VM [`vm`] sizes and keeps.
 //! [`dispatcher_env`] (#371) renders the dispatcher's `etc/dispatcher.env` beside its
 //! worker token: the host's own addresses, the secrets directory and the agent budget.
+//! [`owner`] (#328) is the owner's control without a visit: the passkey pinned at the
+//! host, the widenings and agent keys it signed on the site, and the host's seal key.
 
 pub mod capacity;
 pub mod dispatcher_env;
@@ -29,6 +32,7 @@ pub mod host;
 pub mod install;
 pub mod lint;
 pub mod manifest;
+pub mod owner;
 pub mod pool;
 pub mod run;
 pub mod statement;
@@ -51,12 +55,24 @@ pub mod fuzz {
         let _ = crate::statement::parse(data);
     }
 
-    /// `state.json` as the run loop reads it, the pool's host state (#344) and the `follow`
-    /// answer of a pool from before it.
+    /// `state.json` as the run loop reads it, the pool's host state (#344, with P4's settings
+    /// and orders, #325), the `follow` answer of a pool from before it,
+    /// `run/capacity.json` narrowed to settings (#325), and GitHub's unauthenticated answer
+    /// for its latest release, which freeze detection reads (#326).
     pub fn state(data: &[u8]) {
         let _ = crate::run::state::parse(data);
         let _ = crate::run::pool::parse_state(data);
         let _ = crate::run::pool::parse_follow(data, "w_fuzz");
+        let _ = crate::run::pool::parse_latest(data);
+        if let Ok(b) = crate::run::settings::Base::parse(data) {
+            let s = crate::run::settings::Settings {
+                units: Some(3),
+                emulate: Some(Vec::new()),
+            };
+            let _ = b.narrowed(&s, &crate::run::config::Policy::default());
+        }
+        // The owner's signed documents, pins, COSE keys and assertions (#328).
+        crate::owner::fuzz(data);
     }
 
     /// The bundle archive, then its manifest, as `verify --bundle` reads them once signed.
@@ -66,6 +82,35 @@ pub mod fuzz {
                 let _ = crate::manifest::parse(m);
             }
         }
+    }
+
+    /// The maintainers' co-signature (#330): a policy as `maintainers.toml` pins one, then,
+    /// after the first NUL byte, an armored SSH signature, checked as Alice's and as Bob's
+    /// (the fixtures' Ed25519 and P-256 security keys) over what follows a second NUL, as a
+    /// bundle's and as a statement's.
+    pub fn cosignature(data: &[u8]) {
+        use crate::verify::cosignature::{Policy, BUNDLE_NAMESPACE, ROLLBACK_NAMESPACE};
+        let mut parts = data.splitn(3, |b| *b == 0);
+        let policy = parts.next().unwrap_or_default();
+        let sig = parts.next().unwrap_or_default();
+        let message = parts.next().unwrap_or_default();
+        if let Ok(text) = std::str::from_utf8(policy) {
+            let _ = Policy::parse(text);
+        }
+        let keys = Policy::parse(concat!(
+            "threshold = 2\n[keys]\nalice = '''",
+            include_str!("../tests/fixtures/cosignature/alice.pub"),
+            "'''\nbob = '''",
+            include_str!("../tests/fixtures/cosignature/bob.pub"),
+            "'''\n"
+        ))
+        .expect("the fixtures' keys read");
+        let sigs = ["alice", "bob"]
+            .into_iter()
+            .map(|l| (l.to_owned(), sig.to_vec()))
+            .collect();
+        let _ = keys.check(BUNDLE_NAMESPACE, message, &sigs);
+        let _ = keys.check(ROLLBACK_NAMESPACE, message, &sigs);
     }
 
     /// A set template, and an override after the first NUL byte; the same second part read

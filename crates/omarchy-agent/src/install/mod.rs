@@ -9,7 +9,9 @@
 //!    rootful daemon), fetches the release's pinned docker CLI and compose plugin into the
 //!    agent's own `tools/` (hash-checked; preflight measures through them), and runs
 //!    **preflight**: any blocker stops it, with one screen listing everything to fix,
-//!    before anything else is written;
+//!    before anything else is written. The foreign architecture's lane (#338, design v2
+//!    §7.5) is detected there too — binfmt, then a smoke run of the release's build image
+//!    of that architecture — and only reported: a held lane never stops an install;
 //! 3. prints the envelope (agent.toml) for the person to confirm on `/dev/tty` (`--yes`
 //!    skips) and writes `run/capacity.json`;
 //! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into
@@ -34,12 +36,18 @@
 //! Docker Desktop's or `OrbStack`'s VM when one is here and its home mount is removed; the
 //! envelope records the VM (`[vm]`) and the two sockets; the plist replaces the unit.
 //!
-//! Seams left for later issues, by name: the egress probe
-//! behind the egress sidecar on an internal network, once the worker image has it
-//! ([`egress`]); the `subuid` level for rootless podman, once the dispatcher (#335) starts
-//! task containers with `--userns=auto` (until then rootless podman reads as `user`); the
-//! emulated lane's smoke run (#338, reported only here); task containers and sidecars
-//! carry `org.omarchy-pool.agent.host=<host>` (design v2 §9.3), which uninstall removes by.
+//! Preflight's egress probe runs the way a task runs, behind an egress sidecar from the
+//! release's worker image on a network made like a task's, and probes a signed exception's
+//! bridge only where the envelope grants one (`--direct-network`, #373; [`egress`]).
+//!
+//! Seams left for later issues, by name: the claim saying whether a host runs a signed
+//! exception's bridge (until then the pool may offer such a package to a host that hands it
+//! back, #373, as a lost lease: the pool gives the attempt back for a task's first two losses
+//! and spends one for each after, so such a package fails where only hosts without the grant
+//! claim it); the `subuid` level for rootless podman, once the
+//! dispatcher (#335) starts task containers with `--userns=auto` (until then rootless podman
+//! reads as `user`); task containers and sidecars carry `org.omarchy-pool.agent.host=<host>`
+//! (design v2 §9.3), which uninstall removes by.
 
 pub mod checks;
 
@@ -49,6 +57,8 @@ pub(crate) mod envelope;
 pub(crate) mod files;
 pub(crate) mod launchd;
 pub(crate) mod legacy;
+pub(crate) mod libpod;
+pub(crate) mod loopback;
 pub(crate) mod mac;
 pub(crate) mod net;
 pub(crate) mod secrets;
@@ -57,7 +67,7 @@ pub(crate) mod unit;
 
 pub use sys::Machine;
 
-use std::fmt::Write as _;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -68,7 +78,7 @@ use crate::enroll;
 use crate::host::{HostKey, Identity, KEY_FILE};
 use crate::manifest::Manifest;
 use crate::run::{tools, Verifier};
-use crate::verify::BundleOutcome;
+use crate::verify::{cosignature, BundleOutcome};
 use crate::version::Release;
 
 pub use checks::Report;
@@ -113,6 +123,16 @@ pub struct Places {
     /// (#320).
     pub proc_net: PathBuf,
     pub ifconfig: Option<PathBuf>,
+    /// prep-root.sh's firewall script (world-readable): whether its INPUT drop for the task
+    /// subnets is installed, and which command a rootful host without it is told to run (#367).
+    pub task_firewall: PathBuf,
+    /// `/etc/systemd/system` (world-readable): whether the unit that runs that script at boot
+    /// is there and enabled, or a reboot takes the drop away (#367).
+    pub systemd_system: PathBuf,
+    /// Docker's `daemon.json` (world-readable): the address pool that command carries (#367).
+    pub docker_daemon: PathBuf,
+    /// Where processes are read (`/proc`): a rootless engine's network stack (#367).
+    pub proc: PathBuf,
 }
 
 impl Places {
@@ -152,6 +172,10 @@ impl Places {
             home,
             proc_net: sources.proc_net,
             ifconfig: sources.ifconfig,
+            task_firewall: PathBuf::from("/usr/local/libexec/omarchy-task-firewall"),
+            systemd_system: PathBuf::from("/etc/systemd/system"),
+            docker_daemon: PathBuf::from("/etc/docker/daemon.json"),
+            proc: PathBuf::from("/proc"),
         })
     }
 
@@ -242,6 +266,11 @@ pub struct Options {
     pub task_subnets: Option<String>,
     /// The person says this is a machine or VM used only as a pool host (design v2 §19.1).
     pub dedicated: bool,
+    /// The person grants a signed exception's bridge network (`--direct-network`, the
+    /// envelope's `direct_network`, #373): its probe runs, and the dispatcher runs a package
+    /// with that exception instead of handing it back. `--no-direct-network` takes a recorded
+    /// grant back; neither keeps what agent.toml says.
+    pub direct_network: Option<bool>,
     pub legacy: Option<String>,
     pub agent_env_from: Option<PathBuf>,
     pub max_units: Option<u32>,
@@ -277,6 +306,9 @@ pub trait Sys {
     fn github_scopes(&mut self, token: &str) -> Result<Option<String>, String>;
     /// A release asset or a pinned tool, over HTTPS.
     fn download(&mut self, url: &str) -> Result<Vec<u8>, String>;
+    /// The same for an asset the release may not carry (a maintainer's co-signature,
+    /// #330): `Ok(None)` when the server answers 404, an error when it does not answer.
+    fn download_if_any(&mut self, url: &str) -> Result<Option<Vec<u8>>, String>;
 }
 
 #[derive(Debug)]
@@ -324,11 +356,27 @@ fn say(out: &mut dyn Write, line: &str) {
     let _ = writeln!(out, "omarchy-agent: {line}");
 }
 
-/// The verified release: its manifest.
+/// The verified release: its manifest, once it carries the maintainers' co-signatures
+/// this agent requires (#330, D1 b): the release's `<bundle>.<login>.sshsig` assets, or the
+/// files of those names beside `--bundle`.
 fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Manifest, Failure> {
+    let policy = verifier.cosignature();
+    let mut cosignatures = BTreeMap::new();
     let (archive, sig) = match &o.source {
         Some(Source::Files(b, s)) => {
             let read = |p: &Path| std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
+            if policy.threshold() > 0 {
+                let name = b.file_name().map(|n| n.to_string_lossy().into_owned());
+                for login in policy.logins() {
+                    let beside = b.with_file_name(cosignature::file_name(
+                        name.as_deref().unwrap_or_default(),
+                        login,
+                    ));
+                    if let Ok(found) = std::fs::read(beside) {
+                        cosignatures.insert(login.to_owned(), found);
+                    }
+                }
+            }
             (
                 read(b).map_err(Failure::Refused)?,
                 read(s).map_err(Failure::Refused)?,
@@ -337,6 +385,24 @@ fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Ma
         Some(Source::Release(r)) => {
             let (name, sig) = crate::run::bundle_names(*r);
             let url = |n: &str| format!("{}/{r}/{n}", crate::run::RELEASES);
+            if policy.threshold() > 0 {
+                // One a maintainer did not make answers 404, which counts as none; GitHub not
+                // answering is said as that, never as a release without its co-signature.
+                for login in policy.logins() {
+                    let asset = url(&cosignature::file_name(&name, login));
+                    match sys.download_if_any(&asset) {
+                        Ok(Some(found)) => {
+                            cosignatures.insert(login.to_owned(), found);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            return Err(Failure::Refused(format!(
+                                "GitHub did not answer for the maintainers' co-signature {asset}: {e}; run it again"
+                            )))
+                        }
+                    }
+                }
+            }
             (
                 sys.download(&url(&name)).map_err(Failure::Refused)?,
                 sys.download(&url(&sig)).map_err(Failure::Refused)?,
@@ -348,8 +414,19 @@ fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Ma
             ))
         }
     };
+    let cosigned = || {
+        policy
+            .check(cosignature::BUNDLE_NAMESPACE, &archive, &cosignatures)
+            .require(policy.threshold(), "the release bundle")
+            .map_err(|e| {
+                Failure::Refused(format!("the release bundle is refused (cosignature): {e}"))
+            })
+    };
     match verifier.bundle(&archive, &sig) {
-        Ok(BundleOutcome::Current(b)) => Ok(b.manifest().clone()),
+        Ok(BundleOutcome::Current(b)) => {
+            cosigned()?;
+            Ok(b.manifest().clone())
+        }
         Ok(BundleOutcome::NeedsNewerAgent { why, .. }) => Err(Failure::NeedsNewerAgent(format!(
             "needs a newer agent: {why}"
         ))),
@@ -622,6 +699,11 @@ pub(crate) fn measure_as(
     };
     let mut dedicated = o.dedicated
         || envelope::envelope_value(ex, "dedicated").and_then(|v| v.as_bool()) == Some(true);
+    // A grant an earlier install recorded, or the owner wrote, stays unless taken back with
+    // `--no-direct-network` (#373).
+    let direct_network = o.direct_network.unwrap_or_else(|| {
+        envelope::envelope_value(ex, "direct_network").and_then(|v| v.as_bool()) == Some(true)
+    });
     let project = envelope::set_str(ex, "project").unwrap_or_else(|| envelope::PROJECT.to_owned());
     // The legacy project: `--legacy`, or the one an earlier install recorded, so running
     // install again repairs it without the flag (legacy.json's owner is checked below).
@@ -801,6 +883,31 @@ pub(crate) fn measure_as(
         .as_ref()
         .and_then(|m| m.build_image(std::env::consts::ARCH))
         .map(ToString::to_string);
+    // The emulated lane (#338): the release's build images for its smoke run (the foreign
+    // one of the engine's architecture), within the envelope an earlier install's owner may
+    // have narrowed (`emulate`).
+    let images = capacity::emulation::images(None, manifest.as_ref());
+    let emulate: Option<Vec<String>> = envelope::envelope_value(ex, "emulate").map(|v| {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str().map(str::to_owned))
+            .collect()
+    });
+    // The sandboxed runtime for community tasks (#330), within the envelope's `sandbox` an
+    // earlier install's owner may have set: absent tries what the engine has.
+    let sandbox = match envelope::envelope_value(ex, "sandbox") {
+        None => Ok(capacity::sandbox::Setting::Auto),
+        Some(toml::Value::String(s)) => capacity::sandbox::Setting::parse(Some(&s)),
+        Some(v) => Err(format!(
+            "agent.toml: [envelope] sandbox = {v} is not \"auto\", \"off\" or a runtime's name"
+        )),
+    }
+    .map_err(|e| format!("{e}; nothing was changed"));
+    let sandbox = sandbox.unwrap_or_else(|e| {
+        r.blockers.push(e);
+        capacity::sandbox::Setting::Off
+    });
     let facts = docker.as_ref().and_then(|d| {
         let host = d.host();
         let how = probe::Probe {
@@ -808,6 +915,17 @@ pub(crate) fn measure_as(
             host: Some(&host),
             work_root: &existing_ancestor(&work_root),
             image: image.as_deref(),
+            // A Mac's VM has its own binfmt table: its lane is Rosetta's ([`mac_facts`]).
+            emulation: (!mac).then_some(capacity::emulation::Probe {
+                binfmt: &p.binfmt,
+                images: &images,
+                emulate: emulate.as_deref(),
+            }),
+            // A Mac's VM holds the engine's files: the smoke run alone decides there.
+            sandbox: Some(capacity::sandbox::Probe {
+                setting: &sandbox,
+                local: !mac,
+            }),
         };
         match probe::detect(&how) {
             Ok(f) => Some(f),
@@ -844,6 +962,8 @@ pub(crate) fn measure_as(
         max_cpus: o.max_cpus,
         max_mem_gb: o.max_mem_gb,
         dedicated,
+        emulate,
+        sandbox,
         ..Caps::default()
     };
     let capacity = facts.as_ref().zip(manifest.as_ref()).map(|(f, m)| {
@@ -852,7 +972,7 @@ pub(crate) fn measure_as(
         let emulated: Vec<String> = c
             .emulated()
             .iter()
-            .map(|l| format!(", the {} lane through {}", l.arch, l.via.unwrap_or("emulation")))
+            .map(|l| format!(", the {} lane through {}", l.arch, l.via))
             .collect();
         r.notes.push(format!(
             "capacity: {} CPUs, {} GB, disks {} GB (work root) and {} GB (engine), {} units on the {} lane{}",
@@ -864,6 +984,8 @@ pub(crate) fn measure_as(
             f.arch(),
             emulated.concat()
         ));
+        checks::emulation(&c, &mut r);
+        checks::sandbox(&c, &mut r);
         c
     });
     if let Some(f) = &facts {
@@ -874,9 +996,6 @@ pub(crate) fn measure_as(
             rootful_exception,
             &mut r,
         );
-        if !mac {
-            checks::emulation(f.arch(), Some(f.page_kb()), &p.binfmt, &mut r);
-        }
     }
     let creds = checks::credentials(&p.home);
     if found.as_ref().and_then(|f| f.kind).is_some() {
@@ -925,32 +1044,70 @@ pub(crate) fn measure_as(
                 Err(e) => r.blockers.push(format!("legacy: {e}")),
             }
         }
-        match (task.first().and_then(|t| t.last_28()), &image) {
-            (Some(subnet), Some(img)) => {
-                let mut t =
-                    egress::Targets::of_host(gateway, net::lan_address()).asking(pool.as_deref());
-                if found.as_ref().and_then(|f| f.kind) == Some(VmKind::Dedicated) {
-                    // The Mac as the omarchy VM reaches it, past Colima's NAT.
-                    t.forbidden
-                        .push(("vm-host", crate::vm::VM_HOST.to_owned(), 22));
-                }
-                match egress::probe(d, img, subnet, &t) {
-                    Ok(out) => {
-                        let b = egress::verdict(&out, &t);
-                        if b.is_empty() {
-                            r.notes
-                                .push("egress: a task reaches public addresses only".into());
+        let worker = manifest
+            .as_ref()
+            .map(|m| m.worker_image().index().to_string());
+        match (task.first().and_then(|t| t.last_28()), &image, worker) {
+            (Some(subnet), Some(img), Some(worker)) => {
+                let rootful = facts.as_ref().is_none_or(|f| !f.rootless());
+                let server = d.server();
+                let vm = found.as_ref().and_then(|f| f.kind);
+                // prep-root.sh's firewall is a Linux host's; a Mac's VM gets the agent's own
+                // ([`mac`], before this probe), and none of prep-root.sh's files is on a Mac.
+                let (firewall, unprepared) = if mac {
+                    (String::new(), None)
+                } else {
+                    let script = std::fs::read_to_string(&p.task_firewall).ok();
+                    let fw = egress::Firewall::read(script.as_deref(), &p.systemd_system);
+                    (
+                        egress::firewall_command(
+                            fw,
+                            std::fs::read_to_string(&p.docker_daemon).ok().as_deref(),
+                            &task,
+                            &p.user,
+                            &work_root,
+                            &task_subnets,
+                        ),
+                        egress::unprepared(fw, &task),
+                    )
+                };
+                let podman = server == Ok(engine::Server::Podman);
+                // Rootless podman behind pasta maps its guest address to the host (#372), or to
+                // its VM where a Mac runs one: libpod's /info says which stack it runs.
+                let guest = if podman && !rootful {
+                    match libpod::Libpod::on(&d.socket).and_then(|l| l.info()) {
+                        Ok(i) => i.pasta().then_some(egress::PASTA_GUEST),
+                        Err(e) => {
+                            r.blockers.push(format!("egress: which network stack rootless podman runs (libpod's /info): {e}"));
+                            None
                         }
-                        r.blockers.extend(b);
-                        public = egress::seen(&out);
-                        r.notes.push(match (public, &t.seen) {
-                            (Some(ip), _) => format!("egress: tasks leave from {ip}, which every task's egress refuses with the host's own addresses"),
-                            (None, Some(url)) => format!("egress: the address tasks leave from was not seen ({url} gave none); every task's egress refuses the interfaces' addresses"),
-                            (None, None) => "egress: the address tasks leave from was not asked (the pool is not HTTPS)".into(),
-                        });
                     }
-                    Err(e) => r.blockers.push(format!("egress: {e}")),
-                }
+                } else {
+                    None
+                };
+                let host = egress::Host {
+                    router: gateway,
+                    lan: net::lan_address(),
+                    pool: pool.as_deref(),
+                    worker: &worker,
+                    task: &task,
+                    // What the agent renders for the dispatcher's sidecars now (#371): the
+                    // interfaces' addresses and the public one an earlier probe or run loop saw.
+                    own: addresses::detect(&p.sources(), &p.data, &task),
+                    direct: direct_network,
+                    advice: egress::Advice {
+                        rootful,
+                        podman,
+                        firewall,
+                        vm,
+                    },
+                    server,
+                    guest,
+                    unprepared,
+                    proc: &p.proc,
+                    uid: rustix::process::getuid().as_raw(),
+                };
+                public = egress::check(d, img, subnet, &host, &mut r);
             }
             _ => r
                 .blockers
@@ -1017,6 +1174,7 @@ pub(crate) fn measure_as(
                     && facts.inner_isolation() == capacity::Isolation::Subuid
                     && facts.vm().is_none(),
                 dedicated,
+                direct_network,
                 max_units: o.max_units,
                 // The omarchy VM's size is the envelope's: written so the owner sees it.
                 max_cpus: vm
@@ -1030,6 +1188,7 @@ pub(crate) fn measure_as(
                     .map(|s| s.mem_gb)
                     .or(o.max_mem_gb),
                 vm,
+                emulate: capacity::emulation::foreign_of(facts.arch()).map(|f| vec![f.to_owned()]),
             };
             Some(Ready {
                 manifest,
@@ -1106,6 +1265,8 @@ fn mac_facts(
             host: Some(&host),
             work_root: &o.places.home,
             image: None,
+            emulation: None,
+            sandbox: None,
         };
         probe::rosetta_lane(&how, img)
     });
@@ -1339,24 +1500,23 @@ pub(crate) fn apply(
     let fingerprint = HostKey::load_or_create(&eo.paths.state.join(KEY_FILE))
         .map_or_else(|e| e, |k| k.fingerprint());
     let c = &ready.capacity;
-    let emulated = c.emulated().iter().fold(String::new(), |mut s, l| {
-        let _ = write!(
-            s,
-            ", lane {} through {}",
-            l.arch,
-            l.via.unwrap_or("emulation")
-        );
-        s
-    });
+    let lanes = c
+        .lanes()
+        .iter()
+        .map(|l| match l.via {
+            Some(via) => format!("{} {} through {via}", l.arch, l.mode),
+            None => format!("{} {}", l.arch, l.mode),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     say(
         out,
         &format!(
-            "host {} on {}: {} CPUs, {} GB, lane {} native{emulated}, {} units ({} kept for pool jobs), isolation {}, host key {fingerprint}",
+            "host {} on {}: {} CPUs, {} GB, lanes {lanes}, {} units ({} kept for pool jobs), isolation {}, host key {fingerprint}",
             id.host,
             ready.pool,
             c.cpus(),
             c.mem_gb(),
-            ready.facts.arch(),
             c.units(),
             c.job_reserved(),
             checks::level(c.isolation()),

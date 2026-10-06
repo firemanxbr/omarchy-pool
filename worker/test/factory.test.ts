@@ -266,6 +266,12 @@ describe("a community build, its audit and the review", () => {
   it("the project's review build runs on a trusted worker with its agent, stages its own package and evidence, and queues its audit", async () => {
     // A worker whose agent is down is not handed it (a review build drafts with the agent); one whose agent answers is.
     expect((await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "error" }, "omw_w1")).status).toBe(204);
+    // The project's copy is not built on its requester's host (#339, D35): w1 is m1's, who requested mine, and no other maintainer's
+    // worker can build it — held, until another maintainer releases it to any host with their passkey.
+    expect((await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w1")).status).toBe(204);
+    expect((await call("GET", "/factory/review")).json.staged.find((x: any) => x.id === task).project_build.placement).toMatchObject({ held: true, others: [], mine: ["w1"], requesters: ["m1", "alice"] });
+    const released = await decide("m2", `/factory/tasks/${projectTask}/any-host`);
+    expect(released.status, JSON.stringify(released.json)).toBe(200);
     const c = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w1");
     expect(c.status).toBe(200);
     expect(c.json.task.id).toBe(projectTask);
@@ -831,7 +837,7 @@ describe("where a build runs", () => {
     expect(n.status).toBe(200);
     expect(n.json.task).toMatchObject({ id, attempts: 1, params: { hint: "cargo, not make", needs_native: 1 } });
     expect((await call("POST", `/factory/tasks/${id}/fail`, { error: "exit 96: rustc cannot start on this worker", needs_native: true, final: false }, n.json.token)).json).toEqual({ task: id, status: "queued", attempts: 1 });
-    expect(await env.DB.prepare("SELECT status, summary FROM events WHERE kind = 'build' ORDER BY id DESC LIMIT 1").first()).toEqual({ status: "warn", summary: expect.stringMatching(/^rusty for aarch64 failed on w7 \(attempt 1\/3\) — back in the queue/) });
+    expect(await env.DB.prepare("SELECT status, summary FROM events WHERE kind = 'build' ORDER BY id DESC LIMIT 1").first()).toEqual({ status: "warn", summary: expect.stringMatching(/^rusty for aarch64 failed on w7 \(attempt 1\/3\) \(its needs_native refused: it ran on the native lane\) — back in the queue/) });
     // And its failure that is the recipe's fails at once, as before: the package says why.
     const n2 = await call("POST", "/factory/claim", nat, "omw_w7");
     expect(n2.json.task).toMatchObject({ id, attempts: 2 });

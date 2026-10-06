@@ -15,14 +15,15 @@
 //! **Its network** (#336, D38, D49) is its own: an `--internal` network
 //! `omarchy-task-<id>-<gen>` on a /28 of `OMARCHY_TASK_SUBNETS`, which no
 //! other task, the host, its LAN, the dispatcher or the pool is on, with no
-//! address of the host as its gateway where the engine can be asked
-//! ([`Gateway`]). Its one
+//! address of the host as its gateway ([`Gateway`]). Its one
 //! way out is its **egress sidecar** (`<network>-egress`, the worker image's
 //! `egress` role: `pkg-repo egress`), which listens on its own address of
 //! that network and is also attached to the shared `omarchy-egress` bridge,
 //! where it listens on nothing; the task's `HTTP(S)_PROXY` name it. A
 //! package with a signed exception in `factory/sizing` gets a normal bridge
-//! network of its own instead, and no egress sidecar.
+//! network of its own instead, and no egress sidecar, on a host whose
+//! envelope grants it (`OMARCHY_DIRECT_NETWORK`, #373; elsewhere the lease
+//! goes back before this spec is made).
 //!
 //! **A model kind's agent** (D48) is its own too: an **agent sidecar**
 //! (`<network>-agent`, the worker image's `agent` role, the broker without
@@ -34,9 +35,38 @@
 //! removed with it; their CPUs and memory (0.1 CPU / 64 MB, 0.25 CPU /
 //! 256 MB) come out of the task container's share.
 //!
+//! **Its lane** (#338, design v2 §7.4, §7.5): `--platform linux/<arch>` is
+//! the lane's architecture, and a container on an emulated lane — and only
+//! there — carries `WORKER_LABELS={"emulated":true}`, which makes the build
+//! script probe the toolchains a recipe installs and fail at once with
+//! `needs_native` when one cannot start (a 16K-page host's qemu, D33).
+//!
+//! **Its runtime** (#330, design v2 §10.4; D43): a task that runs what a
+//! contributor wrote — their recipe, the project's review rebuild drafted
+//! from it, a trial of what that built, an audit of it: everything but the
+//! project's own recipe ([`sandboxed`]) — runs in the host's sandboxed
+//! runtime when the agent found one (`run/capacity.json`'s `sandbox`: gVisor's
+//! `runsc` or Kata Containers), `--runtime <name>` on its task container, so
+//! an escape lands in the sandbox's own kernel, not on the host. Only on its
+//! native lane: an emulated lane's binfmt handler is the host kernel's, so a
+//! sandboxed host's emulated lanes take the project's own recipes only (the
+//! pool's selection; the dispatcher hands back one that reaches them). Never
+//! on a sidecar, which runs the signed worker image and no recipe. A signed
+//! network exception (#373) changes the task's network, never its runtime.
+//!
+//! **A pool job's helper** (#340, design v2 §9.2, §10.3; D34) is made here
+//! too: the scripts a pool job runs (`tests/health-check.sh`, the ABI gate's
+//! references) start their check containers through the `omarchy-task-run`
+//! shim ([`super::shim`]), which reads the one shape they use and asks
+//! [`helper_plan`] for the rest — the job's own internal network and egress
+//! sidecar, the job's share less the sidecar's, the task container's
+//! capabilities and flags, one of the job's scratch directories at `/repo`
+//! and nothing else: no token, no socket, no other mount. It runs on the
+//! engine's own runtime, a sandboxed host's included (#330, [`helper_plan`]).
+//!
 //! Seams left for later issues, by name: P2's task caches child issue
 //! mounts the read-only shared pacman cache and the per-package build
-//! caches; emulated lanes (#338) add the emulated lane's `WORKER_LABELS`.
+//! caches.
 
 use std::path::{Path, PathBuf};
 
@@ -104,8 +134,9 @@ pub const AGENT_MEM_MB: u32 = 256;
 
 /// The variables a task container may be given, and nothing else (§9.3).
 /// Both spellings of the proxy variables: curl, pacman and git read only
-/// the lowercase `http_proxy`, others the uppercase ones.
-pub const ENV_ALLOWLIST: [&str; 13] = [
+/// the lowercase `http_proxy`, others the uppercase ones. `WORKER_LABELS`
+/// is `{"emulated":true}` on an emulated lane, and absent elsewhere.
+pub const ENV_ALLOWLIST: [&str; 14] = [
     "HTTP_PROXY",
     "http_proxy",
     "HTTPS_PROXY",
@@ -119,7 +150,40 @@ pub const ENV_ALLOWLIST: [&str; 13] = [
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
     "GITHUB_API",
+    "WORKER_LABELS",
 ];
+
+/// What a container on an emulated lane is told, as the build script reads it
+/// (`emulated_worker`) and as `pkg-repo work`'s emulated workers have always said it.
+pub const EMULATED_LABELS: &str = r#"{"emulated":true}"#;
+
+/// A pool job's helper container (#340): `omarchy-task-<id>-<gen>-helper`, on its job's network.
+pub const HELPER_SUFFIX: &str = "-helper";
+/// The one variable a helper is given besides its proxy: the base image's keyring its check
+/// populates (`tests/health-check.sh`, `tests/trial.sh`), one of the two base images'.
+pub const HELPER_ENV: &str = "KEYRING";
+pub const HELPER_KEYRINGS: [&str; 2] = ["archlinux", "archlinuxarm"];
+
+/// A script a pool job's helper runs from its scratch directory: `[a-z0-9][a-z0-9-]{0,31}.sh`.
+pub fn script_ok(s: &str) -> bool {
+    s.strip_suffix(".sh").is_some_and(|n| {
+        let b = n.as_bytes();
+        !b.is_empty()
+            && b.len() <= 32
+            && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+            && b.iter()
+                .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    })
+}
+
+/// A scratch directory a pool job's script made (`mktemp -d`: `tmp.XXXXXXXXXX`): letters, digits, `.`, `_`, `-`.
+pub fn scratch_name_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && !s.starts_with('.')
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
 
 /// A name that reaches `docker` argv — a package, a release, a host: `[a-z0-9][a-z0-9._+-]{0,63}`.
 pub fn name_ok(s: &str) -> bool {
@@ -140,6 +204,23 @@ pub fn host_ok(s: &str) -> bool {
         && b[0].is_ascii_alphanumeric()
         && b.iter()
             .all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
+
+/// A runtime's name as the engine takes it (`--runtime`), the agent's grammar: `[a-z0-9][a-z0-9._-]{0,63}`.
+pub fn runtime_ok(s: &str) -> bool {
+    name_ok(s) && !s.contains('+')
+}
+
+/// Whether a task's container runs in the host's sandboxed runtime, when it has one (#330,
+/// D43), by what runs in it rather than by its trust alone: everything but the project's own
+/// recipe — a build of trust `project` that is no review rebuild (a recipe on main, a
+/// maintainer's dry run). A contributor's build; the project's review rebuild (`review`: a
+/// recipe the project's drafter wrote from a contributor's evidence before any approval,
+/// design v2 §9.2, §9.5); a trial, whose helper installs what such a rebuild built, its
+/// install scriptlets with it; an audit; and any trust or kind this dispatcher does not know.
+/// Its lane is the caller's: a sandbox covers the native lane only.
+pub fn sandboxed(trust: &str, kind: &str, review: bool) -> bool {
+    !(trust == "project" && kind == "build" && !review)
 }
 
 /// A lease generation, as the pool draws it: `g_` and 16 hex digits (#334).
@@ -282,12 +363,11 @@ impl Slot {
 pub enum Gateway {
     /// Docker 28 or newer: `com.docker.network.bridge.gateway_mode_ipv4=isolated`, no address on the bridge.
     Isolated,
-    /// podman's own CLI: `--disable-dns`, which leaves netavark's bridge without the gateway address.
+    /// podman: `--disable-dns`, an internal network without DNS, which has no gateway and leaves
+    /// netavark's bridge without an address. Its own CLI takes the flag; behind docker's CLI, whose
+    /// podman API forces DNS on and drops docker's option, the engine makes that call through
+    /// libpod's own API (`/libpod/networks/create`, `dns_enabled: false`; #372).
     NoDns,
-    /// podman behind docker's API, which forces DNS on and drops docker's option: the address stays.
-    /// Seam: prep-root.sh's INPUT drop for the task subnets (rootful), or the install child issue's
-    /// preflight probe (#317), is what keeps a task off it there.
-    Engine,
 }
 
 /// A model kind's agent sidecar: where its keys are, and its per-task caps (D45).
@@ -307,7 +387,10 @@ pub struct Spec<'a> {
     pub gen: &'a str,
     pub host: &'a str,
     pub release: &'a str,
+    /// The lane's architecture: the container's `--platform`.
     pub arch: &'a str,
+    /// The lane is emulated on this host (#338): the container is told so.
+    pub emulated: bool,
     pub name: &'a str,
     pub kind: Kind,
     /// The CPUs and the memory of its units (the signed constants); the sidecars' come out of them.
@@ -331,6 +414,9 @@ pub struct Spec<'a> {
     pub deny: &'a [String],
     /// The agent sidecar of a model kind; `None` on a host with no agent key.
     pub agent: Option<Agent<'a>>,
+    /// The host's sandboxed runtime, for a task [`sandboxed`] says runs in it: `--runtime
+    /// <name>` on the task container, never on its sidecars (#330).
+    pub runtime: Option<&'a str>,
 }
 
 /// The container's name: `omarchy-task-<id>-<gen>`, its network's too.
@@ -344,6 +430,7 @@ pub fn owner_of_name(name: &str) -> Option<(u64, String)> {
     let base = name
         .strip_suffix("-egress")
         .or_else(|| name.strip_suffix("-agent"))
+        .or_else(|| name.strip_suffix(HELPER_SUFFIX))
         .unwrap_or(name);
     let rest = base.strip_prefix(NAME_PREFIX)?;
     let (id, gen) = rest.split_once('-')?;
@@ -415,7 +502,6 @@ impl Side<'_> {
                     "com.docker.network.bridge.gateway_mode_ipv4=isolated".into(),
                 ]),
                 Gateway::NoDns => a.push("--disable-dns".into()),
-                Gateway::Engine => {}
             }
         }
         a.extend(["--subnet".into(), self.slot.cidr()]);
@@ -426,7 +512,8 @@ impl Side<'_> {
 
     /// The egress sidecar: created on the shared bridge, attached to the task's network at its fixed
     /// address, started. The bridge comes first: podman (netavark) gives a container whose first network
-    /// is internal no way out through a second one.
+    /// is internal no way out through a second one. Install's egress probe starts its own the same way
+    /// (#373): both are held to `tests/fixtures/egress-sidecar.txt`.
     fn egress(&self) -> Vec<Vec<String>> {
         let name = format!("{}-egress", self.net());
         let ip = self.slot.egress_ip();
@@ -677,6 +764,173 @@ pub fn probe_plan(p: &Probe<'_>) -> Result<(Vec<Vec<String>>, Vec<String>), Stri
     Ok((setup, run.remove(0)))
 }
 
+/// A pool job's helper container (#340, design v2 §9.2, §10.3; D34): what the
+/// `omarchy-task-run` shim read of a script's `run` — the architecture, the
+/// image, the scratch directory it mounts at `/repo` and the script it runs
+/// there — on the job's own lease, /28 and share. Every field is checked by
+/// [`helper_plan`].
+#[derive(Debug, Clone)]
+pub struct Helper<'a> {
+    pub task: u64,
+    pub gen: &'a str,
+    pub host: &'a str,
+    /// The ring's architecture its check runs (`--platform`): a lane of this host, native or emulated.
+    pub arch: &'a str,
+    pub image: &'a str,
+    /// One of the job's own scratch directories, mounted at `/repo`: directly under `scratch`.
+    pub dir: &'a Path,
+    /// The job's scratch root (`<task dir>/tmp`, its scripts' `TMPDIR`).
+    pub scratch: &'a Path,
+    pub read_only: bool,
+    /// `<name>.sh` in `dir`, which `bash` runs.
+    pub script: &'a str,
+    /// The base image's keyring its check populates (`KEYRING`).
+    pub keyring: Option<&'a str>,
+    /// The CPUs and the memory of the job's units; the egress sidecar's come out of them.
+    pub cpus: u32,
+    pub mem_gb: u32,
+    pub worker_image: &'a str,
+    pub subnets: Subnets,
+    pub slot: u32,
+    pub gateway: Gateway,
+    pub deny: &'a [String],
+}
+
+/// The engine calls that make a pool job's helper (#340): the job's internal
+/// network and its egress sidecar (`network create`, `create`, `network
+/// connect omarchy-egress`, `start`), then the helper's own `run` — attached,
+/// so its output and exit code reach the script that asked for it, and never
+/// `--rm`: the shim removes it with the rest of the lease's (an engine
+/// `--rm` would race the removal), and the dispatcher removes what a killed
+/// shim left when the job ends. Every value is checked against the closed
+/// grammar first; a value outside it runs nothing. Its runtime is the
+/// engine's own, on a sandboxed host too (#330): what it runs is the
+/// project's own — the release's scripts in its pinned images, over what a
+/// ring serves (signed, after the maintainers' approval) and the recipes on
+/// main, as the project's own recipe runs outside the sandbox
+/// ([`sandboxed`]) — and on any lane of its arch, an emulated one included,
+/// which a sandbox's kernel cannot run.
+#[allow(clippy::too_many_lines)] // every check of a value, then every flag, mount and variable, in the spec's order
+pub fn helper_plan(h: &Helper<'_>) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
+    if h.task == 0 || !gen_ok(h.gen) || !host_ok(h.host) {
+        return Err("a helper's task, generation or host is outside the grammar".into());
+    }
+    let platform =
+        platform_of(h.arch).ok_or_else(|| format!("arch {:?} is not a lane's", h.arch))?;
+    if !digest_ok(h.image) {
+        return Err(format!(
+            "image {:?} is not an image by digest (repository@sha256:…)",
+            h.image
+        ));
+    }
+    if !script_ok(h.script) {
+        return Err(format!("script {:?} is not <name>.sh", h.script));
+    }
+    if h.keyring.is_some_and(|k| !HELPER_KEYRINGS.contains(&k)) {
+        return Err(format!(
+            "keyring {:?} is not a base image's ({})",
+            h.keyring,
+            HELPER_KEYRINGS.join(", ")
+        ));
+    }
+    if !path_ok(h.dir) || !path_ok(h.scratch) {
+        return Err(format!(
+            "host path {} is outside the grammar",
+            h.dir.display()
+        ));
+    }
+    if h.dir.parent() != Some(h.scratch)
+        || !h
+            .dir
+            .file_name()
+            .is_some_and(|n| scratch_name_ok(&n.to_string_lossy()))
+    {
+        return Err(format!(
+            "{} is not one of this job's scratch directories ({}/<name>)",
+            h.dir.display(),
+            h.scratch.display()
+        ));
+    }
+    if h.cpus == 0 || h.mem_gb == 0 || h.cpus > 4096 || h.mem_gb > 65_536 {
+        return Err(format!(
+            "share {} CPUs, {} GB is outside 1..4096 CPUs and 1..65536 GB",
+            h.cpus, h.mem_gb
+        ));
+    }
+    side_ok(h.worker_image, h.deny, None)?;
+    let side = Side {
+        task: h.task,
+        gen: h.gen,
+        host: h.host,
+        image: h.worker_image,
+        subnets: h.subnets,
+        slot: h
+            .subnets
+            .slot(h.slot)
+            .ok_or_else(|| format!("slot {} is outside {}", h.slot, h.subnets.cidr()))?,
+        direct: false,
+        gateway: h.gateway,
+        deny: h.deny,
+    };
+    let mut setup = vec![side.network()];
+    setup.extend(side.egress());
+    let net = side.net();
+    let mem = format!("{}m", h.mem_gb * 1024 - EGRESS_MEM_MB);
+    let mut a: Vec<String> = vec![
+        "run".into(),
+        "--name".into(),
+        format!("{net}{HELPER_SUFFIX}"),
+    ];
+    a.extend(side.labels(Some("helper")));
+    a.extend(
+        [
+            "--platform",
+            platform,
+            "--network",
+            &net,
+            "--cpus",
+            &millis(h.cpus * 1000 - EGRESS_MILLICPUS),
+            "--memory",
+            &mem,
+            "--memory-swap",
+            &mem,
+            "--pids-limit",
+            &PIDS_LIMIT.to_string(),
+            "--cap-drop",
+            "ALL",
+            // Its output goes to the script that asked for it, attached: nothing on the engine's disk.
+            "--log-driver",
+            "none",
+        ]
+        .map(str::to_owned),
+    );
+    for c in CAPS {
+        a.push("--cap-add".into());
+        a.push(c.into());
+    }
+    a.push("--security-opt".into());
+    a.push("no-new-privileges".into());
+    a.push("-v".into());
+    a.push(format!(
+        "{}:/repo{}",
+        h.dir.display(),
+        if h.read_only { ":ro" } else { "" }
+    ));
+    let mut env: Vec<(&str, String)> = Vec::new();
+    if let Some(k) = h.keyring {
+        env.push((HELPER_ENV, k.to_owned()));
+    }
+    env.extend(side.proxy_env("localhost,127.0.0.1"));
+    for (k, v) in env {
+        a.push("-e".into());
+        a.push(format!("{k}={v}"));
+    }
+    a.push(h.image.to_owned());
+    a.push("bash".into());
+    a.push(format!("/repo/{}", h.script));
+    Ok((setup, a))
+}
+
 /// The task container's `docker` arguments, after `docker` (`run -d …`):
 /// the one place a task container is made (§9.3, §10.3), on its own
 /// network. Every value that reaches the arguments is checked against the
@@ -701,6 +955,9 @@ pub fn task_container(s: &Spec<'_>) -> Result<Vec<String>, String> {
     }
     let platform =
         platform_of(s.arch).ok_or_else(|| format!("arch {:?} is not a lane's", s.arch))?;
+    if let Some(r) = s.runtime.filter(|r| !runtime_ok(r)) {
+        return Err(format!("runtime {r:?} is outside the grammar"));
+    }
     if !digest_ok(s.image) {
         return Err(format!(
             "build image {:?} is not an image by digest (repository@sha256:…)",
@@ -749,6 +1006,11 @@ pub fn task_container(s: &Spec<'_>) -> Result<Vec<String>, String> {
     ] {
         a.push("--label".into());
         a.push(format!("{k}={v}"));
+    }
+    if let Some(r) = s.runtime {
+        // The sandbox's kernel between the recipe and the host's (D43).
+        a.push("--runtime".into());
+        a.push(r.to_owned());
     }
     a.extend(
         [
@@ -815,6 +1077,9 @@ fn env_of(s: &Spec<'_>, side: &Side<'_>) -> Vec<(&'static str, String)> {
         "localhost,127.0.0.1".to_owned()
     };
     env.extend(side.proxy_env(&no_proxy));
+    if s.emulated {
+        env.push(("WORKER_LABELS", EMULATED_LABELS.to_owned()));
+    }
     if s.kind.model() {
         env.push(("FACTORY_PROVIDER", "anthropic".to_owned()));
         env.push(("ANTHROPIC_BASE_URL", agent.clone()));
@@ -869,6 +1134,7 @@ mod tests {
             host: "h_studio-1",
             release: "v1.2.3",
             arch: "aarch64",
+            emulated: false,
             name: "felix",
             kind,
             cpus: 4,
@@ -888,10 +1154,12 @@ mod tests {
                 tokens: 2_000_000,
                 wall_s: 7200,
             }),
+            runtime: None,
         }
     }
 
-    const FLAGS_WITH_VALUE: [&str; 16] = [
+    const FLAGS_WITH_VALUE: [&str; 17] = [
+        "--runtime",
         "--name",
         "--mount",
         "--label",
@@ -996,6 +1264,14 @@ mod tests {
         if flag(r, "--mount").is_some() && !r.name.ends_with("-agent") {
             return Err(format!("{}: --mount outside the agent sidecar", r.name));
         }
+        if flag(r, "--runtime").is_some()
+            && (r.name.ends_with("-egress") || r.name.ends_with("-agent"))
+        {
+            return Err(format!(
+                "{}: a sidecar runs on the engine's own runtime",
+                r.name
+            ));
+        }
         for m in &r.mounts {
             let from = m.split(':').next().unwrap_or("");
             if from.contains("docker.sock")
@@ -1011,7 +1287,8 @@ mod tests {
             let lower = k.to_ascii_lowercase();
             // The placeholder a model kind sends as its key, and the sidecar's token cap (a number), are not credentials.
             let placeholder = k == "ANTHROPIC_API_KEY" && v == AGENT_KEY_PLACEHOLDER
-                || k == "BROKER_AGENT_TOKENS" && v.parse::<u64>().is_ok();
+                || k == "BROKER_AGENT_TOKENS" && v.parse::<u64>().is_ok()
+                || k == HELPER_ENV && HELPER_KEYRINGS.contains(&v);
             if !placeholder
                 && (lower.contains("token")
                     || lower.contains("key")
@@ -1039,8 +1316,20 @@ mod tests {
         }
     }
 
-    /// The task container: the spec's flags, mounts, environment and command.
-    fn check_task(r: &Read<'_>, work: &Path, slot: Slot) -> Result<(), String> {
+    /// The task container: the spec's flags, mounts, environment and command, and the
+    /// sandboxed runtime it was to run in, or none.
+    fn check_task(
+        r: &Read<'_>,
+        work: &Path,
+        slot: Slot,
+        runtime: Option<&str>,
+    ) -> Result<(), String> {
+        if flag(r, "--runtime") != runtime || runtime.is_some_and(|x| !runtime_ok(x)) {
+            return Err(format!(
+                "the task container's runtime: {:?}, not {runtime:?}",
+                flag(r, "--runtime")
+            ));
+        }
         if r.verb != "run" || r.bare != ["-d"] {
             return Err(format!(
                 "the task container is `run -d`: {} {:?}",
@@ -1117,6 +1406,7 @@ mod tests {
                 "ANTHROPIC_BASE_URL" => v == agent,
                 "GITHUB_API" => v == format!("{agent}/github"),
                 "ANTHROPIC_API_KEY" => v == AGENT_KEY_PLACEHOLDER,
+                "WORKER_LABELS" => v == EMULATED_LABELS,
                 k if k.to_ascii_lowercase().contains("proxy") => proxy_ok(k, v, slot),
                 _ => true,
             };
@@ -1130,6 +1420,83 @@ mod tests {
         }
         if r.rest[1..] != ENTRYPOINT {
             return Err(format!("command outside the spec: {:?}", &r.rest[1..]));
+        }
+        Ok(())
+    }
+
+    /// A pool job's helper (#340): attached, never `--rm` (the shim removes it), the task container's
+    /// capabilities and limits, one of its job's scratch directories at `/repo` and nothing else, its
+    /// keyring and its proxy only, a script of that directory run by bash.
+    fn check_helper(r: &Read<'_>, work: &Path, slot: Slot) -> Result<(), String> {
+        check_side_labels(r, "helper")?;
+        // On the engine's own runtime, on a sandboxed host too (#330): see helper_plan.
+        if let Some(rt) = flag(r, "--runtime") {
+            return Err(format!(
+                "{}: a helper runs on the engine's own runtime, not {rt}",
+                r.name
+            ));
+        }
+        if r.verb != "run" || !r.bare.is_empty() {
+            return Err(format!(
+                "{}: a helper is an attached `run`: {} {:?}",
+                r.name, r.verb, r.bare
+            ));
+        }
+        if r.ip.is_some() {
+            return Err(format!("{}: its address is the engine's", r.name));
+        }
+        if flag(r, "--log-driver") != Some("none") || flag(r, "--pids-limit") != Some("8192") {
+            return Err(format!("{}: its log driver and pids limit", r.name));
+        }
+        if flag(r, "--cpus").is_none()
+            || flag(r, "--memory").is_none()
+            || flag(r, "--memory-swap") != flag(r, "--memory")
+        {
+            return Err(format!("{}: its share", r.name));
+        }
+        for c in &r.caps {
+            if !CAPS.contains(c) {
+                return Err(format!("{}: capability outside the spec: {c}", r.name));
+            }
+        }
+        let (id, gen) = owner_of_name(r.name).ok_or("name")?;
+        let scratch = task_dir(work, id, &gen).join("tmp");
+        let [m] = r.mounts.as_slice() else {
+            return Err(format!("{}: mounts {:?}", r.name, r.mounts));
+        };
+        let from = m
+            .strip_suffix(":/repo:ro")
+            .or_else(|| m.strip_suffix(":/repo"))
+            .map(Path::new)
+            .ok_or_else(|| format!("{}: mount outside the spec: {m}", r.name))?;
+        if from.parent() != Some(scratch.as_path())
+            || !from
+                .file_name()
+                .is_some_and(|n| scratch_name_ok(&n.to_string_lossy()))
+        {
+            return Err(format!(
+                "{}: {m} is not one of its job's scratch directories",
+                r.name
+            ));
+        }
+        for e in &r.env {
+            let (k, v) = e.split_once('=').ok_or("env without =")?;
+            let ok = match k {
+                HELPER_ENV => HELPER_KEYRINGS.contains(&v),
+                k => proxy_ok(k, v, slot),
+            };
+            if !ok {
+                return Err(format!("{}: variable outside the spec: {k}={v}", r.name));
+            }
+        }
+        let (image, cmd) = r.rest.split_first().ok_or("no image")?;
+        if !digest_ok(image) {
+            return Err(format!("{}: image not by digest: {image}", r.name));
+        }
+        match cmd {
+            [bash, script]
+                if *bash == "bash" && script.strip_prefix("/repo/").is_some_and(script_ok) => {}
+            _ => return Err(format!("{}: command outside the spec: {cmd:?}", r.name)),
         }
         Ok(())
     }
@@ -1262,13 +1629,24 @@ mod tests {
         Ok(())
     }
 
-    /// Reads a whole plan back: its network, every container attached to it, every connect and start.
-    #[allow(clippy::too_many_lines)] // one reading of every call a plan may hold
+    /// Reads a whole plan back whose task container runs on the engine's own runtime.
     fn check_plan(calls: &[Vec<String>], work: &Path, direct: bool) -> Result<(), String> {
+        check_plan_in(calls, work, direct, None)
+    }
+
+    /// Reads a whole plan back: its network, every container attached to it, every connect and
+    /// start, and the runtime its task container was to run in (#330).
+    #[allow(clippy::too_many_lines)] // one reading of every call a plan may hold
+    fn check_plan_in(
+        calls: &[Vec<String>],
+        work: &Path,
+        direct: bool,
+        runtime: Option<&str>,
+    ) -> Result<(), String> {
         let range = subnets();
         let mut net: Option<(String, Slot)> = None;
         let mut made: Vec<String> = Vec::new();
-        let (mut tasks, mut egress, mut agents) = (0, 0, 0);
+        let (mut tasks, mut egress, mut agents, mut helpers) = (0, 0, 0, 0);
         for c in calls {
             let words: Vec<&str> = c.iter().map(String::as_str).collect();
             match words.as_slice() {
@@ -1357,18 +1735,28 @@ mod tests {
                     } else if r.name.ends_with("-agent") {
                         agents += 1;
                         check_agent(&r, *slot, work)?;
+                    } else if r.name.ends_with(HELPER_SUFFIX) {
+                        helpers += 1;
+                        check_helper(&r, work, *slot)?;
                     } else {
                         tasks += 1;
-                        check_task(&r, work, *slot)?;
+                        check_task(&r, work, *slot, runtime)?;
                     }
                     made.push(r.name.to_owned());
                 }
                 other => return Err(format!("a call outside the spec: {other:?}")),
             }
         }
-        if tasks > 1 || egress > 1 || agents > 1 || (egress == 1) == direct {
+        // A pool job's helper is its lease's one container: never beside a task container or an agent.
+        if tasks > 1
+            || egress > 1
+            || agents > 1
+            || helpers > 1
+            || (helpers == 1 && tasks + agents > 0)
+            || (egress == 1) == direct
+        {
             return Err(format!(
-                "{tasks} task(s), {egress} egress, {agents} agent(s), direct {direct}"
+                "{tasks} task(s), {helpers} helper(s), {egress} egress, {agents} agent(s), direct {direct}"
             ));
         }
         Ok(())
@@ -1412,6 +1800,61 @@ mod tests {
             assert_eq!(p[0][..2], ["network", "create"]);
             assert_eq!(p.last().unwrap()[0], "run");
         }
+    }
+
+    #[test]
+    fn only_a_container_on_an_emulated_lane_is_told_so_and_its_platform_is_the_lanes() {
+        let (tdir, rel, work) = dirs();
+        let after = |a: &[String], f: &str| {
+            a.iter()
+                .position(|x| x == f)
+                .map(|i| a[i + 1].clone())
+                .unwrap()
+        };
+        for kind in [Kind::Build, Kind::ModelBuild, Kind::Trial, Kind::Audit] {
+            // The native lane: no WORKER_LABELS at all.
+            let p = plan(&spec(kind, &tdir, &rel)).unwrap();
+            let a = task_of(&p);
+            assert!(
+                !a.iter().any(|x| x.starts_with("WORKER_LABELS=")),
+                "{kind:?}: a native lane's container is not told anything of emulation"
+            );
+            assert_eq!(after(&a, "--platform"), "linux/arm64");
+            // An x86_64 lane emulated on this aarch64 host (#338).
+            let mut s = spec(kind, &tdir, &rel);
+            s.arch = "x86_64";
+            s.emulated = true;
+            let p = plan(&s).unwrap();
+            check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
+            let a = task_of(&p);
+            assert_eq!(after(&a, "--platform"), "linux/amd64");
+            assert_eq!(
+                a.iter()
+                    .filter(|x| x.starts_with("WORKER_LABELS="))
+                    .collect::<Vec<_>>(),
+                [r#"WORKER_LABELS={"emulated":true}"#]
+            );
+            // Its sidecars run the worker image natively, and are told nothing.
+            for c in p.iter().filter(|c| c[0] == "create") {
+                assert!(
+                    !c.iter().any(|x| x.starts_with("WORKER_LABELS=")),
+                    "{kind:?}: {c:?}"
+                );
+            }
+        }
+        // Any other value of it is outside the spec.
+        let mut bad = task_of(&plan(&spec(Kind::Build, &tdir, &rel)).unwrap());
+        let image = bad.iter().position(|x| x == DIGEST).unwrap();
+        bad.splice(
+            image..image,
+            [
+                "-e".to_owned(),
+                r#"WORKER_LABELS={"emulated":false,"x":1}"#.to_owned(),
+            ],
+        );
+        let mut p = plan(&spec(Kind::Build, &tdir, &rel)).unwrap();
+        *p.last_mut().unwrap() = bad;
+        assert!(check_plan(&p, &work, false).is_err());
     }
 
     #[test]
@@ -1492,6 +1935,45 @@ mod tests {
         let o = task_of(&plan(&one).unwrap());
         assert_eq!(after(&o, "--cpus"), "0.650");
         assert_eq!(after(&o, "--memory"), "1728m");
+    }
+
+    /// The calls of the fixture the dispatcher and install's egress probe both start an egress
+    /// sidecar by (#373), its placeholders filled with `values`.
+    fn egress_fixture(values: &[(&str, &str)]) -> Vec<Vec<String>> {
+        include_str!("../../tests/fixtures/egress-sidecar.txt")
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let l = values
+                    .iter()
+                    .fold(l.to_owned(), |l, (k, v)| l.replace(k, v));
+                l.split(' ').map(str::to_owned).collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_egress_sidecar_is_started_as_the_fixture_install_s_probe_shares_says() {
+        // Install's egress probe starts its own sidecar from the same fixture (omarchy-agent's
+        // install tests): a change to the limits, flags or role here fails until it follows.
+        let (tdir, rel, _) = dirs();
+        let own = ["203.0.113.10".to_owned()];
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        s.deny = &own;
+        let p = plan(&s).unwrap();
+        let want = egress_fixture(&[
+            ("{name}", "omarchy-task-812-g_0123456789abcdef-egress"),
+            (
+                "{labels}",
+                "--label com.omarchy.task=812 --label org.omarchy-pool.task.gen=g_0123456789abcdef --label org.omarchy-pool.agent.host=h_studio-1 --label org.omarchy-pool.task.role=egress",
+            ),
+            ("{out}", EGRESS_NETWORK),
+            ("{image}", WORKER),
+            ("{ip}", "10.231.0.50"),
+            ("{net}", "omarchy-task-812-g_0123456789abcdef"),
+            ("{deny}", "--deny 10.231.0.0/16 --deny 203.0.113.10"),
+        ]);
+        assert_eq!(p[1..4], want[..]);
     }
 
     #[test]
@@ -1722,6 +2204,105 @@ mod tests {
         }
     }
 
+    /// The sandboxed runtime (#330, D43): a task of a contributor's on its native lane runs in it,
+    /// its sidecars on the engine's own runtime; anything else is outside the spec.
+    #[test]
+    fn a_sandboxed_task_runs_in_its_runtime_and_its_sidecars_on_the_engines_own() {
+        let (tdir, rel, work) = dirs();
+        for kind in [Kind::Build, Kind::ModelBuild, Kind::Audit, Kind::Trial] {
+            let mut s = spec(kind, &tdir, &rel);
+            s.runtime = Some("runsc");
+            let p = plan(&s).unwrap();
+            check_plan_in(&p, &work, false, Some("runsc"))
+                .unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
+            let a = task_of(&p);
+            let at = a.iter().position(|x| x == "--runtime").unwrap();
+            assert_eq!(a[at + 1], "runsc");
+            for c in p.iter().filter(|c| c[0] != "run") {
+                assert!(!c.iter().any(|x| x == "--runtime"), "{kind:?}: {c:?}");
+            }
+            // Read as a plan on the engine's own runtime, or another sandbox's: refused.
+            assert!(check_plan(&p, &work, false).is_err());
+            assert!(check_plan_in(&p, &work, false, Some("kata")).is_err());
+            // And a plan without it, read as one that was to have it: refused too.
+            let plain = plan(&spec(kind, &tdir, &rel)).unwrap();
+            assert!(!task_of(&plain).iter().any(|x| x == "--runtime"));
+            assert!(check_plan_in(&plain, &work, false, Some("runsc")).is_err());
+        }
+        // A package's signed network exception (#373) changes its network, never its runtime:
+        // on its bridge, with no egress sidecar, its task container still runs in the sandbox.
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        s.direct = true;
+        s.runtime = Some("runsc");
+        let p = plan(&s).unwrap();
+        check_plan_in(&p, &work, true, Some("runsc")).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
+        assert!(check_plan(&p, &work, true).is_err());
+        assert!(p.iter().all(|c| !c.iter().any(|x| x.ends_with("-egress"))));
+        // A sandboxed task's egress sidecar is started exactly as an unsandboxed one's, which
+        // install's egress probe shares (#373, tests/fixtures/egress-sidecar.txt): on runc.
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        let plain = plan(&s).unwrap();
+        s.runtime = Some("runsc");
+        assert_eq!(plan(&s).unwrap()[1..4], plain[1..4]);
+        // A sidecar under a runtime of its own is outside the spec.
+        let mut s = spec(Kind::ModelBuild, &tdir, &rel);
+        s.runtime = Some("runsc");
+        let good = plan(&s).unwrap();
+        for suffix in ["-egress", "-agent"] {
+            let mut p = good.clone();
+            let i = p
+                .iter()
+                .position(|c| c[0] == "create" && c[2].ends_with(suffix))
+                .unwrap();
+            p[i].splice(3..3, ["--runtime".to_owned(), "runsc".to_owned()]);
+            assert!(
+                check_plan_in(&p, &work, false, Some("runsc")).is_err(),
+                "{suffix}"
+            );
+        }
+        // A runtime outside the grammar fails the task before the engine runs.
+        for bad in ["--privileged", "Runsc", "runsc --privileged", "", "gtk+3"] {
+            let mut s = spec(Kind::Build, &tdir, &rel);
+            s.runtime = Some(bad);
+            assert!(plan(&s).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn everything_but_the_projects_own_recipe_is_sandboxed() {
+        assert!(
+            sandboxed("community", "build", false),
+            "a contributor's recipe"
+        );
+        assert!(
+            sandboxed("project", "build", true),
+            "the project's review rebuild, drafted from a contributor's evidence"
+        );
+        assert!(
+            sandboxed("project", "trial", false),
+            "a trial installs what a review rebuild built"
+        );
+        assert!(sandboxed("project", "audit", false));
+        assert!(
+            sandboxed("host", "build", false) && sandboxed("", "build", false),
+            "a trust it does not know"
+        );
+        assert!(
+            sandboxed("project", "health", false),
+            "a kind it does not know"
+        );
+        assert!(
+            !sandboxed("project", "build", false),
+            "the project's own recipe: on main, or a maintainer's dry run"
+        );
+        assert!(
+            runtime_ok("runsc") && runtime_ok("io.containerd.runsc.v1") && runtime_ok("kata-qemu")
+        );
+        assert!(
+            !runtime_ok("-x") && !runtime_ok("Runsc") && !runtime_ok("a b") && !runtime_ok("a+b")
+        );
+    }
+
     #[test]
     fn the_probe_runs_one_shot_on_a_network_of_its_own() {
         let p = Probe {
@@ -1746,9 +2327,9 @@ mod tests {
             .any(|x| x == "omarchy-task-0-g_0123456789abcdef"));
     }
 
-    /// The internal network's gateway, per engine: docker's isolated mode, podman's CLI without DNS,
-    /// nothing podman's docker API would take (prep-root.sh's INPUT drop is the seam there); a
-    /// signed exception's bridge keeps its gateway, its way out.
+    /// The internal network's gateway, per engine: docker's isolated mode, podman's without DNS (its
+    /// own CLI's flag, which the engine says to libpod's API behind docker's CLI); a signed
+    /// exception's bridge keeps its gateway, its way out.
     #[test]
     fn the_gateway_is_no_address_of_the_host_where_the_engine_can_say_so() {
         let (tdir, rel, _) = dirs();
@@ -1758,7 +2339,6 @@ mod tests {
                 &["-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated"][..],
             ),
             (Gateway::NoDns, &["--disable-dns"][..]),
-            (Gateway::Engine, &[][..]),
         ] {
             let mut s = spec(Kind::Build, &tdir, &rel);
             s.gateway = gateway;
@@ -1919,5 +2499,358 @@ mod tests {
             .unwrap();
         agent_url[last][j] = "ANTHROPIC_BASE_URL=https://api.anthropic.com".into();
         assert!(check_plan(&agent_url, &work, false).is_err());
+    }
+
+    // ---------- a pool job's helpers (#340) ----------
+
+    /// The ring's image the scripts pin (tests/images.env), by digest.
+    const ARCH_BASE: &str = "docker.io/library/archlinux:base@sha256:b944cc65c5f28665dfd5fdbf5ed2997c88f5bb4a0aefac7ee8a7ef01893e5ed9";
+
+    fn helper<'a>(dir: &'a Path, scratch: &'a Path, script: &'a str, ro: bool) -> Helper<'a> {
+        Helper {
+            task: 812,
+            gen: GEN,
+            host: "h_studio-1",
+            arch: "x86_64",
+            image: ARCH_BASE,
+            dir,
+            scratch,
+            read_only: ro,
+            script,
+            keyring: ro.then_some("archlinux"),
+            cpus: 1,
+            mem_gb: 2,
+            worker_image: WORKER,
+            subnets: subnets(),
+            slot: 7,
+            gateway: Gateway::Isolated,
+            deny: &[],
+        }
+    }
+
+    fn helper_calls(h: &Helper<'_>) -> Vec<Vec<String>> {
+        let (mut setup, run) = helper_plan(h).unwrap();
+        setup.push(run);
+        setup
+    }
+
+    #[test]
+    fn every_helper_the_scripts_start_renders_inside_the_spec() {
+        let (tdir, _, work) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        // The health check's (and a trial's), read-only; the ABI gate's references, writable; the
+        // enqueue's PKGBUILD reader (reconcile.rs: it sources recipes, package code), read-only, no keyring.
+        for (script, ro, keyring) in [
+            ("check.sh", true, Some("archlinux")),
+            ("export.sh", false, None),
+            ("build.sh", false, None),
+            ("meta.sh", true, None),
+        ] {
+            let p = helper_calls(&Helper {
+                keyring,
+                ..helper(&dir, &scratch, script, ro)
+            });
+            check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{script}: {e}\n{p:#?}"));
+            let run = p.last().unwrap();
+            let has = |s: &str| run.iter().any(|x| x == s);
+            assert!(
+                !has("--rm") && !has("-d") && !has("--privileged"),
+                "{run:?}"
+            );
+            assert_eq!(value(run, "--platform"), Some("linux/amd64"));
+            assert_eq!(
+                value(run, "--network"),
+                Some("omarchy-task-812-g_0123456789abcdef"),
+                "the job's own internal network"
+            );
+            assert_eq!(
+                (value(run, "--cpus"), value(run, "--memory")),
+                (Some("0.900"), Some("1984m")),
+                "the job's unit, less its egress sidecar's"
+            );
+            assert_eq!(
+                run[run.len() - 2..],
+                ["bash".to_owned(), format!("/repo/{script}")]
+            );
+            // No token, no socket, no host path but its own scratch directory.
+            let all = run.join(" ");
+            assert!(!all.contains("omj.") && !all.contains("omw_") && !all.contains(".sock"));
+            assert_eq!(
+                run.iter().filter(|x| *x == "-v").count(),
+                1,
+                "one mount: {run:?}"
+            );
+        }
+    }
+
+    /// A pool job's helper runs on the engine's own runtime, on a sandboxed host too (#330,
+    /// #340): the project's own scripts in the release's pinned images, over what a ring serves
+    /// (signed, after the maintainers' approval) and the recipes on main, on whichever lane of its
+    /// arch the host runs — a sandbox's kernel has no binfmt handler for an emulated one. One under
+    /// a runtime is outside the spec.
+    #[test]
+    fn a_helper_runs_on_the_engines_own_runtime_and_one_under_another_is_outside_the_spec() {
+        let (tdir, _, work) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        let p = helper_calls(&helper(&dir, &scratch, "check.sh", true));
+        check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
+        assert!(
+            p.iter().all(|c| !c.iter().any(|x| x == "--runtime")),
+            "{p:#?}"
+        );
+        let mut under = p.clone();
+        let last = under.len() - 1;
+        under[last].splice(1..1, ["--runtime".to_owned(), "runsc".to_owned()]);
+        assert!(check_plan(&under, &work, false).is_err());
+        assert!(check_plan_in(&under, &work, false, Some("runsc")).is_err());
+    }
+
+    fn value<'a>(a: &'a [String], f: &str) -> Option<&'a str> {
+        a.iter()
+            .position(|x| x == f)
+            .and_then(|i| a.get(i + 1))
+            .map(String::as_str)
+    }
+
+    #[test]
+    fn a_helpers_network_and_egress_sidecar_are_a_tasks_and_never_a_bridge() {
+        // A pool job's helper runs package code: on the same slot it gets the very internal network
+        // and egress sidecar a task gets, held to the fixture install's egress probe shares (#373).
+        // A signed exception's bridge is a package's build, never a helper's, whatever the owner's
+        // envelope grants (`direct_network`): `Helper` has no such field, and its plan is internal.
+        let (tdir, rel, work) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        let own = ["203.0.113.10".to_owned()];
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        s.deny = &own;
+        let task = plan(&s).unwrap();
+        let helper = helper_calls(&Helper {
+            slot: s.slot,
+            deny: &own,
+            ..helper(&dir, &scratch, "check.sh", true)
+        });
+        check_plan(&helper, &work, false).unwrap_or_else(|e| panic!("{e}\n{helper:#?}"));
+        assert_eq!(helper[..4], task[..4], "the network and the egress sidecar");
+        let want = egress_fixture(&[
+            ("{name}", "omarchy-task-812-g_0123456789abcdef-egress"),
+            (
+                "{labels}",
+                "--label com.omarchy.task=812 --label org.omarchy-pool.task.gen=g_0123456789abcdef --label org.omarchy-pool.agent.host=h_studio-1 --label org.omarchy-pool.task.role=egress",
+            ),
+            ("{out}", EGRESS_NETWORK),
+            ("{image}", WORKER),
+            ("{ip}", "10.231.0.50"),
+            ("{net}", "omarchy-task-812-g_0123456789abcdef"),
+            ("{deny}", "--deny 10.231.0.0/16 --deny 203.0.113.10"),
+        ]);
+        assert_eq!(helper[1..4], want[..]);
+        assert!(check_plan(&helper, &work, true).is_err(), "never a bridge");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one case per line, as rustfmt lays them out
+    fn a_helper_value_outside_the_grammar_runs_nothing() {
+        let (tdir, _, _) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        let base = helper(&dir, &scratch, "check.sh", true);
+        assert!(helper_plan(&base).is_ok());
+        let other = tdir.join("in");
+        let deep = scratch.join("a/b");
+        let root = PathBuf::from("/");
+        let quoted = scratch.join("tmp.a:b");
+        let task_dir_itself = tdir.clone();
+        for (what, h) in [
+            (
+                "a tag",
+                Helper {
+                    image: "docker.io/library/archlinux:base",
+                    ..base.clone()
+                },
+            ),
+            (
+                "another arch",
+                Helper {
+                    arch: "riscv64",
+                    ..base.clone()
+                },
+            ),
+            (
+                "a script with a path",
+                Helper {
+                    script: "../x.sh",
+                    ..base.clone()
+                },
+            ),
+            (
+                "a script that is not .sh",
+                Helper {
+                    script: "check",
+                    ..base.clone()
+                },
+            ),
+            (
+                "a keyring with a space",
+                Helper {
+                    keyring: Some("arch linux"),
+                    ..base.clone()
+                },
+            ),
+            (
+                "another keyring",
+                Helper {
+                    keyring: Some("omarchy"),
+                    ..base.clone()
+                },
+            ),
+            (
+                "the task dir's own in/",
+                Helper {
+                    dir: &other,
+                    ..base.clone()
+                },
+            ),
+            (
+                "a directory deeper down",
+                Helper {
+                    dir: &deep,
+                    ..base.clone()
+                },
+            ),
+            (
+                "the root",
+                Helper {
+                    dir: &root,
+                    ..base.clone()
+                },
+            ),
+            (
+                "a colon",
+                Helper {
+                    dir: &quoted,
+                    ..base.clone()
+                },
+            ),
+            (
+                "the task dir, where the token is",
+                Helper {
+                    dir: &task_dir_itself,
+                    ..base.clone()
+                },
+            ),
+            (
+                "task 0",
+                Helper {
+                    task: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "a generation",
+                Helper {
+                    gen: "g_1",
+                    ..base.clone()
+                },
+            ),
+            (
+                "a slot outside the range",
+                Helper {
+                    slot: 1 << 20,
+                    ..base.clone()
+                },
+            ),
+            (
+                "a worker image by tag",
+                Helper {
+                    worker_image: "ghcr.io/x/y:latest",
+                    ..base.clone()
+                },
+            ),
+            (
+                "no share",
+                Helper {
+                    cpus: 0,
+                    ..base.clone()
+                },
+            ),
+        ] {
+            assert!(helper_plan(&h).is_err(), "{what} must be refused");
+        }
+    }
+
+    #[test]
+    fn the_check_refuses_a_helper_outside_the_spec() {
+        let (tdir, _, work) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        let good = helper_calls(&helper(&dir, &scratch, "check.sh", true));
+        check_plan(&good, &work, false).unwrap();
+        let with = |extra: &[&str]| {
+            let mut p = good.clone();
+            let last = p.len() - 1;
+            let at = p[last].iter().position(|x| x == ARCH_BASE).unwrap();
+            for (k, x) in extra.iter().enumerate() {
+                p[last].insert(at + k, (*x).to_owned());
+            }
+            p
+        };
+        let tdir_s = tdir.display().to_string();
+        let mut forbidden = vec![
+            with(&["-v", "/var/run/docker.sock:/var/run/docker.sock"]),
+            with(&["-v", &format!("{tdir_s}:/job")]),
+            with(&["-e", "OMARCHY_TOKEN=omj.x"]),
+            with(&["-e", "OMARCHY_API=https://pkgs.omarchy-pool.org"]),
+            with(&["-e", "KEYRING=a b"]),
+            with(&["-e", "KEYRING=omw_0123"]),
+            with(&["--cap-add", "SYS_ADMIN"]),
+            with(&["--privileged"]),
+            with(&["--rm"]),
+            with(&["-d"]),
+            with(&["--network", "bridge"]),
+            with(&["--label", "x=y"]),
+        ];
+        // Its mount anywhere but its job's scratch: the task dir (the token file), another lease's.
+        for m in [
+            format!("{tdir_s}:/repo:ro"),
+            format!("{}/tmp/tmp.x:/repo", tdir_s.replace("812-", "813-")),
+            "/srv/omarchy/work/jobs:/repo".to_owned(),
+        ] {
+            let mut p = good.clone();
+            let last = p.len() - 1;
+            let i = p[last].iter().position(|x| x == "-v").unwrap();
+            p[last][i + 1] = m;
+            forbidden.push(p);
+        }
+        // Another command, a tag.
+        let mut cmd = good.clone();
+        let last = cmd.len() - 1;
+        *cmd[last].last_mut().unwrap() = "-c".into();
+        forbidden.push(cmd);
+        let mut tag = good.clone();
+        let i = tag[last].iter().position(|x| x == ARCH_BASE).unwrap();
+        tag[last][i] = "docker.io/library/archlinux:base".into();
+        forbidden.push(tag);
+        // Beside a task container: a lease runs one or the other.
+        let (rel, task_dir) = (work.join("releases/v1.2.3"), tdir.clone());
+        let mut beside = plan(&spec(Kind::Build, &task_dir, &rel)).unwrap();
+        beside.push(good[good.len() - 1].clone());
+        forbidden.push(beside);
+        for p in forbidden {
+            assert!(
+                check_plan(&p, &work, false).is_err(),
+                "must be refused: {p:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_helper_is_its_jobs_lease_by_its_name() {
+        assert_eq!(
+            owner_of_name("omarchy-task-812-g_0123456789abcdef-helper"),
+            Some((812, GEN.to_owned()))
+        );
     }
 }

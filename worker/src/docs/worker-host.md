@@ -149,7 +149,8 @@ to copy.
    minutes, so only the dispatcher is recreated and its tasks run on. Beside
    the token the agent writes the host's own addresses for every task's
    egress to refuse (`OMARCHY_HOST_ADDRESSES`), and once `agent.toml` is
-   there, the secrets directory and the envelope's agent budget (#371); a
+   there, the secrets directory, the envelope's agent budget (#371) and its
+   grant of a signed exception's bridge (`OMARCHY_DIRECT_NETWORK`, #373); a
    rotation keeps them, and the lines you add to the file yourself stay.
 5. Only then does it write `agent.toml` with the host and its registration,
    take the agent keys, write the systemd --user unit, enable linger and start
@@ -189,6 +190,15 @@ private-repository read (a fine-grained token, "public repositories,
 read-only"). A package that truly needs direct network access (raw sockets,
 its own name resolution) gets `network = "direct"` with a `reason` in
 `factory/sizing/tasks.toml`, in a pull request another maintainer approves.
+A host runs such a package's tasks only where its owner granted that bridge
+(`--direct-network` at install, `direct_network = true` in `agent.toml`;
+`--no-direct-network` takes it back), which preflight's egress probe then
+checks too; any other host hands them back (#373) as a lost lease, whose
+attempt the pool gives back twice per task and spends after that: until the
+claim says whether a host runs such packages, a package with the exception
+needs a host that grants it among those that claim its tasks. A rootless host cannot grant it: its bridges reach the LAN through
+the engine's user-mode network stack, while its tasks, behind their egress
+sidecars, never do.
 
 **A host runs as many tasks at once as its units hold (#337).** The pool
 hands it one task per claim and its dispatcher claims again at once while
@@ -205,14 +215,104 @@ the **pool cap** on its page — the Studio canary runs at one build that way
 — and raise it again; nothing running ends when you lower it. The
 runbook's *How the pool hands a host work* has the rules.
 
+**A host moves the rings too (#340).** The pool jobs — sync, render,
+promote, rollback, security, gc, verify, relayout, enqueue, publish and the
+health checks — are the release's own signed code, so the dispatcher runs
+them itself, one at a time in the unit kept for them (never one of your
+builds': the minimum host runs its build beside a sync), each in a process of
+its own with a 2 GB memory limit and a time limit of its kind (45 minutes for
+a health check, 2½ hours for a sync, 3 for a promotion): one that crashes or
+hangs is failed and the pool queues it again, and every task beside it goes
+on. They run on any host whatever architecture they are for (a sync of the
+x86_64 sources runs natively on an aarch64 host, as the Studio's
+`pool-x86_64` always did), except the checks that install a ring's packages
+— a health check, a promotion's ABI gate — which need a lane of that ring's
+architecture, native or emulated. Those check containers, and the enqueue's
+reader of the recipes on `main` (on your host's own architecture), start
+through `omarchy-task-run`, which runs them as it runs a task container: on
+the job's own network behind its egress sidecar, with no token and nothing
+of the host but the job's scratch directory. Nothing to set up on your side:
+the dispatcher claims pool jobs on its own, and the pool hands them to a host
+only once the maintainers' `host-pool-jobs` setting names it — the P1 host
+first, the Studio canary a week later (runbook, *Pool jobs on hosts*) — so a
+host that never gets a sync is most likely not named there yet. A host's agent that stops answering is
+re-checked by the pool, never restarted: the dispatcher's restart would not
+reach it, and would cost the jobs it runs.
+
+**The other architecture runs emulated when the host can (#338).** The
+agent turns on an emulated lane for it when your envelope allows it
+(`emulate` in `agent.toml`: absent allows it, `emulate = []` keeps it off),
+the kernel has qemu's binfmt handler with the `F` flag (`prep-root.sh`
+installs it) and the release's build image of that architecture starts
+there; otherwise it says why the lane is held (`held_lanes` in
+`run/capacity.json`) and the native lane runs on (a Mac's x86_64 lane is
+Rosetta's in its VM, below). An emulated build is
+slower and shares the host's units; on a 16K-page kernel the lane stays on,
+and a build whose toolchain cannot start under qemu goes back to the queue
+for a native host without spending its attempt.
+
+**Contributors' builds run in a sandbox when your engine has one (#330).**
+Install gVisor (`runsc install` registers it with docker) or Kata Containers
+and count the host again: the agent finds it after a smoke run that must
+show a kernel other than your machine's, and from then on the dispatcher
+starts everything a contributor wrote on your native lane in it — their
+builds, the project's review rebuilds of them, trials and audits — so an
+escape from a recipe lands in the sandbox's kernel rather than on your
+machine. The project's own recipes, the sidecars and the check containers
+of the pool's jobs (#340) run on the engine as before. A sandbox does not cover an emulated lane (its kernel has no binfmt
+handler), so the pool then hands your emulated lanes the project's own
+recipes only. `sandbox = "off"` in your envelope turns it off,
+`sandbox = "kata"` picks one — at the host: a widening signed from the
+host page (#328) never sets it, nor does a package's signed network
+exception (#373) take its task out of it; the host page says which your dispatcher
+applies, or why none does (podman's docker API, for one, cannot pass the
+runtime on), and why its claims hold if the runtime refuses a start — for 30
+minutes, doubled with each further refusal in a row, a day at most: fix the
+runtime, then **Restart** on the dispatcher's worker page claims again at
+once. The runbook's *A sandboxed runtime for community tasks* has the
+steps.
+
+**Where the project's copies and their audits go (#339).** The project's
+copy of a package you asked for — its review rebuild, the one that is
+signed and published — is never built on your hosts while another
+maintainer's host has a lane for it and room to hold it at its size: it
+waits for that host, however busy. When only your hosts can build it, it
+waits, and Review offers another maintainer **Release to any host**, which
+they confirm with their passkey; then your host may take it. A host whose
+pool cap is 0, or too small for the copy's size, is none to wait for; one
+whose disk its running builds fill is busy, and waited for.
+Every audit prefers a machine other than the one that built what it
+audits, and an audit of the project's copy takes a model other than the
+one that built it whenever a host with another one answered in the last
+24 hours. So the model your host's agent runs matters: the provider is the
+first key `agent.env` holds, or `FACTORY_PROVIDER`, and `FACTORY_MODEL`
+overrides its model. If every host runs one model, those audits record
+`independent: none` on Review. A different provider or model on one host
+(another key, or `FACTORY_PROVIDER` / `FACTORY_MODEL` in that host's
+`agent.env`) makes them `independent: model`. The runbook's *How the pool
+hands a host work* has the rules.
+
 The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
 isolation level, the release it applied, the pool cap, the large task it
 reserves for when it does, and its leases with their lane and units. Every later call of
 the host to the pool is signed with its key (`Omarchy-Host`); the pool
 refuses a replay, a changed body and a clock more than 120 s off
 ([Security model](/docs/security-model#maintainer-hosts)). The agent asks
-for the host's state every two minutes or so — the release to run, and the
-host orders (#344) — and reports what it did.
+for the host's state every two minutes or so — the release to run, its
+settings and the host orders (#344, #325) — and reports what it did.
+
+## Settings and host orders
+
+A release your host's guard reverts (it rolls back to `last-good/` and
+quarantines the release) does not idle it: for six hours its dispatcher
+keeps claiming on the release it went back to, never below the signed
+`min_release`, and its page and Status say until when (#342). Past that it
+is handed nothing until it runs the pool's release. A release the project
+revokes later is the one a running task does not survive: the next
+dispatcher kills that release's task containers, the pool refuses what they
+would upload and puts their tasks back in the queue, attempt given back;
+every other task finishes on the release it started with
+([Runbook](/docs/runbook#a-new-maintainer-host), *A host reverted a release* and *Revoking a release*).
 
 **Host orders** (#344) are given on the host's page. **Reconcile now** (its
 owner or any maintainer) makes its agent run a round at its next poll.
@@ -228,6 +328,149 @@ directory the agent's user does not own: the button stays greyed until the
 agent's next report says it is fixed), and each order with its agent's
 answer after
 ([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
+
+**Settings** (#325): its page narrows the units the host gives and turns
+its emulated lanes off (or on again), always inside the envelope its owner
+wrote in `agent.toml` at the host — the page shows that envelope and greys
+every value above it. The agent takes a setting at its next poll, and the
+dispatcher claims by it from its next claim; a task already running above
+the new count finishes, nothing is stopped for it. Whatever the pool asks,
+the agent itself refuses a value above the envelope, and the page shows the
+refusal; only the owner widens the envelope — at the host, by editing
+`[envelope]` in `agent.toml` and restarting the agent (`systemctl --user
+restart omarchy-agent`), or from the page with the passkey pinned at the
+host ([Owner control without a visit](#owner-control-without-a-visit)). A
+narrowing needs no signature. The page's **Host orders** card gives the rest, its
+owner's or any maintainer's: **Retry release** lifts the quarantine of a
+release its guard reverted and tries it again; **Rotate token** gives the
+dispatcher a new worker token (the old one works ten more minutes);
+**Diagnostics** brings the dispatcher's last 500 log lines, scrubbed of the
+host's secrets, read on the page — only when the envelope says
+`diagnostics = true`. Every order and its agent's answer are on the page's
+journal of orders and the pool's journal.
+
+**The host brakes the pool** (#325): whatever the pool sends, the agent
+takes host orders at least two seconds apart and at most 20 an hour, at most
+4 narrowings and 6 dispatcher restarts an hour — a round that tries a
+release again after an Update or **Retry release** counts its restarts too,
+its revert's included — and at most one release change every ten minutes (a
+rollback under a signed statement excepted); beyond that it answers
+`refused: brake` (an Update waits for the next poll), and the page shows how
+much of each the last hour spent. On a Mac, a restart of its VM counts as
+one of those restarts, though the brake never holds it. Restarting the
+agent resets none of it.
+
+**A soak is the owner's, at the host** (#326): `soak_minutes = 30` under
+`[envelope]` in `agent.toml` (0, the default, takes a release at once; at
+most 100, so the soak and its round fit inside the pool's two-hour grace)
+makes the host take a new release that long after its agent first saw the
+pool name it, so a bad one can be caught on another host first — a release
+that lands meanwhile waits its own soak, but the host is never kept more
+than 100 minutes behind. It covers the agent's own update
+too, unless the release's manifest sets `agent.urgent` (only a security
+release does). A rollback statement skips it and applies at once;
+**Reconcile now** never does. Meanwhile the pool keeps the host's
+registration out of the 426 gate until the soak ends (and the round's 15
+minutes after it), at most two hours after the deploy, unless the host
+holds the pool's release in quarantine — it reverted it, and claims on its
+last-good instead (above) — and never on a revoked release (#342); its page
+says where it stands at the gate and why, to its owner and the maintainers ([Runbook](/docs/runbook#a-new-maintainer-host), *Soak*).
+
+**The host watches the pool** (#326, freeze detection): every six hours
+its agent reads the tag of GitHub's latest release, and nothing else. If
+GitHub has shown a newer release than the pool names for more than a day
+(and no revocation or signed rollback explains it), the host's page and
+Status warn `pool-behind-github`: the pool may be held on an old release.
+The agent changes nothing for it — it follows only the pool and what is
+signed ([Runbook](/docs/runbook#a-new-maintainer-host), *Freeze detection*).
+
+**The runtime is the owner's, at the host** (#325): `omarchy-agent runtime
+switch compose/podman` (or `compose/docker`) moves the dispatcher to the
+other engine with the same guard as a release, and back if it fails there;
+the pool cannot choose it. Drain the host's registration and let its tasks
+finish first: task containers and caches do not move between engines
+([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*). A Mac's
+bundle stays in its VM's engine: the switch is refused there.
+
+## Owner control without a visit
+
+Its owner widens a host's envelope and sets its agent keys from the host's
+page (#328, design v2 §14, D6 b) — with no visit to the machine, and only
+with the one passkey they pinned at the host. The pool relays; the host
+checks. An agent 0.4.0 or later takes these; the page's **Owner control**
+card shows what its agent reports (the pinned passkey, the seal key, the
+envelope a widening starts from, the agent keys' names) and greys each
+button with why.
+
+1. **Pin a passkey, once, at the host.** **Make a pin** asks one of your
+   passkeys (registered on your page) to sign a pin document for this
+   host, and prints `omarchy-agent envelope pin-passkey <pin>`, good for
+   ten minutes. Paste it at the host as the agent's user. The agent checks
+   the signature itself, with the public key the pin carries, and that the
+   pin names this host and its pool's relying party (`omarchy-pool.org` on
+   `https://omarchy-pool.org`; `localhost` only for a pool on the same
+   machine), then keeps that key in
+   `state/owner.json` (0600); its next report shows it pinned. A new pin
+   replaces the old one (what the old one signed is refused from then on);
+   `omarchy-agent envelope unpin-passkey` removes it, and the site widens
+   nothing until one is pinned again. `omarchy-agent status` prints what is
+   pinned, and the seal key.
+2. **Confirm the seal key, once.** The agent has an X25519 **seal key** of
+   its own (a 0600 file, `state/seal.x25519`, on Linux; the login keychain
+   on a Mac) and reports its public half. Compare the fingerprint on the
+   page with the `seal key:` line of `omarchy-agent status`, then
+   **Confirm the seal key** with your passkey. A seal key made again shows
+   as changed and is confirmed again before anything is sealed to it; so
+   does one other than the key you confirmed in this browser. A browser
+   that never confirmed it (another device, a new profile) shows you the
+   fingerprint to compare once more before its first seal: the pool's
+   record of your confirmation never decides on its own.
+3. **Widen the envelope.** `max_units`, `max_cpus`, `max_mem_gb`,
+   `emulate`, `agent_slots`, `agent_budget`, `diagnostics` and `paths`:
+   **Review and sign** sends what you changed to the pool, which writes the
+   document (this host, a version above the last, an hour to live); your
+   pinned passkey signs it, and the pool relays it as a `widen-envelope`
+   order. The agent refuses it unless the pinned passkey signed exactly that
+   document for this host, on its pool's origin, with you present and
+   verified, within its hour, under a version above the last it took — so
+   a document replayed, or an older one, is refused too. It then sets those
+   keys in `[envelope]` of `agent.toml` (its other lines and its mode kept),
+   takes the new envelope at once and counts `run/capacity.json` again —
+   never more units than the applied release's signed constants and the
+   detected hardware give. The dispatcher is recreated with the new file
+   and claims by it; a running task is never stopped. A Mac's VM is
+   restarted with a new `max_cpus`/`max_mem_gb` as for any change of its
+   size — once no task runs, within the brake — and an emulated lane its
+   detection never checked comes on at its next count: on Linux, which the
+   loop never runs on its own, `omarchy-agent capacity --write` at the
+   host; on a Mac, the next start of its VM. Before your passkey is asked,
+   the page checks that the pool's document is the one it showed you (this
+   host, the envelope you changed, its challenge the document's SHA-256).
+4. **Set agent keys.** `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+   `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY` and `GITHUB_TOKEN`
+   (the keys a task's agent sidecar reads): **Seal and sign** seals the
+   value in your browser to the confirmed seal key — X25519, HKDF-SHA256
+   and AES-256-GCM, bound to this host and the key's name — so the pool
+   stores and relays ciphertext only, inside a document your pinned
+   passkey signed. The agent opens it and writes it to
+   `OMARCHY_SECRETS_DIR/agent.env` (0600), keeping the lines you wrote
+   there; a `GITHUB_TOKEN` with any scope is refused. Only agent sidecars
+   mount that directory, read-only; the dispatcher never does, and the
+   journal, the report and the diagnostics scrub every value. A key is
+   taken out the same way. A task already running keeps what it started
+   with.
+
+Each order and the agent's answer — `done` with what changed, or `refused`
+with why (nothing pinned, another passkey, a replay, an expired document,
+another host or origin) — are on the page's journal of orders. Whatever
+can refuse a widening is checked before anything changes; once `agent.toml`
+or `agent.env` holds it, the answer is `done`, with anything that failed
+after it said. A setting
+that narrows (above) needs no signature
+([Security model](/docs/security-model#maintainer-hosts), *Owner control without a visit*;
+[Runbook](/docs/runbook#a-new-maintainer-host), *Owner control*).
+
+## Stopping a host
 
 To stop a host, use its page, `/hosts/<id>` (#322). **Suspend** (its
 owner or any maintainer, with a reason) stops its claims at once and
@@ -266,19 +509,47 @@ macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
   agent starts, stops and sizes the profile itself, at most once every ten
   minutes and six times a day, and never restarts it for a new size while a
   task runs; after a resize it reports the VM's new size to the pool.
-- **Tasks reach only the internet.** The agent puts the same task firewall
-  in the VM as on a Linux host: a task reaches no address of your LAN, your
-  router or the Mac itself, which preflight's egress probe checks.
+- **Tasks reach only the internet.** A task leaves only through its egress
+  sidecar, and the agent puts the same task firewall in the VM as on a Linux
+  host: a task reaches no address of your LAN, your router or the Mac
+  itself, which preflight's egress probe checks the way a task runs (#373).
 - **An x86_64 lane through Rosetta.** With Rosetta 2 installed the VM runs
   with `--vz-rosetta` (4K pages): x86_64 builds run on a lane that reports
   `via: rosetta`, faster than qemu.
 - **A LaunchAgent is login-scoped.** The agent starts at your login, again
   after a reboot once you log in, and after the Mac wakes; a headless Mac
   sitting at the login window after a boot runs no agent, and that is not
-  supported. While the Mac sleeps it claims nothing: running tasks' leases
-  expire and the pool requeues them, as on any host that goes away. After a
-  wake the agent holds the VM's clock to the pool's, so tasks that run on
-  keep valid job tokens.
+  supported. After a wake the agent holds the VM's clock to the pool's, so
+  tasks that run on keep valid job tokens.
+- **A sleeping Mac has zero free units** (#329, design v2 §19.2), whatever
+  runtime its engine is in (Colima, Docker Desktop, OrbStack). While a task
+  runs — from its claim to its report: a container labelled
+  `com.omarchy.task` runs, or the dispatcher holds its lease while it stages
+  the inputs or uploads the outputs (one file per lease in `<work
+  root>/state/leases/`, rewritten at every heartbeat) — the agent holds a
+  `PreventUserIdleSystemSleep` assertion (`caffeinate -i -w <its pid>`,
+  which `pmset -g assertions` lists): the Mac does not idle into sleep under
+  a task, and may again once none runs. An engine that stops answering keeps
+  it 30 minutes at most, a lease's length: past that the pool requeues what
+  nobody can confirm, and a laptop is not kept awake on its battery for it.
+  When it goes to sleep
+  anyway — idle with no task, the lid, the Apple menu — the agent hears it
+  first, reports `asleep: true` and only then lets it sleep (macOS waits up
+  to 30 s for it): the pool hands the host nothing more, and the host's page
+  says *asleep*. After the wake it reports `asleep: false`, asks the pool
+  for its target at once and, on Colima, checks the VM's clock; the dispatcher claims
+  again with nobody's action. **Closing the lid still sleeps the Mac**, task
+  or not: a task the sleep caught is requeued by the pool when its lease
+  expires (30 minutes without a heartbeat), as on any host that goes away,
+  and nothing on the Mac needs you — once awake, the dispatcher finds no
+  heartbeat accepted within the lease and removes that task's containers
+  itself. The agent hears the sleep through AppKit's
+  `NSWorkspaceWillSleepNotification` (a small `osascript -l JavaScript`
+  watcher it starts and ends; no `unsafe` code, no Apple SDK in the agent):
+  a watcher that does not start is said once in the journal, and the Mac
+  then sleeps as before — the assertion still holds while a task runs. The
+  pool holds `asleep` only while the report that said it is fresh (15
+  minutes): a dispatcher that claims after that is on a Mac that woke.
 - **Docker Desktop and OrbStack** are never installed by the agent; one that
   is already there may be used (isolation `vm-shared`), only with its home
   mount removed and `--dedicated`, your word that nothing else runs in it:

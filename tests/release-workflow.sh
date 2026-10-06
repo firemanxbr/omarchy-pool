@@ -287,6 +287,10 @@ case "$1 $2" in
     esac ;;
   "release edit") [[ "$*" == *"--draft=false"* ]] && echo false > "$GH_STATE" ;;
   "release list") cat "$GH_RELEASES" ;;
+  "api repos/{owner}/{repo}/contents/factory/MAINTAINERS.toml?ref="*)
+    # A release's governance file (#330's co-signature policy), or GitHub's 404.
+    tag="${2##*ref=}"; [[ -f "$GH_GOVERNANCE/$tag" ]] && { cat "$GH_GOVERNANCE/$tag"; exit 0; }
+    echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "release download")
     tag="$3"; dir=""; while [[ $# -gt 0 ]]; do [[ "$1" == --dir ]] && dir="$2"; shift; done
     mkdir -p "$dir"
@@ -304,7 +308,9 @@ STUB
 chmod +x "$tmp/bin/gh"
 v=v1.2.3
 export GH_LOG="$tmp/gh.log" GH_STATE="$tmp/state" GH_ASSETS="$tmp/assets" GH_ASSETS_DIR="$tmp/assets.d" GH_RELEASES="$tmp/releases" STUB_AGENTS="$tmp/agents" \
-  GH_DRAFT="$tmp/draft" PUBLISHING="$v" STUB_UNATTESTED=""
+  GH_DRAFT="$tmp/draft" PUBLISHING="$v" STUB_UNATTESTED="" GH_GOVERNANCE="$tmp/governance"
+# No release in the last 30 days asks a co-signature of this one (#330; tests/cosignature.sh runs the rest).
+: > "$GH_RELEASES"
 all="omarchy-pool-$v-x86_64-linux.tar.gz omarchy-pool-$v-x86_64-linux.tar.gz.sha256 omarchy-pool-$v-aarch64-linux.tar.gz omarchy-pool-$v-aarch64-linux.tar.gz.sha256 omarchy-staging.pub.asc omarchy-agent-x86_64-linux-musl omarchy-agent-aarch64-linux-musl omarchy-agent-aarch64-darwin omarchy-host-$v.tar.gz omarchy-host-$v.tar.gz.sigstore.json install.sh build-images.json"
 # The draft holds the bytes the run made; sums is their SHA-256, as release.yml's publish-release step writes it.
 mkdir -p "$GH_DRAFT"

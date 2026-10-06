@@ -574,7 +574,17 @@ __CHARTS__
       if (by[h].stopped) L.push(["warn", esc(h) + ": its updater is not running — releases do not reach it"]);
       if (by[h].timer) L.push(["info", esc(h) + ": the one-time step of the runbook's <a href=\"/docs/runbook#the-studio-host\">The Studio host</a> is not done — Update is unavailable there; releases still arrive through its timer"]);
     });
+    // A host whose agent reverted the pool's release, claiming on its last-good (#342, design v2 §18.3): the gate's own word from the
+    // listing, until when — six hours after the revert at most, then it is refused like any worker behind the pool's release.
+    (ws || []).filter(function (w) { return !w.revoked_at && w.alive && w.update && w.update.last_good_until; }).forEach(function (w) {
+      L.push(["warn", esc(hostOf(w)) + ": its agent reverted " + esc(w.update.latest) + " — claiming on last-good " + esc(w.update.yours) + " until " + esc(w.update.last_good_until.slice(0, 16).replace("T", " ")) + " UTC, then handed nothing until it runs the pool's release: the runbook's <a href=\"/docs/runbook#a-new-maintainer-host\">A new maintainer host</a>, <em>A host reverted a release</em>"]);
+    });
     return L;
+  }
+  // Freeze detection (#326, design v2 §5.5): a host whose agent says GitHub has shown a newer release than the pool names for over a
+  // day — the pool may be held on an old release. A warning, once per host; the agent acts on nothing.
+  function behindLines(hs) {
+    return (hs || []).map(function (b) { return ["warn", '<a href="/hosts/' + encodeURIComponent(b.host) + '">' + esc(b.name) + "</a> of " + esc(b.owner) + ": pool-behind-github — GitHub's latest release has been " + esc(b.github) + " since " + esc(ago(b.since)) + " while the pool names " + esc(b.pool) + ' — the pool may be held on an old release: the runbook\'s <a href="/docs/runbook#a-new-maintainer-host">A new maintainer host</a>, Freeze detection']; });
   }
   function drawWorkers() {
     $("#workers-note").textContent = WC_DOWN || "";
@@ -589,7 +599,7 @@ __CHARTS__
     var held = drainedRoles(ws, ["project", "review"]), alert = $("#workers-alert");
     if (alert) { alert.hidden = !held.length; alert.textContent = held.map(function (l) { return l.charAt(0).toUpperCase() + l.slice(1) + "."; }).join(" "); }
     var looks = ws.filter(function (w) { return w.alive && !w.revoked_at && (w.crash_loop_since || (w.watchdog && w.watchdog.n >= 2)); });
-    var notes = fleetLines(FACTORY.workers, FACTORY.pool, Date.now()).concat(looks.map(function (w) { return ["warn", workerName(w) + (w.crash_loop_since ? ": a new process every few minutes since " + esc(ago(w.crash_loop_since)) + " — it may be crash-looping; its log has why" : ": restarted by its watchdog " + w.watchdog.n + " times since " + esc(ago(w.watchdog.since)) + " — it wedges the same way; its log has why")]; }));
+    var notes = fleetLines(FACTORY.workers, FACTORY.pool, Date.now()).concat(behindLines(FACTORY.pool_behind_github), looks.map(function (w) { return ["warn", workerName(w) + (w.crash_loop_since ? ": a new process every few minutes since " + esc(ago(w.crash_loop_since)) + " — it may be crash-looping; its log has why" : ": restarted by its watchdog " + w.watchdog.n + " times since " + esc(ago(w.watchdog.since)) + " — it wedges the same way; its log has why")]; }));
     if (notes.length && !WC_DOWN) $("#workers-note").innerHTML = notes.map(function (n) { return '<span class="st-dot ' + (n[0] === "info" ? "run" : n[0]) + '" aria-hidden="true"></span>' + n[1]; }).join("<br>");
     $("#workers-list").innerHTML = ws.map(function (w) { return workerLine(w, tasks[w.current_task]); }).join("") || '<p class="st-empty">no project worker registered</p>';
   }
@@ -1199,9 +1209,11 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="workers"', 'id="workers-list"', 'id="workers-busy"', 'id="workers-note"', 'id="workers-alert"', 'href="/workers"'],
       script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', 'var down = st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", '" not ready"', '" outdated"', '" drained"', "wtMarks(w)", "w.crash_loop_since", "w.watchdog.n >= 2", 'drainedRoles(ws, ["project", "review"])', '$("#workers-alert")',
         // What rolls each host out, and a release that does not start (#277, part 3): from the listing alone.
-        "function fleetLines(ws, pool, now)", "fleetLines(FACTORY.workers, FACTORY.pool, Date.now())", "w.set_rollout", "var SILENT_AFTER_DEPLOY_MIN = 15, DEPLOY_ROLLOUT_MIN = 240;", "seen <= dep + DEPLOY_ROLLOUT_MIN * 60000"],
+        "function fleetLines(ws, pool, now)", "fleetLines(FACTORY.workers, FACTORY.pool, Date.now())", "w.set_rollout", "w.update.last_good_until", '" — claiming on last-good "', "var SILENT_AFTER_DEPLOY_MIN = 15, DEPLOY_ROLLOUT_MIN = 240;", "seen <= dep + DEPLOY_ROLLOUT_MIN * 60000",
+        // Freeze detection (#326): a host whose agent reports the pool behind GitHub.
+        "function behindLines(hs)", "behindLines(FACTORY.pool_behind_github)", "pool-behind-github", 'href="/docs/runbook#a-new-maintainer-host">A new maintainer host</a>, Freeze detection'],
       reads: [
-        { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "workers.0.set_rollout", "pool.version", "pool.deployed_at", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at"] },
+        { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "workers.0.set_rollout", "pool.version", "pool.deployed_at", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at", "pool_behind_github"] },
         { path: "/workers", json: false },
       ],
       visible: EVERYONE,

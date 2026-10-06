@@ -14,13 +14,18 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::{DiskFree, Isolation, Lane, Limits, VmKind};
+use super::emulation::{self, Emulated, Lanes, Smoke};
+use super::sandbox::{self, Listed};
+use super::{DiskFree, Isolation, Limits, VmKind};
 
 const GB: u64 = 1 << 30;
 /// One engine call (design v2 §10: no call blocks longer than this).
 pub const ENGINE_TIMEOUT: Duration = Duration::from_secs(60);
-/// The probe container may pull its image first (install only).
+/// The probe container may pull its image first (install only); so may each smoke run of
+/// an emulated lane (the foreign architecture's build image).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Where the kernel's binfmt handlers are (design v2 §7.5).
+pub const BINFMT: &str = "/proc/sys/fs/binfmt_misc";
 
 /// The limits the probe container is started with, and what its cgroup must then show.
 const PROBE_CPU_MAX: &str = "50000 100000";
@@ -42,6 +47,12 @@ pub struct Engine {
     pub cpus_hard: bool,
     pub memory_hard: bool,
     pub pids: bool,
+    /// The engine's own kernel release (`KernelVersion`): a sandbox's smoke run must print
+    /// another (#330).
+    pub kernel: String,
+    /// The runtimes the engine lists (`Runtimes`), where a sandbox is looked for (#330).
+    #[serde(skip)]
+    pub runtimes: Vec<Listed>,
 }
 
 /// The agent's own cgroup limits (a VPS slice, a systemd slice with `CPUQuota` or
@@ -64,8 +75,11 @@ pub struct Facts {
     pub(super) limits: Limits,
     /// The VM the engine runs in on macOS (#320); `None` on Linux.
     pub(super) vm: Option<VmKind>,
-    /// Emulated lanes a smoke run turned on (a Mac's Rosetta lane, #320).
-    pub(super) emulated: Vec<Lane>,
+    /// The foreign architecture's lane, when detection looked (design v2 §7.5), or a Mac's
+    /// Rosetta lane once its smoke run passed (#320, [`in_mac_vm`]).
+    pub(super) emulation: Option<Lanes>,
+    /// The sandboxed runtime for community tasks, when detection looked (#330, D43).
+    pub(super) sandbox: Option<sandbox::Found>,
 }
 
 impl Facts {
@@ -143,14 +157,18 @@ impl Facts {
         self
     }
 
-    /// An emulated lane `via` something, once its smoke run passed ([`rosetta_lane`]).
+    /// An emulated lane `via` something, once its smoke run passed ([`rosetta_lane`]): one
+    /// lane like detection's (#338), `page16k` from the engine's kernel (a Colima VM's 4K).
     #[must_use]
     pub fn with_lane(mut self, arch: &str, via: &'static str) -> Self {
-        if arch != self.arch() && !self.emulated.iter().any(|l| l.arch == arch) {
-            self.emulated.push(Lane {
+        let page16k = self.page_kb() >= 16;
+        let lanes = self.emulation.get_or_insert_with(Lanes::default);
+        if arch != self.engine.arch && !lanes.on.iter().any(|l| l.arch == arch) {
+            lanes.held.retain(|h| h.arch != arch);
+            lanes.on.push(Emulated {
                 arch: arch.to_owned(),
-                mode: "emulated",
-                via: Some(via),
+                via,
+                page16k,
             });
         }
         self
@@ -179,9 +197,24 @@ impl Facts {
         self.engine.rootless
     }
 
+    /// The emulated lanes detection turned on and the ones it holds, when it looked.
+    pub fn emulation(&self) -> Option<&Lanes> {
+        self.emulation.as_ref()
+    }
+
+    /// The sandboxed runtime detection found for community tasks, and why one is not used,
+    /// when it looked (#330).
+    pub fn sandbox(&self) -> Option<&sandbox::Found> {
+        self.sandbox.as_ref()
+    }
+
     /// The facts as `omarchy-agent capacity` prints them without a release.
     pub fn report(&self) -> serde_json::Value {
         let (cpus, mem_gb) = self.totals();
+        let lanes = self
+            .emulation
+            .as_ref()
+            .map(|e| serde_json::json!({ "emulated": e.on, "held_lanes": e.held }));
         serde_json::json!({
             "cpus": cpus,
             "mem_gb": mem_gb,
@@ -201,6 +234,9 @@ impl Facts {
                 "cpus": self.cgroup.cpus,
                 "mem_gb": self.cgroup.mem_bytes.map(|m| gb(m / GB)),
             },
+            "emulation": lanes,
+            "sandbox": self.sandbox.as_ref().and_then(|s| s.on.as_ref()),
+            "sandbox_held": self.sandbox.as_ref().and_then(|s| s.held.as_deref()),
         })
     }
 }
@@ -223,6 +259,14 @@ pub struct Probe<'a> {
     /// VM). `None` trusts `docker info`'s own answer for the limits, which podman's API
     /// gets wrong for `--cpus`: install and the run loop pass the release's build image.
     pub image: Option<&'a str>,
+    /// The emulated lane's detection (design v2 §7.5): the binfmt table, the foreign
+    /// architecture's build image and the envelope's `emulate`. `None` looks at none (a
+    /// Mac's VM: [`in_mac_vm`]).
+    pub emulation: Option<emulation::Probe<'a>>,
+    /// The sandboxed runtime's detection (#330, D43): the envelope's `sandbox` and whether
+    /// the engine's files are this machine's. Its smoke run starts `image`. `None` looks
+    /// for none.
+    pub sandbox: Option<sandbox::Probe<'a>>,
 }
 
 impl Probe<'_> {
@@ -305,39 +349,130 @@ pub fn detect(p: &Probe<'_>) -> Result<Facts, String> {
                 engine.root_dir
             )
         })?;
+    let page_size = page_size.unwrap_or(rustix::param::page_size() as u64);
+    // The binfmt table is this kernel's, the engine's on Linux (a Mac's engine is in a VM
+    // whose table the agent does not read: its callers pass no `emulation`, and
+    // [`in_mac_vm`] adds the Rosetta lane); the smoke run is the engine's own word on
+    // whether the lane works.
+    let emulation = p.emulation.as_ref().map(|e| {
+        let page_kb = u32::try_from(page_size / 1024).unwrap_or(u32::MAX);
+        emulation::detect(&engine.arch, page_kb, e, p)
+    });
+    // The sandbox's smoke run starts the same image as the probe container: the release's
+    // build image of the engine's own architecture (the native lane, which it covers alone).
+    let sandbox = p.sandbox.as_ref().map(|s| {
+        sandbox::detect(
+            &engine.runtimes,
+            &engine.kernel,
+            p.image,
+            s,
+            &|path| path.exists(),
+            p,
+        )
+    });
     Ok(Facts {
         engine,
         cgroup,
         mem_available,
-        page_size: page_size.unwrap_or(rustix::param::page_size() as u64),
+        page_size,
         disk_free: (work, engine_free),
         limits,
         vm: None,
-        emulated: Vec::new(),
+        emulation,
+        sandbox,
     })
 }
 
+/// The smoke run of a sandboxed runtime through the engine's CLI (#330): `docker run --rm
+/// --network none --runtime <name> --entrypoint uname <image by digest> -r`, which prints
+/// the kernel the container ran on, then `pacman --version` the same way. The runtime's
+/// name and the image are checked against a closed grammar before they reach the argv.
+impl sandbox::Run for Probe<'_> {
+    fn sandbox(&self, runtime: &str, image: &str) -> Result<String, String> {
+        if !sandbox::runtime_ok(runtime) {
+            return Err(format!("{runtime:?} is not a runtime's name"));
+        }
+        if !emulation::image_ok(image) {
+            return Err(format!("{image:?} is not an image by digest"));
+        }
+        let mut kernel = String::new();
+        for (entry, args, says) in sandbox::STEPS {
+            let mut c = self.docker();
+            c.args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--runtime",
+                runtime,
+                "--entrypoint",
+                entry,
+                image,
+            ])
+            .args(args);
+            let out = run(c, PROBE_TIMEOUT).map_err(|e| format!("{entry}: {e}"))?;
+            if !out.contains(says) {
+                return Err(format!(
+                    "{entry} {}: printed {:?}, not {says:?}",
+                    args.join(" "),
+                    out.trim().chars().take(120).collect::<String>()
+                ));
+            }
+            if entry == "uname" {
+                kernel = out.trim().chars().take(120).collect();
+            }
+        }
+        Ok(kernel)
+    }
+}
+
+/// The smoke run of an emulated lane through the engine's CLI (design v2 §15's
+/// `emulation(arch, image)`, which the driver trait wraps with `capacity()` once the run
+/// loop detects, #315): `docker run --rm --network none --platform linux/<arch>
+/// --entrypoint /usr/bin/true <image by digest>`, then `pacman --version` the same way.
+/// The architecture and the image are checked against a closed grammar before they reach
+/// the argv.
+impl Smoke for Probe<'_> {
+    fn emulation(&self, arch: &str, image: &str) -> Result<(), String> {
+        let platform = emulation::platform_of(arch)
+            .ok_or_else(|| format!("{arch:?} is not an architecture the pool builds"))?;
+        if !emulation::image_ok(image) {
+            return Err(format!("{image:?} is not an image by digest"));
+        }
+        for (entry, args, says) in emulation::STEPS {
+            let mut c = self.docker();
+            c.args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--platform",
+                platform,
+                "--entrypoint",
+                entry,
+                image,
+            ])
+            .args(args);
+            let out = run(c, PROBE_TIMEOUT).map_err(|e| format!("{entry}: {e}"))?;
+            if !out.contains(says) {
+                return Err(format!(
+                    "{entry} {}: printed {:?}, not {says:?}",
+                    args.join(" "),
+                    out.trim().chars().take(120).collect::<String>()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The smoke run of an `x86_64` lane through Rosetta (design v2 §7.5 step 2, §19.2; #320):
-/// the release's `x86_64` build image, by digest, starts `/usr/bin/true` and answers
-/// `pacman --version` on `linux/amd64`. In a Colima VM started with `--vz-rosetta` the
-/// engine runs it through Rosetta, on the VM's 4K pages.
+/// the emulated lane's own ([`Smoke`], #338) on `linux/amd64` — the release's `x86_64`
+/// build image, by digest, starts `/usr/bin/true` and answers `pacman --version`. In a
+/// Colima VM started with `--vz-rosetta` the engine runs it through Rosetta, on the VM's
+/// 4K pages.
 pub fn rosetta_lane(p: &Probe<'_>, image_x86_64: &str) -> Result<(), String> {
-    let mut c = p.docker();
-    c.args([
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        "--platform",
-        "linux/amd64",
-        "--entrypoint",
-        "sh",
-        image_x86_64,
-        "-c",
-        "/usr/bin/true && pacman --version >/dev/null",
-    ]);
-    run(c, PROBE_TIMEOUT)
-        .map(drop)
+    p.emulation("x86_64", image_x86_64)
         .map_err(|e| format!("the x86_64 smoke run: {e}"))
 }
 
@@ -389,7 +524,7 @@ pub fn in_mac_vm(
     if let Some(m) = vm.meminfo {
         f = f.with_meminfo(m);
     }
-    let allowed = vm.emulate.is_none_or(|a| a.iter().any(|x| x == "x86_64"));
+    let allowed = emulation::allowed(vm.emulate, "x86_64");
     let said = match (vm.rosetta, allowed, vm.x86_64_image) {
         (false, _, _) => None,
         (true, false, _) => Some(LaneSaid::Note(
@@ -439,6 +574,20 @@ struct InfoRaw {
     cpu_cfs_quota: bool,
     #[serde(rename = "PidsLimit", default)]
     pids_limit: bool,
+    #[serde(rename = "KernelVersion", default)]
+    kernel: String,
+    #[serde(rename = "Runtimes", default)]
+    runtimes: Option<std::collections::BTreeMap<String, RuntimeRaw>>,
+}
+
+/// One of `docker info`'s `Runtimes`: a runtime binary's `path`, or a containerd shim's
+/// `runtimeType` (podman's API gives the first path containers.conf lists).
+#[derive(Deserialize, Default)]
+struct RuntimeRaw {
+    #[serde(default)]
+    path: String,
+    #[serde(rename = "runtimeType", default)]
+    shim: String,
 }
 
 pub(super) fn parse_info(json: &str) -> Result<Engine, String> {
@@ -472,6 +621,17 @@ pub(super) fn parse_info(json: &str) -> Result<Engine, String> {
         cpus_hard: raw.cpu_cfs_quota,
         memory_hard: raw.memory_limit,
         pids: raw.pids_limit,
+        kernel: raw.kernel.trim().to_owned(),
+        runtimes: raw
+            .runtimes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, r)| Listed {
+                name,
+                path: r.path,
+                shim: r.shim,
+            })
+            .collect(),
     })
 }
 
@@ -644,7 +804,21 @@ impl Facts {
             disk_free: (disk_free_gb.0 * GB, disk_free_gb.1 * GB),
             limits,
             vm: None,
-            emulated: Vec::new(),
+            emulation: None,
+            sandbox: None,
         }
+    }
+
+    /// The same facts on a kernel of `page_kb` pages, with what emulation detection found.
+    pub(super) fn with_emulation(mut self, page_kb: u64, lanes: Lanes) -> Self {
+        self.page_size = page_kb * 1024;
+        self.emulation = Some(lanes);
+        self
+    }
+
+    /// The same facts with what the sandbox's detection found (#330).
+    pub(super) fn with_sandbox(mut self, found: sandbox::Found) -> Self {
+        self.sandbox = Some(found);
+        self
     }
 }

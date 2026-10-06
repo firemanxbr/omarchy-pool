@@ -382,7 +382,13 @@ attempt with exit 96, before any drafter turn. `pkg-repo work` and the
 community worker report it with `needs_native`, and the build goes back to
 the queue for a native worker of its architecture, the attempt given back.
 No emulated worker takes it again. Every page that follows the build says
-what it waits for.
+what it waits for. On a maintainer host the word is its lease's lane
+(#338): the dispatcher tells only a container on an emulated lane
+`WORKER_LABELS={"emulated":true}`, and the pool takes `needs_native` from a
+lease whose `lane` is `emulated` — the attempt given back, no emulated lane
+again — and refuses it from a native lane (a failure like any other),
+whatever the registration's labels say. A legacy worker's lease carries the
+lane its claim wrote from its labels.
 
 `--idle-exit 300` makes a worker exit after five minutes without work;
 `--once` makes it one-shot; SIGTERM (`docker stop`) drains it — the task in
@@ -460,12 +466,16 @@ POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?,
   200 {task:{id,name,arch,version,pkgbuild_ref,reason,attempts,…}, token: "omj.…", token_expires_at, lease_minutes, repo, pkgbuild_path, upload}
   204 nothing queued for this worker
   426 {error, latest, yours, behind, update}   `version` (the image's release) is behind the pool's past the grace — every
-                                               worker follows the latest image: update it and claim again (the worker sleeps 5 min)
+                                               worker follows the latest image: update it and claim again (the worker sleeps 5 min);
+                                               `revoked: true` when that release is one the pool's release revokes, whatever the grace (#342)
 POST /factory/tasks/:id/heartbeat                                 (the job token) → lease extended 30 min, a fresh token
 POST /factory/tasks/:id/complete    {sha256, filename, version?, duration_ms?, log_tail?} · jobs: {result, summary}
   409 unless the sha256 is in the pool (project) or in staging (community)
 POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?}
   → {status:"queued"} while attempts < max_attempts, else {status:"failed"}
+  every lease keeps the release it was claimed on (`build_tasks.release`, the claim's `version`); once the pool's release
+  revokes it (#342), its heartbeat, uploads, pool and ring writes and completion get 409 {stop: true, state: "revoked"},
+  and its fail, whatever it says, → {status:"queued", revoked} with the attempt given back
 PUT  /factory/tasks/:id/artifacts/:name                           (the job token) the evidence and the packages, one body up to 90 MB
 POST /factory/tasks/:id/artifacts/:name/multipart?action=create · part&part=N&upload_id= · complete · abort
                                                                    a package above 90 MB, in 64 MB parts — the edge refuses a single body
@@ -473,7 +483,15 @@ POST /factory/tasks/:id/artifacts/:name/multipart?action=create · part&part=N&u
                                                                    the project's review build included (bitwarden, 144 MB, 2026-09-17)
 ```
 
-A maintainer host's registration (#321, `kind = host`) claims as its dispatcher (#334, design v2 §8.1):
+A maintainer host's registration (#321, `kind = host`) claims as its dispatcher (#334, design v2 §8.1).
+Past the grace it is refused with `426` like any worker, but for one exception (#342, D55): while its
+host's reports say its agent reverted the pool's own release, it claims on the release its agent
+applied — its last-good — for six hours after the pool first heard of the revert, never below the
+signed `min_release` nor on a revoked release, with a warning on Status (the listing's
+`update.last_good_until`) and its host's page (*A host reverted a release* in the runbook). A
+soaking host's registration (#326) is kept out of the gate until its soak ends, at most two hours
+after the deploy; neither the soak nor the last-good holds a revoked release, and where both would
+hold, the host claims on its last-good (`worker/src/update.ts` `updateState`).
 
 ```
 POST /factory/claim   {arch, version, hostname, kinds, agent: {provider, model, probe}, usage?,
@@ -499,7 +517,9 @@ leases: their units plus the task's within min(declared units, units recomputed 
 with the signed constants, the pool's cap), one unit kept for pool jobs, model work within
 `agent_slots`, a build's disk budget within both free-disk values less the floor and the budgets
 of the builds it holds — as many leases at once as that allows (#337). A host takes builds of
-every trust, trials and audits; which one comes next is the selection's (below). A Stop is per lease (`task` names it; several open at once, 30 an hour per
+every trust, trials and audits, and — once the `host-pool-jobs` setting names it (#340) — the pool
+jobs: the arch-neutral ones whatever their row's arch, a health check or a promotion only with a
+lane of each arch its helpers check; which one comes next is the selection's (below). A Stop is per lease (`task` names it; several open at once, 30 an hour per
 login), and `fail` takes `lost: true` (a host event: the attempt given back, twice per task at
 most) and `oom: true` (the engine's kill: the attempt spent, the reason kept).
 
@@ -510,29 +530,49 @@ each in one task container it starts through one function (`crates/pkg-repo/src/
 start      refuses a signing key, an agent key or a GitHub token in its environment; re-adopts: a task container with a lease file
            (work/state/leases/<id>-<gen>.json, 0600) runs on or, exited, is completed from its exit code,
            OOMKilled and outputs; one without goes; a lease whose container is gone fails `lost`; then /ready
-loop       per lease: heartbeat (409 stop: kill, fail as stopped), its own watchdog (last accepted heartbeat
+loop       per lease: a release in this host's merged revoked set (#342: the signed manifest built in, with every
+           list a dispatcher of this host kept in work/state/revoked.json) or the heartbeat's 409 state "revoked":
+           kill in whatever phase, fail {revoked, lost}; a task of any other release runs on to its end;
+           heartbeat (409 stop: kill, fail as stopped), its own watchdog (last accepted heartbeat
            + 35 min: kill, report nothing), its container's state; the disk watcher (work root below the
            floor: the youngest build killed `lost`, want 0 until the space is back; a build refused at start
            for its budget: builds left out of the claims, trials and audits not, until it fits, 30 min at most);
            then the claim: want 1 while units are free beside its leases and the job unit, offering only what
            MemAvailable still holds below the largest task it could receive (#337; the shares of the leases it
-           started in the last 5 minutes subtracted: their containers have not grown yet) — again at the next tick
-           after a task, every 30 s otherwise; want 0 every 30 s when full or when fewer units than leases
+           started in the last 5 minutes subtracted: their containers have not grown yet) — and while the job
+           unit is free, the pool's kinds listed with its own (#340) — again at the next tick after a task,
+           every 30 s otherwise; want 0 every 30 s when full, the job unit too, or when fewer units than leases
            remain (nothing running is killed); each lease starts at once in its own container, no host queue
+jobs       a pool job (#340): one at a time, in a child process of its own (pkg-repo pool-job: a 2 GB data rlimit, its
+           job token in <task dir>/token, renewed at each heartbeat, its result in result.json; work dir <work root>/jobs,
+           its scripts' TMPDIR <task dir>/tmp), killed with its process group and its helpers past its kind's timeout
+           (render, rollback, enqueue 30 min; health 45; gc, publish 60; sync, security 150; promote 180; verify,
+           relayout 240) and failed; a job running when the dispatcher is replaced fails `lost`; its scripts' only
+           engine omarchy-task-run (RUNTIME, and docker and podman first on its PATH): `run --rm --platform …
+           [-e KEYRING=…] -v <scratch dir>:/repo[:ro] <an image tests/images.env pins> bash /repo/<script>.sh` as a
+           helper <network>-helper on the job's own internal network beside its egress sidecar, made as a task's
+           and never a sizing exception's bridge, whatever OMARCHY_DIRECT_NETWORK grants (health, promote,
+           security and enqueue — its PKGBUILD reader, on the host's native arch — get a /28), anything else
+           refused (125); the job holds the unit kept for pool jobs, never a task's (a build starts beside it)
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
 out        /task/out: the kind's closed list under its caps (a build: packages, PKGBUILD, vet.json, tests.log,
            resources.json, verdict.json), uploaded by the dispatcher with the job token; /task/log/task.log, ≤ 64 MiB
            (the engine keeps no log of a task container); exited with no verdict.json, or a verdict of a
            SIGTERM or SIGKILL, fails `lost` (a reboot, a shutdown): the attempt is given back
 exit 75    a restart order, or a loop without progress for 15 min: task containers run on, the next dispatcher re-adopts them
-network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a /28 of OMARCHY_TASK_SUBNETS, its gateway
-           off the host (docker ≥ 28: gateway_mode_ipv4=isolated; podman's CLI: --disable-dns); its egress
+network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a /28 of OMARCHY_TASK_SUBNETS, with no
+           gateway (docker ≥ 28: gateway_mode_ipv4=isolated; podman: DNS off, by its own CLI's --disable-dns or,
+           behind docker's CLI, through libpod's API on the socket that CLI talks to, #372; install's preflight
+           refuses a host where a task reaches a network's gateway, #367); its egress
            sidecar <network>-egress (pkg-repo egress: CONNECT, GET, HEAD to public addresses only, judged by the
            resolved address) on the shared omarchy-egress bridge and on the task's network, the task's HTTP(S)_PROXY;
            a model kind's agent sidecar <network>-agent (the broker, agent.env read-only, its caps in BROKER_AGENT_*,
            its usage in <task dir>/agent); all removed with the lease, orphans of this host swept at start and
            before each /28 is chosen;
-           factory/sizing network = "direct" (with a reason): a bridge network of its own, no egress
+           factory/sizing network = "direct" (with a reason): a bridge network of its own, no egress — on a
+           host whose envelope grants it (OMARCHY_DIRECT_NETWORK, #373); elsewhere handed back lost (the attempt
+           given back for a task's first HOST_LOSSES_MAX losses, spent after: the claim does not say yet whether
+           a host runs such packages)
 agent      the claim's agent: {provider, model, probe, error, checked_at} from a probe sidecar on a network of its own
            (at start, every 30 min, sooner after a failure, and for recheck-agent / restart-agent); the day's agent
            calls (OMARCHY_AGENT_CALLS_PER_DAY) spent: agent_slots 0 in the claim and no model task starts
@@ -563,10 +603,49 @@ guaranteed emulated share first — and the first is leased with one
 another claim took it first); D1
 serialises writes, so two workers never receive the same task. A host's
 lease records its `lane`, `size`, `units` and `disk_gb`, and the statement
-itself checks the host's units again. A legacy registration is selected as a
+itself checks the host's units again. A host's lanes are its agent's (`run/capacity.json`, #338): the native one
+and each emulated one it detected. Builds and trials run on a lane of their
+arch; a job with helper containers needs a lane of each ring architecture
+they check (`health` its own, `promote` each it promotes, `security` both),
+native or emulated, with no wait; every other kind is arch-neutral. A legacy registration is selected as a
 host with one lane (its arch, emulated when its labels say so) and one
 build, its own scope (project or community, shared or its owner's) kept
-until #343. The runbook's *How the pool hands a host work* has the rules. Only the lease
+until #343. Placement (#339, design v2 §8.4; D35, D36): the project's copy
+of a package — its review rebuild — is never handed to a host its requester
+owns (the rebuild's owner, and the owner of the contributor's build it
+answers) while another maintainer's host has a lane allowed for it, native or
+emulated with `needs_native` applied, and could hold it idle at its size
+(its units within the pool cap, an agent slot, its disk budget against its
+free disk plus the budgets of the builds it runs — a report below the
+minimum for that disk alone, or a claim holding builds back for disk, is
+busy, not gone); when only
+the requester's hosts have one, it waits, and Review offers another maintainer *Release to any host* at
+once, with their passkey (`POST /factory/tasks/:id/any-host`,
+`any-host:<task>`), on the task (`params.any_host`), the journal and the
+record. An audit — in a fresh container with its own agent sidecar, by
+construction — leaves the machine that built what it audits (its
+registration, or one of the same owner's the pool cannot tell apart from it:
+two registrations are apart only with different owners, or as two hosts'
+registrations of different hosts) to another that can take it now (for 3
+minutes, so the builder never idles for it); an
+audit of the project's copy takes a model (the claim's `agent`: provider and
+model) other than the one that built it whenever a registration taking
+audits with another model, and that is handed work (not drained, below the
+minimum or behind the release), answered in the last 24 hours (its last
+claim while its probe passes, the start of its failing spell while it
+fails), and runs on the same model otherwise; a claim reads those audits
+apart, so a head of them never hides another. Each audit's lease records
+`build_tasks.independent` — `model`, `host` (the same model on another
+machine, for an audit that does not ship) or `none` — cleared when the
+lease goes back to the queue, and Review shows it beside the verdict. A host
+whose agent reports `asleep` (#329: a Mac about to sleep, or asleep, while
+that report is fresh) has zero free units: its claims are handed nothing
+(the lease's own statement checks it again, as it checks a suspension), and
+it is no native capacity an emulated lane waits for, neither the other
+maintainer's host the project's copy waits for nor another machine an audit
+is left to, holds no reservation mark and counts in no size alive until a
+report says it woke. The runbook's *How the pool hands a host work* has the
+rules. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron
 requeues leases past `lease_expires_at` — the way out for a worker that
 vanished, not the way a worker reports: the community worker's shell has

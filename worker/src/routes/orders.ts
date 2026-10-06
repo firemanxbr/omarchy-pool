@@ -33,12 +33,13 @@ import { WORKER_ALIVE_MINUTES } from "../meta";
 import { updateState } from "../update";
 import { FIRST_PICK_MINUTES } from "../queue";
 import { LEASE_MINUTES } from "../lease";
+import { REVERTED_COLUMNS, SOAK_COLUMNS } from "../hosts";
 
 const NO_STORE = { "cache-control": "no-store" };
 const MIN = 60000;
 
 /** The worker's row as the doors read it, by the primary key — for a host's registration (#321), with its host's last report and the release its agent applied. */
-export const WORKER_ROW_SQL = `SELECT w.*, h.reported_at AS host_reported_at, h.release_applied AS host_release FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.id = ?`;
+export const WORKER_ROW_SQL = `SELECT w.*, h.reported_at AS host_reported_at, h.release_applied AS host_release, ${SOAK_COLUMNS("h")}, ${REVERTED_COLUMNS("h")} FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.id = ?`;
 async function workerRow(env: Env, id: string): Promise<(WorkerRow & OrderWorker & { id: string; current_task: number | null; site: string | null; agent_checked_at: string | null; arch: string }) | null> {
   return env.DB.prepare(WORKER_ROW_SQL).bind(id).first();
 }

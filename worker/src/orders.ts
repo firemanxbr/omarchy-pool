@@ -707,6 +707,11 @@ export interface RuleInput {
   needsAgent: boolean;
   /** The agent service this worker shares answers for another worker of its host (the site's read, only after a first proposal of restart-agent): this worker's own process is what fails. */
   siblingAnswers?: boolean;
+  /**
+   * A host's registration (#340, design v2 §8.6): its agent is a fresh probe sidecar per check, so an agent fault leads only to
+   * `recheck-agent`, never a restart — its dispatcher's restart would not reach the agent, and would cost its pool jobs.
+   */
+  host?: boolean;
 }
 
 /** A span as the reasons say it: seconds under a minute and a half (the rules' timings scaled in development), minutes past it. */
@@ -717,10 +722,11 @@ const span = (ms: number) => (ms < 90000 ? `${Math.max(0, Math.round(ms / 1000))
  * answer is re-checked once its own re-check has stalled, then restarted —
  * conditionally, so a worker whose agent answers by then is not — at most
  * twice per spell, 30 minutes apart, then left to a person. A class a
- * restart cannot help gets nothing, not even a re-check. The uptime gate,
- * the per-spell and per-day counts are here; the site election, the breaker
- * and the caps are read or enforced by the caller, only when this proposes
- * a restart-type order.
+ * restart cannot help gets nothing, not even a re-check. A host's
+ * registration (#340) gets the re-check only, never a restart. The uptime
+ * gate, the per-spell and per-day counts are here; the site election, the
+ * breaker and the caps are read or enforced by the caller, only when this
+ * proposes a restart-type order.
  */
 export function decideAuto(x: RuleInput, now: number, scale = 1): Decision {
   const { row, claim } = x;
@@ -749,6 +755,9 @@ export function decideAuto(x: RuleInput, now: number, scale = 1): Decision {
       };
     }
   }
+  // A host: the re-check above is all the rules give (#340) — a restart reaches no agent of its, which is a fresh probe sidecar per
+  // check; its own probe goes on, backing off, and a person sees the spell on its page.
+  if (x.host) return { kind: null, why: "a host's agent is a fresh probe sidecar: the pool re-checks it, never restarts its dispatcher for it", cls };
   if (cls === "unknown") return { kind: null, why: "an error the pool does not know: it does not restart on it — a person looks", cls };
   if (auto.restarts >= MAX_POOL_RESTARTS_PER_SPELL) {
     if (auto.last_restart && now - Date.parse(auto.last_restart) >= step(GIVE_UP_AFTER_MIN)) {

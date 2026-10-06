@@ -287,12 +287,17 @@ pub fn check() -> anyhow::Result<()> {
 
 /// Spawns a task's child in a process group of its own, registered while it
 /// runs, so a stop kills the whole group — a script and whatever it runs.
+/// Outside a task's stop — a dispatcher's pool job (#340), whose dispatcher
+/// kills the job's own process group whole at its timeout — the child stays in
+/// its parent's group, so that kill takes it too.
 fn spawned(cmd: &mut Command) -> std::io::Result<(std::process::Child, Option<Arc<TaskStop>>)> {
     let stop = current();
     if stop.as_ref().is_some_and(|s| s.is_stopped()) {
         return Err(std::io::Error::other("the task was stopped by the pool"));
     }
-    cmd.process_group(0);
+    if stop.is_some() {
+        cmd.process_group(0);
+    }
     let child = cmd.spawn()?;
     if let Some(s) = &stop {
         s.register(child.id());
@@ -731,6 +736,31 @@ mod tests {
         within(&stop, || {
             assert!(status(&mut Command::new("true")).is_err());
         });
+    }
+
+    /// A task's child leads a group of its own, which its stop kills; one outside a task — a
+    /// dispatcher's pool job's script (#340) — stays in its parent's, which the dispatcher kills.
+    #[test]
+    fn a_tasks_child_leads_its_own_group_and_one_outside_a_task_stays_in_its_parents() {
+        let groups = |inside: bool| -> (i32, i32) {
+            let run = || {
+                output(Command::new("sh").args(["-c", "cut -d' ' -f5 /proc/$$/stat; echo $$"]))
+                    .unwrap()
+            };
+            let out = if inside {
+                within(&TaskStop::new(5), run)
+            } else {
+                run()
+            };
+            let text = String::from_utf8(out.stdout).unwrap();
+            let mut l = text.lines().map(|x| x.trim().parse::<i32>().unwrap());
+            (l.next().unwrap(), l.next().unwrap())
+        };
+        let (group, pid) = groups(true);
+        assert_eq!(group, pid, "a task's child leads its own group");
+        let (group, pid) = groups(false);
+        assert_ne!(group, pid);
+        assert_eq!(group, rustix::process::getpgrp().as_raw_nonzero().get());
     }
 
     #[test]

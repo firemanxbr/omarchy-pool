@@ -1,11 +1,17 @@
 //! What the agent asks over the network (design v2 §16.1, §16.4, §17.1): the pool's host
 //! state (`GET /api/v1/hosts/self/state`, signed with the host key, #344) — the release
-//! target, the open Update orders of the host's registration and the host orders — and
-//! its rollback relay, the host report (`POST /api/v1/hosts/self/report`, signed), and
-//! the release assets on GitHub. Answers are read leniently and sorted three ways; none
-//! of them ever stops the agent: no answer, a 5xx or a malformed body changes nothing; a
-//! 401/403 changes nothing and slows the polls to hourly. The host state's answer, whatever
-//! its status, also gives the pool's clock (its `Date`), which a Mac's VM is held to (#320).
+//! target, the open Update orders of the host's registration, the host orders and (#325)
+//! the settings the pool keeps for it — and its rollback relay (with the maintainers'
+//! co-signatures of a statement, #330), the host report
+//! (`POST /api/v1/hosts/self/report`, signed), a new host worker token
+//! (`POST /api/v1/hosts/self/token`, signed, for `rotate-token`), the dispatcher's
+//! scrubbed log lines (`POST /api/v1/hosts/self/diagnostics`, signed, for `diagnostics`),
+//! the release assets on GitHub (a bundle's co-signatures among them, each of which may
+//! not exist), and (#326's freeze detection) the tag of GitHub's latest release, nothing
+//! more of it. Answers are read leniently and sorted three ways; none of them ever stops
+//! the agent: no answer, a 5xx or a malformed body changes nothing; a 401/403 changes
+//! nothing and slows the polls to hourly. The host state's answer, whatever its status,
+//! also gives the pool's clock (its `Date`), which a Mac's VM is held to (#320).
 //!
 //! From this agent on the target is the host state's, never `follow.latest`: the pool's
 //! public `GET /factory/follow` is read by the legacy sets' updaters and the agents before
@@ -15,6 +21,7 @@
 //! without its `follow` every host already on 0.3.0 would see no target and never fetch the
 //! rollback statement (design v2 §16).
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -36,8 +43,8 @@ pub(crate) enum Net<T> {
     Unauthorized(u16),
 }
 
-/// What `GET /api/v1/hosts/self/state` says, as far as this agent reads it (P3's minimal
-/// host state, design v2 §17.1; settings and the other orders are P4's).
+/// What `GET /api/v1/hosts/self/state` says, as far as this agent reads it (design v2
+/// §17.1: P3's release target and orders, #344; P4's settings and other orders, #325).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct HostState {
     /// The release the pool names for this host; `None` when it runs none (a build with
@@ -54,6 +61,9 @@ pub(crate) struct HostState {
     /// open Update are its `follow`'s. A pool from #344 on always sends one, `{"target":
     /// null}` when it runs no release.
     pub older_pool: bool,
+    /// The settings the pool keeps for this host (#325): the last ones its agent took. Read
+    /// only by an agent that has none of its own (a `state.json` lost), always narrowed.
+    pub settings: Option<super::settings::Settings>,
 }
 
 /// What `GET /api/v1/factory/follow?ids=<worker>` says, as far as the agent reads it: read
@@ -78,6 +88,15 @@ pub(crate) struct Order {
     pub not_after: Option<i64>,
 }
 
+/// The argument of a settings order: a value, the envelope's own (`null`), or one this
+/// agent cannot read (refused).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Arg<T> {
+    Set(T),
+    Envelope,
+    Malformed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OrderKind {
     /// Stop and then remove the legacy compose project `legacy.json` records, and write the
@@ -85,18 +104,96 @@ pub(crate) enum OrderKind {
     RetireLegacy,
     /// A round now; it never skips the owner's soak (P4).
     ReconcileNow,
+    /// At most this many units, inside the envelope (#325).
+    SetUnits(Arg<u32>),
+    /// Only these emulated lanes, inside the envelope (#325).
+    SetEmulate(Arg<Vec<String>>),
+    /// A new host worker token for the dispatcher (#325, design v2 §6.1).
+    RotateToken,
+    /// Lift every quarantine and try the release again (#325).
+    RetryRelease,
+    /// The dispatcher's last log lines, scrubbed, if the envelope allows it (#325, M10).
+    Diagnostics,
+    /// Keys of the envelope set as the owner's passkey signed them (#328, design v2 D6 b);
+    /// `None`: no signed document this agent can read (refused).
+    WidenEnvelope(Option<Signed>),
+    /// Agent keys sealed to the host, as the owner's passkey signed them (#328).
+    SetAgentKeys(Option<Signed>),
     /// Any other word, kept to say what was refused.
     Unknown(String),
 }
+
+/// A document the owner's passkey signed (#328), as an order carries it: its exact bytes
+/// (what the assertion's challenge commits to) and the assertion. The host checks both
+/// against the passkey pinned at the host ([`crate::owner::verify_signed`]); the pool only
+/// relays them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Signed {
+    pub doc: String,
+    pub assertion: crate::owner::webauthn::Assertion,
+}
+
+impl Signed {
+    /// The order's `doc` (at most [`crate::owner::DOC_MAX`] bytes) and `assertion`; `None`
+    /// when either is missing or does not read.
+    fn read(o: &serde_json::Value) -> Option<Self> {
+        let doc = o
+            .get("doc")?
+            .as_str()
+            .filter(|d| d.len() <= crate::owner::DOC_MAX)?;
+        let assertion = serde_json::from_value(o.get("assertion")?.clone()).ok()?;
+        Some(Signed {
+            doc: doc.to_owned(),
+            assertion,
+        })
+    }
+}
+
+/// At most this many architectures in a `set-emulate`.
+const MAX_ARCHES: usize = 4;
 
 impl OrderKind {
     pub fn parse(s: &str) -> Self {
         match s {
             "retire-legacy" => OrderKind::RetireLegacy,
             "reconcile-now" => OrderKind::ReconcileNow,
+            "set-units" => OrderKind::SetUnits(Arg::Malformed),
+            "set-emulate" => OrderKind::SetEmulate(Arg::Malformed),
+            "rotate-token" => OrderKind::RotateToken,
+            "retry-release" => OrderKind::RetryRelease,
+            "diagnostics" => OrderKind::Diagnostics,
+            "widen-envelope" => OrderKind::WidenEnvelope(None),
+            "set-agent-keys" => OrderKind::SetAgentKeys(None),
             other => {
                 OrderKind::Unknown(other.chars().filter(|c| !c.is_control()).take(64).collect())
             }
+        }
+    }
+
+    /// The kind with its argument read from the order's object: `units` for `set-units`,
+    /// `emulate` for `set-emulate`.
+    fn read(s: &str, o: &serde_json::Value) -> Self {
+        match Self::parse(s) {
+            OrderKind::SetUnits(_) => OrderKind::SetUnits(match o.get("units") {
+                Some(serde_json::Value::Null) => Arg::Envelope,
+                Some(v) => v
+                    .as_u64()
+                    .and_then(|u| u32::try_from(u).ok())
+                    .map_or(Arg::Malformed, Arg::Set),
+                None => Arg::Malformed,
+            }),
+            OrderKind::SetEmulate(_) => OrderKind::SetEmulate(match o.get("emulate") {
+                Some(serde_json::Value::Null) => Arg::Envelope,
+                Some(serde_json::Value::Array(a)) if a.len() <= MAX_ARCHES => a
+                    .iter()
+                    .map(|x| x.as_str().filter(|x| x.len() <= 16).map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+                    .map_or(Arg::Malformed, Arg::Set),
+                _ => Arg::Malformed,
+            }),
+            OrderKind::WidenEnvelope(_) => OrderKind::WidenEnvelope(Signed::read(o)),
+            OrderKind::SetAgentKeys(_) => OrderKind::SetAgentKeys(Signed::read(o)),
+            k => k,
         }
     }
 
@@ -104,17 +201,26 @@ impl OrderKind {
         match self {
             OrderKind::RetireLegacy => "retire-legacy",
             OrderKind::ReconcileNow => "reconcile-now",
+            OrderKind::SetUnits(_) => "set-units",
+            OrderKind::SetEmulate(_) => "set-emulate",
+            OrderKind::RotateToken => "rotate-token",
+            OrderKind::RetryRelease => "retry-release",
+            OrderKind::Diagnostics => "diagnostics",
+            OrderKind::WidenEnvelope(_) => "widen-envelope",
+            OrderKind::SetAgentKeys(_) => "set-agent-keys",
             OrderKind::Unknown(k) => k,
         }
     }
 }
 
 /// A signed rollback statement as the pool relays it: the exact signed bytes and the
-/// Sigstore bundle.
+/// Sigstore bundle, and the maintainers' co-signatures over it (#330) by login, which the
+/// agent verifies itself (a pool can only withhold one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Relayed {
     pub statement: Vec<u8>,
     pub bundle: Vec<u8>,
+    pub cosignatures: BTreeMap<String, Vec<u8>>,
 }
 
 pub(crate) trait Pool {
@@ -134,22 +240,49 @@ pub(crate) trait Pool {
     fn rollback(&mut self, to: Release) -> Net<Option<Relayed>>;
     /// A file of release `r` on GitHub (the host bundle and its signature).
     fn release_asset(&mut self, r: Release, name: &str) -> Net<Vec<u8>>;
+    /// The same for a file the release may not carry (a maintainer's co-signature, #330):
+    /// `Ok(None)` when GitHub answers 404.
+    fn release_asset_if_any(&mut self, r: Release, name: &str) -> Net<Option<Vec<u8>>>;
     /// A pinned tool (checked by SHA-256 by the caller).
     fn download(&mut self, url: &str) -> Net<Vec<u8>>;
+    /// A new host worker token (signed, #325's `rotate-token`): the pool's answer.
+    fn token(&mut self) -> Net<serde_json::Value>;
+    /// Posts the dispatcher's scrubbed log lines (signed, #325's `diagnostics`).
+    fn diagnostics(&mut self, body: &[u8]) -> Net<()>;
     /// The public address the pool's edge sees this host come from over IPv4 (#371): the
     /// one its tasks leave from too, through the same NAT.
     fn public_address(&mut self) -> Net<IpAddr>;
+    /// The tag of GitHub's latest release (#326's freeze detection), unauthenticated: only
+    /// ever compared with the pool's, never acted on.
+    fn github_latest(&mut self) -> Net<Release>;
+    /// The scopes GitHub names for `token` (`X-OAuth-Scopes`; `None` when it names none, as
+    /// for a fine-grained token): a `GITHUB_TOKEN` the owner sealed (#328) is public read
+    /// only, as install checks one (design v2 §20 item 7). The token goes to GitHub alone.
+    fn github_scopes(&mut self, token: &str) -> Net<Option<String>>;
 }
 
 const STATE_MAX: u64 = 64 << 10;
 const FOLLOW_MAX: u64 = 64 << 10;
 const STATE_PATH: &str = "/api/v1/hosts/self/state";
 const REPORT_PATH: &str = "/api/v1/hosts/self/report";
+const TOKEN_PATH: &str = "/api/v1/hosts/self/token";
+const DIAGNOSTICS_PATH: &str = "/api/v1/hosts/self/diagnostics";
 /// `/cdn-cgi/trace` is a dozen short lines.
 const TRACE_MAX: u64 = 4 << 10;
 const STATEMENT_MAX: u64 = 1 << 20;
 const BUNDLE_MAX: u64 = 64 << 20;
+/// At most this many co-signatures are read from one relay (no governance file lists more
+/// maintainers).
+const MAX_COSIGNATURES: usize = 16;
 pub(crate) const RELEASES: &str = "https://github.com/firemanxbr/omarchy-pool/releases/download";
+/// GitHub's public API for the latest release (not a draft, not a prerelease): its
+/// `tag_name` is all the agent reads of it.
+pub(crate) const LATEST_RELEASE: &str =
+    "https://api.github.com/repos/firemanxbr/omarchy-pool/releases/latest";
+/// GitHub's API for the user a token is: its `X-OAuth-Scopes` say what the token may do.
+const GITHUB_USER: &str = "https://api.github.com/user";
+/// The latest release's JSON lists its assets and notes; a body larger than this is not one.
+const LATEST_MAX: u64 = 1 << 20;
 /// At most this many host orders and Update ids are read from one answer.
 const MAX_ORDERS: usize = 32;
 
@@ -189,10 +322,11 @@ pub(crate) fn parse_state(body: &[u8]) -> Result<HostState, String> {
         .iter()
         .filter_map(|o| {
             let id = o.get("id")?.as_str().filter(|i| is_order_id(i))?.to_owned();
-            let kind = OrderKind::parse(
+            let kind = OrderKind::read(
                 o.get("kind")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(""),
+                o,
             );
             let not_after = match o.get("not_after") {
                 Some(serde_json::Value::String(t)) => super::trust::unix_time(t),
@@ -206,12 +340,34 @@ pub(crate) fn parse_state(body: &[u8]) -> Result<HostState, String> {
             })
         })
         .collect();
+    // The settings the pool keeps: a units count and a list of architectures, each read
+    // alone; anything else is none.
+    let settings = raw
+        .get("settings")
+        .and_then(serde_json::Value::as_object)
+        .map(|s| super::settings::Settings {
+            units: s
+                .get("units")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|u| u32::try_from(u).ok()),
+            emulate: s
+                .get("emulate")
+                .and_then(serde_json::Value::as_array)
+                .filter(|a| a.len() <= MAX_ARCHES)
+                .and_then(|a| {
+                    a.iter()
+                        .map(|x| x.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                }),
+        })
+        .filter(|s| !s.is_empty());
     Ok(HostState {
         target,
         updates,
         orders,
         poll_s: raw.get("poll_s").and_then(serde_json::Value::as_i64),
         older_pool: !raw.contains_key("release"),
+        settings,
     })
 }
 
@@ -250,21 +406,59 @@ pub(crate) fn parse_follow(body: &[u8], worker_id: &str) -> Result<Follow, Strin
     })
 }
 
-/// Reads the relay's body: `{to, statement, bundle}`, the statement as the signed text.
+/// The tag of GitHub's latest release from its API's answer: `tag_name`, a release
+/// (`vX.Y.Z`); everything else in it is ignored.
+pub(crate) fn parse_latest(body: &[u8]) -> Result<Release, String> {
+    let raw: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("GitHub's latest release: {e}"))?;
+    let tag = raw
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("GitHub's latest release: no tag_name")?;
+    Release::parse(tag.trim()).ok_or_else(|| {
+        format!(
+            "GitHub's latest release: {:?} is not vX.Y.Z",
+            tag.chars().take(40).collect::<String>()
+        )
+    })
+}
+
+/// Reads the relay's body: `{to, statement, bundle, cosignatures?}`, the statement as the
+/// signed text. `cosignatures` (login → `ssh-keygen -Y sign`'s armored text, #330) is read
+/// leniently: an entry that is no login and a string is left out, never the statement.
 pub(crate) fn parse_relayed(body: &[u8], to: Release) -> Result<Relayed, String> {
     #[derive(Deserialize)]
     struct Raw {
         to: String,
         statement: String,
         bundle: String,
+        #[serde(default)]
+        cosignatures: Option<serde_json::Value>,
     }
     let raw: Raw = serde_json::from_slice(body).map_err(|e| format!("rollback relay: {e}"))?;
     if Release::parse(&raw.to) != Some(to) {
         return Err(format!("rollback relay: asked for {to}, got {:?}", raw.to));
     }
+    let cosignatures = match raw.cosignatures {
+        Some(serde_json::Value::Object(m)) => m
+            .into_iter()
+            .filter_map(|(login, sig)| match sig {
+                serde_json::Value::String(text)
+                    if crate::verify::cosignature::is_login(&login)
+                        && text.len() <= crate::verify::cosignature::MAX_ARMORED =>
+                {
+                    Some((login, text.into_bytes()))
+                }
+                _ => None,
+            })
+            .take(MAX_COSIGNATURES)
+            .collect(),
+        _ => BTreeMap::new(),
+    };
     Ok(Relayed {
         statement: raw.statement.into_bytes(),
         bundle: raw.bundle.into_bytes(),
+        cosignatures,
     })
 }
 
@@ -291,6 +485,9 @@ pub(crate) struct Https {
     host: Option<(HostKey, String)>,
     /// IPv4 only and never through a proxy: the way a task's egress leaves the host.
     direct_v4: ureq::Agent,
+    /// GitHub's API, for the latest release's tag (#326): a short deadline, so a GitHub
+    /// that does not answer holds one tick for seconds, not a minute.
+    api: ureq::Agent,
     /// The `Date` of the host state's last answer ([`Pool::date`]).
     date: Option<i64>,
     /// The watchdog's clock, moved on as a body's bytes arrive: a long download is
@@ -323,6 +520,7 @@ impl Https {
                 .proxy(None)
                 .build()
                 .into(),
+            api: config(Duration::from_secs(20), 3).build().into(),
             date: None,
             progress: None,
         }
@@ -514,8 +712,39 @@ impl Pool for Https {
         self.get_ok(&self.agent, &format!("{RELEASES}/{r}/{name}"), BUNDLE_MAX)
     }
 
+    fn release_asset_if_any(&mut self, r: Release, name: &str) -> Net<Option<Vec<u8>>> {
+        let url = format!("{RELEASES}/{r}/{name}");
+        match self.get(&self.agent, &url, STATEMENT_MAX) {
+            Net::Ok((404, _)) => Net::Ok(None),
+            other => match ok_body(other) {
+                Net::Ok(b) => Net::Ok(Some(b)),
+                Net::NoAnswer(e) => Net::NoAnswer(format!("{name}: {e}")),
+                Net::Unauthorized(s) => Net::Unauthorized(s),
+            },
+        }
+    }
+
     fn download(&mut self, url: &str) -> Net<Vec<u8>> {
         self.get_ok(&self.downloads, url, super::tools::MAX_TOOL)
+    }
+
+    fn token(&mut self) -> Net<serde_json::Value> {
+        match self.signed_call("POST", TOKEN_PATH, Some(b"")) {
+            Net::Ok(body) => match serde_json::from_slice(&body) {
+                Ok(v) => Net::Ok(v),
+                Err(e) => Net::NoAnswer(format!("token: {e}")),
+            },
+            Net::NoAnswer(e) => Net::NoAnswer(e),
+            Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
+    }
+
+    fn diagnostics(&mut self, body: &[u8]) -> Net<()> {
+        match self.signed_call("POST", DIAGNOSTICS_PATH, Some(body)) {
+            Net::Ok(_) => Net::Ok(()),
+            Net::NoAnswer(e) => Net::NoAnswer(e),
+            Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
     }
 
     fn public_address(&mut self) -> Net<IpAddr> {
@@ -525,6 +754,44 @@ impl Pool for Https {
                 crate::dispatcher_env::addresses::from_trace(&String::from_utf8_lossy(&body))
                     .map_or_else(|| Net::NoAnswer(format!("{url}: no ip= line")), Net::Ok)
             }
+            Net::NoAnswer(e) => Net::NoAnswer(e),
+            Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
+    }
+
+    fn github_scopes(&mut self, token: &str) -> Net<Option<String>> {
+        let res = self
+            .api
+            .get(GITHUB_USER)
+            .header("authorization", &format!("Bearer {token}"))
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28")
+            .call();
+        match res {
+            Ok(r) => match r.status().as_u16() {
+                200 => Net::Ok(
+                    r.headers()
+                        .get("x-oauth-scopes")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned),
+                ),
+                s @ (401 | 403) => Net::Unauthorized(s),
+                s => Net::NoAnswer(format!("GitHub answered HTTP {s}")),
+            },
+            // Never the error's own words: they could carry the request.
+            Err(_) => Net::NoAnswer("GitHub did not answer".into()),
+        }
+    }
+
+    fn github_latest(&mut self) -> Net<Release> {
+        let res = self
+            .api
+            .get(LATEST_RELEASE)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28")
+            .call();
+        match ok_body(self.read(res, LATEST_MAX)) {
+            Net::Ok(body) => parse_latest(&body).map_or_else(Net::NoAnswer, Net::Ok),
             Net::NoAnswer(e) => Net::NoAnswer(e),
             Net::Unauthorized(s) => Net::Unauthorized(s),
         }
@@ -556,7 +823,7 @@ mod tests {
             "orders":[
               {"id":"ho_a","kind":"retire-legacy","not_after":"2027-01-15T09:00:00.000Z","by":"m1"},
               {"id":"ho_b","kind":"reconcile-now","not_after":1800003600},
-              {"id":"ho_c","kind":"rotate-token","not_after":"2027-01-15T09:00:00Z"},
+              {"id":"ho_c","kind":"shell","not_after":"2027-01-15T09:00:00Z"},
               {"id":"ho_d","kind":"reconcile-now","not_after":"soon"},
               {"id":"ho_e","not_after":"2027-01-15T09:00:00Z"},
               {"id":"bad id","kind":"reconcile-now","not_after":1},
@@ -577,7 +844,7 @@ mod tests {
             [
                 ("ho_a", "retire-legacy", Some(1_800_003_600)),
                 ("ho_b", "reconcile-now", Some(1_800_003_600)),
-                ("ho_c", "rotate-token", Some(1_800_003_600)),
+                ("ho_c", "shell", Some(1_800_003_600)),
                 ("ho_d", "reconcile-now", None),
                 ("ho_e", "", Some(1_800_003_600)),
             ]
@@ -617,6 +884,71 @@ mod tests {
         assert!(!k.name().contains('\u{1b}'));
     }
 
+    #[test]
+    fn p4s_orders_and_settings_are_read_with_their_arguments() {
+        let body = br#"{"release":{"target":"v1.21.0"},
+            "settings":{"units":4,"emulate":["x86_64"],"new":1},
+            "orders":[
+              {"id":"ho_1","kind":"set-units","not_after":1800003600,"units":4},
+              {"id":"ho_2","kind":"set-units","not_after":1800003600,"units":null},
+              {"id":"ho_3","kind":"set-units","not_after":1800003600,"units":-1},
+              {"id":"ho_4","kind":"set-units","not_after":1800003600},
+              {"id":"ho_5","kind":"set-emulate","not_after":1800003600,"emulate":[]},
+              {"id":"ho_6","kind":"set-emulate","not_after":1800003600,"emulate":["x86_64",1]},
+              {"id":"ho_7","kind":"set-emulate","not_after":1800003600,"emulate":null},
+              {"id":"ho_8","kind":"rotate-token","not_after":1800003600},
+              {"id":"ho_9","kind":"retry-release","not_after":1800003600},
+              {"id":"ho_a","kind":"diagnostics","not_after":1800003600}
+            ]}"#;
+        let s = parse_state(body).unwrap();
+        let kinds: Vec<&OrderKind> = s.orders.iter().map(|o| &o.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                &OrderKind::SetUnits(Arg::Set(4)),
+                &OrderKind::SetUnits(Arg::Envelope),
+                &OrderKind::SetUnits(Arg::Malformed),
+                &OrderKind::SetUnits(Arg::Malformed),
+                &OrderKind::SetEmulate(Arg::Set(Vec::new())),
+                &OrderKind::SetEmulate(Arg::Malformed),
+                &OrderKind::SetEmulate(Arg::Envelope),
+                &OrderKind::RotateToken,
+                &OrderKind::RetryRelease,
+                &OrderKind::Diagnostics,
+            ]
+        );
+        assert_eq!(
+            s.orders.iter().map(|o| o.kind.name()).collect::<Vec<_>>(),
+            [
+                "set-units",
+                "set-units",
+                "set-units",
+                "set-units",
+                "set-emulate",
+                "set-emulate",
+                "set-emulate",
+                "rotate-token",
+                "retry-release",
+                "diagnostics"
+            ]
+        );
+        assert_eq!(
+            s.settings,
+            Some(crate::run::settings::Settings {
+                units: Some(4),
+                emulate: Some(vec!["x86_64".into()]),
+            })
+        );
+        // Settings that say nothing are none.
+        for none in [
+            &br#"{"release":{"target":null},"settings":null}"#[..],
+            br#"{"release":{"target":null},"settings":{}}"#,
+            br#"{"release":{"target":null},"settings":{"units":"4","emulate":"x86_64"}}"#,
+        ] {
+            assert_eq!(parse_state(none).unwrap().settings, None);
+        }
+    }
+
     /// The host state as the Worker answers it (`tests/fixtures/host-api/state.json`), whose
     /// keys and value types worker/test/host-orders.test.ts holds handleHostState's answer
     /// to: the contract both sides read, written once.
@@ -645,7 +977,24 @@ mod tests {
                     &OrderKind::ReconcileNow,
                     Some(1_800_003_900)
                 ),
+                (
+                    "ho_33333333333333333333333333333333",
+                    &OrderKind::SetUnits(Arg::Set(4)),
+                    Some(1_800_003_960)
+                ),
+                (
+                    "ho_44444444444444444444444444444444",
+                    &OrderKind::SetEmulate(Arg::Set(Vec::new())),
+                    Some(1_800_004_020)
+                ),
             ]
+        );
+        assert_eq!(
+            s.settings,
+            Some(crate::run::settings::Settings {
+                units: Some(6),
+                emulate: Some(vec!["x86_64".into()]),
+            })
         );
     }
 
@@ -726,11 +1075,78 @@ mod tests {
     }
 
     #[test]
+    fn only_the_tag_of_githubs_latest_release_is_read() {
+        // The API's answer, cut down: the tag is read, the rest (assets, notes) ignored.
+        let body = br#"{"url":"https://api.github.com/repos/firemanxbr/omarchy-pool/releases/1",
+            "tag_name":"v1.21.0","name":"v1.21.0","draft":false,"prerelease":false,
+            "assets":[{"name":"omarchy-host-v1.21.0.tar.gz","size":1}],"body":"notes"}"#;
+        assert_eq!(
+            parse_latest(body).unwrap(),
+            Release::parse("v1.21.0").unwrap()
+        );
+        assert_eq!(
+            parse_latest(br#"{"tag_name":" v1.2.3 "}"#).unwrap(),
+            Release::parse("v1.2.3").unwrap()
+        );
+        for bad in [
+            &br#"{"tag_name":"latest"}"#[..],
+            br#"{"tag_name":1}"#,
+            br#"{"message":"Not Found"}"#,
+            b"[]",
+            b"<html>",
+        ] {
+            assert!(
+                parse_latest(bad).is_err(),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        assert!(LATEST_RELEASE.starts_with("https://api.github.com/repos/firemanxbr/omarchy-pool/"));
+    }
+
+    #[test]
     fn the_relay_must_answer_for_the_release_asked() {
         let to = Release::parse("v1.13.4").unwrap();
         let ok = br#"{"to":"v1.13.4","statement":"{\"schema\":1}","bundle":"{}"}"#;
         assert_eq!(parse_relayed(ok, to).unwrap().statement, br#"{"schema":1}"#);
         let other = br#"{"to":"v1.12.0","statement":"{}","bundle":"{}"}"#;
         assert!(parse_relayed(other, to).is_err());
+    }
+
+    #[test]
+    fn the_relays_co_signatures_are_read_leniently_and_never_cost_the_statement() {
+        let to = Release::parse("v1.13.4").unwrap();
+        let body = |c: &str| {
+            format!(r#"{{"to":"v1.13.4","statement":"{{}}","bundle":"{{}}","cosignatures":{c}}}"#)
+        };
+        let r = parse_relayed(
+            body(r#"{"alice":"-----BEGIN SSH SIGNATURE-----","not a login":"x","bob":7}"#)
+                .as_bytes(),
+            to,
+        )
+        .unwrap();
+        assert_eq!(
+            r.cosignatures.keys().collect::<Vec<_>>(),
+            ["alice"],
+            "{r:?}"
+        );
+        for c in ["null", "[]", "\"x\"", "{}"] {
+            let r = parse_relayed(body(c).as_bytes(), to).unwrap();
+            assert!(r.cosignatures.is_empty(), "{c}");
+        }
+        let many: String = (0..40)
+            .map(|i| format!("\"m{i}\":\"s\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let r = parse_relayed(body(&format!("{{{many}}}")).as_bytes(), to).unwrap();
+        assert_eq!(r.cosignatures.len(), MAX_COSIGNATURES);
+        let big = format!(
+            r#"{{"alice":"{}"}}"#,
+            "A".repeat(crate::verify::cosignature::MAX_ARMORED + 1)
+        );
+        assert!(parse_relayed(body(&big).as_bytes(), to)
+            .unwrap()
+            .cosignatures
+            .is_empty());
     }
 }

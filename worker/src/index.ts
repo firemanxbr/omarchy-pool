@@ -27,7 +27,7 @@
  *   GET  /api/v1/security/components              what the rings' packages embed (Go modules, crates), for OSV
  *   PUT  /api/v1/security/advisories|matches       vulnerability data from the Security workflow
  *   POST /api/v1/security/prune                  {advisories, matches}: the run's keys; the rest goes
- *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,retry,artifacts/<file>}
+ *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,retry,any-host,artifacts/<file>}
  *   POST /api/v1/factory/drafts · GET /factory/drafts/:id · POST /factory/grants/:id/revoke   an agent's drafts and grants (#252, routes/agents.ts)
  *   GET|POST /auth/agent · POST /auth/agent/token · POST /auth/agent/revoke · GET|POST /auth/confirm/:id   the grant, the swap, logout, a draft confirmed
  *   POST /auth/confirm/:id/challenge · POST /auth/passkeys/challenge · POST /auth/passkeys · POST /auth/passkeys/:id/remove   passkeys: approve and block confirmed with one (#257, routes/passkeys.ts)
@@ -35,13 +35,20 @@
  *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
  *   GET  /api/v1/factory/workers/:id[/orders|/can] · POST /factory/workers/:id/orders · DELETE /factory/workers/:id/orders/:oid · POST /factory/workers/self/orders/:id   orders to a worker (#277, routes/orders.ts)
  *   GET  /api/v1/factory/follow?ids=a,b          the pool's release and those workers' open Updates: what each set's updater polls (#277)
- *   GET  /api/v1/factory/rollback/:to            the latest rollback statement rollback.yml signed for going back to :to, and its bundle, from R2 (#314)
+ *   GET  /api/v1/factory/rollback/:to            the latest rollback statement rollback.yml signed for going back to :to, and its bundle, from R2 (#314), with the maintainers' co-signatures over it (#330)
+ *   PUT  /api/v1/factory/rollback/:to/cosignature   a maintainer's co-signature of that statement (ssh-keygen -Y sign's output, #330), relayed beside it
  *   POST /api/v1/hosts/enrollments · POST /hosts/enroll · GET /hosts[/:id] · POST /hosts/:id/confirm   maintainer hosts: a one-time token, the machine's enrollment, the owner's Confirm (#321, routes/hosts.ts)
  *   GET  /api/v1/hosts/self/state · POST /hosts/self/token · POST /hosts/self/report   a host's calls, signed with its key (Omarchy-Host); the state
- *                                                  carries its release target, its open Updates and its host orders, the report answers them (#344)
+ *                                                  carries its release target, its open Updates and its host orders, the report answers them (#344);
+ *                                                  and its settings (#325)
  *   POST /api/v1/hosts/:id/suspend|resume|retire · POST /hosts/owners/:login/cause|resume   stopping a host, removed for cause, an owner listed again (#322)
- *   POST /api/v1/hosts/:id/orders                 a host order: reconcile-now, retire-legacy with the owner's passkey (#344)
+ *   POST /api/v1/hosts/:id/orders                 a host order: reconcile-now, retire-legacy with the owner's passkey (#344); set-units,
+ *                                                  set-emulate, rotate-token, retry-release, diagnostics (#325); widen-envelope, set-agent-keys,
+ *                                                  a document the owner's passkey signed (#328)
+ *   POST /api/v1/hosts/self/diagnostics · GET /hosts/:id/diagnostics/:order   a diagnostics order's scrubbed log lines (#325)
  *   POST /api/v1/hosts/:id/cap                    {units | null, reason}: the pool's cap on a host's units, its owner or any maintainer (#337)
+ *   POST /api/v1/hosts/:id/owner/challenge · /owner/pin · /seal-key   the owner's control without a visit (#328): the document their
+ *                                                  passkey signs for a host, the pin pasted at the host, the seal key confirmed
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
@@ -82,8 +89,9 @@ import {
 } from "./routes/contributors";
 import { handleSourceRead } from "./routes/sources";
 import { handleAnswerOrder, handleCancelOrder, handleFollow, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
-import { handleRollbackStatement } from "./routes/rollback";
-import { handleCapHost, handleConfirmHost, handleEnroll, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSuspendHost, signedHost } from "./routes/hosts";
+import { handleRollbackCosignature, handleRollbackStatement } from "./routes/rollback";
+import { handleCapHost, handleConfirmHost, handleEnroll, handleHostDiagnostics, handleHostDiagnosticsGet, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleOwnerChallenge, handleOwnerPin, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSealKeyConfirm, handleSuspendHost, signedHost } from "./routes/hosts";
+import { DIAGNOSTICS_MAX_BYTES } from "./hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
@@ -91,7 +99,7 @@ import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
-import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
+import { handleReviewList, handleAnyHost, handleApprove, handleReject, handleChanges, handleRelease, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAdoptPackage } from "./routes/adopt";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
@@ -488,6 +496,13 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     // Approve is decided with the maintainer's passkey, in the browser (#271): webGate, run by the handler once the predicate allowed it.
     return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env, undefined, webGate(request, url, env, c.login, `approve:${Number(m[1])}`)) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
   }
+  // The project's copy of a maintainer's package, kept off their hosts while another maintainer's can build it (#339, D35), released to
+  // any host by another maintainer when only theirs can: with the passkey, in the browser (webGate), once the predicate allowed it.
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/any-host$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return nobody();
+    return handleAnyHost(c, Number(m[1]), request, env, webGate(request, url, env, c.login, `any-host:${Number(m[1])}`));
+  }
   // Retry at size (#337): a maintainer queues a build that ran out of memory again, at the size they choose.
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/retry$/)) && method === "POST") {
     const c = await contributorOf(request, env);
@@ -652,6 +667,11 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/factory/follow") return handleFollow(url, env);
   // A rollback statement rollback.yml signed, relayed from R2 as stored (#314): a host's agent verifies it; the pool cannot forge one. Public, cached briefly.
   if ((m = path.match(/^\/factory\/rollback\/([^/]+)$/)) && method === "GET") return handleRollbackStatement(m[1], env);
+  // A maintainer's co-signature of that statement (#330): kept beside it and relayed; the hosts verify it, never the pool.
+  if ((m = path.match(/^\/factory\/rollback\/([^/]+)\/cosignature$/)) && method === "PUT") {
+    const c = await maintainerOf(request, env);
+    return c instanceof Response ? c : handleRollbackCosignature(c, m[1], request, env);
+  }
   if ((m = path.match(/^\/users\/([A-Za-z0-9-]{1,39})$/)) && method === "GET") return handleUser(m[1], env);
   // The page is cached for everyone (public, max-age); what one caller may do on it is theirs alone, so it rides on a no-store answer of its own.
   if ((m = path.match(/^\/users\/([A-Za-z0-9-]{1,39})\/can$/)) && method === "GET") return handleUserCan(await contributorOf(request, env), m[1], env);
@@ -709,8 +729,11 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/hosts/self/state") { const s = await signedHost(request, env, url); return s instanceof Response ? s : handleHostState(s, env); }
   if (method === "POST" && path === "/hosts/self/token") { const s = await signedHost(request, env, url); return s instanceof Response ? s : handleHostToken(s, env); }
   if (method === "POST" && path === "/hosts/self/report") { const s = await signedHost(request, env, url); return s instanceof Response ? s : handleHostReport(s, env); }
+  // The lines a diagnostics order asked for (#325): signed, up to 64 KiB.
+  if (method === "POST" && path === "/hosts/self/diagnostics") { const s = await signedHost(request, env, url, DIAGNOSTICS_MAX_BYTES); return s instanceof Response ? s : handleHostDiagnostics(s, env); }
   if (method === "GET" && path === "/hosts") return handleHostsList(await contributorOf(request, env), url, env);
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})$/)) && method === "GET") return handleHostGet(await contributorOf(request, env), m[1], env);
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/diagnostics\/(ho_[0-9a-f]{32})$/)) && method === "GET") return handleHostDiagnosticsGet(await contributorOf(request, env), m[1], m[2], env);
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/confirm$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     return c ? handleConfirmHost(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
@@ -725,6 +748,20 @@ async function api(method: string, path: string, url: URL, request: Request, env
     const c = await contributorOf(request, env);
     if (!c) return json({ error: SIGN_IN }, 401);
     return m[2] === "suspend" ? handleSuspendHost(c, m[1], request, env, url) : m[2] === "resume" ? handleResumeHost(c, m[1], request, env, url) : handleRetireHost(c, m[1], request, env, url);
+  }
+  // The owner's control without a visit (#328, routes/hosts.ts): the document their passkey signs for a host, the pin they paste at
+  // the host, and their confirmation of its seal key; the browser's session only.
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/owner\/challenge$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleOwnerChallenge(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
+  }
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/owner\/pin$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleOwnerPin(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
+  }
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/seal-key$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleSealKeyConfirm(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
   }
   // The pool's cap on a host's units (#337): its owner or any maintainer, the browser's session only.
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/cap$/)) && method === "POST") {

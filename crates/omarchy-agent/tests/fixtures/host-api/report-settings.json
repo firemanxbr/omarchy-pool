@@ -1,0 +1,131 @@
+{
+  "agent": {
+    "skip": null,
+    "version": "0.4.0"
+  },
+  "asleep": false,
+  "brake": {
+    "narrowings_hour": 2,
+    "orders_hour": 2,
+    "release_change_at": null,
+    "restarts_hour": 2
+  },
+  "capacity": {
+    "agent_slots": 2,
+    "at": "2027-01-15T07:00:00Z",
+    "below_minimum": false,
+    "cpus": 12,
+    "dedicated": true,
+    "disk_free_gb": {
+      "engine": 220,
+      "work": 410
+    },
+    "held_lanes": [
+      {
+        "arch": "x86_64",
+        "reason": "off: the pool's settings turn it off (set-emulate)"
+      }
+    ],
+    "isolation": "root",
+    "job_reserved": 1,
+    "lanes": [
+      {
+        "arch": "aarch64",
+        "mode": "native"
+      }
+    ],
+    "limits": {
+      "cpus_hard": true,
+      "memory_hard": true,
+      "pids": true
+    },
+    "mem_gb": 32,
+    "page_kb": 16,
+    "schema": 2,
+    "units": 4
+  },
+  "legacy": null,
+  "orders": [
+    {
+      "at": "2027-01-15T08:03:56Z",
+      "detail": "units 8 → 4 (its envelope gives 8); the dispatcher is recreated with it and claims by it from its next claim, and running tasks above it finish",
+      "id": "ho_33333333333333333333333333333333",
+      "kind": "set-units",
+      "outcome": "done"
+    },
+    {
+      "at": "2027-01-15T08:03:58Z",
+      "detail": "emulated lanes x86_64 → none; the dispatcher is recreated with it and claims by it from its next claim, and running tasks above it finish",
+      "id": "ho_44444444444444444444444444444444",
+      "kind": "set-emulate",
+      "outcome": "done"
+    }
+  ],
+  "owner": {
+    "agent_keys": [],
+    "envelope": {
+      "agent_budget": null,
+      "agent_slots": null,
+      "diagnostics": null,
+      "emulate": null,
+      "max_cpus": null,
+      "max_mem_gb": null,
+      "max_units": null,
+      "paths": null
+    },
+    "passkey": null,
+    "seal": {
+      "fingerprint": "SHA256:wIwZGH0JYi29ol7KfewxDD04AEppH3Sn1BWJ8Ci2GsI",
+      "key": "kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0"
+    },
+    "version": 0
+  },
+  "quarantine": [],
+  "release": {
+    "applied": "v1.21.0",
+    "floor": "v1.21.0",
+    "github_latest": null,
+    "min_release": "v1.20.0",
+    "pool_behind_github": null,
+    "soak_minutes": 0,
+    "soaking_until": null,
+    "target": "v1.21.0"
+  },
+  "rollout": {
+    "since": "2027-01-15T08:04:19Z",
+    "state": "idle",
+    "target": null
+  },
+  "round": {
+    "at": "2027-01-15T08:04:19Z",
+    "detail": "host runs v1.21.0",
+    "from": null,
+    "outcome": "ok",
+    "step": "commit"
+  },
+  "runtime": {
+    "driver": "compose/docker",
+    "switch": null,
+    "switch_last": null
+  },
+  "settings": {
+    "above": [],
+    "effective": {
+      "emulated": [],
+      "units": 4
+    },
+    "emulate": [],
+    "envelope": {
+      "detected_lanes": [
+        "x86_64"
+      ],
+      "detected_units": 11,
+      "diagnostics": true,
+      "emulate": [
+        "x86_64"
+      ],
+      "max_units": 8
+    },
+    "units": 4
+  }
+}

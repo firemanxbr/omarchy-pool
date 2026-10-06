@@ -1,0 +1,25 @@
+-- A host that reverted a release claims on its last-good for up to 6 hours
+-- (#342, epic #307, design v2 §8.6, §16.2, §18.3; D55). Its agent's guard
+-- reverts a release that fails on this host, reports `rolled-back` with the
+-- release it left, and holds that release in quarantine; the pool keeps the
+-- release in hosts.rolled_back_from (0043) while the host's reports still
+-- hold it back, and when it first heard of the revert here. The 426 gate
+-- lets that host's registration claim on the release its agent applied
+-- (release_applied, its last-good) until six hours after this time, never
+-- below the signed min_release nor on a revoked release (update.ts).
+--
+-- build_tasks.release (0045) is the release a lease was claimed on: from
+-- #342 on it is written for every lease, and a lease whose release the
+-- pool's release revokes has its heartbeats, uploads and completion refused
+-- and its failure taken as a requeue with the attempt given back.
+--
+-- build_workers.told_last_good is the `last_good_until` of the revert its
+-- registration was last told it claims on its last-good for: said once per
+-- revert in the journal, whatever 426 comes in between (told_update says
+-- the 426s).
+--
+-- Additive only: the Worker that runs during the deploy minute reads and
+-- writes none of it; each host's next report, and its registration's next
+-- claim, fills it.
+ALTER TABLE hosts ADD COLUMN rolled_back_at TEXT;
+ALTER TABLE build_workers ADD COLUMN told_last_good TEXT;

@@ -350,6 +350,7 @@ fn envelope(secrets: &str, budget: Budget) -> Envelope {
     Envelope {
         secrets_dir: PathBuf::from(secrets),
         budget,
+        direct_network: false,
         task_subnets: task(),
     }
 }
@@ -530,6 +531,57 @@ fn a_refresh_waits_for_another_writer_and_never_puts_back_the_token_it_replaced(
     let none = path_in(&d.join("elsewhere"));
     assert_eq!(refresh(&none, &r).unwrap(), Refresh::NoFile);
     assert!(!none.exists());
+}
+
+#[test]
+fn a_granted_signed_exception_s_bridge_reaches_the_dispatcher_and_a_withdrawn_one_leaves_it() {
+    // agent.toml's `direct_network` (#373): absent is no grant, and only a boolean is read.
+    let of = |extra: &str| {
+        Envelope::from_agent_toml(&format!(
+            "[set]\nsecrets_dir = \"/srv/s\"\n[envelope]\n{extra}\n"
+        ))
+    };
+    assert!(!of("").unwrap().direct_network);
+    assert!(of("direct_network = true").unwrap().direct_network);
+    assert!(!of("direct_network = false").unwrap().direct_network);
+    let e = of("direct_network = \"yes\"").unwrap_err();
+    assert!(
+        e.contains("envelope.direct_network is neither true nor false"),
+        "{e}"
+    );
+    // Granted: one line after the budget's, which the dispatcher reads as the grant.
+    let granted = Envelope {
+        direct_network: true,
+        ..envelope("/srv/s", Budget::default())
+    };
+    let r = Rendered {
+        addresses: Vec::new(),
+        envelope: Some(granted.clone()),
+    };
+    assert_eq!(
+        r.lines().unwrap(),
+        ["OMARCHY_SECRETS_DIR=/srv/s", "OMARCHY_DIRECT_NETWORK=1"]
+    );
+    let base = format!("# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={OMW}\n");
+    let text = render(&base, None, &r).unwrap();
+    assert!(text.contains("\nOMARCHY_DIRECT_NETWORK=1\n"), "{text}");
+    // Withdrawn in agent.toml: the line goes with the next render.
+    let withdrawn = Rendered {
+        envelope: Some(envelope("/srv/s", Budget::default())),
+        ..r.clone()
+    };
+    assert!(!render(&text, None, &withdrawn)
+        .unwrap()
+        .contains("OMARCHY_DIRECT_NETWORK"));
+    // Before agent.toml (a first enrollment): the file's own line stays, as the budget's does.
+    let early = Rendered {
+        addresses: Vec::new(),
+        envelope: None,
+    };
+    assert!(render(&text, None, &early)
+        .unwrap()
+        .contains("\nOMARCHY_DIRECT_NETWORK=1\n"));
+    assert!(not_secret(DIRECT_NETWORK));
 }
 
 #[test]

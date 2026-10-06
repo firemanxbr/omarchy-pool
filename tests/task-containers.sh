@@ -19,8 +19,9 @@
 # 2. tests/health-check.sh against a stub docker first on PATH and a stub
 #    pool: with OMARCHY_TASK_ID=812 its run carries the task's name and
 #    label; without it, the arguments it always had.
-# 3. tests/abi-gate.sh's create, the same way (the script then ends on a
-#    reference it could not export; only the recorded create is read).
+# 3. tests/abi-gate.sh's reference export, the same way (a `run` since #340,
+#    which a pool job's shim takes; the script then ends on a reference the
+#    stub did not export; only the recorded run is read).
 #
 # Requires: bash, python3, curl.
 set -euo pipefail
@@ -141,14 +142,17 @@ args="$(call_of run)"
 [[ "$(head -n2 <<<"$args" | tr '\n' ' ')" == "--rm --platform " ]] || fail "without a task, the run is as it always was: $args"
 grep -q 'com.omarchy.task' <<<"$args" && fail "without a task, no label: $args"
 
-# ---- 3. abi-gate.sh's create ----
+# ---- 3. abi-gate.sh's reference export ----
 : > "$tmp/docker"
 env "${env_common[@]}" OMARCHY_TASK_ID=812 bash "$root/tests/abi-gate.sh" edge aarch64 >"$tmp/out" 2>&1 || true
-args="$(call_of create)"
-grep -qx 'com.omarchy.task=812' <<<"$args" && grep -qE '^omarchy-task-812-ref-[0-9]+$' <<<"$args" || fail "the gate's create carries the task's name and label: $args"
+args="$(call_of run)"
+grep -qx 'com.omarchy.task=812' <<<"$args" && grep -qE '^omarchy-task-812-ref-[0-9]+$' <<<"$args" || fail "the gate's reference run carries the task's name and label: $args"
 : > "$tmp/docker"
 env -u OMARCHY_TASK_ID "${env_common[@]}" bash "$root/tests/abi-gate.sh" edge aarch64 >"$tmp/out" 2>&1 || true
-args="$(call_of create)"
-[[ -n "$args" ]] || fail "the gate created its reference: $(cat "$tmp/out")"
-grep -q 'com.omarchy.task' <<<"$args" && fail "without a task, the create is as it always was: $args"
+args="$(call_of run)"
+[[ -n "$args" ]] || fail "the gate ran its reference's export: $(cat "$tmp/out")"
+grep -q 'com.omarchy.task' <<<"$args" && fail "without a task, the run is the shape a pool job's shim takes: $args"
+# What a pool job's omarchy-task-run takes (#340): --rm, the platform, one scratch directory at /repo, the pinned image, bash /repo/<script>.sh.
+[[ "$(tr '\n' ' ' <<<"$args")" =~ ^--rm\ --platform\ linux/arm64\ -v\ [^\ ]+:/repo\ docker\.io/[^\ ]+@sha256:[0-9a-f]{64}\ bash\ /repo/export\.sh\ $ ]] || fail "the gate's reference run is not the shim's shape: $args"
+grep -q 'create' "$tmp/docker" && fail "the gate creates no container any more (the shim takes run only): $(cat "$tmp/docker")"
 echo "task-containers: ok"

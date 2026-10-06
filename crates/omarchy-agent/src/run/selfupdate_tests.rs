@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use super::{count_start, Pending, Start, DEADLINE_S, MAX_TRIES};
-use crate::run::fake::{publish_agent, relay_statement_agent, Ships, World};
+use crate::run::fake::{publish_agent, publish_agent_as, relay_statement_agent, Ships, World};
 use crate::run::pool::{HostState, Net};
 use crate::run::state::State;
 use crate::version::{self, Release, Version};
@@ -186,7 +186,9 @@ fn a_release_with_a_higher_agent_updates_the_agent_first_and_the_same_one_does_n
         (task.id, task.started_at, "running")
     );
 
-    // A later release with the same agent rolls out with no update at all.
+    // A later release with the same agent rolls out with no update at all (ten minutes on:
+    // the brake takes one release change every ten minutes, #325).
+    w.tick(600);
     publish_agent(
         &w.remote,
         "v1.2.0",
@@ -204,6 +206,67 @@ fn a_release_with_a_higher_agent_updates_the_agent_first_and_the_same_one_does_n
 }
 
 #[test]
+fn a_higher_agent_waits_for_the_owners_soak_unless_its_release_is_urgent() {
+    // Not urgent: the agent waits with its release (#326) — nothing downloaded, no swap.
+    let new = above(7);
+    let mut w = host_with(new, "0.1.0", &binary(true));
+    w.agent.cfg.policy.soak_minutes = 30;
+    w.tick(200);
+    assert_eq!(w.agent.exit, None, "{}", w.journal());
+    assert!(!w.agent.paths.pending().exists());
+    assert!(!w.agent.paths.binary(new).exists());
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "held");
+    assert!(
+        detail.starts_with("v1.1.0 waits for the owner's soak")
+            && detail.contains(&format!("and the agent {new} it ships with it")),
+        "{detail}"
+    );
+    // The soak over, the agent updates itself first, as with none.
+    for _ in 0..40 {
+        w.tick(60);
+        if w.agent.exit.is_some() {
+            break;
+        }
+    }
+    assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
+    assert_eq!(link(&w.agent.paths.current()), format!("versions/{new}"));
+
+    // Urgent (only a security release sets agent.urgent): the agent updates itself at once,
+    // and the release itself still waits for the soak.
+    let mut w = World::running_v1();
+    w.install_layout();
+    publish_agent_as(
+        &w.remote,
+        "v1.1.0",
+        &Ships {
+            version: &new.to_string(),
+            min_agent: "0.1.0",
+            binary: &binary(true),
+        },
+        true,
+    );
+    w.target("v1.1.0", None);
+    w.agent.cfg.policy.soak_minutes = 30;
+    w.tick(200);
+    assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
+    assert_eq!(link(&w.agent.paths.current()), format!("versions/{new}"));
+    let changes = w.changes().len();
+    w.restart_as(new);
+    w.tick(1);
+    assert!(w.agent.gate.is_none(), "{}", w.journal());
+    w.poll();
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "held");
+    assert!(
+        detail.starts_with("v1.1.0 waits for the owner's soak") && !detail.contains("agent"),
+        "{detail}"
+    );
+    assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
+    assert_eq!(w.changes().len(), changes);
+}
+
+#[test]
 fn a_bundle_only_a_higher_agent_reads_updates_the_agent_from_its_outer_layer() {
     let new = above(3);
     let mut w = host_with(new, &new.to_string(), &binary(true));
@@ -217,6 +280,28 @@ fn a_bundle_only_a_higher_agent_reads_updates_the_agent_from_its_outer_layer() {
         .bundles()
         .join("omarchy-host-v1.1.0.tar.gz")
         .exists());
+}
+
+#[test]
+fn a_bundle_only_a_higher_agent_reads_waits_for_the_soak_too() {
+    let new = above(3);
+    let mut w = host_with(new, &new.to_string(), &binary(true));
+    w.agent.cfg.policy.soak_minutes = 30;
+    w.tick(200);
+    assert_eq!(w.agent.exit, None, "{}", w.journal());
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "held");
+    assert!(
+        detail.contains(&format!("and the agent {new} it ships with it")),
+        "{detail}"
+    );
+    for _ in 0..40 {
+        w.tick(60);
+        if w.agent.exit.is_some() {
+            break;
+        }
+    }
+    assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
 }
 
 #[test]
@@ -272,6 +357,8 @@ fn a_wrong_hash_or_a_failing_self_test_changes_nothing_and_this_agent_applies_th
             binary: &binary(true),
         };
         publish_agent(&w.remote, "v1.2.0", &ships);
+        // Ten minutes on: the brake takes one release change every ten minutes (#325).
+        w.tick(600);
         w.target("v1.2.0", None);
         w.round();
         assert_eq!(
