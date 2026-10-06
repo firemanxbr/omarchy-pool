@@ -221,13 +221,17 @@ for a native host without spending its attempt.
 Install gVisor (`runsc install` registers it with docker) or Kata Containers
 and count the host again: the agent finds it after a smoke run that must
 show a kernel other than your machine's, and from then on the dispatcher
-starts every contributor's build on your native lane in it, so an escape
-from a recipe lands in the sandbox's kernel rather than on your machine. The
-project's own builds, the sidecars and an emulated lane run on the engine as
-before. `sandbox = "off"` in your envelope turns it off, `sandbox = "kata"`
-picks one; the host page says which runs, or why none does (podman's docker
-API, for one, cannot pass the runtime on). The runbook's *A sandboxed runtime
-for community tasks* has the steps.
+starts everything a contributor wrote on your native lane in it — their
+builds, the project's review rebuilds of them, trials and audits — so an
+escape from a recipe lands in the sandbox's kernel rather than on your
+machine. The project's own recipes and the sidecars run on the engine as
+before. A sandbox does not cover an emulated lane (its kernel has no binfmt
+handler), so the pool then hands your emulated lanes the project's own
+recipes only. `sandbox = "off"` in your envelope turns it off,
+`sandbox = "kata"` picks one; the host page says which your dispatcher
+applies, or why none does (podman's docker API, for one, cannot pass the
+runtime on), and why its claims hold if the runtime refuses a start. The
+runbook's *A sandboxed runtime for community tasks* has the steps.
 
 **Where the project's copies and their audits go (#339).** The project's
 copy of a package you asked for — its review rebuild, the one that is

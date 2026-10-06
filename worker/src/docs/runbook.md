@@ -971,22 +971,31 @@ task runs, on an internal network behind its egress sidecar.
 
 #### A sandboxed runtime for community tasks
 
-A host whose engine has gVisor's `runsc` or Kata Containers runs its
-community tasks in it (#330, design v2 §10.4; D43): the dispatcher starts a
-contributor's build on the native lane with `--runtime <it>`, so a container
-escape lands in the sandbox's kernel, not on the host. Its sidecars, the
-project's tasks and an emulated lane's run on the engine's own runtime (an
-emulated lane needs the host kernel's binfmt handler, which a sandbox's
-kernel does not have). The agent looks for one at install and at each
+A host whose engine has gVisor's `runsc` or Kata Containers runs what a
+contributor wrote in it (#330, design v2 §10.4; D43): the dispatcher starts a
+contributor's build, the project's review rebuild of one, its trial and its
+audit — everything but the project's own recipe on main or a maintainer's
+dry run — on the native lane with `--runtime <it>`, so a container escape
+lands in the sandbox's kernel, not on the host. Its sidecars and the
+project's own recipes run on the engine's own runtime. An emulated lane needs
+the host kernel's binfmt handler, which a sandbox's kernel does not have: the
+pool hands a host whose dispatcher applies a sandbox only the project's own
+recipes for its emulated lanes, and a contributor's x86_64 work waits for a
+native x86_64 lane or another host's emulated one (on a pool whose only
+x86_64 lane is a sandboxed host's emulated one, it waits until the owner
+turns the sandbox off or another host joins). The agent looks for one at install and at each
 `omarchy-agent capacity … --write`: a runtime `docker info` lists whose name,
 path or shim type says `runsc` (gVisor, tried first) or `kata`, then a smoke
 run of the release's build image under it, which must print a kernel that is
 not the engine's own (`uname -r`) and answer `pacman --version`. The first
 that passes goes into `run/capacity.json`'s `sandbox`
 (`{"runtime":"runsc","kind":"gvisor"}`), which the dispatcher reads before
-each start and the host report carries to the host page (*Sandbox*); none
-reads `"sandbox": null`, and `sandbox_held` says why one the engine has, or
-the envelope names, is not used. A host without one runs its community tasks
+each start and says with each claim (`capacity.sandbox`: the one it
+applies); the host page (*Sandbox*) shows what the claims say — a dispatcher
+from before #330 says nothing, and the page then says the agent found one
+its dispatcher does not apply — beside what the agent found. None reads
+`"sandbox": null`, and `sandbox_held` says why one the engine has, or the
+envelope names, is not used. A host without one runs its community tasks
 as before. To give a Linux host gVisor (at the host, as root; its release
 notes name the current release):
 
@@ -1020,9 +1029,18 @@ a runtime's name only that one (`sandbox = "kata"`). Where it does not apply:
 - **A rootless engine, or a 16K-page kernel** (the Studio's Asahi): whether
   gVisor runs there at all is its smoke run's to say; held, the host runs on
   as before and the reason is on its page.
-- A runtime removed after the count: `docker run --runtime` refuses, and
-  each community task the dispatcher starts fails `lost` (never on the
-  engine's own runtime) until the host is counted again.
+- A runtime removed or broken after the count (runsc uninstalled,
+  `daemon.json` reset, Kata without `/dev/kvm` after a migration):
+  `docker run --runtime` refuses, and the task it was to start fails `lost`
+  — never on the engine's own runtime. Its attempt is given back, but the
+  pool spends one from a task's third loss on a host (`HOST_LOSSES_MAX`), so
+  the dispatcher holds its claims (`want: 0`) for 30 minutes after a first
+  refusal and, after a second in a row, until the host is counted again; the
+  host page says why under *Sandbox* ("its claims hold: runsc refused task
+  … 's start …") and the dispatcher's log says it once. Fix or remove the
+  runtime, then count the host again (above): a new count is a new
+  `run/capacity.json`, which recreates the dispatcher, and it claims again —
+  in the sandbox, or with `"sandbox": null` on the engine's own runtime.
 
 CI's `sandboxed-runtime` job runs all of it on docker with gVisor
 (`tests/sandboxed-runtime.sh`).
