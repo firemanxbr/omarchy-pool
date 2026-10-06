@@ -76,8 +76,8 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
     // Their agents' grants end with their workers (#252): the tokens stop at once, a code not yet swapped too — and what their agents drafted and nobody confirmed yet is discarded with them.
     env.DB.prepare(BLOCK_GRANTS_SQL).bind(at, login),
     env.DB.prepare(DISCARD_SQL).bind(login, JSON.stringify({ error: `${login} was blocked by a maintainer: the agent's grant ended, and nothing was decided` })),
-    // Other people's builds asked of the blocked person's shared workers go back to the queue.
-    env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL WHERE status = 'queued' AND pinned_to IN (SELECT id FROM build_workers WHERE owner = ?)").bind(login),
+    // Other people's builds asked of the blocked person's workers go back to the queue.
+    env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL WHERE status = 'queued' AND pinned_to IN (SELECT id FROM build_workers WHERE owner = ?)").bind(login),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE owner = ? AND trust = 'community' AND status IN ('queued', 'leased', 'staged')").bind(`${login} was blocked by ${c.login}: ${b.reason.slice(0, 200)}`, login),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build it audited was cancelled: its owner was blocked' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.owner') = ?").bind(login),
     // Rejected, and held: a block frees none of their names (contributors.ts, nameIsFree) — a name a review had already freed, and nobody built since, stays free.

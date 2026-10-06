@@ -42,7 +42,11 @@ const canOn = async (login: string, as: Who): Promise<Rights> => {
 };
 const flags = (c: Rights) => Object.fromEntries(RIGHTS.map((r) => [r, c[r]]));
 const allFalse = Object.fromEntries(RIGHTS.map((r) => [r, false]));
-const OWNERS_WORD = "sharing is the owner's word alone: a maintainer can set a worker to its owner's packages, not share it";
+/** A worker's mode is gone (#343): its door answers 410 to everyone, with the pointer, before whose it is. */
+const modeGone = async (id: string, as: Who) => {
+  const r = await call("POST", `/factory/workers/${id}/mode`, as, { mode: "shared" });
+  expect([r.status, r.json.code, r.json.docs], `${as || "nobody"} sets ${id}'s mode`).toEqual([410, "gone", "/docs/worker-host#maintainer-hosts"]);
+};
 
 /** The refusal a door answers is the predicate's sentence with its status. */
 const refusedLike = (res: { status: number; json: any }, status: number, why: string | undefined, what: string) => {
@@ -57,14 +61,14 @@ describe("what a caller may do on a person's page", () => {
     expect(c.why).toEqual(Object.fromEntries(RIGHTS.map((r) => [r, SIGN_IN])));
     expect(Object.keys(c.packages).sort()).toEqual([F.factoryPkg, F.publishedPkg, F.disposablePkg, F.sparePkg].sort());
     for (const name of Object.keys(c.packages)) expect(c.packages[name]).toEqual({ remove: false, why: SIGN_IN });
-    expect(Object.keys(c.workers)).toEqual([F.communityWorker]);
-    expect(c.workers[F.communityWorker]).toEqual({ revoke: false, own_only: false, share_worker: false, why: { revoke: SIGN_IN, own_only: SIGN_IN, share_worker: SIGN_IN } });
+    expect(Object.keys(c.workers)).toEqual([F.ownerWorker]);
+    expect(c.workers[F.ownerWorker]).toEqual({ revoke: false, why: { revoke: SIGN_IN } });
     expect((await call("GET", "/users/nobody/can", "")).status).toBe(404);
     // The doors say the same, in the same words: 401 for nobody, the sign-in.
     refusedLike(await call("POST", `/factory/packages/${F.factoryPkg}/build`, "", {}), 401, SIGN_IN, "nobody builds");
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}`, ""), 401, SIGN_IN, "nobody removes");
-    refusedLike(await call("DELETE", `/factory/workers/${F.communityWorker}`, ""), 401, SIGN_IN, "nobody revokes");
-    refusedLike(await call("POST", `/factory/workers/${F.communityWorker}/mode`, "", { mode: "shared" }), 401, SIGN_IN, "nobody shares w3");
+    refusedLike(await call("DELETE", `/factory/workers/${F.ownerWorker}`, ""), 401, SIGN_IN, "nobody revokes");
+    await modeGone(F.ownerWorker, "");
     refusedLike(await call("POST", `/factory/tasks/${F.projectTask}/withdraw`, "", { note: "nobody's" }), 401, SIGN_IN, "nobody withdraws");
     refusedLike(await call("POST", "/factory/token", ""), 401, SIGN_IN, "nobody mints");
     refusedLike(await call("POST", "/factory/workers", "", { arch: F.arch }), 401, SIGN_IN, "nobody registers");
@@ -83,17 +87,14 @@ describe("what a caller may do on a person's page", () => {
       remove: "only alice or a maintainer removes a registration here",
       revoke: "only alice or a maintainer revokes a worker here",
       withdraw: "a maintainer decides",
-      own_only: "only alice or a maintainer sets where it builds",
-      share_worker: OWNERS_WORD,
     });
     for (const name of Object.keys(c.packages)) expect(c.packages[name]).toEqual({ remove: false, why: "only alice removes it, or a maintainer" });
-    expect(c.workers[F.communityWorker]).toEqual({ revoke: false, own_only: false, share_worker: false, why: { revoke: c.why.revoke, own_only: c.why.own_only, share_worker: OWNERS_WORD } });
+    expect(c.workers[F.ownerWorker]).toEqual({ revoke: false, why: { revoke: c.why.revoke } });
     refusedLike(await call("POST", `/factory/packages/${F.factoryPkg}/build`, "bob", { arches: [F.arch] }), 404, c.why.build, "bob builds mine");
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}`, "bob"), 403, c.packages[F.factoryPkg].why, "bob removes mine");
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}/builds/${F.stagedTask}`, "bob"), 403, c.why.dequeue, "bob takes alice's build out");
-    refusedLike(await call("DELETE", `/factory/workers/${F.communityWorker}`, "bob"), 404, c.why.revoke, "bob revokes w3");
-    refusedLike(await call("POST", `/factory/workers/${F.communityWorker}/mode`, "bob", { mode: "dedicated" }), 403, c.why.own_only, "bob sets w3 to its owner's");
-    refusedLike(await call("POST", `/factory/workers/${F.communityWorker}/mode`, "bob", { mode: "shared" }), 403, c.why.share_worker, "bob shares w3");
+    refusedLike(await call("DELETE", `/factory/workers/${F.ownerWorker}`, "bob"), 404, c.why.revoke, "bob revokes alice's worker");
+    await modeGone(F.ownerWorker, "bob");
     refusedLike(await call("POST", `/factory/tasks/${F.projectTask}/withdraw`, "bob", { note: "bob's word" }), 403, c.why.withdraw, "bob withdraws");
     // The token, the request and a worker are the caller's own: the door mints bob's token, on bob's page — which is why alice's page offers them to nobody else.
     expect((await call("POST", "/factory/token", "bob")).json.login).toBe("bob");
@@ -102,15 +103,15 @@ describe("what a caller may do on a person's page", () => {
 
   it("alice on her own page: the workspace is hers — build, the queue, her legacy worker, the token; Remove per registration and Revoke per worker as they stand; never Withdraw, and no new worker (#331)", async () => {
     const c = await canOn("alice", "alice");
-    expect(flags(c)).toEqual({ ...allFalse, request: true, token: true, build: true, dequeue: true, remove: true, revoke: true, own_only: true, share_worker: true });
+    expect(flags(c)).toEqual({ ...allFalse, request: true, token: true, build: true, dequeue: true, remove: true, revoke: true });
     expect(c.why).toEqual({ register: POOL_HOSTS, withdraw: "a maintainer decides" });
-    expect(c.workers[F.communityWorker]).toEqual({ revoke: true, own_only: true, share_worker: true, why: {} });
+    expect(c.workers[F.ownerWorker]).toEqual({ revoke: true, why: {} });
     // Her two registrations are the maintainers' now: mine approved (its publish waits), ours published into edge.
     expect(c.packages[F.factoryPkg]).toEqual({ remove: false, why: `${F.factoryPkg} is approved: a maintainer removes it` });
     expect(c.packages[F.publishedPkg]).toEqual({ remove: false, why: `${F.publishedPkg} is published: a maintainer removes it` });
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}`, "alice"), 403, c.packages[F.factoryPkg].why, "alice removes mine");
     refusedLike(await call("POST", `/factory/tasks/${F.projectTask}/withdraw`, "alice", { note: "her own" }), 403, c.why.withdraw, "alice withdraws");
-    // Each true, at the door: a build queued, then taken out of the queue; a token; a worker registered before #331 shared, then revoked. A new one is refused with the page's sentence.
+    // Each true, at the door: a build queued, then taken out of the queue; a token; a worker registered before #331 revoked (its mode is gone, #343). A new one is refused with the page's sentence.
     const built = await call("POST", `/factory/packages/${F.factoryPkg}/build`, "alice", { arches: [F.arch] });
     expect(built.status, JSON.stringify(built.json)).toBe(201);
     const queued = built.json.tasks[0] as number;
@@ -119,41 +120,35 @@ describe("what a caller may do on a person's page", () => {
     expect((await call("POST", "/factory/token", "alice")).status).toBe(201);
     refusedLike(await call("POST", "/factory/workers", "alice", { name: "box", arch: F.arch }), 403, c.why.register, "alice registers a worker");
     const w = { json: { worker: await legacyWorker(env, "alice", "box", F.arch) } };
-    expect((await call("POST", `/factory/workers/${w.json.worker}/mode`, "alice", { mode: "shared" })).status).toBe(200);
-    expect((await call("POST", `/factory/workers/${w.json.worker}/mode`, "alice", { mode: "dedicated" })).status).toBe(200);
+    await modeGone(w.json.worker, "alice");
     expect((await call("DELETE", `/factory/workers/${w.json.worker}`, "alice")).json).toMatchObject({ revoked: w.json.worker });
     refusedLike(await call("DELETE", `/factory/workers/${w.json.worker}`, "alice"), 404, `${w.json.worker} is revoked already`, "revoked twice");
-    // Revoked, the worker's row still answers — grey with the state's word for its owner and for a maintainer, before whose it is — and its mode door says the same.
+    // Revoked, the worker's row still answers — grey with the state's word for its owner and for a maintainer, before whose it is.
     const gone = `${w.json.worker} is revoked already`;
-    for (const as of ["alice", "m1", "bob"] as Who[]) expect((await canOn("alice", as)).workers[w.json.worker], as).toEqual({ revoke: false, own_only: false, share_worker: false, why: { revoke: gone, own_only: gone, share_worker: gone } });
-    refusedLike(await call("POST", `/factory/workers/${w.json.worker}/mode`, "alice", { mode: "shared" }), 404, gone, "a revoked worker shared");
-    refusedLike(await call("POST", `/factory/workers/${w.json.worker}/mode`, "m1", { mode: "dedicated" }), 404, gone, "a revoked worker set to its owner's");
+    for (const as of ["alice", "m1", "bob"] as Who[]) expect((await canOn("alice", as)).workers[w.json.worker], as).toEqual({ revoke: false, why: { revoke: gone } });
     expect((await call("DELETE", "/factory/workers/no-such-worker", "alice")).status).toBe(404);
   });
 
-  it("m1, a maintainer, on alice's page: not her workspace — but Revoke, own-only, Withdraw and Remove (an approved one too) are theirs; sharing her worker is not", async () => {
+  it("m1, a maintainer, on alice's page: not her workspace — but Revoke, Withdraw and Remove (an approved one too) are theirs", async () => {
     const c = await canOn("alice", "m1");
-    expect(flags(c)).toEqual({ ...allFalse, remove: true, revoke: true, withdraw: true, own_only: true });
+    expect(flags(c)).toEqual({ ...allFalse, remove: true, revoke: true, withdraw: true });
     expect(c.why).toEqual({
       request: "only alice requests here — yours is on /user/m1",
       register: "only alice registers a worker here — yours is on /user/m1",
       token: "only alice mints their token — yours is on /user/m1",
       build: "only alice builds here — yours is on /user/m1",
       dequeue: "only alice takes their build out of the queue — yours is on /user/m1",
-      share_worker: OWNERS_WORD,
     });
     for (const name of Object.keys(c.packages)) expect(c.packages[name]).toEqual({ remove: true });
-    expect(c.workers[F.communityWorker]).toEqual({ revoke: true, own_only: true, share_worker: false, why: { share_worker: OWNERS_WORD } });
-    // The project's worker, on m1's own page: its mode is nobody's to set — the door's 409 — and the row's verdict says so for m1 as for anyone.
-    const noMode = "a project worker takes the project's work; it has no shared or own mode";
-    expect((await canOn("m1", "m1")).workers[F.worker]).toEqual({ revoke: true, own_only: false, share_worker: false, why: { own_only: noMode, share_worker: noMode } });
-    refusedLike(await call("POST", `/factory/workers/${F.worker}/mode`, "m1", { mode: "dedicated" }), 409, noMode, "m1 sets the project's worker's mode");
+    expect(c.workers[F.ownerWorker]).toEqual({ revoke: true, why: {} });
+    // The project's worker, on m1's own page: Revoke is the maintainer's; its mode, as every worker's, is gone (#343).
+    expect((await canOn("m1", "m1")).workers[F.worker]).toEqual({ revoke: true, why: {} });
+    await modeGone(F.worker, "m1");
     refusedLike(await call("POST", `/factory/packages/${F.factoryPkg}/build`, "m1", { arches: [F.arch] }), 404, c.why.build, "m1 builds mine");
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}/builds/${F.stagedTask}`, "m1"), 403, c.why.dequeue, "m1 takes alice's build out");
-    refusedLike(await call("POST", `/factory/workers/${F.communityWorker}/mode`, "m1", { mode: "shared" }), 403, c.why.share_worker, "m1 shares w3");
-    expect((await call("POST", `/factory/workers/${F.communityWorker}/mode`, "m1", { mode: "dedicated" })).status).toBe(200);
+    await modeGone(F.ownerWorker, "m1");
     expect((await call("POST", `/factory/tasks/${F.projectTask}/withdraw`, "m1", { note: "taken back by the test" })).status).toBe(200);
-    expect((await call("DELETE", `/factory/workers/${F.communityWorker}`, "m1")).json).toMatchObject({ revoked: F.communityWorker });
+    expect((await call("DELETE", `/factory/workers/${F.ownerWorker}`, "m1")).json).toMatchObject({ revoked: F.ownerWorker });
     // The maintainer's removal takes the approved one and the published one alike, and the two under review; then alice's page has nothing to remove.
     for (const name of [F.factoryPkg, F.publishedPkg, F.disposablePkg, F.sparePkg]) {
       const r = await call("DELETE", `/factory/packages/${name}`, "m1");
@@ -165,7 +160,7 @@ describe("what a caller may do on a person's page", () => {
   it("carol, blocked, on her own page: the page is hers, but a request and a build are refused with the block, a worker with the pool's hosts — and her registration is hers to remove", async () => {
     const c = await canOn("carol", "carol");
     const blocked = "carol is blocked by a maintainer: requests under a name that is not hers; nothing can be requested or built until another maintainer lifts it";
-    expect(flags(c)).toEqual({ ...allFalse, token: true, dequeue: true, remove: true, revoke: true, own_only: true, share_worker: true });
+    expect(flags(c)).toEqual({ ...allFalse, token: true, dequeue: true, remove: true, revoke: true });
     expect(c.why).toEqual({ request: blocked, register: POOL_HOSTS, build: blocked, withdraw: "a maintainer decides" });
     expect(c.packages[F.blockedPkg]).toEqual({ remove: true });
     // A worker is a maintainer's before anything else (#331): every contributor reads the same sentence, blocked or not.

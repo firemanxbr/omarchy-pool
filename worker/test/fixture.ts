@@ -21,14 +21,15 @@
  * have something to say.
  *
  * The people: bob, a contributor with nothing of his own; alice, who
- * requested `mine` and `ours` and runs the community worker w3 that built
- * them; carol, blocked by m1 with her package `hers` — the brake's table has
+ * requested `mine` and `ours`, which w3 built — m1's community registration,
+ * a maintainer's legacy set as the Studio's pair is (#343: contributors run
+ * no worker); carol, blocked by m1 with her package `hers` — the brake's table has
  * a row, and m2 is the other maintainer who could lift it; dave, whose two
  * packages m1 approved and neither ring serves: `lost`, whose publish job
  * failed on w1, and `pulled`, blocked by m2 with the approval standing (a
  * block from before #242, which withdraws it now) — the two states of an
  * approval that stands outside every ring, written as rows; m1 and m2, the
- * maintainers — w1 is m1's project worker, m2 asked
+ * maintainers — w1 is m1's project worker and w3 its community one, m2 asked
  * for the project's builds and approved them; each holds a passkey, "laptop",
  * made at their first decision (#271, decide.ts). Every login signs in with the cookie
  * `omc=oms_<login>` and the CLI token `omc_<login>`; the workers' tokens
@@ -237,10 +238,13 @@ async function index(env: Env, source: string, arch: string, p: Pkg, token: stri
 }
 
 /**
- * A contributor's worker registered before #331 closed POST /factory/workers
- * to maintainers: the row the door wrote then (community, dedicated), with
- * the token `omw_<id>`. Such registrations stay until P3 — their owner or a
- * maintainer revokes them and sets their mode, and they claim as before.
+ * A worker registered through POST /factory/workers — a contributor's from
+ * before #331 closed the door to maintainers, or a maintainer's legacy set:
+ * the row the door wrote then (community, its mode `dedicated` — history
+ * since #343, read by nothing), with the token `omw_<id>`. Such
+ * registrations stay until P3 — their owner or a maintainer revokes them; a
+ * maintainer's claims any contributor's build, as a host does, and a
+ * contributor's claims nothing (#343: contributors run no worker).
  */
 export async function legacyWorker(env: Env, owner: string, name: string, arch = "x86_64"): Promise<string> {
   const id = `${owner}-${name}-legacy`;
@@ -281,11 +285,16 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
       ('w1', ?, 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'),
-      ('w3', ?, 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z')`).bind(arch, await sha256Hex("omw_w1"), arch, await sha256Hex("omw_w3")),
+      ('w3', ?, 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z')`).bind(arch, await sha256Hex("omw_w1"), arch, await sha256Hex("omw_w3")),
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2')`),
     env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor'), ('dave', ?, ?, 'contributor')`)
       .bind(await sha256Hex("omc_m1"), await sha256Hex("oms_m1"), await sha256Hex("omc_m2"), await sha256Hex("oms_m2"), await sha256Hex("omc_alice"), await sha256Hex("oms_alice"), await sha256Hex("omc_bob"), await sha256Hex("oms_bob"), await sha256Hex("omc_carol"), await sha256Hex("oms_carol"), await sha256Hex("omc_dave"), await sha256Hex("oms_dave")),
   ]);
+
+  // alice's own registration from before #331, last seen then: hers to read and revoke, and it claims nothing since #343 — her packages
+  // build on the pool's hosts and the maintainers' legacy sets.
+  const ownerWorker = await legacyWorker(env, "alice", "laptop", arch);
+  await env.DB.prepare("UPDATE build_workers SET last_seen = '2026-09-16T00:00:00.000Z' WHERE id = ?").bind(ownerWorker).run();
 
   // alice's request: registered, its record on the pool, one build queued for x86_64.
   const request = async (name: string, version: string, token: string) =>
@@ -321,7 +330,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     return a.task.id as number;
   };
   /**
-   * The story up to the approval: alice's worker builds and stages the
+   * The story up to the approval: w3 builds and stages alice's
    * request, w1 audits it, m2 has the project build it again, w1 builds,
    * stages, audits and tries it, m2 approves. The publish job is queued.
    */
@@ -426,6 +435,21 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     ).bind(kind, arch, kind, JSON.stringify(params), new Date(Date.now() - 20000).toISOString(), new Date().toISOString(), JSON.stringify(result)).first<{ id: number }>())!.id;
   }
 
+  // Workers follow the brain (#277): m1's community registration declares the orders its process takes, and has two on its record, both through the
+  // doors: m2's re-check, answered with what its agent said, and m1's restart, accepted, then seen done when its next process claimed —
+  // each with its issue line and its final line. Nothing is left waiting, so no claim of w3 after this one is handed an order; it
+  // runs while nothing w3 takes is queued — a community registration takes any contributor's build (#343), dave's requests below
+  // queue builds of his.
+  const w3claim = { arch, ...agent, orders: ["drain", "recheck-agent", "restart"], instance: "3b1f0c9e2a7d4e55a1c0f6e2d9b84a17", agent_via: "broker" };
+  must(await call(env, "POST", "/factory/claim", w3claim, "omw_w3"), 204, "w3 declares the orders it takes");
+  const recheck = must(await call(env, "POST", "/factory/workers/w3/orders", { kind: "recheck-agent", reason: "its agent took 40 s to answer this morning" }, "omc_m2"), 201, "m2's re-check of w3").json.order.id as string;
+  must(await call(env, "POST", "/factory/claim", w3claim, "omw_w3"), 200, "w3 takes the re-check");
+  must(await call(env, "POST", `/factory/workers/self/orders/${recheck}`, { instance: w3claim.instance, outcome: "done", code: "probed", detail: "agent openai/gpt-5: ok (812 ms)", agent: { status: "ok", ms: 812 } }, "omw_w3"), 200, "w3 answers the re-check");
+  const restart = must(await call(env, "POST", "/factory/workers/w3/orders", { kind: "restart", reason: "a new image is on the host; take it now" }, "omc_m1"), 201, "m1's restart of w3").json.order.id as string;
+  must(await call(env, "POST", "/factory/claim", w3claim, "omw_w3"), 200, "w3 takes the restart");
+  must(await call(env, "POST", `/factory/workers/self/orders/${restart}`, { instance: w3claim.instance, outcome: "accepted", code: "exiting", detail: "exit 0 in a moment; the restart policy starts the next container" }, "omw_w3"), 200, "w3 accepts the restart");
+  must(await call(env, "POST", "/factory/claim", { ...w3claim, instance: "9c07d2e41b3a4f6d8e5c7b1a0f2e3d4c", previous_exit: { why: "restart" } }, "omw_w3"), 204, "w3's next process claims");
+
   // The brake: carol requested `hers`; m1 blocked the package, then her — m2 is the other maintainer who lifts a block.
   await request("hers", "0.1", "omc_carol");
   must(await decide("m1", "/factory/packages/hers/block", { reason: "the source is not the project's" }), 200, "block hers");
@@ -478,19 +502,6 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   ]);
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('promote', 'stable', ?, 'ok', 'stable: 2 packages from core', ?)")
     .bind(arch, JSON.stringify({ release_id: release, from_release_id: previousRelease, note: "xz 5.8.5, zstd in, bzip2 out", arch })).run();
-  // Workers follow the brain (#277): alice's worker declares the orders its process takes, and has two on its record, both through the
-  // doors: m2's re-check, answered with what its agent said, and m1's restart, accepted, then seen done when its next process claimed —
-  // each with its issue line and its final line. Nothing is left waiting, so no claim of w3 after this one is handed an order.
-  const w3claim = { arch, ...agent, orders: ["drain", "recheck-agent", "restart"], instance: "3b1f0c9e2a7d4e55a1c0f6e2d9b84a17", agent_via: "broker" };
-  must(await call(env, "POST", "/factory/claim", w3claim, "omw_w3"), 204, "w3 declares the orders it takes");
-  const recheck = must(await call(env, "POST", "/factory/workers/w3/orders", { kind: "recheck-agent", reason: "its agent took 40 s to answer this morning" }, "omc_m2"), 201, "m2's re-check of w3").json.order.id as string;
-  must(await call(env, "POST", "/factory/claim", w3claim, "omw_w3"), 200, "w3 takes the re-check");
-  must(await call(env, "POST", `/factory/workers/self/orders/${recheck}`, { instance: w3claim.instance, outcome: "done", code: "probed", detail: "agent openai/gpt-5: ok (812 ms)", agent: { status: "ok", ms: 812 } }, "omw_w3"), 200, "w3 answers the re-check");
-  const restart = must(await call(env, "POST", "/factory/workers/w3/orders", { kind: "restart", reason: "a new image is on the host; take it now" }, "omc_m1"), 201, "m1's restart of w3").json.order.id as string;
-  must(await call(env, "POST", "/factory/claim", w3claim, "omw_w3"), 200, "w3 takes the restart");
-  must(await call(env, "POST", `/factory/workers/self/orders/${restart}`, { instance: w3claim.instance, outcome: "accepted", code: "exiting", detail: "exit 0 in a moment; the restart policy starts the next container" }, "omw_w3"), 200, "w3 accepts the restart");
-  must(await call(env, "POST", "/factory/claim", { ...w3claim, instance: "9c07d2e41b3a4f6d8e5c7b1a0f2e3d4c", previous_exit: { why: "restart" } }, "omw_w3"), 204, "w3's next process claims");
-
   // A maintainer host (#321): m1's "rack", enrolled from rack-1 with the Studio's capacity, waiting for m1's Confirm — what the host page and the person's Hosts table draw.
   const host = "h_rack000001";
   await env.DB.prepare(
@@ -512,7 +523,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   return {
     arch, pkg: "zlib", pkg2: "xz", release, previousRelease, sha: zlib,
     contributor: "bob", owner: "alice", m1: "m1", m2: "m2",
-    factoryPkg: "mine", publishedPkg: "ours", worker: "w1", communityWorker: "w3",
+    factoryPkg: "mine", publishedPkg: "ours", worker: "w1", communityWorker: "w3", ownerWorker,
     contributorTask: mine.contributorTask, projectTask: mine.projectTask, stagedTask, disposableTask, spareTask, disposablePkg: "disposable", sparePkg: "spare",
     blockedContributor: "carol", blockedPkg: "hers",
     outsider: "dave", failedPkg: "lost", pulledPkg: "pulled",

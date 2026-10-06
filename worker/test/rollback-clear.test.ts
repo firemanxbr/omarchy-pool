@@ -4,7 +4,10 @@
  * workers too), so factory/bin/release-rollback clears, around that
  * Worker's deploy, every column this Worker's workerView withholds — but
  * drained_at, drained_by and drain_reason, a person's standing drain, which
- * this Worker serves as `drained` and needs back after a roll-forward.
+ * this Worker serves as `drained` and needs back after a roll-forward, and
+ * mode, history since #343 that this Worker withholds (a row registered
+ * since holds only its default) and a Worker from before #343 reads at
+ * every claim.
  *
  * - Drift: a column workerView withholds (a later migration's among them)
  *   that the clear neither clears nor names as kept fails here, until
@@ -24,7 +27,7 @@ import type { RunningVersion } from "../src/meta";
 import rollbackScript from "../../factory/bin/release-rollback?raw";
 import securityModel from "../src/docs/security-model.md?raw";
 
-const KEEP = ["drained_at", "drained_by", "drain_reason"];
+const KEEP = ["drained_at", "drained_by", "drain_reason", "mode"];
 // What the Worker from before #277 withheld already (its workerView): never served by either, so never the clear's business.
 const OLD_WITHHELD = ["token_hash", "log_tail", "log_at"];
 const POOL: RunningVersion = { version: "v1.0.4", commit: null, deployed_at: null, release_url: null, commit_url: null, analytics: "" };

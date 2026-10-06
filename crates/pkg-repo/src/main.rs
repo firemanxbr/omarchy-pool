@@ -303,8 +303,9 @@ enum Command {
         /// Architecture to work for (default: this machine's).
         #[arg(long, default_value = std::env::consts::ARCH)]
         arch: String,
-        /// Build anyone's community packages, not only this worker owner's
-        /// (donated compute; a community worker only).
+        /// Ignored by the pool since #343: a community registration builds
+        /// any contributor's package, as a host does (kept so an older
+        /// command line still parses).
         #[arg(long)]
         shared: bool,
         /// Job kinds to pull (repeatable). Default: every pool job and the

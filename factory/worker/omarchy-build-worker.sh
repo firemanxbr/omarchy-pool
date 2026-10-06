@@ -33,7 +33,7 @@
 #   OMARCHY_WORKER_TOKEN   this worker's token (POST /factory/workers, shown once); FACTORY_TOKEN is an accepted alias
 #   WORKER_ID              the registered worker id (shown with the token; the image reads it from the broker)
 #   WORKER_LABELS          JSON shown on the Workers page (the id's tooltip), e.g. {"where":"laptop"}
-#   WORKER_SHARED          1 = build anyone's community packages (donated compute); default: the owner's only
+#   WORKER_SHARED          ignored by the pool since #343: a community registration builds any contributor's package
 #   ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN
 #                          the worker owner's agent key, if any (one is enough): drafts and corrects PKGBUILDs
 #                          here, on this machine (factory/bin/agent.py; FACTORY_PROVIDER / FACTORY_MODEL choose);

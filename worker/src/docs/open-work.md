@@ -99,7 +99,7 @@ with dependency graph · the OPR through the gates like every source, chaotic-au
 security layer (Arch + Debian trackers, KEV, EPSS, confidence levels, exposure
 through the graph, fast-track of fixes, `omarchy-cli security`) · paged release
 view and linear release creation at 30k packages · edge-cached API reads ·
-the factory: contributors' workers and staging, maintainers' approvals, the
+the factory: contributors' builds and staging, maintainers' approvals, the
 project's rebuild, package requests and bumps as evidence · every pipeline
 step a pulled job with a per-job token, no shared secret, GitHub only
 releasing · signing inside the Worker · governance from a file, two roles ·

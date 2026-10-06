@@ -11,7 +11,7 @@
  *   factory/<name>/<request>/request.json            what the contributor asked for (record.ts, PR A)
  *   factory/<name>/<request>/build-<task>/…          a build's evidence, copied from staging when it is staged (PR C)
  *   factory/<name>/<request>/decision-<n>.json       approve / reject / block, with the maintainer's login (PR D)
- *   workers/<id>/trust-<time>.json                   who vouched for a worker (contributors.ts, handleTrustWorker)
+ *   workers/<id>/trust-<time>.json                   who vouched for a worker (the per-worker trust door until #343; a host's Confirm, routes/hosts.ts)
  *   <key>.tombstone.json                             a record withdrawn: who, why, what it was (withdrawRecord)
  *
  * Written once, never rewritten — but not irremovable: a log that should

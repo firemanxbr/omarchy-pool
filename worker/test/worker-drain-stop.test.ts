@@ -4,8 +4,8 @@
  *
  * - A drain holds from issue: the drained worker's claim is a 204, the
  *   first one hears the notice, the Build and project-build doors refuse to
- *   pin it, and the builds already pinned to it go to the shared queue once
- *   it has been drained FIRST_PICK_MINUTES. Resume ends it, by §1.10's
+ *   pin it, and the builds already pinned to it go to the queue once it has
+ *   been drained UNPIN_AFTER_DRAIN_MINUTES. Resume ends it, by §1.10's
  *   table of who may.
  * - Stop its task fences the lease: still leased to its worker — no other
  *   worker takes it, the ring lock holds —, every heartbeat, report and
@@ -51,9 +51,9 @@ const cli = (login: string): Who => ({ token: `omc_${login}` });
 const page = (login: string): Who => ({ cookie: `omc=oms_${login}`, origin: ORIGIN });
 const ARCH: Record<string, string> = {};
 /** A claim of a worker that takes orders (instance n), its agent answering — and stops a task on the heartbeat's 409 (it declares stop-task, #277 part 2). */
-const claimBody = (id: string, o: { instance?: number | null; orders?: string[] | null; kinds?: string[]; shared?: boolean } = {}) => ({
+const claimBody = (id: string, o: { instance?: number | null; orders?: string[] | null; kinds?: string[] } = {}) => ({
   arch: ARCH[id], version: "v1.0.2", agent: "claude-code/claude-sonnet-5", agent_status: "ok", agent_error: "", agent_checked_at: "2026-09-30T12:00:00Z", agent_via: "direct",
-  ...(o.kinds ? { kinds: o.kinds } : {}), ...(o.shared ? { shared: true } : {}),
+  ...(o.kinds ? { kinds: o.kinds } : {}),
   ...(o.orders === null ? {} : { orders: o.orders ?? ["drain", "recheck-agent", "restart", "stop-task"] }),
   ...(o.instance === null ? {} : { instance: hex(o.instance ?? 1) }),
 });
@@ -107,10 +107,11 @@ async function seedTask(t: { name: string; arch?: string; kind?: string; trust?:
 beforeAll(async () => {
   const h = (t: string) => sha256Hex(t);
   await env.DB.batch([
-    // m4 and m5 press the stops of the crossing cases: each login has its twenty orders an hour.
-    env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m4'), ('m5')`),
-    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('m3', ?, ?, 'maintainer'), ('m4', ?, ?, 'maintainer'), ('m5', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor')`)
-      .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_m3"), await h("oms_m3"), await h("omc_m4"), await h("oms_m4"), await h("omc_m5"), await h("oms_m5"), await h("omc_alice"), await h("oms_alice"), await h("omc_bob"), await h("oms_bob"), await h("omc_carol"), await h("oms_carol")),
+    // m4 and m5 press the stops of the crossing cases: each login has its twenty orders an hour. m6 and m7 own community registrations,
+    // a maintainer's legacy sets: a contributor's registration claims nothing since #343.
+    env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m4'), ('m5'), ('m6'), ('m7')`),
+    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('m3', ?, ?, 'maintainer'), ('m4', ?, ?, 'maintainer'), ('m5', ?, ?, 'maintainer'), ('m6', ?, ?, 'maintainer'), ('m7', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor')`)
+      .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_m3"), await h("oms_m3"), await h("omc_m4"), await h("oms_m4"), await h("omc_m5"), await h("oms_m5"), await h("omc_m6"), await h("oms_m6"), await h("omc_m7"), await h("oms_m7"), await h("omc_alice"), await h("oms_alice"), await h("omc_bob"), await h("oms_bob"), await h("omc_carol"), await h("oms_carol")),
     env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status) VALUES ('felix', 'bob', 'https://github.com/bob/felix', '["aarch64"]', 'waiting'), ('gus', 'bob', 'https://github.com/bob/gus', '["aarch64"]', 'waiting'), ('hana', 'bob', 'https://github.com/bob/hana', '["aarch64"]', 'waiting')`),
   ]);
 });
@@ -121,41 +122,41 @@ afterEach(() => {
 
 describe("Stop its task: the lease fenced, the task back in the queue once its worker has stopped", () => {
   it("the owner of a community worker stops a stranger's build it runs: still leased, fenced, nothing cancelled, and nobody else takes it", async () => {
-    await seedWorker("alice-box", "aarch64", "alice", "community");
-    await seedWorker("carol-box", "aarch64", "carol", "community");
+    await seedWorker("m6-box", "aarch64", "m6", "community");
+    await seedWorker("m7-box", "aarch64", "m7", "community");
     const t = await seedTask({ name: "felix", owner: "bob" });
-    const c = await claim("alice-box", { shared: true, instance: 10 });
+    const c = await claim("m6-box", { instance: 10 });
     expect(c.status).toBe(200);
     expect(c.json.task.id).toBe(t);
     const before = await taskOf(t);
     // Before the stop, its uploads are taken, as on main.
     expect((await call("PUT", `/factory/tasks/${t}/artifacts/build.log`, undefined, { token: c.json.token }, "==> building\n")).status).toBe(201);
     // Who may not: the build's owner who does not own the worker, another contributor, nobody signed in.
-    expect((await issue("alice-box", { kind: "stop-task", task: t }, cli("bob"))).status).toBe(403);
-    expect((await issue("alice-box", { kind: "stop-task", task: t }, cli("carol"))).status).toBe(403);
-    expect((await issue("alice-box", { kind: "stop-task", task: t }, { origin: ORIGIN })).status).toBe(401);
+    expect((await issue("m6-box", { kind: "stop-task", task: t }, cli("bob"))).status).toBe(403);
+    expect((await issue("m6-box", { kind: "stop-task", task: t }, cli("carol"))).status).toBe(403);
+    expect((await issue("m6-box", { kind: "stop-task", task: t }, { origin: ORIGIN })).status).toBe(401);
     expect((await taskOf(t)).stop_order).toBeNull();
     // What /can says of it: the task, how it stops (a build: its child, or its next call while it transfers), the latest it goes back.
-    const can = await call("GET", "/factory/workers/alice-box/can", undefined, page("alice"));
+    const can = await call("GET", "/factory/workers/m6-box/can", undefined, page("m6"));
     expect(can.json.can.stop_task).toBe(true);
     expect(can.json.stop).toMatchObject({ task: t, kind: "build", stops: "child-or-call", attempt: 1, max_attempts: 3, words: "felix 1.2-1, aarch64, bob's build", stopping: false });
-    const r = await issue("alice-box", { kind: "stop-task", task: t, reason: "hangs in check()" }, page("alice"));
+    const r = await issue("m6-box", { kind: "stop-task", task: t, reason: "hangs in check()" }, page("m6"));
     expect(r.status, JSON.stringify(r.json)).toBe(201);
     // The latest it goes back to the queue, for the page to say on its reader's clock; the door's own note says the pool's, and says so.
-    expect(r.json.order).toMatchObject({ kind: "stop-task", task: t, issued_by: "alice", state: "pending", until: before.lease_expires_at });
+    expect(r.json.order).toMatchObject({ kind: "stop-task", task: t, issued_by: "m6", state: "pending", until: before.lease_expires_at });
     expect(r.json.note).toContain("Nothing is cancelled");
     expect(r.json.note).toContain(`(by ${before.lease_expires_at.slice(11, 16)} UTC at the latest)`);
     const after = await taskOf(t);
-    expect(after).toMatchObject({ status: "leased", lease_owner: "alice-box", stop_order: r.json.order.id, lease_expires_at: before.lease_expires_at });
+    expect(after).toMatchObject({ status: "leased", lease_owner: "m6-box", stop_order: r.json.order.id, lease_expires_at: before.lease_expires_at });
     const lines = await linesOf(r.json.order.id);
     expect(lines).toHaveLength(1);
-    expect(lines[0].summary).toBe(`alice-box: task #${t} (felix 1.2-1, aarch64, bob's build) stopped by alice — hangs in check(); back in the queue once this worker has stopped it (attempt 1 of 3)`);
+    expect(lines[0].summary).toBe(`m6-box: task #${t} (felix 1.2-1, aarch64, bob's build) stopped by m6 — hangs in check(); back in the queue once this worker has stopped it (attempt 1 of 3)`);
     // Another community worker's claim does not get it: it is still leased.
-    expect((await claim("carol-box", { shared: true, instance: 20 })).status).toBe(204);
+    expect((await claim("m7-box", { instance: 20 })).status).toBe(204);
     // The page sees it stopping, from the row alone; /can greys the button with why.
-    const view = await call("GET", "/factory/workers/alice-box");
-    expect(view.json.worker.stopping).toMatchObject({ task: t, order: r.json.order.id, by: "alice" });
-    const stoppingCan = (await call("GET", "/factory/workers/alice-box/can", undefined, page("alice"))).json;
+    const view = await call("GET", "/factory/workers/m6-box");
+    expect(view.json.worker.stopping).toMatchObject({ task: t, order: r.json.order.id, by: "m6" });
+    const stoppingCan = (await call("GET", "/factory/workers/m6-box/can", undefined, page("m6"))).json;
     expect(stoppingCan).toMatchObject({ can: { stop_task: false }, stop: { stopping: true } });
     // An order given now goes once the task is back in the queue: the stop is under way, so the page no longer offers a stop to deliver it sooner.
     expect(stoppingCan.note).toBe(`delivered with its next claim — once task #${t}, which is being stopped, is back in the queue: the claim that gives it back carries the order`);
@@ -163,7 +164,7 @@ describe("Stop its task: the lease fenced, the task back in the queue once its w
     const tv = await call("GET", `/factory/tasks/${t}?fresh=1`);
     expect(tv.json.task.stop_order).toBe(r.json.order.id);
     // Back in the queue by the fenced lease's own end, which nothing renews: the time the door answered and the worker's page says.
-    expect(tv.json.stopping).toMatchObject({ order: r.json.order.id, by: "alice", until: before.lease_expires_at });
+    expect(tv.json.stopping).toMatchObject({ order: r.json.order.id, by: "m6", until: before.lease_expires_at });
 
     // While it is fenced: every heartbeat refused, the lease not renewed, no token; the uploads and the reports refused.
     for (let i = 0; i < 2; i++) {
@@ -177,16 +178,19 @@ describe("Stop its task: the lease fenced, the task back in the queue once its w
     expect((await call("POST", `/factory/tasks/${t}/complete`, { sha256: "0".repeat(64), filename: "x" }, { token: c.json.token })).json).toMatchObject({ stop: true, state: "stopping" });
     expect((await call("POST", `/factory/tasks/${t}/fail`, { error: "x" }, { token: c.json.token })).json).toMatchObject({ stop: true, state: "stopping" });
     // Taking it back is refused: the worker may have killed the task already.
-    const del = await call("DELETE", `/factory/workers/alice-box/orders/${r.json.order.id}`, undefined, cli("alice"));
+    const del = await call("DELETE", `/factory/workers/m6-box/orders/${r.json.order.id}`, undefined, cli("m6"));
     expect(del).toMatchObject({ status: 409, json: { error: `task #${t} is being stopped already: it goes back to the queue once this worker has stopped it` } });
     expect((await taskOf(t)).stop_order).toBe(r.json.order.id);
 
     // The worker's next claim is the proof its processes are gone: the task goes back to the queue, behind its peers; the order is done.
-    const next = await claim("alice-box", { instance: 10 });
-    expect(next.status).toBe(204); // alice-box is dedicated at this claim (no shared): nothing of alice's to take
+    // A community registration takes any contributor's build (#343): a more urgent one waits, so this claim takes that one, not felix.
+    const urgent = await seedTask({ name: "juno", owner: "bob", priority: 50 });
+    const next = await claim("m6-box", { instance: 10 });
+    expect(next.json.task.id).toBe(urgent);
+    await call("POST", `/factory/tasks/${urgent}/fail`, { error: "done testing", final: true }, { token: next.json.token });
     expect(await taskOf(t)).toMatchObject({ status: "queued", lease_owner: null, lease_expires_at: null, stop_order: null, priority: before.priority + 10 });
-    expect((await taskOf(t)).error).toBe("stopped on alice-box by alice: hangs in check()");
-    expect((await rowOf("alice-box")).current_task).toBeNull();
+    expect((await taskOf(t)).error).toBe("stopped on m6-box by m6: hangs in check()");
+    expect((await rowOf("m6-box")).current_task).toBeNull();
     // The task view, read past its edge cache as a broker's adopt() reads it: the fence is gone with the requeue.
     const back = await call("GET", `/factory/tasks/${t}?fresh=2`);
     expect(back.json.task).toMatchObject({ status: "queued", stop_order: null });
@@ -197,9 +201,9 @@ describe("Stop its task: the lease fenced, the task back in the queue once its w
     expect(o.detail).toMatch(new RegExp(`^stopped: it claimed again \\d+ min after the order; task #${t} is back in the queue$`));
     expect((await linesOf(r.json.order.id)).map((l) => JSON.parse(l.payload).state)).toEqual(["pending", "done"]);
     const build = await env.DB.prepare("SELECT status, summary FROM events WHERE kind = 'build' AND json_extract(payload, '$.task') = ? ORDER BY id").bind(t).all<{ status: string; summary: string }>();
-    expect(build.results.map((l) => l.summary)).toEqual([`felix for aarch64: stopped on alice-box by alice: hangs in check() — back in the queue`]);
+    expect(build.results.map((l) => l.summary)).toEqual([`felix for aarch64: stopped on m6-box by m6: hangs in check() — back in the queue`]);
     // Nothing of the stranger's was cancelled: another worker takes it.
-    const other = await claim("carol-box", { shared: true, instance: 20 });
+    const other = await claim("m7-box", { instance: 20 });
     expect(other.json.task.id).toBe(t);
     // Once another worker holds it, the stopped token hears whose it is now.
     expect((await call("POST", `/factory/tasks/${t}/heartbeat`, {}, { token: c.json.token })).json).toMatchObject({ stop: true, state: "leased" });
@@ -228,15 +232,15 @@ describe("Stop its task: the lease fenced, the task back in the queue once its w
   });
 
   it("on its last attempt the task fails at the requeue, its staged packages reclaimed, and the final line says so", async () => {
-    await seedWorker("alice-box2", "aarch64", "alice", "community");
+    await seedWorker("m6-box2", "aarch64", "m6", "community");
     const t = await seedTask({ name: "gus", owner: "bob", attempts: 2, max_attempts: 3 });
-    const c = await claim("alice-box2", { shared: true, instance: 40 });
+    const c = await claim("m6-box2", { instance: 40 });
     expect(c.json.task.id).toBe(t);
     expect((await call("PUT", `/factory/tasks/${t}/artifacts/gus-1.2-1-aarch64.pkg.tar.zst`, undefined, { token: c.json.token }, "pkg")).status).toBe(201);
-    const r = await issue("alice-box2", { kind: "stop-task", task: t }, cli("alice"));
+    const r = await issue("m6-box2", { kind: "stop-task", task: t }, cli("m6"));
     expect(r.status).toBe(201);
     expect((await linesOf(r.json.order.id))[0].summary).toContain("; it fails then: that was its last attempt");
-    await claim("alice-box2", { instance: 40 });
+    await claim("m6-box2", { instance: 40 });
     expect(await taskOf(t)).toMatchObject({ status: "failed", stop_order: null });
     expect((await orderOf(r.json.order.id)).detail).toContain(`task #${t} failed: that was its last attempt`);
     expect((await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ?").bind(t).all()).results.map((o: any) => o.key.split("/").pop())).toEqual([]);
@@ -537,11 +541,12 @@ describe("Drain and Resume: states the pool enforces at the claim", () => {
   });
 
   it("the Build door and the project-build door refuse to pin a drained worker, and the other architecture is not pinned to one", async () => {
-    await seedWorker("bob-shared", "aarch64", "bob", "community");
-    expect((await issue("bob-shared", { kind: "drain", reason: "moving house" }, cli("bob"))).status).toBe(201);
+    // A maintainer's community registration: one a contributor kept from before #331 is never pinned at all (#343).
+    await seedWorker("m2-shared", "aarch64", "m2", "community");
+    expect((await issue("m2-shared", { kind: "drain", reason: "moving house" }, cli("m2"))).status).toBe(201);
     await env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status, pkgbuild_path) VALUES ('ivy', 'alice', 'https://github.com/alice/ivy', '["aarch64"]', 'registered', 'PKGBUILD')`).run();
-    const built = await call("POST", "/factory/packages/ivy/build", { worker: "bob-shared", arches: ["aarch64"] }, cli("alice"));
-    expect(built).toMatchObject({ status: 409, json: { error: expect.stringMatching(/^bob-shared is drained \(by bob, \d\d:\d\d UTC: moving house\) — pin another worker, or use the shared queue$/) } });
+    const built = await call("POST", "/factory/packages/ivy/build", { worker: "m2-shared", arches: ["aarch64"] }, cli("alice"));
+    expect(built).toMatchObject({ status: 409, json: { error: expect.stringMatching(/^m2-shared is drained \(by m2, \d\d:\d\d UTC: moving house\) — pin another worker, or use the queue$/) } });
     // The project-build door: the named review worker is drained; another architecture's live one with the same agent is, too.
     await seedWorker("rev-a", "aarch64", "m1", "project", { agent: "claude-code/claude-sonnet-5", agent_status: "ok", kinds: '["build"]' });
     await seedWorker("rev-x", "x86_64", "m1", "project", { agent: "claude-code/claude-sonnet-5", agent_status: "ok", kinds: '["build"]' });
@@ -557,7 +562,7 @@ describe("Drain and Resume: states the pool enforces at the claim", () => {
     expect(await env.DB.prepare(SAME_AGENT_SQL).bind("x86_64", "claude-code/claude-sonnet-5", alive, "[]").first()).toEqual({ id: "rev-x" });
   });
 
-  it("a build pinned to a worker drained FIRST_PICK_MINUTES or more goes to the shared queue at the sweep, one line; a drain younger than that unpins nothing", async () => {
+  it("a build pinned to a worker drained UNPIN_AFTER_DRAIN_MINUTES or more goes to the queue at the sweep, one line; a drain younger than that unpins nothing", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const t0 = Date.now();
     await seedWorker("alice-pin", "aarch64", "alice", "community");
@@ -570,7 +575,7 @@ describe("Drain and Resume: states the pool enforces at the claim", () => {
     expect(after.pinned_to).toBeNull();
     expect(JSON.parse(after.params).unpinned).toMatchObject({ from: "alice-pin" });
     const lines = await env.DB.prepare("SELECT summary FROM events WHERE kind = 'order' AND json_extract(payload, '$.worker') = 'alice-pin' AND json_extract(payload, '$.unpinned') IS NOT NULL").all<{ summary: string }>();
-    expect(lines.results.map((l) => l.summary)).toEqual([`alice-pin is drained: 1 build pinned to it goes to the shared queue (#${t})`]);
+    expect(lines.results.map((l) => l.summary)).toEqual([`alice-pin is drained: 1 build pinned to it goes to the queue (#${t})`]);
     await sweepOrders(env, t0 + 14 * MIN);
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = 'order' AND json_extract(payload, '$.worker') = 'alice-pin' AND json_extract(payload, '$.unpinned') IS NOT NULL").first<{ n: number }>())!.n).toBe(1);
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(t).run();

@@ -8,15 +8,16 @@ brokers, `agent-proxy`, and the `updater` that rolls them out (the roles:
 [factory/README.md](../README.md) *Three roles*; how the day goes:
 [docs/RUNBOOK.md](../../docs/RUNBOOK.md) *The Studio host*). The project's
 compute is its maintainers' hosts: only a maintainer provides one (#331), and
-a maintainer adding a host uses the same four files. Contributors do not run
-workers; their packages build here.
+a maintainer's new machine joins as a host (*Maintainer hosts* below); the
+four files are the Studio's legacy set until P3 retires it (#343).
+Contributors do not run workers; their packages build on the hosts.
 
 | File | What |
 |---|---|
 | `setup.sh` | run once with `sudo`: the directory tree (a btrfs subvolume where `/` is btrfs), docker + compose + jq + user-mode emulation for the other architecture, the docker group, an env file (mode 600) to fill in for every `env_file` `compose.yml` names. It checks the new `compose.yml` against the host's `.env` and `etc/` before it changes anything (exit 4), keeps the files it replaces in `setup-backup-<time>/` and prints the lines of `compose.yml` it replaces. On a host from before #277 it is the one-time step, which starts and checks the updater before it retires the old timer, and puts everything back when that fails (the runbook, *Once: the updater*) |
-| `register.sh` | registers the eight workers with the pool under a maintainer's token, trusts the six project ones, writes each worker token into `etc/<service>.env` — prints only the ids |
+| `register.sh` | registers the community pair with the pool under a maintainer's token and writes each worker token into `etc/<service>.env` — prints only the ids. Per-worker trust is gone (#343: its door answers 410), so it registers no project service (pool, review, review2) any more: one whose env file has no token is skipped with that word, and the host takes its work — a pool or review container on a registration without project trust exits at start, and the updater holds back a set where one restarts |
 | `rollout.sh` | wakes the `updater` service now (`--check`: asks it what it would do). The rollout itself runs in the image (`omarchy-rollout`), brokers first: `agent-proxy` and the community brokers that changed, each waited for until it answers on `:8790` (at most `ROLLOUT_BROKER_WAIT`, 300 s for all of them; past it a warning, and the rollout goes on), then every worker that changed in one `up`: a stop is a *drain* (SIGTERM — the worker finishes the task it holds, claims nothing new, exits; `stop_grace_period: 3h`), then the new container starts; the unchanged ones keep working |
-| `compose.yml` | twelve services, seven of them run by default — three under the `emulated` profile, `review-x86_64`, `community-x86_64` and `broker-community-x86_64`: off unless `COMPOSE_PROFILES=emulated` is in `.env` (see *x86_64 builds* below); the second review pair, `review2-x86_64` and `review2-aarch64`, under `review2`: off until `register.sh` has registered it, then `COMPOSE_PROFILES=emulated,review2` (or `review2`) and `./rollout.sh` (until then its two registrations show offline on the Workers page; revoke them there on a host that will not run the pair): `pool-*`, `review-*`, `review2-*` (project trust, the runtime's socket, a work directory at the same path on both sides, the shared package cache; their audits and build containers reach the agent through `agent-proxy` on the `review` network), `broker-community-*` + `community-*` (community trust, shared: the broker holds the token, the agent key and `GITHUB_TOKEN` and only receives, processes and answers; the builder beside it holds nothing, one task per container, on a network the two have to themselves; the x86_64 community builder is an emulated container on an aarch64 host, its broker native), `agent-proxy`, plus `updater`: the rollout, following the pool's release, no token |
+| `compose.yml` | twelve services, seven of them run by default — three under the `emulated` profile, `review-x86_64`, `community-x86_64` and `broker-community-x86_64`: off unless `COMPOSE_PROFILES=emulated` is in `.env` (see *x86_64 builds* below); the second review pair, `review2-x86_64` and `review2-aarch64`, under `review2`: off unless the pair was registered and trusted before #343 — then `COMPOSE_PROFILES=emulated,review2` (or `review2`) and `./rollout.sh`; one not registered yet can no longer be added (per-worker trust is gone, #343): the maintainer's host takes that work (any two registrations of it that show offline on the Workers page are revoked there): `pool-*`, `review-*`, `review2-*` (project trust, the runtime's socket, a work directory at the same path on both sides, the shared package cache; their audits and build containers reach the agent through `agent-proxy` on the `review` network), `broker-community-*` + `community-*` (community trust, any contributor's builds, #343: the broker holds the token, the agent key and `GITHUB_TOKEN` and only receives, processes and answers; the builder beside it holds nothing, one task per container, on a network the two have to themselves; the x86_64 community builder is an emulated container on an aarch64 host, its broker native), `agent-proxy`, plus `updater`: the rollout, following the pool's release, no token |
 
 ```
 POOL_ROOT (/srv/omarchy-pool)
@@ -34,7 +35,9 @@ POOL_ROOT (/srv/omarchy-pool)
 ```
 
 Install, from a checkout of this repository on the host (or copy the four
-files over):
+files over) — the Studio's set as it stands; since #343 `register.sh`
+registers the community pair only, so a new install of it has no pool or
+review registration: that work is a host's (*Maintainer hosts*):
 
 ```bash
 sudo factory/host/setup.sh                        # then log in again (the docker group)

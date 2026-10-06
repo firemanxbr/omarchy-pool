@@ -7,15 +7,15 @@
  * is the public API (`/api/v1/factory/*`) with the browser session.
  *
  * The page is the same for every role: Share and Token, the way to request
- * and to register, Build, Remove and Renew on a package, Revoke and the
- * mode on a worker, Withdraw on an approval, the evidence of every build —
+ * and to register, Build, Remove and Renew on a package, Revoke on a
+ * worker, Withdraw on an approval, the evidence of every build —
  * drawn for everyone. What this viewer may not do is the same control grey
  * with the reason in its title (the shell's gate()), never hidden and never
  * a sentence in its place; the reason is the server's own word
  * (GET /users/<login>/can, no-store: the profile is cached for everyone,
  * the rights are the caller's), so a grey button is one the door would
  * refuse in the same words. A maintainer keeps what is theirs on anyone's
- * page — revoke, own only, remove, withdraw.
+ * page — revoke, remove, withdraw.
  */
 import { page, servedGrey, workerPanels } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -51,7 +51,7 @@ const WORKER_FORM = `<label>Name <input type="text" id="w-name" placeholder="lap
  * contributor with the same sentence (POOL_HOSTS).
  */
 const poolHostsLine = () => `<p class="sub" id="w-pool" style="margin:0 0 10px;font-size:12.5px">Nothing to run here: ${POOL_HOSTS}, which the maintainers provide. Request a package and the pool builds it. <a href="/docs/factory#contribute-a-package">How packaging works →</a></p>`;
-const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: the project's compute is its maintainers' hosts. Register one and run the signed image with the token it gives you, shown once; a new registration is listed as a community set until two maintainers trust it for the project. <a href="/docs/workers">Run a worker →</a></p><form id="worker-form" class="form" onsubmit="return false" hidden></form><div id="w-new" hidden><p class="sub">Your worker token, shown once. One command wherever the worker lives (docker or podman):</p><pre id="w-cmd"></pre></div>`;
+const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: the project's compute is its maintainers' hosts, and a new machine is added as a host (below). A registration here is a legacy one, for a set you already run — the Studio's role containers, an omarchy-worker set — until P3 retires them: its token, shown once, builds any contributor's packages, as a host does. <a href="/docs/workers">Run a worker →</a></p><form id="worker-form" class="form" onsubmit="return false" hidden></form><div id="w-new" hidden><p class="sub">Your worker token, shown once, and where it goes:</p><pre id="w-cmd"></pre></div>`;
 /**
  * Add a host (#321, design v2 §6.1): a maintainer's, on their own page — a
  * name and where it runs; the answer is one command to paste on the machine,
@@ -127,7 +127,7 @@ const body = (login: string) => String.raw`
     <p class="sub">The machines under this name, as the <a href="/workers">Workers</a> page shows them — the review ones and the pool's, when this person keeps them, and a legacy community one.</p>
     <div id="w-own">${poolHostsLine()}</div>
     ${workerPanels([
-      { kind: "community", blurb: "legacy community sets, until they retire: their owner's packages, or whatever is queued when shared", hidden: true },
+      { kind: "community", blurb: "legacy community sets, until they retire: any contributor's packages, as a host builds them", hidden: true },
       { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits", hidden: true },
       { kind: "project", blurb: "the pool's own jobs, on the host this maintainer keeps", hidden: true },
     ])}
@@ -184,7 +184,7 @@ const SCRIPT = String.raw`
   function reason(right) { return CAN.why[right] || "sign in with GitHub"; }
   // Remove is answered per registration (an approved one is a maintainer's to remove, one in a ring nobody's): the row's answer where the server gave one, the page's otherwise.
   function removeOf(name) { var p = CAN.packages[name]; return p ? { ok: p.remove === true, why: p.why || "" } : { ok: may("remove"), why: reason("remove") }; }
-  // Revoke and the mode are answered per worker (a revoked one is gone, a project's has no mode: the state's word first, the door's own): the row's answer where the server gave one, the role's otherwise.
+  // Revoke is answered per worker (a revoked one is gone: the state's word first, the door's own): the row's answer where the server gave one, the role's otherwise.
   function workerCan(w, right) { var x = CAN.workers[w.id]; return x ? { ok: x[right] === true, why: (x.why && x.why[right]) || "" } : { ok: may(right), why: reason(right) }; }
   var SHARE_BTN = ${JSON.stringify(SHARE_BTN)}, TOKEN_BTN = ${JSON.stringify(TOKEN_BTN)}, REQUEST_LINK = ${JSON.stringify(REQUEST_LINK)}, WORKER_FORM = ${JSON.stringify(WORKER_FORM)}, REGISTER_TOGGLE = ${JSON.stringify(REGISTER_TOGGLE)}, WORKER_OWN = ${JSON.stringify(WORKER_OWN)};
   var HOST_TOGGLE = ${JSON.stringify(HOST_TOGGLE)}, HOST_FORM = ${JSON.stringify(HOST_FORM)}, HOST_OWN = ${JSON.stringify(HOST_OWN)};
@@ -344,11 +344,10 @@ const SCRIPT = String.raw`
     });
     $("#w-none").hidden = any; $("#wt-legend").hidden = !any;
   }
-  // A worker's buttons, on every row for whoever looks — a revoked worker's and a project's too, grey with the state's word: the mode is the brain's to set — shared (everyone's queue) or its owner's packages only — from the worker's next claim, nothing restarts; and Revoke stops its token. Own only and Revoke are the owner's or a maintainer's, sharing the owner's word alone: the server says which, and why not, per row.
+  // A worker's button, on every row for whoever looks — a revoked worker's too, grey with the state's word: Revoke stops its token, its owner's or a maintainer's — the server says which, and why not, per row. A worker's mode went with the community worker tier (#343).
   function workerActs(w) {
-    var toShared = w.mode !== "shared", mode = workerCan(w, toShared ? "share_worker" : "own_only"), revoke = workerCan(w, "revoke");
-    return gate('<button type="button" class="small-btn" data-mode="' + esc(w.id) + '" data-to="' + (toShared ? "shared" : "dedicated") + '" title="' + (toShared ? "build everyone\'s queue too, from its next claim" : "build its owner\'s packages only, from its next claim") + '">' + (toShared ? "Share" : "Own only") + '</button>', mode.ok, mode.why)
-      + ' ' + gate('<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>', revoke.ok, revoke.why);
+    var revoke = workerCan(w, "revoke");
+    return gate('<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>', revoke.ok, revoke.why);
   }
   function loadWorkers() { return fetch("/api/v1/factory?limit=10" + fresh("&")).then(function (r) { return r.json(); }).then(function (d) { FACTORY = d; renderWorkers(); }).catch(function () {}); }
   // A package's story (routes/story.ts), in its open row: the request as the form checks it today, then one panel per architecture — each is built on a worker of its own and can be ready while the other failed — with its latest chain, the two halves of the score with their evidence, and the one line that says whose turn it is.
@@ -411,7 +410,7 @@ const SCRIPT = String.raw`
     var incomplete = st.request && !st.request.complete;
     var steps = function (items) { return '<ol class="howto">' + items.map(function (x) { return '<li>' + x + '</li>'; }).join("") + '</ol>'; };
     var drafted = function (t) { return !t || !t.pkgbuild_ref || t.pkgbuild_ref.indexOf("draft:") === 0; };
-    if (!c) return 'No build yet — ' + (own ? 'press <b>Build</b>: it goes to the shared queue (the best idle shared worker takes it; a native worker of yours at once), the gate checks it, the second agent audits it.' : 'the contributor\'s build comes first.');
+    if (!c) return 'No build yet — ' + (own ? 'press <b>Build</b>: it goes to the queue (the next host of its architecture with room takes it, contributors\' builds in turn), the gate checks it, the second agent audits it.' : 'the contributor\'s build comes first.');
     var cc = c.contributor, pb = c.project, a = c.approval, sc = c.score, arch = (cc || pb).arch;
     var worker = cc && cc.lease_owner && FACTORY ? FACTORY.workers.filter(function (w) { return w.id === cc.lease_owner; })[0] : null;
     var emulated = worker && worker.labels && worker.labels.emulated;
@@ -426,7 +425,7 @@ const SCRIPT = String.raw`
       return steps([
         'Read what stopped it in ' + evidenceLink(cc, "the evidence of #" + cc.id) + ': the log' + (cc.status === "failed" ? '' : ', the gate\'s log') + ' and the PKGBUILD the agent wrote' + (why ? ' — ' + why : '') + '.',
         'Press <b>Build ' + esc(arch) + '</b>: the next build starts from that PKGBUILD and that log (the lesson), not from nothing — and from a <b>hint</b> you write in the dialog: the binary\'s name, a build flag, a dependency, what the recipe should do differently.',
-        'Choose <b>where</b> in the same dialog' + (emulated ? ': this one ran <b>emulated</b> (' + esc(arch) + ' under qemu on ' + esc(wtShort(worker.id)) + ') — a native worker may be all it needs' : '') + (where && where.native ? ' — ' + where.native + ' native ' + esc(arch) + ' worker(s) online' : where && where.count ? ' — ' + where.count + ' worker(s) can take it' : ' — the project\'s shared workers take it') + '.',
+        'Choose <b>where</b> in the same dialog' + (emulated ? ': this one ran <b>emulated</b> (' + esc(arch) + ' under qemu on ' + esc(wtShort(worker.id)) + ') — a native worker may be all it needs' : '') + (where && where.native ? ' — ' + where.native + ' native ' + esc(arch) + ' worker(s) online' : where && where.count ? ' — ' + where.count + ' worker(s) can take it' : ' — the pool\'s hosts take it') + '.',
       ]);
     };
     if (a && a.standing) return 'Approved by ' + personLink(a.by) + ' ' + ago(a.created_at) + (rings.length ? ' — in <b>' + esc(rings.join(" · ")) + '</b>, signed by the pool; it earns rc and stable like every synced package.' : ' — the publish job carries it into edge.');
@@ -439,11 +438,10 @@ const SCRIPT = String.raw`
     if (pb && pb.status === "failed") return 'The project\'s build failed (<a href="/build/' + pb.id + '">#' + pb.id + '</a>)' + (pb.error ? ' — ' + esc(String(pb.error).slice(0, 140)) : '') + ' — a maintainer reads it and decides; your evidence stands.' + (own ? ' If the recipe is the cause, a new build of yours with the fix is the best help.' : '');
     if (cc && cc.status === "queued") {
       if (cc.pinned_to) return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) for <b>' + esc(wtShort(cc.pinned_to)) + '</b> only' + (FACTORY && !FACTORY.workers.some(function (w) { return w.id === cc.pinned_to && w.alive; }) ? ' — <b>offline</b>: it claims when it is back' : '') + (own ? '. Press <b>Build ' + esc(arch) + '</b> to send it to the queue instead, or to take it out.' : '.');
-      if (cc.shared_after && cc.shared_after > new Date().toISOString()) return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) for ' + (own ? 'your' : 'the owner\'s') + ' own worker — a new release, built from the approved recipe; the shared workers take it from ' + esc(cc.shared_after.slice(0, 10)) + '.' + (own ? ' Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out.' : '');
-      var q = cc.queue ? '<b>' + cc.queue.position + ' of ' + cc.queue.total + '</b> in the shared queue for ' + esc(arch) : 'in the shared queue for ' + esc(arch);
+      var q = cc.queue ? '<b>' + cc.queue.position + ' of ' + cc.queue.total + '</b> in the queue for ' + esc(arch) : 'in the queue for ' + esc(arch);
       // Sent back by an emulated worker a toolchain could not start on: only a native one takes it, the owner's own included — an emulated one of theirs is not "at once".
       if (cc.params && cc.params.needs_native) return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) — ' + q + ': a toolchain or a library could not start <b>emulated</b>, so a <b>native</b> ' + esc(arch) + ' worker takes it' + (where ? ' — ' + esc(where.state) : '') + (own ? '. Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out of the queue.' : '.') + ' This page follows it.';
-      return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) — ' + q + ': the best idle shared worker takes it' + (where ? ' — ' + esc(where.state) : '') + (own ? '; a native worker of yours takes it at once. Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out of the queue.' : '.') + ' This page follows it.';
+      return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) — ' + q + ': the next host of ' + esc(arch) + ' with room takes it, contributors\' builds in turn' + (where ? ' — ' + esc(where.state) : '') + (own ? '. Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out of the queue.' : '.') + ' This page follows it.';
     }
     if (cc && cc.status === "leased") return 'Building (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) on ' + (cc.lease_owner ? wtId(cc.lease_owner) : 'a worker') + (emulated ? ' — emulated' : '') + ' — this page follows it.';
     if (cc && cc.status === "failed") return 'The build failed (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (cc.error ? ' — <b>' + esc(String(cc.error).slice(0, 160)) + '</b>' : '') + (own ? again(cc.attempts > 1 ? 'the agent tried ' + cc.attempts + ' times inside this build' : '') : ' — the contributor fixes it.');
@@ -516,7 +514,7 @@ const SCRIPT = String.raw`
     }, { empty: "no package registered", after: function () { Object.keys(OPEN).forEach(function (n) { if (OPEN[n]) story(n); }); }, text: function (p) { return [p.name, p.category, p.status, p.detail].join(" "); } });
     // ---- builds: the number is the build's page; the package's name its page on the build's architecture and the ring the build is about (ringOfBuild: the lab for a staged one, the shell's default for the rest — the ring Review and the build's page link too); the worker that held it, the bare id whole where the listing has no row (no owner guessed); the evidence, public, for whoever reads
     pager("#builds", d.builds, function (t) {
-      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="' + pkgHref(t.name, ringOfBuild(t.status, null), t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + taskPill(t.status) + (t.needs_native ? ' ' + nativePill({ status: t.status, arch: t.arch, params: { needs_native: t.needs_native } }) : '') + (t.queue ? ' <span class="dim" title="in the shared queue for ' + esc(t.arch) + '">' + t.queue.position + ' of ' + t.queue.total + '</span>' : '') + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' ' + pillHtml("ok", "the project", "the project's own build, from a contributor's evidence") : '') + '</td><td>' + (t.lease_owner ? wtId(t.lease_owner) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td class="when">' + ago(t.created_at) + '</td><td>' + evidence(t) + '</td></tr>';
+      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="' + pkgHref(t.name, ringOfBuild(t.status, null), t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + taskPill(t.status) + (t.needs_native ? ' ' + nativePill({ status: t.status, arch: t.arch, params: { needs_native: t.needs_native } }) : '') + (t.queue ? ' <span class="dim" title="in the queue for ' + esc(t.arch) + '">' + t.queue.position + ' of ' + t.queue.total + '</span>' : '') + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' ' + pillHtml("ok", "the project", "the project's own build, from a contributor's evidence") : '') + '</td><td>' + (t.lease_owner ? wtId(t.lease_owner) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td class="when">' + ago(t.created_at) + '</td><td>' + evidence(t) + '</td></tr>';
     }, { empty: "nothing built yet", text: function (t) { return [t.id, t.name, t.version, t.arch, t.status, t.reason, t.lease_owner].join(" "); } });
     renderReset(d);
     // ---- approvals: last, with the build behind each
@@ -708,10 +706,10 @@ const SCRIPT = String.raw`
       });
       return;
     }
-    var b = ev.target.closest ? ev.target.closest("button[data-build],button[data-remove],button[data-revoke],button[data-mode]") : null; if (!b) return;
+    var b = ev.target.closest ? ev.target.closest("button[data-build],button[data-remove],button[data-revoke]") : null; if (!b) return;
     if (b.hasAttribute("data-build")) {
       var name = b.getAttribute("data-build"), arch = b.getAttribute("data-arch");
-      // Where it runs is the asker's call (one architecture: a maintainer's own workers or the project's shared ones; all: the rule, or the shared ones at once); a hint goes to the agent that drafts the recipe.
+      // Where it runs is the asker's call (one architecture: the queue, or one of the asker's own community registrations — a maintainer's legacy set, #343: a contributor has none and is offered the queue alone; all: the queue); a hint goes to the agent that drafts the recipe.
       var st2 = STORIES[name], det = {}; try { det = JSON.parse((st2 && st2.package && st2.package.detected) || "{}"); } catch (e) {}
       var drafts = !det.has_pkgbuild; // the project's own PKGBUILD is built as it is: no agent, no hint
       var waiting = st2 ? st2.chains.filter(function (c) { return c.contributor && c.contributor.status === "queued" && (!arch || c.contributor.arch === arch); }).map(function (c) { return c.contributor; }) : [];
@@ -719,7 +717,7 @@ const SCRIPT = String.raw`
       var where = FACTORY ? whereOptions(FACTORY.workers, arch || ARCHES[0], login, false, drafts, waiting.length === 1 ? waiting[0].queue : null, pinnedNow) : null;
       if (where && !arch) where.options = where.options.filter(function (o) { return o.value === ""; });
       var queuedNow = waiting.length > 0;
-      ask({ title: (queuedNow ? (pinnedNow ? "Waiting for " + wtShort(pinnedNow) + ": " : "In the queue: ") : "Build ") + name + (arch ? " for " + arch : "") + (queuedNow ? "" : "?"), text: (queuedNow ? "Build <b>#" + waiting.map(function (t) { return t.id; }).join(", #") + "</b> " + (pinnedNow ? "waits for <b>" + esc(wtShort(pinnedNow)) + "</b> only. Keep that, send it to the shared queue instead, or take it out" : "waits in the shared queue. Leave it there, name a worker of yours to take it at once, or take it out") + " — nothing puts it back by itself; this button does. " : "") + (drafts ? "The worker drafts the recipe with its agent — from the last build's PKGBUILD and what stopped it, when there is one — builds it, runs the gate and stages the result as evidence; the second agent audits it. " : "The worker builds the project's own PKGBUILD as it is, runs the gate and stages the result as evidence; the second agent audits it. ") + (arch ? "This architecture only." : "Every architecture the request names."), select: where, input: drafts ? "optional" : false, placeholder: "a hint for the agent (optional): the binary's name, a build flag, a dependency, what to do differently", confirm: queuedNow ? (pinnedNow ? "Keep it so" : "Keep it queued") : "Build", alt: queuedNow ? { text: "Take it out of the queue", danger: true } : null }).then(function (go) {
+      ask({ title: (queuedNow ? (pinnedNow ? "Waiting for " + wtShort(pinnedNow) + ": " : "In the queue: ") : "Build ") + name + (arch ? " for " + arch : "") + (queuedNow ? "" : "?"), text: (queuedNow ? "Build <b>#" + waiting.map(function (t) { return t.id; }).join(", #") + "</b> " + (pinnedNow ? "waits for <b>" + esc(wtShort(pinnedNow)) + "</b> only. Keep that, send it to the queue instead, or take it out" : "waits in the queue. " + (where && where.mine ? "Leave it there, name a worker of yours, or take it out" : "Leave it there or take it out")) + " — nothing puts it back by itself; this button does. " : "") + (drafts ? "The worker drafts the recipe with its agent — from the last build's PKGBUILD and what stopped it, when there is one — builds it, runs the gate and stages the result as evidence; the second agent audits it. " : "The worker builds the project's own PKGBUILD as it is, runs the gate and stages the result as evidence; the second agent audits it. ") + (arch ? "This architecture only." : "Every architecture the request names."), select: where, input: drafts ? "optional" : false, placeholder: "a hint for the agent (optional): the binary's name, a build flag, a dependency, what to do differently", confirm: queuedNow ? (pinnedNow ? "Keep it so" : "Keep it queued") : "Build", alt: queuedNow ? { text: "Take it out of the queue", danger: true } : null }).then(function (go) {
         if (go === null) return; b.disabled = true;
         if (go && typeof go === "object" && go.alt) {
           // Out of the queue: each waiting build of the architecture(s) asked, one call each.
@@ -742,10 +740,6 @@ const SCRIPT = String.raw`
         api("DELETE", API + "/packages/" + encodeURIComponent(rm)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Removed " + esc(rm) + "."); delete OPEN[rm]; acted(); load(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     }
-    else if (b.hasAttribute("data-mode")) {
-      var mid = b.getAttribute("data-mode"), to = b.getAttribute("data-to");
-      api("POST", API + "/workers/" + encodeURIComponent(mid) + "/mode", { mode: to }).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast(esc(r.note || ("mode: " + to))); acted(); loadWorkers(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
-    }
     else if (b.hasAttribute("data-revoke")) {
       var wid = b.getAttribute("data-revoke");
       ask({ title: "Revoke " + wid + "?", text: "Its token stops working at once; a build it holds finishes on its own. Register a new one for a new token.", confirm: "Revoke", danger: true }).then(function (go) {
@@ -764,17 +758,12 @@ const SCRIPT = String.raw`
       if (d.error) { toast(esc(d.error), "error"); return; }
       $("#w-new").hidden = false;
       $("#w-cmd").textContent =
-        "# one command, wherever the worker lives (docker or podman, with compose): it writes the compose file and a .env,\n" +
-        "# pulls the signed image and starts the set — the broker that holds this token, the builder born with nothing,\n" +
-        "# and the updater that keeps both on the pool's latest image (every worker follows it; one behind is handed nothing).\n" +
-        "curl -fsSLo omarchy-worker " + location.origin + "/omarchy-worker && chmod +x omarchy-worker\n" +
-        "./omarchy-worker start --token " + d.token + "\n\n" +
-        "# everyone's queue too, a name for the machine, GitHub's API through the broker (a fine-grained token with no permissions):\n" +
-        "./omarchy-worker start --token " + d.token + " --shared --where laptop --github-token github_pat_…\n" +
-        "# your agent, on the broker, one of: --anthropic-key sk-… · --openai-key … · --gemini-key … · --xai-key … · --claude-token <claude setup-token>\n" +
-        "# then: ./omarchy-worker status · logs · share on|off · update · stop\n" +
-        "# the compose file it writes, for a hand-run set: " + location.origin + "/omarchy-worker/compose.yml\n" +
-        "#   (.env beside it: OMARCHY_WORKER_TOKEN, COMPOSE_PROFILES=community, OMARCHY_WORKER_DIR=<this directory's absolute path>; the updater included)";
+        "# a legacy registration (#343): its token, shown once, for a set you already run — the Studio's role containers, or an omarchy-worker set:\n" +
+        "OMARCHY_WORKER_TOKEN=" + d.token + "\n" +
+        "# put it in the set's .env (or etc/<service>.env on the Studio) and start the set again; an omarchy-worker set, in its directory, with the\n" +
+        "# repository's factory/host/omarchy-worker (a copy the pool served fetches a compose file it no longer serves):\n" +
+        "./omarchy-worker start --token " + d.token + "\n" +
+        "# a new machine joins the pool as a host instead (+ add a host, below): " + location.origin + "/docs/worker-host";
       $("#worker-form").reset(); $("#worker-form").hidden = true; acted(); load(); loadWorkers();
     }).catch(function (e) { $("#w-btn").disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
   }
@@ -809,8 +798,8 @@ export function userHtml(login: string, poolUrl: string, version: RunningVersion
  *
  * The acts in order: the token; Remove, which refuses the owner of an
  * approved package; Build, which queues a build and sets the package
- * waiting; the worker registered, w3 shared and back to its owner's
- * packages, then revoked; the approval withdrawn last — the fixture has
+ * waiting; the worker registered, then revoked; the approval withdrawn
+ * last — the fixture has
  * one, and the build's page may have taken it back before this manifest.
  */
 export const USER_COMPONENTS = (F: Fixture): Component[] => {
@@ -828,18 +817,18 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // What this viewer may do here, read before the first draw and again once a minute and after their own act: every control below reads CAN and is grey with the server's reason where it says no — nobody's answer, all false with the sign-in, until it lands; Remove per registration, Revoke and the mode per worker.
+      // What this viewer may do here, read before the first draw and again once a minute and after their own act: every control below reads CAN and is grey with the server's reason where it says no — nobody's answer, all false with the sign-in, until it lands; Remove per registration, Revoke per worker.
       id: "user.rights",
       page,
       anchor: [],
       script: ['"/can"', "function may(", "function reason(", "function removeOf(", "CAN.packages[name]", "function workerCan(", "CAN.workers[w.id]", '"sign in with GitHub"', "function loadCan(", "function acted(", "tick % 4 === 0) loadCan()"],
       reads: [
-        { path: `${profile}/can`, fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.dequeue", "can.remove", "can.revoke", "can.withdraw", "can.own_only", "can.share_worker", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", "can.why.own_only", "can.why.share_worker", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.communityWorker}.revoke`, `can.workers.${F.communityWorker}.why.revoke`] },
-        { path: `${profile}/can`, as: "contributor", fields: ["login", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", "can.why.own_only", "can.why.share_worker", `can.packages.${F.factoryPkg}.why`, `can.workers.${F.communityWorker}.why.own_only`, `can.workers.${F.communityWorker}.why.share_worker`] },
-        { path: `${profile}/can`, as: "owner", fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.revoke", "can.own_only", "can.share_worker", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.communityWorker}.revoke`, `can.workers.${F.communityWorker}.own_only`, `can.workers.${F.communityWorker}.share_worker`] },
-        { path: `${profile}/can`, as: "maintainer", fields: ["login", "can.remove", "can.revoke", "can.withdraw", "can.own_only", "can.why.request", "can.why.build", "can.why.share_worker", `can.packages.${F.factoryPkg}.remove`, `can.workers.${F.communityWorker}.revoke`, `can.workers.${F.communityWorker}.why.share_worker`] },
-        // A maintainer's own page lists the project's worker: its mode is nobody's to set, the state's word for every role.
-        { path: `/api/v1/users/${F.m1}/can`, as: "maintainer", fields: [`can.workers.${F.worker}.revoke`, `can.workers.${F.worker}.why.own_only`, `can.workers.${F.worker}.why.share_worker`] },
+        { path: `${profile}/can`, fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.dequeue", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.ownerWorker}.revoke`, `can.workers.${F.ownerWorker}.why.revoke`] },
+        { path: `${profile}/can`, as: "contributor", fields: ["login", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.why`] },
+        { path: `${profile}/can`, as: "owner", fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.ownerWorker}.revoke`] },
+        { path: `${profile}/can`, as: "maintainer", fields: ["login", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.build", `can.packages.${F.factoryPkg}.remove`, `can.workers.${F.ownerWorker}.revoke`] },
+        // A maintainer's own page lists the project's worker: Revoke on its row, the maintainer's.
+        { path: `/api/v1/users/${F.m1}/can`, as: "maintainer", fields: [`can.workers.${F.worker}.revoke`] },
       ],
       visible: EVERYONE,
     },
@@ -949,9 +938,9 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.story-next-step",
       page,
       anchor: ['id="packages"'],
-      script: ["function nextStep(", 'evidenceLink(cc, "the evidence of #" + cc.id)', "cc.pinned_to", "cc.shared_after", "cc.queue", "audit.result.verdict", '"A request on the record"', "whereOptions(FACTORY.workers, arch, login, false)", "a && a.standing", "personLink(a.by)", "pb && waitsForNative(pb)"],
+      script: ["function nextStep(", 'evidenceLink(cc, "the evidence of #" + cc.id)', "cc.pinned_to", "cc.queue", "audit.result.verdict", '"A request on the record"', "whereOptions(FACTORY.workers, arch, login, false)", "a && a.standing", "personLink(a.by)", "pb && waitsForNative(pb)"],
       reads: [
-        { path: story, fields: ["chains.0.approval", "chains.0.contributor.status", "chains.0.contributor.pinned_to", "chains.0.contributor.shared_after", "chains.0.contributor.attempts", "chains.0.contributor.pkgbuild_ref", "chains.0.contributor.version", "chains.0.contributor.error", "chains.0.contributor.result.vet.verdict", "chains.0.audit", "chains.0.score.items", "request.complete", "request.version", "rings"] },
+        { path: story, fields: ["chains.0.approval", "chains.0.contributor.status", "chains.0.contributor.pinned_to", "chains.0.contributor.attempts", "chains.0.contributor.pkgbuild_ref", "chains.0.contributor.version", "chains.0.contributor.error", "chains.0.contributor.result.vet.verdict", "chains.0.audit", "chains.0.score.items", "request.complete", "request.version", "rings"] },
         { path: factory, fields: ["workers.0.id", "workers.0.alive", "workers.0.labels"] },
         // The people it names — who decided, who withdrew — are the shell's, their role from the maintainer set it reads once per page.
         { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
@@ -974,7 +963,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="packages"'],
       script: ["st2.package.detected", "det.has_pkgbuild", "whereOptions(FACTORY.workers, arch || ARCHES[0]", "go.alt", '"/builds/" + t.id', '"/build", body', "body.worker = go.pick", "body.hint"],
       reads: [
-        { path: factory, fields: ["workers.0.arch", "workers.0.owner", "workers.0.mode", "workers.0.side", "workers.0.alive", "workers.0.agent_status", "workers.0.update"] },
+        { path: factory, fields: ["workers.0.arch", "workers.0.owner", "workers.0.side", "workers.0.alive", "workers.0.agent_status", "workers.0.update"] },
         { path: story, fields: ["package.detected", "chains.0.contributor.status", "chains.0.contributor.arch", "chains.0.contributor.pinned_to"] },
       ],
       acts: [
@@ -1107,17 +1096,15 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: ["maintainer"],
     },
     {
-      // The three panels by kind from one listing; every row — a revoked worker's and a project's too — carries Share / Own only and Revoke for whoever looks, grey with the state's word first (revoked already; a project worker has no mode) and the role's after (the owner's, and a maintainer's but for sharing, the owner's word alone), the shell's log icon beside the id the same way; the Revoke dialog is this entry's.
+      // The three panels by kind from one listing; every row — a revoked worker's and a project's too — carries Revoke for whoever looks, grey with the state's word first (revoked already) and the role's after (the owner's, and a maintainer's), the shell's log icon beside the id the same way; the Revoke dialog is this entry's. A worker's mode, and Share / Own only with it, are gone (#343): its door answers 410.
       id: "user.workers-tables",
       page,
       shared: "worker-table",
       anchor: ['id="wp-community"', 'id="w-community"', 'id="wp-review"', 'id="w-review"', 'id="wp-project"', 'id="w-project"', 'id="w-none"'],
-      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, toShared ? "share_worker" : "own_only")', 'workerCan(w, "revoke")', "data-mode", "data-revoke", '"/mode"', 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"'],
-      reads: [{ path: factory, fields: ["workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.mode", "workers.0.arch", "workers.0.alive", "workers.0.revoked_at", "workers.0.labels", "workers.0.agent_status", "workers.0.update"] }],
+      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, "revoke")', "data-revoke", 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"'],
+      reads: [{ path: factory, fields: ["workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.arch", "workers.0.alive", "workers.0.revoked_at", "workers.0.labels", "workers.0.agent_status", "workers.0.update"] }],
       acts: [
-        { method: "POST", path: `/api/v1/factory/workers/${F.communityWorker}/mode`, body: { mode: "shared" }, expect: { anonymous: 401, contributor: 403, owner: 200, maintainer: 403 } },
-        { method: "POST", path: `/api/v1/factory/workers/${F.communityWorker}/mode`, body: { mode: "dedicated" }, expect: { anonymous: 401, contributor: 403, maintainer: 200, owner: 200 } },
-        { method: "DELETE", path: `/api/v1/factory/workers/${F.communityWorker}`, expect: { anonymous: 401, contributor: 404, owner: 200 } },
+        { method: "DELETE", path: `/api/v1/factory/workers/${F.ownerWorker}`, expect: { anonymous: 401, contributor: 404, owner: 200 } },
       ],
       visible: EVERYONE,
     },

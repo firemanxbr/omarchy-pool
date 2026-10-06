@@ -39,7 +39,6 @@ import type { Env } from "./index";
 import { findLeak } from "./leak";
 import { parseTag, updateState } from "./update";
 import { WORKER_ALIVE_MINUTES, version as running, type RunningVersion } from "./meta";
-import { FIRST_PICK_MINUTES } from "./queue";
 import { HOST_REPORT_FRESH_MIN } from "./hosts";
 import { afterRequeue, LEASE_MINUTES, requeueStatement, stopError, type LeasedTask } from "./lease";
 
@@ -102,9 +101,10 @@ export const BREAKER_CLEAR_MIN = 15;
  * Who the pool is on its own orders: a value no GitHub login can be (a login
  * is letters, digits and single hyphens), so nobody signs in as the pool and
  * spends its budget or skips a person's cap. One per trust: what the rules
- * order a contributor's worker is counted apart, so a contributor's own
+ * order a community registration is counted apart, so the community
  * registrations can spend the community's share of the budget and never
- * the project's.
+ * the project's. Since #343 those are the maintainers' legacy sets, and the
+ * share stays with them until P3 (routes/factory.ts autoOrder).
  */
 export const POOL_PROJECT = "pool:project";
 export const POOL_COMMUNITY = "pool:community";
@@ -876,10 +876,10 @@ export function stopWay(kind: string, orderKinds: string | null | undefined): St
  * - who resumes (§1.10's table): a project worker, any maintainer — its
  *   owner, when not a maintainer, only a drain of their own: project trust
  *   is the maintainers' word, and so is keeping such a worker out; a
- *   contributor's worker its owner always — putting a machine back to work
- *   is its owner's word, the rule of sharing (0032) — and a maintainer only
+ *   community registration its owner always — putting a machine back to
+ *   work is its owner's word (0032) — and a maintainer only
  *   when a maintainer drained it; a maintainer who must keep it out revokes
- *   it, or sets it to its owner's packages only;
+ *   it;
  * - Stop its task needs a task in hand, not stopped already; it counts in
  *   the restart group, like a restart.
  *
@@ -927,7 +927,7 @@ export function orderVerdicts(c: { login: string; role: string } | null, w: Orde
       }
       // A contributor's machine its owner drained goes back to work on its owner's word only.
       if (w.trust !== "project" && !owner && w.owner !== null && w.drained_by === w.owner) {
-        return no(403, `${w.owner} drained it (${utc(w.drained_at)}${w.drain_reason ? `: ${w.drain_reason}` : ""}): putting their machine back to work is theirs — to keep it out, revoke it or set it to its owner's packages only`);
+        return no(403, `${w.owner} drained it (${utc(w.drained_at)}${w.drain_reason ? `: ${w.drain_reason}` : ""}): putting their machine back to work is theirs — to keep it out, revoke it`);
       }
       // A resume is never counted — not against a login's twenty, not against the worker's hour: undoing a drain must stay possible.
       return allow;
@@ -1275,7 +1275,7 @@ export async function capRefusal(env: Env, a: Pick<IssueAsk, "worker" | "kind" |
     }
     if (community && (mine?.n ?? 0) >= MAX_POOL_COMMUNITY_ORDERS_PER_DAY) {
       const from = mine?.oldest ? clock(Date.parse(mine.oldest) + DAY) : "tomorrow";
-      const why = `the community's share of the pool's daily budget (${MAX_POOL_COMMUNITY_ORDERS_PER_DAY} of ${MAX_POOL_ORDERS_PER_DAY}) is spent: the pool orders contributors' workers again from ${from} tomorrow; the project's keep the rest, and people's orders still work`;
+      const why = `the community's share of the pool's daily budget (${MAX_POOL_COMMUNITY_ORDERS_PER_DAY} of ${MAX_POOL_ORDERS_PER_DAY}) is spent: the pool orders community registrations again from ${from} tomorrow; the project's keep the rest, and people's orders still work`;
       await capLine(env, `order-budget:community:${iso(a.now).slice(0, 10)}`, "warn", why, { cap: MAX_POOL_COMMUNITY_ORDERS_PER_DAY });
       return why;
     }
@@ -1290,7 +1290,7 @@ export async function capRefusal(env: Env, a: Pick<IssueAsk, "worker" | "kind" |
         return why;
       }
       if (community && (theirs?.n ?? 0) >= MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR) {
-        const why = `the pool gave contributors' workers ${MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR} restart-type orders in the last hour, their share of ${MAX_POOL_RESTARTS_PER_HOUR}: it waits for the hour to pass`;
+        const why = `the pool gave community registrations ${MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR} restart-type orders in the last hour, their share of ${MAX_POOL_RESTARTS_PER_HOUR}: it waits for the hour to pass`;
         await capLine(env, `order-cap:pool:community:${iso(a.now).slice(0, 13)}`, "warn", why, { cap: MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR });
         return why;
       }
@@ -1568,11 +1568,11 @@ export function breakerOf(v: string | null | undefined): Breaker | null {
 
 /**
  * Whose spells a worker's breaker counts. A worker's error is its own word:
- * a contributor's registrations could say an outage that is not there. So
- * the project's workers are held only by the project's own spells (the
- * scope "project"), and a contributor's by every worker's ("all") — a
- * contributor can hold the pool's restarts of contributors' workers, never
- * of the project's. Each scope has its key: `worker-breaker:<provider>`,
+ * a community registration could say an outage that is not there. So the
+ * project's workers are held only by the project's own spells (the scope
+ * "project"), and a community one by every worker's ("all") — a community
+ * registration can hold the pool's restarts of community registrations,
+ * never of the project's. Each scope has its key: `worker-breaker:<provider>`,
  * and `worker-breaker:<provider>:project`.
  */
 export type BreakerScope = "project" | "all";
@@ -1584,7 +1584,7 @@ export function breakerOfKey(key: string): { provider: string; scope: BreakerSco
 }
 const SCOPE_WORDS: Record<BreakerScope, { sites: string; workers: string }> = {
   project: { sites: "sites of the project's own", workers: "none of the project's workers of this provider" },
-  all: { sites: "sites", workers: "no contributor's worker of this provider" },
+  all: { sites: "sites", workers: "no community registration of this provider" },
 };
 
 /** Sites with an open spell, per provider, in a scope: a worker's site, or its own id when it has none. */
@@ -1649,7 +1649,12 @@ export const STOPS_DUE_SQL = `SELECT o.id, o.worker_id, o.task_id, o.issued_at, 
  WHERE o.state IN ('pending', 'delivered') AND o.kind = 'stop-task'
    AND NOT EXISTS (SELECT 1 FROM build_tasks t WHERE t.id = o.task_id AND t.status = 'leased' AND t.lease_owner = o.worker_id AND t.stop_order = o.id)`;
 /**
- * Builds pinned to a worker drained for FIRST_PICK_MINUTES or more, a
+ * How long a worker's drain holds before the builds pinned to it go to the queue (the cron's sweep): a drain that ends sooner — a
+ * restart's, a minute's look — unpins nothing. Three minutes, the old first pick's (#343 took the first pick itself away).
+ */
+export const UNPIN_AFTER_DRAIN_MINUTES = 3;
+/**
+ * Builds pinned to a worker drained for UNPIN_AFTER_DRAIN_MINUTES or more, a
  * claim's rebuild included (§1.10): the queue through its own index
  * (idx_build_tasks_queue, status first — the queue's rows, bounded), each
  * pinned worker by its primary key. CROSS JOIN is SQLite's word for "this
@@ -1659,8 +1664,8 @@ export const DRAINED_PINS_SQL = `SELECT t.pinned_to AS worker, w.drained_by AS d
   FROM build_tasks t CROSS JOIN build_workers w ON w.id = t.pinned_to
  WHERE t.status = 'queued' AND t.pinned_to IS NOT NULL AND w.drained_at IS NOT NULL AND w.drained_at <= ?
  GROUP BY t.pinned_to`;
-/** Revoke's unpin (routes/contributors.ts), with a word on the task for its page: which drained worker it was asked for, and when it went to the shared queue. */
-export const UNPIN_DRAINED_SQL = "UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL, params = json_set(COALESCE(params, '{}'), '$.unpinned', json(?)) WHERE status = 'queued' AND pinned_to = ?";
+/** The sweep's unpin, with a word on the task for its page: which drained worker it was asked for, and when it went to the queue. */
+export const UNPIN_DRAINED_SQL = "UPDATE build_tasks SET pinned_to = NULL, params = json_set(COALESCE(params, '{}'), '$.unpinned', json(?)) WHERE status = 'queued' AND pinned_to = ?";
 
 /**
  * The cron's part (every ten minutes, after the expired leases): an order
@@ -1669,7 +1674,7 @@ export const UNPIN_DRAINED_SQL = "UPDATE build_tasks SET pinned_to = NULL, share
  * closed — a re-check expired, a restart failed — each with its line; a
  * stop whose lease ended first is failed, the task back in the queue by
  * then (requeueExpiredLeases); the builds pinned to a worker drained for
- * FIRST_PICK_MINUTES go to the shared queue, one line per worker; a tripped
+ * UNPIN_AFTER_DRAIN_MINUTES go to the queue, one line per worker; a tripped
  * breaker clears once fewer than BREAKER_CLEAR_BELOW of its provider's
  * sites have had an open spell for BREAKER_CLEAR_MIN, at every sweep in
  * between; and a release that finds WORKER_RULES_SCALE set says once that
@@ -1702,8 +1707,8 @@ export async function sweepOrders(env: Env & { WORKER_RULES_SCALE?: string }, no
   }
   for (const w of workers) stmts.push(refreshOpen(env, w));
   if (stmts.length) await env.DB.batch(stmts);
-  // A drained worker's pinned builds go to the shared queue once its drain has held FIRST_PICK_MINUTES: a drain that ends sooner unpins nothing.
-  const pins = (await env.DB.prepare(DRAINED_PINS_SQL).bind(iso(now - FIRST_PICK_MINUTES * MIN)).all<{ worker: string; drained_by: string | null; tasks: string }>()).results;
+  // A drained worker's pinned builds go to the queue once its drain has held UNPIN_AFTER_DRAIN_MINUTES: a drain that ends sooner unpins nothing.
+  const pins = (await env.DB.prepare(DRAINED_PINS_SQL).bind(iso(now - UNPIN_AFTER_DRAIN_MINUTES * MIN)).all<{ worker: string; drained_by: string | null; tasks: string }>()).results;
   let unpinned = 0;
   for (const p of pins) {
     let tasks: number[] = [];
@@ -1711,7 +1716,7 @@ export async function sweepOrders(env: Env & { WORKER_RULES_SCALE?: string }, no
     const res = await env.DB.batch([
       env.DB.prepare(UNPIN_DRAINED_SQL).bind(JSON.stringify({ from: p.worker, at }), p.worker),
       env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('order', NULL, 'factory', 'ok', ?, ?)")
-        .bind(`${p.worker} is drained: ${tasks.length} build${tasks.length === 1 ? "" : "s"} pinned to it go${tasks.length === 1 ? "es" : ""} to the shared queue (${tasks.map((t) => `#${t}`).join(", ")})`, JSON.stringify({ worker: p.worker, drained_by: p.drained_by, unpinned: tasks })),
+        .bind(`${p.worker} is drained: ${tasks.length} build${tasks.length === 1 ? "" : "s"} pinned to it go${tasks.length === 1 ? "es" : ""} to the queue (${tasks.map((t) => `#${t}`).join(", ")})`, JSON.stringify({ worker: p.worker, drained_by: p.drained_by, unpinned: tasks })),
     ]);
     unpinned += res[0].meta.changes ?? 0;
   }
