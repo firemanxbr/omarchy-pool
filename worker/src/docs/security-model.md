@@ -137,8 +137,8 @@ secret). Everything travels in the `Authorization` header over TLS only.
   release's own signed code, trusted like the dispatcher: each runs in a
   child process of it (`pkg-repo pool-job`) with its lease's job token, as a
   legacy pool worker runs them, under a 2 GB memory limit and a time limit,
-  killed whole when it overruns; it never holds the host's worker token, and
-  it reaches no task network. The containers its scripts start run package
+  killed whole when it overruns; it never holds the host's worker token nor
+  the name of its file (#327), and it reaches no task network. The containers its scripts start run package
   code (a health check's pacman, an ABI gate's install of a ring, the
   enqueue's reader, which sources the recipes on `main`), so they go
   through the one spec: the job's only engine is `omarchy-task-run`
@@ -751,8 +751,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   registration the host already has), `retry-release` (lifts a quarantine;
   the release is still checked as any target) and `diagnostics` (design v2
   M10: the dispatcher's last 500 log lines, only when the envelope says
-  `diagnostics = true`, scrubbed on the host of every value in the set's
-  `etc/*.env` and the secrets directory's env files and of anything shaped
+  `diagnostics = true`, scrubbed on the host of the worker token's file
+  (#327), every value in the set's `etc/*.env` and the secrets directory's
+  env files and of anything shaped
   like a pool token (its job tokens `omj.` and agent tokens `oma_` too),
   GitHub or model provider token, then checked again by the
   pool's leak scan, which drops a line that still looks like one; kept a

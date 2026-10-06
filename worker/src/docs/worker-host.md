@@ -334,7 +334,8 @@ host ([Owner control without a visit](#owner-control-without-a-visit)). A
 narrowing needs no signature. The page's **Host orders** card gives the rest, its
 owner's or any maintainer's: **Retry release** lifts the quarantine of a
 release its guard reverted and tries it again; **Rotate token** gives the
-dispatcher a new worker token (the old one works ten more minutes);
+dispatcher a new worker token, in its file (#327; the old one works ten more
+minutes);
 **Diagnostics** brings the dispatcher's last 500 log lines, scrubbed of the
 host's secrets, read on the page — only when the envelope says
 `diagnostics = true`. Every order and its agent's answer are on the page's

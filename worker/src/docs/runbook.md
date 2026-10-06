@@ -1127,8 +1127,10 @@ Preflight, before it starts any VM:
 (`/var/run/docker.sock`, inside the VM, which the dispatcher mounts). The
 lint then refuses any bind of the set (the owner's override included) whose
 source lies under none of the VM's three mounts. `etc/dispatcher.env` is in
-the set directory (`<root>/set/etc/dispatcher.env`, read-only in the VM), and
-its `OMARCHY_HOST_ADDRESSES` are the Mac's own: a Mac has no `/proc`, so they
+the set directory (`<root>/set/etc/dispatcher.env`, read-only in the VM), as
+is the host worker token's file (`<root>/set/run/host/dispatcher/token`,
+0400, #327), which the dispatcher in the VM mounts read-only; and the env
+file's `OMARCHY_HOST_ADDRESSES` are the Mac's own: a Mac has no `/proc`, so they
 are `/sbin/ifconfig -a`'s, by the same rules as on Linux (a vmnet bridge such
 as `bridge100`, the VMs' NAT, counts as a container bridge), and the public
 address the probe task in the VM saw. A task leaves through the Mac, so an
@@ -1405,22 +1407,24 @@ an agent from 0.4.0 (an older one is given none and the page says why):
   Mac the lane is the VM's Rosetta one (#320); a count after a start of the
   VM keeps it as detected, and the setting narrows the new file again.
 - **Rotate token** (`rotate-token`): a new host worker token from the pool
-  (`POST /hosts/self/token`, signed), written to `etc/dispatcher.env` as
-  enrollment writes it — the rest of the file rendered as the run loop
-  renders it (#371), so the host's addresses, the secrets directory, the
-  agent budget and the owner's own lines stay; the changed `etc/` recreates
-  the dispatcher within the ten minutes the old one still works. A token the
-  pool does not give, or one for another registration, is refused with
-  nothing written. (`*_FILE` secrets, #327, move where the token is written:
-  `enroll::write_worker_token` is the one place.)
+  (`POST /hosts/self/token`, signed), written as enrollment writes it
+  (`enroll::write_worker_token`, the one place): to its file,
+  `run/host/dispatcher/token` (0400, #327), with `etc/dispatcher.env` naming
+  its registration and rendered as the run loop renders it (#371), so the
+  host's addresses, the secrets directory, the agent budget and the owner's
+  own lines stay (and the token goes there too only while a release from
+  before #327 is here); the changed file recreates the dispatcher within the
+  ten minutes the old one still works. A token the pool does not give, or one
+  for another registration, is refused with nothing written.
 - **Retry release** (`retry-release`): lifts every quarantine and starts a
   round, as an Update does; the page greys it while the report says nothing
   is quarantined. Without room on the brake for that round's restarts (its
   own and a revert's) it is refused and the quarantine kept.
 - **Diagnostics** (`diagnostics`, design v2 M10): only when the envelope says
   `diagnostics = true`, the dispatcher's last 500 log lines, each cut to 300
-  characters, scrubbed of every value (8 characters or more) of the set's
-  `etc/*.env` and the secrets directory's `*.env`, and of anything shaped like a pool
+  characters, scrubbed of the host worker token's file (#327), of every value (8
+  characters or more) of the set's `etc/*.env` and the secrets directory's
+  `*.env`, and of anything shaped like a pool
   token (`omj.` job tokens and `oma_` agent tokens among them), GitHub, Anthropic or
   OpenAI token; the newest that fit 56 KiB as the JSON body carries them, posted to the
   pool (`POST /hosts/self/diagnostics`, signed, at most 64 KiB), which drops a
