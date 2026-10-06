@@ -715,7 +715,8 @@ dispatcher with the real egress and agent sidecars and two probe tasks at
 once, its environment being the `etc/dispatcher.env` that `omarchy-agent
 dispatcher-env --write` rendered (#371: the token and an owner's line kept,
 0600, the machine's own addresses with a stand-in public one, the secrets
-directory, a budget): a public mirror answers through the egress only; cloud metadata, a
+directory, a budget, the envelope's grant of a signed exception's bridge as
+`OMARCHY_DIRECT_NETWORK=1`, #373): a public mirror answers through the egress only; cloud metadata, a
 public name resolving to loopback, a raw socket ("Network is unreachable"),
 the host's LAN address and upstream router, the task network's gateway (a
 listener of the host's on every address, 22, 53 and the pool's ports 3128,
@@ -727,7 +728,9 @@ as an IPv4-mapped IPv6 literal, which every egress sidecar was given
 `/proc/net` found it; a deny entry written v4-mapped is the IPv4 address,
 unit-tested in `pkg-repo`); the agent sidecar's caps are the
 budget's; the probe sidecar's word reaches the claim; a
-signed exception's task gets a bridge network, whose gateway (the host
+signed exception's task gets a bridge network on that granting host (one
+without the grant hands it back lost before anything starts: `pkg-repo`'s
+dispatch unit tests), whose gateway (the host
 itself on a rootful engine) is out of reach behind an `INPUT` drop for its
 /28 (the rule prep-root.sh's `OMARCHY-TASKS-HOST` chain holds for each task
 subnet; the script adds a bare one, never prep-root.sh's chain), which the
@@ -747,11 +750,25 @@ task networks through libpod's own API (#372), or podman's own CLI with
 `DISPATCH_CLI=podman`. In CI a task network the dispatcher makes on podman is
 covered only by `tests/agent-install.sh`'s `pkg-repo` test below, on
 rootless podman. The install's preflight probe
-tries the same gateways on a real engine in `tests/agent-install.sh`
-(rootful docker and rootless podman in CI; the runbook's *Installing a
-host*): a task's own network made as the dispatcher makes it (on podman
-through libpod's API, internal with DNS off, read back from libpod) has no
-gateway a task reaches on either engine; the same script runs
+runs the way a task runs on a real engine in `tests/agent-install.sh`
+(rootful docker and rootless podman in CI, and again in the image job on
+docker with the worker image it built; the runbook's *Installing a host*;
+#373): preflight's own egress check, on a network made as a task's behind an
+egress sidecar started as the dispatcher starts one — the image job's worker
+image, or elsewhere a stand-in the script builds from the commit's `pkg-repo
+egress` on the pinned Arch base (`tests/images.env`; the worker image needs
+the Arch mirrors to build) — with the dispatcher's deny list (the task subnets
+and the machine's own addresses as the agent renders them), passes on both
+engines: the metadata address, the machine's router, LAN address and own
+addresses and the network's gateway are unreachable straight and refused
+through the sidecar, and GitHub answers through it (the test needs the
+internet), with rootless podman's network stack seen in `/proc` and keeping
+the host's loopback out; and it fails where a task could reach what it must
+not — a network made without `--internal` reaches the LAN straight, and a
+public address of the host's (a stand-in: GitHub's) answers through a sidecar
+not given it, and is refused by one given it. A task's own network made as the
+dispatcher makes it (on podman through libpod's API, internal with DNS off,
+read back from libpod) has no gateway a task reaches on either engine; the same script runs
 `pkg-repo`'s `dispatch::engine` real-engine test, which makes a task network
 with the dispatcher's own code through the pinned docker CLI (the one the
 agent's tests just fetched, the worker image's version) on that socket and
@@ -764,11 +781,22 @@ network stack in libpod's `/info`, so there that part prints a note and is
 skipped: it runs only by hand on a host with podman 5.3 or newer (`bash
 tests/agent-install.sh podman`), and in CI the unit tests below cover its
 verdict. The script reads rootless podman's network stack in `/proc` as
-preflight does; preflight's reading of prep-root.sh's firewall script and its
+preflight does; preflight's probe behind a task's egress sidecar (#373) is
+unit-tested against the docker stub, which answers each target the probe
+task is given unless a test names its answer: the sidecar created as the
+dispatcher creates one (the bridge first, the worker image by digest, `--listen`
+at the network's `.2`, the task subnets then the host's own addresses as
+`--deny`s, the same limits and flags), every target tried straight and through
+it (`<name>@egress`), the public mirror through it, a reach either way and a
+sidecar that never answered refused by name, a public address it was not
+given probed again by one given it, and a signed exception's bridge probed only
+with the envelope's grant (`--direct-network`, agent.toml's `direct_network`,
+`OMARCHY_DIRECT_NETWORK=1` in `etc/dispatcher.env`, a withdrawn grant's line
+dropped); preflight's reading of prep-root.sh's firewall script and its
 boot unit (not there, or not enabled), of a rootless stack's command line
 (each engine's flags, a stack seen only while the probe runs, a guest address
-pasta maps that the probe did not try; pasta's own tried by the bridge's probe
-task, never on a task's own network, which has no route to it), of libpod's `/info` (rootless and pasta, or a podman 4 that names no
+pasta maps that the probe did not try; pasta's own tried by the probe, straight
+and through the sidecar from a task's own network and on a granted bridge), of libpod's `/info` (rootless and pasta, or a podman 4 that names no
 network command) and of libpod's answers (whole, cut short, chunked, not
 libpod's, silent) is unit-tested in `omarchy-agent`, against a stand-in
 libpod on the preflight's socket that records each request (the probe's
@@ -891,15 +919,17 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   agent.toml.
 - `install/tests.rs` — preflight and install on a played Mac (`os` macos;
   launchctl, sysctl, route and a Colima that saves its profile played; a
-  docker stub for the engine in the VM whose egress probe answers as Colima's
-  NAT until the task firewall went in): the VM sized and started with only
+  docker stub for the engine in the VM whose egress probe on a bridge answers
+  as Colima's NAT until the task firewall went in): the VM sized and started with only
   its three mounts, Colima given the pinned docker CLI on its `PATH` (a
   played Colima refuses to start without it, as on a Mac with only Colima
   and Lima from Homebrew) and the agent's `DOCKER_CONFIG`, the task firewall
   put in after the start and before the probe (one that does not apply:
-  blocked, and the probe shows a task reaching the Mac's router, the Mac
-  at `192.168.5.2` and the VM's sshd at its bridge's gateway, told as the
-  omarchy VM's firewall and never as prep-root.sh's, #367), `MemAvailable`
+  blocked; a task behind its egress sidecar reaches nothing all the same, and
+  with the envelope's grant the probe shows a signed exception's bridge
+  reaching the Mac's router, the Mac at `192.168.5.2` and the VM's sshd at
+  its gateway, told as the omarchy VM's firewall and never as prep-root.sh's,
+  #367, #373), `MemAvailable`
   read inside it, isolation `vm`, the
   envelope's `[vm]` and two sockets read back by the run loop and the lint;
   a Mac below the minimum or a directory under `~` starting no VM; the three
@@ -917,7 +947,8 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   another VM type refused; the home directory visible in the VM refused;
   Rosetta's lane after its smoke run, off when it fails; Docker Desktop
   taken as `vm-shared` only with `--dedicated`, no firewall put in it (its
-  probe decides, a bridge's gateway there told as that VM's own), a shared
+  probe decides: a task behind its sidecar passes, a granted bridge's gateway
+  there is told as that VM's own), a shared
   `~/.ssh` refused though `~` is not, and a given
   socket that does not answer told to start Docker Desktop or OrbStack or
   drop `--socket`; install making the set directory it was given, never the

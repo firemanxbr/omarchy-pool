@@ -154,7 +154,9 @@ secret). Everything travels in the `Authorization` header over TLS only.
   that one refused, while a task already running keeps the list its egress was
   started with. A raw socket fails with "Network is
   unreachable"; a package that needs one gets a reviewed exception in
-  `factory/sizing` (a bridge network of its own). A task that needs a model
+  `factory/sizing` (a bridge network of its own), which a host runs only
+  where its owner's envelope grants it (`direct_network`, #373): elsewhere the
+  dispatcher hands the task back before anything starts. A task that needs a model
   gets an agent sidecar of its own, on its network only, with the keys file
   read-only and its caps (calls, tokens, wall time); the dispatcher refuses to
   start with an agent key or a GitHub token in its own environment and keeps the
@@ -170,30 +172,38 @@ secret). Everything travels in the `Authorization` header over TLS only.
   network without DNS, which has no gateway — by podman's own CLI, or behind
   docker's CLI (whose podman API forces DNS on and drops docker's option)
   through libpod's own API on the socket that CLI talks to, which must answer
-  as podman (#372). Stated plainly: a signed exception's bridge always has
-  its gateway, the host itself on a rootful engine, where the `DOCKER-USER` rules (in
-  `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
-  preflight checks it rather than trusting it (#367): on a rootful Linux
-  engine it refuses a host whose prep-root.sh firewall script (world-readable) does
-  not drop every task subnet in INPUT, or whose boot unit for it is not
-  there or not enabled (a reboot would take the drop away, and nothing
-  probes again after install), and a probe task on a bridge and one
-  on a network made as a task's try their gateway on 22, 53 and the pool's
-  ports, and the bridge's the host's LAN address: a connection made or
-  refused there fails the install, with the command that puts the INPUT drop
-  in place or back. On a rootless engine the gateway is the engine's own
-  namespace, and what could reach the host is the user-mode stack's host
-  loopback (RootlessKit's, slirp4netns's or pasta's), off by default: preflight
-  reads the stack's command line in `/proc` while its probe tasks run and
-  refuses one that maps it, with the setting that turns it off (the runbook's
-  *Rootless engines*). It reads rather than listening for a connection: the
-  agent listens on nothing (design v2 §11.2). pasta can also forward an
-  address to the host's own (`--map-guest-addr`, `169.254.1.2` by rootless
-  podman's default from 5.3 on), which a bridge reaches: on rootless podman
-  behind pasta the probe task on a bridge tries it (a task's own network,
-  internal, has no route to it), and an answer there, or an address pasta
-  maps that the probe did not try, refuses the install with containers.conf's
-  `--map-guest-addr none` (#372).
+  as podman (#372). The agent's preflight checks this rather than trusting it,
+  and it probes the way a task runs (#373): a probe task on a network made as a
+  task's, behind an egress sidecar from the release's worker image with the
+  dispatcher's deny list (the task subnets and `OMARCHY_HOST_ADDRESSES`), tries
+  the cloud metadata address, the default gateway, the host's LAN address, the
+  host's own addresses and its network's gateway on 22, 53 and the pool's
+  ports, straight and through the sidecar, and must reach GitHub through the
+  sidecar: a connection made or refused there fails the install (the sidecar's
+  own refusal, a 403, is what it must answer). Stated plainly: a signed
+  exception's bridge always has its gateway, the host itself on a rootful
+  engine, where the `DOCKER-USER` rules (in `FORWARD`) never see traffic to the
+  host (CVE-2024-29018), and on a rootless engine the engine's namespace, with
+  the LAN behind the user-mode network stack; so that bridge runs only where the
+  envelope grants it, and there a probe task on it must fail to reach the
+  metadata address, the default gateway, the LAN address and its gateway. On a
+  rootful Linux engine preflight refuses a host whose prep-root.sh firewall
+  script (world-readable) does not drop every task subnet in INPUT, or whose
+  boot unit for it is not there or not enabled (a reboot would take the drop
+  away, and nothing probes again after install), whatever the probe says: the
+  second layer under every task network, with the command that puts the INPUT
+  drop in place or back. On a rootless engine what could reach the host is the
+  user-mode stack's host loopback (RootlessKit's, slirp4netns's or pasta's),
+  off by default: preflight reads the stack's command line in `/proc` while its
+  probe tasks run and refuses one that maps it, with the setting that turns it
+  off (the runbook's *Rootless engines*). It reads rather than listening for a
+  connection: the agent listens on nothing (design v2 §11.2). pasta can also
+  forward an address to the host's own (`--map-guest-addr`, `169.254.1.2` by
+  rootless podman's default from 5.3 on): on rootless podman behind pasta the
+  probe tries it (a task's own network has no route to it, and its sidecar
+  refuses link-local addresses; a granted bridge has one), and an answer
+  there, or an address pasta maps that the probe did not try, refuses the
+  install with containers.conf's `--map-guest-addr none` (#372).
   A signed `factory/sizing` exception is per package:
   it also covers a contributor's recipe of that package, so its reviewer
   approves exactly that.
@@ -584,7 +594,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   it again after every start, hourly and after a wake. A task reaches
   neither your LAN nor the Mac through Colima's NAT, nor the VM itself at a
   bridge's gateway (the firewall's INPUT drop, #367), and the egress probe
-  checks it before install goes on; every task's egress sidecar also refuses
+  checks it before install goes on (behind a task's egress sidecar, and on a
+  signed exception's bridge where the envelope grants one, #373); every task's
+  egress sidecar also refuses
   the Mac's own addresses (`/sbin/ifconfig -a`'s, a Mac having no `/proc`,
   and the public one it leaves from, #371). Docker Desktop's or OrbStack's VM
   (`vm-shared`) is used only if it is already there, with nothing of the
