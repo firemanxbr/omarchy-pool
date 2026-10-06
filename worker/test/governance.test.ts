@@ -23,6 +23,12 @@ describe("governance file", () => {
   it("accepts the repository's own file", () => {
     expect(parseGovernance(repositoryFile).length).toBeGreaterThan(0);
   });
+
+  it("reads the logins alone beside the maintainers' co-signature keys (#330), which are the host agent's", () => {
+    expect(repositoryFile).toMatch(/^\[cosignature\]\nthreshold = \d+$/m);
+    const withKeys = `maintainers = ["maralcbr", "firemanxbr"]\n\n[cosignature]\nthreshold = 1\n\n[cosignature.keys]\nfiremanxbr = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29cAAAABHNzaDo= firemanxbr@security-key"\n`;
+    expect(parseGovernance(withKeys)).toEqual(["firemanxbr", "maralcbr"]);
+  });
 });
 
 // The way in (#251): the People page's Open the issue and the governance chapter open this form, and what it asks is what the maintainers decide on — the approved package, the agent, the architectures, the rules agreed to. Who applies is the issue's author: a login typed into the form could name another account than the one that applied, one with no record of its own.
