@@ -1,25 +1,35 @@
 /**
- * A maintainer host's page, /hosts/:id (#321, design v2 §18.1) — the minimal
- * one P1 needs; the full page, with the leases' Stop buttons, the "needs a
- * person" box and the host's controls, is P2's (#324).
+ * A maintainer host's page, /hosts/:id (#321, #324, design v2 §18.1).
  *
  * - The head: its name, its status (waiting for its owner's Confirm, active,
  *   suspended) and whose it is.
- * - The numbers: CPUs and memory, the units the pool counts from them, free
- *   disk on the work root and the engine's data root, and the agent slots —
- *   as its agent last reported them; its lanes (native, emulated); its
- *   isolation level; the release it applied against the pool's, and the last
- *   round's outcome.
- * - Its leases: what its registration holds now, each with its lane and
- *   units (#337).
+ * - What needs a person (#324): its owner's Confirm, a suspension, below the
+ *   minimum, the disk under the floor, an emulated lane held for binfmt,
+ *   limits its runtime does not enforce (cgroup delegation), the hosting
+ *   requirement its isolation level does not meet, the engine refusing the
+ *   agent's user (the docker group), and what its agent says of itself
+ *   (linger, credentials within its user's reach) — fleet.ts needsPersonOf.
+ * - The numbers: CPUs and memory, the units the pool counts from them — busy,
+ *   free for a task, the one kept for pool jobs —, free disk on the work root
+ *   and the engine's data root, and the agent slots, as its agent last
+ *   reported them; its lanes (native, emulated with how and 16K pages, held
+ *   with why); its isolation level and whether it is dedicated; its runtime
+ *   and the agent's and compose's versions; the limits its runtime enforces;
+ *   its owner's caps; the release it applied against the pool's, its target
+ *   and its floor, the rollout's state and the last round's outcome.
+ * - Its leases: what its registration holds now, each with its kind,
+ *   package, arch, lane, units and since when (#337), and a Stop that fences
+ *   that task only (#334's per-lease stop-task, capped per login).
  * - The pool's cap on its units (#337, design v2 §7.2): its owner or any
  *   maintainer sets or lifts it, with a reason; and the large task it
  *   reserves for, when it does.
  * - Stop it (#322): Suspend, Resume and Retire, each greyed with the door's
- *   own reason (GET /api/v1/hosts/:id answers `can`), and the way to its
- *   registration's page, where Drain and Resume are.
+ *   own reason (GET /api/v1/hosts/:id answers `can`), and its registration's
+ *   Drain and Resume, with the owner rule — a drain by its owner is lifted by
+ *   its owner only (#324: the worker orders' door, its verdicts in the read).
  * - Its host orders (#344, design v2 §17.1): Reconcile now (a round now, its
- *   owner or any maintainer) and the last orders with their agent's answers.
+ *   owner or any maintainer; an Update of its registration while its agent
+ *   takes no host order) and the last orders with their agent's answers.
  * - Whether it sleeps (#329, design v2 §19.2): a Mac's agent reports
  *   `asleep` before the Mac sleeps and after it woke; a sleeping host has
  *   zero free units — the pool hands it nothing until it wakes, and a task
@@ -46,10 +56,13 @@
  *   and, for anyone, a warning when its agent reports the pool behind GitHub
  *   (freeze detection): GitHub has shown a newer release for over a day.
  *
- * Anyone sees the name, the owner, the status, the architectures and the
- * release; the capacity, the hostname and the host key's fingerprint are its
- * owner's and the maintainers' (GET /api/v1/hosts/:id says which). A static
- * shell, the same for every id; the script reads the host from the address.
+ * Anyone sees the name, the architectures, the release and whether its agent
+ * reports (with whose it is and who stopped it, as the journal says); the
+ * rest — the capacity, the leases, the box, the hostname and the host key's
+ * fingerprint — is its owner's and the maintainers' (GET /api/v1/hosts/:id
+ * says which; the Workers page's fleet row says the units and lanes to
+ * anyone). A static shell, the same for every id; the script reads the host
+ * from the address.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -91,6 +104,14 @@ const CSS = String.raw`
   .hp-lanes label { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); }
   .hp-diag { margin: 0; padding: 12px 16px; max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.5 var(--font-mono); border-top: 1px solid var(--line); }
   .hp-diag:empty { display: none; }
+  /* What needs a person (#324): the warning's edge, one line per thing, its word first. */
+  .hp-needs { border-color: var(--status-warn); }
+  .hp-needs-list { margin: 0; padding: 12px 16px 14px 34px; display: grid; gap: 6px; font-size: 13px; overflow-wrap: anywhere; }
+  .hp-needs-list b { font: 12px var(--font-mono); color: var(--status-warn); margin-right: 6px; }
+  /* A lease's Stop sits at the row's end, never wrapped; a package's name wraps rather than push it off at 1280. */
+  #hp-lease-rows td:nth-child(3) { overflow-wrap: anywhere; }
+  #hp-lease-rows td:last-child { white-space: nowrap; text-align: right; }
+  .hp-held { color: var(--status-warn); }
   @media (max-width: 520px) { .hp-ops .op-btn { flex: 1 1 100%; justify-content: center; } .hp-field { flex: 1 1 100%; } }
   @media (max-width: 520px) { .hp-kv { grid-template-columns: 1fr; gap: 2px 0; } .hp-kv dd { margin-bottom: 8px; } }
 `;
@@ -104,6 +125,12 @@ const BODY = String.raw`
       <p class="hp-lede" id="hp-lede"></p>
       <p class="hp-stopped" id="hp-stopped" role="status"></p>
       <p class="hp-freeze" id="hp-freeze" role="status"></p>
+    </section>
+
+    <section class="op-card hp-needs" id="hp-needs" aria-labelledby="hp-needs-h" hidden>
+      <div class="op-card-h"><b id="hp-needs-h">Needs a person</b><small>what only someone at the machine, or its owner on the site, can fix</small></div>
+      <ul class="hp-needs-list" id="hp-needs-list"></ul>
+      <div class="op-card-f"><a href="/docs/runbook#a-new-maintainer-host">What each one asks →</a></div>
     </section>
 
     <div class="op-stats" id="hp-stats"></div>
@@ -121,8 +148,10 @@ const BODY = String.raw`
           <button type="button" class="op-btn" data-host-act="suspend" disabled>${lucide("ban", 14)}Suspend</button>
           <button type="button" class="op-btn" data-host-act="resume" disabled>${lucide("circle-check", 14)}Resume</button>
           <button type="button" class="op-btn danger" data-host-act="retire" disabled>${lucide("octagon-x", 14)}Retire</button>
+          <button type="button" class="op-btn" data-host-act="drain" disabled>${lucide("circle-slash", 14)}Drain</button>
+          <button type="button" class="op-btn" data-host-act="undrain" disabled>${lucide("circle-check", 14)}Resume claims</button>
         </div>
-        <p class="hp-note">Suspend stops its claims and fences its running tasks; only its owner resumes it, with a passkey. Retire burns its key and its worker token: a new install enrolls a new host. To stop its claims and let its tasks finish, drain its registration.</p>
+        <p class="hp-note">Suspend stops its claims and fences its running tasks; only its owner resumes it, with a passkey. Retire burns its key and its worker token: a new install enrolls a new host. Drain stops its claims and lets its tasks finish; a drain by its owner is lifted by its owner only, one by another maintainer by either of them.</p>
       </div>
       <div class="op-card-f"><a href="/docs/security-model#stopping-a-host">Suspend, retire, drain →</a></div>
     </section>
@@ -166,7 +195,8 @@ const BODY = String.raw`
 
     <section class="op-card" id="hp-leases" aria-labelledby="hp-leases-h">
       <div class="op-card-h"><b id="hp-leases-h">Leases</b><small>the tasks its registration holds now</small></div>
-      <div class="hp-table"><table class="op-table"><thead><tr><th>Task</th><th>Kind</th><th>Package</th><th>Arch</th><th>Lane</th><th>Units</th><th>Since</th></tr></thead><tbody id="hp-lease-rows"></tbody></table></div>
+      <div class="hp-table"><table class="op-table"><thead><tr><th>Task</th><th>Kind</th><th>Package</th><th>Arch</th><th>Lane</th><th>Units</th><th>Since</th><th aria-label="Stop"></th></tr></thead><tbody id="hp-lease-rows"></tbody></table></div>
+      <p class="hp-note" style="margin:0;padding:10px 16px">Stop fences that task only: its lease is refused from then on, its dispatcher stops it, and it goes back to the queue; the host's other tasks run on.</p>
       <div class="op-card-f"><a href="/docs/worker-host#maintainer-hosts">How a host joins →</a></div>
     </section>
   </div>
@@ -176,16 +206,20 @@ const SCRIPT = String.raw`
   // The host this page is about: the address's last segment (the router serves the same shell for every id).
   var ID = decodeURIComponent(location.pathname.replace(/^\/hosts\//, ""));
   var BASE = "/api/v1/hosts/" + encodeURIComponent(ID);
+  // Its registration's worker orders (#324): Drain, Resume, Stop on a lease, and Update as Reconcile now for an agent that takes no host order.
+  var REG_API = "/api/v1/factory/workers/";
   var FRESH_MIN = ${HOST_REPORT_FRESH_MIN};
   var PILL = { active: ["ok", "active"], "pending-owner": ["warn", "waits for its owner's Confirm"], suspended: ["fail", "suspended"], retired: ["na", "retired"] };
-  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14), reconcile: lucide("refresh-cw", 14), legacy: lucide("file-archive", 14), units: lucide("hard-drive", 14), lanes: lucide("git-fork", 14), retry: lucide("package-check", 14), token: lucide("key-round", 14), diag: lucide("scroll-text", 14) })};
+  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14), reconcile: lucide("refresh-cw", 14), legacy: lucide("file-archive", 14), units: lucide("hard-drive", 14), lanes: lucide("git-fork", 14), retry: lucide("package-check", 14), token: lucide("key-round", 14), diag: lucide("scroll-text", 14), stop: lucide("ban", 14) })};
+  // What the "needs a person" box names (#324, fleet.ts needsPersonOf), one word each.
+  var NEED_WORD = { "pending-owner": "Confirm", suspended: "suspended", stopped: "claims stopped", "below-minimum": "below the minimum", "disk-low": "disk low", binfmt: "binfmt", cgroups: "cgroup delegation", hosting: "hosting", "docker-group": "docker group", linger: "linger", credentials: "credentials", round: "its last round" };
   var SETTINGS_AGENT = ${JSON.stringify(HOST_SETTINGS_AGENT)};
   var ORDER_PILL = { open: ["warn", "waits for its agent"], done: ["ok", "done"], refused: ["fail", "refused"], failed: ["fail", "failed"], expired: ["na", "expired"], cancelled: ["na", "cancelled"] };
   var LEGACY_PILL = { running: ["warn", "running"], stopped: ["na", "stopped"], gone: ["na", "no container left"], retiring: ["warn", "being retired"], retired: ["ok", "retired"], unknown: ["na", "not seen"] };
   var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)};
   // A sleeping host (#329): what its sleep means for the pool, in the head's words.
   var SLEEPS = "the pool hands it nothing until it wakes, and a task the sleep caught goes back to the queue when its lease expires.";
-  var H = null, PK = {}, TIMER = 0;
+  var H = null, PK = {}, TIMER = 0, REG = null, VIA = null;
   function stat(k, n, s) { return '<div class="op-stat"><span class="k">' + esc(k) + '</span><span class="n">' + n + '</span><span class="s">' + (s || "") + '</span></div>'; }
   function kv(k, v) { return '<dt>' + esc(k) + '</dt><dd>' + v + '</dd>'; }
   function when(iso) { return iso ? '<span title="' + esc(iso) + '">' + esc(ago(iso)) + '</span>' : '<span class="muted">—</span>'; }
@@ -193,9 +227,10 @@ const SCRIPT = String.raw`
     clearTimeout(TIMER);
     api("GET", BASE).then(function (d) {
       if (d.__status === 404) { $("#hp-name").textContent = ID; $("#hp-lede").textContent = "no such host: it was never enrolled"; endSkeleton(); return; }
-      H = d.host; PK = d.passkey || {};
-      draw(d.host, d.leases || [], d.pool || {}, d.update || null);
-      drawOps(d.host, d.can || { why: {} });
+      H = d.host; PK = d.passkey || {}; REG = d.registration || null; VIA = (d.can || {}).reconcile_via || null;
+      draw(d.host, d.leases, d.pool || {}, d.update || null);
+      drawNeeds(d.host);
+      drawOps(d.host, d.can || { why: {} }, REG);
       drawSettings(d.host, d.can || { why: {} });
       drawOrders(d.host, d.orders, d.can || { why: {} });
       drawLegacy(d.host, d.can || { why: {} });
@@ -233,25 +268,36 @@ const SCRIPT = String.raw`
     var c = h.capacity;
     $("#hp-stats").innerHTML = c ? [
       stat("CPUs", num(c.cpus), "memory " + num(c.mem_gb) + " GB"),
-      stat("Units", h.units === null || h.units === undefined ? "—" : num(h.units), h.asleep ? "asleep: none free until it wakes" : h.pool_cap_units !== null && h.pool_cap_units !== undefined ? "capped at " + num(h.pool_cap_units) + " by the pool" : "1 CPU and 2 GB each, one kept for pool jobs"),
+      // Its units (#324): busy and free for a task now, and the one kept for pool jobs — what the pool counts, under its cap.
+      stat("Units", h.units === null || h.units === undefined ? "—" : num(h.units_busy || 0) + " / " + num(h.units_effective === null || h.units_effective === undefined ? h.units : h.units_effective), h.asleep ? "asleep: none free until it wakes" : "busy · " + num(h.units_free || 0) + " free for a task, " + num(h.job_reserved || 0) + " kept for pool jobs" + (h.pool_cap_units !== null && h.pool_cap_units !== undefined ? " · capped at " + num(h.pool_cap_units) + " by the pool" : "")),
       stat("Disk free", num(c.disk_free_gb.work) + " GB", "work root · engine " + num(c.disk_free_gb.engine) + " GB"),
       stat("Agent slots", c.agent_slots === null || c.agent_slots === undefined ? "—" : num(c.agent_slots), "model tasks at once"),
       stat("Release", esc(h.release_applied || "—"), pool.version ? "the pool runs " + esc(pool.version) : ""),
     ].join("") : "";
-    var lanes = (h.lanes || []).map(function (l) { return esc(l.arch + " " + l.mode + (l.via ? " (" + l.via + (l.page16k ? ", 16K pages" : "") + ")" : "")); }).join(", ");
-    var round = h.round ? esc(String(h.round.outcome || "?")) + (h.round.from ? " from " + esc(h.round.from) : "") + (h.round.step ? " at " + esc(h.round.step) : "") : "—";
+    // Its lanes (#338, #324): native, emulated with how and whether the kernel's pages are 16K, and the ones its agent holds, with why.
+    var lanes = (h.lanes || []).map(function (l) { return esc(l.arch + " " + l.mode + (l.via ? " (" + l.via + (l.page16k ? ", 16K pages" : "") + ")" : "")); }).join(", ")
+      + (h.held_lanes || []).map(function (l) { return '<br><span class="hp-held">' + esc(l.arch) + " held</span> — " + esc(l.reason); }).join("");
+    var round = h.round ? esc(String(h.round.outcome || "?")) + (h.round.from ? " from " + esc(h.round.from) : "") + (h.round.step ? " at " + esc(h.round.step) : "") + (h.round.at ? " " + when(h.round.at) : "") + (h.round.detail ? '<br><span class="muted">' + esc(h.round.detail) + "</span>" : "") : "—";
+    var rt = h.runtime || {}, tools = h.tools || {}, caps = h.owner_caps, lim = h.limits;
     $("#hp-kv").innerHTML = h.fingerprint === undefined
-      ? kv("Status", esc(p[1])) + kv("Release", esc(h.release_applied || "—")) + kv("Details", '<span class="muted">its owner\'s and the maintainers\'</span>')
+      ? kv("Status", esc(p[1])) + kv("Release", esc(h.release_applied || "—")) + kv("Alive", h.alive ? "its agent reports" : '<span class="muted">its agent has not reported in the last ' + esc(String(FRESH_MIN)) + " minutes</span>") + kv("Details", '<span class="muted">its owner\'s and the maintainers\'</span>')
       : [
         kv("Status", esc(p[1]) + (h.status_at && (h.status === "suspended" || h.status === "retired") ? " since " + when(h.status_at) : h.confirmed_at ? " since " + when(h.confirmed_at) : " — enrolled " + when(h.enrolled_at))),
         kv("Host key", '<span class="mono">' + esc(h.fingerprint) + '</span>'),
         kv("Machine", esc((h.hostname || "?") + " · " + (h.os || "?") + " " + (h.arch || "?") + (h.page_kb ? ", " + h.page_kb + "K pages" : ""))),
-        kv("Isolation", esc(h.isolation || "?") + (h.dedicated ? " (dedicated)" : "")),
+        kv("Isolation", esc(h.isolation || "?") + (h.dedicated ? " (dedicated)" : h.dedicated === false ? " (a dedicated user on a shared machine)" : "")),
+        // Its runtime and the versions (#324, design v2 §18.1): the driver as its report says it, its agent's version, and the compose plugin and docker CLI — its report's word, or the ones its release pins.
+        kv("Runtime", esc(rt.driver || "—") + (rt.switch ? ' <span class="muted">— switching to ' + esc(rt.switch.to || "?") + "</span>" : "")),
+        kv("Versions", "agent " + esc(h.agent_version || "?") + " · compose " + esc(tools.compose || "?") + " · docker CLI " + esc(tools.docker || "?") + (tools.engine ? " · engine " + esc(tools.engine) : "") + (tools.pinned ? ' <span class="muted">(the ones ' + esc(h.release_applied || "its release") + " pins)</span>" : "")),
         kv("Lanes", lanes || "—"),
         kv("Capacity", h.below_minimum ? esc(h.below_minimum) : c ? "meets the minimum to join" : "—"),
+        kv("Units", unitWords(h)),
+        kv("Owner's caps", caps ? (caps.max_units === null || caps.max_units === undefined ? "no cap on units" : esc(String(caps.max_units)) + " unit" + (caps.max_units === 1 ? "" : "s")) + (caps.detected_units !== null && caps.detected_units !== undefined ? " of the " + esc(String(caps.detected_units)) + " detected" : "") + (c && c.agent_slots !== null && c.agent_slots !== undefined ? " · " + esc(String(c.agent_slots)) + " agent slot" + (c.agent_slots === 1 ? "" : "s") : "") + (caps.emulate ? " · emulated lanes " + esc(caps.emulate.join(", ") || "none") : "") + ' <span class="muted">— its envelope, at the host</span>' : '<span class="muted">its agent reports none yet</span>'),
+        kv("Limits", lim ? (lim.cpus_hard && lim.memory_hard && lim.pids ? "--cpus, --memory and --pids-limit enforced" : '<span class="hp-blocked">not enforced: ' + esc([lim.cpus_hard ? "" : "--cpus", lim.memory_hard ? "" : "--memory", lim.pids ? "" : "--pids-limit"].filter(Boolean).join(", ")) + "</span>") : '<span class="muted">not reported</span>'),
         kv("Pool cap", capWords(h)),
         kv("Reserving", h.reserving_task ? 'for <a href="/build/' + esc(h.reserving_task) + '">#' + esc(h.reserving_task) + '</a> since ' + when(h.reserving_since) + ': it takes nothing else but pool jobs until its units fit it' : '<span class="muted">no</span>'),
-        kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + (h.rolled_back_at ? " " + when(h.rolled_back_at) : "") + ")" : "") + (h.last_good ? "<br>" + pillHtml("warn", "last-good", "its registration claims on its last-good; past this the pool hands it nothing until it runs the pool's release") + " " + esc(h.last_good) : "")),
+        kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.release_floor ? ' <span class="muted">floor ' + esc(h.release_floor) + "</span>" : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + (h.rolled_back_at ? " " + when(h.rolled_back_at) : "") + ")" : "") + (h.last_good ? "<br>" + pillHtml("warn", "last-good", "its registration claims on its last-good; past this the pool hands it nothing until it runs the pool's release") + " " + esc(h.last_good) : "")),
+        kv("Rollout", h.rollout && h.rollout.state ? esc(h.rollout.state) + (h.rollout.target ? " → " + esc(h.rollout.target) : "") + (h.rollout.since ? " since " + when(h.rollout.since) : "") : '<span class="muted">—</span>'),
         kv("Soak", soakWords(h)),
         kv("Claims", gateLine(update)),
         kv("GitHub", h.soak && h.soak.github_latest ? "its latest release is " + esc(h.soak.github_latest) + ", as its agent read it" : '<span class="muted">not read yet</span>'),
@@ -259,13 +305,31 @@ const SCRIPT = String.raw`
         kv("Agent", esc(h.agent_version || "?") + (h.provider ? " · " + esc(h.provider) + (h.model ? " " + esc(h.model) : "") : "")),
         kv("Reported", when(h.reported_at)),
       ].join("");
-    $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + (t.size > 1 ? " · size " + esc(t.size) : "") + '</td><td>' + esc(t.name) + (t.fenced ? ' ' + pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : '') + '</td><td>' + esc(t.arch) + '</td><td>' + esc(t.lane || "—") + '</td><td>' + esc(t.units === null || t.units === undefined ? "—" : t.units) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="7" class="muted">no lease — nothing runs on it now</td></tr>';
+    // Its leases (#324): its owner's and the maintainers' — each with a Stop that fences that task only, greyed with the door's words.
+    $("#hp-lease-rows").innerHTML = leases === undefined ? '<tr><td colspan="8" class="muted">its owner\'s and the maintainers\' — the Workers page says how many tasks it runs</td></tr>' : leases.map(function (t) {
+      var st = t.stop || {};
+      var stop = t.fenced ? pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : gate('<button type="button" class="op-btn sm" data-stop="' + esc(t.id) + '" data-name="' + esc(t.name) + '">' + ICON.stop + "Stop</button>", st.ok === true, st.why || "");
+      return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + (t.size > 1 ? " · size " + esc(t.size) : "") + '</td><td>' + esc(t.name) + '</td><td>' + esc(t.arch) + '</td><td>' + esc(t.lane || "—") + '</td><td>' + esc(t.units === null || t.units === undefined ? "—" : t.units) + '</td><td>' + when(t.started_at) + '</td><td>' + stop + '</td></tr>';
+    }).join("") || '<tr><td colspan="8" class="muted">no lease — nothing runs on it now</td></tr>';
     endSkeleton();
+  }
+  // Its units in words (#324): what the pool counts, what its leases hold, what is free for a task, the one kept for pool jobs.
+  function unitWords(h) {
+    if (h.units === null || h.units === undefined) return "—";
+    var eff = h.units_effective === null || h.units_effective === undefined ? h.units : h.units_effective;
+    return num(eff) + " the pool counts — " + num(h.units_busy || 0) + " busy on " + num(h.tasks || 0) + " task" + (h.tasks === 1 ? "" : "s") + ", " + num(h.units_free || 0) + " free for a task, " + num(h.job_reserved || 0) + " kept for pool jobs" + (h.state && h.state !== "claiming" && h.state !== "full" ? ' <span class="muted">(' + esc(h.state) + ": none handed out)</span>" : "");
+  }
+  // What needs a person (#324): its owner's and the maintainers', one line each with its word; hidden when nothing does.
+  function drawNeeds(h) {
+    var n = h.needs_person || [];
+    $("#hp-needs").hidden = h.fingerprint === undefined || !n.length;
+    $("#hp-needs-list").innerHTML = n.map(function (x) { return "<li><b>" + esc(NEED_WORD[x.what] || x.what) + "</b>" + esc(x.text) + "</li>"; }).join("");
   }
   // The pool's cap (#337): what the pool hands it at most, whatever its envelope says; none lets its count decide.
   function capWords(h) { return h.pool_cap_units === null || h.pool_cap_units === undefined ? '<span class="muted">none — its count decides</span>' : esc(String(h.pool_cap_units)) + " unit" + (h.pool_cap_units === 1 ? "" : "s") + (h.units !== null && h.units !== undefined ? " of its " + esc(String(h.units)) : ""); }
-  // Stop it (#322): the three buttons as the door answers them for this reader, greyed with its reason; Drain is its registration's page's.
-  function drawOps(h, can) {
+  // Stop it (#322): the three buttons as the door answers them for this reader, greyed with its reason; its registration's Drain and
+  // Resume as the worker orders' door answers them (#324): the owner rule's words where it says no.
+  function drawOps(h, can, reg) {
     var why = can.why || {};
     // The pool's cap (#337): its owner or any maintainer, greyed with the door's reason for everyone else.
     $("#hp-cap").innerHTML = h.status === "retired" ? "" : '<span>Pool cap: ' + capWords(h) + '</span>' + gate('<button type="button" class="op-btn" data-host-act="cap">' + ICON.cap + 'Set the pool cap</button>', can.cap === true, why.cap || "");
@@ -273,7 +337,15 @@ const SCRIPT = String.raw`
       gate('<button type="button" class="op-btn" data-host-act="suspend">' + ICON.suspend + 'Suspend</button>', can.suspend === true, why.suspend || ""),
       gate('<button type="button" class="op-btn" data-host-act="resume">' + ICON.resume + 'Resume</button>', can.resume === true, why.resume || ""),
       gate('<button type="button" class="op-btn danger" data-host-act="retire">' + ICON.retire + 'Retire</button>', can.retire === true, why.retire || ""),
-    ].join("") + (h.worker && h.status !== "retired" ? '<a class="op-btn" href="/worker/' + encodeURIComponent(h.worker) + '#wk-operate">' + ICON.drain + 'Drain or resume its claims</a>' : "");
+    ].concat(regOps(h, reg)).join("");
+  }
+  function regOps(h, reg) {
+    var no = !h.worker ? "it has no registration yet: its owner's Confirm makes it" : h.fingerprint === undefined ? orSignIn("only " + h.owner + " or a maintainer drains it") : "";
+    var r = reg || { can: {}, why: {} }, d = r.drained;
+    return [
+      gate('<button type="button" class="op-btn" data-host-act="drain">' + ICON.drain + "Drain</button>", !no && r.can.drain === true, no || r.why.drain || ""),
+      gate('<button type="button" class="op-btn" data-host-act="undrain" title="' + esc(d ? "drained by " + (d.by || "?") + (d.reason ? ": " + d.reason : "") : "") + '">' + ICON.resume + "Resume claims</button>", !no && r.can.resume === true, no || r.why.resume || ""),
+    ];
   }
   function lanesText(a) { return a && a.length ? a.map(esc).join(", ") : "none"; }
   // Its settings (#325): what its agent reports — the units it gives and its emulated lanes, the envelope they narrow inside, what of
@@ -327,7 +399,8 @@ const SCRIPT = String.raw`
   function drawOrders(h, orders, can) {
     var why = can.why || {}, q = h.quarantine || [], env = (h.settings || {}).envelope || {};
     $("#hp-order-ops").innerHTML = [
-      gate('<button type="button" class="op-btn" data-host-act="reconcile">' + ICON.reconcile + "Reconcile now</button>", can.reconcile === true, why.reconcile || ""),
+      // Reconcile now (#344, #324): a host order; while its agent takes none, an Update of its registration (reconcile_via).
+      gate('<button type="button" class="op-btn" data-host-act="reconcile">' + ICON.reconcile + "Reconcile now</button>", can.reconcile === true || can.reconcile_via === "update", why.reconcile || ""),
       gate('<button type="button" class="op-btn" data-host-act="retry-release">' + ICON.retry + "Retry release</button>", can.retry_release === true && q.length > 0, why.retry_release || "its agent reports no release in quarantine: there is nothing to lift"),
       gate('<button type="button" class="op-btn" data-host-act="rotate-token">' + ICON.token + "Rotate token</button>", can.rotate_token === true, why.rotate_token || ""),
       gate('<button type="button" class="op-btn" data-host-act="diagnostics">' + ICON.diag + "Diagnostics</button>", can.diagnostics === true && env.diagnostics !== false, why.diagnostics || "its envelope does not allow diagnostics: diagnostics = true in agent.toml, at the host"),
@@ -357,6 +430,21 @@ const SCRIPT = String.raw`
     if (d.error) { toast(esc(d.error), "error"); return; }
     toast(esc(d.line || "done")); load();
   }
+  // Its registration's orders (#324): the worker orders' door, the same as its registration's page.
+  function orderDone(d) {
+    if (d.error) { toast(esc(d.error), "error"); return; }
+    toast(esc(d.note || "done")); load();
+  }
+  // A Stop on one lease (#324, #334): that task fenced, and only it — the dispatcher stops it and it goes back to the queue.
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("button[data-stop]") : null;
+    if (!b || b.disabled || !H) return;
+    var task = Number(b.getAttribute("data-stop"));
+    ask({ title: "Stop task #" + task + " on " + H.name, text: "Only this task is fenced: its lease is refused from now on, the dispatcher stops it, and it goes back to the queue. The host's other tasks run on.", input: "optional", confirm: "Stop it", danger: true }).then(function (r) {
+      if (r === null) return;
+      api("POST", REG_API + encodeURIComponent(H.worker || "") + "/orders", { kind: "stop-task", task: task, reason: r || undefined }).then(orderDone).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    });
+  });
   // A diagnostics order's lines (#325), read in place: its owner's and the maintainers'.
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-diag]") : null;
@@ -394,8 +482,18 @@ const SCRIPT = String.raw`
         var post = function (a) { return api("POST", BASE + "/retire", a ? { reason: r, assertion: a } : { reason: r }); };
         (PK.retire ? passkeyed("host:retire:" + ID, post) : post(null)).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
+    } else if (act === "reconcile" && VIA === "update") {
+      // An agent that takes no host order (#324): an Update of its registration reconciles it, its agent taking it at its next poll.
+      api("POST", REG_API + encodeURIComponent(H.worker || "") + "/orders", { kind: "update", reason: "Reconcile now, from the host page" }).then(orderDone).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     } else if (act === "reconcile") {
       api("POST", BASE + "/orders", { kind: "reconcile-now" }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "drain") {
+      ask({ title: "Drain " + H.name, text: "Its registration is handed nothing from its next claim; its running tasks finish. " + (isOwner(H.owner) ? "Drained by you, its owner, only you resume it." : "Its owner, or you, resume it."), input: "required", confirm: "Drain" }).then(function (r) {
+        if (r === null) return;
+        api("POST", REG_API + encodeURIComponent(H.worker || "") + "/orders", { kind: "drain", reason: r }).then(orderDone).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+    } else if (act === "undrain") {
+      api("POST", REG_API + encodeURIComponent(H.worker || "") + "/orders", { kind: "resume" }).then(orderDone).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     } else if (act === "set-units") {
       var u = $("#hp-units") ? $("#hp-units").value : "";
       api("POST", BASE + "/orders", { kind: "set-units", units: u === "" ? null : Number(u) }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
@@ -437,16 +535,22 @@ export function hostHtml(id: string, poolUrl: string, version: RunningVersion): 
   });
 }
 
-/** What /hosts/:id is made of (#321): one read, which answers the details to the owner and the maintainers only. */
+/** What /hosts/:id is made of (#321, #324): one read, which answers the details — the leases among them — to the owner and the maintainers only. */
 export const HOST_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "host.head-facts",
     page: `/hosts/${F.host}`,
     anchor: ['<p class="op-eyebrow">Host</p>', 'id="hp-name"', 'id="hp-status"', 'id="hp-lede"', 'id="hp-stats"', 'id="hp-kv"'],
-    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS"],
+    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS", '"Alive"',
+      // #324: the runtime and its versions, the units busy and free, the held lanes, the owner's caps, the limits, the floor and the rollout.
+      '"Runtime"', '"Versions"', "tools.compose", "tools.docker", "function unitWords(h)", "h.units_busy", "h.units_free", "h.job_reserved", "h.held_lanes", '"Owner\'s caps"', '"Limits"', "h.release_floor", '"Rollout"', "h.rollout.state"],
     reads: [
-      { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.asleep", "host.asleep_since", "leases", "pool.version"] },
-      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
+      { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.asleep", "host.asleep_since", "pool.version"] },
+      {
+        path: `/api/v1/hosts/${F.host}`, as: "maintainer",
+        fields: ["host.fingerprint", "host.capacity", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version",
+          "host.units_busy", "host.units_free", "host.units_effective", "host.job_reserved", "host.tasks", "host.state", "host.held_lanes", "host.limits", "host.owner_caps", "host.runtime", "host.tools.compose", "host.tools.docker", "host.release_floor", "host.rollout", "leases"],
+      },
       { path: "/api/v1/hosts/h_nobody0000", status: 404 },
     ],
     visible: EVERYONE,
@@ -469,13 +573,21 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     // reason —; the doors refuse everyone else server-side, and a session's write without the page's own Origin for every role.
     id: "host.stop",
     page: `/hosts/${F.host}`,
-    anchor: ['id="hp-operate"', 'id="hp-ops"', 'data-host-act="suspend"', 'data-host-act="resume"', 'data-host-act="retire"', 'id="hp-stopped"', 'href="/docs/security-model#stopping-a-host"'],
-    script: ["function drawOps(h, can)", "can.suspend === true", "can.resume === true", "can.retire === true", 'BASE + "/suspend"', 'BASE + "/resume"', 'BASE + "/retire"', 'passkeyed("host:resume:" + ID', 'passkeyed("host:retire:" + ID', "PK.retire", "h.status_by", "h.status_reason", "h.claims_stopped_at", "NOT_LISTED"],
-    reads: [{ path: `/api/v1/hosts/${F.host}`, fields: ["can.suspend", "can.resume", "can.retire", "can.why", "passkey.retire", "host.status_by", "host.status_at", "host.status_reason", "host.claims_stopped_at"] }],
+    anchor: ['id="hp-operate"', 'id="hp-ops"', 'data-host-act="suspend"', 'data-host-act="resume"', 'data-host-act="retire"', 'data-host-act="drain"', 'data-host-act="undrain"', 'id="hp-stopped"', 'href="/docs/security-model#stopping-a-host"'],
+    script: ["function drawOps(h, can, reg)", "can.suspend === true", "can.resume === true", "can.retire === true", 'BASE + "/suspend"', 'BASE + "/resume"', 'BASE + "/retire"', 'passkeyed("host:resume:" + ID', 'passkeyed("host:retire:" + ID', "PK.retire", "h.status_by", "h.status_reason", "h.claims_stopped_at", "NOT_LISTED",
+      // #324: its registration's Drain and Resume, the worker orders' door's verdicts in the read — the owner rule's words where it says no.
+      "function regOps(h, reg)", "r.can.drain === true", "r.can.resume === true", 'kind: "drain"', 'kind: "resume"', 'REG_API + encodeURIComponent(H.worker || "") + "/orders"'],
+    reads: [
+      { path: `/api/v1/hosts/${F.host}`, fields: ["can.suspend", "can.resume", "can.retire", "can.why", "passkey.retire", "host.status_by", "host.status_at", "host.status_reason", "host.claims_stopped_at", "registration"] },
+      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["registration", "host.drained"] },
+    ],
     acts: [
       { method: "POST", path: `/api/v1/hosts/${F.host}/suspend`, body: { reason: "a reason enough" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
       { method: "POST", path: `/api/v1/hosts/${F.host}/resume`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
       { method: "POST", path: `/api/v1/hosts/${F.host}/retire`, body: { reason: "a reason enough" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      // Drain and Resume of its registration: the worker orders' door, refused without the page's own Origin for every role.
+      { method: "POST", path: `/api/v1/factory/workers/${F.worker}/orders`, body: { kind: "drain", reason: "a reason enough" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/factory/workers/${F.worker}/orders`, body: { kind: "resume" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
     ],
     visible: EVERYONE,
   },
@@ -485,15 +597,18 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.orders",
     page: `/hosts/${F.host}`,
     anchor: ['id="hp-orders"', 'id="hp-order-ops"', 'data-host-act="reconcile"', 'id="hp-order-rows"'],
-    script: ["function drawOrders(h, orders, can)", "can.reconcile === true", 'kind: "reconcile-now"', 'BASE + "/orders"', "ORDER_PILL", "o.detail", "no host order yet", "can.retry_release === true", "can.rotate_token === true", "can.diagnostics === true", 'kind: "retry-release"', 'kind: "rotate-token"', 'kind: "diagnostics"', "argText(o)", 'BASE + "/diagnostics/"', "data-diag"],
+    script: ["function drawOrders(h, orders, can)", "can.reconcile === true", 'kind: "reconcile-now"', 'BASE + "/orders"', "ORDER_PILL", "o.detail", "no host order yet", "can.retry_release === true", "can.rotate_token === true", "can.diagnostics === true", 'kind: "retry-release"', 'kind: "rotate-token"', 'kind: "diagnostics"', "argText(o)", 'BASE + "/diagnostics/"', "data-diag",
+      // #324: Reconcile now is an Update of its registration while its agent takes no host order.
+      'can.reconcile_via === "update"', 'VIA === "update"', 'kind: "update"'],
     reads: [
-      { path: `/api/v1/hosts/${F.host}`, fields: ["can.reconcile", "can.retry_release", "can.rotate_token", "can.diagnostics", "can.why"] },
+      { path: `/api/v1/hosts/${F.host}`, fields: ["can.reconcile", "can.reconcile_via", "can.retry_release", "can.rotate_token", "can.diagnostics", "can.why"] },
       { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["orders", "can.reconcile"] },
       // A diagnostics order's lines (#325): none for this order — its owner's and the maintainers' to read.
       { path: `/api/v1/hosts/${F.host}/diagnostics/ho_00000000000000000000000000000000`, as: "maintainer", status: 404 },
     ],
     acts: [
       { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "reconcile-now" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/factory/workers/${F.worker}/orders`, body: { kind: "update", reason: "a reason enough" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
       { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "rotate-token" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
       { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "retry-release" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
       { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "diagnostics" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
@@ -528,11 +643,26 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     visible: ["maintainer"],
   },
   {
+    // Its leases (#337, #324): its owner's and the maintainers' — a visitor's row says whose —, each with a Stop that fences that task
+    // only, as the worker orders' door answers it for the reader (`stop`); the door refuses everyone else server-side, and a session's
+    // write without the page's own Origin for every role.
     id: "host.leases",
     page: `/hosts/${F.host}`,
-    anchor: ['id="hp-leases"', 'id="hp-lease-rows"', 'href="/docs/worker-host#maintainer-hosts"', "<th>Lane</th>", "<th>Units</th>"],
-    script: ['$("#hp-lease-rows")', "no lease — nothing runs on it now", 'href="/build/', "t.lane", "t.units"],
+    anchor: ['id="hp-leases"', 'id="hp-lease-rows"', 'href="/docs/worker-host#maintainer-hosts"', "<th>Lane</th>", "<th>Units</th>", '<th aria-label="Stop"></th>', "Stop fences that task only"],
+    script: ['$("#hp-lease-rows")', "no lease — nothing runs on it now", 'href="/build/', "t.lane", "t.units", "leases === undefined", "data-stop=", "st.ok === true", 'kind: "stop-task", task: task', "button[data-stop]"],
+    reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["leases"] }],
+    acts: [{ method: "POST", path: `/api/v1/factory/workers/${F.worker}/orders`, body: { kind: "stop-task", task: 1 }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
     visible: EVERYONE,
+  },
+  {
+    // What needs a person (#324, design v2 §18.1): its owner's and the maintainers', from its status and its last report — served
+    // hidden, drawn when something does.
+    id: "host.needs",
+    page: `/hosts/${F.host}`,
+    anchor: ['id="hp-needs"', 'id="hp-needs-list"', 'href="/docs/runbook#a-new-maintainer-host">What each one asks →</a>'],
+    script: ["function drawNeeds(h)", "NEED_WORD", "h.needs_person"],
+    reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.needs_person", "host.needs_person.0.what", "host.needs_person.0.text"] }],
+    visible: ["maintainer"],
   },
   {
     // The pool's cap (#337, design v2 §7.2): what the pool hands the host at most; its owner or any maintainer sets or lifts it on the

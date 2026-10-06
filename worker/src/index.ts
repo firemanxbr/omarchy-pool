@@ -45,6 +45,7 @@
  *                                                  set-emulate, rotate-token, retry-release, diagnostics (#325)
  *   POST /api/v1/hosts/self/diagnostics · GET /hosts/:id/diagnostics/:order   a diagnostics order's scrubbed log lines (#325)
  *   POST /api/v1/hosts/:id/cap                    {units | null, reason}: the pool's cap on a host's units, its owner or any maintainer (#337)
+ *   GET  /api/v1/hosts/fleet                      every host's public row and Status's host and capacity lines (#324)
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
@@ -86,7 +87,7 @@ import {
 import { handleSourceRead } from "./routes/sources";
 import { handleAnswerOrder, handleCancelOrder, handleFollow, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
 import { handleRollbackStatement } from "./routes/rollback";
-import { handleCapHost, handleConfirmHost, handleEnroll, handleHostDiagnostics, handleHostDiagnosticsGet, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSuspendHost, signedHost } from "./routes/hosts";
+import { handleCapHost, handleConfirmHost, handleEnroll, handleFleet, handleHostDiagnostics, handleHostDiagnosticsGet, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSuspendHost, signedHost } from "./routes/hosts";
 import { DIAGNOSTICS_MAX_BYTES } from "./hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
@@ -723,6 +724,8 @@ async function api(method: string, path: string, url: URL, request: Request, env
   // The lines a diagnostics order asked for (#325): signed, up to 64 KiB.
   if (method === "POST" && path === "/hosts/self/diagnostics") { const s = await signedHost(request, env, url, DIAGNOSTICS_MAX_BYTES); return s instanceof Response ? s : handleHostDiagnostics(s, env); }
   if (method === "GET" && path === "/hosts") return handleHostsList(await contributorOf(request, env), url, env);
+  // The fleet (#324, design v2 §18.2, §18.3): every host's public row and Status's lines, the capacity per architecture among them.
+  if (method === "GET" && path === "/hosts/fleet") return handleFleet(env);
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})$/)) && method === "GET") return handleHostGet(await contributorOf(request, env), m[1], env);
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/diagnostics\/(ho_[0-9a-f]{32})$/)) && method === "GET") return handleHostDiagnosticsGet(await contributorOf(request, env), m[1], m[2], env);
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/confirm$/)) && method === "POST") {

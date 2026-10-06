@@ -32,20 +32,26 @@
 import { json, readJson, type Env } from "../index";
 import { roleFor } from "../governance";
 import { findLeak } from "../leak";
-import { machineOrigin, version, API_HOST, type RunningVersion } from "../meta";
+import { machineOrigin, version, API_HOST, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { putRecord } from "../record";
-import { writeGate } from "./orders";
+import { writeGate, WORKER_ROW_SQL } from "./orders";
+import { selectionRules } from "./factory";
 import { sha256Hex, viaOf, workspace, SIGN_IN, type Contributor } from "./contributors";
 import { dashboardOrigin } from "./agents";
 import { justNowWords, webGate, SELF_CAUSE } from "./passkeys";
-import { cancelOrdersOf, openOrdersOf, FOLLOW_POLL_S } from "../orders";
+import { cancelOrdersOf, openOrdersOf, orderFacts, orderVerdicts, FOLLOW_POLL_S, type HeldTask, type OrderFacts, type OrderWorker } from "../orders";
+import {
+  capacityLines, capacityOf, fleetHostOf, hostLines, jobReservedOf, limitsOf, needsPersonOf, reportOf, roundOf, secondOpinionOf,
+  CLAMPED_WINDOW_H, LOST_WINDOW_MIN, QUEUED_KINDS, WEEK_DAYS,
+  type AuditRow, type BusyRow, type FleetHostRow, type FleetLease, type MixRow, type QueueRow,
+} from "../fleet";
 import {
   belowMinimum, enrollMessage, fingerprint, hostLine, installCommand, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf, shortId, signedMessage,
   unitsOf, verifySignature, ENROLL_TTL_MIN, MIN_HOST, HOST_NAME, HOST_REPORT_FRESH_MIN, ISOLATIONS, NONCE_KEEP_MIN, OLD_TOKEN_GRACE_MIN, REPORT_MAX_BYTES, SIGNED_SKEW_S, TOKEN_ROTATE_DAYS,
   hostReason, revertedOf, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
   agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT, asleepNow,
   agentTakesSettings, hostSettingsOf, orderArg, reportedBrakeOf, reportedSettingsOf, DIAGNOSTIC_LINE_MAX, DIAGNOSTIC_LINES, DIAGNOSTICS_MAX_BYTES, HOST_ORDER_ID, HOST_SETTINGS_AGENT, SETTINGS_ORDER_KINDS,
-  poolBehindOf, reportedSoakOf, soakOf,
+  poolBehindOf, reportedSoakOf, soakOf, HOST_ROW_TOUCH_MIN, PINNED_TOOLS,
   type Capacity, type HostOrderKind, type Isolation, type OrderArg,
 } from "../hosts";
 import { gateWords, lastGoodMessage, parseTag, revertAfter, updateState } from "../update";
@@ -73,6 +79,8 @@ export interface HostRow {
   asleep_at: string | null;
   /** #342: the release its registration last claimed on (build_workers.version), where HOST_VIEW_COLS joins it. */
   claims_on?: string | null;
+  /** #324: its registration's last claim, its drain and the model its claims say it runs, where HOST_VIEW_COLS joins them. */
+  reg_last_seen?: string | null; drained_at?: string | null; drained_by?: string | null; drain_reason?: string | null; agent?: string | null;
   /** #325: the settings its agent took (its last set-units and set-emulate answered done). */
   settings: string | null;
   /** #326: its soak and freeze detection as its last report says them (migration 0048): what the claims and listings read. */
@@ -147,11 +155,27 @@ export async function handleMintEnrollment(c: Contributor, request: Request, env
   );
 }
 
-/** A host as its page and the listing read it: the row, with the release its registration last claimed on (#342, `claims_on`). */
-const HOST_VIEW_COLS = "hosts.*, (SELECT version FROM build_workers WHERE id = hosts.worker_id) AS claims_on";
+/**
+ * A host as its page, the listings and the fleet read it: the row, with what its registration says beside it — the release it last
+ * claimed on (#342, `claims_on`), its last claim, its drain and the model it runs (#324) — by the registration's primary key.
+ */
+const HOST_VIEW_COLS = "hosts.*, w.version AS claims_on, w.last_seen AS reg_last_seen, w.drained_at, w.drained_by, w.drain_reason, w.agent";
+const HOST_VIEW_FROM = "hosts LEFT JOIN build_workers w ON w.id = hosts.worker_id";
 
-/** What anyone sees of a host, and what its owner and the maintainers see besides (design v2 §18.1). */
-async function hostView(h: HostRow, detailed: boolean, now: number, pool: RunningVersion) {
+/** A HostRow as the fleet's rules read it (fleet.ts FleetHostRow): the columns HOST_VIEW_COLS joins, none missing. */
+const fleetRowOf = (h: HostRow): FleetHostRow => ({ ...h, reg_last_seen: h.reg_last_seen ?? null, drained_at: h.drained_at ?? null, agent: h.agent ?? null });
+
+/** Every lease a host's registration holds, by the lease index: the fleet rows' units and tasks (#324). */
+export const FLEET_LEASES_SQL = "SELECT id, lease_owner, kind, arch, lane, units, size FROM build_tasks WHERE status = 'leased' AND lease_owner IN (SELECT worker_id FROM hosts WHERE worker_id IS NOT NULL AND status != 'retired')";
+
+/**
+ * What anyone sees of a host, and what its owner and the maintainers see besides (design v2 §18.1): anyone, its name, its
+ * architectures, its release and whether its agent reports — with whose it is and whether it sleeps or was stopped, which the
+ * journal says as publicly; its owner and the maintainers, the rest — the runtime and its versions, the capacity and the units busy
+ * and free, the lanes and the held ones, the release with its floor and the rollout, the "needs a person" box, the legacy set, the
+ * settings and the soak.
+ */
+async function hostView(h: HostRow, detailed: boolean, now: number, pool: RunningVersion, leases: FleetLease[] = []) {
   const alive = !!h.reported_at && now - Date.parse(h.reported_at) < HOST_REPORT_FRESH_MIN * MIN;
   const capacity = h.capacity ? (JSON.parse(h.capacity) as Capacity & { below_minimum?: string | null }) : null;
   const lanes = h.lanes ? (JSON.parse(h.lanes) as Capacity["lanes"]) : [];
@@ -168,25 +192,53 @@ async function hostView(h: HostRow, detailed: boolean, now: number, pool: Runnin
   };
   if (!detailed) return out;
   const raw = publicKeyBytes(h.pubkey)!;
+  const report = reportOf(h.report);
+  const fleet = fleetHostOf(fleetRowOf(h), leases, now, selectionRules());
+  const settings = reportedSettingsOf(h.report);
+  const rel = report?.release && typeof report.release === "object" ? (report.release as Record<string, unknown>) : {};
+  const tagOf = (v: unknown) => (typeof v === "string" && /^v\d+\.\d+\.\d+$/.test(v) ? v : null);
+  const rollout = report?.rollout && typeof report.rollout === "object" ? (report.rollout as Record<string, unknown>) : null;
+  const runtime = h.runtime ? (JSON.parse(h.runtime) as Record<string, unknown>) : null;
+  const platform = `${h.arch ?? "?"}-${h.os === "macos" ? "darwin" : "linux"}`;
+  const pinned = PINNED_TOOLS[platform] ?? null;
+  const said = (v: unknown) => (typeof v === "string" && /^v?\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(v) ? v.replace(/^v/, "") : null);
+  // The tools a host on the pool's own release runs are the ones that release pins; the runtime's own word when its report says it.
+  const onPool = !!h.release_applied && h.release_applied === pool.version;
   return {
     ...out,
     where: h.where, hostname: h.hostname, os: h.os, arch: h.arch, page_kb: h.page_kb, isolation: h.isolation, dedicated: h.dedicated === null ? null : !!h.dedicated,
     fingerprint: await fingerprint(raw),
     capacity, lanes, units: h.units, agent_slots: h.agent_slots, disk_free: h.disk_free ? JSON.parse(h.disk_free) : null, pool_cap_units: h.pool_cap_units,
+    // The units the pool counts on it now (#324, design v2 §18.1): what it hands it at most, what its leases hold, what is free for a
+    // task, the one kept for pool jobs, and its tasks; the lanes its agent holds off, and why; the limits its runtime enforces.
+    units_busy: fleet.units_busy, units_free: fleet.units_free, units_effective: fleet.units, job_reserved: jobReservedOf(report), tasks: fleet.tasks, state: fleet.state,
+    held_lanes: capacity?.held_lanes ?? [], limits: limitsOf(report),
+    // The owner's caps (design v2 §7.2, §12): what its envelope gives of what was detected, as its agent reports them.
+    owner_caps: settings ? { max_units: settings.envelope.max_units, detected_units: settings.envelope.detected_units, emulate: settings.envelope.emulate } : null,
     reserving_task: h.reserving_task, reserving_since: h.reserving_since,
     below_minimum: capacity?.below_minimum ?? null,
-    runtime: h.runtime ? JSON.parse(h.runtime) : null, provider: h.provider, model: h.model,
-    agent_version: h.agent_version, release_target: h.release_target, rolled_back_from: h.rolled_back_from, rolled_back_at: h.rolled_back_at,
+    runtime, provider: h.provider, model: h.model,
+    // The versions (design v2 §18.1): its agent's; the compose plugin — its report's word, else the one the release it applied pins when
+    // that is the pool's —; the docker CLI that release pins; the engine's, when its report says it.
+    agent_version: h.agent_version,
+    tools: { compose: said(runtime?.compose) ?? (onPool ? pinned?.compose ?? null : null), docker: onPool ? pinned?.docker ?? null : null, engine: said(runtime?.engine), pinned: !said(runtime?.compose) && onPool && !!pinned?.compose },
+    release_target: h.release_target, rolled_back_from: h.rolled_back_from, rolled_back_at: h.rolled_back_at,
+    release_floor: tagOf(rel.floor), min_release: tagOf(rel.min_release),
+    rollout: rollout ? { state: typeof rollout.state === "string" ? rollout.state.slice(0, 40) : null, since: typeof rollout.since === "string" ? rollout.since.slice(0, 40) : null, target: tagOf(rollout.target) } : null,
     // Its registration claims on its last-good after its agent reverted the pool's release, until then (#342): the gate's own word,
     // on the release its registration last claimed on (its dispatcher's) — on another than its agent's last-good the gate refuses
     // it, and this says nothing; the release its agent applied only before its registration ever claimed.
     last_good: lastGoodMessage(updateState(h.claims_on ?? h.release_applied, pool, now, soakOf({ soaking_until: h.soaking_until, quarantine: h.soak_quarantine }), revertedOf(h))),
-    round: h.report ? ((JSON.parse(h.report) as { round?: unknown }).round ?? null) : null,
+    round: roundOf(report),
+    // What only a person fixes (#324, design v2 §18.1): from its status and its last report.
+    needs_person: needsPersonOf({ ...h, status_by: h.status_by, status_reason: h.status_reason }, report),
+    // Its registration's drain (#322): Drain and Resume are on its page too.
+    drained: h.drained_at ? { at: h.drained_at, by: h.drained_by ?? null, reason: h.drain_reason ?? null } : null,
     // The legacy set its agent reports (#344): the project, its state and directory, what a retire-legacy would be refused for.
     legacy: legacyOf(h.report),
     // Its settings (#325): what its agent reports — the narrowing, the envelope it narrows inside, what applies —, what the pool keeps
     // for it, the brake's last window, and the releases it holds in quarantine (what retry-release lifts).
-    settings: reportedSettingsOf(h.report), pool_settings: hostSettingsOf(h.settings), brake: reportedBrakeOf(h.report), quarantine: quarantineOf(h.report),
+    settings, pool_settings: hostSettingsOf(h.settings), brake: reportedBrakeOf(h.report), quarantine: quarantineOf(h.report),
     // Its owner's soak (#326): the minutes its envelope sets, when the soak of the release it is to take ends, and GitHub's latest tag as its agent read it.
     soak: reportedSoakOf(h.report),
     reported_at: h.reported_at, last_seen: h.last_seen, token_issued_at: h.token_issued_at,
@@ -215,19 +267,98 @@ function quarantineOf(report: string | null): string[] {
 export async function handleHostsList(c: Contributor | null, url: URL, env: Env): Promise<Response> {
   const owner = url.searchParams.get("owner");
   if (owner !== null && !/^[A-Za-z0-9-]{1,39}$/.test(owner)) return json({ error: "owner is a GitHub login" }, 400);
-  const rows = (await (owner
-    ? env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM hosts WHERE owner_login = ? AND status != 'retired' ORDER BY enrolled_at DESC LIMIT 50`).bind(owner)
-    : env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM hosts WHERE status != 'retired' ORDER BY enrolled_at DESC LIMIT 100`)
-  ).all<HostRow>()).results;
+  const [listed, held] = await env.DB.batch([
+    owner
+      ? env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM ${HOST_VIEW_FROM} WHERE hosts.owner_login = ? AND hosts.status != 'retired' ORDER BY hosts.enrolled_at DESC LIMIT 50`).bind(owner)
+      : env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM ${HOST_VIEW_FROM} WHERE hosts.status != 'retired' ORDER BY hosts.enrolled_at DESC LIMIT 100`),
+    env.DB.prepare(FLEET_LEASES_SQL),
+  ]);
+  const rows = listed.results as HostRow[], leases = held.results as FleetLease[];
   const now = Date.now();
   const pool = version(env);
-  const hosts = await Promise.all(rows.map((h) => hostView(h, mayDetail(c, h), now, pool)));
+  const rules = selectionRules();
+  // Each with its fleet row (#324, design v2 §18.2): its lanes, its units busy and free, its tasks and its state, public as the Workers
+  // page is — a person's page lists their hosts with them.
+  const hosts = await Promise.all(rows.map(async (h) => ({ ...(await hostView(h, mayDetail(c, h), now, pool, leases)), fleet: fleetHostOf(fleetRowOf(h), leases, now, rules) })));
   let notices: { host: string; owner: string; line: string; at: string }[] = [];
   if (c && c.role === "maintainer") {
     const recent = (await env.DB.prepare("SELECT * FROM hosts WHERE confirmed_at > ? AND owner_login != ? ORDER BY confirmed_at DESC LIMIT 10").bind(iso(now - 7 * 24 * 60 * MIN), c.login).all<HostRow>()).results;
     notices = recent.map((h) => ({ host: h.id, owner: h.owner_login, at: h.confirmed_at!, line: newHostLine(h) }));
   }
   return json({ hosts, notices, minimum: MIN_HOST, fresh_minutes: HOST_REPORT_FRESH_MIN }, 200, NO_STORE);
+}
+
+// ---------- the fleet: the Workers page's hosts and Status's lines (#324, design v2 §18.2, §18.3) ----------
+
+/** The hosts that are not retired, with their registration's liveness and drain: a handful of maintainers' machines, no index needed. */
+const FLEET_HOSTS_SQL = `SELECT ${HOST_VIEW_COLS} FROM ${HOST_VIEW_FROM} WHERE hosts.status != 'retired' ORDER BY hosts.name, hosts.id LIMIT 100`;
+/** Each architecture's queue of the tasks a lane runs (builds, trials), by the queue index: how many, the oldest, those waiting for a native host. */
+export const QUEUE_BY_ARCH_SQL = `SELECT arch, COUNT(*) AS n, MIN(created_at) AS oldest, SUM(json_extract(params, '$.needs_native') IS 1) AS needs_native
+  FROM build_tasks WHERE status = 'queued' AND kind IN (${QUEUED_KINDS.map((k) => `'${k}'`).join(", ")}) GROUP BY arch`;
+/**
+ * The unit-hours each architecture's lanes spent on hosts' leases over the week (?1 now, ?2 a week ago): every lease of a host
+ * (`lease_gen`) of a lane's kinds, from its start (or the week's) to its end (or now), by its units — what Status's busy ratio
+ * divides by the units the hosts that run the lane have. The tasks a week touched: what the stats' weekly series read as well.
+ */
+export const BUSY_7D_SQL = `SELECT arch, lane, SUM(COALESCE(units, 1) * (julianday(CASE WHEN status = 'leased' THEN ?1 ELSE finished_at END) - julianday(CASE WHEN started_at < ?2 THEN ?2 ELSE started_at END))) * 24 AS unit_hours
+  FROM build_tasks WHERE lease_gen IS NOT NULL AND lane IN ('native', 'emulated') AND kind IN (${QUEUED_KINDS.map((k) => `'${k}'`).join(", ")}) AND started_at IS NOT NULL
+    AND (status = 'leased' OR (finished_at IS NOT NULL AND finished_at > ?2)) GROUP BY arch, lane`;
+/**
+ * The journal's lines Status reads of the last day (by the kind index): a host lease lost (its fail's `lost`) and a task clamped to
+ * the largest host alive (the claim's own line). Matched on the payload's text as the pool writes it (JSON.stringify, no spaces):
+ * SQLite's JSON parser is never asked to read a line.
+ */
+export const FLEET_EVENTS_SQL = `SELECT summary, payload, created_at FROM events WHERE kind = 'build' AND created_at > ?
+  AND (payload LIKE '%"lost":true%' OR payload LIKE '%"clamped":true%') ORDER BY created_at DESC LIMIT 100`;
+/** The models the registrations alive say they run (their claims' `agent`), with how many and how many of them are hosts'. */
+export const MODEL_MIX_SQL = `SELECT agent, COUNT(*) AS n, SUM(kind = 'host') AS hosts FROM build_workers WHERE revoked_at IS NULL AND last_seen > ? AND agent IS NOT NULL
+  GROUP BY agent ORDER BY n DESC, agent LIMIT 20`;
+/** Last week's audits of the project's copies of packages (publish-bound, #339), by how independent their lease recorded them, by the kind index. */
+export const AUDITS_7D_SQL = `SELECT a.independent AS independent, COUNT(*) AS n FROM build_tasks a WHERE a.kind = 'audit' AND a.status = 'done' AND a.finished_at > ?
+  AND EXISTS (SELECT 1 FROM build_tasks b WHERE b.id = json_extract(a.params, '$.task') AND b.kind = 'build' AND b.trust = 'project' AND json_extract(b.params, '$.review') IS NOT NULL)
+  GROUP BY a.independent`;
+
+/**
+ * GET /hosts/fleet — the fleet, public (design v2 §18.2, §18.3): each host's fleet row — owner, lanes, units busy and free, tasks,
+ * release, isolation level, whether its agent reports —; the Status lines — each host's warnings, errors and info, the capacity per
+ * architecture (the scaling signal) and the second opinion —; and the numbers behind them. One read for the Workers page and
+ * Status, kept a minute at the edge as the stats are: the week's sums read the tasks it touched.
+ */
+export async function handleFleet(env: Env): Promise<Response> {
+  const now = Date.now();
+  const at = iso(now), weekAgo = iso(now - WEEK_DAYS * 24 * 60 * MIN);
+  const [hostRows, leaseRows, queue, busy, events, mix, audits] = await env.DB.batch([
+    env.DB.prepare(FLEET_HOSTS_SQL),
+    env.DB.prepare(FLEET_LEASES_SQL),
+    env.DB.prepare(QUEUE_BY_ARCH_SQL),
+    env.DB.prepare(BUSY_7D_SQL).bind(at, weekAgo),
+    env.DB.prepare(FLEET_EVENTS_SQL).bind(iso(now - CLAMPED_WINDOW_H * 60 * MIN)),
+    env.DB.prepare(MODEL_MIX_SQL).bind(iso(now - WORKER_ALIVE_MINUTES * MIN)),
+    env.DB.prepare(AUDITS_7D_SQL).bind(weekAgo),
+  ]);
+  const rows = (hostRows.results as HostRow[]).map(fleetRowOf);
+  const leases = leaseRows.results as FleetLease[];
+  const rules = selectionRules();
+  const hosts = rows.map((h) => fleetHostOf(h, leases, now, rules));
+  const lost: { worker: string; task: number; at: string }[] = [], clamped: { task: number; summary: string; at: string }[] = [];
+  for (const e of events.results as { summary: string; payload: string | null; created_at: string }[]) {
+    let p: { task?: unknown; worker?: unknown; lost?: unknown; clamped?: unknown } = {};
+    try { p = e.payload ? JSON.parse(e.payload) : {}; } catch { continue; }
+    if (typeof p.task !== "number") continue;
+    if (p.lost === true && typeof p.worker === "string" && Date.parse(e.created_at) > now - LOST_WINDOW_MIN * MIN) lost.push({ worker: p.worker, task: p.task, at: e.created_at });
+    if (p.clamped === true && !clamped.some((x) => x.task === p.task)) clamped.push({ task: p.task, summary: e.summary, at: e.created_at });
+  }
+  const pool = version(env);
+  const capacity = capacityOf(queue.results as QueueRow[], hosts, rows, busy.results as BusyRow[], now);
+  const second = secondOpinionOf(mix.results as MixRow[], audits.results as AuditRow[]);
+  const rank = { error: 0, warn: 1, info: 2 } as const;
+  const lines = [...hostLines(rows, { lost, clamped }, pool, now), ...capacityLines(capacity), second.line]
+    .map((l, i) => [l, i] as const).sort((a, b) => rank[a[0].level] - rank[b[0].level] || a[1] - b[1]).map(([l]) => l);
+  return json(
+    { generated_at: at, pool: { version: pool.version, deployed_at: pool.deployed_at }, hosts, lines, capacity, second_opinion: { mix: second.mix, audits: second.audits, none: second.none, share_none: second.share_none } },
+    200,
+    { "cache-control": "public, max-age=60" },
+  );
 }
 
 /** The new-host line, the journal's and the notice's (D40). */
@@ -239,29 +370,74 @@ function newHostLine(h: HostRow): string {
 /** A host's last host orders, newest first, through (host_id, issued_at): what its page lists with each answer (#344), a settings order's value and whether a diagnostics order brought lines (#325). */
 export const HOST_ORDERS_SQL = "SELECT o.id, o.kind, o.arg, o.issued_by, o.issued_at, o.not_after, o.state, o.answered_at, o.detail, d.order_id IS NOT NULL AS lines FROM host_orders o LEFT JOIN host_diagnostics d ON d.order_id = o.id WHERE o.host_id = ? ORDER BY o.issued_at DESC LIMIT 10";
 
-/** GET /hosts/:id — one host and the leases its registration holds (the minimal host page, design v2 §18.1); for its owner and the maintainers its last host orders too (#344). */
+/** The leases a host's registration holds, by the lease index: what its page lists, and what a Stop on each reads (orders.ts HeldTask). */
+export const HOST_LEASES_SQL = "SELECT id, kind, name, arch, version, owner, trust, status, lease_owner, lease_expires_at, stop_order, attempts, max_attempts, params, lane, units, size, started_at FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id";
+type HostLease = HeldTask & { lane: string | null; units: number | null; size: number | null; started_at: string | null };
+
+/**
+ * GET /hosts/:id — one host (the host page, design v2 §18.1). Anyone gets its public fields; its owner and the maintainers its
+ * details, the leases its registration holds — each with whether this reader may Stop it, the door's own words where not (#324) —,
+ * its last host orders (#344), where its registration stands at the 426 gate (#326), and its registration's Drain, Resume and
+ * Update as the worker orders' door answers them (orders.ts orderVerdicts): Drain and Resume with the owner rule (#322), and
+ * Update, which is Reconcile now for an agent that takes no host order yet.
+ */
 export async function handleHostGet(c: Contributor | null, id: string, env: Env): Promise<Response> {
-  const h = await env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM hosts WHERE id = ?`).bind(id).first<HostRow>();
+  const h = await env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM ${HOST_VIEW_FROM} WHERE hosts.id = ?`).bind(id).first<HostRow>();
   if (!h) return json({ error: "no such host" }, 404, NO_STORE);
-  const leases = h.worker_id
-    ? (await env.DB.prepare("SELECT id, kind, name, arch, lane, units, size, started_at, lease_expires_at, stop_order IS NOT NULL AS fenced FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id").bind(h.worker_id).all()).results
-    : [];
-  const viewer = c ? await viewerOf(env, c) : null;
   const detailed = mayDetail(c, h);
+  const held = h.worker_id ? ((await env.DB.prepare(HOST_LEASES_SQL).bind(h.worker_id).all<HostLease>()).results) : [];
+  const viewer = c ? await viewerOf(env, c) : null;
   const orders = detailed
     ? (await env.DB.prepare(HOST_ORDERS_SQL).bind(h.id).all<Record<string, unknown>>()).results.map((o) => ({ ...o, arg: o.arg ? JSON.parse(o.arg as string) : null, lines: !!o.lines }))
     : undefined;
   const pool = version(env);
+  const now = Date.now();
+  const leases = held.map((l) => ({ id: l.id, lease_owner: l.lease_owner ?? "", kind: l.kind, arch: l.arch, lane: l.lane, units: l.units, size: l.size }));
+  const reg = detailed && h.worker_id ? await registrationOf(env, c!, h.worker_id, held, now) : null;
+  const verdicts = hostVerdicts(viewer, h);
+  // Reconcile now (design v2 §17.1): a host order for an agent that takes them; an Update of its registration for one that does not yet.
+  const reconcileVia = verdicts.reconcile.ok ? "order" : reg?.can.update && !agentTakesOrders(h.agent_version) ? "update" : null;
+  const can = canOf(verdicts);
   return json(
     {
       // Where its registration stands at the 426 gate (#326) tells its soak and the releases it holds in quarantine: its owner's and the
       // maintainers', as host.soak and host.quarantine are.
-      host: await hostView(h, detailed, Date.now(), pool), leases, orders, pool: { version: pool.version, deployed_at: pool.deployed_at }, update: detailed ? await gateOf(env, h, pool) : undefined,
-      can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h), retire_legacy: true },
+      host: await hostView(h, detailed, now, pool, leases),
+      // Its leases are its details (§18.1): a visitor gets their count on the Workers page, not what runs.
+      leases: detailed ? held.map((l) => ({
+        id: l.id, kind: l.kind, name: l.name, arch: l.arch, lane: l.lane, units: l.units, size: l.size, started_at: l.started_at, lease_expires_at: l.lease_expires_at, fenced: !!l.stop_order,
+        stop: reg?.stops.get(l.id) ?? { ok: false, why: "its owner's and the maintainers'" },
+      })) : undefined,
+      orders, pool: { version: pool.version, deployed_at: pool.deployed_at }, update: detailed ? await gateOf(env, h, pool) : undefined,
+      registration: reg ? { id: reg.id, drained: reg.drained, can: reg.can, why: reg.why } : null,
+      can: { ...can, reconcile_via: reconcileVia }, passkey: { retire: !!viewer && !isOwner(viewer, h), retire_legacy: true },
     },
     200,
     NO_STORE,
   );
+}
+
+/**
+ * A host's registration as the host page's own controls read it (#324): its drain, and what the worker orders' door
+ * (orders.ts orderVerdicts) answers this reader for Drain, Resume and Update, and for a Stop of each lease — the counts behind
+ * the caps read once (orderFacts), the task each Stop names set in turn — so a grey button is one the door refuses in the
+ * same words.
+ */
+async function registrationOf(env: Env, c: Contributor, worker: string, held: HeldTask[], now: number) {
+  const w = await env.DB.prepare(WORKER_ROW_SQL).bind(worker).first<OrderWorker & { id: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
+  if (!w) return null;
+  const facts: OrderFacts = await orderFacts(env, w.id, c.login, now, true);
+  const v = orderVerdicts(c, w, facts);
+  const pick = (k: "drain" | "resume" | "update") => v[k];
+  const can = { drain: pick("drain").ok, resume: pick("resume").ok, update: pick("update").ok };
+  const why: Record<string, string> = {};
+  for (const k of ["drain", "resume", "update"] as const) { const x = pick(k); if (!x.ok) why[k] = x.why; }
+  const stops = new Map<number, { ok: boolean; why?: string }>();
+  for (const t of held) {
+    const x = orderVerdicts(c, w, { ...facts, task: t }).stop_task;
+    stops.set(t.id, x.ok ? { ok: true } : { ok: false, why: x.why });
+  }
+  return { id: w.id, drained: w.drained_at ? { at: w.drained_at, by: w.drained_by, reason: w.drain_reason } : null, can, why, stops };
 }
 
 /**
@@ -507,7 +683,9 @@ export const POOL_CAP_MAX = 4096;
  * POST /hosts/:id/cap — {units: N | null, reason}: its owner or any
  * maintainer (design v2 §7.2). The pool hands the host at most N units,
  * whatever its envelope and its reports say (hosts.pool_cap_units, which
- * every claim reads); null lifts the cap. Lowered below what it holds,
+ * every claim reads), and its envelope stays as its owner wrote it — the
+ * host is sent nothing; null lifts the cap. A cap above the units the pool
+ * counts on the host is refused (#324): it would cap nothing. Lowered below what it holds,
  * nothing running ends: it claims nothing until its leases fit (§7.6). The
  * Studio canary runs at one build under it (§21.1). One journal line with
  * who and why.
@@ -521,6 +699,8 @@ export async function handleCapHost(c: Contributor, id: string, request: Request
   if (no) return no;
   const units = p.b.units;
   if (units !== null && (typeof units !== "number" || !Number.isInteger(units) || units < 0 || units > POOL_CAP_MAX)) return json({ error: `units: a whole number from 0 to ${POOL_CAP_MAX}, or null to lift the cap`, code: "units" }, 400, NO_STORE);
+  // A cap above the units the pool counts on it caps nothing (#324, design v2 §18.1): refused, so the page never shows a cap that does not hold.
+  if (units !== null && h.units !== null && units > h.units) return json({ error: `units: at most ${h.units}, the units the pool counts on ${h.name} — a cap above them caps nothing; lift the cap (null) to let its count decide`, code: "units" }, 400, NO_STORE);
   const reason = reasonOf(p.b.reason);
   if (reason instanceof Response) return reason;
   const at = iso(Date.now());
@@ -910,14 +1090,16 @@ export async function signedHost(request: Request, env: Env, url: URL, max = REP
  * orders, and its open host orders, each with its id and not_after (an
  * order past it is never sent) and a settings order with its value; P4's
  * (#325) settings: what its agent took, which an agent that lost its own
- * narrows to again. Every answer is the host's alone: no-store.
+ * narrows to again. Every answer is the host's alone: no-store. Its row's
+ * `last_seen` is written only once it is HOST_ROW_TOUCH_MIN old (#324).
  */
 export async function handleHostState(s: SignedHost, env: Env): Promise<Response> {
   const h = s.host;
   const now = Date.now();
   const at = iso(now);
   const [, orders, worker] = await env.DB.batch([
-    env.DB.prepare("UPDATE hosts SET last_seen = ? WHERE id = ?").bind(at, h.id),
+    // Written only when it is HOST_ROW_TOUCH_MIN old (#324): the poll every two minutes writes nothing in between.
+    env.DB.prepare("UPDATE hosts SET last_seen = ? WHERE id = ? AND (last_seen IS NULL OR last_seen < ?)").bind(at, h.id, iso(now - HOST_ROW_TOUCH_MIN * MIN)),
     env.DB.prepare(HOST_OPEN_ORDERS_SQL).bind(h.id, at),
     env.DB.prepare("SELECT open_orders FROM build_workers WHERE id = ? AND host_id = ? AND revoked_at IS NULL").bind(h.worker_id ?? "", h.id),
   ]);
@@ -967,6 +1149,8 @@ export async function handleHostToken(s: SignedHost, env: Env): Promise<Response
  * the last one and the columns its pages read; the units are its own count
  * from the reported totals. `asleep: true` (#329) — a Mac about to sleep —
  * gives the host zero free units until a report says otherwise (asleepNow).
+ * D1 is written only on a change (#324): a report the same as the last one,
+ * within HOST_ROW_TOUCH_MIN of it, writes nothing (`written: false`).
  */
 export async function handleHostReport(s: SignedHost, env: Env): Promise<Response> {
   const h = s.host;
@@ -980,6 +1164,11 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   if (!r || typeof r !== "object" || Array.isArray(r)) return json({ error: "the report is an object" }, 400, NO_STORE);
   const leak = findLeak(text);
   if (leak) return json({ error: `the report carries what looks like ${leak.kind} (line ${leak.line}); nothing was written`, code: "leak" }, 422, NO_STORE);
+  // The same report as the last one the pool kept, within HOST_ROW_TOUCH_MIN of it (#324, design v2 §18): nothing to write — its
+  // answers closed their orders when it first came, and the row is fresh enough for every reader (a host is silent after ten minutes).
+  if (h.report === text && h.reported_at && Date.parse(h.reported_at) > Date.now() - HOST_ROW_TOUCH_MIN * MIN) {
+    return json({ ok: true, at: h.reported_at, units: h.units, below_minimum: null, asleep: h.asleep_at !== null, orders_closed: 0, written: false }, 200, NO_STORE);
+  }
   const str = (v: unknown, re: RegExp) => (typeof v === "string" && re.test(v) ? v : null);
   const tag = /^v\d+\.\d+\.\d+$/;
   // An agent that has no whole capacity file to send leaves it out; null says the same.
@@ -1045,7 +1234,7 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
     ]));
     closed = results.filter((x, i) => i % 3 === 0 && x.meta.changes).length;
   }
-  return json({ ok: true, at, units: cap ? unitsOf(cap) : h.units, below_minimum: cap ? belowMinimum(cap) : null, asleep, orders_closed: closed }, 200, NO_STORE);
+  return json({ ok: true, at, units: cap ? unitsOf(cap) : h.units, below_minimum: cap ? belowMinimum(cap) : null, asleep, orders_closed: closed, written: true }, 200, NO_STORE);
 }
 
 /**
