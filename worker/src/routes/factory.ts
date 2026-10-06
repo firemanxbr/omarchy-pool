@@ -13,7 +13,7 @@ import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
-import { asleepNow, parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
+import { asleepNow, freshSince, parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
 import { largestSize, ownerCap, ownersLeased, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
@@ -1101,7 +1101,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     if (writes.length) await env.DB.batch(writes);
   }
   const choices = select(me, fleet, all, nowMs, rules);
-  const hostOk = k.hostId ? ` AND ${HOST_MAY_LEASE_SQL}` : "";
+  const hostOk = k.hostId ? ` AND ${HOST_MAY_LEASE_SQL} AND ${HOST_AWAKE_SQL}` : "";
   // A host's units, again in the statement itself: what it holds plus this task within its count (the reserved unit for pool jobs only).
   const guard = host ? " AND (SELECT COALESCE(SUM(l.units), 0) FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ?) + ? <= ?" : "";
   for (const c of choices.slice(0, LEASE_TRIES)) {
@@ -1111,8 +1111,9 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     // lease on a worker nobody stopped, so the lease starts without it. A host's lease (#334) carries a new generation, its lane,
     // size, units and disk budget, the release it was claimed on and the claim that took it; a legacy one no generation — the
     // column is cleared, so a host's stale one never outlives its lease — and its one lane. A host's registration leases only
-    // while its host may claim, checked by this very statement (#322): a suspension that commits meanwhile leaves it nothing. A
-    // reservation's window ends with the lease: queued again, the task may be reserved for anew.
+    // while its host may claim and does not sleep, checked by this very statement (#322, #329): a suspension, or an asleep report,
+    // that commits meanwhile leaves it nothing. A reservation's window ends with the lease: queued again, the task may be reserved
+    // for anew.
     const task = await env.DB.prepare(
       `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL, stop_order = NULL,
          lease_gen = ?, lane = ?, size = ?, units = ?, disk_gb = ?, release = ?, claim_id = ?, lease_missed = 0, reserved_at = NULL
@@ -1120,7 +1121,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     )
       .bind(
         k.workerId, plusMinutes(LEASE_MINUTES), at, host ? leaseGen() : null, c.lane, c.size, c.units, c.disk_gb, host ? k.version : null, host ? k.hc!.claimId : null, c.id,
-        ...(hostOk ? [k.hostId] : []), ...(guard ? [k.workerId, c.units, limit] : []),
+        ...(hostOk ? [k.hostId, k.hostId, freshSince(nowMs)] : []), ...(guard ? [k.workerId, c.units, limit] : []),
       )
       .first<TaskRow>();
     if (!task) continue;

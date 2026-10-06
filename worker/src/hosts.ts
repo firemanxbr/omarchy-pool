@@ -69,6 +69,16 @@ export function asleepNow(h: { asleep_at: string | null; reported_at: string | n
   return h.asleep_at !== null && h.reported_at !== null && Date.parse(h.reported_at) > now - HOST_REPORT_FRESH_MIN * 60_000;
 }
 
+/**
+ * The lease's own check that its host does not sleep (#329), asleepNow in SQL: the claim's UPDATE takes a task only while no fresh
+ * report of the host says `asleep`, in the same statement beside HOST_MAY_LEASE_SQL — an asleep report that commits between the
+ * claim's read of its host and its lease leaves it nothing. Two bindings: the host's id, and the time HOST_REPORT_FRESH_MIN before
+ * the claim (ISO, as `reported_at` is written: the strings order as the times do).
+ */
+export const HOST_AWAKE_SQL = "NOT EXISTS (SELECT 1 FROM hosts WHERE id = ? AND asleep_at IS NOT NULL AND reported_at > ?)";
+/** HOST_AWAKE_SQL's second binding: the time HOST_REPORT_FRESH_MIN before `now`. */
+export const freshSince = (now: number): string => new Date(now - HOST_REPORT_FRESH_MIN * 60_000).toISOString();
+
 export const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 export const HOST_ID = /^h_[0-9a-z]{10}$/;
 const ARCHES = ["x86_64", "aarch64"] as const;

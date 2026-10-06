@@ -10,7 +10,9 @@
  * - a host reporting `asleep: true` is handed nothing while work waits — the
  *   claim its dispatcher makes before the VM stops gets a 204 — and its
  *   leases stay its own; the report after the wake, and its next claim takes
- *   work again, with nobody's action;
+ *   work again, with nobody's action; an asleep report that commits between
+ *   a claim's read of its host and its lease leaves that claim nothing (the
+ *   lease's own statement checks it);
  * - a sleeping host is no capacity for anyone else: an emulated lane does not
  *   wait for its native one, and it counts in no size alive;
  * - a stale `asleep` (no report for 15 minutes) holds nothing: a dispatcher
@@ -183,6 +185,40 @@ describe("a host that sleeps gets no new task", () => {
     const again = await claim(mac, [held]);
     expect(again.status, JSON.stringify(again.json)).toBe(200);
     expect(again.json.task.id).toBe(b);
+  });
+
+  it("an asleep report that commits between a claim's read of its host and its lease leaves that claim nothing: the lease's own statement checks it", async () => {
+    const mac = await enrolled(MAC);
+    await report(mac, false);
+    const t = await seedTask();
+    // The report lands after the claim read its host (awake) and before its lease UPDATE runs.
+    const db = env.DB, prepare = db.prepare.bind(db);
+    let raced = false;
+    (db as { prepare: typeof db.prepare }).prepare = (sql: string) => {
+      const stmt = prepare(sql);
+      if (!sql.includes("UPDATE build_tasks SET status = 'leased'")) return stmt;
+      return { bind: (...args: unknown[]) => ({ first: async () => {
+        if (!raced) {
+          raced = true;
+          expect((await report(mac, true)).status).toBe(200);
+        }
+        return stmt.bind(...args).first();
+      } }) } as unknown as D1PreparedStatement;
+    };
+    try {
+      const got = await claim(mac);
+      expect(got.status, JSON.stringify(got.json)).toBe(204);
+    } finally {
+      (db as { prepare: typeof db.prepare }).prepare = prepare;
+    }
+    expect(raced).toBe(true);
+    expect((await rowOf(mac))!.asleep_at).not.toBeNull();
+    expect(await taskOf(t)).toMatchObject({ status: "queued", lease_owner: null });
+    // Awake again: the next claim takes it.
+    await report(mac, false);
+    const again = await claim(mac);
+    expect(again.status, JSON.stringify(again.json)).toBe(200);
+    expect(again.json.task.id).toBe(t);
   });
 
   it("is no capacity for anyone else: an emulated lane does not wait for its native one, and it counts in no size alive", async () => {
