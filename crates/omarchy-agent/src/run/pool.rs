@@ -1,8 +1,9 @@
 //! What the agent asks over the network (design v2 §16.1, §16.4, §17.1): the pool's host
 //! state (`GET /api/v1/hosts/self/state`, signed with the host key, #344) — the release
 //! target, the open Update orders of the host's registration and the host orders — and
-//! its rollback relay, the host report (`POST /api/v1/hosts/self/report`, signed), and
-//! the release assets on GitHub. Answers are read leniently and sorted three ways; none
+//! its rollback relay (with the maintainers' co-signatures of a statement, #330), the host
+//! report (`POST /api/v1/hosts/self/report`, signed), and the release assets on GitHub (a
+//! bundle's co-signatures among them, each of which may not exist). Answers are read leniently and sorted three ways; none
 //! of them ever stops the agent: no answer, a 5xx or a malformed body changes nothing; a
 //! 401/403 changes nothing and slows the polls to hourly. The host state's answer, whatever
 //! its status, also gives the pool's clock (its `Date`), which a Mac's VM is held to (#320).
@@ -15,6 +16,7 @@
 //! without its `follow` every host already on 0.3.0 would see no target and never fetch the
 //! rollback statement (design v2 §16).
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -110,11 +112,13 @@ impl OrderKind {
 }
 
 /// A signed rollback statement as the pool relays it: the exact signed bytes and the
-/// Sigstore bundle.
+/// Sigstore bundle, and the maintainers' co-signatures over it (#330) by login, which the
+/// agent verifies itself (a pool can only withhold one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Relayed {
     pub statement: Vec<u8>,
     pub bundle: Vec<u8>,
+    pub cosignatures: BTreeMap<String, Vec<u8>>,
 }
 
 pub(crate) trait Pool {
@@ -134,6 +138,9 @@ pub(crate) trait Pool {
     fn rollback(&mut self, to: Release) -> Net<Option<Relayed>>;
     /// A file of release `r` on GitHub (the host bundle and its signature).
     fn release_asset(&mut self, r: Release, name: &str) -> Net<Vec<u8>>;
+    /// The same for a file the release may not carry (a maintainer's co-signature, #330):
+    /// `Ok(None)` when GitHub answers 404.
+    fn release_asset_if_any(&mut self, r: Release, name: &str) -> Net<Option<Vec<u8>>>;
     /// A pinned tool (checked by SHA-256 by the caller).
     fn download(&mut self, url: &str) -> Net<Vec<u8>>;
     /// The public address the pool's edge sees this host come from over IPv4 (#371): the
@@ -149,6 +156,9 @@ const REPORT_PATH: &str = "/api/v1/hosts/self/report";
 const TRACE_MAX: u64 = 4 << 10;
 const STATEMENT_MAX: u64 = 1 << 20;
 const BUNDLE_MAX: u64 = 64 << 20;
+/// At most this many co-signatures are read from one relay (no governance file lists more
+/// maintainers).
+const MAX_COSIGNATURES: usize = 16;
 pub(crate) const RELEASES: &str = "https://github.com/firemanxbr/omarchy-pool/releases/download";
 /// At most this many host orders and Update ids are read from one answer.
 const MAX_ORDERS: usize = 32;
@@ -250,21 +260,42 @@ pub(crate) fn parse_follow(body: &[u8], worker_id: &str) -> Result<Follow, Strin
     })
 }
 
-/// Reads the relay's body: `{to, statement, bundle}`, the statement as the signed text.
+/// Reads the relay's body: `{to, statement, bundle, cosignatures?}`, the statement as the
+/// signed text. `cosignatures` (login → `ssh-keygen -Y sign`'s armored text, #330) is read
+/// leniently: an entry that is no login and a string is left out, never the statement.
 pub(crate) fn parse_relayed(body: &[u8], to: Release) -> Result<Relayed, String> {
     #[derive(Deserialize)]
     struct Raw {
         to: String,
         statement: String,
         bundle: String,
+        #[serde(default)]
+        cosignatures: Option<serde_json::Value>,
     }
     let raw: Raw = serde_json::from_slice(body).map_err(|e| format!("rollback relay: {e}"))?;
     if Release::parse(&raw.to) != Some(to) {
         return Err(format!("rollback relay: asked for {to}, got {:?}", raw.to));
     }
+    let cosignatures = match raw.cosignatures {
+        Some(serde_json::Value::Object(m)) => m
+            .into_iter()
+            .filter_map(|(login, sig)| match sig {
+                serde_json::Value::String(text)
+                    if crate::verify::cosignature::is_login(&login)
+                        && text.len() <= crate::verify::cosignature::MAX_ARMORED =>
+                {
+                    Some((login, text.into_bytes()))
+                }
+                _ => None,
+            })
+            .take(MAX_COSIGNATURES)
+            .collect(),
+        _ => BTreeMap::new(),
+    };
     Ok(Relayed {
         statement: raw.statement.into_bytes(),
         bundle: raw.bundle.into_bytes(),
+        cosignatures,
     })
 }
 
@@ -514,6 +545,18 @@ impl Pool for Https {
         self.get_ok(&self.agent, &format!("{RELEASES}/{r}/{name}"), BUNDLE_MAX)
     }
 
+    fn release_asset_if_any(&mut self, r: Release, name: &str) -> Net<Option<Vec<u8>>> {
+        let url = format!("{RELEASES}/{r}/{name}");
+        match self.get(&self.agent, &url, STATEMENT_MAX) {
+            Net::Ok((404, _)) => Net::Ok(None),
+            other => match ok_body(other) {
+                Net::Ok(b) => Net::Ok(Some(b)),
+                Net::NoAnswer(e) => Net::NoAnswer(format!("{name}: {e}")),
+                Net::Unauthorized(s) => Net::Unauthorized(s),
+            },
+        }
+    }
+
     fn download(&mut self, url: &str) -> Net<Vec<u8>> {
         self.get_ok(&self.downloads, url, super::tools::MAX_TOOL)
     }
@@ -732,5 +775,42 @@ mod tests {
         assert_eq!(parse_relayed(ok, to).unwrap().statement, br#"{"schema":1}"#);
         let other = br#"{"to":"v1.12.0","statement":"{}","bundle":"{}"}"#;
         assert!(parse_relayed(other, to).is_err());
+    }
+
+    #[test]
+    fn the_relays_co_signatures_are_read_leniently_and_never_cost_the_statement() {
+        let to = Release::parse("v1.13.4").unwrap();
+        let body = |c: &str| {
+            format!(r#"{{"to":"v1.13.4","statement":"{{}}","bundle":"{{}}","cosignatures":{c}}}"#)
+        };
+        let r = parse_relayed(
+            body(r#"{"alice":"-----BEGIN SSH SIGNATURE-----","not a login":"x","bob":7}"#)
+                .as_bytes(),
+            to,
+        )
+        .unwrap();
+        assert_eq!(
+            r.cosignatures.keys().collect::<Vec<_>>(),
+            ["alice"],
+            "{r:?}"
+        );
+        for c in ["null", "[]", "\"x\"", "{}"] {
+            let r = parse_relayed(body(c).as_bytes(), to).unwrap();
+            assert!(r.cosignatures.is_empty(), "{c}");
+        }
+        let many: String = (0..40)
+            .map(|i| format!("\"m{i}\":\"s\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let r = parse_relayed(body(&format!("{{{many}}}")).as_bytes(), to).unwrap();
+        assert_eq!(r.cosignatures.len(), MAX_COSIGNATURES);
+        let big = format!(
+            r#"{{"alice":"{}"}}"#,
+            "A".repeat(crate::verify::cosignature::MAX_ARMORED + 1)
+        );
+        assert!(parse_relayed(body(&big).as_bytes(), to)
+            .unwrap()
+            .cosignatures
+            .is_empty());
     }
 }

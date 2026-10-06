@@ -1456,7 +1456,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
 }
 
 fn verifier() -> TestVerifier {
-    TestVerifier(Rc::new(RefCell::new(T0)))
+    TestVerifier(Rc::new(RefCell::new(T0)), Rc::default())
 }
 
 fn measure_on(h: &Host, sys: &mut Fake) -> (Report, Option<Ready>) {
@@ -1539,6 +1539,44 @@ fn preflight_lists_every_missing_prerequisite_on_one_screen_and_changes_nothing(
         .map_err(|e| e.to_string())
         .unwrap();
     assert!(r.screen().contains("no unit is left"), "{}", r.screen());
+}
+
+#[test]
+fn a_release_without_the_maintainers_co_signature_is_a_blocker_once_the_agent_requires_it() {
+    use crate::verify::cosignature::tests_support::{policy, TestKey};
+    use crate::verify::cosignature::{self, BUNDLE_NAMESPACE};
+    // #330: this agent pins 1-of-1 (Alice); the bundle beside it carries nothing.
+    let h = host(INFO, EGRESS_OK);
+    let alice = TestKey::ed25519("alice", 1);
+    let carol = TestKey::ed25519("carol", 3);
+    let v = TestVerifier(
+        Rc::new(RefCell::new(T0)),
+        Rc::new(RefCell::new(policy(1, &[&alice]))),
+    );
+    let screen = |h: &Host| {
+        let (r, _) = measure(&h.options, &mut Fake::default(), &v, Some(&h.docker))
+            .map_err(|e| e.to_string())
+            .unwrap();
+        (r.ok(), r.screen())
+    };
+    let (ok, s) = screen(&h);
+    assert!(!ok, "{s}");
+    assert!(
+        s.contains("the release bundle is refused (cosignature): the release bundle needs 1 maintainer co-signature(s) (factory/MAINTAINERS.toml); 0 verify"),
+        "{s}"
+    );
+    // Carol's signature where Alice's goes does not count.
+    let archive = fs::read(h.root.join("bundle.tar.gz")).unwrap();
+    let beside = h
+        .root
+        .join(cosignature::file_name("bundle.tar.gz", "alice"));
+    fs::write(&beside, carol.sign(BUNDLE_NAMESPACE, &archive)).unwrap();
+    let (ok, s) = screen(&h);
+    assert!(!ok && s.contains("alice: signed by another key"), "{s}");
+    // Alice's, beside the bundle: nothing blocks.
+    fs::write(&beside, alice.sign(BUNDLE_NAMESPACE, &archive)).unwrap();
+    let (ok, s) = screen(&h);
+    assert!(ok, "{s}");
 }
 
 #[test]

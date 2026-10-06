@@ -1067,6 +1067,19 @@ fn prune(state: &mut State, ctx: &mut Ctx, target: Release, from: Option<Release
         for ext in ["tar.gz", "tar.gz.sigstore.json"] {
             let _ = fs::remove_file(ctx.paths.bundles().join(format!("omarchy-host-{r}.{ext}")));
         }
+        // And its maintainers' co-signatures (#330), one file each.
+        let cosigned = format!("omarchy-host-{r}.tar.gz.");
+        for e in fs::read_dir(ctx.paths.bundles())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            if n.starts_with(&cosigned) && n.ends_with(".sshsig") {
+                let _ = fs::remove_file(e.path());
+            }
+        }
         ctx.journal.write(
             ctx.now,
             "pruned",

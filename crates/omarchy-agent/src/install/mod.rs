@@ -60,6 +60,7 @@ pub(crate) mod unit;
 
 pub use sys::Machine;
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -70,7 +71,7 @@ use crate::enroll;
 use crate::host::{HostKey, Identity, KEY_FILE};
 use crate::manifest::Manifest;
 use crate::run::{tools, Verifier};
-use crate::verify::BundleOutcome;
+use crate::verify::{cosignature, BundleOutcome};
 use crate::version::Release;
 
 pub use checks::Report;
@@ -340,11 +341,27 @@ fn say(out: &mut dyn Write, line: &str) {
     let _ = writeln!(out, "omarchy-agent: {line}");
 }
 
-/// The verified release: its manifest.
+/// The verified release: its manifest, once it carries the maintainers' co-signatures
+/// this agent requires (#330, D1 b): the release's `<bundle>.<login>.sshsig` assets, or the
+/// files of those names beside `--bundle`.
 fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Manifest, Failure> {
+    let policy = verifier.cosignature();
+    let mut cosignatures = BTreeMap::new();
     let (archive, sig) = match &o.source {
         Some(Source::Files(b, s)) => {
             let read = |p: &Path| std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
+            if policy.threshold() > 0 {
+                let name = b.file_name().map(|n| n.to_string_lossy().into_owned());
+                for login in policy.logins() {
+                    let beside = b.with_file_name(cosignature::file_name(
+                        name.as_deref().unwrap_or_default(),
+                        login,
+                    ));
+                    if let Ok(found) = std::fs::read(beside) {
+                        cosignatures.insert(login.to_owned(), found);
+                    }
+                }
+            }
             (
                 read(b).map_err(Failure::Refused)?,
                 read(s).map_err(Failure::Refused)?,
@@ -353,6 +370,14 @@ fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Ma
         Some(Source::Release(r)) => {
             let (name, sig) = crate::run::bundle_names(*r);
             let url = |n: &str| format!("{}/{r}/{n}", crate::run::RELEASES);
+            if policy.threshold() > 0 {
+                // One a maintainer did not make answers 404, which counts as none.
+                for login in policy.logins() {
+                    if let Ok(found) = sys.download(&url(&cosignature::file_name(&name, login))) {
+                        cosignatures.insert(login.to_owned(), found);
+                    }
+                }
+            }
             (
                 sys.download(&url(&name)).map_err(Failure::Refused)?,
                 sys.download(&url(&sig)).map_err(Failure::Refused)?,
@@ -364,8 +389,19 @@ fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Ma
             ))
         }
     };
+    let cosigned = || {
+        policy
+            .check(cosignature::BUNDLE_NAMESPACE, &archive, &cosignatures)
+            .require(policy.threshold(), "the release bundle")
+            .map_err(|e| {
+                Failure::Refused(format!("the release bundle is refused (cosignature): {e}"))
+            })
+    };
     match verifier.bundle(&archive, &sig) {
-        Ok(BundleOutcome::Current(b)) => Ok(b.manifest().clone()),
+        Ok(BundleOutcome::Current(b)) => {
+            cosigned()?;
+            Ok(b.manifest().clone())
+        }
         Ok(BundleOutcome::NeedsNewerAgent { why, .. }) => Err(Failure::NeedsNewerAgent(format!(
             "needs a newer agent: {why}"
         ))),

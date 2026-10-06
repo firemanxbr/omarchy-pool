@@ -450,6 +450,21 @@ impl Agent {
         let Some(b) = self.cached(applied) else {
             return false;
         };
+        // Its agent is taken only under this agent's co-signature requirement (#330), as at
+        // go_to: an agent never moves on a bundle its own policy did not accept.
+        match self.cosigned_cached(applied, now) {
+            Some(Ok(())) => {}
+            Some(Err(why)) => {
+                self.upward_checked = Some(applied);
+                self.journal.write(
+                    now,
+                    "agent-update",
+                    serde_json::json!({"release": applied.to_string(), "detail": format!("its agent is not taken: {why}")}),
+                );
+                return false;
+            }
+            None => return false,
+        }
         let ships = b.manifest().outer().agent().clone();
         match self.upgrade(applied, &ships, now) {
             Ok(true) => true,
