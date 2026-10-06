@@ -724,6 +724,11 @@ fn a_rootless_engines_stack_is_read_while_the_probe_runs_and_refused_with_its_se
     assert_eq!(out, "probed");
     assert_eq!(seen.iter().map(|s| s.pid).collect::<Vec<_>>(), [40, 42, 43]);
     assert!(!loopback::scan(&proc, me).iter().any(|s| s.pid == 43));
+    // A probe that panics (a real-engine test's unwrap) fails: the watcher stops with it.
+    let panicked = std::panic::catch_unwind(|| {
+        loopback::watching(&proc, me, || panic!("the probe task failed"))
+    });
+    assert!(panicked.is_err());
 
     // The verdict, with the engine's setting.
     let docker = advice(false, false).loopback();

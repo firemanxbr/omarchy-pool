@@ -140,8 +140,15 @@ pub(crate) fn scan(proc: &Path, uid: u32) -> Vec<Stack> {
 }
 
 /// Runs `f`, watching `uid`'s processes in `proc` every 100 ms until it returns, and once
-/// after: what it returned, and every stack seen meanwhile.
+/// after: what it returned, and every stack seen meanwhile. A panic in `f` stops the watcher
+/// too and goes on unwinding: the scope would otherwise wait on the watcher for ever.
 pub(crate) fn watching<T>(proc: &Path, uid: u32, f: impl FnOnce() -> T) -> (T, Vec<Stack>) {
+    struct Done<'a>(&'a AtomicBool);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
     let done = AtomicBool::new(false);
     std::thread::scope(|s| {
         let watcher = s.spawn(|| {
@@ -159,8 +166,10 @@ pub(crate) fn watching<T>(proc: &Path, uid: u32, f: impl FnOnce() -> T) -> (T, V
                 std::thread::sleep(Duration::from_millis(100));
             }
         });
-        let out = f();
-        done.store(true, Ordering::Release);
+        let out = {
+            let _done = Done(&done);
+            f()
+        };
         (out, watcher.join().unwrap_or_default())
     })
 }
