@@ -51,7 +51,8 @@
 //! native lane: an emulated lane's binfmt handler is the host kernel's, so a
 //! sandboxed host's emulated lanes take the project's own recipes only (the
 //! pool's selection; the dispatcher hands back one that reaches them). Never
-//! on a sidecar, which runs the signed worker image and no recipe.
+//! on a sidecar, which runs the signed worker image and no recipe. A signed
+//! network exception (#373) changes the task's network, never its runtime.
 //!
 //! Seams left for later issues, by name: P2's task caches child issue
 //! mounts the read-only shared pacman cache and the per-package build
@@ -1934,6 +1935,21 @@ mod tests {
             assert!(!task_of(&plain).iter().any(|x| x == "--runtime"));
             assert!(check_plan_in(&plain, &work, false, Some("runsc")).is_err());
         }
+        // A package's signed network exception (#373) changes its network, never its runtime:
+        // on its bridge, with no egress sidecar, its task container still runs in the sandbox.
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        s.direct = true;
+        s.runtime = Some("runsc");
+        let p = plan(&s).unwrap();
+        check_plan_in(&p, &work, true, Some("runsc")).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
+        assert!(check_plan(&p, &work, true).is_err());
+        assert!(p.iter().all(|c| !c.iter().any(|x| x.ends_with("-egress"))));
+        // A sandboxed task's egress sidecar is started exactly as an unsandboxed one's, which
+        // install's egress probe shares (#373, tests/fixtures/egress-sidecar.txt): on runc.
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        let plain = plan(&s).unwrap();
+        s.runtime = Some("runsc");
+        assert_eq!(plan(&s).unwrap()[1..4], plain[1..4]);
         // A sidecar under a runtime of its own is outside the spec.
         let mut s = spec(Kind::ModelBuild, &tdir, &rel);
         s.runtime = Some("runsc");

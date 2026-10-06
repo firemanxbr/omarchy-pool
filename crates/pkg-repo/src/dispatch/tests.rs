@@ -3351,6 +3351,44 @@ fn a_package_with_its_signed_exception_gets_a_bridge_network_and_no_egress() {
         .contains("sizing"));
 }
 
+/// A package's signed network exception (#373) changes its network, never its runtime (#330):
+/// a contributor's on a sandboxed host's native lane runs on its bridge in the sandbox, as every
+/// other task of a contributor's there does; it never takes the exception as a way around it.
+#[test]
+fn a_contributors_package_with_its_signed_exception_runs_on_its_bridge_in_the_sandbox() {
+    let h = H::new();
+    sandboxed_file(&h);
+    std::fs::create_dir_all(h.checkout.join("factory/sizing")).unwrap();
+    std::fs::write(
+        h.checkout.join("factory/sizing/tasks.toml"),
+        "schema = 1\n[package.\"felix\"]\nnetwork = \"direct\"\nreason = \"its tests open raw sockets\"\n",
+    )
+    .unwrap();
+    let mut d = h.dispatcher();
+    d.net.direct = true;
+    h.give(on_lane(community(7, GEN), "aarch64", Some("native")));
+    h.ticks(&mut d, 3);
+    let net = spec::container_name(7, GEN);
+    assert!(h.engine.has(7, GEN) && h.engine.has_network(&net));
+    assert!(!h.engine.has_name(&sidecar(7, GEN, "egress")));
+    assert_eq!(
+        runtimes_of(&h, 7, GEN),
+        [Some("runsc".to_owned())],
+        "{:?}",
+        h.pool.fails_of(7)
+    );
+    // And the engine refusing its runtime fails it as any sandboxed start: never on runc.
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
+    h.give(on_lane(community(8, GEN2), "aarch64", Some("native")));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert!(!h.engine.has(8, GEN2));
+    assert!(runtimes_of(&h, 8, GEN2)
+        .iter()
+        .all(|r| r.as_deref() == Some("runsc")));
+    assert_eq!(h.pool.fails_of(8)[0]["lost"], true);
+}
+
 #[test]
 fn a_package_with_its_signed_exception_goes_back_from_a_host_whose_envelope_does_not_grant_it() {
     // A rootless host, say: its bridges reach the LAN through the engine's user-mode network

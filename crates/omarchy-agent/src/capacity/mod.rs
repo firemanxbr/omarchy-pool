@@ -235,8 +235,9 @@ impl AgentToml {
     }
 }
 
-/// Every key of `agent.toml`'s `[envelope]` (design v2 §12), and `direct_network`, the grant
-/// of a signed exception's bridge network (#373).
+/// Every key of `agent.toml`'s `[envelope]` (design v2 §12), `direct_network`, the grant
+/// of a signed exception's bridge network (#373), and `sandbox`, the sandboxed runtime what
+/// a contributor wrote runs in (#330). A signed widening sets neither (`owner::WIDENABLE`).
 const ENVELOPE_KEYS: &[&str] = &[
     "max_units",
     "max_cpus",

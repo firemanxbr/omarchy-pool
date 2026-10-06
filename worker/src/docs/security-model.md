@@ -161,8 +161,11 @@ secret). Everything travels in the `Authorization` header over TLS only.
   selects on that and the host page (*Sandbox*) shows it — not merely what
   the agent found, which a dispatcher from before #330 ignores — with why
   one the engine has is not used and why the claims hold. The envelope's `sandbox` (`"off"`, or one
-  runtime's name) is the owner's; a host without one runs these tasks as
-  before, at its isolation level. Stated plainly: a sandbox's kernel is a
+  runtime's name) is the owner's, set at the host: a signed widening from
+  the browser (#328) never sets it. A host without one runs these tasks as
+  before, at its isolation level. A package with a signed network exception
+  (`direct_network`, #373) changes its network, never its runtime: on a
+  granted host its task runs on its bridge in the sandbox all the same. Stated plainly: a sandbox's kernel is a
   smaller surface, not none — a bug in gVisor's, or in the gofer that serves
   the task's mounts, is still an escape — and the task's own mounts (its
   directories, the release's checkout read-only) are the host's files
@@ -822,8 +825,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   own parser and the lint, and the units are counted again under the applied
   release's signed constants and the detected hardware: a widening never
   gives more than the machine has; nor does it ever set the grant of a
-  signed exception's bridge (`direct_network`, #373), which stays the
-  host's. Narrowing (`set-units`, `set-emulate`) needs no signature, as
+  signed exception's bridge (`direct_network`, #373) or the sandboxed
+  runtime what a contributor wrote runs in (`sandbox`, #330), which stay
+  the host's. Narrowing (`set-units`, `set-emulate`) needs no signature, as
   before. Agent keys are sealed in the owner's
   browser to the host's X25519 seal key, which its owner confirmed once by
   its fingerprint (`omarchy-agent status` prints it at the host): the pool

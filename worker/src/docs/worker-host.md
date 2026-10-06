@@ -238,7 +238,9 @@ machine. The project's own recipes and the sidecars run on the engine as
 before. A sandbox does not cover an emulated lane (its kernel has no binfmt
 handler), so the pool then hands your emulated lanes the project's own
 recipes only. `sandbox = "off"` in your envelope turns it off,
-`sandbox = "kata"` picks one; the host page says which your dispatcher
+`sandbox = "kata"` picks one — at the host: a widening signed from the
+host page (#328) never sets it, nor does a package's signed network
+exception (#373) take its task out of it; the host page says which your dispatcher
 applies, or why none does (podman's docker API, for one, cannot pass the
 runtime on), and why its claims hold if the runtime refuses a start — for 30
 minutes, doubled with each further refusal in a row, a day at most: fix the
