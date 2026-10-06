@@ -802,13 +802,22 @@ fn the_pools_record_of_the_settings_is_taken_only_by_an_agent_without_its_own() 
 /// The report with settings as the pool reads it (`tests/fixtures/host-api/report-settings.json`,
 /// which worker/test/host-settings.test.ts posts, signed, and reads back for the host page):
 /// a host whose envelope allows 8 of its 11 units and its emulated lane, narrowed to 4 units
-/// and no emulated lane. The contract both sides read, written once.
+/// and no emulated lane, and whose agent user has no linger (#324: `needs_person`, which
+/// worker/test/host-page.test.ts reads into the host page's box). The contract both sides
+/// read, written once.
 #[test]
 fn the_report_with_settings_keeps_the_shape_the_pool_reads() {
     use crate::run::orders::tests::{fixture, shape};
     let mut w = studio();
     w.agent.cfg.policy.emulate = Some(vec![foreign().to_owned()]);
     w.agent.cfg.policy.diagnostics = true;
+    let home = w.dir.join("home-omarchy");
+    fs::create_dir_all(&home).unwrap();
+    w.agent.self_check = Some(crate::run::needs::SelfCheck::new(
+        home,
+        "omarchy".into(),
+        Some(w.dir.join("linger")),
+    ));
     for o in [
         json!({"id": format!("ho_{}", "3".repeat(32)), "kind": "set-units", "units": 4}),
         json!({"id": format!("ho_{}", "4".repeat(32)), "kind": "set-emulate", "emulate": []}),
@@ -830,5 +839,9 @@ fn the_report_with_settings_keeps_the_shape_the_pool_reads() {
         json!([{"arch": foreign(), "reason": crate::run::settings::OFF_IN_SETTINGS}])
     );
     assert_eq!(r["brake"]["narrowings_hour"], 2);
+    assert_eq!(
+        r["needs_person"],
+        fixture("report-settings.json")["needs_person"]
+    );
     assert_eq!(shape(&r), shape(&fixture("report-settings.json")));
 }

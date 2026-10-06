@@ -66,6 +66,7 @@ pub(crate) mod compose;
 pub(crate) mod driver;
 pub(crate) mod exec;
 pub(crate) mod journal;
+pub(crate) mod needs;
 pub(crate) mod orders;
 pub(crate) mod owner;
 pub(crate) mod pool;

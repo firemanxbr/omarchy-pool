@@ -173,6 +173,9 @@ pub(crate) struct Agent {
     /// A Mac's login keychain, where the seal key's private half lives (#328); `None` on
     /// Linux, where it is a 0600 file beside the host key.
     pub keychain: Option<Box<dyn crate::owner::keychain::Security>>,
+    /// What only a person fixes that the agent sees of itself (#324: linger, credentials
+    /// within its user's reach), for the report's `needs_person`; `None` says nothing.
+    pub self_check: Option<super::needs::SelfCheck>,
 }
 
 /// The run loop's half of `etc/dispatcher.env` (#371): at its start, then every
@@ -328,6 +331,7 @@ impl Agent {
             seal: None,
             seal_tried: None,
             keychain: None,
+            self_check: None,
         }
     }
 

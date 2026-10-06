@@ -45,6 +45,12 @@
     "units": 4
   },
   "legacy": null,
+  "needs_person": [
+    {
+      "detail": "linger is off for omarchy: the agent does not start at boot and stops when omarchy logs out — run `sudo loginctl enable-linger omarchy`",
+      "what": "linger"
+    }
+  ],
   "orders": [
     {
       "at": "2027-01-15T08:03:56Z",

@@ -12,7 +12,10 @@
 //! the pool's claim grace follows — and freeze detection's `github_latest` and
 //! `pool_behind_github`. #328 adds `owner`: the passkey pinned at the host and the last
 //! signed version taken, the seal key, the envelope's keys a signed widening may set, and
-//! the names of the agent keys. Bundle and task fields stay with the issues that read them.
+//! the names of the agent keys. #324 adds `needs_person` ([`super::needs`]): what only a
+//! person fixes that the agent sees of itself — linger off, credentials within its user's
+//! reach —, `{what, detail}` each, for the host page's box. Bundle and task fields stay
+//! with the issues that read them.
 //!
 //! A Mac about to sleep reports at once ([`Agent::report_now`]), whatever the spacing or a
 //! retry's wait: the sleep waits for it.
@@ -98,6 +101,11 @@ impl Agent {
                 "to": e.to, "outcome": e.outcome, "detail": short(&e.detail), "at": iso(e.at),
             })),
         });
+        // What only a person fixes that the agent sees of itself (#324): looked at hourly.
+        body["needs_person"] = self
+            .self_check
+            .as_mut()
+            .map_or_else(|| serde_json::json!([]), |c| c.view(now));
         body["asleep"] = self
             .power
             .as_ref()
