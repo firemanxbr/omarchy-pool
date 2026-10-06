@@ -182,6 +182,10 @@ try:
     # The tools: the versions and sums the worker image pins.
     cf = (ROOT / "factory/image/Containerfile").read_text()
     docker_v = re.search(r"^ARG DOCKER_CLI=(\S+)$", cf, re.M).group(1)
+    # podman 4's "<nil>" gateway of a task network made through libpod (#372): docker's CLI
+    # from 29 on cannot list or inspect it (the Containerfile's note at DOCKER_CLI).
+    ok(int(docker_v.split(".")[0]) < 29,
+       f"the docker CLI {docker_v} is below 29: from 29 on it cannot read podman 4's \"<nil>\" gateway of a task network (#372)")
     compose_v = re.search(r"^ARG COMPOSE=(\S+)$", cf, re.M).group(1)
     runs = [r for r in re.split(r"\n(?=RUN |ARG |COPY |ENV |LABEL )", cf) if r.startswith("RUN ")]
     def sums_in(marker):

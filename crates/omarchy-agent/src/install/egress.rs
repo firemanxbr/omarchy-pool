@@ -1,9 +1,9 @@
-//! The egress probe (#317, #367; design v2 §9.4, §13.3): probe tasks must fail to reach the
-//! cloud metadata address, the default gateway, the host's LAN address and their own
-//! network's gateway, and must reach a public address. Anything they reach that they must
-//! not — a connection made, or one refused, which is an answer from the target too — fails
-//! the install; so does a public address they cannot reach, or a target they gave no answer
-//! for.
+//! The egress probe (#317, #367, #372; design v2 §9.4, §13.3): probe tasks must fail to reach
+//! the cloud metadata address, the default gateway, the host's LAN address, their own
+//! network's gateway and, on rootless podman behind pasta, pasta's guest-mapped address, and
+//! must reach a public address. Anything they reach that they must not — a connection made,
+//! or one refused, which is an answer from the target too — fails the install; so does a
+//! public address they cannot reach, or a target they gave no answer for.
 //!
 //! Two probe tasks run, one after the other, each on its own network carved from the task
 //! subnets (their last /28) and at its last address, away from `.1`:
@@ -16,9 +16,18 @@
 //!    never crosses (CVE-2024-29018), so only prep-root.sh's INPUT drop for the task subnets
 //!    (`OMARCHY-TASKS-HOST`) keeps a task off it.
 //! 2. On a network made like a task's own ([`super::engine::task_network`]): its gateway on
-//!    the same ports. Docker 28 or newer puts none there (its isolated gateway mode); behind
-//!    podman's docker API there is one, the host's own on a rootful engine (prep-root.sh's
-//!    INPUT drop closes it there) and rootless podman's namespace otherwise.
+//!    the same ports. Docker 28 or newer puts none there (its isolated gateway mode), and
+//!    neither does podman for a network made through libpod's own API, internal with DNS off,
+//!    as the dispatcher makes it (#372; its docker API would turn DNS on and keep a gateway).
+//!
+//! On rootless podman behind pasta (libpod's `/info` says which stack it runs), the first also
+//! tries pasta's guest-mapped address ([`PASTA_GUEST`], podman's `--map-guest-addr` from 5.3
+//! on), which pasta forwards to the host's own address, where its services listen: anything
+//! there fails the install, with the containers.conf setting that turns the mapping off
+//! ([`GUEST_SETTING`]). The second does not: a task's own network is internal, with no route
+//! off its subnet, so the address is unreachable there, which `nc -z` (a probe image without
+//! bash) cannot tell from a refusal. An address pasta's command line maps that the probe did
+//! not try (one an owner set) is refused the same way ([`loopback::guest_verdict`]).
 //!
 //! On a Mac (#320) the probe runs in the `omarchy` VM, whose task firewall the agent puts
 //! there itself (`crate::vm::firewall`, before the probe), and the first probe task has one
@@ -44,10 +53,10 @@
 //! it off ([`super::loopback`], [`Advice::loopback`]). Until the probe runs behind an egress
 //! sidecar (#373) a rootless host is expected to fail all the same: the bridge's traffic
 //! leaves through the user-mode network stack, so the LAN target answers from inside it, and
-//! the bridge's gateway is the engine's own namespace, which answers too; rootless podman's
-//! task networks keep their gateway behind its docker API (#372). The probe's answers decide,
-//! not the engine's kind, and a host whose LAN address is not found, with a gateway that
-//! drops TCP 53, is judged on what remains.
+//! the bridge's gateway is the engine's own namespace, which answers too; a task's own
+//! network passes there (#372). The probe's answers decide, not the engine's kind, and a host
+//! whose LAN address is not found, with a gateway that drops TCP 53, is judged on what
+//! remains.
 //!
 //! The first probe task also asks the pool which address it comes from (#371): the pool's
 //! origin answers `/cdn-cgi/trace` at Cloudflare's edge, whose `ip=` line is the public
@@ -66,7 +75,8 @@ use std::path::Path;
 use crate::capacity::VmKind;
 
 use super::checks::Report;
-use super::engine::{self, Docker, Server};
+use super::engine::{self, Docker, Server, TaskNetwork};
+use super::libpod::Libpod;
 use super::loopback;
 use super::net::Cidr;
 
@@ -74,6 +84,10 @@ use super::net::Cidr;
 /// ports the pool's own services listen on — the egress sidecar's proxy, the agent sidecar's
 /// (and the broker's), the dispatcher's `/ready`. Nothing of the host may answer there.
 pub(crate) const GATEWAY_PORTS: [u16; 5] = [22, 53, 3128, 8790, 8791];
+
+/// pasta's guest-mapped address as rootless podman runs it from 5.3 on (`--map-guest-addr`,
+/// what `host.containers.internal` names): pasta forwards it to the host's own address (#372).
+pub(crate) const PASTA_GUEST: Ipv4Addr = Ipv4Addr::new(169, 254, 1, 2);
 
 /// What a probe target is, which says what reaching it means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +100,8 @@ pub(crate) enum What {
     Lan,
     /// The probe network's own gateway, its `.1` (#367).
     Gateway,
+    /// pasta's guest-mapped address, which reaches the host's own address (#372).
+    Guest,
     /// The Mac as the `omarchy` VM reaches it ([`crate::vm::VM_HOST`], #320).
     VmHost,
 }
@@ -114,6 +130,7 @@ impl Target {
             What::Router => "router".into(),
             What::Lan => "lan".into(),
             What::Gateway => format!("gateway-{}", self.port),
+            What::Guest => format!("guest-{}", self.port),
             What::VmHost => "vm-host".into(),
         }
     }
@@ -124,6 +141,7 @@ impl Target {
             What::Router => "the default gateway",
             What::Lan => "the host's LAN address",
             What::Gateway => "its network's gateway",
+            What::Guest => "pasta's guest-mapped address",
             What::VmHost => "the Mac as its VM reaches it",
         }
     }
@@ -134,8 +152,8 @@ impl Target {
 pub(crate) enum Network {
     /// A plain bridge: the network a package with a signed exception gets.
     Bridge,
-    /// A task's own, made with these `network create` options ([`engine::task_network`]).
-    Task(Vec<&'static str>),
+    /// A task's own, made as the dispatcher makes it ([`engine::task_network`]).
+    Task(TaskNetwork),
 }
 
 impl Network {
@@ -167,6 +185,12 @@ fn gateway(subnet: Cidr) -> impl Iterator<Item = Target> {
         .map(move |p| Target::new(What::Gateway, gw, p))
 }
 
+/// One kind of target, called `name`, that answered on these ports: one blocker however many.
+fn answered(t: &Targets, what: What, name: &str, ports: &[String]) -> Option<String> {
+    let x = t.forbidden.iter().find(|x| x.what == what)?;
+    (!ports.is_empty()).then(|| format!("{name} {} ({})", x.host, ports.join(", ")))
+}
+
 impl Targets {
     /// On a signed exception's bridge in `subnet`: the metadata address, the host's default
     /// gateway and LAN address when it has them, the bridge's own gateway, and GitHub (which
@@ -188,14 +212,27 @@ impl Targets {
         }
     }
 
-    /// On a task's own network in `subnet`, made with `create`: its gateway.
-    pub fn of_task(subnet: Cidr, create: Vec<&'static str>) -> Self {
+    /// On a task's own network in `subnet`, made as `create` says: its gateway.
+    pub fn of_task(subnet: Cidr, create: TaskNetwork) -> Self {
         Targets {
             network: Network::Task(create),
             forbidden: gateway(subnet).collect(),
             public: None,
             seen: None,
         }
+    }
+
+    /// pasta's guest-mapped address too, on every port of [`GATEWAY_PORTS`], when the engine is
+    /// rootless podman behind pasta (#372): on a bridge only, which has a route to it.
+    pub fn guest(mut self, guest: Option<Ipv4Addr>) -> Self {
+        if let Some(g) = guest {
+            self.forbidden.extend(
+                GATEWAY_PORTS
+                    .into_iter()
+                    .map(|p| Target::new(What::Guest, g, p)),
+            );
+        }
+        self
     }
 
     /// The pool's own origin answers the question at Cloudflare's edge; a pool that is not
@@ -280,22 +317,27 @@ pub(crate) fn probe(
     t: &Targets,
 ) -> Result<String, String> {
     let mut net = format!("omarchy-egress-probe-{}", std::process::id());
-    let mut create = vec!["network".to_owned(), "create".to_owned()];
-    if let Network::Task(options) = &t.network {
+    if let Network::Task(_) = t.network {
         net.push_str("-task");
-        create.extend(options.iter().map(|o| (*o).to_owned()));
     }
-    create.extend([
-        "--subnet".to_owned(),
-        subnet.to_string(),
-        "--label".to_owned(),
-        LABEL.to_owned(),
-        net.clone(),
-    ]);
     sweep(docker).map_err(|e| format!("an earlier egress probe's leftovers: {e}"))?;
-    docker
-        .run(&create.iter().map(String::as_str).collect::<Vec<_>>())
-        .map_err(|e| format!("the egress probe's network {subnet}: {e}"))?;
+    match &t.network {
+        // podman: through libpod's own API, as the dispatcher makes a task's network (#372).
+        Network::Task(TaskNetwork::Libpod) => {
+            let (k, v) = LABEL.split_once('=').unwrap_or((LABEL, ""));
+            Libpod::on(&docker.socket).and_then(|l| l.create_network(&net, subnet, &[(k, v)]))
+        }
+        how => {
+            let mut create = vec!["network", "create"];
+            if let Network::Task(TaskNetwork::Cli(options)) = how {
+                create.extend(options.iter().copied());
+            }
+            let cidr = subnet.to_string();
+            create.extend(["--subnet", &cidr, "--label", LABEL, &net]);
+            docker.run(&create).map(|_| ())
+        }
+    }
+    .map_err(|e| format!("the egress probe's network {subnet}: {e}"))?;
     let ip = subnet.last_host().to_string();
     let mut args: Vec<String> = [
         "run",
@@ -342,10 +384,10 @@ fn answer<'a>(out: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// What the probe's output says: the blockers, none when only the public address answered.
-/// A gateway that answers on several ports is one blocker.
+/// A gateway, or pasta's guest-mapped address, that answers on several ports is one blocker.
 pub(crate) fn verdict(out: &str, t: &Targets, advice: &Advice) -> Vec<String> {
     let mut blockers = Vec::new();
-    let mut gateway = Vec::new();
+    let (mut gateway, mut guest) = (Vec::new(), Vec::new());
     for x in &t.forbidden {
         match answer(out, &x.name()) {
             Some("blocked") => {}
@@ -356,6 +398,7 @@ pub(crate) fn verdict(out: &str, t: &Targets, advice: &Advice) -> Vec<String> {
                 x.port
             )),
             Some(r) if x.what == What::Gateway => gateway.push(format!("port {}: {r}", x.port)),
+            Some(r) if x.what == What::Guest => guest.push(format!("port {}: {r}", x.port)),
             // The host's own address is reached through INPUT, which DOCKER-USER never sees;
             // a Mac's is past its VM's NAT, as the router is.
             Some(r) if x.what == What::Lan && advice.rootful && advice.vm.is_none() => blockers.push(format!(
@@ -373,18 +416,18 @@ pub(crate) fn verdict(out: &str, t: &Targets, advice: &Advice) -> Vec<String> {
             )),
         }
     }
-    if let Some(g) = t
-        .forbidden
-        .iter()
-        .find(|x| x.what == What::Gateway)
-        .filter(|_| !gateway.is_empty())
-    {
+    if let Some(g) = answered(t, What::Gateway, "its gateway", &gateway) {
         blockers.push(format!(
-            "egress: {} reaches its gateway {} ({}); {}",
+            "egress: {} reaches {g}; {}",
             t.network.describe(),
-            g.host,
-            gateway.join(", "),
             advice.gateway(&t.network)
+        ));
+    }
+    if let Some(g) = answered(t, What::Guest, "pasta's guest-mapped address", &guest) {
+        blockers.push(format!(
+            "egress: {} reaches {g}, which pasta forwards to this host's own address, where its services listen; {}",
+            t.network.describe(),
+            GUEST_SETTING
         ));
     }
     if let Some((host, port)) = &t.public {
@@ -398,6 +441,10 @@ pub(crate) fn verdict(out: &str, t: &Targets, advice: &Advice) -> Vec<String> {
     }
     blockers
 }
+
+/// The setting that keeps rootless podman's pasta from mapping its guest address to the host's
+/// own (#372): podman passes `--map-guest-addr` only when `pasta_options` does not.
+pub(crate) const GUEST_SETTING: &str = "rootless podman's setting: in containers.conf (~/.config/containers/containers.conf, /etc/containers/containers.conf, or a file in their containers.conf.d) add \"--map-guest-addr\", \"none\" to pasta_options under [network] (pasta_options = [\"--map-guest-addr\", \"none\"]), then stop every container of this user so its network namespace starts again without the mapping";
 
 /// What a blocker tells the person to change, for this host's engine (#367).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,7 +486,7 @@ impl Advice {
             return self.host_itself();
         }
         match (on, self.podman) {
-            (Network::Task(_), true) => "that is rootless podman's own namespace: its docker-compatible API gives every network it makes a gateway with DNS on, and no setting removes it until the dispatcher makes task networks through libpod's API (#372; the runbook's Rootless engines)".into(),
+            (Network::Task(_), true) => "the engine put an address on a task's network although it was made through libpod's API with DNS off, as the dispatcher makes it, which leaves netavark's bridge without one (#372; the runbook's Rootless engines)".into(),
             (Network::Task(_), false) => "the engine put an address on a task's network although the dispatcher asks for none (Docker's isolated gateway mode)".into(),
             (Network::Bridge, _) => "that is the rootless engine's own namespace, which a bridge network reaches: every rootless host fails here until the probe runs the way a task runs, behind its egress sidecar (#373; the runbook's Rootless engines)".into(),
         }
@@ -599,6 +646,9 @@ pub(crate) struct Host<'a> {
     pub pool: Option<&'a str>,
     /// Which engine answers, for a task network's options.
     pub server: Result<Server, String>,
+    /// pasta's guest-mapped address, tried on rootless podman behind pasta by the bridge's probe
+    /// task ([`PASTA_GUEST`]).
+    pub guest: Option<Ipv4Addr>,
     pub advice: Advice,
     /// Why prep-root.sh's INPUT drop is not installed, when it is not ([`unprepared`]):
     /// judged on a rootful engine only, and never on a Mac.
@@ -609,8 +659,8 @@ pub(crate) struct Host<'a> {
     pub uid: u32,
 }
 
-/// Preflight's egress (#317, #367): prep-root.sh's INPUT drop on a rootful engine, both probe
-/// tasks, and a rootless engine's network stack while they run; their blockers and notes
+/// Preflight's egress (#317, #367, #372): prep-root.sh's INPUT drop on a rootful engine, both
+/// probe tasks, and a rootless engine's network stack while they run; their blockers and notes
 /// into `r`; the public address tasks leave from, when the pool said it.
 pub(crate) fn check(
     docker: &Docker,
@@ -647,7 +697,14 @@ pub(crate) fn check(
         out
     };
     let mut public = None;
-    let mut t = Targets::of_host(h.router, h.lan, subnet).asking(h.pool);
+    // What the bridge's probe tried besides its network's gateway, when it passed.
+    let guest = h
+        .guest
+        .map(|g| format!(", nor pasta's guest-mapped address {g}"))
+        .unwrap_or_default();
+    let mut t = Targets::of_host(h.router, h.lan, subnet)
+        .guest(h.guest)
+        .asking(h.pool);
     if h.advice.vm == Some(VmKind::Dedicated) {
         // The Mac as the omarchy VM reaches it, past Colima's NAT (#320).
         t.forbidden
@@ -657,10 +714,9 @@ pub(crate) fn check(
         Ok(out) => {
             let b = verdict(&out, &t, &h.advice);
             if b.is_empty() {
-                r.notes.push(
-                    "egress: a task reaches public addresses only, not its network's gateway"
-                        .into(),
-                );
+                r.notes.push(format!(
+                    "egress: a task reaches public addresses only, not its network's gateway{guest}"
+                ));
             }
             r.blockers.extend(b);
             public = seen(&out);
@@ -674,6 +730,8 @@ pub(crate) fn check(
     }
     match h.server.clone().and_then(engine::task_network) {
         Ok(create) => {
+            // Not pasta's guest-mapped address: an internal network has no route to it, and
+            // `nc -z` reads an unreachable address that fails at once as a refusal.
             let t = Targets::of_task(subnet, create);
             match run(&t) {
                 Ok(out) => {
@@ -695,6 +753,8 @@ pub(crate) fn check(
             Ok(note) => r.notes.push(note),
             Err(b) => r.blockers.push(b),
         }
+        r.blockers
+            .extend(loopback::guest_verdict(&stacks, h.guest, GUEST_SETTING));
     }
     public
 }
