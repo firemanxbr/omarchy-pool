@@ -860,6 +860,40 @@ so a size-4 build waits for memory rather than run smaller.
   need a lane of each ring architecture they check, native or emulated, with
   no wait: a health check its own, a promotion (its ABI gates and health
   checks) each it promotes, a security job's fast-track both.
+- **The project's copy is not built on its requester's host (#339, D35).**
+  A review rebuild of a package a maintainer asked for (the rebuild's owner,
+  and the owner of the contributor's build it answers) is handed to none of
+  that maintainer's hosts while another maintainer's host has a lane
+  allowed for it — native, or emulated unless it is `needs_native`; it
+  waits for that host however busy it is, and their other work goes on.
+  When only the requester's hosts have one (a single maintainer's hosts, or
+  a `needs_native` rebuild with the other host's lane emulated), Review's
+  rebuild pane says at once *waits for a host — only @m1's can build it*,
+  with **Release to any host** for another maintainer: confirmed with their
+  passkey, written on the task (`params.any_host`), the journal (a `review`
+  line, *released to any host by …*) and the record; any host takes it at
+  its next claim, the requester's included. Bringing another maintainer's
+  host with that lane online (or resuming a drained one) builds it without
+  a release. A claim never pins a rebuild to the requester's host: naming
+  one is refused (`requester_host`), and another architecture's same-agent
+  pick goes unpinned instead.
+- **The second opinion (#339, D36).** An audit runs in a fresh container
+  with its own agent sidecar. It leaves the host that built what it audits
+  to another that can take it now, for 3 minutes. An audit of the project's
+  copy takes another model (the claim's `agent`: provider and model) than
+  the one that built it whenever a registration that takes audits with
+  another model was seen in the last 24 hours — however long that host is
+  busy, and for a day after it went quiet; otherwise it runs on the same
+  model. Each audit says how independent it was beside its verdict on
+  Review (`independent: model`, `host` or `none`). Audits held for a host
+  that is gone for good: retire it, or drain its registration, and the next
+  claim hands them to the model alive. What counts, and how the last week
+  went:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, agent, last_seen, drained_at FROM build_workers WHERE last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') AND revoked_at IS NULL AND agent IS NOT NULL"
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT independent, COUNT(*) AS n FROM build_tasks WHERE kind = 'audit' AND started_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') GROUP BY independent"
+  ```
 - **Contributors take turns.** Community builds are handed round-robin by
   owner (fewest leased first), and a contributor holds at most
   ceil(the alive fleet's builds / 4) at once. The divisor is a setting: 0

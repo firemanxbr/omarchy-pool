@@ -576,7 +576,24 @@ they check (`health` its own, `promote` each it promotes, `security` both),
 native or emulated, with no wait; every other kind is arch-neutral. A legacy registration is selected as a
 host with one lane (its arch, emulated when its labels say so) and one
 build, its own scope (project or community, shared or its owner's) kept
-until #343. The runbook's *How the pool hands a host work* has the rules. Only the lease
+until #343. Placement (#339, design v2 §8.4; D35, D36): the project's copy
+of a package — its review rebuild — is never handed to a host its requester
+owns (the rebuild's owner, and the owner of the contributor's build it
+answers) while another maintainer's host has a lane allowed for it, native or
+emulated with `needs_native` applied; when only the requester's hosts have
+one, it waits, and Review offers another maintainer *Release to any host* at
+once, with their passkey (`POST /factory/tasks/:id/any-host`,
+`any-host:<task>`), on the task (`params.any_host`), the journal and the
+record. An audit — in a fresh container with its own agent sidecar, by
+construction — leaves the registration that built what it audits to another
+that can take it now (for 3 minutes, so the builder never idles for it); an
+audit of the project's copy takes a model (the claim's `agent`: provider and
+model) other than the one that built it whenever a registration taking
+audits with another model was seen in the last 24 hours, and runs on the
+same model otherwise. Each audit's lease records `build_tasks.independent`
+— `model`, `host` (the same model on another host, for an audit that does
+not ship) or `none` — and Review shows it beside the verdict. The runbook's
+*How the pool hands a host work* has the rules. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron
 requeues leases past `lease_expires_at` — the way out for a worker that
 vanished, not the way a worker reports: the community worker's shell has

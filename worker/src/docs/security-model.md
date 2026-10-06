@@ -148,7 +148,13 @@ secret). Everything travels in the `Authorization` header over TLS only.
   and keys only, never another contributor's draft or an audit's verdict,
   and an audit's agent belongs to the audit, whose container runs no recipe.
   The audit quotes the build's output as data, has no tool with side
-  effects, and its report is evidence for a maintainer, never a gate.
+  effects, and its report is evidence for a maintainer, never a gate. The
+  second opinion runs elsewhere (#339, D36): an audit leaves the host that
+  built what it audits to another that can take it, and an audit of the
+  project's copy takes another model than the one that built it whenever a
+  host with one was alive in the last 24 hours; every audit records how
+  independent it was (`model`, `host`, `none`), shown on Review beside its
+  verdict, so a maintainer reads whether the same model judged its own work.
   An internal network's bridge address is otherwise the host itself, so
   the dispatcher asks the engine to leave it off: Docker's isolated gateway
   mode (Docker 28 or newer; an older daemon is refused) or, on podman's own
@@ -497,6 +503,16 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
   the host declared.
+- **Never the copy of their own package** (#339, design v2 §8.4, D35). The
+  project's copy of a package — the review rebuild that is signed and
+  published once another maintainer approves it — is never handed to a host
+  its requester owns while another maintainer's host has a lane allowed for
+  it (native, or emulated unless it needs native), so the bytes that ship
+  of a package a maintainer asked for are not their own machine's. When only
+  their hosts can build it, it waits, and Review offers another maintainer
+  — never the requester — a release to any host with their passkey
+  (`any-host:<task>`), on the task, the journal and the record. A claim
+  never pins a rebuild to its requester's host.
 
 ## Stopping a host
 
