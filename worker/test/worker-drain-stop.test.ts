@@ -552,9 +552,9 @@ describe("Drain and Resume: states the pool enforces at the claim", () => {
     expect((await issue("rev-a", { kind: "resume" }, cli("m1"))).status).toBe(201);
     expect((await issue("rev-x", { kind: "drain" }, cli("m1"))).status).toBe(201);
     const alive = new Date(Date.now() - 10 * MIN).toISOString();
-    expect(await env.DB.prepare(SAME_AGENT_SQL).bind("x86_64", "claude-code/claude-sonnet-5", alive).first()).toBeNull();
+    expect(await env.DB.prepare(SAME_AGENT_SQL).bind("x86_64", "claude-code/claude-sonnet-5", alive, "[]").first()).toBeNull();
     expect((await issue("rev-x", { kind: "resume" }, cli("m1"))).status).toBe(201);
-    expect(await env.DB.prepare(SAME_AGENT_SQL).bind("x86_64", "claude-code/claude-sonnet-5", alive).first()).toEqual({ id: "rev-x" });
+    expect(await env.DB.prepare(SAME_AGENT_SQL).bind("x86_64", "claude-code/claude-sonnet-5", alive, "[]").first()).toEqual({ id: "rev-x" });
   });
 
   it("a build pinned to a worker drained FIRST_PICK_MINUTES or more goes to the shared queue at the sweep, one line; a drain younger than that unpins nothing", async () => {

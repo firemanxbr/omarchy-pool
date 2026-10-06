@@ -1,0 +1,18 @@
+-- Placement (#339, epic #307, design v2 §8.4, §9.5; D35, D36). The second
+-- opinion runs elsewhere, with another model when one exists: a publish-bound
+-- audit (of the project's review rebuild) takes a model other than the one
+-- that built it whenever a registration with another model was alive in the
+-- last 24 hours, and every audit prefers a host other than its build's. Each
+-- audit's lease records how independent it was, and Review shows it next to
+-- the verdict: model (another model judged the build), host (the same model,
+-- on another host: an audit that does not ship), none (neither). Written at
+-- lease, so the lease that ran the audit says it; NULL for every other kind
+-- and for an audit leased before this.
+--
+-- The requester-host rule (D35) needs no column: a review rebuild released
+-- to any host carries who released it, when, and with which passkey in its
+-- params (`any_host`), beside the rest of the claim that queued it.
+--
+-- Additive only: the Worker that runs during the deploy minute reads and
+-- writes none of it.
+ALTER TABLE build_tasks ADD COLUMN independent TEXT CHECK (independent IN ('model', 'host', 'none'));

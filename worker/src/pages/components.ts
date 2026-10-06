@@ -383,7 +383,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     id: "shell.gate",
     page: "/",
     anchor: ["button[disabled], select[disabled], input[disabled], textarea[disabled], a.disabled {", ".decide {"],
-    script: ["function gate(", 'aria-disabled="true"', 'closest("a.disabled")', "function gatePill(", "function auditPill(", "function trialPill("],
+    script: ["function gate(", 'aria-disabled="true"', 'closest("a.disabled")', "function gatePill(", "function auditPill(", "function independentPill(", "function trialPill("],
     visible: EVERYONE,
   },
   {

@@ -163,7 +163,17 @@ secret). Everything travels in the `Authorization` header over TLS only.
   and keys only, never another contributor's draft or an audit's verdict,
   and an audit's agent belongs to the audit, whose container runs no recipe.
   The audit quotes the build's output as data, has no tool with side
-  effects, and its report is evidence for a maintainer, never a gate.
+  effects, and its report is evidence for a maintainer, never a gate. The
+  second opinion runs elsewhere (#339, D36): an audit leaves the machine
+  that built what it audits to another that can take it, and an audit of the
+  project's copy takes another model than the one that built it whenever a
+  host with one was alive in the last 24 hours; every audit records how
+  independent it was (`model`, `host`, `none`), shown on Review beside its
+  verdict, so a maintainer reads whether the same model judged its own work.
+  It errs low: `host` only when the two registrations are certainly on
+  different machines (different owners, or two hosts' registrations of
+  different hosts), so one maintainer's legacy role containers, which share a
+  machine, say `none`.
   An internal network's bridge address is otherwise the host itself, so
   the dispatcher asks the engine to leave it off: Docker's isolated gateway
   mode (Docker 28 or newer; an older daemon is refused) or, on podman, a
@@ -651,6 +661,19 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   they hold (a job token). The `asleep` its report carries can only make the pool
   hand the host less (zero free units), never more, and a stale one (no
   report for 15 minutes) holds nothing.
+- **Never the copy of their own package** (#339, design v2 §8.4, D35). The
+  project's copy of a package — the review rebuild that is signed and
+  published once another maintainer approves it — is never handed to a host
+  its requester owns while another maintainer's host has a lane allowed for
+  it (native, or emulated unless it needs native), so the bytes that ship
+  of a package a maintainer asked for are not their own machine's. When only
+  their hosts can build it, it waits, and Review offers another maintainer
+  — never the requester — a release to any host with their passkey
+  (`any-host:<task>`), on the task, the journal and the record. A claim
+  never pins a rebuild to its requester's host. Another maintainer's host
+  whose agent says it sleeps (#329) has no lane for it until it wakes, so
+  the rebuild may be offered for release meanwhile; the release still takes
+  another maintainer's passkey, and a sleeping host is never where it runs.
 
 ## Stopping a host
 
