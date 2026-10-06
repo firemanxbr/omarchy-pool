@@ -407,7 +407,8 @@ pacman package cache (a directory per architecture) with every build
 container it starts, so a dependency downloads once; `OMARCHY_BUILD_CACHE`
 likewise mounts a build cache at `/build/cache` — cargo's registry, Go's
 module and build caches, ccache's objects — so a Rust or Go package
-rebuilds in minutes. A build container runs make, ninja and cargo with
+rebuilds in minutes. A maintainer host's dispatcher keeps those caches
+itself, per package and read-only where shared (#341, below). A build container runs make, ninja and cargo with
 the job count its dispatcher set to match the task's CPUs (`MAKEFLAGS`,
 `NINJAFLAGS`, `CARGO_BUILD_JOBS`), or with every core it sees when none was
 set, with ccache on.
@@ -585,6 +586,20 @@ network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a 
            host whose envelope grants it (OMARCHY_DIRECT_NETWORK, #373); elsewhere handed back lost (the attempt
            given back for a task's first HOST_LOSSES_MAX losses, spent after: the claim does not say yet whether
            a host runs such packages)
+caches     per lease (#341, D52): <work>/cache/pacman/<arch> read-only at /var/cache/pacman/shared (a build's and an
+           audit's pacman's first CacheDir; a trial's check reads none), and <task dir>/pkgcache writable at
+           /var/cache/pacman/pkg, where it downloads; a build also its own package's
+           <work>/cache/build/<trust>/<arch>/<package> at /build/cache — never the tree, another package's or the other
+           side's; after the lease its downloads go into the shared cache only when each file's SHA-256 is the one the
+           pool's signed edge databases of that arch list (every source's, fetched hourly, each .sig verified with the
+           pool's key built into the dispatcher; a name two databases list with different bytes is never merged), each
+           package with the pool's own copy of its upstream .sig beside it (<source>/<arch>/<file>.sig: a build's
+           pacman checks the image's Arch sections' packages by the .sig beside the file it found, and fails on one
+           without it), which must be the .sig the build downloaded when it downloaded one, or not at all; the rest
+           discarded, and each pass removes a file whose name the databases of the day list with other bytes than
+           its record's, its .sig after it; the pacman cache keeps two versions per package within OMARCHY_CACHE_PACMAN_GB, the build
+           caches go least recently used first within OMARCHY_CACHE_BUILD_GB (the envelope's cache_caps; 10 and 20 GB
+           by default), never one a lease mounts
 agent      the claim's agent: {provider, model, probe, error, checked_at} from a probe sidecar on a network of its own
            (at start, every 30 min, sooner after a failure, and for recheck-agent / restart-agent); the day's agent
            calls (OMARCHY_AGENT_CALLS_PER_DAY) spent: agent_slots 0 in the claim and no model task starts
