@@ -78,7 +78,10 @@
 //! `OMARCHY_SECRETS_DIR` as install chose it (a path only: never mounted
 //! here) and the envelope's agent budget (`OMARCHY_AGENT_CALLS_PER_TASK`,
 //! `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK`, `…_CALLS_PER_DAY`), each only
-//! when agent.toml sets it, so the defaults below hold otherwise. A changed
+//! when agent.toml sets it, so the defaults below hold otherwise, and
+//! `OMARCHY_DIRECT_NETWORK=1` when the envelope grants a signed exception's
+//! bridge network (#373), which install's egress probe then checked: without
+//! it a package with `network = "direct"` is handed back. A changed
 //! file recreates the dispatcher, which re-adopts its tasks. The dispatcher
 //! keeps the registration's id it learned in `state/host`.
 
@@ -249,6 +252,10 @@ pub struct Net {
     pub caps: budget::Caps,
     /// How the engine keeps a task network's gateway off the host: asked of the engine at start.
     pub gateway: spec::Gateway,
+    /// The owner's envelope grants a signed exception's bridge network (`OMARCHY_DIRECT_NETWORK`,
+    /// #373): only then is a package with `network = "direct"` started, on the bridge install's
+    /// egress probe checked; otherwise it is handed back.
+    pub direct: bool,
 }
 
 impl Default for Net {
@@ -260,6 +267,7 @@ impl Default for Net {
             secrets_dir: None,
             caps: budget::Caps::default(),
             gateway: spec::Gateway::Isolated,
+            direct: false,
         }
     }
 }
@@ -1027,6 +1035,18 @@ impl Dispatcher {
                 return live;
             }
         };
+        // Its bridge only where the owner's envelope grants it, which install's egress probe
+        // then checked (#373): a rootless engine's bridge reaches the LAN through its user-mode
+        // network stack. Elsewhere it goes back for a host that runs it. Seam: the claim does not
+        // say yet whether a host runs such packages, so the pool may offer one here again.
+        if direct && !self.net.direct {
+            let why = format!(
+                "{}'s signed network exception (factory/sizing: network = \"direct\") needs a bridge network, which this host's envelope does not grant (agent.toml's direct_network): handed back",
+                live.lease.task.name
+            );
+            self.begin_ending(&mut live, Ending::Lost(why));
+            return live;
+        }
         let Some(slot) = self.free_slot() else {
             let why = format!(
                 "every task network of {} is in use",

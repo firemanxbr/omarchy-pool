@@ -21,7 +21,9 @@
 //! that network and is also attached to the shared `omarchy-egress` bridge,
 //! where it listens on nothing; the task's `HTTP(S)_PROXY` name it. A
 //! package with a signed exception in `factory/sizing` gets a normal bridge
-//! network of its own instead, and no egress sidecar.
+//! network of its own instead, and no egress sidecar, on a host whose
+//! envelope grants it (`OMARCHY_DIRECT_NETWORK`, #373; elsewhere the lease
+//! goes back before this spec is made).
 //!
 //! **A model kind's agent** (D48) is its own too: an **agent sidecar**
 //! (`<network>-agent`, the worker image's `agent` role, the broker without
