@@ -50,16 +50,18 @@ cleanup() {
     done
     [[ -f "$E2E/wrangler.log" ]] && { printf '\n==> the local pool (wrangler dev), last 60 lines:\n' >&2; tail -n 60 "$E2E/wrangler.log" >&2; }
   fi
-  for pid in "${AGENT_PID:-}" "${WRANGLER_PID:-}" "${ABRMD_PID:-}"; do
+  for pid in "${AGENT_PID:-}" "${ABRMD_PID:-}"; do
     if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; fi
   done
+  # wrangler dev and its workerd: their own process group, so none outlives the script.
+  if [[ -n ${WRANGLER_PID:-} ]]; then kill -- -"$WRANGLER_PID" 2>/dev/null || true; fi
   for f in "$E2E/swtpm.pid" "$E2E/other-swtpm.pid"; do
     if [[ -f $f ]]; then kill "$(cat "$f")" 2>/dev/null || true; fi
   done
 }
 trap cleanup EXIT
 
-for tool in swtpm tpm2-abrmd tpm2_createprimary tpm2_load tpm2_print tpm2_clear jq curl npx; do
+for tool in swtpm tpm2-abrmd tpm2_createprimary tpm2_load tpm2_print tpm2_clear jq curl npx setsid; do
   command -v "$tool" >/dev/null || fail "$tool is not installed"
 done
 
@@ -87,7 +89,7 @@ npx wrangler d1 migrations apply omarchy-repo --local --persist-to "$STATE" >/de
 npx wrangler d1 execute omarchy-repo --local --persist-to "$STATE" --command \
   "INSERT INTO factory_maintainers (login) VALUES ('e2e');
    INSERT INTO contributors (login, token_hash, session_hash, role, github_id) VALUES ('e2e', '$(sha256 omc_e2e)', '$(sha256 oms_e2e)', 'maintainer', 4242);" >/dev/null
-npx wrangler dev --ip 127.0.0.1 --port "$PORT" --persist-to "$STATE" --env-file "$E2E/.dev.vars" --var "SOURCE_CHECK:off" > "$E2E/wrangler.log" 2>&1 &
+setsid npx wrangler dev --ip 127.0.0.1 --port "$PORT" --persist-to "$STATE" --env-file "$E2E/.dev.vars" --var "SOURCE_CHECK:off" > "$E2E/wrangler.log" 2>&1 &
 WRANGLER_PID=$!
 for _ in $(seq 1 60); do curl -fs "$POOL/api/v1/version" >/dev/null 2>&1 && break; sleep 1; done
 curl -fs "$POOL/api/v1/version" >/dev/null || fail "the local pool did not start"
