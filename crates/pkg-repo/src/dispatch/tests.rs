@@ -598,6 +598,7 @@ impl jobs::Launch for FakeLaunch {
             .arg(script)
             .env("JOB_DIR", dir)
             .env("OMARCHY_WORKER_TOKEN", "omw_host-secret")
+            .env("OMARCHY_WORKER_TOKEN_FILE", "/run/omarchy/worker-token")
             .env("OMARCHY_TOKEN", "omj.stale");
         c
     }
@@ -3959,8 +3960,9 @@ fn an_arch_neutral_pool_job_runs_in_a_child_process_of_its_own_and_reports_what_
         .unwrap()
         .iter()
         .any(|c| c.iter().any(|x| x.contains("omarchy-task-40-"))));
-    // Its environment: the shim first on PATH and as RUNTIME, its own scratch, no worker token, no
-    // stale job token (its token is in its directory), no helper context (a render starts none).
+    // Its environment: the shim first on PATH and as RUNTIME, its own scratch, no worker token nor the
+    // name of its file (#327), no stale job token (its token is in its directory), no helper context (a
+    // render starts none).
     let env = std::fs::read_to_string(&env).unwrap();
     let var = |k: &str| {
         env.lines()
@@ -3981,6 +3983,7 @@ fn an_arch_neutral_pool_job_runs_in_a_child_process_of_its_own_and_reports_what_
     );
     for k in [
         "OMARCHY_WORKER_TOKEN",
+        "OMARCHY_WORKER_TOKEN_FILE",
         "OMARCHY_TOKEN",
         "OMARCHY_TASK_RUN",
         "OMARCHY_TASK_ID",

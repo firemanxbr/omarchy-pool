@@ -6,7 +6,12 @@
 # (exit 75) during its guard, a broken one the guard reverts and quarantines,
 # and a rollback statement that preempts a round — while a long-running task
 # container keeps running throughout. Decoy docker, compose and podman
-# binaries first in PATH prove the agent runs only the pinned ones.
+# binaries first in PATH prove the agent runs only the pinned ones. The host
+# starts with the worker token in etc/dispatcher.env, as #371's agent left it:
+# the first round moves it to run/host/dispatcher/token (#327), `docker
+# inspect` then shows it in neither the dispatcher's nor the task's
+# environment, the dispatcher reads it through a read-only mount, and a
+# rotation recreates the dispatcher alone.
 #
 # Needs a Linux engine: `docker` (rootful, /var/run/docker.sock) or `podman`
 # (rootless, its API socket; started here when it is not). CI runs both

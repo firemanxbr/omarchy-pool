@@ -7,9 +7,11 @@
 #   its host key, enrolls with a capacity report and prints the fingerprint →
 #   nothing is registered and the token is in no process's argv → the owner's
 #   page shows the same fingerprint, and Confirm → the agent fetches the host
-#   worker token with a host-key-signed request into etc/dispatcher.env (0600),
-#   beside the host's own addresses (#371) → that token claims → a rotation
-#   gives a new one while the old one still claims, keeping the addresses and
+#   worker token with a host-key-signed request into its own file,
+#   run/host/dispatcher/token (0400, #327), and its registration into
+#   etc/dispatcher.env (0600) beside the host's own addresses (#371), the env
+#   file holding no token → that token claims → a rotation rewrites the file
+#   with a new one while the old one still claims, keeping the addresses and
 #   an owner's own line, and writing agent.toml's secrets directory and agent
 #   budget → the journal has the new-host line → running it again keeps the
 #   identity and the worker token → (#322) a suspension refuses its claims,
@@ -126,9 +128,14 @@ WORKER=$(jq -r .worker <<<"$confirm")
 wait "$AGENT_PID" || fail "the agent did not finish its enrollment"
 AGENT_PID=
 ENV_FILE="$DATA/omarchy-agent/sets/host/etc/dispatcher.env"
-[[ $(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE") == 600 ]] || fail "dispatcher.env is not 0600"
-OMW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
-[[ $OMW == omw_* ]] || fail "no worker token in dispatcher.env"
+TOKEN_FILE="$DATA/omarchy-agent/sets/host/run/host/dispatcher/token"
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+[[ $(mode_of "$ENV_FILE") == 600 ]] || fail "dispatcher.env is not 0600"
+# The token in its own file (#327), which the host set mounts read-only into the dispatcher; none in the env file.
+[[ $(mode_of "$TOKEN_FILE") == 400 && $(mode_of "$(dirname "$TOKEN_FILE")") == 700 ]] || fail "run/host/dispatcher/token is not 0400 in a 0700 directory"
+OMW=$(cat "$TOKEN_FILE")
+[[ $OMW == omw_* ]] || fail "no worker token in run/host/dispatcher/token"
+grep -q 'OMARCHY_WORKER_TOKEN\|omw_' "$ENV_FILE" && fail "a worker token in dispatcher.env"
 # The registration beside it is what install writes into agent.toml's worker_id (#317).
 [[ $(sed -n 's/^# worker: //p' "$ENV_FILE") == "$WORKER" ]] || fail "dispatcher.env does not name $WORKER"
 # The host's own addresses beside the token (#371), its LAN address among them, where the agent reads
@@ -167,19 +174,19 @@ agent_budget = { calls_per_task = 50, calls_per_day = 900 }
 TOML
 echo 'TZ=UTC' >> "$ENV_FILE"
 XDG_DATA_HOME="$DATA" "$AGENT" token >> "$E2E/agent.log" 2>&1 || fail "the rotation"
-NEW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
+NEW=$(cat "$TOKEN_FILE")
 [[ $NEW == omw_* && $NEW != "$OMW" ]] || fail "no new token"
 for t in "$OMW" "$NEW"; do
   code=$(host_claim "$t")
   [[ $code == 204 ]] || fail "a claim after the rotation: $code"
 done
-[[ $(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE") == 600 ]] || fail "dispatcher.env is not 0600 after the rotation"
+[[ $(mode_of "$ENV_FILE") == 600 && $(mode_of "$TOKEN_FILE") == 400 ]] || fail "dispatcher.env is not 0600, or the token file 0400, after the rotation"
 [[ $(sed -n 's/^OMARCHY_HOST_ADDRESSES=//p' "$ENV_FILE") == "$ADDRS" ]] || fail "the rotation did not keep the host's addresses"
 [[ $(sed -n 's/^TZ=//p' "$ENV_FILE") == UTC ]] || fail "the rotation did not keep the owner's line"
 [[ $(sed -n 's/^OMARCHY_SECRETS_DIR=//p' "$ENV_FILE") == "$DATA/omarchy-agent/secrets" ]] || fail "no OMARCHY_SECRETS_DIR from agent.toml"
 [[ $(sed -n 's/^OMARCHY_AGENT_CALLS_PER_TASK=//p' "$ENV_FILE")/$(sed -n 's/^OMARCHY_AGENT_CALLS_PER_DAY=//p' "$ENV_FILE") == 50/900 ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$ENV_FILE")"
 grep -Eq '^OMARCHY_AGENT_(TOKENS|MINUTES)_PER_TASK=' "$ENV_FILE" && fail "a budget key agent.toml does not set"
-[[ $(grep -c '^OMARCHY_WORKER_TOKEN=' "$ENV_FILE") == 1 ]] || fail "more than one token line"
+grep -q 'OMARCHY_WORKER_TOKEN\|omw_' "$ENV_FILE" && fail "the rotation wrote a token into dispatcher.env"
 
 step "The journal, the notice's words, and a second run that keeps the identity"
 curl -fs "$POOL/api/v1/events?kind=host" | jq -e --arg h "$HOST" '.events[] | select(.payload.host == $h) | select(.summary | startswith("new host of e2e: 8 cores, 16 GB, '"$ARCH"' native, isolation root (dedicated)"))' >/dev/null || fail "no journal line"
@@ -187,7 +194,7 @@ XDG_DATA_HOME="$DATA" "$AGENT" enroll > "$E2E/again.log" 2>&1 || { cat "$E2E/aga
 grep -q "this machine is host $HOST" "$E2E/again.log" || fail "the second run did not keep the identity"
 # ...and the worker token: a fetch rotates, so a second one would cut off the token a running dispatcher holds.
 grep -q "keeps its worker token" "$E2E/again.log" || fail "the second run fetched a token again"
-[[ $(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE") == "$NEW" ]] || fail "the second run replaced the worker token"
+[[ $(cat "$TOKEN_FILE") == "$NEW" ]] || fail "the second run replaced the worker token"
 [[ $(curl -fs "$POOL/api/v1/hosts?owner=e2e" -H "cookie: $SESSION" | jq '.hosts | length') == 1 ]] || fail "a second host"
 
 step "Suspend (#322): the claims and the agent's calls refused, nothing changed on the machine; the owner's Resume, with a passkey"
@@ -201,7 +208,7 @@ susp=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/suspend" "${WEB[@]}" -d '{"rea
 [[ $(curl -s -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $NEW" -H 'content-type: application/json' -d "$(host_claim_body)" | jq -r .code) == host_suspended ]] || fail "a suspended host claimed"
 XDG_DATA_HOME="$DATA" "$AGENT" token > "$E2E/suspended.log" 2>&1 && fail "a suspended host got a worker token"
 grep -q "e2e-vm is suspended (by e2e: e2e: the fans)" "$E2E/suspended.log" || { cat "$E2E/suspended.log"; fail "the agent did not say why"; }
-[[ $(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE") == "$NEW" ]] || fail "the suspension changed the dispatcher's token"
+[[ $(cat "$TOKEN_FILE") == "$NEW" ]] || fail "the suspension changed the dispatcher's token"
 [[ $(curl -s -o /dev/null -w '%{http_code}' "$POOL/api/v1/factory/follow?ids=$WORKER") == 403 ]] || fail "a suspended host's follow"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/hosts/$HOST/resume" "${WEB[@]}" -d '{}')
 [[ $code == 403 ]] || fail "a resume with no passkey: $code"
@@ -266,6 +273,6 @@ FP2=$(sed -n 's/^omarchy-agent: host key fingerprint: //p' "$E2E/reinstall.log" 
 curl -fs -o /dev/null -X POST "$POOL/api/v1/hosts/$HOST2/confirm" "${WEB[@]}" -d '{}' || fail "confirm the new host"
 wait "$AGENT_PID" || { cat "$E2E/reinstall.log"; fail "the re-install did not finish"; }
 AGENT_PID=
-[[ $(host_claim "$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")") == 204 ]] || fail "the new host's token"
+[[ $(host_claim "$(cat "$TOKEN_FILE")") == 204 ]] || fail "the new host's token"
 
 printf '\n\033[1;32mhost enrollment: ok\033[0m (%s, %s, %s; suspended, resumed, a passkey pinned, retired, then %s)\n' "$HOST" "$WORKER" "$FP" "$HOST2"

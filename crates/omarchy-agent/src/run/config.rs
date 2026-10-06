@@ -759,6 +759,7 @@ max_units = 3
             crate::dispatcher_env::Rendered {
                 addresses: Vec::new(),
                 envelope: Some(crate::dispatcher_env::Envelope::of_config(c)),
+                plain: false,
             }
             .lines()
             .unwrap()

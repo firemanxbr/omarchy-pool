@@ -30,14 +30,15 @@
 //!   envelope — more units than it allows, a lane its `emulate` excludes — is refused, with
 //!   nothing changed. `null` gives the envelope's own back.
 //! - `rotate-token`: a new host worker token from the pool (`POST /hosts/self/token`),
-//!   written for the dispatcher where enrollment writes it, the rest of
-//!   `etc/dispatcher.env` rendered as the loop's own refresh renders it (#371); the changed
-//!   `etc/` recreates the dispatcher with it within the ten minutes the old one still works.
+//!   written for the dispatcher where enrollment writes it — its file,
+//!   `run/host/dispatcher/token` (#327), with its registration in `etc/dispatcher.env`, the
+//!   rest of which is rendered as the loop's own refresh renders it (#371); the changed file
+//!   recreates the dispatcher with it within the ten minutes the old one still works.
 //! - `retry-release`: lifts every quarantine and starts a round, as an Update does — only
 //!   with room on the brake for that round's restarts (its own and a revert's).
 //! - `diagnostics`: the dispatcher's last [`DIAGNOSTIC_LINES`] log lines, scrubbed of every
-//!   secret the agent knows (the set's and the secrets directory's env values, and anything
-//!   shaped like a token), posted to the pool for the host's page — only when the envelope
+//!   secret the agent knows (the worker token's file, the set's and the secrets directory's
+//!   env values, and anything shaped like a token), posted to the pool for the host's page — only when the envelope
 //!   says `diagnostics = true` (M10); refused otherwise.
 //!
 //! Every order goes through the host-side brake ([`super::brake`]): at least two seconds
@@ -486,8 +487,8 @@ impl Agent {
         Ok(format!("{said}{tail}"))
     }
 
-    /// `rotate-token`: a new host worker token, written where enrollment writes it; the
-    /// changed `etc/` recreates the dispatcher with it at the next tick.
+    /// `rotate-token`: a new host worker token, written where enrollment writes it (its
+    /// file, #327); the changed file recreates the dispatcher with it at the next tick.
     fn rotate_token(&mut self, now: i64) -> Result<String, String> {
         let a = match self.pool.token() {
             Net::Ok(a) => a,
@@ -510,9 +511,10 @@ impl Agent {
                 self.cfg.worker_id
             ));
         }
-        // Where enrollment writes it, the rest of the file rendered as the loop's own
-        // refresh renders it (#371): the host's addresses, the secrets directory, the agent
-        // budget and the owner's lines stay. The seam #327's token file moves.
+        // Where enrollment writes it — its file (#327), and etc/dispatcher.env too only while
+        // a release here reads it there — the rest of etc/dispatcher.env rendered as the
+        // loop's own refresh renders it (#371): the host's addresses, the secrets directory,
+        // the agent budget and the owner's lines stay.
         let sources = self
             .host_env
             .as_ref()
@@ -528,7 +530,8 @@ impl Agent {
         ));
         self.state.brake.record(now, &[Ask::Restart]);
         Ok(format!(
-            "a new host worker token is in etc/dispatcher.env (next rotation after {}); the dispatcher is recreated with it at once, and the one it replaces works ten more minutes",
+            "a new host worker token is in {} (next rotation after {}); the dispatcher is recreated with it at once, and the one it replaces works ten more minutes",
+            dispatcher_env::TOKEN_FILE,
             cut(a["rotate_after"].as_str().unwrap_or("?"))
         ))
     }

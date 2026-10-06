@@ -20,8 +20,10 @@
 //! Self-update (#316) is part of [`run`]; [`install`] (#317) puts a Linux host together:
 //! preflight, the envelope, enrollment, the agent keys, the unit and linger; and a Mac
 //! (#320): the `LaunchAgent` and the `omarchy` Colima VM [`vm`] sizes and keeps.
-//! [`dispatcher_env`] (#371) renders the dispatcher's `etc/dispatcher.env` beside its
-//! worker token: the host's own addresses, the secrets directory and the agent budget.
+//! [`dispatcher_env`] (#371, #327) writes the dispatcher's worker token to its own file,
+//! which the host set mounts read-only, and renders `etc/dispatcher.env` beside it: the
+//! token's registration, the host's own addresses, the secrets directory and the agent
+//! budget.
 //! [`owner`] (#328) is the owner's control without a visit: the passkey pinned at the
 //! host, the widenings and agent keys it signed on the site, and the host's seal key.
 

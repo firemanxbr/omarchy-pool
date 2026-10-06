@@ -133,6 +133,7 @@ fn on_a_suspended_host_the_agent_changes_nothing_and_after_a_resume_it_works_aga
     )
     .unwrap();
     let env = etc.join("dispatcher.env");
+    let token_file = data.join("omarchy-agent/sets/host/run/host/dispatcher/token");
     let before = format!(
         "# worker: m1-box-0a9z\nOMARCHY_WORKER_TOKEN=omw_{}\n",
         "0f".repeat(24)
@@ -148,14 +149,26 @@ fn on_a_suspended_host_the_agent_changes_nothing_and_after_a_resume_it_works_aga
             text(&o)
         );
         assert_eq!(std::fs::read_to_string(&env).unwrap(), before);
+        assert!(!token_file.exists());
         assert!(state.join("host.json").exists());
     }
     // Resumed on the site: the same identity and key work again, nothing done on the machine.
+    // The new token goes into its own file (0400, #327), and the env file holds none.
     let o = run_env(&["token"], &data, None);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
-    assert!(std::fs::read_to_string(&env)
-        .unwrap()
-        .contains(&format!("OMARCHY_WORKER_TOKEN=omw_{}", "1e".repeat(24))));
+    assert_eq!(
+        std::fs::read_to_string(&token_file).unwrap(),
+        format!("omw_{}\n", "1e".repeat(24))
+    );
+    assert_eq!(
+        std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
+    let after = std::fs::read_to_string(&env).unwrap();
+    assert!(
+        after.contains("\n# worker: m1-box-0a9z\n") && !after.contains("OMARCHY_WORKER_TOKEN"),
+        "{after}"
+    );
     let _ = std::fs::remove_dir_all(&data);
 }
 
@@ -1026,7 +1039,9 @@ fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the
     );
     assert!(!env.exists());
 
-    // With the token there: rendered, the token and the owner's line kept, 0600.
+    // With the token there, as #371's agent left it: rendered, the owner's line kept,
+    // 0600, and the token moved to its own file (0400, #327) — no release here reads it
+    // from the env file.
     let token = format!("omw_{}", "0f".repeat(24));
     std::fs::write(
         &env,
@@ -1035,12 +1050,27 @@ fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the
     .unwrap();
     let o = run(&["dispatcher-env", "--data-dir", &d, "--write"]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(
+        text(&o).contains("moved the worker token it held to run/host/dispatcher/token"),
+        "{}",
+        text(&o)
+    );
     let written = std::fs::read_to_string(&env).unwrap();
     assert!(
         written.contains(&format!(
-            "\n# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={token}\nOMARCHY_HOST_ADDRESSES={addresses}\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_TASK=17\nTZ=UTC\n"
+            "\n# worker: m1-rack-0a9z\nOMARCHY_HOST_ADDRESSES={addresses}\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_TASK=17\nTZ=UTC\n"
         )),
         "{written}"
+    );
+    assert!(!written.contains(&token), "{written}");
+    let token_file = set.join("run/host/dispatcher/token");
+    assert_eq!(
+        std::fs::read_to_string(&token_file).unwrap(),
+        format!("{token}\n")
+    );
+    assert_eq!(
+        std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777,
+        0o400
     );
     assert_eq!(
         std::fs::metadata(&env).unwrap().permissions().mode() & 0o777,

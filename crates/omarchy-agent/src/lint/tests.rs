@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 
 use super::{
-    lint_compose, lint_quadlet, lint_set_toml, parse_set_toml, reference_variables, references,
-    Engine, Envelope, Needs, Ready, Reference, SetToml, Violation,
+    lint_compose, lint_quadlet, lint_set_toml, parse_set_toml, reads_token_file,
+    reference_variables, references, secret_files, token_file_of, Engine, Envelope, Needs, Ready,
+    Reference, SetToml, Violation,
 };
 
 fn fixtures() -> PathBuf {
@@ -127,6 +128,7 @@ fn each_acceptance_case_is_refused_in_the_template() {
         ("anthropic-key", "secret_interpolation"),
         ("github-token", "secret_interpolation"),
         ("secrets-mount", "secrets_mount"),
+        ("other-secret-file", "secret_file"),
         ("no-build-images", "build_images"),
     ] {
         let template = read(&format!("template/{file}.yml"));
@@ -157,6 +159,7 @@ fn each_acceptance_case_is_refused_through_an_override() {
         ("anthropic-key", "secret_interpolation"),
         ("github-token", "secret_interpolation"),
         ("secrets-mount", "secrets_mount"),
+        ("other-secret-file", "secret_file"),
         ("build-image-tag", "build_images"),
     ] {
         let over = fixtures().join(format!("override/{file}.yml"));
@@ -274,6 +277,147 @@ fn what_the_owner_may_change_passes() {
         lint_compose(HOST, Some(over), &envelope("studio"), Engine::Rootful),
         "secrets_mount",
         over,
+    );
+}
+
+#[test]
+fn the_dispatcher_mounts_its_own_token_file_read_only_and_nothing_else_of_the_set_s_secrets() {
+    // #327: run/host/<service>/token is that service's alone; the directories holding the
+    // secret files, another service's file, and its own writable are refused, however the
+    // path is spelt — and nothing under the secrets directory, as before.
+    let svc = |body: &str| format!("services:\n  dispatcher:\n{body}");
+    for (over, rule) in [
+        (
+            svc("    volumes: [\"./run/host/dispatcher/token:/t\"]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [\"./run/host/dispatcher/token:/t:rw\"]\n"),
+            "secret_file",
+        ),
+        // Compose takes the last of ro and rw: writable.
+        (
+            svc("    volumes: [\"./run/host/dispatcher/token:/t:ro,rw\"]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [\"./run/host/dispatcher/token:/run/omarchy/worker-token:z,ro,rw\"]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [{type: bind, source: ./run/host/dispatcher/token, target: /t}]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [\"./run/host/agent/token:/t:ro\"]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [\"run/host/egress/token:/t:ro\"]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [\"./run/host/dispatcher/../agent/token:/t:ro\"]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [\"./run/host/dispatcher/token.old:/t:ro\"]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [\"./run/host/dispatcher:/d:ro\"]\n"),
+            "secret_file",
+        ),
+        (svc("    volumes: [\"./run/host:/h:ro\"]\n"), "secret_file"),
+        (svc("    volumes: [\"./run:/r:ro\"]\n"), "secret_file"),
+        (svc("    volumes: [\".:/set:ro\"]\n"), "secret_file"),
+        (
+            svc("    volumes: [\"./etc/../run/host:/h:ro\"]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [\"${OMARCHY_SECRETS_DIR}/agent.env:/a:ro\"]\n"),
+            "secrets_mount",
+        ),
+    ] {
+        refused_for(
+            lint_compose(HOST, Some(&over), &Envelope::reference(), Engine::Rootful),
+            rule,
+            &over,
+        );
+    }
+    // By its absolute path, where the envelope knows the set directory: another service's
+    // file, and a directory above the set's that the envelope lists.
+    let mut e = envelope("studio");
+    let set = "/home/omarchy/.local/share/omarchy-agent/sets/host";
+    for over in [
+        svc(&format!(
+            "    volumes: [\"{set}/run/host/agent/token:/t:ro\"]\n"
+        )),
+        svc(&format!("    volumes: [\"{set}:/set:ro\"]\n")),
+        svc("    volumes: [\"/home/omarchy/.local/share/omarchy-agent:/a:ro\"]\n"),
+    ] {
+        e.paths.push("/home/omarchy".into());
+        refused_for(
+            lint_compose(HOST, Some(&over), &e, Engine::Rootful),
+            "secret_file",
+            &over,
+        );
+    }
+    // Its own file read-only, either syntax, passes; so does the rest of run/ and the set.
+    for over in [
+        svc("    volumes: [\"./run/host/dispatcher/token:/run/omarchy/worker-token:ro\"]\n"),
+        svc("    volumes: [\"./run/host/dispatcher/token:/t:ro,z\"]\n"),
+        svc("    volumes: [\"./run/host/dispatcher/token:/t:rw,ro\"]\n"),
+        svc(&format!("    volumes: [\"{set}/run/host/dispatcher/token:/t:ro\"]\n")),
+        svc("    volumes: [\"./run/capacity.json:/c:ro\", \"./etc/extra.conf:/e:ro\", \"./files:/f:ro\"]\n"),
+    ] {
+        lint_compose(HOST, Some(&over), &envelope("studio"), Engine::Rootful)
+            .unwrap_or_else(|v| panic!("{over}: {v:?}"));
+    }
+    assert_eq!(token_file_of("dispatcher"), "run/host/dispatcher/token");
+}
+
+#[test]
+fn a_template_from_before_the_token_file_passes_and_the_run_loop_reads_what_a_template_mounts() {
+    // A template from before #327 — the token in etc/dispatcher.env, no file — still
+    // passes: a rollback may name it.
+    let older = mutate(
+        &mutate(
+            &real_set("compose.yml"),
+            "      OMARCHY_WORKER_TOKEN_FILE: /run/omarchy/worker-token   # the host worker token, a read-only file (#327)\n",
+            "",
+        ),
+        "      - type: bind\n        source: ./run/host/dispatcher/token\n        target: /run/omarchy/worker-token\n        read_only: true\n        bind: { create_host_path: false }\n",
+        "",
+    );
+    lint_compose(&older, None, &Envelope::reference(), Engine::Rootful).unwrap();
+    // But never with the token's value in its environment.
+    let plain = mutate(
+        &real_set("compose.yml"),
+        "      OMARCHY_WORKER_TOKEN_FILE: /run/omarchy/worker-token",
+        "      OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN}",
+    );
+    refused_for(
+        lint_compose(&plain, None, &Envelope::reference(), Engine::Rootful),
+        "environment",
+        "the token's value in the environment",
+    );
+
+    // What the run loop reads of a template: whether it reads the token file, and the
+    // secret files compose must find.
+    let template = real_set("compose.yml");
+    assert!(reads_token_file(&template) && reads_token_file(HOST));
+    assert!(!reads_token_file(&older));
+    assert!(!reads_token_file("not: [yaml"));
+    assert_eq!(secret_files(&template), ["run/host/dispatcher/token"]);
+    assert_eq!(secret_files(HOST), ["run/host/dispatcher/token"]);
+    assert!(secret_files(&older).is_empty());
+    assert_eq!(
+        secret_files(&format!(
+            "{HOST}      - ./run/host/dispatcher/../dispatcher/token:/again:ro\n"
+        )),
+        ["run/host/dispatcher/token"]
     );
 }
 

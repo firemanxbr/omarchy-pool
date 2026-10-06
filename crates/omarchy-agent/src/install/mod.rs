@@ -14,9 +14,11 @@
 //!    of that architecture — and only reported: a held lane never stops an install;
 //! 3. prints the envelope (agent.toml) for the person to confirm on `/dev/tty` (`--yes`
 //!    skips) and writes `run/capacity.json`;
-//! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into
-//!    `etc/dispatcher.env` with the host's own addresses (#371: its interfaces' and the
-//!    public one the egress probe saw tasks leave from, kept in `egress.json`);
+//! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into its
+//!    file `run/host/dispatcher/token` (0400, #327), which the dispatcher mounts read-only,
+//!    and its registration into `etc/dispatcher.env` with the host's own addresses (#371: its
+//!    interfaces' and the public one the egress probe saw tasks leave from, kept in
+//!    `egress.json`);
 //! 5. only then writes agent.toml, with the `host_id` and `worker_id` enrollment gave:
 //!    before it there is no run loop, no dispatcher, and nothing claims; then
 //!    `etc/dispatcher.env` gets the secrets directory and the agent budget from it (#371);
@@ -796,6 +798,7 @@ pub(crate) fn measure_as(
         set_dir.join("compose.override.yml"),
         set_dir.join(".env"),
         enroll_paths.dispatcher_env(),
+        enroll_paths.token(),
         secrets_dir.join("agent.env"),
         p.data.join(legacy::FILE),
     ] {
@@ -1502,12 +1505,13 @@ pub(crate) fn apply(
                 env_file.display()
             )))
         }
-        Refresh::Written | Refresh::Unchanged => say(
+        Refresh::Written | Refresh::Unchanged | Refresh::TokenMoved => say(
             out,
             &format!(
-                "{} (0600): the worker token, {}",
+                "{} (0600): the registration, {}; the worker token in {} (0400)",
                 env_file.display(),
-                rendered.lines().map_err(Failure::Refused)?.join(", ")
+                rendered.lines().map_err(Failure::Refused)?.join(", "),
+                eo.paths.token().display()
             ),
         ),
     }
