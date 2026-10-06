@@ -9,8 +9,9 @@
 #      dispatcher-env --write` renders etc/dispatcher.env beside a worker
 #      token — this machine's own addresses (its interfaces', and a stand-in
 #      for the public address install's egress probe saw), the secrets
-#      directory and the envelope's agent budget — keeping the token and an
-#      owner's line, 0600; the dispatcher's environment is that file
+#      directory, the envelope's agent budget and its grant of a signed
+#      exception's bridge (OMARCHY_DIRECT_NETWORK=1, #373) — keeping the token
+#      and an owner's line, 0600; the dispatcher's environment is that file
 #   1. from inside a task container: a public mirror answers through its
 #      egress sidecar (CONNECT and a plain GET); 169.254.169.254 is refused by
 #      the egress and unreachable directly; a public name that resolves to
@@ -35,7 +36,9 @@
 #   2. the probe sidecar's word reaches the claim (`agent`): with a key the
 #      provider refuses, it says so, which shows the agent sidecar's way out
 #   3. a package with a signed exception in factory/sizing gets a bridge
-#      network, and its raw socket reaches the internet; its bridge's gateway
+#      network on a host whose envelope grants it (this one's, step 0; a host
+#      without the grant hands it back, #373: pkg-repo's dispatch tests), and
+#      its raw socket reaches the internet; its bridge's gateway
 #      is the host itself on a rootful engine, out of reach behind an INPUT
 #      drop for its /28 (the rule prep-root.sh's OMARCHY-TASKS-HOST chain
 #      holds for each task subnet, #367), which this test adds for the run
@@ -222,6 +225,7 @@ socket_cli = "/var/run/docker.sock"
 allow_socket = true
 rootful_ack = true
 dedicated = true
+direct_network = true
 agent_budget = { calls_per_task = 37, tokens_per_task = 123456, minutes_per_task = 7, calls_per_day = 4000 }
 TOML
 chmod 600 "$agent_data/agent.toml"
@@ -237,10 +241,11 @@ addresses=",$(key OMARCHY_HOST_ADDRESSES),"
 [[ "$addresses" == *",$host_public,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($addresses) lacks the public $host_public"
 [[ "$(key OMARCHY_SECRETS_DIR)" == "$tmp/secrets" ]] || fail "OMARCHY_SECRETS_DIR: $(key OMARCHY_SECRETS_DIR)"
 [[ "$(key OMARCHY_AGENT_CALLS_PER_TASK) $(key OMARCHY_AGENT_TOKENS_PER_TASK) $(key OMARCHY_AGENT_MINUTES_PER_TASK) $(key OMARCHY_AGENT_CALLS_PER_DAY)" == "37 123456 7 4000" ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$envfile")"
+[[ "$(key OMARCHY_DIRECT_NETWORK)" == 1 ]] || fail "the envelope's grant of a signed exception's bridge: $(grep OMARCHY_DIRECT_NETWORK "$envfile" || echo none)"
 # The dispatcher's environment is that file, as compose's env_file gives it.
 from_agent=()
 while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || from_agent+=("$line"); done < "$envfile"
-echo "ok: the agent wrote etc/dispatcher.env (0600): the token and the owner's line kept, OMARCHY_HOST_ADDRESSES=${addresses:1:${#addresses}-2}, the secrets directory, the budget"
+echo "ok: the agent wrote etc/dispatcher.env (0600): the token and the owner's line kept, OMARCHY_HOST_ADDRESSES=${addresses:1:${#addresses}-2}, the secrets directory, the budget, the grant of a signed exception's bridge"
 
 # The pool: who the host is, tasks one per claim (then 204), heartbeats by beats/<id>, every request kept.
 mkdir -p "$tmp/beats"; : > "$tmp/tasks.jsonl"; : > "$tmp/requests.jsonl"

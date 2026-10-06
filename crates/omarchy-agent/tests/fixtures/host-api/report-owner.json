@@ -10,47 +10,60 @@
     "release_change_at": null,
     "restarts_hour": 0
   },
-  "legacy": {
-    "dir": "/srv/omarchy-pool",
-    "order": "ho_11111111111111111111111111111111",
-    "project": "omarchy-pool",
-    "since": "2027-01-15T08:02:22Z",
-    "state": "retired"
-  },
+  "legacy": null,
   "orders": [
     {
       "at": "2027-01-15T08:02:16Z",
-      "detail": "expired at 2027-01-15T08:02:15Z",
-      "id": "ho_22222222222222222222222222222222",
-      "kind": "reconcile-now",
-      "outcome": "refused"
+      "detail": "m1's passkey widened the envelope (version 2): max_units 3 → 8; run/capacity.json counted again: units 3 → 8 — the dispatcher is recreated with it and claims by it from its next claim",
+      "id": "ho_55555555555555555555555555555555",
+      "kind": "widen-envelope",
+      "outcome": "done"
     },
     {
       "at": "2027-01-15T08:02:22Z",
-      "detail": "stopped and removed 3 container(s) and 1 network(s) of compose project omarchy-pool; the marker is in /srv/omarchy-pool/.omarchy-agent: rollout.sh, setup.sh, omarchy-worker and the updater refuse there",
-      "id": "ho_11111111111111111111111111111111",
-      "kind": "retire-legacy",
+      "detail": "m1's passkey (version 3): CLAUDE_CODE_OAUTH_TOKEN, GITHUB_TOKEN set, OPENAI_API_KEY taken out in /srv/omarchy-pool/host-secrets/agent.env — the next agent sidecar reads it; a task already running keeps what it started with",
+      "id": "ho_66666666666666666666666666666666",
+      "kind": "set-agent-keys",
       "outcome": "done"
     }
   ],
   "owner": {
-    "agent_keys": [],
+    "agent_keys": [
+      "GEMINI_API_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "GITHUB_TOKEN"
+    ],
     "envelope": {
-      "agent_budget": null,
-      "agent_slots": null,
-      "diagnostics": null,
-      "emulate": null,
-      "max_cpus": null,
-      "max_mem_gb": null,
-      "max_units": null,
-      "paths": null
+      "agent_budget": {
+        "calls_per_day": 5000,
+        "calls_per_task": 200
+      },
+      "agent_slots": 2,
+      "diagnostics": false,
+      "emulate": [
+        "x86_64"
+      ],
+      "max_cpus": 12,
+      "max_mem_gb": 32,
+      "max_units": 8,
+      "paths": [
+        "/srv/omarchy-pool/host",
+        "/srv/omarchy-pool/host-secrets"
+      ]
     },
-    "passkey": null,
+    "passkey": {
+      "alg": "ES256",
+      "by": "m1",
+      "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+      "origin": "https://omarchy-pool.org",
+      "pinned_at": "2027-01-15T08:00:00Z",
+      "rp_id": "omarchy-pool.org"
+    },
     "seal": {
       "fingerprint": "SHA256:wIwZGH0JYi29ol7KfewxDD04AEppH3Sn1BWJ8Ci2GsI",
       "key": "kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0"
     },
-    "version": 0
+    "version": 3
   },
   "quarantine": [],
   "release": {

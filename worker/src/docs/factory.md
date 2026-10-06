@@ -568,7 +568,10 @@ network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a 
            a model kind's agent sidecar <network>-agent (the broker, agent.env read-only, its caps in BROKER_AGENT_*,
            its usage in <task dir>/agent); all removed with the lease, orphans of this host swept at start and
            before each /28 is chosen;
-           factory/sizing network = "direct" (with a reason): a bridge network of its own, no egress
+           factory/sizing network = "direct" (with a reason): a bridge network of its own, no egress — on a
+           host whose envelope grants it (OMARCHY_DIRECT_NETWORK, #373); elsewhere handed back lost (the attempt
+           given back for a task's first HOST_LOSSES_MAX losses, spent after: the claim does not say yet whether
+           a host runs such packages)
 agent      the claim's agent: {provider, model, probe, error, checked_at} from a probe sidecar on a network of its own
            (at start, every 30 min, sooner after a failure, and for recheck-agent / restart-agent); the day's agent
            calls (OMARCHY_AGENT_CALLS_PER_DAY) spent: agent_slots 0 in the claim and no model task starts

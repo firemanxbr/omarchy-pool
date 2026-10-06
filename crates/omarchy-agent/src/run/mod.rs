@@ -38,7 +38,10 @@
 //!   too, unless `agent.urgent`), a rollback statement skips it, and the report's
 //!   `soaking_until` lets the pool keep the host out of its 426 gate meanwhile; freeze
 //!   detection (#326, [`freeze`]): GitHub's latest release tag every six hours, and
-//!   `pool-behind-github` when the pool has named an older one for more than a day.
+//!   `pool-behind-github` when the pool has named an older one for more than a day;
+//! - the owner's control without a visit (#328, [`owner`]): `widen-envelope` and
+//!   `set-agent-keys`, taken only when the passkey pinned at the host signed them
+//!   (`crate::owner`), and the host's seal key in the report.
 //!
 //! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
 //! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
@@ -63,6 +66,7 @@ pub(crate) mod driver;
 pub(crate) mod exec;
 pub(crate) mod journal;
 pub(crate) mod orders;
+pub(crate) mod owner;
 pub(crate) mod pool;
 pub(crate) mod power;
 pub(crate) mod report;
@@ -76,7 +80,7 @@ pub(crate) mod vm;
 mod agent;
 pub(crate) mod cli;
 
-pub use cli::{logs, round, run, runtime_switch, self_test, status};
+pub use cli::{envelope, logs, round, run, runtime_switch, self_test, status};
 
 // What install (#317) shares with the loop: the verifier, the release assets' names and
 // where they are, and the pinned tools.

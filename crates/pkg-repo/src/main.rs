@@ -423,6 +423,17 @@ enum Command {
         agent_minutes_per_task: u64,
         #[arg(long, env = "OMARCHY_AGENT_CALLS_PER_DAY", default_value_t = 5000)]
         agent_calls_per_day: u32,
+        /// The owner's envelope grants a signed exception's bridge network (`direct_network`,
+        /// which the agent writes as `OMARCHY_DIRECT_NETWORK=1` once install's egress probe
+        /// checked that bridge, #373): without it, a package with `network = "direct"` in
+        /// `factory/sizing` is handed back, never started on a bridge nobody probed here.
+        #[arg(
+            long,
+            env = "OMARCHY_DIRECT_NETWORK",
+            action = clap::ArgAction::SetTrue,
+            value_parser = clap::builder::FalseyValueParser::new()
+        )]
+        direct_network: bool,
     },
     /// A task's egress sidecar (#336, design v2 §9.4): a forward proxy that
     /// allows CONNECT, GET and HEAD to public addresses only, judged by the
@@ -773,6 +784,7 @@ fn main() -> Result<()> {
             agent_tokens_per_task,
             agent_minutes_per_task,
             agent_calls_per_day,
+            direct_network,
         } => {
             use std::time::Duration;
             let lease = Duration::from_secs(lease_s);
@@ -805,6 +817,7 @@ fn main() -> Result<()> {
                         .filter(|a| !a.is_empty())
                         .collect(),
                     secrets_dir: secrets_dir.filter(|d| !d.as_os_str().is_empty()),
+                    direct: direct_network,
                     caps: dispatch::budget::Caps {
                         calls_per_task: agent_calls_per_task.max(1),
                         tokens_per_task: agent_tokens_per_task.max(1),

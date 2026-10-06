@@ -771,6 +771,7 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | Option | What it does |
 |---|---|
 | `--dedicated` | this machine or VM is used only as a pool host (design v2 §19.1); without it the host must be a dedicated user at the `subuid` level holding no credentials |
+| `--direct-network`, `--no-direct-network` | grants a signed exception's bridge network (agent.toml's `direct_network = true`, #373): a package with `network = "direct"` in `factory/sizing` runs here on a plain bridge, which preflight's egress probe then checks too; without it such a task is handed back. Only a rootful Linux host with prep-root.sh's firewall (or the Mac's `omarchy` VM) can keep that bridge off the LAN. A re-run without either keeps the grant `agent.toml` holds; `--no-direct-network` takes it back (`direct_network = false`). Grant it this way, on an install or a re-run, so the bridge is probed: a grant written into `agent.toml` by hand reaches the dispatcher unprobed |
 | `--work-root <dir>`, `--secrets-dir <dir>` | where tasks work (default `<data>/work`) and where `agent.env` goes (default `<data>/secrets`); the secrets directory must be outside the work root and the set directory |
 | `--socket <path>` | the engine's socket; otherwise the first that answers of rootless podman's API socket, rootless docker, `/var/run/docker.sock` |
 | `--task-subnets <cidr>[,<cidr>]` | the task networks' range (default `10.231.0.0/16`, as prep-root.sh's) |
@@ -797,35 +798,77 @@ the `agent.env` a re-run keeps (public read only: a classic token with no scope;
 GitHub names no scopes for, is refused), a secrets directory with a character
 the dispatcher refuses (letters, digits and `/ . _ - +` only), an
 `agent_budget` the agent would refuse (an unknown key, or not a whole number
-from 1), and the **egress probe** (#317, #367): two probe tasks, one after
-the other, in the last /28 of the task subnets. The first, on a plain bridge
-(the network a signed `factory/sizing` exception gets), must fail to reach
-`169.254.169.254`, the default gateway, the host's LAN address and its own
-network's gateway (its `.1`) on 22, 53 and the pool's ports (3128, 8790,
-8791), and must reach GitHub, which on a rootful host is what prep-root.sh's
-`DOCKER-USER` rules give. The second, on a network made as the dispatcher
-makes a task's (internal and, on Docker, in its isolated gateway mode; a
-Docker older than 28 has no such mode and is refused here, as the dispatcher refuses
-it), must fail to reach its gateway on the same ports. A connection refused counts as reached: the
-refusal is the target's own answer. On a rootful engine a network's gateway,
-like the host's LAN address, is the host itself, and the `DOCKER-USER` rules
-sit in `FORWARD`, which traffic to the host never crosses (CVE-2024-29018):
-only prep-root.sh's `INPUT` drop for the task subnets (`OMARCHY-TASKS-HOST`)
-keeps a task off the host's own services. So on a rootful engine preflight
-checks it two ways, and either refuses the install with the command to run:
-the unit's script (`/usr/local/libexec/omarchy-task-firewall`,
+from 1), and the **egress probe** (#317, #367, #373), which runs the way a
+task runs, in the last /28 of the task subnets: a network made as the
+dispatcher makes a task's (internal and, on Docker, in its isolated gateway
+mode — a Docker older than 28 has no such mode and is refused here, as the
+dispatcher refuses it —; on podman through libpod's own API, internal with
+DNS off, #372), with its **egress sidecar** at its `.2`: the release's worker
+image in its `egress` role, started as the dispatcher starts one (on a bridge
+of the probe's own first, its stand-in for the shared `omarchy-egress`; the
+same limits and flags), refusing what the dispatcher's sidecars refuse — the
+task subnets and the host's own addresses, `OMARCHY_HOST_ADDRESSES` as the
+agent renders it now (#371). The probe task, at the network's last address,
+tries `169.254.169.254`, the default gateway, the host's LAN address, every
+IPv4 address of the host's own and its network's gateway (its `.1`) on 22,
+53 and the pool's ports (3128, 8790, 8791), each twice: straight from its
+network, where nothing may answer, and through its sidecar (`CONNECT`), which
+must refuse it or find nothing there; and it must reach GitHub through the
+sidecar. A connection refused counts as reached: the refusal is the target's
+own answer. It also asks the pool's origin (`/cdn-cgi/trace`, at Cloudflare's
+edge), through its sidecar, which address it comes from: that public address
+is kept in `egress.json` and every task's egress refuses it (#371); one the
+sidecar was not given yet (a first install) is tried once more, straight and
+through a sidecar given it, as the dispatcher's are from install on; not
+seen is a note, not a blocker. A rootless host passes it as a rootful one
+does: a task never leaves through the engine's user-mode network stack but
+by its sidecar, which refuses the LAN and the router.
+
+A **signed exception's bridge** — the plain bridge a package with `network =
+"direct"` in `factory/sizing` gets, for builds that open raw sockets — is
+probed too, and only, when the envelope grants it: `--direct-network` (agent.toml's
+`direct_network = true`, kept by a re-run; `--no-direct-network` takes it back),
+which the dispatcher reads as `OMARCHY_DIRECT_NETWORK=1` in `etc/dispatcher.env`.
+Without the grant the dispatcher hands such a package's task back to the pool
+before anything starts, and the probe says it probed no bridge. The hand-back is
+a lost lease: the pool gives the attempt back for the first two of a task's
+losses (`HOST_LOSSES_MAX`), and spends one for each after, so such a package
+fails ("lost too often on its host", then out of attempts) where only hosts
+without the grant claim it. The claim does not say yet whether a host runs such
+packages, which would keep them off the others (a follow-up of #373); no
+package in `factory/sizing/tasks.toml` has the exception today. With it, a probe task on that bridge must
+fail to reach the metadata address, the default gateway, the host's LAN
+address and the bridge's own gateway on the same ports, and must reach GitHub,
+which on a rootful Linux host is what prep-root.sh's `DOCKER-USER` rules and
+its `INPUT` drop give. A rootless engine's bridge reaches the LAN through its
+user-mode network stack, and its gateway is the engine's own namespace: such a
+host cannot grant the exception, and preflight says to take the grant off.
+
+On a rootful engine a network's gateway, like the host's LAN address, is the
+host itself, and the `DOCKER-USER` rules sit in `FORWARD`, which traffic to
+the host never crosses (CVE-2024-29018): only prep-root.sh's `INPUT` drop for
+the task subnets (`OMARCHY-TASKS-HOST`) keeps a task off the host's own
+services, the second layer under every task network. So on a rootful engine
+preflight checks it two ways, and either refuses the install with the command
+to run: the unit's script (`/usr/local/libexec/omarchy-task-firewall`,
 world-readable) must jump from `INPUT` to `OMARCHY-TASKS-HOST` and drop every
 task subnet there, and the unit that runs it at boot
 (`/etc/systemd/system/omarchy-task-firewall.service`) must be there and
 enabled (its link in `/etc/systemd/system/multi-user.target.wants`), whatever
 the probe says — a host whose own firewall drops the ports probed may leave
 its other services open to a task, and a unit that does not run at boot
-leaves the host open after the next reboot, when nothing probes again — and
-the probe must reach neither the gateway nor the LAN address, which shows the
-rule is in effect (the agent is never root and cannot read the firewall
-itself). The command is `sudo systemctl restart
-omarchy-task-firewall.service` when the script and the enabled unit are in
-place, the rule having been flushed since (a firewall reload); `sudo
+leaves the host open after the next reboot, when nothing probes again — and,
+where the envelope grants a signed exception's bridge, that bridge's probe
+must reach neither its gateway nor the LAN address, which shows the rule is in
+effect (the agent is never root and cannot read the firewall itself). Without
+the grant nothing a probe task tries crosses `INPUT`: a task's own network has
+no address of the host's (Docker's isolated gateway mode, libpod's network with
+DNS off) and no route off its subnet, and its sidecar refuses the LAN; so
+preflight checks the script and the unit only, and the drop is the second
+layer under task networks that reach nothing of the host's (#373). The command
+is `sudo systemctl restart omarchy-task-firewall.service` when the script and
+the enabled unit are in place, the rule having been flushed since (a firewall
+reload, which a granted bridge's probe shows); `sudo
 systemctl enable omarchy-task-firewall.service && sudo systemctl restart
 omarchy-task-firewall.service` when the unit is there but not enabled; and
 otherwise `sudo factory/host/prep-root.sh` with this install's `--user`,
@@ -833,15 +876,12 @@ otherwise `sudo factory/host/prep-root.sh` with this install's `--user`,
 `/etc/docker/daemon.json` names (prep-root.sh would set its own default
 otherwise; one it would not keep as it is, several pools or a size other
 than /24, is said). On a rootless engine there is no such rule, and what
-could reach the host is the engine's **host loopback**: while both probe
-tasks run, preflight reads the command line of the engine's user-mode network
-stack in `/proc` and refuses one that maps the host's loopback, with the
-setting to change (*Rootless engines*, below). The first task asks the pool's
-origin (`/cdn-cgi/trace`, at Cloudflare's edge) which
-address it comes from too: that public address is kept in `egress.json` and every
-task's egress refuses it (#371); not seen is a note, not a blocker. Until the
-probe runs behind an egress sidecar (#373), a rootless host is expected to
-fail it (below). The probe's answers decide, not the engine's kind. Leftovers of an interrupted
+could reach the host is the engine's **host loopback**: while the probe
+tasks run (the sidecar's bridge starts rootless podman's stack), preflight
+reads the command line of the engine's user-mode network stack in `/proc` and
+refuses one that maps the host's loopback, with the setting to change
+(*Rootless engines*, below). The probe's answers decide, not the engine's
+kind. Leftovers of an interrupted
 probe (labelled `org.omarchy-pool.probe=egress`) are removed before it
 runs. A work root that does not exist under a directory the user cannot
 write is a blocker naming prep-root.sh. A socket
@@ -862,7 +902,8 @@ the run loop asks again every hour, and within minutes after no answer), `OMARCH
 (the path chosen here, never mounted into the dispatcher) and, when the
 envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
 `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK` and `…_CALLS_PER_DAY` (without one, the
-dispatcher's defaults). Every other line of that file is yours and kept. It writes the
+dispatcher's defaults), and `OMARCHY_DIRECT_NETWORK=1` when the envelope grants
+a signed exception's bridge (#373). Every other line of that file is yours and kept. It writes the
 agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
 `--legacy`, and the unit `~/.config/systemd/user/omarchy-agent.service`
 (`Type=notify`, `Restart=always`, `WatchdogSec=300`,
@@ -886,9 +927,14 @@ as "needs a person" before removing anything, since the agent would keep
 running under linger.
 
 `tests/agent-install.sh` runs the egress probe and the legacy project against
-a real engine in CI, rootful docker and rootless podman: a task network's
-gateway is reached on a plain bridge (the host itself on rootful docker, the
-engine's namespace on rootless podman) and not behind an `INPUT` drop for
+a real engine in CI, rootful docker and rootless podman: preflight's probe the
+way a task runs (#373) passes on both, behind an egress sidecar (a stand-in
+built from the commit's `pkg-repo egress`, and in the image job the worker
+image itself), and fails where a task could reach what it must not — a
+network made without `--internal` reaches the LAN, and a public address of
+the host's the sidecar was not given answers through it; a signed
+exception's bridge reaches its gateway (the host itself on rootful docker,
+the engine's namespace on rootless podman) and not behind an `INPUT` drop for
 one test /28 (the rule prep-root.sh's `OMARCHY-TASKS-HOST` holds for each
 task subnet), which the script adds on a rootful engine where it may (root,
 or `sudo -n`); a task's own network, made as the dispatcher makes it (on
@@ -920,9 +966,10 @@ loopback off by default; pasta's guest-mapped address (from podman 5.3, the
 table's third row, below) is on. Whether the loopback is mapped is on the
 stack's command line, which the engine's own user (the agent's, design v2
 §19.3) reads in `/proc/<pid>/cmdline`:
-preflight reads it there while both probe tasks run (rootless podman starts
-its stack with the first container on a bridge network and stops it with the
-last), and refuses the install with the setting to change when any of this
+preflight reads it there while the probe tasks run (rootless podman starts
+its stack with the first container on a bridge network — the probe's egress
+sidecar, on a bridge of its own, and a signed exception's bridge where the
+envelope grants one — and stops it with the last), and refuses the install with the setting to change when any of this
 user's `rootlesskit`, `slirp4netns` or `pasta` processes maps it — or when
 none was seen, since nothing then says it is off. The agent listens on
 nothing (design v2 §11.2), so it reads the setting rather than waiting for a
@@ -930,20 +977,25 @@ connection. The stack carries both a signed exception's bridge and a task's
 own network; the latter is internal, with no route to these addresses, and
 so is reached only through the former and the shared `omarchy-egress`
 bridge, whose sidecars refuse private addresses by what a name resolves to.
+That is why a rootless host passes the egress probe, which runs the way a task
+runs, behind its sidecar (#373), and cannot grant a signed exception's bridge
+(`--direct-network`): its bridges reach the LAN and the router through the
+stack, and their gateway is the engine's own namespace, which answers.
 
 pasta can also map an address to the host's **own** address, which reaches
 every service of the host that listens on its interfaces: its guest-mapped
 address (`--map-guest-addr`), which rootless podman passes as `169.254.1.2`
 (what `host.containers.internal` names) from podman 5.3 on, unless
 `pasta_options` names one. On rootless podman behind pasta (libpod's `/info`
-says which stack it runs) the probe task on a bridge tries `169.254.1.2` on
-22, 53 and the pool's ports, and preflight refuses the install when anything
-answers there, with the setting to change; an address that pasta's command
-line maps and the probe did not try (one an owner set) is refused as it is. A
-task's own network is internal and has no route to it, so the probe task on
-one does not try it (an unreachable address that fails at once reads as a
-refusal to `nc -z`); a signed exception's bridge has one, and so does the
-shared `omarchy-egress` bridge, whose sidecars refuse link-local addresses.
+says which stack it runs) the probe tries `169.254.1.2` on 22, 53 and the
+pool's ports, and preflight refuses the install when anything answers there,
+with the setting to change; an address that pasta's command line maps and
+the probe did not try (one an owner set) is refused as it is. A task's own
+network is internal and has no route to it (the probe task reads its routes
+to tell that from a refusal), and its sidecar, on the shared `omarchy-egress`
+bridge, refuses link-local addresses: with the defaults, the probe passes. A
+signed exception's bridge has a route there, which its probe tries when the
+envelope grants one.
 
 | Engine | What maps the host into its networks, where, when on | Default | What turns it off |
 |---|---|---|---|
@@ -957,17 +1009,20 @@ dispatcher makes it on podman through libpod's own API, internal with DNS
 off (its docker-compatible API would turn DNS on and keep a gateway at `.1`,
 where aardvark-dns answers on 53 and the namespace refuses every other
 port), and on Docker with its isolated gateway mode (#372); preflight's
-second probe task, on a network made the same way, passes with the defaults
-above. podman 4's docker-compatible API shows such a network with
+probe task, on a network made the same way behind its egress sidecar, passes
+with the defaults above (#373). podman 4's docker-compatible API shows such a network with
 `"Gateway": "<nil>"`, which docker's CLI from 29 on cannot read: on a podman 4
 host (rootful too) with a task running, an owner's own docker CLI 29 or newer
 on podman's socket fails `docker network ls` and `docker network inspect` with
 `ParseAddr("<nil>")`; podman's own CLI, or the docker CLI the worker image and
-the agent pin (27.5.1), lists them. A rootless host still fails the first
-probe task until #373 lands, and preflight says so: a signed exception's bridge reaches the LAN and the
-router through the user-mode stack, and its gateway (the engine's namespace)
-refuses connections, which counts as reached; #373 runs the probe the way a
-task runs, on an internal network behind its egress sidecar.
+the agent pin (27.5.1), lists them. A rootless host passes the egress probe
+with these defaults — rootless Docker with RootlessKit's
+`--disable-host-loopback`, rootless podman as it comes — since the probe runs
+the way a task runs, on an internal network behind its egress sidecar (#373);
+only a grant of a signed exception's bridge (`--direct-network`) would fail
+it there: that bridge reaches the LAN and the router through the user-mode
+stack, and its gateway (the engine's namespace) refuses connections, which
+counts as reached.
 
 ### Installing a Mac
 
@@ -1052,12 +1107,14 @@ Preflight, before it starts any VM:
 - through the release's pinned CLI on `~/.colima/omarchy/docker.sock`: the
   capacity inside the VM (`MemAvailable` read inside it), the three
   directories visible in the VM at their own paths and your home directory
-  not, the x86_64 smoke run through Rosetta, and the egress probe, which the
-  firewall must pass (the Mac's default gateway from `route -n get default`,
-  its LAN address, and the Mac as the VM reaches it, `192.168.5.2`; and, as
-  on Linux, the probe network's gateway on 22, 53 and the pool's ports,
-  #367, which is the VM itself and which the firewall's `INPUT` drop
-  closes). prep-root.sh's files are not looked for on a Mac.
+  not, the x86_64 smoke run through Rosetta, and the egress probe, as on
+  Linux the way a task runs, behind its egress sidecar (#373), with one more
+  target: the Mac as the VM reaches it, `192.168.5.2`, beside the Mac's
+  default gateway from `route -n get default`, its LAN address and its own
+  addresses; with `--direct-network` a signed exception's bridge too, which
+  the firewall must keep off them, and off the probe network's gateway on
+  22, 53 and the pool's ports (#367), the VM itself, which the firewall's
+  `INPUT` drop closes. prep-root.sh's files are not looked for on a Mac.
 
 `agent.toml` records the VM (`[vm] runtime = "colima"`, `rosetta`,
 `disk_gb`) and the two sockets: `socket_cli` (the Mac's
@@ -1083,7 +1140,9 @@ your home directory shared with it — neither `~` nor any folder in it
 (Docker Desktop: Settings, Resources, File sharing; preflight probes `~`,
 the folders that hold credentials and the usual project folders); the agent
 never starts, stops or sizes their VM, and puts no firewall in it, so the
-egress probe decides as on any host.
+egress probe decides as on any host: a task behind its egress sidecar passes
+there, and a signed exception's bridge, which their NAT carries to the LAN,
+cannot be granted.
 
 **Resizing the VM.** Re-run `omarchy-agent install --max-cpus N
 --max-mem-gb M` (it holds the size to the release's minimum and to the Mac
@@ -1383,8 +1442,13 @@ host of that engine (#372): on podman through libpod's own API on the socket
 it mounts, internal with DNS off; where libpod does not answer there, the
 dispatcher does not start, so the round's guard fails and the switch goes
 back. The switch runs none of install's preflight probes on the new engine
-(the gateway, the host loopback, pasta's guest-mapped address: *Rootless
-engines*, above).
+(the egress probe behind its sidecar, a granted bridge's probe, the gateway,
+the host loopback, pasta's guest-mapped address: *Rootless engines*, above).
+A grant of a signed exception's bridge (`direct_network`, #373) goes with
+it, unprobed there as one written by hand is: run `omarchy-agent preflight`
+again after the switch (its socket is the one `agent.toml` now names), which
+reads the grant and probes that engine's bridge, or take the grant back with
+install's `--no-direct-network`.
 A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
 and `logs` follow it. Install writes no runtime into `agent.toml` (it finds
 a socket, and podman's speaks docker's API): until a switch names one there,
@@ -1509,6 +1573,77 @@ real `systemd --user` in CI. With an owner's soak (*Soak*, below) the agent
 a release ships waits with its release, unless the manifest sets
 `agent.urgent`: then the agent updates itself at once and the release still
 waits.
+
+### Owner control
+
+From agent 0.4.0 a host's owner widens its envelope and sets its agent keys
+from the host's page (#328, design v2 §14; [The project's
+host](/docs/worker-host#owner-control-without-a-visit) says what each does).
+Two things are done at the host, once:
+
+- **Pin a passkey.** On the host's page, *Owner control* → **Make a pin**,
+  with one of your passkeys; it prints a command good for ten minutes. At
+  the host, as the agent's user (on a Mac, in your own login session):
+
+  ```sh
+  omarchy-agent envelope pin-passkey <pin>      # or: … pin-passkey - < pin.txt
+  # pinned m1's passkey (ES256, credential AbCdEfGhIjKl…) for omarchy-pool.org on https://omarchy-pool.org: …
+  omarchy-agent status                          # owner:  m1's ES256 passkey AbCdEfGhIjKl… …  /  seal key: SHA256:…
+  ```
+
+  The agent refuses a pin for another host, for a relying party that is not
+  its pool's (`localhost` only when its pool is on the same machine), one
+  whose signature does not check, or one past its ten minutes; it then keeps the passkey's public key in `state/owner.json`
+  (0600), and the page shows it pinned after its next report (within its
+  poll). Pinning another passkey replaces it; `omarchy-agent envelope
+  unpin-passkey` removes it, and the site then widens nothing and sets no
+  key. A passkey you lost is replaced only at the host — by design, the
+  site has no way around the pin.
+- **Confirm the seal key.** The agent makes its X25519 seal key the first
+  time it runs (on Linux `state/seal.x25519`, 0600, with `state/seal.pub`;
+  on a Mac the login keychain, service `org.omarchy-pool.agent`, account
+  `seal-key-…`) and journals its fingerprint (`seal-key`). Compare the
+  page's fingerprint with `omarchy-agent status`'s `seal key:` line, then
+  **Confirm the seal key** with your passkey. On a Mac whose keychain is
+  locked (an SSH session with nobody logged in) the agent journals that the
+  seal key could not be loaded, tries again every ten minutes, and takes no
+  agent key meanwhile; everything else runs. A seal key made again (the file
+  removed, a new keychain) shows as changed on the page: confirm it again,
+  and seal the keys again — the agent refuses keys sealed to another key.
+
+Then, on the page: **Widen the envelope** (the agent answers `done` with
+what changed in `agent.toml` and in `run/capacity.json`, and recreates the
+dispatcher with the new count) and **Set agent keys** (written to
+`OMARCHY_SECRETS_DIR/agent.env`, 0600; your own lines there are kept, and
+the next agent sidecar reads it). Each is one order on the page's journal of
+orders; the agent's answer says why when it refuses:
+
+| The answer says | What it means |
+|---|---|
+| `no passkey is pinned at this host` | pin one first (above) |
+| `signed with another passkey (…), not the one pinned at this host` | sign with the pinned passkey, or pin this one |
+| `its version N is not above the last this host took` | a replay, or an older document: sign a new one |
+| `the document expired at …` / `… ahead of this host's clock` | signed more than an hour ago, or the host's clock is off: sign again, check the clock |
+| `the passkey's answer was made on …` / `the passkey signed for another relying party` / `the authenticator did not verify the user` | not signed on the pool's page, or without verifying you: sign again there |
+| `the keys were sealed to another seal key` | confirm the host's seal key on the page, then seal again |
+| `GITHUB_TOKEN carries the scopes …` | a `GITHUB_TOKEN` is public read only: make one with no scope |
+| `done`: `… was taken already: nothing changed again` | the agent stopped after making the change and before its answer reached the pool; the change is in place |
+| `done`, ending `; but …` | the change is in `agent.toml` or `agent.env`, and what failed after it is said — for `run/capacity.json was not counted again`, run `omarchy-agent capacity --write` at the host |
+
+The page refuses a second document signed at the same version (two tabs,
+or a widening and keys signed at once) with `409`, `version`: press again,
+and the passkey signs the next one. The page also refuses, before your
+passkey is asked, a document the pool answered that is not the one it
+asked for (another envelope, other keys, another seal key, a challenge
+that is not its SHA-256): that is a pool to look into, not a retry.
+
+A widening's `emulate` turns a lane on at the host's next count, which the
+loop does not run on Linux — **decision**: the loop never runs a capacity
+probe or an emulation smoke test on its own there, so on Linux it takes
+`omarchy-agent capacity --write` at the host, as the page's dialog says
+(on a Mac, the next start of its VM counts it); a Mac's VM takes a new
+`max_cpus` or `max_mem_gb` with a restart once no task runs. Narrowing
+(*Settings*) needs no signature.
 
 ### Soak
 
@@ -2035,6 +2170,22 @@ start time), a task that was running finishes, and the page's units say the
 new count after the agent's next report. Give its envelope's units back (the first entry of the
 list), then ask Diagnostics while `agent.toml` says `diagnostics = false`:
 refused, saying so.
+
+**Rehearse owner control on the P1 host** (#328) once its agent reports
+0.4.0 (`tests/agent-host-orders.sh` widens and sets a key against a stand-in
+in CI, with a virtual authenticator; `tests/host-enroll-e2e.sh` pins one
+made on a local pool's page): pin your passkey at the host and confirm its
+seal key (*Owner control*, above). Then, from the page alone: **Widen the
+envelope** with `max_units` one above what `agent.toml` says (and no more
+than the machine has) — within two minutes the order says `done`,
+`agent.toml` says the new cap, `jq .units run/capacity.json` the new count
+and the dispatcher was recreated; **Set agent keys** with a scratch
+`OPENAI_API_KEY` — `done`, `agent.env` in the secrets directory holds it
+(0600), `docker inspect` of the dispatcher shows neither the value nor a
+mount of the secrets directory, and `omarchy-agent status` and the page name
+the key, never its value; take it out again the same way. A widening is
+counted under the release's signed constants and the detected hardware, so
+the units it gives are never more than the machine has.
 
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,
