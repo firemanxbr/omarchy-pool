@@ -101,6 +101,7 @@ dl() { # name own [barrier-peer]
       printf "\n[cachefix]\nSigLevel = Never\nServer = file:///repo\n" >> /tmp/pacman.conf
       echo "== shared write: $(touch /var/cache/pacman/shared/planted 2>&1 || true)"
       pacman --config /tmp/pacman.conf -Sy --noconfirm >/dev/null || exit 3
+      echo "== synced"
       if [[ -n "$1" ]]; then touch "/sync/$0"; for _ in $(seq 120); do [[ -e "/sync/$1" ]] && break; sleep 0.25; done; fi
       pacman --config /tmp/pacman.conf -Sw --noconfirm cachefix-dep cachefix-a cachefix-b 2>&1
       echo "== exit: $?"' "$1" "${3:-}"
@@ -130,6 +131,9 @@ echo "ok: a task finds what the shared cache holds, checks it and downloads noth
 dep="$(basename "$(ls "$tmp"/repo/cachefix-dep-*.pkg.tar.zst)")"
 cp "$tmp/own-a/$(basename "$(ls "$tmp"/repo/cachefix-a-*.pkg.tar.zst)")" "$tmp/shared/$dep"
 dl d own-d > "$tmp/d.log" 2>&1 || true
-grep -qx '== exit: 0' "$tmp/d.log" && fail "a corrupt file in the read-only cache went unnoticed: $(cat "$tmp/d.log")"
+# The transaction itself fails, for those bytes: the sync went through, pacman ran to its end and said why.
+grep -qx '== synced' "$tmp/d.log" || fail "task d did not get as far as the download: $(cat "$tmp/d.log")"
+grep -qx '== exit: [1-9][0-9]*' "$tmp/d.log" || fail "a corrupt file in the read-only cache went unnoticed: $(cat "$tmp/d.log")"
+grep -qF "File /var/cache/pacman/shared/$dep is corrupted" "$tmp/d.log" || fail "task d's pacman failed, but not on the corrupt file of the shared cache: $(cat "$tmp/d.log")"
 echo "ok: bytes the database does not list, in the read-only cache, fail the task — what the merge-back's check keeps out"
 echo "ok: the task caches' pacman side ($RT, $image)"

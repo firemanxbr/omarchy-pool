@@ -104,6 +104,8 @@ for name in ("ok", "slow", "fill", "cache-a", "cache-b", "cache-c"):
     with tarfile.open(f"{sys.argv[1]}/{name}-1.0-1-{sys.argv[2]}.pkg.tar.zst", "w", format=tarfile.GNU_FORMAT) as t:
         ti = tarfile.TarInfo(".PKGINFO"); ti.size = len(info); t.addfile(ti, io.BytesIO(info))
 PY
+# Where the work root is on this host, for a stub recipe that tries the host's own paths to the caches (#341).
+printf '%s\n' "$tmp/work" > "$tmp/checkout/fixtures/work-root"
 cat > "$tmp/checkout/factory/worker/omarchy-build-worker.sh" <<'STUB'
 #!/usr/bin/env bash
 # The stub task: what the real script's --task mode leaves (outputs, verdict.json, the log), by the task's name.
@@ -131,6 +133,16 @@ case "$name" in
     echo "$name" > "/build/cache/own-$name"
     # A recipe that writes outside its cache: the cache tree is not mounted, and /build/cache/.. is its own /build.
     echo "== outside: $(ls -A /build/cache/.. | tr '\n' ' ')"
+    if [[ "$name" == cache-a ]]; then
+      # Every road it has to a project cache of its own name and to the other package's (AC1): up from its cache,
+      # and the host's own paths of them (the test wrote its work root here). Each lands in the container, if anywhere.
+      w="$(cat /pool/fixtures/work-root)"
+      for d in "/build/cache/../../cache/build/project/$arch/cache-a" "/build/cache/../cache-b" "/build/cache/../../../cache-b" \
+               "$w/cache/build/project/$arch/cache-a" "$w/cache/build/community/$arch/cache-b" "$w/cache"; do
+        mkdir -p "$d" 2>/dev/null; echo "planted by cache-a's recipe" > "$d/planted" 2>/dev/null
+      done
+      echo "== escapes tried"
+    fi
     [[ "$name" == cache-c ]] && ok
     # pacman's downloads go to its own cache, the dependency both builds need first as a .part, held until both are in flight.
     lib="libfixture-1.0-1-$arch.pkg.tar.zst"
@@ -478,6 +490,7 @@ for i in 30 31; do
   grep -q '^== outside: .*cache' "$(log_of "$i")" || fail "task $i's /build: $(grep '== outside' "$(log_of "$i")")"
   grep -q 'marker-project\|own-cache-[ab]' <(grep '== outside' "$(log_of "$i")") && fail "task $i reached past its cache: $(grep '== outside' "$(log_of "$i")")"
 done
+grep -q '^== escapes tried' "$(log_of 30)" || fail "cache-a's recipe did not try its escapes: $(cat "$(log_of 30)")"
 # Both downloaded into their own caches meanwhile, never into the shared one.
 [[ -z "$(ls -A "$tmp/work/cache/pacman/$arch")" ]] || fail "a build wrote into the shared pacman cache: $(ls -A "$tmp/work/cache/pacman/$arch")"
 finish 30; finish 31
@@ -497,6 +510,9 @@ jq -r 'select(.path | test("^/(core|packages)/")) | .path' "$tmp/requests.jsonl"
 [[ "$(ls -A "$tmp/work/cache/build/community/$arch/cache-a")" == own-cache-a ]] || fail "cache-a's build cache: $(ls -A "$tmp/work/cache/build/community/$arch/cache-a")"
 [[ "$(ls -A "$tmp/work/cache/build/community/$arch/cache-b")" == own-cache-b ]] || fail "cache-b's build cache: $(ls -A "$tmp/work/cache/build/community/$arch/cache-b")"
 [[ "$(ls -A "$tmp/work/cache/build/project/$arch/cache-a")" == marker-project ]] || fail "the project cache was touched: $(ls -A "$tmp/work/cache/build/project/$arch/cache-a")"
+# cache-a's recipe tried to write past its cache, by every road it had: nothing it planted is anywhere in the host's cache tree.
+planted="$(find "$tmp/work/cache" -name planted -print 2>/dev/null)"
+[[ -z "$planted" ]] || fail "a recipe wrote past its own cache: $planted"
 echo "ok: two builds at once each mount their own package's build cache and the shared pacman cache read-only; only the signed bytes are merged back"
 # The next build finds the dependency there, read-only, as merged.
 give 32 cache-c 1

@@ -41,7 +41,7 @@ jobs:
         run: bash tests/worker-needs-native.sh
         env:
           PKG_REPO: target/release/pkg-repo
-      - name: The dispatcher on a real engine — a task container born with nothing on its own internal network with its egress sidecar, staged in and out; a failure, the memory limit's kill and an output outside its list; restarts that re-adopt and sweep orphans; a lease the pool stops hearing; a stop; the disk watcher; pool jobs; two builds at once in their own package caches, the shared pacman cache read-only and only the signed bytes merged back; pool jobs — a health check's helper through omarchy-task-run on its own network under the job's 2 GB limit, other engine calls refused, a hung job killed at its timeout while a build beats on
+      - name: The dispatcher on a real engine — a task container born with nothing on its own internal network with its egress sidecar, staged in and out; a failure, the memory limit's kill and an output outside its list; restarts that re-adopt and sweep orphans; a lease the pool stops hearing; a stop; the disk watcher; pool jobs — a health check's helper through omarchy-task-run on its own network under the job's 2 GB limit, other engine calls refused, a hung job killed at its timeout while a build beats on; the task caches — two builds at once in their own package caches, a recipe's writes past its own cache reaching nothing, the shared pacman cache read-only and only the signed bytes merged back
         run: bash tests/dispatch-engine.sh
         env:
           PKG_REPO: target/release/pkg-repo
