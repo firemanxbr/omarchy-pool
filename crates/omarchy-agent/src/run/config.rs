@@ -427,6 +427,46 @@ max_units = 3
     }
 
     #[test]
+    fn the_grant_of_a_signed_exception_s_bridge_is_read_strictly_and_reaches_the_dispatcher() {
+        let studio = include_str!("../../tests/fixtures/lint/envelope/studio.toml");
+        let with = |line: &str| {
+            format!(
+                "worker_id = \"w_1\"\n{}",
+                studio.replacen("[envelope]\n", &format!("[envelope]\n{line}\n"), 1)
+            )
+        };
+        let rendered = |c: &Config| {
+            crate::dispatcher_env::Rendered {
+                addresses: Vec::new(),
+                envelope: Some(crate::dispatcher_env::Envelope::of_config(c)),
+            }
+            .lines()
+            .unwrap()
+        };
+        // No key: no grant, and no line for the dispatcher, which hands such a package back.
+        let c = Config::parse(&with("")).unwrap();
+        assert!(!c.direct_network);
+        assert!(!rendered(&c)
+            .iter()
+            .any(|l| l.starts_with("OMARCHY_DIRECT_NETWORK")));
+        // The grant (#373): the run loop writes it into etc/dispatcher.env.
+        let c = Config::parse(&with("direct_network = true")).unwrap();
+        assert!(c.direct_network);
+        assert!(rendered(&c).contains(&"OMARCHY_DIRECT_NETWORK=1".to_owned()));
+        let c = Config::parse(&with("direct_network = false")).unwrap();
+        assert!(!c.direct_network);
+        assert!(!rendered(&c)
+            .iter()
+            .any(|l| l.starts_with("OMARCHY_DIRECT_NETWORK")));
+        // Anything but true or false is a configuration error (the loop exits 78), never read
+        // as a grant or as none.
+        for bad in ["direct_network = \"yes\"", "direct_network = 1"] {
+            let e = Config::parse(&with(bad)).unwrap_err();
+            assert!(e.contains("direct_network"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
     fn a_macs_vm_takes_its_size_from_the_envelope() {
         let mac = include_str!("../../tests/fixtures/lint/envelope/mac.toml");
         let c = Config::parse(&format!("worker_id = \"w_1\"\n{mac}")).unwrap();

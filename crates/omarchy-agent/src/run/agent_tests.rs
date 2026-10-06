@@ -785,6 +785,47 @@ fn agent_toml_is_read_again_so_the_loop_never_puts_back_what_a_rotation_or_dispa
 }
 
 #[test]
+fn the_grant_of_a_signed_exception_s_bridge_reaches_the_dispatcher_and_goes_with_its_key() {
+    let mut w = with_host_env();
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let toml = w.agent.paths.data.join("agent.toml");
+    let secrets = w.dir.join("secrets");
+    let with = |line: &str| {
+        format!(
+            "[set]\nsecrets_dir = \"{}\"\n[envelope]\n{line}\n",
+            secrets.display()
+        )
+    };
+    let granted = |w: &World| {
+        fs::read_to_string(w.set_dir().join("etc/dispatcher.env"))
+            .unwrap()
+            .lines()
+            .any(|l| l == "OMARCHY_DIRECT_NETWORK=1")
+    };
+    // The owner's envelope grants it (install's --direct-network, #373): the loop renders it.
+    fs::write(&toml, with("direct_network = true")).unwrap();
+    w.tick(3);
+    settle(&mut w);
+    assert!(granted(&w), "{}", fs::read_to_string(&env).unwrap());
+    // Taken back (--no-direct-network writes false): the line goes, the dispatcher hands such a
+    // package back again.
+    fs::write(&toml, with("direct_network = false")).unwrap();
+    w.tick(61);
+    assert!(!granted(&w), "{}", fs::read_to_string(&env).unwrap());
+    fs::write(&toml, with("direct_network = true")).unwrap();
+    w.tick(61);
+    assert!(granted(&w));
+    fs::write(&toml, with("")).unwrap();
+    w.tick(61);
+    assert!(!granted(&w), "no key is no grant");
+    // A value that is neither true nor false is no grant either: what the loop started with,
+    // which has none.
+    fs::write(&toml, with("direct_network = \"yes\"")).unwrap();
+    w.tick(61);
+    assert!(!granted(&w));
+}
+
+#[test]
 fn interpolated_output_and_the_token_never_reach_the_disk_or_a_report() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
