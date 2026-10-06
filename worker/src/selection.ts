@@ -270,9 +270,9 @@ export const OWNER_DIVISOR = 4;
 /** Scheduled by lane, native preferred: they run the task's architecture. */
 export const LANE_KINDS: readonly string[] = ["build", "trial"];
 /**
- * Jobs whose helper containers run the task's architecture: any lane of it, no preference, no wait. Seam (#340): hosts claim pool
- * jobs from #340 (routes/factory.ts HOST_KINDS is builds, trials and audits until then), so on a host this rule and RING_JOBS's
- * run end to end with it; legacy registrations keep today's rule.
+ * Jobs whose helper containers run the task's architecture: any lane of it, no preference, no wait. Hosts claim pool jobs since
+ * #340 (routes/factory.ts HOST_KINDS), their dispatcher starting those helpers through omarchy-task-run on that lane; legacy
+ * registrations keep today's rule.
  */
 export const HELPER_KINDS: readonly string[] = ["health"];
 /** The architectures a ring serves. */

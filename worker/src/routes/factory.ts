@@ -419,7 +419,9 @@ export function workerReady(w: { last_seen: string; kinds: string | null; agent:
 const ALL_KINDS = ["build", "sync", "promote", "rollback", "render", "health", "security", "metrics", "gc", "enqueue", "audit", "verify", "relayout", "publish", "trial"];
 /**
  * Jobs any architecture can run: they read the index or the staging area, not packages of one arch. A legacy registration's
- * rule; a host's is wider (design v2 §7.4, §8.6): every kind but builds, trials and jobs with helper containers (selection.ts).
+ * rule; a host's is wider (design v2 §7.4, §8.6; #340): every kind but builds, trials and jobs with helper containers
+ * (`HOST_ANY_ARCH_KINDS`, selection.ts) — sync, render, rollback, gc, verify, relayout, enqueue and publish run in its dispatcher's own
+ * native process whatever their row's arch, as today's pool-x86_64 (the native aarch64 image registered for x86_64) runs them.
  */
 export const LEGACY_ANY_ARCH: readonly string[] = ["metrics", "gc", "security", "promote", "audit", "verify", "relayout"];
 const ANY_ARCH_KINDS = LEGACY_ANY_ARCH.map((k) => `'${k}'`).join(", ");
@@ -513,7 +515,7 @@ function afterClaim(row: OrdersRow, facts: ClaimFacts, step: InstanceStep | null
 async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell: string | null }, o: { agent: string | null; needsAgent: boolean; at: string; host?: boolean }): Promise<OrderOut | null> {
   const now = Date.parse(o.at);
   const { scale } = rulesScale(env);
-  const input = { row: x.row, claim: x.claim, status: x.status, error: x.error, spell: x.spell, instanceSince: x.instanceSince, conflict: x.conflict, needsAgent: o.needsAgent };
+  const input = { row: x.row, claim: x.claim, status: x.status, error: x.error, spell: x.spell, instanceSince: x.instanceSince, conflict: x.conflict, needsAgent: o.needsAgent, host: o.host };
   let d: Decision = decideAuto(input, now, scale);
   if (d.kind === null) return null;
   const w = x.row;
@@ -521,6 +523,10 @@ async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell
     await giveUp(env, w, x.spell, d.next, d.summary);
     return null;
   }
+  // A host's agent fault is answered by a re-check only (design v2 §8.6, #340): decideAuto proposes nothing else for it, and the
+  // site's pacing and election (siblingsAnswering, siteVerdict) are a legacy set's — a host's agent is a fresh probe sidecar, shared
+  // with no other registration.
+  if (o.host && d.kind !== "recheck-agent") return null;
   let reason = d.reason;
   if (d.kind !== "recheck-agent") {
     if (await breakerHolds(env, { id: w.id, site: w.site, agent: o.agent, cls: d.cls, trust: w.trust }, now)) return null;
@@ -569,8 +575,13 @@ async function giveUp(env: Env, w: OrdersRow, spell: string | null, next: AutoSt
 
 // ---------- host registrations (#334) ----------
 
-/** The kinds a host registration takes (design v2 §8.2, §22): builds of every trust, trials and audits; pool jobs join with #340. */
-export const HOST_KINDS = ["build", "trial", "audit"];
+/**
+ * The kinds a host registration takes (design v2 §8.2, §22): builds of every trust, trials and audits, and — from P2 (#340) — the pool
+ * jobs, which its dispatcher runs each in a child process of its own on the unit kept for them (selection.ts noRoom): the arch-neutral
+ * ones on any host (`HOST_ANY_ARCH_KINDS`), those with helper containers on a host with a lane of each architecture they check (`HELPER_KINDS`,
+ * `RING_JOBS`). `metrics` is the pool's own (its cron), never a task; listed, it is never handed.
+ */
+export const HOST_KINDS = [...ALL_KINDS];
 /** An unfenced lease that two consecutive claims of its host do not list goes back to the queue once it is this old (§8.1). */
 export const HOST_LEASE_GRACE_MIN = 2;
 /** `lost` gives the attempt back at most this many times per task (D54). */
@@ -2004,6 +2015,8 @@ function poolWaits(w: WorkerRow): string | null {
   const cls = (w.agent_error_class ?? null) as (typeof NOTHING_CLASSES)[number] | null;
   if (cls && NOTHING_CLASSES.includes(cls)) return `the pool does nothing for this error (${cls}): a restart cannot help — its own re-check runs every 30 min`;
   if (w.order_kinds === null || w.order_kinds === undefined) return "its image takes no orders: its host's updater replaces it";
+  // A host's (#340): its agent is a fresh probe sidecar, so the pool re-checks it and never restarts its dispatcher for it.
+  if (w.kind === "host") return "a host's agent is a fresh probe sidecar: the pool re-checks it, never restarts its dispatcher for it — its own probe goes on, and a person looks";
   if (cls === "unknown") return "an error the pool does not know: it re-checks it at most once and does not restart on it — a person looks";
   return null;
 }
