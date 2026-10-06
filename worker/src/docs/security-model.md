@@ -1045,8 +1045,8 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   whose agent says it sleeps (#329) has no lane for it until it wakes, so
   the rebuild may be offered for release meanwhile; the release still takes
   another maintainer's passkey, and a sleeping host is never where it runs.
-  The solo-maintainer exception lifts this for the maintainer it names, on
-  their own packages only (#394, below): their own host builds the copy,
+  The solo-maintainer exception lifts this for the maintainer it names,
+  only on their own packages (#394, below): their own host builds the copy,
   with no release.
 
 ### The solo-maintainer exception (#394)

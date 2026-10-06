@@ -3008,7 +3008,7 @@ merge the brain applies it (`worker/src/governance.ts`, the table
 solo-maintainer exception since …*; `GET /api/v1/factory/maintainers` says
 `solo`, and Status and Review say it is in force.
 
-**While it is on**, for the named maintainer and their own packages only:
+**While it is on**, for the named maintainer, and only on their own packages:
 
 - Review's doors let them through — **Claim** (labelled *Claim ·
   self-review* on their row), **Approve** with their passkey as always,
