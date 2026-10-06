@@ -23,14 +23,15 @@
 import { parse } from "smol-toml";
 import manifestToml from "../../factory/bundle/manifest.toml";
 import { fromB64url } from "./webauthn";
-import type { HostSoak } from "./update";
+import type { HostSoak, Reverted } from "./update";
 
 interface Resources { cpus: number; mem_gb: number }
 export interface MinHost extends Resources { work_disk_gb: number; engine_disk_gb: number }
 interface TaskUnits { build_per_size: number; trial: number; audit: number; job: number; job_reserved: number }
 interface SignedCapacity { max_size: number; community_max_size: number; min: MinHost; reserve: Resources; unit: Resources; units: TaskUnits; disk: { build_gb_per_size: number; floor_gb: number }; emulated: { share_when_native_waits: number } }
 
-const SIGNED = (parse(manifestToml) as unknown as { capacity: SignedCapacity }).capacity;
+const MANIFEST = parse(manifestToml) as unknown as { min_release: string; revoked: string[]; capacity: SignedCapacity };
+const SIGNED = MANIFEST.capacity;
 /** The minimum a host must have to join (D30), as the release signs it. */
 export const MIN_HOST: Readonly<MinHost> = Object.freeze({ ...SIGNED.min });
 /** What a host keeps for itself, and one capacity unit (design v2 §7.3). */
@@ -45,6 +46,14 @@ export const BUILD_GB_PER_SIZE = SIGNED.disk.build_gb_per_size;
 export const DISK_FLOOR_GB = SIGNED.disk.floor_gb;
 /** The share of a host's builds its emulated lanes may hold while native work for it is queued (D50: the work-conserving cap). */
 export const EMULATED_SHARE = SIGNED.emulated.share_when_native_waits;
+
+/**
+ * The releases the signed manifest retires (design v2 §5.2, §8.6; #342): `min_release`, the floor no host goes below, and
+ * `revoked`, the releases no host may run whatever a statement says. The pool deployed from a release reads that release's — the
+ * latest release's — and refuses what a revoked release's leases send, and every claim on one (update.ts). Not frozen: the
+ * Worker's tests set a list on it (test/last-good.test.ts); nothing in the Worker writes it.
+ */
+export const RELEASE_POLICY: { min_release: string; revoked: string[] } = { min_release: MANIFEST.min_release, revoked: [...MANIFEST.revoked] };
 
 /** An enrollment token lives this long, and is spent once. */
 export const ENROLL_TTL_MIN = 15;
@@ -341,6 +350,19 @@ export function installCommand(poolVersion: string, token: string, pool: string 
 export const OWNER_LISTED_SQL = (col: string) => `EXISTS (SELECT 1 FROM factory_maintainers m CROSS JOIN contributors c ON c.login = m.login WHERE c.github_id = ${col})`;
 
 /**
+ * What a host's last reports say of a release it reverted (#342, design v2 §8.6, §16.2), as three columns of the row `alias`
+ * names: the release its guard reverted and still holds back (`rolled_back_from`), since when the pool knows it
+ * (`rolled_back_at`), and the release it applied — its last-good. The report's handler fills them (routes/hosts.ts); the 426 gate
+ * reads them (update.ts lastGoodUntil) at every claim of its registration, in the fleet and in the listings.
+ */
+export const REVERTED_COLUMNS = (alias: string) => `${alias}.rolled_back_from AS rolled_back_from, ${alias}.rolled_back_at AS rolled_back_at, ${alias}.release_applied AS release_applied`;
+export interface RevertedColumns { rolled_back_from?: string | null; rolled_back_at?: string | null; release_applied?: string | null }
+/** A host's revert as the 426 gate weighs it, or null when its reports name none. */
+export function revertedOf(r: RevertedColumns | null | undefined): Reverted | null {
+  return r?.rolled_back_from ? { from: r.rolled_back_from, at: r.rolled_back_at ?? null, applied: r.release_applied ?? null } : null;
+}
+
+/**
  * A host's soak as its last report says it (#326), as two columns of the row `alias` names: what soakOf reads. Plain columns the
  * report's handler fills (migration 0048), never the report parsed by SQL: SQLite's JSON parser refuses nesting V8's accepts, and
  * one host's report would fail every claim and listing that read it.
@@ -348,9 +370,9 @@ export const OWNER_LISTED_SQL = (col: string) => `EXISTS (SELECT 1 FROM factory_
 export const SOAK_COLUMNS = (alias: string) => `${alias}.soaking_until AS soaking_until, ${alias}.soak_quarantine AS quarantine`;
 export interface SoakColumns { soaking_until: unknown; quarantine: unknown }
 
-/** A host as every claim of its registration reads it: one row by the primary key, the owner joined with the maintainer list, its soak (#326). */
-export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed, ${SOAK_COLUMNS("hosts")}, sandbox_applied FROM hosts WHERE id = ?`;
-export interface HostClaimRow extends SoakColumns {
+/** A host as every claim of its registration reads it: one row by the primary key, the owner joined with the maintainer list, its soak (#326), the release it reverted (#342) and the sandbox it applies (#330). */
+export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed, ${SOAK_COLUMNS("hosts")}, ${REVERTED_COLUMNS("hosts")}, sandbox_applied FROM hosts WHERE id = ?`;
+export interface HostClaimRow extends SoakColumns, RevertedColumns {
   name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number;
   /** #330: what its dispatcher's last claim said of the sandbox it applies (sandboxApplied), written again only when a claim says something new. */
   sandbox_applied: string | null;

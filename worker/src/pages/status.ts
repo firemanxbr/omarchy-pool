@@ -574,6 +574,11 @@ __CHARTS__
       if (by[h].stopped) L.push(["warn", esc(h) + ": its updater is not running — releases do not reach it"]);
       if (by[h].timer) L.push(["info", esc(h) + ": the one-time step of the runbook's <a href=\"/docs/runbook#the-studio-host\">The Studio host</a> is not done — Update is unavailable there; releases still arrive through its timer"]);
     });
+    // A host whose agent reverted the pool's release, claiming on its last-good (#342, design v2 §18.3): the gate's own word from the
+    // listing, until when — six hours after the revert at most, then it is refused like any worker behind the pool's release.
+    (ws || []).filter(function (w) { return !w.revoked_at && w.alive && w.update && w.update.last_good_until; }).forEach(function (w) {
+      L.push(["warn", esc(hostOf(w)) + ": its agent reverted " + esc(w.update.latest) + " — claiming on last-good " + esc(w.update.yours) + " until " + esc(w.update.last_good_until.slice(0, 16).replace("T", " ")) + " UTC, then handed nothing until it runs the pool's release: the runbook's <a href=\"/docs/runbook#a-new-maintainer-host\">A new maintainer host</a>, <em>A host reverted a release</em>"]);
+    });
     return L;
   }
   // Freeze detection (#326, design v2 §5.5): a host whose agent says GitHub has shown a newer release than the pool names for over a
@@ -1204,7 +1209,7 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="workers"', 'id="workers-list"', 'id="workers-busy"', 'id="workers-note"', 'id="workers-alert"', 'href="/workers"'],
       script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', 'var down = st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", '" not ready"', '" outdated"', '" drained"', "wtMarks(w)", "w.crash_loop_since", "w.watchdog.n >= 2", 'drainedRoles(ws, ["project", "review"])', '$("#workers-alert")',
         // What rolls each host out, and a release that does not start (#277, part 3): from the listing alone.
-        "function fleetLines(ws, pool, now)", "fleetLines(FACTORY.workers, FACTORY.pool, Date.now())", "w.set_rollout", "var SILENT_AFTER_DEPLOY_MIN = 15, DEPLOY_ROLLOUT_MIN = 240;", "seen <= dep + DEPLOY_ROLLOUT_MIN * 60000",
+        "function fleetLines(ws, pool, now)", "fleetLines(FACTORY.workers, FACTORY.pool, Date.now())", "w.set_rollout", "w.update.last_good_until", '" — claiming on last-good "', "var SILENT_AFTER_DEPLOY_MIN = 15, DEPLOY_ROLLOUT_MIN = 240;", "seen <= dep + DEPLOY_ROLLOUT_MIN * 60000",
         // Freeze detection (#326): a host whose agent reports the pool behind GitHub.
         "function behindLines(hs)", "behindLines(FACTORY.pool_behind_github)", "pool-behind-github", 'href="/docs/runbook#a-new-maintainer-host">A new maintainer host</a>, Freeze detection'],
       reads: [

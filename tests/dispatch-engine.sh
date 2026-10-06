@@ -20,7 +20,10 @@
 #      of this host without a lease file is removed at start
 #   4. a lease the pool stops hearing: its own watchdog kills its container
 #      and reports nothing, while the other lease runs on; a stop (409) kills
-#      and fails as stopped
+#      and fails as stopped; the pool's word that a lease's release is revoked
+#      (409, state `revoked`, #342) kills it with its sidecar and network —
+#      made through libpod's API behind docker's CLI on podman (#372) — and
+#      fails it revoked and lost
 #   5. the disk watcher: below the floor, the youngest build is killed `lost`
 #      and the claims say want 0
 #
@@ -106,7 +109,7 @@ case "$name" in
 esac
 STUB
 
-# The pool: who the host is, tasks from tasks.jsonl one per claim (then 204), heartbeats by beats/<id> (ok | down | stop), every
+# The pool: who the host is, tasks from tasks.jsonl one per claim (then 204), heartbeats by beats/<id> (ok | down | stop | revoked), every
 # request kept in requests.jsonl.
 mkdir -p "$tmp/beats"; : > "$tmp/tasks.jsonl"; : > "$tmp/requests.jsonl"
 cat > "$tmp/pool.py" <<'P'
@@ -146,6 +149,7 @@ class H(BaseHTTPRequestHandler):
             mode = open(f"{d}/beats/{m.group(1)}").read().strip() if os.path.exists(f"{d}/beats/{m.group(1)}") else "ok"
             if mode == "down": return self.send(500, {"error": "down"})
             if mode == "stop": return self.send(409, {"error": "stopped", "stop": True, "state": "cancelled"})
+            if mode == "revoked": return self.send(409, {"error": "revoked", "stop": True, "state": "revoked"})
             return self.send(200, {"token": f"omj.renewed-{m.group(1)}"})
         return self.send(200, {})
 srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
@@ -267,7 +271,7 @@ finish 5
 until_ 30 "task 5 completed by the new dispatcher" reported 5 complete
 echo "ok: a replaced dispatcher's task finishes; one that ended meanwhile is completed from its container; one killed meanwhile fails lost; a stranger, an orphan sidecar and an orphan network go"
 
-# ---------- 4. the pool stops hearing one lease; a stop ----------
+# ---------- 4. the pool stops hearing one lease; a stop; a revoked release ----------
 stop 15
 start --lease-s 20
 give 8 slow 2; give 9 slow 2
@@ -284,7 +288,16 @@ until_ 30 "task 9 stopped" reported 9 fail
 jq -e '.error | contains("stopped by the pool (cancelled)")' <<<"$(report 9 fail)" >/dev/null || fail "task 9: $(report 9 fail)"
 gone 9 || fail "task 9's container survived its stop"
 until_ 10 "task 9's sidecar and network removed" side_gone 9
-echo "ok: an expired lease's container is killed by its own watchdog and nothing reported, the other runs on; a stop kills and fails as stopped"
+give 12 slow 1
+until_ 60 "task 12 runs" running 12
+side_there 12 || fail "task 12's sidecar or network is missing"
+echo revoked > "$tmp/beats/12"
+until_ 30 "task 12 killed as revoked" reported 12 fail
+jq -e '.revoked == true and .lost == true and .final == false and (.error | contains("is revoked"))' <<<"$(report 12 fail)" >/dev/null || fail "task 12: $(report 12 fail)"
+gone 12 || fail "task 12's container survived its release's revocation"
+until_ 10 "task 12's sidecar and network removed" side_gone 12
+reported 12 complete && fail "a revoked lease was completed"
+echo "ok: an expired lease's container is killed by its own watchdog and nothing reported, the other runs on; a stop kills and fails as stopped; a revoked one is killed with its sidecar and network and fails revoked and lost"
 
 # ---------- 5. the disk watcher ----------
 stop 15

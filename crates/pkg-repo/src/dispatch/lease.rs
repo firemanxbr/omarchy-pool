@@ -37,6 +37,11 @@ pub enum Ending {
     Expired,
     /// A host event (the disk watcher, a container the engine lost): killed, reported `lost`.
     Lost(String),
+    /// Its release is revoked (#342): killed, reported `revoked` (and `lost`, which a pool from
+    /// before #342 reads as a host event); the pool takes nothing of it and requeues it. A
+    /// dispatcher from before #342 cannot read a lease file that says so: it removes the
+    /// container, which was being killed anyway, and the pool requeues the lease.
+    Revoked(String),
 }
 
 /// The lane a lease runs on (#338, design v2 §7.4, §7.5): the architecture of its

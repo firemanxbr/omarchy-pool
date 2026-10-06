@@ -267,6 +267,17 @@ settings and the host orders (#344, #325) — and reports what it did.
 
 ## Settings and host orders
 
+A release your host's guard reverts (it rolls back to `last-good/` and
+quarantines the release) does not idle it: for six hours its dispatcher
+keeps claiming on the release it went back to, never below the signed
+`min_release`, and its page and Status say until when (#342). Past that it
+is handed nothing until it runs the pool's release. A release the project
+revokes later is the one a running task does not survive: the next
+dispatcher kills that release's task containers, the pool refuses what they
+would upload and puts their tasks back in the queue, attempt given back;
+every other task finishes on the release it started with
+([Runbook](/docs/runbook#a-new-maintainer-host), *A host reverted a release* and *Revoking a release*).
+
 **Host orders** (#344) are given on the host's page. **Reconcile now** (its
 owner or any maintainer) makes its agent run a round at its next poll.
 **Retire legacy set** is for a host installed beside an older set with
@@ -323,8 +334,9 @@ release does). A rollback statement skips it and applies at once;
 **Reconcile now** never does. Meanwhile the pool keeps the host's
 registration out of the 426 gate until the soak ends (and the round's 15
 minutes after it), at most two hours after the deploy, unless the host
-holds the pool's release in quarantine; its page says where it stands at
-the gate and why, to its owner and the maintainers ([Runbook](/docs/runbook#a-new-maintainer-host), *Soak*).
+holds the pool's release in quarantine — it reverted it, and claims on its
+last-good instead (above) — and never on a revoked release (#342); its page
+says where it stands at the gate and why, to its owner and the maintainers ([Runbook](/docs/runbook#a-new-maintainer-host), *Soak*).
 
 **The host watches the pool** (#326, freeze detection): every six hours
 its agent reads the tag of GitHub's latest release, and nothing else. If
