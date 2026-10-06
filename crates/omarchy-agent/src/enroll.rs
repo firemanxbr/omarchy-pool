@@ -236,7 +236,8 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
                     )))
                 }
                 // The TPM could not be asked (a device this user may not open, tpm2-abrmd
-                // not running): the key may well be there, so the identity is kept.
+                // not running), or did not say the key is gone (a load that timed out, a TPM
+                // out of memory or busy): the key may well be there, so the identity is kept.
                 (None, _) => {
                     return Err(Failure::Refused(format!(
                         "{why}; nothing was sent, and this machine stays host {host_id}: run it again once the TPM answers"
@@ -1293,6 +1294,7 @@ mod tests {
         assert_eq!(none.calls("sign"), 0);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     #[allow(clippy::too_many_lines)] // one pool, one machine through a cleared TPM
     fn a_host_whose_tpm_key_does_not_sign_says_so_at_once_and_a_new_command_after_a_clear_enrolls_a_new_host(

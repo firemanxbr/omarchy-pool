@@ -281,8 +281,12 @@ fn mode_opens(mode: u32, owner: u32, group: u32, ids: &Ids) -> bool {
     bits & 0o6 == 0o6
 }
 
-/// The ids of `uid`'s user manager: the process of that uid in its `user@<uid>.service`'s
-/// `init.scope`. `None` when none runs (no linger, no login), or it cannot be read.
+/// The ids of `uid`'s user manager: the `systemd` process of that uid in its
+/// `user@<uid>.service`'s `init.scope`. The scope holds `(sd-pam)` too, which systemd forks
+/// from the manager and drops to the user's uid and gid with no supplementary groups: it
+/// would never show tss, and after a PID wrap it can come first in `/proc`, so only the
+/// process named `systemd` is the manager. `None` when none runs (no linger, no login), or
+/// it cannot be read.
 fn user_manager(proc: &Path, uid: u32) -> Option<Ids> {
     let scope = format!("/user@{uid}.service/init.scope");
     fs::read_dir(proc).ok()?.flatten().find_map(|e| {
@@ -294,7 +298,11 @@ fn user_manager(proc: &Path, uid: u32) -> Option<Ids> {
         if !cgroup.lines().any(|l| l.trim_end().ends_with(&scope)) {
             return None;
         }
-        read_ids(&e.path().join("status")).filter(|ids| ids.uid == uid)
+        let status = fs::read_to_string(e.path().join("status")).ok()?;
+        if status.lines().find_map(|l| l.strip_prefix("Name:"))?.trim() != "systemd" {
+            return None;
+        }
+        parse_ids(&status).filter(|ids| ids.uid == uid)
     })
 }
 
@@ -317,6 +325,28 @@ pub fn tcti_ok(t: &str) -> bool {
         }),
         None => false,
     }
+}
+
+/// Whether what `tpm2_load` said is the TPM refusing the key's blob: `TPM_RC_INTEGRITY`
+/// (a format-1 response code of the TPM itself, error `0x01F`, on a parameter — `0x1DF`
+/// for the private blob, the load's first), which a TPM answers to a blob sealed under
+/// another storage key: its seed changed (`tpm2_clear`), or it is another TPM. tpm2-tools
+/// says it as `Esys_Load(0x1DF) - tpm:parameter(1):integrity check failed`: the code, or
+/// its words. Nothing else a load says is that refusal.
+fn integrity_refused(said: &str) -> bool {
+    const RC_FMT1: u32 = 0x080;
+    const RC_INTEGRITY: u32 = 0x01F;
+    if said.contains("integrity check failed") {
+        return true;
+    }
+    said.split("(0x").skip(1).any(|rest| {
+        let hex = rest.split(')').next().unwrap_or_default();
+        u32::from_str_radix(hex, 16).is_ok_and(|rc| {
+            // The TPM's own layer (the upper 16 bits zero), not the TSS's or a resource
+            // manager's.
+            rc >> 16 == 0 && rc & RC_FMT1 != 0 && rc & 0x03F == RC_INTEGRITY
+        })
+    })
 }
 
 /// The host key in the TPM: its public point, the TPM that holds it, and the files that
@@ -452,10 +482,13 @@ impl Key {
     }
 
     /// Whether the key is gone from the TPM for good, asked once it did not sign: the TPM is
-    /// reached and makes the storage key as ever, but refuses the key's blob under it — it
-    /// was cleared (its seed is another), or the files are another machine's. What the TPM
-    /// said, then; `None` when the key loads, and when the TPM could not be asked at all (a
-    /// device this user may not open, tpm2-abrmd not running): no answer is not a verdict.
+    /// reached and makes the storage key as ever, but refuses the key's blob under it with
+    /// its integrity check ([`integrity_refused`]) — it was cleared (its seed is another), or
+    /// the files are another machine's. What the TPM said, then. `None` when the key loads,
+    /// when the TPM could not be asked at all (a device this user may not open, tpm2-abrmd
+    /// not running), and when the load failed any other way (a run that did not answer in
+    /// time, a context file not written on a full disk, a TPM out of object memory or asking
+    /// for a retry): no answer is not a verdict, since a lost key's identity is set aside.
     pub fn lost(&self) -> Option<String> {
         self.tools.reachable(&self.tcti).ok()?;
         let work = Work::new(&self.state).ok()?;
@@ -474,6 +507,7 @@ impl Key {
                 &self.tcti,
             )
             .err()
+            .filter(|said| integrity_refused(said))
     }
 
     fn signature(
@@ -830,7 +864,7 @@ pub(crate) mod fake {
             let public = read(arg(args, "-u")?)?;
             let keys = self.keys.lock().unwrap();
             let pkcs8 = keys.get(&id).ok_or(
-                "tpm2_load: Esys_Load(0x9A2) - tpm:parameter(2):integrity check failed (exit 1)",
+                "tpm2_load: ERROR: Esys_Load(0x1DF) - tpm:parameter(1):integrity check failed (exit 1)",
             )?;
             if parse_public(&public).map(|p| p.to_vec()).ok().as_deref()
                 != Some(pair(pkcs8).public_key().as_ref())
@@ -1106,7 +1140,19 @@ mod tests {
         assert!(k.lost().unwrap().contains("integrity check failed"));
         *tpm.fails.lock().unwrap() = Some(("createprimary".into(), "Permission denied".into()));
         assert_eq!(k.lost(), None);
+        // A load that fails any other way is no verdict either: the host is not set aside
+        // because its TPM was busy or its disk full.
+        for why in [
+            "ERROR: Esys_Load(0x902) - tpm:warn(2.0): out of memory for object contexts",
+            "ERROR: Esys_Load(0x922) - tpm:warn(2.0): the TPM was not able to start the command",
+            "did not answer within 60 s",
+            "ERROR: Could not write the context: No space left on device",
+        ] {
+            *tpm.fails.lock().unwrap() = Some(("load".into(), why.into()));
+            assert_eq!(k.lost(), None, "{why}");
+        }
         *tpm.fails.lock().unwrap() = None;
+        assert!(k.lost().is_some());
         fs::set_permissions(d.join(PRIVATE_FILE), fs::Permissions::from_mode(0o640)).unwrap();
         assert!(Key::load(&d, tpm.clone())
             .err()
@@ -1122,6 +1168,34 @@ mod tests {
         assert!(!present(&d));
         assert_eq!(fs::read_dir(&d).unwrap().count(), 0);
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn only_the_tpm_s_integrity_refusal_of_the_blob_is_a_lost_key() {
+        for said in [
+            // tpm2-tools 5.6 on swtpm 0.7 after tpm2_clear, its lines as Cli::run joins them.
+            "tpm2_load: WARNING:esys:src/tss2-esys/api/Esys_Load.c:324:Esys_Load_Finish() Received TPM Error; ERROR:esys:src/tss2-esys/api/Esys_Load.c:112:Esys_Load() Esys Finish ErrorCode (0x000001df); ERROR: Esys_Load(0x1DF) - tpm:parameter(1):integrity check failed; ERROR: Unable to run /usr/bin/tpm2_load (exit 1)",
+            "Esys Finish ErrorCode (0x000001df)",
+            "Esys_Load(0x2DF)",
+            "tpm:parameter(1):integrity check failed",
+        ] {
+            assert!(integrity_refused(said), "{said}");
+        }
+        for said in [
+            "tpm2_load did not answer within 60 s",
+            "/usr/bin/tpm2_load: No such file or directory (os error 2)",
+            "Esys_Load(0x902) - tpm:warn(2.0): out of memory for object contexts",
+            "Esys_Load(0x922) - tpm:warn(2.0): the TPM was not able to start the command",
+            "Esys_Load(0x9A2) - tpm:session(1):the authorization HMAC check failed and DA counter incremented",
+            "Esys_Load(0x1D5) - tpm:parameter(1):structure is the wrong size",
+            // Another layer's code (the TSS's, a resource manager's) is not the TPM's refusal.
+            "Esys_Load(0xA009F)",
+            "ERROR: Could not open file \"key.ctx\": No space left on device",
+            "Esys_Load(0x",
+            "Esys_Load(0xZZ)",
+        ] {
+            assert!(!integrity_refused(said), "{said}");
+        }
     }
 
     #[test]
@@ -1208,9 +1282,10 @@ mod tests {
         let m = fs::metadata(&dev).unwrap();
         // The agent's user: not the device's owner, so its group decides.
         let (uid, tss) = (m.uid() + 1000, m.gid());
-        let status = |gid: u32, groups: &str| {
-            format!("Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\nGroups:\t{groups}\n")
+        let named = |name: &str, gid: u32, groups: &str| {
+            format!("Name:\t{name}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\nGroups:\t{groups}\n")
         };
+        let status = |gid: u32, groups: &str| named("systemd", gid, groups);
         let proc = d.join("proc");
         let process = |pid: &str, cgroup: &str, st: &str| {
             fs::create_dir_all(proc.join(pid)).unwrap();
@@ -1233,6 +1308,9 @@ mod tests {
             &format!("0::/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/x.scope\n"),
             &status(other, &format!("{other} {tss}")),
         );
+        // Nor is (sd-pam) beside it in init.scope, with no supplementary groups, whatever
+        // its PID (a lower one, after a wrap).
+        process("4241", &manager_cgroup, &named("(sd-pam)", other, ""));
         let why = manager_opens(&proc, &dev, uid).unwrap_err();
         assert!(
             why.contains(&format!(
@@ -1250,8 +1328,10 @@ mod tests {
         // The group is the manager's primary one: it opens it too.
         process("4242", &manager_cgroup, &status(tss, ""));
         assert_eq!(manager_opens(&proc, &dev, uid), Ok(()));
-        // No manager runs (no linger, no login): nothing to say.
+        // No manager runs (no linger, no login): nothing to say, an (sd-pam) left or not.
         fs::remove_dir_all(proc.join("4242")).unwrap();
+        assert_eq!(manager_opens(&proc, &dev, uid), Ok(()));
+        fs::remove_dir_all(proc.join("4241")).unwrap();
         assert_eq!(manager_opens(&proc, &dev, uid), Ok(()));
         // This login opens it through something else than its groups (an ACL): nothing is told.
         process("4242", &manager_cgroup, &status(other, ""));

@@ -26,8 +26,9 @@
 #      the machine has a TPM (/dev/tpmrm0), for the host key (#330)
 #   2. rootful: the user in the docker group; a TPM: the user in the tss
 #      group, which opens /dev/tpmrm0 — before linger (7.) starts its user
-#      manager, which keeps the groups it started with; one already running
-#      is said under "needs a person" (restart it, or reboot)
+#      manager, which keeps the groups it started with; one running without
+#      the group is said under "needs a person" (restart it, or reboot), on
+#      every run until it has it
 #   3. binfmt: the foreign architecture's qemu handler, with the F flag so
 #      containers use it (for the emulated lane, design v2 §7.5)
 #   4. rootful: docker's default address pools (daemon.json), so its own
@@ -176,15 +177,28 @@ fi
 
 if ((tpm)); then
   echo "==> 2. the tss group (the TPM, where the host key is made)"
+  added=0
   if id -nG "$user" | tr ' ' '\n' | grep -qx tss; then
     echo "    $user is in it"
   else
     run usermod -aG tss "$user"
     changed "$user added (a new login picks it up)"
-    # The user manager runs the agent's service and keeps the groups it started with: one
-    # already running (linger on, or a login open) never opens the TPM until it restarts.
-    uid="$(id -u "$user")"
-    if systemctl is-active --quiet "user@$uid.service"; then
+    added=1
+  fi
+  # The user manager runs the agent's service and keeps the groups it started with: one
+  # already running (linger on, or a login open) when the group was added — by this run or
+  # an earlier one — never opens the TPM until it restarts. Asked on every run: its main
+  # process's gid and groups (/proc/<pid>/status) against tss's; when they cannot be read,
+  # only a group this run added is said.
+  uid="$(id -u "$user")"
+  if systemctl is-active --quiet "user@$uid.service"; then
+    tss_gid="$(getent group tss | cut -d: -f3)" || tss_gid=""
+    pid="$(systemctl show -p MainPID --value "user@$uid.service")" || pid=""
+    manager_groups=""
+    if [[ "$pid" =~ ^[1-9][0-9]*$ && -r "$fs/proc/$pid/status" ]]; then
+      manager_groups="$(sed -n -e 's/^Gid:[[:space:]]*\([0-9]*\).*/\1/p' -e 's/^Groups:[[:space:]]*//p' "$fs/proc/$pid/status" | tr '\n' ' ')"
+    fi
+    if ((added)) || [[ -n "$tss_gid" && -n "$manager_groups" && " $manager_groups " != *" $tss_gid "* ]]; then
       attention+=("tss: $user's user manager already runs, without the group: systemctl restart user@$uid.service (it stops $user's processes), or reboot, so the agent's service opens the TPM")
     fi
   fi

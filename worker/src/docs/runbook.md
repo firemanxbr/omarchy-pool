@@ -539,7 +539,8 @@ emulated lane), btrfs-progs and jq; puts the user in the docker group
 and puts the user in the tss group, for the host key (#330, *Where the host
 key lives*, below) — before linger starts the user's manager, which keeps the
 groups it started with, and saying under *needs a person* when that manager
-already runs (restart it, or reboot); sets docker's default address pools and, on a daemon with no
+already runs without the group (restart it, or reboot), on every run until
+its main process has it; sets docker's default address pools and, on a daemon with no
 container or image yet, `userns-remap`; makes the work root (a btrfs
 subvolume where it can); turns on linger; delegates cgroup v2 controllers to
 the user's systemd (rootless); and installs `DOCKER-USER` drop rules from
@@ -841,9 +842,15 @@ Retire the host on its page, add it again and paste the command it prints:
 the agent sees the TPM refuse the old key before it sends anything, keeps the
 old identity beside (`state/host.json.lost-<host>`) and enrolls the machine
 as a new host with a new key in the TPM (`enroll` without a new command says
-these steps and stops at once). A TPM it cannot ask at all — the device out
-of the user's reach, tpm2-abrmd stopped — is no verdict: the identity is
-kept, and the install stops at once saying why. A Mac's key stays a file until the agent is signed with
+these steps and stops at once). Only the TPM's own refusal of the key's blob
+counts — its integrity check,
+`Esys_Load(0x1DF) - tpm:parameter(1):integrity check failed`, which is what a
+cleared TPM, or another machine's, answers. A
+TPM it cannot ask at all — the device out of the user's reach, tpm2-abrmd
+stopped — or one whose load fails any other way (a run that does not answer,
+a TPM out of memory or busy, a full disk) is no verdict: the identity and the
+key are kept, and the install stops at once saying why; run it again once
+the TPM answers. A Mac's key stays a file until the agent is signed with
 a Developer ID and notarised for the Secure Enclave (still open in #330).
 
 It verifies the release bundle and that it is the agent that release ships,

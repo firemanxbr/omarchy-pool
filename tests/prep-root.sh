@@ -29,13 +29,15 @@
 #   flushed and rebuilt in order, the jumps added once.
 # - A TPM (/dev/tpmrm0, #330): tpm2-tools installed and the user in the tss
 #   group; again, nothing changes. Added while the user's manager runs: said
-#   under "needs a person" (exit 1), the manager not restarted. No TPM: no
-#   tpm2-tools, no tss.
+#   under "needs a person" (exit 1), the manager not restarted; run again
+#   while that manager still runs without the group (its main process's
+#   groups, in /proc), said again; restarted with it, or not read, nothing.
+#   No TPM: no tpm2-tools, no tss.
 #
 # prep-root.sh runs as root on a real host: here its root check is lifted in
 # a copy, OMARCHY_PREP_FS points it at a temporary root, and pacman, apt-get,
-# systemctl, usermod, loginctl, btrfs, docker, id, stat, chown, uname and
-# iptables are stubs on PATH that record what they were asked.
+# systemctl, usermod, loginctl, btrfs, docker, id, getent, stat, chown, uname
+# and iptables are stubs on PATH that record what they were asked.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -57,6 +59,7 @@ stub btrfs "$log"'; mkdir -p "$3"'
 stub chown "$log"'; echo "$1" > "$STATE/owner"'
 stub uname 'echo "$STUB_ARCH"'
 stub id 'case "$1" in -u) echo 1000 ;; -nG) cat "$STATE/groups" | tr -d "\n" ; echo ;; -gn) echo omarchy ;; *) exit 1 ;; esac'
+stub getent '[[ "$1 $2" == "group tss" ]] && echo "tss:x:59:"'
 # stat -f -c %T: the filesystem type; stat -c "%U:%G %a": the owner chown set, and the mode.
 stub stat 'if [[ "$1" == -f ]]; then echo "$STUB_FSTYPE"; else printf "%s %s\n" "$(cat "$STATE/owner" 2>/dev/null || echo root:root)" "$(cat "$STATE/mode" 2>/dev/null || echo 755)"; fi'
 stub chmod 'if [[ "$1" == 0750 ]]; then echo "chmod $*" >> "$STUB_LOG"; echo 750 > "$STATE/mode"; fi; exec /bin/chmod "$@"'
@@ -64,6 +67,7 @@ stub docker 'echo "docker $*" >> "$STUB_LOG.read"; case "$1" in info) echo "$STU
 stub systemctl "$log"'
 case "$1" in
   is-active) [[ -e "$STATE/active-${3%.service}" ]] ;;
+  show) cat "$STATE/pid-${5%.service}" 2>/dev/null || echo 0 ;;
   is-enabled) [[ -e "$STATE/enabled-${3%.service}" ]] ;;
   restart|enable)
     [[ "$*" == *omarchy-task-firewall* && "$*" != "enable omarchy-task-firewall.service" ]] && touch "$STATE/active-omarchy-task-firewall"
@@ -293,11 +297,34 @@ grep -q "omarchy is in it" "$tmp/out" || fail "a TPM, again: the tss group not s
 fresh arch aarch64 btrfs
 mkdir -p "$tmp/fs/dev" && : > "$tmp/fs/dev/tpmrm0"
 touch "$STATE/active-user@1000"
+echo 4242 > "$STATE/pid-user@1000"
+manager() { # its groups → /proc/4242/status, the manager's main process
+  mkdir -p "$tmp/fs/proc/4242"
+  printf 'Name:\tsystemd\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nGroups:\t%s\n' "$1" > "$tmp/fs/proc/4242/status"
+}
+manager "1000 "
 prep --user omarchy --work-root "$wr"
 [[ $status -eq 1 ]] || fail "a TPM, manager running: exit $status, want 1"
 logged "pacman -S --needed --noconfirm qemu-user-static qemu-user-static-binfmt btrfs-progs jq docker tpm2-tools"
 grep -q "needs a person" "$tmp/out" && grep -qF "systemctl restart user@1000.service (it stops omarchy's processes), or reboot" "$tmp/out" \
   || fail "a TPM, manager running: not said"
 not_logged "systemctl restart user@"
+# Run again with the manager not restarted: the user is in tss, its manager still is not.
+prep --user omarchy --work-root "$wr"
+[[ $status -eq 1 ]] || fail "a TPM, manager still without the group: exit $status, want 1"
+not_logged "usermod"
+grep -q "omarchy is in it" "$tmp/out" && grep -qF "systemctl restart user@1000.service (it stops omarchy's processes), or reboot" "$tmp/out" \
+  || fail "a TPM, manager still without the group: not said"
+logged "systemctl show -p MainPID --value user@1000.service"
+# Restarted, with the group: nothing more to say.
+manager "1000 59"
+prep --user omarchy --work-root "$wr"
+[[ $status -eq 0 ]] || fail "a TPM, manager with the group: exit $status, want 0"
+grep -q "user manager already runs" "$tmp/out" && fail "a TPM, manager with the group: said anyway"
+# Its groups not read (no main PID): nothing said for a group an earlier run added.
+manager "1000 "
+rm "$STATE/pid-user@1000"
+prep --user omarchy --work-root "$wr"
+[[ $status -eq 0 ]] || fail "a TPM, manager not read: exit $status, want 0"
 
 echo "prep-root.sh: every root-only step, idempotent, nothing else"
