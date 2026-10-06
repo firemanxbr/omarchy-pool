@@ -17,6 +17,8 @@ use toml::{Table, Value};
 #[allow(clippy::struct_excessive_bools)] // the envelope's own switches, one for one
 pub(crate) struct Values {
     pub pool: String,
+    /// The driver that runs the set (#330): the flag's, or agent.toml's.
+    pub driver: crate::run::config::DriverKind,
     pub set_dir: PathBuf,
     pub work_root: PathBuf,
     pub secrets_dir: PathBuf,
@@ -102,7 +104,7 @@ pub(crate) fn render(
     set.insert("secrets_dir".into(), path(&v.secrets_dir));
     set.entry("project")
         .or_insert_with(|| Value::String(PROJECT.into()));
-    set.insert("driver".into(), Value::String("compose".into()));
+    set.insert("driver".into(), Value::String(v.driver.word().into()));
     set.insert("socket_cli".into(), path(&v.socket));
     set.insert("socket_mount".into(), path(&v.socket_mount));
     set.insert(
@@ -116,8 +118,22 @@ pub(crate) fn render(
     env.insert("userns_remap".into(), Value::Boolean(v.userns_remap));
     env.insert("dedicated".into(), Value::Boolean(v.dedicated));
     env.insert("direct_network".into(), Value::Boolean(v.direct_network));
-    env.entry("drivers")
-        .or_insert_with(|| Value::Array(vec![Value::String("compose".into())]));
+    // The drivers a runtime switch may move to: the one install runs with at least, which
+    // the owner chose here (#330); the rest is theirs.
+    let chosen = Value::String(v.driver.word().into());
+    let drivers = env
+        .entry("drivers")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(list) = drivers.as_array_mut() {
+        let named = list.iter().any(|d| {
+            d == &chosen
+                || (v.driver == crate::run::config::DriverKind::Compose
+                    && d.as_str().is_some_and(|d| d.starts_with("compose/")))
+        });
+        if !named {
+            list.push(chosen);
+        }
+    }
     for (k, cap) in [
         ("max_units", v.max_units),
         ("max_cpus", v.max_cpus),

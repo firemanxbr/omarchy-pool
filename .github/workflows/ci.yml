@@ -300,6 +300,37 @@ jobs:
       - name: A good build passes its health gate, broken ones are rolled back after three starts
         run: bash tests/agent-self-update.sh
 
+  agent-quadlet:
+    name: Host agent on the Quadlet driver (rootless podman, systemd --user)
+    # #330: the set as a unit of the user's own systemd on rootless podman,
+    # with no compose. podman's own generator reads what the agent renders
+    # from the same bundle every other host runs and writes the argv compose
+    # would; then the run loop rolls a stand-in dispatcher out as that unit —
+    # releases, ordered restarts (exit 75) during a guard counted as the
+    # service's restarts, broken releases reverted and quarantined, a
+    # rollback statement, the host worker token in its read-only file (#327)
+    # and a rotation restarting the unit alone — while a task container keeps
+    # running. The
+    # runner's user manager is started by lingering, as the installer does
+    # on a host.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Start the runner user's systemd manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          for _ in $(seq 1 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      - name: The generator reads the rendered set, and the run loop rolls it out as a Quadlet unit with a task that survives every rollout
+        run: |
+          command -v podman >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q podman; }
+          bash tests/agent-quadlet.sh
+
   agent-version:
     name: Host agent version (raised with every change to the agent)
     # Design v2 D17 (#311): the agent's own semver moves with what goes into

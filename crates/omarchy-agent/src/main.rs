@@ -7,7 +7,8 @@
 //!     (and the maintainers' co-signatures found beside the file, `<file>.<login>.sshsig`
 //!     for each maintainer this agent pins, #330: said, never a refusal by hand)
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
-//!     (<dir>/compose.yml and <dir>/set.toml)
+//!     (<dir>/compose.yml and <dir>/set.toml; and, #330, the set as the Quadlet driver
+//!     renders it: the template always, the override with it for a Quadlet host)
 //! omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
 //!     [--probe-image <image>] [--emulate-image <image>]
 //!     [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
@@ -20,10 +21,11 @@
 //!     [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
 //!     [--direct-network | --no-direct-network] [--legacy <project>] [--agent-env-from <file>]
 //!     [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta]
-//!     [--wait-minutes <n>] [--yes]
+//!     [--driver compose|quadlet] [--wait-minutes <n>] [--yes]
 //!     (#317, what install.sh runs once the binary is in place: preflight, the envelope,
 //!     the enrollment below, agent.toml, the agent keys, the unit and linger, the service;
-//!     on a Mac, #320, the omarchy Colima VM and the LaunchAgent)
+//!     on a Mac, #320, the omarchy Colima VM and the LaunchAgent; #330, --driver quadlet:
+//!     the set as a unit of this user's systemd on rootless podman, with no compose)
 //! omarchy-agent preflight <the same options>
 //!     (one screen of everything that stops an install; changes nothing)
 //! omarchy-agent uninstall [--data-dir <dir>]
@@ -47,9 +49,10 @@
 //! omarchy-agent logs [--data-dir <dir>] [-n <lines>]
 //! omarchy-agent self-test --release <vX.Y.Z> [--data-dir <dir>]
 //!     (what a self-update asks of the new agent before it hands over: prints `ok`)
-//! omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
+//! omarchy-agent runtime switch <compose/docker|compose/podman|quadlet> [--socket <path>] [--data-dir <dir>]
 //!     (#325: the owner moves the bundle to another driver this binary carries, with the
-//!     same guard and revert; never the pool's to choose)
+//!     same guard and revert; never the pool's to choose. #330: quadlet, the set as a unit
+//!     of this user's systemd on rootless podman)
 //! omarchy-agent envelope pin-passkey [<pin> | -] [--data-dir <dir>]
 //! omarchy-agent envelope unpin-passkey [--data-dir <dir>]
 //!     (#328: the owner's passkey pinned at the host, from the pin the site prints — read
@@ -92,7 +95,7 @@ const USAGE: &str = "usage:
       [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
       [--direct-network | --no-direct-network] [--legacy <project>] [--agent-env-from <file>]
       [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta]
-      [--wait-minutes <n>] [--yes]
+      [--driver compose|quadlet] [--wait-minutes <n>] [--yes]
   omarchy-agent preflight <install's options>
   omarchy-agent uninstall [--data-dir <dir>]
   omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
@@ -103,7 +106,7 @@ const USAGE: &str = "usage:
   omarchy-agent round [--data-dir <dir>]
   omarchy-agent logs [--data-dir <dir>] [-n <lines>]
   omarchy-agent self-test --release <vX.Y.Z> [--data-dir <dir>]
-  omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
+  omarchy-agent runtime switch <compose/docker|compose/podman|quadlet> [--socket <path>] [--data-dir <dir>]
   omarchy-agent envelope pin-passkey [<pin> | -] [--data-dir <dir>]
   omarchy-agent envelope unpin-passkey [--data-dir <dir>]
   omarchy-agent --version
@@ -339,10 +342,20 @@ fn lint_cmd(args: &[String]) -> Result<u8, String> {
     let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
     let text =
         |path: &str| String::from_utf8(read(path)?).map_err(|_| format!("{path}: not UTF-8"));
-    let envelope = match get("--envelope") {
-        Some(p) => Envelope::from_agent_toml(&text(p)?)?,
+    let agent_toml = get("--envelope").map(text).transpose()?;
+    let envelope = match &agent_toml {
+        Some(t) => Envelope::from_agent_toml(t)?,
         None => Envelope::reference(),
     };
+    // The host the override is for runs the Quadlet driver: by default (CI's case, every
+    // driver), or when the envelope's set.driver says so.
+    let quadlet_host = agent_toml.as_deref().is_none_or(|t| {
+        t.parse::<toml::Table>()
+            .ok()
+            .and_then(|t| t.get("set")?.get("driver")?.as_str().map(str::to_owned))
+            .as_deref()
+            == Some("quadlet")
+    });
     let template = text(&Path::new(dir).join("compose.yml").to_string_lossy())?;
     let set_toml = text(&Path::new(dir).join("set.toml").to_string_lossy())?;
     let over = get("--override").map(text).transpose()?;
@@ -354,6 +367,17 @@ fn lint_cmd(args: &[String]) -> Result<u8, String> {
         lint::lint_set_toml(&set_toml, &template)
             .err()
             .unwrap_or_default(),
+    );
+    // The same bundle serves both drivers (#330): the template always renders for Quadlet,
+    // and an override with it when it is a Quadlet host's.
+    violations.extend(
+        lint::lint_quadlet(
+            &template,
+            over.as_deref().filter(|_| quadlet_host),
+            &lint::reference_variables(),
+        )
+        .err()
+        .unwrap_or_default(),
     );
     if violations.is_empty() {
         println!("lint-set: {dir}: clean");
@@ -466,6 +490,7 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
             "--max-units",
             "--max-cpus",
             "--max-mem-gb",
+            "--driver",
         ],
         &mut rest,
     )?;
@@ -473,6 +498,12 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
         return Err(USAGE.to_owned());
     }
     let get = |name: &str| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let driver = get("--driver")
+        .map(|d| {
+            omarchy_agent::run::config::DriverKind::parse(d)
+                .ok_or_else(|| format!("--driver {d:?}: compose or quadlet\n{USAGE}"))
+        })
+        .transpose()?;
     let num = |name: &str| -> Result<Option<u32>, String> {
         get(name)
             .map(|v| {
@@ -507,6 +538,7 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
         dedicated: on.contains(&"--dedicated"),
         direct_network,
         legacy: get("--legacy").map(str::to_owned),
+        driver,
         agent_env_from: path("--agent-env-from"),
         max_units: num("--max-units")?,
         max_cpus: num("--max-cpus")?,
