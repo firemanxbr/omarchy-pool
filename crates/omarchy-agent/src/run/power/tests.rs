@@ -226,7 +226,7 @@ fn every_mac_keeps_its_sleep_whatever_its_runtime_and_linux_none() {
     for runtime in ["colima", "docker-desktop", "orbstack"] {
         let text = mac.replace("runtime = \"colima\"", &format!("runtime = {runtime:?}"));
         let cfg = Config::parse(&format!("worker_id = \"w_1\"\n{text}")).unwrap();
-        let k = keeper(&cfg).unwrap_or_else(|| panic!("{runtime}: no keeper"));
+        let k = keeper(&cfg, false).unwrap_or_else(|| panic!("{runtime}: no keeper"));
         assert!(!k.asleep());
     }
     let dir = tempdir();
@@ -236,7 +236,10 @@ fn every_mac_keeps_its_sleep_whatever_its_runtime_and_linux_none() {
         &dir.join("secrets"),
     );
     let cfg = Config::parse(&linux).unwrap();
-    assert!(keeper(&cfg).is_none());
+    assert!(keeper(&cfg, false).is_none());
+    // A Mac's build (`Agent::mac`, played on any OS) keeps it even with `[vm]` gone, as the
+    // runtime switch refuses it (#325).
+    assert!(keeper(&cfg, true).is_some());
 }
 
 /// A lease file at `<work root>/state/leases/<name>`, last written at `at`.

@@ -308,10 +308,12 @@ impl Drop for Mac {
 }
 
 /// The keeper of a Mac agent's sleep, `None` on Linux: agent.toml has `[vm]`, whatever
-/// runtime its engine is in ([`Config::mac`]). The VM's clock is checked after a wake only
-/// where the agent keeps the VM (Colima); the rest is the same on every Mac.
-pub(crate) fn keeper(cfg: &Config) -> Option<Sleep> {
-    cfg.mac.then(|| Sleep::new(Box::<Mac>::default()))
+/// runtime its engine is in ([`Config::mac`]), or the agent is built for a Mac (`mac`,
+/// [`super::agent::Agent::mac`]), as the runtime switch tells a Mac (#325). The VM's clock
+/// is checked after a wake only where the agent keeps the VM (Colima); the rest is the same
+/// on every Mac.
+pub(crate) fn keeper(cfg: &Config, mac: bool) -> Option<Sleep> {
+    (cfg.mac || mac).then(|| Sleep::new(Box::<Mac>::default()))
 }
 
 /// Whether the dispatcher holds a lease: a lease file in `<work root>/state/leases/` (one

@@ -136,7 +136,8 @@ pub struct Config {
     /// VM, which the agent uses but never manages.
     pub vm: Option<Vm>,
     /// agent.toml has `[vm]`, whatever its runtime (Colima, Docker Desktop, `OrbStack`):
-    /// the host is a Mac, whose sleep the agent holds off and reports (#329).
+    /// the host is a Mac, whose sleep the agent holds off and reports (#329) and whose
+    /// runtime switch it refuses (#325), as it does on a Mac's build without `[vm]`.
     pub mac: bool,
 }
 

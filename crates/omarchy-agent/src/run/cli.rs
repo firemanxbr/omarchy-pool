@@ -291,12 +291,11 @@ fn setup(
         .as_ref()
         .map(|v| keeper(&cfg, v, &paths))
         .transpose()?;
-    // A Mac's sleep (#329) is the agent's to hold off and report, whatever runtime its
-    // engine is in.
-    let power = super::power::keeper(&cfg);
     let mut agent = Agent::new(cfg, paths, state, pool, Box::new(Sigstore), Drivers::Pinned);
     agent.vm = vm;
-    agent.power = power;
+    // A Mac's sleep (#329) is the agent's to hold off and report, whatever runtime its
+    // engine is in.
+    agent.power = super::power::keeper(&agent.cfg, agent.mac);
     if let Some(e) = key_error {
         agent.journal.write(
             super::now(),
