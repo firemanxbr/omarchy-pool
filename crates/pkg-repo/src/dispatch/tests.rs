@@ -3296,6 +3296,8 @@ fn a_package_with_its_signed_exception_gets_a_bridge_network_and_no_egress() {
     )
     .unwrap();
     let mut d = h.dispatcher();
+    // The owner's envelope grants it (#373).
+    d.net.direct = true;
     h.give(community(7, GEN));
     h.ticks(&mut d, 3);
     let net = spec::container_name(7, GEN);
@@ -3347,6 +3349,48 @@ fn a_package_with_its_signed_exception_gets_a_bridge_network_and_no_egress() {
         .as_str()
         .unwrap()
         .contains("sizing"));
+}
+
+#[test]
+fn a_package_with_its_signed_exception_goes_back_from_a_host_whose_envelope_does_not_grant_it() {
+    // A rootless host, say: its bridges reach the LAN through the engine's user-mode network
+    // stack, so its owner grants no bridge, and install's egress probe checked none (#373).
+    let h = H::new();
+    std::fs::create_dir_all(h.checkout.join("factory/sizing")).unwrap();
+    std::fs::write(
+        h.checkout.join("factory/sizing/tasks.toml"),
+        "schema = 1\n[package.\"felix\"]\nnetwork = \"direct\"\nreason = \"its tests open raw sockets\"\n",
+    )
+    .unwrap();
+    let mut d = h.dispatcher();
+    assert!(!d.net.direct);
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    let net = spec::container_name(7, GEN);
+    assert!(!h.engine.has(7, GEN) && !h.engine.has_network(&net));
+    assert!(!h.engine.has_name(&sidecar(7, GEN, "egress")));
+    let f = h.pool.fails_of(7);
+    assert_eq!(f[0]["lost"], true, "{}", f[0]);
+    assert!(
+        f[0]["error"].as_str().unwrap().contains(
+            "felix's signed network exception (factory/sizing: network = \"direct\") needs a bridge network, which this host's envelope does not grant"
+        ),
+        "{}",
+        f[0]
+    );
+    // Another package of the same release runs as every task does, behind its egress.
+    h.give(task(
+        8,
+        "build",
+        "other",
+        "https://github.com/o/o@v1:PKGBUILD",
+        "community",
+        json!({}),
+        GEN2,
+    ));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(8, GEN2) && h.engine.has_name(&sidecar(8, GEN2, "egress")));
 }
 
 #[test]

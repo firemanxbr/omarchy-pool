@@ -4,11 +4,12 @@
 //! `worker_id` the enrollment gave, #321), by a person at the host and by the person's
 //! `omarchy-agent runtime switch` there (#325), never by the pool. It is refused when
 //! group- or world-writable or owned by another user. Unknown keys are left alone
-//! (capacity caps are #333's), but `[envelope].agent_budget`, which reaches the
-//! dispatcher (#371), is read strictly. What the pool may narrow inside it — units,
-//! emulated lanes — and what it allows the pool to ask — diagnostics — is [`Policy`]
-//! (#325, design v2 §12), with the owner's soak (`soak_minutes`, #326). Any problem here is
-//! a local configuration error: the loop exits 78 and says why.
+//! (capacity caps are #333's), but `[envelope].agent_budget` and
+//! `[envelope].direct_network`, which reach the dispatcher (#371, #373), are read strictly.
+//! What the pool may narrow inside it — units, emulated lanes — and what it allows the pool
+//! to ask — diagnostics — is [`Policy`] (#325, design v2 §12), with the owner's soak
+//! (`soak_minutes`, #326). Any problem here is a local configuration error: the loop exits
+//! 78 and says why.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -120,6 +121,9 @@ pub struct Config {
     pub task_subnets: Option<String>,
     /// `[envelope].agent_budget` (#371): what `etc/dispatcher.env` gives the dispatcher.
     pub agent_budget: Budget,
+    /// `[envelope].direct_network` (#373): the owner grants a signed exception's bridge
+    /// network, which `etc/dispatcher.env` tells the dispatcher.
+    pub direct_network: bool,
     pub envelope: Envelope,
     /// What install detected behind the socket (`set.engine`, #317): the lint holds a
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
@@ -256,6 +260,7 @@ struct EnvelopePart {
     max_cpus: Option<u32>,
     max_mem_gb: Option<u32>,
     agent_budget: Option<toml::Value>,
+    direct_network: Option<bool>,
     max_units: Option<u32>,
     emulate: Option<Vec<String>>,
     #[serde(default)]
@@ -441,6 +446,7 @@ impl Config {
             socket_mount,
             task_subnets: f.envelope.task_subnets,
             agent_budget: Budget::from_envelope(f.envelope.agent_budget.as_ref())?,
+            direct_network: f.envelope.direct_network.unwrap_or(false),
             envelope,
             engine,
             runtime,
@@ -493,6 +499,74 @@ impl Config {
         }
         env
     }
+}
+
+/// `text` with `[<table>]`'s `keys` set line by line — each `key = <TOML value>`, or taken
+/// out when its value is `None` —: a key's line replaced (or dropped) where it is, a
+/// missing one added after the section's last key, a missing section added at the end;
+/// every other line as it was. agent.toml is the owner's policy document (design v2 §12),
+/// so the runtime switch (#325, `[set]`) and a signed widening (#328, `[envelope]`) change
+/// only their keys' lines, and the owner's comments and layout stay. A caller reads the
+/// result back: a layout the line edit cannot name a value in (a dotted key, a sub-table, a
+/// value over several lines) is written again from its table instead.
+pub(crate) fn table_lines(text: &str, table: &str, keys: &[(&str, Option<String>)]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    // A key to take out needs no line added when the file lacks it.
+    let mut done: Vec<bool> = keys.iter().map(|(_, v)| v.is_none()).collect();
+    // While in the table: the index of its last line that is a key or its header.
+    let mut last: Option<usize> = None;
+    let mut seen = false;
+    let add = |out: &mut Vec<String>, done: &mut [bool], at: usize| {
+        let missing: Vec<String> = keys
+            .iter()
+            .zip(done.iter())
+            .filter(|(_, d)| !**d)
+            .filter_map(|((k, v), _)| v.as_ref().map(|v| format!("{k} = {v}")))
+            .collect();
+        out.splice(at..at, missing);
+        done.fill(true);
+    };
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with('[') {
+            if let Some(i) = last.take() {
+                add(&mut out, &mut done, i + 1);
+            }
+            let name = t.trim_start_matches('[').split(']').next().unwrap_or("");
+            if !t.starts_with("[[") && name.trim() == table {
+                seen = true;
+                last = Some(out.len());
+            }
+            out.push(line.to_owned());
+            continue;
+        }
+        if let Some(i) = last.as_mut() {
+            if !t.is_empty() && !t.starts_with('#') {
+                let key = t.split_once('=').map(|(k, _)| k.trim().trim_matches('"'));
+                if let Some(k) = key.and_then(|k| keys.iter().position(|(n, _)| *n == k)) {
+                    done[k] = true;
+                    if let Some(v) = &keys[k].1 {
+                        *i = out.len();
+                        let indent = &line[..line.len() - t.len()];
+                        out.push(format!("{indent}{} = {v}", keys[k].0));
+                    }
+                    continue;
+                }
+                *i = out.len();
+            }
+        }
+        out.push(line.to_owned());
+    }
+    if let Some(i) = last {
+        add(&mut out, &mut done, i + 1);
+    }
+    if !seen && done.iter().any(|d| !d) {
+        out.push(String::new());
+        out.push(format!("[{table}]"));
+        let at = out.len();
+        add(&mut out, &mut done, at);
+    }
+    out.join("\n") + "\n"
 }
 
 #[cfg(test)]
@@ -566,6 +640,46 @@ max_units = 3
             let text = format!("worker_id = \"w_1\"\n{}", studio.replacen(from, to, 1));
             let e = Config::parse(&text).unwrap_err();
             assert!(e.contains(why), "{why}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_grant_of_a_signed_exception_s_bridge_is_read_strictly_and_reaches_the_dispatcher() {
+        let studio = include_str!("../../tests/fixtures/lint/envelope/studio.toml");
+        let with = |line: &str| {
+            format!(
+                "worker_id = \"w_1\"\n{}",
+                studio.replacen("[envelope]\n", &format!("[envelope]\n{line}\n"), 1)
+            )
+        };
+        let rendered = |c: &Config| {
+            crate::dispatcher_env::Rendered {
+                addresses: Vec::new(),
+                envelope: Some(crate::dispatcher_env::Envelope::of_config(c)),
+            }
+            .lines()
+            .unwrap()
+        };
+        // No key: no grant, and no line for the dispatcher, which hands such a package back.
+        let c = Config::parse(&with("")).unwrap();
+        assert!(!c.direct_network);
+        assert!(!rendered(&c)
+            .iter()
+            .any(|l| l.starts_with("OMARCHY_DIRECT_NETWORK")));
+        // The grant (#373): the run loop writes it into etc/dispatcher.env.
+        let c = Config::parse(&with("direct_network = true")).unwrap();
+        assert!(c.direct_network);
+        assert!(rendered(&c).contains(&"OMARCHY_DIRECT_NETWORK=1".to_owned()));
+        let c = Config::parse(&with("direct_network = false")).unwrap();
+        assert!(!c.direct_network);
+        assert!(!rendered(&c)
+            .iter()
+            .any(|l| l.starts_with("OMARCHY_DIRECT_NETWORK")));
+        // Anything but true or false is a configuration error (the loop exits 78), never read
+        // as a grant or as none.
+        for bad in ["direct_network = \"yes\"", "direct_network = 1"] {
+            let e = Config::parse(&with(bad)).unwrap_err();
+            assert!(e.contains("direct_network"), "{bad}: {e}");
         }
     }
 

@@ -21,7 +21,9 @@
 //! that network and is also attached to the shared `omarchy-egress` bridge,
 //! where it listens on nothing; the task's `HTTP(S)_PROXY` name it. A
 //! package with a signed exception in `factory/sizing` gets a normal bridge
-//! network of its own instead, and no egress sidecar.
+//! network of its own instead, and no egress sidecar, on a host whose
+//! envelope grants it (`OMARCHY_DIRECT_NETWORK`, #373; elsewhere the lease
+//! goes back before this spec is made).
 //!
 //! **A model kind's agent** (D48) is its own too: an **agent sidecar**
 //! (`<network>-agent`, the worker image's `agent` role, the broker without
@@ -470,7 +472,8 @@ impl Side<'_> {
 
     /// The egress sidecar: created on the shared bridge, attached to the task's network at its fixed
     /// address, started. The bridge comes first: podman (netavark) gives a container whose first network
-    /// is internal no way out through a second one.
+    /// is internal no way out through a second one. Install's egress probe starts its own the same way
+    /// (#373): both are held to `tests/fixtures/egress-sidecar.txt`.
     fn egress(&self) -> Vec<Vec<String>> {
         let name = format!("{}-egress", self.net());
         let ip = self.slot.egress_ip();
@@ -1637,6 +1640,45 @@ mod tests {
         let o = task_of(&plan(&one).unwrap());
         assert_eq!(after(&o, "--cpus"), "0.650");
         assert_eq!(after(&o, "--memory"), "1728m");
+    }
+
+    /// The calls of the fixture the dispatcher and install's egress probe both start an egress
+    /// sidecar by (#373), its placeholders filled with `values`.
+    fn egress_fixture(values: &[(&str, &str)]) -> Vec<Vec<String>> {
+        include_str!("../../tests/fixtures/egress-sidecar.txt")
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let l = values
+                    .iter()
+                    .fold(l.to_owned(), |l, (k, v)| l.replace(k, v));
+                l.split(' ').map(str::to_owned).collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_egress_sidecar_is_started_as_the_fixture_install_s_probe_shares_says() {
+        // Install's egress probe starts its own sidecar from the same fixture (omarchy-agent's
+        // install tests): a change to the limits, flags or role here fails until it follows.
+        let (tdir, rel, _) = dirs();
+        let own = ["203.0.113.10".to_owned()];
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        s.deny = &own;
+        let p = plan(&s).unwrap();
+        let want = egress_fixture(&[
+            ("{name}", "omarchy-task-812-g_0123456789abcdef-egress"),
+            (
+                "{labels}",
+                "--label com.omarchy.task=812 --label org.omarchy-pool.task.gen=g_0123456789abcdef --label org.omarchy-pool.agent.host=h_studio-1 --label org.omarchy-pool.task.role=egress",
+            ),
+            ("{out}", EGRESS_NETWORK),
+            ("{image}", WORKER),
+            ("{ip}", "10.231.0.50"),
+            ("{net}", "omarchy-task-812-g_0123456789abcdef"),
+            ("{deny}", "--deny 10.231.0.0/16 --deny 203.0.113.10"),
+        ]);
+        assert_eq!(p[1..4], want[..]);
     }
 
     #[test]

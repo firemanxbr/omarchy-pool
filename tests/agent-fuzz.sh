@@ -5,10 +5,11 @@
 # override, state.json with the pool's host state and the follow answer
 # of a pool from before it (#315, #344), run/capacity.json narrowed to the
 # pool's settings (#325), GitHub's unauthenticated answer for its latest
-# release, the tag freeze detection reads (#326), and the maintainers'
-# co-signature (#330: the pinned policy and an armored SSH signature). Each
-# target starts from the crate's fixtures as its corpus; a crash, a leak or a
-# timeout fails the run and leaves the input under
+# release, the tag freeze detection reads (#326), the maintainers'
+# co-signature (#330: the pinned policy and an armored SSH signature), and
+# the owner's signed documents, passkey assertions, pins and COSE keys
+# (#328). Each target starts from the crate's fixtures as its corpus; a
+# crash, a leak or a timeout fails the run and leaves the input under
 # crates/omarchy-agent/fuzz/artifacts/.
 #
 # Needs the pinned nightly and cargo-fuzz (ci.yml installs both). By hand:
@@ -37,6 +38,14 @@ printf '%s' '{"schema":2,"at":"2027-01-15T08:00:00Z","cpus":12,"mem_gb":32,"unit
 printf '%s' '{"latest":"v1.21.0","deployed_at":"2026-10-01T00:00:00Z","poll_s":120,"workers":[{"id":"w_fuzz","version":"v1.20.0","outdated":true,"update":"ord_1"}]}'   >"$corpus/state/follow.json"
 # GitHub's answer for its latest release (#326): only tag_name is read.
 printf '%s' '{"url":"https://api.github.com/repos/firemanxbr/omarchy-pool/releases/1","tag_name":"v1.21.0","name":"v1.21.0","draft":false,"prerelease":false,"published_at":"2026-10-01T00:00:00Z","assets":[{"name":"omarchy-host-v1.21.0.tar.gz","size":1}],"body":"notes"}'   >"$corpus/state/github-latest.json"
+# The owner's documents as the pool writes them, an assertion and a pin as the
+# browser answers them (#328): the recorded fixtures of tests/owner-fixtures.mjs.
+owner="$fixtures/owner/cases.json"
+jq -r '.widen.doc' "$owner" >"$corpus/state/owner-widen.json"
+jq -r '.keys.doc' "$owner" >"$corpus/state/owner-keys.json"
+jq -c '.widen.assertion' "$owner" >"$corpus/state/owner-assertion.json"
+jq -r '.pins.es256' "$owner" >"$corpus/state/owner-pin.txt"
+jq -c '{max_units: 8, emulate: ["x86_64"], agent_budget: {calls_per_day: 9000}}' -n >"$corpus/state/owner-envelope.json"
 # A bundle archive as release.yml writes it: manifest.json and a set.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

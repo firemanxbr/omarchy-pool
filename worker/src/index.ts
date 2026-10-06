@@ -43,9 +43,12 @@
  *                                                  and its settings (#325)
  *   POST /api/v1/hosts/:id/suspend|resume|retire · POST /hosts/owners/:login/cause|resume   stopping a host, removed for cause, an owner listed again (#322)
  *   POST /api/v1/hosts/:id/orders                 a host order: reconcile-now, retire-legacy with the owner's passkey (#344); set-units,
- *                                                  set-emulate, rotate-token, retry-release, diagnostics (#325)
+ *                                                  set-emulate, rotate-token, retry-release, diagnostics (#325); widen-envelope, set-agent-keys,
+ *                                                  a document the owner's passkey signed (#328)
  *   POST /api/v1/hosts/self/diagnostics · GET /hosts/:id/diagnostics/:order   a diagnostics order's scrubbed log lines (#325)
  *   POST /api/v1/hosts/:id/cap                    {units | null, reason}: the pool's cap on a host's units, its owner or any maintainer (#337)
+ *   POST /api/v1/hosts/:id/owner/challenge · /owner/pin · /seal-key   the owner's control without a visit (#328): the document their
+ *                                                  passkey signs for a host, the pin pasted at the host, the seal key confirmed
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
@@ -87,7 +90,7 @@ import {
 import { handleSourceRead } from "./routes/sources";
 import { handleAnswerOrder, handleCancelOrder, handleFollow, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
 import { handleRollbackCosignature, handleRollbackStatement } from "./routes/rollback";
-import { handleCapHost, handleConfirmHost, handleEnroll, handleHostDiagnostics, handleHostDiagnosticsGet, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSuspendHost, signedHost } from "./routes/hosts";
+import { handleCapHost, handleConfirmHost, handleEnroll, handleHostDiagnostics, handleHostDiagnosticsGet, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleOwnerChallenge, handleOwnerPin, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSealKeyConfirm, handleSuspendHost, signedHost } from "./routes/hosts";
 import { DIAGNOSTICS_MAX_BYTES } from "./hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
@@ -745,6 +748,20 @@ async function api(method: string, path: string, url: URL, request: Request, env
     const c = await contributorOf(request, env);
     if (!c) return json({ error: SIGN_IN }, 401);
     return m[2] === "suspend" ? handleSuspendHost(c, m[1], request, env, url) : m[2] === "resume" ? handleResumeHost(c, m[1], request, env, url) : handleRetireHost(c, m[1], request, env, url);
+  }
+  // The owner's control without a visit (#328, routes/hosts.ts): the document their passkey signs for a host, the pin they paste at
+  // the host, and their confirmation of its seal key; the browser's session only.
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/owner\/challenge$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleOwnerChallenge(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
+  }
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/owner\/pin$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleOwnerPin(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
+  }
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/seal-key$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleSealKeyConfirm(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
   }
   // The pool's cap on a host's units (#337): its owner or any maintainer, the browser's session only.
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/cap$/)) && method === "POST") {

@@ -135,11 +135,13 @@ export type Ran = { nodes: Record<string, any> } & Record<string, any>;
  * functions that draw are exercised. `functions` names the script's own
  * functions to hand back (decisionCell, gate, a page's button makers),
  * `variables` the script's variables to get a setter for (`setCAN(v)`,
- * `setWHO(v)`), `search` the address's query. decision-cell.test.ts runs
- * the shell this way, user-page.test.ts a person's page, go-menu.test.ts
- * the request form reached with ?name=.
+ * `setWHO(v)`), `search` the address's query, `querySelectorAll` what the
+ * document's querySelectorAll answers (none by default: host-owner.test.ts
+ * reads a form back from the HTML the script wrote). decision-cell.test.ts
+ * runs the shell this way, user-page.test.ts a person's page,
+ * go-menu.test.ts the request form reached with ?name=.
  */
-export function runScript(code: string, opts: { pathname: string; search?: string; functions: string[]; variables?: string[]; fetch?: (path: string, init?: RequestInit) => Promise<Response> }): Ran {
+export function runScript(code: string, opts: { pathname: string; search?: string; functions: string[]; variables?: string[]; fetch?: (path: string, init?: RequestInit) => Promise<Response>; querySelectorAll?: (sel: string, nodes: Record<string, any>) => any[] }): Ran {
   const trimmed = code.trim();
   const body = trimmed.startsWith("(function () {") && trimmed.endsWith("})();") ? trimmed.slice("(function () {".length, -"})();".length) : trimmed;
   const nodes: Record<string, any> = {};
@@ -159,7 +161,7 @@ export function runScript(code: string, opts: { pathname: string; search?: strin
   });
   const document = {
     querySelector: (sel: string) => (nodes[sel] = nodes[sel] || node(sel)),
-    querySelectorAll: () => [], addEventListener() {}, createElement: () => node(), body: node(), documentElement: { getAttribute: () => null }, title: "",
+    querySelectorAll: (sel: string) => (opts.querySelectorAll ? opts.querySelectorAll(sel, nodes) : []), addEventListener() {}, createElement: () => node(), body: node(), documentElement: { getAttribute: () => null }, title: "",
   };
   const out = [
     "nodes: nodes",

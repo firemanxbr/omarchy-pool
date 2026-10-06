@@ -1,0 +1,269 @@
+{
+ "note": "made by tests/owner-fixtures.mjs: the virtual authenticator's answers to the pool's documents, and keys sealed by worker/src/seal.ts",
+ "host": "h_0123456789",
+ "rp_id": "omarchy-pool.org",
+ "origin": "https://omarchy-pool.org",
+ "by": "m1",
+ "seal": {
+  "private": "cP_U3FIK_Ca_iT2Fcr64Kat2bMlBht3hh5IhsHCYbXk",
+  "public": "kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0"
+ },
+ "pins": {
+  "es256": "eyJkb2MiOiJ7XCJzY2hlbWFcIjpcIm9tYXJjaHktYWdlbnQvb3duZXIvMVwiLFwiYWN0XCI6XCJwaW4tcGFzc2tleVwiLFwiaG9zdFwiOlwiaF8wMTIzNDU2Nzg5XCIsXCJpc3N1ZWRfYXRcIjpcIjIwMjctMDEtMTVUMDc6NTU6MDAuMDAwWlwiLFwibm90X2FmdGVyXCI6XCIyMDI3LTAxLTE1VDA4OjEwOjAwLjAwMFpcIixcImJ5XCI6XCJtMVwiLFwicnBfaWRcIjpcIm9tYXJjaHktcG9vbC5vcmdcIixcIm9yaWdpblwiOlwiaHR0cHM6Ly9vbWFyY2h5LXBvb2wub3JnXCJ9IiwiYXNzZXJ0aW9uIjp7ImNyZWRlbnRpYWwiOiJnbDRJa1Z1enZTb2pENE5yNGJaTjN1eGw5bVRkVC15QThSdnJtaGVTV3pvIiwiY2xpZW50X2RhdGEiOiJleUowZVhCbElqb2lkMlZpWVhWMGFHNHVaMlYwSWl3aVkyaGhiR3hsYm1kbElqb2lSMGhLVjFabVYxcDJTMmxIVFhCRmRGZEZSRWs1UVUxZldscDZhMnhzVjFsMGNsUkxlREZuY1U1aVRTSXNJbTl5YVdkcGJpSTZJbWgwZEhCek9pOHZiMjFoY21Ob2VTMXdiMjlzTG05eVp5SXNJbU55YjNOelQzSnBaMmx1SWpwbVlXeHpaWDAiLCJhdXRoZW50aWNhdG9yX2RhdGEiOiJ6N29sVWxQWmp2MElMTVhTNkk1YVhNOVlOcGV0LU5MdVlBRnc5NGNSMnpBRkFBQUFBUSIsInNpZ25hdHVyZSI6Ik1FUUNJR251bk5nNWJyanZKRTV2azM5bjlEN1BDbXFuYzBtcHZyWlRaVWhSc3Z3Z0FpQXdWQ0loTk12d0lULVFIbG1NVjBlQlFVcmlMMHcwWEZQMGJTTmxKVmUzVnciLCJ1c2VyX2hhbmRsZSI6IiJ9LCJwdWJsaWNfa2V5IjoicFFFQ0F5WWdBU0ZZSUZ3bDB5MkxsS1ExOFJDc2JUaHVkckJoRnFaTERidzBTN05JSTZ3VkIwdTVJbGdnSC1MUDZTNFU1aERqM0FZNG94NGVKeTF6UGtidjA2WFI5ZUg5TEUwcldfSSIsImFsZyI6LTd9",
+  "eddsa": "eyJkb2MiOiJ7XCJzY2hlbWFcIjpcIm9tYXJjaHktYWdlbnQvb3duZXIvMVwiLFwiYWN0XCI6XCJwaW4tcGFzc2tleVwiLFwiaG9zdFwiOlwiaF8wMTIzNDU2Nzg5XCIsXCJpc3N1ZWRfYXRcIjpcIjIwMjctMDEtMTVUMDc6NTU6MDAuMDAwWlwiLFwibm90X2FmdGVyXCI6XCIyMDI3LTAxLTE1VDA4OjEwOjAwLjAwMFpcIixcImJ5XCI6XCJtMVwiLFwicnBfaWRcIjpcIm9tYXJjaHktcG9vbC5vcmdcIixcIm9yaWdpblwiOlwiaHR0cHM6Ly9vbWFyY2h5LXBvb2wub3JnXCJ9IiwiYXNzZXJ0aW9uIjp7ImNyZWRlbnRpYWwiOiJGbjdNeDg5a1NCNE16ZXhqQl9iUmtxMC1ZUjNjNWpNMnNwQlRKcXA5TG80IiwiY2xpZW50X2RhdGEiOiJleUowZVhCbElqb2lkMlZpWVhWMGFHNHVaMlYwSWl3aVkyaGhiR3hsYm1kbElqb2lSMGhLVjFabVYxcDJTMmxIVFhCRmRGZEZSRWs1UVUxZldscDZhMnhzVjFsMGNsUkxlREZuY1U1aVRTSXNJbTl5YVdkcGJpSTZJbWgwZEhCek9pOHZiMjFoY21Ob2VTMXdiMjlzTG05eVp5SXNJbU55YjNOelQzSnBaMmx1SWpwbVlXeHpaWDAiLCJhdXRoZW50aWNhdG9yX2RhdGEiOiJ6N29sVWxQWmp2MElMTVhTNkk1YVhNOVlOcGV0LU5MdVlBRnc5NGNSMnpBRkFBQUFBQSIsInNpZ25hdHVyZSI6Im5aS0stQy1WM0hPMlY1bVZvOEhSVHotYmU3aHpzeDE2clVlODV0YUNmOFlhRkdOVXpiV2dMak9OYU9CUHM5V2k1MWU4dno4WGVmODBfMUJ3cFk4cEFBIiwidXNlcl9oYW5kbGUiOiIifSwicHVibGljX2tleSI6InBBRUJBeWNnQmlGWUlHZDdTRm44SVFuT19sNTlQUC1wbjhxSFd3VndIRHdFVTlpaGdYdmhPRVc0IiwiYWxnIjotOH0",
+  "rs256": "eyJkb2MiOiJ7XCJzY2hlbWFcIjpcIm9tYXJjaHktYWdlbnQvb3duZXIvMVwiLFwiYWN0XCI6XCJwaW4tcGFzc2tleVwiLFwiaG9zdFwiOlwiaF8wMTIzNDU2Nzg5XCIsXCJpc3N1ZWRfYXRcIjpcIjIwMjctMDEtMTVUMDc6NTU6MDAuMDAwWlwiLFwibm90X2FmdGVyXCI6XCIyMDI3LTAxLTE1VDA4OjEwOjAwLjAwMFpcIixcImJ5XCI6XCJtMVwiLFwicnBfaWRcIjpcIm9tYXJjaHktcG9vbC5vcmdcIixcIm9yaWdpblwiOlwiaHR0cHM6Ly9vbWFyY2h5LXBvb2wub3JnXCJ9IiwiYXNzZXJ0aW9uIjp7ImNyZWRlbnRpYWwiOiJKUEI3bVotSnFNU2NXb29oZnJ4Z0xRUWJ6M29aRThIMllfdTg2TkNmMmhJIiwiY2xpZW50X2RhdGEiOiJleUowZVhCbElqb2lkMlZpWVhWMGFHNHVaMlYwSWl3aVkyaGhiR3hsYm1kbElqb2lSMGhLVjFabVYxcDJTMmxIVFhCRmRGZEZSRWs1UVUxZldscDZhMnhzVjFsMGNsUkxlREZuY1U1aVRTSXNJbTl5YVdkcGJpSTZJbWgwZEhCek9pOHZiMjFoY21Ob2VTMXdiMjlzTG05eVp5SXNJbU55YjNOelQzSnBaMmx1SWpwbVlXeHpaWDAiLCJhdXRoZW50aWNhdG9yX2RhdGEiOiJ6N29sVWxQWmp2MElMTVhTNkk1YVhNOVlOcGV0LU5MdVlBRnc5NGNSMnpBRkFBQUFBUSIsInNpZ25hdHVyZSI6IlZfUUlvRlBzLTBVTFF0YzNHa1R3b1NvdTJnNTBSQUlybkFWaW5wX0w5c1hNa3RNQXRKbDhncS1WNDFFOUdfQVFxZ0xFWXdLNkoyYUtsT01KZlFrTXA5MDUwclJySDdmZFlrNFA4dms2eE5NUFpYT2V3NC1reHhyRGVva3hhMUkxaUJqQS1tejRESUxZVWVwVWZtTE1kUGVDcGE0dUZSR2lPYXF1YU9odlRpbTA3cnIwSUNJSlptbC1raU0wUlZTVENKU1loa2Y1N2ZIY2hKYy1TUldIYXNOeUZCQ3BhOGM4eGlIalVzQTU1TXlpTUlrNGtOWnNJX2JmNFlXTXhjcEYybG5peExRcHBQR0ZOS3FuVVF6Z2swMGU0Rk8wNWRBMmtRb1RXekk3TnFNYUZnMnFFQWVHZ2ViTzVDRnhzekFMZ1ZZcmZFN2tRdlhXU3BHZkREX0hBQSIsInVzZXJfaGFuZGxlIjoiIn0sInB1YmxpY19rZXkiOiJwQUVEQXprQkFDQlpBUUN1bjVYc29Tcks0bGFveFVTQnRMcy1EWWJrT3ZMMFk1S3dQOFAwTWxBdGF4MnpzQ3hzUk1fc0hxT2s3T2IwVGY2dW85TURwYmdha0x3VlB2aUR5ZmlCUFptNENvSFBvRE00RVJKOENqRG5QRVRkYUFtclN3ZjJDcTJrWHZjYjhGZ255NGlOVFA1eEc3Vk1XZEwtanZpcDFVMzRqcmZtYXI0S3A2UHYxQ0NuMlhnMm9VLXk2bURaQ2Q3RmlPcE5BMy1Td2R0Z2RJWV9fRENBMVhPdTd1dGk5TEpuVjdGc19NN3pGdHNOd2lHS3lWZnhlbi1SWEpCb0o0YXdPbFNzbWxDSzdRdVJMV3JNdVRnME1BMmhJbTI5QnhVZXpXLUR6NDBjbXh1dUZScFpxMjVyS2lyZEVGcEROc0JaZy1uVHlaUDRmdVVYRGdTb1R0V2x2SWJjTldwUElVTUJBQUUiLCJhbGciOi0yNTd9",
+  "other_host": "eyJkb2MiOiJ7XCJzY2hlbWFcIjpcIm9tYXJjaHktYWdlbnQvb3duZXIvMVwiLFwiYWN0XCI6XCJwaW4tcGFzc2tleVwiLFwiaG9zdFwiOlwiaF85OTk5OTk5OTk5XCIsXCJpc3N1ZWRfYXRcIjpcIjIwMjctMDEtMTVUMDc6NTU6MDAuMDAwWlwiLFwibm90X2FmdGVyXCI6XCIyMDI3LTAxLTE1VDA4OjEwOjAwLjAwMFpcIixcImJ5XCI6XCJtMVwiLFwicnBfaWRcIjpcIm9tYXJjaHktcG9vbC5vcmdcIixcIm9yaWdpblwiOlwiaHR0cHM6Ly9vbWFyY2h5LXBvb2wub3JnXCJ9IiwiYXNzZXJ0aW9uIjp7ImNyZWRlbnRpYWwiOiJnbDRJa1Z1enZTb2pENE5yNGJaTjN1eGw5bVRkVC15QThSdnJtaGVTV3pvIiwiY2xpZW50X2RhdGEiOiJleUowZVhCbElqb2lkMlZpWVhWMGFHNHVaMlYwSWl3aVkyaGhiR3hsYm1kbElqb2lNSEZxY1hCaFMwcHdRM052VkRVellWOXRaRmcxTlcxNllVOHdXV0ZRT0hBeWFGaEJkV2xvY0Y5ME1DSXNJbTl5YVdkcGJpSTZJbWgwZEhCek9pOHZiMjFoY21Ob2VTMXdiMjlzTG05eVp5SXNJbU55YjNOelQzSnBaMmx1SWpwbVlXeHpaWDAiLCJhdXRoZW50aWNhdG9yX2RhdGEiOiJ6N29sVWxQWmp2MElMTVhTNkk1YVhNOVlOcGV0LU5MdVlBRnc5NGNSMnpBRkFBQUFBZyIsInNpZ25hdHVyZSI6Ik1FWUNJUURUbl92SjBTU0RwajVLLVE4Z09DeXMzdVNXVVAwemp0dGxSOTNDbUNBOExBSWhBT0xJcldTQ00wWlFXczROa3FBUnc5aHFMYUY5cG15cDQxa1N5dTN1NTNRbSIsInVzZXJfaGFuZGxlIjoiIn0sInB1YmxpY19rZXkiOiJwUUVDQXlZZ0FTRllJRndsMHkyTGxLUTE4UkNzYlRodWRyQmhGcVpMRGJ3MFM3TklJNndWQjB1NUlsZ2dILUxQNlM0VTVoRGozQVk0b3g0ZUp5MXpQa2J2MDZYUjllSDlMRTByV19JIiwiYWxnIjotN30",
+  "no_uv": "eyJkb2MiOiJ7XCJzY2hlbWFcIjpcIm9tYXJjaHktYWdlbnQvb3duZXIvMVwiLFwiYWN0XCI6XCJwaW4tcGFzc2tleVwiLFwiaG9zdFwiOlwiaF8wMTIzNDU2Nzg5XCIsXCJpc3N1ZWRfYXRcIjpcIjIwMjctMDEtMTVUMDc6NTU6MDAuMDAwWlwiLFwibm90X2FmdGVyXCI6XCIyMDI3LTAxLTE1VDA4OjEwOjAwLjAwMFpcIixcImJ5XCI6XCJtMVwiLFwicnBfaWRcIjpcIm9tYXJjaHktcG9vbC5vcmdcIixcIm9yaWdpblwiOlwiaHR0cHM6Ly9vbWFyY2h5LXBvb2wub3JnXCJ9IiwiYXNzZXJ0aW9uIjp7ImNyZWRlbnRpYWwiOiJnbDRJa1Z1enZTb2pENE5yNGJaTjN1eGw5bVRkVC15QThSdnJtaGVTV3pvIiwiY2xpZW50X2RhdGEiOiJleUowZVhCbElqb2lkMlZpWVhWMGFHNHVaMlYwSWl3aVkyaGhiR3hsYm1kbElqb2lSMGhLVjFabVYxcDJTMmxIVFhCRmRGZEZSRWs1UVUxZldscDZhMnhzVjFsMGNsUkxlREZuY1U1aVRTSXNJbTl5YVdkcGJpSTZJbWgwZEhCek9pOHZiMjFoY21Ob2VTMXdiMjlzTG05eVp5SXNJbU55YjNOelQzSnBaMmx1SWpwbVlXeHpaWDAiLCJhdXRoZW50aWNhdG9yX2RhdGEiOiJ6N29sVWxQWmp2MElMTVhTNkk1YVhNOVlOcGV0LU5MdVlBRnc5NGNSMnpBQkFBQUFBdyIsInNpZ25hdHVyZSI6Ik1FVUNJQ2poTmhaNG5ZQTJtM3B3SnU4WjdCb1ZvU2Nqa2g0eFQyZkZMYndsU3lJWUFpRUFyQ2p1WHZ3U2ZmYVdLc2dNR2k5Q1ZSTEF4a3hjOWx6eGNNaXp6S2VnVXZNIiwidXNlcl9oYW5kbGUiOiIifSwicHVibGljX2tleSI6InBRRUNBeVlnQVNGWUlGd2wweTJMbEtRMThSQ3NiVGh1ZHJCaEZxWkxEYncwUzdOSUk2d1ZCMHU1SWxnZ0gtTFA2UzRVNWhEajNBWTRveDRlSnkxelBrYnYwNlhSOWVIOUxFMHJXX0kiLCJhbGciOi03fQ",
+  "other_key": "eyJkb2MiOiJ7XCJzY2hlbWFcIjpcIm9tYXJjaHktYWdlbnQvb3duZXIvMVwiLFwiYWN0XCI6XCJwaW4tcGFzc2tleVwiLFwiaG9zdFwiOlwiaF8wMTIzNDU2Nzg5XCIsXCJpc3N1ZWRfYXRcIjpcIjIwMjctMDEtMTVUMDc6NTU6MDAuMDAwWlwiLFwibm90X2FmdGVyXCI6XCIyMDI3LTAxLTE1VDA4OjEwOjAwLjAwMFpcIixcImJ5XCI6XCJtMVwiLFwicnBfaWRcIjpcIm9tYXJjaHktcG9vbC5vcmdcIixcIm9yaWdpblwiOlwiaHR0cHM6Ly9vbWFyY2h5LXBvb2wub3JnXCJ9IiwiYXNzZXJ0aW9uIjp7ImNyZWRlbnRpYWwiOiJnbDRJa1Z1enZTb2pENE5yNGJaTjN1eGw5bVRkVC15QThSdnJtaGVTV3pvIiwiY2xpZW50X2RhdGEiOiJleUowZVhCbElqb2lkMlZpWVhWMGFHNHVaMlYwSWl3aVkyaGhiR3hsYm1kbElqb2lSMGhLVjFabVYxcDJTMmxIVFhCRmRGZEZSRWs1UVUxZldscDZhMnhzVjFsMGNsUkxlREZuY1U1aVRTSXNJbTl5YVdkcGJpSTZJbWgwZEhCek9pOHZiMjFoY21Ob2VTMXdiMjlzTG05eVp5SXNJbU55YjNOelQzSnBaMmx1SWpwbVlXeHpaWDAiLCJhdXRoZW50aWNhdG9yX2RhdGEiOiJ6N29sVWxQWmp2MElMTVhTNkk1YVhNOVlOcGV0LU5MdVlBRnc5NGNSMnpBRkFBQUFCQSIsInNpZ25hdHVyZSI6Ik1FVUNJQy1vUmZkdFZZOWlnNWdlWmFHYjBvbk5pNjk0LU9OTFBiTDBFM2c4YnpPUkFpRUF5N1RNTVZVTkFWazYtczZHUFNZVC1GOFJWbjdSQlhFbGNrSTc5TTIzaHpJIiwidXNlcl9oYW5kbGUiOiIifSwicHVibGljX2tleSI6InBRRUNBeVlnQVNGWUlGY0lnU1dfeWtjczdfd1hzX3FLMTJickd0S1picDFRSXhVd2FDclNncC1OSWxnZ2MwZnEzNXBsZ3RfTjJZbXpzLWwyLVFxMG5Sb3EtSVlaOWd6cjVVY1gzQWsiLCJhbGciOi03fQ"
+ },
+ "widen": {
+  "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+  "assertion": {
+   "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+   "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+   "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAABQ",
+   "signature": "MEUCIQDjM0vc5u8ylVbVP89Lz-bC6nEVgfNrxS2pgzRKeqoa5wIgQ2eheq_kmAZDNeyxPKVCUYeyGubSxZ8JOux4h0VntUU",
+   "user_handle": ""
+  }
+ },
+ "widen_lower": {
+  "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":1,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":16}}",
+  "assertion": {
+   "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+   "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiTWE1R1B4NXY5TjEwVmR5ZmpqWTgxeHIxX192UHdfQ3RIU2luMzZhS0VUdyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+   "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAABg",
+   "signature": "MEUCIQDaSLbzxO6IkkfakltxbmlKdYaQ94Jw422qmoI3d-6n9AIgaVHs9rMiPYBIOumLUe0qXndxIUYewiZxK7w3e8-lRAI",
+   "user_handle": ""
+  }
+ },
+ "widen_eddsa": {
+  "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+  "assertion": {
+   "credential": "Fn7Mx89kSB4MzexjB_bRkq0-YR3c5jM2spBTJqp9Lo4",
+   "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+   "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAAA",
+   "signature": "ggUHlkktRKbgVFQmwiCTe1GuyWT9sKwI1D1pFsJ4iQ6sIc9nE9dVNNnU9veN604obZ42C02UJuPpy48RD091Cw",
+   "user_handle": ""
+  }
+ },
+ "widen_rs256": {
+  "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+  "assertion": {
+   "credential": "JPB7mZ-JqMScWoohfrxgLQQbz3oZE8H2Y_u86NCf2hI",
+   "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+   "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAAg",
+   "signature": "XtEL6fvoNM2VG3yWrcm6GZsp7l4W_8dlVk5uARTZBJl3ZFJOBc8zxc_yvJz1RmasPEJU8gGebpuK3ITovHeNhnjZ1CtUgIdWrbsZOhSUK6hg88FSOc570gHwKf91iWoUxm8EFhvI0gfSLyamBn5rFVh56P1OQviBOPR63regNGncZNozqN-8QyFFBCeNkg-tRRF3C00VobrraysLn8jVj_Olo9oosDUY-asAFo24QrjaqNQtSIVQK1mafxeIMtg7X2puA9mbBoYzE8iBEyrjwQU3huQS-0reWJV1P5Q3Pc-LUtqaXR-n0QSd6Gy9EvfG0vFIc8Zr73OXuDPKv4gtww",
+   "user_handle": ""
+  }
+ },
+ "refused": [
+  {
+   "why": "another credential",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "UtWiksDY6der1EaAv9B66AVlHYDnqEb9OkkYz9kR9Gg",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAAQ",
+    "signature": "MEQCIEA6e2uB4FncKI8vRR3pq9MEjr5_no-79XwPRPjIJGa-AiAbACRPVeueMp8G270Vq19--Wyoc5V9IJAdue5ddtbEyg",
+    "user_handle": ""
+   },
+   "says": "signed with another passkey"
+  },
+  {
+   "why": "another origin",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vZXZpbC5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAABw",
+    "signature": "MEUCIHz_rg42oGD949_MjAv9D0pE95QpYz-GmksghlQYhj2VAiEA-wRzUsC3SJXvDq-ZIyyLiJ57bCql_5tgXHIxpCnW-fs",
+    "user_handle": ""
+   },
+   "says": "made on \"https://evil.example\""
+  },
+  {
+   "why": "another relying party",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "nBgN4M1pnueIl8R8_bPn7h11kG4xt3RqR0fepTaQmDcFAAAACA",
+    "signature": "MEQCIEzD2sHBZ5_St5Pfsljvjjeyw2gS46jdxVkt_xYlIlCiAiAXoVJAPhDwSelld7vDQHsuW45v5IqWOnfz3rZHgfMBVg",
+    "user_handle": ""
+   },
+   "says": "another relying party"
+  },
+  {
+   "why": "no user present",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAEAAAACQ",
+    "signature": "MEUCIAPvAgfHhygqM7QcuRkGVqNTTHwtKI-N6GuM9fzGzlSUAiEA4nRY4y6hDrySh0wFZ3OMyAh_u2SLjHfMq645CSzVF1I",
+    "user_handle": ""
+   },
+   "says": "nobody was present"
+  },
+  {
+   "why": "no user verification",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zABAAAACg",
+    "signature": "MEYCIQDd1pLK7WbdcGnNVIRh-Y8aQRnOj0dbsI9IbsrYuxVG1AIhANeLlYhW1P1QuQ6-GDKP9yiQDY_KGG5NQ5FT0M55lVKi",
+    "user_handle": ""
+   },
+   "says": "did not verify the user"
+  },
+  {
+   "why": "a document changed after it was signed",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":64}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAACw",
+    "signature": "MEYCIQCR5eoCv2a6Sp2fP6QcDYqHSBJ31qV_wUdXmheq76EaRAIhAIE81dy3UN8KbUsevo6jkaunh-DVzGa4u3erfRJQGU6G",
+    "user_handle": ""
+   },
+   "says": "not for this document"
+  },
+  {
+   "why": "another host's document",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_9999999999\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiT3pwWDZhbnpwbEF1VS1pc1lZZFlUZURQcF8zTWcyVUtjNUVFVkJfQW9vSSIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAADA",
+    "signature": "MEUCIQCNZx5p4FDYORN9f_G-o5u-h7OPI4wTgF2PJqHCz83OjQIgNEY88gHeDoAOokwxF2PyeZFBGCkKB6p9_vyeo_c7yGE",
+    "user_handle": ""
+   },
+   "says": "for host h_9999999999"
+  },
+  {
+   "why": "an expired document",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T06:00:00.000Z\",\"not_after\":\"2027-01-15T07:00:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiTzZfS3Rka2FfZHQ4WDh6cXQ0ZzZad3dVbl9ycVRwTjNIc201SDJGNlRvVSIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAADQ",
+    "signature": "MEYCIQCPzT_hOCCL31HZyzzgyReEkLbK__DyCwi47o9O1Z5mrQIhAJbpJQi_WNgn4dENBivnkp01fAsTRXtbHgzmrZaNlEw7",
+    "user_handle": ""
+   },
+   "says": "expired at"
+  },
+  {
+   "why": "a registration's answer",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAADg",
+    "signature": "MEYCIQD-EHAfzA8nJYZM2sCpAkd9hsF-j7g4rLXuUkqMtCwVLgIhAMfggp2ltdxzZqbBW0y39GsaD-NZOsmNJZkwHScoO72e",
+    "user_handle": ""
+   },
+   "says": "not webauthn.get"
+  },
+  {
+   "why": "a frame of another site",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjp0cnVlfQ",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAADw",
+    "signature": "MEQCIH7mbrtc9CG8JbF0JurgzDZ53i8wPAATPvfvJqhQUtgnAiBLrgFNKpFzO07ERpNzZksp45Uo8cjRiQJstqrSO7oKpg",
+    "user_handle": ""
+   },
+   "says": "frame of another site"
+  },
+  {
+   "why": "a signature that is not the pinned key's",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"max_units\":8}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaHFNMm1iY2ZMVl9tbFhBR3N5SUJ2VXo5d2stbmFTaW1IOFdTVDRXM3lUbyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAEA",
+    "signature": "MEQCIFk3jAJv_mfONcqSjo9cmL2RRG4QId3XhHO9CQgreRRXAiArit7vVtR92Mj06ecJqIeQRVUoXUyqu8Ztrv4QhsgeXg",
+    "user_handle": ""
+   },
+   "says": "is not the pinned passkey's"
+  },
+  {
+   "why": "a widening of a key the owner keeps at the host",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"widen-envelope\",\"host\":\"h_0123456789\",\"version\":2,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"envelope\":{\"allow_socket\":false}}",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQTVYMU1TRnBzdnV4c1lZQW12YW1INWhBbWJkWHhhWjFfQlUwR3NWMVVlQSIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAEQ",
+    "signature": "MEUCIQD8j5he4Jc55w6d7IyIholywHePTVfzWZf91vo-2KDC7QIgUJP2AZGjhHIYQ3tmEJlsOkrtE4_kEJta-YN0mfeu3pU",
+    "user_handle": ""
+   },
+   "says": "\"allow_socket\" is no key"
+  }
+ ],
+ "keys": {
+  "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"set-agent-keys\",\"host\":\"h_0123456789\",\"version\":3,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"seal_key\":\"kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0\",\"keys\":[{\"name\":\"CLAUDE_CODE_OAUTH_TOKEN\",\"epk\":\"RJJH8vIe1InRBsdshhI6bc56RiZ288YCZzJMwuTRIwY\",\"nonce\":\"K4oNCngiHSVAShmS\",\"ct\":\"pp9oZ-ghE337APSrlenyTLfzvBaf8ok4stcRbg0ZxQoz9nEU-lfzRDHCspRzHcXMwJyVPVAcZ7BoGaHH_xvzKV06zizB2eUjnFKYz7z_oMpQCA\"},{\"name\":\"GITHUB_TOKEN\",\"epk\":\"GLePAlO-qyBDvDwgPuciuyx_3PY6RDcr4X0GeAZScE0\",\"nonce\":\"mMMPCoBo-GW7v59J\",\"ct\":\"wNdJ6S_HRDeGd-WK_6s8LhnL9anizwtv9jio02_ulz_CyUZyAgu7BQS6EQm-ZuG6VFeaa-zC-l03s-Tlpg\"},{\"name\":\"OPENAI_API_KEY\",\"remove\":true}]}",
+  "assertion": {
+   "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+   "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiY0dvc0ZlZ1VBSWdCaVhBRE1UQ3BVV0Q1ME5yMG9aN0hOYkU2Y0pkc0JCdyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+   "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAEg",
+   "signature": "MEUCIQCckk0KLgGWx-j_qvWnmfsZQTIm7lHJx7sKLGN_UfCcnAIgUJ0Q-ahk70e_BwOME6cLaBMbZjLEUtDDUElvkPfnbiE",
+   "user_handle": ""
+  },
+  "values": {
+   "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-CANARY0fTheSealedKeyThatNeverReachesThePool0123456789",
+   "GITHUB_TOKEN": "ghp_CANARYpublicReadToken0123456789abcdefABCD"
+  }
+ },
+ "keys_refused": [
+  {
+   "why": "sealed to another seal key",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"set-agent-keys\",\"host\":\"h_0123456789\",\"version\":3,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"seal_key\":\"ZiaYVRrNtNBGAVfR7R1NDlaUDf8OElab3P9GDHX37EA\",\"keys\":[{\"name\":\"CLAUDE_CODE_OAUTH_TOKEN\",\"epk\":\"V83DsjMpIFrwTHDuw-PX0Ezfo6KNY2WiwTz6b4yDbAc\",\"nonce\":\"dYO61RVXywhhhpf8\",\"ct\":\"iSaD9NJWJ3rMOjh1BmmeyqM0DOM2EcS7YyCxxS5QWziQ--Auk1L04h9l1TLUoK2ganUhTIWBFi3126UA3A2tGT65sQJ0jQIcdJwysR9Ksh89BA\"}]}",
+   "says": "sealed to another seal key",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiTjZFb09xaW91MENMbzU5dmhLZVpJbXdad1BjYkdTbjc5RkY2TzdVeFZnZyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAEw",
+    "signature": "MEQCIFSzfxVpQKdkXuLdSoeIPDat7Rst9NmZWaiJDNfCpo2bAiBqCR0Kp0sALlIg-MiYZEWfr3QumNUQXJDRGsv964dxqA",
+    "user_handle": ""
+   }
+  },
+  {
+   "why": "sealed under another key's name",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"set-agent-keys\",\"host\":\"h_0123456789\",\"version\":3,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"seal_key\":\"kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0\",\"keys\":[{\"name\":\"CLAUDE_CODE_OAUTH_TOKEN\",\"epk\":\"WCe9T0TAywhNLC0b-oOsirpjQ0yFDg87MYVvJH6GPCA\",\"nonce\":\"7oWSGxKR-HOU05YW\",\"ct\":\"w80zIk-9oCjJCowpZK5qa_PZgQ1_QUSca5PCQI3myvMB356eADGfPutzuuSAlXDL1ls-dOyOua1XcFr8nemYjTRdI5EqxjLsNAVPhvOt8wEaUg\"}]}",
+   "says": "does not open with this host's seal key",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiSEhqN3JSbURQWEVrQ1JPcWQ2ZFhmQlpfOUQ0MG1vSDh4NkRaSW8wSFVyRSIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAFA",
+    "signature": "MEUCIQCKD6rrsbJ3WZdYh9sjKWo_Qn70cXpXQ0YeVOPbT7b-7gIgCkbHdcRHPcKJxNoXFknwKelulGfWEHvf2jnv4mGWW3U",
+    "user_handle": ""
+   }
+  },
+  {
+   "why": "sealed for another host",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"set-agent-keys\",\"host\":\"h_0123456789\",\"version\":3,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"seal_key\":\"kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0\",\"keys\":[{\"name\":\"CLAUDE_CODE_OAUTH_TOKEN\",\"epk\":\"tDcYK9iF6SLkIlvlOD4Lk70LjXhq1c6mTukiPzgkN1U\",\"nonce\":\"GwfNHvhT9RMZ14BN\",\"ct\":\"DJQWv94v1AyHCflt69Zl5821vccUzkXefCLnMSZ5EEtK39ZW5zU4CmLb4cixcLpYzVo80ajOYshz66qFlVusK8p1oXqb2JEq7b-Xe09l2YBxgA\"}]}",
+   "says": "does not open with this host's seal key",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoieEFhWGs5MVliaFhfVXRRZEVDUVFTSzRZZU9WRHJ3Rm5WakhuM1ktSWlIZyIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAFQ",
+    "signature": "MEQCIFqcMbarIjRUM8xNSGHdK2mbvgQ_PuY_i3HIX_SXEl8-AiAx04KmdRynwnlP1B0hsH80rMvspSN8-aHTRKl5Nw4uaw",
+    "user_handle": ""
+   }
+  },
+  {
+   "why": "a variable that is no agent key",
+   "doc": "{\"schema\":\"omarchy-agent/owner/1\",\"act\":\"set-agent-keys\",\"host\":\"h_0123456789\",\"version\":3,\"issued_at\":\"2027-01-15T07:55:00.000Z\",\"not_after\":\"2027-01-15T08:55:00.000Z\",\"by\":\"m1\",\"seal_key\":\"kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0\",\"keys\":[{\"name\":\"ANTHROPIC_BASE_URL\",\"epk\":\"wHm3YGQkvtwl93G8MCpIYxQifZTsFb4PRG8kzr8h9BQ\",\"nonce\":\"2iGxYgVDDTqA-Fb2\",\"ct\":\"G4sgW9SWA_r4KDRQqtuFVPesptC04lL3q1Edigfc23q9Xy13\"}]}",
+   "says": "\"ANTHROPIC_BASE_URL\" is no agent key",
+   "assertion": {
+    "credential": "gl4IkVuzvSojD4Nr4bZN3uxl9mTdT-yA8RvrmheSWzo",
+    "client_data": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoibjBxWEYxdWxYQklqeDBnUXJyOFM4WUxnSXktazNwb1hfNHliM1hSRzJUNCIsIm9yaWdpbiI6Imh0dHBzOi8vb21hcmNoeS1wb29sLm9yZyIsImNyb3NzT3JpZ2luIjpmYWxzZX0",
+    "authenticator_data": "z7olUlPZjv0ILMXS6I5aXM9YNpet-NLuYAFw94cR2zAFAAAAFg",
+    "signature": "MEUCIQDs7ElttoADolcTtgPd3YgZJ1MkFTxdwi5cflAS0D9q8AIgXtI-fnVQj2xw6zjiLBhKsj02j8gb8b9HRT3s5PrD6jc",
+    "user_handle": ""
+   }
+  }
+ ]
+}
