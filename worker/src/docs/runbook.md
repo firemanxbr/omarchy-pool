@@ -1294,6 +1294,65 @@ a release ships waits with its release, unless the manifest sets
 `agent.urgent`: then the agent updates itself at once and the release still
 waits.
 
+### Owner control
+
+From agent 0.6.0 a host's owner widens its envelope and sets its agent keys
+from the host's page (#328, design v2 §14; [The project's
+host](/docs/worker-host#owner-control-without-a-visit) says what each does).
+Two things are done at the host, once:
+
+- **Pin a passkey.** On the host's page, *Owner control* → **Make a pin**,
+  with one of your passkeys; it prints a command good for ten minutes. At
+  the host, as the agent's user (on a Mac, in your own login session):
+
+  ```sh
+  omarchy-agent envelope pin-passkey <pin>      # or: … pin-passkey - < pin.txt
+  # pinned m1's passkey (ES256, credential AbCdEfGhIjKl…) for omarchy-pool.org on https://omarchy-pool.org: …
+  omarchy-agent status                          # owner:  m1's ES256 passkey AbCdEfGhIjKl… …  /  seal key: SHA256:…
+  ```
+
+  The agent refuses a pin for another host, for a relying party that is not
+  its pool's, one whose signature does not check, or one past its ten
+  minutes; it then keeps the passkey's public key in `state/owner.json`
+  (0600), and the page shows it pinned after its next report (within its
+  poll). Pinning another passkey replaces it; `omarchy-agent envelope
+  unpin-passkey` removes it, and the site then widens nothing and sets no
+  key. A passkey you lost is replaced only at the host — by design, the
+  site has no way around the pin.
+- **Confirm the seal key.** The agent makes its X25519 seal key the first
+  time it runs (on Linux `state/seal.x25519`, 0600, with `state/seal.pub`;
+  on a Mac the login keychain, service `org.omarchy-pool.agent`, account
+  `seal-key-…`) and journals its fingerprint (`seal-key`). Compare the
+  page's fingerprint with `omarchy-agent status`'s `seal key:` line, then
+  **Confirm the seal key** with your passkey. On a Mac whose keychain is
+  locked (an SSH session with nobody logged in) the agent journals that the
+  seal key could not be loaded, tries again every ten minutes, and takes no
+  agent key meanwhile; everything else runs. A seal key made again (the file
+  removed, a new keychain) shows as changed on the page: confirm it again,
+  and seal the keys again — the agent refuses keys sealed to another key.
+
+Then, on the page: **Widen the envelope** (the agent answers `done` with
+what changed in `agent.toml` and in `run/capacity.json`, and recreates the
+dispatcher with the new count) and **Set agent keys** (written to
+`OMARCHY_SECRETS_DIR/agent.env`, 0600; your own lines there are kept, and
+the next agent sidecar reads it). Each is one order on the page's journal of
+orders; the agent's answer says why when it refuses:
+
+| The answer says | What it means |
+|---|---|
+| `no passkey is pinned at this host` | pin one first (above) |
+| `signed with another passkey (…), not the one pinned at this host` | sign with the pinned passkey, or pin this one |
+| `its version N is not above the last this host took` | a replay, or an older document: sign a new one |
+| `the document expired at …` / `… ahead of this host's clock` | signed more than an hour ago, or the host's clock is off: sign again, check the clock |
+| `the passkey's answer was made on …` / `the passkey signed for another relying party` / `the authenticator did not verify the user` | not signed on the pool's page, or without verifying you: sign again there |
+| `the keys were sealed to another seal key` | confirm the host's seal key on the page, then seal again |
+| `GITHUB_TOKEN carries the scopes …` | a `GITHUB_TOKEN` is public read only: make one with no scope |
+
+A widening's `emulate` turns a lane on at the host's next count
+(`omarchy-agent capacity --write`; on a Mac, a restart of its VM); a Mac's
+VM takes a new `max_cpus` or `max_mem_gb` with a restart once no task runs.
+Narrowing (*Settings*) needs no signature.
+
 ### Soak
 
 An owner may make a host take a new release later than the pool names it
@@ -1619,6 +1678,22 @@ start time), a task that was running finishes, and the page's units say the
 new count after the agent's next report. Give its envelope's units back (the first entry of the
 list), then ask Diagnostics while `agent.toml` says `diagnostics = false`:
 refused, saying so.
+
+**Rehearse owner control on the P1 host** (#328) once its agent reports
+0.6.0 (`tests/agent-host-orders.sh` widens and sets a key against a stand-in
+in CI, with a virtual authenticator; `tests/host-enroll-e2e.sh` pins one
+made on a local pool's page): pin your passkey at the host and confirm its
+seal key (*Owner control*, above). Then, from the page alone: **Widen the
+envelope** with `max_units` one above what `agent.toml` says (and no more
+than the machine has) — within two minutes the order says `done`,
+`agent.toml` says the new cap, `jq .units run/capacity.json` the new count
+and the dispatcher was recreated; **Set agent keys** with a scratch
+`OPENAI_API_KEY` — `done`, `agent.env` in the secrets directory holds it
+(0600), `docker inspect` of the dispatcher shows neither the value nor a
+mount of the secrets directory, and `omarchy-agent status` and the page name
+the key, never its value; take it out again the same way. A widening is
+counted under the release's signed constants and the detected hardware, so
+the units it gives are never more than the machine has.
 
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,

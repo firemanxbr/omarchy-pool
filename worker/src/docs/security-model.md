@@ -43,6 +43,8 @@ please do not file a public issue for it.
 | Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered with the browser's session, on their own page or, the first one, in the dialog of the act that needs it (#287); the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
 | Host enrollment token `ome_…` | the maintainer who pressed *Add a host*, for the one command they paste on the machine (in the environment of `sh`, never an argument) | enroll one host, once, within 15 minutes, as that maintainer — while they are still in `factory/MAINTAINERS.toml` and still the same GitHub user id | claim, confirm the host, or enroll a second one | live (#321); stored as its SHA-256; burnt by the enrollment in the same D1 batch that creates the host |
 | Host key (Ed25519) | one maintainer host's agent: `host.ed25519`, mode 0600, made at install, never in a container | sign the host's calls (`Omarchy-Host`: method, path, body hash, time, nonce): read its state, fetch or rotate its worker token, report, post the diagnostics its own order asked for (#325) | claim, change the maintainer list, widen the owner's envelope; be replayed (a nonce table), act from a clock 120 s off; act before its owner confirmed its fingerprint on the site | live (#321); a suspended or retired host's key is refused |
+| Owner's pinned passkey (at the host) | one maintainer host's agent, for its owner: the COSE public key, credential id, algorithm and relying party of one of the owner's passkeys, pinned with `omarchy-agent envelope pin-passkey` and kept in `state/owner.json` (0600) | let the host take a `widen-envelope` or `set-agent-keys` document the pool relays (#328, D6 b): only one this passkey signed, for this host, on its pool's origin, user present and verified, within its hour and under a version above the last it took | be used by the pool or another passkey; widen above the release's signed constants or the detected hardware; set any key but the six agent keys; be replayed | live (#328); unpinned at the host, the site widens nothing |
+| Seal key (X25519) | one maintainer host's agent: `state/seal.x25519` (0600) on Linux, the login keychain on a Mac; its public half reported, its fingerprint confirmed once by the owner on the host's page | open the agent keys the owner's browser sealed to it (HKDF-SHA256, AES-256-GCM, bound to the host and the key's name) into `OMARCHY_SECRETS_DIR/agent.env` | sign anything; take a sealed key that the pinned passkey did not sign; be read by the pool, the dispatcher or a container | live (#328); a key made again is confirmed again before anything is sealed to it |
 | Session cookie `oms_…` | one person's browser, after Sign in with GitHub | what that person's contributor token can, from the dashboard's pages | — | live; separate from the CLI token, so signing in never invalidates a worker; *sign out* (in the header of every page) invalidates it on the server, not only in that browser |
 | Signing key (OpenPGP) | the pool's Worker only (`SIGNING_KEY` secret, `worker/src/signing.ts`) | sign the databases it stores and the packages the factory builds (`POST /pool/:sha256/sign`) | — | live; no worker, runner or repository holds it |
 | `CLOUDFLARE_API_TOKEN` | the release workflow on GitHub | deploy the Worker, apply migrations, record the deploy | — | live; all GitHub holds (no hosted worker: Actions runs CI and the release only) |
@@ -560,8 +562,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   record of a host's settings, which only an agent that lost its own takes,
   is narrowed by the envelope the same way, and what of it is above the
   envelope is reported, never applied. No
-  order widens the envelope, selects a driver or names a path, an image or a
-  command: the closed set is `retire-legacy`, `reconcile-now`, `set-units`,
+  order the pool can make widens the envelope, selects a driver or names a
+  path, an image or a command (a widening is the owner's passkey's, signed,
+  below): the closed set is `retire-legacy`, `reconcile-now`, `set-units`,
   `set-emulate`, `rotate-token` (a new worker token from the same signed
   `POST /hosts/self/token`, written only in the pool's shapes, for the
   registration the host already has), `retry-release` (lifts a quarantine;
@@ -572,7 +575,8 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   like a pool token (its job tokens `omj.` and agent tokens `oma_` too),
   GitHub or model provider token, then checked again by the
   pool's leak scan, which drops a line that still looks like one; kept a
-  week, for its owner and the maintainers only). Because the pool may be
+  week, for its owner and the maintainers only), with `widen-envelope` and
+  `set-agent-keys` (#328, below). Because the pool may be
   compromised, **the host brakes it**, in its own code and with counters it
   keeps in `state.json` (a restart loop resets nothing): orders at least 2 s
   apart and at most 20 an hour; at most 6 dispatcher restarts an hour that
@@ -593,6 +597,52 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   dispatcher at most six times an hour — a slowdown, never a widening,
   a foreign command or a secret. Changing the runtime is the owner's alone:
   `omarchy-agent runtime switch` at the host, which the pool cannot ask for.
+- **Owner control without a visit** (#328, design v2 §14, D6 b). Two more
+  orders — `widen-envelope` and `set-agent-keys`, its owner's only, an agent
+  from 0.6.0 — carry a document the owner's passkey signed, and the agent
+  takes one only when **the passkey its owner pinned at the host** signed it:
+  the pool can relay them, never make one. The pin is made on the host's
+  page (the owner's passkey signs a ten-minute pin document for that host)
+  and pasted at the host (`omarchy-agent envelope pin-passkey`), where the
+  agent checks the signature with the public key the pin carries and that
+  the relying party is its own pool's before it keeps that key. From then on
+  it checks each document itself: the pinned credential and its signature
+  (ES256, EdDSA or RS256) over the authenticator data and the client data,
+  the client data's type, challenge (the document's SHA-256) and origin, the
+  authenticator data's RP id hash, user present and user verified flags and
+  counter, the document's host, act, time (issued within five minutes of
+  its clock, at most two hours to live) and a version above the last it took
+  — recorded before anything changes, so a document is good once and an
+  older one never comes back. A forged document (no assertion, another
+  passkey, another host or origin, a replay, a lower version, user presence
+  or verification missing) is refused on the host with nothing changed and
+  answered so. A widening sets only `max_units`, `max_cpus`, `max_mem_gb`,
+  `emulate`, `agent_slots`, `agent_budget`, `diagnostics` and `paths` in
+  `[envelope]` (agent.toml's other lines kept), each checked by agent.toml's
+  own parser and the lint, and the units are counted again under the applied
+  release's signed constants and the detected hardware: a widening never
+  gives more than the machine has. Narrowing (`set-units`, `set-emulate`)
+  needs no signature, as before. Agent keys are sealed in the owner's
+  browser to the host's X25519 seal key, which its owner confirmed once by
+  its fingerprint (`omarchy-agent status` prints it at the host): the pool
+  stores and relays only `{name, epk, nonce, ct}`, and its tests read every
+  table of D1 after a key went through and find no trace of the value. A
+  sealed key is taken only inside a document the pinned passkey signed —
+  sealing is not signing, anyone may seal to a public key — and only under
+  the six names of the agent keys (`ANTHROPIC_API_KEY`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+  `XAI_API_KEY`, `GITHUB_TOKEN`), so not even a signed document sets, say,
+  a model provider's base URL; a `GITHUB_TOKEN` with any scope is refused.
+  The agent writes them to `OMARCHY_SECRETS_DIR/agent.env` (0600, the
+  owner's own lines kept), which only agent sidecars mount, read-only: the
+  dispatcher never does (the lint), never has them in its environment, and
+  the journal, the report and the diagnostics scrub every value the file
+  holds. What it does not cover: the pin trusts the page that made it, once
+  — a pool compromised at the moment its owner makes the pin, or confirms
+  the seal key, could show them its own document or key, which is why the
+  agent prints what it pinned and `omarchy-agent status` the seal key's
+  fingerprint, to compare; on a Mac the Keychain holds the seal key only
+  (the host key stays a 0600 file there).
 - **The host worker token** (`omw_…`) is the dispatcher's only, written
   0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
   id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
