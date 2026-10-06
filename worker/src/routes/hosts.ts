@@ -70,6 +70,8 @@ export interface HostRow {
   reserving_task: number | null; reserving_since: string | null;
   /** #329: when its agent's report first said it sleeps; NULL while it is awake. */
   asleep_at: string | null;
+  /** #342: the release its registration last claimed on (build_workers.version), where HOST_VIEW_COLS joins it. */
+  claims_on?: string | null;
   /** #325: the settings its agent took (its last set-units and set-emulate answered done). */
   settings: string | null;
 }
@@ -142,6 +144,9 @@ export async function handleMintEnrollment(c: Contributor, request: Request, env
   );
 }
 
+/** A host as its page and the listing read it: the row, with the release its registration last claimed on (#342, `claims_on`). */
+const HOST_VIEW_COLS = "hosts.*, (SELECT version FROM build_workers WHERE id = hosts.worker_id) AS claims_on";
+
 /** What anyone sees of a host, and what its owner and the maintainers see besides (design v2 §18.1). */
 async function hostView(h: HostRow, detailed: boolean, now: number, pool: RunningVersion) {
   const alive = !!h.reported_at && now - Date.parse(h.reported_at) < HOST_REPORT_FRESH_MIN * MIN;
@@ -168,8 +173,9 @@ async function hostView(h: HostRow, detailed: boolean, now: number, pool: Runnin
     runtime: h.runtime ? JSON.parse(h.runtime) : null, provider: h.provider, model: h.model,
     agent_version: h.agent_version, release_target: h.release_target, rolled_back_from: h.rolled_back_from, rolled_back_at: h.rolled_back_at,
     // Its registration claims on its last-good after its agent reverted the pool's release, until then (#342): the gate's own word,
-    // on the release its agent applied — its dispatcher runs it.
-    last_good: lastGoodMessage(updateState(h.release_applied, pool, now, revertedOf(h))),
+    // on the release its registration last claimed on (its dispatcher's) — on another than its agent's last-good the gate refuses
+    // it, and this says nothing; the release its agent applied only before its registration ever claimed.
+    last_good: lastGoodMessage(updateState(h.claims_on ?? h.release_applied, pool, now, revertedOf(h))),
     round: h.report ? ((JSON.parse(h.report) as { round?: unknown }).round ?? null) : null,
     // The legacy set its agent reports (#344): the project, its state and directory, what a retire-legacy would be refused for.
     legacy: legacyOf(h.report),
@@ -203,8 +209,8 @@ export async function handleHostsList(c: Contributor | null, url: URL, env: Env)
   const owner = url.searchParams.get("owner");
   if (owner !== null && !/^[A-Za-z0-9-]{1,39}$/.test(owner)) return json({ error: "owner is a GitHub login" }, 400);
   const rows = (await (owner
-    ? env.DB.prepare("SELECT * FROM hosts WHERE owner_login = ? AND status != 'retired' ORDER BY enrolled_at DESC LIMIT 50").bind(owner)
-    : env.DB.prepare("SELECT * FROM hosts WHERE status != 'retired' ORDER BY enrolled_at DESC LIMIT 100")
+    ? env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM hosts WHERE owner_login = ? AND status != 'retired' ORDER BY enrolled_at DESC LIMIT 50`).bind(owner)
+    : env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM hosts WHERE status != 'retired' ORDER BY enrolled_at DESC LIMIT 100`)
   ).all<HostRow>()).results;
   const now = Date.now();
   const pool = version(env);
@@ -228,7 +234,7 @@ export const HOST_ORDERS_SQL = "SELECT o.id, o.kind, o.arg, o.issued_by, o.issue
 
 /** GET /hosts/:id — one host and the leases its registration holds (the minimal host page, design v2 §18.1); for its owner and the maintainers its last host orders too (#344). */
 export async function handleHostGet(c: Contributor | null, id: string, env: Env): Promise<Response> {
-  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  const h = await env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM hosts WHERE id = ?`).bind(id).first<HostRow>();
   if (!h) return json({ error: "no such host" }, 404, NO_STORE);
   const leases = h.worker_id
     ? (await env.DB.prepare("SELECT id, kind, name, arch, lane, units, size, started_at, lease_expires_at, stop_order IS NOT NULL AS fenced FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id").bind(h.worker_id).all()).results

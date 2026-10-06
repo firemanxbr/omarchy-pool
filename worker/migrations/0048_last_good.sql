@@ -13,6 +13,13 @@
 -- pool's release revokes has its heartbeats, uploads and completion refused
 -- and its failure taken as a requeue with the attempt given back.
 --
+-- build_workers.told_last_good is the `last_good_until` of the revert its
+-- registration was last told it claims on its last-good for: said once per
+-- revert in the journal, whatever 426 comes in between (told_update says
+-- the 426s).
+--
 -- Additive only: the Worker that runs during the deploy minute reads and
--- writes none of it; each host's next report fills it.
+-- writes none of it; each host's next report, and its registration's next
+-- claim, fills it.
 ALTER TABLE hosts ADD COLUMN rolled_back_at TEXT;
+ALTER TABLE build_workers ADD COLUMN told_last_good TEXT;

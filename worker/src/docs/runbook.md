@@ -1532,8 +1532,9 @@ rollout's grace for **six hours** after the pool first heard of the revert
 lifts the quarantine, does not start them again). Never on a release below
 the signed `min_release`, never on a revoked one. While it does, Status
 warns *"<host>: its agent reverted vX — claiming on last-good vY until …"*,
-the host's page says the same beside its release, and the journal says it
-once. Then the registration is refused with `426` like any other behind the
+the host's page says the same beside its release (while its dispatcher
+claims on that last-good), and the journal says it once per revert. Then
+the registration is refused with `426` like any other behind the
 pool's release, told once, until it runs the pool's release.
 
 What to do within the six hours: read the round's `detail` on the host's

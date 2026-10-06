@@ -134,6 +134,8 @@ describe("the D1 migration (0048)", () => {
   it("adds when the pool first heard a host revert a release", async () => {
     const cols = (await env.DB.prepare("SELECT name FROM pragma_table_info('hosts')").all<{ name: string }>()).results.map((r) => r.name);
     expect(cols).toEqual(expect.arrayContaining(["rolled_back_from", "rolled_back_at", "release_applied"]));
+    const workerCols = (await env.DB.prepare("SELECT name FROM pragma_table_info('build_workers')").all<{ name: string }>()).results.map((r) => r.name);
+    expect(workerCols).toContain("told_last_good");
   });
 });
 
@@ -189,13 +191,17 @@ describe("a host that reverted the pool's release", () => {
     expect(mine.update.last_good_until).toBe(until);
     const page = await call("GET", `/hosts/${h.host}`, { session: "m1", on });
     expect(page.json.host.last_good).toContain(`claiming on last-good v3.4.1 until ${until}`);
-    // Its dispatcher on another release than the one its agent applied gets none.
+    // Its dispatcher on another release than the one its agent applied gets none, and its page says no more that it claims.
     expect((await hostClaim(h.token, "v3.4.0", { on, want: 0 })).status).toBe(426);
+    expect((await call("GET", `/hosts/${h.host}`, { session: "m1", on })).json.host.last_good).toBeNull();
     // Below the signed floor: none.
     RELEASE_POLICY.min_release = "v3.4.2";
     expect((await hostClaim(h.token, "v3.4.1", { on, want: 0 })).status).toBe(426);
     RELEASE_POLICY.min_release = SIGNED.min_release;
     expect((await hostClaim(h.token, "v3.4.1", { on, want: 0 })).status).toBe(204);
+    // Claiming on its last-good again after those 426s: still told once (per revert), and the page says so again.
+    expect((await warnings(h.worker)).filter((w) => w.summary.includes("last-good")).map((w) => w.summary)).toEqual(told.map((w) => w.summary));
+    expect((await call("GET", `/hosts?owner=m1`, { session: "m1", on })).json.hosts.find((x: any) => x.id === h.host).last_good).toContain(`claiming on last-good v3.4.1 until ${until}`);
     // Six hours after the pool heard of the revert: 426, told once.
     const toldBefore = (await warnings(h.worker)).filter((w) => w.summary.includes("handed nothing")).length;
     vi.useFakeTimers({ toFake: ["Date"] });

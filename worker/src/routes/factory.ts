@@ -1489,18 +1489,20 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
 }
 
 /**
- * A host's registration claiming on its last-good (#342, design v2 §18.3): said once in the journal per release it reverted, as a
- * warning — told_update keeps `<release>+last-good`, so the 426 that follows the six hours is told once too. One read of the row by
- * its primary key, only while the exception holds.
+ * A host's registration claiming on its last-good (#342, design v2 §18.3): said once in the journal per revert, as a warning —
+ * told_last_good keeps the revert's `last_good_until` (fixed per revert), so a 426 in between (a claim on another release, a raised
+ * min_release) does not say it again. told_update keeps `<release>+last-good`, so a 426 that follows (the six hours over, or one in
+ * between) is told once more: the registration went from claiming to refused. One read of the row by its primary key, only while
+ * the exception holds; the journal line and the marks in one batch, the line guarded by the mark.
  */
 async function toldLastGood(env: Env, workerId: string, owner: string | null, u: UpdateState): Promise<void> {
   const mark = `${u.latest}+last-good`;
-  const told = await env.DB.prepare("SELECT told_update FROM build_workers WHERE id = ?").bind(workerId).first<{ told_update: string | null }>();
-  if (told?.told_update === mark) return;
+  const told = await env.DB.prepare("SELECT told_update, told_last_good FROM build_workers WHERE id = ?").bind(workerId).first<{ told_update: string | null; told_last_good: string | null }>();
+  if (told?.told_update === mark && told.told_last_good === u.last_good_until) return;
   await env.DB.batch([
-    env.DB.prepare("UPDATE build_workers SET told_update = ? WHERE id = ?").bind(mark, workerId),
-    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('worker', NULL, 'factory', 'warn', ?, ?)")
-      .bind(`${workerId}: ${lastGoodMessage(u)}`, JSON.stringify({ worker: workerId, owner, yours: u.yours, latest: u.latest, last_good_until: u.last_good_until })),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'worker', NULL, 'factory', 'warn', ?, ? WHERE (SELECT told_last_good FROM build_workers WHERE id = ?) IS NOT ?")
+      .bind(`${workerId}: ${lastGoodMessage(u)}`, JSON.stringify({ worker: workerId, owner, yours: u.yours, latest: u.latest, last_good_until: u.last_good_until }), workerId, u.last_good_until ?? null),
+    env.DB.prepare("UPDATE build_workers SET told_update = ?, told_last_good = ? WHERE id = ?").bind(mark, u.last_good_until ?? null, workerId),
   ]);
 }
 
