@@ -34,8 +34,14 @@
 #     through it until the sidecar is given it. The sidecar's image is
 #     WORKER_IMAGE (ci.yml's image job passes the worker image it built), else
 #     a stand-in built here: this commit's `pkg-repo egress` on the Arch base
-#     the worker image is built from, started as its entrypoint starts the
-#     egress role (the worker image itself needs the Arch mirrors to build);
+#     the worker image is built from, for this machine's architecture
+#     (ARCHLINUX_BASE on x86_64, ARCHLINUXARM_BASE on aarch64), started as its
+#     entrypoint starts the egress role (the worker image itself needs the Arch
+#     mirrors to build) — so on Linux only, x86_64 or aarch64: elsewhere (a Mac
+#     against a podman machine) WORKER_IMAGE is needed. The probe task runs
+#     twice, from busybox (sh and nc) and from that Arch base (bash, as the
+#     release's build image has it), so both ways the script reaches a target
+#     meet the real sidecar;
 #   - the dispatcher's own task network on the same engine (pkg-repo's
 #     dispatch::engine test, through the pinned docker CLI the agent's tests
 #     fetched, the version the worker image runs): internal, no gateway
@@ -100,14 +106,27 @@ if [[ "$engine" == docker ]] && rootful && ipt -S INPUT >/dev/null 2>&1; then
   export OMARCHY_TEST_INPUT_DROP=10.197.9.240/28
 fi
 
+# The Arch base the worker image and the release's build image are built from, for this
+# machine's architecture, as emulated-lane.sh picks it (a Mac's podman machine runs the Mac's).
+case "$(uname -m)" in
+  x86_64) arch_base="$ARCHLINUX_BASE" ;;
+  aarch64|arm64) arch_base="$ARCHLINUXARM_BASE" ;;
+  *) echo "agent-install.sh: no Arch base for $(uname -m) (x86_64 or aarch64)" >&2; exit 1 ;;
+esac
+# The probe task's image with bash (#373): the release's build image probes with bash's
+# /dev/tcp, busybox with nc; the tests run both against the sidecar.
+export OMARCHY_BASH_IMAGE="$arch_base"
+
 # The egress sidecar's image (#373): WORKER_IMAGE, or a stand-in made here from this commit's
 # `pkg-repo egress`, on the Arch base the worker image is built from (its glibc is the newest),
 # started as factory/image/entrypoint.sh starts the egress role. Built with the engine's own CLI,
-# into the store its socket serves.
+# into the store its socket serves. The binary is this machine's, so the stand-in needs a Linux
+# one: elsewhere (a Mac against a podman machine) it would hold a binary the engine cannot run.
 cli() { if [[ "$engine" == podman ]]; then podman "$@"; else docker -H "unix://$socket" "$@"; fi; }
 if [[ -n "${WORKER_IMAGE:-}" ]]; then
   export OMARCHY_EGRESS_IMAGE="$WORKER_IMAGE"
 else
+  [[ "$(uname -s)" == Linux ]] || { echo "agent-install.sh: the egress stand-in is this machine's pkg-repo, which only a Linux one can run: set WORKER_IMAGE=<a worker image> here" >&2; exit 1; }
   cargo build --locked -q -p pkg-repo
   ctx="$(mktemp -d)"
   cp target/debug/pkg-repo "$ctx/pkg-repo"
@@ -119,7 +138,7 @@ else
 exec pkg-repo egress "$@"
 SH
   chmod 755 "$ctx/pkg-repo" "$ctx/entrypoint"
-  printf 'FROM %s\nCOPY pkg-repo entrypoint /usr/local/bin/\nENTRYPOINT ["/usr/local/bin/entrypoint"]\n' "$ARCHLINUX_BASE" > "$ctx/Containerfile"
+  printf 'FROM %s\nCOPY pkg-repo entrypoint /usr/local/bin/\nENTRYPOINT ["/usr/local/bin/entrypoint"]\n' "$arch_base" > "$ctx/Containerfile"
   standin="localhost/omarchy-egress-standin:$$"
   cli build -q -t "$standin" -f "$ctx/Containerfile" "$ctx" >/dev/null
   export OMARCHY_EGRESS_IMAGE="$standin"

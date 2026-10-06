@@ -4625,7 +4625,10 @@ mod engine_tests {
     /// task could reach what it must not: a network made without `--internal` reaches the LAN
     /// (the host itself on a rootful engine, through the user-mode stack on a rootless one),
     /// and a public address of the host's that the sidecar was not given (a stand-in: GitHub's)
-    /// answers through it until it is.
+    /// answers through it until it is. The probe task that passes runs from busybox (sh and
+    /// `nc`) and from an image with bash (`OMARCHY_BASH_IMAGE`, the Arch base, whose `/dev/tcp`
+    /// the release's build image probes with), so both ways the script reaches a target and reads
+    /// the sidecar's answer meet the real sidecar.
     #[test]
     #[ignore = "needs a real engine: tests/agent-install.sh"]
     #[allow(clippy::too_many_lines)] // one engine, one story: the probe passes, then each way it fails
@@ -4669,44 +4672,49 @@ mod engine_tests {
             proc: Path::new("/proc"),
             uid: me,
         };
-        let mut r = Report::default();
-        egress::check(&d, &image, subnet, &h, &mut r);
-        println!("the probe, the way a task runs:\n{}", r.screen());
-        assert!(r.blockers.is_empty(), "{}", r.screen());
-        assert!(
-            r.notes.iter().any(|n| n.starts_with(
-                "egress: a task on its own network reaches public addresses through its egress sidecar only"
-            )),
-            "{:?}",
-            r.notes
-        );
-        // Nothing of the signed exception's bridge without the grant.
-        assert!(
-            r.notes
-                .iter()
-                .any(|n| n.contains("no signed exception's bridge probed")),
-            "{:?}",
-            r.notes
-        );
-        if rootless {
+        for probe_image in [image.clone(), env("OMARCHY_BASH_IMAGE")] {
+            let mut r = Report::default();
+            egress::check(&d, &probe_image, subnet, &h, &mut r);
+            println!(
+                "the probe, the way a task runs, from {probe_image}:\n{}",
+                r.screen()
+            );
+            assert!(r.blockers.is_empty(), "{probe_image}: {}", r.screen());
+            assert!(
+                r.notes.iter().any(|n| n.starts_with(
+                    "egress: a task on its own network reaches public addresses through its egress sidecar only"
+                )),
+                "{probe_image}: {:?}",
+                r.notes
+            );
+            // Nothing of the signed exception's bridge without the grant.
             assert!(
                 r.notes
                     .iter()
-                    .any(|n| n.contains("maps nothing to the host's loopback")),
+                    .any(|n| n.contains("no signed exception's bridge probed")),
                 "{:?}",
                 r.notes
             );
+            if rootless {
+                assert!(
+                    r.notes
+                        .iter()
+                        .any(|n| n.contains("maps nothing to the host's loopback")),
+                    "{:?}",
+                    r.notes
+                );
+            }
+            // No probe container or network is left.
+            let left = d
+                .run(&[
+                    "ps",
+                    "-aq",
+                    "--filter",
+                    "label=org.omarchy-pool.probe=egress",
+                ])
+                .unwrap();
+            assert!(left.trim().is_empty(), "{left}");
         }
-        // No probe container or network is left.
-        let left = d
-            .run(&[
-                "ps",
-                "-aq",
-                "--filter",
-                "label=org.omarchy-pool.probe=egress",
-            ])
-            .unwrap();
-        assert!(left.trim().is_empty(), "{left}");
 
         // A network made without --internal (an engine that ignored it): the LAN answers a
         // task straight, so the probe fails, as it would on such a host.
@@ -4720,21 +4728,24 @@ mod engine_tests {
             },
             Vec::new(),
         );
-        let out = egress::probe(&d, &image, subnet, &open).unwrap();
-        let b = egress::verdict(&out, &open, &a);
-        println!("a network that is not internal:\n{out}\n{b:?}");
-        // The LAN answers on every engine here (the host itself on a rootful one, through the
-        // user-mode stack on a rootless one), and the router and the metadata address do where
-        // they answer at all: whichever it is, the probe fails.
-        assert!(
-            b.iter().any(|x| x.contains("without its egress sidecar")),
-            "{b:?}"
-        );
-        if !b
-            .iter()
-            .any(|x| x.contains("reaches the host's LAN address"))
-        {
-            println!("note: the LAN address ({lan:?}) gave no answer here: the open network failed on what remains");
+        // From busybox and from bash alike: each reaches a target its own way.
+        for probe_image in [image.clone(), env("OMARCHY_BASH_IMAGE")] {
+            let out = egress::probe(&d, &probe_image, subnet, &open).unwrap();
+            let b = egress::verdict(&out, &open, &a);
+            println!("a network that is not internal, from {probe_image}:\n{out}\n{b:?}");
+            // The LAN answers on every engine here (the host itself on a rootful one, through
+            // the user-mode stack on a rootless one), and the router and the metadata address do
+            // where they answer at all: whichever it is, the probe fails.
+            assert!(
+                b.iter().any(|x| x.contains("without its egress sidecar")),
+                "{probe_image}: {b:?}"
+            );
+            if !b
+                .iter()
+                .any(|x| x.contains("reaches the host's LAN address"))
+            {
+                println!("note: the LAN address ({lan:?}) gave no answer here: the open network failed on what remains");
+            }
         }
 
         // An address of the host's the sidecar was not given answers through it; given it, the

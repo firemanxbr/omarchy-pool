@@ -756,15 +756,21 @@ docker with the worker image it built; the runbook's *Installing a host*;
 #373): preflight's own egress check, on a network made as a task's behind an
 egress sidecar started as the dispatcher starts one — the image job's worker
 image, or elsewhere a stand-in the script builds from the commit's `pkg-repo
-egress` on the pinned Arch base (`tests/images.env`; the worker image needs
-the Arch mirrors to build) — with the dispatcher's deny list (the task subnets
-and the machine's own addresses as the agent renders them), passes on both
-engines: the metadata address, the machine's router, LAN address and own
+egress` on the pinned Arch base for the machine's architecture
+(`ARCHLINUX_BASE` on x86_64, `ARCHLINUXARM_BASE` on aarch64,
+`tests/images.env`; the worker image needs the Arch mirrors to build; Linux
+only, since the binary is the machine's: from a Mac against a podman machine,
+`WORKER_IMAGE`) — with the dispatcher's deny list (the task subnets and the
+machine's own addresses as the agent renders them), passes on both engines,
+its probe task run from busybox (`nc`) and again from that Arch base (bash's
+`/dev/tcp`, as the release's build image probes), so both ways the script
+reaches a target and reads the sidecar's answer meet the real sidecar: the metadata address, the machine's router, LAN address and own
 addresses and the network's gateway are unreachable straight and refused
 through the sidecar, and GitHub answers through it (the test needs the
 internet), with rootless podman's network stack seen in `/proc` and keeping
 the host's loopback out; and it fails where a task could reach what it must
-not — a network made without `--internal` reaches the LAN straight, and a
+not — a network made without `--internal` reaches the LAN straight (from
+both images), and a
 public address of the host's (a stand-in: GitHub's) answers through a sidecar
 not given it, and is refused by one given it. A task's own network made as the
 dispatcher makes it (on podman through libpod's API, internal with DNS off,
@@ -786,13 +792,21 @@ unit-tested against the docker stub, which answers each target the probe
 task is given unless a test names its answer: the sidecar created as the
 dispatcher creates one (the bridge first, the worker image by digest, `--listen`
 at the network's `.2`, the task subnets then the host's own addresses as
-`--deny`s, the same limits and flags), every target tried straight and through
+`--deny`s, the same limits and flags, the dispatcher's and the probe's calls
+both held to one fixture, `crates/pkg-repo/tests/fixtures/egress-sidecar.txt`,
+which `pkg-repo`'s spec tests read too), every target tried straight and through
 it (`<name>@egress`), the public mirror through it, a reach either way and a
 sidecar that never answered refused by name, a public address it was not
 given probed again by one given it, and a signed exception's bridge probed only
 with the envelope's grant (`--direct-network`, agent.toml's `direct_network`,
 `OMARCHY_DIRECT_NETWORK=1` in `etc/dispatcher.env`, a withdrawn grant's line
-dropped); preflight's reading of prep-root.sh's firewall script and its
+dropped; the run loop reading the key strictly, `"yes"` a configuration error;
+a grant agent.toml holds kept by a re-run, the advice naming
+`--no-direct-network`, which takes it back and records `false`); the probe
+script itself, on Linux, against a stand-in sidecar on loopback answering as
+`pkg-repo egress` words it (403 `denied`; a 502 `refused` only for the
+target's `Connection refused`, and `blocked` for a name the sidecar cannot
+resolve, which it words `refused: … does not resolve`; 200 `open`); preflight's reading of prep-root.sh's firewall script and its
 boot unit (not there, or not enabled), of a rootless stack's command line
 (each engine's flags, a stack seen only while the probe runs, a guest address
 pasta maps that the probe did not try; pasta's own tried by the probe, straight
