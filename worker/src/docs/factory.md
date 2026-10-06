@@ -532,7 +532,9 @@ out        /task/out: the kind's closed list under its caps (a build: packages, 
            SIGTERM or SIGKILL, fails `lost` (a reboot, a shutdown): the attempt is given back
 exit 75    a restart order, or a loop without progress for 15 min: task containers run on, the next dispatcher re-adopts them
 network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a /28 of OMARCHY_TASK_SUBNETS, its gateway
-           off the host (docker ≥ 28: gateway_mode_ipv4=isolated; podman's CLI: --disable-dns); its egress
+           off the host (docker ≥ 28: gateway_mode_ipv4=isolated; podman's CLI: --disable-dns; behind podman's
+           docker API it stays, closed by prep-root.sh's INPUT drop, and install's preflight refuses a host where
+           a task reaches a network's gateway, #367); its egress
            sidecar <network>-egress (pkg-repo egress: CONNECT, GET, HEAD to public addresses only, judged by the
            resolved address) on the shared omarchy-egress bridge and on the task's network, the task's HTTP(S)_PROXY;
            a model kind's agent sidecar <network>-agent (the broker, agent.env read-only, its caps in BROKER_AGENT_*,

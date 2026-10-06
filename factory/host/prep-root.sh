@@ -317,10 +317,14 @@ if [[ "$runtime" == rootful ]]; then
   if ((script_changed || unit_changed)); then
     run systemctl enable omarchy-task-firewall.service
     run systemctl restart omarchy-task-firewall.service
-  elif systemctl is-active --quiet omarchy-task-firewall.service; then
+  elif systemctl is-active --quiet omarchy-task-firewall.service \
+    && systemctl is-enabled --quiet omarchy-task-firewall.service; then
     echo "    in place"
   else
-    run systemctl enable --now omarchy-task-firewall.service
+    # Stopped, or running but not enabled (a reboot would take the drop away): the agent's
+    # preflight refuses either (#367).
+    run systemctl enable omarchy-task-firewall.service
+    run systemctl restart omarchy-task-firewall.service
   fi
 fi
 

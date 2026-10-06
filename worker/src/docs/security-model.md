@@ -177,7 +177,25 @@ secret). Everything travels in the `Authorization` header over TLS only.
   cannot be asked (it forces DNS on and drops docker's option), so there a
   service of the host listening on all addresses is reachable from a task
   unless the host's firewall (`prep-root.sh`'s INPUT drop for the task
-  subnets) closes it. A signed `factory/sizing` exception is per package:
+  subnets) closes it; and a signed exception's bridge always has its gateway,
+  the host itself on a rootful engine, where the `DOCKER-USER` rules (in
+  `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
+  preflight checks it rather than trusting it (#367): on a rootful Linux
+  engine it refuses a host whose prep-root.sh firewall script (world-readable) does
+  not drop every task subnet in INPUT, or whose boot unit for it is not
+  there or not enabled (a reboot would take the drop away, and nothing
+  probes again after install), and a probe task on a bridge and one
+  on a network made as a task's try their gateway on 22, 53 and the pool's
+  ports, and the bridge's the host's LAN address: a connection made or
+  refused there fails the install, with the command that puts the INPUT drop
+  in place or back. On a rootless engine the gateway is the engine's own
+  namespace, and what could reach the host is the user-mode stack's host
+  loopback (RootlessKit's, slirp4netns's or pasta's), off by default: preflight
+  reads the stack's command line in `/proc` while its probe tasks run and
+  refuses one that maps it, with the setting that turns it off (the runbook's
+  *Rootless engines*). It reads rather than listening for a connection: the
+  agent listens on nothing (design v2 §11.2).
+  A signed `factory/sizing` exception is per package:
   it also covers a contributor's recipe of that package, so its reviewer
   approves exactly that.
 - **A log that carries a secret is refused.** Text evidence uploaded to
@@ -565,7 +583,8 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   of the VM (a login, a resize, a clock restart) applies it as soon as
   dockerd is up, as on a Linux host, not when the agent next looks; it runs
   it again after every start, hourly and after a wake. A task reaches
-  neither your LAN nor the Mac through Colima's NAT, and the egress probe
+  neither your LAN nor the Mac through Colima's NAT, nor the VM itself at a
+  bridge's gateway (the firewall's INPUT drop, #367), and the egress probe
   checks it before install goes on; every task's egress sidecar also refuses
   the Mac's own addresses (`/sbin/ifconfig -a`'s, a Mac having no `/proc`,
   and the public one it leaves from, #371). Docker Desktop's or OrbStack's VM
