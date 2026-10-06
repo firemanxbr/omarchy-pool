@@ -8,7 +8,8 @@
  * - The numbers: CPUs and memory, the units the pool counts from them, free
  *   disk on the work root and the engine's data root, and the agent slots —
  *   as its agent last reported them; its lanes (native, emulated); its
- *   isolation level; the release it applied against the pool's, and the last
+ *   isolation level and its runtime (its driver: compose, or Quadlet,
+ *   #330); the release it applied against the pool's, and the last
  *   round's outcome.
  * - Its leases: what its registration holds now, each with its lane and
  *   units (#337).
@@ -283,6 +284,7 @@ const SCRIPT = String.raw`
         kv("Host key", '<span class="mono">' + esc(h.fingerprint) + '</span>'),
         kv("Machine", esc((h.hostname || "?") + " · " + (h.os || "?") + " " + (h.arch || "?") + (h.page_kb ? ", " + h.page_kb + "K pages" : ""))),
         kv("Isolation", esc(h.isolation || "?") + (h.dedicated ? " (dedicated)" : "")),
+        kv("Runtime", runtimeWords(h)),
         kv("Lanes", lanes || "—"),
         kv("Capacity", h.below_minimum ? esc(h.below_minimum) : c ? "meets the minimum to join" : "—"),
         kv("Pool cap", capWords(h)),
@@ -297,6 +299,14 @@ const SCRIPT = String.raw`
       ].join("");
     $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + (t.size > 1 ? " · size " + esc(t.size) : "") + '</td><td>' + esc(t.name) + (t.fenced ? ' ' + pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : '') + '</td><td>' + esc(t.arch) + '</td><td>' + esc(t.lane || "—") + '</td><td>' + esc(t.units === null || t.units === undefined ? "—" : t.units) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="7" class="muted">no lease — nothing runs on it now</td></tr>';
     endSkeleton();
+  }
+  // Its runtime (#325, #330): the driver its agent reports — compose on docker or on podman, or Quadlet, a unit of its owner's own
+  // systemd on rootless podman — and the owner's switch in flight, which only the owner starts, at the host.
+  function runtimeWords(h) {
+    var r = h.runtime || {}, words = { "compose/docker": "compose on docker", "compose/podman": "compose on podman", quadlet: "Quadlet: a unit of its owner's systemd, on rootless podman" };
+    if (!r.driver) return '<span class="muted">not said yet by its agent</span>';
+    var name = function (d) { return esc(words[d] || d); };
+    return name(r.driver) + (r.switch && r.switch.to ? " — switching to " + name(r.switch.to) + (r.switch.step ? " (" + esc(r.switch.step) + ")" : "") : "");
   }
   // The pool's cap (#337): what the pool hands it at most, whatever its envelope says; none lets its count decide.
   function capWords(h) { return h.pool_cap_units === null || h.pool_cap_units === undefined ? '<span class="muted">none — its count decides</span>' : esc(String(h.pool_cap_units)) + " unit" + (h.pool_cap_units === 1 ? "" : "s") + (h.units !== null && h.units !== undefined ? " of its " + esc(String(h.units)) : ""); }

@@ -1457,6 +1457,55 @@ that one (`null` until the engine answers). On a Mac (#320) the switch is
 refused with nothing changed: the bundle runs in the VM's engine, which the
 agent keeps, and the drivers it carries are a Linux host's.
 
+**The Quadlet driver** (#330, design v2 §15, v1 §10.2): on rootless podman
+with no compose, the agent runs the dispatcher as a unit of the owner's own
+systemd. Each round renders the set — the release's `compose.yml`, its
+labels (`agent.yml`) and `compose.override.yml`, merged and interpolated as
+compose would, from `agent.toml`'s variables only — into
+`~/.config/containers/systemd/omarchy-host-dispatcher.container` (`set.unit_dir`
+in `agent.toml` names another place; the unit is `omarchy-<project>-<service>`,
+or `<project>-<service>` for a project that begins with `omarchy-`), then
+`systemctl --user daemon-reload` and `restart`: podman's generator makes the
+service, which runs the container with `--rm` and restarts it a second after
+any exit, with no start limit (the guard judges a release that keeps
+restarting, by the service's `NRestarts` and the engine's `die` events for
+the container's name, an exit 75 being an ordered restart as on compose). The
+agent stops a unit with `systemctl --user stop --no-block` (the template's
+`stop_grace_period` is the container's stop timeout, systemd's
+`TimeoutStopSec` 30 s more) and removes it by deleting its file and reloading,
+so a reboot between two rounds never starts a release the rollout left;
+everything it asks of the engine — state, labels, exits, `/ready`, the pull of
+the rendered image, an image's removal — goes through the pinned docker CLI on
+podman's API socket, as on compose, and it never runs the podman CLI. Its hash
+(the unit without its comments, as `org.omarchy-pool.agent.config-hash` on the
+container) is the plan's config hash. podman's `AutoUpdate=` is never
+written. `lint-set` renders every template for Quadlet too, so a release CI
+passes runs on both drivers, and on a Quadlet host a round lints the owner's
+override the same way: a service network, `depends_on`, `profiles`, a string
+command or entrypoint with quotes or backslashes (give a list), an
+entrypoint whose first word starts with `[`, a `restart: on-failure:N`, a
+named volume not declared at the top level, a home-relative bind or a
+variable `agent.toml` does not set (compose would use a blank) is `refused`
+with `quadlet: …`, and the host keeps what it ran. Install takes the driver
+with `--driver quadlet` (preflight: Linux, podman's Quadlet generator, the
+socket answering as rootless podman — `$XDG_RUNTIME_DIR/podman/podman.sock`
+unless `--socket` names another —, the user manager and linger); a re-run
+keeps the driver `agent.toml` names, and refuses another on an installed host:
+`omarchy-agent runtime switch quadlet` (the envelope's `drivers` naming
+`quadlet`) moves a running host, stopping the old dispatcher before the unit
+starts, and `runtime switch compose/podman` goes back — on one rootless
+podman, compose and Quadlet are two drivers of one engine. Uninstall stops
+the unit and removes its file before it removes the containers. On the host:
+`omarchy-agent status` (`driver: quadlet on <socket>, its units in <dir>`),
+`systemctl --user status omarchy-host-dispatcher`, `journalctl --user -u
+omarchy-host-dispatcher`. A unit the generator did not take fails the round's
+create (`podman's generator made no unit of …`, then the revert):
+`/usr/libexec/podman/quadlet -dryrun -user` says why. A user manager that does
+not answer (`Failed to connect to bus`: no linger, or a session without
+`XDG_RUNTIME_DIR`) is `engine-unreachable`, and nothing changes until it
+answers. `tests/agent-quadlet.sh` runs podman's generator on what the agent
+renders and the run loop on rootless podman under a real user manager in CI.
+
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the
 release applied, targeted and its floor — with the owner's soak and until

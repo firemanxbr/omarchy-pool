@@ -753,7 +753,12 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   scrubbed logs where the owner allowed them, and make it restart its
   dispatcher at most six times an hour — a slowdown, never a widening,
   a foreign command or a secret. Changing the runtime is the owner's alone:
-  `omarchy-agent runtime switch` at the host, which the pool cannot ask for.
+  `omarchy-agent runtime switch` at the host, which the pool cannot ask for —
+  the Quadlet driver (#330) among them, which runs the dispatcher as a unit
+  of the owner's own systemd on rootless podman: the unit is rendered from
+  the same signed set and `agent.toml`'s variables, names the worker token's
+  file by path and never holds it, and never uses podman's `AutoUpdate=`,
+  which would let podman move the host to an image no release signed.
 - **Owner control without a visit** (#328, design v2 §14, D6 b). Two more
   orders — `widen-envelope` and `set-agent-keys`, its owner's only, an agent
   from 0.4.0 — carry a document the owner's passkey signed, and the agent
