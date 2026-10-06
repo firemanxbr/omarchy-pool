@@ -408,7 +408,8 @@ Mac's bundle stays in its VM's engine: the switch is refused there.
 ## A host on Quadlet
 
 A Linux host with rootless podman and no compose can run its dispatcher as
-a unit of your own systemd (#330, design v2 §15): the **Quadlet driver**.
+a unit of your own systemd (#330, design v2 §15): the **Quadlet driver**
+(an agent from 0.5.0).
 The bundle is the same as every other host's — the release's signed
 `compose.yml`, the agent's labels and your `compose.override.yml` — and the
 agent renders it, as compose would load it, into

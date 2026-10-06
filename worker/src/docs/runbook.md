@@ -1593,9 +1593,9 @@ that one (`null` until the engine answers). On a Mac (#320) the switch is
 refused with nothing changed: the bundle runs in the VM's engine, which the
 agent keeps, and the drivers it carries are a Linux host's.
 
-**The Quadlet driver** (#330, design v2 §15, v1 §10.2): on rootless podman
-with no compose, the agent runs the dispatcher as a unit of the owner's own
-systemd. Each round renders the set — the release's `compose.yml`, its
+**The Quadlet driver** (#330, design v2 §15, v1 §10.2; an agent from 0.5.0):
+on rootless podman with no compose, the agent runs the dispatcher as a unit of
+the owner's own systemd. Each round renders the set — the release's `compose.yml`, its
 labels (`agent.yml`) and `compose.override.yml`, merged and interpolated as
 compose would, from `agent.toml`'s variables only — into
 `~/.config/containers/systemd/omarchy-host-dispatcher.container` (`set.unit_dir`
