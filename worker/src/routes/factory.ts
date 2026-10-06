@@ -86,6 +86,8 @@ interface TaskRow {
   lane: string | null;
   claim_id: string | null;
   host_losses: number;
+  /** #339: an audit's independence of what it audits (model | host | none), written at its lease; NULL for every other kind. */
+  independent: string | null;
 }
 
 /** Who is calling a worker endpoint: a registered worker (own token) or a job (its per-task token). */
@@ -744,9 +746,8 @@ const projectCopySql = (t: string) => `(${t}.kind = 'build' AND ${t}.trust = 'pr
 /**
  * What placement reads of a candidate (#339, design v2 §8.4; `t` the alias), each by a primary key: the project's copy's requesters —
  * its owner and the owner of the contributor's build of the same package it answers — and who released it to any host (D35); an
- * audit's build — the
- * registration that built it, the model it was built with (its `built_with`, else that registration's agent) and whether it is the
- * project's copy (D36).
+ * audit's build — the registration that built it, the model it was built with (its `built_with`, else that registration's agent) and
+ * whether it is the project's copy (D36).
  */
 const placementCols = (t: string) => `CASE WHEN ${projectCopySql(t)} THEN json_array(${t}.owner, (SELECT rq.owner FROM build_tasks rq WHERE rq.id = json_extract(${t}.params, '$.review') AND rq.name = ${t}.name)) END AS requesters,
     CASE WHEN ${projectCopySql(t)} THEN json_extract(${t}.params, '$.any_host.by') END AS any_host,
