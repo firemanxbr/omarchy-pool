@@ -45,7 +45,7 @@ import {
   hostReason, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
   agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT, asleepNow,
   agentTakesSettings, hostSettingsOf, orderArg, reportedBrakeOf, reportedSettingsOf, DIAGNOSTIC_LINE_MAX, DIAGNOSTIC_LINES, DIAGNOSTICS_MAX_BYTES, HOST_ORDER_ID, HOST_SETTINGS_AGENT, SETTINGS_ORDER_KINDS,
-  poolBehindOf, reportedSoakOf, soakOf,
+  poolBehindOf, reportedSoakOf, sandboxAppliedOf, soakOf,
   type Capacity, type HostOrderKind, type Isolation, type OrderArg,
 } from "../hosts";
 import { gateWords, parseTag, updateState } from "../update";
@@ -73,6 +73,8 @@ export interface HostRow {
   settings: string | null;
   /** #326: its soak and freeze detection as its last report says them (migration 0048): what the claims and listings read. */
   soaking_until: string | null; soak_quarantine: string | null; pool_behind_github: string | null;
+  /** #330: the sandbox its dispatcher's last claim said it applies (migration 0049, hosts.ts sandboxApplied); NULL while its claims do not say. */
+  sandbox_applied: string | null;
 }
 
 function newToken(prefix: string): string {
@@ -166,6 +168,9 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
     where: h.where, hostname: h.hostname, os: h.os, arch: h.arch, page_kb: h.page_kb, isolation: h.isolation, dedicated: h.dedicated === null ? null : !!h.dedicated,
     fingerprint: await fingerprint(raw),
     capacity, lanes, units: h.units, agent_slots: h.agent_slots, disk_free: h.disk_free ? JSON.parse(h.disk_free) : null, pool_cap_units: h.pool_cap_units,
+    // The sandbox its dispatcher applies, as its last claim said (#330) — beside what its agent found (capacity.sandbox): null while
+    // its claims do not say (a dispatcher before #330), whatever its agent found.
+    sandbox_applied: sandboxAppliedOf(h.sandbox_applied),
     reserving_task: h.reserving_task, reserving_since: h.reserving_since,
     below_minimum: capacity?.below_minimum ?? null,
     runtime: h.runtime ? JSON.parse(h.runtime) : null, provider: h.provider, model: h.model,

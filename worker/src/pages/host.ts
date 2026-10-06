@@ -9,9 +9,11 @@
  *   disk on the work root and the engine's data root, and the agent slots —
  *   as its agent last reported them; its lanes (native, emulated); its
  *   isolation level and its sandboxed runtime (#330, design v2 §10.4; D43:
- *   gVisor or Kata, which its community tasks on the native lane run in, or
- *   none, with why one its engine has is not used); the release it applied
- *   against the pool's, and the last round's outcome.
+ *   gVisor or Kata, as its dispatcher's claims say it applies it — what a
+ *   contributor wrote runs in it on the native lane, and its emulated lanes
+ *   take the project's own recipes only — or none, with why one its engine
+ *   has is not used or why its claims hold); the release it applied against
+ *   the pool's, and the last round's outcome.
  * - Its leases: what its registration holds now, each with its lane and
  *   units (#337).
  * - The pool's cap on its units (#337, design v2 §7.2): its owner or any
@@ -265,17 +267,26 @@ const SCRIPT = String.raw`
     $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + (t.size > 1 ? " · size " + esc(t.size) : "") + '</td><td>' + esc(t.name) + (t.fenced ? ' ' + pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : '') + '</td><td>' + esc(t.arch) + '</td><td>' + esc(t.lane || "—") + '</td><td>' + esc(t.units === null || t.units === undefined ? "—" : t.units) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="7" class="muted">no lease — nothing runs on it now</td></tr>';
     endSkeleton();
   }
-  // Its sandboxed runtime (#330, D43): which its community tasks on the native lane run in, so a container escape lands in the
-  // sandbox's kernel, not on the host; an emulated lane's run on the engine's own (its binfmt handler is the host kernel's).
+  // Its sandboxed runtime (#330, D43): the one its dispatcher applies, as its last claim said — what a contributor wrote (their builds,
+  // the project's review rebuilds of them, trials, audits) runs in it on the native lane, so a container escape lands in the sandbox's
+  // kernel, not on the host, and its emulated lanes take the project's own recipes only — beside what its agent found and why one is
+  // not used. Only what the dispatcher says is claimed: one before #330 ignores what its agent found.
   function sandboxWords(h) {
-    var c = h.capacity || {}, s = c.sandbox;
+    var c = h.capacity || {}, found = c.sandbox, a = h.sandbox_applied;
+    var named = function (s) { return esc((SANDBOX_KINDS[s.kind] || s.kind) + " (" + s.runtime + ")"); };
     var held = c.sandbox_held ? '<br><span class="muted">' + esc(c.sandbox_held) + '</span>' : "";
-    if (s === undefined) return '<span class="muted">its agent does not say (one before the sandbox, #330)</span>' + held;
-    if (s === null) return "none — its community tasks run on the engine's own runtime, at its isolation level" + held;
+    var none = "none — what its contributors wrote runs on the engine's own runtime, at its isolation level";
+    if (!a) {
+      if (found) return '<span class="muted">its agent found ' + named(found) + ", but its dispatcher does not say it applies it (one before #330): what its contributors wrote may run on the engine's own runtime</span>" + held;
+      if (found === null) return none + held;
+      return '<span class="muted">its agent does not say (one before the sandbox, #330)</span>' + held;
+    }
+    var stop = a.held ? '<br><span class="muted">its claims hold: ' + esc(a.held) + '</span>' : "";
+    if (!a.sandbox) return none + stop + held;
     var lanes = h.lanes || [], native = lanes.filter(function (l) { return l.mode === "native"; }).map(function (l) { return l.arch; });
     var emulated = lanes.filter(function (l) { return l.mode === "emulated"; }).map(function (l) { return l.arch; });
-    return esc((SANDBOX_KINDS[s.kind] || s.kind) + " (" + s.runtime + ")") + " — its community tasks on the " + esc(native.join(", ") || "native") + " lane run in it: a container escape lands in its kernel, not on the host"
-      + (emulated.length ? "; on its emulated " + esc(emulated.join(", ")) + " lane they run on the engine's own runtime" : "") + held;
+    return named(a.sandbox) + " — what its contributors wrote (their builds, the project's review rebuilds, trials, audits) runs in it on the " + esc(native.join(", ") || "native") + " lane: a container escape lands in its kernel, not on the host"
+      + (emulated.length ? "; its emulated " + esc(emulated.join(", ")) + " lane takes the project's own recipes only" : "") + stop + held;
   }
   // The pool's cap (#337): what the pool hands it at most, whatever its envelope says; none lets its count decide.
   function capWords(h) { return h.pool_cap_units === null || h.pool_cap_units === undefined ? '<span class="muted">none — its count decides</span>' : esc(String(h.pool_cap_units)) + " unit" + (h.pool_cap_units === 1 ? "" : "s") + (h.units !== null && h.units !== undefined ? " of its " + esc(String(h.units)) : ""); }
@@ -458,10 +469,10 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.head-facts",
     page: `/hosts/${F.host}`,
     anchor: ['<p class="op-eyebrow">Host</p>', 'id="hp-name"', 'id="hp-status"', 'id="hp-lede"', 'id="hp-stats"', 'id="hp-kv"'],
-    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Sandbox"', "function sandboxWords(h)", "c.sandbox_held", '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS"],
+    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Sandbox"', "function sandboxWords(h)", "c.sandbox_held", "h.sandbox_applied", '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS"],
     reads: [
       { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.asleep", "host.asleep_since", "leases", "pool.version"] },
-      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.capacity.sandbox", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
+      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.capacity.sandbox", "host.sandbox_applied", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
       { path: "/api/v1/hosts/h_nobody0000", status: 404 },
     ],
     visible: EVERYONE,
