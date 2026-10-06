@@ -20,6 +20,11 @@
  *   registration's page, where Drain and Resume are.
  * - Its host orders (#344, design v2 §17.1): Reconcile now (a round now, its
  *   owner or any maintainer) and the last orders with their agent's answers.
+ * - Whether it sleeps (#329, design v2 §19.2): a Mac's agent reports
+ *   `asleep` before the Mac sleeps and after it woke; a sleeping host has
+ *   zero free units — the pool hands it nothing until it wakes, and a task
+ *   the sleep caught (the lid closed under it) goes back to the queue when
+ *   its lease expires. Its head says so, for anyone.
  * - Its legacy set (#344, design v2 §21.1 step 6): the compose project its
  *   install recorded beside the bundle, its state and directory as its agent
  *   reports them, and Retire legacy set — its owner's, with a passkey: the
@@ -139,6 +144,8 @@ const SCRIPT = String.raw`
   var ORDER_PILL = { open: ["warn", "waits for its agent"], done: ["ok", "done"], refused: ["fail", "refused"], failed: ["fail", "failed"], expired: ["na", "expired"], cancelled: ["na", "cancelled"] };
   var LEGACY_PILL = { running: ["warn", "running"], stopped: ["na", "stopped"], gone: ["na", "no container left"], retiring: ["warn", "being retired"], retired: ["ok", "retired"], unknown: ["na", "not seen"] };
   var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)};
+  // A sleeping host (#329): what its sleep means for the pool, in the head's words.
+  var SLEEPS = "the pool hands it nothing until it wakes, and a task the sleep caught goes back to the queue when its lease expires.";
   var H = null, PK = {}, TIMER = 0;
   function stat(k, n, s) { return '<div class="op-stat"><span class="k">' + esc(k) + '</span><span class="n">' + n + '</span><span class="s">' + (s || "") + '</span></div>'; }
   function kv(k, v) { return '<dt>' + esc(k) + '</dt><dd>' + v + '</dd>'; }
@@ -159,9 +166,9 @@ const SCRIPT = String.raw`
     document.title = h.name + " · Host · omarchy-pool";
     $("#hp-name").textContent = h.name;
     var p = PILL[h.status] || ["na", h.status];
-    $("#hp-status").innerHTML = '<span class="op-pill ' + p[0] + '">' + esc(p[1]) + '</span>';
+    $("#hp-status").innerHTML = '<span class="op-pill ' + p[0] + '">' + esc(p[1]) + '</span>' + (h.asleep ? ' <span class="op-pill na" title="' + esc(SLEEPS) + '">asleep</span>' : "");
     $("#hp-id").textContent = h.id + (h.worker ? " · registration " + h.worker : "");
-    $("#hp-lede").innerHTML = "A maintainer host of " + personLink(h.owner) + (h.where ? ", " + esc(h.where) : "") + " — " + esc((h.arches || []).join(", ") || "no lane reported") + ". " + (h.status === "pending-owner" ? 'It waits for its owner to compare its fingerprint and press Confirm, on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>; nothing claims before that.' : h.alive ? "Its agent reports." : '<span class="muted">Its agent has not reported in the last ' + esc(String(FRESH_MIN)) + ' minutes.</span>');
+    $("#hp-lede").innerHTML = "A maintainer host of " + personLink(h.owner) + (h.where ? ", " + esc(h.where) : "") + " — " + esc((h.arches || []).join(", ") || "no lane reported") + ". " + (h.status === "pending-owner" ? 'It waits for its owner to compare its fingerprint and press Confirm, on <a href="/user/' + encodeURIComponent(h.owner) + '#hosts">their page</a>; nothing claims before that.' : h.asleep ? "It sleeps (its agent said so " + when(h.asleep_since) + "): " + esc(SLEEPS) : h.alive ? "Its agent reports." : '<span class="muted">Its agent has not reported in the last ' + esc(String(FRESH_MIN)) + ' minutes' + (h.asleep_since ? "; its last report said it was going to sleep, " + when(h.asleep_since) : "") + '.</span>');
     // Who stopped it and why, for anyone (the journal's words): a suspension or a retirement, and the maintainer list's stop.
     var stopped = [];
     if ((h.status === "suspended" || h.status === "retired") && h.status_by) stopped.push(esc(h.status === "suspended" ? "Suspended" : "Retired") + " by " + personLink(h.status_by) + (h.status_at ? " " + when(h.status_at) : "") + (h.status_reason ? ": " + esc(h.status_reason) : "") + (h.status === "suspended" ? ". It claims nothing until " + personLink(h.owner) + " resumes it." : ". A new install enrolls a new host."));
@@ -170,7 +177,7 @@ const SCRIPT = String.raw`
     var c = h.capacity;
     $("#hp-stats").innerHTML = c ? [
       stat("CPUs", num(c.cpus), "memory " + num(c.mem_gb) + " GB"),
-      stat("Units", h.units === null || h.units === undefined ? "—" : num(h.units), h.pool_cap_units !== null && h.pool_cap_units !== undefined ? "capped at " + num(h.pool_cap_units) + " by the pool" : "1 CPU and 2 GB each, one kept for pool jobs"),
+      stat("Units", h.units === null || h.units === undefined ? "—" : num(h.units), h.asleep ? "asleep: none free until it wakes" : h.pool_cap_units !== null && h.pool_cap_units !== undefined ? "capped at " + num(h.pool_cap_units) + " by the pool" : "1 CPU and 2 GB each, one kept for pool jobs"),
       stat("Disk free", num(c.disk_free_gb.work) + " GB", "work root · engine " + num(c.disk_free_gb.engine) + " GB"),
       stat("Agent slots", c.agent_slots === null || c.agent_slots === undefined ? "—" : num(c.agent_slots), "model tasks at once"),
       stat("Release", esc(h.release_applied || "—"), pool.version ? "the pool runs " + esc(pool.version) : ""),
@@ -282,7 +289,7 @@ export function hostHtml(id: string, poolUrl: string, version: RunningVersion): 
   return page({
     path: `/hosts/${id}`,
     title: "Host · omarchy-pool",
-    description: "One maintainer host of the pool: its status, its capacity and units, its lanes and isolation level, the release it applied, its host orders, its legacy set and its leases.",
+    description: "One maintainer host of the pool: its status and whether it sleeps, its capacity and units, its lanes and isolation level, the release it applied, its host orders, its legacy set and its leases.",
     active: "factory",
     body: BODY,
     script: SCRIPT,
@@ -299,9 +306,9 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.head-facts",
     page: `/hosts/${F.host}`,
     anchor: ['<p class="op-eyebrow">Host</p>', 'id="hp-name"', 'id="hp-status"', 'id="hp-lede"', 'id="hp-stats"', 'id="hp-kv"'],
-    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)"],
+    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS"],
     reads: [
-      { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "leases", "pool.version"] },
+      { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.asleep", "host.asleep_since", "leases", "pool.version"] },
       { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
       { path: "/api/v1/hosts/h_nobody0000", status: 404 },
     ],

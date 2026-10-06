@@ -59,6 +59,16 @@ export const REPORT_MAX_BYTES = 16 * 1024;
 /** A host whose agent reported within this long is one whose agent reports: an Update for its registration is taken (§8.6). */
 export const HOST_REPORT_FRESH_MIN = 15;
 
+/**
+ * Whether a host sleeps now (#329, design v2 §19.2): its last report said `asleep: true` — a Mac's agent says so before the Mac
+ * sleeps and says `asleep: false` after the wake — and that report is fresh (HOST_REPORT_FRESH_MIN). A sleeping host has zero
+ * free units (selection.ts). A stale one says nothing: an agent reports at least every five minutes while its Mac is awake, so a
+ * dispatcher that claims past it is on a host that woke whose agent has not said so, and is handed work as any other.
+ */
+export function asleepNow(h: { asleep_at: string | null; reported_at: string | null }, now: number): boolean {
+  return h.asleep_at !== null && h.reported_at !== null && Date.parse(h.reported_at) > now - HOST_REPORT_FRESH_MIN * 60_000;
+}
+
 export const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 export const HOST_ID = /^h_[0-9a-z]{10}$/;
 const ARCHES = ["x86_64", "aarch64"] as const;
