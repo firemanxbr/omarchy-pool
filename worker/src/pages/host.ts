@@ -208,10 +208,11 @@ const SCRIPT = String.raw`
     if (!k || !k.minutes) return '<span class="muted">none — a new release goes at its next poll</span>';
     return esc(String(k.minutes)) + " minutes" + (k.until ? (Date.parse(k.until) > Date.now() ? " — " + esc(h.release_target || "the pool's release") + " waits until " + when(k.until) : " — over " + when(k.until) + ": its round brings " + esc(h.release_target || "the release")) : "") + '; a rollback statement skips it, Reconcile now does not';
   }
-  // Where its registration stands at the 426 gate (#326): claiming through its soak, within the grace, or refused, and why.
+  // Where its registration stands at the 426 gate (#326): claiming through its soak, on its last-good after a revert (#342), within the
+  // grace, or refused — on a revoked release too, whatever it runs against the pool's — and why.
   function gateLine(u) {
     if (!u) return '<span class="muted">its registration has not claimed with a release yet</span>';
-    if (!u.outdated) return '<span class="muted">it runs the pool\'s release</span>';
+    if (!u.outdated && !u.revoked) return '<span class="muted">it runs the pool\'s release</span>';
     return u.required ? '<span class="hp-blocked">' + esc(u.words || "refused with 426") + "</span>" : esc(u.words || "");
   }
   function draw(h, leases, pool, update) {
@@ -250,7 +251,7 @@ const SCRIPT = String.raw`
         kv("Capacity", h.below_minimum ? esc(h.below_minimum) : c ? "meets the minimum to join" : "—"),
         kv("Pool cap", capWords(h)),
         kv("Reserving", h.reserving_task ? 'for <a href="/build/' + esc(h.reserving_task) + '">#' + esc(h.reserving_task) + '</a> since ' + when(h.reserving_since) + ': it takes nothing else but pool jobs until its units fit it' : '<span class="muted">no</span>'),
-        kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + ")" : "")),
+        kv("Release", esc(h.release_applied || "—") + (h.release_target ? " → " + esc(h.release_target) : "") + (h.rolled_back_from ? " (rolled back from " + esc(h.rolled_back_from) + (h.rolled_back_at ? " " + when(h.rolled_back_at) : "") + ")" : "") + (h.last_good ? "<br>" + pillHtml("warn", "last-good", "its registration claims on its last-good; past this the pool hands it nothing until it runs the pool's release") + " " + esc(h.last_good) : "")),
         kv("Soak", soakWords(h)),
         kv("Claims", gateLine(update)),
         kv("GitHub", h.soak && h.soak.github_latest ? "its latest release is " + esc(h.soak.github_latest) + ", as its agent read it" : '<span class="muted">not read yet</span>'),

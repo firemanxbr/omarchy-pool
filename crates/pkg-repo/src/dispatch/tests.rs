@@ -3060,3 +3060,170 @@ fn the_claim_says_who_the_agent_is_from_the_probe_sidecar() {
         .unwrap()
         .contains("no agent key"));
 }
+
+// ---------- revoked releases (#342) ----------
+
+/// A newer release's manifest, as a stub: it revokes v1.2.3, the release `task()` leases on.
+const REVOKING: &str =
+    "min_release = \"v1.0.0\"\nrevoked = [\"v1.2.3\"]\npools = [\"https://pool.example\"]\n";
+
+/// A task leased on `release` (as the pool's claim answer carries `build_tasks.release`).
+fn on_release(mut t: Value, release: &str) -> Value {
+    t["task"]["release"] = json!(release);
+    t
+}
+
+#[test]
+fn a_dispatcher_whose_manifest_revokes_a_running_tasks_release_kills_it_and_reports_it_and_older_tasks_finish(
+) {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    // Three leases of the release before: one on v1.2.3 running, one on v1.2.3 whose container
+    // exits while the dispatcher is replaced, and one on v1.2.2, older and not revoked.
+    h.give(community(7, GEN));
+    h.give(community(8, GEN2));
+    h.give(on_release(community(9, &gen_of(9)), "v1.2.2"));
+    h.ticks(&mut d, 6);
+    assert!(h.engine.has(7, GEN) && h.engine.has(8, GEN2) && h.engine.has(9, &gen_of(9)));
+    drop(d);
+    h.leave(8, GEN2, &built_ok(), "==> Finished making: felix\n");
+    h.engine.exit(8, GEN2, 0, false);
+    // The next release's dispatcher: its signed manifest revokes v1.2.3.
+    let mut d = h.dispatcher();
+    d.revoke_signed(&super::revoked::of_manifest(REVOKING).unwrap());
+    h.ticks(&mut d, 2);
+    for (id, gen) in [(7, GEN), (8, GEN2)] {
+        assert!(
+            !h.engine.has(id, gen),
+            "task {id}'s containers are killed by label"
+        );
+        let f = h.pool.fails_of(id);
+        assert_eq!(f.len(), 1, "task {id} reported once: {f:?}");
+        assert_eq!(f[0]["revoked"], true);
+        assert_eq!(
+            f[0]["lost"], true,
+            "a pool from before #342 gives the attempt back"
+        );
+        assert_eq!(f[0]["final"], false);
+        assert!(
+            f[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("release v1.2.3 is revoked"),
+            "{f:?}"
+        );
+        assert!(
+            h.pool.completes_of(id).is_empty(),
+            "nothing of task {id} completed"
+        );
+    }
+    assert!(
+        h.pool.staged_of(8).is_empty(),
+        "nothing of the exited one uploaded"
+    );
+    assert_eq!(
+        h.leases().iter().map(|l| l.task.id).collect::<Vec<_>>(),
+        vec![9],
+        "only the older release's lease is left"
+    );
+    // The older release's task finishes on the release it started with.
+    assert!(h.engine.has(9, &gen_of(9)), "not touched");
+    h.leave(9, &gen_of(9), &built_ok(), "==> Finished making: felix\n");
+    h.engine.exit(9, &gen_of(9), 0, false);
+    h.ticks(&mut d, 2);
+    assert_eq!(h.pool.completes_of(9).len(), 1, "completed normally");
+    assert!(h.pool.fails_of(9).is_empty());
+    // The set is kept on the host: a dispatcher of an older release, whose manifest revokes nothing
+    // (a rollback), still kills a lease of v1.2.3.
+    drop(d);
+    let mut d = h.dispatcher();
+    h.advance(31);
+    h.give(community(10, &gen_of(10)));
+    h.ticks(&mut d, 4);
+    assert!(!h.engine.has(10, &gen_of(10)));
+    assert_eq!(h.pool.fails_of(10)[0]["revoked"], true);
+}
+
+#[test]
+fn the_pools_word_at_a_heartbeat_kills_a_lease_and_reports_it_revoked_and_is_not_kept() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(7, GEN));
+    h.pool
+        .beats
+        .lock()
+        .unwrap()
+        .insert(7, BeatMode::Stop("revoked".into()));
+    h.advance(301);
+    h.ticks(&mut d, 2);
+    assert!(!h.engine.has(7, GEN), "killed");
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(f["revoked"], true);
+    assert!(f["error"]
+        .as_str()
+        .unwrap()
+        .contains("release v1.2.3 is revoked"));
+    assert!(h.leases().is_empty());
+    // The pool's word was for that lease only: a new lease of the same release starts.
+    h.pool.beats.lock().unwrap().clear();
+    h.advance(31);
+    h.give(community(8, GEN2));
+    h.ticks(&mut d, 3);
+    assert!(
+        h.engine.has(8, GEN2),
+        "a pool cannot revoke a release on this host for good"
+    );
+}
+
+#[test]
+fn a_dispatcher_whose_own_release_is_revoked_here_takes_no_task_and_still_claims_for_its_orders() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    d.tick();
+    assert_eq!(
+        h.pool.last_claim()["want"],
+        1,
+        "a release not revoked takes work"
+    );
+    drop(d);
+    // A later release's dispatcher kept this one in the host's set, then the agent's guard reverted the
+    // host to it, and the pool was rolled back onto it: its manifest does not revoke it, so it would lease.
+    std::fs::create_dir_all(h.work.join("state")).unwrap();
+    std::fs::write(
+        h.work.join("state/revoked.json"),
+        json!([pkg_manifest::BUILD_VERSION]).to_string(),
+    )
+    .unwrap();
+    let before = h.pool.claim_bodies.lock().unwrap().len();
+    let mut d = h.dispatcher();
+    h.advance(31);
+    // A pool that hands it a task anyway, leased on this release: given back, never started.
+    h.give(on_release(community(7, GEN), pkg_manifest::BUILD_VERSION));
+    h.ticks(&mut d, 3);
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    let bodies = h.pool.claim_bodies.lock().unwrap()[before..].to_vec();
+    assert!(bodies.len() >= 2, "it claims on: {bodies:?}");
+    assert!(
+        bodies
+            .iter()
+            .all(|b| b["want"] == 0 && b.get("offer").is_none()),
+        "every claim says want 0: {bodies:?}"
+    );
+    assert!(
+        h.engine.runs.lock().unwrap().is_empty(),
+        "no container started"
+    );
+    assert!(h.leases().is_empty());
+    let f = h.pool.fails_of(7);
+    assert_eq!(f.len(), 1, "given back once: {f:?}");
+    assert_eq!(f[0]["final"], false);
+    assert!(h.pool.completes_of(7).is_empty());
+    // Its claims still carry its orders.
+    h.advance(121);
+    h.give(json!({ "task": null, "orders": [{ "id": format!("wo_{}", "5".repeat(32)), "kind": "restart", "reason": "test", "issued_by": "maintainer" }] }));
+    d.tick();
+    assert_eq!(d.exit, Some(75));
+}

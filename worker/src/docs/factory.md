@@ -466,12 +466,16 @@ POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?,
   200 {task:{id,name,arch,version,pkgbuild_ref,reason,attempts,…}, token: "omj.…", token_expires_at, lease_minutes, repo, pkgbuild_path, upload}
   204 nothing queued for this worker
   426 {error, latest, yours, behind, update}   `version` (the image's release) is behind the pool's past the grace — every
-                                               worker follows the latest image: update it and claim again (the worker sleeps 5 min)
+                                               worker follows the latest image: update it and claim again (the worker sleeps 5 min);
+                                               `revoked: true` when that release is one the pool's release revokes, whatever the grace (#342)
 POST /factory/tasks/:id/heartbeat                                 (the job token) → lease extended 30 min, a fresh token
 POST /factory/tasks/:id/complete    {sha256, filename, version?, duration_ms?, log_tail?} · jobs: {result, summary}
   409 unless the sha256 is in the pool (project) or in staging (community)
 POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?}
   → {status:"queued"} while attempts < max_attempts, else {status:"failed"}
+  every lease keeps the release it was claimed on (`build_tasks.release`, the claim's `version`); once the pool's release
+  revokes it (#342), its heartbeat, uploads, pool and ring writes and completion get 409 {stop: true, state: "revoked"},
+  and its fail, whatever it says, → {status:"queued", revoked} with the attempt given back
 PUT  /factory/tasks/:id/artifacts/:name                           (the job token) the evidence and the packages, one body up to 90 MB
 POST /factory/tasks/:id/artifacts/:name/multipart?action=create · part&part=N&upload_id= · complete · abort
                                                                    a package above 90 MB, in 64 MB parts — the edge refuses a single body
@@ -479,7 +483,15 @@ POST /factory/tasks/:id/artifacts/:name/multipart?action=create · part&part=N&u
                                                                    the project's review build included (bitwarden, 144 MB, 2026-09-17)
 ```
 
-A maintainer host's registration (#321, `kind = host`) claims as its dispatcher (#334, design v2 §8.1):
+A maintainer host's registration (#321, `kind = host`) claims as its dispatcher (#334, design v2 §8.1).
+Past the grace it is refused with `426` like any worker, but for one exception (#342, D55): while its
+host's reports say its agent reverted the pool's own release, it claims on the release its agent
+applied — its last-good — for six hours after the pool first heard of the revert, never below the
+signed `min_release` nor on a revoked release, with a warning on Status (the listing's
+`update.last_good_until`) and its host's page (*A host reverted a release* in the runbook). A
+soaking host's registration (#326) is kept out of the gate until its soak ends, at most two hours
+after the deploy; neither the soak nor the last-good holds a revoked release, and where both would
+hold, the host claims on its last-good (`worker/src/update.ts` `updateState`).
 
 ```
 POST /factory/claim   {arch, version, hostname, kinds, agent: {provider, model, probe}, usage?,
@@ -516,7 +528,10 @@ each in one task container it starts through one function (`crates/pkg-repo/src/
 start      refuses a signing key, an agent key or a GitHub token in its environment; re-adopts: a task container with a lease file
            (work/state/leases/<id>-<gen>.json, 0600) runs on or, exited, is completed from its exit code,
            OOMKilled and outputs; one without goes; a lease whose container is gone fails `lost`; then /ready
-loop       per lease: heartbeat (409 stop: kill, fail as stopped), its own watchdog (last accepted heartbeat
+loop       per lease: a release in this host's merged revoked set (#342: the signed manifest built in, with every
+           list a dispatcher of this host kept in work/state/revoked.json) or the heartbeat's 409 state "revoked":
+           kill in whatever phase, fail {revoked, lost}; a task of any other release runs on to its end;
+           heartbeat (409 stop: kill, fail as stopped), its own watchdog (last accepted heartbeat
            + 35 min: kill, report nothing), its container's state; the disk watcher (work root below the
            floor: the youngest build killed `lost`, want 0 until the space is back; a build refused at start
            for its budget: builds left out of the claims, trials and audits not, until it fits, 30 min at most);
