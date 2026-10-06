@@ -63,6 +63,13 @@
 //! changed) — and the claim offers no emulated lane without its build image
 //! by digest.
 //!
+//! **Caches** (#341, design v2 §9.3; D52, [`cache`]): a build mounts its own
+//! package's build cache on its own side and nothing else of the cache tree,
+//! every task its lane's pacman cache read-only beside a writable one of its
+//! own; what a lease downloaded is merged into the shared cache, in a thread of
+//! the dispatcher's, only when the pool's signed databases list its bytes, and
+//! both caches are pruned to the envelope's `cache_caps`.
+//!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
 //! restart makes the dispatcher exit 75 (tasks survive), recheck-agent and
@@ -107,7 +114,9 @@
 //! when agent.toml sets it, so the defaults below hold otherwise, and
 //! `OMARCHY_DIRECT_NETWORK=1` when the envelope grants a signed exception's
 //! bridge network (#373), which install's egress probe then checked: without
-//! it a package with `network = "direct"` is handed back. A changed
+//! it a package with `network = "direct"` is handed back; and the envelope's
+//! `cache_caps` (`OMARCHY_CACHE_PACMAN_GB`, `OMARCHY_CACHE_BUILD_GB`, #341),
+//! each only when agent.toml sets it. A changed
 //! file recreates the dispatcher, which re-adopts its tasks. The dispatcher
 //! keeps the registration's id it learned in `state/host`.
 
