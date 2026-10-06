@@ -273,6 +273,9 @@ jobs:
       - name: The image reinstalls a Claude Code that does not answer, so a restart of the agent service fixes a broken install
         working-directory: .
         run: bash tests/entrypoint-agent.sh
+      - name: The image takes the worker token from a read-only file over the plain variable, which still starts an older release's dispatcher
+        working-directory: .
+        run: bash tests/entrypoint-token-file.sh
       - name: The restart policy a worker counts on, on a real engine (on-failure:N runs out)
         working-directory: .
         run: bash tests/restart-policy.sh

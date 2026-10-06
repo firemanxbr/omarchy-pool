@@ -17,7 +17,8 @@
 #   builder     `omarchy-build-worker --self-test`
 #   updater     the updater's entrypoint, `omarchy-rollout --self-test`, against this runner's socket and a compose project
 #   dispatcher  `pkg-repo dispatch` through its entrypoint (#335): refuses a signing key in its environment; without one it
-#               re-adopts nothing, answers /ready on loopback, claims with want 0 (no capacity file) and leaves on SIGTERM
+#               re-adopts nothing, answers /ready on loopback, claims with want 0 (no capacity file) and leaves on SIGTERM —
+#               its worker token from a read-only file, as the host set mounts it (OMARCHY_WORKER_TOKEN_FILE, #327)
 #   egress      `pkg-repo egress` through its entrypoint (#336): it listens, and refuses cloud metadata (403) and a POST (405)
 #
 # usage: tests/image-smoke.sh <image>      (docker; RUNTIME=podman for podman)
@@ -116,16 +117,19 @@ out="$("$RT" run --rm --network host -v "$sock:/var/run/docker.sock" -e OMARCHY_
   && fail "the dispatcher started with a signing key: $out"
 grep -q 'never holds a package signing key' <<<"$out" || fail "the dispatcher's refusal of a signing key: $out"
 # … and without one it re-adopts (nothing here), answers /ready on loopback, claims with want 0 (no capacity file), and stops on SIGTERM.
-: > "$tmp/claims"; mkdir -p "$tmp/work"
+# Its token is a read-only file, as the host set mounts the agent's run/host/dispatcher/token (#327): the stub pool takes the
+# claim only with that token, and the container's environment holds none.
+: > "$tmp/claims"; mkdir -p "$tmp/work"; printf 'omw_smoke\n' > "$tmp/token"; chmod 444 "$tmp/token"
 out="$("$RT" run --rm --network host --security-opt label=disable -v "$sock:/var/run/docker.sock" -v "$tmp/work:$tmp/work" -e OMARCHY_WORKER_ROLE=dispatcher \
-  -e OMARCHY_WORKER_TOKEN=omw_smoke -e OMARCHY_WORK_ROOT="$tmp/work" -e OMARCHY_API="http://127.0.0.1:$port" -e OMARCHY_POOL="http://127.0.0.1:$port" \
+  -v "$tmp/token:/run/omarchy/worker-token:ro" -e OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token \
+  -e OMARCHY_WORK_ROOT="$tmp/work" -e OMARCHY_API="http://127.0.0.1:$port" -e OMARCHY_POOL="http://127.0.0.1:$port" \
   -e OMARCHY_WORKER_IMAGE="$self_id" --entrypoint bash "$image" -c 'omarchy-worker --ready 127.0.0.1:18791 & p=$!; ok=""; for _ in $(seq 1 60); do curl -sf http://127.0.0.1:18791/ready >/dev/null && { ok=1; break; }; sleep 1; done; sleep 4; kill -TERM $p; wait $p; echo "ready=${ok:-no}"' 2>&1)" \
   || fail "the dispatcher did not start: $out"
 grep -q '^ready=1$' <<<"$out" || fail "the dispatcher never answered /ready: $out"
 [[ -s "$tmp/claims" ]] || fail "the dispatcher sent no claim: $out"
 jq -e '.want == 0 and (.claim_id | startswith("c_")) and .leases == [] and (.orders | index("stop-task") != null)' <<<"$(head -n1 "$tmp/claims")" >/dev/null \
   || fail "the dispatcher's first claim: $(head -n1 "$tmp/claims")"
-echo "ok: the dispatcher (refuses a signing key; ready, claimed, stopped on SIGTERM)"
+echo "ok: the dispatcher (refuses a signing key; ready, claimed with the token of its read-only file, stopped on SIGTERM)"
 
 # The egress sidecar's role: it listens, refuses cloud metadata and any method but CONNECT, GET and HEAD.
 egress="omarchy-smoke-egress-$$"

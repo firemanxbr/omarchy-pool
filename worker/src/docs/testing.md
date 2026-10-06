@@ -536,6 +536,18 @@ not (an install cut short) removed and installed again — so a restart of
 the agent service fixes it; and a project worker's start writes the id the
 pool answered for its token to `/run/omarchy/worker-id`, mode 0644, where
 its set's updater reads it (#277), never the token.
+`bash tests/entrypoint-token-file.sh` (CI) runs the same entrypoint with the
+worker token as a read-only file (#327, design v2 §14, D15): the dispatcher
+role starts `pkg-repo dispatch` with `OMARCHY_WORKER_TOKEN_FILE` and no token
+in its environment; a file named but missing, unreadable, empty or more than
+one token stops it before pkg-repo starts, never falling back to
+`OMARCHY_WORKER_TOKEN`; that plain variable alone still starts it (a
+dispatcher of an older release's template), neither stops it; a project
+worker asks the pool with the file's token and `pkg-repo work` and the broker
+hold it, not the plain one; an agent sidecar and a builder behind a broker
+hold neither (the builder says it dropped the file's path). `pkg-repo`'s
+own unit tests (`worker_token.rs`) prefer the file, read one token on one
+line, and refuse a named file that gives none.
 `bash tests/restart-policy.sh` (CI, docker) pins the engine's restart
 policy a worker counts on: under `on-failure:2` an exit 75 is started
 again twice in the container's whole life and then left down, a healthy
@@ -705,8 +717,10 @@ worker's entrypoint against a stub pool (its id written, `pkg-repo work
 --self-test`, then `pkg-repo work` itself up to its first claim — which
 process it is, what it takes, what rolls its set out — and out on the empty
 answer), the broker answering on `:8790`, the builder's and the updater's
-`--self-test`, and the egress sidecar's role refusing cloud metadata and a
-POST. `bash tests/task-networks.sh` (CI, on that local build; #336) runs the
+`--self-test`, the dispatcher refusing a signing key and otherwise answering
+`/ready` and claiming with the token of a read-only file
+(`OMARCHY_WORKER_TOKEN_FILE`, as the host set mounts it, #327), and the egress
+sidecar's role refusing cloud metadata and a POST. `bash tests/task-networks.sh` (CI, on that local build; #336) runs the
 dispatcher with the real egress and agent sidecars and two probe tasks at
 once, its environment being the `etc/dispatcher.env` that `omarchy-agent
 dispatcher-env --write` rendered (#371: the token and an owner's line kept,
