@@ -393,6 +393,11 @@ fn a_widening_sets_only_the_keys_it_may_and_keeps_the_owners_lines() {
             serde_json::json!({"task_subnets": "10.0.0.0/8"}),
             "\"task_subnets\" is no key",
         ),
+        // #373's grant of a signed exception's bridge stays the host's.
+        (
+            serde_json::json!({"direct_network": true}),
+            "\"direct_network\" is no key",
+        ),
         (
             serde_json::json!({"max_units": 0}),
             "max_units: a whole number from 1",

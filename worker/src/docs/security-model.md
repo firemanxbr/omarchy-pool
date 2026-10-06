@@ -780,8 +780,10 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   `[envelope]` (agent.toml's other lines kept), each checked by agent.toml's
   own parser and the lint, and the units are counted again under the applied
   release's signed constants and the detected hardware: a widening never
-  gives more than the machine has. Narrowing (`set-units`, `set-emulate`)
-  needs no signature, as before. Agent keys are sealed in the owner's
+  gives more than the machine has; nor does it ever set the grant of a
+  signed exception's bridge (`direct_network`, #373), which stays the
+  host's. Narrowing (`set-units`, `set-emulate`) needs no signature, as
+  before. Agent keys are sealed in the owner's
   browser to the host's X25519 seal key, which its owner confirmed once by
   its fingerprint (`omarchy-agent status` prints it at the host): the pool
   stores and relays only `{name, epk, nonce, ct}`, and its tests read every
