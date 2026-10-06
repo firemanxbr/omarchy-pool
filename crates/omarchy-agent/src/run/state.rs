@@ -1,6 +1,7 @@
 //! `state.json` (design v2 §16.1, §16.2): what the agent knows across restarts — the trust
 //! floor, the merged `min_release` and `revoked`, the last accepted rollback statement, the
-//! rollout in flight, quarantines, the last round and the poll schedule.
+//! rollout in flight, quarantines, the last round, the poll schedule, and the host orders
+//! (#344): the ids taken, their answers and a `retire-legacy` in flight.
 //!
 //! Written before each step acts, atomically (a temporary file, fsync, rename), so a
 //! restart anywhere resumes where it was. Read leniently (#316): unknown fields are
@@ -11,10 +12,10 @@
 //! `statement_seq` or `applied` cannot be read is a local error (exit 78), never "start
 //! from nothing", since that would forget the floor.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +46,7 @@ pub struct State {
     /// What the pool named last.
     pub target: Option<Release>,
     pub quarantine: BTreeMap<Release, Quarantine>,
-    /// The last Update order (seen in `follow`) a round was started for.
+    /// The last Update order (seen in the host state) a round was started for.
     pub update_seen: Option<String>,
     /// The pinned tools in use: SHA-256 of the docker and compose downloads.
     pub tools: Option<ToolPins>,
@@ -57,6 +58,8 @@ pub struct State {
     /// An agent version a self-update rolled back from: skipped until a higher one
     /// (design v2 §16.3).
     pub agent_skip: Option<Version>,
+    /// The host orders (#344, design v2 §17.1).
+    pub orders: Orders,
 }
 
 impl Default for State {
@@ -78,6 +81,7 @@ impl Default for State {
             round: Round::default(),
             poll: Poll::default(),
             agent_skip: None,
+            orders: Orders::default(),
         }
     }
 }
@@ -226,6 +230,79 @@ pub struct Poll {
     pub last_at: i64,
 }
 
+/// How many order ids the agent remembers (design v2 §17.1): an id among them is never
+/// taken again, whatever the pool says.
+pub const SEEN_RING: usize = 512;
+/// How many answers the state keeps, and every report carries until they leave.
+pub const ANSWERS_KEPT: usize = 8;
+
+/// The host orders the agent took (#344): the ring of ids, the answers, a retire in flight.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Orders {
+    /// The last [`SEEN_RING`] ids taken, host orders' and Updates' alike, oldest first.
+    pub seen: VecDeque<String>,
+    /// The last [`ANSWERS_KEPT`] answers, oldest first.
+    pub answers: Vec<OrderAnswer>,
+    /// The `retire-legacy` in flight: it runs to its end across ticks and restarts.
+    pub retire: Option<Retire>,
+}
+
+impl Orders {
+    pub fn seen(&self, id: &str) -> bool {
+        self.seen.iter().any(|s| s == id)
+    }
+
+    /// Remembers `id`; the oldest leaves past [`SEEN_RING`].
+    pub fn remember(&mut self, id: &str) {
+        if !self.seen(id) {
+            self.seen.push_back(id.to_owned());
+        }
+        while self.seen.len() > SEEN_RING {
+            self.seen.pop_front();
+        }
+    }
+
+    /// Keeps an answer; the oldest leaves past [`ANSWERS_KEPT`].
+    pub fn answer(&mut self, a: OrderAnswer) {
+        self.answers.retain(|x| x.id != a.id);
+        self.answers.push(a);
+        let extra = self.answers.len().saturating_sub(ANSWERS_KEPT);
+        self.answers.drain(..extra);
+    }
+}
+
+/// What the agent answered an order: `done`, `refused` or `failed`, with its words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderAnswer {
+    pub id: String,
+    pub kind: String,
+    pub outcome: String,
+    pub detail: String,
+    pub at: i64,
+}
+
+/// A `retire-legacy` in flight: the recorded project, the directory its marker went into,
+/// and how far it got. The marker is written before anything is stopped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retire {
+    pub order: String,
+    pub project: String,
+    pub dir: PathBuf,
+    /// When it was taken: it fails past its time limit.
+    pub since: i64,
+    pub step: RetireStep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RetireStep {
+    /// Stopping the project's containers.
+    Stop,
+    /// Removing its containers, then its networks.
+    Remove,
+}
+
 /// Reads `state.json`: `Ok(None)` when there is none yet.
 pub fn load(path: &Path) -> Result<Option<State>, String> {
     let bytes = match fs::metadata(path) {
@@ -260,6 +337,7 @@ const LENIENT: &[&str] = &[
     "round",
     "poll",
     "agent_skip",
+    "orders",
 ];
 
 /// The lenient parser `load` uses (and the fuzz target).
@@ -455,7 +533,7 @@ mod tests {
             .keys()
             .filter(|k| !previous.contains(&k.as_str()))
             .collect();
-        assert_eq!(added, ["agent_skip"]);
+        assert_eq!(added, ["agent_skip", "orders"]);
     }
 
     #[test]

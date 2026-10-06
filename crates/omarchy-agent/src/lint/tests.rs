@@ -381,6 +381,63 @@ fn the_real_host_set_passes_lint_set_under_the_reference_and_the_studio_envelope
 }
 
 #[test]
+fn on_a_mac_every_bind_source_lies_under_a_directory_the_omarchy_vm_mounts() {
+    // #320: the VM mounts the work root, the secrets and the set directories, at their own
+    // paths; the socket is the VM's own. The real set passes.
+    let mac = envelope("mac");
+    assert_eq!(
+        mac.vm_mounts.as_deref().unwrap(),
+        [
+            PathBuf::from("/Users/Shared/omarchy-pool/work"),
+            PathBuf::from("/Users/Shared/omarchy-pool/secrets"),
+            PathBuf::from("/Users/Shared/omarchy-pool/set"),
+        ]
+    );
+    let template = real_set("compose.yml");
+    lint_compose(&template, None, &mac, Engine::Rootful).unwrap();
+    for over in [
+        "services:\n  dispatcher:\n    volumes: [\"${OMARCHY_WORK_ROOT}/cache:/cache\"]\n",
+        "services:\n  dispatcher:\n    volumes: [\"./etc/extra.conf:/etc/extra.conf:ro\"]\n",
+        "services:\n  dispatcher:\n    volumes: [\"/Users/Shared/omarchy-pool/set/files/x:/x:ro\"]\n",
+    ] {
+        lint_compose(&template, Some(over), &mac, Engine::Rootful)
+            .unwrap_or_else(|v| panic!("{over}: {v:?}"));
+    }
+    // A path the envelope lists but the VM does not mount: the engine in the VM would bind
+    // an empty directory of its own.
+    let over =
+        "services:\n  dispatcher:\n    volumes: [\"/Users/Shared/omarchy-pool/cache:/cache\"]\n";
+    refused_for(
+        lint_compose(&template, Some(over), &mac, Engine::Rootful),
+        "vm_mount",
+        over,
+    );
+    // The same set under a Linux envelope has no such rule.
+    let linux = Envelope {
+        vm_mounts: None,
+        ..mac.clone()
+    };
+    lint_compose(&template, Some(over), &linux, Engine::Rootful).unwrap();
+    // [vm] runtime colima without the three directories is refused; a shared VM's runtime
+    // has no mounts the agent knows.
+    let text = read("envelope/mac.toml");
+    let e = Envelope::from_agent_toml(&mutate(
+        &text,
+        "work_root    = \"/Users/Shared/omarchy-pool/work\"\n",
+        "",
+    ))
+    .unwrap_err();
+    assert!(e.contains("[vm] runtime colima needs"), "{e}");
+    let shared = Envelope::from_agent_toml(&mutate(
+        &text,
+        "runtime = \"colima\"",
+        "runtime = \"docker-desktop\"",
+    ))
+    .unwrap();
+    assert_eq!(shared.vm_mounts, None);
+}
+
+#[test]
 fn the_real_host_set_is_refused_with_a_second_service_without_its_role_or_with_an_agent_key() {
     let template = real_set("compose.yml");
     let lint = |t: &str| lint_compose(t, None, &Envelope::reference(), Engine::Rootful);

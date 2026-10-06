@@ -35,6 +35,7 @@ what is running is always a commit that passed them twice.
 | `pkg-repo` (`dispatch`) | the dispatcher's loop against a fake engine and a fake pool (#335, #336, `src/dispatch/tests.rs`), and its capacity (#337): a fake pool handing out N tasks — the host takes as many as its 11 units hold, five builds each in its own container started at once (no queue on the host), the sixth handed to a claim that offered nothing given back `lost`, then one `want: 0` claim in 30 s listing all five, and `want: 1` again once one ends; a memory check that refuses — `MemAvailable` below one unit's 2 GB claims nothing, 9 GB offers four of ten free units (the claim's `offer`, its `capacity.units` still the host's 11), a task above the offer given back, one within it run, and the memory back offers every unit again (`Constants::offer`: the largest task it could receive, a size-4 build, decides); claims that follow each other at once at a constant 9 GB never offer the same memory twice (4 units, then 2, then `want: 0`: the shares of the leases just started count until `MEM_RAMP` after their start), and past the ramp what is left is offered; the claim's work root as measured now when it holds less than the agent's probe, never more; fewer units than leases (a cap lowered) claims `want: 0` and kills nothing — that and the first are regression coverage of #335's re-claim at once and `want: 0` when full | unit tests; and its lanes (#338): only a container on an emulated lane carries `WORKER_LABELS={"emulated":true}`, an x86_64 build on the emulated lane runs `--platform linux/amd64`, an aarch64 one on the native lane `linux/arm64`, an audit of an x86_64 build the host's own, each lane kept in its lease file (one from before lanes runs its task natively), an emulated lane's `needs_native` verdict reported as the script said it; a lease on a lane the host does not run now (no emulated lane in `run/capacity.json`, a native lease of another arch, an unknown word) or whose build image is not a digest given back `lost` before docker runs — and a lease prepared again after a restart once the agent has turned its emulated lane off, while one whose lane is still on starts on it — and an emulated lane without its image by digest not offered in the claim; `dispatch::capacity` reads the agent's own `run/capacity.json` fixtures (`crates/omarchy-agent/tests/fixtures/capacity/`: an emulated lane on, a held one) whole, its lanes and held lanes going with the claim as written |
 | `omarchy-agent` (`capacity`) | capacity detection (#333, `src/capacity/tests.rs`) and emulated lanes (#338, design v2 §7.5): with a stubbed binfmt tree and a fake smoke run, an aarch64 host with qemu's x86_64 handler (the F flag) reports the x86_64 lane after the smoke run of the release's x86_64 build image (`via: qemu`), sharing its units; without the handler, disabled or without the F flag it holds the lane with "needs a person: prep-root.sh installs qemu-user-static-binfmt", runs no smoke run and keeps its native lane, and a held lane is no preflight blocker; `emulate = []` holds every emulated lane off and runs nothing for it, and holds one a probe found anyway; on 16K pages the lane is on with `page16k: true`; Rosetta's handler reads `via: rosetta`; a failed smoke run or no image holds the lane with its reason; the smoke run itself through a fake docker CLI (`run --rm --network none --platform linux/<arch> --entrypoint /usr/bin/true`, then `pacman --version`, a pacman that does not answer failing it, an image or arch outside the grammar refused before docker runs); install's preflight reports the lane (held, on, off in the envelope) and never stops on it, its smoke run starting the release's build image of the engine's foreign architecture (the engine's, not the agent binary's), and the envelope it writes carries `emulate` with that architecture unless the owner's file already says (`emulate = []` kept); `[envelope] emulate` refused for an arch the pool does not build; the `run/capacity.json` this agent writes for the Studio (x86_64 on through qemu, 16K pages) and for an x86_64 host whose aarch64 lane is held is, field for field, the fixture the dispatcher's tests read (`tests/fixtures/capacity/`) | unit tests; `tests/agent-capacity.sh` and `tests/emulated-lane.sh` on real engines |
 | `omarchy-cli` | the MCP server's protocol handling: initialize, notifications, ping, tools/list, unknown methods, tool errors as results (`isError`) not protocol errors, bad arguments refused before any request; the write tools (#252): listed by the credential's scopes and never for another origin, each against a one-thread pool on 127.0.0.1 — the method, path and body, the token on writes and the caller's own reads only, text evidence only and never a package, the drafts' route and never a decision's, the pool's refusals in its words, a minute's memory that keeps a read for its minute only, the edge cache passed after a write, a build picked from the story but never a call stopped by it, the gate's summary under `requester_text`; login's loopback (127.0.0.1 only, its own callback only — anything else answered while it waits, another `state` swapping nothing — the verifier only in the swap) and PKCE (RFC 7636's own example); the credentials file (0600, refused when others can read it, bound to its origin, an expired grant said without a request, read again by a running session after a login or a logout); `logout` deleting it only once the grant is revoked or gone, and `login` refusing to leave a live grant of another name or pool behind | unit tests |
+| `omarchy-agent` (host orders, #344) | the run loop's target from the signed host state, never `follow` — but from a pool from before #344, whose state names no release (a rollback below it), its `follow`'s target and Update, said once, and a `follow` that does not answer backed off as a pool that does not; `reconcile-now` starting a round, waiting while a revert finishes, lifting no quarantine and saying why no round started; an unknown kind, an order past its `not_after` or with none, and a repeated id refused (the ring of 512, said once on the journal, as no answer); `retire-legacy` against a stand-in legacy project on the fake engine — the marker written first, listed again by a poll while it stops and passed over without a word, then exactly the recorded project's containers stopped and removed and its networks removed (a container with the agent's host label, another project, the task and the dispatcher untouched), `legacy.json` updated, answered and reported; refused with nothing changed for no record, the bundle's own project, a directory others may write (said in the report first), one with no compose file, contradicting or ambiguous directories and a `legacy.json` others may write; resumed after a restart, waiting for an engine that does not answer, failing after 30 minutes with the marker left, a network in use said, `legacy.json` marked retired only while it still names the project retired, and carried on (with the report) while a rollout step cannot write; the report on change, every five minutes and retried a minute after a failure — hourly on 401/403, at once when a poll gets through again — with no secret; the contract with the pool written once in `tests/fixtures/host-api/` (the host state `parse_state` reads; the reports' keys and value types before and after a retire-legacy), which `host-orders.test.ts` holds the Worker to; the host calls signed over the paths the pool reads; install again after a retire-legacy keeping the rootful exception and looking at nothing of the retired set; `rollout.sh`, `setup.sh`, `omarchy-worker update` and the updater's `--self-test` refusing (or standing down) in the directory once the agent's marker is there, not before | unit tests (`run::orders`) against the fake engine and pool; `tests/agent-host-orders.sh docker` and `… podman` (CI; by hand under the engine lock) on a real engine with the pinned docker and compose: `reconcile-now` and `retire-legacy` beside a stand-in legacy compose project and an unrecorded one |
 | `pkg-check` | pacman `desc` parsing, satisfiers, ABI check verdicts against a real `liblzma.so.5` | unit + `tests/check.rs` |
 | `pkg-store` (`poc/crates`) | install / upgrade / remove, collisions, `.pacnew`, I/O failure rollback, crash recovery before and after commit | `tests/transactions.rs` against a temp root |
 
@@ -103,6 +104,7 @@ the network. Two kinds of tests live there:
 | `emulated-lanes.test.ts` | `needs_native` per lane through the Worker (#338, `routes/factory.ts` `handleFail`, `src/hosts.ts`; design v2 §8.6, D33): from a lease on the Studio's emulated x86_64 lane it requeues the task with its attempt given back and the mark kept beside its params, the journal saying it waits for a native worker, and no emulated lane takes it again — the same host's, ninety minutes on, another host's — while a native x86_64 host takes it at once; from a native lane it is refused — a failure like any other, its attempt spent, no mark, journaled with *its needs_native refused*, `needs_native_refused` in the payload — on a host that also runs an emulated lane and whose registration's labels say `emulated` (a host's labels are never read), and on the last attempt it fails; a legacy registration's lease keeps its word (the emulated lane its claim wrote from its labels, a lease from before lanes by its labels, a native one refused); the capacity a host reports keeps each emulated lane's `via` and `page16k` and up to four held lanes with their reasons (cut at 300 characters, one that does not read left out); a claim whose emulated lane says how it runs is taken; the claim's own statements (`LANE_HEAD_SQL`, `NEUTRAL_HEAD_SQL`) bring an x86_64 health check to the x86_64 lane's head only and promotions beside the arch-neutral kinds with the arch they name (`job_arch`), and selection over those rows gives the Studio the health check on its emulated lane at once while an idle native x86_64 host is alive, and a host with no x86_64 lane neither it nor a promotion that checks x86_64; a host's claim listing `health` and `promote` takes neither yet (`HOST_KINDS`, until #340) |
 | `placement.test.ts` | placement through the Worker (#339, `routes/factory.ts` `selectAndLease`, `placements`, `modelsAlive`; `routes/review.ts` `anyHostVerdict`, `handleAnyHost`; migration 0047; design v2 §8.4, §9.5, D35, D36), maintainers' hosts claiming with their owner on the registration and their model in the claim's `agent`, real passkeys: the migration's `independent` (model, host, none, nothing else); a review rebuild of m1's package handed to no host of m1's while m2's host has a lane for it — m2's full for hours — and to m2's once free, Review's row saying it waits for that host with no release; one whose requesters are not known (no owner, its contributor's build gone) any host's, the claim's filter hiding nothing else; m2's emulated x86_64 lane taking m1's x86_64 copy at once, and one marked `needs_native` held on m1's native host alone; with only m1's hosts held at once, Review offering m2 the release (m1 `conflict_of_interest`, a contributor `maintainer_only`, nobody the sign-in), the door refusing nobody, a contributor, the requester, a maintainer without an answer, a token and an answer made for another act, then m2's release with their passkey — `params.any_host`, the `review` line with the passkey and the record, a second release refused, the list saying who released it — and m1's host taking it at its next claim; a claim refusing a worker of the requester's (`requester_host`) and leaving another architecture's same-agent pick unpinned when it is the requester's; with one provider the builder handed neither audit while another host can take them, the copy's recording `none` and a contributor build's `host`; with two a publish-bound audit handed only to the other model (`model`), a host with it last seen 23 hours ago still holding it, 25 hours ago no longer (`none`), and one alive whose agent has failed for an hour holding it while one failing for a day does not; Review's script drawing the held line with Release to any host live for another maintainer and grey with the server's words for the requester, the released line, nothing when another maintainer's host can build it, the step's *a release* and the log's words, and the audit's independence beside its verdict for each value (nothing for an audit not leased yet); `any-host:<task>` an act of its own; the placement reads, the release and the models' read by their indexes |
 | `host-suspend.test.ts` | stopping a maintainer host (#322, `routes/hosts.ts`, `src/hosts.ts`, `governance.ts`, migration 0044), with real host keys and passkeys: the migration's columns and the four statuses; Suspend by a maintainer stopping the claims at once (`host_suspended`, in its words), the key refused with its status, the agent's `follow` refused, an open order cancelled, the running lease fenced by one closed order row of its own — every heartbeat refused — and back in the queue at its lease's end with the person and the reason; Resume refused to another maintainer, a token and an answer with no passkey, then the owner's: the same token claims the task again with nothing done on the host; the doors refusing nobody signed in, a contributor, a token, another origin and a reason too short, too long or with a secret, and `GET /hosts/:id` carrying the same verdicts; Retire by a maintainer with a passkey (the key refused, the token revoked, the old key never enrolled again, a new key a new host) and by its owner without one; a host's drain (D57): the owner's lifted by the owner only, another maintainer's by either of the two and not by a third; the maintainer list (D39): a removal holding at the next claim before the sync, the sync's mark and one line per host, nothing fenced, the running task heartbeating and uploading to the pool, listed again still stopped until the owner's one Resume with a passkey; a login renamed to one that resolves to the same GitHub user id changing nothing; removed for cause by another maintainer with a passkey and a reason — every host suspended and both leases fenced, the owner, a contributor and an answer with no passkey refused; the pure rules and the passkey's subjects; and every new statement by its index |
+| `host-orders.test.ts` | the minimal host state and its host orders (#344, `routes/hosts.ts`, `src/hosts.ts`, migration 0046), with real host keys and passkeys: the migration's closed kinds and states and one open order per kind; the signed state naming the pool's release (none from a Worker that runs none), the registration's open Updates and the host's open orders with their id and `not_after` — never one past it, never another host's — and refused to a suspended host, whose open orders the suspension cancelled; Reconcile now by its owner or another maintainer and refused to nobody, a contributor, a token, another origin, an unknown kind, a host waiting for Confirm, an agent before 0.3.0 (taken once it reports 0.3.0) and a second open order; Retire legacy set by its owner only, with a passkey for that act, while its agent reports a legacy set, refused to another maintainer with a passkey, to a token and without one, and with why for no legacy set, one being retired and one retired; `GET /hosts/:id` carrying the verdicts, the legacy set and the last orders to the owner and the maintainers only; the report's answers closing that host's open orders once — never another host's, never a malformed one, one the pool expired meanwhile too, never a cancelled one — with a journal line in the pool's words only; a refusal's words kept; Retire legacy set greyed, and refused at the door, with the agent's words while its report says it would refuse; the contract with the agent in `crates/omarchy-agent/tests/fixtures/host-api/` — the state's keys and value types the fixture's, the agent's reports posted as the fixtures are, closing its orders and read back field by field; expiry by the door and the cron, cancellation by a retirement; the pure rules and every new statement by its index |
 | `orders-pure.test.ts` | the orders' pure core (#277, `src/orders.ts`): an agent's error by class (what a restart can help, what it cannot), text a person or a worker gave cleaned and refused when it looks like a secret, a claim's kinds in one canonical form, a claim that names no process declaring nothing, the instance step (two processes on one token — a day of two processes claiming with their network's jitter, a second one that draws a new instance at every claim or names none, the one the row names stopping first: one line, no lift while two claim, at most a write per three minutes besides the liveness write; a crash loop only over unexplained short processes, the watchdog's lines — each over random schedules from a seeded generator), the journal naming a process by four hex digits and a version only by a tag the pool parsed, the probe's age on the pool's clock, a host's shared agent service (the election, the others' give-up with it, a worker restarted itself once the service answers another, the pacing), a site under the name of who runs it, the breaker's two scopes, the pool's names no login can be, the step machine (one re-check when the worker's own stalled, a conditional restart after ten minutes, never a process under two, two a spell and three a day, then a give-up line, nothing for an error a restart cannot help — over 48 h of claims every 30 s), the scale honoured only on a Worker that is not a release, who may press what — Drain on every image, Resume by §1.10's table, Stop its task only for its owner and any maintainer and only for the task in hand, once, in the restart group; Update allowed on an outdated worker whose set follows the pool and on an outdated builder whatever its image takes, refused on the latest release, a newer one, one that reports none, a pool that runs none, and a project worker's set that does not follow, each with its reason — how soon a stopped task stops by what runs it (`stopWay`), what rolls a set out — every pair of updater and host script, and a report that is not there, mapped to exactly one `set_rollout`, read tolerantly and in one form, said in the page's and the door's words —, what closes an Update, and the pool's sentences |
 | `worker-orders.test.ts` | orders through the Worker (#277, `routes/orders.ts`, the claim in `routes/factory.ts`): the doors (its owner and every maintainer, anyone else refused server-side in the words `/can` greys the button with; a session's write only as JSON from the pool's own origin; one open order per kind), the claim that carries the order to one process once and the answer from that process only, observation and staleness, nothing delivered while two processes share the token, a claim that says the same writing nothing; the rules on a fake clock (a late agent re-checked then restarted only if needed, a restart refused by a worker whose agent answers, the uptime gate, a broker's builder only through a broker that exits with it, a host's agent service restarted once through its elected worker, the fleet breaker tripped by three sites and cleared once, after fifteen minutes); the caps inside the `INSERT` (a worker's seventh in an hour, a login's twenty-first, the pool's sixty-first a day and eleventh restart an hour, each journaled once); the sweep and revoke; exactly one issue line and one final line per order; fail open; Update through the set's updater (#277's third part: on an outdated builder its owner's and a maintainer's, listed by `follow`, never in a claim answer, closed done by a claim on the pool's release with one final line; on a project worker only where an updater from #277 on rolls its set out, every other `set_rollout` refused with its reason and `/can` greyed in the same words; the claim's `rollout` written only when it changes; an Update nothing carries out expired after six hours with one line; the dialog's names from the site's read — the default Studio's four, the emulated profile's six, a builder alone, a stranger none; `follow`'s 1 to 16 well-formed ids, unknown and revoked ones left out, the release `/version` says, its edge copy kept thirty seconds per release so a deploy or a rollback is never answered from before it); and every statement of the orders path by its index (`EXPLAIN QUERY PLAN`), the updaters' `follow` by the primary key |
 | `worker-orders-bounds.test.ts` | orders at their edges (#277), on a database of their own: a person's Cancel between a claim's read and its close (one final line, the claim's close writes none); a delivered order keeping its half hour past its TTL; the breaker's matrix — which rows count (not seen for 11 minutes, revoked, a class it does not count, another provider, a spell ended, two workers of one site), a contributor's three registrations holding contributors' workers and never the project's, hysteresis (a count back at two starts the wait again, no flap), a dead site, a development pool's scale leaving it alone, two claims tripping it at once, a key the weekly gc keeps; a host's agent service restarted through its elected worker, then the other restarted itself once the service answers the first, and the page's words at each step; the emulated profile's four review workers — one service restart, the others' give-up with it, and nothing read after; a person's restart of the service holding the rules' without an issue that fails; a person whose login is `pool` a person; the community's share of the day and of the hour; a claim that names no process; a failing worker's liveness write costing what a ready one's does (the breaker's index unwritten); the kill switch; the breaker's key, the open spells or the site's workers throwing; an order riding a 426; and the caps, a rule beside a person, and two claims deciding at once |
@@ -711,12 +713,33 @@ answer), the broker answering on `:8790`, the builder's and the updater's
 `--self-test`, and the egress sidecar's role refusing cloud metadata and a
 POST. `bash tests/task-networks.sh` (CI, on that local build; #336) runs the
 dispatcher with the real egress and agent sidecars and two probe tasks at
-once: a public mirror answers through the egress only; cloud metadata, a
+once, its environment being the `etc/dispatcher.env` that `omarchy-agent
+dispatcher-env --write` rendered (#371: the token and an owner's line kept,
+0600, the machine's own addresses with a stand-in public one, the secrets
+directory, a budget): a public mirror answers through the egress only; cloud metadata, a
 public name resolving to loopback, a raw socket ("Network is unreachable"),
 the host's LAN address and gateway, and the other task's container, egress
-and agent are out of reach; the probe sidecar's word reaches the claim; a
+and agent are out of reach; through the egress the host's LAN address is
+refused and so is the stand-in public one, as "an address of this host" and
+as an IPv4-mapped IPv6 literal, which every egress sidecar was given
+(`--deny`; the LAN address is checked among the agent's where iproute2 and
+`/proc/net` found it; a deny entry written v4-mapped is the IPv4 address,
+unit-tested in `pkg-repo`); the agent sidecar's caps are the
+budget's; the probe sidecar's word reaches the claim; a
 signed exception's task gets a bridge network; a stop removes only that
-task's container, sidecars and network.
+task's container, sidecars and network. The agent's side of that file is
+unit-tested on interface lists (`crates/omarchy-agent/tests/fixtures/addresses/`:
+a home LAN host with docker's bridges and IPv6, a VPS with a public /32, and
+a Mac's `ifconfig -a` listing with its vmnet bridge and a VPN tunnel, read
+through a played `ifconfig` beside no `/proc/net`; a bridge on a global range
+kept, an address on `lo` but loopback's kept), on
+`/cdn-cgi/trace` answers (an IPv4 address in its v4-mapped form kept as
+IPv4), on two writers (a refresh waits for a rotation's lock and keeps its
+token), and in the run loop against the fake engine and pool (a new DHCP
+lease, a new public address asked hourly and again within minutes after no
+answer, agent.toml read again and refused when others may write it or it is
+a link), and `tests/host-enroll-e2e.sh` (the E2E
+workflow) checks its keys after the Confirm and a rotation.
 `bash tests/emulated-lane.sh` (CI's `emulated-lane` job, on an x86_64 and an
 aarch64 runner with `qemu-user-static`; #338) runs an emulated lane on a real
 engine, each runner emulating the other architecture: the agent's smoke run
@@ -747,6 +770,143 @@ started with `OMARCHY_BROKER` drops a token set on it by mistake and starts
 the build with zero secrets. `factory/worker/omarchy-build-worker.sh` is
 sourced up to its dispatch line for that (`sed '/^hold_secrets$/,$d'`), in
 `docker run --rm ghcr.io/firemanxbr/omarchy-worker:aarch64` with fake values.
+
+## A Mac host
+
+What #320 adds is tested on Linux, where a Mac is played, and on a macOS
+runner, where the agent's tests run whole (the `agent` job's macOS entry:
+`cargo test -p omarchy-agent`):
+
+- `crates/omarchy-agent/src/vm/` — the VM's size (half of a 16-core, 64 GB
+  Mac is 8 CPUs and 32 GB; the envelope's caps; never the whole Mac; half of
+  a 6-core Mac refused below the minimum, with what the caps could give), its
+  three mounts (under the home directory in any case, holding it, linked into
+  it, overlapping, a `:` or `,` all refused; below `/Users/Shared`, a root
+  another account owns said once for the three, a directory swapped for a
+  link refused, the root itself a link, one not there yet left to install,
+  a mount elsewhere not looked at), the `colima start` argv, the
+  saved `colima.yaml` read back (a size, a mount or Rosetta is a restart; the
+  home mount, Colima's default with no mounts, a mount point elsewhere and a
+  forwarded SSH agent are exposures; another VM type or architecture is the
+  person's to delete), the task firewall's rules (prep-root.sh's step 9 for
+  the task subnets, DNS to the VM's resolvers before the drops, hooked in
+  once) and its script run under `sh` with iptables and systemctl played
+  (the rules kept in the VM, 0755; under systemd the unit after
+  `docker.service` enabled for every boot and reloaded only when it
+  changed; the rules applied each run), Colima's environment (the pinned
+  docker CLI first on its `PATH`, the agent's own `DOCKER_CONFIG`), the
+  clock after a wake (the VM held within five seconds of the pool's `Date`
+  through the Mac's own — 5 s behind a Mac 5 s behind the pool is 10 s and
+  set; a Mac off the pool's said, the VM then held to the Mac's, a sleep's
+  drift on top of it removed, a `Date` years off moving nothing), an HTTP
+  `Date`, and M7's rate limit.
+- `run/vm/` — the run loop's keeper on a played Colima: a stopped VM started
+  as a child the loop polls (only once the pinned docker CLI is known, which
+  Colima needs), the rate limit holding a second start and said once, the
+  task firewall run after every start, hourly and after a wake (one that
+  does not apply said and tried again), a size change waiting for running
+  tasks (an engine that does not answer counts as a task), a size below the
+  release's signed minimum neither started nor resized and one above the Mac
+  held to it, an exposure restarted at once, only a start while a
+  self-update's gate is shut, a wake asking the pool now, the clock set to
+  the pool's and the profile restarted when that does not hold, the clock
+  checked while a resize waits for tasks and beside an unreadable
+  `colima.yaml`, a work root swapped for a link into the home directory
+  keeping a stopped VM stopped and a set directory swapped for a link
+  keeping a running one from being stopped for a resize ("needs a person");
+  and the count after a start (a docker stub for the engine in the VM):
+  `run/capacity.json` rewritten with the VM's totals and the Rosetta lane,
+  unchanged when nothing changed, the lane left out under `emulate = []`; a
+  release's x86_64 image the VM's store lacks: no smoke run, the lane kept as
+  the file had it (none added to a file without it) and a resize's new CPUs
+  written; the native build image it lacks: no pull, no run, the file as it
+  was. `run/agent_tests.rs` (`on_a_mac`) — the agent with its
+  keeper: a wake polls the pool at once (no poll due) and the VM's clock is
+  set to the `Date` of that answer on the same tick; a Mac whose clock the
+  pool refuses (a 401 for the signed host state) hearing the pool's time
+  from the refusal, said to need a person and its VM held to the Mac's; a
+  wake asking the pool's edge for the public address at once, which reaches
+  `etc/dispatcher.env` on that tick; a start that ended
+  counts the capacity again, and a count that did not happen is tried again
+  an hour later, not every tick; the applied release's minimum holds the
+  size.
+  `capacity/tests.rs` — a Mac's facts, one function for install, `capacity`
+  and the count: the VM's level and `MemAvailable`, the Rosetta lane after
+  its smoke run (the emulated lane's own, #338: one lane like a binfmt one,
+  `page16k: false`, nothing in `held_lanes`), none under `emulate = []` or
+  when it fails, and Docker Desktop's VM at `vm-shared` only. `run/compose.rs` — a running task is any
+  container labelled `com.omarchy.task` (a task with the `direct` exception
+  has no sidecar). `run/pool.rs` — the answer's `Date` header read (the host
+  state's, whatever its status);
+  `enroll.rs` — `token` and `enroll` find a Mac's set directory from
+  agent.toml.
+- `install/tests.rs` — preflight and install on a played Mac (`os` macos;
+  launchctl, sysctl, route and a Colima that saves its profile played; a
+  docker stub for the engine in the VM whose egress probe answers as Colima's
+  NAT until the task firewall went in): the VM sized and started with only
+  its three mounts, Colima given the pinned docker CLI on its `PATH` (a
+  played Colima refuses to start without it, as on a Mac with only Colima
+  and Lima from Homebrew) and the agent's `DOCKER_CONFIG`, the task firewall
+  put in after the start and before the probe (one that does not apply:
+  blocked, and the probe shows a task reaching the Mac's router and the Mac
+  at `192.168.5.2`), `MemAvailable` read inside it, isolation `vm`, the
+  envelope's `[vm]` and two sockets read back by the run loop and the lint;
+  a Mac below the minimum or a directory under `~` starting no VM; the three
+  directories missing (Colima installed by hand): preflight says install
+  makes them and starts nothing, install makes them 0700 and starts the VM,
+  one whose parent this user cannot write refused; prep-mac.sh's root made
+  first by another account as a link (preflight and install refuse it,
+  make nothing in it and start no VM) or owned by another uid (played with
+  `chown` when the tests run as root); preflight never
+  restarting a running VM that differs, install refusing to while a task
+  runs in it and counting the action before the stop; `--rosetta`,
+  `--no-rosetta` and agent.toml's `[vm] rosetta` carried over a repair; over
+  SSH with no GUI login, the Terminal instruction and nothing written; a
+  saved profile that mounts `~` or forwards the SSH agent restarted, one of
+  another VM type refused; the home directory visible in the VM refused;
+  Rosetta's lane after its smoke run, off when it fails; Docker Desktop
+  taken as `vm-shared` only with `--dedicated`, no firewall put in it (its
+  probe decides), a shared `~/.ssh` refused though `~` is not, and a given
+  socket that does not answer told to start Docker Desktop or OrbStack or
+  drop `--socket`; install making the set directory it was given, never the
+  default (Linux and a Mac); the LaunchAgent written and bootstrapped in
+  `gui/<uid>` (its plist checked by `plutil -lint` on the macOS runner), a
+  failed bootstrap's Terminal line, and uninstall; `etc/dispatcher.env` in
+  the Mac's set directory with the token, the Mac's addresses (a played
+  `ifconfig`, no `/proc/net`) and the public one the probe task in the VM
+  saw, and the secrets directory the VM mounts.
+- `lint/tests.rs` — on a Mac every bind source lies under a directory the VM
+  mounts (`vm_mount`); `run/selfupdate_tests.rs` — the watchdog ends a new
+  agent still behind its shut gate 30 s past its deadline, and the next start
+  rolls it back (launchd restarts only on exit); its first look after a
+  sleep (a wall-clock gap between two looks) starts the count again instead
+  of ending a loop whose first tick after the wake is a slow one; under
+  launchd (`XPC_SERVICE_NAME`) a refused agent.toml is waited on until it
+  changes, not said every 10 s.
+- `run/exec.rs` — a start that meets `ETXTBSY` ("Text file busy": a binary
+  just written — a self-update's new agent, a pinned tool, a test's stub —
+  still open in a child that another thread forked and that has not exec'd
+  yet) tried again for about 2 s, 2 ms apart and doubling, and any other
+  error returned at once; on Linux, a script still open for writing starts
+  once it is closed. Its callers: `exec::run` and `Background`,
+  `capacity::probe::run`, install's commands and `ifconfig`; the stubs a shell
+  starts (the task firewall's iptables and systemctl, the guards' docker,
+  curl and jq) are written from a child process (`exec::write_stub`), where
+  no fork of the multithreaded test process can hold them.
+- `bash tests/prep-mac.sh` (CI) — `factory/host/prep-mac.sh` against stubs
+  (uname, id, sw_vers, brew, stat), under dash: Colima and Lima only, the
+  three directories 0700, nothing changed on a second run, `--dry-run`, and
+  refusals (root, Linux, Intel, macOS 12, no Homebrew, a root under or
+  holding `~`, relative, with `:`, another user's, a link); shellcheck.
+- `python3 tests/host-bundle.py` — the release pins the Darwin docker CLI and
+  compose plugin at the worker image's versions; `worker/test/host-enroll.test.ts`
+  — a Mac enrolls at `vm` with its Rosetta lane, which the host's page shows,
+  and reports `vm-shared`.
+
+What only the laptop shows — a reboot, a sleep of at least 30 minutes, a
+release, a broken agent's release, an x86_64 build through Rosetta, an SSH
+session with nobody logged in — is the runbook's *Installing a Mac*
+([A new maintainer host](/docs/runbook#a-new-maintainer-host)), followed by hand.
 
 ## The agent without a key
 

@@ -19,7 +19,11 @@ pub(crate) struct Values {
     pub set_dir: PathBuf,
     pub work_root: PathBuf,
     pub secrets_dir: PathBuf,
+    /// The engine's socket for the agent's CLI (`set.socket_cli`), and the one the
+    /// dispatcher bind-mounts (`set.socket_mount`): the same on Linux; on a Mac the VM's
+    /// own `/var/run/docker.sock`.
     pub socket: PathBuf,
+    pub socket_mount: PathBuf,
     pub task_subnets: String,
     /// A rootful daemon behind the socket: the owner acknowledges root-equivalence by
     /// confirming the envelope (or with `--yes`).
@@ -35,6 +39,21 @@ pub(crate) struct Values {
     /// (`[]` turns emulated lanes off; absent reads as allowed). Written only where the
     /// file has none: an owner's own value, `[]` above all, is never replaced.
     pub emulate: Option<Vec<String>>,
+    /// A Mac's VM (#320): `[vm]`.
+    pub vm: Option<Vm>,
+}
+
+/// `[vm]` on a Mac (#320, design v2 §19.2): the runtime the engine is in — `colima` (the
+/// `omarchy` profile the agent starts, stops and sizes from the envelope's `max_cpus` and
+/// `max_mem_gb`), or `docker-desktop` / `orbstack` (used because they are here, never
+/// managed) — whether its VM runs `x86_64` through Rosetta, and its disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Vm {
+    pub runtime: &'static str,
+    pub rosetta: bool,
+    pub disk_gb: u32,
+    /// The omarchy VM's size, written as the envelope's caps.
+    pub size: Option<crate::vm::Size>,
 }
 
 /// The default project of the host set (`set.toml`'s `project_default`).
@@ -81,7 +100,7 @@ pub(crate) fn render(
         .or_insert_with(|| Value::String(PROJECT.into()));
     set.insert("driver".into(), Value::String("compose".into()));
     set.insert("socket_cli".into(), path(&v.socket));
-    set.insert("socket_mount".into(), path(&v.socket));
+    set.insert("socket_mount".into(), path(&v.socket_mount));
     set.insert(
         "engine".into(),
         Value::String(if v.rootful { "rootful" } else { "rootless" }.into()),
@@ -107,6 +126,24 @@ pub(crate) fn render(
         env.entry("emulate")
             .or_insert_with(|| Value::Array(e.iter().map(|a| Value::String(a.clone())).collect()));
     }
+    match &v.vm {
+        Some(vm) => {
+            let table = table(&mut t, "vm");
+            table.insert("runtime".into(), Value::String(vm.runtime.into()));
+            if vm.runtime == "colima" {
+                table.insert("profile".into(), Value::String(crate::vm::PROFILE.into()));
+                table.insert("rosetta".into(), Value::Boolean(vm.rosetta));
+                table.insert("disk_gb".into(), Value::Integer(i64::from(vm.disk_gb)));
+            } else {
+                for k in ["profile", "rosetta", "disk_gb"] {
+                    table.remove(k);
+                }
+            }
+        }
+        None => {
+            t.remove("vm");
+        }
+    }
     let body = toml::to_string(&t).map_err(|e| format!("agent.toml: {e}"))?;
     Ok(format!(
         "# The agent's envelope (design v2 §12): written by `omarchy-agent install` and by a\n# person at this host, never by the pool. Narrow it here; widening is yours alone.\n{body}"
@@ -124,8 +161,19 @@ pub(crate) fn set_path(existing: Option<&str>, key: &str) -> Option<PathBuf> {
     set_str(existing, key).map(PathBuf::from)
 }
 
+/// An existing agent.toml's `[<table>].<key>`, as text.
+pub(crate) fn table_str(existing: Option<&str>, table: &str, key: &str) -> Option<String> {
+    let t: Table = toml::from_str(existing?).ok()?;
+    t.get(table)?.get(key)?.as_str().map(str::to_owned)
+}
+
+/// An existing agent.toml's `[<table>].<key>`.
+pub(crate) fn table_value(existing: Option<&str>, table: &str, key: &str) -> Option<Value> {
+    let t: Table = toml::from_str(existing?).ok()?;
+    t.get(table)?.get(key).cloned()
+}
+
 /// An existing agent.toml's `[envelope].<key>`.
 pub(crate) fn envelope_value(existing: Option<&str>, key: &str) -> Option<Value> {
-    let t: Table = toml::from_str(existing?).ok()?;
-    t.get("envelope")?.get(key).cloned()
+    table_value(existing, "envelope", key)
 }

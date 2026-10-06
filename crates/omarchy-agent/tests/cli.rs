@@ -782,3 +782,95 @@ fn capacity_reports_both_disks_on_a_visible_engine_root_and_through_a_probe_cont
     assert!(text(&o).contains("--work-root"), "{}", text(&o));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the_owner_s_lines() {
+    let data = std::env::temp_dir().join(format!(
+        "omarchy-agent-dispatcher-env-cli-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data);
+    let set = data.join("sets/host");
+    std::fs::create_dir_all(set.join("etc")).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let toml = |budget: &str| {
+        format!(
+            "pool = \"https://pkgs.omarchy-pool.org\"\nhost_id = \"h_0123456789\"\nworker_id = \"m1-rack-0a9z\"\n[set]\ndir = \"{}\"\nwork_root = \"/srv/omarchy-pool/host\"\nsecrets_dir = \"/srv/omarchy-pool/host-secrets\"\nsocket_cli = \"/var/run/docker.sock\"\n[envelope]\nallow_socket = true\nrootful_ack = true\ndedicated = true\n{budget}\n",
+            set.display()
+        )
+    };
+    let agent_toml = data.join("agent.toml");
+    std::fs::write(&agent_toml, toml("agent_budget = { calls_per_task = 17 }")).unwrap();
+    std::fs::set_permissions(&agent_toml, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // The public address install's egress probe saw.
+    std::fs::write(
+        data.join("egress.json"),
+        r#"{"public":"198.51.100.20","at":"2026-10-03T00:00:00Z"}"#,
+    )
+    .unwrap();
+    let d = data.display().to_string();
+
+    // What it would write; nothing written.
+    let o = run(&["dispatcher-env", "--data-dir", &d]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    let addresses = out
+        .lines()
+        .find_map(|l| l.strip_prefix("OMARCHY_HOST_ADDRESSES="))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(addresses.split(',').any(|a| a == "198.51.100.20"), "{out}");
+    assert!(
+        out.contains(
+            "\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_TASK=17\n"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("OMARCHY_WORKER_TOKEN"), "{out}");
+    let env = set.join("etc/dispatcher.env");
+    assert!(!env.exists());
+
+    // --write makes no file: there is none before the owner's Confirm.
+    let o = run(&["dispatcher-env", "--data-dir", &d, "--write"]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("no etc/dispatcher.env yet"),
+        "{}",
+        text(&o)
+    );
+    assert!(!env.exists());
+
+    // With the token there: rendered, the token and the owner's line kept, 0600.
+    let token = format!("omw_{}", "0f".repeat(24));
+    std::fs::write(
+        &env,
+        format!("# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={token}\nTZ=UTC\n"),
+    )
+    .unwrap();
+    let o = run(&["dispatcher-env", "--data-dir", &d, "--write"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let written = std::fs::read_to_string(&env).unwrap();
+    assert!(
+        written.contains(&format!(
+            "\n# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={token}\nOMARCHY_HOST_ADDRESSES={addresses}\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_TASK=17\nTZ=UTC\n"
+        )),
+        "{written}"
+    );
+    assert_eq!(
+        std::fs::metadata(&env).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let o = run(&["dispatcher-env", "--data-dir", &d, "--write"]);
+    assert!(text(&o).contains("already says this"), "{}", text(&o));
+
+    // A budget the dispatcher could not take is agent.toml's error, said, and nothing changes.
+    std::fs::write(&agent_toml, toml("agent_budget = { calls_per_task = -1 }")).unwrap();
+    let o = run(&["dispatcher-env", "--data-dir", &d, "--write"]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("calls_per_task must be a whole number"),
+        "{}",
+        text(&o)
+    );
+    assert_eq!(std::fs::read_to_string(&env).unwrap(), written);
+    let _ = std::fs::remove_dir_all(&data);
+}

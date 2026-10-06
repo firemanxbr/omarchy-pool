@@ -11,11 +11,17 @@
 //! (the one it replaces works ten more minutes only, so two fetches in a row would cut
 //! off a running dispatcher). Rotation is `omarchy-agent token`, and the run loop's
 //! (#315).
+//!
+//! The token goes into `etc/dispatcher.env` with what the agent renders beside it
+//! ([`crate::dispatcher_env`], #371): the host's own addresses, and once install wrote
+//! agent.toml, the secrets directory and the agent budget. Both an enrollment and a
+//! rotation render them again; one that keeps its token renders them too.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::dispatcher_env::{self, Envelope, Refresh, Rendered, Sources};
 use crate::host::{self, HostKey, Identity};
 use crate::pool::{shown, Answer, Pool};
 
@@ -23,6 +29,8 @@ use crate::pool::{shown, Answer, Pool};
 /// `${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-agent`).
 #[derive(Debug, Clone)]
 pub struct Paths {
+    /// The data directory: agent.toml, and the public address the host's tasks leave from.
+    pub data: PathBuf,
     /// The host key and `host.json`.
     pub state: PathBuf,
     /// The host set: `etc/dispatcher.env`, `run/capacity.json`.
@@ -32,15 +40,33 @@ pub struct Paths {
 impl Paths {
     pub fn under(data: &Path) -> Self {
         Self {
+            data: data.to_path_buf(),
             state: data.join("state"),
             set: data.join("sets").join("host"),
+        }
+    }
+    /// As installed: the set directory agent.toml names (a Mac's is outside the data
+    /// directory, #320), else the default one.
+    pub fn installed(data: &Path) -> Self {
+        let set = std::fs::read_to_string(data.join("agent.toml"))
+            .ok()
+            .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+            .and_then(|t| t.get("set")?.get("dir")?.as_str().map(PathBuf::from))
+            .filter(|d| crate::lint::is_plain_absolute(d));
+        match set {
+            Some(set) => Self {
+                data: data.to_path_buf(),
+                state: data.join("state"),
+                set,
+            },
+            None => Self::under(data),
         }
     }
     pub fn capacity(&self) -> PathBuf {
         self.set.join("run").join("capacity.json")
     }
     pub fn dispatcher_env(&self) -> PathBuf {
-        self.set.join("etc").join("dispatcher.env")
+        dispatcher_env::path_in(&self.set)
     }
 }
 
@@ -53,6 +79,8 @@ pub struct Options {
     /// How long to wait for the owner's Confirm, and how often to ask.
     pub wait: Duration,
     pub poll: Duration,
+    /// Where the host's own addresses are read (`/proc/net`).
+    pub sources: Sources,
 }
 
 #[derive(Debug)]
@@ -177,18 +205,59 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
     };
     say(out, &format!("host key fingerprint: {}", key.fingerprint()));
     let state = wait_for_confirm(o, &key, &pool, &id, out)?;
-    if !state["token"].is_null() && holds_token(&o.paths.dispatcher_env()) {
+    let env = o.paths.dispatcher_env();
+    if !state["token"].is_null() && holds_token(&env) {
         say(
             out,
             &format!(
                 "host {} keeps its worker token ({}); `omarchy-agent token` rotates it",
                 id.host,
-                o.paths.dispatcher_env().display()
+                env.display()
             ),
         );
+        let r = rendered(o, out);
+        if dispatcher_env::refresh(&env, &r)? == Refresh::Written {
+            said_rendered(out, &env, &r);
+        }
         return Ok(());
     }
     fetch_token(o, &key, &pool, &id, out)
+}
+
+/// What the dispatcher's env file gets beside the token: the host's addresses now and,
+/// once install wrote agent.toml, its secrets directory and agent budget. An agent.toml
+/// that does not read, or names a secrets directory the dispatcher would refuse, leaves
+/// those lines as they are, and says why: the token never waits on it.
+fn rendered(o: &Options, out: &mut impl Write) -> Rendered {
+    let envelope = match Envelope::of_data_dir(&o.paths.data) {
+        None => None,
+        Some(Ok(e)) if dispatcher_env::dispatcher_path(&e.secrets_dir) => Some(e),
+        Some(Ok(e)) => {
+            say(out, &format!("the secrets directory {} is not a path the dispatcher takes (letters, digits and / . _ - +); it is not written beside the token", e.secrets_dir.display()));
+            None
+        }
+        Some(Err(e)) => {
+            say(out, &format!("{e}: the secrets directory and the agent budget beside the token are left as they were"));
+            None
+        }
+    };
+    Rendered::now(&o.sources, &o.paths.data, envelope)
+}
+
+fn said_rendered(out: &mut impl Write, env: &Path, r: &Rendered) {
+    let addresses = dispatcher_env::addresses::joined(&r.addresses);
+    say(
+        out,
+        &format!(
+            "{} (0600) names this host's own addresses for every task's egress to refuse: {}",
+            env.display(),
+            if addresses.is_empty() {
+                "none found"
+            } else {
+                addresses.as_str()
+            }
+        ),
+    );
 }
 
 /// Whether the pool says this host is retired: its signed state refused with `retired`.
@@ -417,13 +486,10 @@ pub fn fetch_token(
         .ok_or("the answer carries no worker token (omw_ and 48 hex digits)")?;
     let env = o.paths.dispatcher_env();
     host::private_dir(env.parent().ok_or("no etc directory")?)?;
-    host::replace(
-        &env,
-        format!(
-            "# The host worker token (omarchy-agent, #321): the dispatcher's only, rotated every 30 days.\n# worker: {worker}\nOMARCHY_WORKER_TOKEN={token}\n"
-        )
-        .as_bytes(),
-    )?;
+    // The rest of the file is rendered again (#371): a rotation keeps the host's addresses,
+    // the secrets directory, the agent budget and the owner's own lines.
+    let r = rendered(o, out);
+    dispatcher_env::write_token(&env, worker, token, &r)?;
     say(
         out,
         &format!(
@@ -433,15 +499,25 @@ pub fn fetch_token(
             shown(a.json["rotate_after"].as_str().unwrap_or("?"))
         ),
     );
+    said_rendered(out, &env, &r);
     Ok(())
 }
 
 /// The machine's name as the pool takes it: a DNS label's characters, at most 63.
 fn hostname() -> String {
+    // A Mac has neither file and exports no HOSTNAME: uname's node name (#320).
     let raw = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .or_else(|_| std::fs::read_to_string("/etc/hostname"))
         .ok()
         .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| {
+            Some(
+                rustix::system::uname()
+                    .nodename()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        })
         .unwrap_or_default();
     let name: String = raw
         .trim()
@@ -460,6 +536,36 @@ fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host's interfaces, from a fixture: a home LAN, docker's bridges, IPv6.
+    fn fixture() -> Sources {
+        Sources {
+            proc_net: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home"),
+            ifconfig: None,
+        }
+    }
+
+    #[test]
+    fn the_installed_set_directory_is_the_one_agent_toml_names() {
+        // A Mac's set directory is outside the data directory (#320): `token` and `enroll`
+        // write dispatcher.env there, where the VM mounts it.
+        let data = crate::run::state::tempdir();
+        assert_eq!(Paths::installed(&data).set, data.join("sets/host"));
+        std::fs::write(
+            data.join("agent.toml"),
+            "[set]\ndir = \"/Users/Shared/omarchy-pool/set\"\n",
+        )
+        .unwrap();
+        let p = Paths::installed(&data);
+        assert_eq!(
+            p.dispatcher_env(),
+            Path::new("/Users/Shared/omarchy-pool/set/etc/dispatcher.env")
+        );
+        assert_eq!(p.state, data.join("state"));
+        // One that is not a plain absolute path is not followed.
+        std::fs::write(data.join("agent.toml"), "[set]\ndir = \"../elsewhere\"\n").unwrap();
+        assert_eq!(Paths::installed(&data).set, data.join("sets/host"));
+    }
 
     #[test]
     fn a_token_is_ome_and_48_hex_digits() {
@@ -608,6 +714,7 @@ mod tests {
             token: Some(format!("ome_{}", "0".repeat(48))),
             wait: Duration::from_secs(5),
             poll: Duration::from_millis(10),
+            sources: fixture(),
         };
         // The machine was host h_0000000001 on this pool, with its key and a capacity report.
         host::private_dir(&o.paths.state).unwrap();
@@ -648,6 +755,130 @@ mod tests {
         let (key, _, _) = open(&o).unwrap();
         assert_ne!(key.public_b64u(), old_key);
         assert!(holds_token(&o.paths.dispatcher_env()));
+        // Beside the token, the host's own addresses (#371); no agent.toml yet, so no
+        // secrets directory and no budget.
+        let env = std::fs::read_to_string(o.paths.dispatcher_env()).unwrap();
+        assert!(
+            env.contains("\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,2001:db8:1:2::/64,"),
+            "{env}"
+        );
+        assert!(!env.contains("OMARCHY_SECRETS_DIR"), "{env}");
+        assert!(
+            said.contains(
+                "names this host's own addresses for every task's egress to refuse: 10.8.0.2,"
+            ),
+            "{said}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_rotation_keeps_the_addresses_and_the_owner_s_lines_and_an_enrollment_renders_them_again() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let d = std::env::temp_dir().join(format!("omarchy-agent-rotate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let n = AtomicUsize::new(0);
+        let pool = pool_scripted(move |method, path, _, _| match (method, path) {
+            ("GET", "/api/v1/hosts/self/state") => (
+                200,
+                r#"{"status":"active","owner":"m1","token":"held"}"#.into(),
+            ),
+            ("POST", "/api/v1/hosts/self/token") => {
+                let i = n.fetch_add(1, Ordering::Relaxed);
+                (
+                    200,
+                    serde_json::json!({"worker": "m1-rack-0a9z", "token": format!("omw_{:048x}", i + 1), "rotate_after": "later"})
+                        .to_string(),
+                )
+            }
+            _ => (404, "{}".into()),
+        });
+        let o = Options {
+            pool: None,
+            paths: Paths::under(&d),
+            token: None,
+            wait: Duration::from_secs(5),
+            poll: Duration::from_millis(10),
+            sources: fixture(),
+        };
+        host::private_dir(&o.paths.state).unwrap();
+        HostKey::load_or_create(&o.paths.state.join(host::KEY_FILE)).unwrap();
+        Identity {
+            pool,
+            host: "h_0123456789".into(),
+        }
+        .write(&o.paths.state)
+        .unwrap();
+        // The envelope install wrote; the token of #321's agent, and an owner's own line.
+        std::fs::write(
+            d.join("agent.toml"),
+            "[set]\nsecrets_dir = \"/srv/omarchy-pool/host-secrets\"\n[envelope]\nagent_budget = { calls_per_day = 900 }\n",
+        )
+        .unwrap();
+        let env = o.paths.dispatcher_env();
+        host::private_dir(env.parent().unwrap()).unwrap();
+        let first = format!("omw_{}", "0f".repeat(24));
+        std::fs::write(
+            &env,
+            format!("# The host worker token (omarchy-agent, #321): the dispatcher's only, rotated every 30 days.\n# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={first}\nTZ=UTC\n"),
+        )
+        .unwrap();
+
+        let mut out = Vec::new();
+        rotate(&o, &mut out).unwrap();
+        let text = std::fs::read_to_string(&env).unwrap();
+        let token = format!("omw_{:048x}", 1);
+        for want in [
+            format!("\n# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={token}\n"),
+            "\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n".into(),
+            "\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_DAY=900\nTZ=UTC\n".into(),
+        ] {
+            assert!(text.contains(&want), "{want:?} in:\n{text}");
+        }
+        assert!(!text.contains(&first), "{text}");
+        assert_eq!(
+            std::fs::metadata(&env).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        // The owner narrows the budget; enrolling again keeps the token and renders the rest.
+        std::fs::write(
+            d.join("agent.toml"),
+            "[set]\nsecrets_dir = \"/srv/omarchy-pool/host-secrets\"\n[envelope]\nagent_budget = { calls_per_day = 800 }\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        run(&o, &mut out).unwrap();
+        let again = std::fs::read_to_string(&env).unwrap();
+        assert_eq!(
+            again,
+            text.replace("CALLS_PER_DAY=900", "CALLS_PER_DAY=800")
+        );
+        assert!(String::from_utf8_lossy(&out).contains("keeps its worker token"));
+
+        // An agent.toml that does not read never holds the token back: the rest stays.
+        std::fs::write(
+            d.join("agent.toml"),
+            "[envelope]\nagent_budget = { calls_per_dai = 1 }\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        rotate(&o, &mut out).unwrap();
+        let third = std::fs::read_to_string(&env).unwrap();
+        assert!(
+            third.contains(&format!("OMARCHY_WORKER_TOKEN=omw_{:048x}\n", 2)),
+            "{third}"
+        );
+        assert!(
+            third.contains("OMARCHY_AGENT_CALLS_PER_DAY=800\n"),
+            "{third}"
+        );
+        assert!(
+            String::from_utf8_lossy(&out).contains("left as they were"),
+            "{}",
+            String::from_utf8_lossy(&out)
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -668,6 +899,7 @@ mod tests {
             token: Some(format!("ome_{}", "0".repeat(48))),
             wait: Duration::from_secs(5),
             poll: Duration::from_millis(10),
+            sources: fixture(),
         };
         host::private_dir(&o.paths.state).unwrap();
         let key = HostKey::load_or_create(&o.paths.state.join(host::KEY_FILE))
@@ -715,6 +947,7 @@ mod tests {
                 token: None,
                 wait: Duration::from_secs(0),
                 poll: Duration::from_millis(10),
+                sources: fixture(),
             };
             host::private_dir(&o.paths.state).unwrap();
             let key = HostKey::create_fresh(&o.paths.state.join(host::KEY_FILE)).unwrap();
@@ -742,6 +975,7 @@ mod tests {
             token: None,
             wait: Duration::from_secs(0),
             poll: Duration::from_millis(10),
+            sources: fixture(),
         };
         let first = open(&o).unwrap().0.public_b64u();
         assert_ne!(open(&o).unwrap().0.public_b64u(), first);
@@ -796,6 +1030,7 @@ mod tests {
             token: None,
             wait: Duration::from_secs(0),
             poll: Duration::from_millis(10),
+            sources: fixture(),
         };
         let mut out = Vec::new();
         let e = run(&o, &mut out).unwrap_err().to_string();

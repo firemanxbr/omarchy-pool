@@ -1,7 +1,11 @@
 //! `omarchy-agent run` and its companions `status`, `round` and `logs` (design v2 §15,
 //! §16.1, §16.2, §16.4, §18.4; #315): the run loop that rolls the host bundle's one
 //! service, the dispatcher, out to this host — verify, lint, plan, pull, replace, guard,
-//! commit or revert — on the pinned compose driver.
+//! commit or revert — on the pinned compose driver. At its start and every minute it also
+//! renders the dispatcher's `etc/dispatcher.env` beside the token (#371,
+//! [`crate::dispatcher_env`]): the host's addresses when they change (the public one asked
+//! of the pool's edge every hour), agent.toml's secrets directory and budget as agent.toml
+//! says them now; a file that changed starts a round like any input.
 //!
 //! Seams left for later issues, each named where it sits:
 //! - install, preflight and runtime discovery (#317, `crate::install`): agent.toml (with
@@ -17,7 +21,16 @@
 //! - self-update (#316, [`selfupdate`]): a bundle with a higher agent updates the agent
 //!   first, upward only, behind a health gate. A release's pinned docker and compose
 //!   roll forward only: they are switched before its round and not reverted with it;
-//! - the host state (#344) replaces `follow.latest` as the target.
+//! - the host state (#344, [`pool`]) is the target, signed with the host key: from this
+//!   agent on `follow.latest` is read only from a pool from before #344, whose state
+//!   names no release (a rollback below it). It carries the open Updates and the host
+//!   orders ([`orders`]: `retire-legacy` and `reconcile-now`; P4 adds the rest and the
+//!   settings), whose answers ride the host report ([`report`]).
+//!
+//! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
+//! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
+//! agent only when it exits, so the progress watchdog ([`cli`]) also ends a self-update's
+//! candidate that hangs past its health gate's deadline.
 
 pub mod config;
 pub mod state;
@@ -26,15 +39,18 @@ pub(crate) mod compose;
 pub(crate) mod driver;
 pub(crate) mod exec;
 pub(crate) mod journal;
+pub(crate) mod orders;
 pub(crate) mod pool;
+pub(crate) mod report;
 pub(crate) mod rollout;
 pub(crate) mod selfupdate;
 pub(crate) mod target;
 pub(crate) mod tools;
 pub(crate) mod trust;
+pub(crate) mod vm;
 
 mod agent;
-mod cli;
+pub(crate) mod cli;
 
 pub use cli::{logs, round, run, self_test, status};
 

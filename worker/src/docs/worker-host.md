@@ -146,15 +146,24 @@ to copy.
 4. The agent fetches the host worker token with a request signed by the host
    key and writes it to `etc/dispatcher.env` (0600) for the dispatcher. It
    rotates the token every 30 days; the one it replaces works ten more
-   minutes, so only the dispatcher is recreated and its tasks run on.
+   minutes, so only the dispatcher is recreated and its tasks run on. Beside
+   the token the agent writes the host's own addresses for every task's
+   egress to refuse (`OMARCHY_HOST_ADDRESSES`), and once `agent.toml` is
+   there, the secrets directory and the envelope's agent budget (#371); a
+   rotation keeps them, and the lines you add to the file yourself stay.
 5. Only then does it write `agent.toml` with the host and its registration,
    take the agent keys, write the systemd --user unit, enable linger and start
-   the agent, whose first round starts the dispatcher.
+   the agent, whose first round starts the dispatcher (on a Mac, the
+   LaunchAgent: [A Mac as a maintainer host](#a-mac-as-a-maintainer-host)).
 
 **Every task on a host is fenced in (#336).** Each task runs on its own
 internal network: it reaches public addresses only, through its own egress
 sidecar (cloud metadata, the host's LAN and every other private range are
-refused, judged by the address a name resolves to), never another task. A
+refused, judged by the address a name resolves to, and so are the host's own
+addresses: every address of its interfaces and the public one its tasks leave
+from, which the agent writes into `etc/dispatcher.env` and keeps current — it
+reads the interfaces every minute and asks the pool's edge for the public
+address every hour, and within minutes when it did not answer), never another task. A
 task that needs a model — a draft, a review rebuild, an audit — gets its own
 agent sidecar, which mounts `OMARCHY_SECRETS_DIR/agent.env` read-only; no two
 tasks share one, and the dispatcher itself never holds the key. Per task a
@@ -163,7 +172,12 @@ sidecar makes at most `OMARCHY_AGENT_CALLS_PER_TASK` calls (200),
 `OMARCHY_AGENT_MINUTES_PER_TASK` (120); the host makes at most
 `OMARCHY_AGENT_CALLS_PER_DAY` calls a day (5000, UTC, the probe's one call
 each run included), after which it takes no model work until the next
-day. The sidecars run as root with no capabilities (no `CAP_DAC_OVERRIDE`),
+day. To set them, give `agent.toml`'s envelope an `agent_budget` (any of
+`calls_per_task`, `tokens_per_task`, `minutes_per_task`, `calls_per_day`,
+each a whole number from 1): within a minute the agent writes them into
+`etc/dispatcher.env` (`omarchy-agent dispatcher-env --write` does it at once)
+and the dispatcher is recreated with them; a key you leave out keeps its
+default. The sidecars run as root with no capabilities (no `CAP_DAC_OVERRIDE`),
 so `agent.env` must be owned by the uid their root maps to (root on a rootful
 engine, the maintainer on a rootless one) at 0600, or be 0644 inside the 0700
 `etc/`; otherwise the probe fails and the host takes no model work (#317's
@@ -197,7 +211,8 @@ agent turns on an emulated lane for it when your envelope allows it
 the kernel has qemu's binfmt handler with the `F` flag (`prep-root.sh`
 installs it) and the release's build image of that architecture starts
 there; otherwise it says why the lane is held (`held_lanes` in
-`run/capacity.json`) and the native lane runs on. An emulated build is
+`run/capacity.json`) and the native lane runs on (a Mac's x86_64 lane is
+Rosetta's in its VM, below). An emulated build is
 slower and shares the host's units; on a 16K-page kernel the lane stays on,
 and a build whose toolchain cannot start under qemu goes back to the queue
 for a native host without spending its attempt.
@@ -207,7 +222,24 @@ isolation level, the release it applied, the pool cap, the large task it
 reserves for when it does, and its leases with their lane and units. Every later call of
 the host to the pool is signed with its key (`Omarchy-Host`); the pool
 refuses a replay, a changed body and a clock more than 120 s off
-([Security model](/docs/security-model#maintainer-hosts)).
+([Security model](/docs/security-model#maintainer-hosts)). The agent asks
+for the host's state every two minutes or so — the release to run, and the
+host orders (#344) — and reports what it did.
+
+**Host orders** (#344) are given on the host's page. **Reconcile now** (its
+owner or any maintainer) makes its agent run a round at its next poll.
+**Retire legacy set** is for a host installed beside an older set with
+`--legacy` (the Studio's role containers, or an `omarchy-worker` set): once
+that set has been drained as the way back for 14 days, its owner retires it,
+with a passkey. The agent writes the `.omarchy-agent` marker into the set's
+directory, then stops and removes that compose project's containers and
+networks — nothing else — so `rollout.sh`, `setup.sh`, `omarchy-worker` and
+the updater refuse there from then on. The page shows the set, its state and
+its directory before you press it (and why it would be refused, such as a
+directory the agent's user does not own: the button stays greyed until the
+agent's next report says it is fixed), and each order with its agent's
+answer after
+([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
 
 To stop a host, use its page, `/hosts/<id>` (#322). **Suspend** (its
 owner or any maintainer, with a reason) stops its claims at once and
@@ -221,3 +253,53 @@ a drain you made is yours alone to lift. If a pull request takes you off
 their running tasks finish; listed again, **Resume my hosts** on your
 page brings all of them back at once
 ([Security model](/docs/security-model#stopping-a-host)).
+
+## A Mac as a maintainer host
+
+A maintainer's Mac (Apple silicon, macOS 13 or later) can be a pool host
+like any other (#320, design v2 §19.2, §19.3, §21.3): the same agent,
+enrollment, protocol and release stream. "Native macOS host" means a native
+macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
+**`omarchy` Colima profile**: no Linux container runs on Darwin itself.
+
+- **The VM is dedicated** (isolation `vm`): a container escape lands in the
+  VM, not in your account. It mounts exactly three directories, each at its
+  own path — the work root (writable), the secrets directory and the set
+  directory (read-only), under `/Users/Shared/omarchy-pool` by default — and
+  nothing of your home directory: no `~/.ssh`, no Keychain files, no
+  forwarded SSH agent. Preflight refuses any of the three under `~`, or
+  below `/Users/Shared` another account's or a link, and checks, from a
+  container, that the VM sees them and not your home; the agent checks the
+  paths again before every start of the VM.
+- **Sized from capacity.** The VM gets the envelope's `max_cpus` and
+  `max_mem_gb`, by default half of the Mac: a 16-core, 64 GB Mac gives it 8
+  CPUs and 32 GB, which are 7 units (3 builds and the job unit). A Mac that
+  cannot give it the release's minimum (4 CPUs, 8 GB) does not join. The
+  agent starts, stops and sizes the profile itself, at most once every ten
+  minutes and six times a day, and never restarts it for a new size while a
+  task runs; after a resize it reports the VM's new size to the pool.
+- **Tasks reach only the internet.** The agent puts the same task firewall
+  in the VM as on a Linux host: a task reaches no address of your LAN, your
+  router or the Mac itself, which preflight's egress probe checks.
+- **An x86_64 lane through Rosetta.** With Rosetta 2 installed the VM runs
+  with `--vz-rosetta` (4K pages): x86_64 builds run on a lane that reports
+  `via: rosetta`, faster than qemu.
+- **A LaunchAgent is login-scoped.** The agent starts at your login, again
+  after a reboot once you log in, and after the Mac wakes; a headless Mac
+  sitting at the login window after a boot runs no agent, and that is not
+  supported. While the Mac sleeps it claims nothing: running tasks' leases
+  expire and the pool requeues them, as on any host that goes away. After a
+  wake the agent holds the VM's clock to the pool's, so tasks that run on
+  keep valid job tokens.
+- **Docker Desktop and OrbStack** are never installed by the agent; one that
+  is already there may be used (isolation `vm-shared`), only with its home
+  mount removed and `--dedicated`, your word that nothing else runs in it:
+
+| Runtime | Terms | The agent's use |
+|---|---|---|
+| Colima (and Lima) | MIT | the default: installed by `factory/host/prep-mac.sh` from Homebrew, driven by the agent |
+| Docker Desktop | free only for personal use, education, non-commercial open source, or companies under 250 employees **and** under US$10M revenue; government must pay | used if present (when Colima is not installed, or with `--socket`), never installed; `vm-shared` |
+| OrbStack | a paid licence for commercial, freelance, non-profit and government use | used if present, as Docker Desktop, never installed; `vm-shared` |
+
+The runbook's [A new maintainer host](/docs/runbook#a-new-maintainer-host),
+under *Installing a Mac*, has the commands.

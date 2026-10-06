@@ -34,7 +34,10 @@
 //! [`emulation`] (#338, design v2 §7.5) adds the foreign architecture's lane to `lanes`
 //! when the envelope allows it, binfmt is there and the smoke run passes — on 16K pages
 //! too (D33) — and says why it is held otherwise (`held_lanes`); the native lane never
-//! depends on it.
+//! depends on it. On a Mac (#320) the binfmt table is the VM's, which the agent does not
+//! read: [`probe::in_mac_vm`] puts the `x86_64` lane through Rosetta into the same lanes
+//! after the same smoke run, and says why it is off in install's notes and the run loop's
+//! journal rather than in `held_lanes`.
 
 pub mod emulation;
 pub mod probe;
@@ -67,6 +70,22 @@ pub enum Isolation {
     User,
     /// Task root mapped away from the daemon's user (`userns-remap`).
     Subuid,
+    /// macOS: the dedicated `omarchy` Colima VM, which mounts only the work root, the
+    /// secrets directory and the set directory (#320): an escape lands in the VM.
+    Vm,
+    /// macOS: Docker Desktop's or `OrbStack`'s VM, shared with the person's own containers
+    /// and mounting the home directory by default; used if present, never installed.
+    #[serde(rename = "vm-shared")]
+    VmShared,
+}
+
+/// The VM a macOS engine runs in (#320, design v2 §19.2, §19.3), as install found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmKind {
+    /// The `omarchy` Colima profile the agent starts, stops and sizes (M7).
+    Dedicated,
+    /// Docker Desktop or `OrbStack`.
+    Shared,
 }
 
 /// Whether the runtime enforces the hard limits every task gets (D32).
@@ -123,6 +142,9 @@ pub struct AgentToml {
     pub caps: Caps,
     pub work_root: Option<String>,
     pub socket_cli: Option<String>,
+    /// A Mac's VM (#320, `[vm]`): its runtime (`colima`, `docker-desktop`, `orbstack`) and
+    /// whether it runs `x86_64` through Rosetta. The envelope's `emulate` is `caps.emulate`.
+    pub vm: Option<(String, bool)>,
 }
 
 impl AgentToml {
@@ -133,6 +155,13 @@ impl AgentToml {
             set: SetPart,
             #[serde(default)]
             envelope: EnvelopePart,
+            vm: Option<VmPart>,
+        }
+        #[derive(Deserialize)]
+        struct VmPart {
+            runtime: String,
+            #[serde(default)]
+            rosetta: bool,
         }
         #[derive(Deserialize, Default)]
         struct SetPart {
@@ -187,6 +216,7 @@ impl AgentToml {
             },
             work_root: f.set.work_root,
             socket_cli: f.set.socket_cli,
+            vm: f.vm.map(|v| (v.runtime, v.rosetta)),
         })
     }
 }
@@ -349,6 +379,10 @@ impl Capacity {
     pub fn isolation(&self) -> Isolation {
         self.isolation
     }
+    /// The emulated lanes, after the native one (#338; a Mac's Rosetta lane, #320).
+    pub fn emulated(&self) -> &[emulation::Emulated] {
+        &self.emulated
+    }
     pub fn limits(&self) -> Limits {
         self.limits
     }
@@ -411,8 +445,10 @@ impl Capacity {
     }
 }
 
-/// One architecture the host runs: `native`, or `emulated` with how (`via`: `qemu`,
-/// `rosetta`) and whether the kernel's pages are larger than the guest's (`page16k`).
+/// One architecture the host runs: `native`, or `emulated` with how (`via`: `qemu`, or
+/// `rosetta` — a Linux VM's binfmt handler, or a Mac's Colima VM started with
+/// `--vz-rosetta`, #320) and whether the kernel's pages are larger than the guest's
+/// (`page16k`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Lane {
     pub arch: String,
@@ -540,7 +576,7 @@ pub fn now() -> String {
 }
 
 /// Seconds since the epoch as `YYYY-MM-DDTHH:MM:SSZ` (civil from days, H. Hinnant).
-fn utc(secs: u64) -> String {
+pub(crate) fn utc(secs: u64) -> String {
     let (days, rem) = (secs / 86_400, secs % 86_400);
     let z = days + 719_468;
     let era = z / 146_097;

@@ -15,8 +15,8 @@ use crate::verify::{BundleOutcome, Rejection, StatementOutcome};
 use crate::version::Release;
 
 use super::agent::Verifier;
-use super::driver::{Answer, Driver, Exit, Project, PullState, Unit};
-use super::pool::{Follow, Net, Pool, Relayed};
+use super::driver::{Answer, Driver, Exit, Foreign, Project, PullState, Unit};
+use super::pool::{Follow, HostState, Net, Order, OrderKind, Pool, Relayed};
 
 // ---------------------------------------------------------------------------------------
 // The engine.
@@ -46,6 +46,10 @@ pub(crate) struct Container {
     pub saved_leases: bool,
     pub readopted: usize,
     pub started_at: i64,
+    /// compose's working directory label (a legacy project's container, #344).
+    pub working_dir: String,
+    /// The agent's host label: a task's, or a container that claims a host and a project.
+    pub agent_host: String,
 }
 
 #[derive(Default)]
@@ -59,6 +63,8 @@ pub(crate) struct EngineState {
     pub pull_fails: bool,
     pull_left: Option<u32>,
     pub removed_images: Vec<String>,
+    /// Networks: (id, compose project, used by a container that stays).
+    pub networks: Vec<(String, String, bool)>,
     next: u64,
 }
 
@@ -91,8 +97,49 @@ impl EngineState {
             saved_leases: false,
             readopted: 0,
             started_at: at,
+            working_dir: String::new(),
+            agent_host: "h_0123456789".into(),
         });
         id
+    }
+
+    /// A container of another compose project — the legacy set's (#344) — running, made
+    /// by compose in `dir`.
+    pub fn start_foreign(&mut self, project: &str, service: &str, dir: &str) -> String {
+        let id = self.id();
+        let at = self.clock;
+        self.containers.push(Container {
+            id: id.clone(),
+            project: project.into(),
+            service: service.into(),
+            status: "running".into(),
+            restarts: 0,
+            config_hash: String::new(),
+            release: String::new(),
+            behavior: Behavior::Good,
+            exits: Vec::new(),
+            ready_at: 0,
+            saved_leases: false,
+            readopted: 0,
+            started_at: at,
+            working_dir: dir.into(),
+            agent_host: String::new(),
+        });
+        id
+    }
+
+    /// A network of compose project `project`; `used` by a container of another project.
+    pub fn add_network(&mut self, project: &str, used: bool) -> String {
+        let id = self.id();
+        self.networks.push((id.clone(), project.into(), used));
+        id
+    }
+
+    pub fn of_project(&self, project: &str) -> Vec<&Container> {
+        self.containers
+            .iter()
+            .filter(|c| c.project == project)
+            .collect()
     }
 
     /// The pool's restart order (#277): the dispatcher exits 75, the engine restarts it,
@@ -341,6 +388,8 @@ impl Driver for FakeDriver {
                 saved_leases: false,
                 readopted: tasks,
                 started_at: at,
+                working_dir: p.dir.display().to_string(),
+                agent_host: label(p, "org.omarchy-pool.agent.host"),
             });
         }
         Answer::Yes(())
@@ -387,6 +436,74 @@ impl Driver for FakeDriver {
         self.0.borrow_mut().removed_images.push(image.to_owned());
         Answer::Yes(())
     }
+
+    fn project_containers(&mut self, project: &str) -> Answer<Vec<Foreign>> {
+        let e = self.0.borrow();
+        if e.down {
+            return Answer::NoAnswer("down".into());
+        }
+        Answer::Yes(
+            e.containers
+                .iter()
+                .filter(|c| c.project == project)
+                .map(|c| Foreign {
+                    id: c.id.clone(),
+                    status: c.status.clone(),
+                    working_dir: c.working_dir.clone(),
+                    agent_host: c.agent_host.clone(),
+                })
+                .collect(),
+        )
+    }
+
+    fn project_networks(&mut self, project: &str) -> Answer<Vec<String>> {
+        let e = self.0.borrow();
+        if e.down {
+            return Answer::NoAnswer("down".into());
+        }
+        Answer::Yes(
+            e.networks
+                .iter()
+                .filter(|n| n.1 == project)
+                .map(|n| n.0.clone())
+                .collect(),
+        )
+    }
+
+    fn remove_network(&mut self, id: &str) -> Answer<()> {
+        let mut e = self.0.borrow_mut();
+        if e.down {
+            return Answer::NoAnswer("down".into());
+        }
+        if e.networks.iter().any(|n| n.0 == id && n.2) {
+            return Answer::NoAnswer(format!(
+                "Error response from daemon: network {} has active endpoints",
+                &id[id.len() - 4..]
+            ));
+        }
+        e.touch_network(id);
+        e.networks.retain(|n| n.0 != id);
+        Answer::Yes(())
+    }
+
+    fn tasks_running(&mut self) -> Answer<bool> {
+        let e = self.0.borrow();
+        if e.down {
+            return Answer::NoAnswer("down".into());
+        }
+        Answer::Yes(
+            e.containers
+                .iter()
+                .any(|c| c.project.is_empty() && c.status == "running"),
+        )
+    }
+}
+
+impl EngineState {
+    fn touch_network(&mut self, id: &str) {
+        self.changes
+            .push(format!("network rm {}", &id[id.len().saturating_sub(4)..]));
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -394,10 +511,24 @@ impl Driver for FakeDriver {
 
 #[derive(Default)]
 pub(crate) struct PoolState {
-    pub follow: Option<Net<Follow>>,
+    pub state: Option<Net<HostState>>,
+    /// What the pool's edge says the host comes from; `None` answers nothing.
+    pub public: Option<Net<std::net::IpAddr>>,
+    pub publics: u32,
     pub assets: BTreeMap<String, Vec<u8>>,
     pub statements: BTreeMap<Release, Relayed>,
-    pub follows: u32,
+    /// How many times the host state was asked for.
+    pub polls: u32,
+    /// The host reports posted, as JSON; `report_answer` is what posting one answers.
+    pub reports: Vec<serde_json::Value>,
+    pub report_answer: Option<Net<()>>,
+    /// How many times a report was posted, whatever the answer.
+    pub report_tries: u32,
+    /// The public `follow` a pool from before #344 answers, and the workers it was asked for.
+    pub follow: Option<Net<Follow>>,
+    pub follows: Vec<String>,
+    /// The `Date` the host state's answer carries, whatever its status (#320).
+    pub date: Option<i64>,
 }
 
 pub(crate) type Remote = Rc<RefCell<PoolState>>;
@@ -405,10 +536,31 @@ pub(crate) type Remote = Rc<RefCell<PoolState>>;
 pub(crate) struct FakePool(pub Remote);
 
 impl Pool for FakePool {
-    fn follow(&mut self, _: &str) -> Net<Follow> {
+    fn state(&mut self) -> Net<HostState> {
         let mut s = self.0.borrow_mut();
-        s.follows += 1;
-        s.follow.clone().unwrap_or(Net::NoAnswer("no pool".into()))
+        s.polls += 1;
+        s.state.clone().unwrap_or(Net::NoAnswer("no pool".into()))
+    }
+
+    fn date(&self) -> Option<i64> {
+        self.0.borrow().date
+    }
+
+    fn follow(&mut self, worker_id: &str) -> Net<Follow> {
+        let mut s = self.0.borrow_mut();
+        s.follows.push(worker_id.to_owned());
+        s.follow.clone().unwrap_or(Net::NoAnswer("HTTP 404".into()))
+    }
+
+    fn report(&mut self, body: &[u8]) -> Net<()> {
+        let mut s = self.0.borrow_mut();
+        s.report_tries += 1;
+        let answer = s.report_answer.clone().unwrap_or(Net::Ok(()));
+        if answer == Net::Ok(()) {
+            s.reports
+                .push(serde_json::from_slice(body).expect("a report is JSON"));
+        }
+        answer
     }
 
     fn rollback(&mut self, to: Release) -> Net<Option<Relayed>> {
@@ -426,6 +578,12 @@ impl Pool for FakePool {
 
     fn download(&mut self, url: &str) -> Net<Vec<u8>> {
         Net::NoAnswer(format!("{url}: no downloads in tests"))
+    }
+
+    fn public_address(&mut self) -> Net<std::net::IpAddr> {
+        let mut s = self.0.borrow_mut();
+        s.publics += 1;
+        s.public.clone().unwrap_or(Net::NoAnswer("no pool".into()))
     }
 }
 
@@ -684,16 +842,50 @@ impl World {
         self.dir.join("set")
     }
 
-    pub fn follow(&self, latest: &str, update: Option<&str>) {
-        self.remote.borrow_mut().follow = Some(Net::Ok(Follow {
-            latest: Release::parse(latest),
-            update: update.map(str::to_owned),
+    /// The pool's host state names `latest`, with an open Update `update` and no host
+    /// order.
+    pub fn target(&self, latest: &str, update: Option<&str>) {
+        self.remote.borrow_mut().state = Some(Net::Ok(HostState {
+            target: Release::parse(latest),
+            updates: update.map(str::to_owned).into_iter().collect(),
+            orders: Vec::new(),
             poll_s: Some(120),
+            older_pool: false,
         }));
     }
 
-    pub fn pool_answers(&self, answer: Net<Follow>) {
-        self.remote.borrow_mut().follow = Some(answer);
+    /// The host state carries `orders` (kind, id, seconds from now to its `not_after`)
+    /// beside what it names already.
+    pub fn orders(&self, orders: &[(&str, &str, i64)]) {
+        let now = self.now;
+        let mut r = self.remote.borrow_mut();
+        let mut s = match r.state.take() {
+            Some(Net::Ok(s)) => s,
+            _ => HostState::default(),
+        };
+        s.orders = orders
+            .iter()
+            .map(|(kind, id, left)| Order {
+                id: (*id).into(),
+                kind: OrderKind::parse(kind),
+                not_after: Some(now + left),
+            })
+            .collect();
+        r.state = Some(Net::Ok(s));
+    }
+
+    pub fn pool_answers(&self, answer: Net<HostState>) {
+        self.remote.borrow_mut().state = Some(answer);
+    }
+
+    /// The last host report posted.
+    pub fn last_report(&self) -> serde_json::Value {
+        self.remote
+            .borrow()
+            .reports
+            .last()
+            .cloned()
+            .expect("a report was posted")
     }
 
     /// `secs` later, one tick.
@@ -701,6 +893,12 @@ impl World {
         self.now += secs;
         self.engine.borrow_mut().clock = self.now;
         self.agent.tick(self.now, false).unwrap();
+    }
+
+    /// The pool asked now, as when a poll falls due (no SIGUSR1: nothing forces a round).
+    pub fn poll(&mut self) {
+        self.agent.state.poll.next_at = 0;
+        self.tick(1);
     }
 
     /// A round asked for now (SIGUSR1).
@@ -754,7 +952,7 @@ impl World {
     pub fn running_v1() -> Self {
         let mut w = World::new();
         w.release("v1.0.0");
-        w.follow("v1.0.0", None);
+        w.target("v1.0.0", None);
         w.round();
         assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
         w.engine.borrow_mut().start_task();

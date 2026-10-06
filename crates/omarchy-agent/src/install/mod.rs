@@ -14,9 +14,12 @@
 //!    of that architecture — and only reported: a held lane never stops an install;
 //! 3. prints the envelope (agent.toml) for the person to confirm on `/dev/tty` (`--yes`
 //!    skips) and writes `run/capacity.json`;
-//! 4. enrolls (#321): the owner's Confirm, then the host worker token;
+//! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into
+//!    `etc/dispatcher.env` with the host's own addresses (#371: its interfaces' and the
+//!    public one the egress probe saw tasks leave from, kept in `egress.json`);
 //! 5. only then writes agent.toml, with the `host_id` and `worker_id` enrollment gave:
-//!    before it there is no run loop, no dispatcher, and nothing claims;
+//!    before it there is no run loop, no dispatcher, and nothing claims; then
+//!    `etc/dispatcher.env` gets the secrets directory and the agent budget from it (#371);
 //! 6. the agent keys into `OMARCHY_SECRETS_DIR/agent.env`, outside the work root;
 //! 7. with `--legacy <project>`, `legacy.json`, changing nothing in that project;
 //! 8. the systemd --user unit, linger, and the service started: the run loop's first
@@ -27,7 +30,13 @@
 //! Re-running it repairs the install and keeps the identity and the owner's envelope.
 //! Every owner file is written through [`files`] (`openat`, `O_NOFOLLOW`).
 //!
-//! Seams left for later issues, by name: macOS (launchd, Colima) is P3; the egress probe
+//! On a Mac (#320, [`mac`], [`launchd`]): preflight also asks for a GUI login (a
+//! `LaunchAgent` is login-scoped), sizes and starts the `omarchy` Colima VM with only the
+//! work root, the secrets and the set directories mounted (none under `~`), or takes
+//! Docker Desktop's or `OrbStack`'s VM when one is here and its home mount is removed; the
+//! envelope records the VM (`[vm]`) and the two sockets; the plist replaces the unit.
+//!
+//! Seams left for later issues, by name: the egress probe
 //! behind the egress sidecar on an internal network, once the worker image has it
 //! ([`egress`]); the `subuid` level for rootless podman, once the dispatcher (#335) starts
 //! task containers with `--userns=auto` (until then rootless podman reads as `user`); task
@@ -40,7 +49,9 @@ pub(crate) mod egress;
 pub(crate) mod engine;
 pub(crate) mod envelope;
 pub(crate) mod files;
+pub(crate) mod launchd;
 pub(crate) mod legacy;
+pub(crate) mod mac;
 pub(crate) mod net;
 pub(crate) mod secrets;
 mod sys;
@@ -52,7 +63,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::capacity::{self, probe, Capacity, Caps, Facts};
+use crate::capacity::{self, probe, Capacity, Caps, Facts, VmKind};
+use crate::dispatcher_env::{self, addresses, Envelope, Refresh, Rendered, Sources};
 use crate::enroll;
 use crate::host::{HostKey, Identity, KEY_FILE};
 use crate::manifest::Manifest;
@@ -83,6 +95,25 @@ pub struct Places {
     pub linger_dir: PathBuf,
     pub routes: PathBuf,
     pub binfmt: PathBuf,
+    /// This user's uid: launchd's `gui/<uid>` domain (macOS).
+    pub uid: u32,
+    /// `$COLIMA_HOME` or `~/.colima` (macOS), and the variable when the person set it, for
+    /// the `LaunchAgent`'s environment.
+    pub colima_home: PathBuf,
+    pub colima_home_env: Option<String>,
+    /// `~/Library/LaunchAgents` and `~/Library/Logs/omarchy-agent` (macOS).
+    pub launch_agents: PathBuf,
+    pub logs: PathBuf,
+    /// An SSH session (`SSH_CONNECTION` or `SSH_TTY`): said when there is no GUI login.
+    pub ssh: bool,
+    /// Rosetta 2's runtime, there once installed (macOS).
+    pub rosetta: PathBuf,
+    /// Where prep-mac.sh makes the work root, the secrets and the set directories.
+    pub mac_root: PathBuf,
+    /// Where the host's own addresses are read (`/proc/net`, #371), and a Mac's `ifconfig`
+    /// (#320).
+    pub proc_net: PathBuf,
+    pub ifconfig: Option<PathBuf>,
 }
 
 impl Places {
@@ -98,30 +129,90 @@ impl Places {
             .ok()
             .filter(|u| !u.is_empty())
             .ok_or("USER is not set")?;
+        let colima_env = std::env::var_os("COLIMA_HOME").filter(|v| !v.is_empty());
+        let sources = Sources::system();
         Ok(Places {
             data: crate::run::config::data_dir(data_flag)?,
             config_home: var("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
-            home,
             xdg_runtime_dir: var("XDG_RUNTIME_DIR"),
             user,
             os: std::env::consts::OS,
             linger_dir: PathBuf::from("/var/lib/systemd/linger"),
             routes: PathBuf::from("/proc/net/route"),
             binfmt: PathBuf::from("/proc/sys/fs/binfmt_misc"),
+            uid: rustix::process::getuid().as_raw(),
+            colima_home: crate::vm::colima_home(&home, colima_env.as_deref()),
+            colima_home_env: colima_env.map(|v| v.to_string_lossy().into_owned()),
+            launch_agents: home.join("Library/LaunchAgents"),
+            logs: home.join("Library/Logs/omarchy-agent"),
+            ssh: ["SSH_CONNECTION", "SSH_TTY"]
+                .iter()
+                .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty())),
+            rosetta: PathBuf::from(crate::vm::ROSETTA_RUNTIME),
+            mac_root: PathBuf::from(crate::vm::MAC_ROOT),
+            home,
+            proc_net: sources.proc_net,
+            ifconfig: sources.ifconfig,
         })
     }
 
+    pub fn mac(&self) -> bool {
+        self.os == "macos"
+    }
+    /// The set directory by default: under the data directory on Linux; on a Mac beside
+    /// the work root, outside the home directory, since the VM mounts it (#320).
     pub fn set_dir(&self) -> PathBuf {
-        self.data.join("sets").join("host")
+        if self.mac() {
+            self.mac_root.join("set")
+        } else {
+            self.data.join("sets").join("host")
+        }
+    }
+    fn default_dir(&self, name: &str) -> PathBuf {
+        if self.mac() {
+            self.mac_root.join(name)
+        } else {
+            self.data.join(name)
+        }
     }
     pub fn unit_dir(&self) -> PathBuf {
         self.config_home.join("systemd").join("user")
     }
+    /// The agent's own `DOCKER_CONFIG`, the run loop's: a Mac's Colima writes its Docker
+    /// context there, never into the person's `~/.docker` (#320).
+    pub fn docker_config(&self) -> PathBuf {
+        crate::run::config::Paths {
+            data: self.data.clone(),
+        }
+        .docker_config()
+    }
     fn agent_toml(&self) -> PathBuf {
         self.data.join("agent.toml")
     }
-    fn enroll_paths(&self) -> enroll::Paths {
-        enroll::Paths::under(&self.data)
+    fn plist(&self) -> PathBuf {
+        self.launch_agents.join(launchd::PLIST)
+    }
+    fn enroll_paths(&self, set_dir: &Path) -> enroll::Paths {
+        enroll::Paths {
+            data: self.data.clone(),
+            state: self.data.join("state"),
+            set: set_dir.to_owned(),
+        }
+    }
+    /// The `LaunchAgent`'s plist for this data directory.
+    fn render_plist(&self) -> Result<String, String> {
+        let env: Vec<(&str, String)> = self
+            .colima_home_env
+            .iter()
+            .map(|v| ("COLIMA_HOME", v.clone()))
+            .collect();
+        launchd::render(&self.data, &self.home, &self.logs, &env)
+    }
+    fn sources(&self) -> Sources {
+        Sources {
+            proc_net: self.proc_net.clone(),
+            ifconfig: self.ifconfig.clone(),
+        }
     }
 }
 
@@ -143,7 +234,12 @@ pub struct Options {
     pub pool: Option<String>,
     pub work_root: Option<PathBuf>,
     pub secrets_dir: Option<PathBuf>,
+    /// The set directory (`<data>/sets/host` on Linux, prep-mac.sh's on a Mac).
+    pub set_dir: Option<PathBuf>,
     pub socket: Option<PathBuf>,
+    /// An `x86_64` lane through Rosetta in the Mac's VM: `--rosetta`, `--no-rosetta`, else
+    /// what agent.toml's `[vm] rosetta` says, else on.
+    pub rosetta: Option<bool>,
     pub task_subnets: Option<String>,
     /// The person says this is a machine or VM used only as a pool host (design v2 §19.1).
     pub dedicated: bool,
@@ -164,7 +260,16 @@ pub struct Options {
 /// What the person's machine does for install: the terminal, the network, systemd.
 pub trait Sys {
     /// `systemctl` or `loginctl` with `args`: its stdout, or why it failed.
-    fn run(&mut self, prog: &str, args: &[&str]) -> Result<String, String>;
+    fn run(&mut self, prog: &str, args: &[&str]) -> Result<String, String> {
+        self.run_env(prog, args, &[])
+    }
+    /// [`Sys::run`] with `env` added to the environment (a Mac's `colima`, #320).
+    fn run_env(
+        &mut self,
+        prog: &str,
+        args: &[&str],
+        env: &[(&'static str, String)],
+    ) -> Result<String, String>;
     /// Shows `text` on `/dev/tty` and asks yes or no.
     fn confirm(&mut self, text: &str) -> Result<bool, String>;
     /// `KEY=value` lines typed on `/dev/tty` without echo, until an empty line.
@@ -203,6 +308,17 @@ pub(crate) struct Ready {
     pub values: envelope::Values,
     pub legacy: Option<legacy::Seen>,
     pub existing: Option<String>,
+    /// The public address the egress probe saw tasks leave from (#371).
+    pub public: Option<std::net::IpAddr>,
+}
+
+/// What measures the host: preflight changes nothing but the agent's tool cache, and on a
+/// Mac starts a stopped `omarchy` VM to measure it; install also makes the Mac's missing
+/// directories and restarts a VM that differs (#320).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Preflight,
+    Install,
 }
 
 fn say(out: &mut dyn Write, line: &str) {
@@ -290,7 +406,7 @@ pub(crate) fn choose_pool(
 
 /// The nearest directory that exists, from `p` up: where free disk is measured for a work
 /// root install has not made yet.
-fn existing_ancestor(p: &Path) -> PathBuf {
+pub(crate) fn existing_ancestor(p: &Path) -> PathBuf {
     let mut d = p.to_path_buf();
     while !d.is_dir() {
         if !d.pop() {
@@ -342,30 +458,42 @@ fn other_networks(
 }
 
 /// `omarchy-agent preflight`: one screen, changing nothing but the agent's own cache of
-/// the release's hash-checked tools.
+/// the release's hash-checked tools (and, on a Mac, the `omarchy` VM it starts to measure).
 pub fn preflight(o: &Options, sys: &mut dyn Sys) -> Result<Report, Failure> {
-    measure(o, sys, &crate::run::Sigstore, None).map(|(r, _)| r)
+    measure_as(o, sys, &crate::run::Sigstore, None, Mode::Preflight).map(|(r, _)| r)
 }
 
-/// Preflight's report, and what install needs when nothing blocks.
-#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // one check after another, in the screen's order
+/// Install's measure: preflight's report, and what install needs when nothing blocks.
 pub(crate) fn measure(
     o: &Options,
     sys: &mut dyn Sys,
     verifier: &dyn Verifier,
     docker_cli: Option<&Path>,
 ) -> Result<(Report, Option<Ready>), Failure> {
+    measure_as(o, sys, verifier, docker_cli, Mode::Install)
+}
+
+/// Preflight's report, and what install needs when nothing blocks.
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // one check after another, in the screen's order
+pub(crate) fn measure_as(
+    o: &Options,
+    sys: &mut dyn Sys,
+    verifier: &dyn Verifier,
+    docker_cli: Option<&Path>,
+    mode: Mode,
+) -> Result<(Report, Option<Ready>), Failure> {
     let p = &o.places;
+    let mac = p.mac();
     let mut r = Report::default();
-    if p.os != "linux" {
+    if p.os != "linux" && !mac {
         r.blockers.push(format!(
-            "this is {}: install runs on Linux in P1; macOS (launchd, the Colima VM) comes in P3",
+            "this is {}: install runs on Linux and macOS (a Mac through its omarchy VM)",
             p.os
         ));
     }
     let existing = std::fs::read_to_string(p.agent_toml()).ok();
     let ex = existing.as_deref();
-    let enrolled = Identity::read(&p.enroll_paths().state).ok().flatten();
+    let enrolled = Identity::read(&p.data.join("state")).ok().flatten();
     if enrolled.is_none() && o.token.is_none() {
         r.blockers.push(
             "enrollment: this machine has not enrolled yet, and OMARCHY_ENROLL is not set: add the host on your page and paste the command it prints".into(),
@@ -414,7 +542,8 @@ pub(crate) fn measure(
         if !exe.as_deref().is_some_and(same) {
             if let Err(e) = own_hash(m, &current) {
                 r.blockers.push(format!(
-                    "the unit would start {}, which is not this release's agent ({e}); run install.sh, or give the data directory it used ({})",
+                    "the {} would start {}, which is not this release's agent ({e}); run install.sh, or give the data directory it used ({})",
+                    if mac { "LaunchAgent" } else { "unit" },
                     current.display(),
                     p.data.display()
                 ));
@@ -422,21 +551,26 @@ pub(crate) fn measure(
         }
     }
 
-    // Where things go.
-    let set_dir = p.set_dir();
+    // Where things go: on a Mac outside the home directory, which the VM never mounts.
+    let set_dir = o
+        .set_dir
+        .clone()
+        .or_else(|| envelope::set_path(ex, "dir"))
+        .unwrap_or_else(|| p.set_dir());
     let work_root = o
         .work_root
         .clone()
         .or_else(|| envelope::set_path(ex, "work_root"))
-        .unwrap_or_else(|| p.data.join("work"));
+        .unwrap_or_else(|| p.default_dir("work"));
     let secrets_dir = o
         .secrets_dir
         .clone()
         .or_else(|| envelope::set_path(ex, "secrets_dir"))
-        .unwrap_or_else(|| p.data.join("secrets"));
+        .unwrap_or_else(|| p.default_dir("secrets"));
     for (what, d) in [
         ("work root", &work_root),
         ("secrets directory", &secrets_dir),
+        ("set directory", &set_dir),
     ] {
         if !crate::lint::is_plain_absolute(d) {
             r.blockers.push(format!(
@@ -445,10 +579,32 @@ pub(crate) fn measure(
             ));
         }
     }
+    // It reaches the dispatcher through etc/dispatcher.env (#371), which names its
+    // agent.env in an agent sidecar's mount and refuses any other path.
+    if crate::lint::is_plain_absolute(&secrets_dir)
+        && !dispatcher_env::dispatcher_path(&secrets_dir)
+    {
+        r.blockers.push(format!(
+            "the secrets directory {} has a character the dispatcher refuses: letters, digits and / . _ - + only",
+            secrets_dir.display()
+        ));
+    }
+    // The agent budget a re-run keeps reaches it too, and agent.toml is refused with a bad
+    // one: said here, before the owner's Confirm, not after the token is written.
+    if let Err(e) =
+        dispatcher_env::Budget::from_envelope(envelope::envelope_value(ex, "agent_budget").as_ref())
+    {
+        r.blockers.push(e);
+    }
     if let Err(e) = secrets::outside(&secrets_dir, &work_root, &set_dir) {
         r.blockers.push(e);
     }
-    if let Err(e) = unit::render(&p.data) {
+    let service = if mac {
+        p.render_plist()
+    } else {
+        unit::render(&p.data)
+    };
+    if let Err(e) = service {
         r.blockers.push(e);
     }
     let task_subnets = o
@@ -465,17 +621,39 @@ pub(crate) fn measure(
             Vec::new()
         }
     };
-    let dedicated = o.dedicated
+    let mut dedicated = o.dedicated
         || envelope::envelope_value(ex, "dedicated").and_then(|v| v.as_bool()) == Some(true);
     let project = envelope::set_str(ex, "project").unwrap_or_else(|| envelope::PROJECT.to_owned());
     // The legacy project: `--legacy`, or the one an earlier install recorded, so running
     // install again repairs it without the flag (legacy.json's owner is checked below).
+    // A project retire-legacy removed (#344) is no legacy set any more: nothing of it is
+    // looked at again. The rootful exception it was recorded with stays until P6 (design v2
+    // §19.3, §21.1): the Studio stays rootful after step 6, and install again repairs it.
+    let recorded = std::fs::read(p.data.join(legacy::FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok());
+    let retired = recorded.as_ref().filter(|l| l.retired_at.is_some());
     let legacy_project = o.legacy.clone().or_else(|| {
-        std::fs::read(p.data.join(legacy::FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok())
-            .map(|l| l.project)
+        recorded
+            .as_ref()
+            .filter(|l| l.retired_at.is_none())
+            .map(|l| l.project.clone())
     });
+    let rootful_exception =
+        legacy_project.is_some() || retired.is_some_and(|l| l.rootful_exception);
+    if let (None, Some(l)) = (&legacy_project, retired) {
+        r.notes.push(format!(
+            "legacy: {} was retired at {} ({}); {}",
+            l.project,
+            l.retired_at.as_deref().unwrap_or_default(),
+            l.retired_by.as_deref().unwrap_or("retire-legacy"),
+            if l.rootful_exception {
+                "its rootful exception stays until P6"
+            } else {
+                "nothing of it is looked at again"
+            }
+        ));
+    }
     if let Some(l) = &legacy_project {
         if !legacy::valid_project(l) {
             r.blockers
@@ -483,15 +661,19 @@ pub(crate) fn measure(
         } else if *l == project {
             r.blockers
                 .push(format!("--legacy {l:?} is the new bundle's own project"));
+        } else if mac {
+            r.blockers
+                .push("--legacy is the Studio's (Linux): a Mac has no legacy set".into());
         }
     }
 
     // The owner files already there.
+    let enroll_paths = p.enroll_paths(&set_dir);
     for f in [
         p.agent_toml(),
         set_dir.join("compose.override.yml"),
         set_dir.join(".env"),
-        p.enroll_paths().dispatcher_env(),
+        enroll_paths.dispatcher_env(),
         secrets_dir.join("agent.env"),
         p.data.join(legacy::FILE),
     ] {
@@ -504,16 +686,21 @@ pub(crate) fn measure(
     // Nothing in a data directory that fails it is run (its tools/ above all).
     let tools_dir = p.data.join("tools");
     let mut trusted = true;
-    let unit_dir = p.unit_dir();
+    let service_dir = if mac {
+        p.launch_agents.clone()
+    } else {
+        p.unit_dir()
+    };
     for d in [
         &p.data,
         &tools_dir,
         &set_dir,
         &work_root,
         &secrets_dir,
-        &unit_dir,
+        &service_dir,
     ] {
-        if d.exists() {
+        // ~/Library/LaunchAgents is the person's, shared with every other agent of theirs.
+        if d.exists() && !(mac && *d == service_dir) {
             if let Err(e) = files::owned_dir(d) {
                 trusted &= *d != p.data && *d != tools_dir;
                 r.blockers.push(e);
@@ -521,8 +708,9 @@ pub(crate) fn measure(
         }
     }
     // A work root to make (prep-root.sh makes it where root owns the parent) must be
-    // makeable by this user, or apply would fail after the person confirmed.
-    if !work_root.exists() {
+    // makeable by this user, or apply would fail after the person confirmed. On a Mac the
+    // VM mounts it before install writes anything: prep-mac.sh makes all three (below).
+    if !work_root.exists() && !mac {
         let parent = existing_ancestor(&work_root);
         if rustix::fs::access(&parent, rustix::fs::Access::WRITE_OK).is_err() {
             r.blockers.push(format!(
@@ -534,22 +722,8 @@ pub(crate) fn measure(
         }
     }
 
-    // The engine.
-    let given = o
-        .socket
-        .clone()
-        .or_else(|| envelope::set_path(ex, "socket_cli"));
-    let socket = match engine::discover(
-        given.as_deref(),
-        &engine::candidates(p.xdg_runtime_dir.as_deref()),
-        engine::connect,
-    ) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            r.blockers.push(e);
-            None
-        }
-    };
+    // The release's pinned docker CLI, before the engine: on a Mac Colima needs it to start
+    // the VM.
     let cli = match (docker_cli, &manifest) {
         _ if !trusted => {
             r.notes.push(
@@ -572,6 +746,56 @@ pub(crate) fn measure(
             None => None,
         },
         (None, None) => None,
+    };
+    // The engine: on a Mac in its VM, started and sized here when it is the omarchy one.
+    let given = o
+        .socket
+        .clone()
+        .or_else(|| envelope::set_path(ex, "socket_cli"));
+    let caps = (
+        o.max_cpus.or_else(|| envelope_u32(ex, "max_cpus")),
+        o.max_mem_gb.or_else(|| envelope_u32(ex, "max_mem_gb")),
+    );
+    let vm_mounts = crate::vm::mounts(&work_root, &secrets_dir, &set_dir);
+    let found = mac.then(|| {
+        let min = manifest.as_ref().map(|m| {
+            let c = m.capacity().constants();
+            (c.min.cpus, c.min.mem_gb)
+        });
+        // The owner's choice of the x86_64 lane carries over, as the envelope's caps do.
+        let rosetta = o
+            .rosetta
+            .or_else(|| {
+                (envelope::table_str(ex, "vm", "runtime").as_deref() == Some("colima"))
+                    .then(|| envelope::table_value(ex, "vm", "rosetta")?.as_bool())
+                    .flatten()
+            })
+            .unwrap_or(true);
+        let ask = mac::Ask {
+            given: given.as_deref(),
+            mounts: &vm_mounts,
+            caps,
+            rosetta,
+            min,
+            docker_cli: cli.as_deref(),
+            subnets: &task,
+            mode,
+        };
+        mac::engine(o, sys, &ask, &mut r)
+    });
+    let socket = match &found {
+        Some(f) => f.socket.clone(),
+        None => match engine::discover(
+            given.as_deref(),
+            &engine::candidates(p.xdg_runtime_dir.as_deref()),
+            engine::connect,
+        ) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                r.blockers.push(e);
+                None
+            }
+        },
     };
     let docker = socket.zip(cli).map(|(socket, cli)| Docker { cli, socket });
     let image = manifest
@@ -596,7 +820,8 @@ pub(crate) fn measure(
             host: Some(&host),
             work_root: &existing_ancestor(&work_root),
             image: image.as_deref(),
-            emulation: Some(capacity::emulation::Probe {
+            // A Mac's VM has its own binfmt table: its lane is Rosetta's ([`mac_facts`]).
+            emulation: (!mac).then_some(capacity::emulation::Probe {
                 binfmt: &p.binfmt,
                 images: &images,
                 emulate: emulate.as_deref(),
@@ -610,6 +835,28 @@ pub(crate) fn measure(
             }
         }
     });
+    // A Mac: the level is the VM's, MemAvailable is the VM's own (M7), the x86_64 lane is
+    // Rosetta's when its smoke run passes, and the VM sees the three directories only.
+    let facts = match (facts, found.as_ref().and_then(|f| f.kind)) {
+        (Some(f), Some(kind)) => Some(mac_facts(
+            o,
+            sys,
+            f,
+            kind,
+            found.as_ref(),
+            docker.as_ref(),
+            image.as_deref(),
+            manifest.as_ref(),
+            ex,
+            &vm_mounts,
+            &mut r,
+        )),
+        (f, _) => f,
+    };
+    if found.as_ref().and_then(|f| f.kind) == Some(VmKind::Dedicated) {
+        // The omarchy VM is a VM used only as a pool host (design v2 §19.1).
+        dedicated = true;
+    }
     let caps = Caps {
         max_units: o.max_units,
         max_cpus: o.max_cpus,
@@ -621,14 +868,20 @@ pub(crate) fn measure(
     let capacity = facts.as_ref().zip(manifest.as_ref()).map(|(f, m)| {
         let c = Capacity::new(f, &caps, m.capacity());
         r.blockers.extend(capacity::preflight(&c));
+        let emulated: Vec<String> = c
+            .emulated()
+            .iter()
+            .map(|l| format!(", the {} lane through {}", l.arch, l.via))
+            .collect();
         r.notes.push(format!(
-            "capacity: {} CPUs, {} GB, disks {} GB (work root) and {} GB (engine), {} units on the {} lane",
+            "capacity: {} CPUs, {} GB, disks {} GB (work root) and {} GB (engine), {} units on the {} lane{}",
             c.cpus(),
             c.mem_gb(),
             c.disk_free_gb().work,
             c.disk_free_gb().engine,
             c.units(),
-            f.arch()
+            f.arch(),
+            emulated.concat()
         ));
         checks::emulation(&c, &mut r);
         c
@@ -638,11 +891,22 @@ pub(crate) fn measure(
             f.isolation(),
             !f.rootless(),
             dedicated,
-            legacy_project.is_some(),
+            rootful_exception,
             &mut r,
         );
     }
-    checks::credentials_verdict(&checks::credentials(&p.home), dedicated, &mut r);
+    let creds = checks::credentials(&p.home);
+    if found.as_ref().and_then(|f| f.kind).is_some() {
+        // A Mac: an escape lands in the VM, which sees nothing of the home directory.
+        if !creds.is_empty() {
+            r.notes.push(format!(
+                "credentials in your home directory stay out of the VM ({} found; nothing of ~ is mounted)",
+                creds.len()
+            ));
+        }
+    } else {
+        checks::credentials_verdict(&creds, dedicated, &mut r);
+    }
     if p.os == "linux" {
         checks::user_manager(&p.user, &p.linger_dir, p.xdg_runtime_dir.as_deref(), &mut r);
     }
@@ -651,7 +915,11 @@ pub(crate) fn measure(
     let routes = std::fs::read_to_string(&p.routes)
         .map(|t| net::parse_routes(&t))
         .unwrap_or_default();
+    let gateway = found
+        .as_ref()
+        .map_or_else(|| net::default_gateway(&routes), |f| f.gateway);
     let mut legacy_seen = None;
+    let mut public = None;
     if let Some(d) = &docker {
         match other_networks(d, &project, legacy_project.as_deref()) {
             Ok(n) => checks::subnets(&task, &routes, &n, &mut r),
@@ -676,7 +944,13 @@ pub(crate) fn measure(
         }
         match (task.first().and_then(|t| t.last_28()), &image) {
             (Some(subnet), Some(img)) => {
-                let t = egress::Targets::of_host(net::default_gateway(&routes), net::lan_address());
+                let mut t =
+                    egress::Targets::of_host(gateway, net::lan_address()).asking(pool.as_deref());
+                if found.as_ref().and_then(|f| f.kind) == Some(VmKind::Dedicated) {
+                    // The Mac as the omarchy VM reaches it, past Colima's NAT.
+                    t.forbidden
+                        .push(("vm-host", crate::vm::VM_HOST.to_owned(), 22));
+                }
                 match egress::probe(d, img, subnet, &t) {
                     Ok(out) => {
                         let b = egress::verdict(&out, &t);
@@ -685,6 +959,12 @@ pub(crate) fn measure(
                                 .push("egress: a task reaches public addresses only".into());
                         }
                         r.blockers.extend(b);
+                        public = egress::seen(&out);
+                        r.notes.push(match (public, &t.seen) {
+                            (Some(ip), _) => format!("egress: tasks leave from {ip}, which every task's egress refuses with the host's own addresses"),
+                            (None, Some(url)) => format!("egress: the address tasks leave from was not seen ({url} gave none); every task's egress refuses the interfaces' addresses"),
+                            (None, None) => "egress: the address tasks leave from was not asked (the pool is not HTTPS)".into(),
+                        });
                     }
                     Err(e) => r.blockers.push(format!("egress: {e}")),
                 }
@@ -728,19 +1008,45 @@ pub(crate) fn measure(
     let ready = match (manifest, pool, docker, capacity, facts) {
         (Some(manifest), Some(pool), Some(docker), Some(capacity), Some(facts)) if r.ok() => {
             let socket = docker.socket;
+            let vm = found
+                .as_ref()
+                .filter(|f| f.kind.is_some())
+                .map(|f| envelope::Vm {
+                    runtime: mac::runtime_of(&socket, &p.colima_home),
+                    rosetta: f.want.as_ref().is_some_and(|w| w.rosetta),
+                    disk_gb: f.want.as_ref().map_or(crate::vm::DISK_GB, |w| w.disk_gb),
+                    size: f.want.as_ref().map(|w| w.size),
+                });
             let values = envelope::Values {
                 pool: pool.clone(),
                 set_dir,
                 work_root,
                 secrets_dir,
+                socket_mount: if vm.is_some() {
+                    PathBuf::from(crate::vm::SOCKET_MOUNT)
+                } else {
+                    socket.clone()
+                },
                 socket,
                 task_subnets,
                 rootful: !facts.rootless(),
-                userns_remap: !facts.rootless() && facts.isolation() == capacity::Isolation::Subuid,
+                userns_remap: !facts.rootless()
+                    && facts.inner_isolation() == capacity::Isolation::Subuid
+                    && facts.vm().is_none(),
                 dedicated,
                 max_units: o.max_units,
-                max_cpus: o.max_cpus,
-                max_mem_gb: o.max_mem_gb,
+                // The omarchy VM's size is the envelope's: written so the owner sees it.
+                max_cpus: vm
+                    .as_ref()
+                    .and_then(|v| v.size)
+                    .map(|s| s.cpus)
+                    .or(o.max_cpus),
+                max_mem_gb: vm
+                    .as_ref()
+                    .and_then(|v| v.size)
+                    .map(|s| s.mem_gb)
+                    .or(o.max_mem_gb),
+                vm,
                 emulate: capacity::emulation::foreign_of(facts.arch()).map(|f| vec![f.to_owned()]),
             };
             Some(Ready {
@@ -751,15 +1057,91 @@ pub(crate) fn measure(
                 values,
                 legacy: legacy_seen,
                 existing,
+                public,
             })
         }
         _ => None,
     };
-    if r.ok() && ready.is_none() {
+    if r.ok() && ready.is_none() && !found.as_ref().is_some_and(|f| f.deferred) {
         r.blockers
             .push("preflight could not measure this host".into());
     }
     Ok((r, ready))
+}
+
+/// An existing agent.toml's `[envelope].<key>` as a number.
+fn envelope_u32(existing: Option<&str>, key: &str) -> Option<u32> {
+    envelope::envelope_value(existing, key)
+        .and_then(|v| v.as_integer())
+        .and_then(|n| u32::try_from(n).ok())
+}
+
+/// The facts of an engine in a Mac's VM (#320, [`probe::in_mac_vm`]): the VM's level; on
+/// the omarchy VM its own `MemAvailable` (M7) and, with Rosetta, the `x86_64` lane once its
+/// smoke run passed and the envelope's `emulate` does not leave it out; and what the VM may
+/// see.
+#[allow(clippy::too_many_arguments)] // preflight's state, passed through once
+fn mac_facts(
+    o: &Options,
+    sys: &mut dyn Sys,
+    f: Facts,
+    kind: VmKind,
+    found: Option<&mac::Found>,
+    docker: Option<&Docker>,
+    image: Option<&str>,
+    manifest: Option<&Manifest>,
+    ex: Option<&str>,
+    mounts: &[crate::vm::Mount],
+    r: &mut Report,
+) -> Facts {
+    let meminfo = (kind == VmKind::Dedicated)
+        .then(|| mac::meminfo(sys, found.map_or(&[][..], |x| &x.colima_env)))
+        .flatten();
+    let emulate: Option<Vec<String>> = envelope::envelope_value(ex, "emulate")
+        .and_then(|v| v.as_array().cloned())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        });
+    let x86 = manifest
+        .and_then(|m| m.build_image("x86_64"))
+        .map(ToString::to_string);
+    let vm = probe::MacVm {
+        kind,
+        meminfo: meminfo.as_deref(),
+        rosetta: found
+            .and_then(|x| x.want.as_ref())
+            .is_some_and(|w| w.rosetta),
+        emulate: emulate.as_deref(),
+        x86_64_image: x86.as_deref(),
+    };
+    let (f, said) = probe::in_mac_vm(f, &vm, &mut |img| {
+        let d = docker.ok_or("no engine")?;
+        let host = d.host();
+        let how = probe::Probe {
+            docker: &d.cli.to_string_lossy(),
+            host: Some(&host),
+            work_root: &o.places.home,
+            image: None,
+            emulation: None,
+        };
+        probe::rosetta_lane(&how, img)
+    });
+    match said {
+        Some(probe::LaneSaid::Note(n)) => r.notes.push(n),
+        Some(probe::LaneSaid::Warning(w)) => r.warnings.push(w),
+        None => {}
+    }
+    if let (Some(d), Some(img)) = (docker, image) {
+        let extra = if kind == VmKind::Shared {
+            mac::home_parts(&o.places.home)
+        } else {
+            Vec::new()
+        };
+        mac::sees(d, img, &o.places.home, mounts, &extra, r);
+    }
+    f
 }
 
 /// What a finished install leaves for a person (linger, systemd), if anything.
@@ -815,7 +1197,9 @@ pub(crate) fn apply(
     let exception = ready.legacy.is_some() && ready.facts.isolation() == capacity::Isolation::Root;
     let ask = format!(
         "{shown}\nThe host's envelope{}{}. Write it and enroll this host?",
-        if v.rootful {
+        if v.vm.is_some() {
+            " (the dispatcher holds the VM's daemon socket: root in the VM, which sees nothing of your home directory)"
+        } else if v.rootful {
             " (rootful: the dispatcher holds a root daemon's socket, root-equivalent)"
         } else {
             ""
@@ -838,20 +1222,26 @@ pub(crate) fn apply(
     }
 
     // The directories, and the capacity report enrollment sends.
-    for d in [&p.data, &p.set_dir(), &v.secrets_dir, &v.work_root] {
+    for d in [&p.data, &v.set_dir, &v.secrets_dir, &v.work_root] {
         files::make_dir(d).map_err(Failure::Refused)?;
     }
     let at = capacity::now();
     capacity::write_if_changed(&v.set_dir, &ready.capacity, &at)
         .map_err(|e| Failure::Refused(format!("{}/run/capacity.json: {e}", v.set_dir.display())))?;
+    // The public address tasks leave from, before the token is written beside the host's
+    // addresses (#371). Not seen this time: an earlier install's stays.
+    if let Some(ip) = ready.public {
+        addresses::keep_seen(&p.data, ip, &at).map_err(Failure::Refused)?;
+    }
 
     // Enrollment: the owner's Confirm, then the host worker token.
     let eo = enroll::Options {
         pool: Some(ready.pool.clone()),
-        paths: p.enroll_paths(),
+        paths: p.enroll_paths(&v.set_dir),
         token: o.token.clone(),
         wait: o.wait,
         poll: o.poll,
+        sources: p.sources(),
     };
     // Its lines (the fingerprint, where to confirm) are shown as they come: the person
     // compares them while it waits.
@@ -884,6 +1274,30 @@ pub(crate) fn apply(
             id.host
         ),
     );
+    // The dispatcher's environment beside its token (#371): the secrets directory install
+    // chose and the agent budget, now that agent.toml says them, and the host's addresses.
+    let env_file = eo.paths.dispatcher_env();
+    let rendered = Rendered::now(
+        &p.sources(),
+        &p.data,
+        Some(Envelope::from_agent_toml(&text).map_err(Failure::Refused)?),
+    );
+    match dispatcher_env::refresh(&env_file, &rendered).map_err(Failure::Refused)? {
+        Refresh::NoFile => {
+            return Err(Failure::Refused(format!(
+                "{} is gone since the enrollment wrote it",
+                env_file.display()
+            )))
+        }
+        Refresh::Written | Refresh::Unchanged => say(
+            out,
+            &format!(
+                "{} (0600): the worker token, {}",
+                env_file.display(),
+                rendered.lines().map_err(Failure::Refused)?.join(", ")
+            ),
+        ),
+    }
 
     agent_keys(o, v, sys, out)?;
 
@@ -894,10 +1308,12 @@ pub(crate) fn apply(
             containers: seen.containers.clone(),
             networks: seen.networks.clone(),
             rootful_exception: ready.facts.isolation() == capacity::Isolation::Root,
+            // Where retire-legacy will write its marker (#344): compose's working directory.
+            dir: seen.dir(),
+            retired_at: None,
+            retired_by: None,
         };
-        let body =
-            serde_json::to_vec_pretty(&record).map_err(|e| Failure::Refused(e.to_string()))?;
-        files::write(&p.data, legacy::FILE, &body, 0o600).map_err(Failure::Refused)?;
+        legacy::record(&p.data, &record).map_err(Failure::Refused)?;
         say(
             out,
             &format!(
@@ -907,17 +1323,36 @@ pub(crate) fn apply(
         );
     }
 
-    // The unit, linger, the service: its first round rolls the bundle out.
-    let unit_text = unit::render(&p.data).map_err(Failure::Refused)?;
-    files::make_dir(&p.unit_dir()).map_err(Failure::Refused)?;
-    files::write(&p.unit_dir(), unit::NAME, unit_text.as_bytes(), 0o644)
-        .map_err(Failure::Refused)?;
-    if let Err(e) = unit::linger(sys, &p.user) {
-        done.needs_person.push(e);
-    }
-    match unit::start(sys) {
-        Ok(()) => say(out, &format!("{} started: its first round renders, pulls and starts release v{}'s bundle (omarchy-agent status)", unit::NAME, ready.manifest.outer().release())),
-        Err(e) => done.needs_person.push(e),
+    // The unit and linger, or the LaunchAgent; the service: its first round rolls the
+    // bundle out.
+    let first = format!(
+        "its first round renders, pulls and starts release v{}'s bundle (omarchy-agent status)",
+        ready.manifest.outer().release()
+    );
+    if p.mac() {
+        let plist = p.render_plist().map_err(Failure::Refused)?;
+        for d in [&p.launch_agents, &p.logs] {
+            std::fs::create_dir_all(d)
+                .map_err(|e| Failure::Refused(format!("{}: {e}", d.display())))?;
+        }
+        files::write(&p.launch_agents, launchd::PLIST, plist.as_bytes(), 0o644)
+            .map_err(Failure::Refused)?;
+        match launchd::start(sys, p.uid, &p.plist(), p.ssh) {
+            Ok(()) => say(out, &format!("{} loaded (gui/{}), logs in {}: {first}; it starts again at each login (a LaunchAgent is login-scoped)", launchd::LABEL, p.uid, p.logs.display())),
+            Err(e) => done.needs_person.push(e),
+        }
+    } else {
+        let unit_text = unit::render(&p.data).map_err(Failure::Refused)?;
+        files::make_dir(&p.unit_dir()).map_err(Failure::Refused)?;
+        files::write(&p.unit_dir(), unit::NAME, unit_text.as_bytes(), 0o644)
+            .map_err(Failure::Refused)?;
+        if let Err(e) = unit::linger(sys, &p.user) {
+            done.needs_person.push(e);
+        }
+        match unit::start(sys) {
+            Ok(()) => say(out, &format!("{} started: {first}", unit::NAME)),
+            Err(e) => done.needs_person.push(e),
+        }
     }
 
     let fingerprint = HostKey::load_or_create(&eo.paths.state.join(KEY_FILE))
@@ -926,7 +1361,10 @@ pub(crate) fn apply(
     let lanes = c
         .lanes()
         .iter()
-        .map(|l| format!("{} {}", l.arch, l.mode))
+        .map(|l| match l.via {
+            Some(via) => format!("{} {} through {via}", l.arch, l.mode),
+            None => format!("{} {}", l.arch, l.mode),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     say(
@@ -1016,30 +1454,28 @@ fn agent_keys(
 /// and networks, task containers and sidecars (only here), an egress probe's leftovers,
 /// and the bundle's files. A user manager it cannot reach stops it before anything goes. The
 /// recorded legacy project is never touched; the host identity, agent.toml, the agent
-/// binaries and the secrets directory stay, so a new install keeps the identity.
+/// binaries and the secrets directory stay, so a new install keeps the identity. On a Mac
+/// (#320) the `LaunchAgent` is booted out and its plist removed, the set directory (outside
+/// the data directory) emptied, and the `omarchy` VM stopped, never deleted.
+#[allow(clippy::too_many_lines)] // the uninstall's steps, in order
 pub fn uninstall(
     places: &Places,
     sys: &mut dyn Sys,
     out: &mut dyn Write,
 ) -> Result<Vec<String>, String> {
     let mut left = Vec::new();
-    unit::stop(sys)?;
-    files::remove(&places.unit_dir(), unit::NAME)?;
-    unit::reload(sys);
-    say(out, &format!("stopped and removed {}", unit::NAME));
+    if places.mac() {
+        launchd::stop(sys, places.uid, places.ssh)?;
+        files::remove(&places.launch_agents, launchd::PLIST)?;
+        say(out, &format!("unloaded and removed {}", launchd::PLIST));
+    } else {
+        unit::stop(sys)?;
+        files::remove(&places.unit_dir(), unit::NAME)?;
+        unit::reload(sys);
+        say(out, &format!("stopped and removed {}", unit::NAME));
+    }
 
     let cfg = std::fs::read_to_string(places.agent_toml()).ok();
-    let legacy_project = std::fs::read(places.data.join(legacy::FILE))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok())
-        .map(|l| l.project);
-    let socket = envelope::set_path(cfg.as_deref(), "socket_cli");
-    let project = envelope::set_str(cfg.as_deref(), "project")
-        .unwrap_or_else(|| envelope::PROJECT.to_owned());
-    let host = cfg
-        .as_deref()
-        .and_then(|t| toml::from_str::<toml::Table>(t).ok())
-        .and_then(|t| t.get("host_id").and_then(|h| h.as_str().map(str::to_owned)));
     let state = crate::run::state::load(&places.data.join("state.json"))
         .ok()
         .flatten();
@@ -1047,6 +1483,33 @@ pub fn uninstall(
         .and_then(|s| s.tools)
         .and_then(|pins| tools::open(&places.data.join("tools"), &pins).ok())
         .map(|t| t.docker);
+    // The omarchy VM is started (its saved configuration) for the containers to be removed;
+    // Colima wants the pinned docker CLI on its PATH for that (#320).
+    let colima = envelope::table_str(cfg.as_deref(), "vm", "runtime").as_deref() == Some("colima");
+    let env = crate::vm::colima_env(cli.as_deref(), &places.docker_config());
+    if colima
+        && sys
+            .run_env("colima", &["status", "--profile", crate::vm::PROFILE], &env)
+            .is_err()
+    {
+        if let Err(e) = sys.run_env("colima", &["start", "--profile", crate::vm::PROFILE], &env) {
+            left.push(format!(
+                "needs a person: the {} VM did not start ({e})",
+                crate::vm::PROFILE
+            ));
+        }
+    }
+    let legacy_record = std::fs::read(places.data.join(legacy::FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok());
+    let legacy_project = legacy_record.as_ref().map(|l| l.project.clone());
+    let socket = envelope::set_path(cfg.as_deref(), "socket_cli");
+    let project = envelope::set_str(cfg.as_deref(), "project")
+        .unwrap_or_else(|| envelope::PROJECT.to_owned());
+    let host = cfg
+        .as_deref()
+        .and_then(|t| toml::from_str::<toml::Table>(t).ok())
+        .and_then(|t| t.get("host_id").and_then(|h| h.as_str().map(str::to_owned)));
     // Containers that could not be removed keep their set (its dispatcher.env) until a
     // later uninstall removes them.
     let mut keep_set = false;
@@ -1078,6 +1541,13 @@ pub fn uninstall(
             Err(_) => {}
         }
     }
+    // A set directory outside the data directory (a Mac's, which the VM mounts): what is in
+    // it goes, the directory prep-mac.sh made stays.
+    if let Some(set) = envelope::set_path(cfg.as_deref(), "dir")
+        .filter(|s| !keep_set && !s.starts_with(&places.data))
+    {
+        empty_set_dir(&set, places, cfg.as_deref())?;
+    }
     if let Err(e) = forget_bundle(&places.data.join("state.json")) {
         left.push(format!("needs a person: state.json still names the removed bundle ({e}); a new install's first round may not start until an Update order"));
     }
@@ -1088,10 +1558,69 @@ pub fn uninstall(
             places.data.display()
         ),
     );
-    if let Some(l) = legacy_project {
-        say(out, &format!("the legacy project {l} was not touched"));
+    match legacy_record {
+        Some(l) if l.retired_at.is_some() => say(
+            out,
+            &format!(
+                "the legacy project {} was retired already ({}); its marker stays in {}",
+                l.project,
+                l.retired_at.as_deref().unwrap_or_default(),
+                l.dir
+                    .as_ref()
+                    .map_or_else(|| "its directory".to_owned(), |d| d.display().to_string())
+            ),
+        ),
+        Some(l) => say(
+            out,
+            &format!("the legacy project {} was not touched", l.project),
+        ),
+        None => {}
+    }
+    if colima {
+        match sys.run_env("colima", &["stop", "--profile", crate::vm::PROFILE], &env) {
+            Ok(_) => say(
+                out,
+                &format!(
+                    "stopped the {p} VM; `colima delete -p {p}` removes it and its disk",
+                    p = crate::vm::PROFILE
+                ),
+            ),
+            Err(e) => left.push(format!(
+                "needs a person: the {} VM did not stop ({e})",
+                crate::vm::PROFILE
+            )),
+        }
     }
     Ok(left)
+}
+
+/// Empties a set directory outside the data directory, when it is the agent's own and
+/// holds none of the directories that stay (the data directory, the home directory, the
+/// work root, the secrets directory).
+fn empty_set_dir(set: &Path, places: &Places, cfg: Option<&str>) -> Result<(), String> {
+    let keep = [
+        Some(places.data.clone()),
+        Some(places.home.clone()),
+        envelope::set_path(cfg, "work_root"),
+        envelope::set_path(cfg, "secrets_dir"),
+    ];
+    if keep.iter().flatten().any(|k| k.starts_with(set)) || files::owned_dir(set).is_err() {
+        return Err(format!(
+            "{}: not emptied (not the agent's own set directory)",
+            set.display()
+        ));
+    }
+    for e in std::fs::read_dir(set).map_err(|e| format!("{}: {e}", set.display()))? {
+        let e = e.map_err(|e| format!("{}: {e}", set.display()))?;
+        let p = e.path();
+        let gone = if e.file_type().is_ok_and(|t| t.is_dir()) {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
+        gone.map_err(|err| format!("{}: {err}", p.display()))?;
+    }
+    Ok(())
 }
 
 /// `state.json` without the bundle uninstall removed: no applied release and no round in

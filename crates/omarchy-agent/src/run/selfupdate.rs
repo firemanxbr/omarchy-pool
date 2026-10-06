@@ -368,7 +368,7 @@ impl Agent {
                 return Err(format!("the engine does not answer: {e}"));
             }
         }
-        let last = match self.pool.follow(&self.cfg.worker_id) {
+        let last = match self.pool.state() {
             Net::Ok(_) => "ok",
             Net::NoAnswer(_) => "no-answer",
             Net::Unauthorized(_) => "unauthorized",

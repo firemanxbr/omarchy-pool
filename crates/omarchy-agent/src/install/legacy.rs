@@ -1,8 +1,11 @@
 //! A legacy set beside the new bundle (#317, design v2 §13.2 step 8, §21): with
 //! `--legacy <compose project>` the project is only recorded, in `legacy.json`, and
-//! nothing in it is changed — no container, file or network, and no marker (that is
-//! `retire-legacy`'s, P3). Preflight checks that it exists and that the new work root and
-//! task subnets do not overlap its paths and networks; uninstall never touches it.
+//! nothing in it is changed — no container, file or network, and no marker (that is the
+//! `retire-legacy` host order's, #344, `crate::run`'s). Preflight checks that it exists
+//! and that the new work root and task subnets do not overlap its paths and networks;
+//! uninstall never touches it. The record keeps the project's directory (compose's
+//! working directory, where its `compose.yml` is), the one `retire-legacy` writes its
+//! marker into, and once retired, when and by which order.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +16,7 @@ use super::net::Cidr;
 
 pub(crate) const FILE: &str = "legacy.json";
 const PROJECT_LABEL: &str = "com.docker.compose.project";
+const DIR_LABEL: &str = "com.docker.compose.project.working_dir";
 
 /// `legacy.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +28,36 @@ pub(crate) struct Legacy {
     pub networks: Vec<String>,
     /// A rootful daemon without userns-remap, allowed beside the legacy set until P6.
     pub rootful_exception: bool,
+    /// The project's directory, when its containers named one (a record from before #344
+    /// has none: `retire-legacy` then reads it from the containers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
+    /// `retire-legacy` stopped and removed it (#344): when, and the order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_by: Option<String>,
+}
+
+/// `legacy.json` under the data directory: `Ok(None)` when there is none. The file is the
+/// agent's own (install wrote it 0600): one that is a link, another user's or writable by
+/// others is refused.
+pub(crate) fn recorded(data: &Path) -> Result<Option<Legacy>, String> {
+    let path = data.join(FILE);
+    super::files::check_owner_file(&path)?;
+    match std::fs::read(&path) {
+        Ok(b) => serde_json::from_slice(&b)
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Writes `legacy.json` (0600, through `openat` with `O_NOFOLLOW`).
+pub(crate) fn record(data: &Path, l: &Legacy) -> Result<(), String> {
+    let body = serde_json::to_vec_pretty(l).map_err(|e| e.to_string())?;
+    super::files::write(data, FILE, &body, 0o600)
 }
 
 /// A compose project name as compose takes it.
@@ -44,6 +78,18 @@ pub(crate) struct Seen {
     pub networks: Vec<String>,
     pub paths: Vec<PathBuf>,
     pub subnets: Vec<Cidr>,
+    /// The working directories its containers name (compose's label), each once.
+    pub dirs: Vec<PathBuf>,
+}
+
+impl Seen {
+    /// The project's one directory, when its containers agree on one absolute path.
+    pub fn dir(&self) -> Option<PathBuf> {
+        match self.dirs.as_slice() {
+            [d] if d.is_absolute() => Some(d.clone()),
+            _ => None,
+        }
+    }
 }
 
 fn lines(s: &str) -> Vec<String> {
@@ -75,6 +121,15 @@ pub(crate) fn look(docker: &Docker, project: &str) -> Result<Seen, String> {
             .into_iter()
             .map(PathBuf::from)
             .collect();
+        let format = format!("{{{{index .Config.Labels \"{DIR_LABEL}\"}}}}");
+        let mut args = vec!["inspect", "--format", format.as_str()];
+        args.extend(seen.containers.iter().map(String::as_str));
+        for d in lines(&docker.run(&args)?) {
+            let d = PathBuf::from(d);
+            if !seen.dirs.contains(&d) {
+                seen.dirs.push(d);
+            }
+        }
     }
     if !seen.networks.is_empty() {
         let mut args = vec![

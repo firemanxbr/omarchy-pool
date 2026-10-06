@@ -3,8 +3,10 @@
 
 use std::fs;
 
+use crate::dispatcher_env::{Budget, Sources};
+use crate::run::agent::HostEnv;
 use crate::run::fake::{publish, relay_statement, rendered_compose, World, T0, TOKEN};
-use crate::run::pool::{Follow, Net};
+use crate::run::pool::{HostState, Net};
 use crate::run::state::{Files, Phase, Step};
 use crate::version::Release;
 
@@ -28,7 +30,7 @@ fn a_release_reaches_the_host_with_no_human_action_and_a_running_task_keeps_runn
 
     // A release: the pool names it, and the next poll rolls it out.
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     let start = w.journal().lines().count();
     w.tick(200);
     while w.step() != "idle" {
@@ -100,7 +102,7 @@ fn a_broken_dispatcher_is_reverted_and_quarantined_and_an_update_order_lifts_it(
         &[],
         "    command: [broken]\n",
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     let (outcome, detail) = w.outcome();
     assert_eq!(outcome, "rolled-back", "{detail}");
@@ -140,7 +142,7 @@ fn a_broken_dispatcher_is_reverted_and_quarantined_and_an_update_order_lifts_it(
     );
 
     // An Update order lifts the quarantine and starts a round at once.
-    w.follow("v1.1.0", Some("ord_1"));
+    w.target("v1.1.0", Some("ord_1"));
     w.tick(600);
     assert!(w.agent.state.quarantine.is_empty() || w.step() != "idle");
     assert_eq!(w.agent.state.rollout.target, r("v1.1.0"));
@@ -170,7 +172,7 @@ fn a_quarantine_ends_after_an_hour_with_one_retry() {
         &[],
         "    command: [broken]\n",
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     assert_eq!(w.outcome().0, "rolled-back");
     w.tick(3601);
@@ -193,7 +195,7 @@ fn a_quarantine_ends_after_an_hour_with_one_retry() {
         w.outcome()
     );
     w.release("v1.1.1");
-    w.follow("v1.1.1", None);
+    w.target("v1.1.1", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.1.1"));
 }
@@ -202,7 +204,7 @@ fn a_quarantine_ends_after_an_hour_with_one_retry() {
 fn two_ordered_restarts_during_the_guard_do_not_fail_it() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while w.step() != "guard" {
         w.tick(3);
@@ -228,7 +230,7 @@ fn two_ordered_restarts_during_the_guard_do_not_fail_it() {
 fn an_exit_other_than_75_during_the_guard_fails_it() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while w.step() != "guard" {
         w.tick(3);
@@ -263,21 +265,21 @@ fn an_exit_other_than_75_during_the_guard_fails_it() {
 fn a_rollback_statement_mid_round_preempts_it_and_moves_the_host_down() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
     let task = w.engine.borrow().tasks()[0].id.clone();
 
     // v1.2.0 is rolling out ...
     w.release("v1.2.0");
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round_now();
     while w.step() != "guard" {
         w.tick(3);
     }
     // ... when rollback.yml retracts everything above v1.0.0 and the pool goes back to it.
     relay_statement(&w.remote, 1, "v1.0.0", "v1.2.0", b"signed");
-    w.follow("v1.0.0", None);
+    w.target("v1.0.0", None);
     w.round_now();
     assert!(
         w.journal().contains("\"event\":\"preempted\""),
@@ -302,7 +304,7 @@ fn a_rollback_statement_mid_round_preempts_it_and_moves_the_host_down() {
     assert!(!w.journal().contains("agent-available"));
 
     // The same statement again is not a second rollback: going forward needs nothing.
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
 }
@@ -327,13 +329,13 @@ fn forged_targets_are_refused_with_named_reasons_and_nothing_changes() {
         &["v1.2.5"],
         "",
     );
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
     let changes = w.changes().len();
 
     let refused = |w: &mut World, target: &str, reason: &str| {
-        w.follow(target, None);
+        w.target(target, None);
         w.round_now();
         let (outcome, detail) = w.outcome();
         assert_eq!(outcome, "refused", "{target}: {detail}");
@@ -425,11 +427,11 @@ fn storms_of_401_and_5xx_leave_everything_running_and_the_agent_recovers_by_itse
 
     // Two hours of 503s: back-off to 10 minutes, nothing changes.
     w.pool_answers(Net::NoAnswer("HTTP 503".into()));
-    let polls = w.remote.borrow().follows;
+    let polls = w.remote.borrow().polls;
     for _ in 0..(2 * 3600 / 30) {
         w.tick(30);
     }
-    let asked = w.remote.borrow().follows - polls;
+    let asked = w.remote.borrow().polls - polls;
     assert!(
         (12..=30).contains(&asked),
         "{asked} polls in two hours of 5xx"
@@ -440,11 +442,11 @@ fn storms_of_401_and_5xx_leave_everything_running_and_the_agent_recovers_by_itse
     // Then four hours of 401s: hourly polls, nothing changes.
     w.pool_answers(Net::Unauthorized(401));
     w.tick(600);
-    let polls = w.remote.borrow().follows;
+    let polls = w.remote.borrow().polls;
     for _ in 0..(4 * 3600 / 60) {
         w.tick(60);
     }
-    let asked = w.remote.borrow().follows - polls;
+    let asked = w.remote.borrow().polls - polls;
     assert!(
         (3..=5).contains(&asked),
         "{asked} polls in four hours of 401"
@@ -464,7 +466,7 @@ fn storms_of_401_and_5xx_leave_everything_running_and_the_agent_recovers_by_itse
 
     // The pool answers again, with a release: rolled out by the same process.
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     for _ in 0..400 {
         w.tick(5);
         if w.applied().as_deref() == Some("v1.1.0") {
@@ -480,7 +482,7 @@ fn with_the_dispatcher_env_missing_the_dispatcher_is_held_and_the_reason_reporte
     let mut w = World::new();
     fs::remove_file(w.set_dir().join("etc/dispatcher.env")).unwrap();
     w.release("v1.0.0");
-    w.follow("v1.0.0", None);
+    w.target("v1.0.0", None);
     w.round();
     let (outcome, detail) = w.outcome();
     assert_eq!(outcome, "held");
@@ -503,10 +505,290 @@ fn with_the_dispatcher_env_missing_the_dispatcher_is_held_and_the_reason_reporte
 }
 
 #[test]
+fn the_host_s_addresses_reach_dispatcher_env_and_a_change_recreates_the_dispatcher_with_the_token_kept(
+) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut w = World::running_v1();
+    // The host's interfaces, a copy of a fixture the test changes as the host would (#371).
+    let net = w.dir.join("net");
+    fs::create_dir_all(&net).unwrap();
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home");
+    for f in ["fib_trie", "if_inet6", "route"] {
+        fs::copy(fixture.join(f), net.join(f)).unwrap();
+    }
+    w.agent.host_env = Some(HostEnv::new(Sources {
+        proc_net: net.clone(),
+        ifconfig: None,
+    }));
+    w.agent.cfg.agent_budget = Budget {
+        calls_per_day: Some(900),
+        ..Budget::default()
+    };
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let first = w.engine.borrow().dispatcher().unwrap().id.clone();
+
+    // At its start: rendered with the token kept, 0600, and a round recreates the dispatcher.
+    w.tick(3);
+    let text = fs::read_to_string(&env).unwrap();
+    for want in [
+        format!("\nOMARCHY_WORKER_TOKEN={TOKEN}\n"),
+        "\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n".into(),
+        format!("\nOMARCHY_SECRETS_DIR={}\nOMARCHY_AGENT_CALLS_PER_DAY=900\n", w.dir.join("secrets").display()),
+    ] {
+        assert!(text.contains(&want), "{want:?} in:\n{text}");
+    }
+    assert_eq!(
+        fs::metadata(&env).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        w.agent.state.rollout.why.contains("an input changed"),
+        "{:?}",
+        w.agent.state.rollout
+    );
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    let second = w.engine.borrow().dispatcher().unwrap().id.clone();
+    assert_ne!(first, second, "the dispatcher was recreated with the file");
+    assert!(
+        w.journal().contains("\"event\":\"dispatcher-env\""),
+        "{}",
+        w.journal()
+    );
+
+    // Nothing changed: read again every minute, never written, no round.
+    for _ in 0..3 {
+        w.tick(61);
+    }
+    assert_eq!(w.step(), "idle");
+    assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    assert_eq!(w.engine.borrow().dispatcher().unwrap().id, second);
+
+    // The LAN address changes (a new DHCP lease): the addresses only, the token as it was.
+    let fib = fs::read_to_string(net.join("fib_trie")).unwrap();
+    fs::write(
+        net.join("fib_trie"),
+        fib.replace("192.168.1.20", "192.168.1.21"),
+    )
+    .unwrap();
+    w.tick(61);
+    let moved = fs::read_to_string(&env).unwrap();
+    assert_eq!(moved, text.replace("192.168.1.20", "192.168.1.21"));
+    assert_ne!(w.step(), "idle");
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_ne!(w.engine.borrow().dispatcher().unwrap().id, second);
+    assert_eq!(w.engine.borrow().tasks().len(), 1, "the task runs on");
+
+    // No file (the owner has not confirmed): none is made, the dispatcher is held.
+    fs::remove_file(&env).unwrap();
+    w.tick(61);
+    assert!(!env.exists());
+}
+
+/// A world whose host's interfaces are a copy of the home fixture, with the run loop's half
+/// of `etc/dispatcher.env` on (#371).
+fn with_host_env() -> World {
+    let mut w = World::running_v1();
+    let net = w.dir.join("net");
+    fs::create_dir_all(&net).unwrap();
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home");
+    for f in ["fib_trie", "if_inet6", "route"] {
+        fs::copy(fixture.join(f), net.join(f)).unwrap();
+    }
+    w.agent.host_env = Some(HostEnv::new(Sources {
+        proc_net: net,
+        ifconfig: None,
+    }));
+    w
+}
+
+fn settle(w: &mut World) {
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+}
+
+#[test]
+fn the_public_address_the_pool_s_edge_sees_is_asked_hourly_within_minutes_after_no_answer_and_a_new_one_refused_with_the_token_kept(
+) {
+    let mut w = with_host_env();
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let addresses = |w: &World| {
+        fs::read_to_string(w.set_dir().join("etc/dispatcher.env"))
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("OMARCHY_HOST_ADDRESSES="))
+            .unwrap()
+            .to_owned()
+    };
+    // Install saw 198.51.100.20; the pool's edge says the same at the loop's start.
+    crate::dispatcher_env::addresses::keep_seen(
+        &w.agent.paths.data,
+        "198.51.100.20".parse().unwrap(),
+        "2027-01-15T07:00:00Z",
+    )
+    .unwrap();
+    w.remote.borrow_mut().public = Some(Net::Ok("198.51.100.20".parse().unwrap()));
+    w.tick(3);
+    assert_eq!(w.remote.borrow().publics, 1);
+    assert_eq!(
+        addresses(&w),
+        "10.8.0.2,192.168.1.20,198.51.100.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64"
+    );
+    settle(&mut w);
+    let text = fs::read_to_string(&env).unwrap();
+    let dispatcher = w.engine.borrow().dispatcher().unwrap().id.clone();
+
+    // The provider hands the home connection a new public address: within the hour the
+    // edge is asked again, and every task's egress refuses the new one; the token stays.
+    w.remote.borrow_mut().public = Some(Net::Ok("198.51.100.77".parse().unwrap()));
+    for _ in 0..10 {
+        w.tick(61);
+    }
+    assert_eq!(
+        w.remote.borrow().publics,
+        1,
+        "asked hourly, not every minute"
+    );
+    assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    for _ in 0..55 {
+        w.tick(61);
+    }
+    assert_eq!(w.remote.borrow().publics, 2);
+    assert_eq!(
+        fs::read_to_string(&env).unwrap(),
+        text.replace("198.51.100.20", "198.51.100.77")
+    );
+    assert_eq!(
+        crate::dispatcher_env::addresses::seen(&w.agent.paths.data),
+        Some("198.51.100.77".parse().unwrap())
+    );
+    settle(&mut w);
+    assert_ne!(w.engine.borrow().dispatcher().unwrap().id, dispatcher);
+
+    // No answer (the pool down, an IPv6-only host): the address last seen stays, and the
+    // edge is asked again within minutes, not the hour — after a power cut the loop often
+    // starts before the network is up, and the provider's new address must not wait.
+    let text = fs::read_to_string(&env).unwrap();
+    w.remote.borrow_mut().public = Some(Net::NoAnswer("timed out".into()));
+    for _ in 0..61 {
+        if w.remote.borrow().publics == 3 {
+            break;
+        }
+        w.tick(61);
+    }
+    assert_eq!(w.remote.borrow().publics, 3, "the hourly ask, unanswered");
+    for _ in 0..10 {
+        w.tick(61);
+    }
+    assert_eq!(
+        w.remote.borrow().publics,
+        6,
+        "asked again after one, two and four minutes, then every five"
+    );
+    assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    // The edge answers again, with a new address: refused within five minutes.
+    w.remote.borrow_mut().public = Some(Net::Ok("198.51.100.99".parse().unwrap()));
+    for _ in 0..5 {
+        w.tick(61);
+    }
+    assert_eq!(
+        fs::read_to_string(&env).unwrap(),
+        text.replace("198.51.100.77", "198.51.100.99")
+    );
+    // Answered: hourly again.
+    let asked = w.remote.borrow().publics;
+    for _ in 0..30 {
+        w.tick(61);
+    }
+    assert_eq!(w.remote.borrow().publics, asked);
+}
+
+#[test]
+fn agent_toml_is_read_again_so_the_loop_never_puts_back_what_a_rotation_or_dispatcher_env_wrote() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut w = with_host_env();
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let secrets = w.dir.join("secrets");
+    // The loop started without a budget; the owner then gives agent.toml one.
+    fs::write(
+        w.agent.paths.data.join("agent.toml"),
+        format!(
+            "[set]\nsecrets_dir = \"{}\"\n[envelope]\nagent_budget = {{ calls_per_task = 40 }}\n",
+            secrets.display()
+        ),
+    )
+    .unwrap();
+    w.tick(3);
+    settle(&mut w);
+    let text = fs::read_to_string(&env).unwrap();
+    assert!(
+        text.contains(&format!(
+            "\nOMARCHY_SECRETS_DIR={}\nOMARCHY_AGENT_CALLS_PER_TASK=40\n",
+            secrets.display()
+        )),
+        "{text}"
+    );
+    // Rendered every minute from then on, it stays as agent.toml says.
+    for _ in 0..3 {
+        w.tick(61);
+    }
+    assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    assert_eq!(w.step(), "idle");
+    // An agent.toml that does not read now (an edit half done): what the loop started with.
+    fs::write(
+        w.agent.paths.data.join("agent.toml"),
+        "[envelope]\nagent_budget = { calls_per_tusk = 40 }\n",
+    )
+    .unwrap();
+    w.tick(61);
+    assert!(
+        !fs::read_to_string(&env)
+            .unwrap()
+            .contains("OMARCHY_AGENT_CALLS_PER_TASK"),
+        "the start's configuration has no budget"
+    );
+    // One others may write, or a symbolic link, is refused as the loop's start refuses it
+    // (design v2 §12): its budget never reaches the file.
+    let toml = w.agent.paths.data.join("agent.toml");
+    let budget = format!(
+        "[set]\nsecrets_dir = \"{}\"\n[envelope]\nagent_budget = {{ calls_per_task = 99 }}\n",
+        secrets.display()
+    );
+    let budgeted = |w: &World| {
+        fs::read_to_string(w.set_dir().join("etc/dispatcher.env"))
+            .unwrap()
+            .contains("\nOMARCHY_AGENT_CALLS_PER_TASK=99\n")
+    };
+    fs::write(&toml, &budget).unwrap();
+    fs::set_permissions(&toml, fs::Permissions::from_mode(0o664)).unwrap();
+    w.tick(61);
+    assert!(!budgeted(&w), "a group-writable agent.toml is not read");
+    let elsewhere = w.dir.join("elsewhere.toml");
+    fs::write(&elsewhere, &budget).unwrap();
+    fs::remove_file(&toml).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &toml).unwrap();
+    w.tick(61);
+    assert!(!budgeted(&w), "a link is not followed");
+    // Its own again: read.
+    fs::remove_file(&toml).unwrap();
+    fs::write(&toml, &budget).unwrap();
+    w.tick(61);
+    assert!(budgeted(&w));
+}
+
+#[test]
 fn interpolated_output_and_the_token_never_reach_the_disk_or_a_report() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     let work_root = w.dir.join("work").display().to_string();
     let mut files = Vec::new();
@@ -603,7 +885,7 @@ fn the_agent_resumes_a_round_after_a_restart_at_every_step() {
     // The ticks of one good round, then the same round with a restart after each tick.
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     let mut ticks = 0;
     while w.step() != "idle" {
@@ -615,7 +897,7 @@ fn the_agent_resumes_a_round_after_a_restart_at_every_step() {
         let mut w = World::running_v1();
         let task = w.engine.borrow().tasks()[0].id.clone();
         w.release("v1.1.0");
-        w.follow("v1.1.0", None);
+        w.target("v1.1.0", None);
         w.round_now();
         for _ in 0..at {
             w.tick(3);
@@ -657,7 +939,7 @@ fn a_reboot_during_the_ready_wait_or_the_guard_does_not_revert_a_good_release() 
     for at in ["ready", "guard"] {
         let mut w = World::running_v1();
         w.release("v1.1.0");
-        w.follow("v1.1.0", None);
+        w.target("v1.1.0", None);
         w.round_now();
         let reached = |w: &World| match &w.agent.state.rollout.step {
             Step::Replace {
@@ -700,7 +982,7 @@ fn a_reboot_during_the_ready_wait_or_the_guard_does_not_revert_a_good_release() 
 fn a_pull_failure_changes_nothing_and_the_next_poll_retries() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.engine.borrow_mut().pull_fails = true;
     w.round();
     assert_eq!(w.outcome().0, "pull-failed");
@@ -723,7 +1005,7 @@ fn a_lint_violation_is_refused_by_name() {
     )
     .unwrap();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     let (outcome, detail) = w.outcome();
     assert_eq!(outcome, "refused");
@@ -737,7 +1019,7 @@ fn a_lint_violation_is_refused_by_name() {
 fn an_engine_that_does_not_answer_changes_nothing_until_it_does() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.engine.borrow_mut().down = true;
     w.round_now();
     for _ in 0..20 {
@@ -757,12 +1039,12 @@ fn a_newer_release_preempts_a_round_before_its_commit() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
     w.release("v1.2.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while w.step() != "pull" {
         w.tick(3);
     }
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round_now();
     assert_eq!(w.agent.state.rollout.target, r("v1.2.0"));
     // Preempted at pull: the new round rendered v1.2.0 in the same tick.
@@ -781,10 +1063,10 @@ fn a_newer_release_preempts_a_round_before_its_commit() {
 }
 
 #[test]
-fn a_follow_answer_without_a_release_changes_nothing() {
+fn a_host_state_without_a_release_changes_nothing() {
     let mut w = World::running_v1();
     let changes = w.changes().len();
-    w.pool_answers(Net::Ok(Follow::default()));
+    w.pool_answers(Net::Ok(HostState::default()));
     w.round_now();
     w.tick(300);
     assert_eq!(w.changes().len(), changes);
@@ -796,13 +1078,13 @@ fn an_older_release_does_not_preempt_a_round() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
     w.release("v1.2.0");
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round_now();
     while w.step() != "pull" {
         w.tick(3);
     }
     // Admitted, but neither newer nor under a rollback statement: the round goes on.
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     assert_eq!(w.agent.state.rollout.target, r("v1.2.0"));
     assert!(!w.journal().contains("\"preempted\""), "{}", w.journal());
@@ -823,7 +1105,7 @@ fn an_update_order_seen_while_a_revert_finishes_is_kept_for_the_next_poll() {
         &[],
         "    command: [broken]\n",
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while !matches!(
         w.agent.state.rollout.step,
@@ -834,7 +1116,7 @@ fn an_update_order_seen_while_a_revert_finishes_is_kept_for_the_next_poll() {
     ) {
         w.tick(3);
     }
-    w.follow("v1.1.0", Some("ord_1"));
+    w.target("v1.1.0", Some("ord_1"));
     w.round_now();
     assert_eq!(w.agent.state.update_seen, None);
     while w.step() != "idle" {
@@ -854,7 +1136,7 @@ fn an_update_order_seen_while_a_revert_finishes_is_kept_for_the_next_poll() {
 fn at_commit() -> World {
     let mut w = World::running_v1();
     w.release("v1.1.0");
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round_now();
     while w.step() != "commit" {
         w.tick(3);
@@ -905,4 +1187,247 @@ fn a_commit_whose_set_directory_write_failed_finishes_once_it_can_write() {
     assert_eq!(w.step(), "commit");
     w.tick(3);
     assert_committed(&w);
+}
+
+/// A Mac's run loop (#320): the agent with its VM keeper over a played Colima.
+mod on_a_mac {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+    use std::rc::Rc;
+
+    use super::r;
+    use crate::dispatcher_env::Sources;
+    use crate::run::agent::HostEnv;
+    use crate::run::fake::World;
+    use crate::run::pool::{HostState, Net};
+    use crate::run::vm::tests::{saved_for, want, Fake, World as Colima};
+    use crate::run::vm::Keeper;
+
+    /// What a played count was given: the set directory and the VM's meminfo.
+    type Counted = Vec<(PathBuf, Option<String>)>;
+
+    /// A host running v1.0.0 whose VM is played by `colima`, the pinned docker CLI known.
+    fn mac(colima: Colima) -> (World, Rc<RefCell<Colima>>) {
+        let mut w = World::running_v1();
+        let played = Rc::new(RefCell::new(Colima {
+            want: Some(want()),
+            mac: "16\n68719476736\n".into(),
+            ..colima
+        }));
+        let subnets = crate::install::net::parse_list("10.231.0.0/16").unwrap();
+        let mut k = Keeper::new(
+            Box::new(Fake(Rc::clone(&played))),
+            want(),
+            crate::vm::firewall(&subnets),
+            Path::new("/Users/maintainer"),
+            &w.agent.paths.data,
+        );
+        k.use_docker(Path::new("/data/tools/0a/docker"));
+        w.agent.vm = Some(k);
+        (w, played)
+    }
+
+    /// The pool answers v1.0.0 with its `Date`: this machine's clock, as a pool on time.
+    fn dated(w: &World) {
+        w.pool_answers(Net::Ok(HostState {
+            target: r("v1.0.0"),
+            poll_s: Some(120),
+            ..HostState::default()
+        }));
+        w.remote.borrow_mut().date = Some(crate::run::now());
+    }
+
+    #[test]
+    fn a_wake_polls_the_pool_at_once_and_the_vms_clock_is_set_to_its_date_on_that_tick() {
+        let (mut w, colima) = mac(Colima {
+            running: true,
+            saved: Some(saved_for(&want())),
+            set_holds: true,
+            ..Colima::default()
+        });
+        dated(&w);
+        w.tick(3);
+        // The Mac slept: the VM's clock stayed 40 minutes behind, and no poll is due yet.
+        colima.borrow_mut().skew = -2400;
+        w.agent.state.poll.next_at = w.now + 600;
+        // The pool's Date at the wake's poll is its time then, not the first poll's: the
+        // test's own pauses are not a Mac clock off the pool's.
+        dated(&w);
+        let polls = w.remote.borrow().polls;
+        w.tick(crate::vm::WAKE_GAP_S + 1);
+        assert_eq!(w.remote.borrow().polls, polls + 1, "{}", w.journal());
+        let calls = colima.borrow().calls.clone();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("ssh sudo -n date -u -s @")),
+            "{calls:?}"
+        );
+        assert!(colima.borrow().skew.abs() <= 1);
+        let journal = w.journal();
+        assert!(journal.contains("the Mac woke"), "{journal}");
+        assert!(
+            journal.contains("the VM's clock was -2400 s off"),
+            "{journal}"
+        );
+    }
+
+    /// The host state is signed (#344), and the pool refuses a signature whose time is more
+    /// than 120 s from its own: a Mac whose clock is that far off hears the pool's time from
+    /// the refusal's `Date`, is said to need a person, and its VM is held to the Mac's clock,
+    /// never moved to the pool's.
+    #[test]
+    fn a_mac_whose_clock_the_pool_refuses_hears_its_time_from_the_refusal() {
+        let (mut w, colima) = mac(Colima {
+            running: true,
+            saved: Some(saved_for(&want())),
+            set_holds: true,
+            ..Colima::default()
+        });
+        colima.borrow_mut().skew = -300;
+        w.pool_answers(Net::Unauthorized(401));
+        w.remote.borrow_mut().date = Some(crate::run::now() + 600);
+        w.agent.state.poll.next_at = w.now;
+        w.tick(3);
+        let journal = w.journal();
+        assert!(journal.contains("the pool answered 401"), "{journal}");
+        // 600 s and -300 s, give or take the second the tick may take.
+        assert!(
+            journal.contains("needs a person: this Mac's clock is")
+                && journal.contains("s off the pool's; the agent does not set it"),
+            "{journal}"
+        );
+        assert!(
+            journal.contains("the VM's clock was -30")
+                && journal.contains("s off the Mac's; set to it"),
+            "{journal}"
+        );
+        assert!(colima.borrow().skew.abs() <= 1, "held to the Mac's clock");
+    }
+
+    /// A Mac that woke may be on another network: the pool's edge is asked at once which
+    /// public address its tasks leave from, not at the hour, and dispatcher.env gets it on
+    /// that tick (#371).
+    #[test]
+    fn a_wake_asks_the_pools_edge_for_the_public_address_at_once() {
+        let (mut w, _colima) = mac(Colima {
+            running: true,
+            saved: Some(saved_for(&want())),
+            set_holds: true,
+            ..Colima::default()
+        });
+        w.agent.host_env = Some(HostEnv::new(Sources {
+            proc_net: w.dir.join("no-proc"),
+            ifconfig: None,
+        }));
+        w.remote.borrow_mut().public = Some(Net::Ok("198.51.100.20".parse().unwrap()));
+        w.tick(3);
+        assert_eq!(w.remote.borrow().publics, 1);
+        for _ in 0..10 {
+            w.tick(30);
+        }
+        assert_eq!(w.remote.borrow().publics, 1, "hourly while it is awake");
+        w.remote.borrow_mut().public = Some(Net::Ok("203.0.113.9".parse().unwrap()));
+        w.tick(crate::vm::WAKE_GAP_S + 1);
+        assert_eq!(w.remote.borrow().publics, 2, "{}", w.journal());
+        let env = std::fs::read_to_string(w.set_dir().join("etc/dispatcher.env")).unwrap();
+        assert!(
+            env.contains("\nOMARCHY_HOST_ADDRESSES=203.0.113.9\n"),
+            "{env}"
+        );
+    }
+
+    #[test]
+    fn once_a_start_of_the_vm_ended_the_hosts_capacity_is_counted_again() {
+        let (mut w, colima) = mac(Colima::default());
+        let counted: Rc<RefCell<Counted>> = Rc::default();
+        let seen = Rc::clone(&counted);
+        w.agent.count = Box::new(move |c| {
+            seen.borrow_mut()
+                .push((c.set_dir.to_owned(), c.meminfo.map(str::to_owned)));
+            Ok("counted: 8 CPUs".into())
+        });
+        w.agent.docker_cli = Some(PathBuf::from("/data/tools/0a/docker"));
+        w.tick(3);
+        assert!(colima.borrow().calls[0].starts_with("start --profile omarchy"));
+        assert!(counted.borrow().is_empty(), "not before the start ended");
+        w.tick(3);
+        assert!(colima.borrow().running);
+        let c = counted.borrow();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, w.set_dir());
+        assert!(c[0]
+            .1
+            .as_deref()
+            .is_some_and(|m| m.contains("MemAvailable")));
+        assert!(w.journal().contains("counted: 8 CPUs"), "{}", w.journal());
+    }
+
+    #[test]
+    fn a_count_that_did_not_happen_after_a_start_is_tried_again_an_hour_later() {
+        let (mut w, colima) = mac(Colima::default());
+        let tries: Rc<RefCell<usize>> = Rc::default();
+        let seen = Rc::clone(&tries);
+        w.agent.count = Box::new(move |_| {
+            *seen.borrow_mut() += 1;
+            if *seen.borrow() == 1 {
+                Err("the release's build image x is not in the VM's image store, and the loop pulls none".into())
+            } else {
+                Ok("counted: 8 CPUs".into())
+            }
+        });
+        w.agent.docker_cli = Some(PathBuf::from("/data/tools/0a/docker"));
+        w.tick(3);
+        w.tick(3);
+        assert!(colima.borrow().running);
+        assert_eq!(*tries.borrow(), 1);
+        assert!(
+            w.journal().contains("the loop tries again in an hour"),
+            "{}",
+            w.journal()
+        );
+        // Not on every tick: an hour later, then no more once it counted.
+        for _ in 0..115 {
+            w.tick(30);
+        }
+        assert_eq!(*tries.borrow(), 1);
+        for _ in 0..5 {
+            w.tick(30);
+        }
+        assert_eq!(*tries.borrow(), 2);
+        assert!(w.journal().contains("counted: 8 CPUs"), "{}", w.journal());
+        for _ in 0..240 {
+            w.tick(30);
+        }
+        assert_eq!(*tries.borrow(), 2);
+    }
+
+    #[test]
+    fn the_applied_releases_signed_minimum_holds_the_vms_size() {
+        // agent.toml edited down to 2 CPUs and 4 GB: below the release's minimum.
+        let (mut w, colima) = mac(Colima::default());
+        let mut tiny = want();
+        tiny.size = crate::vm::Size { cpus: 2, mem_gb: 4 };
+        let subnets = crate::install::net::parse_list("10.231.0.0/16").unwrap();
+        let mut k = Keeper::new(
+            Box::new(Fake(Rc::clone(&colima))),
+            tiny,
+            crate::vm::firewall(&subnets),
+            Path::new("/Users/maintainer"),
+            &w.agent.paths.data,
+        );
+        k.use_docker(Path::new("/data/tools/0a/docker"));
+        w.agent.vm = Some(k);
+        w.tick(3);
+        assert!(
+            colima.borrow().calls.is_empty(),
+            "{:?}",
+            colima.borrow().calls
+        );
+        assert!(
+            w.journal().contains("below the minimum to join"),
+            "{}",
+            w.journal()
+        );
+    }
 }
