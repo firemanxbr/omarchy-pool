@@ -70,6 +70,8 @@ pub(crate) struct QState {
     pub broken: bool,
     /// The podman answers as a rootful one.
     pub rootful: bool,
+    /// The podman's version, when not 4.9.3.
+    pub podman: Option<String>,
     pub reloads: u32,
     next: u64,
 }
@@ -479,10 +481,11 @@ impl Driver for FakeApi {
     }
 
     fn engine(&mut self) -> Answer<EngineId> {
+        let q = self.0.borrow();
         Answer::Yes(EngineId {
             runtime: Runtime::Podman,
-            version: "4.9.3".into(),
-            rootless: !self.0.borrow().rootful,
+            version: q.podman.clone().unwrap_or_else(|| "4.9.3".into()),
+            rootless: !q.rootful,
         })
     }
 

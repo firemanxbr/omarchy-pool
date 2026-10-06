@@ -62,6 +62,31 @@ pub fn unit_name(project: &str, service: &str) -> String {
     }
 }
 
+/// The oldest podman whose Quadlet reads every key [`render`] writes: `Pull=` and
+/// `PodmanArgs=` came in podman 4.6 (`Tmpfs=` and `UserNS=` in 4.5). An older generator
+/// rejects the whole file and makes no service of it: every round would fail at its create,
+/// and the revert's last-good unit with it.
+pub const PODMAN_MIN: (u32, u32) = (4, 6);
+
+/// Why podman `version` (its `Podman Engine` component) cannot run what [`render`] writes,
+/// or `None` when it can: install's preflight and the owner's switch refuse the driver
+/// there, before anything is written.
+pub fn podman_refused(version: &str) -> Option<String> {
+    let mut parts = version.split(|c: char| !c.is_ascii_digit());
+    let mut number = || parts.next().and_then(|p| p.parse::<u32>().ok());
+    let (major, minor) = (number(), number());
+    let (a, b) = PODMAN_MIN;
+    match major.zip(minor) {
+        Some(v) if v >= PODMAN_MIN => None,
+        Some(_) => Some(format!(
+            "podman {version} is older than {a}.{b}, whose Quadlet reads every key the agent writes (Pull=, PodmanArgs=): its generator would make no service of the dispatcher's unit"
+        )),
+        None => Some(format!(
+            "podman's version {version:?} does not read, so whether its Quadlet reads the agent's units ({a}.{b} or later) is unknown"
+        )),
+    }
+}
+
 /// Renders every service of the set: `sources` in compose's order (the template, the
 /// overlay, the override), relative paths resolved in `dir`, `${...}` from `env` only.
 pub fn render(
@@ -217,7 +242,22 @@ fn lookup<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
+/// How deep `${...}` may nest in a default or an alternative. A set's own nest one or two
+/// deep; past this an input is refused rather than recursed into until the stack runs out.
+const MAX_NESTING: usize = 16;
+
+/// `s` interpolated as compose interpolates it, from `env` alone.
 pub(crate) fn interpolate(s: &str, env: &[(String, String)]) -> Result<String, String> {
+    interpolate_at(s, env, 0)
+}
+
+/// [`interpolate`] inside `depth` enclosing `${...}`.
+fn interpolate_at(s: &str, env: &[(String, String)], depth: usize) -> Result<String, String> {
+    if depth > MAX_NESTING {
+        return Err(format!(
+            "${{...}} nested deeper than {MAX_NESTING}: not a form a set uses"
+        ));
+    }
     let mut out = String::new();
     let b = s.as_bytes();
     let mut i = 0;
@@ -248,7 +288,7 @@ pub(crate) fn interpolate(s: &str, env: &[(String, String)]) -> Result<String, S
             Some(b'{') => {
                 let close = matching_brace(s, i + 1)
                     .ok_or_else(|| format!("{s:?}: a ${{ without its }}"))?;
-                out.push_str(&braced(&s[i + 2..close], env)?);
+                out.push_str(&braced(&s[i + 2..close], env, depth)?);
                 i = close + 1;
             }
             _ => return Err(format!("{s:?}: a $ that is neither $$ nor a variable")),
@@ -279,8 +319,8 @@ fn matching_brace(s: &str, open: usize) -> Option<usize> {
     None
 }
 
-/// What is inside `${...}`.
-fn braced(inner: &str, env: &[(String, String)]) -> Result<String, String> {
+/// What is inside `${...}`, itself inside `depth` others.
+fn braced(inner: &str, env: &[(String, String)], depth: usize) -> Result<String, String> {
     let end = inner
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .unwrap_or(inner.len());
@@ -316,8 +356,11 @@ fn braced(inner: &str, env: &[(String, String)]) -> Result<String, String> {
                 own()
             }
         }
-        (":-" | "-", false) | (":+" | "+", true) => interpolate(arg, env),
-        (":?" | "?", false) => Err(format!("${{{name}}}: {}", interpolate(arg, env)?)),
+        (":-" | "-", false) | (":+" | "+", true) => interpolate_at(arg, env, depth + 1),
+        (":?" | "?", false) => Err(format!(
+            "${{{name}}}: {}",
+            interpolate_at(arg, env, depth + 1)?
+        )),
         _ => Err(format!("${{{inner}}}: not a form compose reads")),
     }
 }

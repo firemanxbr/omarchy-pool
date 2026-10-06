@@ -121,16 +121,13 @@ pub mod fuzz {
             return;
         };
         let vars = crate::lint::reference_variables();
-        match text.split_once('\0') {
-            Some((template, over)) => {
-                crate::lint::fuzz(template, Some(over));
-                let _ = crate::lint::lint_set_toml(over, template);
-                let _ = crate::lint::lint_quadlet(template, Some(over), &vars);
-            }
-            None => {
-                crate::lint::fuzz(text, None);
-                let _ = crate::lint::lint_quadlet(text, None, &vars);
-            }
+        if let Some((template, over)) = text.split_once('\0') {
+            crate::lint::fuzz(template, Some(over));
+            let _ = crate::lint::lint_set_toml(over, template);
+            let _ = crate::lint::lint_quadlet(template, Some(over), &vars);
+        } else {
+            crate::lint::fuzz(text, None);
+            let _ = crate::lint::lint_quadlet(text, None, &vars);
         }
     }
 }

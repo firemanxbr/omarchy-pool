@@ -382,6 +382,16 @@ fn what_refuses_a_switch_changes_nothing() {
         "{QUADLET_SOCKET} answers as rootful podman 4.9.3: the Quadlet driver runs rootless podman"
     ))
     );
+    // A podman whose Quadlet would not read the unit's `Pull=` and `PodmanArgs=`: its
+    // generator would make no service, and the switch's round would fail at create.
+    let q = w.add_quadlet(QUADLET_SOCKET);
+    q.borrow_mut().podman = Some("4.5.1".into());
+    assert!(
+        refused(&mut w, "quadlet", QUADLET_SOCKET).starts_with(&format!(
+            "{QUADLET_SOCKET}: podman 4.5.1 is older than 4.6, whose Quadlet reads every key the agent writes"
+        ))
+    );
+    assert!(q.borrow().changes.is_empty() && q.borrow().loaded.is_empty());
     w.agent.cfg.policy.drivers = vec!["compose".into()];
     assert!(refused(&mut w, "compose/docker", "/var/run/docker.sock")
         .starts_with("the bundle runs on compose/docker at /var/run/docker.sock already"));

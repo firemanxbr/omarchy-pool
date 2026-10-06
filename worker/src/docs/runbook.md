@@ -1486,16 +1486,28 @@ command or entrypoint with quotes or backslashes (give a list), an
 entrypoint whose first word starts with `[`, a `restart: on-failure:N`, a
 named volume not declared at the top level, a home-relative bind or a
 variable `agent.toml` does not set (compose would use a blank) is `refused`
-with `quadlet: …`, and the host keeps what it ran. Install takes the driver
-with `--driver quadlet` (preflight: Linux, podman's Quadlet generator, the
-socket answering as rootless podman — `$XDG_RUNTIME_DIR/podman/podman.sock`
-unless `--socket` names another —, the user manager and linger); a re-run
+with `quadlet: …`, and the host keeps what it ran. The env files are
+podman's `--env-file`: in an owner's own line of `etc/dispatcher.env`, `$`
+is not expanded, a ` #` after the value stays in it and podman 4 keeps
+quotes, where compose expands `$VAR`, drops the comment and strips the
+quotes; the agent's own lines have no quotes, `$` or comment and mean the
+same on both, as does an owner's line written so. Install takes the
+driver with `--driver quadlet` (preflight: Linux, podman 4.6 or later with its
+Quadlet generator — 4.4 and 4.5 ship one that rejects the unit's `Pull=` and
+`PodmanArgs=` and would make no service of it, so preflight and the switch
+refuse them —, the socket answering as rootless podman —
+`$XDG_RUNTIME_DIR/podman/podman.sock` unless `--socket` names another —, the
+user manager and linger); a re-run
 keeps the driver `agent.toml` names, and refuses another on an installed host:
 `omarchy-agent runtime switch quadlet` (the envelope's `drivers` naming
 `quadlet`) moves a running host, stopping the old dispatcher before the unit
 starts, and `runtime switch compose/podman` goes back — on one rootless
 podman, compose and Quadlet are two drivers of one engine. Uninstall stops
-the unit and removes its file before it removes the containers. On the host:
+the unit and removes its file before it removes the containers — also on a
+host a switch to Quadlet is still moving (`agent.toml` names compose until
+the switch's round is `ok`), and a unit systemd never loaded (no round made
+it yet, or the generator did not take it) is not stopped, its file removed
+all the same. On the host:
 `omarchy-agent status` (`driver: quadlet on <socket>, its units in <dir>`),
 `systemctl --user status omarchy-host-dispatcher`, `journalctl --user -u
 omarchy-host-dispatcher`. A unit the generator did not take fails the round's

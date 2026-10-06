@@ -54,6 +54,11 @@ pub(crate) struct Fake {
     pub downloaded: Vec<String>,
     /// GitHub does not answer for an asset the release may not carry.
     pub assets_unanswered: bool,
+    /// User units systemd has not loaded (#330: a Quadlet unit no round created, or one its
+    /// generator did not take): `show` says `not-found`, `stop` exits 5.
+    pub not_loaded: Vec<String>,
+    /// Every `systemctl --user stop` fails.
+    pub stop_fails: bool,
 }
 
 impl Default for Fake {
@@ -80,6 +85,8 @@ impl Default for Fake {
             served: BTreeMap::new(),
             downloaded: Vec::new(),
             assets_unanswered: false,
+            not_loaded: Vec::new(),
+            stop_fails: false,
         }
     }
 }
@@ -141,6 +148,20 @@ impl Sys for Fake {
                 Ok(if self.linger { "yes\n" } else { "no\n" }.into())
             }
             ("loginctl", Some("enable-linger")) if self.enable_linger => Ok(String::new()),
+            ("systemctl", Some("--user")) if self.systemd => {
+                let unit = args.last().copied().unwrap_or_default();
+                let unloaded = self.not_loaded.iter().any(|u| u == unit);
+                match args.get(1).copied() {
+                    Some("show") if unloaded => Ok("LoadState=not-found\nActiveState=inactive\n".into()),
+                    Some("stop") if unloaded => Err(format!(
+                        "{line}: exit 5: Failed to stop {unit}: Unit {unit} not loaded."
+                    )),
+                    Some("stop") if self.stop_fails => Err(format!(
+                        "{line}: exit 1: Failed to connect to bus: No medium found"
+                    )),
+                    _ => Ok(String::new()),
+                }
+            }
             ("systemctl", _) if self.systemd => Ok(String::new()),
             ("launchctl", Some("print")) => {
                 let agent = args.get(1).is_some_and(|d| d.ends_with(launchd::LABEL));
@@ -1317,6 +1338,10 @@ fn a_tasks_network_is_made_as_the_dispatcher_makes_it_on_this_engine() {
     for bad in ["", "null", r#"{"Version":"x"}"#] {
         assert!(engine::parse_server(bad).is_err(), "{bad}");
     }
+    // podman's own version, which the Quadlet driver's preflight holds to 4.6 (#330).
+    assert_eq!(engine::parse_podman(podman), Ok(Some("4.9.3".into())));
+    assert_eq!(engine::parse_podman(docker), Ok(None));
+    assert!(engine::parse_podman("").is_err());
     assert_eq!(
         engine::task_network(Server::Docker(28)).unwrap(),
         engine::TaskNetwork::Cli(vec![
@@ -5421,6 +5446,20 @@ fn the_quadlet_driver_is_refused_where_it_cannot_run_and_a_running_host_is_switc
         "{}",
         r.screen()
     );
+    // podman 4.4 and 4.5 ship the generator, but it would not read the unit's `Pull=` and
+    // `PodmanArgs=` (4.6) and would make no service of it.
+    let h = quadlet_host();
+    fs::write(h.root.join("version"), PODMAN.replace("4.9.3", "4.5.1")).unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    assert!(
+        r.screen().contains(
+            "--driver quadlet: podman 4.5.1 is older than 4.6, whose Quadlet reads every key the agent writes"
+        ),
+        "{}",
+        r.screen()
+    );
+    assert!(!r.screen().contains("driver: quadlet on"), "{}", r.screen());
     // A host installed on compose: the runtime switch moves it, stopping the old dispatcher
     // first; a second install would leave it running.
     let h = quadlet_host();
@@ -5453,16 +5492,15 @@ fn the_quadlet_driver_is_refused_where_it_cannot_run_and_a_running_host_is_switc
     );
 }
 
-#[test]
-fn uninstall_stops_the_quadlet_unit_and_removes_its_file_before_the_containers() {
+/// A Quadlet host installed, with its dispatcher's unit file as the run loop's driver writes
+/// it and one of the owner's own beside it.
+fn installed_quadlet_host() -> (Host, PathBuf) {
     let h = quadlet_host();
     let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
     apply(&h.options, &ready, &mut Fake::default(), &mut Vec::new())
         .map_err(|e| e.to_string())
         .unwrap();
-    let p = &h.options.places;
-    // The run loop's unit, as its Quadlet driver writes it.
-    let units = p.quadlet_dir();
+    let units = h.options.places.quadlet_dir();
     fs::create_dir_all(&units).unwrap();
     fs::write(
         units.join("omarchy-host-dispatcher.container"),
@@ -5470,6 +5508,13 @@ fn uninstall_stops_the_quadlet_unit_and_removes_its_file_before_the_containers()
     )
     .unwrap();
     fs::write(units.join("owners-own.container"), "[Container]\n").unwrap();
+    (h, units)
+}
+
+#[test]
+fn uninstall_stops_the_quadlet_unit_and_removes_its_file_before_the_containers() {
+    let (h, units) = installed_quadlet_host();
+    let p = &h.options.places;
     let mut sys = Fake::default();
     let mut out = Vec::new();
     uninstall(p, &mut sys, &mut out).unwrap();
@@ -5492,4 +5537,88 @@ fn uninstall_stops_the_quadlet_unit_and_removes_its_file_before_the_containers()
         .rposition(|c| c == "systemctl --user daemon-reload")
         .unwrap();
     assert!(stop < reload, "{:?}", sys.calls);
+}
+
+#[test]
+fn uninstall_removes_a_quadlet_unit_systemd_never_loaded_or_could_not_stop() {
+    let unit = "omarchy-host-dispatcher";
+    let quadlet_left = |left: &[String]| {
+        left.iter()
+            .find(|l| l.contains("the Quadlet units"))
+            .cloned()
+    };
+    // Installed, uninstalled before any round created the unit (the dispatcher waits for
+    // the owner's Confirm), or its generator did not take the file: nothing to stop, and
+    // `stop` would exit 5. The file goes all the same, with no "needs a person".
+    let (h, units) = installed_quadlet_host();
+    let mut sys = Fake {
+        not_loaded: vec![format!("{unit}.service")],
+        ..Fake::default()
+    };
+    let mut out = Vec::new();
+    let left = uninstall(&h.options.places, &mut sys, &mut out).unwrap();
+    assert_eq!(quadlet_left(&left), None, "{left:?}");
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .contains(&format!("stopped and removed the Quadlet unit(s) {unit}")));
+    assert!(!units.join(format!("{unit}.container")).exists());
+    assert!(units.join("owners-own.container").exists());
+    assert!(
+        !sys.calls
+            .iter()
+            .any(|c| c == &format!("systemctl --user stop {unit}.service")),
+        "{:?}",
+        sys.calls
+    );
+    assert_eq!(
+        sys.calls.last().map(String::as_str),
+        Some("systemctl --user daemon-reload")
+    );
+    // A stop that fails: the file is removed and systemd told anyway, and a person is
+    // asked to stop what may still run.
+    let (h, units) = installed_quadlet_host();
+    let mut sys = Fake {
+        stop_fails: true,
+        ..Fake::default()
+    };
+    let left = uninstall(&h.options.places, &mut sys, &mut Vec::new()).unwrap();
+    let e = quadlet_left(&left).unwrap_or_else(|| panic!("{left:?}"));
+    assert!(
+        e.contains(&format!("{unit}.service")) && e.contains("Failed to connect to bus"),
+        "{e}"
+    );
+    assert!(e.contains(&units.display().to_string()), "{e}");
+    assert!(!units.join(format!("{unit}.container")).exists());
+    assert!(sys
+        .calls
+        .iter()
+        .any(|c| c == "systemctl --user daemon-reload"));
+    // A runtime switch to Quadlet still moving: agent.toml names compose until its round is
+    // `ok`, while the unit's file is already there, with its restart policy.
+    let (h, units) = installed_quadlet_host();
+    let toml = h.options.places.agent_toml();
+    let text = fs::read_to_string(&toml).unwrap();
+    assert!(text.contains("driver = \"quadlet\""), "{text}");
+    fs::write(
+        &toml,
+        text.replace("driver = \"quadlet\"", "driver = \"compose\""),
+    )
+    .unwrap();
+    let mut sys = Fake::default();
+    let left = uninstall(&h.options.places, &mut sys, &mut Vec::new()).unwrap();
+    assert_eq!(quadlet_left(&left), None, "{left:?}");
+    assert!(!units.join(format!("{unit}.container")).exists());
+    assert!(sys
+        .calls
+        .iter()
+        .any(|c| c == &format!("systemctl --user stop {unit}.service")));
+    // A compose host with no unit file: systemd is not asked about one.
+    let h = host(INFO, EGRESS_OK);
+    let mut sys = Fake::default();
+    let _ = uninstall(&h.options.places, &mut sys, &mut Vec::new());
+    assert!(
+        !sys.calls.iter().any(|c| c.contains(unit)),
+        "{:?}",
+        sys.calls
+    );
 }

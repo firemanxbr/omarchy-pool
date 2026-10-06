@@ -91,7 +91,8 @@ impl Systemd for Systemctl {
     }
 }
 
-/// podman's Quadlet generator, where systemd looks for a user generator (podman 4.4 on).
+/// podman's Quadlet generator, where systemd looks for a user generator (podman 4.4 on; the
+/// driver's units need 4.6, [`crate::quadlet::PODMAN_MIN`]).
 pub(crate) fn generator() -> Option<PathBuf> {
     [
         "/usr/lib/systemd/user-generators/podman-user-generator",

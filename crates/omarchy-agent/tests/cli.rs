@@ -585,6 +585,63 @@ fn status_logs_and_round_read_the_data_directory() {
 }
 
 #[test]
+fn status_names_the_driver_and_where_a_quadlet_host_s_units_are() {
+    let data = scratch("driver");
+    let d = data.to_string_lossy().into_owned();
+    std::fs::write(data.join("state.json"), "{}").unwrap();
+    let config = data.join("config");
+    let driver = |set: &str| {
+        std::fs::write(
+            data.join("agent.toml"),
+            format!(
+                "pool = \"https://pkgs.omarchy-pool.org\"\nhost_id = \"h_1\"\nworker_id = \"w_1\"\n[set]\ndir = \"{0}/set\"\nwork_root = \"{0}/work\"\nsecrets_dir = \"{0}/secrets\"\n{set}[envelope]\nallow_socket = true\nrootful_ack = true\ndedicated = true\n",
+                data.display()
+            ),
+        )
+        .unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_omarchy-agent"))
+            .args(["status", "--data-dir", &d])
+            .env("XDG_CONFIG_HOME", &config)
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .find(|l| l.starts_with("driver:"))
+            .unwrap_or_else(|| panic!("no driver line: {}", text(&o)))
+            .to_owned()
+    };
+    // Compose, before the engine said which it is, and once agent.toml says.
+    assert_eq!(
+        driver("socket_cli = \"/var/run/docker.sock\"\n"),
+        "driver:    compose on /var/run/docker.sock (the engine says which at the agent's start)"
+    );
+    assert_eq!(
+        driver("socket_cli = \"/run/podman/podman.sock\"\nruntime = \"podman\"\n"),
+        "driver:    compose/podman on /run/podman/podman.sock"
+    );
+    // Quadlet (#330): its units where podman's generator reads the user's, or `set.unit_dir`.
+    let socket = "socket_cli = \"/run/user/1000/podman/podman.sock\"\ndriver = \"quadlet\"\n";
+    assert_eq!(
+        driver(socket),
+        format!(
+            "driver:    quadlet on /run/user/1000/podman/podman.sock, its units in {}",
+            config.join("containers/systemd").display()
+        )
+    );
+    assert_eq!(
+        driver(&format!(
+            "{socket}unit_dir = \"{}\"\n",
+            data.join("units").display()
+        )),
+        format!(
+            "driver:    quadlet on /run/user/1000/podman/podman.sock, its units in {}",
+            data.join("units").display()
+        )
+    );
+}
+
+#[test]
 fn run_keeps_running_with_no_pool_and_round_asks_it_again() {
     let data = scratch("loop");
     let d = data.to_string_lossy().into_owned();

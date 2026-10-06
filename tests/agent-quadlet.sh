@@ -23,7 +23,8 @@
 # against a fake user systemd in the crate's unit tests (run::quadlet,
 # run::switch).
 #
-# Needs Linux with podman 4.4 or later (its Quadlet generator) and a systemd
+# Needs Linux with podman 4.6 or later (whose Quadlet generator reads every key
+# the agent writes: Pull= and PodmanArgs= came in 4.6) and a systemd
 # user manager (CI: ubuntu-latest with linger, as agent-self-update). By hand:
 # `bash tests/agent-quadlet.sh`; it writes one unit into
 # ~/.config/containers/systemd and removes it at its end.
@@ -39,7 +40,10 @@ quadlet=""
 for q in /usr/libexec/podman/quadlet /usr/lib/podman/quadlet; do
   [[ -x "$q" ]] && { quadlet="$q"; break; }
 done
-[[ -n "$quadlet" ]] || fail "no podman Quadlet generator (podman 4.4 or later ships it)"
+[[ -n "$quadlet" ]] || fail "no podman Quadlet generator (the driver needs podman 4.6 or later)"
+version="$(podman version --format '{{.Client.Version}}')"
+[[ "$(printf '%s\n' 4.6 "${version%%-*}" | sort -V | head -n1)" == 4.6 ]] \
+  || fail "podman $version: the driver's units need podman 4.6 or later"
 
 echo "==> podman's generator reads the host set as the agent renders it ($quadlet)"
 OMARCHY_QUADLET="$quadlet" cargo test --locked -p omarchy-agent --lib -- --ignored --exact \

@@ -395,7 +395,10 @@ podman host. The unit holds `agent.toml`'s paths and variables, and names
 
 - **Choose it at install**: `install.sh … | OMARCHY_ENROLL=… sh -s --
   --driver quadlet` (or `omarchy-agent install --driver quadlet`). It needs
-  podman 4.4 or later (its Quadlet generator), its rootless API socket
+  podman 4.6 or later (its Quadlet generator reads every key the agent
+  writes, `Pull=` and `PodmanArgs=` among them: 4.4 and 4.5 ship a
+  generator that would make no service of the unit, and preflight refuses
+  them), its rootless API socket
   (`systemctl --user enable --now podman.socket`; install asks
   `$XDG_RUNTIME_DIR/podman/podman.sock` unless you give `--socket`) and
   your systemd user manager with linger; preflight says what is missing.
@@ -404,7 +407,8 @@ podman host. The unit holds `agent.toml`'s paths and variables, and names
   driver; to change a running host's, switch it.
 - **Or switch to it later**, at the host: name `quadlet` in the envelope's
   `drivers`, drain the host's registration, then `omarchy-agent runtime
-  switch quadlet`. The agent stops the dispatcher where it runs, brings the
+  switch quadlet` (refused, with nothing changed, below podman 4.6). The
+  agent stops the dispatcher where it runs, brings the
   same release up as the unit through a whole round, and writes the driver
   into `agent.toml` only once that round is `ok`; it goes back otherwise.
   From compose on the same rootless podman this keeps the engine (and its
@@ -420,6 +424,14 @@ podman host. The unit holds `agent.toml`'s paths and variables, and names
   the round's lint (`quadlet: …`) and the host keeps running what it ran. A
   unit you stop by hand is started again within 15 minutes, as a stopped
   compose container is. Uninstall stops the unit and removes its file.
+- **Your own lines in `etc/dispatcher.env`** reach the dispatcher as
+  podman's `--env-file` reads them, not as compose does: `$` is not
+  expanded, a ` #` after the value is part of it, and podman 4 keeps
+  quotes (`FOO="a b"` gives `"a b"`), where compose's reader expands
+  `$VAR`, drops the comment and strips the quotes. Write a line
+  unquoted, with no `$` and no comment after its value (`FOO=a b`), and
+  it means the same on both drivers; the lines the agent writes are
+  already so.
 
 The host's report says `quadlet` as its driver, and the host's page shows
 it beside its isolation level.

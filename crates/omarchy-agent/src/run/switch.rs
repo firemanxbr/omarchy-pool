@@ -287,7 +287,7 @@ impl Agent {
         point(&mut cfg, p);
         if cfg.driver == DriverKind::Quadlet && super::quadlet::generator().is_none() {
             return Err(
-                "podman's Quadlet generator is not installed here (podman 4.4 or later ships it)"
+                "podman's Quadlet generator is not installed here (the driver needs podman 4.6 or later)"
                     .into(),
             );
         }
@@ -433,6 +433,14 @@ impl Agent {
                 req.socket.display(),
                 id.version
             ));
+        }
+        // The units the driver writes need a podman whose Quadlet reads every key of them:
+        // an older one would make no service, and the switch's round would fail at create.
+        let old = (kind == DriverKind::Quadlet)
+            .then(|| crate::quadlet::podman_refused(&id.version))
+            .flatten();
+        if let Some(e) = old {
+            return Err(format!("{}: {e}", req.socket.display()));
         }
         let host = self.cfg.host_id.clone();
         let tasks = match self.driver.as_deref_mut().map(|d| d.host_tasks(&host)) {

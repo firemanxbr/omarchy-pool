@@ -369,6 +369,37 @@ fn interpolation_is_compose_s_with_agent_toml_s_variables_only() {
     // An unset variable stops the render (compose would put a blank string there).
     let e = host("    user: ${OMARCHY_UID}\n").unwrap_err();
     assert!(e.contains("${OMARCHY_UID} is not set"), "{e}");
+    // Defaults nested as deep as a set would nest them are read; an override nesting them
+    // thousands deep is refused, never recursed into until the stack runs out.
+    let nest = |n: usize| format!("{}x{}", "${B:-".repeat(n), "}".repeat(n));
+    assert_eq!(interpolate(&nest(MAX_NESTING), &env).unwrap(), "x");
+    for n in [MAX_NESTING + 2, 20_000] {
+        let e = interpolate(&nest(n), &env).unwrap_err();
+        assert!(e.contains("nested deeper than 16"), "{n}: {e}");
+    }
+    let e = host(&format!("    user: \"{}\"\n", nest(20_000))).unwrap_err();
+    assert!(e.contains("nested deeper"), "{e}");
+}
+
+#[test]
+fn the_driver_needs_a_podman_whose_quadlet_reads_every_key_it_writes() {
+    for v in ["4.6.0", "4.6.2", "4.9.3", "5.0.0-rc1", "5.4.2", "10.0"] {
+        assert_eq!(podman_refused(v), None, "{v}");
+    }
+    // Pull= and PodmanArgs= came in 4.6: an older generator makes no service of the unit.
+    for v in ["4.5.1", "4.4.1", "3.4.4"] {
+        let e = podman_refused(v).unwrap();
+        assert!(e.contains(&format!("podman {v} is older than 4.6")), "{e}");
+    }
+    for v in ["", "v4.9", "4", "dev"] {
+        assert!(
+            podman_refused(v).unwrap().contains("does not read"),
+            "{v:?}"
+        );
+    }
+    // What the renderer writes is what needs 4.6.
+    let r = host("").unwrap();
+    assert!(r.text.contains("\nPull=never\n") && r.text.contains("\nPodmanArgs="));
 }
 
 #[test]
