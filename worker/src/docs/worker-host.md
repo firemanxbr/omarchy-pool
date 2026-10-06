@@ -277,16 +277,23 @@ macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
   sitting at the login window after a boot runs no agent, and that is not
   supported. After a wake the agent holds the VM's clock to the pool's, so
   tasks that run on keep valid job tokens.
-- **A sleeping Mac has zero free units** (#329, design v2 §19.2). While a
-  task container runs (any container labelled `com.omarchy.task`) the agent
-  holds a `PreventUserIdleSystemSleep` assertion (`caffeinate -i -w <its
-  pid>`, which `pmset -g assertions` lists): the Mac does not idle into
-  sleep under a task, and may again once none runs. When it goes to sleep
+- **A sleeping Mac has zero free units** (#329, design v2 §19.2), whatever
+  runtime its engine is in (Colima, Docker Desktop, OrbStack). While a task
+  runs — from its claim to its report: a container labelled
+  `com.omarchy.task` runs, or the dispatcher holds its lease while it stages
+  the inputs or uploads the outputs (one file per lease in `<work
+  root>/state/leases/`, rewritten at every heartbeat) — the agent holds a
+  `PreventUserIdleSystemSleep` assertion (`caffeinate -i -w <its pid>`,
+  which `pmset -g assertions` lists): the Mac does not idle into sleep under
+  a task, and may again once none runs. An engine that stops answering keeps
+  it 30 minutes at most, a lease's length: past that the pool requeues what
+  nobody can confirm, and a laptop is not kept awake on its battery for it.
+  When it goes to sleep
   anyway — idle with no task, the lid, the Apple menu — the agent hears it
   first, reports `asleep: true` and only then lets it sleep (macOS waits up
   to 30 s for it): the pool hands the host nothing more, and the host's page
   says *asleep*. After the wake it reports `asleep: false`, asks the pool
-  for its target at once and checks the VM's clock; the dispatcher claims
+  for its target at once and, on Colima, checks the VM's clock; the dispatcher claims
   again with nobody's action. **Closing the lid still sleeps the Mac**, task
   or not: a task the sleep caught is requeued by the pool when its lease
   expires (30 minutes without a heartbeat), as on any host that goes away,

@@ -569,7 +569,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   agent starts and ends — `caffeinate -i -w <the agent's pid>` while a task
   runs, and an `osascript` watcher of AppKit's sleep and wake notifications
   that dies with the agent —, not code of the agent's own: its `unsafe`
-  stays forbidden. The `asleep` its report carries can only make the pool
+  stays forbidden. To know a lease is held with no task container running
+  it reads the names and times of the dispatcher's lease files, never what
+  they hold (a job token). The `asleep` its report carries can only make the pool
   hand the host less (zero free units), never more, and a stale one (no
   report for 15 minutes) holds nothing.
 

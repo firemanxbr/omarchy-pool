@@ -568,7 +568,8 @@ host with one lane (its arch, emulated when its labels say so) and one
 build, its own scope (project or community, shared or its owner's) kept
 until #343. A host whose agent reports `asleep` (#329: a Mac about to sleep,
 or asleep, while that report is fresh) has zero free units: its claims are
-handed nothing, and it is no native capacity an emulated lane waits for,
+handed nothing (the lease's own statement checks it again, as it checks a
+suspension), and it is no native capacity an emulated lane waits for,
 holds no reservation mark and counts in no size alive until a report says it
 woke. The runbook's *How the pool hands a host work* has the rules. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron

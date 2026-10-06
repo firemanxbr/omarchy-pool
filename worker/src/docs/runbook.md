@@ -861,16 +861,20 @@ work after its threshold, or at once with no native x86_64 host eligible,
 #337, and the dispatcher runs it with `--platform linux/amd64`); and over SSH
 with nobody logged in at the Mac, the Terminal instruction.
 
-**Sleep (#329).** A sleeping Mac has zero free units: the agent holds off
-idle sleep while a task runs, and tells the pool before the Mac sleeps and
-after it wakes ([A Mac as a maintainer host](/docs/worker-host#a-mac-as-a-maintainer-host)).
+**Sleep (#329).** A sleeping Mac has zero free units, whatever runtime its
+engine is in (Colima, Docker Desktop, OrbStack): the agent holds off idle
+sleep while a task runs — from its claim to its report, a task container
+running or the dispatcher holding its lease file — and tells the pool before
+the Mac sleeps and after it wakes ([A Mac as a maintainer host](/docs/worker-host#a-mac-as-a-maintainer-host)).
 What the journal (`omarchy-agent logs`, event `sleep`) says: "the Mac's sleep
 and wake are heard" once after each start (or why not: then the Mac sleeps as
 before, and the agent tries again every ten minutes); "a task runs: the Mac
 does not idle-sleep until none runs" and "no task runs: the Mac may idle-sleep
-again" as tasks start and end; "the Mac goes to sleep: the host reports
-asleep" before a sleep and "the Mac woke: the host reports itself awake"
-after it. While a task runs, `pmset -g assertions` lists
+again" as tasks start and end; "the engine has not said whether a task
+runs for 30 minutes" when the engine stopped answering under a task (the
+assertion is let go: the pool requeues what nobody can confirm); "the Mac
+goes to sleep: the host reports asleep" before a sleep and "the Mac woke:
+the host reports itself awake" after it. While a task runs, `pmset -g assertions` lists
 `caffeinate` holding `PreventUserIdleSystemSleep`; with none, it does not.
 The host's page says *asleep* while the Mac sleeps (its *Units* stat: none
 free until it wakes). A Mac that reports asleep is handed nothing; a lease the
@@ -1063,7 +1067,7 @@ is said ("needs a person"), never set; the VM is then held to the Mac's
 clock, so the pool's answer never moves it further than that from the
 Mac's own. The clock is checked whatever else waits (a resize held back by a
 task, a `colima.yaml` that cannot be read). It also keeps the Mac awake
-while a task container runs and reports `asleep` around a sleep (#329, *Sleep*
+while a task runs and reports `asleep` around a sleep (#329, *Sleep*
 under *Installing a Mac*): a wake macOS announces after a sleep too short to
 leave a gap in the ticks asks the pool and checks the clock the same way.
 The journal's `vm`, `vm-clock`, `capacity` and `sleep` lines say what it
