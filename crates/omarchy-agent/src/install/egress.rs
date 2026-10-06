@@ -29,13 +29,14 @@
 //! stack's command line on a Mac. The agent puts nothing in Docker Desktop's or `OrbStack`'s
 //! VM: such a host is judged on the probe's answers like any other.
 //!
-//! On a rootful engine on Linux preflight also reads prep-root.sh's firewall script and its boot unit,
-//! which are world-readable: a script that does not drop every task subnet, or none, or a unit
-//! that is not there or not enabled (a reboot would take the drop away), refuses the install
-//! with the command that installs it ([`unprepared`], [`firewall_command`]), whatever the
-//! probe says, since a host's own firewall may close the ports probed and leave the others
-//! open. The agent is never root and cannot read the rules in effect: the probe is what shows
-//! they hold (a rule flushed since the unit ran is refused with the command that puts it back).
+//! On a rootful engine on Linux preflight also reads prep-root.sh's firewall script and its
+//! boot unit, which are world-readable: a script that does not drop every task subnet, or
+//! none, or a unit that is not there or not enabled (a reboot would take the drop away),
+//! refuses the install with the command that installs it ([`unprepared`],
+//! [`firewall_command`]), whatever the probe says, since a host's own firewall may close the
+//! ports probed and leave the others open. The agent is never root and cannot read the rules
+//! in effect: the probe is what shows they hold (a rule flushed since the unit ran is refused
+//! with the command that puts it back).
 //!
 //! On a rootless engine there is no such rule, and what could reach the host is the user-mode
 //! network stack's host loopback: while both probe tasks run, preflight reads the stack's
@@ -625,8 +626,8 @@ pub(crate) fn check(
         ));
     }
     // A rootless engine's network stack, seen while the probe tasks run (rootless podman's
-    // runs only while a container on a bridge network does).
-    // A Mac's engine runs in its VM, whose processes the agent does not see.
+    // runs only while a container on a bridge network does); never a Mac's, whose engine
+    // runs in its VM, where the agent sees no process.
     let watch = !h.advice.rootful && h.advice.vm.is_none();
     let mut stacks: Vec<loopback::Stack> = Vec::new();
     let mut probed = false;
