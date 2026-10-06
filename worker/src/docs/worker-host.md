@@ -243,8 +243,10 @@ reserves for when it does, and its leases with their lane and units. Every later
 the host to the pool is signed with its key (`Omarchy-Host`); the pool
 refuses a replay, a changed body and a clock more than 120 s off
 ([Security model](/docs/security-model#maintainer-hosts)). The agent asks
-for the host's state every two minutes or so — the release to run, and the
-host orders (#344) — and reports what it did.
+for the host's state every two minutes or so — the release to run, its
+settings and the host orders (#344, #325) — and reports what it did.
+
+## Settings and host orders
 
 **Host orders** (#344) are given on the host's page. **Reconcile now** (its
 owner or any maintainer) makes its agent run a round at its next poll.
@@ -260,6 +262,45 @@ directory the agent's user does not own: the button stays greyed until the
 agent's next report says it is fixed), and each order with its agent's
 answer after
 ([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
+
+**Settings** (#325): its page narrows the units the host gives and turns
+its emulated lanes off (or on again), always inside the envelope its owner
+wrote in `agent.toml` at the host — the page shows that envelope and greys
+every value above it. The agent takes a setting at its next poll, and the
+dispatcher claims by it from its next claim; a task already running above
+the new count finishes, nothing is stopped for it. Whatever the pool asks,
+the agent itself refuses a value above the envelope, and the page shows the
+refusal; only the owner widens the envelope, by editing `[envelope]` in
+`agent.toml` at the host and restarting the agent (`systemctl --user restart
+omarchy-agent`). The page's **Host orders** card gives the rest, its
+owner's or any maintainer's: **Retry release** lifts the quarantine of a
+release its guard reverted and tries it again; **Rotate token** gives the
+dispatcher a new worker token (the old one works ten more minutes);
+**Diagnostics** brings the dispatcher's last 500 log lines, scrubbed of the
+host's secrets, read on the page — only when the envelope says
+`diagnostics = true`. Every order and its agent's answer are on the page's
+journal of orders and the pool's journal.
+
+**The host brakes the pool** (#325): whatever the pool sends, the agent
+takes host orders at least two seconds apart and at most 20 an hour, at most
+4 narrowings and 6 dispatcher restarts an hour — a round that tries a
+release again after an Update or **Retry release** counts its restarts too,
+its revert's included — and at most one release change every ten minutes (a
+rollback under a signed statement excepted); beyond that it answers
+`refused: brake` (an Update waits for the next poll), and the page shows how
+much of each the last hour spent. On a Mac, a restart of its VM counts as
+one of those restarts, though the brake never holds it. Restarting the
+agent resets none of it.
+
+**The runtime is the owner's, at the host** (#325): `omarchy-agent runtime
+switch compose/podman` (or `compose/docker`) moves the dispatcher to the
+other engine with the same guard as a release, and back if it fails there;
+the pool cannot choose it. Drain the host's registration and let its tasks
+finish first: task containers and caches do not move between engines
+([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*). A Mac's
+bundle stays in its VM's engine: the switch is refused there.
+
+## Stopping a host
 
 To stop a host, use its page, `/hosts/<id>` (#322). **Suspend** (its
 owner or any maintainer, with a reason) stops its claims at once and
@@ -307,10 +348,37 @@ macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
 - **A LaunchAgent is login-scoped.** The agent starts at your login, again
   after a reboot once you log in, and after the Mac wakes; a headless Mac
   sitting at the login window after a boot runs no agent, and that is not
-  supported. While the Mac sleeps it claims nothing: running tasks' leases
-  expire and the pool requeues them, as on any host that goes away. After a
-  wake the agent holds the VM's clock to the pool's, so tasks that run on
-  keep valid job tokens.
+  supported. After a wake the agent holds the VM's clock to the pool's, so
+  tasks that run on keep valid job tokens.
+- **A sleeping Mac has zero free units** (#329, design v2 §19.2), whatever
+  runtime its engine is in (Colima, Docker Desktop, OrbStack). While a task
+  runs — from its claim to its report: a container labelled
+  `com.omarchy.task` runs, or the dispatcher holds its lease while it stages
+  the inputs or uploads the outputs (one file per lease in `<work
+  root>/state/leases/`, rewritten at every heartbeat) — the agent holds a
+  `PreventUserIdleSystemSleep` assertion (`caffeinate -i -w <its pid>`,
+  which `pmset -g assertions` lists): the Mac does not idle into sleep under
+  a task, and may again once none runs. An engine that stops answering keeps
+  it 30 minutes at most, a lease's length: past that the pool requeues what
+  nobody can confirm, and a laptop is not kept awake on its battery for it.
+  When it goes to sleep
+  anyway — idle with no task, the lid, the Apple menu — the agent hears it
+  first, reports `asleep: true` and only then lets it sleep (macOS waits up
+  to 30 s for it): the pool hands the host nothing more, and the host's page
+  says *asleep*. After the wake it reports `asleep: false`, asks the pool
+  for its target at once and, on Colima, checks the VM's clock; the dispatcher claims
+  again with nobody's action. **Closing the lid still sleeps the Mac**, task
+  or not: a task the sleep caught is requeued by the pool when its lease
+  expires (30 minutes without a heartbeat), as on any host that goes away,
+  and nothing on the Mac needs you — once awake, the dispatcher finds no
+  heartbeat accepted within the lease and removes that task's containers
+  itself. The agent hears the sleep through AppKit's
+  `NSWorkspaceWillSleepNotification` (a small `osascript -l JavaScript`
+  watcher it starts and ends; no `unsafe` code, no Apple SDK in the agent):
+  a watcher that does not start is said once in the journal, and the Mac
+  then sleeps as before — the assertion still holds while a task runs. The
+  pool holds `asleep` only while the report that said it is fresh (15
+  minutes): a dispatcher that claims after that is on a Mac that woke.
 - **Docker Desktop and OrbStack** are never installed by the agent; one that
   is already there may be used (isolation `vm-shared`), only with its home
   mount removed and `--dedicated`, your word that nothing else runs in it:

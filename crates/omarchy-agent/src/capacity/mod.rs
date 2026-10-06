@@ -529,7 +529,9 @@ pub enum Written {
 }
 
 /// Writes `<set dir>/run/capacity.json` only when something other than `at` changed,
-/// atomically (a new file renamed over the old one). A `run/` or a `capacity.json` that is
+/// atomically (a new file renamed over the old one). A file the run loop narrowed (#325)
+/// is compared by its detected values; when detection changed, the new file goes in whole
+/// and the loop narrows it again at its next tick. A `run/` or a `capacity.json` that is
 /// a symbolic link is refused, never followed.
 pub fn write_if_changed(set_dir: &Path, c: &Capacity, at: &str) -> std::io::Result<Written> {
     let run = set_dir.join("run");
@@ -547,6 +549,12 @@ pub fn write_if_changed(set_dir: &Path, c: &Capacity, at: &str) -> std::io::Resu
         let mut same = serde_json::from_slice::<serde_json::Value>(&old).ok();
         if let Some(serde_json::Value::Object(m)) = same.as_mut() {
             m.insert("at".into(), serde_json::Value::String(at.to_owned()));
+            // A file the run loop narrowed to the pool's settings (#325) is compared by what
+            // it detected: the same detection leaves the narrowing in place.
+            if let Some(serde_json::Value::Object(d)) = m.remove("detected") {
+                m.extend(d);
+            }
+            m.remove("settings");
         }
         if same.as_ref() == Some(&serde_json::to_value(&new)?) {
             return Ok(Written::Unchanged);
