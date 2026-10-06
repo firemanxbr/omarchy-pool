@@ -817,6 +817,7 @@ fn the_report_with_settings_keeps_the_shape_the_pool_reads() {
         home,
         "omarchy".into(),
         Some(w.dir.join("linger")),
+        true,
     ));
     for o in [
         json!({"id": format!("ho_{}", "3".repeat(32)), "kind": "set-units", "units": 4}),

@@ -424,8 +424,11 @@ export function roomOf(m: Pick<Member, "units">, held: Pick<Held, "kind" | "unit
   return { task: m.units - Math.max(r.job_reserved, jobs) - tasks, job: m.units - tasks - jobs };
 }
 
-/** Why a candidate does not fit a host's free capacity now, or null: units (the reserved one for pool jobs only), agent slots, disk. */
-export function noRoom(m: Member, held: Held[], c: Pick<Candidate, "kind" | "model">, units: number, disk: number | null, r: Rules): string | null {
+/**
+ * Why a candidate does not fit a host's free capacity now, or null: units (the reserved one for pool jobs only), agent slots, disk. The
+ * fleet's rows ask it too, whether a build fits a host that claims (fleet.ts fleetHostOf, #324): the same room test as a claim's.
+ */
+export function noRoom(m: Pick<Member, "legacy" | "units" | "offer" | "agent_slots" | "disk">, held: Pick<Held, "kind" | "units" | "model" | "disk_gb">[], c: Pick<Candidate, "kind" | "model">, units: number, disk: number | null, r: Rules): string | null {
   // A legacy registration is one build: any one task of a build's units or fewer.
   if (m.legacy) return units > r.build_per_size ? "units" : null;
   const room = roomOf(m, held, r);

@@ -2348,11 +2348,16 @@ names its host, linked to its page; errors come first.
   queued, the oldest waited X; free native units: 0, free emulated units:
   M"* once an architecture's oldest queued build or trial waited 60
   minutes (from its creation, a requeued task's run counted) with no free
-  build of it — no host that claims has a build's units free on a lane of
-  it, a native one for the builds an emulated lane sent back. One that
-  waited beside a free build is an info line saying so: its placement (a
-  project's copy kept off its requester's host), a pin or its size holds
-  it, and a new host would not take it sooner. *"Tasks waiting for a
+  build of it — no host that claims has a build's units and disk free on a
+  lane of it (a native one for the builds an emulated lane sent back), as a
+  claim's own room test judges them: a build's two units free for a task,
+  and its 20 GB budget plus the 10 GB floor within the smaller free disk
+  less the budgets of the builds the host already runs. Units free on a
+  host whose disk holds no further build still warn (its free units are in
+  the line; its page has its disk). One that waited beside a free build is
+  an info line saying so: its placement (a project's copy kept off its
+  requester's host), a pin or its size (a larger build's units or disk)
+  holds it, and a new host would not take it sooner. *"Tasks waiting for a
   native <arch> host: K"* while builds
   an emulated lane sent back (`needs_native`) wait — only a native host of
   that architecture takes those. The table under the lines has the queue,
@@ -2382,7 +2387,11 @@ applies), and what the agent says of itself in its report's
 `needs_person` (from agent 0.5.0, looked at again hourly: linger off —
 `sudo loginctl enable-linger <user>` —, and credentials within its user's
 reach, by path: an SSH private key, a `gh` login, stored git credentials,
-a browser profile; install's preflight says the same once).
+a browser profile; install's preflight warns of the same once, or refuses
+them on a shared machine). A Mac's agent says neither: launchd starts it at
+its user's login, and its engine runs in the VM, which mounts nothing of
+the home directory, so the person's own keys there are no one's to move
+(install only notes how many it found).
 
 The pool writes a host's own row only when its report changed, or once the
 row is five minutes old (`HOST_ROW_TOUCH_MIN`): the state poll every two

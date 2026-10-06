@@ -171,8 +171,8 @@ const HOST_VIEW_FROM = "hosts LEFT JOIN build_workers w ON w.id = hosts.worker_i
 /** A HostRow as the fleet's rules read it (fleet.ts FleetHostRow): the columns HOST_VIEW_COLS joins, none missing. */
 const fleetRowOf = (h: HostRow): FleetHostRow => ({ ...h, reg_last_seen: h.reg_last_seen ?? null, drained_at: h.drained_at ?? null, agent: h.agent ?? null });
 
-/** Every lease a host's registration holds, by the lease index: the fleet rows' units and tasks (#324). */
-export const FLEET_LEASES_SQL = "SELECT id, lease_owner, kind, arch, lane, units, size FROM build_tasks WHERE status = 'leased' AND lease_owner IN (SELECT worker_id FROM hosts WHERE worker_id IS NOT NULL AND status != 'retired')";
+/** Every lease a host's registration holds, by the lease index: the fleet rows' units, disk budgets and tasks (#324). */
+export const FLEET_LEASES_SQL = "SELECT id, lease_owner, kind, arch, lane, units, size, disk_gb FROM build_tasks WHERE status = 'leased' AND lease_owner IN (SELECT worker_id FROM hosts WHERE worker_id IS NOT NULL AND status != 'retired')";
 
 /**
  * What anyone sees of a host, and what its owner and the maintainers see besides (design v2 §18.1): anyone, its name, its

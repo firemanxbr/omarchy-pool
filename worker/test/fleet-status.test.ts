@@ -11,7 +11,8 @@
  *   error naming the check (a floor's refusal is none); a new host and an
  *   agent's self-rollback as info; errors first;
  * - the scaling signal: an x86_64 backlog whose oldest waited 60 minutes with
- *   no free build of it says how many wait and the free units native and
+ *   no free build of it (a build's units and disk free, as a claim's room
+ *   test judges them) says how many wait and the free units native and
  *   emulated — beside a free build, an info line that says so —, the
  *   needs_native waits counted; the week's busy ratio per lane;
  * - the second opinion: the fleet's model mix and the share of last week's
@@ -166,7 +167,7 @@ describe("the scaling signal (fleet.ts capacityOf, capacityLines)", () => {
     const room = [row()].map((h) => fleetHostOf(h, studioLeases.slice(0, 3), NOW, RULES));
     const emulated = capacityOf([{ arch: "x86_64", n: 1, oldest: ago(90), needs_native: 0 }], room, [row()], [], NOW);
     expect(emulated[0].build_fits).toEqual({ native: false, emulated: true });
-    expect(capacityLines(emulated)).toEqual([{ level: "info", kind: "capacity", arch: "x86_64", text: "x86_64: 1 task queued, the oldest waited 1 h 30 min, while a free build of it fits on a host that claims (free native units: 0, free emulated units: 4) — what holds them is their placement, a pin or their size, not the fleet's room" }]);
+    expect(capacityLines(emulated)).toEqual([{ level: "info", kind: "capacity", arch: "x86_64", text: "x86_64: 1 task queued, the oldest waited 1 h 30 min, while a host that claims has a build's units and disk free for it (free native units: 0, free emulated units: 4) — what holds them is their placement, a pin or their size, not the fleet's room" }]);
     // A native x86_64 host that claims with seven units free: the same, whatever the native waits.
     const vpsRow = vps();
     const native = capacityOf([{ arch: "x86_64", n: 2, oldest: ago(61), needs_native: 2 }], [fleetHostOf(vpsRow, [], NOW, RULES)], [vpsRow], [], NOW);
@@ -177,6 +178,28 @@ describe("the scaling signal (fleet.ts capacityOf, capacityLines)", () => {
     const full = capacityOf([{ arch: "x86_64", n: 1, oldest: ago(61), needs_native: 0 }], [fleetHostOf(vpsRow, tight, NOW, RULES)], [vpsRow], [], NOW);
     expect(full[0]).toMatchObject({ free_native: 0, build_fits: { native: false, emulated: false } });
     expect(capacityLines(full)).toEqual([expect.objectContaining({ level: "warn", kind: "capacity", text: "x86_64: 1 task queued, the oldest waited 1 h 1 min; free native units: 0, free emulated units: 0" })]);
+  });
+
+  it("units free on a host whose disk holds no further build are no free build: the warning stands, as a claim's room test would refuse it", () => {
+    // A VPS with 80 GB free on its engine's data root running three builds (60 GB of budgets): one unit-pair still free, but a
+    // fourth build's 20 GB and the 10 GB floor do not fit what is left — no build would lease there.
+    const signed = { gb: RULES.gb_per_size, floor: RULES.floor_gb };
+    expect(signed).toEqual({ gb: 20, floor: DISK_FLOOR_GB });
+    const disky = vps({ units: 9, capacity: capOf({ cpus: 10, mem_gb: 20, units: 9, disk_free_gb: { work: 300, engine: 80 }, lanes: [{ arch: "x86_64", mode: "native" }] }) });
+    const three: FleetLease[] = [1, 2, 3].map((id) => ({ id, lease_owner: "m2-vps-x86", kind: "build", arch: "x86_64", lane: "native", units: 2, size: 1, disk_gb: signed.gb }));
+    const host = fleetHostOf(disky, three, NOW, RULES);
+    expect(host).toMatchObject({ state: "claiming", units_busy: 6, units_free: 2, build_fits: false });
+    const caps = capacityOf([{ arch: "x86_64", n: 2, oldest: ago(61), needs_native: 0 }], [host], [disky], [], NOW);
+    expect(caps[0]).toMatchObject({ free_native: 2, build_fits: { native: false, emulated: false } });
+    expect(capacityLines(caps)).toEqual([{ level: "warn", kind: "capacity", arch: "x86_64", text: "x86_64: 2 tasks queued, the oldest waited 1 h 1 min; free native units: 2, free emulated units: 0" }]);
+    // Two builds held (40 GB): a third's 20 GB and the floor fit the 40 left — a free build, the info line.
+    const two = fleetHostOf(disky, three.slice(0, 2), NOW, RULES);
+    expect(two).toMatchObject({ units_free: 4, build_fits: true });
+    expect(capacityLines(capacityOf([{ arch: "x86_64", n: 2, oldest: ago(61), needs_native: 0 }], [two], [disky], [], NOW)).map((l) => l.level)).toEqual(["info"]);
+    // A lease that wrote no budget counts none, as selection's own read of the leases does (routes/factory.ts LEASES_HELD_SQL).
+    expect(fleetHostOf(disky, three.map((l) => ({ ...l, disk_gb: null })), NOW, RULES).build_fits).toBe(true);
+    // A host that does not claim fits nothing, whatever its room.
+    expect(fleetHostOf(vps({ reg_last_seen: ago(15) }), [], NOW, RULES)).toMatchObject({ state: "not-claiming", build_fits: false });
   });
 
   it("the week's busy ratio per architecture and lane, against the units the hosts that run it have since they were confirmed", () => {

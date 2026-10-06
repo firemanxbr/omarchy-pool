@@ -6,6 +6,12 @@
 //! report's `needs_person`, which the host page's "needs a person" box shows its owner and
 //! the maintainers. Only the agent can see them: the pool reads nothing of the machine.
 //!
+//! A Mac says neither, by install's own rule: launchd starts the agent at its user's login
+//! (#377), and its engine runs in the VM, which mounts nothing of the home directory, so an
+//! escape lands in the VM and not in the person's account (design v2 §19.2) — install only
+//! notes the credentials there, and the person's own SSH keys and logins in their daily
+//! home are nothing to move.
+//!
 //! Each is `{what, detail}`, `what` one of `linger` and `credentials`; a path is said, never
 //! what a file holds.
 
@@ -25,15 +31,25 @@ pub(crate) struct SelfCheck {
     /// `/var/lib/systemd/linger` on Linux; `None` on a Mac, where launchd starts the agent
     /// at its user's login.
     pub linger_dir: Option<PathBuf>,
+    /// Whether credentials within its user's reach are said: on Linux, where an escape
+    /// lands in the agent's user (install warns, or refuses on a shared machine); not on a
+    /// Mac, where it lands in the VM (install's note only, design v2 §19.2).
+    pub credentials: bool,
     seen: Option<(i64, serde_json::Value)>,
 }
 
 impl SelfCheck {
-    pub fn new(home: PathBuf, user: String, linger_dir: Option<PathBuf>) -> Self {
+    pub fn new(
+        home: PathBuf,
+        user: String,
+        linger_dir: Option<PathBuf>,
+        credentials: bool,
+    ) -> Self {
         Self {
             home,
             user,
             linger_dir,
+            credentials,
             seen: None,
         }
     }
@@ -48,8 +64,14 @@ impl SelfCheck {
             .or_else(|_| std::env::var("LOGNAME"))
             .ok()
             .filter(|u| !u.is_empty())?;
+        Some(Self::on(home, user, mac))
+    }
+
+    /// What the agent looks for where it runs: linger and credentials on Linux, neither on
+    /// a Mac (this module's head), whose report says an empty list.
+    pub fn on(home: PathBuf, user: String, mac: bool) -> Self {
         let linger = (!mac).then(|| PathBuf::from("/var/lib/systemd/linger"));
-        Some(Self::new(home, user, linger))
+        Self::new(home, user, linger, !mac)
     }
 
     /// What it found, looked at again once [`EVERY_S`] passed since the last look.
@@ -74,6 +96,9 @@ impl SelfCheck {
                     "detail": format!("linger is off for {u}: the agent does not start at boot and stops when {u} logs out — run `sudo loginctl enable-linger {u}`"),
                 }));
             }
+        }
+        if !self.credentials {
+            return out;
         }
         for f in crate::install::checks::credentials(&self.home)
             .into_iter()
@@ -115,7 +140,7 @@ mod tests {
         )
         .unwrap();
         fs::write(home.join(".ssh/id_ed25519.pub"), "ssh-ed25519 AAAA\n").unwrap();
-        let mut c = SelfCheck::new(home.clone(), "omarchy".into(), Some(linger.clone()));
+        let mut c = SelfCheck::new(home.clone(), "omarchy".into(), Some(linger.clone()), true);
         let v = c.view(1000);
         let items = v.as_array().unwrap();
         assert_eq!(items.len(), 2, "{v}");
@@ -137,9 +162,8 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn a_mac_says_no_linger_and_credentials_are_capped() {
-        let d = tmp("mac");
+    fn many_keys(name: &str) -> (PathBuf, PathBuf) {
+        let d = tmp(name);
         let home = d.join("home");
         fs::create_dir_all(home.join(".ssh")).unwrap();
         for i in 0..10 {
@@ -149,11 +173,39 @@ mod tests {
             )
             .unwrap();
         }
-        let mut c = SelfCheck::new(home, "omarchy".into(), None);
+        (d, home)
+    }
+
+    #[test]
+    fn credentials_on_linux_are_capped() {
+        let (d, home) = many_keys("cap");
+        let linger = d.join("linger");
+        fs::create_dir_all(&linger).unwrap();
+        fs::write(linger.join("omarchy"), "").unwrap();
+        let mut c = SelfCheck::new(home, "omarchy".into(), Some(linger), true);
         let v = c.view(0);
         let items = v.as_array().unwrap();
         assert_eq!(items.len(), CREDENTIALS_MAX);
         assert!(items.iter().all(|i| i["what"] == "credentials"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_mac_says_neither_linger_nor_its_persons_own_credentials() {
+        // The agent is a LaunchAgent in the person's own login: their keys in their daily
+        // home are out of the VM's reach, as install says (a note, never a warning).
+        let (d, home) = many_keys("mac");
+        let mut c = SelfCheck::on(home.clone(), "marcelo".into(), true);
+        assert_eq!((c.linger_dir.as_ref(), c.credentials), (None, false));
+        assert_eq!(c.view(0), serde_json::json!([]));
+        // The same home on Linux says its keys (and linger, whose directory the test's
+        // machine may lack): the Mac's silence is its rule, not an empty home.
+        let linux = SelfCheck::on(home, "marcelo".into(), false).view(0);
+        assert!(linux
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["what"] == "credentials"));
         let _ = fs::remove_dir_all(&d);
     }
 }

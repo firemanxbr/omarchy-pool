@@ -23,7 +23,7 @@
  * own words — those stay on the host's page, its owner's and the maintainers'.
  */
 import { DISK_FLOOR_GB, HOST_REPORT_FRESH_MIN, TASK_UNITS, hostLine, type Arch, type Capacity, type Lane } from "./hosts";
-import { ALIVE_MS, LANE_KINDS, roomOf, unitsOf, type Rules } from "./selection";
+import { ALIVE_MS, LANE_KINDS, diskOf, noRoom, roomOf, unitsOf, type Rules } from "./selection";
 import { UPDATE_GRACE_MINUTES, compareTags, parseTag } from "./update";
 
 const MIN = 60_000;
@@ -71,8 +71,8 @@ export interface FleetHostRow {
   /** Its registration's last claim, its drain, and the model its claims say it runs ("<provider>/<model>"). */
   reg_last_seen: string | null; drained_at: string | null; agent: string | null;
 }
-/** A lease as the fleet's read gives it: whose, of what, on which lane, how many units. */
-export interface FleetLease { id: number; lease_owner: string; kind: string; arch: string; lane: string | null; units: number | null; size: number | null }
+/** A lease as the fleet's read gives it: whose, of what, on which lane, how many units, and a build's disk budget as its lease wrote it. */
+export interface FleetLease { id: number; lease_owner: string; kind: string; arch: string; lane: string | null; units: number | null; size: number | null; disk_gb?: number | null }
 
 /** What a host's last report is, parsed once; null when it sent none or it does not read. */
 export function reportOf(text: string | null): Record<string, any> | null {
@@ -149,6 +149,11 @@ export interface FleetHost {
   arches: string[]; lanes: Lane[];
   /** What the pool hands it at most (its count under the pool's cap); its leases' units; the free ones it could be handed now; the one kept for pool jobs. */
   units: number | null; units_busy: number; units_free: number; job_reserved: number;
+  /**
+   * Whether a build of size 1 fits it now, as a claim's own room test judges it (selection.ts noRoom): a build's units free for a
+   * task, and its disk budget above the floor beside the budgets of the builds it holds. False while it does not claim.
+   */
+  build_fits: boolean;
   /** The tasks it runs: its registration's leases. */
   tasks: number;
   release: string | null; isolation: string | null; dedicated: boolean | null;
@@ -174,7 +179,8 @@ export function fleetHostOf(h: FleetHostRow, leases: FleetLease[], now: number, 
   const lanes = json<Lane[]>(h.lanes, []);
   const report = reportOf(h.report);
   const mine = h.worker_id ? leases.filter((l) => l.lease_owner === h.worker_id) : [];
-  const held = mine.map((l) => ({ kind: l.kind, units: l.units ?? unitsOf(l.kind, l.size, r) }));
+  // As selection's LEASES_HELD_SQL reads them (routes/factory.ts): a lease's units, else its kind's; its disk budget, else none.
+  const held = mine.map((l) => ({ kind: l.kind, units: l.units ?? unitsOf(l.kind, l.size, r), model: false, disk_gb: l.disk_gb ?? 0 }));
   const units = h.units === null ? null : Math.min(h.units, h.pool_cap_units ?? Number.MAX_SAFE_INTEGER);
   // Alive: its agent reported within HOST_REPORT_FRESH_MIN and something of it reached the pool within SILENT_MIN — never both
   // "silent" and alive in one row.
@@ -190,10 +196,16 @@ export function fleetHostOf(h: FleetHostRow, leases: FleetLease[], now: number, 
   const claims = state === "claiming";
   const job = jobReservedOf(report);
   const room = units === null ? 0 : Math.max(0, roomOf({ units }, held, { job_reserved: job }).task);
+  // A build of size 1, with no model work (no agent slot asked): its units and its disk, against what the host's report keeps of
+  // its free disk (the row's disk_free, written from the same report) — what the scaling signal asks of a host that claims.
+  const disk = json<KeptCapacity | null>(h.capacity, null)?.disk_free_gb ?? null;
+  const build = { kind: "build", model: false, disk_gb: null } as const;
+  const fits = claims && units !== null
+    && noRoom({ legacy: false, units, agent_slots: h.agent_slots ?? 0, disk }, held, build, unitsOf("build", 1, r), diskOf(build, 1, r), { ...r, job_reserved: job }) === null;
   return {
     id: h.id, name: h.name, owner: h.owner_login, status: h.status, worker: h.worker_id,
     arches: [...new Set(lanes.map((l) => l.arch))], lanes,
-    units, units_busy: held.reduce((n, l) => n + l.units, 0), units_free: claims ? room : 0, job_reserved: job,
+    units, units_busy: held.reduce((n, l) => n + l.units, 0), units_free: claims ? room : 0, job_reserved: job, build_fits: fits,
     tasks: mine.length,
     release: h.release_applied, isolation: h.isolation, dedicated: h.dedicated === null ? null : !!h.dedicated,
     alive, asleep, claims, state: claims && room === 0 ? "full" : state,
@@ -205,7 +217,7 @@ export function fleetHostOf(h: FleetHostRow, leases: FleetLease[], now: number, 
 /** What the box names: one word each, the page's icon and the tests key on it. */
 export type NeedKind = "pending-owner" | "suspended" | "stopped" | "below-minimum" | "disk-low" | "binfmt" | "cgroups" | "hosting" | "docker-group" | "linger" | "credentials" | "round";
 export interface Need { what: NeedKind; text: string }
-/** What an agent may say a person must fix in its report's `needs_person` (crates/omarchy-agent run/needs.rs, from 0.5.0: linger, the credentials within its user's reach — only it sees them). */
+/** What an agent may say a person must fix in its report's `needs_person` (crates/omarchy-agent run/needs.rs, from 0.5.0: linger, the credentials within its user's reach — only it sees them; a Mac's says neither). */
 const AGENT_NEEDS: readonly NeedKind[] = ["linger", "credentials", "docker-group", "binfmt", "cgroups", "hosting"];
 
 /**
@@ -344,7 +356,7 @@ export interface ArchCapacity {
   needs_native: number;
   /** The free units the hosts that claim now could hand a task of this arch: on a native lane, on an emulated one. */
   free_native: number; free_emulated: number;
-  /** Whether one host that claims has a build's units free (TASK_UNITS.build_per_size) on a lane of it: a native one, an emulated one. */
+  /** Whether a build fits one host that claims with a lane of it (FleetHost.build_fits: its units and its disk free): a native one, an emulated one. */
   build_fits: { native: boolean; emulated: boolean };
   /** How many hosts run it natively and emulated. */
   hosts_native: number; hosts_emulated: number;
@@ -379,7 +391,7 @@ export function capacityOf(queue: QueueRow[], hosts: FleetHost[], rows: FleetHos
       queued: q?.n ?? 0, oldest_at: q?.oldest ?? null, oldest_wait_min: q?.oldest ? Math.max(0, Math.floor((now - Date.parse(q.oldest)) / MIN)) : null,
       needs_native: Number(q?.needs_native ?? 0),
       free_native: native.reduce((n, h) => n + h.units_free, 0), free_emulated: emulated.reduce((n, h) => n + h.units_free, 0),
-      build_fits: { native: native.some((h) => h.units_free >= TASK_UNITS.build_per_size), emulated: emulated.some((h) => h.units_free >= TASK_UNITS.build_per_size) },
+      build_fits: { native: native.some((h) => h.build_fits), emulated: emulated.some((h) => h.build_fits) },
       hosts_native: native.length, hosts_emulated: emulated.length,
       busy_7d: { all: ratio(used(null), capOf(live.filter((h) => has(h, "native") || has(h, "emulated")))), native: ratio(used("native"), capOf(native)), emulated: ratio(used("emulated"), capOf(emulated)) },
     };
@@ -388,11 +400,11 @@ export function capacityOf(queue: QueueRow[], hosts: FleetHost[], rows: FleetHos
 
 /**
  * The capacity lines (design v2 §18.3): an architecture whose oldest queued task waited CAPACITY_WAIT_MIN with no free build of
- * it — no host that claims has a build's units free on a lane of it (a native one for tasks an emulated lane sent back) — says
- * how many wait and the free units native and emulated, the project's prompt to add a host of it; one that waited beside a free
- * build is an info line that says so (placement, a pin, a size: not the fleet's room). The wait counts from the task's creation:
- * a task back in the queue after a lease (lost, stopped, sent back for a native host) counts its run too. And the tasks an
- * emulated lane sent back wait for a native host of their arch, counted.
+ * it — no host that claims with a lane of it (a native one for tasks an emulated lane sent back) has a build's units and disk
+ * free, as a claim's room test judges them — says how many wait and the free units native and emulated, the project's prompt to
+ * add a host of it; one that waited beside a free build is an info line that says so (placement, a pin, a size: not the fleet's
+ * room). The wait counts from the task's creation: a task back in the queue after a lease (lost, stopped, sent back for a native
+ * host) counts its run too. And the tasks an emulated lane sent back wait for a native host of their arch, counted.
  */
 export function capacityLines(caps: ArchCapacity[]): StatusLine[] {
   const out: StatusLine[] = [];
@@ -403,7 +415,7 @@ export function capacityLines(caps: ArchCapacity[]): StatusLine[] {
       // for something else — the placement of a project's copy, a pin, their size — and a new host would not take them sooner.
       const fits = c.build_fits.native || (c.build_fits.emulated && c.queued > c.needs_native);
       if (!fits) out.push({ level: "warn", kind: "capacity", arch: c.arch, text: `${waited}; free native units: ${c.free_native}, free emulated units: ${c.free_emulated}${c.hosts_native === 0 ? ` — no host runs ${c.arch} natively` : ""}` });
-      else out.push({ level: "info", kind: "capacity", arch: c.arch, text: `${waited}, while a free build of it fits on a host that claims (free native units: ${c.free_native}, free emulated units: ${c.free_emulated}) — what holds them is their placement, a pin or their size, not the fleet's room` });
+      else out.push({ level: "info", kind: "capacity", arch: c.arch, text: `${waited}, while a host that claims has a build's units and disk free for it (free native units: ${c.free_native}, free emulated units: ${c.free_emulated}) — what holds them is their placement, a pin or their size, not the fleet's room` });
     }
     if (c.needs_native > 0) out.push({ level: "warn", kind: "needs-native", arch: c.arch, text: `tasks waiting for a native ${c.arch} host: ${c.needs_native}${c.hosts_native === 0 ? " — none runs it natively: only a native host takes them" : ""}` });
   }
