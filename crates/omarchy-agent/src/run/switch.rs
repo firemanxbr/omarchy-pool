@@ -461,8 +461,9 @@ impl Agent {
         // A Mac's bundle runs in a VM's engine (#320): the agent keeps the omarchy Colima
         // VM — its three mounts, its task firewall, its clock — around the docker engine
         // inside it, and Docker Desktop's or OrbStack's is the person's. The drivers this
-        // binary carries move between a Linux host's engines only.
-        if self.cfg.vm.is_some() || cfg!(target_os = "macos") {
+        // binary carries move between a Linux host's engines only. A Mac's build refuses
+        // even with agent.toml's `[vm]` gone.
+        if self.cfg.vm.is_some() || self.mac {
             return Err("this host's bundle runs in a Mac's VM (#320), whose engine the agent keeps: the runtime switch moves between a Linux host's engines only".into());
         }
         let r = Runtime::parse(&req.driver).ok_or_else(|| {

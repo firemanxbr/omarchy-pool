@@ -400,6 +400,11 @@ fn what_refuses_a_switch_changes_nothing() {
     assert!(refused(&mut w, "compose/podman", PODMAN)
         .starts_with("this host's bundle runs in a Mac's VM (#320)"));
     w.agent.cfg.vm = None;
+    // A Mac's build, played on any OS, refuses even with agent.toml's `[vm]` gone.
+    w.agent.mac = true;
+    assert!(refused(&mut w, "compose/podman", PODMAN)
+        .starts_with("this host's bundle runs in a Mac's VM (#320)"));
+    w.agent.mac = false;
     // The pool cannot ask for one: nothing it sends names a driver, and the request is the
     // agent's own file.
     assert!(!w.agent.paths.data.join(REQUEST).exists());

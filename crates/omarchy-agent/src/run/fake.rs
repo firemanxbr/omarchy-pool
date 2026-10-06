@@ -886,6 +886,9 @@ impl World {
             Box::new(TestVerifier(Rc::clone(signed_at))),
             Drivers::Fixed,
         );
+        // A Linux host's agent, whichever OS runs the tests: a Mac (#320) is played with
+        // `mac` and agent.toml's `[vm]`.
+        a.mac = false;
         let by_socket = Rc::clone(sockets);
         a.drivers_on = Some(Box::new(move |socket| {
             by_socket
