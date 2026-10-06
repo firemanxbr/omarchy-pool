@@ -123,7 +123,7 @@ export async function holdsPasskey(env: Env, login: string): Promise<boolean> {
  * `passkey:reset:<login>`, `promote:force:<from>:<to>[:<arch>]` — so an
  * answer made for one act decides no other.
  */
-export const SUBJECT = new RegExp(String.raw`^(?:approve:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39}|promote:force:(?:${PROMOTED_RINGS.join("|")}):(?:${PROMOTED_RINGS.join("|")})(?::(?:${REPO_ARCHES.join("|")}))?|host:(?:resume|retire|retire-legacy):h_[0-9a-z]{10}|host:(?:cause|resume-all):[A-Za-z0-9-]{1,39})$`);
+export const SUBJECT = new RegExp(String.raw`^(?:approve:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39}|promote:force:(?:${PROMOTED_RINGS.join("|")}):(?:${PROMOTED_RINGS.join("|")})(?::(?:${REPO_ARCHES.join("|")}))?|host:(?:resume|retire|retire-legacy|seal-key|pin-passkey|widen-envelope|set-agent-keys):h_[0-9a-z]{10}|host:(?:cause|resume-all):[A-Za-z0-9-]{1,39})$`);
 
 /** A forced promotion's act (#284): the rings and the architecture it names, as the door and the Status page's button bind it. */
 export const forcedSubject = (from: string, to: string, arch?: string): string => `promote:force:${from}:${to}${arch ? `:${arch}` : ""}`;
@@ -135,7 +135,12 @@ function actOf(subject: string): { act: string; nothing: string } {
   if (kind === "block") return { act: `blocking ${b}`, nothing: "nothing was decided" };
   if (kind === "promote") return { act: `forcing ${b} into ${c}${d ? ` on ${d}` : ""}`, nothing: "nothing was queued" };
   // A host's acts (#322): the host's id, or the owner's login.
-  if (kind === "host") return { act: a === "resume" ? `resuming host ${b}` : a === "retire" ? `retiring host ${b}` : a === "retire-legacy" ? `retiring the legacy set of host ${b}` : a === "cause" ? `removing ${b} for cause` : `resuming ${b}'s hosts`, nothing: "nothing changed" };
+  if (kind === "host") {
+    // The owner's control without a visit (#328): a pin, the seal key, a widening, agent keys.
+    const owner: Record<string, string> = { "seal-key": `confirming the seal key of host ${b}`, "pin-passkey": `pinning a passkey at host ${b}`, "widen-envelope": `widening the envelope of host ${b}`, "set-agent-keys": `setting the agent keys of host ${b}` };
+    if (owner[a]) return { act: owner[a], nothing: "nothing changed" };
+    return { act: a === "resume" ? `resuming host ${b}` : a === "retire" ? `retiring host ${b}` : a === "retire-legacy" ? `retiring the legacy set of host ${b}` : a === "cause" ? `removing ${b} for cause` : `resuming ${b}'s hosts`, nothing: "nothing changed" };
+  }
   if (a === "add") return { act: "adding a passkey", nothing: "no passkey was added" };
   if (a === "remove") return { act: "removing a passkey", nothing: "nothing was removed" };
   return { act: `resetting ${b}'s passkeys`, nothing: "nothing was reset" };
@@ -224,11 +229,15 @@ export const RESET_GRANTS_SQL = `UPDATE agent_grants SET revoked_at = ${NOW}, re
 
 // ---------- challenges ----------
 
-/** A new challenge for the login, for a registration (draft null) or an assertion bound to a draft or an act — replacing the earlier one for the same — or null when five other ceremonies wait already. */
-export async function issueChallenge(env: Env, login: string, purpose: "register" | "confirm", draft: string | null): Promise<string | null> {
+/**
+ * A new challenge for the login, for a registration (draft null) or an assertion bound to a draft or an act — replacing the earlier
+ * one for the same — or null when five other ceremonies wait already. Random, or (#328) `value`: the SHA-256 of a document the owner
+ * signs for a host, which the host recomputes — a pool-written document with a version and a host of its own, so no two are alike.
+ */
+export async function issueChallenge(env: Env, login: string, purpose: "register" | "confirm", draft: string | null, value?: string): Promise<string | null> {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  const challenge = toB64url(bytes);
+  const challenge = value ?? toB64url(bytes);
   const expires = new Date(Date.now() + CHALLENGE_MINUTES * 60_000).toISOString();
   const [, , ins] = await env.DB.batch([
     env.DB.prepare(CHALLENGE_PRUNE_SQL).bind(login),
@@ -313,6 +322,9 @@ async function checkAssertion(env: Env, rp: RelyingParty, login: string, bound: 
 
 /** A JSON body's `assertion`, as checkAssertion reads it: anything that is not an object is none. */
 const assertionIn = (v: unknown): AssertionFields => (v && typeof v === "object" ? (v as AssertionFields) : {});
+
+/** The challenge a document is signed with (#328): base64url of its SHA-256, as the host recomputes it. */
+export const docChallenge = async (doc: string): Promise<string> => toB64url(await sha256(doc));
 
 /** An act's refusal on the web, as JSON (403): the reason in the person's words, what did not happen, and a code a script and a test read; no passkey at all carries the way to register one. */
 function refusedAct(r: AssertionRefusal, rp: RelyingParty, login: string, subject: string): Response {
@@ -501,7 +513,9 @@ export async function handlePasskeyAssert(url: URL, request: Request, env: Env):
   const { c, rp } = who;
   const b = (await request.json().catch(() => null)) as { for?: unknown } | null;
   const subject = typeof b?.for === "string" && SUBJECT.test(b.for) ? b.for : null;
-  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id>, passkey:reset:<login>, promote:force:<from>:<to>[:<arch>], host:resume:<host>, host:retire:<host>, host:retire-legacy:<host>, host:cause:<login> or host:resume-all:<login>", code: "for" }, 400, NO_STORE);
+  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id>, passkey:reset:<login>, promote:force:<from>:<to>[:<arch>], host:resume:<host>, host:retire:<host>, host:retire-legacy:<host>, host:seal-key:<host>, host:cause:<login> or host:resume-all:<login>", code: "for" }, 400, NO_STORE);
+  // A document the owner signs for a host (#328) is asked for at its own door, which writes the document the challenge commits to.
+  if (/^host:(?:pin-passkey|widen-envelope|set-agent-keys):/.test(subject)) return json({ error: "a pin, a widening and agent keys are signed over the document the host's page asks for (POST /api/v1/hosts/<id>/owner/challenge)", code: "for" }, 400, NO_STORE);
   if (!subject.startsWith("passkey:remove:")) {
     const no = maintainerRefusal(c);
     if (no) return no;
@@ -613,9 +627,10 @@ export type PasskeyGate = (assertion: unknown) => Promise<Confirmed | Response>;
  * writes anything (decidedWith), so a refusal of the act is said first and
  * in the same words as anywhere else.
  */
-export function webGate(request: Request, url: URL, env: Env, login: string, subject: string): PasskeyGate {
+export function webGate(request: Request, url: URL, env: Env, login: string, subject: string, doc?: string): PasskeyGate {
   // The door's words: approve and block, or a promotion forced past its evidence (#284).
   const [are, nothing] = subject.startsWith("promote:") ? ["a promotion forced past its evidence is", "nothing was queued"]
+    : /^host:(?:seal-key|pin-passkey|widen-envelope|set-agent-keys):/.test(subject) ? ["a host's pin, its seal key, a widening of its envelope and its agent keys are", "nothing changed"]
     : subject.startsWith("host:") ? ["a host's resume and retirement, the retirement of its legacy set, and a removal for cause, are", "nothing changed"]
     : ["approve and block are", "nothing was decided"];
   return async (assertion) => {
@@ -625,6 +640,8 @@ export function webGate(request: Request, url: URL, env: Env, login: string, sub
     const rp = relyingParty(url);
     if (!rp) return json({ error: `${are} confirmed with a passkey, which works on ${DASHBOARD_HOST} (and on localhost in development), not on ${url.hostname}; ${nothing}`, code: "rp_unavailable" }, 403, NO_STORE);
     if (request.headers.get("origin") !== url.origin) return json({ error: `not from the pool's page: ${are} confirmed on ${rp.origin}; ${nothing}`, code: "origin" }, 403, NO_STORE);
+    // A document the owner signs for a host (#328): the answer must be for exactly its bytes, which the host checks again.
+    if (doc !== undefined && challengeOf(assertionIn(assertion).client_data) !== (await docChallenge(doc))) return refusedAct({ refused: "challenge" }, rp, login, subject);
     const ok = await checkAssertion(env, rp, login, subject, assertionIn(assertion));
     return "refused" in ok ? refusedAct(ok, rp, login, subject) : ok;
   };

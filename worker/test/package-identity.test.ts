@@ -68,7 +68,8 @@ async function planOf(x: { sql: string; args: unknown[] }): Promise<string> {
 /** What 0036 added, taken off again, and what the migrations after it added (the package's maintainer in the pool, #244; the reviews table takes its changes column, #247, with it): the schema as production has it before the migration. */
 const REWIND = [
   // What 0047 added (host settings and diagnostics, #325) comes off first: its table, with its index (host_orders.arg and
-  // hosts.settings go with their tables below).
+  // hosts.settings go with their tables below, as do 0049's — host_orders rebuilt with the owner's two kinds and hosts' seal key
+  // columns, #328).
   "DROP TABLE host_diagnostics",
   // What 0046 added comes off next, in the reverse of the order D1 applies the two: the host orders' table, with its indexes (#344);
   "DROP TABLE host_orders",

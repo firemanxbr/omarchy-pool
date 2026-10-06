@@ -37,7 +37,8 @@ import { putRecord } from "../record";
 import { writeGate } from "./orders";
 import { sha256Hex, viaOf, workspace, SIGN_IN, type Contributor } from "./contributors";
 import { dashboardOrigin } from "./agents";
-import { justNowWords, webGate, SELF_CAUSE } from "./passkeys";
+import { docChallenge, issueChallenge, PASSKEYS_SQL, justNowWords, relyingParty, webGate, CEREMONY_MS, SELF_CAUSE, TOO_MANY_CHALLENGES, CHALLENGE_MINUTES } from "./passkeys";
+import { toB64url } from "../webauthn";
 import { cancelOrdersOf, openOrdersOf, FOLLOW_POLL_S } from "../orders";
 import {
   belowMinimum, enrollMessage, fingerprint, hostLine, installCommand, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf, shortId, signedMessage,
@@ -46,7 +47,8 @@ import {
   agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT,
   agentTakesSettings, hostSettingsOf, orderArg, reportedBrakeOf, reportedSettingsOf, DIAGNOSTIC_LINE_MAX, DIAGNOSTIC_LINES, DIAGNOSTICS_MAX_BYTES, HOST_ORDER_ID, HOST_SETTINGS_AGENT, SETTINGS_ORDER_KINDS,
   poolBehindOf, reportedSoakOf, soakOf,
-  type Capacity, type HostOrderKind, type Isolation, type OrderArg,
+  agentTakesOwner, ownerDoc, readOwnerDoc, reportedOwnerOf, sealKeyOf, sealedKeys, widening, HOST_OWNER_AGENT, OWNER_DOC_TTL_MIN, OWNER_ORDER_KINDS, PIN_DOC_TTL_MIN,
+  type Capacity, type HostOrderKind, type Isolation, type OrderArg, type OwnerAct, type OwnerDocInput,
 } from "../hosts";
 import { gateWords, parseTag, updateState } from "../update";
 
@@ -71,6 +73,8 @@ export interface HostRow {
   settings: string | null;
   /** #326: its soak and freeze detection as its last report says them (migration 0048): what the claims and listings read. */
   soaking_until: string | null; soak_quarantine: string | null; pool_behind_github: string | null;
+  /** #328: the X25519 seal key its agent reports, and the one its owner confirmed ({key, by, at, passkey}, migration 0049). */
+  seal_key: string | null; seal_confirmed: string | null;
 }
 
 function newToken(prefix: string): string {
@@ -173,12 +177,32 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
     settings: reportedSettingsOf(h.report), pool_settings: hostSettingsOf(h.settings), brake: reportedBrakeOf(h.report), quarantine: quarantineOf(h.report),
     // Its owner's soak (#326): the minutes its envelope sets, when the soak of the release it is to take ends, and GitHub's latest tag as its agent read it.
     soak: reportedSoakOf(h.report),
+    // The owner's control without a visit (#328): the passkey pinned at the host, the envelope a widening starts from, the agent keys' names —
+    // and its seal key, whether its owner confirmed it, and whether it changed since.
+    owner: reportedOwnerOf(h.report), seal: await sealView(h),
     reported_at: h.reported_at, last_seen: h.last_seen, token_issued_at: h.token_issued_at,
     summary: capacity ? hostLine(capacity, h.isolation, h.dedicated === null ? null : !!h.dedicated) : null,
   };
 }
 
 const mayDetail = (c: Contributor | null, h: Pick<HostRow, "owner_login">) => !!c && (c.role === "maintainer" || c.login === h.owner_login);
+
+/** The seal key its agent reports (#328) with its fingerprint — the one `omarchy-agent status` prints at the host — and its owner's confirmation: whose and when, and whether it is still the key reported. */
+async function sealView(h: Pick<HostRow, "seal_key" | "seal_confirmed">) {
+  const key = sealKeyOf(h.seal_key);
+  let confirmed: { key?: unknown; by?: unknown; at?: unknown } | null = null;
+  try {
+    confirmed = h.seal_confirmed ? JSON.parse(h.seal_confirmed) : null;
+  } catch {
+    confirmed = null;
+  }
+  if (!key && !confirmed) return null;
+  return {
+    key, fingerprint: key ? await fingerprint(fromB64urlKey(key)) : null,
+    confirmed: confirmed && typeof confirmed.by === "string" && typeof confirmed.at === "string" ? { by: confirmed.by, at: confirmed.at, current: confirmed.key === key } : null,
+  };
+}
+const fromB64urlKey = (k: string) => publicKeyBytes(k)!;
 
 /** The releases its last report holds in quarantine (#325: what retry-release lifts), each a tag. */
 function quarantineOf(report: string | null): string[] {
@@ -232,7 +256,7 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
   const viewer = c ? await viewerOf(env, c) : null;
   const detailed = mayDetail(c, h);
   const orders = detailed
-    ? (await env.DB.prepare(HOST_ORDERS_SQL).bind(h.id).all<Record<string, unknown>>()).results.map((o) => ({ ...o, arg: o.arg ? JSON.parse(o.arg as string) : null, lines: !!o.lines }))
+    ? (await env.DB.prepare(HOST_ORDERS_SQL).bind(h.id).all<Record<string, unknown>>()).results.map((o) => ({ ...o, arg: o.arg ? argView(o.kind as string, JSON.parse(o.arg as string)) : null, lines: !!o.lines }))
     : undefined;
   const pool = version(env);
   return json(
@@ -317,7 +341,7 @@ async function viewerOf(env: Env, c: Contributor): Promise<HostViewer> {
 /** The owner is a GitHub user id, not a login: a renamed owner is still the owner, and a login someone else took is not. */
 const isOwner = (v: HostViewer, h: Pick<HostRow, "owner_github_id">) => v.github_id !== null && v.github_id === h.owner_github_id;
 
-export type HostRight = "suspend" | "resume" | "retire" | "cap" | "reconcile" | "retire_legacy" | "settings" | "rotate_token" | "retry_release" | "diagnostics";
+export type HostRight = "suspend" | "resume" | "retire" | "cap" | "reconcile" | "retire_legacy" | "settings" | "rotate_token" | "retry_release" | "diagnostics" | "owner";
 type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
 
 /**
@@ -345,13 +369,18 @@ type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; wh
  *   the owner's envelope allows: whether a value fits it is the agent's to
  *   say, and it refuses above it — the page greys what the last report says
  *   the envelope excludes, never the door.
+ * - P5's (#328) — a pin, the seal key's confirmation, a widening of the
+ *   envelope, agent keys: its owner only, while a maintainer, with their
+ *   passkey, on an active host whose agent takes them (HOST_OWNER_AGENT on).
+ *   Whatever the door says, the host takes a widening or a key only when the
+ *   passkey pinned there signed it.
  */
 export function hostVerdicts(
   v: HostViewer | null,
   h: Pick<HostRow, "name" | "status" | "owner_login" | "owner_github_id"> & Partial<Pick<HostRow, "agent_version" | "report">>,
 ): Record<HostRight, HostVerdict> {
   const no = (status: 401 | 403 | 404 | 409, why: string): HostVerdict => ({ ok: false, status, why });
-  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), cap: no(401, SIGN_IN), reconcile: no(401, SIGN_IN), retire_legacy: no(401, SIGN_IN), settings: no(401, SIGN_IN), rotate_token: no(401, SIGN_IN), retry_release: no(401, SIGN_IN), diagnostics: no(401, SIGN_IN) };
+  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), cap: no(401, SIGN_IN), reconcile: no(401, SIGN_IN), retire_legacy: no(401, SIGN_IN), settings: no(401, SIGN_IN), rotate_token: no(401, SIGN_IN), retry_release: no(401, SIGN_IN), diagnostics: no(401, SIGN_IN), owner: no(401, SIGN_IN) };
   const owner = isOwner(v, h);
   const theirs = !owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer stops ${h.name}`) : null;
   const gone = h.status === "retired" ? no(409, `${h.name} is retired: a new install enrolls a new host`) : null;
@@ -382,6 +411,12 @@ export function hostVerdicts(
       ?? (!v.maintainer ? no(403, `${OWNER_NOT_MAINTAINER}: ${h.name}'s legacy set stays`) : null)
       ?? takes ?? legacyWhy ?? { ok: true },
     settings: p4, rotate_token: p4, retry_release: p4, diagnostics: p4,
+    // P5's (#328): its owner's alone, with the passkey they pin at the host.
+    owner: (!owner ? no(403, `only ${h.owner_login} widens ${h.name}'s envelope and sets its agent keys, with the passkey pinned at the host`) : null)
+      ?? (!v.maintainer ? no(403, `${OWNER_NOT_MAINTAINER}: ${h.name}'s envelope and keys stay as they are`) : null)
+      ?? takes
+      ?? (!agentTakesOwner(h.agent_version) ? no(409, `its agent (${h.agent_version ?? "unknown"}) takes no signed widening or sealed key: agent ${HOST_OWNER_AGENT} or later does, and a release brings it by itself`) : null)
+      ?? { ok: true },
   };
 }
 const canOf = (v: Record<HostRight, HostVerdict>) => {
@@ -672,10 +707,13 @@ export const HOST_OPEN_ORDERS_SQL = "SELECT id, kind, not_after, arg FROM host_o
 const RIGHT_OF: Record<HostOrderKind, HostRight> = {
   "reconcile-now": "reconcile", "retire-legacy": "retire_legacy", "set-units": "settings", "set-emulate": "settings",
   "rotate-token": "rotate_token", "retry-release": "retry_release", diagnostics: "diagnostics",
+  "widen-envelope": "owner", "set-agent-keys": "owner",
 };
 
 /** An order's line on the journal: who asked what of which host (a settings order with its value). */
-function orderLine(h: HostRow, kind: HostOrderKind, by: string, arg: OrderArg | null, passkey: string): string {
+/** What an owner order's line and its row on the page say of it (#328): its version, the envelope's keys or the keys' names — never the document or a ciphertext. */
+type OwnerArgView = { version: number; envelope: Record<string, unknown> } | { version: number; keys: string[] };
+function orderLine(h: HostRow, kind: HostOrderKind, by: string, arg: OrderArg | OwnerArgView | null, passkey: string): string {
   const lanes = (e: string[]) => (e.length ? e.join(", ") : "none");
   switch (kind) {
     case "retire-legacy":
@@ -694,6 +732,14 @@ function orderLine(h: HostRow, kind: HostOrderKind, by: string, arg: OrderArg | 
       return `${hostLine_(h)}: ${by} ordered its quarantined release tried again`;
     case "diagnostics":
       return `${hostLine_(h)}: ${by} asked for its dispatcher's last log lines`;
+    case "widen-envelope": {
+      const env = arg && "envelope" in arg ? arg.envelope : {};
+      return `${hostLine_(h)}: ${by}${passkey} signed a widening of its envelope (version ${arg && "version" in arg ? arg.version : "?"}: ${Object.keys(env).join(", ")}) — its agent takes it only when the passkey pinned there signed it`;
+    }
+    case "set-agent-keys": {
+      const names = arg && "keys" in arg ? arg.keys : [];
+      return `${hostLine_(h)}: ${by}${passkey} sealed its agent keys to it (version ${arg && "version" in arg ? arg.version : "?"}: ${names.join(", ")}) — the pool holds only ciphertext`;
+    }
     default:
       return `${hostLine_(h)}: ${by} ordered a round now`;
   }
@@ -732,20 +778,27 @@ export async function handleHostOrder(c: Contributor, id: string, request: Reque
   if (no) return no;
   const arg = orderArg(kind, p.b);
   if (typeof arg === "string") return json({ error: arg, code: "arg" }, 400, NO_STORE);
-  const ok = kind === "retire-legacy" ? await webGate(request, url, env, c.login, `host:retire-legacy:${id}`)(p.b.assertion) : null;
+  // P5's (#328): the document the owner's passkey signed, as this host's page asked for it, relayed whole — the host checks it again.
+  const owner = OWNER_ORDER_KINDS.includes(kind) ? ownerOrder(kind, h, c.login, p.b) : null;
+  if (owner instanceof Response) return owner;
+  const ok = kind === "retire-legacy" ? await webGate(request, url, env, c.login, `host:retire-legacy:${id}`)(p.b.assertion)
+    : owner ? await webGate(request, url, env, c.login, `host:${kind}:${id}`, owner.doc)(p.b.assertion)
+    : null;
   if (ok instanceof Response) return ok;
   const now = Date.now();
   const at = iso(now);
   const notAfter = iso(now + HOST_ORDER_TTL_MIN * MIN);
   const oid = newOrderId();
-  const line = orderLine(h, kind, c.login, arg, ok ? justNowWords(ok) : "");
+  const line = orderLine(h, kind, c.login, owner ? owner.view : arg, ok ? justNowWords(ok) : "");
+  const stored = owner ? { version: owner.view.version, doc: owner.doc, assertion: assertionFields(p.b.assertion) } : arg;
+  const shown = owner ? owner.view : arg;
   try {
     await env.DB.batch([
       env.DB.prepare(EXPIRE_HOST_ORDERS_SQL).bind(at, id),
       env.DB.prepare("INSERT INTO host_orders (id, host_id, kind, issued_by, via, confirmed_with, issued_at, not_after, arg) SELECT ?, id, ?, ?, 'web', ?, ?, ?, ? FROM hosts WHERE id = ? AND status = 'active'")
-        .bind(oid, kind, c.login, ok ? ok.passkey : null, at, notAfter, arg ? JSON.stringify(arg) : null, id),
+        .bind(oid, kind, c.login, ok ? ok.passkey : null, at, notAfter, stored ? JSON.stringify(stored) : null, id),
       env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', ?, ?, ? WHERE EXISTS (SELECT 1 FROM host_orders WHERE id = ?)")
-        .bind(kind === "retire-legacy" ? "warn" : "ok", line, JSON.stringify({ host: id, owner: h.owner_login, by: c.login, via: "web", action: "order", order: oid, kind, not_after: notAfter, ...(arg ?? {}), ...(ok ? { confirmed_with: ok.passkey } : {}) }), oid),
+        .bind(kind === "retire-legacy" || owner ? "warn" : "ok", line, JSON.stringify({ host: id, owner: h.owner_login, by: c.login, via: "web", action: "order", order: oid, kind, not_after: notAfter, ...(shown ?? {}), ...(ok ? { confirmed_with: ok.passkey } : {}) }), oid),
     ]);
   } catch (e) {
     if (/UNIQUE/i.test(String(e))) return json({ error: `${kind} is waiting for ${h.name}'s agent already: one at a time, until it answers or the order expires`, code: "order_open" }, 409, NO_STORE);
@@ -754,13 +807,212 @@ export async function handleHostOrder(c: Contributor, id: string, request: Reque
   if (!(await env.DB.prepare("SELECT 1 FROM host_orders WHERE id = ?").bind(oid).first())) return json({ error: `${h.name} was not ordered: it changed a moment ago`, code: "host_right" }, 409, NO_STORE);
   return json(
     {
-      order: { id: oid, kind, state: "open", not_after: notAfter, ...(arg ? { arg } : {}), ...(ok ? { confirmed_with: ok.passkey } : {}) },
+      order: { id: oid, kind, state: "open", not_after: notAfter, ...(shown ? { arg: shown } : {}), ...(ok ? { confirmed_with: ok.passkey } : {}) },
       host: id, by: c.login, line,
       note: `its agent takes it at its next poll (within ${FOLLOW_POLL_S / 60} min) and answers in its next report; not taken by ${notAfter}, it expires`,
     },
     201,
     NO_STORE,
   );
+}
+
+// ---------- the owner's control without a visit (#328, design v2 §12, §14, D6 b) ----------
+
+/** An assertion's five fields as a page posts them, strings only, as the host reads them (crates/omarchy-agent/src/owner/webauthn.rs `Assertion`). */
+function assertionFields(v: unknown): Record<string, string> {
+  const a = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  const s = (x: unknown, max: number) => (typeof x === "string" && x.length <= max ? x : "");
+  return { credential: s(a.credential, 1400), client_data: s(a.client_data, 4096), authenticator_data: s(a.authenticator_data, 2048), signature: s(a.signature, 1024), user_handle: s(a.user_handle, 128) };
+}
+
+/** What a stored owner order says on the page and the journal: its version and the envelope's keys, or the keys' names — never the document or a ciphertext. */
+function argView(kind: string, arg: Record<string, unknown> | null): unknown {
+  if (!arg || !(OWNER_ORDER_KINDS as readonly string[]).includes(kind)) return arg;
+  const d = readOwnerDoc(arg.doc);
+  if (!d) return { version: arg.version ?? null };
+  return kind === "widen-envelope" ? { version: d.version, envelope: d.envelope ?? {} } : { version: d.version, keys: (d.keys ?? []).map((k) => (k.remove ? `${k.name} (taken out)` : k.name)) };
+}
+
+/** The highest version the host's owner orders and its last report name: the next document is one above both, so the host never takes one twice. Through (host_id, issued_at). */
+export const OWNER_VERSION_SQL = "SELECT MAX(json_extract(arg, '$.version')) AS v FROM host_orders WHERE host_id = ? AND kind IN ('widen-envelope', 'set-agent-keys')";
+async function nextOwnerVersion(env: Env, h: HostRow): Promise<number> {
+  const r = await env.DB.prepare(OWNER_VERSION_SQL).bind(h.id).first<{ v: number | null }>();
+  return Math.max(r?.v ?? 0, reportedOwnerOf(h.report)?.version ?? 0) + 1;
+}
+
+/** The seal key a host's agent reports and its owner confirmed — the one the browser seals to — or why there is none. */
+function confirmedSeal(h: HostRow): string | Response {
+  const key = sealKeyOf(h.seal_key);
+  if (!key) return json({ error: `${h.name}'s agent reports no seal key yet: agent ${HOST_OWNER_AGENT} makes one at its start`, code: "seal_key" }, 409, NO_STORE);
+  let c: { key?: unknown } | null = null;
+  try {
+    c = h.seal_confirmed ? JSON.parse(h.seal_confirmed) : null;
+  } catch {
+    c = null;
+  }
+  if (!c || c.key !== key) return json({ error: c ? `${h.name}'s seal key changed since you confirmed it: compare its fingerprint with \`omarchy-agent status\` at the host and confirm it again` : `confirm ${h.name}'s seal key first: compare its fingerprint with \`omarchy-agent status\` at the host`, code: "seal_key" }, 409, NO_STORE);
+  return key;
+}
+
+/**
+ * A widening or agent keys as a page posts them (#328): the document this host's page asked the pool for (POST …/owner/challenge),
+ * byte for byte, for this host, this act and this login, not expired; its envelope or its sealed keys as the pool writes them; the
+ * keys sealed to the seal key its owner confirmed. The order's arg is then the document and the assertion, relayed whole.
+ */
+function ownerOrder(kind: HostOrderKind, h: HostRow, login: string, b: Record<string, unknown>): { doc: string; view: OwnerArgView } | Response {
+  const d = readOwnerDoc(b.doc);
+  if (!d || d.act !== kind || d.host !== h.id || d.by !== login || !Number.isSafeInteger(d.version) || (d.version as number) < 1) {
+    return json({ error: "doc: the document this page asked the pool for (POST /api/v1/hosts/<id>/owner/challenge), as it came: for this host, this act and you", code: "doc" }, 400, NO_STORE);
+  }
+  if (!(Date.parse(d.not_after) > Date.now())) return json({ error: `the document expired at ${d.not_after}: press again`, code: "doc" }, 409, NO_STORE);
+  if (kind === "widen-envelope") {
+    const w = widening(d.envelope);
+    if (typeof w === "string") return json({ error: w, code: "arg" }, 400, NO_STORE);
+    return { doc: b.doc as string, view: { version: d.version as number, envelope: w } };
+  }
+  const k = sealedKeys(d.keys);
+  if (typeof k === "string") return json({ error: k, code: "arg" }, 400, NO_STORE);
+  const seal = confirmedSeal(h);
+  if (seal instanceof Response) return seal;
+  if (d.seal_key !== seal) return json({ error: `the keys were sealed to another seal key than ${h.name}'s: seal them again`, code: "seal_key" }, 409, NO_STORE);
+  return { doc: b.doc as string, view: { version: d.version as number, keys: k.map((x) => (x.remove ? `${x.name} (taken out)` : x.name)) } };
+}
+
+/** The acts a document is signed for. */
+const OWNER_ACTS: readonly OwnerAct[] = ["pin-passkey", "widen-envelope", "set-agent-keys"];
+
+/**
+ * POST /hosts/:id/owner/challenge — {act, envelope? | keys?}: the document
+ * the owner's passkey signs for this host (#328, design v2 D6 b) and the
+ * options navigator.credentials.get() takes for it: its challenge is the
+ * document's SHA-256 (issued to this login for `host:<act>:<id>`, five
+ * minutes, once), user verification required. A pin's names this host and
+ * the page's relying party, for any of the login's passkeys; a widening's
+ * and agent keys' carry a version above every one this host was given or
+ * took, and are for the passkey pinned there alone — none pinned, or one
+ * that is no longer the login's, is said before the device is asked. The
+ * agent keys arrive sealed in the browser, to the seal key its owner
+ * confirmed: the pool never sees a value.
+ */
+export async function handleOwnerChallenge(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url, "widened and given its agent keys");
+  if (p instanceof Response) return p;
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  const no = refusedBy(hostVerdicts(p.v, h).owner);
+  if (no) return no;
+  const rp = relyingParty(url);
+  if (!rp) return json({ error: `a passkey works on the pool's own page, not on ${url.hostname}`, code: "rp_unavailable" }, 403, NO_STORE);
+  const act = OWNER_ACTS.find((a) => a === p.b.act);
+  if (!act) return json({ error: `act: one of ${OWNER_ACTS.join(", ")}`, code: "act" }, 400, NO_STORE);
+  const now = Date.now();
+  const base = { act, host: id, issued_at: iso(now), by: c.login };
+  let d: OwnerDocInput;
+  let allow: string[] | null = null;
+  if (act === "pin-passkey") {
+    d = { ...base, not_after: iso(now + PIN_DOC_TTL_MIN * MIN), rp_id: rp.id, origin: rp.origin };
+  } else {
+    const pinned = reportedOwnerOf(h.report)?.passkey;
+    if (!pinned) return json({ error: `no passkey is pinned at ${h.name} yet: make a pin here and paste it at the host (omarchy-agent envelope pin-passkey) — its next report says so`, code: "not_pinned" }, 409, NO_STORE);
+    if (pinned.rp_id !== rp.id || pinned.origin !== rp.origin) return json({ error: `the passkey pinned at ${h.name} answers on ${pinned.origin}, not on this page (${rp.origin}): sign there, or pin one made here`, code: "not_pinned" }, 409, NO_STORE);
+    if (!(await env.DB.prepare("SELECT 1 FROM passkeys WHERE credential_id = ? AND login = ?").bind(pinned.credential, c.login).first())) {
+      return json({ error: `the passkey pinned at ${h.name} is not one of ${c.login}'s on the site any more: pin another at the host`, code: "not_pinned" }, 409, NO_STORE);
+    }
+    allow = [pinned.credential];
+    const version = await nextOwnerVersion(env, h);
+    const notAfter = iso(now + OWNER_DOC_TTL_MIN * MIN);
+    if (act === "widen-envelope") {
+      const w = widening(p.b.envelope);
+      if (typeof w === "string") return json({ error: w, code: "arg" }, 400, NO_STORE);
+      d = { ...base, version, not_after: notAfter, envelope: w };
+    } else {
+      const k = sealedKeys(p.b.keys);
+      if (typeof k === "string") return json({ error: k, code: "arg" }, 400, NO_STORE);
+      const seal = confirmedSeal(h);
+      if (seal instanceof Response) return seal;
+      d = { ...base, version, not_after: notAfter, seal_key: seal, keys: k };
+    }
+  }
+  const keys = (await env.DB.prepare(PASSKEYS_SQL).bind(c.login).all<{ credential_id: string }>()).results;
+  if (!keys.length) return json({ error: `this is confirmed with your passkey, and ${c.login} has none yet: add one on your page`, code: "no_passkey", register: `/user/${encodeURIComponent(c.login)}#passkeys` }, 403, NO_STORE);
+  const doc = ownerDoc(d);
+  const challenge = await docChallenge(doc);
+  if (!(await issueChallenge(env, c.login, "confirm", `host:${act}:${id}`, challenge))) {
+    return json({ error: `${TOO_MANY_CHALLENGES} — nothing changed`, code: "rate_limited" }, 429, { ...NO_STORE, "retry-after": String(CHALLENGE_MINUTES * 60) });
+  }
+  const credentials = allow ?? keys.map((k) => k.credential_id);
+  return json({
+    doc, act, ...(d.version ? { version: d.version } : {}), not_after: d.not_after,
+    publicKey: { challenge, rpId: rp.id, timeout: CEREMONY_MS, userVerification: "required", allowCredentials: credentials.map((id) => ({ type: "public-key", id })) },
+  }, 200, NO_STORE);
+}
+
+/**
+ * POST /hosts/:id/owner/pin — {doc, assertion}: the pin the owner pastes at
+ * the host (`omarchy-agent envelope pin-passkey <pin>`, #328): the
+ * document this page asked for (this host, the page's relying party, ten
+ * minutes), the assertion of one of the owner's passkeys over it — checked
+ * here as every act's is, and again at the host with the key the pin
+ * carries — and that passkey's COSE public key and algorithm, as it was
+ * registered. Base64url of their JSON; journaled. Nothing changes on the
+ * host until the owner pastes it there.
+ */
+export async function handleOwnerPin(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url, "widened and given its agent keys");
+  if (p instanceof Response) return p;
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  const no = refusedBy(hostVerdicts(p.v, h).owner);
+  if (no) return no;
+  const d = readOwnerDoc(p.b.doc);
+  if (!d || d.act !== "pin-passkey" || d.host !== id || d.by !== c.login) return json({ error: "doc: the pin's document this page asked the pool for, as it came", code: "doc" }, 400, NO_STORE);
+  if (!(Date.parse(d.not_after) > Date.now())) return json({ error: `the pin's document expired at ${d.not_after}: press Make a pin again`, code: "doc" }, 409, NO_STORE);
+  const ok = await webGate(request, url, env, c.login, `host:pin-passkey:${id}`, p.b.doc as string)(p.b.assertion);
+  if (ok instanceof Response) return ok;
+  const key = await env.DB.prepare("SELECT credential_id, public_key, alg FROM passkeys WHERE id = ?").bind(ok.passkey).first<{ credential_id: string; public_key: string; alg: number }>();
+  if (!key) return json({ error: "the passkey went a moment ago: nothing was pinned", code: "not_yours" }, 409, NO_STORE);
+  const pin = toB64url(new TextEncoder().encode(JSON.stringify({ doc: p.b.doc, assertion: assertionFields(p.b.assertion), public_key: key.public_key, alg: key.alg })));
+  const line = `${hostLine_(h)}: ${c.login} made a pin of their passkey (${ok.passkey})${justNowWords(ok)} — pasted at the host, it is the one passkey its agent takes a widening or agent keys with`;
+  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('host', NULL, 'factory', 'ok', ?, ?)")
+    .bind(line, JSON.stringify({ host: id, owner: h.owner_login, by: c.login, via: "web", action: "pin", passkey: ok.passkey, not_after: d.not_after }))
+    .run();
+  return json({
+    host: id, pin, command: `omarchy-agent envelope pin-passkey ${pin}`, passkey: ok.passkey, not_after: d.not_after, line,
+    note: `paste it at the host before ${d.not_after}, as the agent's user: the agent checks it there, keeps the passkey's public key, and from then on takes a widening of its envelope and its agent keys only when this passkey signed them`,
+  }, 200, NO_STORE);
+}
+
+/**
+ * POST /hosts/:id/seal-key — {key, assertion}: its owner confirms, once, the
+ * X25519 seal key its agent reports (#328), with their passkey
+ * (`host:seal-key:<id>`), having compared its fingerprint with what
+ * `omarchy-agent status` prints at the host. The browser seals agent keys to
+ * the confirmed key alone; a seal key that changes (one made again) is
+ * confirmed again before anything is sealed to it.
+ */
+export async function handleSealKeyConfirm(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url, "widened and given its agent keys");
+  if (p instanceof Response) return p;
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  const no = refusedBy(hostVerdicts(p.v, h).owner);
+  if (no) return no;
+  const key = sealKeyOf(p.b.key);
+  const reported = sealKeyOf(h.seal_key);
+  if (!reported) return json({ error: `${h.name}'s agent reports no seal key yet: agent ${HOST_OWNER_AGENT} makes one at its start`, code: "seal_key" }, 409, NO_STORE);
+  if (key !== reported) return json({ error: `the seal key ${h.name}'s agent reports is ${await fingerprint(publicKeyBytes(reported)!)}: reload the page and compare that one`, code: "seal_key" }, 409, NO_STORE);
+  const ok = await webGate(request, url, env, c.login, `host:seal-key:${id}`)(p.b.assertion);
+  if (ok instanceof Response) return ok;
+  const at = iso(Date.now());
+  const fp = await fingerprint(publicKeyBytes(key)!);
+  const line = `${hostLine_(h)}: ${c.login} confirmed its seal key ${fp}${justNowWords(ok)} — its agent keys are sealed to it in the browser, and the pool holds only ciphertext`;
+  const [res] = await env.DB.batch([
+    env.DB.prepare("UPDATE hosts SET seal_confirmed = ? WHERE id = ? AND seal_key = ?").bind(JSON.stringify({ key, by: c.login, at, passkey: ok.passkey }), id, key),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'ok', ?, ? WHERE changes() > 0")
+      .bind(line, JSON.stringify({ host: id, owner: h.owner_login, by: c.login, via: "web", action: "seal-key", fingerprint: fp, confirmed_with: ok.passkey })),
+  ]);
+  if (!res.meta.changes) return json({ error: `${h.name}'s seal key changed a moment ago: reload the page`, code: "seal_key" }, 409, NO_STORE);
+  return json({ host: id, seal: { key, fingerprint: fp, confirmed: { by: c.login, at, current: true } }, confirmed_with: ok.passkey, line }, 200, NO_STORE);
 }
 
 /** GET /hosts/:id/diagnostics/:order — the dispatcher's log lines a diagnostics order brought (#325): its owner's and the maintainers'. */
@@ -982,7 +1234,7 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
     `UPDATE hosts SET report = ?, reported_at = ?, last_seen = ?, agent_version = COALESCE(?, agent_version), release_applied = ?, release_target = ?, rolled_back_from = ?,
        isolation = ?, dedicated = ?, runtime = COALESCE(?, runtime), provider = ?, model = ?,
        capacity = COALESCE(?, capacity), lanes = COALESCE(?, lanes), units = COALESCE(?, units), agent_slots = COALESCE(?, agent_slots), disk_free = COALESCE(?, disk_free),
-       soaking_until = ?, soak_quarantine = ?, pool_behind_github = ?
+       soaking_until = ?, soak_quarantine = ?, pool_behind_github = ?, seal_key = COALESCE(?, seal_key)
      WHERE id = ?`,
   )
     .bind(
@@ -990,6 +1242,8 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
       isolation, dedicated, runtime ? JSON.stringify(runtime) : null, str(r.agent?.provider, /^[a-z0-9-]{1,40}$/), str(r.agent?.model, /^[A-Za-z0-9._:-]{1,80}$/),
       cap ? JSON.stringify({ ...cap, below_minimum: belowMinimum(cap) }) : null, cap ? JSON.stringify(cap.lanes) : null, cap ? unitsOf(cap) : null, cap ? cap.agent_slots : null, cap ? JSON.stringify(cap.disk_free_gb) : null,
       soak ? soak.until : null, soak ? JSON.stringify(soak.quarantined) : null, behindNow ? JSON.stringify(behindNow) : null,
+      // Its seal key (#328), as the report signed with its host key says it: the page shows it for its owner to confirm.
+      sealKeyOf(r.owner?.seal?.key),
       h.id,
     )
     .run();

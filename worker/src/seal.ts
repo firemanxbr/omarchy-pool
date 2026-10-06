@@ -37,7 +37,7 @@ export async function sealAgentKey(sealKey: string, host: string, name: string, 
   const hostKey = await crypto.subtle.importKey("raw", pub, { name: "X25519" }, false, []);
   const eph = (await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"])) as CryptoKeyPair;
   const epk = new Uint8Array((await crypto.subtle.exportKey("raw", eph.publicKey)) as ArrayBuffer);
-  const shared = await crypto.subtle.deriveBits({ name: "X25519", public: hostKey } as unknown as Algorithm, eph.privateKey, 256);
+  const shared = await crypto.subtle.deriveBits({ name: "X25519", public: hostKey } as unknown as SubtleCryptoDeriveKeyAlgorithm, eph.privateKey, 256);
   const info = enc.encode("omarchy-agent/seal/1\n" + host + "\n" + name);
   const salt = new Uint8Array(64);
   salt.set(epk, 0);

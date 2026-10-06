@@ -401,9 +401,13 @@ export function hostReason(v: unknown): string | null {
  * agent paces and brakes them (two seconds apart, twenty an hour, and its
  * limits on restarts, release changes and narrowings).
  */
-export const HOST_ORDER_KINDS = ["retire-legacy", "reconcile-now", "set-units", "set-emulate", "rotate-token", "retry-release", "diagnostics"] as const;
+export const HOST_ORDER_KINDS = ["retire-legacy", "reconcile-now", "set-units", "set-emulate", "rotate-token", "retry-release", "diagnostics", "widen-envelope", "set-agent-keys"] as const;
 export type HostOrderKind = (typeof HOST_ORDER_KINDS)[number];
 export const isHostOrderKind = (k: unknown): k is HostOrderKind => typeof k === "string" && (HOST_ORDER_KINDS as readonly string[]).includes(k);
+/** P5's kinds (#328): a document the owner's passkey signed, which an agent from HOST_OWNER_AGENT takes when the passkey pinned at the host made it. */
+export const OWNER_ORDER_KINDS: readonly HostOrderKind[] = ["widen-envelope", "set-agent-keys"];
+/** The first agent that takes them (#328): an older one refuses them as unknown. */
+export const HOST_OWNER_AGENT = "0.6.0";
 /** P4's kinds (#325): an agent from HOST_SETTINGS_AGENT takes them. */
 export const SETTINGS_ORDER_KINDS: readonly HostOrderKind[] = ["set-units", "set-emulate", "rotate-token", "retry-release", "diagnostics"];
 /** The first agent that takes P4's settings and orders (#325): an older one refuses them as unknown. */
@@ -436,6 +440,10 @@ export function agentTakesOrders(v: string | null | undefined): boolean {
 /** Whether an agent of version `v` takes P4's settings and orders (at or above HOST_SETTINGS_AGENT, #325). */
 export function agentTakesSettings(v: string | null | undefined): boolean {
   return atLeast(v, HOST_SETTINGS_AGENT);
+}
+/** Whether an agent of version `v` takes P5's signed widening and sealed keys (at or above HOST_OWNER_AGENT, #328). */
+export function agentTakesOwner(v: string | null | undefined): boolean {
+  return atLeast(v, HOST_OWNER_AGENT);
 }
 
 // ---------- the host's settings (#325, design v2 §12, §17.1) ----------
@@ -592,4 +600,192 @@ export function orderAnswers(v: unknown): OrderAnswer[] {
     out.push({ id: x.id, outcome: x.outcome, detail });
   }
   return out;
+}
+
+// ---------- the owner's control without a visit (#328, design v2 §12, §14, D6 b) ----------
+
+/**
+ * What the owner signs with the passkey pinned at the host, written by the
+ * pool and checked by the agent (crates/omarchy-agent/src/owner/mod.rs, which
+ * reads it strictly): the schema, the act, the host, the version above the
+ * last the host took (none for a pin), when it was issued and until when it
+ * holds, the owner's login, then the act's own fields — the relying party
+ * for a pin, the envelope's keys for a widening, the seal key and the sealed
+ * keys for agent keys. The challenge the passkey signs is the SHA-256 of
+ * exactly these bytes, which the agent recomputes: the pool relays the
+ * document, it cannot change it. Key order is fixed (the agent's fixtures,
+ * tests/owner-fixtures.mjs, are written the same way).
+ */
+export const OWNER_DOC_SCHEMA = "omarchy-agent/owner/1";
+export type OwnerAct = "pin-passkey" | "widen-envelope" | "set-agent-keys";
+/** A widening or keys document holds as long as an order waits for its agent; a pin, the minutes it takes to paste it at the host. */
+export const OWNER_DOC_TTL_MIN = 60;
+export const PIN_DOC_TTL_MIN = 10;
+/** The agent reads a document up to this size. */
+export const OWNER_DOC_MAX = 32 * 1024;
+/** The `[envelope]` keys a signed widening may set: the agent's own list (owner::WIDENABLE). */
+export const WIDENABLE = ["max_units", "max_cpus", "max_mem_gb", "emulate", "agent_slots", "agent_budget", "diagnostics", "paths"] as const;
+/** The agent keys a sealed document may set: the ones agent sidecars read and the dispatcher refuses to hold (owner::AGENT_KEYS). */
+export const AGENT_KEY_NAMES = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "GITHUB_TOKEN"] as const;
+const BUDGET_KEYS = ["calls_per_task", "tokens_per_task", "minutes_per_task", "calls_per_day"];
+const B64U = /^[A-Za-z0-9_-]+$/;
+
+export interface SealedKeyArg { name: string; epk?: string; nonce?: string; ct?: string; remove?: true }
+export interface OwnerDocInput {
+  act: OwnerAct; host: string; version?: number; issued_at: string; not_after: string; by: string;
+  rp_id?: string; origin?: string; envelope?: Record<string, unknown>; seal_key?: string; keys?: SealedKeyArg[];
+}
+
+/** The document's bytes, as the passkey signs them and the agent reads them. */
+export function ownerDoc(d: OwnerDocInput): string {
+  const o: Record<string, unknown> = { schema: OWNER_DOC_SCHEMA, act: d.act, host: d.host };
+  if (d.act !== "pin-passkey") o.version = d.version;
+  o.issued_at = d.issued_at;
+  o.not_after = d.not_after;
+  o.by = d.by;
+  if (d.act === "pin-passkey") Object.assign(o, { rp_id: d.rp_id, origin: d.origin });
+  if (d.act === "widen-envelope") o.envelope = d.envelope;
+  if (d.act === "set-agent-keys") Object.assign(o, { seal_key: d.seal_key, keys: d.keys });
+  return JSON.stringify(o);
+}
+
+/** A document the pool wrote, read back from what a page posts: its fields, or null when it is none of the pool's shapes. */
+export function readOwnerDoc(text: unknown): OwnerDocInput | null {
+  if (typeof text !== "string" || text.length > OWNER_DOC_MAX) return null;
+  let d: Record<string, unknown>;
+  try {
+    d = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!d || typeof d !== "object" || d.schema !== OWNER_DOC_SCHEMA) return null;
+  const act = d.act;
+  if (act !== "pin-passkey" && act !== "widen-envelope" && act !== "set-agent-keys") return null;
+  if (typeof d.host !== "string" || typeof d.issued_at !== "string" || typeof d.not_after !== "string" || typeof d.by !== "string") return null;
+  const doc = d as unknown as OwnerDocInput;
+  // Byte for byte what the pool writes: a document that reads but was not written so is refused.
+  return ownerDoc(doc) === text ? doc : null;
+}
+
+const whole = (v: unknown, min: number, max: number) => Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
+
+/**
+ * A proposed envelope from the owner's form: each key one of WIDENABLE with
+ * a value of its type and range — the agent's own rules, so a value the host
+ * would refuse is said here first —, or why not. The host checks it again,
+ * and its own envelope file, whatever this said.
+ */
+export function widening(v: unknown): Record<string, unknown> | string {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return "envelope: an object of the keys to set";
+  const out: Record<string, unknown> = {};
+  const entries = Object.entries(v as Record<string, unknown>);
+  if (!entries.length) return "envelope: name at least one key to set";
+  for (const [k, x] of entries) {
+    if (!(WIDENABLE as readonly string[]).includes(k)) return `envelope: ${k} is no key a signed widening sets (it sets ${WIDENABLE.join(", ")}); the rest of the envelope is its owner's, at the host`;
+    const nullable = ["max_units", "max_cpus", "max_mem_gb", "emulate", "agent_budget"].includes(k);
+    if (x === null) {
+      if (!nullable) return `envelope.${k}: null is not a value of it`;
+      out[k] = null;
+      continue;
+    }
+    if (k === "max_units" || k === "max_cpus") {
+      if (!whole(x, 1, 4096)) return `envelope.${k}: a whole number from 1 to 4096, or null for none`;
+    } else if (k === "max_mem_gb") {
+      if (!whole(x, 1, 65536)) return "envelope.max_mem_gb: a whole number of GB from 1 to 65536, or null for none";
+    } else if (k === "agent_slots") {
+      if (!whole(x, 0, 64)) return "envelope.agent_slots: a whole number from 0 to 64";
+    } else if (k === "diagnostics") {
+      if (typeof x !== "boolean") return "envelope.diagnostics: true or false";
+    } else if (k === "emulate") {
+      if (!Array.isArray(x) || x.some((a) => !ARCHES.includes(a as Arch)) || new Set(x).size !== x.length) return "envelope.emulate: a list of distinct architectures (x86_64, aarch64), [] for none, or null for detection's";
+    } else if (k === "agent_budget") {
+      if (!x || typeof x !== "object" || Array.isArray(x)) return "envelope.agent_budget: a table of calls_per_task, tokens_per_task, minutes_per_task, calls_per_day";
+      for (const [bk, bv] of Object.entries(x as Record<string, unknown>)) {
+        if (!BUDGET_KEYS.includes(bk) || !whole(bv, 1, 1e12)) return `envelope.agent_budget.${bk}: one of ${BUDGET_KEYS.join(", ")}, a whole number from 1`;
+      }
+    } else {
+      if (!Array.isArray(x) || x.length > 16 || new Set(x).size !== x.length || x.some((p) => typeof p !== "string" || p.length > 4096 || p === "/" || !p.startsWith("/") || p.split("/").slice(1).some((c) => c === "" || c === "." || c === ".."))) return "envelope.paths: at most 16 plain absolute paths below /, each once";
+    }
+    out[k] = x;
+  }
+  return out;
+}
+
+/** The sealed keys a page posts: each one of AGENT_KEY_NAMES, once, sealed (epk, nonce, ct, base64url) or taken out; one to six. */
+export function sealedKeys(v: unknown): SealedKeyArg[] | string {
+  if (!Array.isArray(v) || v.length === 0 || v.length > AGENT_KEY_NAMES.length) return `keys: one to ${AGENT_KEY_NAMES.length} sealed keys`;
+  const out: SealedKeyArg[] = [];
+  for (const k of v as Record<string, unknown>[]) {
+    if (!k || typeof k !== "object" || !(AGENT_KEY_NAMES as readonly string[]).includes(k.name as string)) return `keys: each names one of ${AGENT_KEY_NAMES.join(", ")}`;
+    if (out.some((o) => o.name === k.name)) return `keys: ${k.name as string} is named twice`;
+    if (k.remove === true) {
+      if (Object.keys(k).some((x) => x !== "name" && x !== "remove")) return `keys: ${k.name as string} is taken out and sealed at once`;
+      out.push({ name: k.name as string, remove: true });
+      continue;
+    }
+    const field = (f: unknown, len: [number, number]) => typeof f === "string" && B64U.test(f) && f.length >= len[0] && f.length <= len[1];
+    if (Object.keys(k).some((x) => !["name", "epk", "nonce", "ct"].includes(x)) || !field(k.epk, [43, 43]) || !field(k.nonce, [16, 16]) || !field(k.ct, [23, 1400])) return `keys: ${k.name as string} is not sealed as the page seals (epk, nonce, ct)`;
+    out.push({ name: k.name as string, epk: k.epk as string, nonce: k.nonce as string, ct: k.ct as string });
+  }
+  return out;
+}
+
+/** A host's X25519 seal key as its report says it (`owner.seal.key`): 32 bytes, base64url; null otherwise. */
+export function sealKeyOf(v: unknown): string | null {
+  if (typeof v !== "string" || v.length !== 43 || !B64U.test(v)) return null;
+  try {
+    return fromB64url(v, "the seal key").length === 32 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The owner's part of a host's last report (#328): the passkey pinned at the
+ * host (never its key), the last signed version it took, its seal key, the
+ * envelope's keys a widening may set as its agent.toml says them, and the
+ * names of the agent keys its agent.env holds — never a value.
+ */
+export interface ReportedOwner {
+  passkey: { credential: string; alg: string; rp_id: string; origin: string; by: string; pinned_at: string } | null;
+  version: number | null;
+  seal: { key: string; fingerprint: string } | null;
+  envelope: Record<string, unknown> | null;
+  agent_keys: string[];
+}
+export function reportedOwnerOf(report: string | null): ReportedOwner | null {
+  if (!report) return null;
+  let r: { owner?: unknown };
+  try {
+    r = JSON.parse(report);
+  } catch {
+    return null;
+  }
+  const o = r?.owner as Record<string, any> | null | undefined;
+  if (!o || typeof o !== "object") return null;
+  const text = (v: unknown, max: number) => (typeof v === "string" && v.length <= max && !/[\x00-\x1f\x7f]/.test(v) ? v : null);
+  const p = o.passkey && typeof o.passkey === "object" ? o.passkey : null;
+  const credential = p ? text(p.credential, 1400) : null;
+  const passkey = p && credential && B64U.test(credential)
+    ? { credential, alg: text(p.alg, 8) ?? "?", rp_id: text(p.rp_id, 253) ?? "?", origin: text(p.origin, 300) ?? "?", by: text(p.by, 39) ?? "?", pinned_at: text(p.pinned_at, 40) ?? "?" }
+    : null;
+  const key = sealKeyOf(o.seal?.key);
+  const fp = text(o.seal?.fingerprint, 60);
+  const env = o.envelope && typeof o.envelope === "object" && !Array.isArray(o.envelope) ? o.envelope : null;
+  let envelope: Record<string, unknown> | null = null;
+  if (env) {
+    envelope = {};
+    for (const k of WIDENABLE) envelope[k] = k in env ? env[k] : null;
+    // Only what reads as the envelope's own: a value of another shape is shown as none, never as the agent's word.
+    for (const [k, v] of Object.entries(envelope)) {
+      if (v !== null && typeof widening({ [k]: v }) === "string") envelope[k] = null;
+    }
+  }
+  return {
+    passkey,
+    version: Number.isSafeInteger(o.version) && o.version >= 0 ? o.version : null,
+    seal: key && fp ? { key, fingerprint: fp } : null,
+    envelope,
+    agent_keys: Array.isArray(o.agent_keys) ? o.agent_keys.filter((k: unknown): k is string => typeof k === "string" && /^[A-Z_][A-Z0-9_]{0,63}$/.test(k)).slice(0, 32) : [],
+  };
 }
