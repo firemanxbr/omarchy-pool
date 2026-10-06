@@ -6,10 +6,11 @@
 # of a pool from before it (#315, #344), run/capacity.json narrowed to the
 # pool's settings (#325), GitHub's unauthenticated answer for its latest
 # release, the tag freeze detection reads (#326), the maintainers'
-# co-signature (#330: the pinned policy and an armored SSH signature), and
-# the owner's signed documents, passkey assertions, pins and COSE keys
-# (#328). Each target starts from the crate's fixtures as its corpus; a
-# crash, a leak or a timeout fails the run and leaves the input under
+# co-signature (#330: the pinned policy and an armored SSH signature), the
+# owner's signed documents, passkey assertions, pins and COSE keys (#328),
+# and a host key's TPM public area and the TPM's signatures (#330). Each
+# target starts from the crate's fixtures as its corpus; a crash, a leak or
+# a timeout fails the run and leaves the input under
 # crates/omarchy-agent/fuzz/artifacts/.
 #
 # Needs the pinned nightly and cargo-fuzz (ci.yml installs both). By hand:
@@ -46,6 +47,11 @@ jq -r '.keys.doc' "$owner" >"$corpus/state/owner-keys.json"
 jq -c '.widen.assertion' "$owner" >"$corpus/state/owner-assertion.json"
 jq -r '.pins.es256' "$owner" >"$corpus/state/owner-pin.txt"
 jq -c '{max_units: 8, emulate: ["x86_64"], agent_budget: {calls_per_day: 9000}}' -n >"$corpus/state/owner-envelope.json"
+# The host key in a TPM (#330): its public area and the TPM's signatures, as swtpm wrote
+# them (tests/tpm-fixtures.sh), and the public areas the agent refuses.
+for f in host.tpm.pub exportable.pub storage.pub rsa.pub enroll.sig request.sig; do
+  cp "$fixtures/tpm/$f" "$corpus/state/tpm-$f"
+done
 # A bundle archive as release.yml writes it: manifest.json and a set.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

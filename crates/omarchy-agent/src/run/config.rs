@@ -94,10 +94,11 @@ impl Paths {
     pub fn pending(&self) -> PathBuf {
         self.data.join("pending")
     }
-    /// The host key the enrollment made (`crate::enroll::Paths`): the host state's and
-    /// the report's requests are signed with it (#344).
-    pub fn host_key(&self) -> PathBuf {
-        self.data.join("state").join(crate::host::KEY_FILE)
+    /// Where the enrollment made the host key (`crate::enroll::Paths`' state directory): the
+    /// host state's and the report's requests are signed with it (#344) — `host.ed25519`, or
+    /// the files of a key in the TPM (#330).
+    pub fn host_key_dir(&self) -> PathBuf {
+        self.data.join("state")
     }
 }
 

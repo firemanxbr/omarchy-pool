@@ -128,7 +128,7 @@ impl Pool {
             Some(b) => serde_json::to_vec(b).map_err(|e| e.to_string())?,
             None => Vec::new(),
         };
-        let header = key.header(host, method, path, &bytes);
+        let header = key.header(host, method, path, &bytes)?;
         let url = format!("{}{path}", self.origin);
         let res = match method {
             "GET" => self

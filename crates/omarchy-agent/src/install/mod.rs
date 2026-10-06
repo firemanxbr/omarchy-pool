@@ -77,7 +77,7 @@ use std::time::Duration;
 use crate::capacity::{self, probe, Capacity, Caps, Facts, VmKind};
 use crate::dispatcher_env::{self, addresses, Envelope, Refresh, Rendered, Sources};
 use crate::enroll;
-use crate::host::{HostKey, Identity, KEY_FILE};
+use crate::host::{HostKey, Identity};
 use crate::manifest::Manifest;
 use crate::run::{tools, Verifier};
 use crate::verify::{cosignature, BundleOutcome};
@@ -281,6 +281,9 @@ pub struct Options {
     pub yes: bool,
     /// `OMARCHY_ENROLL`, from the environment only.
     pub token: Option<String>,
+    /// Where the enrollment makes the host key: in the TPM where the machine has one (#330),
+    /// as `OMARCHY_HOST_KEY` and `OMARCHY_TPM_TCTI` ask.
+    pub key: crate::host::KeyChoice,
     pub wait: Duration,
     pub poll: Duration,
     /// The binary whose hash must be the release's agent (this one, by default).
@@ -576,6 +579,10 @@ pub(crate) fn measure_as(
         r.blockers.push(
             "enrollment: this machine has not enrolled yet, and OMARCHY_ENROLL is not set: add the host on your page and paste the command it prints".into(),
         );
+    }
+    // Where the enrollment will make the host key (#330); an enrolled host keeps its own.
+    if enrolled.is_none() {
+        checks::host_key(&o.key, p.os == "linux" && !mac, &mut r);
     }
 
     // The release, the pool and this binary.
@@ -1387,6 +1394,7 @@ pub(crate) fn apply(
         wait: o.wait,
         poll: o.poll,
         sources: p.sources(),
+        key: o.key.clone(),
     };
     // Its lines (the fingerprint, where to confirm) are shown as they come: the person
     // compares them while it waits.
@@ -1501,8 +1509,9 @@ pub(crate) fn apply(
         }
     }
 
-    let fingerprint = HostKey::load_or_create(&eo.paths.state.join(KEY_FILE))
-        .map_or_else(|e| e, |k| k.fingerprint());
+    // The key the enrollment made, never a new one: in the TPM, or a file (#330).
+    let fingerprint = HostKey::load_in(&eo.paths.state)
+        .map_or_else(|e| e, |k| format!("{}, {}", k.fingerprint(), k.describe()));
     let c = &ready.capacity;
     let lanes = c
         .lanes()
