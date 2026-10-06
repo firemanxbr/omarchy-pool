@@ -3,7 +3,7 @@ name = "omarchy-agent"
 description = "The host agent: verify a signed host bundle or rollback statement, lint the host set, and roll it out"
 # The agent's own semver (design v2 D17), bumped only when its code changes; never the
 # release tag, so an unchanged agent keeps its hash from release to release.
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
