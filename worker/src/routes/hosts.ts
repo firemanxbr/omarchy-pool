@@ -45,9 +45,10 @@ import {
   hostReason, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
   agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT,
   agentTakesSettings, hostSettingsOf, orderArg, reportedBrakeOf, reportedSettingsOf, DIAGNOSTIC_LINE_MAX, DIAGNOSTIC_LINES, DIAGNOSTICS_MAX_BYTES, HOST_ORDER_ID, HOST_SETTINGS_AGENT, SETTINGS_ORDER_KINDS,
+  poolBehindOf, reportedSoakOf, soakOf,
   type Capacity, type HostOrderKind, type Isolation, type OrderArg,
 } from "../hosts";
-import { parseTag } from "../update";
+import { gateWords, parseTag, updateState } from "../update";
 
 const NO_STORE = { "cache-control": "no-store" };
 const MIN = 60000;
@@ -146,6 +147,8 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
   const out: Record<string, unknown> = {
     id: h.id, name: h.name, owner: h.owner_login, status: h.status, arches: lanes.map((l) => l.arch), release_applied: h.release_applied, alive,
     worker: h.worker_id, enrolled_at: h.enrolled_at, confirmed_at: h.confirmed_at,
+    // Freeze detection (#326): its agent says GitHub has shown a newer release than the pool names for over a day — about the pool, public as Status says it.
+    pool_behind_github: poolBehindOf(h.report),
     // Who stopped it and why (#322) — the journal's words, public as the journal is — and whether the list stopped its claims.
     status_by: h.status_by, status_at: h.status_at, status_reason: h.status_reason, claims_stopped_at: h.owner_removed_at,
   };
@@ -166,6 +169,8 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
     // Its settings (#325): what its agent reports — the narrowing, the envelope it narrows inside, what applies —, what the pool keeps
     // for it, the brake's last window, and the releases it holds in quarantine (what retry-release lifts).
     settings: reportedSettingsOf(h.report), pool_settings: hostSettingsOf(h.settings), brake: reportedBrakeOf(h.report), quarantine: quarantineOf(h.report),
+    // Its owner's soak (#326): the minutes its envelope sets, when the soak of the release it is to take ends, and GitHub's latest tag as its agent read it.
+    soak: reportedSoakOf(h.report),
     reported_at: h.reported_at, last_seen: h.last_seen, token_issued_at: h.token_issued_at,
     summary: capacity ? hostLine(capacity, h.isolation, h.dedicated === null ? null : !!h.dedicated) : null,
   };
@@ -227,11 +232,39 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
   const orders = detailed
     ? (await env.DB.prepare(HOST_ORDERS_SQL).bind(h.id).all<Record<string, unknown>>()).results.map((o) => ({ ...o, arg: o.arg ? JSON.parse(o.arg as string) : null, lines: !!o.lines }))
     : undefined;
+  const pool = version(env);
   return json(
-    { host: await hostView(h, detailed, Date.now()), leases, orders, pool: { version: version(env).version }, can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h), retire_legacy: true } },
+    {
+      host: await hostView(h, detailed, Date.now()), leases, orders, pool: { version: pool.version, deployed_at: pool.deployed_at }, update: await gateOf(env, h, pool),
+      can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h), retire_legacy: true },
+    },
     200,
     NO_STORE,
   );
+}
+
+/**
+ * Where its registration stands at the 426 gate (#326, update.ts): the release its last claim reported against the pool's, with its
+ * soak, as the claim itself decides it, and why in the page's words. Null with no registration, or one that never claimed.
+ */
+async function gateOf(env: Env, h: HostRow, pool: ReturnType<typeof version>) {
+  if (!h.worker_id) return null;
+  const w = await env.DB.prepare("SELECT version FROM build_workers WHERE id = ?").bind(h.worker_id).first<{ version: string | null }>();
+  if (!parseTag(w?.version)) return null;
+  const soak = soakOf(soakColumnsOf(h.report));
+  const u = updateState(w!.version, pool, Date.now(), soak);
+  return { ...u, words: gateWords(u, soak, pool.deployed_at) };
+}
+
+/** The soak columns a claim reads with SQL (SOAK_COLUMNS), from the report itself. */
+function soakColumnsOf(report: string | null): { soaking_until: unknown; quarantine: unknown } | null {
+  if (!report) return null;
+  try {
+    const r = JSON.parse(report) as { release?: { soaking_until?: unknown }; quarantine?: unknown };
+    return { soaking_until: r?.release?.soaking_until ?? null, quarantine: r?.quarantine ?? null };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -945,6 +978,8 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   const dedicated = runtime && typeof runtime.dedicated === "boolean" ? (runtime.dedicated ? 1 : 0) : h.dedicated;
   const round = r.round && typeof r.round === "object" ? r.round : null;
   const at = iso(Date.now());
+  // Freeze detection (#326): the journal says when a host starts and stops reporting the pool behind GitHub, once each.
+  const [behindWas, behindNow] = [poolBehindOf(h.report), poolBehindOf(text)];
   await env.DB.prepare(
     `UPDATE hosts SET report = ?, reported_at = ?, last_seen = ?, agent_version = COALESCE(?, agent_version), release_applied = ?, release_target = ?, rolled_back_from = ?,
        isolation = ?, dedicated = ?, runtime = COALESCE(?, runtime), provider = ?, model = ?,
@@ -958,6 +993,14 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
       h.id,
     )
     .run();
+  if (!!behindWas !== !!behindNow) {
+    const line = behindNow
+      ? `${hostLine_(h)}: its agent reports the pool behind GitHub — GitHub's latest release has been ${behindNow.github} for more than a day (since ${behindNow.since}) while the pool names ${behindNow.pool}; nothing changes on the host: check the pool's deploys (freeze detection)`
+      : `${hostLine_(h)}: its agent no longer reports the pool behind GitHub`;
+    await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('host', NULL, 'factory', ?, ?, ?)")
+      .bind(behindNow ? "warn" : "ok", line, JSON.stringify({ host: h.id, owner: h.owner_login, action: "pool-behind-github", ...(behindNow ?? { github: null, pool: null, since: null }) }))
+      .run();
+  }
   // The host orders it answers (#344): each closes an open order of this host only, once; its line is the pool's words, the
   // agent's own stay on the host's page. A settings order answered done becomes the host's settings (#325).
   const answers = orderAnswers(r.orders);

@@ -23,6 +23,7 @@
 import { parse } from "smol-toml";
 import manifestToml from "../../factory/bundle/manifest.toml";
 import { fromB64url } from "./webauthn";
+import type { HostSoak } from "./update";
 
 interface Resources { cpus: number; mem_gb: number }
 export interface MinHost extends Resources { work_disk_gb: number; engine_disk_gb: number }
@@ -250,9 +251,72 @@ export function installCommand(poolVersion: string, token: string, pool: string 
  */
 export const OWNER_LISTED_SQL = (col: string) => `EXISTS (SELECT 1 FROM factory_maintainers m CROSS JOIN contributors c ON c.login = m.login WHERE c.github_id = ${col})`;
 
-/** A host as every claim of its registration reads it: one row by the primary key, the owner joined with the maintainer list. */
-export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed FROM hosts WHERE id = ?`;
-export interface HostClaimRow { name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number }
+/** A host's soak as its last report says it (#326), as two columns of the row `alias` names: what soakOf reads. */
+export const SOAK_COLUMNS = (alias: string) => `json_extract(${alias}.report, '$.release.soaking_until') AS soaking_until, json_extract(${alias}.report, '$.quarantine') AS quarantine`;
+export interface SoakColumns { soaking_until: unknown; quarantine: unknown }
+
+/** A host as every claim of its registration reads it: one row by the primary key, the owner joined with the maintainer list, its soak (#326). */
+export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed, ${SOAK_COLUMNS("hosts")} FROM hosts WHERE id = ?`;
+export interface HostClaimRow extends SoakColumns { name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number }
+
+/**
+ * A host's soak from the columns of SOAK_COLUMNS (#326): when its agent says
+ * the soak of the release the pool names ends — an ISO time, or none — and the
+ * releases its report holds in quarantine. Null when it reports no soak.
+ */
+export function soakOf(r: SoakColumns | null | undefined): HostSoak | null {
+  const until = r && typeof r.soaking_until === "string" && r.soaking_until.length <= 40 && Number.isFinite(Date.parse(r.soaking_until)) ? r.soaking_until : null;
+  if (!until) return null;
+  let q: unknown = r!.quarantine;
+  try {
+    if (typeof q === "string") q = JSON.parse(q);
+  } catch {
+    q = [];
+  }
+  const quarantined = Array.isArray(q) ? q.map((x) => (x as { release?: unknown })?.release).filter((t): t is string => typeof t === "string" && /^v\d+\.\d+\.\d+$/.test(t)).slice(0, 16) : [];
+  return { until, quarantined };
+}
+
+/**
+ * Freeze detection (#326, design v2 §5.5): what a host's last report says
+ * when GitHub has shown a release newer than the one the pool names for more
+ * than a day — GitHub's tag, the pool's, and since when the agent saw it so.
+ * The agent never acts on it; the pool shows it on the host's page and Status.
+ */
+export interface PoolBehind { github: string; pool: string; since: string }
+export function poolBehindOf(report: string | null): PoolBehind | null {
+  if (!report) return null;
+  let r: { release?: { pool_behind_github?: unknown } };
+  try {
+    r = JSON.parse(report);
+  } catch {
+    return null;
+  }
+  const b = r?.release?.pool_behind_github as Record<string, unknown> | null | undefined;
+  const tag = (v: unknown) => (typeof v === "string" && /^v\d+\.\d+\.\d+$/.test(v) ? v : null);
+  if (!b || typeof b !== "object") return null;
+  const github = tag(b.github), pool = tag(b.pool);
+  const since = typeof b.since === "string" && b.since.length <= 40 && Number.isFinite(Date.parse(b.since)) ? b.since : null;
+  return github && pool && since ? { github, pool, since } : null;
+}
+
+/** The owner's soak as a host's last report says it (#326): its minutes, and when the soak of the release it is to take ends. */
+export interface ReportedSoak { minutes: number | null; until: string | null; github_latest: string | null }
+export function reportedSoakOf(report: string | null): ReportedSoak | null {
+  if (!report) return null;
+  let r: { release?: Record<string, unknown> };
+  try {
+    r = JSON.parse(report);
+  } catch {
+    return null;
+  }
+  const rel = r?.release;
+  if (!rel || typeof rel !== "object") return null;
+  const minutes = Number.isInteger(rel.soak_minutes) && (rel.soak_minutes as number) >= 0 && (rel.soak_minutes as number) <= 1440 ? (rel.soak_minutes as number) : null;
+  const until = typeof rel.soaking_until === "string" && rel.soaking_until.length <= 40 && Number.isFinite(Date.parse(rel.soaking_until)) ? rel.soaking_until : null;
+  const github = typeof rel.github_latest === "string" && /^v\d+\.\d+\.\d+$/.test(rel.github_latest) ? rel.github_latest : null;
+  return minutes === null && until === null && github === null ? null : { minutes, until, github_latest: github };
+}
 
 /**
  * The lease's own check of a host registration (#322): the claim's UPDATE takes a task only while its host is active and its owner

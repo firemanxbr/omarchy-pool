@@ -9,11 +9,11 @@ import { isTextEvidence, reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../
 import { findLeak } from "../leak";
 import { chains, chainOf, storyRows, requestView, placeInQueue, stands, type Chain } from "./story";
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
-import { updateMessage, updateState } from "../update";
+import { updateMessage, updateState, type HostSoak } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
-import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
+import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, HOST_REPORT_FRESH_MIN, hostClaimRefusal, MAX_SIZE, poolBehindOf, SOAK_COLUMNS, soakOf, TASK_UNITS, type Capacity, type HostClaimRow, type PoolBehind } from "../hosts";
 import { largestSize, ownerCap, ownersLeased, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
@@ -773,11 +773,13 @@ export const NEUTRAL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols("c"
 
 /** The registrations alive (§8.3: claimed in the last 2 minutes; a legacy one, LEGACY_ALIVE_MS) with their host's capacity, as the fleet. */
 export const FLEET_SQL = `SELECT w.id, w.kind, w.arch, w.labels, w.kinds, w.agent_status, w.drained_at, w.trust, w.owner, w.mode, w.version, w.last_seen, w.current_task,
-    h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since
+    h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since, ${SOAK_COLUMNS("h")}
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL`;
 interface FleetRow {
   id: string; kind: string | null; arch: string; labels: string | null; kinds: string | null; agent_status: string | null; drained_at: string | null; trust: string; owner: string | null; mode: string | null; version: string | null; last_seen: string; current_task: number | null;
   host_id: string | null; host_status: string | null; owner_removed_at: string | null; units: number | null; lanes: string | null; agent_slots: number | null; disk_free: string | null; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null;
+  /** #326: its host's soak, which keeps it out of the update gate as the claim's own (SOAK_COLUMNS). */
+  soaking_until: unknown; quarantine: unknown;
 }
 /** Every lease the pool holds, by the lease index: what each registration holds, each owner's builds, the units and slots in use. */
 export const LEASES_HELD_SQL = `SELECT id, lease_owner, kind, arch, lane, units, size, disk_gb, trust, owner, ${AGENT_SCOPE} AS model FROM build_tasks WHERE status = 'leased'`;
@@ -829,7 +831,7 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
   return {
     id: r.id, legacy: !host, lanes, units: Math.min(r.units ?? 0, r.pool_cap_units ?? Number.MAX_SAFE_INTEGER), agent_slots: r.agent_slots ?? 0,
     disk: jsonOr<{ work: number; engine: number } | null>(r.disk_free, null), kinds, probe_ok: r.agent_status === "ok", drained: r.drained_at !== null,
-    below_minimum: reportedBelow(r.capacity), may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool).required,
+    below_minimum: reportedBelow(r.capacity), may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool, Date.now(), host ? soakOf(r) : null).required,
     seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
     scope: host ? { trust: "host", owner: null, shared: false } : r.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: r.owner, shared: r.mode === "shared" },
     busy: !host && r.current_task !== null,
@@ -1162,10 +1164,13 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // A host's registration (#322, design v2 §6.2, §6.4): its host suspended or retired, or its owner no longer a maintainer — the owner's id
   // joined with the list at this very claim, between two syncs too — claims nothing, and is told why. Its running leases are not this
   // door's: a suspension fenced them; a removal lets them finish and upload. One read by the primary key, for host registrations only.
+  // Its soak rides the same read (#326): the update grace below follows it.
+  let soak: HostSoak | null = null;
   if (actor.w.host_id) {
     const h = await env.DB.prepare(HOST_CLAIM_SQL).bind(actor.w.host_id).first<HostClaimRow>();
     const no = h ? hostClaimRefusal(h) : { code: "host_status", error: "its host is gone" };
     if (no) return json(no, 403);
+    soak = soakOf(h);
   }
   const trust = actor.w.trust === "project" ? "project" : "community";
   // What this worker may claim. Project trust takes any kind it declares,
@@ -1226,8 +1231,10 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   }
   // Every worker follows the latest image (update.ts): one behind past the
   // rollout's grace is touched — alive, and the Workers page says why it
-  // idles — told once per release in the journal, and handed nothing.
-  const update = updateState(b.version, running(env));
+  // idles — told once per release in the journal, and handed nothing. A
+  // soaking host's registration claims until its soak ends, at most two hours
+  // after the deploy (#326).
+  const update = updateState(b.version, running(env), Date.now(), soak);
   if (update.required) {
     // Handed nothing, but an order waiting for it rides the refusal: a restart or a re-check does not need the latest image.
     const orders = after ? await ordersSafely(() => takeOrders(env, after, Date.parse(at))) : [];
@@ -1863,12 +1870,20 @@ function parseJson(text: string | null): unknown {
 }
 
 /**
+ * The hosts whose agent reports the pool behind GitHub (#326, design v2 §5.5): an active host, its report fresh, saying
+ * `pool_behind_github` — Status's warning. The hosts are a handful of maintainers' machines: no index needed.
+ */
+export const POOL_BEHIND_SQL = `SELECT id, name, owner_login, report FROM hosts
+  WHERE status = 'active' AND reported_at > ? AND json_extract(report, '$.release.pool_behind_github') IS NOT NULL ORDER BY id LIMIT 20`;
+
+/**
  * GET /factory — the workers and the queue. `?live=1` is the read a page
  * polls for what is running now (the Factory's workers card, #246): the
  * tasks in flight only (queued or leased), found through the queue's
  * status index, and no counts — the whole listing reads every task twice
  * (the counts, then an order no index gives), about 2 000 rows a miss in
- * production, the live read the queue's few rows.
+ * production, the live read the queue's few rows. Beside them, the hosts
+ * whose agent reports the pool behind GitHub (#326), for Status.
  */
 export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   const limit = Math.min(200, Math.max(10, Number(url?.searchParams.get("limit") ?? 60) || 60));
@@ -1884,6 +1899,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
     .all<WorkerRow>();
   const tasks = await env.DB.prepare(`SELECT * FROM build_tasks ${live ? "WHERE status IN ('leased', 'queued') " : ""}ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?`).bind(limit).all<TaskRow>();
   const pool = running(env);
+  const behind = await env.DB.prepare(POOL_BEHIND_SQL).bind(new Date(Date.now() - HOST_REPORT_FRESH_MIN * 60000).toISOString()).all<{ id: string; name: string; owner_login: string; report: string | null }>();
   return json(
     {
       generated_at: now(),
@@ -1896,6 +1912,11 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       // A task's params and result are JSON here as they are on the task's own page (handleTask): one shape for a task, whoever reads it.
       // A host lease's claim_id is its replay key and lease_gen its token's generation (#334): the pool's, never a page's.
       tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, claim_id: undefined, lease_gen: undefined, params: parseJson(t.params), result: parseJson(t.result) })),
+      // Freeze detection (#326): each host whose agent says GitHub has shown a newer release than the pool names for over a day.
+      pool_behind_github: behind.results.flatMap((h) => {
+        const b: PoolBehind | null = poolBehindOf(h.report);
+        return b ? [{ host: h.id, name: h.name, owner: h.owner_login, ...b }] : [];
+      }),
     },
     200,
     { "cache-control": "public, max-age=10" },
