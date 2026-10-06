@@ -1871,8 +1871,9 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
     // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
     ready: workerReady(w, since),
     // Where its image stands against the pool's release (update.ts): behind past the grace, it is handed nothing — a soaking host's
-    // registration claims through its soak, as its claim does (#326).
-    update: updateState(w.version, pool, Date.now(), w.kind === "host" ? soakOf({ soaking_until: w.soaking_until, quarantine: w.quarantine }) : null),
+    // registration claims through its soak, as its claim does (#326). When the soak ends stays its owner's and the maintainers' (the
+    // host page's `update` and host.soak): the listings are public, and `required` alone says the claim's verdict.
+    update: { ...updateState(w.version, pool, Date.now(), w.kind === "host" ? soakOf({ soaking_until: w.soaking_until, quarantine: w.quarantine }) : null), soaking_until: undefined },
     soaking_until: undefined, quarantine: undefined,
     kinds: w.kinds ? JSON.parse(w.kinds) : null,
     // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).

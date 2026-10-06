@@ -123,9 +123,12 @@ describe("a soaking host's claim grace (POST /factory/claim, #326)", () => {
     // The listings (Status, the Workers page, its own page) say the same: behind, but not handed nothing.
     const listed = (await call("GET", "/factory?limit=13", { env: pool })).json.workers.find((w: { id: string }) => w.id === worker);
     expect(listed.update).toMatchObject({ outdated: true, required: false });
-    expect(listed.update.soaking_until).toBeTruthy();
+    // When the soak ends is its owner's and the maintainers' (the host page's), not the public listings'.
+    expect(listed.update.soaking_until).toBeUndefined();
     expect(listed.quarantine).toBeUndefined();
-    expect((await call("GET", `/factory/workers/${worker}`, { env: pool })).json.worker.update).toMatchObject({ required: false });
+    const own = (await call("GET", `/factory/workers/${worker}`, { env: pool })).json.worker.update;
+    expect(own).toMatchObject({ required: false });
+    expect(own.soaking_until).toBeUndefined();
     // The soak ended, its round running: the agent still says when, and the round's margin covers it...
     await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: isoIn(-(SOAK_ROUND_MINUTES - 2)) }, quarantine: [] });
     expect((await claim(token, "v1.0.2", pool)).status).not.toBe(426);
