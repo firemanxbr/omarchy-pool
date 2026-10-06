@@ -540,6 +540,26 @@ describe("D35 under the exception: m1's own host builds the project's copy of m1
     expect(p).toMatch(/SEARCH gs USING INTEGER PRIMARY KEY/);
     expect(p).not.toMatch(/SCAN (build_tasks|c|rq|au|gs)(?! USING)/);
   });
+
+  it("a legacy project registration of m1's — selected as a host with one lane and one build since #343 — takes m1's copy under the exception, and holds it again without the table", async () => {
+    await applyGovernance(env, ["m1", "m2"], "sha-solo-legacy-on", SOLO);
+    // Only the legacy registration is alive for aarch64: the hosts of the tests above are gone quiet.
+    await env.DB.prepare("UPDATE build_workers SET last_seen = '2000-01-01T00:00:00.000Z' WHERE id IN ('m1-studio', 'm2-box')").run();
+    await env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES ('m1-pool-aarch64', 'aarch64', 'm1', ?, 'project', 'm2', ?, ?, 'ok', '["build","trial","audit"]')`)
+      .bind(await sha256Hex("omw_m1-pool-aarch64"), new Date().toISOString(), AGENT).run();
+    const legacyClaim = () => call("POST", "/factory/claim", { arch: "aarch64", agent: AGENT, agent_status: "ok", kinds: ["build", "trial", "audit"] }, "omw_m1-pool-aarch64");
+    const own = await seedCopy("m1");
+    expect(await placementOf(own.contributor, "oms_m2")).toMatchObject({ held: false, others: [], mine: ["m1-pool-aarch64"], solo: { maintainer: "m1", hosts: ["m1-pool-aarch64"], since: "2026-10-06" }, any_host: { ok: false } });
+    const c = await legacyClaim();
+    expect(c.status, JSON.stringify(c.json)).toBe(200);
+    expect(c.json.task).toMatchObject({ id: own.copy, lease_owner: "m1-pool-aarch64" });
+    // The table taken away: the same registration is the requester's again — the copy held for another maintainer's release.
+    await applyGovernance(env, ["m1", "m2"], "sha-solo-legacy-off");
+    const again = await seedCopy("m1");
+    expect(await placementOf(again.contributor, "oms_m2")).toMatchObject({ held: true, others: [], mine: ["m1-pool-aarch64"], any_host: { ok: true } });
+    expect((await placementOf(again.contributor, "oms_m2")).solo).toBeUndefined();
+    expect((await legacyClaim()).status).toBe(204);
+  });
 });
 
 describe("the pages: Review's line and marks, Status's line, the build page's and the package page's marks, the governance chapter's list", () => {

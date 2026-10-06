@@ -1440,6 +1440,23 @@ describe("the solo-maintainer exception (#394): the requester-host rule lifted f
     expect(placementOf({ members: [m2], leases: [] }, shared, T0, R)).toEqual({ others: [], mine: ["m2-vps"], held: true, solo: { maintainer: "m1", hosts: [] } });
   });
 
+  it("a legacy project registration — a host with one lane and one build since #343 — is m1's host to the exception as any of m1's: it takes m1's copy, and m2's is still kept off m2's", () => {
+    const pool = legacy("m1-pool-aarch64", "aarch64", { trust: "project", owner: "m1", model: "anthropic/claude-a" });
+    const theirs = legacy("m2-pool-aarch64", "aarch64", { trust: "project", owner: "m2", model: "anthropic/claude-a" });
+    const own = task(soloCopy(["m1"]));
+    expect(requesterHost(pool, own)).toBe(false);
+    expect(placementOf({ members: [pool], leases: [] }, own, T0, R)).toEqual({ others: [], mine: ["m1-pool-aarch64"], held: false, solo: { maintainer: "m1", hosts: ["m1-pool-aarch64"] } });
+    expect(select(pool, { members: [pool], leases: [] }, [own], T0, R)).toMatchObject([{ id: own.id, lane: "native" }]);
+    // Without the table it is the requester's registration again: held for a release.
+    const before = task(copyOf(["m1"]));
+    expect(placementOf({ members: [pool], leases: [] }, before, T0, R)).toEqual({ others: [], mine: ["m1-pool-aarch64"], held: true });
+    expect(select(pool, { members: [pool], leases: [] }, [before], T0, R)).toEqual([]);
+    // Another maintainer's legacy registration gains nothing: m2's copy goes to m1's, never to m2's.
+    const m2s = task(soloCopy(["m2"]));
+    expect(select(theirs, { members: [pool, theirs], leases: [] }, [m2s], T0, R)).toEqual([]);
+    expect(select(pool, { members: [pool, theirs], leases: [] }, [m2s], T0, R)).toMatchObject([{ id: m2s.id }]);
+  });
+
   it("a contributor's package is placed as it always was: its copy anyone's, the exception's host among them, no word of it", () => {
     const m1 = owned("m1-studio", "m1", "aarch64", 11);
     const s = new Sim([m1]);
