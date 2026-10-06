@@ -719,7 +719,9 @@ process it is, what it takes, what rolls its set out — and out on the empty
 answer), the broker answering on `:8790`, the builder's and the updater's
 `--self-test`, the dispatcher refusing a signing key and otherwise answering
 `/ready` and claiming with the token of a read-only file
-(`OMARCHY_WORKER_TOKEN_FILE`, as the host set mounts it, #327), and the egress
+(`OMARCHY_WORKER_TOKEN_FILE`, as the host set mounts it, #327: 0400 and the
+runner's, as the agent's file is its user's) with none in the environment
+`docker inspect` shows, and the egress
 sidecar's role refusing cloud metadata and a POST. `bash tests/task-networks.sh` (CI, on that local build; #336) runs the
 dispatcher with the real egress and agent sidecars and two probe tasks at
 once, its environment being the `etc/dispatcher.env` that `omarchy-agent
@@ -729,7 +731,9 @@ budget; #327: the worker token an older agent left there moved to
 `run/host/dispatcher/token`, 0400, which the dispatcher reads through
 `OMARCHY_WORKER_TOKEN_FILE`, the stub pool naming the host to that token
 only), and `docker inspect` of every task, egress and agent sidecar showing
-no token or key in its environment: a public mirror answers through the egress only; cloud metadata, a
+no token or key in its environment (the draft's task names its key as the
+placeholder `via-agent-sidecar` alone, the contributor's build no
+`ANTHROPIC_` variable at all): a public mirror answers through the egress only; cloud metadata, a
 public name resolving to loopback, a raw socket ("Network is unreachable"),
 the host's LAN address and gateway, and the other task's container, egress
 and agent are out of reach; through the egress the host's LAN address is

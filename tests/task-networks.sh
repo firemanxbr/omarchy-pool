@@ -40,7 +40,8 @@
 #
 # And `docker inspect` of every container the dispatcher made — the task
 # containers, their egress and agent sidecars — shows no token or key in its
-# environment (#327): the agent sidecar names its keys' read-only file only.
+# environment (#327): the agent sidecar names its keys' read-only file only,
+# and the draft's task names its key as the placeholder alone.
 #
 # Every container, network and image it makes is labelled with this run's own
 # host id and removed at the end; nothing else on the engine is touched.
@@ -336,14 +337,21 @@ echo "ok: started from the agent's etc/dispatcher.env, every egress refuses the 
 # Who the host is, asked with the token of its file: the stub answers that token only.
 jq -e 'select(.path == "/api/v1/factory/workers/self")' "$tmp/requests.jsonl" > /dev/null || fail "the dispatcher never asked who it is"
 # docker inspect shows no token or key in any container the dispatcher made (#327): the tasks, their egress and agent sidecars.
+# A model kind's task (A) names its key as a placeholder, the real one being its agent sidecar's: that one line is no key,
+# and any other ANTHROPIC_API_KEY is.
+placeholder="ANTHROPIC_API_KEY=via-agent-sidecar"
 for c in "$A" "$A-egress" "$A-agent" "$B" "$B-egress"; do
-  cenv="$("$RT" inspect "$c" | jq -c '.[0].Config.Env')"
+  cenv="$("$RT" inspect "$c" | jq -c --arg p "$placeholder" '[.[0].Config.Env[] | select(. != $p)]')"
   for secret in "$token" omw_ omj. sk-ant- OMARCHY_WORKER_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN; do
     [[ "$cenv" != *"$secret"* ]] || fail "$c's environment holds $secret: $cenv"
   done
 done
+"$RT" inspect "$A" | jq -e --arg p "$placeholder" '[.[0].Config.Env[] | select(startswith("ANTHROPIC_API_KEY="))] == [$p]' > /dev/null \
+  || fail "task A's key is not the placeholder alone: $("$RT" inspect "$A" | jq -c '[.[0].Config.Env[] | select(startswith("ANTHROPIC_"))]')"
+"$RT" inspect "$B" | jq -e '.[0].Config.Env | any(startswith("ANTHROPIC_")) | not' > /dev/null \
+  || fail "task B, a contributor's build, has an ANTHROPIC_ variable: $("$RT" inspect "$B" | jq -c '[.[0].Config.Env[] | select(startswith("ANTHROPIC_"))]')"
 "$RT" inspect "$A-agent" | jq -e '.[0].Config.Env | any(startswith("OMARCHY_AGENT_ENV="))' > /dev/null || fail "the agent sidecar names no keys file"
-echo "ok: docker inspect shows no token or key in the environment of a task, an egress or an agent sidecar; the agent sidecar names its keys' read-only file"
+echo "ok: docker inspect shows no token or key in the environment of a task, an egress or an agent sidecar (task A's key the placeholder alone, B none); the agent sidecar names its keys' read-only file"
 
 # ---------- 2. the probe sidecar ----------
 probe_said() { jq -c 'select(.path == "/api/v1/factory/claim") | .body.agent // empty' "$tmp/requests.jsonl" | tail -n1; }
