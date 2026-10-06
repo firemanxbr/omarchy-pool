@@ -10,6 +10,8 @@ use std::rc::Rc;
 
 use sha2::{Digest as _, Sha256};
 
+use crate::verify::cosignature::tests_support::TestKey;
+use crate::verify::cosignature::{self, Policy};
 use crate::verify::tests_support;
 use crate::verify::{BundleOutcome, Rejection, StatementOutcome};
 use crate::version::Release;
@@ -588,6 +590,10 @@ pub(crate) struct PoolState {
     pub github_reads: u32,
     /// The `Date` the host state's answer carries, whatever its status (#320).
     pub date: Option<i64>,
+    /// GitHub does not answer for release assets (#330: a co-signature that may exist).
+    pub assets_unanswered: bool,
+    /// The release assets asked for that may not exist, by name.
+    pub asked_if_any: Vec<String>,
 }
 
 pub(crate) type Remote = Rc<RefCell<PoolState>>;
@@ -627,12 +633,23 @@ impl Pool for FakePool {
     }
 
     fn release_asset(&mut self, r: Release, name: &str) -> Net<Vec<u8>> {
-        self.0
-            .borrow()
-            .assets
+        let s = self.0.borrow();
+        if s.assets_unanswered {
+            return Net::NoAnswer("github.com did not answer".into());
+        }
+        s.assets
             .get(&format!("{r}/{name}"))
             .cloned()
             .map_or_else(|| Net::NoAnswer("HTTP 404".into()), Net::Ok)
+    }
+
+    fn release_asset_if_any(&mut self, r: Release, name: &str) -> Net<Option<Vec<u8>>> {
+        let mut s = self.0.borrow_mut();
+        s.asked_if_any.push(name.to_owned());
+        if s.assets_unanswered {
+            return Net::NoAnswer(format!("{name}: github.com did not answer"));
+        }
+        Net::Ok(s.assets.get(&format!("{r}/{name}")).cloned())
     }
 
     fn download(&mut self, url: &str) -> Net<Vec<u8>> {
@@ -682,8 +699,10 @@ impl Pool for FakePool {
 // ---------------------------------------------------------------------------------------
 // Signed content.
 
-/// Verifies for real but for the cryptographic check, which vouches at `signed_at`.
-pub(crate) struct TestVerifier(pub Rc<RefCell<i64>>);
+/// Verifies for real but for the cryptographic check, which vouches at `signed_at`; the
+/// maintainers' co-signature policy is the test's (none unless it pins one, #330), never
+/// the one this build pins.
+pub(crate) struct TestVerifier(pub Rc<RefCell<i64>>, pub Rc<RefCell<Policy>>);
 
 impl Verifier for TestVerifier {
     fn bundle(&self, archive: &[u8], sig: &[u8]) -> Result<BundleOutcome, Rejection> {
@@ -691,6 +710,9 @@ impl Verifier for TestVerifier {
     }
     fn statement(&self, json: &[u8], sig: &[u8]) -> Result<StatementOutcome, Rejection> {
         tests_support::verify_statement(json, sig, *self.0.borrow())
+    }
+    fn cosignature(&self) -> Policy {
+        self.1.borrow().clone()
     }
 }
 
@@ -813,8 +835,29 @@ pub(crate) fn relay_statement_agent(
         Relayed {
             statement: json.into_bytes(),
             bundle: sig.to_vec(),
+            cosignatures: BTreeMap::new(),
         },
     );
+}
+
+/// A maintainer co-signs release `r`'s bundle as published: the asset
+/// `omarchy-host-<r>.tar.gz.<login>.sshsig` beside it (#330).
+pub(crate) fn cosign(remote: &Remote, r: &str, key: &TestKey) {
+    let name = format!("omarchy-host-{r}.tar.gz");
+    let mut s = remote.borrow_mut();
+    let archive = s.assets[&format!("{r}/{name}")].clone();
+    s.assets.insert(
+        format!("{r}/{}", cosignature::file_name(&name, &key.login)),
+        key.sign(cosignature::BUNDLE_NAMESPACE, &archive),
+    );
+}
+
+/// A maintainer co-signs the statement the pool relays for going back to `to` (#330).
+pub(crate) fn cosign_statement(remote: &Remote, to: &str, key: &TestKey) {
+    let mut s = remote.borrow_mut();
+    let relayed = s.statements.get_mut(&Release::parse(to).unwrap()).unwrap();
+    let sig = key.sign(cosignature::ROLLBACK_NAMESPACE, &relayed.statement);
+    relayed.cosignatures.insert(key.login.clone(), sig);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -833,6 +876,8 @@ pub(crate) struct World {
     pub engine: Engine,
     pub remote: Remote,
     pub signed_at: Rc<RefCell<i64>>,
+    /// The maintainers' co-signature the agent requires (#330): none unless a test pins one.
+    pub cosign: Rc<RefCell<Policy>>,
     pub dir: PathBuf,
     pub now: i64,
     /// The engines by socket (#325's runtime switch): the agent's driver is the one its
@@ -873,16 +918,26 @@ impl World {
         }));
         let remote: Remote = Rc::new(RefCell::new(PoolState::default()));
         let signed_at = Rc::new(RefCell::new(T0));
+        let cosign = Rc::new(RefCell::new(Policy::default()));
         let sockets: Sockets = Rc::new(RefCell::new(BTreeMap::from([(
             cfg.socket_cli.clone(),
             Rc::clone(&engine),
         )])));
-        let agent = Self::agent(cfg, paths, State::default(), &sockets, &remote, &signed_at);
+        let agent = Self::agent(
+            cfg,
+            paths,
+            State::default(),
+            &sockets,
+            &remote,
+            &signed_at,
+            &cosign,
+        );
         World {
             agent,
             engine,
             remote,
             signed_at,
+            cosign,
             dir,
             now: T0,
             sockets,
@@ -896,13 +951,14 @@ impl World {
         sockets: &Sockets,
         remote: &Remote,
         signed_at: &Rc<RefCell<i64>>,
+        cosign: &Rc<RefCell<Policy>>,
     ) -> Agent {
         let mut a = Agent::new(
             cfg,
             paths,
             state,
             Box::new(FakePool(Rc::clone(remote))),
-            Box::new(TestVerifier(Rc::clone(signed_at))),
+            Box::new(TestVerifier(Rc::clone(signed_at), Rc::clone(cosign))),
             Drivers::Fixed,
         );
         // A Linux host's agent, whichever OS runs the tests: a Mac (#320) is played with
@@ -969,6 +1025,7 @@ impl World {
             &self.sockets,
             &self.remote,
             &self.signed_at,
+            &self.cosign,
         );
         self.agent.resume(self.now);
         Self::drive(&mut self.agent, &self.sockets);
