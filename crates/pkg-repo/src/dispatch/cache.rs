@@ -13,10 +13,14 @@
 //!   project cache or another package's. An audit and a trial compile nothing and mount
 //!   none.
 //! - **The pacman cache, shared read-only.** Every task container mounts
-//!   `<work>/cache/pacman/<arch>` read-only at `/var/cache/pacman/shared`, its pacman's
-//!   first `CacheDir` (the build script's `pacman_ready`), and its own writable
-//!   `<task dir>/pkgcache` at `/var/cache/pacman/pkg`, the second: pacman downloads into
-//!   the first writable one, so concurrent builds never share a file they write.
+//!   `<work>/cache/pacman/<arch>` read-only at `/var/cache/pacman/shared` and its own
+//!   writable `<task dir>/pkgcache` at `/var/cache/pacman/pkg`. A build's and an audit's
+//!   pacman names the shared one its first `CacheDir` and its own the second (the build
+//!   script's `pacman_ready`): pacman downloads into the first writable one, so
+//!   concurrent builds never share a file they write. A trial's check names none and
+//!   downloads everything itself, as in its own container: it installs the lab's
+//!   sections above edge's, and the shared cache holds the bytes edge's databases list,
+//!   which the lab's need not.
 //! - **Verified merge-back.** When a lease ends, what it downloaded goes aside
 //!   (`cache/incoming/<arch>/<id>-<gen>`, [`collect`]) and, in a thread of its own
 //!   ([`upkeep`]), into the shared cache only when each file's SHA-256 is the one the
@@ -26,17 +30,22 @@
 //!   ([`crate::sign::verify_with_keyring`]). A file no database lists, one whose bytes
 //!   are not the listed ones, and one two databases list with different bytes (a task
 //!   that resolves it from the other repository would find bytes it refuses, in a cache
-//!   it cannot delete from) are discarded.
+//!   it cannot delete from) are discarded. What was merged is recorded
+//!   (`cache/merged/<arch>/<file>`: its SHA-256 and size), and every pass checks the
+//!   shared cache again against the databases of the day ([`recheck`]): a file whose
+//!   name they now list with other bytes, or list twice at odds, or that is not whole
+//!   (a crash) leaves it — the snapshot it was merged by is not the one tasks resolve by.
 //! - **Caps and pruning**, from the envelope's `cache_caps` (`OMARCHY_CACHE_PACMAN_GB`,
 //!   `OMARCHY_CACHE_BUILD_GB` in `etc/dispatcher.env`, written by the agent): the pacman
 //!   cache keeps the two newest versions of each package and, above its cap, drops the
 //!   oldest merged first, older versions before newest ones; the build caches go least
 //!   recently used first, a package's whole directory at a time, never one a lease of
-//!   this host mounts.
+//!   this host mounts. Each pass prunes before it asks the pool anything, so a pool that
+//!   does not answer never holds the caches over their caps.
 //!
 //! Only the dispatcher walks into `cache/` (0700): a task mounts its parts of it, which
-//! needs no walk from inside. The databases fetched, the files being merged and the use
-//! stamps of the build caches are never mounted into a task.
+//! needs no walk from inside. The databases fetched, the files being merged, their
+//! records and the use stamps of the build caches are never mounted into a task.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{File, Permissions};
@@ -84,6 +93,8 @@ pub const KEEP_VERSIONS: usize = 2;
 pub const DEFAULT_PACMAN_GB: u64 = 10;
 pub const DEFAULT_BUILD_GB: u64 = 20;
 const GB: u64 = 1 << 30;
+/// The lanes a host's caches are kept for.
+const ARCHES: [&str; 2] = ["aarch64", "x86_64"];
 
 /// The pool's public key, built in: what signs its databases (`docs/omarchy-staging.pub.asc`,
 /// the key a build's pacman trusts them by).
@@ -148,6 +159,18 @@ fn tmp_dir(work_root: &Path) -> PathBuf {
     work_root.join("cache").join("tmp")
 }
 
+/// The records of what was merged into the shared pacman cache of one architecture: one
+/// file per package file, its SHA-256 and size — what each pass checks the shared cache
+/// against the databases of the day by, without hashing it again.
+fn merged_dir(work_root: &Path, arch: &str) -> PathBuf {
+    work_root.join("cache").join("merged").join(arch)
+}
+
+/// Build caches being deleted: moved here under [`BUILD_LOCK`], deleted after it.
+fn trash_dir(work_root: &Path) -> PathBuf {
+    work_root.join("cache").join("trash")
+}
+
 /// A build cache is made ready for a lease and pruned under this one lock: a directory a
 /// lease is about to mount is never the one the upkeep removes.
 static BUILD_LOCK: Mutex<()> = Mutex::new(());
@@ -201,24 +224,32 @@ pub fn ready(
 
 /// What a lease downloaded (`<task dir>/pkgcache`) goes aside for the merge-back before its
 /// task directory is removed: `true` when it left anything. Its container is gone by then,
-/// so nothing writes there any more.
-pub fn collect(task_dir: &Path, work_root: &Path, arch: &str, task: u64, gen: &str) -> bool {
+/// so nothing writes there any more. An error (`cache/` on another file system than the
+/// tasks', say) is the caller's to say: those downloads are lost with the task directory.
+pub fn collect(
+    task_dir: &Path,
+    work_root: &Path,
+    arch: &str,
+    task: u64,
+    gen: &str,
+) -> std::io::Result<bool> {
     if spec::platform_of(arch).is_none() || !spec::gen_ok(gen) {
-        return false;
+        return Ok(false);
     }
     let from = task_dir.join("pkgcache");
     if !std::fs::read_dir(&from).is_ok_and(|mut d| d.next().is_some()) {
-        return false;
+        return Ok(false);
     }
     let to = incoming_dir(work_root)
         .join(arch)
         .join(format!("{task}-{gen}"));
     let _ = std::fs::remove_dir_all(&to);
-    cache_root(work_root).is_ok()
-        && to
-            .parent()
-            .is_some_and(|p| std::fs::create_dir_all(p).is_ok())
-        && std::fs::rename(&from, &to).is_ok()
+    cache_root(work_root)?;
+    if let Some(p) = to.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    std::fs::rename(&from, &to)?;
+    Ok(true)
 }
 
 // ---------- the signed databases ----------
@@ -294,8 +325,9 @@ fn db_name(source: &str) -> String {
 
 /// The databases of one architecture fetched again from the pool, when the ones here are
 /// older than [`DB_FRESH`]: each into place only once its signature verified, one the pool
-/// serves no longer (404) removed, one that did not come kept as it was. Returns what went
-/// wrong, for the log.
+/// serves no longer (404) removed. At the first that does not come, the pool is not asked
+/// for the rest: every copy here is kept and the next pass asks again (one timeout a pass
+/// for a pool that hangs, not one per database). Returns what went wrong, for the log.
 pub fn refresh(
     pool: &dyn Pool,
     pool_url: &str,
@@ -351,9 +383,10 @@ pub fn refresh(
             Err(e) => {
                 answered = false;
                 notes.push(format!(
-                    "{name} ({arch}): {}; the copy here is kept",
+                    "{name} ({arch}): {}; the copies here are kept, and the pool asked again at the next pass",
                     crate::orders::clean_line(&e.to_string())
                 ));
+                break;
             }
         }
     }
@@ -398,7 +431,7 @@ pub struct Merged {
     /// Copied into the shared cache: the bytes the databases list.
     pub merged: usize,
     pub bytes: u64,
-    /// Listed and already there.
+    /// Listed and already there, as these bytes.
     pub present: usize,
     /// Listed with other bytes (or another size): discarded.
     pub mismatched: usize,
@@ -408,6 +441,8 @@ pub struct Merged {
     pub ambiguous: usize,
     /// Not a regular file, or a name no package has: discarded.
     pub refused: usize,
+    /// Listed, but the copy failed (the disk, not the bytes: a full work root, an I/O error): not merged.
+    pub failed: usize,
 }
 
 impl Merged {
@@ -419,6 +454,7 @@ impl Merged {
         self.unknown += o.unknown;
         self.ambiguous += o.ambiguous;
         self.refused += o.refused;
+        self.failed += o.failed;
     }
 
     fn discarded(&self) -> usize {
@@ -437,9 +473,29 @@ fn file_name_ok(f: &str) -> bool {
         })
 }
 
-/// `src` copied to `tmp` (0644, made new) while its SHA-256 is computed, without following
-/// a link, stopping past `size` bytes: whether the copy is exactly the listed bytes.
-fn copy_verified(src: &Path, tmp: &Path, sha: &str, size: u64) -> std::io::Result<bool> {
+/// The record of a file merged: `<sha256> <size>`. One that does not read is none (a crash
+/// while it was written): the file is then hashed again.
+fn read_record(path: &Path) -> Option<(String, u64)> {
+    let s = std::fs::read_to_string(path).ok()?;
+    let (sha, size) = s.trim().split_once(' ')?;
+    (sha.len() == 64 && sha.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')))
+        .then(|| size.parse().ok().map(|n| (sha.to_owned(), n)))
+        .flatten()
+}
+
+fn write_record(work_root: &Path, arch: &str, name: &str, sha: &str, size: u64) {
+    let dir = merged_dir(work_root, arch);
+    let tmp = tmp_dir(work_root).join("record.part");
+    let _ = std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::create_dir_all(tmp_dir(work_root)))
+        .and_then(|()| std::fs::write(&tmp, format!("{sha} {size}\n")))
+        .and_then(|()| std::fs::rename(&tmp, dir.join(name)));
+}
+
+/// `src`'s bytes hashed without following a link, stopping past `size` bytes, and written
+/// to `to` meanwhile when one is given: whether they are exactly the listed ones. An error
+/// is the disk's, never the bytes'.
+fn verify(src: &Path, mut to: Option<&mut File>, sha: &str, size: u64) -> std::io::Result<bool> {
     use rustix::fs::{Mode, OFlags};
     let fd = rustix::fs::open(
         src,
@@ -450,11 +506,6 @@ fn copy_verified(src: &Path, tmp: &Path, sha: &str, size: u64) -> std::io::Resul
     if !from.metadata()?.is_file() {
         return Ok(false);
     }
-    let mut to = File::options()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(tmp)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut total = 0u64;
@@ -468,22 +519,60 @@ fn copy_verified(src: &Path, tmp: &Path, sha: &str, size: u64) -> std::io::Resul
             return Ok(false);
         }
         hasher.update(&buf[..n]);
-        to.write_all(&buf[..n])?;
+        if let Some(to) = to.as_deref_mut() {
+            to.write_all(&buf[..n])?;
+        }
     }
-    to.flush()?;
     Ok(total == size && hex::encode(hasher.finalize()) == sha)
 }
 
-/// One lease's downloads (`incoming`) merged into the shared cache `shared` by `index`:
-/// each file listed once, with its size and SHA-256, is copied in (through `tmp`, on the
-/// same file system, renamed into place: a task never sees half of one); every other is
-/// discarded. `incoming` itself is left to the caller.
-pub fn merge(incoming: &Path, shared: &Path, tmp: &Path, index: &Index) -> Merged {
+/// `src` copied into the shared cache as `dest` when its bytes are the listed ones: through
+/// `part` (0644, made new, on the same file system), on the disk before it is renamed into
+/// place and the rename on the disk after — a task never sees half a file, and a crash
+/// never leaves the name with half its bytes. `Ok(false)`: other bytes.
+fn place(
+    src: &Path,
+    part: &Path,
+    dest: &Path,
+    shared: &Path,
+    sha: &str,
+    size: u64,
+) -> std::io::Result<bool> {
+    let mut to = File::options()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(part)?;
+    if !verify(src, Some(&mut to), sha, size)? {
+        return Ok(false);
+    }
+    to.sync_all()?;
+    std::fs::set_permissions(part, Permissions::from_mode(0o644))?;
+    std::fs::rename(part, dest)?;
+    File::open(shared)?.sync_all()?;
+    Ok(true)
+}
+
+/// One lease's downloads (`incoming`) merged into the shared cache of `arch` by `index`:
+/// each file listed once, with its size and SHA-256, is copied in and recorded; one already
+/// there is left as it is only when its record says these bytes (else it is replaced: it
+/// was merged when the databases listed others, or is not whole); every other is
+/// discarded. `incoming` itself is left to the caller. With the counts, the first copy
+/// that failed for the disk's sake, for the log.
+pub fn merge(
+    work_root: &Path,
+    arch: &str,
+    incoming: &Path,
+    index: &Index,
+) -> (Merged, Option<String>) {
     let mut m = Merged::default();
+    let mut failure = None;
     let Ok(entries) = std::fs::read_dir(incoming) else {
-        return m;
+        return (m, failure);
     };
-    let _ = std::fs::create_dir_all(tmp);
+    let (shared, tmp) = (pacman_dir(work_root, arch), tmp_dir(work_root));
+    let _ = std::fs::create_dir_all(&tmp);
+    let _ = std::fs::create_dir_all(&shared);
     for e in entries.flatten() {
         let Ok(name) = e.file_name().into_string() else {
             m.refused += 1;
@@ -507,25 +596,119 @@ pub fn merge(incoming: &Path, shared: &Path, tmp: &Path, index: &Index) -> Merge
             }
         };
         let dest = shared.join(&name);
-        if dest.symlink_metadata().is_ok() {
+        let whole = dest
+            .symlink_metadata()
+            .is_ok_and(|md| md.is_file() && md.len() == size);
+        if whole
+            && read_record(&merged_dir(work_root, arch).join(&name))
+                .is_some_and(|(s, n)| s == sha && n == size)
+        {
             m.present += 1;
             continue;
         }
         // One file at a time, under a name of its own: a package's name may already be 255 bytes long.
         let part = tmp.join("merging.part");
         let _ = std::fs::remove_file(&part);
-        let ok = copy_verified(&e.path(), &part, &sha, size).unwrap_or(false)
-            && std::fs::set_permissions(&part, Permissions::from_mode(0o644)).is_ok()
-            && std::fs::rename(&part, &dest).is_ok();
-        if ok {
-            m.merged += 1;
-            m.bytes += size;
-        } else {
-            let _ = std::fs::remove_file(&part);
-            m.mismatched += 1;
+        match place(&e.path(), &part, &dest, &shared, &sha, size) {
+            Ok(true) => {
+                // A record that is not written leaves the file to be hashed again at the next pass.
+                write_record(work_root, arch, &name, &sha, size);
+                m.merged += 1;
+                m.bytes += size;
+            }
+            Ok(false) => {
+                let _ = std::fs::remove_file(&part);
+                m.mismatched += 1;
+            }
+            Err(err) => {
+                let _ = std::fs::remove_file(&part);
+                m.failed += 1;
+                failure.get_or_insert_with(|| format!("{name}: {err}"));
+            }
         }
     }
-    m
+    (m, failure)
+}
+
+/// What a check of the shared pacman cache against the databases of the day did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Rechecked {
+    /// Files whose name the databases now list with other bytes, or twice at odds, or that
+    /// are not whole: removed.
+    pub removed: usize,
+    pub freed: u64,
+    /// Files without a record (a crash before it was written) hashed, found to be the
+    /// listed bytes and recorded.
+    pub adopted: usize,
+}
+
+impl Rechecked {
+    fn add(&mut self, o: &Rechecked) {
+        self.removed += o.removed;
+        self.freed += o.freed;
+        self.adopted += o.adopted;
+    }
+}
+
+/// The shared pacman cache of `arch` checked again against `index`, the databases of the
+/// day (#341): a file was merged by the snapshot of its day, and a task resolves by
+/// today's. A name they now list with other bytes than its record's — a source that
+/// published the same file name since — or list twice at odds would fail every task that
+/// resolves it (pacman refuses the bytes and cannot delete them from a read-only cache),
+/// so it goes; so does one whose size is not its record's (a crash while it was written).
+/// A file without a record is hashed and kept only when it is the listed bytes. A name no
+/// database lists any more (an older version) is no task's to resolve: the versions'
+/// pruning takes it. Records of files no longer there go too. `index` must not be empty:
+/// without the databases nothing is known, and nothing is removed.
+pub fn recheck(work_root: &Path, arch: &str, index: &Index) -> Rechecked {
+    let mut out = Rechecked::default();
+    if index.is_empty() {
+        return out;
+    }
+    let (shared, records) = (pacman_dir(work_root, arch), merged_dir(work_root, arch));
+    if let Ok(entries) = std::fs::read_dir(&shared) {
+        for e in entries.flatten() {
+            let Ok(name) = e.file_name().into_string() else {
+                continue;
+            };
+            let Ok(md) = e.metadata() else { continue };
+            if !md.file_type().is_file() {
+                continue;
+            }
+            let record = read_record(&records.join(&name));
+            let keep = match index.listed(&name) {
+                Listed::Ambiguous => false,
+                Listed::Unknown => record.is_none_or(|(_, n)| n == md.len()),
+                Listed::Once(_, size) if md.len() != size => false,
+                Listed::Once(sha, size) => match record {
+                    Some(r) => r == (sha, size),
+                    None => match verify(&e.path(), None, &sha, size) {
+                        Ok(true) => {
+                            write_record(work_root, arch, &name, &sha, size);
+                            out.adopted += 1;
+                            true
+                        }
+                        Ok(false) => false,
+                        // Unread is not other bytes: judged again at the next pass.
+                        Err(_) => true,
+                    },
+                },
+            };
+            if !keep && std::fs::remove_file(e.path()).is_ok() {
+                let _ = std::fs::remove_file(records.join(&name));
+                out.removed += 1;
+                out.freed += md.len();
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(&records) {
+        for e in entries.flatten() {
+            if shared.join(e.file_name()).symlink_metadata().is_err() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    out
 }
 
 // ---------- pruning ----------
@@ -548,20 +731,35 @@ pub fn package_of(file: &str) -> Option<(String, String)> {
         .then(|| (format!("{name} {arch}"), format!("{ver}-{rel}")))
 }
 
-/// The shared pacman caches `dirs` (one per architecture) pruned: the two newest versions of
-/// each package kept, then, while they hold more than `cap` bytes, the oldest merged
-/// removed first, a package's older version before any newest one.
-pub fn prune_pacman(dirs: &[PathBuf], cap: u64) -> Pruned {
+/// The shared pacman caches of both architectures pruned: the two newest versions of each
+/// package kept, then, while they hold more than `cap` bytes, the oldest merged removed
+/// first, a package's older version before any newest one; a file's record goes with it.
+///
+/// A task's pacman that found a file here before it was removed, and opens it again to
+/// check or install it, fails its transaction (`could not find package in cache`: it does
+/// not download what it chose not to): rare — an older version first, a newest one only
+/// above the cap — and the pool runs the build again. Holding every removal until no lease
+/// that could have chosen the file runs would hold a busy host over its cap for good. A
+/// host that sees it often has a `pacman_gb` too small for what its builds need at once.
+pub fn prune_pacman(work_root: &Path, cap: u64) -> Pruned {
     struct File {
         path: PathBuf,
+        record: PathBuf,
         len: u64,
         at: SystemTime,
         newest: bool,
     }
+    let remove = |f: &File| {
+        let gone = std::fs::remove_file(&f.path).is_ok();
+        if gone {
+            let _ = std::fs::remove_file(&f.record);
+        }
+        gone
+    };
     let mut out = Pruned::default();
     let mut kept: Vec<File> = Vec::new();
-    for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+    for arch in ARCHES {
+        let Ok(entries) = std::fs::read_dir(pacman_dir(work_root, arch)) else {
             continue;
         };
         let mut by_package: BTreeMap<String, Vec<(String, File)>> = BTreeMap::new();
@@ -573,6 +771,7 @@ pub fn prune_pacman(dirs: &[PathBuf], cap: u64) -> Pruned {
             let name = e.file_name().to_string_lossy().into_owned();
             let f = File {
                 path: e.path(),
+                record: merged_dir(work_root, arch).join(&name),
                 len: md.len(),
                 at: md.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                 newest: false,
@@ -587,7 +786,7 @@ pub fn prune_pacman(dirs: &[PathBuf], cap: u64) -> Pruned {
                 if i < KEEP_VERSIONS {
                     f.newest = i == 0;
                     kept.push(f);
-                } else if std::fs::remove_file(&f.path).is_ok() {
+                } else if remove(&f) {
                     out.removed += 1;
                     out.freed += f.len;
                 }
@@ -600,7 +799,7 @@ pub fn prune_pacman(dirs: &[PathBuf], cap: u64) -> Pruned {
         if total <= cap {
             break;
         }
-        if std::fs::remove_file(&f.path).is_ok() {
+        if remove(f) {
             out.removed += 1;
             out.freed += f.len;
             total -= f.len;
@@ -633,7 +832,9 @@ fn usage(dir: &Path) -> u64 {
 /// The build caches pruned to `cap` bytes, least recently used first (by the stamp a lease's
 /// start leaves, else the directory's own time), a package's whole cache at a time; never
 /// one in `in_use` (a lease of this host mounts it) or used since `since` (a lease that
-/// started meanwhile).
+/// started meanwhile). Under [`BUILD_LOCK`] a cache is only moved out of the tree (a
+/// rename), and deleted after it: a ccache of a few hundred thousand files takes long to
+/// delete, and a lease's start on the dispatcher's main loop waits on that lock.
 pub fn prune_build(
     work_root: &Path,
     cap: u64,
@@ -643,13 +844,15 @@ pub fn prune_build(
     struct Pkg {
         dir: PathBuf,
         stamp: PathBuf,
+        trash: PathBuf,
         size: u64,
         at: SystemTime,
     }
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let trash = trash_dir(work_root);
     let mut pkgs = Vec::new();
     for trust in [Trust::Community, Trust::Project] {
-        for arch in ["aarch64", "x86_64"] {
+        for arch in ARCHES {
             let side = work_root
                 .join("cache")
                 .join("build")
@@ -668,8 +871,13 @@ pub fn prune_build(
                 let at = mtime(&stamp)
                     .or_else(|| mtime(&dir))
                     .unwrap_or(SystemTime::UNIX_EPOCH);
+                let n = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
                 pkgs.push(Pkg {
                     size: usage(&dir),
+                    trash: trash.join(format!("{}-{arch}-{name}-{n}", trust.as_str())),
                     dir,
                     stamp,
                     at,
@@ -687,12 +895,23 @@ pub fn prune_build(
         if in_use.contains(&p.dir) {
             continue;
         }
-        let _held = BUILD_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        if mtime(&p.stamp).is_some_and(|t| t >= since) {
-            continue;
-        }
-        if std::fs::remove_dir_all(&p.dir).is_ok() {
-            let _ = std::fs::remove_file(&p.stamp);
+        let gone = {
+            let _held = BUILD_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+            if mtime(&p.stamp).is_some_and(|t| t >= since) {
+                continue;
+            }
+            let moved = std::fs::create_dir_all(&trash)
+                .and_then(|()| std::fs::rename(&p.dir, &p.trash))
+                .is_ok();
+            // A tree on another file system (a link of the owner's) is deleted where it is.
+            let gone = moved || std::fs::remove_dir_all(&p.dir).is_ok();
+            if gone {
+                let _ = std::fs::remove_file(&p.stamp);
+            }
+            gone
+        };
+        if gone {
+            let _ = std::fs::remove_dir_all(&p.trash);
             out.removed += 1;
             out.freed += p.size;
             total -= p.size;
@@ -723,6 +942,8 @@ pub struct Report {
     /// The leases whose downloads were merged back or discarded.
     pub leases: usize,
     pub merged: Merged,
+    /// The shared pacman caches checked again against the databases of the day.
+    pub rechecked: Rechecked,
     pub pacman: Pruned,
     pub build: Pruned,
     pub notes: Vec<String>,
@@ -747,6 +968,26 @@ impl Report {
                 m.refused
             ));
         }
+        if m.failed > 0 {
+            parts.push(format!(
+                "{} listed download(s) could not be copied into the shared pacman cache (the disk, not the bytes; below)",
+                m.failed
+            ));
+        }
+        let c = &self.rechecked;
+        if c.removed > 0 {
+            parts.push(format!(
+                "{} file(s) of the shared pacman cache removed: the pool's signed databases list other bytes under their names now, or they were not whole ({} MB)",
+                c.removed,
+                c.freed >> 20
+            ));
+        }
+        if c.adopted > 0 {
+            parts.push(format!(
+                "{} file(s) of the shared pacman cache without a record hashed: the listed bytes, kept",
+                c.adopted
+            ));
+        }
         if self.pacman.removed > 0 {
             parts.push(format!(
                 "{} file(s) of the pacman cache pruned ({} MB; {} MB left)",
@@ -768,28 +1009,36 @@ impl Report {
     }
 }
 
-/// One pass: every lease's downloads set aside since the last one merged back by the
-/// signed databases of its architecture (fetched again when stale) or discarded, then both
-/// caches pruned to their caps.
+/// One pass: both caches pruned to their caps first, with no network (a pool that does
+/// not answer, which the refresh may wait minutes on, never holds them over their caps);
+/// then, for each architecture with downloads set aside or a shared cache that holds
+/// anything, the signed databases (fetched again when stale): the shared cache checked
+/// again by them and every lease's downloads merged back by them or discarded; then the
+/// pacman cache pruned again, with what came in.
 pub fn upkeep(u: &Upkeep) -> Report {
     let since = SystemTime::now();
     let mut r = Report::default();
-    let tmp = tmp_dir(&u.work_root);
+    let w = &u.work_root;
+    let tmp = tmp_dir(w);
     let _ = std::fs::remove_dir_all(&tmp);
-    let incoming = incoming_dir(&u.work_root);
-    for arch in ["aarch64", "x86_64"] {
-        let Ok(entries) = std::fs::read_dir(incoming.join(arch)) else {
-            continue;
-        };
-        let leases: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        if leases.is_empty() {
+    // What an earlier pass moved out of the build caches and did not finish deleting.
+    let _ = std::fs::remove_dir_all(trash_dir(w));
+    r.build = prune_build(w, u.caps.build, &u.in_use, since);
+    r.pacman = prune_pacman(w, u.caps.pacman);
+    let mut failure = None;
+    for arch in ARCHES {
+        let leases: Vec<PathBuf> = std::fs::read_dir(incoming_dir(w).join(arch))
+            .map(|d| d.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        let holds = std::fs::read_dir(pacman_dir(w, arch)).is_ok_and(|mut d| d.next().is_some());
+        if leases.is_empty() && !holds {
             continue;
         }
-        let index = match key_file(&u.work_root, u.key.as_deref()) {
+        let index = match key_file(w, u.key.as_deref()) {
             Ok(key) => {
                 r.notes
-                    .extend(refresh(&*u.pool, &u.pool_url, &u.work_root, arch, &key));
-                let (index, notes) = load(&u.work_root, arch, &key);
+                    .extend(refresh(&*u.pool, &u.pool_url, w, arch, &key));
+                let (index, notes) = load(w, arch, &key);
                 r.notes.extend(notes);
                 index
             }
@@ -799,25 +1048,34 @@ pub fn upkeep(u: &Upkeep) -> Report {
             }
         };
         if index.is_empty() {
-            r.notes.push(format!(
-                "no signed database of {arch} could be read: every download of these leases is discarded"
-            ));
+            if !leases.is_empty() {
+                r.notes.push(format!(
+                    "no signed database of {arch} could be read: every download of these leases is discarded"
+                ));
+            }
+        } else {
+            r.rechecked.add(&recheck(w, arch, &index));
         }
-        let shared = pacman_dir(&u.work_root, arch);
-        let _ = std::fs::create_dir_all(&shared);
         for lease in leases {
-            let m = merge(&lease, &shared, &tmp, &index);
+            let (m, err) = merge(w, arch, &lease, &index);
             r.merged.add(&m);
+            if failure.is_none() {
+                failure = err;
+            }
             r.leases += 1;
             let _ = std::fs::remove_dir_all(&lease);
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
-    r.pacman = prune_pacman(
-        &["aarch64", "x86_64"].map(|a| pacman_dir(&u.work_root, a)),
-        u.caps.pacman,
-    );
-    r.build = prune_build(&u.work_root, u.caps.build, &u.in_use, since);
+    if let Some(e) = failure {
+        r.notes.push(format!("the first copy that failed: {e}"));
+    }
+    let after = prune_pacman(w, u.caps.pacman);
+    r.pacman = Pruned {
+        removed: r.pacman.removed + after.removed,
+        freed: r.pacman.freed + after.freed,
+        left: after.left,
+    };
     r
 }
 
@@ -825,9 +1083,11 @@ pub fn upkeep(u: &Upkeep) -> Report {
 pub(crate) mod tests {
     //! The caches' own tests (#341): the merge-back against the fixture databases
     //! (`tests/fixtures/pool-dbs/`, signed by a key of their own, `write_the_fixtures`),
-    //! with matching, mismatching, unknown and ambiguous files; a database that does not
-    //! verify left unread; the pacman cache pruned to two versions and its cap; the build
-    //! caches least recently used first and never one in use.
+    //! with matching, mismatching, unknown and ambiguous files, and a file there already
+    //! with other bytes replaced; the shared cache checked again by a later snapshot of
+    //! the databases; a database that does not verify left unread; the pacman cache pruned
+    //! to two versions and its cap; the build caches least recently used first and never
+    //! one in use. (`refresh` against a pool is the dispatcher's tests', with its fake pool.)
 
     use super::*;
 
@@ -846,13 +1106,34 @@ pub(crate) mod tests {
 
     /// The fixture databases as the pool would serve them, into `<work>/cache/syncdb/<arch>`.
     fn place_fixtures(work: &Path, arch: &str) {
+        place_only(work, arch, &["core", "packages"]);
+    }
+
+    /// Only these sources' fixture databases in `<work>/cache/syncdb/<arch>`: a snapshot of the pool's.
+    fn place_only(work: &Path, arch: &str, sources: &[&str]) {
         let dir = db_dir(work, arch);
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        for source in ["core", "packages"] {
+        for source in sources {
             for f in [db_name(source), format!("{}.sig", db_name(source))] {
                 std::fs::copy(fixture_dir().join(&f), dir.join(&f)).unwrap();
             }
         }
+    }
+
+    fn sha(b: &[u8]) -> String {
+        hex::encode(Sha256::digest(b))
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .map(|d| {
+                d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
     }
 
     #[test]
@@ -906,6 +1187,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // each kind of download, then what is already there
     fn the_merge_back_takes_only_the_bytes_the_signed_databases_list() {
         let t = tempfile::tempdir().unwrap();
         let work = t.path();
@@ -916,10 +1198,8 @@ pub(crate) mod tests {
         std::fs::create_dir_all(incoming.join("download-x1")).unwrap();
         let put = |name: &str, bytes: &[u8]| std::fs::write(incoming.join(name), bytes).unwrap();
         // Matching: the shared dependency, as the pool lists it.
-        put(
-            &file("libfixture", arch),
-            &fixture_bytes("libfixture", "libfixture", arch),
-        );
+        let lib = fixture_bytes("libfixture", "libfixture", arch);
+        put(&file("libfixture", arch), &lib);
         // Mismatching: listed, other bytes of the same size, and other bytes of another size.
         let evil = fixture_bytes("evil", "evil", arch);
         let mut same_size = evil.clone();
@@ -928,10 +1208,7 @@ pub(crate) mod tests {
         put(&format!("evil-1.0-1-{arch}.pkg.tar.zst.sig"), b"x");
         // Unknown: a recipe's own file, and pacman's half-downloaded one.
         put(&file("stranger", arch), b"planted");
-        put(
-            &format!("{}.part", file("libfixture", arch)),
-            &fixture_bytes("libfixture", "libfixture", arch),
-        );
+        put(&format!("{}.part", file("libfixture", arch)), &lib);
         // Ambiguous: the bytes core lists, which packages lists otherwise.
         put(&file("twin", arch), &fixture_bytes("twin", "core", arch));
         // A link to a file the dispatcher can read is no download.
@@ -940,45 +1217,157 @@ pub(crate) mod tests {
             incoming.join(file("linked", arch)),
         )
         .unwrap();
-        let shared = work.join("shared");
-        std::fs::create_dir_all(&shared).unwrap();
-        let m = merge(&incoming, &shared, &work.join("tmp"), &index);
+        let shared = pacman_dir(work, arch);
+        let (m, failure) = merge(work, arch, &incoming, &index);
         assert_eq!(
             m,
             Merged {
                 merged: 1,
-                bytes: fixture_bytes("libfixture", "libfixture", arch).len() as u64,
+                bytes: lib.len() as u64,
                 present: 0,
                 mismatched: 1,
                 unknown: 3,
                 ambiguous: 1,
                 refused: 2,
+                failed: 0,
             }
         );
-        let names: Vec<String> = std::fs::read_dir(&shared)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, [file("libfixture", arch)]);
+        assert_eq!(failure, None);
+        assert_eq!(names_in(&shared), [file("libfixture", arch)]);
         let merged = shared.join(file("libfixture", arch));
-        assert_eq!(
-            std::fs::read(&merged).unwrap(),
-            fixture_bytes("libfixture", "libfixture", arch)
-        );
+        assert_eq!(std::fs::read(&merged).unwrap(), lib);
         assert_eq!(
             std::fs::metadata(&merged).unwrap().permissions().mode() & 0o7777,
             0o644
         );
+        // Its record: the bytes it was merged as.
+        assert_eq!(
+            read_record(&merged_dir(work, arch).join(file("libfixture", arch))),
+            Some((sha(&lib), lib.len() as u64))
+        );
         // The same file from a second lease is there already; nothing half-made is left behind.
-        let m = merge(&incoming, &shared, &work.join("tmp"), &index);
+        let (m, _) = merge(work, arch, &incoming, &index);
         assert_eq!((m.merged, m.present), (0, 1));
-        assert_eq!(std::fs::read_dir(work.join("tmp")).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(tmp_dir(work)).unwrap().count(), 0);
+        // There with other bytes than the listed ones (merged by another listing, or not whole
+        // after a crash): replaced by the listed bytes, and recorded as them.
+        let mut stale = lib.clone();
+        stale[3] ^= 1;
+        std::fs::write(&merged, &stale).unwrap();
+        write_record(
+            work,
+            arch,
+            &file("libfixture", arch),
+            &sha(&stale),
+            stale.len() as u64,
+        );
+        let (m, _) = merge(work, arch, &incoming, &index);
+        assert_eq!((m.merged, m.present), (1, 0));
+        assert_eq!(std::fs::read(&merged).unwrap(), lib);
+        std::fs::write(&merged, &lib[..10]).unwrap();
+        let (m, _) = merge(work, arch, &incoming, &index);
+        assert_eq!((m.merged, m.present), (1, 0));
+        assert_eq!(std::fs::read(&merged).unwrap(), lib);
+        // A copy that fails for the disk's sake is no mismatch: counted apart, and said.
+        let t3 = tempfile::tempdir().unwrap();
+        place_fixtures(t3.path(), arch);
+        std::fs::create_dir_all(t3.path().join("cache")).unwrap();
+        std::fs::write(tmp_dir(t3.path()), b"not a directory").unwrap();
+        let (m, failure) = merge(t3.path(), arch, &incoming, &index);
+        assert_eq!((m.merged, m.failed, m.mismatched, m.unknown), (0, 2, 0, 3));
+        assert!(
+            failure
+                .as_deref()
+                .is_some_and(|f| f.contains(".pkg.tar.zst: ") && f.contains("Not a directory")),
+            "{failure:?}"
+        );
         // With no database read, everything is discarded.
-        let shared2 = work.join("shared2");
-        std::fs::create_dir_all(&shared2).unwrap();
-        let m = merge(&incoming, &shared2, &work.join("tmp"), &Index::default());
+        let t2 = tempfile::tempdir().unwrap();
+        let (m, _) = merge(t2.path(), arch, &incoming, &Index::default());
         assert_eq!((m.merged, m.unknown), (0, 6));
-        assert_eq!(std::fs::read_dir(&shared2).unwrap().count(), 0);
+        assert!(names_in(&pacman_dir(t2.path(), arch)).is_empty());
+    }
+
+    /// The shared cache against the databases of the day (#341): a file merged when one
+    /// snapshot listed it goes once another lists its name with other bytes, or twice at
+    /// odds, or once it is not whole; a file without a record is kept only as the listed
+    /// bytes; one no database lists any more stays for the versions' pruning.
+    #[test]
+    fn every_pass_checks_the_shared_cache_again_by_the_databases_of_the_day() {
+        let t = tempfile::tempdir().unwrap();
+        let work = t.path();
+        let arch = "x86_64";
+        let key = fixture_dir().join("pool.pub.asc");
+        let shared = pacman_dir(work, arch);
+        let records = merged_dir(work, arch);
+        let incoming = work.join("incoming");
+        std::fs::create_dir_all(&incoming).unwrap();
+        let (lib, twin_core, twin_packages) = (
+            fixture_bytes("libfixture", "libfixture", arch),
+            fixture_bytes("twin", "core", arch),
+            fixture_bytes("twin", "packages", arch),
+        );
+        // The first snapshot: core only, which lists twin once, as its own bytes.
+        place_only(work, arch, &["core"]);
+        let (core_only, _) = load(work, arch, &key);
+        std::fs::write(incoming.join(file("libfixture", arch)), &lib).unwrap();
+        std::fs::write(incoming.join(file("twin", arch)), &twin_core).unwrap();
+        assert_eq!(merge(work, arch, &incoming, &core_only).0.merged, 2);
+        // A file with no record but the listed bytes (a crash before its record was written),
+        // one with no record and other bytes of the listed size, two no database lists, and a
+        // record of nothing.
+        std::fs::remove_file(records.join(file("twin", arch))).unwrap();
+        let mut evil = fixture_bytes("evil", "evil", arch);
+        evil[0] ^= 1;
+        std::fs::write(shared.join(file("evil", arch)), &evil).unwrap();
+        std::fs::write(shared.join("libfixture-0.9-1-x86_64.pkg.tar.zst"), b"old").unwrap();
+        std::fs::write(shared.join(file("stranger", arch)), b"by hand").unwrap();
+        std::fs::write(records.join("gone-1.0-1-x86_64.pkg.tar.zst"), "x 1\n").unwrap();
+        let c = recheck(work, arch, &core_only);
+        assert_eq!(
+            (c.removed, c.freed, c.adopted),
+            (1, evil.len() as u64, 1),
+            "{c:?}"
+        );
+        assert!(!shared.join(file("evil", arch)).exists());
+        assert_eq!(
+            names_in(&records),
+            [file("libfixture", arch), file("twin", arch)]
+        );
+        // libfixture-0.9 is listed by none: kept, as the stranger. Now cut short, a recorded file goes.
+        std::fs::write(shared.join(file("libfixture", arch)), &lib[..7]).unwrap();
+        let c = recheck(work, arch, &core_only);
+        assert_eq!((c.removed, c.freed), (1, 7));
+        assert!(!records.join(file("libfixture", arch)).exists());
+        // The next snapshot lists twin twice at odds: no task can trust it, it goes.
+        place_only(work, arch, &["core", "packages"]);
+        let (both, _) = load(work, arch, &key);
+        assert_eq!(recheck(work, arch, &both).removed, 1);
+        assert!(!shared.join(file("twin", arch)).exists());
+        // Merged again by core's listing, then a snapshot where only packages lists the name, otherwise.
+        assert_eq!(merge(work, arch, &incoming, &core_only).0.merged, 2);
+        place_only(work, arch, &["packages"]);
+        let (packages_only, _) = load(work, arch, &key);
+        assert_eq!(recheck(work, arch, &packages_only).removed, 1);
+        assert!(!shared.join(file("twin", arch)).exists());
+        std::fs::write(incoming.join(file("twin", arch)), &twin_packages).unwrap();
+        let (m, _) = merge(work, arch, &incoming, &packages_only);
+        assert_eq!(m.merged, 1);
+        assert_eq!(
+            std::fs::read(shared.join(file("twin", arch))).unwrap(),
+            twin_packages
+        );
+        assert_eq!(
+            names_in(&shared),
+            [
+                "libfixture-0.9-1-x86_64.pkg.tar.zst".to_owned(),
+                file("libfixture", arch),
+                file("stranger", arch),
+                file("twin", arch)
+            ]
+        );
+        // Without the databases nothing is known, and nothing goes.
+        assert_eq!(recheck(work, arch, &Index::default()), Rechecked::default());
     }
 
     fn write_at(path: &Path, len: usize, secs_ago: u64) {
@@ -994,7 +1383,8 @@ pub(crate) mod tests {
     #[test]
     fn the_pacman_cache_keeps_two_versions_of_each_package_then_its_cap() {
         let t = tempfile::tempdir().unwrap();
-        let (a, x) = (t.path().join("aarch64"), t.path().join("x86_64"));
+        let work = t.path();
+        let (a, x) = (pacman_dir(work, "aarch64"), pacman_dir(work, "x86_64"));
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&x).unwrap();
         // zlib: four versions, epochs and pkgrels among them; vercmp orders them, not the names.
@@ -1004,33 +1394,39 @@ pub(crate) mod tests {
             ("1:1.3.2-10", 50),
             ("1.3.3-1", 10),
         ] {
-            write_at(&a.join(format!("zlib-{v}-aarch64.pkg.tar.zst")), 1000, ago);
+            let f = format!("zlib-{v}-aarch64.pkg.tar.zst");
+            write_at(&a.join(&f), 1000, ago);
+            write_record(work, "aarch64", &f, &"0".repeat(64), 1000);
         }
         write_at(&a.join("felix-2.0-1-any.pkg.tar.zst"), 1000, 300);
         write_at(&x.join("zlib-1:1.3.2-3-x86_64.pkg.tar.zst"), 1000, 200);
-        let p = prune_pacman(&[a.clone(), x.clone()], u64::MAX);
+        let p = prune_pacman(work, u64::MAX);
         assert_eq!((p.removed, p.freed, p.left), (2, 2000, 4000));
-        let mut left: Vec<String> = std::fs::read_dir(&a)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        left.sort();
         assert_eq!(
-            left,
+            names_in(&a),
             [
                 "felix-2.0-1-any.pkg.tar.zst",
                 "zlib-1:1.3.2-10-aarch64.pkg.tar.zst",
                 "zlib-1:1.3.2-3-aarch64.pkg.tar.zst"
             ]
         );
+        // A file's record goes with it.
+        assert_eq!(
+            names_in(&merged_dir(work, "aarch64")),
+            [
+                "zlib-1:1.3.2-10-aarch64.pkg.tar.zst",
+                "zlib-1:1.3.2-3-aarch64.pkg.tar.zst"
+            ]
+        );
         // Above the cap: the older version goes before any newest one, then the oldest merged.
-        let p = prune_pacman(&[a.clone(), x.clone()], 2500);
+        let p = prune_pacman(work, 2500);
         assert_eq!((p.removed, p.left), (2, 2000));
         assert!(!a.join("zlib-1:1.3.2-3-aarch64.pkg.tar.zst").exists());
         assert!(!a.join("felix-2.0-1-any.pkg.tar.zst").exists());
         assert!(a.join("zlib-1:1.3.2-10-aarch64.pkg.tar.zst").exists());
         assert!(x.join("zlib-1:1.3.2-3-x86_64.pkg.tar.zst").exists());
-        assert_eq!(prune_pacman(&[a, x], 0).left, 0);
+        assert_eq!(prune_pacman(work, 0).left, 0);
+        assert!(names_in(&merged_dir(work, "aarch64")).is_empty());
         assert_eq!(
             package_of("zlib-1:1.3.2-3-x86_64.pkg.tar.zst"),
             Some(("zlib x86_64".into(), "1:1.3.2-3".into()))
@@ -1070,6 +1466,8 @@ pub(crate) mod tests {
         assert_eq!((p.removed, p.freed, p.left), (2, 2 * each, 2 * each));
         assert!(!old.exists() && !mid.exists() && busy.exists() && new.exists());
         assert!(!used_stamp(work, Trust::Community, "aarch64", "old").exists());
+        // Moved out of the tree under the lock, deleted after it: nothing is left aside.
+        assert!(names_in(&trash_dir(work)).is_empty());
         // One used since the pass began (a lease that started meanwhile) stays too.
         ready(work, Trust::Community, "x86_64", "new", true).unwrap();
         let p = prune_build(work, 0, &in_use, SystemTime::now() - Duration::from_secs(5));
@@ -1102,16 +1500,23 @@ pub(crate) mod tests {
         let gen = "g_00000000000000a1";
         let tdir = spec::task_dir(work, 7, gen);
         std::fs::create_dir_all(tdir.join("pkgcache")).unwrap();
-        assert!(!collect(&tdir, work, "aarch64", 7, gen));
+        assert!(!collect(&tdir, work, "aarch64", 7, gen).unwrap());
         std::fs::write(tdir.join("pkgcache/x.pkg.tar.zst"), b"x").unwrap();
-        assert!(!collect(&tdir, work, "riscv64", 7, gen));
-        assert!(collect(&tdir, work, "aarch64", 7, gen));
+        assert!(!collect(&tdir, work, "riscv64", 7, gen).unwrap());
+        assert!(collect(&tdir, work, "aarch64", 7, gen).unwrap());
         assert!(incoming_dir(work)
             .join("aarch64")
             .join(format!("7-{gen}"))
             .join("x.pkg.tar.zst")
             .is_file());
         assert!(!tdir.join("pkgcache").exists());
+        // Downloads that cannot be set aside are an error the dispatcher says, not a quiet nothing.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(other.path().join("cache")).unwrap();
+        std::fs::write(incoming_dir(other.path()), b"not a directory").unwrap();
+        std::fs::create_dir_all(tdir.join("pkgcache")).unwrap();
+        std::fs::write(tdir.join("pkgcache/x.pkg.tar.zst"), b"x").unwrap();
+        assert!(collect(&tdir, other.path(), "aarch64", 7, gen).is_err());
     }
 
     /// Makes `tests/fixtures/pool-dbs/` again: two databases rendered with pkg-repo's own

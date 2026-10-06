@@ -784,19 +784,7 @@ impl H {
 
     /// The pool serves the fixture databases (#341) for `arch`, signed by the key the harness's dispatchers verify with.
     fn serve_fixture_dbs(&self, arch: &str) {
-        let dir = super::cache::tests::fixture_dir();
-        let mut public = self.pool.public.lock().unwrap();
-        for source in ["core", "packages"] {
-            for f in [
-                format!("omarchy-{source}-edge.db"),
-                format!("omarchy-{source}-edge.db.sig"),
-            ] {
-                public.insert(
-                    format!("https://pool.example/{source}/{arch}/{f}"),
-                    std::fs::read(dir.join(&f)).unwrap(),
-                );
-            }
-        }
+        serve_dbs(&self.pool, arch, &["core", "packages"]);
     }
 
     /// The `-v` mounts a lease's task container was started with.
@@ -838,6 +826,35 @@ fn community(id: u64, gen: &str) -> Value {
         json!({}),
         gen,
     )
+}
+
+/// `pool` serves these sources' fixture databases (#341) for `arch` at `https://pool.example`,
+/// and no other: a snapshot of the pool's signed databases.
+fn serve_dbs(pool: &FakePool, arch: &str, sources: &[&str]) {
+    let dir = super::cache::tests::fixture_dir();
+    let mut public = pool.public.lock().unwrap();
+    public.retain(|url, _| !url.contains(&format!("/{arch}/")));
+    for source in sources {
+        for f in [
+            format!("omarchy-{source}-edge.db"),
+            format!("omarchy-{source}-edge.db.sig"),
+        ] {
+            public.insert(
+                format!("https://pool.example/{source}/{arch}/{f}"),
+                std::fs::read(dir.join(&f)).unwrap(),
+            );
+        }
+    }
+}
+
+/// A file's time set back by `secs`: a stamp as old as that.
+fn age(path: &Path, secs: u64) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(secs))
+        .unwrap();
 }
 
 /// A package as makepkg writes one, enough for pkg-extract: a tar with its .PKGINFO.
@@ -1114,6 +1131,131 @@ fn the_caches_stay_under_their_caps_and_a_running_builds_cache_is_kept() {
     );
     assert!(!old.exists(), "the least recently used build cache went");
     assert!(felix.join("ccache").is_file(), "the running build's stays");
+}
+
+/// The shared pacman cache is checked again by every later snapshot of the pool's signed
+/// databases (#341): a file merged when core alone listed its name goes from the shared cache
+/// once the pool's databases list that name twice with different bytes — a task resolving it
+/// from the other repository would find bytes its pacman refuses and cannot delete.
+#[test]
+fn a_merged_file_whose_name_the_databases_list_otherwise_later_leaves_the_shared_cache() {
+    use super::cache::tests::fixture_bytes;
+    let h = H::new();
+    serve_dbs(&h.pool, "aarch64", &["core"]);
+    let mut d = h.dispatcher();
+    h.give(community(1, GEN));
+    h.ticks(&mut d, 4);
+    assert!(h.engine.has(1, GEN));
+    let twin = "twin-1.0-1-aarch64.pkg.tar.zst";
+    std::fs::write(
+        h.tdir(1, GEN).join("pkgcache").join(twin),
+        fixture_bytes("twin", "core", "aarch64"),
+    )
+    .unwrap();
+    h.leave(1, GEN, &built_ok(), "==> Finished making\n");
+    h.engine.exit(1, GEN, 0, false);
+    h.ticks(&mut d, 3);
+    let shared = h.work.join("cache/pacman/aarch64");
+    assert!(shared.join(twin).is_file(), "merged by core's listing");
+    // The pool's next snapshot lists twin in packages too, with other bytes; an hour on, a pass reads it.
+    serve_dbs(&h.pool, "aarch64", &["core", "packages"]);
+    h.advance(super::cache::EVERY);
+    h.ticks(&mut d, 1);
+    assert!(
+        shared.join(twin).is_file(),
+        "the databases here are fresh for an hour"
+    );
+    age(&h.work.join("cache/syncdb/aarch64/.fetched"), 2 * 3600);
+    h.advance(super::cache::EVERY);
+    h.ticks(&mut d, 1);
+    assert!(
+        !shared.join(twin).exists(),
+        "listed twice at odds now: no task can trust it"
+    );
+    assert!(!h.work.join("cache/merged/aarch64").join(twin).exists());
+}
+
+/// The pool's signed databases fetched again (#341): not within the hour; a database whose
+/// signature does not verify is not put in place and the copy here is kept; a pool that does
+/// not answer is asked once, not for every database, the copies are kept and the next pass
+/// asks again; a database the pool serves no longer (404) is removed.
+#[test]
+#[allow(clippy::too_many_lines)] // the refresh's every path, one after another on one copy
+fn the_databases_are_fetched_again_when_stale_only_into_place_once_verified() {
+    use super::cache::{refresh, tests::fixture_dir};
+    let pool = FakePool::default();
+    serve_dbs(&pool, "x86_64", &["core", "packages"]);
+    let t = tempfile::tempdir().unwrap();
+    let work = t.path();
+    let key = fixture_dir().join("pool.pub.asc");
+    let url = "https://pool.example";
+    let dir = work.join("cache/syncdb/x86_64");
+    let (core, packages) = ("omarchy-core-edge.db", "omarchy-packages-edge.db");
+    let fixture = |f: &str| std::fs::read(fixture_dir().join(f)).unwrap();
+    let asked = || std::mem::take(&mut *pool.public_asked.lock().unwrap());
+    // The first: every source asked, the two the pool serves in place with their signatures.
+    let notes = refresh(&pool, url, work, "x86_64", &key);
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(asked().len(), 9 + 2);
+    assert_eq!(std::fs::read(dir.join(core)).unwrap(), fixture(core));
+    assert_eq!(
+        std::fs::read(dir.join(packages)).unwrap(),
+        fixture(packages)
+    );
+    assert!(dir.join(format!("{packages}.sig")).is_file());
+    // Within the hour: nothing is asked.
+    assert!(refresh(&pool, url, work, "x86_64", &key).is_empty());
+    assert!(asked().is_empty());
+    // Stale, and core's URL serves another database under core's signature: not put in place.
+    age(&dir.join(".fetched"), 2 * 3600);
+    pool.public
+        .lock()
+        .unwrap()
+        .insert(format!("{url}/core/x86_64/{core}"), fixture(packages));
+    let notes = refresh(&pool, url, work, "x86_64", &key);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains(&format!("{core} (x86_64): its signature does not verify"))),
+        "{notes:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.join(core)).unwrap(),
+        fixture(core),
+        "the copy here is kept"
+    );
+    assert!(!dir.join(".new").exists());
+    // Stale, and the pool does not answer: asked once, said, the copies kept, the stamp not renewed.
+    serve_dbs(&pool, "x86_64", &["core", "packages"]);
+    age(&dir.join(".fetched"), 2 * 3600);
+    asked();
+    pool.down.store(true, Ordering::SeqCst);
+    let notes = refresh(&pool, url, work, "x86_64", &key);
+    assert_eq!(asked().len(), 1, "one timeout a pass, not one per database");
+    assert!(
+        notes.len() == 1 && notes[0].contains("the copies here are kept"),
+        "{notes:?}"
+    );
+    assert_eq!(std::fs::read(dir.join(core)).unwrap(), fixture(core));
+    assert_eq!(
+        std::fs::read(dir.join(packages)).unwrap(),
+        fixture(packages)
+    );
+    let stamp_age = |p: &Path| {
+        std::time::SystemTime::now()
+            .duration_since(std::fs::metadata(p).unwrap().modified().unwrap())
+            .unwrap()
+    };
+    assert!(stamp_age(&dir.join(".fetched")) > super::cache::DB_FRESH);
+    refresh(&pool, url, work, "x86_64", &key);
+    assert_eq!(asked().len(), 1, "the next pass asks again");
+    // Up again, and packages is no longer served: its database and signature go, core's stays.
+    pool.down.store(false, Ordering::SeqCst);
+    serve_dbs(&pool, "x86_64", &["core"]);
+    assert!(refresh(&pool, url, work, "x86_64", &key).is_empty());
+    assert!(!dir.join(packages).exists() && !dir.join(format!("{packages}.sig")).exists());
+    assert_eq!(std::fs::read(dir.join(core)).unwrap(), fixture(core));
+    assert!(stamp_age(&dir.join(".fetched")) < super::cache::DB_FRESH);
 }
 
 #[test]

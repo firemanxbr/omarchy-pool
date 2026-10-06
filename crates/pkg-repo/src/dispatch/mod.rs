@@ -961,14 +961,19 @@ impl Dispatcher {
         }
         // What its pacman downloaded goes aside for the verified merge-back (#341), whatever
         // ended it: only what the pool's signed databases list is ever merged.
-        if cache::collect(
+        match cache::collect(
             &self.ctx.task_dir(l),
             &self.ctx.work_root,
             l.arch(),
             l.task.id,
             &l.gen,
         ) {
-            self.caches.dirty = true;
+            Ok(true) => self.caches.dirty = true,
+            Ok(false) => {}
+            Err(e) => say(format!(
+                "task {}: its downloads could not be set aside for the shared pacman cache ({e}); they go with its directory",
+                l.task.id
+            )),
         }
         let _ = std::fs::remove_dir_all(self.ctx.task_dir(l));
         self.store.remove(l.task.id, &l.gen);

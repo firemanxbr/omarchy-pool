@@ -52,8 +52,8 @@
 //! and nothing else: no token, no socket, no other mount.
 //!
 //! **Its caches** (#341, D52; [`super::cache`]) are cut from the lease
-//! itself: the host's pacman cache of its lane, read-only, as its pacman's
-//! first `CacheDir`, beside its own writable one, and, for a build, the build
+//! itself: the host's pacman cache of its lane, read-only (a build's and an
+//! audit's pacman's first `CacheDir`), beside its own writable one, and, for a build, the build
 //! cache of its own package on its own side of the pool
 //! (`<work>/cache/build/<trust>/<arch>/<package>` at `/build/cache`) — never
 //! the cache tree, a project cache for a community task, or another
@@ -1041,8 +1041,8 @@ pub fn task_container(s: &Spec<'_>) -> Result<Vec<String>, String> {
         format!("{}:/task/log", d("log")),
         format!("{}:/build", d("build")),
         format!("{}:/pool:ro", s.release_dir.display()),
-        // The host's pacman cache of its lane, read-only: its pacman's first CacheDir; its own,
-        // where it downloads, the second (#341, D52).
+        // The host's pacman cache of its lane, read-only: a build's and an audit's pacman's first
+        // CacheDir; its own, where it downloads, the second (#341, D52).
         format!(
             "{}:{}:ro",
             cache::pacman_dir(s.work_root, s.arch).display(),
