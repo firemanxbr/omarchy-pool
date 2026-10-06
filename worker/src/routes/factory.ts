@@ -637,7 +637,8 @@ export const HOST_LEASES_SQL = "SELECT id, name, arch, kind, trust, lease_owner,
  * in the queue with its attempt, counted in host_losses as a `lost` report
  * is (D54), so a host that keeps losing its leases cannot hand a task back
  * for ever. Past HOST_LOSSES_MAX the attempt is spent, as an expired lease's
- * is: behind its peers, failed when it was the last.
+ * is: behind its peers, failed when it was the last. Back in the queue, an
+ * audit says no independence until its next lease writes one (#339).
  */
 const SPENT = `host_losses >= ${HOST_LOSSES_MAX}`;
 const LAST = `${SPENT} AND attempts >= max_attempts`;
@@ -648,6 +649,7 @@ export const LOST_LEASE_SQL = `UPDATE build_tasks SET
     attempts = CASE WHEN ${SPENT} THEN attempts ELSE MAX(attempts - 1, 0) END,
     priority = CASE WHEN ${SPENT} THEN priority + 10 ELSE priority END,
     error = CASE WHEN ${SPENT} THEN ?1 || ' — lost too often on its host: the attempt is spent' ELSE ?1 || '; the attempt is given back' END,
+    independent = CASE WHEN ${LAST} THEN independent ELSE NULL END,
     host_losses = host_losses + 1, lease_expires_at = NULL, lease_missed = 0
   WHERE id = ?2 AND status = 'leased' AND lease_owner = ?3 AND lease_gen = ?4 AND stop_order IS NULL RETURNING id, status, attempts, error`;
 
@@ -743,16 +745,29 @@ const ringLock = (t: string) => ` AND NOT (${t}.kind IN (${RING_MOVERS}) AND EXI
 const ownSize = (t: string) => `CASE WHEN json_type(${t}.params, '$.size') IN ('integer', 'real') THEN json_extract(${t}.params, '$.size') END`;
 /** The project's copy of a package (`t` the alias; #339, D35): its review rebuild — a project build that answers a contributor's. */
 const projectCopySql = (t: string) => `(${t}.kind = 'build' AND ${t}.trust = 'project' AND json_extract(${t}.params, '$.review') IS NOT NULL)`;
+/** The model a staged build was built with (`au` the build, `bw` its registration, #339): its `built_with`, else that registration's agent. */
+const builtWithSql = `COALESCE(json_extract(au.params, '$.built_with'), bw.agent)`;
 /**
  * What placement reads of a candidate (#339, design v2 §8.4; `t` the alias), each by a primary key: the project's copy's requesters —
  * its owner and the owner of the contributor's build of the same package it answers — and who released it to any host (D35); an
- * audit's build — the registration that built it, the model it was built with (its `built_with`, else that registration's agent) and
- * whether it is the project's copy (D36).
+ * audit's build — the registration that built it, the model it was built with, that registration's owner and its host when it is a
+ * host's (the machine, as far as the pool tells machines apart: selection.ts `apart`), and whether it is the project's copy (D36).
  */
 const placementCols = (t: string) => `CASE WHEN ${projectCopySql(t)} THEN json_array(${t}.owner, (SELECT rq.owner FROM build_tasks rq WHERE rq.id = json_extract(${t}.params, '$.review') AND rq.name = ${t}.name)) END AS requesters,
     CASE WHEN ${projectCopySql(t)} THEN json_extract(${t}.params, '$.any_host.by') END AS any_host,
-    CASE WHEN ${t}.kind = 'audit' THEN (SELECT json_object('by', au.lease_owner, 'with', COALESCE(json_extract(au.params, '$.built_with'), (SELECT bw.agent FROM build_workers bw WHERE bw.id = au.lease_owner)), 'copy', ${projectCopySql("au")})
-      FROM build_tasks au WHERE au.id = json_extract(${t}.params, '$.task')) END AS audited`;
+    CASE WHEN ${t}.kind = 'audit' THEN (SELECT json_object('by', au.lease_owner, 'with', ${builtWithSql}, 'owner', bw.owner, 'host', CASE WHEN bw.kind = 'host' THEN bw.host_id END, 'copy', ${projectCopySql("au")})
+      FROM build_tasks au LEFT JOIN build_workers bw ON bw.id = au.lease_owner WHERE au.id = json_extract(${t}.params, '$.task')) END AS audited`;
+/**
+ * An audit of the project's copy that the claimer's model cannot count as another (`t` the alias; #339, D36): built with that model,
+ * or one of the two not known — what selection.ts holds from the claimer while a registration with another model was alive in the last
+ * 24 hours. The claim reads them apart from the rest, so a head of them waiting for another model never hides the audits the claimer
+ * can take. Never NULL, so `NOT` of it keeps every other row; one binding (the claimer's model) when it has one.
+ */
+const sameModelAuditOf = (t: string, model: string | null): { sql: string; binds: unknown[] } => ({
+  sql: `(${t}.kind = 'audit' AND EXISTS (SELECT 1 FROM build_tasks au LEFT JOIN build_workers bw ON bw.id = au.lease_owner
+      WHERE au.id = json_extract(${t}.params, '$.task') AND ${projectCopySql("au")}${model ? ` AND COALESCE(${builtWithSql}, '') IN ('', ?)` : ""}))`,
+  binds: model ? [model] : [],
+});
 /** A candidate as selection reads it (`t` the alias). */
 const candidateCols = (t: string) => `${t}.id, ${t}.name, ${t}.arch, ${t}.kind, ${t}.trust, ${t}.owner, ${t}.priority, ${t}.created_at, ${t}.pinned_to, ${t}.reserved_at, json_extract(${t}.params, '$.needs_native') AS needs_native, ${ownSize(t)} AS asked, ${agentScope(`${t}.`)} AS model, CASE WHEN ${t}.kind IN (${RING_JOB_KINDS}) THEN json_extract(${t}.params, '$.arch') END AS job_arch, ${placementCols(t)}`;
 interface CandidateRow { id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; priority: number; created_at: string; pinned_to: string | null; reserved_at: string | null; needs_native: number | null; asked: number | null; model: number; job_arch: string | null; requesters: string | null; any_host: string | null; audited: string | null }
@@ -788,6 +803,8 @@ export const OWNER_HEADS_SQL = (scope: string) => `WITH RECURSIVE o(owner) AS (
 export const LANE_HEAD_SQL = (filters: string) => `SELECT ${candidateCols("c")} FROM build_tasks c WHERE c.status = 'queued' AND c.arch = ? AND c.kind NOT IN (${HOST_ANY_ARCH_KINDS}) AND ${filters} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`;
 /** The head of the arch-neutral kinds for a host (`filters` on alias c), whatever their arch. */
 export const NEUTRAL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols("c")} FROM build_tasks c WHERE c.status = 'queued' AND c.kind IN (${HOST_ANY_ARCH_KINDS}) AND ${filters} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`;
+/** The head of the audits a claimer's model cannot count as another (`filters` on alias c, from ` AND`; #339, D36): read apart, so they hide no other audit. */
+export const SAME_MODEL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols("c")} FROM build_tasks c WHERE c.status = 'queued' AND c.kind = 'audit'${filters} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`;
 
 /** The registrations alive (§8.3: claimed in the last 2 minutes; a legacy one, LEGACY_ALIVE_MS) with their host's capacity, as the fleet. */
 export const FLEET_SQL = `SELECT w.id, w.kind, w.arch, w.labels, w.kinds, w.agent, w.agent_status, w.drained_at, w.trust, w.owner, w.mode, w.version, w.last_seen, w.current_task,
@@ -850,7 +867,7 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
     below_minimum: reportedBelow(r.capacity), may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool).required,
     seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
     scope: host ? { trust: "host", owner: null, shared: false } : r.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: r.owner, shared: r.mode === "shared" },
-    busy: !host && r.current_task !== null, owner: r.owner, model: r.agent,
+    busy: !host && r.current_task !== null, owner: r.owner, model: r.agent, host_id: host ? r.host_id : null,
   };
 }
 
@@ -859,24 +876,26 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
  * #339): the registrations — a few dozen rows, as the fleet's — with their hosts by the primary key. Read at a claim only when a
  * publish-bound audit is among its candidates.
  */
-export const MODELS_SQL = `SELECT w.id, w.kind, w.kinds, w.trust, w.agent, w.agent_status, w.agent_error_since, w.drained_at, w.last_seen, h.id AS host_id, h.status AS host_status, h.owner_removed_at
+export const MODELS_SQL = `SELECT w.id, w.kind, w.kinds, w.trust, w.agent, w.agent_status, w.agent_error_since, w.drained_at, w.version, w.last_seen, h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.capacity
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL AND w.agent IS NOT NULL`;
-interface ModelRow { id: string; kind: string | null; kinds: string | null; trust: string; agent: string; agent_status: string | null; agent_error_since: string | null; drained_at: string | null; last_seen: string; host_id: string | null; host_status: string | null; owner_removed_at: string | null }
+interface ModelRow { id: string; kind: string | null; kinds: string | null; trust: string; agent: string; agent_status: string | null; agent_error_since: string | null; drained_at: string | null; version: string | null; last_seen: string; host_id: string | null; host_status: string | null; owner_removed_at: string | null; capacity: string | null }
 
 /**
- * The models a publish-bound audit weighs (D36): every registration that takes audits and may claim — a host active with its owner
- * listed, a legacy project registration — and is not drained (a drained host never holds an audit back), with the model it said and
- * when that model last answered: its last claim while its probe passes, the start of its failing spell while it fails — so a host
- * whose agent has not answered for a day holds nothing, however often it claims, and one that failed an hour ago still does. The
- * claimer with the one this claim says.
+ * The models a publish-bound audit weighs (D36): every registration that takes audits and may be handed one — a host active with its
+ * owner listed and not below the signed minimum (D44), a legacy project registration; none drained or behind the pool's release past
+ * the grace (426): those claim, so they would stay "alive", and are handed nothing, so an audit held for their model would wait for as
+ * long as they claim — with the model it said and when that model last answered: its last claim while its probe passes, the start of
+ * its failing spell while it fails — so a host whose agent has not answered for a day holds nothing, however often it claims, and one
+ * that failed an hour ago still does. The claimer with the one this claim says.
  */
 async function modelsAlive(env: Env, nowMs: number, me: { id: string; model: string | null; kinds: string[]; probeOk: boolean }): Promise<NonNullable<Fleet["models"]>> {
   const rows = (await env.DB.prepare(MODELS_SQL).bind(new Date(nowMs - MODEL_WINDOW_MS).toISOString()).all<ModelRow>()).results;
+  const pool = running(env);
   const out: NonNullable<Fleet["models"]> = [];
   for (const r of rows) {
-    if (r.id === me.id || r.drained_at) continue;
+    if (r.id === me.id || r.drained_at || updateState(r.version ?? undefined, pool).required) continue;
     const host = r.kind === "host" && r.host_id !== null;
-    if (host ? r.host_status !== "active" || r.owner_removed_at !== null : r.trust !== "project") continue;
+    if (host ? r.host_status !== "active" || r.owner_removed_at !== null || reportedBelow(r.capacity) : r.trust !== "project") continue;
     const kinds = jsonOr<string[] | null>(r.kinds, null) ?? (host ? HOST_KINDS : ALL_KINDS);
     const answered = r.agent_status === "ok" ? Date.parse(r.last_seen) : r.agent_status === "error" && r.agent_error_since ? Date.parse(r.agent_error_since) : NaN;
     if (kinds.includes("audit") && Number.isFinite(answered)) out.push({ id: r.id, model: r.agent, at: answered });
@@ -899,8 +918,8 @@ function candidateOf(r: CandidateRow, sizes: Map<string, Sizing>, nativeMs: Map<
 }
 
 /** What placement knows of a candidate's row (#339): the project's copy's requesters and its release (D35), an audit's build (D36). */
-function placementOfRow(r: Pick<CandidateRow, "requesters" | "any_host" | "audited">): Pick<Candidate, "publish_bound" | "requesters" | "any_host" | "built_by" | "built_with"> {
-  const audited = jsonOr<{ by?: unknown; with?: unknown; copy?: unknown } | null>(r.audited, null);
+function placementOfRow(r: Pick<CandidateRow, "requesters" | "any_host" | "audited">): Pick<Candidate, "publish_bound" | "requesters" | "any_host" | "built_by" | "built_with" | "built_on"> {
+  const audited = jsonOr<{ by?: unknown; with?: unknown; owner?: unknown; host?: unknown; copy?: unknown } | null>(r.audited, null);
   const text = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
   return {
     publish_bound: r.requesters !== null || audited?.copy === 1,
@@ -908,6 +927,7 @@ function placementOfRow(r: Pick<CandidateRow, "requesters" | "any_host" | "audit
     any_host: r.any_host,
     built_by: text(audited?.by),
     built_with: text(audited?.with),
+    built_on: audited ? { owner: text(audited.owner), host_id: text(audited.host) } : null,
   };
 }
 
@@ -916,10 +936,12 @@ export interface PlacementView extends Placement { requesters: string[]; release
 
 /**
  * Where each queued project's copy among `ids` may run (D35): the fleet
- * alive read once — its registrations' lanes, owners, kinds and probes,
- * never their leases (a busy host still runs it once its units free up) —
- * and each task as the claim reads it (candidateCols). Review reads it for
- * the rebuilds it lists, and the release to any host decides on it.
+ * alive read once — its registrations' lanes, owners, kinds, probes and
+ * capacity (one that could not hold the copy idle — its pool cap, its units,
+ * its disk — is none to wait for), never their leases (a busy host still
+ * runs it once its units free up) — and each task as the claim reads it
+ * (candidateCols). Review reads it for the rebuilds it lists, and the
+ * release to any host decides on it.
  */
 export async function placements(env: Env, ids: number[], at = Date.now()): Promise<Map<number, PlacementView>> {
   const out = new Map<number, PlacementView>();
@@ -931,15 +953,19 @@ export async function placements(env: Env, ids: number[], at = Date.now()): Prom
   const pool = running(env);
   const fleet: Fleet = { members: (fleetRows.results as FleetRow[]).map((r) => memberOf(r, pool)), leases: [] };
   const rules = selectionRules();
-  for (const r of rows.results as (CandidateRow & { any_host_at: string | null })[]) {
-    const c = candidateOf(r, new Map(), new Map());
+  const placed = rows.results as (CandidateRow & { any_host_at: string | null; page_size: number | null; page_disk_gb: number | null })[];
+  // The size and budget its package's page sets, as the claim reads them (PACKAGE_SIZES_SQL): a host too small for them is none to wait for.
+  const sizes = new Map(placed.filter((r) => r.page_size !== null || r.page_disk_gb !== null).map((r) => [r.name, { size: r.page_size, disk_gb: r.page_disk_gb }]));
+  for (const r of placed) {
+    const c = candidateOf(r, sizes, new Map());
     if (c.kind !== "build" || !c.publish_bound) continue;
     out.set(c.id, { ...placementOf(fleet, c, at, rules), requesters: c.requesters ?? [], released: c.any_host ? { by: c.any_host, at: r.any_host_at } : null });
   }
   return out;
 }
-/** The queued tasks Review asks the placement of, by their primary keys, as the claim reads them. */
-export const PLACEMENTS_SQL = `SELECT ${candidateCols("c")}, json_extract(c.params, '$.any_host.at') AS any_host_at FROM build_tasks c WHERE c.id IN (SELECT value FROM json_each(?)) AND +c.status = 'queued'`;
+/** The queued tasks Review asks the placement of, by their primary keys, as the claim reads them — with their package page's size and budget. */
+export const PLACEMENTS_SQL = `SELECT ${candidateCols("c")}, json_extract(c.params, '$.any_host.at') AS any_host_at, p.size AS page_size, p.disk_gb AS page_disk_gb
+  FROM build_tasks c LEFT JOIN factory_packages p ON p.name = c.name WHERE c.id IN (SELECT value FROM json_each(?)) AND +c.status = 'queued'`;
 
 /** What the claim knows of the claimer for selection: a host's capacity and lanes, or a legacy registration's one lane and scope. */
 interface Claimer {
@@ -1006,7 +1032,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     disk: cap?.disk_free_gb ?? null, kinds: k.kinds, probe_ok: k.probeOk, drained: false, below_minimum: host ? reportedBelow(hostRow?.capacity ?? null) : false, may_claim: true, behind: false, seen_at: nowMs,
     reserving: hostRow?.reserving_task != null && hostRow.reserving_since ? { task: hostRow.reserving_task, since: Date.parse(hostRow.reserving_since) } : null,
     scope: host ? { trust: "host", owner: null, shared: false } : k.legacy!.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: k.legacy!.owner, shared: k.legacy!.shared },
-    offer: host && k.hc!.offer !== null ? k.hc!.offer : undefined, owner: k.owner, model: k.model,
+    offer: host && k.hc!.offer !== null ? k.hc!.offer : undefined, owner: k.owner, model: k.model, host_id: host ? k.hostId : null,
   };
   // A host below the signed minimum keeps its bundle running and claims nothing (D44).
   if (me.below_minimum) return null;
@@ -1105,6 +1131,11 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   const archs = host ? [...new Set(lanes.map((l) => l.arch))] : [k.arch];
   const native = lanes.find((l) => l.mode === "native")?.arch ?? k.arch;
   const emulatedOnly = (a: string) => !lanes.some((l) => l.arch === a && l.mode === "native");
+  // The second opinion's model rule (D36, #339) in the reads: the audits of the project's copy this claimer's model cannot count as
+  // another are read apart from the head that holds the audits — selection holds them all from it while another model was alive in the
+  // last 24 hours, so a head of them (more than HEAD_LIMIT while that host is away) never hides an audit it can take.
+  const sameModel = k.kinds.includes("audit") ? sameModelAuditOf("c", k.model || null) : null;
+  const otherAudits = sameModel ? { sql: ` AND NOT ${sameModel.sql}`, binds: sameModel.binds } : { sql: "", binds: [] };
   const reads: D1PreparedStatement[] = [];
   for (const a of archs) {
     if (host) {
@@ -1113,8 +1144,8 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
       reads.push(env.DB.prepare(LANE_HEAD_SQL(`${scope.sql}${fits.sql}${emulatedOnly(a) ? notNeedsNative("c") : ""}`)).bind(a, ...scope.binds, ...fits.binds));
     } else {
       // A legacy registration's one lane: its arch, or a kind any arch runs.
-      reads.push(env.DB.prepare(`SELECT ${cols} FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope.sql}${fits.sql} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`)
-        .bind(a, ...scope.binds, ...fits.binds));
+      reads.push(env.DB.prepare(`SELECT ${cols} FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope.sql}${fits.sql}${otherAudits.sql} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`)
+        .bind(a, ...scope.binds, ...fits.binds, ...otherAudits.binds));
     }
     if (k.kinds.includes("build") && k.legacy?.trust !== "project") {
       reads.push(env.DB.prepare(OWNER_HEADS_SQL(`${scope2.sql}${fits2.sql}${host && emulatedOnly(a) ? notNeedsNative("c2") : ""}`)).bind(OWNERS_LIMIT, a, ...scope2.binds, ...fits2.binds, capped));
@@ -1122,7 +1153,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   }
   if (host) {
     // The arch-neutral kinds (an audit; pool jobs from P2's dispatcher on), whatever their arch.
-    reads.push(env.DB.prepare(NEUTRAL_HEAD_SQL(`${scope.sql}${fits.sql}`)).bind(...scope.binds, ...fits.binds));
+    reads.push(env.DB.prepare(NEUTRAL_HEAD_SQL(`${scope.sql}${fits.sql}${otherAudits.sql}`)).bind(...scope.binds, ...fits.binds, ...otherAudits.binds));
     // The first native task for this host, whatever its size: while one waits, its emulated lanes keep to their share (the cap).
     if (lanes.some((l) => l.mode === "emulated")) {
       reads.push(env.DB.prepare(`SELECT ${cols} FROM build_tasks c WHERE c.status = 'queued' AND c.arch = ? AND c.kind IN (${LANE_KINDS.map((x) => `'${x}'`).join(", ")}) AND ${scope.sql}
@@ -1130,6 +1161,11 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     }
     // The task this host reserves for, wherever it stands in the queue: the one it may take while it reserves.
     if (k.hostId) reads.push(env.DB.prepare(`SELECT ${cols} FROM build_tasks c WHERE c.id = (SELECT reserving_task FROM hosts WHERE id = ?) AND c.status = 'queued' AND ${scope.sql}`).bind(k.hostId, ...scope.binds));
+  }
+  // The audits of the project's copy read apart (above): their own head, as bounded — taken when no other model was alive in the day.
+  if (sameModel) {
+    const lane = host ? "" : ` AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS}))`;
+    reads.push(env.DB.prepare(SAME_MODEL_HEAD_SQL(`${lane} AND ${scope.sql}${fits.sql} AND ${sameModel.sql}`)).bind(...(host ? [] : [k.arch]), ...scope.binds, ...fits.binds, ...sameModel.binds));
   }
   // The oldest builds the reservation weighs (a host's claim decides it): those some host alive could run, larger than one build.
   const claimers = members.filter((m) => !m.legacy && m.seen_at > nowMs - ALIVE_MS && m.may_claim && !m.below_minimum && !m.drained && !m.behind);
@@ -1726,11 +1762,13 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   const exhausted = !needsNative && !lost && (b.final === true || task.attempts >= task.max_attempts);
   const review = task.kind === "build" && task.params ? (JSON.parse(task.params) as { review?: number }).review : undefined;
   // A requeued task goes behind its peers (priority + 10) so one broken
-  // PKGBUILD does not hold the queue. One sent back for a native worker
-  // waits for no other: not the worker it was pinned to, not the owner's
-  // fourteen days of a bump — the one that had it is the one that cannot.
+  // PKGBUILD does not hold the queue; an audit's independence goes with the
+  // lease that ran it (#339: its next lease writes its own). One sent back
+  // for a native worker waits for no other: not the worker it was pinned to,
+  // not the owner's fourteen days of a bump — the one that had it is the one
+  // that cannot.
   const failed = await env.DB.prepare(
-    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10${needsNative ? ", attempts = attempts - 1, pinned_to = NULL, shared_after = NULL, params = json_set(COALESCE(params, '{}'), '$.needs_native', 1)" : ""}${lost ? ", attempts = attempts - 1, host_losses = host_losses + 1" : ""} WHERE id = ? AND ${LEASE_HELD}`,
+    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10${exhausted ? "" : ", independent = NULL"}${needsNative ? ", attempts = attempts - 1, pinned_to = NULL, shared_after = NULL, params = json_set(COALESCE(params, '{}'), '$.needs_native', 1)" : ""}${lost ? ", attempts = attempts - 1, host_losses = host_losses + 1" : ""} WHERE id = ? AND ${LEASE_HELD}`,
   )
     .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id, who, task.lease_gen)
     .run();

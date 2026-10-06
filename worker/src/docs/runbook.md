@@ -1245,32 +1245,50 @@ so a size-4 build waits for memory rather than run smaller.
   A review rebuild of a package a maintainer asked for (the rebuild's owner,
   and the owner of the contributor's build it answers) is handed to none of
   that maintainer's hosts while another maintainer's host has a lane
-  allowed for it — native, or emulated unless it is `needs_native`; it
-  waits for that host however busy it is, and their other work goes on.
-  When only the requester's hosts have one (a single maintainer's hosts, or
-  a `needs_native` rebuild with the other host's lane emulated), Review's
+  allowed for it — native, or emulated unless it is `needs_native` — and
+  could hold it idle: its units within the pool cap for the rebuild's size
+  (the size its page, the sizing file or a Retry asks, clamped only to the
+  largest host alive), an agent slot, its disk budget; it waits for that
+  host however busy it is, and their other work goes on. When only the
+  requester's hosts have one (a single maintainer's hosts, a `needs_native`
+  rebuild with the other host's lane emulated, or a size only the
+  requester's host holds — the rebuild is never run smaller there), Review's
   rebuild pane says at once *waits for a host — only @m1's can build it*,
   with **Release to any host** for another maintainer: confirmed with their
   passkey, written on the task (`params.any_host`), the journal (a `review`
   line, *released to any host by …*) and the record; any host takes it at
   its next claim, the requester's included. Bringing another maintainer's
-  host with that lane online (or resuming a drained one) builds it without
-  a release. A claim never pins a rebuild to the requester's host: naming
-  one is refused (`requester_host`), and another architecture's same-agent
-  pick goes unpinned instead.
+  host with that lane online (or resuming a drained one, or raising a pool
+  cap of 0 — or one below the rebuild's units — on its page) builds it
+  without a release. A claim never pins a rebuild to the requester's host:
+  naming one is refused (`requester_host`), and another architecture's
+  same-agent pick goes to another maintainer's worker with that agent, or
+  unpinned when there is none.
 - **The second opinion (#339, D36).** An audit runs in a fresh container
-  with its own agent sidecar. It leaves the host that built what it audits
-  to another that can take it now, for 3 minutes. An audit of the project's
+  with its own agent sidecar. It leaves the machine that built what it
+  audits to another that can take it now, for 3 minutes. The pool tells
+  machines apart by owner and host: two registrations are on different
+  machines only when their owners differ or they are two hosts'
+  registrations of different hosts. A maintainer's legacy role containers
+  (the Studio's `community-*` and `review-*`, until #343), and a host's
+  registration beside its own legacy set during the canary, are one
+  machine, so an audit one takes of another's build says `none`, never
+  `host`. An audit of the project's
   copy takes another model (the claim's `agent`: provider and model) than
   the one that built it whenever a registration that takes audits with
   another model answered in the last 24 hours — however long that host is
   busy, and for a day after it went quiet or its agent began failing (a host
   whose agent has failed for a day holds nothing, however often it claims);
-  otherwise it runs on the same model. Each audit says how independent it was beside its verdict on
-  Review (`independent: model`, `host` or `none`). Audits held for a host
-  that is gone for good: retire it, or drain its registration, and the next
-  claim hands them to the model alive. What counts, and how the last week
-  went:
+  otherwise it runs on the same model. A host that is handed nothing —
+  drained, below the signed minimum, or behind the pool's release past the
+  grace — holds none, however often it claims. A claim reads those audits
+  apart from the rest, so a pile of them waiting for another model never
+  hides a contributor build's audit the claimer can take. Each audit says
+  how independent it was beside its verdict on Review (`independent:
+  model`, `host` or `none`; nothing while it is queued, again too). Audits
+  held for a host that is gone for good: retire it, or drain its
+  registration, and the next claim hands them to the model alive. What
+  counts, and how the last week went:
 
   ```bash
   npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, agent, agent_status, agent_error_since, last_seen, drained_at FROM build_workers WHERE last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') AND revoked_at IS NULL AND agent IS NOT NULL"

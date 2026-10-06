@@ -217,6 +217,25 @@ slower and shares the host's units; on a 16K-page kernel the lane stays on,
 and a build whose toolchain cannot start under qemu goes back to the queue
 for a native host without spending its attempt.
 
+**Where the project's copies and their audits go (#339).** The project's
+copy of a package you asked for — its review rebuild, the one that is
+signed and published — is never built on your hosts while another
+maintainer's host has a lane for it and room to hold it at its size: it
+waits for that host, however busy. When only your hosts can build it, it
+waits, and Review offers another maintainer **Release to any host**, which
+they confirm with their passkey; then your host may take it. A host whose
+pool cap is 0, or too small for the copy's size, is none to wait for.
+Every audit prefers a machine other than the one that built what it
+audits, and an audit of the project's copy takes a model other than the
+one that built it whenever a host with another one answered in the last
+24 hours. So the model your host's agent runs matters: the provider is the
+first key `agent.env` holds, or `FACTORY_PROVIDER`, and `FACTORY_MODEL`
+overrides its model. If every host runs one model, those audits record
+`independent: none` on Review. A different provider or model on one host
+(another key, or `FACTORY_PROVIDER` / `FACTORY_MODEL` in that host's
+`agent.env`) makes them `independent: model`. The runbook's *How the pool
+hands a host work* has the rules.
+
 The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
 isolation level, the release it applied, the pool cap, the large task it
 reserves for when it does, and its leases with their lane and units. Every later call of

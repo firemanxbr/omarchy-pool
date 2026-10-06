@@ -7,19 +7,24 @@
  * - the requester-host rule: a review rebuild of m1's package is handed to no
  *   host of m1's while m2's host has a lane allowed for it — m2's, however
  *   busy, an emulated lane included; when only m1's hosts have one (a single
- *   maintainer's hosts, or `needs_native` with m2's lane emulated) it is held,
+ *   maintainer's hosts, `needs_native` with m2's lane emulated, m2's host too
+ *   small for the size its page asks or capped at 0) it is held,
  *   Review says so at once with Release to any host for another maintainer
  *   (the server's reason for anyone else), and after m2 releases it with
  *   their passkey — on the task, the journal and the record — m1's host takes
  *   it at its next claim; a claim never pins a rebuild to its requester's
- *   host;
+ *   host, and another architecture's same-agent pick is another
+ *   maintainer's worker whichever claimed last;
  * - the second opinion: with one provider an audit goes to a host other than
  *   its builder's and a publish-bound one records `independent: none`, a
- *   contributor build's `host`; with two providers a publish-bound audit is
+ *   contributor build's `host`; the Studio's legacy role containers are one
+ *   machine (`none`); with two providers a publish-bound audit is
  *   handed only to the other model, however long, and records `model`; a host
  *   with another model last seen 23 hours ago still holds it, 25 hours ago no
- *   longer, and one whose agent has failed for a day holds nothing however
- *   often it claims;
+ *   longer, and one whose agent has failed for a day, or that is below the
+ *   minimum or behind the release, holds nothing however often it claims;
+ *   more than HEAD_LIMIT of them waiting hide no other audit; an audit back
+ *   in the queue says no independence;
  * - Review's view (the page's own script): the release line and its button
  *   for each viewer, the audit's independence beside its verdict on both
  *   panes;
@@ -33,8 +38,9 @@ import worker from "../src/index";
 import { applyGovernance } from "../src/governance";
 import { sha256Hex } from "../src/routes/contributors";
 import { unitsOf } from "../src/hosts";
-import { LANE_HEAD_SQL, MODELS_SQL, NEUTRAL_HEAD_SQL, PLACEMENTS_SQL } from "../src/routes/factory";
-import { ANY_HOST_SQL } from "../src/routes/review";
+import { HEAD_LIMIT, LANE_HEAD_SQL, LOST_LEASE_SQL, MODELS_SQL, NEUTRAL_HEAD_SQL, PLACEMENTS_SQL, SAME_MODEL_HEAD_SQL } from "../src/routes/factory";
+import { REQUEUE_SQL } from "../src/lease";
+import { ANY_HOST_SQL, SAME_AGENT_SQL } from "../src/routes/review";
 import { SUBJECT } from "../src/routes/passkeys";
 import { settleTargets } from "../src/targets";
 import { toB64url } from "../src/webauthn";
@@ -70,6 +76,13 @@ const GPT = "openai/gpt-b";
 
 const boxes = new Map<string, { box: Box; model: string }>();
 let hostSeq = 0;
+/** A legacy registration of the Studio's compose set (until #343): its owner's, one role, its agent's model. */
+async function seedLegacy(id: string, owner: string, trust: "project" | "community", kinds: string[]): Promise<void> {
+  await env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, kinds, agent, agent_status) VALUES (?, 'aarch64', ?, ?, 'shared', ?, ?, ?, ?, ?, 'ok')")
+    .bind(id, owner, await sha256Hex(`omw_${id}`), trust, trust === "project" ? owner : null, new Date().toISOString(), JSON.stringify(kinds), CLAUDE).run();
+}
+/** A legacy registration's claim, as the worker image sends it: its arch, its kinds, its agent. */
+const legacyClaim = (id: string, kinds: string[]) => call("POST", "/factory/claim", { token: `omw_${id}`, body: { arch: "aarch64", kinds, agent: CLAUDE, agent_status: "ok" } });
 /** A maintainer's host, active, with its registration — its owner's, the model its claims say — seen `ago` minutes ago. */
 async function seedHost(id: string, owner: string, box: Box, model = CLAUDE, ago = 0): Promise<void> {
   const hostId = `h_p${String(++hostSeq).padStart(9, "0")}`;
@@ -209,6 +222,25 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
     expect(c.json.task).toMatchObject({ id: copy, lease_owner: "m1-anon" });
   });
 
+  it("another maintainer's host that could never hold the copy — too small for the size its page asks, or its pool cap 0 — is none to wait for: held at once, the release offered; released, the requester's host builds it at that size", async () => {
+    await seedHost("m1-big", "m1", STUDIO);
+    await seedHost("m2-small", "m2", ARM);
+    const { name, contributor, copy } = await seedCopy("m1");
+    // Size 4 on its page: m1's Studio holds it (11 units), m2's 7-unit host never does.
+    await env.DB.prepare("UPDATE factory_packages SET size = 4 WHERE name = ?").bind(name).run();
+    expect((await claim("m2-small")).status).toBe(204);
+    expect((await claim("m1-big")).status).toBe(204);
+    expect((await reviewRow(contributor, "m3")).project_build.placement).toMatchObject({ held: true, others: [], mine: ["m1-big"], any_host: { ok: true, why: null } });
+    const r = await call("POST", `/factory/tasks/${copy}/any-host`, { session: "m3", body: { assertion: await assertion("m3", `any-host:${copy}`) } });
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect((await claim("m1-big")).json.task).toMatchObject({ id: copy, lease_owner: "m1-big", size: 4 });
+    // A pool cap of 0 on m2's host ("it claims nothing"): a size-1 copy is held as well.
+    const small = await seedCopy("m1");
+    expect((await reviewRow(small.contributor, "m3")).project_build.placement).toMatchObject({ held: false, others: ["m2-small"] });
+    await env.DB.prepare("UPDATE hosts SET pool_cap_units = 0 WHERE worker_id = 'm2-small'").run();
+    expect((await reviewRow(small.contributor, "m3")).project_build.placement).toMatchObject({ held: true, others: [], mine: ["m1-big"], any_host: { ok: true } });
+  });
+
   it("another maintainer's emulated lane counts, at once — no wait for the requester's native host; with needs_native only the requester's host has a lane, and the rebuild is held", async () => {
     await seedHost("m1-vps86", "m1", VPS86);
     await seedHost("m2-studio", "m2", STUDIO);
@@ -291,6 +323,12 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
     expect(claimed.json).toMatchObject({ pinned_to: "m3-pin", agent: CLAUDE });
     const pins = (await env.DB.prepare("SELECT arch, pinned_to FROM build_tasks WHERE id IN (SELECT value FROM json_each(?)) ORDER BY arch").bind(JSON.stringify(claimed.json.tasks)).all<{ arch: string; pinned_to: string | null }>()).results;
     expect(pins).toEqual([{ arch: "aarch64", pinned_to: "m3-pin" }, { arch: "x86_64", pinned_to: null }]);
+    // Another maintainer's x86_64 host with the same agent, seen before m1's: the pick is it, whichever claimed last — the statement
+    // leaves the requester's workers out rather than drop the one row it reads.
+    await seedHost("m3-pin86", "m3", VPS86, CLAUDE, 1);
+    const alive = new Date(Date.now() - 10 * MIN).toISOString();
+    expect(await env.DB.prepare(SAME_AGENT_SQL).bind("x86_64", CLAUDE, alive, JSON.stringify(["m1"])).first()).toEqual({ id: "m3-pin86" });
+    expect(await env.DB.prepare(SAME_AGENT_SQL).bind("x86_64", CLAUDE, alive, "[]").first()).toEqual({ id: "m1-pin86" });
   });
 });
 
@@ -332,6 +370,53 @@ describe("the second opinion (D36): elsewhere, with another model when one exist
   });
 });
 
+describe("the second opinion's machine and the audits' head (D36)", () => {
+  it("the Studio's legacy set is one machine: an audit of what community-* built, taken by review-* beside it, says none; with m2's host alive it goes there first, and says host", async () => {
+    await seedLegacy("st-community", "m1", "community", ["build"]);
+    await seedLegacy("st-review", "m1", "project", ["audit"]);
+    const one = await seedAudit("st-community", { publish: false });
+    const c = await legacyClaim("st-review", ["audit"]);
+    expect(c.json.task).toMatchObject({ id: one.audit, lease_owner: "st-review", independent: "none" });
+    // m2's host alive and idle: review-* leaves the next audit to it, another machine.
+    await seedHost("m2-l", "m2", ARM);
+    const two = await seedAudit("st-community", { publish: false });
+    expect((await legacyClaim("st-review", ["audit"])).status).toBe(204);
+    expect((await claim("m2-l")).json.task).toMatchObject({ id: two.audit, lease_owner: "m2-l", independent: "host" });
+  });
+
+  it("more than HEAD_LIMIT audits of the project's copy waiting for another model hide no audit the claimer's model can take", async () => {
+    await seedHost("m1-h", "m1", ARM, CLAUDE);
+    // m2's host runs another model and was seen an hour ago: inside the day, so every audit of the project's copy built with Claude waits for it.
+    await seedHost("m2-away", "m2", ARM, GPT, 60);
+    const name = `audited${++seq}`;
+    const built = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, params, lease_owner, staged_prefix, finished_at)
+       VALUES (?, 'aarch64', '1.0-1', 'review:1', 'built', 30, 'staged', 0, 'project', 'alice', 'build', ?, 'm1-h', ?, ?) RETURNING id`,
+    ).bind(name, JSON.stringify({ review: 1, built_with: CLAUDE }), `staging/x/${name}/0/`, new Date().toISOString()).first<{ id: number }>())!.id;
+    const audit = env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, params) VALUES (?, 'aarch64', '1.0-1', ?, 'staged', 40, 'queued', 0, 'project', NULL, 'audit', ?)`);
+    await env.DB.batch(Array.from({ length: HEAD_LIMIT + 5 }, () => audit.bind(name, `staging:${built}`, JSON.stringify({ task: built, name, owner: "alice", arch: "aarch64" }))));
+    const theirs = await seedAudit("m1-h", { publish: false });
+    const c = await claim("m1-h");
+    expect(c.json.task).toMatchObject({ id: theirs.audit, independent: "none" });
+  });
+
+  it("an audit back in the queue says no independence: the requeue, a lost lease and a failure that is not the last clear it with the lease", async () => {
+    await seedHost("m1-q", "m1", ARM);
+    await seedHost("m2-q", "m2", ARM);
+    const at = () => new Date().toISOString();
+    for (const back of ["requeue", "lost", "fail"] as const) {
+      const { audit } = await seedAudit("m1-q", { publish: false });
+      const c = await claim("m2-q");
+      expect(c.json.task).toMatchObject({ id: audit, independent: "host" });
+      if (back === "requeue") await env.DB.prepare(REQUEUE_SQL).bind(at(), "the lease expired", audit, "m2-q", null, null).run();
+      else if (back === "lost") await env.DB.prepare(LOST_LEASE_SQL).bind("lost on its host", audit, "m2-q", c.json.task.lease_gen, at()).run();
+      else expect((await call("POST", `/factory/tasks/${audit}/fail`, { token: c.json.token, body: { error: "the agent did not answer", final: false } })).status).toBe(200);
+      expect(await taskOf(audit), back).toMatchObject({ status: "queued", independent: null });
+      await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(audit).run();
+    }
+  });
+});
+
 describe("the models a publish-bound audit weighs (D36)", () => {
   it("a host with another model counts while its agent answered in the last 24 hours: one failing for an hour still holds the audit, one failing for a day — however often it claims — no longer", async () => {
     await seedHost("m1-w", "m1", ARM, CLAUDE);
@@ -344,6 +429,27 @@ describe("the models a publish-bound audit weighs (D36)", () => {
     await env.DB.prepare("UPDATE build_workers SET agent_error_since = ?, last_seen = ? WHERE id = 'm3-g'").bind(new Date(Date.now() - 25 * HOUR).toISOString(), new Date().toISOString()).run();
     const c = await claim("m1-w");
     expect(c.json.task).toMatchObject({ id: copy.audit, independent: "none" });
+  });
+
+  it("a host with another model that is handed nothing — below the signed minimum, or behind the pool's release past the grace — holds no audit, however often it claims", async () => {
+    await seedHost("m1-v", "m1", ARM, CLAUDE);
+    await seedHost("m3-v", "m3", ARM, GPT);
+    const below = await seedAudit("m2-x", { publish: true, builtWith: CLAUDE });
+    expect((await claim("m1-v")).status).toBe(204);
+    await env.DB.prepare("UPDATE hosts SET capacity = json_set(capacity, '$.below_minimum', 'memory: 6 GB, below the 8 GB a host needs') WHERE worker_id = 'm3-v'").run();
+    expect((await claim("m1-v")).json.task).toMatchObject({ id: below.audit, independent: "none" });
+    await env.DB.prepare("UPDATE hosts SET capacity = json_set(capacity, '$.below_minimum', json('null')) WHERE worker_id = 'm3-v'").run();
+    // The pool at v1.0.2 for an hour; m3's host still on v1.0.0, two releases behind: answered 426, handed nothing.
+    const was = { version: env.POOL_VERSION, deployed: env.POOL_DEPLOYED_AT };
+    Object.assign(env, { POOL_VERSION: "v1.0.2", POOL_DEPLOYED_AT: new Date(Date.now() - HOUR).toISOString() });
+    try {
+      const behind = await seedAudit("m2-x", { publish: true, builtWith: CLAUDE });
+      expect((await claim("m1-v")).status).toBe(204);
+      await env.DB.prepare("UPDATE build_workers SET version = 'v1.0.0' WHERE id = 'm3-v'").run();
+      expect((await claim("m1-v")).json.task).toMatchObject({ id: behind.audit, independent: "none" });
+    } finally {
+      Object.assign(env, { POOL_VERSION: was.version, POOL_DEPLOYED_AT: was.deployed });
+    }
   });
 });
 
@@ -395,8 +501,9 @@ describe("Review's view (the page's own script)", () => {
     expect(d.nodes["#rv-y-evid"].innerHTML).toContain('<span>audit <span class="pill ok">ok</span> <span class="muted" title="reads well">report</span> <span class="pill ok" title="another model judged it than the one that built it">independent: model</span></span>');
     expect(d.independentPill({ independent: "host" })).toBe(' <span class="pill warn" title="the same model judged it, on another host than the one that built it">independent: host</span>');
     expect(d.independentPill({ independent: "none" })).toMatch(/^ <span class="pill warn" title="the model that built it judged it: the project's copy takes another model whenever a host with one was alive in the last 24 hours[^"]*">independent: none<\/span>$/);
-    // An audit not leased yet, or leased before #339, says nothing of it.
+    // An audit not leased yet, or leased before #339, says nothing of it — nor one back in the queue, whatever its lost lease said.
     expect(d.independentPill({ independent: null })).toBe("");
+    expect(d.independentPill({ status: "queued", independent: "model" })).toBe("");
     expect(d.independentPill(null)).toBe("");
   });
 });
@@ -413,6 +520,7 @@ describe("the passkey's act and what the planner reads", () => {
     const cases: [string, string, unknown[], RegExp][] = [
       ["a lane's head, with what placement reads", LANE_HEAD_SQL(scope("c")), ["aarch64", '["build"]', "w"], /SEARCH c USING INDEX idx_build_tasks_queue \(status=\? AND arch=\?\)/],
       ["the arch-neutral head, with what placement reads", NEUTRAL_HEAD_SQL(scope("c")), ['["audit"]', "w"], /SEARCH c USING INDEX idx_build_tasks_(queue|kind) /],
+      ["the audits of the project's copy read apart, with what placement reads", SAME_MODEL_HEAD_SQL(` AND ${scope("c")}`), ['["audit"]', "w"], /SEARCH c USING INDEX idx_build_tasks_(queue|kind) /],
       ["the queued copies Review asks about", PLACEMENTS_SQL, ["[1,2]"], /SEARCH c USING INTEGER PRIMARY KEY/],
       ["the release", ANY_HOST_SQL, ['{"by":"m2"}', 1], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
     ];

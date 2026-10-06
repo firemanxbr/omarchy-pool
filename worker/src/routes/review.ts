@@ -821,8 +821,12 @@ export async function verdictOn(c: Contributor, id: number, word: "approve" | "c
  * same moment is refused with whose it is. Claiming is deciding on the
  * package, so it is signed on the record and a journal line like the rest.
  */
-/** Another architecture's rebuild goes to a live project worker of it with the same agent, an idle one first — never a drained one (#277): it would wait until it is resumed. */
-export const SAME_AGENT_SQL = "SELECT id FROM build_workers WHERE arch = ? AND trust = 'project' AND revoked_at IS NULL AND drained_at IS NULL AND agent = ? AND agent_status = 'ok' AND last_seen > ? AND (kinds IS NULL OR EXISTS (SELECT 1 FROM json_each(kinds) WHERE value = 'build')) ORDER BY current_task IS NOT NULL, last_seen DESC LIMIT 1";
+/**
+ * Another architecture's rebuild goes to a live project worker of it with the same agent, an idle one first — never a drained one
+ * (#277): it would wait until it is resumed; nor one of the package's requesters (#339, D35; the last binding, their logins): it would
+ * wait for a release.
+ */
+export const SAME_AGENT_SQL = "SELECT id FROM build_workers WHERE arch = ? AND trust = 'project' AND revoked_at IS NULL AND drained_at IS NULL AND agent = ? AND agent_status = 'ok' AND last_seen > ? AND (kinds IS NULL OR EXISTS (SELECT 1 FROM json_each(kinds) WHERE value = 'build')) AND (owner IS NULL OR owner NOT IN (SELECT value FROM json_each(?))) ORDER BY current_task IS NOT NULL, last_seen DESC LIMIT 1";
 
 export async function handleProjectBuild(c: Contributor, id: number, request: Request, env: Env, through?: Through): Promise<Response> {
   const b = (await request.json().catch(() => ({}))) as { note?: unknown; worker?: unknown };
@@ -858,12 +862,10 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   // The same agent on the other architectures: a live project worker of that architecture that builds, whose agent answered — an idle one first. build_workers is the project's and the contributors' machines, a few dozen rows.
   const alive = new Date(Date.now() - WORKER_ALIVE_MINUTES * 60000).toISOString();
   // Never a worker of the package's requester (#339, D35): the project's copy is not built on its requester's host, so pinned to one it
-  // would wait for a release — the rebuild of that architecture goes unpinned instead, to any other maintainer's host that runs it.
-  const sameAgent = async (arch: string): Promise<string | null> => {
-    const id = agent ? ((await env.DB.prepare(SAME_AGENT_SQL).bind(arch, agent, alive).first<{ id: string }>())?.id ?? null) : null;
-    const whose = id ? (await env.DB.prepare("SELECT owner FROM build_workers WHERE id = ?").bind(id).first<{ owner: string | null }>())?.owner ?? null : null;
-    return id && !(whose && f.requesters.includes(whose)) ? id : null;
-  };
+  // would wait for a release. The statement leaves them out, so another maintainer's live worker with the same agent is found whichever
+  // claimed last; with none, the rebuild of that architecture goes unpinned, to any other maintainer's host that runs it.
+  const sameAgent = async (arch: string): Promise<string | null> =>
+    agent ? ((await env.DB.prepare(SAME_AGENT_SQL).bind(arch, agent, alive, JSON.stringify(f.requesters)).first<{ id: string }>())?.id ?? null) : null;
   const queued: { task: number; arch: string; from: number; pinned_to: string | null; agent: string | null }[] = [];
   for (const s of from) {
     const pin = s.id === id ? pinned : await sameAgent(s.arch);

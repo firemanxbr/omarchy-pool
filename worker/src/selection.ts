@@ -50,9 +50,10 @@
  *   requester's hosts have a lane allowed for it: `placementOf`); a
  *   publish-bound audit takes a model other than the one that built what it
  *   audits while a registration with another model was alive in the last 24
- *   hours; and an audit leaves the registration that built what it audits
- *   to another that can take it now, for ELSEWHERE_MS. Each audit's lease
- *   records how independent it is (`independenceOf`).
+ *   hours; and an audit leaves the machine that built what it audits — the
+ *   registration that built it, or one the pool cannot tell apart from it
+ *   (`apart`) — to another that can take it now, for ELSEWHERE_MS. Each
+ *   audit's lease records how independent it is (`independenceOf`).
  *
  * Order: priority, then — community builds only — how many builds their
  * owner holds leased across the fleet (fewest first: round-robin by owner),
@@ -128,6 +129,8 @@ export interface Member {
   owner?: string | null;
   /** The model its claims say it runs, "<provider>/<model>" (the claim's `agent`), for the second opinion (D36). */
   model?: string | null;
+  /** A host's registration: its host (hosts.id), the machine it runs on (D36, `apart`); none for a legacy one. */
+  host_id?: string | null;
 }
 
 export interface Candidate {
@@ -165,7 +168,12 @@ export interface Candidate {
   /** An audit's: the registration that built what it audits, and the model that built it (its `built_with`, else that registration's). */
   built_by?: string | null;
   built_with?: string | null;
+  /** An audit's: the machine that built what it audits, as far as the pool tells machines apart — that registration's owner, and its host when it is a host's (`apart`, D36). */
+  built_on?: Machine | null;
 }
+
+/** A registration's machine, as far as the pool tells machines apart (D36): whose registration it is, and its host when it is a host's. */
+export interface Machine { owner?: string | null; host_id?: string | null }
 
 /** The signed constants (hosts.ts, factory/bundle/manifest.toml) and the settings selection runs with. */
 export interface Rules {
@@ -424,13 +432,21 @@ export function requesterHost(m: Pick<Member, "owner">, c: Pick<Candidate, "kind
  * Whether a registration has a lane allowed for a task (D35's "can run"):
  * alive and claiming (not drained, behind or below the minimum), taking it —
  * its kinds, the pin, the probe for model work, its scope — on a lane of its
- * arch, native or emulated, with `needs_native` applied. Its room is not
+ * arch, native or emulated, with `needs_native` applied, and able to hold it
+ * once it holds nothing: the task's units within its count (its pool cap
+ * applied; the reserved job unit kept), an agent slot for model work, and a
+ * build's disk budget within its free disk less the floor — at the size the
+ * task gets in the fleet alive (`largest`, D31), the maintainer's size kept.
+ * A host whose cap is 0 or below the task, or too small for it, never takes
+ * it: as a drained one, it is none to wait for. What it holds now is not
  * asked: a busy host runs it once its units free up.
  */
-export function mayRun(m: Member, c: Candidate, now: number, r: Rules): boolean {
+export function mayRun(m: Member, c: Candidate, now: number, r: Rules, largest: number): boolean {
   if (!counts(m, now) || m.drained || m.behind || !takes(m, c)) return false;
   const lane = laneFor(m, c, r);
-  return !!lane && !(lane.byLane && lane.mode === "emulated" && c.needs_native);
+  if (!lane || (lane.byLane && lane.mode === "emulated" && c.needs_native)) return false;
+  const size = sizeOf(c, largest, r)?.size ?? null;
+  return !noRoom({ ...m, offer: undefined }, [], c, unitsOf(c.kind, size, r), diskOf(c, size, r), r);
 }
 
 /** Where the project's copy of a package may run (D35): who may run it, and whether it waits for another maintainer's release. */
@@ -455,8 +471,9 @@ export interface Placement {
 export function placementOf(fleet: Fleet, c: Candidate, now: number, r: Rules): Placement {
   const others: string[] = [], mine: string[] = [];
   if (projectCopy(c)) {
+    const largest = largestSize(fleet, now, r);
     for (const m of fleet.members) {
-      if (m.owner == null || !mayRun(m, c, now, r)) continue;
+      if (m.owner == null || !mayRun(m, c, now, r, largest)) continue;
       ((c.requesters ?? []).includes(m.owner) ? mine : others).push(m.id);
     }
   }
@@ -485,16 +502,33 @@ export function needsOtherModel(fleet: Fleet, c: Candidate, now: number): boolea
 const anotherModel = (m: Pick<Member, "model">, c: Pick<Candidate, "built_with">): boolean => !!m.model && !!c.built_with && m.model !== c.built_with;
 
 /**
- * Whether a registration other than `except` and other than the one that
- * built what an audit audits could take it now (D36: the second opinion
- * prefers another host): alive and claiming, taking it, with the model the
- * rule asks for, not reserving for another task, its units and an agent slot
- * free (a legacy one: holding nothing).
+ * Whether two registrations are certainly on different machines (D36):
+ * different owners, or the registrations of two different hosts. Anything
+ * else may be one machine: the legacy role containers of one maintainer —
+ * the Studio's `community-*` builds a contributor's package and its
+ * `review-*` audits it, until #343 — or a host's registration beside its own
+ * legacy set during the canary (§21.1), or an owner the pool does not know.
+ */
+export function apart(a: Machine, b: Machine): boolean {
+  if (a.owner != null && b.owner != null && a.owner !== b.owner) return true;
+  return a.host_id != null && b.host_id != null && a.host_id !== b.host_id;
+}
+
+/** Whether a registration may be on the machine that built what an audit audits: the registration that built it, or one the pool cannot tell apart from it. */
+const besideBuilder = (m: Pick<Member, "id" | "owner" | "host_id">, c: Pick<Candidate, "built_by" | "built_on">): boolean =>
+  c.built_by != null && (m.id === c.built_by || !apart(m, c.built_on ?? {}));
+
+/**
+ * Whether a registration other than `except`, on another machine than the
+ * one that built what an audit audits (`apart`), could take it now (D36:
+ * the second opinion prefers another host): alive and claiming, taking it,
+ * with the model the rule asks for, not reserving for another task, its
+ * units and an agent slot free (a legacy one: holding nothing).
  */
 export function auditElsewhere(fleet: Fleet, c: Candidate, now: number, r: Rules, except: string): boolean {
   const model = needsOtherModel(fleet, c, now);
   for (const x of fleet.members) {
-    if (x.id === except || x.id === c.built_by || !counts(x, now) || x.drained || x.behind) continue;
+    if (x.id === except || besideBuilder(x, c) || !counts(x, now) || x.drained || x.behind) continue;
     if (!takes(x, c) || !laneFor(x, c, r) || (model && !anotherModel(x, c))) continue;
     const mark = reservingNow(x, now);
     if (mark && mark.task !== c.id) continue;
@@ -508,17 +542,19 @@ export function auditElsewhere(fleet: Fleet, c: Candidate, now: number, r: Rules
 /**
  * How independent an audit leased to `m` is of what it audits (D36), as
  * its lease records it: `model` — another model judges the build; `host` —
- * the same model (or one not known) on another registration than the one
- * that built it; `none` — neither. A publish-bound audit is independent by
+ * the same model (or one not known) on a machine certainly not the one that
+ * built it (`apart`: another owner's, or another host's registration — never
+ * a legacy role container beside the builder's, which says `none`); `none` —
+ * neither. A publish-bound audit is independent by
  * its model or not at all: the project's copy is the recipe a model wrote,
  * and the same model on another host is no second opinion of it — so the
  * share of publish-bound audits that say `none` is what asks one host to
  * run another model (#324). Null for every other kind.
  */
-export function independenceOf(m: Pick<Member, "id" | "model">, c: Pick<Candidate, "kind" | "publish_bound" | "built_by" | "built_with">): Independence | null {
+export function independenceOf(m: Pick<Member, "id" | "model" | "owner" | "host_id">, c: Pick<Candidate, "kind" | "publish_bound" | "built_by" | "built_with" | "built_on">): Independence | null {
   if (c.kind !== "audit") return null;
   if (anotherModel(m, c)) return "model";
-  if (!c.publish_bound && c.built_by != null && c.built_by !== m.id) return "host";
+  if (!c.publish_bound && c.built_by != null && !besideBuilder(m, c)) return "host";
   return "none";
 }
 
@@ -573,9 +609,10 @@ export function select(H: Member, fleet: Fleet, candidates: Candidate[], now: nu
     if (requesterHost(H, c)) continue;
     if (c.kind === "audit") {
       // The second opinion (D36): a publish-bound audit takes another model while one was alive in the last 24 hours, and an audit
-      // leaves the registration that built what it audits to another that can take it now, for ELSEWHERE_MS.
+      // leaves the machine that built what it audits — its registration, or one the pool cannot tell apart from it — to another that
+      // can take it now, for ELSEWHERE_MS.
       if (needsOtherModel(fleet, c, now) && !anotherModel(H, c)) continue;
-      if (c.built_by === H.id && now - c.queued_at < ELSEWHERE_MS && auditElsewhere(fleet, c, now, r, H.id)) continue;
+      if (besideBuilder(H, c) && now - c.queued_at < ELSEWHERE_MS && auditElsewhere(fleet, c, now, r, H.id)) continue;
     }
     const lane = laneFor(H, c, r);
     if (!lane) continue;

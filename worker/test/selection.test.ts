@@ -50,19 +50,22 @@
  *   never on that maintainer's host while another maintainer's has a lane
  *   allowed for it (an emulated one counts, at once; `needs_native` applied),
  *   held from the first minute when one maintainer's hosts are all there is,
- *   and taken at the next claim once released; pins to a host registration;
- *   with one provider an audit leaves the builder's host to another that can
- *   take it now, with two a publish-bound audit takes the other model however
- *   long that host is busy, and a host with another model seen in the last
- *   24 hours holds it until the day is up; each audit's independence as its
- *   lease records it; and a review rebuild and its audit placed across two
- *   maintainers' hosts.
+ *   or when no other maintainer's host could ever hold it (its size, its pool
+ *   cap, its disk), and taken at the next claim once released; pins to a host
+ *   registration; with one provider an audit leaves the builder's machine to
+ *   another that can take it now, with two a publish-bound audit takes the
+ *   other model however long that host is busy, and a host with another
+ *   model seen in the last 24 hours holds it until the day is up, a head of
+ *   them hiding no other audit; each audit's independence as its lease
+ *   records it, of the machine (one maintainer's legacy role containers are
+ *   one); and a review rebuild and its audit placed across two maintainers'
+ *   hosts.
  */
 import { describe, expect, it } from "vitest";
 import {
-  alive, auditElsewhere, buildsOf, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, otherModels, ownerCap, ownersLeased, placementOf, requesterHost, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
+  alive, apart, auditElsewhere, buildsOf, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, otherModels, ownerCap, ownersLeased, placementOf, requesterHost, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
   ALIVE_MS, ELSEWHERE_MS, HELPER_KINDS, LANE_KINDS, MIN, MODEL_WINDOW_MS, RING_ARCHES, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
-  type Candidate, type Fleet, type Held, type Independence, type Member, type Mode,
+  type Candidate, type Fleet, type Held, type Independence, type Machine, type Member, type Mode,
 } from "../src/selection";
 import { selectionRules, HEAD_LIMIT, OWNERS_LIMIT, RESERVE_CANDIDATES, RESERVE_WINDOW } from "../src/routes/factory";
 import { readSizing, shippedSizing } from "../src/sizing";
@@ -71,15 +74,18 @@ import { BUILD_GB_PER_SIZE, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, M
 const R = selectionRules();
 const T0 = Date.parse("2026-10-01T00:00:00.000Z");
 
-/** A host registration: its native lane, the lanes it runs emulated, its units as the pool counts them. */
+/** A host registration: its native lane, the lanes it runs emulated, its units as the pool counts them; its host is a machine of its own. */
 function host(id: string, arch: string, units: number, o: Partial<Member> & { emulated?: string[] } = {}): Member {
   const { emulated = [], ...rest } = o;
   return {
     id, legacy: false, lanes: [{ arch, mode: "native" }, ...emulated.map((a) => ({ arch: a, mode: "emulated" as Mode }))], units, agent_slots: 2,
     disk: { work: 400, engine: 200 }, kinds: ["build", "trial", "audit", "sync", "health"], probe_ok: true, drained: false, below_minimum: false, may_claim: true, behind: false,
-    seen_at: T0, reserving: null, scope: { trust: "host", owner: null, shared: false }, ...rest,
+    seen_at: T0, reserving: null, scope: { trust: "host", owner: null, shared: false }, host_id: `h_${id}`, ...rest,
   };
 }
+
+/** The machine a registration runs on, as an audit of what it built carries it (routes/factory.ts placementCols). */
+const machineOf = (m: Member): Machine => ({ owner: m.owner ?? null, host_id: m.host_id ?? null });
 
 /** A legacy registration: one lane, its arch, emulated when its labels say so. */
 function legacy(id: string, arch: string, o: Partial<Member> & { emulated?: boolean; trust?: "project" | "community" } = {}): Member {
@@ -138,8 +144,9 @@ class Sim {
   /**
    * The candidates as a claim of `m` reads them (routes/factory.ts selectAndLease), from the whole queue: each read bounded and filtered
    * by what `m` can take now (noRoom, the capped contributors) — the head of each lane's arch, the arch-neutral kinds' head, each
-   * contributor's first build of each arch, the first native task whatever its size, the task it reserves for — and, at a host's claim,
-   * the oldest builds the reservation weighs.
+   * contributor's first build of each arch, the first native task whatever its size, the task it reserves for, the audits of the
+   * project's copy its model cannot count as another (their own head, #339) — and, at a host's claim, the oldest builds the reservation
+   * weighs.
    */
   reads(m: Member): { candidates: Candidate[]; oldest: Candidate[] } {
     const r = this.rules, now = this.now, fleet = this.fleet(), queue = this.candidates();
@@ -157,12 +164,14 @@ class Sim {
     };
     const byOrder = (a: Candidate, b: Candidate) => a.priority - b.priority || a.id - b.id;
     const neutral = (k: string) => !LANE_KINDS.includes(k) && !HELPER_KINDS.includes(k);
+    // The audits of the project's copy the claimer's model cannot count as another (sameModelAuditOf): read apart, their own head (D36).
+    const sameModel = (c: Candidate) => m.kinds.includes("audit") && c.kind === "audit" && !!c.publish_bound && !(m.model && c.built_with && c.built_with !== m.model);
     const emulatedOnly = (a: string) => !m.lanes.some((l) => l.arch === a && l.mode === "native");
     const out = new Map<number, Candidate>();
     const put = (cs: Candidate[]) => cs.forEach((c) => out.set(c.id, c));
     const owners = [...new Set(queue.filter((c) => c.trust === "community" && c.owner).map((c) => c.owner!))].sort().slice(0, OWNERS_LIMIT);
     for (const a of [...new Set(m.lanes.map((l) => l.arch))]) {
-      if (m.legacy) put(queue.filter((c) => (c.arch === a || r.legacy_any_arch.includes(c.kind)) && scope(c) && fits(c)).sort(byOrder).slice(0, HEAD_LIMIT));
+      if (m.legacy) put(queue.filter((c) => (c.arch === a || r.legacy_any_arch.includes(c.kind)) && scope(c) && fits(c) && !sameModel(c)).sort(byOrder).slice(0, HEAD_LIMIT));
       else put(queue.filter((c) => c.arch === a && !neutral(c.kind) && scope(c) && fits(c) && !(emulatedOnly(a) && c.needs_native)).sort(byOrder).slice(0, HEAD_LIMIT));
       if (m.kinds.includes("build") && m.scope.trust !== "project") {
         for (const o of owners) {
@@ -171,9 +180,10 @@ class Sim {
         }
       }
     }
+    put(queue.filter((c) => sameModel(c) && (!m.legacy || c.arch === m.lanes[0].arch || r.legacy_any_arch.includes(c.kind)) && scope(c) && fits(c)).sort(byOrder).slice(0, HEAD_LIMIT));
     let oldest: Candidate[] = [];
     if (!m.legacy) {
-      put(queue.filter((c) => neutral(c.kind) && scope(c) && fits(c)).sort(byOrder).slice(0, HEAD_LIMIT));
+      put(queue.filter((c) => neutral(c.kind) && scope(c) && fits(c) && !sameModel(c)).sort(byOrder).slice(0, HEAD_LIMIT));
       const native = m.lanes.find((l) => l.mode === "native")!.arch;
       if (m.lanes.some((l) => l.mode === "emulated")) put(queue.filter((c) => c.arch === native && LANE_KINDS.includes(c.kind) && scope(c) && !isCapped(c)).sort(byOrder).slice(0, 1));
       if (m.reserving) put(queue.filter((c) => c.id === m.reserving!.task && scope(c)));
@@ -234,7 +244,7 @@ class Sim {
       // Staged: its audit is queued, the build's registration and model on it — publish-bound when the build is the project's copy.
       if (this.audits && t.kind === "build") {
         const by = this.members.find((x) => x.id === l.by);
-        this.add({ arch: t.arch, kind: "audit", model: true, trust: "project", priority: 40, name: `audit-${t.name}`, publish_bound: !!t.publish_bound, built_by: l.by, built_with: by?.model ?? null });
+        this.add({ arch: t.arch, kind: "audit", model: true, trust: "project", priority: 40, name: `audit-${t.name}`, publish_bound: !!t.publish_bound, built_by: l.by, built_with: by?.model ?? null, built_on: by ? machineOf(by) : null });
       }
     }
     this.leases = this.leases.filter((x) => x.ends > this.now);
@@ -949,7 +959,7 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
     // A rebuild an emulated lane sent back (needs_native): only the requester's native host has a lane allowed — held at once.
     const native = task(copyOf(["m1"], { arch: "x86_64", needs_native: true }));
     const fleet: Fleet = { members: [vps, studio], leases: [] };
-    expect(mayRun(studio, native, T0, R)).toBe(false);
+    expect(mayRun(studio, native, T0, R, largestSize(fleet, T0, R))).toBe(false);
     expect(placementOf(fleet, native, T0, R)).toEqual({ others: [], mine: ["m1-vps86"], held: true });
     expect(select(vps, fleet, [native], T0, R)).toEqual([]);
     expect(select(studio, fleet, [native], T0, R)).toEqual([]);
@@ -1001,6 +1011,35 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
     expect(select(m1, fleet, [{ ...toM1, any_host: "m2" }], T0, R)).toHaveLength(1);
   });
 
+  it("another maintainer's host that could never hold the copy — too small for its size, its pool cap 0 or below a build, its disk or agent slots short — is none to wait for: held, the release offered at once", () => {
+    const studio = owned("m1-studio", "m1", "aarch64", 11);
+    const vps = owned("m2-vps", "m2", "aarch64", 5);
+    const fleet: Fleet = { members: [studio, vps], leases: [] };
+    // The copy asks size 4 (its page, the sizing file): the largest host alive runs it, and that host is its requester's.
+    const big = task(copyOf(["m1"], { size: 4, queued_at: T0 - 3 * 60 * MIN }));
+    expect(largestSize(fleet, T0, R)).toBe(4);
+    expect(mayRun(vps, big, T0, R, 4)).toBe(false);
+    expect(placementOf(fleet, big, T0, R)).toEqual({ others: [], mine: ["m1-studio"], held: true });
+    expect(select(studio, fleet, [big], T0, R)).toEqual([]);
+    expect(select(vps, fleet, [big], T0, R)).toEqual([]);
+    // No reservation for it either: no host it may go to could ever lease it.
+    expect(reserve(fleet, [big], () => true, T0, R)).toEqual({ set: null, clear: [] });
+    // Released: the requester's host builds it at the size asked — never run smaller on the other host.
+    expect(select(studio, fleet, [{ ...big, any_host: "m2" }], T0, R)).toMatchObject([{ id: big.id, size: 4, asked: null }]);
+    // At a size the other host holds, it waits for that host, however busy.
+    expect(placementOf(fleet, task(copyOf(["m1"], { size: 2 })), T0, R)).toEqual({ others: ["m2-vps"], mine: ["m1-studio"], held: false });
+    // A pool cap of 0 ("it claims nothing", routes/hosts.ts), one below a build, a disk short of a build's budget and the floor, no agent slot.
+    const small = task(copyOf(["m1"]));
+    for (const o of [{ units: 0 }, { units: 2 }, { disk: { work: 25, engine: 200 } }, { disk: null }, { agent_slots: 0 }]) {
+      const other = owned("m2-vps", "m2", "aarch64", 5, o);
+      expect(placementOf({ members: [studio, other], leases: [] }, small, T0, R), JSON.stringify(o)).toEqual({ others: [], mine: ["m1-studio"], held: true });
+      expect(select(other, { members: [studio, other], leases: [] }, [small], T0, R), JSON.stringify(o)).toEqual([]);
+    }
+    // What a host holds now is not asked: full, it still runs the copy once its units free up.
+    const full: Held[] = [0, 1].map((i) => ({ task: 9100 + i, by: "m2-vps", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: "project", owner: null, disk_gb: 20 }));
+    expect(placementOf({ members: [studio, vps], leases: full }, small, T0, R)).toEqual({ others: ["m2-vps"], mine: ["m1-studio"], held: false });
+  });
+
   it("is the project's copy's only: a contributor's build of the package, its trial and its audit go to the requester's host as to any other", () => {
     const m1 = owned("m1-studio", "m1", "aarch64", 11);
     for (const t of [task({ arch: "aarch64", trust: "community", owner: "m1" }), task({ arch: "aarch64", kind: "trial", owner: "m1" }), task({ arch: "aarch64", kind: "audit", model: true, publish_bound: true, built_by: "x", built_with: "anthropic/claude-a" })]) {
@@ -1013,22 +1052,23 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
 });
 
 describe("the second opinion (D36): elsewhere, and with another model when one exists", () => {
-  /** An audit of a build `by` built with `model`; publish-bound when it audits the project's copy. */
-  const auditOf = (by: string, model: string, publish = true, o: Partial<Candidate> = {}) => task({ arch: "aarch64", kind: "audit", model: true, trust: "project", priority: 40, publish_bound: publish, built_by: by, built_with: model, ...o });
+  /** An audit of a build `by` built with `model`, on its machine; publish-bound when it audits the project's copy. */
+  const auditOf = (by: Member, model: string, publish = true, o: Partial<Candidate> = {}) =>
+    task({ arch: "aarch64", kind: "audit", model: true, trust: "project", priority: 40, publish_bound: publish, built_by: by.id, built_with: model, built_on: machineOf(by), ...o });
 
   it("independence, as the lease records it: model — another model judged it; host — the same model elsewhere, for an audit that does not ship; none — otherwise", () => {
     const a = owned("a", "m1", "aarch64", 11);
     const b = owned("b", "m2", "aarch64", 11);
     const c = owned("c", "m2", "aarch64", 11, { model: "openai/gpt-b" });
-    expect(independenceOf(c, auditOf("a", "anthropic/claude-a"))).toBe("model");
-    expect(independenceOf(c, auditOf("a", "anthropic/claude-a", false))).toBe("model");
-    expect(independenceOf(b, auditOf("a", "anthropic/claude-a", false))).toBe("host");
-    expect(independenceOf(a, auditOf("a", "anthropic/claude-a", false))).toBe("none");
+    expect(independenceOf(c, auditOf(a, "anthropic/claude-a"))).toBe("model");
+    expect(independenceOf(c, auditOf(a, "anthropic/claude-a", false))).toBe("model");
+    expect(independenceOf(b, auditOf(a, "anthropic/claude-a", false))).toBe("host");
+    expect(independenceOf(a, auditOf(a, "anthropic/claude-a", false))).toBe("none");
     // A publish-bound audit is independent by its model or not at all.
-    expect(independenceOf(b, auditOf("a", "anthropic/claude-a"))).toBe("none");
+    expect(independenceOf(b, auditOf(a, "anthropic/claude-a"))).toBe("none");
     // A model not known, on either side, is no other model.
-    expect(independenceOf({ id: "c", model: null }, auditOf("a", "anthropic/claude-a"))).toBe("none");
-    expect(independenceOf(c, auditOf("a", "", false, { built_with: null }))).toBe("host");
+    expect(independenceOf({ id: "c", model: null }, auditOf(a, "anthropic/claude-a"))).toBe("none");
+    expect(independenceOf(c, auditOf(a, "", false, { built_with: null }))).toBe("host");
     expect(independenceOf(c, task({ arch: "aarch64" }))).toBeNull();
   });
 
@@ -1036,8 +1076,8 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     const a = owned("a", "m1", "aarch64", 11);
     const b = owned("b", "m2", "aarch64", 11);
     const s = new Sim([a, b]);
-    const copy = s.add({ ...auditOf("a", "anthropic/claude-a"), queued_at: T0 })[0];
-    const contributor = s.add({ ...auditOf("a", "anthropic/claude-a", false), queued_at: T0 })[0];
+    const copy = s.add({ ...auditOf(a, "anthropic/claude-a"), queued_at: T0 })[0];
+    const contributor = s.add({ ...auditOf(a, "anthropic/claude-a", false), queued_at: T0 })[0];
     // The builder claims first, every minute: the other host takes both.
     s.run(1);
     expect(s.startOf(copy)).toMatchObject({ by: "b", independent: "none" });
@@ -1046,14 +1086,14 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     // No other host has room: the builder takes it at once — a preference never idles it.
     const full = new Sim([a, b]);
     full.leases.push(...[0, 1].map((i) => ({ task: 7000 + i, by: "b", kind: "audit", arch: "aarch64", lane: null, units: 1, model: true, trust: "project", owner: null, disk_gb: 0, started: T0, ends: T0 + 600 * MIN })));
-    const [mine] = full.add(auditOf("a", "anthropic/claude-a"));
+    const [mine] = full.add(auditOf(a, "anthropic/claude-a"));
     expect(auditElsewhere(full.fleet(), mine, T0, R, "a")).toBe(false);
     full.run(1);
     expect(full.startOf(mine)).toMatchObject({ by: "a", at: T0, independent: "none" });
     // Another host alive that does not claim (a stalled dispatcher): the builder takes it once ELSEWHERE_MS passed.
     const stalled = new Sim([a, b]);
     stalled.silent.add("b");
-    const [late] = stalled.add(auditOf("a", "anthropic/claude-a", false));
+    const [late] = stalled.add(auditOf(a, "anthropic/claude-a", false));
     stalled.run(ELSEWHERE_MS / MIN);
     expect(stalled.startOf(late)).toBeUndefined();
     stalled.run(1);
@@ -1065,9 +1105,9 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     const b = owned("b", "m2", "aarch64", 11, { model: "openai/gpt-b" });
     const s = new Sim([a, b]);
     s.leases.push(...[0, 1].map((i) => ({ task: 7100 + i, by: "b", kind: "audit", arch: "aarch64", lane: null, units: 1, model: true, trust: "project", owner: null, disk_gb: 0, started: T0, ends: T0 + 300 * MIN })));
-    const [copy] = s.add(auditOf("a", "anthropic/claude-a"));
+    const [copy] = s.add(auditOf(a, "anthropic/claude-a"));
     // A contributor build's audit takes another model by preference only: b is full, so the builder takes it once ELSEWHERE_MS is up, or at once.
-    const [contributor] = s.add(auditOf("a", "anthropic/claude-a", false));
+    const [contributor] = s.add(auditOf(a, "anthropic/claude-a", false));
     expect(otherModels(s.fleet(), copy, T0)).toEqual(["openai/gpt-b"]);
     s.run(300);
     expect(s.startOf(copy)).toBeUndefined();
@@ -1076,7 +1116,7 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     expect(s.startOf(copy)).toMatchObject({ by: "b", at: T0 + 300 * MIN, independent: "model" });
     // The builder's own host, its model changed since: another model, so it may — independent by model.
     const changed = { ...a, model: "google/gemini-c" };
-    expect(select(changed, { members: [changed, b], leases: [], models: [{ id: "b", model: "openai/gpt-b", at: T0 }] }, [auditOf("a", "anthropic/claude-a", true, { queued_at: T0 - ELSEWHERE_MS })], T0, R)).toMatchObject([{ independent: "model" }]);
+    expect(select(changed, { members: [changed, b], leases: [], models: [{ id: "b", model: "openai/gpt-b", at: T0 }] }, [auditOf(a, "anthropic/claude-a", true, { queued_at: T0 - ELSEWHERE_MS })], T0, R)).toMatchObject([{ independent: "model" }]);
   });
 
   it("the 24 hours: a host with another model that went quiet still holds a publish-bound audit until a day after it was last seen; then the audit runs and records none", () => {
@@ -1085,7 +1125,7 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     const s = new Sim([a, b]);
     // m3's host ran another model and was last seen at T0 − 23 h: it is not a member alive, its model still counts.
     s.past.push({ id: "m3-box", model: "openai/gpt-c", at: T0 - 23 * 60 * MIN });
-    const [copy] = s.add(auditOf("a", "anthropic/claude-a"));
+    const [copy] = s.add(auditOf(a, "anthropic/claude-a"));
     s.run(60);
     expect(s.startOf(copy)).toBeUndefined();
     expect(needsOtherModel(s.fleet(), copy, s.now - MIN)).toBe(true);
@@ -1099,6 +1139,60 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     expect(otherModels(drained.fleet(), copy, T0)).toEqual([]);
     const noAudits = new Sim([a, b, owned("c", "m3", "aarch64", 11, { model: "openai/gpt-c", kinds: ["build"] })]);
     expect(otherModels(noAudits.fleet(), copy, T0)).toEqual([]);
+  });
+
+  it("independence is of the machine, not the registration: the legacy role containers of one maintainer, and a host beside its own legacy set, are one machine — none; another owner's, or another host of the same owner's, is another", () => {
+    // The Studio's legacy compose set until #343: community-aarch64 builds a contributor's package, review-aarch64 audits it — one machine, m1's.
+    const community = legacy("community-aarch64", "aarch64", { trust: "community", owner: "m1", scope: { trust: "community", owner: "m1", shared: true }, kinds: ["build"], model: "anthropic/claude-a" });
+    const review = legacy("review-aarch64", "aarch64", { trust: "project", owner: "m1", kinds: ["audit"], model: "anthropic/claude-a" });
+    const audit = auditOf(community, "anthropic/claude-a", false);
+    expect(apart(machineOf(review), machineOf(community))).toBe(false);
+    expect(independenceOf(review, audit)).toBe("none");
+    // The canary (design v2 §21.1): the Studio's host registration beside its legacy set — one machine as well.
+    const studio = owned("m1-studio", "m1", "aarch64", 11);
+    expect(independenceOf(studio, audit)).toBe("none");
+    expect(independenceOf(review, auditOf(studio, "anthropic/claude-a", false))).toBe("none");
+    // An owner the pool does not know (a project registration of the shared token) could be anyone's: one machine, as far as it can tell.
+    expect(independenceOf(legacy("pool-aarch64", "aarch64", { kinds: ["audit"], model: "anthropic/claude-a" }), auditOf(studio, "anthropic/claude-a", false))).toBe("none");
+    // Another maintainer's registration, or another host of m1's own: another machine.
+    const vps = owned("m2-vps", "m2", "aarch64", 7);
+    expect(independenceOf(vps, audit)).toBe("host");
+    expect(independenceOf(owned("m1-laptop", "m1", "aarch64", 5), auditOf(studio, "anthropic/claude-a", false))).toBe("host");
+    // The preference follows the machine: review-aarch64 leaves the audit to m2's host while it can take it, for ELSEWHERE_MS…
+    const fleet: Fleet = { members: [community, review, vps], leases: [] };
+    const queued = { ...audit, queued_at: T0 };
+    expect(auditElsewhere(fleet, queued, T0, R, "review-aarch64")).toBe(true);
+    expect(select(review, fleet, [queued], T0, R)).toEqual([]);
+    expect(select(vps, fleet, [queued], T0, R)).toMatchObject([{ id: audit.id, independent: "host" }]);
+    // …and a registration on the builder's machine is never "elsewhere": with only the Studio's set, review-aarch64 takes it at once, none.
+    const alone: Fleet = { members: [community, review, studio], leases: [] };
+    expect(auditElsewhere(alone, queued, T0, R, "review-aarch64")).toBe(false);
+    expect(select(review, alone, [queued], T0, R)).toMatchObject([{ id: audit.id, independent: "none" }]);
+    // Through a day of the Studio's set and m2's host: every contributor build community-aarch64 makes is audited on m2's host, "host".
+    const s = new Sim([community, review, owned("m2-vps", "m2", "aarch64", 7, { kinds: ["audit"] })], (t) => (t.kind === "audit" ? 5 : 20));
+    s.audits = true;
+    const builds = s.add({ arch: "aarch64", trust: "community", owner: "alice", model: true }, 3);
+    s.run(120);
+    const audits = s.ran.filter((r) => r.task.kind === "audit");
+    expect(builds.every((b) => s.startOf(b)?.by === "community-aarch64")).toBe(true);
+    expect(audits).toHaveLength(3);
+    expect(audits.every((r) => r.by === "m2-vps" && r.independent === "host")).toBe(true);
+  });
+
+  it("a head of publish-bound audits waiting for another model hides no audit the builder's model can take: more than HEAD_LIMIT of them, a contributor build's audit behind them", () => {
+    const a = owned("a", "m1", "aarch64", 11);
+    const s = new Sim([a]);
+    // The only host with another model was last seen an hour ago: inside the day, so every audit of the project's copy waits for it.
+    s.past.push({ id: "m3-box", model: "openai/gpt-c", at: T0 - 60 * MIN });
+    const copies = s.add({ ...auditOf(a, "anthropic/claude-a"), queued_at: T0 }, HEAD_LIMIT + 5);
+    const [contributor] = s.add({ ...auditOf(a, "anthropic/claude-a", false), queued_at: T0 });
+    s.run(1);
+    expect(copies.some((c) => s.startOf(c))).toBe(false);
+    expect(s.startOf(contributor)).toMatchObject({ by: "a", at: T0, independent: "none" });
+    // They are its candidates all the same, read apart: the day up, it takes them.
+    s.now = T0 + MODEL_WINDOW_MS;
+    s.run(1);
+    expect(s.ran.filter((r) => r.task.publish_bound).length).toBeGreaterThan(0);
   });
 
   it("a review rebuild and its audit placed across two maintainers' hosts: the rebuild off its requester's host, its audit on the other model", () => {

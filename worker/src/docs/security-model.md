@@ -164,12 +164,16 @@ secret). Everything travels in the `Authorization` header over TLS only.
   and an audit's agent belongs to the audit, whose container runs no recipe.
   The audit quotes the build's output as data, has no tool with side
   effects, and its report is evidence for a maintainer, never a gate. The
-  second opinion runs elsewhere (#339, D36): an audit leaves the host that
-  built what it audits to another that can take it, and an audit of the
+  second opinion runs elsewhere (#339, D36): an audit leaves the machine
+  that built what it audits to another that can take it, and an audit of the
   project's copy takes another model than the one that built it whenever a
   host with one was alive in the last 24 hours; every audit records how
   independent it was (`model`, `host`, `none`), shown on Review beside its
   verdict, so a maintainer reads whether the same model judged its own work.
+  It errs low: `host` only when the two registrations are certainly on
+  different machines (different owners, or two hosts' registrations of
+  different hosts), so one maintainer's legacy role containers, which share a
+  machine, say `none`.
   An internal network's bridge address is otherwise the host itself, so
   the dispatcher asks the engine to leave it off: Docker's isolated gateway
   mode (Docker 28 or newer; an older daemon is refused) or, on podman's own

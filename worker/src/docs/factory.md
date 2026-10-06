@@ -582,20 +582,27 @@ until #343. Placement (#339, design v2 §8.4; D35, D36): the project's copy
 of a package — its review rebuild — is never handed to a host its requester
 owns (the rebuild's owner, and the owner of the contributor's build it
 answers) while another maintainer's host has a lane allowed for it, native or
-emulated with `needs_native` applied; when only the requester's hosts have
-one, it waits, and Review offers another maintainer *Release to any host* at
+emulated with `needs_native` applied, and could hold it idle at its size
+(its units within the pool cap, an agent slot, its disk budget); when only
+the requester's hosts have one, it waits, and Review offers another maintainer *Release to any host* at
 once, with their passkey (`POST /factory/tasks/:id/any-host`,
 `any-host:<task>`), on the task (`params.any_host`), the journal and the
 record. An audit — in a fresh container with its own agent sidecar, by
-construction — leaves the registration that built what it audits to another
-that can take it now (for 3 minutes, so the builder never idles for it); an
+construction — leaves the machine that built what it audits (its
+registration, or one of the same owner's the pool cannot tell apart from it:
+two registrations are apart only with different owners, or as two hosts'
+registrations of different hosts) to another that can take it now (for 3
+minutes, so the builder never idles for it); an
 audit of the project's copy takes a model (the claim's `agent`: provider and
 model) other than the one that built it whenever a registration taking
-audits with another model answered in the last 24 hours (its last claim
-while its probe passes, the start of its failing spell while it fails), and
-runs on the same model otherwise. Each audit's lease records `build_tasks.independent`
-— `model`, `host` (the same model on another host, for an audit that does
-not ship) or `none` — and Review shows it beside the verdict. The runbook's
+audits with another model, and that is handed work (not drained, below the
+minimum or behind the release), answered in the last 24 hours (its last
+claim while its probe passes, the start of its failing spell while it
+fails), and runs on the same model otherwise; a claim reads those audits
+apart, so a head of them never hides another. Each audit's lease records
+`build_tasks.independent` — `model`, `host` (the same model on another
+machine, for an audit that does not ship) or `none` — cleared when the
+lease goes back to the queue, and Review shows it beside the verdict. The runbook's
 *How the pool hands a host work* has the rules. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron
 requeues leases past `lease_expires_at` — the way out for a worker that
