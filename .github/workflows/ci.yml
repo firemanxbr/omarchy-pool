@@ -406,6 +406,9 @@ jobs:
       - name: A maintainer's legacy set's command (factory/host/omarchy-worker, until P3), against a stubbed docker and pool — no new set, no mode, the switch guard
         working-directory: .
         run: bash tests/omarchy-worker-cli.sh
+      - name: The contributor worker path and the community-worker claim code are gone — none of their identifiers in worker/src (#343)
+        working-directory: .
+        run: bash tests/contributor-path-gone.sh
 
   worker-image:
     name: Worker image (a local build — every role starts)
