@@ -130,6 +130,50 @@ secret). Everything travels in the `Authorization` header over TLS only.
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
   runs the dispatcher on a real engine (`tests/dispatch-engine.sh`).
+- **What a contributor wrote, in a sandbox, where the host has one (#330, D43).**
+  A contributor's recipe is the code most likely to try an escape, and on a
+  host it runs beside the dispatcher's tokens — as root on a rootful engine
+  without remapping (design v2 §10.4, §19.3). When the host's engine has
+  gVisor's `runsc` or Kata Containers, the agent finds it: a smoke run of the
+  release's build image under it must print a kernel that is not the
+  engine's own, so a runtime on the host's kernel — docker's CLI on podman,
+  whose API does not pass `--runtime` on — is never taken for one. The
+  dispatcher then starts, with `--runtime <it>`, every task that runs what a
+  contributor wrote — decided by what runs, not by the trust label: a
+  contributor's build; the project's review rebuild, whose recipe the
+  project's drafter wrote from the contributor's evidence before anyone
+  approved it (§9.5 says it can be subverted); the trial that installs what
+  that rebuild built, install scriptlets and all; the audit that reads it;
+  and any kind or trust the dispatcher does not know. An escape from them
+  lands in gVisor's user-space kernel or in Kata's VM, not on the host. Only
+  the project's own recipe — on main, or a maintainer's dry run — runs on the
+  engine's own runtime. A sandbox covers the native lane only: an emulated
+  lane runs its architecture through the host kernel's binfmt handler, which
+  a sandbox's kernel does not have, so the pool hands a host whose
+  dispatcher applies a sandbox none of that work for its emulated lanes —
+  only the project's own recipes — and the dispatcher hands back one that
+  reaches them anyway, before anything runs. The dispatcher never runs such a
+  task outside a sandbox the host says it has: a runtime the engine refuses
+  fails the start (`lost`) and holds its claims (30 minutes, doubled after
+  each further refusal in a row, a day at most; a restart of the dispatcher
+  ends it), and a capacity file whose sandbox it cannot read claims
+  nothing. Each claim says the sandbox the dispatcher applies; the pool
+  selects on that and the host page (*Sandbox*) shows it — not merely what
+  the agent found, which a dispatcher from before #330 ignores — with why
+  one the engine has is not used and why the claims hold. The envelope's `sandbox` (`"off"`, or one
+  runtime's name) is the owner's, set at the host: a signed widening from
+  the browser (#328) never sets it. A host without one runs these tasks as
+  before, at its isolation level. A package with a signed network exception
+  (`direct_network`, #373) changes its network, never its runtime: on a
+  granted host its task runs on its bridge in the sandbox all the same. Stated plainly: a sandbox's kernel is a
+  smaller surface, not none — a bug in gVisor's, or in the gofer that serves
+  the task's mounts, is still an escape — and the task's own mounts (its
+  directories, the release's checkout read-only) are the host's files
+  either way. Its sidecars run the signed worker image on the engine's own
+  runtime, and the sandboxed recipe reaches them over its internal network
+  (design v2 §10.1): a recipe that first compromises its egress or agent
+  sidecar runs code outside the sandbox, and can try an escape from there
+  at the host's isolation level.
 - **Pool jobs stay in the dispatcher; their check containers go through the
   spec (#340, D34).** A host's pool jobs — sync, render, promote, rollback,
   security, gc, verify, relayout, enqueue, publish, health — are the
@@ -149,7 +193,14 @@ secret). Everything travels in the `Authorization` header over TLS only.
   bridge, whatever the owner's envelope grants: `direct_network` is a
   package build's, #373), with the job's unit, the task container's
   capabilities, that one directory and no token; any other shape, verb or
-  flag is refused before the engine is asked. The spec's CI test renders
+  flag is refused before the engine is asked. They run on the engine's own
+  runtime on a host with a sandboxed runtime too (#330): what they run is the
+  project's own — the release's scripts in its pinned images, over what a
+  ring serves (signed, after the maintainers' approval) and the recipes on
+  `main` — as the project's own recipe does, and on any lane of their
+  architecture, an emulated one included, which a sandbox's kernel cannot
+  run. A sandbox hold holds a host's pool jobs with its tasks: they share
+  its claim. The spec's CI test renders
   every helper the scripts start, and the shim's tests every shape refused.
   Hosts take pool jobs only once the maintainers' `host-pool-jobs` setting
   names them.
@@ -809,8 +860,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   own parser and the lint, and the units are counted again under the applied
   release's signed constants and the detected hardware: a widening never
   gives more than the machine has; nor does it ever set the grant of a
-  signed exception's bridge (`direct_network`, #373), which stays the
-  host's. Narrowing (`set-units`, `set-emulate`) needs no signature, as
+  signed exception's bridge (`direct_network`, #373) or the sandboxed
+  runtime what a contributor wrote runs in (`sandbox`, #330), which stay
+  the host's. Narrowing (`set-units`, `set-emulate`) needs no signature, as
   before. Agent keys are sealed in the owner's
   browser to the host's X25519 seal key, which its owner confirmed once by
   its fingerprint (`omarchy-agent status` prints it at the host): the pool

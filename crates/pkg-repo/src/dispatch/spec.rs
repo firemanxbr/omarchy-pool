@@ -41,6 +41,19 @@
 //! script probe the toolchains a recipe installs and fail at once with
 //! `needs_native` when one cannot start (a 16K-page host's qemu, D33).
 //!
+//! **Its runtime** (#330, design v2 §10.4; D43): a task that runs what a
+//! contributor wrote — their recipe, the project's review rebuild drafted
+//! from it, a trial of what that built, an audit of it: everything but the
+//! project's own recipe ([`sandboxed`]) — runs in the host's sandboxed
+//! runtime when the agent found one (`run/capacity.json`'s `sandbox`: gVisor's
+//! `runsc` or Kata Containers), `--runtime <name>` on its task container, so
+//! an escape lands in the sandbox's own kernel, not on the host. Only on its
+//! native lane: an emulated lane's binfmt handler is the host kernel's, so a
+//! sandboxed host's emulated lanes take the project's own recipes only (the
+//! pool's selection; the dispatcher hands back one that reaches them). Never
+//! on a sidecar, which runs the signed worker image and no recipe. A signed
+//! network exception (#373) changes the task's network, never its runtime.
+//!
 //! **A pool job's helper** (#340, design v2 §9.2, §10.3; D34) is made here
 //! too: the scripts a pool job runs (`tests/health-check.sh`, the ABI gate's
 //! references) start their check containers through the `omarchy-task-run`
@@ -48,7 +61,8 @@
 //! [`helper_plan`] for the rest — the job's own internal network and egress
 //! sidecar, the job's share less the sidecar's, the task container's
 //! capabilities and flags, one of the job's scratch directories at `/repo`
-//! and nothing else: no token, no socket, no other mount.
+//! and nothing else: no token, no socket, no other mount. It runs on the
+//! engine's own runtime, a sandboxed host's included (#330, [`helper_plan`]).
 //!
 //! Seams left for later issues, by name: P2's task caches child issue
 //! mounts the read-only shared pacman cache and the per-package build
@@ -190,6 +204,23 @@ pub fn host_ok(s: &str) -> bool {
         && b[0].is_ascii_alphanumeric()
         && b.iter()
             .all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
+
+/// A runtime's name as the engine takes it (`--runtime`), the agent's grammar: `[a-z0-9][a-z0-9._-]{0,63}`.
+pub fn runtime_ok(s: &str) -> bool {
+    name_ok(s) && !s.contains('+')
+}
+
+/// Whether a task's container runs in the host's sandboxed runtime, when it has one (#330,
+/// D43), by what runs in it rather than by its trust alone: everything but the project's own
+/// recipe — a build of trust `project` that is no review rebuild (a recipe on main, a
+/// maintainer's dry run). A contributor's build; the project's review rebuild (`review`: a
+/// recipe the project's drafter wrote from a contributor's evidence before any approval,
+/// design v2 §9.2, §9.5); a trial, whose helper installs what such a rebuild built, its
+/// install scriptlets with it; an audit; and any trust or kind this dispatcher does not know.
+/// Its lane is the caller's: a sandbox covers the native lane only.
+pub fn sandboxed(trust: &str, kind: &str, review: bool) -> bool {
+    !(trust == "project" && kind == "build" && !review)
 }
 
 /// A lease generation, as the pool draws it: `g_` and 16 hex digits (#334).
@@ -383,6 +414,9 @@ pub struct Spec<'a> {
     pub deny: &'a [String],
     /// The agent sidecar of a model kind; `None` on a host with no agent key.
     pub agent: Option<Agent<'a>>,
+    /// The host's sandboxed runtime, for a task [`sandboxed`] says runs in it: `--runtime
+    /// <name>` on the task container, never on its sidecars (#330).
+    pub runtime: Option<&'a str>,
 }
 
 /// The container's name: `omarchy-task-<id>-<gen>`, its network's too.
@@ -769,7 +803,13 @@ pub struct Helper<'a> {
 /// `--rm`: the shim removes it with the rest of the lease's (an engine
 /// `--rm` would race the removal), and the dispatcher removes what a killed
 /// shim left when the job ends. Every value is checked against the closed
-/// grammar first; a value outside it runs nothing.
+/// grammar first; a value outside it runs nothing. Its runtime is the
+/// engine's own, on a sandboxed host too (#330): what it runs is the
+/// project's own — the release's scripts in its pinned images, over what a
+/// ring serves (signed, after the maintainers' approval) and the recipes on
+/// main, as the project's own recipe runs outside the sandbox
+/// ([`sandboxed`]) — and on any lane of its arch, an emulated one included,
+/// which a sandbox's kernel cannot run.
 #[allow(clippy::too_many_lines)] // every check of a value, then every flag, mount and variable, in the spec's order
 pub fn helper_plan(h: &Helper<'_>) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
     if h.task == 0 || !gen_ok(h.gen) || !host_ok(h.host) {
@@ -915,6 +955,9 @@ pub fn task_container(s: &Spec<'_>) -> Result<Vec<String>, String> {
     }
     let platform =
         platform_of(s.arch).ok_or_else(|| format!("arch {:?} is not a lane's", s.arch))?;
+    if let Some(r) = s.runtime.filter(|r| !runtime_ok(r)) {
+        return Err(format!("runtime {r:?} is outside the grammar"));
+    }
     if !digest_ok(s.image) {
         return Err(format!(
             "build image {:?} is not an image by digest (repository@sha256:…)",
@@ -963,6 +1006,11 @@ pub fn task_container(s: &Spec<'_>) -> Result<Vec<String>, String> {
     ] {
         a.push("--label".into());
         a.push(format!("{k}={v}"));
+    }
+    if let Some(r) = s.runtime {
+        // The sandbox's kernel between the recipe and the host's (D43).
+        a.push("--runtime".into());
+        a.push(r.to_owned());
     }
     a.extend(
         [
@@ -1106,10 +1154,12 @@ mod tests {
                 tokens: 2_000_000,
                 wall_s: 7200,
             }),
+            runtime: None,
         }
     }
 
-    const FLAGS_WITH_VALUE: [&str; 16] = [
+    const FLAGS_WITH_VALUE: [&str; 17] = [
+        "--runtime",
         "--name",
         "--mount",
         "--label",
@@ -1214,6 +1264,14 @@ mod tests {
         if flag(r, "--mount").is_some() && !r.name.ends_with("-agent") {
             return Err(format!("{}: --mount outside the agent sidecar", r.name));
         }
+        if flag(r, "--runtime").is_some()
+            && (r.name.ends_with("-egress") || r.name.ends_with("-agent"))
+        {
+            return Err(format!(
+                "{}: a sidecar runs on the engine's own runtime",
+                r.name
+            ));
+        }
         for m in &r.mounts {
             let from = m.split(':').next().unwrap_or("");
             if from.contains("docker.sock")
@@ -1258,8 +1316,20 @@ mod tests {
         }
     }
 
-    /// The task container: the spec's flags, mounts, environment and command.
-    fn check_task(r: &Read<'_>, work: &Path, slot: Slot) -> Result<(), String> {
+    /// The task container: the spec's flags, mounts, environment and command, and the
+    /// sandboxed runtime it was to run in, or none.
+    fn check_task(
+        r: &Read<'_>,
+        work: &Path,
+        slot: Slot,
+        runtime: Option<&str>,
+    ) -> Result<(), String> {
+        if flag(r, "--runtime") != runtime || runtime.is_some_and(|x| !runtime_ok(x)) {
+            return Err(format!(
+                "the task container's runtime: {:?}, not {runtime:?}",
+                flag(r, "--runtime")
+            ));
+        }
         if r.verb != "run" || r.bare != ["-d"] {
             return Err(format!(
                 "the task container is `run -d`: {} {:?}",
@@ -1359,6 +1429,13 @@ mod tests {
     /// keyring and its proxy only, a script of that directory run by bash.
     fn check_helper(r: &Read<'_>, work: &Path, slot: Slot) -> Result<(), String> {
         check_side_labels(r, "helper")?;
+        // On the engine's own runtime, on a sandboxed host too (#330): see helper_plan.
+        if let Some(rt) = flag(r, "--runtime") {
+            return Err(format!(
+                "{}: a helper runs on the engine's own runtime, not {rt}",
+                r.name
+            ));
+        }
         if r.verb != "run" || !r.bare.is_empty() {
             return Err(format!(
                 "{}: a helper is an attached `run`: {} {:?}",
@@ -1552,9 +1629,20 @@ mod tests {
         Ok(())
     }
 
-    /// Reads a whole plan back: its network, every container attached to it, every connect and start.
-    #[allow(clippy::too_many_lines)] // one reading of every call a plan may hold
+    /// Reads a whole plan back whose task container runs on the engine's own runtime.
     fn check_plan(calls: &[Vec<String>], work: &Path, direct: bool) -> Result<(), String> {
+        check_plan_in(calls, work, direct, None)
+    }
+
+    /// Reads a whole plan back: its network, every container attached to it, every connect and
+    /// start, and the runtime its task container was to run in (#330).
+    #[allow(clippy::too_many_lines)] // one reading of every call a plan may hold
+    fn check_plan_in(
+        calls: &[Vec<String>],
+        work: &Path,
+        direct: bool,
+        runtime: Option<&str>,
+    ) -> Result<(), String> {
         let range = subnets();
         let mut net: Option<(String, Slot)> = None;
         let mut made: Vec<String> = Vec::new();
@@ -1652,7 +1740,7 @@ mod tests {
                         check_helper(&r, work, *slot)?;
                     } else {
                         tasks += 1;
-                        check_task(&r, work, *slot)?;
+                        check_task(&r, work, *slot, runtime)?;
                     }
                     made.push(r.name.to_owned());
                 }
@@ -2116,6 +2204,105 @@ mod tests {
         }
     }
 
+    /// The sandboxed runtime (#330, D43): a task of a contributor's on its native lane runs in it,
+    /// its sidecars on the engine's own runtime; anything else is outside the spec.
+    #[test]
+    fn a_sandboxed_task_runs_in_its_runtime_and_its_sidecars_on_the_engines_own() {
+        let (tdir, rel, work) = dirs();
+        for kind in [Kind::Build, Kind::ModelBuild, Kind::Audit, Kind::Trial] {
+            let mut s = spec(kind, &tdir, &rel);
+            s.runtime = Some("runsc");
+            let p = plan(&s).unwrap();
+            check_plan_in(&p, &work, false, Some("runsc"))
+                .unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
+            let a = task_of(&p);
+            let at = a.iter().position(|x| x == "--runtime").unwrap();
+            assert_eq!(a[at + 1], "runsc");
+            for c in p.iter().filter(|c| c[0] != "run") {
+                assert!(!c.iter().any(|x| x == "--runtime"), "{kind:?}: {c:?}");
+            }
+            // Read as a plan on the engine's own runtime, or another sandbox's: refused.
+            assert!(check_plan(&p, &work, false).is_err());
+            assert!(check_plan_in(&p, &work, false, Some("kata")).is_err());
+            // And a plan without it, read as one that was to have it: refused too.
+            let plain = plan(&spec(kind, &tdir, &rel)).unwrap();
+            assert!(!task_of(&plain).iter().any(|x| x == "--runtime"));
+            assert!(check_plan_in(&plain, &work, false, Some("runsc")).is_err());
+        }
+        // A package's signed network exception (#373) changes its network, never its runtime:
+        // on its bridge, with no egress sidecar, its task container still runs in the sandbox.
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        s.direct = true;
+        s.runtime = Some("runsc");
+        let p = plan(&s).unwrap();
+        check_plan_in(&p, &work, true, Some("runsc")).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
+        assert!(check_plan(&p, &work, true).is_err());
+        assert!(p.iter().all(|c| !c.iter().any(|x| x.ends_with("-egress"))));
+        // A sandboxed task's egress sidecar is started exactly as an unsandboxed one's, which
+        // install's egress probe shares (#373, tests/fixtures/egress-sidecar.txt): on runc.
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        let plain = plan(&s).unwrap();
+        s.runtime = Some("runsc");
+        assert_eq!(plan(&s).unwrap()[1..4], plain[1..4]);
+        // A sidecar under a runtime of its own is outside the spec.
+        let mut s = spec(Kind::ModelBuild, &tdir, &rel);
+        s.runtime = Some("runsc");
+        let good = plan(&s).unwrap();
+        for suffix in ["-egress", "-agent"] {
+            let mut p = good.clone();
+            let i = p
+                .iter()
+                .position(|c| c[0] == "create" && c[2].ends_with(suffix))
+                .unwrap();
+            p[i].splice(3..3, ["--runtime".to_owned(), "runsc".to_owned()]);
+            assert!(
+                check_plan_in(&p, &work, false, Some("runsc")).is_err(),
+                "{suffix}"
+            );
+        }
+        // A runtime outside the grammar fails the task before the engine runs.
+        for bad in ["--privileged", "Runsc", "runsc --privileged", "", "gtk+3"] {
+            let mut s = spec(Kind::Build, &tdir, &rel);
+            s.runtime = Some(bad);
+            assert!(plan(&s).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn everything_but_the_projects_own_recipe_is_sandboxed() {
+        assert!(
+            sandboxed("community", "build", false),
+            "a contributor's recipe"
+        );
+        assert!(
+            sandboxed("project", "build", true),
+            "the project's review rebuild, drafted from a contributor's evidence"
+        );
+        assert!(
+            sandboxed("project", "trial", false),
+            "a trial installs what a review rebuild built"
+        );
+        assert!(sandboxed("project", "audit", false));
+        assert!(
+            sandboxed("host", "build", false) && sandboxed("", "build", false),
+            "a trust it does not know"
+        );
+        assert!(
+            sandboxed("project", "health", false),
+            "a kind it does not know"
+        );
+        assert!(
+            !sandboxed("project", "build", false),
+            "the project's own recipe: on main, or a maintainer's dry run"
+        );
+        assert!(
+            runtime_ok("runsc") && runtime_ok("io.containerd.runsc.v1") && runtime_ok("kata-qemu")
+        );
+        assert!(
+            !runtime_ok("-x") && !runtime_ok("Runsc") && !runtime_ok("a b") && !runtime_ok("a+b")
+        );
+    }
+
     #[test]
     fn the_probe_runs_one_shot_on_a_network_of_its_own() {
         let p = Probe {
@@ -2395,6 +2582,29 @@ mod tests {
                 "one mount: {run:?}"
             );
         }
+    }
+
+    /// A pool job's helper runs on the engine's own runtime, on a sandboxed host too (#330,
+    /// #340): the project's own scripts in the release's pinned images, over what a ring serves
+    /// (signed, after the maintainers' approval) and the recipes on main, on whichever lane of its
+    /// arch the host runs — a sandbox's kernel has no binfmt handler for an emulated one. One under
+    /// a runtime is outside the spec.
+    #[test]
+    fn a_helper_runs_on_the_engines_own_runtime_and_one_under_another_is_outside_the_spec() {
+        let (tdir, _, work) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        let p = helper_calls(&helper(&dir, &scratch, "check.sh", true));
+        check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
+        assert!(
+            p.iter().all(|c| !c.iter().any(|x| x == "--runtime")),
+            "{p:#?}"
+        );
+        let mut under = p.clone();
+        let last = under.len() - 1;
+        under[last].splice(1..1, ["--runtime".to_owned(), "runsc".to_owned()]);
+        assert!(check_plan(&under, &work, false).is_err());
+        assert!(check_plan_in(&under, &work, false, Some("runsc")).is_err());
     }
 
     fn value<'a>(a: &'a [String], f: &str) -> Option<&'a str> {

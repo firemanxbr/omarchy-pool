@@ -67,8 +67,9 @@ async function planOf(x: { sql: string; args: unknown[] }): Promise<string> {
 
 /** What 0036 added, taken off again, and what the migrations after it added (the package's maintainer in the pool, #244; the reviews table takes its changes column, #247, with it): the schema as production has it before the migration. */
 const REWIND = [
-  // 0049 (the owner's control, #328) rebuilds host_orders with the owner's two kinds and adds hosts' seal key columns, which go with
-  // their tables below. Then the two 0048s, in the reverse of the order D1 applies them (by name): a host on its last-good's (#342)
+  // The two 0049s, in the reverse of the order D1 applies them (by name): the owner's control (#328) rebuilds host_orders with the
+  // owner's two kinds and adds hosts' seal key columns; a host's sandbox (#330) adds hosts.sandbox_applied alone. All go with their
+  // tables below. Then the two 0048s, in the reverse of the order D1 applies them (by name): a host on its last-good's (#342)
   // first — the mark of the last-good its registration was told of (hosts.rolled_back_at goes with 0043's table below) —; the
   // owner's soak and freeze detection's (#326) add columns to hosts alone, which go with their table below.
   "ALTER TABLE build_workers DROP COLUMN told_last_good",

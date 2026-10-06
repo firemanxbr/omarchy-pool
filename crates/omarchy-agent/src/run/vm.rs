@@ -189,6 +189,12 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         image: image.as_deref(),
         // The VM's lane is Rosetta's ([`probe::in_mac_vm`]), not the binfmt table's.
         emulation: None,
+        // A sandboxed runtime in the VM's engine (#330): the VM's files are not this
+        // machine's, so its smoke run alone decides.
+        sandbox: Some(crate::capacity::sandbox::Probe {
+            setting: &toml.caps.sandbox,
+            local: false,
+        }),
     };
     // The loop pulls nothing: a pull of a multi-GB build image would hold the tick far past
     // one engine call (and the watchdog's patience). A native build image the VM's store
