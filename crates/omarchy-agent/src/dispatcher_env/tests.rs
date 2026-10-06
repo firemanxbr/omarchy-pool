@@ -351,6 +351,7 @@ fn envelope(secrets: &str, budget: Budget) -> Envelope {
         secrets_dir: PathBuf::from(secrets),
         budget,
         direct_network: false,
+        cache_caps: CacheCaps::default(),
         task_subnets: task(),
     }
 }
@@ -582,6 +583,90 @@ fn a_granted_signed_exception_s_bridge_reaches_the_dispatcher_and_a_withdrawn_on
         .unwrap()
         .contains("\nOMARCHY_DIRECT_NETWORK=1\n"));
     assert!(not_secret(DIRECT_NETWORK));
+}
+
+/// The task caches' caps (#341, design v2 §12, D52): `[envelope].cache_caps` read strictly, each
+/// cap a line of its own only when agent.toml sets it, owned by the agent like the budget.
+#[test]
+fn the_cache_caps_reach_the_dispatcher_only_when_the_envelope_sets_them() {
+    let of = |extra: &str| {
+        Envelope::from_agent_toml(&format!(
+            "[set]\nsecrets_dir = \"/srv/s\"\n[envelope]\n{extra}\n"
+        ))
+    };
+    assert_eq!(of("").unwrap().cache_caps, CacheCaps::default());
+    let studio = of("cache_caps = { pacman_gb = 40, build_gb = 120 }").unwrap();
+    assert_eq!(
+        studio.cache_caps,
+        CacheCaps {
+            pacman_gb: Some(40),
+            build_gb: Some(120)
+        }
+    );
+    let r = Rendered {
+        addresses: Vec::new(),
+        envelope: Some(studio.clone()),
+    };
+    assert_eq!(
+        r.lines().unwrap(),
+        [
+            "OMARCHY_SECRETS_DIR=/srv/s",
+            "OMARCHY_CACHE_PACMAN_GB=40",
+            "OMARCHY_CACHE_BUILD_GB=120"
+        ]
+    );
+    // One cap: one line, the other the dispatcher's default.
+    let one = of("cache_caps = { build_gb = 60 }").unwrap();
+    let r1 = Rendered {
+        addresses: Vec::new(),
+        envelope: Some(one),
+    };
+    assert_eq!(
+        r1.lines().unwrap(),
+        ["OMARCHY_SECRETS_DIR=/srv/s", "OMARCHY_CACHE_BUILD_GB=60"]
+    );
+    // An owner's own line of the same key is the agent's to render: it goes with the next render.
+    let base = format!(
+        "# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={OMW}\nOMARCHY_CACHE_PACMAN_GB=999\n"
+    );
+    let text = render(&base, None, &r1).unwrap();
+    assert!(!text.contains("OMARCHY_CACHE_PACMAN_GB"), "{text}");
+    assert!(text.contains("\nOMARCHY_CACHE_BUILD_GB=60\n"), "{text}");
+    // Before agent.toml (a first enrollment): the file's own lines stay.
+    let early = Rendered {
+        addresses: Vec::new(),
+        envelope: None,
+    };
+    assert!(render(&render(&base, None, &r).unwrap(), None, &early)
+        .unwrap()
+        .contains("OMARCHY_CACHE_PACMAN_GB=40\nOMARCHY_CACHE_BUILD_GB=120\n"));
+    assert!(not_secret("OMARCHY_CACHE_BUILD_GB"));
+    for (bad, why) in [
+        (
+            "cache_caps = { pacman_gb = 0 }",
+            "pacman_gb must be a whole number",
+        ),
+        (
+            "cache_caps = { build_gb = -5 }",
+            "build_gb must be a whole number",
+        ),
+        (
+            "cache_caps = { build_gb = 2000000 }",
+            "build_gb must be a whole number",
+        ),
+        (
+            "cache_caps = { build_gb = \"lots\" }",
+            "build_gb must be a whole number",
+        ),
+        (
+            "cache_caps = { pacman = 40 }",
+            "cache_caps.pacman is none of pacman_gb, build_gb",
+        ),
+        ("cache_caps = 40", "not a table"),
+    ] {
+        let e = of(bad).unwrap_err();
+        assert!(e.contains(why), "{bad}: {e}");
+    }
 }
 
 #[test]

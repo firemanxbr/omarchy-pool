@@ -3304,6 +3304,7 @@ fn a_public_address_the_sidecar_was_not_given_is_probed_again_by_one_given_it() 
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // the file through an enrollment and a re-run, then each envelope key preflight refuses
 fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_beside_the_token() {
     // The probe task saw the pool see it come from 198.51.100.20 (#371), through its egress
     // sidecar as a task asks anything (#373).
@@ -3388,6 +3389,23 @@ fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_
     assert!(
         r.screen()
             .contains("envelope.agent_budget.calls_per_tusk is none of calls_per_task"),
+        "{}",
+        r.screen()
+    );
+    // So is a cache cap it would refuse (#341).
+    let caps = fs::read_to_string(p.data.join("agent.toml"))
+        .unwrap()
+        .replace("calls_per_tusk = 50", "calls_per_task = 50")
+        .replace(
+            "[envelope]\n",
+            "[envelope]\ncache_caps = { pacman_gb = 0 }\n",
+        );
+    fs::write(p.data.join("agent.toml"), caps).unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    assert!(
+        r.screen()
+            .contains("envelope.cache_caps.pacman_gb must be a whole number of GB from 1"),
         "{}",
         r.screen()
     );
