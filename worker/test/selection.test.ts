@@ -55,17 +55,17 @@
  *   allowed for it (an emulated one counts, at once; `needs_native` applied),
  *   held from the first minute when one maintainer's hosts are all there is,
  *   or when no other maintainer's host could ever hold it (its size, its pool
- *   cap, its disk), while one only busy is waited for (its disk filled by its
- *   builds, below the minimum for that alone, its builds held back for disk),
- *   and taken at the next claim once released; pins to a host
- *   registration; with one provider an audit leaves the builder's machine to
- *   another that can take it now, with two a publish-bound audit takes the
- *   other model however long that host is busy, and a host with another
- *   model seen in the last 24 hours holds it until the day is up, a head of
- *   them hiding no other audit; each audit's independence as its lease
- *   records it, of the machine (one maintainer's legacy role containers are
- *   one); and a review rebuild and its audit placed across two maintainers'
- *   hosts.
+ *   cap, its disk) or it sleeps, while one only busy is waited for (its disk
+ *   filled by its builds, below the minimum for that alone, its builds held
+ *   back for disk), and taken at the next claim once released; pins to a
+ *   host registration; with one provider an audit leaves the builder's
+ *   machine to another that can take it now — never to one that sleeps —,
+ *   with two a publish-bound audit takes the other model however long that
+ *   host is busy, and a host with another model seen in the last 24 hours
+ *   holds it until the day is up, a head of them hiding no other audit; each
+ *   audit's independence as its lease records it, of the machine (one
+ *   maintainer's legacy role containers are one); and a review rebuild and
+ *   its audit placed across two maintainers' hosts.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -1107,6 +1107,23 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
     }
   });
 
+  it("another maintainer's host that sleeps (#329) is none to wait for: held, the release offered at once; awake again, it takes the copy at its next claim", () => {
+    const studio = owned("m1-studio", "m1", "aarch64", 11);
+    const mac = owned("m2-mac", "m2", "aarch64", 7, { asleep: true });
+    const s = new Sim([studio, mac]);
+    const [copy] = s.add(copyOf(["m1"]));
+    // Zero free units, however soon it wakes: no lane allowed for the copy, so only the requester's host has one.
+    expect(mayRun(mac, copy, T0, R, largestSize(s.fleet(), T0, R))).toBe(false);
+    expect(placementOf(s.fleet(), copy, T0, R)).toEqual({ others: [], mine: ["m1-studio"], held: true });
+    s.run(30);
+    expect(s.startOf(copy)).toBeUndefined();
+    // Its agent says it woke: it is the other maintainer's host with a lane for it again — not held — and takes the copy.
+    mac.asleep = false;
+    expect(placementOf(s.fleet(), copy, s.now, R)).toEqual({ others: ["m2-mac"], mine: ["m1-studio"], held: false });
+    s.run(1);
+    expect(s.startOf(copy)).toMatchObject({ by: "m2-mac", at: T0 + 30 * MIN, lane: "native" });
+  });
+
   it("is the project's copy's only: a contributor's build of the package, its trial and its audit go to the requester's host as to any other", () => {
     const m1 = owned("m1-studio", "m1", "aarch64", 11);
     for (const t of [task({ arch: "aarch64", trust: "community", owner: "m1" }), task({ arch: "aarch64", kind: "trial", owner: "m1" }), task({ arch: "aarch64", kind: "audit", model: true, publish_bound: true, built_by: "x", built_with: "anthropic/claude-a" })]) {
@@ -1165,6 +1182,12 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     expect(stalled.startOf(late)).toBeUndefined();
     stalled.run(1);
     expect(stalled.startOf(late)).toMatchObject({ by: "a", at: T0 + ELSEWHERE_MS, independent: "none" });
+    // Another host that sleeps (#329) is no machine to leave it to: zero free units, so the builder takes it at once.
+    const sleeping = new Sim([a, { ...b, asleep: true }]);
+    const [now] = sleeping.add(auditOf(a, "anthropic/claude-a", false));
+    expect(auditElsewhere(sleeping.fleet(), now, T0, R, "a")).toBe(false);
+    sleeping.run(1);
+    expect(sleeping.startOf(now)).toMatchObject({ by: "a", at: T0, independent: "none" });
   });
 
   it("two providers: a publish-bound audit never runs on the builder's model while a host with another one is alive, however busy; it runs there, independent by model", () => {

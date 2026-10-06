@@ -665,7 +665,10 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   their hosts can build it, it waits, and Review offers another maintainer
   — never the requester — a release to any host with their passkey
   (`any-host:<task>`), on the task, the journal and the record. A claim
-  never pins a rebuild to its requester's host.
+  never pins a rebuild to its requester's host. Another maintainer's host
+  whose agent says it sleeps (#329) has no lane for it until it wakes, so
+  the rebuild may be offered for release meanwhile; the release still takes
+  another maintainer's passkey, and a sleeping host is never where it runs.
 
 ## Stopping a host
 

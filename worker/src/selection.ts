@@ -56,7 +56,9 @@
  *   audit's lease records how independent it is (`independenceOf`);
  * - **asleep** (#329, design v2 §19.2): a host whose agent reported that it
  *   sleeps (a Mac about to sleep, or asleep) has zero free units: it takes
- *   nothing, is no native capacity an emulated lane waits for, holds no
+ *   nothing, is no native capacity an emulated lane waits for, is neither
+ *   the other maintainer's host the project's copy waits for (`mayRun`)
+ *   nor another machine an audit is left to (`auditElsewhere`), holds no
  *   reservation mark and counts in neither the largest size alive nor the
  *   fleet's builds; its leases still count as held, and once it reports
  *   itself awake it is a host like any other.
@@ -443,29 +445,31 @@ export function requesterHost(m: Pick<Member, "owner">, c: Pick<Candidate, "kind
 
 /**
  * Whether a registration has a lane allowed for a task (D35's "can run"):
- * alive and claiming (not drained, behind or below the minimum), taking it —
- * its kinds, the pin, the probe for model work, its scope — on a lane of its
- * arch, native or emulated, with `needs_native` applied, and able to hold it
- * once it holds nothing: the task's units within its count (its pool cap
- * applied; the reserved job unit kept), an agent slot for model work, and a
- * build's disk budget within its free disk less the floor — at the size the
- * task gets in the fleet alive (`largest`, D31), the maintainer's size kept.
- * A host whose cap is 0 or below the task, or too small for it, never takes
- * it: as a drained one, it is none to wait for. What it holds now is not
- * asked: a busy host runs it once its units free up. Nor is the moment its
- * last claim and report caught: what its memory offered that round; its
- * free disk, which the builds it runs (`held`, its leases) are filling (the
- * budgets they hold come back when they end), and the minimum that disk
- * alone keeps it below (`below_disk`); and the builds its dispatcher leaves
- * out of its claims while a disk hold lasts (crates/pkg-repo dispatch
- * KINDS_HELD, DISK_HOLD at most) — every host takes builds (routes/factory.ts
- * HOST_KINDS). An estimate that runs high only makes the copy wait for that
- * host until it is idle, when its own report decides.
+ * alive and claiming (not drained, behind, below the minimum or asleep),
+ * taking it — its kinds, the pin, the probe for model work, its scope — on
+ * a lane of its arch, native or emulated, with `needs_native` applied, and
+ * able to hold it once it holds nothing: the task's units within its count
+ * (its pool cap applied; the reserved job unit kept), an agent slot for
+ * model work, and a build's disk budget within its free disk less the floor
+ * — at the size the task gets in the fleet alive (`largest`, D31), the
+ * maintainer's size kept. A host whose cap is 0 or below the task, or too
+ * small for it, never takes it: as a drained one, it is none to wait for —
+ * nor is a host whose agent says it sleeps (#329), however soon it may
+ * wake: it has zero free units until it reports itself awake. What it holds
+ * now is not asked: a busy host runs it once its units free up. Nor is the
+ * moment its last claim and report caught: what its memory offered that
+ * round; its free disk, which the builds it runs (`held`, its leases) are
+ * filling (the budgets they hold come back when they end), and the minimum
+ * that disk alone keeps it below (`below_disk`); and the builds its
+ * dispatcher leaves out of its claims while a disk hold lasts (crates/pkg-repo
+ * dispatch KINDS_HELD, DISK_HOLD at most) — every host takes builds
+ * (routes/factory.ts HOST_KINDS). An estimate that runs high only makes the
+ * copy wait for that host until it is idle, when its own report decides.
  */
 export function mayRun(m: Member, c: Candidate, now: number, r: Rules, largest: number, held: readonly Held[] = []): boolean {
   const idle = m.legacy ? m : { ...m, offer: undefined, kinds: m.kinds.includes("build") ? m.kinds : [...m.kinds, "build"], disk: m.disk && idleDisk(m.disk, held) };
   const below = m.below_minimum && !(m.below_disk && idle.disk && idle.disk.work >= m.below_disk.work && idle.disk.engine >= m.below_disk.engine);
-  if (!alive(m, now) || !m.may_claim || below || m.drained || m.behind || !takes(idle, c)) return false;
+  if (!alive(m, now) || !m.may_claim || below || m.drained || m.behind || m.asleep || !takes(idle, c)) return false;
   const lane = laneFor(m, c, r);
   if (!lane || (lane.byLane && lane.mode === "emulated" && c.needs_native)) return false;
   const size = sizeOf(c, largest, r)?.size ?? null;
@@ -550,9 +554,10 @@ const besideBuilder = (m: Pick<Member, "id" | "owner" | "host_id">, c: Pick<Cand
 /**
  * Whether a registration other than `except`, on another machine than the
  * one that built what an audit audits (`apart`), could take it now (D36:
- * the second opinion prefers another host): alive and claiming, taking it,
- * with the model the rule asks for, not reserving for another task, its
- * units and an agent slot free (a legacy one: holding nothing).
+ * the second opinion prefers another host): alive and claiming (awake, too:
+ * a host whose agent says it sleeps takes nothing, #329), taking it, with
+ * the model the rule asks for, not reserving for another task, its units
+ * and an agent slot free (a legacy one: holding nothing).
  */
 export function auditElsewhere(fleet: Fleet, c: Candidate, now: number, r: Rules, except: string): boolean {
   const model = needsOtherModel(fleet, c, now);

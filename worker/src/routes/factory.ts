@@ -956,7 +956,8 @@ export interface PlacementView extends Placement { requesters: string[]; release
  * Where each queued project's copy among `ids` may run (D35): the fleet
  * alive read once — its registrations' lanes, owners, kinds, probes and
  * capacity (one that could not hold the copy idle — its pool cap, its units,
- * its disk — is none to wait for), with the leases the pool holds, read
+ * its disk — is none to wait for, nor is one whose agent says it sleeps,
+ * #329), with the leases the pool holds, read
  * only for the disk budgets of the builds each host runs, which come back to
  * it when they end (a busy host still runs it once its units free up:
  * selection.ts mayRun) — and each task as the claim reads it
@@ -973,7 +974,7 @@ export async function placements(env: Env, ids: number[], at = Date.now()): Prom
   ]);
   const pool = running(env);
   const rules = selectionRules();
-  const fleet: Fleet = { members: (fleetRows.results as FleetRow[]).map((r) => memberOf(r, pool)), leases: (leaseRows.results as LeaseRow[]).map((l) => heldOf(l, rules)) };
+  const fleet: Fleet = { members: (fleetRows.results as FleetRow[]).map((r) => memberOf(r, pool, at)), leases: (leaseRows.results as LeaseRow[]).map((l) => heldOf(l, rules)) };
   const placed = rows.results as (CandidateRow & { any_host_at: string | null; page_size: number | null; page_disk_gb: number | null })[];
   // The size and budget its package's page sets, as the claim reads them (PACKAGE_SIZES_SQL): a host too small for them is none to wait for.
   const sizes = new Map(placed.filter((r) => r.page_size !== null || r.page_disk_gb !== null).map((r) => [r.name, { size: r.page_size, disk_gb: r.page_disk_gb }]));

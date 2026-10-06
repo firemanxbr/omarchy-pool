@@ -1414,8 +1414,9 @@ so a size-4 build waits for memory rather than run smaller.
   idle: the disk its running builds fill (their budgets count as free again,
   a report below the minimum for its disk alone included) and the builds its
   dispatcher leaves out of its claims during a disk hold do not make it
-  none to wait for; a host short of disk with nothing running, or below the
-  minimum for its CPUs or memory, is. When only the
+  none to wait for; a host short of disk with nothing running, below the
+  minimum for its CPUs or memory, or whose agent says it sleeps (#329: a
+  Mac with its lid shut, until it reports itself awake), is. When only the
   requester's hosts have one (a single maintainer's hosts, a `needs_native`
   rebuild with the other host's lane emulated, or a size only the
   requester's host holds — the rebuild is never run smaller there), Review's
@@ -1508,7 +1509,10 @@ so a size-4 build waits for memory rather than run smaller.
 - **A sleeping host has zero free units** (#329). A Mac's agent reports
   `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
   meanwhile its claims are handed nothing, it makes no emulated lane wait,
-  holds no reservation mark and counts in no size alive; its leases stay
+  is not the other maintainer's host a project's copy waits for (Review
+  offers the release if only the requester's hosts are left) nor a machine
+  an audit is left to, holds no reservation mark and counts in no size
+  alive; its leases stay
   its own until they expire. The pool holds it only while that report is
   fresh (15 minutes): a dispatcher that claims after that is on a Mac that
   woke. The host's page says *asleep*.
