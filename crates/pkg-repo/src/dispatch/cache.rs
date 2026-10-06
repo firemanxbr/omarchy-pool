@@ -37,11 +37,13 @@
 //!   `.sig` beside the file it found: one in the read-only shared cache without its `.sig`
 //!   is downloaded again and then refused (`missing required signature`), failing every
 //!   task that installs it from there, and so is one beside a wrong `.sig`, which pacman
-//!   cannot delete. So a package is merged with the pool's own copy of its upstream
-//!   signature beside it (`<source>/<arch>/<file>.sig`, fetched as the databases are,
-//!   [`Signatures`]), which must be the very bytes its task downloaded when it downloaded
-//!   one — never a task's own — or it is not merged; one the pool keeps no signature of
-//!   (its own builds, which tasks install from its sections, `PackageNever`) goes alone.
+//!   cannot delete. So a package is merged with the signature the pool keeps beside it
+//!   (`<source>/<arch>/<file>.sig`, fetched as the databases are, [`Signatures`]): its
+//!   upstream's, or for the pool's own builds the pool key's, which `pkg-repo publish` makes
+//!   and their sections (`PackageNever`) never read. It must be the very bytes its task
+//!   downloaded when it downloaded one — never a task's own — or the package is not merged;
+//!   one the pool keeps no signature of (an upstream that ships none, a build published
+//!   while the pool had no signing key) goes alone, when its task downloaded none either.
 //! - **Checked again.** What was merged is recorded (`cache/merged/<arch>/<file>`: its
 //!   SHA-256 and size), and every pass checks the shared cache again against the
 //!   databases of the day ([`recheck`]): a file whose name they now list with other bytes,
@@ -617,14 +619,14 @@ fn holds(work_root: &Path, arch: &str, file: &str, sha: &str, size: u64) -> bool
 /// No package signature is longer: pacman downloads none past 16 KiB either.
 const MAX_SIG: u64 = 16 << 10;
 
-/// The pool's copy of a package's upstream signature, by the source whose database lists the
-/// package and the package's file name: `Ok(None)` when it keeps none there, `Err` when it
-/// does not answer.
+/// The signature the pool keeps beside a package (its upstream's, or the pool key's for the
+/// pool's own builds), by the source whose database lists the package and the package's file
+/// name: `Ok(None)` when it keeps none there, `Err` when it does not answer.
 pub type Vouch<'a> = dyn FnMut(&str, &str) -> Result<Option<Vec<u8>>, String> + 'a;
 
-/// The pool's copies of the upstream signatures of one architecture's packages, asked for
-/// while a pass merges (`<pool>/<source>/<arch>/<file>.sig`, beside the package, as
-/// `worker/src/r2.ts` lays them out). A pool that does not answer is asked no more this pass:
+/// The signatures the pool keeps beside one architecture's packages, asked for while a pass
+/// merges (`<pool>/<source>/<arch>/<file>.sig`, beside the package, as `worker/src/r2.ts`
+/// lays them out). A pool that does not answer is asked no more this pass:
 /// one timeout a pass, as for the databases.
 pub struct Signatures<'a> {
     pub pool: &'a dyn Pool,
@@ -685,10 +687,11 @@ fn read_capped(src: &Path, cap: u64) -> std::io::Result<Option<Vec<u8>>> {
 /// What goes beside a package merged into the shared cache.
 #[derive(Debug, PartialEq, Eq)]
 enum Beside {
-    /// The pool's copy of its upstream signature.
+    /// The signature the pool keeps beside it: its upstream's, or the pool key's (the pool's
+    /// own builds, which `pkg-repo publish` signs).
     Signature(Vec<u8>),
-    /// Nothing: the pool keeps no signature of it (its own builds), and its task's pacman
-    /// downloaded none.
+    /// Nothing: the pool keeps no signature of it (an upstream that ships none, a build
+    /// published while the pool had no signing key), and its task's pacman downloaded none.
     Nothing,
     /// The package is not merged: the signature its task's pacman downloaded is not the
     /// pool's copy, or the pool keeps none of it, or keeps several (two sources' upstreams

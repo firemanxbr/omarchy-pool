@@ -2139,19 +2139,21 @@ A host's dispatcher keeps its tasks' caches under `<work root>/cache/`
 A download enters `pacman/<arch>/` only when its SHA-256 and size are what
 those databases list for its file name; a file they do not list (a recipe's,
 a `.part`), one with other bytes and one two databases list with different
-bytes are discarded. A package enters with the pool's own copy of its
-upstream signature beside it (`<source>/<arch>/<file>.sig`, fetched from the
-pool as the databases are), or not at all: a build's pacman downloads a
+bytes are discarded. A package enters with the signature the pool keeps
+beside it (`<source>/<arch>/<file>.sig`, fetched from the pool as the
+databases are: its upstream's, or for the pool's own builds the pool key's,
+which `pkg-repo publish` makes), or not at all: a build's pacman downloads a
 package's `.sig` with it from the image's own Arch and Arch Linux ARM
 sections, whose `SigLevel` checks packages, and checks the package by the
 `.sig` beside the file it found, so a package there without its `.sig`, or
 beside another one, fails every build that installs it. When its build
 downloaded a `.sig`, that `.sig` must be the pool's copy; a `.sig` of a
-build's own never enters. A package the pool keeps no signature of (its own
-builds, which tasks install from the pool's sections with `PackageNever`)
-enters alone. Each pass — after a lease ends, and every 15 minutes —
-prunes first, before it asks the pool anything: the pacman cache to the two
-newest versions of each package, then within `OMARCHY_CACHE_PACMAN_GB` (older
+build's own never enters. A package the pool keeps no signature of (an
+upstream that ships none, or a build published before the pool had its key)
+enters alone; the pool's own builds enter with the pool's `.sig`, which their
+`PackageNever` sections never read. Each pass — after a lease ends, and
+every 15 minutes — prunes first, before it asks the pool anything: the
+pacman cache to the two newest versions of each package, then within `OMARCHY_CACHE_PACMAN_GB` (older
 versions first, then the oldest merged); the build caches least recently
 used first within `OMARCHY_CACHE_BUILD_GB`, never one a lease of the host
 mounts. Then it checks the shared cache again against the databases of the
