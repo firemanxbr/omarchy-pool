@@ -18,6 +18,10 @@
 //!   published into `lab`, `lab` rendered — then the helper container, which
 //!   installs from the public lab URL with no token; its transcript attached
 //!   as `trial.log`.
+//! - a **pool job** (#340, [`super::jobs`]): no container of its own — its
+//!   directory and the release's checkout prepared here, the job run in a
+//!   child process of the dispatcher, and what it returned reported by
+//!   [`finish_job`] once that process is gone.
 //!
 //! Seam: a correction of a failed draft runs today inside the build's own
 //! container (the script's attempts), with the build's own agent sidecar

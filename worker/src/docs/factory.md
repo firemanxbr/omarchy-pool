@@ -514,7 +514,9 @@ leases: their units plus the task's within min(declared units, units recomputed 
 with the signed constants, the pool's cap), one unit kept for pool jobs, model work within
 `agent_slots`, a build's disk budget within both free-disk values less the floor and the budgets
 of the builds it holds — as many leases at once as that allows (#337). A host takes builds of
-every trust, trials and audits; which one comes next is the selection's (below). A Stop is per lease (`task` names it; several open at once, 30 an hour per
+every trust, trials and audits, and — once the `host-pool-jobs` setting names it (#340) — the pool
+jobs: the arch-neutral ones whatever their row's arch, a health check or a promotion only with a
+lane of each arch its helpers check; which one comes next is the selection's (below). A Stop is per lease (`task` names it; several open at once, 30 an hour per
 login), and `fail` takes `lost: true` (a host event: the attempt given back, twice per task at
 most) and `oom: true` (the engine's kill: the attempt spent, the reason kept).
 
@@ -534,9 +536,19 @@ loop       per lease: a release in this host's merged revoked set (#342: the sig
            for its budget: builds left out of the claims, trials and audits not, until it fits, 30 min at most);
            then the claim: want 1 while units are free beside its leases and the job unit, offering only what
            MemAvailable still holds below the largest task it could receive (#337; the shares of the leases it
-           started in the last 5 minutes subtracted: their containers have not grown yet) — again at the next tick
-           after a task, every 30 s otherwise; want 0 every 30 s when full or when fewer units than leases
+           started in the last 5 minutes subtracted: their containers have not grown yet) — and while the job
+           unit is free, the pool's kinds listed with its own (#340) — again at the next tick after a task,
+           every 30 s otherwise; want 0 every 30 s when full, the job unit too, or when fewer units than leases
            remain (nothing running is killed); each lease starts at once in its own container, no host queue
+jobs       a pool job (#340): one at a time, in a child process of its own (pkg-repo pool-job: a 2 GB data rlimit, its
+           job token in <task dir>/token, renewed at each heartbeat, its result in result.json; work dir <work root>/jobs,
+           its scripts' TMPDIR <task dir>/tmp), killed with its process group and its helpers past its kind's timeout
+           (render, rollback, enqueue 30 min; health 45; gc, publish 60; sync, security 150; promote 180; verify,
+           relayout 240) and failed; a job running when the dispatcher is replaced fails `lost`; its scripts' only
+           engine omarchy-task-run (RUNTIME, and docker and podman first on its PATH): `run --rm --platform …
+           [-e KEYRING=…] -v <scratch dir>:/repo[:ro] <an image tests/images.env pins> bash /repo/<script>.sh` as a
+           helper <network>-helper on the job's own internal network beside its egress sidecar (health, promote,
+           security get a /28), anything else refused (125)
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
 out        /task/out: the kind's closed list under its caps (a build: packages, PKGBUILD, vet.json, tests.log,
            resources.json, verdict.json), uploaded by the dispatcher with the job token; /task/log/task.log, ≤ 64 MiB
