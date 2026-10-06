@@ -55,9 +55,16 @@
 #              design v2 §9, #335): `pkg-repo dispatch` — it claims as many
 #              tasks as the host's capacity allows and runs each in one
 #              isolated, credential-less task container through the
-#              runtime's socket. Its host's worker token comes from
-#              etc/dispatcher.env; it holds no agent key and refuses a
-#              package signing key.
+#              runtime's socket. Its host's worker token is a read-only
+#              file the host set mounts (OMARCHY_WORKER_TOKEN_FILE, the
+#              agent's run/host/dispatcher/token, #327), never a value in
+#              its environment; it holds no agent key and refuses a package
+#              signing key.
+#
+# OMARCHY_WORKER_TOKEN_FILE names a file holding the worker token, and wins
+# over OMARCHY_WORKER_TOKEN, whose value anyone who can talk to the runtime's
+# socket reads with `docker inspect` (design v2 §14, D15). The plain variable
+# keeps working: a container started from an older release carries it there.
 #
 # OMARCHY_BROKER makes this container a builder: it holds no token and no
 # key, asks the broker who it is, builds one task and exits (/docs/security-model,
@@ -98,6 +105,16 @@ case "$role" in ""|pool|review|community|agent|broker|updater|dispatcher|egress)
 if [[ "$role" == egress ]]; then
   exec pkg-repo egress "$@"
 fi
+# The worker token's file (#327): one token on one line, as the agent writes it. A file
+# that is named but gives no token stops the container — never a silent fall back to a
+# plain variable that may be stale.
+token_from_file() {
+  local f="$OMARCHY_WORKER_TOKEN_FILE" t
+  [[ -f "$f" && -r "$f" ]] || { echo "omarchy-worker: OMARCHY_WORKER_TOKEN_FILE=$f is not a file this container can read (the host set mounts the agent's run/host/dispatcher/token there, read-only)" >&2; return 1; }
+  t="$(head -c 4097 "$f" | tr -d '\r')"
+  [[ -n "$t" && ${#t} -le 4096 && "$t" != *[![:graph:]]* ]] || { echo "omarchy-worker: OMARCHY_WORKER_TOKEN_FILE=$f holds no worker token (one token on one line)" >&2; return 1; }
+  printf '%s' "$t"
+}
 # An agent sidecar's keys (#336): KEY=VALUE lines of a file mounted read-only, the agent's keys and settings only — a worker
 # token or anything else in it is ignored, and named. A value may be quoted; nothing in the file is run.
 load_agent_env() {
@@ -130,17 +147,33 @@ fi
 if [[ "$role" == dispatcher ]]; then
   sock="${DOCKER_HOST:-unix:///var/run/docker.sock}"; sock="${sock#unix://}"
   [[ "$sock" == *://* || -S "$sock" ]] || { echo "omarchy-worker: the dispatcher starts task containers through the runtime's socket; mount it at $sock" >&2; exit 2; }
+  # pkg-repo reads the file itself (and prefers it); checked here so a missing mount says so
+  # before anything starts. The token never enters this shell's environment.
+  if [[ -n "${OMARCHY_WORKER_TOKEN_FILE:-}" ]]; then
+    token_from_file > /dev/null || exit 2
+  elif [[ -z "${OMARCHY_WORKER_TOKEN:-}" ]]; then
+    echo "omarchy-worker: the dispatcher has no worker token: OMARCHY_WORKER_TOKEN_FILE (the host set mounts the agent's run/host/dispatcher/token) or, from an older release, OMARCHY_WORKER_TOKEN" >&2; exit 2
+  fi
   exec pkg-repo dispatch "$@"
 fi
 if [[ "$role" == agent && -n "${OMARCHY_AGENT_ENV:-}" ]]; then
   # A task's agent sidecar, or the probe's: never the pool's path, whatever the environment says.
-  unset OMARCHY_WORKER_TOKEN FACTORY_TOKEN
+  unset OMARCHY_WORKER_TOKEN OMARCHY_WORKER_TOKEN_FILE FACTORY_TOKEN
   load_agent_env "$OMARCHY_AGENT_ENV" || exit 2
 fi
 if [[ "$role" == agent && "${1:-}" == --probe ]]; then
   ensure_claude || echo "omarchy-worker: Claude Code did not install" >&2
   export PATH="$HOME/.local/bin:$PATH"
   exec python3 /usr/local/lib/omarchy-factory/bin/agent.py --probe
+fi
+# The roles that hold the worker token read it from the environment — the broker, the
+# pool's answer below, pkg-repo work, the build worker: the file's value goes there, into
+# this container's processes only, never into its configuration. A builder behind a broker
+# holds none (below), and neither does the agent role.
+if [[ -n "${OMARCHY_WORKER_TOKEN_FILE:-}" && -z "${OMARCHY_BROKER:-}" && "$role" != agent ]]; then
+  OMARCHY_WORKER_TOKEN="$(token_from_file)" || exit 2
+  export OMARCHY_WORKER_TOKEN
+  unset OMARCHY_WORKER_TOKEN_FILE
 fi
 if [[ "$role" == broker || "$role" == agent ]]; then
   # The broker: the credentials stay here. Claude Code is installed the
@@ -153,7 +186,7 @@ if [[ -n "${OMARCHY_BROKER:-}" ]]; then
   # A builder behind a broker: no token, no key — ask the broker who this
   # worker is. The broker may still be starting (installing the agent).
   OMARCHY_BROKER="${OMARCHY_BROKER%/}"
-  for k in OMARCHY_WORKER_TOKEN FACTORY_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY XAI_API_KEY GITHUB_TOKEN; do
+  for k in OMARCHY_WORKER_TOKEN OMARCHY_WORKER_TOKEN_FILE FACTORY_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY XAI_API_KEY GITHUB_TOKEN; do
     [[ -n "${!k:-}" ]] && echo "omarchy-worker: $k is set on a builder behind a broker; it belongs on the broker — ignoring it" >&2 && unset "$k"
   done
   self=""; for _ in $(seq 1 40); do

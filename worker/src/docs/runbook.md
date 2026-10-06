@@ -894,9 +894,14 @@ Then it prints the envelope (`agent.toml`) to confirm, writes
 `run/capacity.json`, enrolls ([Maintainer hosts](/docs/worker-host#maintainer-hosts):
 the fingerprint, your Confirm on the site, the host worker token) and only then writes `agent.toml` with
 the `host_id` and `worker_id` the enrollment gave — before your Confirm
-there is no run loop, no dispatcher and nothing that claims. Then
-`etc/dispatcher.env` (0600) holds, beside the worker token, what the
-dispatcher takes from the agent (#371): `OMARCHY_HOST_ADDRESSES` (every
+there is no run loop, no dispatcher and nothing that claims. The host worker
+token is `run/host/dispatcher/token` in the set directory (0400, its
+directories 0700, #327), the one secret file the host set mounts, read-only,
+into the dispatcher (`OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token`):
+`docker inspect` of the dispatcher, a sidecar or a task shows no token or
+key in its environment. Then `etc/dispatcher.env` (0600) holds the token's
+registration (`# worker:`) and what the dispatcher takes from the agent
+(#371): `OMARCHY_HOST_ADDRESSES` (every
 address of the host's interfaces but loopback's and a container bridge's the
 egress refuses anyway — private, link-local, unique local or in the task
 subnets —, an IPv6 one as its /64, and the public address the probe saw, which
@@ -1026,6 +1031,98 @@ it there: that bridge reaches the LAN and the router through the user-mode
 stack, and its gateway (the engine's namespace) refuses connections, which
 counts as reached.
 
+#### A sandboxed runtime for community tasks
+
+A host whose engine has gVisor's `runsc` or Kata Containers runs what a
+contributor wrote in it (#330, design v2 §10.4; D43): the dispatcher starts a
+contributor's build, the project's review rebuild of one, its trial and its
+audit — everything but the project's own recipe on main or a maintainer's
+dry run — on the native lane with `--runtime <it>`, so a container escape
+lands in the sandbox's kernel, not on the host. Its sidecars, the
+project's own recipes and the check containers of the pool's jobs (#340:
+the release's scripts over what a ring serves, on any lane) run on the
+engine's own runtime. A package's signed network exception (#373) changes
+its task's network, never its runtime. An emulated lane needs
+the host kernel's binfmt handler, which a sandbox's kernel does not have: the
+pool hands a host whose dispatcher applies a sandbox only the project's own
+recipes for its emulated lanes, and a contributor's x86_64 work waits for a
+native x86_64 lane or another host's emulated one (on a pool whose only
+x86_64 lane is a sandboxed host's emulated one, it waits until the owner
+turns the sandbox off or another host joins). The agent looks for one at install and at each
+`omarchy-agent capacity … --write`: a runtime `docker info` lists whose name,
+path or shim type says `runsc` (gVisor, tried first) or `kata`, then a smoke
+run of the release's build image under it, which must print a kernel that is
+not the engine's own (`uname -r`) and answer `pacman --version`. The first
+that passes goes into `run/capacity.json`'s `sandbox`
+(`{"runtime":"runsc","kind":"gvisor"}`), which the dispatcher reads before
+each start and says with each claim (`capacity.sandbox`: the one it
+applies); the host page (*Sandbox*) shows what the claims say — a dispatcher
+from before #330 says nothing, and the page then says the agent found one
+its dispatcher does not apply — beside what the agent found. None reads
+`"sandbox": null`, and `sandbox_held` says why one the engine has, or the
+envelope names, is not used. A host without one runs its community tasks
+as before. To give a Linux host gVisor (at the host, as root; its release
+notes name the current release):
+
+```bash
+r=20260928 a="$(uname -m)"   # a gVisor release, the machine's architecture
+cd /tmp && curl -fsSLO "https://storage.googleapis.com/gvisor/releases/release/$r/$a/gvisor.tar.zstd" \
+  && curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/$r/$a/gvisor.tar.zstd.sha512" | sha512sum -c -
+sudo mkdir -p /opt/gvisor && sudo tar --zstd -xf gvisor.tar.zstd -C /opt/gvisor   # runsc and its gvisor-bin/
+sudo /opt/gvisor/runsc install       # "runsc" in /etc/docker/daemon.json's runtimes
+sudo systemctl reload docker         # a reload: running task containers keep running
+docker run --rm --runtime runsc busybox uname -r   # gVisor's kernel, not the host's
+```
+
+then count the host again with the owner's envelope and the applied release
+(the command under *How the pool hands a host work*, *Emulated lanes are
+detected*), or run install again; the run loop sees the file change and the
+recreated dispatcher starts the next community task in it. Check it with
+`jq '.sandbox, .sandbox_held' <set dir>/run/capacity.json`, or without a
+release `omarchy-agent capacity --work-root <dir> --probe-image <the build
+image by digest>`. The envelope's `sandbox` is the owner's, set at the
+host (a widening signed on the host page never sets it, #328): absent or
+`"auto"` takes the first that passes, `"off"` none (nothing is run for it),
+a runtime's name only that one (`sandbox = "kata"`). Where it does not apply:
+
+- **podman**: the dispatcher's docker CLI cannot pass `--runtime` through
+  podman's docker API, which runs podman's default runtime instead; the smoke
+  run sees the host's kernel and the agent names no sandbox (`sandbox_held`
+  says so).
+- **Kata** needs `/dev/kvm`: on a VM, nested virtualisation. Its docker
+  registration is a shim (`"runtimes": {"kata": {"runtimeType":
+  "io.containerd.kata.v2"}}`), which the agent reads the same way.
+- **A rootless engine, or a 16K-page kernel** (the Studio's Asahi): whether
+  gVisor runs there at all is its smoke run's to say; held, the host runs on
+  as before and the reason is on its page.
+- A runtime removed or broken after the count (runsc uninstalled,
+  `daemon.json` reset, Kata without `/dev/kvm` after a migration):
+  `docker run --runtime` refuses, and the task it was to start fails `lost`
+  — never on the engine's own runtime. Its attempt is given back, but the
+  pool spends one from a task's third loss on a host (`HOST_LOSSES_MAX`), so
+  the dispatcher holds its claims (`want: 0`, its pool jobs' unit with
+  them, #340) for 30 minutes after a first
+  refusal, twice as long after each further one in a row (1, 2, 4 … hours,
+  a day at most), and claims again when the hold is over — the leases it
+  claimed before a hold and refused while it holds are lost with it, and
+  count as that one refusal; the host page
+  says why under *Sandbox* ("its claims hold: runsc refused task … 's start
+  …: no claim for 1 hour (2 refusals in a row) …") and the dispatcher's log
+  says it once. Only the runtime's own error holds the claims (docker's
+  "unknown or invalid runtime name", an OCI runtime's or its shim's): a
+  start that fails for a pull or an engine that did not answer is lost as on
+  any host. Fix or remove the runtime, then press **Restart** on the
+  dispatcher's worker page (the host page's *Drain or resume its claims*
+  leads there): a new dispatcher has no hold, and claims again at once — in
+  the sandbox, or with `"sandbox": null` on the engine's own runtime once
+  the host is counted again without it (a count that finds something
+  changed writes a new `run/capacity.json`, which recreates the dispatcher
+  too). A count that finds the host as it was writes nothing (`capacity:
+  … unchanged`) and leaves the hold to run out.
+
+CI's `sandboxed-runtime` job runs all of it on docker with gVisor
+(`tests/sandboxed-runtime.sh`).
+
 ### Installing a Mac
 
 A Mac (Apple silicon, macOS 13 or later) is a maintainer host through its own
@@ -1124,8 +1221,10 @@ Preflight, before it starts any VM:
 (`/var/run/docker.sock`, inside the VM, which the dispatcher mounts). The
 lint then refuses any bind of the set (the owner's override included) whose
 source lies under none of the VM's three mounts. `etc/dispatcher.env` is in
-the set directory (`<root>/set/etc/dispatcher.env`, read-only in the VM), and
-its `OMARCHY_HOST_ADDRESSES` are the Mac's own: a Mac has no `/proc`, so they
+the set directory (`<root>/set/etc/dispatcher.env`, read-only in the VM), as
+is the host worker token's file (`<root>/set/run/host/dispatcher/token`,
+0400, #327), which the dispatcher in the VM mounts read-only; and the env
+file's `OMARCHY_HOST_ADDRESSES` are the Mac's own: a Mac has no `/proc`, so they
 are `/sbin/ifconfig -a`'s, by the same rules as on Linux (a vmnet bridge such
 as `bridge100`, the VMs' NAT, counts as a container bridge), and the public
 address the probe task in the VM saw. A task leaves through the Mac, so an
@@ -1257,6 +1356,39 @@ keeps the list its egress sidecar was started with); the journal says
 rename, so none puts back what another just wrote. `omarchy-agent
 dispatcher-env` prints what it would write; `--write` writes it now.
 
+**Rotating the host worker token** (#327): `omarchy-agent token` fetches a
+new one with a request signed by the host key and rewrites
+`run/host/dispatcher/token` (every rotation writes there alone: the 30-day
+rotation, and the pool's `rotate-token` host order once it lands, #325).
+The token file is an input of the set, so the next tick starts a round that
+recreates the dispatcher, and only it: the old one saves its leases and
+exits, the new one reads the new file and re-adopts every task, which runs
+on (the old token works ten more minutes, more than the round takes). The
+journal scrubs the token from its file as it does `etc/*.env` values.
+
+**A host from before #327** had the token in `etc/dispatcher.env`. Its agent
+updates itself first: the bundle's `min_agent` is the first agent that writes
+the token file (0.3.0), since an older one refuses the template that mounts it
+and would report its lint, so a host whose self-update fails reports
+`needs-newer-agent` and stays on its release. The new agent
+moves the token to its file at its first start (`dispatcher-env` in the journal:
+"the host worker token moved …"), losing nothing; a token line there is
+always taken as the newest one (an older agent wrote it). While a release
+from before #327 runs or is being rolled out — its dispatcher reads only
+`OMARCHY_WORKER_TOKEN` — the agent keeps the token in `etc/dispatcher.env`
+too, and a round that rolls back to such a release puts it back before it
+creates that dispatcher. A rollback statement whose `agent_to` moves the agent
+down hands that round to the agent below, which may be from before #327 and
+keep a token line without writing one, so the agent puts the line back before
+it moves when the target's template reads the token there: a line it cannot
+write holds the statement (`held`, "the dispatcher's token: …"), and a move
+that fails takes the line out again. Once no such release is left the next
+minute's refresh takes it out, which recreates the dispatcher once more. A
+token line the agent cannot move (not one word) stops it with a
+`dispatcher-env` line in the journal until you fix or remove the line. The
+image reads `OMARCHY_WORKER_TOKEN_FILE` before `OMARCHY_WORKER_TOKEN`, and a
+file it names but cannot read stops the container instead of falling back.
+
 Each round goes `render → lint → plan → pull → replace → guard → commit`,
 or `revert`, each step written to `state.json` before it acts, so a restart
 anywhere resumes it (a ready wait or a guard in flight starts its clock again:
@@ -1272,7 +1404,8 @@ origin must be in its `pools`, and the target must be at or above the floor
 merged from every verified manifest and never lowered) — or covered by a
 rollback statement (*Rollback statements* in the security model), which
 preempts a round in flight, as a newer release does, at any step before
-`commit` (an older release waits for the round to end). The dispatcher alone is replaced: stopped (it saves its leases
+`commit` (an older release waits for the round to end). Before it hashes the set's inputs, a round puts the token into
+`etc/dispatcher.env` or takes it out as the releases staged and applied need (#327). The dispatcher alone is replaced: stopped (it saves its leases
 and exits within 60 s), created from the new files and waited for on
 `/ready`; task containers are never part of a plan and keep running. The
 guard then samples it for `guard_s`: a restart streak, two restarts that
@@ -1281,8 +1414,9 @@ lost `/ready` revert to `last-good/` and quarantine the release for an hour
 (one retry, then until a newer release); an Update order on the host's
 worker, or the host order `retry-release`, lifts every quarantine and starts
 a round. A changed
-`compose.override.yml`, `etc/` file or `run/capacity.json` starts a round
-too, and the running set is compared with `last-good/` every 15 minutes.
+`compose.override.yml`, `etc/` file, `run/capacity.json` or the token file
+starts a round too, and the running set is compared with `last-good/` every
+15 minutes.
 Two known gaps: a round preempted during its replace leaves the dispatcher
 stopped (its leases saved) until the new round's replace, and a release's
 pinned docker and compose roll forward only — tools that cannot talk to the
@@ -1291,7 +1425,7 @@ engine leave the round at `engine-unreachable` until a newer release.
 | The last round says | What it means |
 |---|---|
 | `ok`, `no-change` | the set runs the target |
-| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again); or the release waits for the owner's soak (`… waits for the owner's soak until …`, #326, *Soak* below) |
+| `held` | the dispatcher waits for a file: `etc/dispatcher.env` and `run/host/dispatcher/token` until the owner confirms the host (#321, #327), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again); or the release waits for the owner's soak (`… waits for the owner's soak until …`, #326, *Soak* below) |
 | `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
 | `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep` (deeper than 14 days without the maintainers' co-signature over the statement), `cosignature` (the bundle lacks the co-signatures this agent pins, #330), `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
@@ -1367,22 +1501,24 @@ an agent from 0.4.0 (an older one is given none and the page says why):
   Mac the lane is the VM's Rosetta one (#320); a count after a start of the
   VM keeps it as detected, and the setting narrows the new file again.
 - **Rotate token** (`rotate-token`): a new host worker token from the pool
-  (`POST /hosts/self/token`, signed), written to `etc/dispatcher.env` as
-  enrollment writes it — the rest of the file rendered as the run loop
-  renders it (#371), so the host's addresses, the secrets directory, the
-  agent budget and the owner's own lines stay; the changed `etc/` recreates
-  the dispatcher within the ten minutes the old one still works. A token the
-  pool does not give, or one for another registration, is refused with
-  nothing written. (`*_FILE` secrets, #327, move where the token is written:
-  `enroll::write_worker_token` is the one place.)
+  (`POST /hosts/self/token`, signed), written as enrollment writes it
+  (`enroll::write_worker_token`, the one place): to its file,
+  `run/host/dispatcher/token` (0400, #327), with `etc/dispatcher.env` naming
+  its registration and rendered as the run loop renders it (#371), so the
+  host's addresses, the secrets directory, the agent budget and the owner's
+  own lines stay (and the token goes there too only while a release from
+  before #327 is here); the changed file recreates the dispatcher within the
+  ten minutes the old one still works. A token the pool does not give, or one
+  for another registration, is refused with nothing written.
 - **Retry release** (`retry-release`): lifts every quarantine and starts a
   round, as an Update does; the page greys it while the report says nothing
   is quarantined. Without room on the brake for that round's restarts (its
   own and a revert's) it is refused and the quarantine kept.
 - **Diagnostics** (`diagnostics`, design v2 M10): only when the envelope says
   `diagnostics = true`, the dispatcher's last 500 log lines, each cut to 300
-  characters, scrubbed of every value (8 characters or more) of the set's
-  `etc/*.env` and the secrets directory's `*.env`, and of anything shaped like a pool
+  characters, scrubbed of the host worker token's file (#327), of every value (8
+  characters or more) of the set's `etc/*.env` and the secrets directory's
+  `*.env`, and of anything shaped like a pool
   token (`omj.` job tokens and `oma_` agent tokens among them), GitHub, Anthropic or
   OpenAI token; the newest that fit 56 KiB as the JSON body carries them, posted to the
   pool (`POST /hosts/self/diagnostics`, signed, at most 64 KiB), which drops a
@@ -1950,7 +2086,10 @@ so a size-4 build waits for memory rather than run smaller.
   <scratch dir>:/repo[:ro] <image pinned in tests/images.env> bash
   /repo/<script>.sh`; anything else a job's script asks of the engine it
   refuses with 125 (`omarchy-task-run: refused — …` in the dispatcher's
-  log). The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
+  log). On a host with a sandboxed runtime (#330) they run on the engine's
+  own runtime all the same, its emulated lanes included, and a sandbox hold
+  (*A sandboxed runtime for community tasks*) holds its pool jobs with its
+  tasks until it ends or the dispatcher restarts. The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
   ABI gate's cached Omarchy reference), as a legacy pool worker's work
   directory. On the host, while one runs:
 

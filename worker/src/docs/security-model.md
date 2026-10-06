@@ -108,7 +108,8 @@ secret). Everything travels in the `Authorization` header over TLS only.
   same package, on the same side, wrote.
 - **On a maintainer host, one container per task, born with nothing
   (#335).** The host's one service, the dispatcher (`pkg-repo dispatch`),
-  holds the host's worker token and each lease's job token, and starts every
+  holds the host's worker token (a read-only file, never its environment,
+  #327) and each lease's job token, and starts every
   task — a build, an audit, a trial's helper — in a container made by one
   function: no socket, no token of any kind, no agent key, not the work root
   nor another task's directory, `--cap-drop ALL` with the few capabilities
@@ -130,14 +131,58 @@ secret). Everything travels in the `Authorization` header over TLS only.
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
   runs the dispatcher on a real engine (`tests/dispatch-engine.sh`).
+- **What a contributor wrote, in a sandbox, where the host has one (#330, D43).**
+  A contributor's recipe is the code most likely to try an escape, and on a
+  host it runs beside the dispatcher's tokens — as root on a rootful engine
+  without remapping (design v2 §10.4, §19.3). When the host's engine has
+  gVisor's `runsc` or Kata Containers, the agent finds it: a smoke run of the
+  release's build image under it must print a kernel that is not the
+  engine's own, so a runtime on the host's kernel — docker's CLI on podman,
+  whose API does not pass `--runtime` on — is never taken for one. The
+  dispatcher then starts, with `--runtime <it>`, every task that runs what a
+  contributor wrote — decided by what runs, not by the trust label: a
+  contributor's build; the project's review rebuild, whose recipe the
+  project's drafter wrote from the contributor's evidence before anyone
+  approved it (§9.5 says it can be subverted); the trial that installs what
+  that rebuild built, install scriptlets and all; the audit that reads it;
+  and any kind or trust the dispatcher does not know. An escape from them
+  lands in gVisor's user-space kernel or in Kata's VM, not on the host. Only
+  the project's own recipe — on main, or a maintainer's dry run — runs on the
+  engine's own runtime. A sandbox covers the native lane only: an emulated
+  lane runs its architecture through the host kernel's binfmt handler, which
+  a sandbox's kernel does not have, so the pool hands a host whose
+  dispatcher applies a sandbox none of that work for its emulated lanes —
+  only the project's own recipes — and the dispatcher hands back one that
+  reaches them anyway, before anything runs. The dispatcher never runs such a
+  task outside a sandbox the host says it has: a runtime the engine refuses
+  fails the start (`lost`) and holds its claims (30 minutes, doubled after
+  each further refusal in a row, a day at most; a restart of the dispatcher
+  ends it), and a capacity file whose sandbox it cannot read claims
+  nothing. Each claim says the sandbox the dispatcher applies; the pool
+  selects on that and the host page (*Sandbox*) shows it — not merely what
+  the agent found, which a dispatcher from before #330 ignores — with why
+  one the engine has is not used and why the claims hold. The envelope's `sandbox` (`"off"`, or one
+  runtime's name) is the owner's, set at the host: a signed widening from
+  the browser (#328) never sets it. A host without one runs these tasks as
+  before, at its isolation level. A package with a signed network exception
+  (`direct_network`, #373) changes its network, never its runtime: on a
+  granted host its task runs on its bridge in the sandbox all the same. Stated plainly: a sandbox's kernel is a
+  smaller surface, not none — a bug in gVisor's, or in the gofer that serves
+  the task's mounts, is still an escape — and the task's own mounts (its
+  directories, the release's checkout read-only) are the host's files
+  either way. Its sidecars run the signed worker image on the engine's own
+  runtime, and the sandboxed recipe reaches them over its internal network
+  (design v2 §10.1): a recipe that first compromises its egress or agent
+  sidecar runs code outside the sandbox, and can try an escape from there
+  at the host's isolation level.
 - **Pool jobs stay in the dispatcher; their check containers go through the
   spec (#340, D34).** A host's pool jobs — sync, render, promote, rollback,
   security, gc, verify, relayout, enqueue, publish, health — are the
   release's own signed code, trusted like the dispatcher: each runs in a
   child process of it (`pkg-repo pool-job`) with its lease's job token, as a
   legacy pool worker runs them, under a 2 GB memory limit and a time limit,
-  killed whole when it overruns; it never holds the host's worker token, and
-  it reaches no task network. The containers its scripts start run package
+  killed whole when it overruns; it never holds the host's worker token nor
+  the name of its file (#327), and it reaches no task network. The containers its scripts start run package
   code (a health check's pacman, an ABI gate's install of a ring, the
   enqueue's reader, which sources the recipes on `main`), so they go
   through the one spec: the job's only engine is `omarchy-task-run`
@@ -149,7 +194,14 @@ secret). Everything travels in the `Authorization` header over TLS only.
   bridge, whatever the owner's envelope grants: `direct_network` is a
   package build's, #373), with the job's unit, the task container's
   capabilities, that one directory and no token; any other shape, verb or
-  flag is refused before the engine is asked. The spec's CI test renders
+  flag is refused before the engine is asked. They run on the engine's own
+  runtime on a host with a sandboxed runtime too (#330): what they run is the
+  project's own — the release's scripts in its pinned images, over what a
+  ring serves (signed, after the maintainers' approval) and the recipes on
+  `main` — as the project's own recipe does, and on any lane of their
+  architecture, an emulated one included, which a sandbox's kernel cannot
+  run. A sandbox hold holds a host's pool jobs with its tasks: they share
+  its claim. The spec's CI test renders
   every helper the scripts start, and the shim's tests every shape refused.
   Hosts take pool jobs only once the maintainers' `host-pool-jobs` setting
   names them.
@@ -756,8 +808,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   registration the host already has), `retry-release` (lifts a quarantine;
   the release is still checked as any target) and `diagnostics` (design v2
   M10: the dispatcher's last 500 log lines, only when the envelope says
-  `diagnostics = true`, scrubbed on the host of every value in the set's
-  `etc/*.env` and the secrets directory's env files and of anything shaped
+  `diagnostics = true`, scrubbed on the host of the worker token's file
+  (#327), every value in the set's `etc/*.env` and the secrets directory's
+  env files and of anything shaped
   like a pool token (its job tokens `omj.` and agent tokens `oma_` too),
   GitHub or model provider token, then checked again by the
   pool's leak scan, which drops a line that still looks like one; kept a
@@ -810,8 +863,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   own parser and the lint, and the units are counted again under the applied
   release's signed constants and the detected hardware: a widening never
   gives more than the machine has; nor does it ever set the grant of a
-  signed exception's bridge (`direct_network`, #373), which stays the
-  host's. Narrowing (`set-units`, `set-emulate`) needs no signature, as
+  signed exception's bridge (`direct_network`, #373) or the sandboxed
+  runtime what a contributor wrote runs in (`sandbox`, #330), which stay
+  the host's. Narrowing (`set-units`, `set-emulate`) needs no signature, as
   before. Agent keys are sealed in the owner's
   browser to the host's X25519 seal key, which its owner confirmed once by
   its fingerprint (`omarchy-agent status` prints it at the host): the pool
@@ -860,20 +914,41 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   On a Mac the Keychain holds the seal key only (the host key stays a 0600
   file there; hardware-bound host keys are P6), and agent.env stays a 0600
   file, which agent sidecars in the VM mount.
-- **The host worker token** (`omw_…`) is the dispatcher's only, written
-  0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
-  id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
-  digits and dashes), so a pool cannot add a variable to the dispatcher's
-  environment (#371: the secrets directory's path and the agent budget come
-  from `agent.toml`, the host's addresses from its interfaces and from the
-  address the pool's edge saw the probe task or the agent come from, which is
-  read as one IP address, so a pool can at most add one address to the deny
-  list, never a variable); strings the pool sends reach the terminal without control
-  characters. It is a new one at every fetch; the agent
-  rotates it every 30 days. The one it replaces works ten more minutes (kept
+- **The host worker token** (`omw_…`) is the dispatcher's only, and reaches
+  it as a read-only file, never as a value in its environment (#327, design
+  v2 §14, D15): container environment is readable through `docker inspect` by
+  anyone who can talk to the engine's socket. The agent writes it to
+  `run/host/dispatcher/token` in the set directory (0400, owned by the agent's
+  user, in 0700 directories); the host set mounts that file read-only into the
+  dispatcher and names it in `OMARCHY_WORKER_TOKEN_FILE`, which the image's
+  entrypoint and `pkg-repo` read before `OMARCHY_WORKER_TOKEN` (a file named
+  but unreadable stops the container; it never falls back). `lint-set`
+  refuses a service mounting anything under the secrets directory, another
+  service's secret file (`run/host/<service>/token`), its own writable, or a
+  directory that holds them. The agent writes the token, and the
+  registration's id (`# worker:` in `etc/dispatcher.env`, 0600), only in the
+  shapes the pool mints (`omw_` and 48 hex digits; letters, digits and
+  dashes), so a pool cannot add a variable to the dispatcher's environment
+  (#371: the secrets directory's path and the agent budget come from
+  `agent.toml`, the host's addresses from its interfaces and from the address
+  the pool's edge saw the probe task or the agent come from, which is read as
+  one IP address, so a pool can at most add one address to the deny list,
+  never a variable); strings the pool sends reach the terminal without control
+  characters. It is a new one at every fetch; the agent rotates it every 30
+  days by rewriting the file. The one it replaces works ten more minutes (kept
   on the host's row, never on the registration that older Workers list), so
-  only the dispatcher is recreated, and a running task — whose job token does
-  not depend on it — never notices.
+  only the dispatcher is recreated — the file is an input of the set — and a
+  running task, whose job token does not depend on it, never notices. Stated
+  plainly: while a release from before #327 runs or is being rolled out on a
+  host, its dispatcher reads only `OMARCHY_WORKER_TOKEN`, so the agent keeps
+  the token in `etc/dispatcher.env` too (and the dispatcher's environment
+  shows it) until no such release is left; a new token also passes through
+  that file for the moment between two of its writes when the file names no
+  registration yet, another one, or still holds an older token's line, so a
+  writer stopped half-way never leaves an older token that looks newer; and on
+  a rootful engine the socket makes the dispatcher root-equivalent anyway —
+  the file protects against leaks through `inspect`, logs, crash dumps and
+  bugs, not against a compromised dispatcher.
 - **The host report** is at most 16 KiB (its `runtime` at most 2 KiB) and
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
@@ -964,6 +1039,24 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   whose agent says it sleeps (#329) has no lane for it until it wakes, so
   the rebuild may be offered for release meanwhile; the release still takes
   another maintainer's passkey, and a sleeping host is never where it runs.
+
+### Where secrets live on a maintainer host
+
+| Secret | Where it comes from | At rest | Which container gets it |
+|---|---|---|---|
+| Host key | generated at install | 0600 `state/host.ed25519` in the agent's data directory | none, ever |
+| Seal key (X25519, #328) | generated by the agent; its owner confirms its fingerprint once on the host's page | 0600 `state/seal.x25519` beside the host key (on a Mac, the Keychain) | none, ever |
+| Host worker token `omw_` | minted by the pool for the confirmed host, fetched with a host-key-signed request, rotated every 30 days | 0400 `run/host/dispatcher/token` in the set directory (and in 0600 `etc/dispatcher.env` only while a release from before #327 is applied or staged, from just before a rollback statement's `agent_to` moves the agent down to run a rollback to one, or for the moment between two writes when the env file names no registration yet, another one, or still holds an older token's line) | the dispatcher only, as a read-only file mount (`OMARCHY_WORKER_TOKEN_FILE`), never in its environment except while that `etc/dispatcher.env` line is there (the file is the dispatcher's `env_file`; a release from before #327 reads `OMARCHY_WORKER_TOKEN` from it) |
+| Job tokens `omj.` | the claim answer, per lease, carrying the lease generation | the dispatcher's memory and `work/state/leases/` (0600) | the dispatcher and its pool-job children only; never a task |
+| Agent keys, `GITHUB_TOKEN` (public read only), `CLAUDE_CODE_OAUTH_TOKEN` | typed at install on `/dev/tty`, copied from an existing file with confirmation, or set from the host's page: sealed in the owner's browser to the host's seal key, in a document the passkey pinned at the host signed (#328) | 0600 `OMARCHY_SECRETS_DIR/agent.env`, outside the work root and the set directory | a task's agent sidecar only, as a read-only file mount (`OMARCHY_AGENT_ENV`), never in its environment |
+
+So, whenever `etc/dispatcher.env` holds no token line (no release from
+before #327 applied, staged or about to be rolled back to, no token write
+half-way), `docker inspect` of the dispatcher, of every sidecar and of every task
+container shows no token or key in its environment: the egress sidecar and the
+task container hold none at all. `tests/agent-run-loop.sh` checks the
+dispatcher's and a task's on a real engine, `tests/task-networks.sh` every
+sidecar's and task's the real dispatcher makes.
 
 ## Stopping a host
 

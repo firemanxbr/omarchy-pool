@@ -294,13 +294,12 @@ enum Command {
         )]
         pool: String,
         /// The worker's token (`omw_…` from `POST /factory/workers`); the registration names the worker.
-        #[arg(
-            long,
-            env = "OMARCHY_WORKER_TOKEN",
-            hide_env_values = true,
-            required_unless_present = "self_test"
-        )]
+        #[arg(long, env = "OMARCHY_WORKER_TOKEN", hide_env_values = true)]
         worker_token: Option<String>,
+        /// A file holding the worker's token, read instead of `--worker-token` (#327): its
+        /// value then never sits in the container's environment, which `docker inspect` shows.
+        #[arg(long, env = "OMARCHY_WORKER_TOKEN_FILE")]
+        worker_token_file: Option<PathBuf>,
         /// Architecture to work for (default: this machine's).
         #[arg(long, default_value = std::env::consts::ARCH)]
         arch: String,
@@ -359,9 +358,15 @@ enum Command {
             default_value = "https://pool.omarchy-pool.org"
         )]
         pool: String,
-        /// The host's worker token (`etc/dispatcher.env`, written by the agent).
+        /// The host's worker token, from the environment: a dispatcher started from a release
+        /// before #327, whose template gave it in `etc/dispatcher.env`.
         #[arg(long, env = "OMARCHY_WORKER_TOKEN", hide_env_values = true)]
-        worker_token: String,
+        worker_token: Option<String>,
+        /// The file holding the host's worker token, which wins over `--worker-token` (#327,
+        /// design v2 §14, D15): the agent's `run/host/dispatcher/token`, which the host set
+        /// mounts read-only, so the token is in no container's environment.
+        #[arg(long, env = "OMARCHY_WORKER_TOKEN_FILE")]
+        worker_token_file: Option<PathBuf>,
         /// The work root: task directories, release checkouts, lease files. The same path on the
         /// host and in this container, since task containers mount parts of it.
         #[arg(long, env = "OMARCHY_WORK_ROOT")]
@@ -719,6 +724,7 @@ fn main() -> Result<()> {
             api,
             pool,
             worker_token,
+            worker_token_file,
             arch,
             kinds,
             shared,
@@ -735,8 +741,10 @@ fn main() -> Result<()> {
             work::run(&work::WorkOptions {
                 api,
                 pool,
-                worker_token: worker_token
-                    .context("--worker-token (or OMARCHY_WORKER_TOKEN) is required")?,
+                worker_token: pkg_repo::worker_token::resolve(
+                    worker_token_file.as_deref(),
+                    worker_token.as_deref(),
+                )?,
                 arch: if arch == "arm64" {
                     "aarch64".to_owned()
                 } else {
@@ -766,6 +774,7 @@ fn main() -> Result<()> {
             api,
             pool,
             worker_token,
+            worker_token_file,
             work_root,
             capacity_file,
             checkout,
@@ -794,7 +803,10 @@ fn main() -> Result<()> {
             dispatch::run(&dispatch::Options {
                 api,
                 pool,
-                worker_token,
+                worker_token: pkg_repo::worker_token::resolve(
+                    worker_token_file.as_deref(),
+                    worker_token.as_deref(),
+                )?,
                 work_root,
                 capacity_file,
                 checkout,

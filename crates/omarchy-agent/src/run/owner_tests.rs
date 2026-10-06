@@ -306,6 +306,30 @@ fn every_widening_the_pool_could_forge_is_refused_and_reported() {
     );
 }
 
+/// A widening counts the units again and nothing else of detection's (#328): the sandboxed
+/// runtime it found and why one is not used (#330) stay as it wrote them, for the dispatcher
+/// recreated with the new count, since only a count at the host changes them — `sandbox` is
+/// no key a widening sets.
+#[test]
+fn a_widening_keeps_the_sandbox_detection_found() {
+    let c = cases();
+    let mut w = owned(1);
+    let mut f = capacity(&w);
+    let sandbox = serde_json::json!({"runtime": "runsc", "kind": "gvisor"});
+    let held = serde_json::json!("kata-qemu: its smoke run printed the engine's own kernel");
+    f["sandbox"] = sandbox.clone();
+    f["sandbox_held"] = held.clone();
+    fs::write(w.set_dir().join("run/capacity.json"), f.to_string()).unwrap();
+    settle(&mut w);
+    send(&w, &[("ho_w1", widen(&c["widen"]))]);
+    w.poll();
+    let (outcome, detail) = answer(&w, "ho_w1");
+    assert_eq!(outcome, "done", "{detail}");
+    let f = capacity(&w);
+    assert_eq!(f["units"], 8);
+    assert_eq!((&f["sandbox"], &f["sandbox_held"]), (&sandbox, &held));
+}
+
 #[test]
 fn a_widening_never_gives_more_units_than_the_constants_and_the_hardware() {
     let c = cases();

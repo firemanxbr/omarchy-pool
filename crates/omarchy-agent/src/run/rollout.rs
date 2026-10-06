@@ -3,11 +3,13 @@
 //! `state.json` before it acts so a restart anywhere resumes where it was.
 //!
 //! - render: `staging/<set>/` = the release's set files, `pins.json` and the agent's label
-//!   overlay (`agent.yml`); the owner's override, `etc/` and `run/capacity.json` are
-//!   referenced in place and hashed into the overlay.
+//!   overlay (`agent.yml`); the owner's override, `etc/`, `run/capacity.json` and the
+//!   dispatcher's token file are referenced in place and hashed into the overlay — after
+//!   `etc/dispatcher.env` got the token too if the staged release is from before #327, or
+//!   lost it if no such release is left ([`dispatcher_env::refresh_token`]).
 //! - lint: the P0 invariants, on the template as written, before interpolation.
 //! - plan: replace a service whose config hash differs or that does not run; hold it
-//!   while one of its env files (or `run/capacity.json`) is missing.
+//!   while one of its env files, its secret files (#327) or `run/capacity.json` is missing.
 //! - pull: a child, polled; a failure changes nothing and the next poll retries.
 //! - replace: stop the old dispatcher (it saves its leases and exits within 60 s), create
 //!   the new one, wait for `/ready` (answered once leases are re-adopted). Task
@@ -26,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
+use crate::dispatcher_env;
 use crate::lint::{self, SetToml};
 use crate::version::Release;
 
@@ -329,8 +332,9 @@ const PINS: &str = "pins.json";
 const OVERLAY: &str = "agent.yml";
 
 /// The inputs referenced in place (design v2 §16.2): the owner's override, every file
-/// of `etc/` and `run/capacity.json`. Their hash goes into the overlay as a label, so a
-/// change to any of them changes compose's config hash and replaces the dispatcher.
+/// of `etc/`, `run/capacity.json` and the dispatcher's token file (#327). Their hash goes
+/// into the overlay as a label, so a change to any of them — a rotation's new token above
+/// all — changes compose's config hash and replaces the dispatcher, and only it.
 pub(crate) fn inputs_hash(set_dir: &Path) -> String {
     let mut h = Sha256::new();
     let mut add = |name: &str, path: &Path| {
@@ -367,6 +371,10 @@ pub(crate) fn inputs_hash(set_dir: &Path) -> String {
         );
     }
     add("run/capacity.json", &set_dir.join("run/capacity.json"));
+    add(
+        dispatcher_env::TOKEN_FILE,
+        &dispatcher_env::token_path_in(set_dir),
+    );
     format!("sha256:{}", hex::encode(h.finalize()))
 }
 
@@ -472,6 +480,21 @@ fn render(state: &mut State, pending: Option<&Target>, ctx: &mut Ctx) -> Result<
             return Ok(());
         }
     };
+    // The token where every release here reads it (#327): in etc/dispatcher.env too while
+    // one from before its file is staged or applied — a rollback's target, or the one this
+    // upgrade replaces, which a revert would start again — and only in its file after.
+    let plain = dispatcher_env::older_release_here(&ctx.paths.data);
+    if let Err(e) = dispatcher_env::refresh_token(&dispatcher_env::path_in(&ctx.cfg.set_dir), plain)
+    {
+        finish(
+            state,
+            ctx,
+            Outcome::Refused,
+            None,
+            &format!("the dispatcher's token: {e}"),
+        );
+        return Ok(());
+    }
     let inputs = inputs_hash(&ctx.cfg.set_dir);
     write_atomic(
         &dir.join(OVERLAY),
@@ -537,9 +560,12 @@ pub(crate) fn dry_run(cfg: &Config, t: &Target) -> Result<(), String> {
     }
 }
 
-/// What the dispatcher may not start without: its env files (the host worker token is
-/// written once the owner confirmed the host, #321) and the capacity file (#333).
-fn missing_inputs(cfg: &Config, set: &SetToml) -> Vec<String> {
+/// What the dispatcher may not start without: its env files and the secret files its
+/// template mounts (the registration and the host worker token are written once the owner
+/// confirmed the host, #321, #327) and the capacity file (#333). A secret file compose did
+/// not find would be a directory it made in its place.
+fn missing_inputs(cfg: &Config, set: &SetToml, template: &str) -> Vec<String> {
+    let secrets = lint::secret_files(template);
     let mut wanted: Vec<&str> = set
         .needs
         .env_files
@@ -547,6 +573,7 @@ fn missing_inputs(cfg: &Config, set: &SetToml) -> Vec<String> {
         .flatten()
         .map(String::as_str)
         .collect();
+    wanted.extend(secrets.iter().map(String::as_str));
     wanted.push("run/capacity.json");
     wanted
         .into_iter()
@@ -559,11 +586,13 @@ fn missing_inputs(cfg: &Config, set: &SetToml) -> Vec<String> {
 fn held_reason(missing: &[String]) -> String {
     let mut why: Vec<String> = Vec::new();
     for m in missing {
-        why.push(if m.starts_with("etc/") {
-            format!("awaiting the owner's Confirm: {m} is missing")
-        } else {
-            format!("{m} is missing (capacity detection, #333)")
-        });
+        why.push(
+            if m.starts_with("etc/") || m.starts_with(lint::SECRET_FILES) {
+                format!("awaiting the owner's Confirm: {m} is missing")
+            } else {
+                format!("{m} is missing (capacity detection, #333)")
+            },
+        );
     }
     format!("the dispatcher is held: {}", why.join("; "))
 }
@@ -598,7 +627,8 @@ fn plan(state: &mut State, ctx: &mut Ctx) {
         Ok(v) => v,
         Err(e) => return finish(state, ctx, Outcome::Refused, None, &e),
     };
-    let missing = missing_inputs(ctx.cfg, &set);
+    let template = read_text(&staging(ctx).join("compose.yml")).unwrap_or_default();
+    let missing = missing_inputs(ctx.cfg, &set, &template);
     if !missing.is_empty() {
         return finish(state, ctx, Outcome::Held, None, &held_reason(&missing));
     }

@@ -18,7 +18,10 @@
  * - **lane**: a build or a trial of H's native arch is on the native lane;
  *   one of an arch H runs emulated is on the emulated lane when it is not
  *   marked `needs_native` and it waited its threshold T, or no *eligible*
- *   native capacity exists for it; a job with helper containers of a ring's
+ *   native capacity exists for it — on a host whose dispatcher applies a
+ *   sandboxed runtime (#330, D43), only the project's own recipe: a
+ *   sandbox covers the native lane, so what a contributor wrote runs on no
+ *   lane of that host outside it; a job with helper containers of a ring's
  *   architecture (`health`; the ABI gate and the health checks inside
  *   `promote`, the fast-track's inside `security`) needs a lane of each
  *   architecture it checks, native or emulated, with no preference and no
@@ -115,6 +118,12 @@ export interface Member {
   id: string;
   legacy: boolean;
   lanes: Lane[];
+  /**
+   * Its dispatcher starts what a contributor wrote in a sandboxed runtime (#330, D43), as its claims say (the claimer's: this claim's
+   * capacity; the fleet's: hosts.sandbox_applied). A sandbox covers the native lane only, so its emulated lanes take the project's
+   * own recipes only (laneFor). Undefined: none (every legacy registration).
+   */
+  sandbox?: boolean;
   /** What the pool hands it at most: min(declared units, units recomputed with the signed constants, the pool's cap). */
   units: number;
   agent_slots: number;
@@ -347,12 +356,26 @@ export function diskOf(c: Pick<Candidate, "kind" | "disk_gb">, size: number | nu
   return c.disk_gb ?? r.gb_per_size * (size ?? 1);
 }
 
-/** The lane a registration would run a candidate on, or null when it has none for it; `byLane` when native is preferred and the emulated lane waits. */
-export function laneFor(m: Pick<Member, "lanes" | "legacy">, c: Pick<Candidate, "kind" | "arch" | "job_arch">, r: Rules): { mode: Mode | null; byLane: boolean } | null {
+/**
+ * Whether a task runs what a contributor wrote, so a host's sandboxed runtime holds it (#330, design v2 §10.4; D43), as the dispatcher
+ * decides it (crates/pkg-repo dispatch spec::sandboxed): everything but the project's own recipe — a build of trust `project` that is
+ * no review rebuild (publish_bound: the project's copy, drafted from a contributor's evidence).
+ */
+export function contributorsCode(c: Pick<Candidate, "kind" | "trust" | "publish_bound">): boolean {
+  return !(c.kind === "build" && c.trust === "project" && !c.publish_bound);
+}
+
+/**
+ * The lane a registration would run a candidate on, or null when it has none for it; `byLane` when native is preferred and the emulated
+ * lane waits. A sandboxed host's emulated lane takes no build or trial of a contributor's code (#330): its sandbox's kernel has no
+ * binfmt handler, and the host has a sandbox, so none of it runs outside one there.
+ */
+export function laneFor(m: Pick<Member, "lanes" | "legacy" | "sandbox">, c: Pick<Candidate, "kind" | "arch" | "job_arch" | "trust" | "publish_bound">, r: Rules): { mode: Mode | null; byLane: boolean } | null {
   const lanes = m.lanes.filter((l) => l.arch === c.arch);
   const native = lanes.some((l) => l.mode === "native");
   if (LANE_KINDS.includes(c.kind)) {
     if (native) return { mode: "native", byLane: true };
+    if (m.sandbox && contributorsCode(c)) return null;
     return lanes.length ? { mode: "emulated", byLane: true } : null;
   }
   if (m.legacy) {
@@ -360,6 +383,8 @@ export function laneFor(m: Pick<Member, "lanes" | "legacy">, c: Pick<Candidate, 
     if (lanes.length) return { mode: lanes[0].mode, byLane: false };
     return r.legacy_any_arch.includes(c.kind) ? { mode: null, byLane: false } : null;
   }
+  // A helper's containers run the project's own scripts over what a ring serves, on the engine's own runtime on a sandboxed host too
+  // (#330, #340: crates/pkg-repo dispatch spec::helper_plan), so a sandboxed host's emulated lane takes them as any host's does.
   if (HELPER_KINDS.includes(c.kind)) return lanes.length ? { mode: native ? "native" : "emulated", byLane: false } : null;
   // A ring job's helpers: a lane of every architecture they run, whichever mode; the job itself runs in the dispatcher's own process.
   const helpers = helperArches(c);

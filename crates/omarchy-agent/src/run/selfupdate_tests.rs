@@ -7,7 +7,12 @@ use std::fs;
 use std::path::Path;
 
 use super::{count_start, Pending, Start, DEADLINE_S, MAX_TRIES};
-use crate::run::fake::{publish_agent, publish_agent_as, relay_statement_agent, Ships, World};
+use crate::dispatcher_env::Sources;
+use crate::run::agent::HostEnv;
+use crate::run::fake::{
+    publish_agent, publish_agent_as, publish_agent_before_token_file, relay_statement_agent, Ships,
+    World, TOKEN,
+};
 use crate::run::pool::{HostState, Net};
 use crate::run::state::State;
 use crate::version::{self, Release, Version};
@@ -600,6 +605,94 @@ fn a_rollback_keeps_the_running_agent_and_only_agent_to_moves_it_down() {
     // The agent below applies v1.0.1: the floor is already there.
     assert_eq!(w.agent.state.statement_seq, Some(2));
     assert_eq!(w.agent.state.floor, Release::parse("v1.0.1"));
+    assert_eq!(w.changes().len(), changes);
+    // v1.0.1 reads the token from its file: the env file still holds none (#327).
+    assert!(!env_has_token(&w));
+}
+
+/// Whether `etc/dispatcher.env` carries the host worker token as `OMARCHY_WORKER_TOKEN`.
+fn env_has_token(w: &World) -> bool {
+    fs::read_to_string(w.set_dir().join("etc/dispatcher.env"))
+        .unwrap()
+        .contains(&format!("\nOMARCHY_WORKER_TOKEN={TOKEN}\n"))
+}
+
+#[test]
+fn an_agent_to_a_release_from_before_the_token_file_puts_the_token_back_before_the_agent_moves_down(
+) {
+    // A settled host past #327: v1.1.0 applied, which ships this agent and reads the token
+    // from its file, the run loop's minute refresh on, no token line. Then v1.0.1, from
+    // before #327 and shipping agent 0.1.0 (also from before it), and a statement that moves
+    // the host and its agent down to them: the agent below runs that round and writes no
+    // token line, so this one puts the line back before it moves.
+    let host = |self_test: bool| {
+        let mut w = World::running_v1();
+        w.install_layout();
+        w.agent.host_env = Some(HostEnv::new(Sources {
+            proc_net: w.dir.join("no-proc-net"),
+            ifconfig: None,
+        }));
+        publish_agent(
+            &w.remote,
+            "v1.1.0",
+            &Ships {
+                version: &me().to_string(),
+                min_agent: "0.1.0",
+                binary: &binary(true),
+            },
+        );
+        w.target("v1.1.0", None);
+        w.round();
+        while w.step() != "idle" {
+            w.tick(3);
+        }
+        assert_eq!(w.applied().as_deref(), Some("v1.1.0"), "{:?}", w.outcome());
+        assert!(!env_has_token(&w));
+        publish_agent_before_token_file(
+            &w.remote,
+            "v1.0.1",
+            &Ships {
+                version: "0.1.0",
+                min_agent: "0.1.0",
+                binary: &binary(self_test),
+            },
+        );
+        relay_statement_agent(&w.remote, 1, "v1.0.1", "v1.1.0", b"signed", Some("0.1.0"));
+        w.target("v1.0.1", None);
+        w
+    };
+
+    // The agent below fails its self-test: the statement waits, and the line is out again,
+    // so no round recreates the dispatcher for it.
+    let mut w = host(false);
+    let env = fs::read_to_string(w.set_dir().join("etc/dispatcher.env")).unwrap();
+    let changes = w.changes().len();
+    w.round_now();
+    assert_eq!(w.agent.exit, None);
+    assert_eq!(w.outcome().0, "held", "{:?}", w.outcome());
+    assert!(w.outcome().1.contains("self-test"), "{:?}", w.outcome());
+    assert_eq!(w.agent.state.statement_seq, None, "not accepted");
+    assert_eq!(link(&w.agent.paths.current()), format!("versions/{}", me()));
+    assert_eq!(
+        fs::read_to_string(w.set_dir().join("etc/dispatcher.env")).unwrap(),
+        env
+    );
+    assert_eq!(w.step(), "idle");
+    assert_eq!(w.changes().len(), changes);
+
+    // It passes: when this agent exits, the token is where v1.0.1's dispatcher reads it, and
+    // still in its file.
+    let mut w = host(true);
+    let changes = w.changes().len();
+    w.round_now();
+    assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
+    assert_eq!(link(&w.agent.paths.current()), "versions/0.1.0");
+    assert_eq!(w.agent.state.statement_seq, Some(1));
+    assert!(env_has_token(&w));
+    assert_eq!(
+        crate::dispatcher_env::read_token(&w.token_file()).unwrap(),
+        Some((TOKEN.to_owned(), 0o400))
+    );
     assert_eq!(w.changes().len(), changes);
 }
 

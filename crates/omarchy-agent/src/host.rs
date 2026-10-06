@@ -12,7 +12,9 @@
 //!   build the same bytes, which `tests/host-enroll-e2e.sh` proves end to end.
 //! - The enrollment proves possession with a signature of [`enroll_message`].
 //! - `host.json` keeps which pool and which host this machine is; the host worker token
-//!   goes to the dispatcher's `etc/dispatcher.env` (mode 0600), and nowhere else.
+//!   goes to the dispatcher's own file, `run/host/dispatcher/token` (mode 0400, #327),
+//!   which the host set mounts read-only, and nowhere else (but `etc/dispatcher.env` while
+//!   a release from before that file is on the host).
 
 use std::fs;
 use std::io::Write;

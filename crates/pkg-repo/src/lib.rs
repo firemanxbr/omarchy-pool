@@ -23,6 +23,7 @@ pub mod syncdb;
 pub mod usage;
 pub mod verify;
 pub mod work;
+pub mod worker_token;
 
 use std::io::Write;
 

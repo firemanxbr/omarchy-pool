@@ -1873,7 +1873,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
     fs::write(
         &docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" network connect \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *\" create --name omarchy-egress-probe-\"*|*\" start omarchy-egress-probe-\"*) ;;\n  *omarchy-egress-probe-*-task\" \"*\" public@egress \"*) {r}/probe-answers {r}/task-egress \"$@\" ;;\n  *omarchy-egress-probe-*-task\" \"*) {r}/probe-answers {r}/task-seen \"$@\" ;;\n  *omarchy-egress-probe-*) {r}/probe-answers {r}/egress \"$@\" ;;\n  *\" --entrypoint pacman \"*) cat {r}/pacman 2>/dev/null || exit 125 ;;\n  *\" --entrypoint /usr/bin/true \"*) test -e {r}/pacman || exit 125 ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" network connect \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *\" create --name omarchy-egress-probe-\"*|*\" start omarchy-egress-probe-\"*) ;;\n  *omarchy-egress-probe-*-task\" \"*\" public@egress \"*) {r}/probe-answers {r}/task-egress \"$@\" ;;\n  *omarchy-egress-probe-*-task\" \"*) {r}/probe-answers {r}/task-seen \"$@\" ;;\n  *omarchy-egress-probe-*) {r}/probe-answers {r}/egress \"$@\" ;;\n  *\" --entrypoint pacman \"*) cat {r}/pacman 2>/dev/null || exit 125 ;;\n  *\" --entrypoint uname \"*) cat {r}/uname 2>/dev/null || exit 125 ;;\n  *\" --entrypoint /usr/bin/true \"*) test -e {r}/pacman || exit 125 ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = root.display()
         ),
     )
@@ -2237,6 +2237,99 @@ fn preflight_reports_the_emulated_lane_and_never_stops_on_a_held_one() {
     );
     let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
     assert!(!log.contains("--platform"), "{log}");
+}
+
+/// `INFO` with gVisor registered (`runsc install`) and the engine's kernel said (#330).
+const INFO_RUNSC: &str = r#"{"NCPU":12,"MemTotal":33443418112,"DockerRootDir":"/nonexistent/storage","Architecture":"aarch64","SecurityOptions":["name=rootless"],"CgroupVersion":"2","MemoryLimit":true,"CpuCfsQuota":true,"PidsLimit":true,"KernelVersion":"6.16.8-asahi","Runtimes":{"runc":{"path":"runc"},"runsc":{"runtimeType":"io.containerd.runsc.v1"}}}"#;
+
+#[test]
+fn preflight_says_the_sandbox_and_never_stops_on_one_it_cannot_use() {
+    // The probe container's image: the release's build image of this machine's architecture.
+    let image = tests_support::manifest("v1.20.0", "v1.0.0", &[])
+        .build_image(std::env::consts::ARCH)
+        .unwrap()
+        .to_string();
+    // gVisor registered with the engine: its smoke run, on the release's build image of the
+    // native lane, shows a kernel that is not the engine's — the sandbox, said in the notes.
+    let h = host(INFO_RUNSC, EGRESS_OK);
+    fs::write(h.root.join("uname"), "4.19.0-gvisor\n").unwrap();
+    fs::write(h.root.join("pacman"), "Pacman v7.0.0 - libalpm v15.0.0\n").unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.notes.iter().any(|n| n.starts_with(
+            "sandbox: gVisor (runsc) — community tasks on the aarch64 lane run in it"
+        )),
+        "{}",
+        r.screen()
+    );
+    let ready = ready.expect("ready");
+    assert_eq!(
+        ready.capacity.sandbox().map(|s| s.runtime.as_str()),
+        Some("runsc")
+    );
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(
+        log.contains(&format!(
+            "run --rm --network none --runtime runsc --entrypoint uname {image} -r"
+        )),
+        "{log}"
+    );
+
+    // Under `--runtime runsc` the engine's own kernel (docker's CLI on podman): none, a
+    // warning with why, and the install goes on.
+    let h = host(INFO_RUNSC, EGRESS_OK);
+    fs::write(h.root.join("uname"), "6.16.8-asahi\n").unwrap();
+    fs::write(h.root.join("pacman"), "Pacman v7.0.0 - libalpm v15.0.0\n").unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    assert!(ready.unwrap().capacity.sandbox().is_none());
+    assert!(
+        r.warnings.iter().any(|w| w.starts_with(
+            "sandbox: runsc: its container ran on the engine's own kernel (6.16.8-asahi)"
+        )),
+        "{}",
+        r.screen()
+    );
+    assert!(
+        r.notes.iter().any(|n| n.starts_with("sandbox: none")),
+        "{}",
+        r.screen()
+    );
+
+    // The owner's envelope from an earlier install turns it off: nothing is run for it; one
+    // that does not read stops the install with its words.
+    for (envelope, ok) in [
+        ("sandbox = \"off\"", true),
+        ("sandbox = \"Runsc\"", false),
+        ("sandbox = true", false),
+    ] {
+        let h = host(INFO_RUNSC, EGRESS_OK);
+        fs::write(h.root.join("uname"), "4.19.0-gvisor\n").unwrap();
+        fs::create_dir_all(h.root.join("data")).unwrap();
+        fs::write(
+            h.root.join("data/agent.toml"),
+            format!("[envelope]\n{envelope}\n"),
+        )
+        .unwrap();
+        fs::set_permissions(
+            h.root.join("data/agent.toml"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let (r, _) = measure_on(&h, &mut Fake::default());
+        assert_eq!(r.ok(), ok, "{}", r.screen());
+        if !ok {
+            assert!(
+                r.screen()
+                    .contains(&format!("[envelope] {envelope} is not")),
+                "{}",
+                r.screen()
+            );
+        }
+        let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+        assert!(!log.contains("--runtime"), "{log}");
+    }
 }
 
 #[test]
@@ -3335,18 +3428,30 @@ fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_
     let text = fs::read_to_string(&env).unwrap();
     let secrets = h.root.join("secrets");
     for want in [
-        format!("\nOMARCHY_WORKER_TOKEN=omw_{}\n", "0f".repeat(24)),
+        "\n# worker: m1-rack-0a9z\n".to_owned(),
         "\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,198.51.100.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n".into(),
         format!("\nOMARCHY_SECRETS_DIR={}\n", secrets.display()),
     ] {
         assert!(text.contains(&want), "{want:?} in:\n{text}");
     }
+    // The token in its own file, read-only to the dispatcher (#327), not in its environment.
+    let token = format!("omw_{}", "0f".repeat(24));
+    assert!(
+        !text.contains(&token) && !text.contains("OMARCHY_WORKER_TOKEN"),
+        "{text}"
+    );
+    let file = p.set_dir().join("run/host/dispatcher/token");
+    assert_eq!(fs::read_to_string(&file).unwrap(), format!("{token}\n"));
+    assert_eq!(mode(&file), 0o400);
+    assert_eq!(mode(file.parent().unwrap()), 0o700);
     // No agent_budget in the envelope: the dispatcher's defaults.
     assert!(!text.contains("OMARCHY_AGENT_"), "{text}");
     assert_eq!(mode(&env), 0o600);
     let said = String::from_utf8_lossy(&out).into_owned();
     assert!(
-        said.contains("dispatcher.env (0600): the worker token, OMARCHY_HOST_ADDRESSES=10.8.0.2,"),
+        said.contains("dispatcher.env (0600): the registration, OMARCHY_HOST_ADDRESSES=10.8.0.2,")
+            && said.contains("; the worker token in ")
+            && said.contains("run/host/dispatcher/token (0400)"),
         "{said}"
     );
     let seen: crate::dispatcher_env::addresses::Seen =
@@ -4502,15 +4607,25 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
     let _ = fs::remove_dir_all(&home);
 }
 
-/// `etc/dispatcher.env` in the Mac's set directory, which the VM mounts: the token, the
-/// Mac's own addresses (`ifconfig`'s and the public one the probe task in the VM saw) and
-/// the secrets directory (#371).
+/// `etc/dispatcher.env` in the Mac's set directory, which the VM mounts: the token's
+/// registration, the Mac's own addresses (`ifconfig`'s and the public one the probe task in
+/// the VM saw) and the secrets directory (#371); the token in its own file there, 0400,
+/// which the dispatcher in the VM mounts read-only, and not in the env file (#327).
 fn holds_the_macs_dispatcher_env(h: &Host) {
+    use std::os::unix::fs::PermissionsExt as _;
     let set = h.root.join("shared/set");
     let p = &h.options.places;
     let env = fs::read_to_string(set.join("etc/dispatcher.env")).unwrap();
+    let token = format!("omw_{}", "0f".repeat(24));
+    let file = crate::dispatcher_env::token_path_in(&set);
+    assert_eq!(fs::read_to_string(&file).unwrap().trim(), token);
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
+    assert!(!env.contains(&token), "the token in the env file:\n{env}");
     for want in [
-        format!("\nOMARCHY_WORKER_TOKEN=omw_{}\n", "0f".repeat(24)),
+        "\n# worker: m1-rack-0a9z\n".to_owned(),
         "\nOMARCHY_HOST_ADDRESSES=100.101.102.103,192.168.1.23,203.0.113.7,2001:db8:1:2::/64,fd7a:115c:a1e0::/64,fe80::/64\n".into(),
         format!("\nOMARCHY_SECRETS_DIR={}\n", h.root.join("shared/secrets").display()),
     ] {

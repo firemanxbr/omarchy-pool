@@ -14,9 +14,11 @@
 //!    of that architecture — and only reported: a held lane never stops an install;
 //! 3. prints the envelope (agent.toml) for the person to confirm on `/dev/tty` (`--yes`
 //!    skips) and writes `run/capacity.json`;
-//! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into
-//!    `etc/dispatcher.env` with the host's own addresses (#371: its interfaces' and the
-//!    public one the egress probe saw tasks leave from, kept in `egress.json`);
+//! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into its
+//!    file `run/host/dispatcher/token` (0400, #327), which the dispatcher mounts read-only,
+//!    and its registration into `etc/dispatcher.env` with the host's own addresses (#371: its
+//!    interfaces' and the public one the egress probe saw tasks leave from, kept in
+//!    `egress.json`);
 //! 5. only then writes agent.toml, with the `host_id` and `worker_id` enrollment gave:
 //!    before it there is no run loop, no dispatcher, and nothing claims; then
 //!    `etc/dispatcher.env` gets the secrets directory and the agent budget from it (#371);
@@ -755,6 +757,7 @@ pub(crate) fn measure_as(
         set_dir.join("compose.override.yml"),
         set_dir.join(".env"),
         enroll_paths.dispatcher_env(),
+        enroll_paths.token(),
         secrets_dir.join("agent.env"),
         p.data.join(legacy::FILE),
     ] {
@@ -894,6 +897,20 @@ pub(crate) fn measure_as(
             .filter_map(|a| a.as_str().map(str::to_owned))
             .collect()
     });
+    // The sandboxed runtime for community tasks (#330), within the envelope's `sandbox` an
+    // earlier install's owner may have set: absent tries what the engine has.
+    let sandbox = match envelope::envelope_value(ex, "sandbox") {
+        None => Ok(capacity::sandbox::Setting::Auto),
+        Some(toml::Value::String(s)) => capacity::sandbox::Setting::parse(Some(&s)),
+        Some(v) => Err(format!(
+            "agent.toml: [envelope] sandbox = {v} is not \"auto\", \"off\" or a runtime's name"
+        )),
+    }
+    .map_err(|e| format!("{e}; nothing was changed"));
+    let sandbox = sandbox.unwrap_or_else(|e| {
+        r.blockers.push(e);
+        capacity::sandbox::Setting::Off
+    });
     let facts = docker.as_ref().and_then(|d| {
         let host = d.host();
         let how = probe::Probe {
@@ -906,6 +923,11 @@ pub(crate) fn measure_as(
                 binfmt: &p.binfmt,
                 images: &images,
                 emulate: emulate.as_deref(),
+            }),
+            // A Mac's VM holds the engine's files: the smoke run alone decides there.
+            sandbox: Some(capacity::sandbox::Probe {
+                setting: &sandbox,
+                local: !mac,
             }),
         };
         match probe::detect(&how) {
@@ -944,6 +966,7 @@ pub(crate) fn measure_as(
         max_mem_gb: o.max_mem_gb,
         dedicated,
         emulate,
+        sandbox,
         ..Caps::default()
     };
     let capacity = facts.as_ref().zip(manifest.as_ref()).map(|(f, m)| {
@@ -965,6 +988,7 @@ pub(crate) fn measure_as(
             emulated.concat()
         ));
         checks::emulation(&c, &mut r);
+        checks::sandbox(&c, &mut r);
         c
     });
     if let Some(f) = &facts {
@@ -1245,6 +1269,7 @@ fn mac_facts(
             work_root: &o.places.home,
             image: None,
             emulation: None,
+            sandbox: None,
         };
         probe::rosetta_lane(&how, img)
     });
@@ -1409,12 +1434,13 @@ pub(crate) fn apply(
                 env_file.display()
             )))
         }
-        Refresh::Written | Refresh::Unchanged => say(
+        Refresh::Written | Refresh::Unchanged | Refresh::TokenMoved => say(
             out,
             &format!(
-                "{} (0600): the worker token, {}",
+                "{} (0600): the registration, {}; the worker token in {} (0400)",
                 env_file.display(),
-                rendered.lines().map_err(Failure::Refused)?.join(", ")
+                rendered.lines().map_err(Failure::Refused)?.join(", "),
+                eo.paths.token().display()
             ),
         ),
     }
