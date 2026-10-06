@@ -585,6 +585,32 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
   the host declared.
+- **The owner's soak and freeze detection** (#326, design v2 D16, §5.5).
+  An owner may make a host wait `soak_minutes` (at most 120) before it takes
+  a new release, from when its agent first saw the pool name it — its own
+  clock, never the pool's word on when it deployed, which would let a
+  compromised pool skip the soak; the agent's own update waits with it
+  unless the signed manifest sets `agent.urgent` (only a security release
+  does). Nothing the pool sends skips it (`reconcile-now`, an Update); a
+  rollback statement does, since only `rollback.yml` signs one, and the
+  soaking host still learns each verified release's `revoked` and
+  `min_release` while it waits. The pool keeps a soaking host's
+  registration out of the 426 gate until the soak its agent reports ends,
+  15 minutes more for the round, never more than two hours after the
+  deploy and not at all while the host holds the pool's release in
+  quarantine — so an agent that reports a soak it is not in gains at most
+  that window of claims on the release it runs, which the 426 gate let any
+  worker have for 45 minutes before. Freeze detection is the host's check
+  on a pool that holds it on an old release: every six hours the agent
+  reads the tag of GitHub's latest release (`api.github.com`,
+  unauthenticated) and nothing else, and when GitHub has shown a newer
+  release than the pool names for more than a day — neither in the merged
+  `revoked` nor retracted by a rollback statement the pool relays and the
+  agent verifies — it reports `pool-behind-github`, which the host's page,
+  Status and the journal show. It never acts on GitHub's word alone: no
+  round, no fetch, no change on the host; the tag is no signed word, only a
+  second opinion on the pool's, and a compromised pool could already idle
+  the fleet with 426, so this is a warning, not a guarantee.
 
 ## Stopping a host
 

@@ -559,7 +559,12 @@ origins, the images by digest, the container tools by URL and SHA-256 and
 the **capacity constants** that bound how many tasks a host may run. They
 come from [`factory/bundle/manifest.toml`](../factory/bundle/manifest.toml):
 changing one changes every host at the next release, without an agent
-release, and needs another maintainer's review (CODEOWNERS).
+release, and needs another maintainer's review (CODEOWNERS). Its
+`urgent_agent` marks a security release's agent (#326): set it, in the
+fixing release's pull request, to the agent version that release ships, and
+the manifest's `agent.urgent` lets hosts take that agent at once, past their
+owners' soak (*Soak*, below); it lapses by itself with the next agent version,
+and one above the agent shipped is refused.
 
 `install.sh` is always at its canonical URL, the latest release's:
 
@@ -782,7 +787,7 @@ engine leave the round at `engine-unreachable` until a newer release.
 | The last round says | What it means |
 |---|---|
 | `ok`, `no-change` | the set runs the target |
-| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again) |
+| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again); or the release waits for the owner's soak (`… waits for the owner's soak until …`, #326, *Soak* below) |
 | `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
 | `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep`, `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
@@ -801,8 +806,9 @@ given on the host's page:
 - **Reconcile now** (`reconcile-now`), its owner or any maintainer: a round
   now, as `omarchy-agent round` starts one — the release the pool names,
   checked and rolled out as any round, no quarantine lifted (an Update or
-  `retry-release` does), and never past the owner's soak once its issue
-  brings one. It waits while a commit or a revert finishes.
+  `retry-release` does), and never past the owner's soak (#326: the round it
+  asks for is held like any other, and its answer says so). It waits while a
+  commit or a revert finishes.
 - **Retire legacy set** (`retire-legacy`), its owner only, with a passkey:
   the agent reads `legacy.json` (the project `install --legacy` recorded)
   and finds the project's directory — the one recorded, or the one compose's
@@ -926,7 +932,9 @@ that one (`null` until the engine answers).
 
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the
-release applied, targeted and its floor, the rollout and the last round, the
+release applied, targeted and its floor — with the owner's soak and until
+when it holds the target, GitHub's latest tag and `pool_behind_github`
+(#326) —, the rollout and the last round, the
 legacy set and the last answers), which closes the order on the site — one
 the site expired meanwhile too (a retire-legacy answers only at its end); an
 order its agent does not take within its hour expires there. A report that
@@ -981,7 +989,77 @@ under `versions/`. `omarchy-agent status` shows an update in flight and a
 skipped version; `state.json` is read leniently, so the agent rolled back to
 reads what the newer one wrote. `tests/agent-self-update.sh` runs deliberately
 broken builds (a panic at start, a hang before ready, a hang after it) under a
-real `systemd --user` in CI.
+real `systemd --user` in CI. With an owner's soak (*Soak*, below) the agent
+a release ships waits with its release, unless the manifest sets
+`agent.urgent`: then the agent updates itself at once and the release still
+waits.
+
+### Soak
+
+An owner may make a host take a new release later than the pool names it
+(#326; design v2 D16), so a bad one can be caught on another host first:
+`soak_minutes = 30` under `[envelope]` in `agent.toml`, at the host (0, the
+default, takes it at once; at most 120 — more is refused at the agent's
+start, exit 78), then `systemctl --user restart omarchy-agent`. A release
+the pool names above the one that runs waits that long from when the agent
+first saw the pool name it (its own clock, kept in `state.json` across
+restarts); its bundle is fetched and verified meanwhile, so the host still
+learns of a revocation. A newer release named meanwhile waits its own soak
+from then, but the soak never keeps the host more than two hours behind the
+release it ran when it fell behind: when releases land faster than the
+soak, the one named then is taken at that bound. The last round says `held`
+with `… waits for the owner's soak until <time>`, once; `omarchy-agent
+status` says `soak:` with the seconds left. What the soak does not hold: a
+rollback statement (applied at once, as everywhere), a round to the release
+that runs (a changed input, drift), and the first release a host applies.
+What never skips it: **Reconcile now**, an Update order, `omarchy-agent
+round`. The agent a release ships waits with it unless the manifest sets
+`agent.urgent` — set only by a security release —: then the agent updates
+itself at once and the release itself still waits.
+
+The pool follows the soak at its claim (`worker/src/update.ts`): the report
+says when the soak of the release the pool names ends
+(`release.soaking_until`, kept until the host runs it, so its round is
+covered too), and the host's registration is kept out of the 426 gate until
+then and `SOAK_ROUND_MINUTES` (15) after it, whatever the releases behind —
+never more than `SOAK_GRACE_MAX_MINUTES` (120) after the deploy, and not at
+all while its report holds the pool's release (or a later one) in
+quarantine: it reverted it, and its claim on last-good is a rule of its own.
+The host's page says where its registration stands at the gate and why
+(*Claims*): claiming through its soak, within the plain grace, or `refused
+with 426` with what ended the grace — the soak over, the two hours after
+the deploy, the quarantine. A host whose agent was down through a deploy
+and comes back more than two hours later is refused for the rest of its soak:
+lower `soak_minutes`, or let it run its soak out.
+
+### Freeze detection
+
+A compromised pool could hold its hosts on an old release (#326; design v2
+§5.5). Every six hours each agent reads the tag of GitHub's latest release
+(`api.github.com/repos/firemanxbr/omarchy-pool/releases/latest`,
+unauthenticated, an hour later when it does not answer) and nothing else of
+it. When GitHub has shown a release newer than the one the pool names for
+more than a day — counted from when the agent first saw both, since a tag
+carries no time —, that release is not in the merged `revoked`, and no
+rollback statement the pool relays for its release (verified as any)
+retracts it, the agent reports `pool-behind-github`: on the host's page (a
+warning anyone sees), on Status (*Workers*, while the report is fresh) and
+once on the journal when it starts and when it ends. **It acts on nothing**:
+no round, no fetch of that release, nothing changes on the host, which goes
+on following the pool and what is signed. `omarchy-agent status` says
+`github:` with the latest tag and, while it lasts, `pool-behind-github`.
+
+When Status warns `pool-behind-github`: compare the pool's release (the
+chip in the dashboard header, `/api/v1/version`) with GitHub's latest
+release. A deploy that failed after the release was published (the `deploy`
+job of `release.yml`) leaves exactly this — run it again (*Releasing the
+pool itself*). A rollback leaves GitHub's latest where it was on purpose; the
+hosts verify the statement the pool relays for its release and say nothing,
+so a warning after one means a host could not verify it (`omarchy-agent
+verify --statement` by hand says why). Otherwise the pool may be held back:
+check its `deploy` events on the journal and who deployed what before
+anything else, and treat it as an incident (the security model's
+*Maintainer hosts*, the owner's soak and freeze detection).
 
 ### How the pool hands a host work
 
@@ -1249,7 +1327,9 @@ wrong version and linking the wrong objects while looking alive): the
 pool compares the release a worker reports at each claim with its own
 and, past the rollout's grace (`UPDATE_GRACE_MINUTES` = 45 after the
 deploy), hands it nothing — `426`, *outdated* on the Workers page, one
-journal line per release — until it updates. Every set carries an
+journal line per release — until it updates; a soaking host's
+registration claims on through its owner's soak, at most two hours after
+the deploy (#326, *Soak*). Every set carries an
 **updater** container of the same image (`OMARCHY_WORKER_ROLE=updater`,
 `factory/bin/omarchy-rollout`: the same rolling replacement, itself
 last) — contributors' sets since `omarchy-worker start` writes one, this
