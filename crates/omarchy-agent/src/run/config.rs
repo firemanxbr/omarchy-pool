@@ -3,8 +3,9 @@
 //! agent.toml is written by `omarchy-agent install` (#317: with the `host_id` and
 //! `worker_id` the enrollment gave, #321) and by a person at the host, never by the pool. It is refused when group- or world-writable or owned by another
 //! user. Unknown keys are left alone (capacity caps are #333's, settings P4's), but
-//! `[envelope].agent_budget`, which reaches the dispatcher (#371), is read strictly. Any
-//! problem here is a local configuration error: the loop exits 78 and says why.
+//! `[envelope].agent_budget` and `[envelope].direct_network`, which reach the dispatcher
+//! (#371, #373), are read strictly. Any problem here is a local configuration error: the loop
+//! exits 78 and says why.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -116,6 +117,9 @@ pub struct Config {
     pub task_subnets: Option<String>,
     /// `[envelope].agent_budget` (#371): what `etc/dispatcher.env` gives the dispatcher.
     pub agent_budget: Budget,
+    /// `[envelope].direct_network` (#373): the owner grants a signed exception's bridge
+    /// network, which `etc/dispatcher.env` tells the dispatcher.
+    pub direct_network: bool,
     pub envelope: Envelope,
     /// What install detected behind the socket (`set.engine`, #317): the lint holds a
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
@@ -176,6 +180,7 @@ struct EnvelopePart {
     max_cpus: Option<u32>,
     max_mem_gb: Option<u32>,
     agent_budget: Option<toml::Value>,
+    direct_network: Option<bool>,
 }
 
 /// An id the pool hands out (host and worker ids).
@@ -297,6 +302,7 @@ impl Config {
             socket_mount,
             task_subnets: f.envelope.task_subnets,
             agent_budget: Budget::from_envelope(f.envelope.agent_budget.as_ref())?,
+            direct_network: f.envelope.direct_network.unwrap_or(false),
             envelope,
             engine,
             vm,

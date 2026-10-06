@@ -16,8 +16,9 @@
 //! omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
 //!     [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
 //!     [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
-//!     [--legacy <project>] [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>]
-//!     [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>] [--yes]
+//!     [--direct-network] [--legacy <project>] [--agent-env-from <file>] [--max-units <n>]
+//!     [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>]
+//!     [--yes]
 //!     (#317, what install.sh runs once the binary is in place: preflight, the envelope,
 //!     the enrollment below, agent.toml, the agent keys, the unit and linger, the service;
 //!     on a Mac, #320, the omarchy Colima VM and the LaunchAgent)
@@ -75,8 +76,9 @@ const USAGE: &str = "usage:
   omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
       [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
       [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
-      [--legacy <project>] [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>]
-      [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>] [--yes]
+      [--direct-network] [--legacy <project>] [--agent-env-from <file>] [--max-units <n>]
+      [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>]
+      [--yes]
   omarchy-agent preflight <install's options>
   omarchy-agent uninstall [--data-dir <dir>]
   omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
@@ -346,7 +348,16 @@ fn switches(args: &[String], known: &[&'static str]) -> (Vec<String>, Vec<&'stat
 }
 
 fn install_options(args: &[String]) -> Result<install::Options, String> {
-    let (args, on) = switches(args, &["--yes", "--dedicated", "--rosetta", "--no-rosetta"]);
+    let (args, on) = switches(
+        args,
+        &[
+            "--yes",
+            "--dedicated",
+            "--direct-network",
+            "--rosetta",
+            "--no-rosetta",
+        ],
+    );
     let rosetta = match (on.contains(&"--rosetta"), on.contains(&"--no-rosetta")) {
         (true, true) => return Err(format!("--rosetta or --no-rosetta, not both\n{USAGE}")),
         (true, false) => Some(true),
@@ -412,6 +423,7 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
         rosetta,
         task_subnets: get("--task-subnets").map(str::to_owned),
         dedicated: on.contains(&"--dedicated"),
+        direct_network: on.contains(&"--direct-network"),
         legacy: get("--legacy").map(str::to_owned),
         agent_env_from: path("--agent-env-from"),
         max_units: num("--max-units")?,
