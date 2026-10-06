@@ -42,7 +42,7 @@ please do not file a public issue for it.
 | Agent token `oma_…` | one agent on one person's machine, granted by that person in their signed-in browser (`omarchy-cli login`: a loopback address and PKCE), kept in `~/.config/omarchy-cli/credentials.toml` (0600) and bound to the origin that granted it | the tools of `omarchy-cli mcp` its scopes hold, as that person: request and follow packages (`contribute`); claim, release, read evidence and draft a verdict (`review`) or a block (`block`) — the two a maintainer's only, read again on every call; twenty calls a minute, five requests, ten claims and thirty drafts a day | decide anything — approve, request changes, reject and block are drafts the person confirms in the browser, approve and block with the person's passkey; every other route (403); give the project's agent a hint; outlive seven days with `review` or `block`, ninety with `contribute` | live; revoked by `omarchy-cli logout`, the person's page, a block of the person, or a reset of their passkeys (#284) |
 | Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered with the browser's session, on their own page or, the first one, in the dialog of the act that needs it (#287); the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
 | Host enrollment token `ome_…` | the maintainer who pressed *Add a host*, for the one command they paste on the machine (in the environment of `sh`, never an argument) | enroll one host, once, within 15 minutes, as that maintainer — while they are still in `factory/MAINTAINERS.toml` and still the same GitHub user id | claim, confirm the host, or enroll a second one | live (#321); stored as its SHA-256; burnt by the enrollment in the same D1 batch that creates the host |
-| Host key (Ed25519) | one maintainer host's agent: `host.ed25519`, mode 0600, made at install, never in a container | sign the host's calls (`Omarchy-Host`: method, path, body hash, time, nonce): read its state, fetch or rotate its worker token, report, post the diagnostics its own order asked for (#325) | claim, change the maintainer list, widen the owner's envelope; be replayed (a nonce table), act from a clock 120 s off; act before its owner confirmed its fingerprint on the site | live (#321); a suspended or retired host's key is refused |
+| Host key (Ed25519, or ECDSA P-256 in the host's TPM) | one maintainer host's agent, made at install, never in a container: made in the machine's TPM where its user may open one (#330: `fixedtpm` and `fixedparent`, so the TPM never lets it out; the agent keeps `host.tpm.pub` and `host.tpm.priv`, a blob only that TPM loads, 0600), else `host.ed25519`, mode 0600 | sign the host's calls (`Omarchy-Host`: method, path, body hash, time, nonce): read its state, fetch or rotate its worker token, report, post the diagnostics its own order asked for (#325) | claim, change the maintainer list, widen the owner's envelope; be replayed (a nonce table), act from a clock 120 s off; act before its owner confirmed its fingerprint on the site | live (#321); a suspended or retired host's key is refused; in a Linux host's TPM where it has one (#330), the store on the host's page; a Mac's Secure Enclave still open (it needs the agent signed and notarised) |
 | Owner's pinned passkey (at the host) | one maintainer host's agent, for its owner: the COSE public key, credential id, algorithm and relying party of one of the owner's passkeys, pinned with `omarchy-agent envelope pin-passkey` and kept in `state/owner.json` (0600) | let the host take a `widen-envelope` or `set-agent-keys` document the pool relays (#328, D6 b): only one this passkey signed, for this host, on its pool's origin, user present and verified, within its hour and under a version above the last it took | be used by the pool or another passkey; widen above the release's signed constants or the detected hardware; set any key but the six agent keys; be replayed | live (#328); unpinned at the host, the site widens nothing |
 | Seal key (X25519) | one maintainer host's agent: `state/seal.x25519` (0600) on Linux, the login keychain on a Mac; its public half reported, its fingerprint confirmed once by the owner on the host's page | open the agent keys the owner's browser sealed to it (HKDF-SHA256, AES-256-GCM, bound to the host and the key's name) into `OMARCHY_SECRETS_DIR/agent.env` | sign anything; take a sealed key that the pinned passkey did not sign; be read by the pool, the dispatcher or a container | live (#328); a key made again is confirmed again before anything is sealed to it |
 | Session cookie `oms_…` | one person's browser, after Sign in with GitHub | what that person's contributor token can, from the dashboard's pages | — | live; separate from the CLI token, so signing in never invalidates a worker; *sign out* (in the header of every page) invalidates it on the server, not only in that browser |
@@ -778,6 +778,45 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   state, fetches or rotates its worker token, reports, and posts the
   dispatcher's log lines a `diagnostics` order of that host asked for (#325);
   it cannot claim, change the maintainer list or widen anything.
+- **Where the host key lives** (#330, design v2 §14, P6; the Linux half of
+  hardware-bound host keys). Where the machine has a TPM 2.0 the agent's
+  user may open (`/dev/tpmrm0`, the tss group), the enrollment makes the key
+  inside it with the distribution's tpm2-tools — no TPM library is linked
+  into the agent — as an ECDSA P-256 key (TPM 2.0 has no Ed25519) with
+  `fixedtpm`, `fixedparent` and `sensitivedataorigin`: the TPM made it and
+  never lets it out, so the two files the agent keeps (its public area, and
+  its private part sealed by the TPM to its own storage key) sign nothing on
+  any other machine, and nothing here once the TPM is cleared. Elsewhere —
+  no TPM, one out of the user's reach, no tpm2-tools, a Mac, or the owner's
+  `OMARCHY_HOST_KEY=file` — the key is the Ed25519 file it always was, and
+  the enrollment says why not the TPM; `OMARCHY_HOST_KEY=tpm` makes a TPM out
+  of reach stop the enrollment instead. The pool verifies either key the
+  same way (64-byte signatures over the same words), records where it lives
+  (`key_store`, held to the key's kind: a TPM's key is P-256, a file's
+  Ed25519) and shows it on the host's page beside the fingerprint. What it
+  does not do, stated plainly: the store is the agent's word at enrollment —
+  the pool asks the TPM for no attestation (no endorsement-key certificate is
+  checked), so a modified agent could call a file key `tpm` (but never a
+  P-256 key `file`, nor an Ed25519 key `tpm`); on a VM the TPM is the
+  hypervisor's virtual one; and the key's own authorization is empty, so a
+  process running as the agent's user, or root, on the machine signs with it
+  while it is there. The tss group that opens `/dev/tpmrm0` opens the whole
+  TPM, not the agent's key alone: the agent's user, and anything running as
+  it — a task that escaped its container where it lands as that user (the
+  `user` isolation level, design v2 §10.4, §19.3) among them — may send the TPM any command its authorizations allow.
+  The owner hierarchy's must stay empty for the agent, so it may define and
+  write NV indices and evict persistent objects; with the lockout
+  authorization empty too, as on most machines, it may `tpm2_clear` the TPM,
+  ending every key it holds (systemd-cryptenroll's or clevis's LUKS bindings
+  among them). Only the lockout authorization can be set without stopping the
+  agent, and setting it takes `TPM2_Clear` through lockout away from that
+  user: the runbook advises it, or a file key, on a machine whose TPM seals
+  other secrets. A key in the TPM bounds what a stolen copy of the
+  agent's files is worth — nothing elsewhere — not what a compromise of the
+  machine itself is. The agent reaches the TPM only through a resource
+  manager (the kernel's `/dev/tpmrm0`, or tpm2-abrmd), never the raw device.
+  A Mac's Secure Enclave needs the agent signed with a Developer ID and
+  notarised, and stays open in #330.
 - **The host state and its orders** (#344, design v2 §11, §17.1). From agent
   0.3.0 the release a host rolls out is the one its signed state names —
   still checked against `release.yml`'s signature, the floor, `min_release`,
@@ -939,7 +978,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   pinned and `omarchy-agent status` the seal key's fingerprint, to compare,
   and why the journal shows every widening and key set with who signed it.
   On a Mac the Keychain holds the seal key only (the host key stays a 0600
-  file there; hardware-bound host keys are P6), and agent.env stays a 0600
+  file there until the agent is signed with a Developer ID and notarised for
+  the Secure Enclave, the half of #330 still open; a Linux host's is in its
+  TPM where it has one), and agent.env stays a 0600
   file, which agent sidecars in the VM mount.
 - **The host worker token** (`omw_…`) is the dispatcher's only, and reaches
   it as a read-only file, never as a value in its environment (#327, design
@@ -1140,7 +1181,7 @@ What that changes, and what it does not:
 
 | Secret | Where it comes from | At rest | Which container gets it |
 |---|---|---|---|
-| Host key | generated at install | 0600 `state/host.ed25519` in the agent's data directory | none, ever |
+| Host key | generated at install | in the machine's TPM where the agent's user may open one (#330: ECDSA P-256, made inside it and never out of it; `state/host.tpm.pub` and `state/host.tpm.priv`, 0600, a blob only that TPM loads), else 0600 `state/host.ed25519` in the agent's data directory | none, ever |
 | Seal key (X25519, #328) | generated by the agent; its owner confirms its fingerprint once on the host's page | 0600 `state/seal.x25519` beside the host key (on a Mac, the Keychain) | none, ever |
 | Host worker token `omw_` | minted by the pool for the confirmed host, fetched with a host-key-signed request, rotated every 30 days | 0400 `run/host/dispatcher/token` in the set directory (and in 0600 `etc/dispatcher.env` only while a release from before #327 is applied or staged, from just before a rollback statement's `agent_to` moves the agent down to run a rollback to one, or for the moment between two writes when the env file names no registration yet, another one, or still holds an older token's line) | the dispatcher only, as a read-only file mount (`OMARCHY_WORKER_TOKEN_FILE`; on the Quadlet driver, #330, the unit's read-only `Volume=`, which podman never creates when the file is missing), never in its environment except while that `etc/dispatcher.env` line is there (the file is the dispatcher's `env_file`; a release from before #327 reads `OMARCHY_WORKER_TOKEN` from it) |
 | Job tokens `omj.` | the claim answer, per lease, carrying the lease generation | the dispatcher's memory and `work/state/leases/` (0600) | the dispatcher and its pool-job children only; never a task |
