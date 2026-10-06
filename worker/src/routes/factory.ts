@@ -13,7 +13,7 @@ import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
-import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
+import { asleepNow, freshSince, parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
 import { largestSize, ownerCap, ownersLeased, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
@@ -777,11 +777,13 @@ export const NEUTRAL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols("c"
 
 /** The registrations alive (§8.3: claimed in the last 2 minutes; a legacy one, LEGACY_ALIVE_MS) with their host's capacity, as the fleet. */
 export const FLEET_SQL = `SELECT w.id, w.kind, w.arch, w.labels, w.kinds, w.agent_status, w.drained_at, w.trust, w.owner, w.mode, w.version, w.last_seen, w.current_task,
-    h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since
+    h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since,
+    h.asleep_at, h.reported_at
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL`;
 interface FleetRow {
   id: string; kind: string | null; arch: string; labels: string | null; kinds: string | null; agent_status: string | null; drained_at: string | null; trust: string; owner: string | null; mode: string | null; version: string | null; last_seen: string; current_task: number | null;
   host_id: string | null; host_status: string | null; owner_removed_at: string | null; units: number | null; lanes: string | null; agent_slots: number | null; disk_free: string | null; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null;
+  asleep_at: string | null; reported_at: string | null;
 }
 /** Every lease the pool holds, by the lease index: what each registration holds, each owner's builds, the units and slots in use. */
 export const LEASES_HELD_SQL = `SELECT id, lease_owner, kind, arch, lane, units, size, disk_gb, trust, owner, ${AGENT_SCOPE} AS model FROM build_tasks WHERE status = 'leased'`;
@@ -826,7 +828,7 @@ function legacyLanes(arch: string, labels: string | null): Lane[] {
 const reportedBelow = (capacity: string | null): boolean => !!jsonOr<{ below_minimum?: unknown } | null>(capacity, null)?.below_minimum;
 
 /** A registration of the fleet, from its row (another than the claimer: what it last said). */
-function memberOf(r: FleetRow, pool: RunningVersion): Member {
+function memberOf(r: FleetRow, pool: RunningVersion, nowMs = Date.now()): Member {
   const host = r.kind === "host" && r.host_id !== null;
   const kinds = jsonOr<string[] | null>(r.kinds, null) ?? (host ? HOST_KINDS : r.trust === "project" ? ALL_KINDS : ["build"]);
   const lanes = host ? jsonOr<Lane[] | null>(r.lanes, null) ?? [{ arch: r.arch, mode: "native" }] : legacyLanes(r.arch, r.labels);
@@ -837,6 +839,8 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
     seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
     scope: host ? { trust: "host", owner: null, shared: false } : r.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: r.owner, shared: r.mode === "shared" },
     busy: !host && r.current_task !== null,
+    // A host whose agent says it sleeps has zero free units (#329).
+    asleep: host && asleepNow(r, nowMs),
   };
 }
 
@@ -898,13 +902,13 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     env.DB.prepare(FLEET_SQL).bind(new Date(nowMs - Math.max(ALIVE_MS, LEGACY_ALIVE_MS)).toISOString()),
     env.DB.prepare(LEASES_HELD_SQL),
     env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(OWNER_CAP_KEY),
-    env.DB.prepare("SELECT name, capacity, pool_cap_units, reserving_task, reserving_since FROM hosts WHERE id = ?").bind(k.hostId ?? ""),
+    env.DB.prepare("SELECT name, capacity, pool_cap_units, reserving_task, reserving_since, asleep_at, reported_at FROM hosts WHERE id = ?").bind(k.hostId ?? ""),
   ]);
   const divisor = Number((setting.results[0] as { value?: string } | undefined)?.value);
   const rules = selectionRules(Number.isInteger(divisor) && divisor >= 0 ? divisor : OWNER_DIVISOR);
   const pool = running(env);
-  const members = (fleetRows.results as FleetRow[]).filter((r) => r.id !== k.workerId).map((r) => memberOf(r, pool));
-  const hostRow = self.results[0] as { name: string; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null } | undefined;
+  const members = (fleetRows.results as FleetRow[]).filter((r) => r.id !== k.workerId).map((r) => memberOf(r, pool, nowMs));
+  const hostRow = self.results[0] as { name: string; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null; asleep_at: string | null; reported_at: string | null } | undefined;
   const cap = host ? k.hc!.capacity! : null;
   // The claimer as it claims now: a host's capacity is this claim's — units within min(declared, recomputed, the pool's cap), and what its
   // memory offers this round beside them — but below the minimum as its agent last reported it (D44), as every other host is judged:
@@ -915,9 +919,11 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     reserving: hostRow?.reserving_task != null && hostRow.reserving_since ? { task: hostRow.reserving_task, since: Date.parse(hostRow.reserving_since) } : null,
     scope: host ? { trust: "host", owner: null, shared: false } : k.legacy!.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: k.legacy!.owner, shared: k.legacy!.shared },
     offer: host && k.hc!.offer !== null ? k.hc!.offer : undefined,
+    asleep: host && !!hostRow && asleepNow(hostRow, nowMs),
   };
-  // A host below the signed minimum keeps its bundle running and claims nothing (D44).
-  if (me.below_minimum) return null;
+  // A host below the signed minimum keeps its bundle running and claims nothing (D44); one whose agent says it sleeps has zero free
+  // units (#329) — a Mac about to sleep, whose dispatcher claims once more before the VM stops — until its agent says it woke.
+  if (me.below_minimum || me.asleep) return null;
   members.push(me);
   const leases: Held[] = (leaseRows.results as LeaseRow[]).map((l) => ({
     task: l.id, by: l.lease_owner, kind: l.kind, arch: l.arch, lane: l.lane === "native" || l.lane === "emulated" ? l.lane : null,
@@ -1099,7 +1105,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     if (writes.length) await env.DB.batch(writes);
   }
   const choices = select(me, fleet, all, nowMs, rules);
-  const hostOk = k.hostId ? ` AND ${HOST_MAY_LEASE_SQL}` : "";
+  const hostOk = k.hostId ? ` AND ${HOST_MAY_LEASE_SQL} AND ${HOST_AWAKE_SQL}` : "";
   // A host's units, again in the statement itself: what it holds plus this task within its count (the reserved unit for pool jobs only).
   const guard = host ? " AND (SELECT COALESCE(SUM(l.units), 0) FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ?) + ? <= ?" : "";
   for (const c of choices.slice(0, LEASE_TRIES)) {
@@ -1109,8 +1115,9 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     // lease on a worker nobody stopped, so the lease starts without it. A host's lease (#334) carries a new generation, its lane,
     // size, units and disk budget, the release it was claimed on and the claim that took it; a legacy one no generation — the
     // column is cleared, so a host's stale one never outlives its lease — and its one lane. A host's registration leases only
-    // while its host may claim, checked by this very statement (#322): a suspension that commits meanwhile leaves it nothing. A
-    // reservation's window ends with the lease: queued again, the task may be reserved for anew.
+    // while its host may claim and does not sleep, checked by this very statement (#322, #329): a suspension, or an asleep report,
+    // that commits meanwhile leaves it nothing. A reservation's window ends with the lease: queued again, the task may be reserved
+    // for anew.
     const task = await env.DB.prepare(
       `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL, stop_order = NULL,
          lease_gen = ?, lane = ?, size = ?, units = ?, disk_gb = ?, release = ?, claim_id = ?, lease_missed = 0, reserved_at = NULL
@@ -1118,7 +1125,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     )
       .bind(
         k.workerId, plusMinutes(LEASE_MINUTES), at, host ? leaseGen() : null, c.lane, c.size, c.units, c.disk_gb, host ? k.version : null, host ? k.hc!.claimId : null, c.id,
-        ...(hostOk ? [k.hostId] : []), ...(guard ? [k.workerId, c.units, limit] : []),
+        ...(hostOk ? [k.hostId, k.hostId, freshSince(nowMs)] : []), ...(guard ? [k.workerId, c.units, limit] : []),
       )
       .first<TaskRow>();
     if (!task) continue;
@@ -1703,7 +1710,7 @@ export const OOM_ERROR = /^out of memory at \d+ GB/;
 export async function largestAlive(env: Env, at = Date.now()): Promise<number> {
   const rows = (await env.DB.prepare(FLEET_SQL).bind(new Date(at - Math.max(ALIVE_MS, LEGACY_ALIVE_MS)).toISOString()).all<FleetRow>()).results;
   const pool = running(env);
-  return largestSize({ members: rows.map((r) => memberOf(r, pool)), leases: [] }, at, selectionRules());
+  return largestSize({ members: rows.map((r) => memberOf(r, pool, at)), leases: [] }, at, selectionRules());
 }
 
 /**

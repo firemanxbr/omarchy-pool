@@ -397,9 +397,15 @@ fn what_refuses_a_switch_changes_nothing() {
         disk_gb: 100,
         rosetta: true,
     });
+    w.agent.cfg.mac = true;
     assert!(refused(&mut w, "compose/podman", PODMAN)
         .starts_with("this host's bundle runs in a Mac's VM (#320)"));
+    // Nor off Docker Desktop's or OrbStack's, the person's VM: agent.toml's `[vm]` says a
+    // Mac whatever its runtime (#329).
     w.agent.cfg.vm = None;
+    assert!(refused(&mut w, "compose/podman", PODMAN)
+        .starts_with("this host's bundle runs in a Mac's VM (#320)"));
+    w.agent.cfg.mac = false;
     // A Mac's build, played on any OS, refuses even with agent.toml's `[vm]` gone.
     w.agent.mac = true;
     assert!(refused(&mut w, "compose/podman", PODMAN)

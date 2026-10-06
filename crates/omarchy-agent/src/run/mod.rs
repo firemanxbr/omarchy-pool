@@ -41,7 +41,9 @@
 //! candidate that hangs past its health gate's deadline. A restart of the VM recreates the
 //! dispatcher, so the brake counts it as one of its restarts (it never holds the keeper,
 //! whose own rate limit governs it), and the runtime switch, which moves between Linux
-//! engines, is refused there.
+//! engines, is refused there. It keeps the Mac awake while a task runs, and reports
+//! `asleep` before the Mac sleeps and again after it woke (#329, [`power`]): a sleeping
+//! host has zero free units.
 
 pub mod brake;
 pub mod config;
@@ -55,6 +57,7 @@ pub(crate) mod exec;
 pub(crate) mod journal;
 pub(crate) mod orders;
 pub(crate) mod pool;
+pub(crate) mod power;
 pub(crate) mod report;
 pub(crate) mod rollout;
 pub(crate) mod selfupdate;
