@@ -2,7 +2,10 @@
 # register.sh — registers this host's eight workers with the pool and trusts
 # the project's six (pool, review and the second review pair), writing each
 # worker token into etc/<service>.env beside this script; nothing is printed
-# but the ids.
+# but the ids. Per-worker trust is gone (#343: the trust door answers 410),
+# so a project service registered from now on stays untrusted and its role
+# container refuses to start: a lost project registration is not replaced
+# here — the host the agent runs takes that work (docs/worker-host).
 #
 #   OMARCHY_CONTRIBUTOR_TOKEN=omc_… ./register.sh        a maintainer's token (profile page)
 #
@@ -36,10 +39,10 @@ for svc in pool-x86_64 pool-aarch64 review-x86_64 review-aarch64 review2-x86_64 
   umask 077
   printf '# %s\n# worker: %s\nOMARCHY_WORKER_TOKEN=%s\n' "$svc" "$id" "$token" > "$f"
   if [[ "$role" != community ]]; then
-    api POST "/factory/workers/$id/trust" '{"trust":"project"}' >/dev/null || { echo "$svc: registered as $id but not trusted — trust it on Review" >&2; continue; }
+    api POST "/factory/workers/$id/trust" '{"trust":"project"}' >/dev/null || { echo "$svc: registered as $id but not trusted: per-worker trust is gone (#343) — revoke it on its page; the host takes this work" >&2; continue; }
     echo "$svc: $id (project trust by $login)"
   else
-    echo "$svc: $id (community, shared)"
+    echo "$svc: $id (community: contributors' builds)"
   fi
 done
 echo "tokens are in $here/etc/*.env (mode 600); docker compose up -d starts the workers"
