@@ -1511,13 +1511,13 @@ impl Dispatcher {
             std::iter::once(self.jobs.bin.clone()).chain(std::env::split_paths(&path)),
         )
         .unwrap_or(path);
-        // Its token is in its directory (renewed there at each heartbeat), never the host's worker token;
+        // Its token is in its directory (renewed there at each heartbeat), never the host's worker token,
+        // nor the name of the file that holds it (#327: a `pkg-repo` call of its scripts would read it there);
         // what would put a container outside the spec (a shared pacman cache, a task's name and label) is not passed.
-        cmd.env("PATH", path)
+        crate::worker_token::withhold(&mut cmd)
+            .env("PATH", path)
             .env("RUNTIME", self.jobs.bin.join(shim::NAME))
             .env("TMPDIR", &scratch)
-            .env_remove("OMARCHY_WORKER_TOKEN")
-            .env_remove("OMARCHY_TOKEN")
             .env_remove("OMARCHY_TASK_ID")
             .env_remove("OMARCHY_PKG_CACHE");
         match &context {
