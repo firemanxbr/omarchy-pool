@@ -280,6 +280,62 @@ fn is_https_origin(s: &str) -> bool {
     })
 }
 
+impl Policy {
+    /// The envelope's bounds as agent.toml says them; an architecture the pool does not
+    /// build is refused.
+    fn of(e: &EnvelopePart) -> Result<Self, String> {
+        if let Some(bad) = e
+            .emulate
+            .iter()
+            .flatten()
+            .find(|a| !ARCHES.contains(&a.as_str()))
+        {
+            return Err(format!(
+                "agent.toml: envelope.emulate names {bad:?}, which is neither x86_64 nor aarch64"
+            ));
+        }
+        Ok(Policy {
+            max_units: e.max_units,
+            emulate: e.emulate.clone(),
+            diagnostics: e.diagnostics,
+            drivers: e
+                .drivers
+                .clone()
+                .unwrap_or_else(|| vec!["compose".to_owned()]),
+        })
+    }
+}
+
+impl Vm {
+    /// `[vm]`: the `omarchy` Colima profile, sized by the envelope; `None` for a VM the
+    /// agent uses but never manages (Docker Desktop's, `OrbStack`'s).
+    fn of(v: VmPart, e: &EnvelopePart) -> Result<Option<Self>, String> {
+        match v.runtime.as_str() {
+            "colima" => {
+                if let Some(p) = v.profile.filter(|p| p != crate::vm::PROFILE) {
+                    return Err(format!(
+                        "agent.toml: vm.profile {p:?}: the agent's VM is the {} profile",
+                        crate::vm::PROFILE
+                    ));
+                }
+                let (Some(cpus), Some(mem_gb)) = (e.max_cpus, e.max_mem_gb) else {
+                    return Err("agent.toml: [vm] runtime colima takes its size from envelope.max_cpus and envelope.max_mem_gb (install writes them)".into());
+                };
+                Ok(Some(Vm {
+                    cpus,
+                    mem_gb,
+                    disk_gb: v.disk_gb.unwrap_or(crate::vm::DISK_GB),
+                    rosetta: v.rosetta.unwrap_or(false),
+                }))
+            }
+            "docker-desktop" | "orbstack" => Ok(None),
+            other => Err(format!(
+                "agent.toml: vm.runtime {other:?} is none of colima, docker-desktop, orbstack"
+            )),
+        }
+    }
+}
+
 impl Config {
     pub fn parse(text: &str) -> Result<Self, String> {
         let f: File = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
@@ -336,26 +392,7 @@ impl Config {
                 format!("agent.toml: set.runtime {r:?} is neither \"docker\" nor \"podman\"")
             })?),
         };
-        if let Some(bad) = f
-            .envelope
-            .emulate
-            .iter()
-            .flatten()
-            .find(|a| !ARCHES.contains(&a.as_str()))
-        {
-            return Err(format!(
-                "agent.toml: envelope.emulate names {bad:?}, which is neither x86_64 nor aarch64"
-            ));
-        }
-        let policy = Policy {
-            max_units: f.envelope.max_units,
-            emulate: f.envelope.emulate,
-            diagnostics: f.envelope.diagnostics,
-            drivers: f
-                .envelope
-                .drivers
-                .unwrap_or_else(|| vec!["compose".to_owned()]),
-        };
+        let policy = Policy::of(&f.envelope)?;
         let socket_cli = need_path(f.set.socket_cli, "set.socket_cli")?;
         let socket_mount = match f.set.socket_mount {
             None => socket_cli.clone(),
@@ -363,32 +400,7 @@ impl Config {
         };
         let vm = match f.vm {
             None => None,
-            Some(v) => match v.runtime.as_str() {
-                "colima" => {
-                    if let Some(p) = v.profile.filter(|p| p != crate::vm::PROFILE) {
-                        return Err(format!(
-                            "agent.toml: vm.profile {p:?}: the agent's VM is the {} profile",
-                            crate::vm::PROFILE
-                        ));
-                    }
-                    let (Some(cpus), Some(mem_gb)) = (f.envelope.max_cpus, f.envelope.max_mem_gb)
-                    else {
-                        return Err("agent.toml: [vm] runtime colima takes its size from envelope.max_cpus and envelope.max_mem_gb (install writes them)".into());
-                    };
-                    Some(Vm {
-                        cpus,
-                        mem_gb,
-                        disk_gb: v.disk_gb.unwrap_or(crate::vm::DISK_GB),
-                        rosetta: v.rosetta.unwrap_or(false),
-                    })
-                }
-                "docker-desktop" | "orbstack" => None,
-                other => {
-                    return Err(format!(
-                    "agent.toml: vm.runtime {other:?} is none of colima, docker-desktop, orbstack"
-                ))
-                }
-            },
+            Some(v) => Vm::of(v, &f.envelope)?,
         };
         Ok(Config {
             pool,
