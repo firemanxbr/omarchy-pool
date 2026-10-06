@@ -26,6 +26,14 @@
 #      fails it revoked and lost
 #   5. the disk watcher: below the floor, the youngest build is killed `lost`
 #      and the claims say want 0
+#   6. pool jobs (#340): a health check runs in a child process of the
+#      dispatcher under its 2 GB data rlimit, which its script inherits, and
+#      its check container goes through omarchy-task-run — on
+#      the job's own internal network with its egress sidecar, its scratch
+#      directory read-only, no token, no socket — while any other engine call
+#      of the job is refused; a job that hangs is killed at its timeout and
+#      failed, with what it started, while a build's lease beats on and
+#      completes
 #
 # Every task runs on its own internal network with its egress sidecar (#336);
 # here the worker image the sidecars run is a stand-in that only sleeps (the
@@ -109,6 +117,39 @@ case "$name" in
 esac
 STUB
 
+# The release's health check, as a pool job runs it (#340): its check container through $RUNTIME in the shape tests/health-check.sh
+# uses, the image the release pins (tests/images.env: this run's stub image by its content id); then two engine calls the shim must
+# refuse. "hang" is a check that never ends.
+mkdir -p "$tmp/checkout/tests"
+printf 'STUB_BASE="%s"\n' "$image_id" > "$tmp/checkout/tests/images.env"
+cat > "$tmp/checkout/tests/health-check.sh" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+RING="$1"; ARCH="${2:-x86_64}"
+source "$(cd "$(dirname "$0")" && pwd)/images.env"
+case "$ARCH" in x86_64) PLATFORM=linux/amd64 KEYRING=archlinux ;; *) PLATFORM=linux/arm64 KEYRING=archlinuxarm ;; esac
+RUNTIME="${RUNTIME:-$(command -v docker || command -v podman)}"
+out="$OMARCHY_WORK_DIR/health-$RING.out"
+if [[ "$RING" == hang ]]; then echo $$ > "$OMARCHY_WORK_DIR/hang.pid"; exec sleep 600; fi
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+cat > "$WORK/check.sh" <<'CHECK'
+echo "== env"; env | sort
+echo "== repo: $(touch /repo/x 2>&1 || true)"
+echo "== socket: $(ls /var/run/docker.sock /run/docker.sock /run/podman/podman.sock 2>&1 | tr '\n' ' ')"
+sleep 4
+echo "TOTAL=3"
+exit 0
+CHECK
+"$RUNTIME" run --rm --platform "$PLATFORM" -e KEYRING="$KEYRING" -v "$WORK:/repo:ro" "$STUB_BASE" bash /repo/check.sh > "$out" 2>&1
+code=$?
+"$RUNTIME" run --rm --privileged --platform "$PLATFORM" -v "$WORK:/repo:ro" "$STUB_BASE" bash /repo/check.sh >/dev/null 2>&1; echo "== privileged: $?" >> "$out"
+docker ps >/dev/null 2>&1; echo "== docker ps: $?" >> "$out"
+echo "== runtime: $RUNTIME" >> "$out"
+echo "== data: $(ulimit -d) $(ulimit -H -d)" >> "$out"
+exit "$code"
+STUB
+chmod +x "$tmp/checkout/tests/health-check.sh"
+
 # The pool: who the host is, tasks from tasks.jsonl one per claim (then 204), heartbeats by beats/<id> (ok | down | stop | revoked), every
 # request kept in requests.jsonl.
 mkdir -p "$tmp/beats"; : > "$tmp/tasks.jsonl"; : > "$tmp/requests.jsonl"
@@ -167,6 +208,10 @@ capacity 11 150
 give() { # id name units — one task for the next claim, a community build with its own lease generation
   jq -cn --argjson id "$1" --arg n "$2" --arg a "$arch" --argjson u "$3" --arg g "g_$(printf '%016x' "$1")" \
     '{task:{id:$id,kind:"build",name:$n,arch:$a,trust:"community",pkgbuild_ref:"https://example.invalid/x@v1:PKGBUILD",params:{},attempts:1,max_attempts:3,publish:1,lease_gen:$g,units:$u,disk_gb:0,release:"v9.9.9"},token:("omj.secret-of-" + ($id|tostring)),lease_minutes:30}' >> "$tmp/tasks.jsonl"
+}
+give_health() { # id ring — a pool job for the next claim: the health check of this machine's ring arch (#340)
+  jq -cn --argjson id "$1" --arg r "$2" --arg a "$arch" --arg g "g_$(printf '%016x' "$1")" \
+    '{task:{id:$id,kind:"health",name:"health",arch:$a,trust:"project",pkgbuild_ref:"-",params:{ring:$r,arch:$a},attempts:1,max_attempts:3,publish:1,lease_gen:$g,units:1,disk_gb:0,release:"v9.9.9"},token:("omj.secret-of-" + ($id|tostring)),lease_minutes:30}' >> "$tmp/tasks.jsonl"
 }
 gen() { printf 'g_%016x' "$1"; }
 name() { echo "omarchy-task-$1-$(gen "$1")"; }
@@ -314,5 +359,59 @@ gone 10 || fail "task 10's container survived the disk watcher"
 sleep 3
 jq -c 'select(.path == "/api/v1/factory/claim") | .body.want' "$tmp/requests.jsonl" | tail -n1 | grep -qx 0 || fail "the dispatcher still claims work with the disk below its floor"
 echo "ok: below the floor the disk watcher kills the youngest build, lost, and the claims say want 0"
+
+# ---------- 6. pool jobs (#340) ----------
+stop 15
+start --job-timeout-s 30
+[[ "$arch" == x86_64 || "$arch" == aarch64 ]] || fail "no lane of $arch"
+helper="$(name 20)-helper"
+give_health 20 rc
+helper_running() { [[ "$("$RT" inspect --format '{{.State.Status}}' "$(name "$1")-helper" 2>/dev/null)" == running ]]; }
+until_ 60 "task 20's check container runs" helper_running 20
+# Its check container: the job's own internal network, alone on it with its egress sidecar; its scratch directory read-only at /repo
+# and nothing else mounted; no credential; the spec's capabilities and flags.
+[[ "$(nets_of "$helper")" == "$(name 20)" ]] || fail "task 20's helper is on: $(nets_of "$helper")"
+"$RT" network inspect "$(name 20)" | jq -e '.[0] | (.Internal == true or .internal == true)' >/dev/null || fail "task 20's network is not internal"
+[[ "$(nets_of "$(name 20)-egress")" == "$(printf '%s\n' "$(name 20)" omarchy-egress | sort | tr '\n' ' ' | sed 's/ $//')" ]] || fail "task 20's egress is on: $(nets_of "$(name 20)-egress")"
+"$RT" inspect "$helper" | jq -e --arg w "$tmp/work/tasks/20-$(gen 20)/tmp/" '.[0] as $c | ["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_SETUID","CAP_SETGID","CAP_KILL"] as $ok
+  | $c.HostConfig.Privileged == false and $c.HostConfig.PidsLimit == 8192 and $c.HostConfig.LogConfig.Type == "none"
+  and ($c.Mounts | length) == 1 and $c.Mounts[0].Destination == "/repo" and $c.Mounts[0].RW == false and ($c.Mounts[0].Source | startswith($w))
+  and (if $c.EffectiveCaps then ($c.EffectiveCaps - $ok | length) == 0 else ($c.HostConfig.CapDrop | index("ALL")) != null end)' >/dev/null \
+  || fail "task 20's helper: $("$RT" inspect "$helper" | jq -c '.[0] | {Mounts, HostConfig: (.HostConfig | {Privileged, PidsLimit, LogConfig, CapDrop, CapAdd}), EffectiveCaps}')"
+"$RT" inspect --format '{{json .Config.Env}}' "$helper" | grep -qiE 'omj\.|omw_|token|secret|OMARCHY_' && fail "a credential in task 20's helper: $("$RT" inspect --format '{{json .Config.Env}}' "$helper")"
+until_ 60 "task 20 completed" reported 20 complete
+jq -e '.summary == "rc/'"$arch"' healthy"' <<<"$(report 20 complete)" >/dev/null || fail "task 20's report: $(report 20 complete)"
+out="$tmp/work/jobs/health-rc.out"
+grep -q '^TOTAL=3$' "$out" || fail "the check's output did not reach the script: $(cat "$out")"
+grep -qx "KEYRING=archlinux\(arm\)\?" "$out" && grep -q '^HTTPS_PROXY=http://' "$out" || fail "the check's environment: $(cat "$out")"
+grep -qiE 'omj\.|omw_|OMARCHY_TOKEN|OMARCHY_API' "$out" && fail "a token or the pool's API in the check container: $(cat "$out")"
+grep -q '== repo: .*Read-only' "$out" || fail "the check's /repo is writable: $(grep '== repo' "$out")"
+grep -q '== socket: ls: cannot access' "$out" || fail "a socket in the check container: $(grep '== socket' "$out")"
+grep -qx '== privileged: 125' "$out" && grep -qx '== docker ps: 125' "$out" || fail "the shim took a shape it must refuse: $(grep '^== [pd]' "$out")"
+grep -qx "== runtime: $tmp/work/state/bin/omarchy-task-run" "$out" || fail "the job's RUNTIME: $(grep '== runtime' "$out")"
+# The job's 2 GB data rlimit, which pkg-repo pool-job set on itself before anything ran: its script inherits it, soft and hard.
+grep -qx '== data: 2097152 2097152' "$out" || fail "the job's memory limit: $(grep '== data' "$out")"
+until_ 10 "task 20's helper, sidecar and network removed" side_gone 20
+"$RT" inspect --type container "$helper" >/dev/null 2>&1 && fail "task 20's helper survived it"
+claims_jobs() { jq -c 'select(.path == "/api/v1/factory/claim") | .body.kinds' "$tmp/requests.jsonl" | tail -n1 | grep -q '"health"'; }
+until_ 10 "the claims list the pool's kinds again, its unit free" claims_jobs
+echo "ok: a pool job's check container goes through omarchy-task-run: its own internal network and egress, its scratch read-only, no token or socket; any other engine call refused"
+# A job that hangs, beside a build: killed at its timeout and failed, with what it started; the build beats on and completes.
+give 21 slow 2
+until_ 60 "task 21 runs" running 21
+give_health 22 hang
+until_ 30 "task 22's check hangs" test -s "$tmp/work/jobs/hang.pid"
+beats() { jq -c --arg p "/api/v1/factory/tasks/$1/heartbeat" 'select(.path == $p)' "$tmp/requests.jsonl" | wc -l; }
+b21="$(beats 21)"
+until_ 60 "task 22 failed at its timeout" reported 22 fail
+jq -e '.timed_out == true and .final == false and (.error | contains("ran past its timeout"))' <<<"$(report 22 fail)" >/dev/null || fail "task 22: $(report 22 fail)"
+# Killed, or a zombie its new parent has not reaped yet.
+script_gone() { local p; p="$(cat "$tmp/work/jobs/hang.pid")"; ! kill -0 "$p" 2>/dev/null || [[ "$(awk '{ print $3 }' "/proc/$p/stat" 2>/dev/null)" == Z ]]; }
+until_ 10 "the hung job's script killed with it" script_gone
+[[ "$(beats 21)" -gt "$b21" ]] || fail "task 21's heartbeats stopped while task 22 hung"
+running 21 || fail "task 21 was touched by task 22's kill"
+finish 21
+until_ 30 "task 21 completed" reported 21 complete
+echo "ok: a pool job that hangs is killed at its timeout and failed, with its script; a build's lease beats on and completes"
 stop 15
 echo "ok: the dispatcher on a real engine ($RT, $STUB_IMAGE)"

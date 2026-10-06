@@ -26,7 +26,9 @@ case "$ARCH" in
 esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PKG_REPO="${PKG_REPO:-$ROOT/target/release/pkg-repo}"
-RUNTIME="$(command -v docker || command -v podman)"
+# The engine: RUNTIME when set — a dispatcher's pool job sets it to omarchy-task-run (#340), which runs this
+# script's check container through the task spec — or the docker (or podman) on PATH.
+RUNTIME="${RUNTIME:-$(command -v docker || command -v podman)}"
 LOG="${TRIAL_LOG:-${OMARCHY_WORK_DIR:-/tmp}/tmp/trial-$TASK.log}"; mkdir -p "$(dirname "$LOG")"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

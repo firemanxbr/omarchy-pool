@@ -114,7 +114,11 @@ impl Cli {
     /// Docker 28 (an older daemon is refused, in its own words: it would make the network with the
     /// host's address on it).
     pub fn gateway(&mut self) -> Result<spec::Gateway, String> {
-        if self.runtime == "podman" {
+        // By its name, or its path's (a pool job's shim runs the engine by its absolute path, #340).
+        if std::path::Path::new(&self.runtime)
+            .file_name()
+            .is_some_and(|n| n == "podman")
+        {
             return Ok(spec::Gateway::NoDns);
         }
         let out = self.call(&["version", "--format", "{{json .Server}}"])?;

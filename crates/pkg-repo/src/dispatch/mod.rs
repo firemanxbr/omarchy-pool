@@ -79,6 +79,21 @@
 //! whose own release is in that set takes no new task: it claims with
 //! `want: 0`, for its leases and orders only.
 //!
+//! **Pool jobs** (#340, design v2 §7.3, §9.2; D34): sync, render, promote,
+//! rollback, security, gc, verify, relayout, enqueue, publish and health run
+//! here, each in a child process of the dispatcher ([`jobs`]): a 2 GB memory
+//! limit, a per-kind timeout past which the dispatcher kills its process group
+//! and its helper containers and fails it, its job token as today, its report
+//! made by the loop once the child is gone. They take the unit kept for them,
+//! one at a time — the claim lists the pool's kinds while no job is held and
+//! wants one even when every other unit is busy — and run arch-neutral, in
+//! this native process. The helper containers their scripts start (a health
+//! check, an ABI gate's references) reach the engine only through the
+//! `omarchy-task-run` shim ([`shim`]), which takes the one shape the scripts
+//! use and makes it through the task spec on the job's own /28, on a lane of
+//! the ring's architecture. A job does not survive its dispatcher: one that
+//! was running when a new dispatcher starts is failed `lost`.
+//!
 //! **Its environment** (#371): the agent writes `etc/dispatcher.env` (0600,
 //! the host set's `env_file`) with the host's worker token, the host's own
 //! addresses for the egress to refuse (`OMARCHY_HOST_ADDRESSES`: its
@@ -99,12 +114,14 @@
 pub mod budget;
 pub mod capacity;
 pub mod engine;
+pub mod jobs;
 pub mod kinds;
 pub mod lease;
 pub mod libpod;
 pub mod pool;
 pub mod probe;
 pub mod revoked;
+pub mod shim;
 pub mod sizing;
 pub mod spec;
 #[cfg(test)]
@@ -132,10 +149,11 @@ use crate::stop::Beat;
 use crate::work::{say, Task};
 use crate::RepoError;
 
-/// What a host claims in P1 (design v2 §8.2): builds of every trust, trials and audits.
-/// Seam (#340): pool jobs join here, the pool's `HOST_KINDS` with them; those with helper
-/// containers (`health`, `promote`'s ABI gates and health checks) then take a lane of each
-/// ring architecture they check, native or emulated, as selection already decides (#338).
+/// The tasks a host claims (design v2 §8.2): builds of every trust, trials and audits, each in
+/// a task container. Pool jobs ([`jobs::POOL_KINDS`], #340) join them in the claim while the
+/// unit kept for them is free; those with helper containers (`health`, `promote`'s ABI gates
+/// and health checks, `security`'s) take a lane of each ring architecture they check, native
+/// or emulated, as selection decides (#338).
 pub const KINDS: [&str; 3] = ["build", "trial", "audit"];
 /// The orders the dispatcher executes: drain (a notice), stop-task (the heartbeat's 409), restart (exit 75),
 /// recheck-agent and restart-agent (a fresh probe).
@@ -248,6 +266,8 @@ pub struct Options {
     pub timing: Timing,
     pub disk_floor_gb: Option<u64>,
     pub net: Net,
+    /// Every pool job's timeout instead of its kind's (the engine tests' hidden flag, #340).
+    pub job_timeout: Option<Duration>,
 }
 
 /// What the dispatcher needs for its tasks' networks and sidecars (#336).
@@ -347,6 +367,8 @@ struct Live {
     fin: Option<Job<Result<String, Retry>>>,
     retry_at: u64,
     beat_at: u64,
+    /// A pool job's child process while it runs (#340).
+    child: Option<jobs::Child>,
 }
 
 impl Live {
@@ -358,7 +380,30 @@ impl Live {
             fin: None,
             retry_at: 0,
             beat_at: 0,
+            child: None,
         }
+    }
+
+    fn is_job(&self) -> bool {
+        jobs::is_job(&self.lease.task.kind)
+    }
+}
+
+/// What the dispatcher runs its pool jobs with (#340).
+pub struct JobConf {
+    /// How a job's child starts: this binary's `pool-job`.
+    pub launch: Arc<dyn jobs::Launch>,
+    /// `<work root>/state/bin`: the shim, as `omarchy-task-run`, `docker` and `podman`, first on a job's `PATH`.
+    pub bin: PathBuf,
+    /// The engine's CLI by absolute path: what the shim runs, never itself.
+    pub engine: PathBuf,
+    /// Every job's timeout instead of its kind's (the engine tests' hidden flag).
+    pub timeout: Option<Duration>,
+}
+
+impl JobConf {
+    fn timeout(&self, kind: &str) -> Duration {
+        self.timeout.unwrap_or_else(|| jobs::timeout(kind))
     }
 }
 
@@ -427,6 +472,8 @@ pub struct Dispatcher {
     probe: Prober,
     /// This host's merged revoked set (#342, [`revoked`]): a lease of one of these is killed and reported.
     revoked: BTreeSet<String>,
+    /// Pool jobs (#340).
+    pub jobs: JobConf,
 }
 
 /// The probe sidecar's standing: its last answer, the probe running now, when the next one is due, the orders waiting for it.
@@ -487,6 +534,14 @@ impl Dispatcher {
             revoked: revoked::merged(&ctx_work_root, &revoked::signed()),
             ledger: budget::Ledger::new(&ctx_work_root),
             probe: Prober::default(),
+            jobs: JobConf {
+                launch: Arc::new(jobs::Exe(
+                    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pkg-repo")),
+                )),
+                bin: ctx_work_root.join("state").join("bin"),
+                engine: PathBuf::from("docker"),
+                timeout: None,
+            },
         })
     }
 
@@ -557,7 +612,9 @@ impl Dispatcher {
         for lease in found.leases {
             let name = spec::container_name(lease.task.id, &lease.gen);
             let mut live = Live::new(lease);
-            if live.lease.ending.is_none() {
+            if live.lease.ending.is_none() && live.is_job() {
+                self.readopt_job(&mut live);
+            } else if live.lease.ending.is_none() {
                 let state = self
                     .engine
                     .inspect(&name)
@@ -589,6 +646,34 @@ impl Dispatcher {
             self.leases.insert(live.lease.key(), live);
         }
         Ok(())
+    }
+
+    /// A pool job a previous dispatcher ran (#340): its child went with that dispatcher. One that
+    /// had written its result is reported from it; one that was still running is lost — its
+    /// attempt given back, and whatever its helpers left removed; one being prepared is prepared
+    /// again; one being reported is reported again.
+    fn readopt_job(&self, live: &mut Live) {
+        let id = live.lease.task.id;
+        match live.lease.phase {
+            Phase::Preparing => say(format!(
+                "task {id}: prepared again, the dispatcher restarted before its job started"
+            )),
+            Phase::Finishing => {}
+            Phase::Running if jobs::read_result(&self.ctx.task_dir(&live.lease)).is_some() => {
+                say(format!(
+                    "task {id}: its job ended while no dispatcher ran; reporting what it left"
+                ));
+                live.lease.phase = Phase::Finishing;
+                self.save(&live.lease);
+            }
+            Phase::Running => self.begin_ending(
+                live,
+                Ending::Lost(
+                    "its job's process ended with the dispatcher that ran it (a pool job runs in the dispatcher's own process tree)"
+                        .into(),
+                ),
+            ),
+        }
     }
 
     /// Orphans of this host — task containers, their sidecars, a probe's, their networks — that no
@@ -761,6 +846,10 @@ impl Dispatcher {
         l.ending = Some(end);
         self.save(l);
         live.stop.store(true, Ordering::SeqCst);
+        // A pool job's process group goes first: a script of it would start another helper.
+        if let Some(mut c) = live.child.take() {
+            c.kill();
+        }
         self.engine.remove_lease(l.task.id, &l.gen);
     }
 
@@ -844,6 +933,106 @@ impl Dispatcher {
         });
     }
 
+    /// A pool job's report, once its child is gone (#340).
+    fn spawn_fin_job(&self, live: &mut Live, now: u64) {
+        let (ctx, lease) = (Arc::clone(&self.ctx), live.lease.clone());
+        let work = move || kinds::finish_job(&ctx, &lease, now);
+        live.fin = Some(if self.inline {
+            Job::Done(work())
+        } else {
+            Job::Running(std::thread::spawn(work))
+        });
+    }
+
+    /// A running pool job (#340): its child's end, or its timeout — past it, its process group
+    /// and its helper containers are killed and it is failed. Either way its report follows, once
+    /// what its helpers left is gone.
+    fn step_job(&mut self, mut live: Live, now: u64) -> Option<Live> {
+        let limit = self.jobs.timeout(&live.lease.task.kind);
+        let started = live.lease.started_at.unwrap_or(now);
+        let Some(child) = live.child.as_mut() else {
+            self.begin_ending(
+                &mut live,
+                Ending::Lost("its job's process is not this dispatcher's".into()),
+            );
+            return Some(live);
+        };
+        let end = match child.try_wait() {
+            Ok(Some(status)) => {
+                // What it left of its process group: a script still running, its engine client.
+                child.kill_group();
+                jobs::End::of(status, limit)
+            }
+            Ok(None) if now >= started + limit.as_secs() => {
+                child.kill();
+                jobs::End {
+                    timed_out: true,
+                    limit_s: limit.as_secs(),
+                    ..jobs::End::default()
+                }
+            }
+            Ok(None) => return Some(live),
+            Err(e) => {
+                say(format!(
+                    "task {}: its job's process cannot be read ({e}); killing it",
+                    live.lease.task.id
+                ));
+                let status = child.kill();
+                status.map_or_else(
+                    || jobs::End {
+                        limit_s: limit.as_secs(),
+                        ..jobs::End::default()
+                    },
+                    |s| jobs::End::of(s, limit),
+                )
+            }
+        };
+        live.child = None;
+        // The helper containers a killed shim left, and their network.
+        self.engine
+            .remove_lease(live.lease.task.id, &live.lease.gen);
+        let reported = jobs::read_result(&self.ctx.task_dir(&live.lease)).is_some();
+        say(format!(
+            "task {}: {} {}",
+            live.lease.task.id,
+            live.lease.task.kind,
+            if reported && !end.timed_out {
+                "ended; reporting what it returned".to_owned()
+            } else {
+                end.words()
+            }
+        ));
+        live.lease.notes["job"] = serde_json::to_value(&end).unwrap_or_default();
+        live.lease.phase = Phase::Finishing;
+        self.save(&live.lease);
+        self.spawn_fin_job(&mut live, now);
+        self.after_fin(live, now)
+    }
+
+    /// The job token a heartbeat renewed, where a running pool job reads it (#340): its scripts get
+    /// the freshest at their start, its calls that take the token again (relayout's pages) too.
+    fn write_job_token(&self, l: &Lease) {
+        let dir = self.ctx.task_dir(l);
+        if dir.is_dir() {
+            if let Err(e) = jobs::write_private(&dir.join(jobs::TOKEN_FILE), l.token.as_bytes()) {
+                say(format!(
+                    "task {}: its renewed token could not be written for its job: {e}",
+                    l.task.id
+                ));
+            }
+        }
+    }
+
+    /// Kills every pool job's process group (the dispatcher exits): a job does not outlive it,
+    /// and the next one fails what was running `lost`.
+    pub fn kill_jobs(&mut self) {
+        for live in self.leases.values_mut() {
+            if let Some(mut c) = live.child.take() {
+                c.kill();
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn step(&mut self, mut live: Live, now: u64) -> Option<Live> {
         let name = spec::container_name(live.lease.task.id, &live.lease.gen);
@@ -890,6 +1079,9 @@ impl Dispatcher {
                     live.lease.last_beat = now;
                     if let Some(t) = fresh {
                         live.lease.token = t;
+                        if live.is_job() && live.lease.phase == Phase::Running {
+                            self.write_job_token(&live.lease);
+                        }
                     }
                     self.save(&live.lease);
                 }
@@ -949,6 +1141,7 @@ impl Dispatcher {
                     }
                 }
             }
+            Phase::Running if live.is_job() => return self.step_job(live, now),
             Phase::Running => match self.engine.inspect(&name) {
                 Err(e) => say(format!(
                     "task {}: {}; asking again",
@@ -974,6 +1167,12 @@ impl Dispatcher {
                     Ending::Lost("its container is gone: the engine lost it".into()),
                 ),
             },
+            Phase::Finishing if live.is_job() => {
+                if live.fin.is_none() && now >= live.retry_at {
+                    self.spawn_fin_job(&mut live, now);
+                }
+                return self.after_fin(live, now);
+            }
             Phase::Finishing => {
                 if live.fin.is_none() && now >= live.retry_at {
                     match self.engine.inspect(&name) {
@@ -1026,6 +1225,9 @@ impl Dispatcher {
     /// Starts a prepared lease's network, sidecars and container: a build only with its disk budget plus the floor free (D53).
     #[allow(clippy::too_many_lines)] // the checks before the engine runs, then the plan, in order
     fn start(&mut self, mut live: Live, now: u64) -> Live {
+        if live.is_job() {
+            return self.start_job(live, now);
+        }
         let Some(kind) = kinds::kind_of(&live.lease) else {
             self.begin_ending(&mut live, Ending::Lost("no container kind".into()));
             return live;
@@ -1211,6 +1413,147 @@ impl Dispatcher {
         live
     }
 
+    /// The architectures this host runs a lane of now (`run/capacity.json`): its native one, and the emulated.
+    fn lanes_now(&self) -> Vec<String> {
+        capacity::read(&self.capacity_file)
+            .map(|c| std::iter::once(c.arch).chain(c.emulated).collect())
+            .unwrap_or_default()
+    }
+
+    /// Starts a prepared pool job (#340): its helpers' lanes checked again and their /28, its
+    /// files — the job, its token, the shim's context — and its child process, in a process group
+    /// of its own, with the shim first on its `PATH` as the only engine it reaches.
+    #[allow(clippy::too_many_lines)] // the checks, the files, then the child's environment, in order
+    fn start_job(&mut self, mut live: Live, now: u64) -> Live {
+        let kind = live.lease.task.kind.clone();
+        let tdir = self.ctx.task_dir(&live.lease);
+        let rdir = self.ctx.release_dir(&live.lease.release);
+        let scratch = tdir.join("tmp");
+        let lanes = self.lanes_now();
+        let native = capacity::read(&self.capacity_file).map_or_else(native_arch, |c| c.arch);
+        let missing: Vec<String> = jobs::helper_arches(&live.lease.task, &native)
+            .into_iter()
+            .filter(|a| !lanes.contains(a))
+            .collect();
+        if !missing.is_empty() {
+            let why = format!(
+                "its helper containers run {}, and this host runs no lane of it now (run/capacity.json): handed back",
+                missing.join(" and ")
+            );
+            self.begin_ending(&mut live, Ending::Lost(why));
+            return live;
+        }
+        let slot = if jobs::has_helpers(&kind) {
+            let Some(slot) = self.free_slot() else {
+                let why = format!(
+                    "every task network of {} is in use: its helpers have none",
+                    self.net.subnets.cidr()
+                );
+                self.begin_ending(&mut live, Ending::Lost(why));
+                return live;
+            };
+            Some(slot)
+        } else {
+            None
+        };
+        let spec = jobs::Spec {
+            task: live.lease.task.clone(),
+            api: self.ctx.pool.api_url().to_owned(),
+            pool: self.ctx.pool_url.clone(),
+            arch: native.clone(),
+            work_dir: self.ctx.work_root.join("jobs"),
+            repo_dir: rdir.clone(),
+            scratch: scratch.clone(),
+        };
+        let context = slot.map(|slot| shim::Context {
+            task: live.lease.task.id,
+            gen: live.lease.gen.clone(),
+            host: self.host.clone(),
+            scratch: scratch.clone(),
+            arches: lanes.clone(),
+            images: shim::pinned_images(&rdir),
+            units: live.lease.units,
+            unit_cpus: self.ctx.constants.unit_cpus,
+            unit_mem_gb: self.ctx.constants.unit_mem_gb,
+            worker_image: self.net.worker_image.clone(),
+            subnets: self.net.subnets.cidr(),
+            slot,
+            deny: self.net.deny.clone(),
+            engine: self.jobs.engine.clone(),
+        });
+        let written = std::fs::create_dir_all(&scratch)
+            .and_then(|()| {
+                jobs::write_private(
+                    &tdir.join(jobs::SPEC_FILE),
+                    &serde_json::to_vec(&spec).unwrap_or_default(),
+                )
+            })
+            .and_then(|()| {
+                jobs::write_private(&tdir.join(jobs::TOKEN_FILE), live.lease.token.as_bytes())
+            })
+            .and_then(|()| match &context {
+                Some(c) => jobs::write_private(
+                    &tdir.join(jobs::CONTEXT_FILE),
+                    &serde_json::to_vec(c).unwrap_or_default(),
+                ),
+                None => Ok(()),
+            });
+        if let Err(e) = written {
+            self.begin_ending(
+                &mut live,
+                Ending::Lost(format!("its job's files could not be written: {e}")),
+            );
+            return live;
+        }
+        let mut cmd = self.jobs.launch.command(&tdir);
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(self.jobs.bin.clone()).chain(std::env::split_paths(&path)),
+        )
+        .unwrap_or(path);
+        // Its token is in its directory (renewed there at each heartbeat), never the host's worker token;
+        // what would put a container outside the spec (a shared pacman cache, a task's name and label) is not passed.
+        cmd.env("PATH", path)
+            .env("RUNTIME", self.jobs.bin.join(shim::NAME))
+            .env("TMPDIR", &scratch)
+            .env_remove("OMARCHY_WORKER_TOKEN")
+            .env_remove("OMARCHY_TOKEN")
+            .env_remove("OMARCHY_TASK_ID")
+            .env_remove("OMARCHY_PKG_CACHE");
+        match &context {
+            Some(_) => cmd.env(shim::CONTEXT_VAR, tdir.join(jobs::CONTEXT_FILE)),
+            None => cmd.env_remove(shim::CONTEXT_VAR),
+        };
+        live.lease.phase = Phase::Running;
+        live.lease.started_at = Some(now);
+        live.lease.net_slot = slot;
+        self.save(&live.lease);
+        match jobs::Child::spawn(cmd) {
+            Ok(c) => live.child = Some(c),
+            Err(e) => {
+                self.begin_ending(
+                    &mut live,
+                    Ending::Lost(format!("its job's process did not start: {e}")),
+                );
+                return live;
+            }
+        }
+        say(format!(
+            "task {}: {kind} started in a process of its own ({} at most, 2 GB{})",
+            live.lease.task.id,
+            jobs::span(self.jobs.timeout(&kind).as_secs()),
+            slot.and_then(|s| self.net.subnets.slot(s))
+                .map(|s| format!(
+                    "; its helpers on {} through {}, network {}",
+                    jobs::helper_arches(&live.lease.task, &native).join(" and "),
+                    shim::NAME,
+                    s.cidr()
+                ))
+                .unwrap_or_default()
+        ));
+        live
+    }
+
     /// The lowest /28 no lease and no probe holds, once what no lease or probe owns is swept.
     fn free_slot(&self) -> Option<u32> {
         let held: Vec<(u64, String)> = self
@@ -1326,12 +1669,22 @@ impl Dispatcher {
         }
         let cap = capacity::read(&self.capacity_file);
         let used: u32 = self.leases.values().map(|v| v.lease.units).sum();
+        let jobs_used: u32 = self
+            .leases
+            .values()
+            .filter(|v| v.is_job())
+            .map(|v| v.lease.units)
+            .sum();
         // What a task may take now (§7.6, #337): the units beside its leases and the job unit — none when
         // fewer units than leases remain (a cap lowered: nothing running is killed, it claims nothing until
         // they fit) — and, when MemAvailable is below the largest task it could receive, only what the memory
         // still holds: another workload on the machine leaves it what still fits, or nothing this round.
+        // A pool job running holds the job unit, never a task's (#340, design v2 §7.3: the minimum host runs
+        // its one build beside it), as the pool counts it (selection.ts roomOf).
         let free = cap.as_ref().map_or(0, |c| {
-            c.units.saturating_sub(c.job_reserved).saturating_sub(used)
+            c.units
+                .saturating_sub(c.job_reserved.max(jobs_used))
+                .saturating_sub(used - jobs_used)
         });
         // What the leases just started still owe the memory: their whole share, from their claim until
         // MEM_RAMP after their container started — a burst of claims never offers the same memory twice.
@@ -1351,6 +1704,16 @@ impl Dispatcher {
         let available = self.probes.mem_available_gb();
         let mem = available.map(|m| m.saturating_sub(promised));
         let offer = self.ctx.constants.offer(free, mem);
+        // The unit kept for pool jobs (#340): one job at a time, in it (or in a unit still free), while
+        // the memory holds it — offered even when every other unit is busy, so rings keep moving.
+        let job_free = cap.as_ref().map_or(0, |c| {
+            if self.leases.values().any(Live::is_job) {
+                0
+            } else {
+                c.units.saturating_sub(used).min(1)
+            }
+        });
+        let job_offer = self.ctx.constants.offer(job_free, mem);
         if offer < free {
             if self.mem_held != Some(offer) {
                 let owed = if promised > 0 {
@@ -1373,13 +1736,22 @@ impl Dispatcher {
         // go on with `want: 0`, for its leases and its orders (said once, at re-adoption).
         let want = cap.as_ref().is_some_and(|c| {
             !c.below_minimum
-                && offer > 0
+                && (offer > 0 || job_offer > 0)
                 && c.engine_free_gb >= self.floor_gb
                 && spec::digest_ok(self.images.of(&c.arch))
         }) && !self.disk_low
             && !self.revoked.contains(pkg_manifest::BUILD_VERSION);
-        // What a task may take: the units this claim offered, none when it said `want: 0`.
-        let room = if want { offer } else { 0 };
+        // What a task, and a pool job, may take: the units this claim offered, none when it said `want: 0`.
+        let room = if want { (offer, job_offer) } else { (0, 0) };
+        // Its kinds: builds left out while a disk hold lasts; the pool's while a job holds its unit.
+        let mut kinds: Vec<&str> = if self.disk_hold > 0 {
+            KINDS_HELD.to_vec()
+        } else {
+            KINDS.to_vec()
+        };
+        if job_offer > 0 {
+            kinds.extend(jobs::POOL_KINDS);
+        }
         let claim_id = self
             .claim_id
             .get_or_insert_with(|| format!("c_{}", &orders::new_instance()[..24]))
@@ -1392,7 +1764,7 @@ impl Dispatcher {
             .collect();
         let mut body = json!({
             "arch": arch, "version": pkg_manifest::BUILD_VERSION, "hostname": crate::work::hostname(),
-            "kinds": if self.disk_hold > 0 { &KINDS_HELD[..] } else { &KINDS[..] }, "labels": { "role": "dispatcher" }, "log": crate::work::log_chunk(),
+            "kinds": kinds, "labels": { "role": "dispatcher" }, "log": crate::work::log_chunk(),
             "orders": TAKES, "instance": self.instance, "started_at": iso(self.started),
             "claim_id": claim_id, "want": u8::from(want), "leases": leases,
         });
@@ -1514,11 +1886,13 @@ impl Dispatcher {
         t: HostTask,
         token: String,
         staging_full: bool,
-        room: u32,
+        room: (u32, u32),
         cap: Option<&capacity::File>,
         now: u64,
     ) {
         let task = t.task;
+        let job = jobs::is_job(&task.kind);
+        let room = if job { room.1 } else { room.0 };
         let refuse = |this: &Self, why: &str, is_final: bool| {
             say(format!("task {}: refused — {why}", task.id));
             let _ = this
@@ -1556,15 +1930,45 @@ impl Dispatcher {
                 true,
             );
         }
-        if !KINDS.contains(&task.kind.as_str()) {
+        if !KINDS.contains(&task.kind.as_str()) && !job {
             return refuse(
                 self,
                 &format!(
-                    "this dispatcher runs builds, trials and audits in P1, not {}",
+                    "this dispatcher runs builds, trials, audits and pool jobs, not {}",
                     task.kind
                 ),
                 false,
             );
+        }
+        // A pool job whose helpers run a ring's architecture (#340): a lane of it here now, native or
+        // emulated, or it is given back, its attempt with it.
+        if job {
+            let lanes: Vec<String> = cap
+                .map(|c| {
+                    std::iter::once(c.arch.clone())
+                        .chain(c.emulated.iter().cloned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let native = cap.map_or_else(native_arch, |c| c.arch.clone());
+            let missing: Vec<String> = jobs::helper_arches(&task, &native)
+                .into_iter()
+                .filter(|a| !lanes.contains(a))
+                .collect();
+            if !missing.is_empty() {
+                let why = format!(
+                    "its helper containers run {}, and this host runs no lane of it (its lanes: {}): handed back",
+                    missing.join(" and "),
+                    lanes.join(", ")
+                );
+                say(format!("task {}: refused — {why}", task.id));
+                let _ = self.pool().fail(
+                    task.id,
+                    &token,
+                    &json!({ "error": why, "lost": true, "final": false }),
+                );
+                return;
+            }
         }
         // Its lane (#338, design v2 §7.4): one this host runs now, or it is given back, its
         // attempt with it — never started on a lane the agent has since turned off.
@@ -1954,6 +2358,7 @@ pub fn run(opts: &Options) -> Result<()> {
         .with_context(|| format!("creating {}", opts.work_root.display()))?;
     let mut engine = engine::Cli::find()
         .ok_or_else(|| anyhow!("no container engine answers (docker, or podman)"))?;
+    let engine_runtime = engine.runtime.clone();
     let gateway = engine.gateway().map_err(|e| anyhow!("{e}"))?;
     if let Some(l) = &engine.libpod {
         say(format!(
@@ -2008,6 +2413,16 @@ pub fn run(opts: &Options) -> Result<()> {
     d.terminating = Arc::clone(&terminating);
     d.net = opts.net.clone();
     d.net.gateway = gateway;
+    // Pool jobs (#340): the shim first on their PATH, as the only engine their scripts reach; the real one by its path.
+    let exe = std::env::current_exe().context("this binary's path, for the pool jobs' shim")?;
+    jobs::install_shim(&d.jobs.bin, &exe).context("the pool jobs' shim (state/bin)")?;
+    d.jobs.engine = jobs::engine_path(
+        &engine_runtime,
+        &d.jobs.bin,
+        std::env::var_os("PATH").as_deref(),
+    )
+    .ok_or_else(|| anyhow!("{engine_runtime} is not on PATH by an absolute path"))?;
+    d.jobs.timeout = opts.job_timeout;
     let progress = Arc::new(AtomicU64::new(epoch_now()));
     loop_watchdog(
         Arc::clone(&progress),
@@ -2030,11 +2445,12 @@ pub fn run(opts: &Options) -> Result<()> {
         std::thread::sleep(Duration::from_secs(15));
     }
     say(format!(
-        "dispatcher {} ready — host {host}, {} lease(s) re-adopted — asking {} for {}",
+        "dispatcher {} ready — host {host}, {} lease(s) re-adopted — asking {} for {}, and pool jobs ({}) in the unit kept for them",
         pkg_manifest::BUILD_VERSION,
         d.holds().len(),
         opts.api,
-        KINDS.join(", ")
+        KINDS.join(", "),
+        jobs::POOL_KINDS.join(", ")
     ));
     loop {
         d.tick();
@@ -2047,11 +2463,13 @@ pub fn run(opts: &Options) -> Result<()> {
             s.leases = d.snapshot();
         }
         if let Some(code) = d.exit {
+            d.kill_jobs();
             std::process::exit(code);
         }
         if terminating.load(Ordering::SeqCst) {
+            d.kill_jobs();
             say(format!(
-                "stopping: no claim since the signal; {} lease(s) written, their containers run on",
+                "stopping: no claim since the signal; {} lease(s) written, their containers run on (a pool job ends with its dispatcher)",
                 d.holds().len()
             ));
             return Ok(());

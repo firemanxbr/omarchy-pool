@@ -215,6 +215,30 @@ the **pool cap** on its page — the Studio canary runs at one build that way
 — and raise it again; nothing running ends when you lower it. The
 runbook's *How the pool hands a host work* has the rules.
 
+**A host moves the rings too (#340).** The pool jobs — sync, render,
+promote, rollback, security, gc, verify, relayout, enqueue, publish and the
+health checks — are the release's own signed code, so the dispatcher runs
+them itself, one at a time in the unit kept for them (never one of your
+builds': the minimum host runs its build beside a sync), each in a process of
+its own with a 2 GB memory limit and a time limit of its kind (45 minutes for
+a health check, 2½ hours for a sync, 3 for a promotion): one that crashes or
+hangs is failed and the pool queues it again, and every task beside it goes
+on. They run on any host whatever architecture they are for (a sync of the
+x86_64 sources runs natively on an aarch64 host, as the Studio's
+`pool-x86_64` always did), except the checks that install a ring's packages
+— a health check, a promotion's ABI gate — which need a lane of that ring's
+architecture, native or emulated. Those check containers, and the enqueue's
+reader of the recipes on `main` (on your host's own architecture), start
+through `omarchy-task-run`, which runs them as it runs a task container: on
+the job's own network behind its egress sidecar, with no token and nothing
+of the host but the job's scratch directory. Nothing to set up on your side:
+the dispatcher claims pool jobs on its own, and the pool hands them to a host
+only once the maintainers' `host-pool-jobs` setting names it — the P1 host
+first, the Studio canary a week later (runbook, *Pool jobs on hosts*) — so a
+host that never gets a sync is most likely not named there yet. A host's agent that stops answering is
+re-checked by the pool, never restarted: the dispatcher's restart would not
+reach it, and would cost the jobs it runs.
+
 **The other architecture runs emulated when the host can (#338).** The
 agent turns on an emulated lane for it when your envelope allows it
 (`emulate` in `agent.toml`: absent allows it, `emulate = []` keeps it off),
