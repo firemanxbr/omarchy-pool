@@ -773,7 +773,18 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   P-256 key `file`, nor an Ed25519 key `tpm`); on a VM the TPM is the
   hypervisor's virtual one; and the key's own authorization is empty, so a
   process running as the agent's user, or root, on the machine signs with it
-  while it is there. A key in the TPM bounds what a stolen copy of the
+  while it is there. The tss group that opens `/dev/tpmrm0` opens the whole
+  TPM, not the agent's key alone: the agent's user, and anything running as
+  it — a task that escaped its container where it lands as that user (the
+  `user` isolation level, design v2 §10.4, §19.3) among them — may send the TPM any command its authorizations allow.
+  The owner hierarchy's must stay empty for the agent, so it may define and
+  write NV indices and evict persistent objects; with the lockout
+  authorization empty too, as on most machines, it may `tpm2_clear` the TPM,
+  ending every key it holds (systemd-cryptenroll's or clevis's LUKS bindings
+  among them). Only the lockout authorization can be set without stopping the
+  agent, and setting it takes `TPM2_Clear` through lockout away from that
+  user: the runbook advises it, or a file key, on a machine whose TPM seals
+  other secrets. A key in the TPM bounds what a stolen copy of the
   agent's files is worth — nothing elsewhere — not what a compromise of the
   machine itself is. The agent reaches the TPM only through a resource
   manager (the kernel's `/dev/tpmrm0`, or tpm2-abrmd), never the raw device.

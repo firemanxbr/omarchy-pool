@@ -6,8 +6,9 @@
  *
  *   POST /hosts/enrollments      a maintainer, from their page: {name, where?} → a one-time ome_ token, 15 minutes,
  *                                bound to their login and GitHub user id, and the one command to paste on the machine
- *   POST /hosts/enroll           the machine's agent, with the token, its new Ed25519 key, what it is and its capacity,
- *                                and a proof it holds the key: the host waits in pending-owner
+ *   POST /hosts/enroll           the machine's agent, with the token, its new key (Ed25519 in a file, or ECDSA P-256
+ *                                made in its TPM, #330), what it is and its capacity, and a proof it holds the key:
+ *                                the host waits in pending-owner
  *   GET  /hosts[?owner=]         the hosts — for the owner and the maintainers with the details (the fingerprint the
  *                                owner compares, the capacity), and for a maintainer the other maintainers' new ones
  *   GET  /hosts/:id              one host, and its leases (the host page)

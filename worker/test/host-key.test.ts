@@ -21,7 +21,9 @@ import worker from "../src/index";
 import { applyGovernance } from "../src/governance";
 import { sha256Hex } from "../src/routes/contributors";
 import { toB64url } from "../src/webauthn";
-import { enrollMessage, fingerprint, hostPublicKey, keyStoreFits, signedMessage, verifyHostSignature, KEY_HELD_MAX } from "../src/hosts";
+import { enrollMessage, fingerprint, hostPublicKey, keyStoreFits, signedMessage, verifyHostSignature, HOST_KEY_ALG_NAMES, KEY_HELD_MAX } from "../src/hosts";
+import { hostHtml } from "../src/pages/host";
+import { userHtml } from "../src/pages/user";
 import tpmCasesJson from "../../crates/omarchy-agent/tests/fixtures/tpm/cases.json?raw";
 
 const ORIGIN = "http://pool.test";
@@ -216,5 +218,50 @@ describe("a host whose key is a file", () => {
     // A host enrolled before the column: NULL, read as a file.
     await env.DB.prepare("UPDATE hosts SET key_store = NULL, key_held = NULL WHERE id = ?").bind(e.json.host).run();
     expect((await view(e.json.host)).host_key).toEqual({ store: "file", alg: "ed25519", held: null });
+  });
+});
+
+describe("the pages' words for where a host's key lives", () => {
+  // The pages' own functions, read out of the pages they serve, as host-sandbox.test.ts reads sandboxWords.
+  const VERSION = { version: "v1.0.0", commit: null, deployed_at: null, release_url: null, commit_url: null, analytics: "" };
+  const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+  const hostPage = hostHtml("h_keywords01", "https://pool.example", VERSION);
+  const hostStart = hostPage.indexOf("function keyWords(h) {");
+  const keyWords = new Function("esc", "KEY_ALGS", `${hostPage.slice(hostStart, hostPage.indexOf("\n  }\n", hostStart) + 4)}; return keyWords;`)(esc, HOST_KEY_ALG_NAMES) as (h: unknown) => string;
+  const userPage = userHtml("m1", "https://pool.example", VERSION);
+  const userStart = userPage.indexOf("function keyWhere(h) {");
+  const keyWhere = new Function("esc", `${userPage.slice(userStart, userPage.indexOf("\n", userStart))}; return keyWhere;`)(esc) as (h: unknown) => string;
+  const held = "/dev/tpmrm0 is there, but this user (uid 1000) may not open it: <b>tss</b> & \"more\"";
+  const heldShown = "/dev/tpmrm0 is there, but this user (uid 1000) may not open it: &lt;b&gt;tss&lt;/b&gt; &amp; &quot;more&quot;";
+
+  it("are drawn beside the fingerprint, on the host page and in its owner's hosts and Confirm", () => {
+    expect(hostStart).toBeGreaterThan(0);
+    expect(hostPage).toContain("'</span><br>' + keyWords(h)");
+    expect(userStart).toBeGreaterThan(0);
+    expect(userPage).toContain("esc(h.fingerprint) + '</span>' + keyWhere(h)");
+    expect(userPage).toContain("'<br><code>' + esc(h.fingerprint) + '</code>' + keyWhere(h)");
+  });
+
+  it("say a key in the TPM was made there and never leaves it", () => {
+    expect(keyWords({ host_key: { store: "tpm", alg: "p256", held: null } })).toBe("in its TPM (ECDSA P-256): made there, and never out of it — a copy of its agent's files signs nothing on another machine");
+    expect(keyWhere({ host_key: { store: "tpm", alg: "p256", held: null } })).toBe(" · its key is in its TPM, never out of it");
+  });
+
+  it("say a key is a file, and why not in the TPM when its agent said, escaped", () => {
+    expect(keyWords({ host_key: { store: "file", alg: "ed25519", held: null } })).toBe("a file (Ed25519), 0600 in its agent's state directory");
+    expect(keyWords({ host_key: { store: "file", alg: "ed25519", held } })).toBe(`a file (Ed25519), 0600 in its agent's state directory<br><span class="muted">not in its TPM: ${heldShown}</span>`);
+    expect(keyWhere({ host_key: { store: "file", alg: "ed25519", held: null } })).toBe(" · its key is a file");
+    expect(keyWhere({ host_key: { store: "file", alg: "ed25519", held } })).toBe(` · its key is a file (not in its TPM: ${heldShown})`);
+    for (const w of [keyWords({ host_key: { store: "file", alg: "ed25519", held } }), keyWhere({ host_key: { store: "file", alg: "ed25519", held } })]) {
+      expect(w).not.toContain("<b>");
+    }
+  });
+
+  it("say nothing in the hosts table where the reader is not shown the key, read a host_key missing as a file, and name an unknown kind as it came, escaped", () => {
+    // GET /hosts gives host_key to its owner and the maintainers only: the hosts table says nothing.
+    expect(keyWhere({})).toBe("");
+    // The pool sends one for every host it shows the fingerprint of (one enrolled before #330: a file); without it, the default.
+    expect(keyWords({})).toBe("a file (?), 0600 in its agent's state directory");
+    expect(keyWords({ host_key: { store: "file", alg: "<x>", held: null } })).toBe("a file (&lt;x&gt;), 0600 in its agent's state directory");
   });
 });
