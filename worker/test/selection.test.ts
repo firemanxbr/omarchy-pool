@@ -44,13 +44,25 @@
  *   bounds that claim only;
  * - a drained, below-minimum, suspended or behind native host never makes an
  *   emulated lane wait;
- * - and a legacy registration as a host with one lane and one build.
+ * - a legacy registration as a host with one lane and one build;
+ * - placement (#339, D35, D36), on fleets of maintainers' hosts with the
+ *   models their claims say: the project's copy of a maintainer's package
+ *   never on that maintainer's host while another maintainer's has a lane
+ *   allowed for it (an emulated one counts, at once; `needs_native` applied),
+ *   held from the first minute when one maintainer's hosts are all there is,
+ *   and taken at the next claim once released; pins to a host registration;
+ *   with one provider an audit leaves the builder's host to another that can
+ *   take it now, with two a publish-bound audit takes the other model however
+ *   long that host is busy, and a host with another model seen in the last
+ *   24 hours holds it until the day is up; each audit's independence as its
+ *   lease records it; and a review rebuild and its audit placed across two
+ *   maintainers' hosts.
  */
 import { describe, expect, it } from "vitest";
 import {
-  alive, buildsOf, cooling, diskOf, helperArches, largestSize, nativeCapacity, noRoom, ownerCap, ownersLeased, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
-  ALIVE_MS, HELPER_KINDS, LANE_KINDS, MIN, RING_ARCHES, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
-  type Candidate, type Fleet, type Held, type Member, type Mode,
+  alive, auditElsewhere, buildsOf, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, otherModels, ownerCap, ownersLeased, placementOf, requesterHost, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
+  ALIVE_MS, ELSEWHERE_MS, HELPER_KINDS, LANE_KINDS, MIN, MODEL_WINDOW_MS, RING_ARCHES, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
+  type Candidate, type Fleet, type Held, type Independence, type Member, type Mode,
 } from "../src/selection";
 import { selectionRules, HEAD_LIMIT, OWNERS_LIMIT, RESERVE_CANDIDATES, RESERVE_WINDOW } from "../src/routes/factory";
 import { readSizing, shippedSizing } from "../src/sizing";
@@ -85,7 +97,7 @@ function task(o: Partial<Candidate> & { arch: string }): Candidate {
 }
 
 interface Lease extends Held { ends: number; started: number }
-interface Ran { task: Candidate; by: string; lane: Mode | null; at: number; size: number | null; asked: number | null; share: boolean }
+interface Ran { task: Candidate; by: string; lane: Mode | null; at: number; size: number | null; asked: number | null; share: boolean; independent: Independence | null }
 
 /**
  * A fleet on a fake clock. `minutes(task, lane)` is how long a task runs:
@@ -99,9 +111,15 @@ class Sim {
   history = new Map<string, number>();
   /** Registrations that are alive but never claim (a stalled dispatcher): eligible capacity that takes nothing. */
   silent = new Set<string>();
+  /** Registrations no longer among the members whose model a publish-bound audit still weighs (D36): last seen at `at`. */
+  past: { id: string; model: string; at: number }[] = [];
+  /** Whether a build that ends queues its audit, as a staged build does (routes/factory.ts handleComplete): the second opinion (#339). */
+  audits = false;
   constructor(public members: Member[], public minutes: (t: Candidate, lane: Mode | null) => number = (_t, lane) => (lane === "emulated" ? 90 : 30), public rules = R) {}
+  /** The fleet as a claim reads it — with the models the route reads when a publish-bound audit is a candidate (D36). */
   fleet(): Fleet {
-    return { members: this.members, leases: this.leases };
+    const models = this.members.filter((m) => m.model && m.kinds.includes("audit") && m.may_claim && !m.drained).map((m) => ({ id: m.id, model: m.model!, at: m.seen_at }));
+    return { members: this.members, leases: this.leases, models: [...models, ...this.past] };
   }
   add(o: Partial<Candidate> & { arch: string }, n = 1): Candidate[] {
     const out: Candidate[] = [];
@@ -130,7 +148,9 @@ class Sim {
     const cap = ownerCap(fleet, now, r);
     const capped = new Set([...ownersLeased(fleet)].filter(([, n]) => n >= cap).map(([o]) => o));
     const isCapped = (c: Candidate) => c.kind === "build" && c.trust === "community" && c.owner !== null && capped.has(c.owner);
-    const scope = (c: Candidate) => takes(m, c) && !(m.legacy && m.lanes[0].mode === "emulated" && c.needs_native);
+    // The claim's own filters (scopeOf): its kinds, the pin, the probe, an emulated legacy lane's needs_native, and the project's copy of
+    // a package its owner requested (D35).
+    const scope = (c: Candidate) => takes(m, c) && !(m.legacy && m.lanes[0].mode === "emulated" && c.needs_native) && !requesterHost(m, c);
     const fits = (c: Candidate) => {
       const z = sizeOf(c, largest, r)?.size ?? null;
       return !noRoom(m, held, c, unitsOf(c.kind, z, r), diskOf(c, z, r), r) && !isCapped(c);
@@ -192,7 +212,7 @@ class Sim {
       this.queue = this.queue.filter((q) => q.id !== c.id);
       for (const x of this.members) if (x.reserving?.task === c.id) x.reserving = null;
       this.leases.push({ task: t.id, by: m.id, kind: t.kind, arch: t.arch, lane: c.lane, units: c.units, model: t.model, trust: t.trust, owner: t.owner, disk_gb: c.disk_gb ?? 0, started: this.now, ends: this.now + this.minutes(t, c.lane) * MIN });
-      const r: Ran = { task: t, by: m.id, lane: c.lane, at: this.now, size: c.size, asked: c.asked, share: c.share };
+      const r: Ran = { task: t, by: m.id, lane: c.lane, at: this.now, size: c.size, asked: c.asked, share: c.share, independent: c.independent };
       this.ran.push(r);
       got.push(r);
     }
@@ -207,8 +227,15 @@ class Sim {
   }
   step(): void {
     for (const l of this.leases.filter((x) => x.ends <= this.now)) {
-      const t = this.ran.find((r) => r.task.id === l.task)!.task;
+      // A lease a test put on a host to keep it busy ends with nothing queued after it.
+      const t = this.ran.find((r) => r.task.id === l.task)?.task;
+      if (!t) continue;
       if (l.lane === "native" && t.kind === "build") this.history.set(`${t.name}/${t.arch}`, l.ends - l.started);
+      // Staged: its audit is queued, the build's registration and model on it — publish-bound when the build is the project's copy.
+      if (this.audits && t.kind === "build") {
+        const by = this.members.find((x) => x.id === l.by);
+        this.add({ arch: t.arch, kind: "audit", model: true, trust: "project", priority: 40, name: `audit-${t.name}`, publish_bound: !!t.publish_bound, built_by: l.by, built_with: by?.model ?? null });
+      }
     }
     this.leases = this.leases.filter((x) => x.ends > this.now);
     for (const m of this.members) {
@@ -840,6 +867,11 @@ describe("eligible native capacity", () => {
     expect(waits(box({ disk: { work: 400, engine: 25 } }))).toBe(false);
     const full: Held[] = [0, 1, 2].map((i) => ({ task: 900 + i, by: "box", kind: "build", arch: "x86_64", lane: "native", units: 2, model: false, trust: "project", owner: null, disk_gb: 20 }));
     expect(waits(box(), full)).toBe(false);
+    // One the requester-host rule excludes (D35, #339): the project's copy of its owner's own package.
+    const copy = task({ arch: "x86_64", publish_bound: true, requesters: ["m1"], model: true });
+    expect(nativeCapacity({ members: [studio, box({ owner: "m1" })], leases: [] }, copy, T0, R, "studio")).toBe(false);
+    expect(nativeCapacity({ members: [studio, box({ owner: "m2" })], leases: [] }, copy, T0, R, "studio")).toBe(true);
+    expect(nativeCapacity({ members: [studio, box({ owner: "m1" })], leases: [] }, { ...copy, any_host: "m2" }, T0, R, "studio")).toBe(true);
     // In the claim: the drained host's arch runs emulated at once.
     const s = new Sim([studio, box({ drained: true })]);
     const [x] = s.add({ arch: "x86_64" });
@@ -872,5 +904,218 @@ describe("legacy registrations", () => {
     expect(select(project, { members: [project], leases: [] }, [task({ arch: "aarch64", trust: "community", owner: "alice" })], T0, R)).toEqual([]);
     const mine = legacy("dave-aarch64", "aarch64", { trust: "community", scope: { trust: "community", owner: "dave", shared: false } });
     expect(select(mine, { members: [mine], leases: [] }, [task({ arch: "aarch64", trust: "community", owner: "erin" }), task({ arch: "aarch64", trust: "community", owner: "dave" })], T0, R).map((c) => c.id)).toEqual([ids]);
+  });
+});
+
+// ---------- placement (#339, design v2 §8.4; D35, D36) ----------
+
+/** A maintainer's host: its owner, and the model its claims say it runs. */
+const owned = (id: string, owner: string, arch: string, units: number, o: Partial<Member> & { emulated?: string[] } = {}) => host(id, arch, units, { owner, model: "anthropic/claude-a", ...o });
+/** The project's copy of a package its requesters asked for: the review rebuild, publish-bound, model work. */
+const copyOf = (requesters: string[], o: Partial<Candidate> & { arch?: string } = {}) => ({ arch: "aarch64", kind: "build", trust: "project", model: true, publish_bound: true, requesters, priority: 30, ...o });
+/** Leases that keep a host's builds busy until `until` minutes. */
+const busy = (s: Sim, id: string, n: number, until: number) => s.leases.push(...Array.from({ length: n }, (_, i) => ({ task: 5000 + s.leases.length + i, by: id, kind: "build", arch: "aarch64", lane: "native" as Mode, units: 2, model: false, trust: "project", owner: null, disk_gb: 20, started: T0, ends: T0 + until * MIN })));
+
+describe("the requester-host rule (D35): the project's copy is not built on its requester's host", () => {
+  it("a review rebuild of a maintainer's own package never runs on their host while another maintainer's can take it — however busy that one, however long it waits", () => {
+    const m1 = owned("m1-studio", "m1", "aarch64", 11);
+    const m2 = owned("m2-vps", "m2", "aarch64", 7);
+    const s = new Sim([m1, m2], () => 30);
+    busy(s, "m2-vps", 3, 240);
+    const [copy] = s.add(copyOf(["m1"]));
+    // m1's host takes its other work meanwhile: a build of the pool's, and the copy of another maintainer's package.
+    const [other] = s.add({ arch: "aarch64" });
+    const [theirs] = s.add(copyOf(["m2"]));
+    s.run(240);
+    expect(s.startOf(copy)).toBeUndefined();
+    expect(s.startOf(other)).toMatchObject({ by: "m1-studio", at: T0 });
+    expect(s.startOf(theirs)).toMatchObject({ by: "m1-studio", at: T0 });
+    // m2's host has a lane allowed for it the whole time: it is not held, nothing to release.
+    expect(placementOf(s.fleet(), copy, s.now, R)).toEqual({ others: ["m2-vps"], mine: ["m1-studio"], held: false });
+    // m2's builds end: its host takes it at once.
+    s.run(1);
+    expect(s.startOf(copy)).toMatchObject({ by: "m2-vps", at: T0 + 240 * MIN, lane: "native" });
+    expect(s.ran.filter((r) => r.task.id === copy.id).every((r) => r.by !== "m1-studio")).toBe(true);
+  });
+
+  it("another maintainer's lane is any lane allowed for the task: an emulated one counts, at once — the requester's native host never makes it wait — and needs_native leaves only the requester's", () => {
+    const vps = owned("m1-vps86", "m1", "x86_64", 7);
+    const studio = owned("m2-studio", "m2", "aarch64", 11, { emulated: ["x86_64"] });
+    const s = new Sim([vps, studio]);
+    const [copy] = s.add(copyOf(["m1"], { arch: "x86_64" }));
+    s.run(1);
+    // No T to wait: the requester's host is excluded, so no native capacity is eligible for it (design v2 §8.3).
+    expect(s.startOf(copy)).toMatchObject({ by: "m2-studio", lane: "emulated", at: T0 });
+    // A rebuild an emulated lane sent back (needs_native): only the requester's native host has a lane allowed — held at once.
+    const native = task(copyOf(["m1"], { arch: "x86_64", needs_native: true }));
+    const fleet: Fleet = { members: [vps, studio], leases: [] };
+    expect(mayRun(studio, native, T0, R)).toBe(false);
+    expect(placementOf(fleet, native, T0, R)).toEqual({ others: [], mine: ["m1-vps86"], held: true });
+    expect(select(vps, fleet, [native], T0, R)).toEqual([]);
+    expect(select(studio, fleet, [native], T0, R)).toEqual([]);
+    // Released to any host by another maintainer: the requester's host takes it.
+    const released = { ...native, any_host: "m2" };
+    expect(placementOf(fleet, released, T0, R)).toEqual({ others: [], mine: ["m1-vps86"], held: false });
+    expect(select(vps, fleet, [released], T0, R)).toMatchObject([{ id: native.id, lane: "native" }]);
+  });
+
+  it("a single maintainer's hosts only: their own package's copy is held from the first minute — no timeout — and never taken until another maintainer releases it; anyone else's is theirs at once", () => {
+    const a = owned("m1-studio", "m1", "aarch64", 11);
+    const b = owned("m1-laptop", "m1", "aarch64", 5);
+    const s = new Sim([a, b]);
+    const [own] = s.add(copyOf(["m1"]));
+    const [contributors] = s.add(copyOf(["alice", "m1"]));
+    const [theirs] = s.add(copyOf(["m2"]));
+    expect(placementOf(s.fleet(), own, T0, R)).toEqual({ others: [], mine: ["m1-studio", "m1-laptop"], held: true });
+    s.run(600);
+    expect(s.startOf(own)).toBeUndefined();
+    // A contributor's package whose build m1 asked for too is m1's request as well (requestersOf), and m2's is m1's hosts' at once.
+    expect(s.startOf(contributors)).toBeUndefined();
+    expect(s.startOf(theirs)).toMatchObject({ by: "m1-studio", at: T0 });
+    // No host alive with a lane for it at all is no hold: it waits for any host, as every build does.
+    expect(placementOf({ members: [], leases: [] }, own, T0, R)).toEqual({ others: [], mine: [], held: false });
+    // A drained, suspended, behind or silent host of another maintainer's, or one whose agent does not answer, is none to wait for
+    // either: held, the release offered; one that can run it is.
+    for (const o of [{ drained: true }, { may_claim: false }, { behind: true }, { probe_ok: false }, { seen_at: T0 - ALIVE_MS - MIN }]) {
+      expect(placementOf({ members: [a, owned("m2-vps", "m2", "aarch64", 7, o)], leases: [] }, own, T0, R).held, JSON.stringify(o)).toBe(true);
+    }
+    expect(placementOf({ members: [a, owned("m2-vps", "m2", "aarch64", 7)], leases: [] }, own, T0, R)).toEqual({ others: ["m2-vps"], mine: ["m1-studio"], held: false });
+    // Released: taken at the next claim.
+    s.queue.find((t) => t.id === own.id)!.any_host = "m2";
+    s.run(1);
+    expect(s.startOf(own)).toMatchObject({ at: T0 + 600 * MIN });
+  });
+
+  it("pins are to a host registration: one pinned to another maintainer's host waits for that host; one pinned to its requester's host is held for a release", () => {
+    const m1 = owned("m1-studio", "m1", "aarch64", 11);
+    const m2 = owned("m2-vps", "m2", "aarch64", 7);
+    const third = owned("m3-box", "m3", "aarch64", 7);
+    const fleet: Fleet = { members: [m1, m2, third], leases: [] };
+    const toM2 = task(copyOf(["m1"], { pinned_to: "m2-vps" }));
+    expect(select(third, fleet, [toM2], T0, R)).toEqual([]);
+    expect(select(m1, fleet, [toM2], T0, R)).toEqual([]);
+    expect(select(m2, fleet, [toM2], T0, R)).toHaveLength(1);
+    const toM1 = task(copyOf(["m1"], { pinned_to: "m1-studio" }));
+    expect(placementOf(fleet, toM1, T0, R)).toEqual({ others: [], mine: ["m1-studio"], held: true });
+    expect([m1, m2, third].flatMap((m) => select(m, fleet, [toM1], T0, R))).toEqual([]);
+    expect(select(m1, fleet, [{ ...toM1, any_host: "m2" }], T0, R)).toHaveLength(1);
+  });
+
+  it("is the project's copy's only: a contributor's build of the package, its trial and its audit go to the requester's host as to any other", () => {
+    const m1 = owned("m1-studio", "m1", "aarch64", 11);
+    for (const t of [task({ arch: "aarch64", trust: "community", owner: "m1" }), task({ arch: "aarch64", kind: "trial", owner: "m1" }), task({ arch: "aarch64", kind: "audit", model: true, publish_bound: true, built_by: "x", built_with: "anthropic/claude-a" })]) {
+      expect(requesterHost(m1, t)).toBe(false);
+      expect(select(m1, { members: [m1], leases: [] }, [t], T0, R), t.kind).toHaveLength(1);
+    }
+    // A registration with no owner on the row is nobody's requester.
+    expect(requesterHost({ owner: null }, task(copyOf(["m1"])))).toBe(false);
+  });
+});
+
+describe("the second opinion (D36): elsewhere, and with another model when one exists", () => {
+  /** An audit of a build `by` built with `model`; publish-bound when it audits the project's copy. */
+  const auditOf = (by: string, model: string, publish = true, o: Partial<Candidate> = {}) => task({ arch: "aarch64", kind: "audit", model: true, trust: "project", priority: 40, publish_bound: publish, built_by: by, built_with: model, ...o });
+
+  it("independence, as the lease records it: model — another model judged it; host — the same model elsewhere, for an audit that does not ship; none — otherwise", () => {
+    const a = owned("a", "m1", "aarch64", 11);
+    const b = owned("b", "m2", "aarch64", 11);
+    const c = owned("c", "m2", "aarch64", 11, { model: "openai/gpt-b" });
+    expect(independenceOf(c, auditOf("a", "anthropic/claude-a"))).toBe("model");
+    expect(independenceOf(c, auditOf("a", "anthropic/claude-a", false))).toBe("model");
+    expect(independenceOf(b, auditOf("a", "anthropic/claude-a", false))).toBe("host");
+    expect(independenceOf(a, auditOf("a", "anthropic/claude-a", false))).toBe("none");
+    // A publish-bound audit is independent by its model or not at all.
+    expect(independenceOf(b, auditOf("a", "anthropic/claude-a"))).toBe("none");
+    // A model not known, on either side, is no other model.
+    expect(independenceOf({ id: "c", model: null }, auditOf("a", "anthropic/claude-a"))).toBe("none");
+    expect(independenceOf(c, auditOf("a", "", false, { built_with: null }))).toBe("host");
+    expect(independenceOf(c, task({ arch: "aarch64" }))).toBeNull();
+  });
+
+  it("one provider: an audit leaves the host that built what it audits to another that can take it now, and runs on the builder when none can; the copy's audit says none, a contributor build's host", () => {
+    const a = owned("a", "m1", "aarch64", 11);
+    const b = owned("b", "m2", "aarch64", 11);
+    const s = new Sim([a, b]);
+    const copy = s.add({ ...auditOf("a", "anthropic/claude-a"), queued_at: T0 })[0];
+    const contributor = s.add({ ...auditOf("a", "anthropic/claude-a", false), queued_at: T0 })[0];
+    // The builder claims first, every minute: the other host takes both.
+    s.run(1);
+    expect(s.startOf(copy)).toMatchObject({ by: "b", independent: "none" });
+    expect(s.startOf(contributor)).toMatchObject({ by: "b", independent: "host" });
+    expect(needsOtherModel(s.fleet(), copy, T0)).toBe(false);
+    // No other host has room: the builder takes it at once — a preference never idles it.
+    const full = new Sim([a, b]);
+    full.leases.push(...[0, 1].map((i) => ({ task: 7000 + i, by: "b", kind: "audit", arch: "aarch64", lane: null, units: 1, model: true, trust: "project", owner: null, disk_gb: 0, started: T0, ends: T0 + 600 * MIN })));
+    const [mine] = full.add(auditOf("a", "anthropic/claude-a"));
+    expect(auditElsewhere(full.fleet(), mine, T0, R, "a")).toBe(false);
+    full.run(1);
+    expect(full.startOf(mine)).toMatchObject({ by: "a", at: T0, independent: "none" });
+    // Another host alive that does not claim (a stalled dispatcher): the builder takes it once ELSEWHERE_MS passed.
+    const stalled = new Sim([a, b]);
+    stalled.silent.add("b");
+    const [late] = stalled.add(auditOf("a", "anthropic/claude-a", false));
+    stalled.run(ELSEWHERE_MS / MIN);
+    expect(stalled.startOf(late)).toBeUndefined();
+    stalled.run(1);
+    expect(stalled.startOf(late)).toMatchObject({ by: "a", at: T0 + ELSEWHERE_MS, independent: "none" });
+  });
+
+  it("two providers: a publish-bound audit never runs on the builder's model while a host with another one is alive, however busy; it runs there, independent by model", () => {
+    const a = owned("a", "m1", "aarch64", 11);
+    const b = owned("b", "m2", "aarch64", 11, { model: "openai/gpt-b" });
+    const s = new Sim([a, b]);
+    s.leases.push(...[0, 1].map((i) => ({ task: 7100 + i, by: "b", kind: "audit", arch: "aarch64", lane: null, units: 1, model: true, trust: "project", owner: null, disk_gb: 0, started: T0, ends: T0 + 300 * MIN })));
+    const [copy] = s.add(auditOf("a", "anthropic/claude-a"));
+    // A contributor build's audit takes another model by preference only: b is full, so the builder takes it once ELSEWHERE_MS is up, or at once.
+    const [contributor] = s.add(auditOf("a", "anthropic/claude-a", false));
+    expect(otherModels(s.fleet(), copy, T0)).toEqual(["openai/gpt-b"]);
+    s.run(300);
+    expect(s.startOf(copy)).toBeUndefined();
+    expect(s.startOf(contributor)).toMatchObject({ by: "a", at: T0, independent: "none" });
+    s.run(1);
+    expect(s.startOf(copy)).toMatchObject({ by: "b", at: T0 + 300 * MIN, independent: "model" });
+    // The builder's own host, its model changed since: another model, so it may — independent by model.
+    const changed = { ...a, model: "google/gemini-c" };
+    expect(select(changed, { members: [changed, b], leases: [], models: [{ id: "b", model: "openai/gpt-b", at: T0 }] }, [auditOf("a", "anthropic/claude-a", true, { queued_at: T0 - ELSEWHERE_MS })], T0, R)).toMatchObject([{ independent: "model" }]);
+  });
+
+  it("the 24 hours: a host with another model that went quiet still holds a publish-bound audit until a day after it was last seen; then the audit runs and records none", () => {
+    const a = owned("a", "m1", "aarch64", 11);
+    const b = owned("b", "m2", "aarch64", 11);
+    const s = new Sim([a, b]);
+    // m3's host ran another model and was last seen at T0 − 23 h: it is not a member alive, its model still counts.
+    s.past.push({ id: "m3-box", model: "openai/gpt-c", at: T0 - 23 * 60 * MIN });
+    const [copy] = s.add(auditOf("a", "anthropic/claude-a"));
+    s.run(60);
+    expect(s.startOf(copy)).toBeUndefined();
+    expect(needsOtherModel(s.fleet(), copy, s.now - MIN)).toBe(true);
+    expect(needsOtherModel(s.fleet(), copy, s.now)).toBe(false);
+    s.run(1);
+    // An hour on, the day since m3's host was last seen is up: the audit runs on the builder's model — by now any host's, the builder's
+    // preference spent (ELSEWHERE_MS) — and says so.
+    expect(s.startOf(copy)).toMatchObject({ at: T0 + 60 * MIN, independent: "none" });
+    // A drained host's model, or a registration that takes no audits, holds nothing (the route reads neither, routes/factory.ts modelsAlive).
+    const drained = new Sim([a, b, owned("c", "m3", "aarch64", 11, { model: "openai/gpt-c", drained: true })]);
+    expect(otherModels(drained.fleet(), copy, T0)).toEqual([]);
+    const noAudits = new Sim([a, b, owned("c", "m3", "aarch64", 11, { model: "openai/gpt-c", kinds: ["build"] })]);
+    expect(otherModels(noAudits.fleet(), copy, T0)).toEqual([]);
+  });
+
+  it("a review rebuild and its audit placed across two maintainers' hosts: the rebuild off its requester's host, its audit on the other model", () => {
+    const m1 = owned("m1-studio", "m1", "aarch64", 11);
+    const m2 = owned("m2-vps", "m2", "aarch64", 7, { model: "openai/gpt-b" });
+    const s = new Sim([m1, m2], (t) => (t.kind === "audit" ? 10 : 30));
+    s.audits = true;
+    const [copy] = s.add(copyOf(["m1"]));
+    s.run(45);
+    expect(s.startOf(copy)).toMatchObject({ by: "m2-vps", at: T0 });
+    const audit = s.ran.find((r) => r.task.kind === "audit" && r.task.name === `audit-${copy.name}`)!;
+    expect(audit).toMatchObject({ by: "m1-studio", at: T0 + 30 * MIN, independent: "model" });
+    expect(audit.task).toMatchObject({ publish_bound: true, built_by: "m2-vps", built_with: "openai/gpt-b" });
+    // The same with m2's package: its copy on m1's host, its audit on m2's model.
+    const [back] = s.add(copyOf(["m2"]));
+    s.run(45);
+    expect(s.startOf(back)).toMatchObject({ by: "m1-studio" });
+    expect(s.ran.find((r) => r.task.name === `audit-${back.name}`)).toMatchObject({ by: "m2-vps", independent: "model" });
   });
 });
