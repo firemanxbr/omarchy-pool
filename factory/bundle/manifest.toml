@@ -9,6 +9,12 @@
 # The oldest agent that may apply a bundle of this layout; an older agent
 # updates itself first (outer layer, frozen).
 min_agent = "0.1.0"
+# The agent version a security release marks urgent (#326; the manifest's
+# agent.urgent): a host takes that agent at once, past its owner's soak — the
+# release itself still waits for it. Set it to the agent version the fixing
+# release ships, in that release's pull request; it lapses by itself with the
+# next agent version. "" marks none.
+urgent_agent = ""
 # The anti-downgrade floor every host merges in (design v2 §5.2): a target
 # below it is refused even with a rollback statement. Raise it to retire
 # releases for good; never above the release being cut (the writer refuses).
@@ -68,6 +74,11 @@ share_when_native_waits = 0.5
 # test holds them equal), and release.yml downloads each one and checks its
 # sum before it signs. aarch64-darwin is a Mac's (#320, design v2 §19.2): the
 # same versions, built for Darwin, so Homebrew is needed for Colima and Lima only.
+# The docker CLI stays below 29 while podman 4 hosts are served (#372): podman
+# 4's docker API shows a task network made through libpod (no gateway) with
+# "Gateway": "<nil>", which docker's CLI from 29 on fails to parse, and the
+# agent lists the probe's networks with it (as the dispatcher lists its own
+# with the image's); see the Containerfile's DOCKER_CLI.
 [tools.x86_64-linux.docker]
 url = "https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz"
 sha256 = "4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640"

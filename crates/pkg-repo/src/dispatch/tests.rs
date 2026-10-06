@@ -3650,12 +3650,8 @@ fn a_health_check_gets_the_shims_context_on_a_lane_of_its_ring_and_one_without_s
         "the job's unit"
     );
     assert_eq!(
-        (
-            c.worker_image.as_str(),
-            c.gateway.as_str(),
-            c.engine.as_path()
-        ),
-        (WORKER, "isolated", Path::new("/usr/bin/docker"))
+        (c.worker_image.as_str(), c.engine.as_path()),
+        (WORKER, Path::new("/usr/bin/docker"))
     );
     assert!(spec::Subnets::parse(&c.subnets)
         .unwrap()

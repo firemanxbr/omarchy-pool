@@ -173,7 +173,6 @@ pub struct Context {
     /// `OMARCHY_TASK_SUBNETS`, and the job's /28 of it.
     pub subnets: String,
     pub slot: u32,
-    pub gateway: String,
     /// The host's own addresses, which the egress refuses.
     pub deny: Vec<String>,
     /// The engine itself: its CLI by absolute path, never this shim.
@@ -219,10 +218,13 @@ pub fn fits(run: &Run, ctx: &Context) -> Result<(), String> {
     Ok(())
 }
 
-/// The helper's plan: the job's network and egress sidecar, then its own `run`.
-pub fn plan_of(run: &Run, ctx: &Context) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
-    let gateway =
-        Gateway::of_word(&ctx.gateway).ok_or_else(|| format!("gateway {:?}", ctx.gateway))?;
+/// The helper's plan: the job's network and egress sidecar, then its own `run` — on this engine's
+/// way of keeping a network's gateway off the host, as the engine itself says it.
+pub fn plan_of(
+    run: &Run,
+    ctx: &Context,
+    gateway: Gateway,
+) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
     let subnets = Subnets::parse(&ctx.subnets)?;
     let units = ctx.units.max(1);
     spec::helper_plan(&spec::Helper {
@@ -278,12 +280,22 @@ pub fn run_with(context: Option<&Path>, args: &[String]) -> i32 {
     if let Err(why) = fits(&run, &ctx) {
         return refuse(&why);
     }
-    let (setup, helper) = match plan_of(&run, &ctx) {
+    // The engine itself, by its path, as the dispatcher asks it at its start: how it keeps a network's
+    // gateway off the host (behind docker's CLI, podman's networks through libpod's API, #372).
+    let mut engine = engine::Cli {
+        runtime: ctx.engine.display().to_string(),
+        libpod: None,
+    };
+    let gateway = match engine.gateway() {
+        Ok(g) => g,
+        Err(why) => {
+            eprintln!("{NAME}: the engine did not say how it keeps a network's gateway off the host: {why}");
+            return REFUSED;
+        }
+    };
+    let (setup, helper) = match plan_of(&run, &ctx, gateway) {
         Ok(p) => p,
         Err(why) => return refuse(&why),
-    };
-    let engine = engine::Cli {
-        runtime: ctx.engine.display().to_string(),
     };
     // What an earlier helper of this job left (a shim killed half-way): the lease's network would be in the way.
     engine.remove_lease(ctx.task, &ctx.gen);
@@ -435,7 +447,6 @@ mod tests {
             worker_image: "ghcr.io/firemanxbr/omarchy-worker@sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
             subnets: "10.231.0.0/16".into(),
             slot: 3,
-            gateway: "isolated".into(),
             deny: Vec::new(),
             engine: PathBuf::from("/usr/bin/docker"),
         }
@@ -455,8 +466,10 @@ mod tests {
             dir.display()
         ));
         fits(&good, &c).unwrap();
-        let (setup, helper) = plan_of(&good, &c).unwrap();
+        let (setup, helper) = plan_of(&good, &c, Gateway::Isolated).unwrap();
         assert_eq!(setup[0][..3], ["network", "create", "--internal"]);
+        let (podman, _) = plan_of(&good, &c, Gateway::NoDns).unwrap();
+        assert!(podman[0].iter().any(|a| a == "--disable-dns"), "{podman:?}");
         assert_eq!(
             helper[..3],
             ["run", "--name", "omarchy-task-9-g_0123456789abcdef-helper"]

@@ -9,11 +9,11 @@ import { isTextEvidence, reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../
 import { findLeak } from "../leak";
 import { chains, chainOf, storyRows, requestView, placeInQueue, stands, type Chain } from "./story";
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
-import { isRevoked, lastGoodMessage, updateMessage, updateState, type UpdateState } from "../update";
+import { isRevoked, lastGoodMessage, updateMessage, updateState, type HostSoak, type UpdateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, requeueRevoked, revokedRefusal, stopError } from "../lease";
-import { asleepNow, freshSince, parseCapacity, poolJobsOn, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, MIN_HOST, REVERTED_COLUMNS, revertedOf, TASK_UNITS, type Capacity, type HostClaimRow, type RevertedColumns } from "../hosts";
+import { asleepNow, freshSince, parseCapacity, poolJobsOn, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, HOST_REPORT_FRESH_MIN, hostClaimRefusal, MAX_SIZE, MIN_HOST, poolBehindOf, REVERTED_COLUMNS, revertedOf, SOAK_COLUMNS, soakOf, TASK_UNITS, type Capacity, type HostClaimRow, type PoolBehind, type RevertedColumns } from "../hosts";
 import { largestSize, ownerCap, ownersLeased, placementOf, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
@@ -828,13 +828,15 @@ export const SAME_MODEL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols(
 /** The registrations alive (§8.3: claimed in the last 2 minutes; a legacy one, LEGACY_ALIVE_MS) with their host's capacity, as the fleet. */
 export const FLEET_SQL = `SELECT w.id, w.kind, w.arch, w.labels, w.kinds, w.agent, w.agent_status, w.drained_at, w.trust, w.owner, w.mode, w.version, w.last_seen, w.current_task,
     h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since,
-    h.asleep_at, h.reported_at, ${REVERTED_COLUMNS("h")}
+    h.asleep_at, h.reported_at, ${SOAK_COLUMNS("h")}, ${REVERTED_COLUMNS("h")}
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL`;
 /** #342: its host's revert, which keeps it out of the update gate on its last-good as the claim's own (REVERTED_COLUMNS). */
 interface FleetRow extends RevertedColumns {
   id: string; kind: string | null; arch: string; labels: string | null; kinds: string | null; agent: string | null; agent_status: string | null; drained_at: string | null; trust: string; owner: string | null; mode: string | null; version: string | null; last_seen: string; current_task: number | null;
   host_id: string | null; host_status: string | null; owner_removed_at: string | null; units: number | null; lanes: string | null; agent_slots: number | null; disk_free: string | null; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null;
   asleep_at: string | null; reported_at: string | null;
+  /** #326: its host's soak, which keeps it out of the update gate as the claim's own (SOAK_COLUMNS). */
+  soaking_until: unknown; quarantine: unknown;
 }
 /** Every lease the pool holds, by the lease index: what each registration holds, each owner's builds, the units and slots in use. */
 export const LEASES_HELD_SQL = `SELECT id, lease_owner, kind, arch, lane, units, size, disk_gb, trust, owner, ${AGENT_SCOPE} AS model FROM build_tasks WHERE status = 'leased'`;
@@ -900,7 +902,7 @@ function memberOf(r: FleetRow, pool: RunningVersion, nowMs = Date.now()): Member
   return {
     id: r.id, legacy: !host, lanes, units: Math.min(r.units ?? 0, r.pool_cap_units ?? Number.MAX_SAFE_INTEGER), agent_slots: r.agent_slots ?? 0,
     disk: jsonOr<{ work: number; engine: number } | null>(r.disk_free, null), kinds, probe_ok: r.agent_status === "ok", drained: r.drained_at !== null,
-    below_minimum: reportedBelow(r.capacity), below_disk: host ? belowOnDisk(r.capacity) : null, may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool, Date.now(), host ? revertedOf(r) : null).required,
+    below_minimum: reportedBelow(r.capacity), below_disk: host ? belowOnDisk(r.capacity) : null, may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool, nowMs, host ? soakOf(r) : null, host ? revertedOf(r) : null).required,
     seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
     scope: host ? { trust: "host", owner: null, shared: false } : r.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: r.owner, shared: r.mode === "shared" },
     busy: !host && r.current_task !== null, owner: r.owner, model: r.agent, host_id: host ? r.host_id : null,
@@ -915,14 +917,18 @@ function memberOf(r: FleetRow, pool: RunningVersion, nowMs = Date.now()): Member
  * publish-bound audit is among its candidates.
  */
 export const MODELS_SQL = `SELECT w.id, w.kind, w.kinds, w.trust, w.agent, w.agent_status, w.agent_error_since, w.drained_at, w.version, w.last_seen, h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.capacity,
-    ${REVERTED_COLUMNS("h")}
+    ${SOAK_COLUMNS("h")}, ${REVERTED_COLUMNS("h")}
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL AND w.agent IS NOT NULL`;
-interface ModelRow extends RevertedColumns { id: string; kind: string | null; kinds: string | null; trust: string; agent: string; agent_status: string | null; agent_error_since: string | null; drained_at: string | null; version: string | null; last_seen: string; host_id: string | null; host_status: string | null; owner_removed_at: string | null; capacity: string | null }
+interface ModelRow extends RevertedColumns {
+  id: string; kind: string | null; kinds: string | null; trust: string; agent: string; agent_status: string | null; agent_error_since: string | null; drained_at: string | null; version: string | null; last_seen: string; host_id: string | null; host_status: string | null; owner_removed_at: string | null; capacity: string | null;
+  /** #326: its host's soak, and #342: its host's revert, which keep it out of the update gate as the fleet's members are (SOAK_COLUMNS, REVERTED_COLUMNS). */
+  soaking_until: unknown; quarantine: unknown;
+}
 
 /**
  * The models a publish-bound audit weighs (D36): every registration that takes audits and may be handed one — a host active with its
  * owner listed and not below the signed minimum (D44), a legacy project registration; none drained or behind the pool's release past
- * the grace (426): those claim, so they would stay "alive", and are handed nothing, so an audit held for their model would wait for as
+ * the grace (426; a host's owner's soak extends it as the fleet's, #326): those claim, so they would stay "alive", and are handed nothing, so an audit held for their model would wait for as
  * long as they claim — with the model it said and when that model last answered: its last claim while its probe passes, the start of
  * its failing spell while it fails — so a host whose agent has not answered for a day holds nothing, however often it claims, and one
  * that failed an hour ago still does. The claimer with the one this claim says.
@@ -933,7 +939,7 @@ async function modelsAlive(env: Env, nowMs: number, me: { id: string; model: str
   const out: NonNullable<Fleet["models"]> = [];
   for (const r of rows) {
     const host = r.kind === "host" && r.host_id !== null;
-    if (r.id === me.id || r.drained_at || updateState(r.version ?? undefined, pool, nowMs, host ? revertedOf(r) : null).required) continue;
+    if (r.id === me.id || r.drained_at || updateState(r.version ?? undefined, pool, nowMs, host ? soakOf(r) : null, host ? revertedOf(r) : null).required) continue;
     if (host ? r.host_status !== "active" || r.owner_removed_at !== null || reportedBelow(r.capacity) : r.trust !== "project") continue;
     const kinds = jsonOr<string[] | null>(r.kinds, null) ?? (host ? HOST_KINDS : ALL_KINDS);
     const answered = r.agent_status === "ok" ? Date.parse(r.last_seen) : r.agent_status === "error" && r.agent_error_since ? Date.parse(r.agent_error_since) : NaN;
@@ -1346,14 +1352,16 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // A host's registration (#322, design v2 §6.2, §6.4): its host suspended or retired, or its owner no longer a maintainer — the owner's id
   // joined with the list at this very claim, between two syncs too — claims nothing, and is told why. Its running leases are not this
   // door's: a suspension fenced them; a removal lets them finish and upload. One read by the primary key, for host registrations only.
-  // What its host's reports say of a release it reverted rides the same read (#342): the update gate below weighs it. So does whether the
-  // maintainers let it take pool jobs yet (#340, the `host-pool-jobs` setting).
+  // Its soak (#326), and what its host's reports say of a release it reverted (#342), ride the same read: the update gate below weighs
+  // both. So does whether the maintainers let it take pool jobs yet (#340, the `host-pool-jobs` setting).
+  let soak: HostSoak | null = null;
   let reverted: ReturnType<typeof revertedOf> = null;
   let poolJobs = false;
   if (actor.w.host_id) {
     const h = await env.DB.prepare(HOST_CLAIM_SQL).bind(actor.w.host_id).first<HostClaimRow>();
     const no = h ? hostClaimRefusal(h) : { code: "host_status", error: "its host is gone" };
     if (no) return json(no, 403);
+    soak = soakOf(h);
     reverted = revertedOf(h);
     poolJobs = poolJobsOn(h!.pool_jobs, { worker: workerId, name: h!.name });
   }
@@ -1417,9 +1425,11 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // Every worker follows the latest image (update.ts): one behind past the
   // rollout's grace, or on a revoked release (#342), is touched — alive, and
   // the Workers page says why it idles — told once per release in the
-  // journal, and handed nothing. A host whose agent reverted the pool's
-  // release claims on its last-good for six hours (#342), told once too.
-  const update = updateState(b.version, running(env), Date.now(), reverted);
+  // journal, and handed nothing. A soaking host's registration claims until
+  // its soak ends, at most two hours after the deploy (#326); a host whose
+  // agent reverted the pool's release claims on its last-good for six hours
+  // (#342), told once too. Neither holds a revoked release.
+  const update = updateState(b.version, running(env), Date.now(), soak, reverted);
   if (update.last_good_until) await toldLastGood(env, workerId, actor.w.owner ?? null, update);
   if (update.required) {
     // Handed nothing, but an order waiting for it rides the refusal: a restart or a re-check does not need the latest image.
@@ -2003,6 +2013,8 @@ export interface WorkerRow {
   drained_at?: string | null; drained_by?: string | null; drain_reason?: string | null; auto_orders?: string | null;
   // #321: a host's registration.
   kind?: string | null; host_id?: string | null;
+  // #326: its host's soak, where the listing joins it (SOAK_COLUMNS): the 426 gate's own view of it.
+  soaking_until?: unknown; quarantine?: unknown;
   // #342: its host's revert, where the listing joins it (REVERTED_COLUMNS): the 426 gate's own view of it.
   rolled_back_from?: string | null; rolled_back_at?: string | null; release_applied?: string | null;
 }
@@ -2091,10 +2103,15 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
     // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
     ready: workerReady(w, since),
     // Where its image stands against the pool's release (update.ts): behind past the grace, or on a revoked release, it is handed
-    // nothing — a host's registration on its last-good after its agent reverted the pool's release claims until `last_good_until`
-    // (#342), which Status warns of. Its host's columns are the gate's input, not the listing's.
-    update: updateState(w.version, pool, Date.now(), w.kind === "host" ? revertedOf(w) : null),
-    rolled_back_from: undefined, rolled_back_at: undefined, release_applied: undefined,
+    // nothing — a soaking host's registration claims through its soak, as its claim does (#326); a host's registration on its
+    // last-good after its agent reverted the pool's release claims until `last_good_until` (#342), which Status warns of. When the
+    // soak ends stays its owner's and the maintainers' (the host page's `update` and host.soak): the listings are public, and
+    // `required` alone says the claim's verdict. Its host's columns are the gate's input, not the listing's.
+    update: {
+      ...updateState(w.version, pool, Date.now(), w.kind === "host" ? soakOf({ soaking_until: w.soaking_until, quarantine: w.quarantine }) : null, w.kind === "host" ? revertedOf(w) : null),
+      soaking_until: undefined,
+    },
+    soaking_until: undefined, quarantine: undefined, rolled_back_from: undefined, rolled_back_at: undefined, release_applied: undefined,
     kinds: w.kinds ? JSON.parse(w.kinds) : null,
     // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).
     usage: w.usage ? JSON.parse(w.usage) : null,
@@ -2109,9 +2126,16 @@ function parseJson(text: string | null): unknown {
   try { return text ? JSON.parse(text) : null; } catch { return null; }
 }
 
-/** The workers every listing serves (workerView), with a host registration's revert beside it (#342): the 426 gate's own view of it. */
-export const WORKERS_LISTING_SQL = `SELECT w.*, ${REVERTED_COLUMNS("h")} FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id
+/** The workers every listing serves (workerView), with a host registration's soak (#326) and revert (#342) beside it: the 426 gate's own view of it. */
+export const WORKERS_LISTING_SQL = `SELECT w.*, ${SOAK_COLUMNS("h")}, ${REVERTED_COLUMNS("h")} FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id
   WHERE w.revoked_at IS NULL ORDER BY (w.last_seen > ?) DESC, w.last_seen DESC LIMIT 200`;
+
+/**
+ * The hosts whose agent reports the pool behind GitHub (#326, design v2 §5.5): an active host, its report fresh, saying
+ * `pool_behind_github` — Status's warning. The hosts are a handful of maintainers' machines: no index needed.
+ */
+export const POOL_BEHIND_SQL = `SELECT id, name, owner_login, pool_behind_github FROM hosts
+  WHERE status = 'active' AND reported_at > ? AND pool_behind_github IS NOT NULL ORDER BY id LIMIT 20`;
 
 /**
  * GET /factory — the workers and the queue. `?live=1` is the read a page
@@ -2119,7 +2143,8 @@ export const WORKERS_LISTING_SQL = `SELECT w.*, ${REVERTED_COLUMNS("h")} FROM bu
  * tasks in flight only (queued or leased), found through the queue's
  * status index, and no counts — the whole listing reads every task twice
  * (the counts, then an order no index gives), about 2 000 rows a miss in
- * production, the live read the queue's few rows.
+ * production, the live read the queue's few rows. Beside them, the hosts
+ * whose agent reports the pool behind GitHub (#326), for Status.
  */
 export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   const limit = Math.min(200, Math.max(10, Number(url?.searchParams.get("limit") ?? 60) || 60));
@@ -2133,6 +2158,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
     .all<WorkerRow>();
   const tasks = await env.DB.prepare(`SELECT * FROM build_tasks ${live ? "WHERE status IN ('leased', 'queued') " : ""}ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?`).bind(limit).all<TaskRow>();
   const pool = running(env);
+  const behind = await env.DB.prepare(POOL_BEHIND_SQL).bind(new Date(Date.now() - HOST_REPORT_FRESH_MIN * 60000).toISOString()).all<{ id: string; name: string; owner_login: string; pool_behind_github: string | null }>();
   return json(
     {
       generated_at: now(),
@@ -2145,6 +2171,11 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       // A task's params and result are JSON here as they are on the task's own page (handleTask): one shape for a task, whoever reads it.
       // A host lease's claim_id is its replay key and lease_gen its token's generation (#334): the pool's, never a page's.
       tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, claim_id: undefined, lease_gen: undefined, params: parseJson(t.params), result: parseJson(t.result) })),
+      // Freeze detection (#326): each host whose agent says GitHub has shown a newer release than the pool names for over a day.
+      pool_behind_github: behind.results.flatMap((h) => {
+        const b: PoolBehind | null = poolBehindOf(h.pool_behind_github);
+        return b ? [{ host: h.id, name: h.name, owner: h.owner_login, ...b }] : [];
+      }),
     },
     200,
     { "cache-control": "public, max-age=10" },

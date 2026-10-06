@@ -124,14 +124,73 @@ export interface UpdateState {
   revoked?: true;
   /** Past the grace, but its host reverted the pool's release (#342): it claims on its last-good until then. */
   last_good_until?: string;
+  /** Past the grace, but its host soaks the pool's release (#326): it claims until then. */
+  soaking_until?: string;
 }
 
 /**
- * Where a worker's image stands against the pool, at `at` (now); `reverted`,
- * what its host's reports say of a release it reverted (#342), for a host's
+ * An owner's soak (#326, design v2 D16): a host whose owner set
+ * `soak_minutes` takes a new release that long after its agent first saw the
+ * pool name it, so a bad one can be caught elsewhere first. Its claims would
+ * meet the gate meanwhile — two releases behind, or one past the grace, with
+ * several releases a day — and idle the host the soak meant to protect. So
+ * the pool extends the grace of that host's registration until the soak its
+ * agent reports ends (`release.soaking_until`), and the round's
+ * SOAK_ROUND_MINUTES after it (the pull, the replace, the guard), whatever
+ * the releases behind — but never past SOAK_GRACE_MAX_MINUTES after the
+ * pool's deploy (the agent's longest soak, 100 minutes, leaves its first
+ * poll and its round inside them), and none for a host that holds the
+ * pool's release in quarantine now: it reverted it, it is not waiting for
+ * it, and its claim on last-good is a rule of its own.
+ */
+export const SOAK_GRACE_MAX_MINUTES = 120;
+export const SOAK_ROUND_MINUTES = 15;
+
+/** A release a host's report holds in quarantine: its tag, and until when — an ISO time, or null: until a newer release. */
+export interface Quarantined {
+  release: string;
+  until: string | null;
+}
+
+/** What a host's last report says of its soak: when it ends, and the releases it holds in quarantine. */
+export interface HostSoak {
+  until: string | null;
+  quarantined: Quarantined[];
+}
+
+/**
+ * The pool's release `latest` as a host holds it in quarantine at `at`, by its agent's own rule (rollout::quarantined): that
+ * release, its quarantine not past its `until`. Another release's does not count — a host that reverted a later release the pool
+ * has since rolled back from waits for, and soaks, the one the pool names —, nor a quarantine that ended.
+ */
+export function quarantinedNow(soak: HostSoak | null | undefined, latest: Tag, at: number): Quarantined | null {
+  return soak?.quarantined.find((q) => {
+    const t = parseTag(q.release);
+    // An end it cannot read holds, as the agent's "until a newer release" does.
+    return t !== null && compareTags(t, latest) === 0 && (q.until === null || !(Date.parse(q.until) <= at));
+  }) ?? null;
+}
+
+/** Until when a soaking host's registration may claim behind the pool's release `latest`, deployed at `deployed` (ms), at `at`; null when it may not. */
+export function soakGraceUntil(soak: HostSoak | null | undefined, latest: Tag, deployed: number, at: number): string | null {
+  if (!soak?.until || !Number.isFinite(deployed)) return null;
+  const until = Date.parse(soak.until);
+  if (!Number.isFinite(until)) return null;
+  if (quarantinedNow(soak, latest, at)) return null;
+  const end = Math.min(until + SOAK_ROUND_MINUTES * 60000, deployed + SOAK_GRACE_MAX_MINUTES * 60000);
+  return at < end ? new Date(end).toISOString() : null;
+}
+
+/**
+ * Where a worker's image stands against the pool, at `at` (now); `soak`, its
+ * host's soak as its last report says it (#326); `reverted`, what its host's
+ * reports say of a release it reverted (#342) — both for a host's
  * registration; `policy`, the releases the signed manifest retires.
  */
-export function updateState(workerVersion: string | null | undefined, pool: Pick<RunningVersion, "version" | "deployed_at">, at = Date.now(), reverted: Reverted | null = null, policy: ReleasePolicy = RELEASE_POLICY): UpdateState {
+export function updateState(
+  workerVersion: string | null | undefined, pool: Pick<RunningVersion, "version" | "deployed_at">, at = Date.now(),
+  soak: HostSoak | null = null, reverted: Reverted | null = null, policy: ReleasePolicy = RELEASE_POLICY,
+): UpdateState {
   const yours = workerVersion && workerVersion !== "container" ? workerVersion : null;
   const w = parseTag(yours);
   const p = parseTag(pool.version);
@@ -147,9 +206,16 @@ export function updateState(workerVersion: string | null | undefined, pool: Pick
   // grace that restarted at each would never end for it.
   const deployed = pool.deployed_at ? Date.parse(pool.deployed_at) : NaN;
   const past = outdated && Number.isFinite(deployed) && (behind === null || behind >= 2 || at - deployed > UPDATE_GRACE_MINUTES * 60000);
-  // A host that reverted the pool's release claims on its last-good, six hours at most (#342).
+  // A host that reverted the pool's release claims on its last-good, six hours at most (#342): a rule of its own, which the soak's
+  // grace never stands in for nor shortens.
   const lastGood = past ? lastGoodUntil(reverted, yours, pool.version, at, policy) : null;
-  return { latest: pool.version, yours, outdated, behind, required: revoked || (past && lastGood === null), ...marks, ...(lastGood ? { last_good_until: lastGood } : {}) };
+  // A soaking host's grace (#326): until its soak ends, at most two hours after the deploy — never on a revoked release, whatever
+  // the soak: what it would build is refused.
+  const soaking = past && !revoked && lastGood === null ? soakGraceUntil(soak, p, deployed, at) : null;
+  return {
+    latest: pool.version, yours, outdated, behind, required: revoked || (past && soaking === null && lastGood === null),
+    ...marks, ...(lastGood ? { last_good_until: lastGood } : {}), ...(soaking ? { soaking_until: soaking } : {}),
+  };
 }
 
 /** The refusal a claim gets, and the line the journal keeps. */
@@ -161,4 +227,42 @@ export function updateMessage(u: UpdateState): string {
 /** The warning a host claiming on its last-good carries (#342, design v2 §18.3): the journal's line, Status's and the host page's words. */
 export function lastGoodMessage(u: UpdateState): string | null {
   return u.last_good_until ? `its agent reverted ${u.latest}: claiming on last-good ${u.yours} until ${u.last_good_until}, then refused like any registration behind the pool's release` : null;
+}
+
+/**
+ * Why a host's registration claims or is refused with 426, in the host page's
+ * words (#326): the gate, the soak's grace and what ended it — a soak past
+ * its end and the round's margin, the two hours after the deploy, or a
+ * quarantine of the pool's release —; a revoked release, refused whatever
+ * the grace, and a claim on its last-good after its agent reverted the
+ * pool's release, until when and what ended it (#342, `reverted`, as the
+ * gate weighed it). Null when it runs the pool's release.
+ */
+export function gateWords(u: UpdateState, soak: HostSoak | null, deployedAt: string | null, at = Date.now(), reverted: Reverted | null = null): string | null {
+  if (u.revoked) return `refused with 426 — its registration runs ${u.yours}, a release the pool's release (${u.latest}) revokes: it is handed nothing whatever the grace, its soak or its last-good, and nothing its tasks send on that release is taken`;
+  if (!u.outdated) return null;
+  const behind = u.behind ? ` (${u.behind} release${u.behind === 1 ? "" : "s"} behind)` : "";
+  const runs = `its registration runs ${u.yours}, the pool ${u.latest}${behind}`;
+  if (u.last_good_until) return `${runs}: its agent reverted ${u.latest}, so it claims on its last-good until ${u.last_good_until} (${LAST_GOOD_HOURS} hours after the pool heard of the revert), then it is refused like any registration behind the pool's release`;
+  if (u.soaking_until) return `${runs}: it claims through its owner's soak, until ${u.soaking_until} — the pool's grace follows the soak its agent reports, ${SOAK_ROUND_MINUTES} minutes past its end for the round, at most ${SOAK_GRACE_MAX_MINUTES / 60} hours after the deploy`;
+  if (!u.required) return `${runs}: within the rollout's grace (${UPDATE_GRACE_MINUTES} minutes after the deploy, one release behind at most); its agent rolls the release out`;
+  const latest = parseTag(u.latest);
+  const held = latest ? quarantinedNow(soak, latest, at)?.release : undefined;
+  const deployed = deployedAt ? Date.parse(deployedAt) : NaN;
+  // Its agent reverted the pool's release (#342): what ended its claim on its last-good, or why the gate does not take it.
+  const from = parseTag(reverted?.from);
+  const revert = reverted && from && latest && compareTags(from, latest) === 0 ? reverted : null;
+  const lastGoodEnd = revert?.at ? Date.parse(revert.at) + LAST_GOOD_HOURS * 3600e3 : NaN;
+  const why = revert
+    ? Number.isFinite(lastGoodEnd) && at >= lastGoodEnd
+      ? `its agent reverted ${revert.from}, and its ${LAST_GOOD_HOURS} hours on its last-good ended at ${new Date(lastGoodEnd).toISOString()}: Retry release, or the release after it`
+      : `its agent reverted ${revert.from}, but the gate takes a claim on its last-good only on the release its agent applied (${revert.applied ?? "none reported"}), at or above min_release (${RELEASE_POLICY.min_release}) and not revoked: Retry release, or the release after it`
+    : held
+      ? `it holds ${held} in quarantine — its guard reverted it — so its soak gives no grace: Retry release, or the release after it`
+      : soak?.until && Number.isFinite(deployed) && Date.parse(soak.until) + SOAK_ROUND_MINUTES * 60000 > deployed + SOAK_GRACE_MAX_MINUTES * 60000
+        ? `its soak runs until ${soak.until}, past the pool's grace for a soak, which ends ${SOAK_GRACE_MAX_MINUTES / 60} hours after the deploy (${new Date(deployed + SOAK_GRACE_MAX_MINUTES * 60000).toISOString()})`
+        : soak?.until
+          ? `its soak ended at ${soak.until} and its round has not brought the release yet: the pool's grace ran ${SOAK_ROUND_MINUTES} minutes past it`
+          : `past the rollout's grace (${UPDATE_GRACE_MINUTES} minutes after the deploy, one release behind at most), and its agent reports no soak`;
+  return `refused with 426 — ${runs}: ${why}`;
 }
