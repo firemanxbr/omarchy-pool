@@ -149,9 +149,13 @@ to copy.
    minutes, so only the dispatcher is recreated and its tasks run on. Beside
    the token the agent writes the host's own addresses for every task's
    egress to refuse (`OMARCHY_HOST_ADDRESSES`), and once `agent.toml` is
-   there, the secrets directory, the envelope's agent budget (#371) and its
-   grant of a signed exception's bridge (`OMARCHY_DIRECT_NETWORK`, #373); a
-   rotation keeps them, and the lines you add to the file yourself stay.
+   there, the secrets directory, the envelope's agent budget (#371), its
+   grant of a signed exception's bridge (`OMARCHY_DIRECT_NETWORK`, #373) and
+   its cache caps (`OMARCHY_CACHE_PACMAN_GB`, `OMARCHY_CACHE_BUILD_GB`, when
+   it has a `cache_caps`, #341). Those come from `agent.toml` alone: a line
+   of yours for one of their keys is replaced, so set them in the envelope. A
+   rotation keeps them, and every other line you add to the file yourself
+   stays.
 5. Only then does it write `agent.toml` with the host and its registration,
    take the agent keys, write the systemd --user unit, enable linger and start
    the agent, whose first round starts the dispatcher (on a Mac, the
@@ -204,12 +208,15 @@ sidecars, never do.
 build cache only — cargo's registry, Go's caches and ccache's objects under
 `<work root>/cache/build/<community|project>/<arch>/<package>` — so a
 contributor's recipe never reaches a project cache or another package's.
-Every task reads the host's pacman cache of its architecture
-(`<work root>/cache/pacman/<arch>`) read-only and downloads into one of its
-own; after the task, the dispatcher copies a download into the shared cache
-only when its SHA-256 is the one the pool's signed `edge` databases list for
-it (fetched hourly into `cache/syncdb/`, each verified with the pool's key),
-and discards everything else. The pacman cache keeps the two newest versions
+A build and an audit read the host's pacman cache of their architecture
+(`<work root>/cache/pacman/<arch>`) read-only, and download into one of
+their own (a trial downloads everything itself: it installs the lab above
+edge, whose bytes the shared cache holds); after the task, the dispatcher
+copies a download into the shared cache only when its SHA-256 is the one the
+pool's signed `edge` databases list for it (fetched hourly into
+`cache/syncdb/`, each verified with the pool's key), discards everything
+else, and on every pass removes a file whose name those databases have come
+to list with other bytes. The pacman cache keeps the two newest versions
 of each package within `OMARCHY_CACHE_PACMAN_GB` (10 GB), and the build
 caches go least recently used first, a package at a time, within
 `OMARCHY_CACHE_BUILD_GB` (20 GB), never one a running build mounts. To set

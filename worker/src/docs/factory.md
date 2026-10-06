@@ -574,13 +574,15 @@ network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a 
            host whose envelope grants it (OMARCHY_DIRECT_NETWORK, #373); elsewhere handed back lost (the attempt
            given back for a task's first HOST_LOSSES_MAX losses, spent after: the claim does not say yet whether
            a host runs such packages)
-caches     per lease (#341, D52): <work>/cache/pacman/<arch> read-only at /var/cache/pacman/shared, its pacman's first
-           CacheDir, and <task dir>/pkgcache writable at /var/cache/pacman/pkg, where it downloads; a build also its own
-           package's <work>/cache/build/<trust>/<arch>/<package> at /build/cache — never the tree, another package's or the
-           other side's; after the lease its downloads go into the shared cache only when each file's SHA-256 is the one
-           the pool's signed edge databases of that arch list (every source's, fetched hourly, each .sig verified with the
+caches     per lease (#341, D52): <work>/cache/pacman/<arch> read-only at /var/cache/pacman/shared (a build's and an
+           audit's pacman's first CacheDir; a trial's check reads none), and <task dir>/pkgcache writable at
+           /var/cache/pacman/pkg, where it downloads; a build also its own package's
+           <work>/cache/build/<trust>/<arch>/<package> at /build/cache — never the tree, another package's or the other
+           side's; after the lease its downloads go into the shared cache only when each file's SHA-256 is the one the
+           pool's signed edge databases of that arch list (every source's, fetched hourly, each .sig verified with the
            pool's key built into the dispatcher; a name two databases list with different bytes is never merged), the
-           rest discarded; the pacman cache keeps two versions per package within OMARCHY_CACHE_PACMAN_GB, the build
+           rest discarded, and each pass removes a file whose name the databases of the day list with other bytes than
+           its record's; the pacman cache keeps two versions per package within OMARCHY_CACHE_PACMAN_GB, the build
            caches go least recently used first within OMARCHY_CACHE_BUILD_GB (the envelope's cache_caps; 10 and 20 GB
            by default), never one a lease mounts
 agent      the claim's agent: {provider, model, probe, error, checked_at} from a probe sidecar on a network of its own

@@ -131,15 +131,17 @@ secret). Everything travels in the `Authorization` header over TLS only.
   on its own side (`cache/build/<trust>/<arch>/<package>` at `/build/cache`,
   cut by the dispatcher from the lease), never the tree, another package's
   or, from a community task, a project cache; an audit and a trial mount
-  none. Every task mounts the host's pacman cache of its lane read-only, its
-  pacman's first `CacheDir`, and downloads into a writable cache of its own,
-  so no recipe plants a package another build installs and two builds never
-  write one file. What a task downloaded enters the shared cache only when
-  its SHA-256 is the one the pool's signed databases list for that file name
-  (each database's `.sig` verified with the pool's key the dispatcher
-  carries; a name two databases list with different bytes is never merged);
-  everything else is discarded. The caches stay within the envelope's
-  `cache_caps`.
+  none. Every task mounts the host's pacman cache of its lane read-only (a
+  build's and an audit's pacman's first `CacheDir`; a trial's check, which
+  installs the lab above edge, reads none) and downloads into a writable
+  cache of its own, so no recipe plants a package another build installs and
+  two builds never write one file. What a task downloaded enters the shared
+  cache only when its SHA-256 is the one the pool's signed databases list for
+  that file name (each database's `.sig` verified with the pool's key the
+  dispatcher carries; a name two databases list with different bytes is never
+  merged); everything else is discarded, and a file whose name the databases
+  later list with other bytes leaves the shared cache at the next pass. The
+  caches stay within the envelope's `cache_caps`.
   The dispatcher refuses to start with a package signing key in its
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
