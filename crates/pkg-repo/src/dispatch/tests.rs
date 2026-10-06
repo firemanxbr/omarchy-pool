@@ -987,8 +987,9 @@ fn a_community_build_runs_staged_in_and_out_and_its_container_holds_nothing() {
 /// The task caches (#341, design v2 §9.3, D52): two builds at once, of two packages that need
 /// the same dependency, on the two sides — each mounts its own package's build cache on its own
 /// side and the shared pacman cache read-only, and downloads into a cache of its own. After them
-/// only the bytes the pool's signed databases list are merged into the shared cache, once; a
-/// planted file and one with other bytes are discarded; the next build mounts what was merged.
+/// only the bytes the pool's signed databases list are merged into the shared cache, once, with
+/// the dependency's signature as the pool keeps it beside it; a planted file, one with other
+/// bytes and a forged signature are discarded; the next build mounts what was merged.
 #[test]
 #[allow(clippy::too_many_lines)] // two leases from their start to the merge-back of what they downloaded, then the next
 fn two_builds_at_once_download_into_their_own_caches_and_only_the_signed_bytes_are_merged_back() {
@@ -1052,12 +1053,26 @@ fn two_builds_at_once_download_into_their_own_caches_and_only_the_signed_bytes_a
     assert!(cache.join("build/community/aarch64/alpha").is_dir());
     assert!(!cache.join("build/project/aarch64/alpha").exists());
 
-    // What their pacman downloaded, each into its own cache: the dependency both need, and in
-    // alpha's a file its recipe planted under a listed name and one no database lists.
+    // What their pacman downloaded, each into its own cache: the dependency both need with its
+    // signature (a repository whose SigLevel checks packages: the image's own), and in alpha's
+    // a signature its recipe forged for it, a file it planted under a listed name and one no
+    // database lists. The pool keeps the upstream signature beside the package, in core's
+    // directory: the source whose database lists it.
     let lib = fixture_bytes("libfixture", "libfixture", "aarch64");
     let libname = "libfixture-1.0-1-aarch64.pkg.tar.zst";
-    for (id, gen) in [(1, GEN), (2, gen2)] {
-        std::fs::write(h.tdir(id, gen).join("pkgcache").join(libname), &lib).unwrap();
+    let sig_name = format!("{libname}.sig");
+    let upstream = b"libfixture's upstream signature".to_vec();
+    h.pool.public.lock().unwrap().insert(
+        format!("https://pool.example/core/aarch64/{sig_name}"),
+        upstream.clone(),
+    );
+    for (id, gen, sig) in [
+        (1, GEN, &b"forged by alpha's recipe"[..]),
+        (2, gen2, &upstream[..]),
+    ] {
+        let own = h.tdir(id, gen).join("pkgcache");
+        std::fs::write(own.join(libname), &lib).unwrap();
+        std::fs::write(own.join(&sig_name), sig).unwrap();
     }
     std::fs::write(
         h.tdir(1, GEN)
@@ -1084,12 +1099,16 @@ fn two_builds_at_once_download_into_their_own_caches_and_only_the_signed_bytes_a
     merged.sort();
     assert_eq!(
         merged,
-        [libname],
-        "only the bytes the signed databases list"
+        [libname.to_owned(), sig_name.clone()],
+        "only the bytes the signed databases list, and the signature the pool keeps"
     );
     assert_eq!(
         std::fs::read(cache.join("pacman/aarch64").join(libname)).unwrap(),
         lib
+    );
+    assert_eq!(
+        std::fs::read(cache.join("pacman/aarch64").join(&sig_name)).unwrap(),
+        upstream
     );
     assert_eq!(
         std::fs::read_dir(cache.join("incoming/aarch64"))
@@ -1106,6 +1125,15 @@ fn two_builds_at_once_download_into_their_own_caches_and_only_the_signed_bytes_a
             .iter()
             .any(|u| u == "https://pool.example/core/aarch64/omarchy-core-edge.db"),
         "the databases were asked of the pool's repositories"
+    );
+    assert!(
+        h.pool
+            .public_asked
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| *u == format!("https://pool.example/core/aarch64/{sig_name}")),
+        "the signature was compared with the pool's copy"
     );
     // The next build mounts it, read-only, beside a cache of its own.
     h.give(community(3, GEN2));
@@ -1285,6 +1313,57 @@ fn the_databases_are_fetched_again_when_stale_only_into_place_once_verified() {
     assert!(!dir.join(packages).exists() && !dir.join(format!("{packages}.sig")).exists());
     assert_eq!(std::fs::read(dir.join(core)).unwrap(), fixture(core));
     assert!(stamp_age(&dir.join(".fetched")) < super::cache::DB_FRESH);
+}
+
+/// The pool's copies of the packages' upstream signatures (#341), asked for while a pass
+/// merges: beside the package in the source's directory, as the pool lays them out; one it
+/// keeps none of is none; past 16 KiB it is no signature; a pool that does not answer is
+/// asked once, not for every signature of the pass.
+#[test]
+fn the_pools_copy_of_a_signature_is_asked_beside_its_package_once_a_pass_when_down() {
+    use super::cache::Signatures;
+    let pool = FakePool::default();
+    let t = tempfile::tempdir().unwrap();
+    let file = "libfixture-1.0-1-x86_64.pkg.tar.zst";
+    pool.public.lock().unwrap().extend([
+        (
+            format!("https://pool.example/extra/x86_64/{file}.sig"),
+            b"upstream".to_vec(),
+        ),
+        (
+            "https://pool.example/extra/x86_64/big-1-1-x86_64.pkg.tar.zst.sig".to_owned(),
+            vec![0u8; 16 * 1024 + 1],
+        ),
+    ]);
+    let mut sigs = Signatures {
+        pool: &pool,
+        pool_url: "https://pool.example/",
+        arch: "x86_64",
+        tmp: t.path().join("tmp"),
+        unanswered: None,
+    };
+    assert_eq!(sigs.of("extra", file), Ok(Some(b"upstream".to_vec())));
+    assert_eq!(sigs.of("core", file), Ok(None));
+    assert_eq!(sigs.of("extra", "big-1-1-x86_64.pkg.tar.zst"), Ok(None));
+    assert_eq!(
+        std::fs::read_dir(t.path().join("tmp")).unwrap().count(),
+        0,
+        "nothing left aside"
+    );
+    pool.down.store(true, Ordering::SeqCst);
+    assert!(sigs.of("extra", file).is_err());
+    assert!(sigs.of("core", file).is_err());
+    assert!(sigs.unanswered.is_some());
+    assert_eq!(
+        *pool.public_asked.lock().unwrap(),
+        [
+            format!("https://pool.example/extra/x86_64/{file}.sig"),
+            format!("https://pool.example/core/x86_64/{file}.sig"),
+            "https://pool.example/extra/x86_64/big-1-1-x86_64.pkg.tar.zst.sig".to_owned(),
+            format!("https://pool.example/extra/x86_64/{file}.sig"),
+        ],
+        "asked once while down"
+    );
 }
 
 #[test]

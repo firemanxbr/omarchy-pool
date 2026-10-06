@@ -140,9 +140,14 @@ secret). Everything travels in the `Authorization` header over TLS only.
   cache only when its SHA-256 is the one the pool's signed databases list for
   that file name (each database's `.sig` verified with the pool's key the
   dispatcher carries; a name two databases list with different bytes is never
-  merged); everything else is discarded, and a file whose name the databases
-  later list with other bytes leaves the shared cache at the next pass. The
-  caches stay within the envelope's `cache_caps`.
+  merged), and with the pool's own copy of its upstream signature beside it
+  (the very `.sig` the task downloaded, when it downloaded one) or not at
+  all: a task's own `.sig` never enters, since a wrong one — or none — beside
+  a package of a repository whose `SigLevel` checks packages fails every
+  build that installs it, and pacman cannot delete it from a read-only
+  cache. Everything else is discarded, and a file whose name the databases
+  later list with other bytes leaves the shared cache at the next pass, its
+  signature after it. The caches stay within the envelope's `cache_caps`.
   The dispatcher refuses to start with a package signing key in its
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and

@@ -580,9 +580,12 @@ caches     per lease (#341, D52): <work>/cache/pacman/<arch> read-only at /var/c
            <work>/cache/build/<trust>/<arch>/<package> at /build/cache — never the tree, another package's or the other
            side's; after the lease its downloads go into the shared cache only when each file's SHA-256 is the one the
            pool's signed edge databases of that arch list (every source's, fetched hourly, each .sig verified with the
-           pool's key built into the dispatcher; a name two databases list with different bytes is never merged), the
-           rest discarded, and each pass removes a file whose name the databases of the day list with other bytes than
-           its record's; the pacman cache keeps two versions per package within OMARCHY_CACHE_PACMAN_GB, the build
+           pool's key built into the dispatcher; a name two databases list with different bytes is never merged), each
+           package with the pool's own copy of its upstream .sig beside it (<source>/<arch>/<file>.sig: a build's
+           pacman checks the image's Arch sections' packages by the .sig beside the file it found, and fails on one
+           without it), which must be the .sig the build downloaded when it downloaded one, or not at all; the rest
+           discarded, and each pass removes a file whose name the databases of the day list with other bytes than
+           its record's, its .sig after it; the pacman cache keeps two versions per package within OMARCHY_CACHE_PACMAN_GB, the build
            caches go least recently used first within OMARCHY_CACHE_BUILD_GB (the envelope's cache_caps; 10 and 20 GB
            by default), never one a lease mounts
 agent      the claim's agent: {provider, model, probe, error, checked_at} from a probe sidecar on a network of its own

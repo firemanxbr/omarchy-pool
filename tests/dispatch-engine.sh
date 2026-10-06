@@ -40,9 +40,10 @@
 #      reach) and the shared pacman cache read-only, and downloads into a
 #      cache of its own; after them, only the bytes the pool's signed
 #      databases list (the fixture databases, served by the stub pool, signed
-#      by their own key) are merged into the shared cache — a planted file, an
-#      unlisted one and one two databases list otherwise are not; the next
-#      build finds it there, read-only
+#      by their own key) are merged into the shared cache, with the pool's copy
+#      of the dependency's signature beside it — a planted file, an unlisted
+#      one, one two databases list otherwise and a forged signature are not;
+#      the next build finds it there, read-only
 #
 # Every task runs on its own internal network with its egress sidecar (#336);
 # here the worker image the sidecars run is a stand-in that only sleeps (the
@@ -153,7 +154,11 @@ case "$name" in
     if [[ "$name" == cache-a ]]; then
       echo "planted by cache-a's recipe" > "/var/cache/pacman/pkg/evil-1.0-1-$arch.pkg.tar.zst"
       echo x > "/var/cache/pacman/pkg/stranger-1.0-1-$arch.pkg.tar.zst"
+      # A signature its recipe forged for the dependency another build installs.
+      echo "forged by cache-a's recipe" > "/var/cache/pacman/pkg/$lib.sig"
     else
+      # The dependency's upstream signature, as its pacman downloads it beside the package (a repository whose SigLevel checks them).
+      printf 'omarchy-pool fixture signature of %s for %s\n' libfixture "$arch" > "/var/cache/pacman/pkg/$lib.sig"
       printf 'omarchy-pool fixture package %s (%s) for %s\n' twin core "$arch" > "/var/cache/pacman/pkg/twin-1.0-1-$arch.pkg.tar.zst"
     fi
     ok ;;
@@ -221,6 +226,11 @@ class H(BaseHTTPRequestHandler):
         m = re.match(r"/(core|packages)/(x86_64|aarch64)/(omarchy-(core|packages)-edge\.db(\.sig)?)$", self.path)
         if m and m.group(1) == m.group(4) and os.path.exists(f"{dbs}/{m.group(3)}"):
             data = open(f"{dbs}/{m.group(3)}", "rb").read()
+            self.send_response(200); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+        # Its copy of the shared dependency's upstream signature, beside the package in core's directory, where core's database lists it.
+        m = re.match(r"/core/(x86_64|aarch64)/libfixture-1\.0-1-(x86_64|aarch64)\.pkg\.tar\.zst\.sig$", self.path)
+        if m and m.group(1) == m.group(2):
+            data = f"omarchy-pool fixture signature of libfixture for {m.group(1)}\n".encode()
             self.send_response(200); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data); return
         return self.send(404, {"error": "none"})
     def do_PUT(self):
@@ -502,7 +512,9 @@ until_ 60 "the dependency merged into the shared pacman cache" merged
 want_sha="$(printf 'omarchy-pool fixture package %s (%s) for %s\n' libfixture libfixture "$arch" | sha256sum | cut -c1-64)"
 [[ "$(sha256sum "$tmp/work/cache/pacman/$arch/$lib" | cut -c1-64)" == "$want_sha" ]] || fail "the merged dependency is not the bytes the signed database lists"
 sleep 2
-[[ "$(ls -A "$tmp/work/cache/pacman/$arch")" == "$lib" ]] || fail "the shared pacman cache holds more than the signed bytes: $(ls -A "$tmp/work/cache/pacman/$arch")"
+[[ "$(ls -A "$tmp/work/cache/pacman/$arch")" == "$(printf '%s\n%s' "$lib" "$lib.sig")" ]] || fail "the shared pacman cache holds more than the signed bytes and the pool's signature of them: $(ls -A "$tmp/work/cache/pacman/$arch")"
+[[ "$(cat "$tmp/work/cache/pacman/$arch/$lib.sig")" == "omarchy-pool fixture signature of libfixture for $arch" ]] || fail "the dependency's signature is not the pool's copy: $(cat "$tmp/work/cache/pacman/$arch/$lib.sig")"
+jq -r '.path' "$tmp/requests.jsonl" | grep -qx "/core/$arch/$lib.sig" || fail "the dependency's signature was not asked of the pool"
 [[ -z "$(ls -A "$tmp/work/cache/incoming/$arch" 2>/dev/null)" ]] || fail "downloads left aside: $(ls -A "$tmp/work/cache/incoming/$arch")"
 grep -q 'caches: the downloads of' "$tmp/dispatcher.log" || fail "the merge-back was not said"
 jq -r 'select(.path | test("^/(core|packages)/")) | .path' "$tmp/requests.jsonl" | grep -qx "/core/$arch/omarchy-core-edge.db.sig" || fail "the databases' signatures were not asked of the pool"

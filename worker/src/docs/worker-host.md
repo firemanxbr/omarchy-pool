@@ -225,9 +225,11 @@ their own (a trial downloads everything itself: it installs the lab above
 edge, whose bytes the shared cache holds); after the task, the dispatcher
 copies a download into the shared cache only when its SHA-256 is the one the
 pool's signed `edge` databases list for it (fetched hourly into
-`cache/syncdb/`, each verified with the pool's key), discards everything
-else, and on every pass removes a file whose name those databases have come
-to list with other bytes. The pacman cache keeps the two newest versions
+`cache/syncdb/`, each verified with the pool's key), with the pool's own copy
+of the package's upstream `.sig` beside it — which a build's pacman checks
+the image's Arch packages by, and fails without — or not at all; it
+discards everything else, and on every pass removes a file whose name those
+databases have come to list with other bytes. The pacman cache keeps the two newest versions
 of each package within `OMARCHY_CACHE_PACMAN_GB` (10 GB), and the build
 caches go least recently used first, a package at a time, within
 `OMARCHY_CACHE_BUILD_GB` (20 GB), never one a running build mounts. To set

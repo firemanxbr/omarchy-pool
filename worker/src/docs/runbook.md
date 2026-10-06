@@ -2126,7 +2126,8 @@ A host's dispatcher keeps its tasks' caches under `<work root>/cache/`
   none and downloads everything itself, as in its own container: it installs
   the lab's sections above edge's, and this cache holds the bytes edge's
   databases list, which the lab's need not;
-- `merged/<arch>/` — one record per file merged: its SHA-256 and size;
+- `merged/<arch>/` — one record per file merged, a package's signature
+  included: its SHA-256 and size;
 - `incoming/<arch>/<id>-<gen>/` — a lease's downloads set aside when it
   ends, until the next pass of the upkeep merges or discards them;
 - `syncdb/<arch>/` — the pool's signed `edge` databases of every source,
@@ -2138,7 +2139,17 @@ A host's dispatcher keeps its tasks' caches under `<work root>/cache/`
 A download enters `pacman/<arch>/` only when its SHA-256 and size are what
 those databases list for its file name; a file they do not list (a recipe's,
 a `.part`), one with other bytes and one two databases list with different
-bytes are discarded. Each pass — after a lease ends, and every 15 minutes —
+bytes are discarded. A package enters with the pool's own copy of its
+upstream signature beside it (`<source>/<arch>/<file>.sig`, fetched from the
+pool as the databases are), or not at all: a build's pacman downloads a
+package's `.sig` with it from the image's own Arch and Arch Linux ARM
+sections, whose `SigLevel` checks packages, and checks the package by the
+`.sig` beside the file it found, so a package there without its `.sig`, or
+beside another one, fails every build that installs it. When its build
+downloaded a `.sig`, that `.sig` must be the pool's copy; a `.sig` of a
+build's own never enters. A package the pool keeps no signature of (its own
+builds, which tasks install from the pool's sections with `PackageNever`)
+enters alone. Each pass — after a lease ends, and every 15 minutes —
 prunes first, before it asks the pool anything: the pacman cache to the two
 newest versions of each package, then within `OMARCHY_CACHE_PACMAN_GB` (older
 versions first, then the oldest merged); the build caches least recently
@@ -2146,14 +2157,15 @@ used first within `OMARCHY_CACHE_BUILD_GB`, never one a lease of the host
 mounts. Then it checks the shared cache again against the databases of the
 day: a file whose name they now list with other bytes than its record's (a
 source published the same file name since), or list twice at odds, or that
-is not whole (a crash while it was written) is removed. Both caps
+is not whole (a crash while it was written) is removed, and its signature
+after it. Both caps
 are the envelope's `cache_caps` (`agent.toml`: `cache_caps = { pacman_gb =
 40, build_gb = 120 }` on the Studio; 10 and 20 GB when it sets none), which
 the agent writes into `etc/dispatcher.env`. The dispatcher's log says what a
 pass did:
 
 ```
-caches: the downloads of 2 lease(s): 14 merged into the shared pacman cache (310 MB), 3 there already, 2 discarded (…); 6 file(s) of the pacman cache pruned (…)
+caches: the downloads of 2 lease(s): 14 merged into the shared pacman cache (310 MB) and 12 signature(s) of the pool's beside their package, 15 there already, 2 discarded (…); 6 file(s) of the pacman cache pruned (…)
 ```
 
 - **Nothing is ever merged** (`no signed database of <arch> could be read`):
@@ -2162,6 +2174,20 @@ caches: the downloads of 2 lease(s): 14 merged into the shared pacman cache (310
   come, and the next pass asks again) or do not verify with the dispatcher's
   key (a release whose key is not the pool's). Builds go on, each downloading
   what it needs.
+- **`… for a signature the pool does not keep as the one downloaded`**, or
+  `the pool's copies of the packages' signatures (<arch>): …` (the pool did
+  not answer): those packages are not merged, and each build downloads them
+  itself until a later lease's merge-back has the pool's copy. Many of them
+  from one repository mean the pool keeps no signatures of it, or other ones
+  (an upstream that signs its packages again): `pkg-repo sync` keeps the
+  upstream `.sig` beside each package it takes.
+- **`<package>: missing required signature`** in a build's log, for a file
+  of `/var/cache/pacman/shared`: that package is there without its `.sig`,
+  which the merge-back never leaves (one the pool keeps no signature of,
+  taken from a build whose repository checks none, then needed by one whose
+  repository does). The pass after that build ends takes the package out (`N
+  package(s) taken out of the shared pacman cache`); to clear it at once,
+  remove that file from `cache/pacman/<arch>/`.
 - **`File /var/cache/pacman/shared/<file> is corrupted`** in a build's log:
   the shared cache holds bytes under that name which the repository the
   build resolved it from lists otherwise; pacman cannot delete them from a

@@ -30,17 +30,29 @@
 //!   ([`crate::sign::verify_with_keyring`]). A file no database lists, one whose bytes
 //!   are not the listed ones, and one two databases list with different bytes (a task
 //!   that resolves it from the other repository would find bytes it refuses, in a cache
-//!   it cannot delete from) are discarded. What was merged is recorded
-//!   (`cache/merged/<arch>/<file>`: its SHA-256 and size), and every pass checks the
-//!   shared cache again against the databases of the day ([`recheck`]): a file whose
-//!   name they now list with other bytes, or list twice at odds, or that is not whole
-//!   (a crash) leaves it — the snapshot it was merged by is not the one tasks resolve by.
+//!   it cannot delete from) are discarded.
+//! - **A package's signature beside it.** pacman downloads a package's `.sig` with it from a
+//!   repository whose `SigLevel` checks packages (the image's own Arch and Arch Linux ARM
+//!   sections, where most of a build's dependencies come from) and checks the package by the
+//!   `.sig` beside the file it found: one in the read-only shared cache without its `.sig`
+//!   is downloaded again and then refused (`missing required signature`), failing every
+//!   task that installs it from there, and so is one beside a wrong `.sig`, which pacman
+//!   cannot delete. So a package is merged with the pool's own copy of its upstream
+//!   signature beside it (`<source>/<arch>/<file>.sig`, fetched as the databases are,
+//!   [`Signatures`]), which must be the very bytes its task downloaded when it downloaded
+//!   one — never a task's own — or it is not merged; one the pool keeps no signature of
+//!   (its own builds, which tasks install from its sections, `PackageNever`) goes alone.
+//! - **Checked again.** What was merged is recorded (`cache/merged/<arch>/<file>`: its
+//!   SHA-256 and size), and every pass checks the shared cache again against the
+//!   databases of the day ([`recheck`]): a file whose name they now list with other bytes,
+//!   or list twice at odds, or that is not whole (a crash) leaves it, and its signature
+//!   after it — the snapshot it was merged by is not the one tasks resolve by.
 //! - **Caps and pruning**, from the envelope's `cache_caps` (`OMARCHY_CACHE_PACMAN_GB`,
 //!   `OMARCHY_CACHE_BUILD_GB` in `etc/dispatcher.env`, written by the agent): the pacman
-//!   cache keeps the two newest versions of each package and, above its cap, drops the
-//!   oldest merged first, older versions before newest ones; the build caches go least
-//!   recently used first, a package's whole directory at a time, never one a lease of
-//!   this host mounts. Each pass prunes before it asks the pool anything, so a pool that
+//!   cache keeps the two newest versions of each package (a signature goes with its
+//!   package, after it) and, above its cap, drops the oldest merged first, older versions
+//!   before newest ones; the build caches go least recently used first, a package's whole
+//!   directory at a time, never one a lease of this host mounts. Each pass prunes before it asks the pool anything, so a pool that
 //!   does not answer never holds the caches over their caps.
 //!
 //! Only the dispatcher walks into `cache/` (0700): a task mounts its parts of it, which
@@ -255,10 +267,13 @@ pub fn collect(
 // ---------- the signed databases ----------
 
 /// What the pool's signed databases of one architecture list: each file name, with the
-/// SHA-256 and the size of the bytes each database that lists it names.
+/// SHA-256 and the size of the bytes each database that lists it names, and the sources whose
+/// databases list it — where the pool keeps its copy of the file's upstream signature
+/// (`<source>/<arch>/<file>.sig`, `worker/src/r2.ts`).
 #[derive(Debug, Default)]
 pub struct Index {
     files: HashMap<String, BTreeSet<(String, u64)>>,
+    sources: HashMap<String, BTreeSet<String>>,
 }
 
 /// What the databases say of one file name.
@@ -273,14 +288,18 @@ pub enum Listed {
 }
 
 impl Index {
-    /// One database's packages (gzip- or zstd-compressed, as the pool renders them).
-    pub fn add(&mut self, db: &[u8]) -> std::io::Result<usize> {
+    /// One source's database's packages (gzip- or zstd-compressed, as the pool renders them).
+    pub fn add(&mut self, source: &str, db: &[u8]) -> std::io::Result<usize> {
         let pkgs = crate::syncdb::parse_sync_db(db)?;
         for p in &pkgs {
             self.files
                 .entry(p.filename.clone())
                 .or_default()
                 .insert((p.sha256.to_ascii_lowercase(), p.size_download));
+            self.sources
+                .entry(p.filename.clone())
+                .or_default()
+                .insert(source.to_owned());
         }
         Ok(pkgs.len())
     }
@@ -301,6 +320,14 @@ impl Index {
             }),
             Some(_) => Listed::Ambiguous,
         }
+    }
+
+    /// The sources whose databases list `file`.
+    pub fn sources(&self, file: &str) -> impl Iterator<Item = &str> {
+        self.sources
+            .get(file)
+            .into_iter()
+            .flat_map(|s| s.iter().map(String::as_str))
     }
 }
 
@@ -416,7 +443,7 @@ pub fn load(work_root: &Path, arch: &str, key: &Path) -> (Index, Vec<String>) {
             ));
             continue;
         }
-        if let Err(e) = std::fs::read(&db).and_then(|b| index.add(&b)) {
+        if let Err(e) = std::fs::read(&db).and_then(|b| index.add(source, &b)) {
             notes.push(format!("{name} ({arch}) does not read: {e}"));
         }
     }
@@ -425,13 +452,15 @@ pub fn load(work_root: &Path, arch: &str, key: &Path) -> (Index, Vec<String>) {
 
 // ---------- the merge-back ----------
 
-/// What one merge-back did with a lease's downloads.
+/// What one merge-back did with a lease's downloads, and what it took out of the shared cache.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Merged {
-    /// Copied into the shared cache: the bytes the databases list.
+    /// Packages copied into the shared cache: the bytes the databases list.
     pub merged: usize,
     pub bytes: u64,
-    /// Listed and already there, as these bytes.
+    /// Signatures put beside their package in the shared cache: the pool's copies.
+    pub signed: usize,
+    /// Packages, and signatures downloaded with them, already there as these bytes.
     pub present: usize,
     /// Listed with other bytes (or another size): discarded.
     pub mismatched: usize,
@@ -439,26 +468,37 @@ pub struct Merged {
     pub unknown: usize,
     /// Listed by two databases with different bytes: discarded.
     pub ambiguous: usize,
+    /// Packages not merged for their signature, and the signatures downloaded with them: the
+    /// one downloaded is not the pool's copy, or the pool keeps none, or several, or did not
+    /// answer; and a signature downloaded beside no package merged.
+    pub unvouched: usize,
     /// Not a regular file, or a name no package has: discarded.
     pub refused: usize,
     /// Listed, but the copy failed (the disk, not the bytes: a full work root, an I/O error): not merged.
     pub failed: usize,
+    /// Packages taken out of the shared cache: there without the signature their task's
+    /// pacman downloaded with them, which every task of that repository fails on, and none of
+    /// the pool's to put beside them.
+    pub withdrawn: usize,
 }
 
 impl Merged {
     fn add(&mut self, o: &Merged) {
         self.merged += o.merged;
         self.bytes += o.bytes;
+        self.signed += o.signed;
         self.present += o.present;
         self.mismatched += o.mismatched;
         self.unknown += o.unknown;
         self.ambiguous += o.ambiguous;
+        self.unvouched += o.unvouched;
         self.refused += o.refused;
         self.failed += o.failed;
+        self.withdrawn += o.withdrawn;
     }
 
     fn discarded(&self) -> usize {
-        self.mismatched + self.unknown + self.ambiguous + self.refused
+        self.mismatched + self.unknown + self.ambiguous + self.unvouched + self.refused
     }
 }
 
@@ -483,13 +523,28 @@ fn read_record(path: &Path) -> Option<(String, u64)> {
         .flatten()
 }
 
-fn write_record(work_root: &Path, arch: &str, name: &str, sha: &str, size: u64) {
+fn write_record(
+    work_root: &Path,
+    arch: &str,
+    name: &str,
+    sha: &str,
+    size: u64,
+) -> std::io::Result<()> {
     let dir = merged_dir(work_root, arch);
     let tmp = tmp_dir(work_root).join("record.part");
-    let _ = std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::create_dir_all(tmp_dir(work_root)))
-        .and_then(|()| std::fs::write(&tmp, format!("{sha} {size}\n")))
-        .and_then(|()| std::fs::rename(&tmp, dir.join(name)));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(tmp_dir(work_root))?;
+    std::fs::write(&tmp, format!("{sha} {size}\n"))?;
+    std::fs::rename(&tmp, dir.join(name))
+}
+
+/// A file of the shared cache and its record removed: whether the file went.
+fn remove_merged(work_root: &Path, arch: &str, name: &str) -> bool {
+    let gone = std::fs::remove_file(pacman_dir(work_root, arch).join(name)).is_ok();
+    if gone {
+        let _ = std::fs::remove_file(merged_dir(work_root, arch).join(name));
+    }
+    gone
 }
 
 /// `src`'s bytes hashed without following a link, stopping past `size` bytes, and written
@@ -526,53 +581,182 @@ fn verify(src: &Path, mut to: Option<&mut File>, sha: &str, size: u64) -> std::i
     Ok(total == size && hex::encode(hasher.finalize()) == sha)
 }
 
-/// `src` copied into the shared cache as `dest` when its bytes are the listed ones: through
-/// `part` (0644, made new, on the same file system), on the disk before it is renamed into
-/// place and the rename on the disk after — a task never sees half a file, and a crash
-/// never leaves the name with half its bytes. `Ok(false)`: other bytes.
-fn place(
-    src: &Path,
-    part: &Path,
-    dest: &Path,
-    shared: &Path,
-    sha: &str,
-    size: u64,
-) -> std::io::Result<bool> {
-    let mut to = File::options()
+/// A new file in the dispatcher's own `cache/tmp` (0644): what is then renamed into the
+/// shared cache, on the same file system.
+fn part(path: &Path) -> std::io::Result<File> {
+    let _ = std::fs::remove_file(path);
+    File::options()
         .write(true)
         .create_new(true)
         .mode(0o644)
-        .open(part)?;
-    if !verify(src, Some(&mut to), sha, size)? {
-        return Ok(false);
-    }
+        .open(path)
+}
+
+/// `part`, written whole, renamed into place as `dest`: on the disk before, the rename after
+/// — a task never sees half a file, and a crash never leaves the name with half its bytes.
+fn commit(to: &File, part: &Path, dest: &Path, shared: &Path) -> std::io::Result<()> {
     to.sync_all()?;
     std::fs::set_permissions(part, Permissions::from_mode(0o644))?;
     std::fs::rename(part, dest)?;
-    File::open(shared)?.sync_all()?;
-    Ok(true)
+    File::open(shared)?.sync_all()
+}
+
+/// Whether the shared cache of `arch` holds `file` as the bytes `sha` and `size` (its record
+/// says so, and it is whole).
+fn holds(work_root: &Path, arch: &str, file: &str, sha: &str, size: u64) -> bool {
+    pacman_dir(work_root, arch)
+        .join(file)
+        .symlink_metadata()
+        .is_ok_and(|md| md.is_file() && md.len() == size)
+        && read_record(&merged_dir(work_root, arch).join(file))
+            .is_some_and(|(s, n)| s == sha && n == size)
+}
+
+// ---------- the packages' signatures ----------
+
+/// No package signature is longer: pacman downloads none past 16 KiB either.
+const MAX_SIG: u64 = 16 << 10;
+
+/// The pool's copy of a package's upstream signature, by the source whose database lists the
+/// package and the package's file name: `Ok(None)` when it keeps none there, `Err` when it
+/// does not answer.
+pub type Vouch<'a> = dyn FnMut(&str, &str) -> Result<Option<Vec<u8>>, String> + 'a;
+
+/// The pool's copies of the upstream signatures of one architecture's packages, asked for
+/// while a pass merges (`<pool>/<source>/<arch>/<file>.sig`, beside the package, as
+/// `worker/src/r2.ts` lays them out). A pool that does not answer is asked no more this pass:
+/// one timeout a pass, as for the databases.
+pub struct Signatures<'a> {
+    pub pool: &'a dyn Pool,
+    pub pool_url: &'a str,
+    pub arch: &'a str,
+    /// Where each copy is downloaded to, the dispatcher's own (`cache/tmp`).
+    pub tmp: PathBuf,
+    /// What the pool said when it did not answer.
+    pub unanswered: Option<String>,
+}
+
+impl Signatures<'_> {
+    pub fn of(&mut self, source: &str, file: &str) -> Result<Option<Vec<u8>>, String> {
+        if let Some(e) = &self.unanswered {
+            return Err(e.clone());
+        }
+        let url = format!(
+            "{}/{source}/{}/{file}.sig",
+            self.pool_url.trim_end_matches('/'),
+            self.arch
+        );
+        let dest = self.tmp.join("signature.part");
+        let _ = std::fs::create_dir_all(&self.tmp);
+        let got = match self.pool.public_file(&url, &dest) {
+            Ok(true) => Ok(read_capped(&dest, MAX_SIG)
+                .ok()
+                .flatten()
+                .filter(|s| !s.is_empty())),
+            Ok(false) => Ok(None),
+            Err(e) => {
+                let said = crate::orders::clean_line(&e.to_string());
+                self.unanswered = Some(said.clone());
+                Err(said)
+            }
+        };
+        let _ = std::fs::remove_file(&dest);
+        got
+    }
+}
+
+/// `src`'s bytes, without following a link, when it is a regular file of at most `cap` bytes.
+fn read_capped(src: &Path, cap: u64) -> std::io::Result<Option<Vec<u8>>> {
+    use rustix::fs::{Mode, OFlags};
+    let fd = rustix::fs::open(
+        src,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let from = File::from(fd);
+    if !from.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    from.take(cap + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= cap).then_some(bytes))
+}
+
+/// What goes beside a package merged into the shared cache.
+#[derive(Debug, PartialEq, Eq)]
+enum Beside {
+    /// The pool's copy of its upstream signature.
+    Signature(Vec<u8>),
+    /// Nothing: the pool keeps no signature of it (its own builds), and its task's pacman
+    /// downloaded none.
+    Nothing,
+    /// The package is not merged: the signature its task's pacman downloaded is not the
+    /// pool's copy, or the pool keeps none of it, or keeps several (two sources' upstreams
+    /// signed these bytes, and which one a task's keyring takes is the task's repository's),
+    /// or did not answer.
+    Unvouched,
+}
+
+/// What goes beside `package` (listed once by `index`), whose task's pacman downloaded
+/// `downloaded` beside it (`None`: none, or one that does not read).
+///
+/// pacman downloads a package's `.sig` with it from a repository whose `SigLevel` checks
+/// packages (the image's own Arch and Arch Linux ARM sections, where most of a build's
+/// dependencies come from) and checks the package by the `.sig` beside the file it found:
+/// one in the read-only shared cache without its `.sig` is downloaded again, then refused
+/// (`missing required signature`), failing every task that installs it from there — and a
+/// wrong one, which pacman cannot delete, fails them too. So the signature is the pool's own
+/// copy of the upstream one, or the package is not merged; and the pool's copy goes beside it
+/// even when the task downloaded none, since a task's recipe can delete its own.
+fn beside(
+    index: &Index,
+    package: &str,
+    downloaded: Option<&[u8]>,
+    vouch: &mut Vouch<'_>,
+) -> Beside {
+    let mut copies = BTreeSet::new();
+    for source in index.sources(package) {
+        match vouch(source, package) {
+            Ok(Some(copy)) => {
+                copies.insert(copy);
+            }
+            Ok(None) => {}
+            Err(_) => return Beside::Unvouched,
+        }
+    }
+    if copies.len() > 1 {
+        return Beside::Unvouched;
+    }
+    match (downloaded, copies.pop_first()) {
+        (Some(d), Some(copy)) if !d.is_empty() && d == copy.as_slice() => Beside::Signature(copy),
+        (Some(_), _) => Beside::Unvouched,
+        (None, Some(copy)) => Beside::Signature(copy),
+        (None, None) => Beside::Nothing,
+    }
 }
 
 /// One lease's downloads (`incoming`) merged into the shared cache of `arch` by `index`:
-/// each file listed once, with its size and SHA-256, is copied in and recorded; one already
-/// there is left as it is only when its record says these bytes (else it is replaced: it
-/// was merged when the databases listed others, or is not whole); every other is
-/// discarded. `incoming` itself is left to the caller. With the counts, the first copy
-/// that failed for the disk's sake, for the log.
+/// each package listed once, with its size and SHA-256, is copied in and recorded, with the
+/// pool's copy of its upstream signature beside it ([`beside`]: the package is not merged
+/// when that cannot be had); one already there is left as it is only when its record says
+/// these bytes (else it is replaced: it was merged when the databases listed others, or is
+/// not whole); every other file is discarded. `incoming` itself is left to the caller. With
+/// the counts, the first copy that failed for the disk's sake, for the log.
 pub fn merge(
     work_root: &Path,
     arch: &str,
     incoming: &Path,
     index: &Index,
+    vouch: &mut Vouch<'_>,
 ) -> (Merged, Option<String>) {
     let mut m = Merged::default();
     let mut failure = None;
     let Ok(entries) = std::fs::read_dir(incoming) else {
         return (m, failure);
     };
-    let (shared, tmp) = (pacman_dir(work_root, arch), tmp_dir(work_root));
-    let _ = std::fs::create_dir_all(&tmp);
-    let _ = std::fs::create_dir_all(&shared);
+    let _ = std::fs::create_dir_all(tmp_dir(work_root));
+    let _ = std::fs::create_dir_all(pacman_dir(work_root, arch));
+    let (mut packages, mut signatures) = (Vec::new(), HashMap::new());
     for e in entries.flatten() {
         let Ok(name) = e.file_name().into_string() else {
             m.refused += 1;
@@ -580,61 +764,170 @@ pub fn merge(
         };
         // `DirEntry::metadata` does not follow a link: a link, a directory (pacman's own
         // download directories) or a device is nothing to merge.
-        if !e.metadata().is_ok_and(|md| md.file_type().is_file()) || !file_name_ok(&name) {
+        if !e.metadata().is_ok_and(|md| md.file_type().is_file()) {
             m.refused += 1;
-            continue;
-        }
-        let (sha, size) = match index.listed(&name) {
-            Listed::Once(sha, size) => (sha, size),
-            Listed::Unknown => {
-                m.unknown += 1;
-                continue;
-            }
-            Listed::Ambiguous => {
-                m.ambiguous += 1;
-                continue;
-            }
-        };
-        let dest = shared.join(&name);
-        let whole = dest
-            .symlink_metadata()
-            .is_ok_and(|md| md.is_file() && md.len() == size);
-        if whole
-            && read_record(&merged_dir(work_root, arch).join(&name))
-                .is_some_and(|(s, n)| s == sha && n == size)
-        {
-            m.present += 1;
-            continue;
-        }
-        // One file at a time, under a name of its own: a package's name may already be 255 bytes long.
-        let part = tmp.join("merging.part");
-        let _ = std::fs::remove_file(&part);
-        match place(&e.path(), &part, &dest, &shared, &sha, size) {
-            Ok(true) => {
-                // A record that is not written leaves the file to be hashed again at the next pass.
-                write_record(work_root, arch, &name, &sha, size);
-                m.merged += 1;
-                m.bytes += size;
-            }
-            Ok(false) => {
-                let _ = std::fs::remove_file(&part);
-                m.mismatched += 1;
-            }
-            Err(err) => {
-                let _ = std::fs::remove_file(&part);
-                m.failed += 1;
-                failure.get_or_insert_with(|| format!("{name}: {err}"));
-            }
+        } else if let Some(package) = name.strip_suffix(".sig").filter(|p| file_name_ok(p)) {
+            signatures.insert(package.to_owned(), e.path());
+        } else if file_name_ok(&name) {
+            packages.push((name, e.path()));
+        } else {
+            m.refused += 1;
         }
     }
+    for (name, src) in packages {
+        let downloaded = signatures.remove(&name);
+        let Listed::Once(sha, size) = index.listed(&name) else {
+            if index.listed(&name) == Listed::Unknown {
+                m.unknown += 1;
+            } else {
+                m.ambiguous += 1;
+            }
+            m.unvouched += usize::from(downloaded.is_some());
+            continue;
+        };
+        let downloaded =
+            downloaded.map(|p| read_capped(&p, MAX_SIG).ok().flatten().unwrap_or_default());
+        let file = Download {
+            name: &name,
+            src: &src,
+            sha: &sha,
+            size,
+            downloaded,
+        };
+        if let Err(e) = merge_one(work_root, arch, index, &file, vouch, &mut m) {
+            m.failed += 1;
+            failure.get_or_insert_with(|| format!("{name}: {e}"));
+        }
+    }
+    // A signature without its package: pacman downloads both, or neither.
+    m.unvouched += signatures.len();
     (m, failure)
+}
+
+/// One package of a lease's downloads, listed once.
+struct Download<'a> {
+    name: &'a str,
+    src: &'a Path,
+    sha: &'a str,
+    size: u64,
+    /// The signature its task's pacman downloaded with it: empty when there is one that does
+    /// not read (past 16 KiB, say), which is no signature of the pool's either.
+    downloaded: Option<Vec<u8>>,
+}
+
+/// One package merged ([`merge`]). Into the shared cache in the order that leaves no task a
+/// package without the signature it was merged with: an old package of other bytes out
+/// first, then its signature; the new signature in (its record first: a crash leaves a record
+/// of nothing, never a signature unrecorded), then the package. An error is the disk's, and
+/// counted by the caller.
+fn merge_one(
+    work_root: &Path,
+    arch: &str,
+    index: &Index,
+    d: &Download<'_>,
+    vouch: &mut Vouch<'_>,
+    m: &mut Merged,
+) -> std::io::Result<()> {
+    let shared = pacman_dir(work_root, arch);
+    let sig_name = format!("{}.sig", d.name);
+    let with_sig = usize::from(d.downloaded.is_some());
+    let downloaded = d.downloaded.as_deref();
+    if holds(work_root, arch, d.name, d.sha, d.size) {
+        let Some(got) = downloaded else {
+            // What it holds beside it stays as it is.
+            m.present += 1;
+            return Ok(());
+        };
+        let sig_there = read_record(&merged_dir(work_root, arch).join(&sig_name));
+        if sig_there.is_some() && shared.join(&sig_name).is_file() {
+            // A signature there already: the pool's, whatever this one is.
+            m.present += 1 + with_sig;
+            return Ok(());
+        }
+        // There without a signature, while its task's pacman downloaded one with it: every
+        // task of that repository fails on it. The pool's copy goes beside it, or it goes.
+        return match beside(index, d.name, Some(got), vouch) {
+            Beside::Signature(sig) => {
+                put_signature(work_root, arch, &sig_name, &sig)?;
+                m.present += 1;
+                m.signed += 1;
+                Ok(())
+            }
+            Beside::Nothing | Beside::Unvouched => {
+                if remove_merged(work_root, arch, d.name) {
+                    m.withdrawn += 1;
+                }
+                m.unvouched += 1 + with_sig;
+                Ok(())
+            }
+        };
+    }
+    let path = tmp_dir(work_root).join("merging.part");
+    let mut to = part(&path).inspect_err(|_| m.unvouched += with_sig)?;
+    let copied = verify(d.src, Some(&mut to), d.sha, d.size);
+    if !matches!(copied, Ok(true)) {
+        let _ = std::fs::remove_file(&path);
+        m.unvouched += with_sig;
+        m.mismatched += usize::from(copied.is_ok());
+        return copied.map(|_| ());
+    }
+    let sig = match beside(index, d.name, downloaded, vouch) {
+        Beside::Signature(sig) => Some(sig),
+        Beside::Nothing => None,
+        Beside::Unvouched => {
+            let _ = std::fs::remove_file(&path);
+            m.unvouched += 1 + with_sig;
+            return Ok(());
+        }
+    };
+    let placed = (|| {
+        remove_merged(work_root, arch, d.name);
+        remove_merged(work_root, arch, &sig_name);
+        if let Some(sig) = &sig {
+            put_signature(work_root, arch, &sig_name, sig)?;
+        }
+        commit(&to, &path, &shared.join(d.name), &shared)
+    })();
+    if let Err(e) = placed {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    // A record that is not written leaves the file to be hashed again at the next pass.
+    let _ = write_record(work_root, arch, d.name, d.sha, d.size);
+    m.merged += 1;
+    m.bytes += d.size;
+    // The one downloaded, if any, was these bytes ([`beside`]): it is the one put there.
+    m.signed += usize::from(sig.is_some());
+    Ok(())
+}
+
+/// The pool's copy of a signature put in the shared cache as `name`, its record first.
+fn put_signature(work_root: &Path, arch: &str, name: &str, sig: &[u8]) -> std::io::Result<()> {
+    let shared = pacman_dir(work_root, arch);
+    write_record(
+        work_root,
+        arch,
+        name,
+        &hex::encode(Sha256::digest(sig)),
+        sig.len() as u64,
+    )?;
+    let path = tmp_dir(work_root).join("signature-merging.part");
+    let placed = part(&path).and_then(|mut to| {
+        to.write_all(sig)?;
+        commit(&to, &path, &shared.join(name), &shared)
+    });
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(merged_dir(work_root, arch).join(name));
+    }
+    placed
 }
 
 /// What a check of the shared pacman cache against the databases of the day did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Rechecked {
     /// Files whose name the databases now list with other bytes, or twice at odds, or that
-    /// are not whole: removed.
+    /// are not whole, and signatures beside no package or without their record: removed.
     pub removed: usize,
     pub freed: u64,
     /// Files without a record (a crash before it was written) hashed, found to be the
@@ -658,14 +951,17 @@ impl Rechecked {
 /// so it goes; so does one whose size is not its record's (a crash while it was written).
 /// A file without a record is hashed and kept only when it is the listed bytes. A name no
 /// database lists any more (an older version) is no task's to resolve: the versions'
-/// pruning takes it. Records of files no longer there go too. `index` must not be empty:
-/// without the databases nothing is known, and nothing is removed.
+/// pruning takes it. A package's signature stays only beside its package, whole and with its
+/// record (the pool's copy, recorded before it was put there); one that is not takes its
+/// package with it, the package first. Records of files no longer there go too. `index` must not be empty: without the
+/// databases nothing is known, and nothing is removed.
 pub fn recheck(work_root: &Path, arch: &str, index: &Index) -> Rechecked {
     let mut out = Rechecked::default();
     if index.is_empty() {
         return out;
     }
     let (shared, records) = (pacman_dir(work_root, arch), merged_dir(work_root, arch));
+    let mut signatures = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&shared) {
         for e in entries.flatten() {
             let Ok(name) = e.file_name().into_string() else {
@@ -673,6 +969,10 @@ pub fn recheck(work_root: &Path, arch: &str, index: &Index) -> Rechecked {
             };
             let Ok(md) = e.metadata() else { continue };
             if !md.file_type().is_file() {
+                continue;
+            }
+            if name.strip_suffix(".sig").is_some() {
+                signatures.push((e.path(), name, md.len()));
                 continue;
             }
             let record = read_record(&records.join(&name));
@@ -684,7 +984,7 @@ pub fn recheck(work_root: &Path, arch: &str, index: &Index) -> Rechecked {
                     Some(r) => r == (sha, size),
                     None => match verify(&e.path(), None, &sha, size) {
                         Ok(true) => {
-                            write_record(work_root, arch, &name, &sha, size);
+                            let _ = write_record(work_root, arch, &name, &sha, size);
                             out.adopted += 1;
                             true
                         }
@@ -699,6 +999,31 @@ pub fn recheck(work_root: &Path, arch: &str, index: &Index) -> Rechecked {
                 out.removed += 1;
                 out.freed += md.len();
             }
+        }
+    }
+    // After the packages: one removed above leaves its signature beside nothing. One not
+    // whole, or without its record, takes its package with it, first: a package without the
+    // signature it was merged with fails every task of a repository that checks it.
+    for (path, name, len) in signatures {
+        let package = name.strip_suffix(".sig").unwrap_or(&name);
+        let beside = shared
+            .join(package)
+            .symlink_metadata()
+            .is_ok_and(|md| md.is_file());
+        if beside && read_record(&records.join(&name)).is_some_and(|(_, n)| n == len) {
+            continue;
+        }
+        if beside {
+            let size = std::fs::symlink_metadata(shared.join(package)).map_or(0, |md| md.len());
+            if remove_merged(work_root, arch, package) {
+                out.removed += 1;
+                out.freed += size;
+            }
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            let _ = std::fs::remove_file(records.join(&name));
+            out.removed += 1;
+            out.freed += len;
         }
     }
     if let Ok(entries) = std::fs::read_dir(&records) {
@@ -733,7 +1058,9 @@ pub fn package_of(file: &str) -> Option<(String, String)> {
 
 /// The shared pacman caches of both architectures pruned: the two newest versions of each
 /// package kept, then, while they hold more than `cap` bytes, the oldest merged removed
-/// first, a package's older version before any newest one; a file's record goes with it.
+/// first, a package's older version before any newest one; a file's record goes with it, and
+/// its signature after it. A signature is no version of its own, and one beside no package
+/// goes.
 ///
 /// A task's pacman that found a file here before it was removed, and opens it again to
 /// check or install it, fails its transaction (`could not find package in cache`: it does
@@ -745,14 +1072,28 @@ pub fn prune_pacman(work_root: &Path, cap: u64) -> Pruned {
     struct File {
         path: PathBuf,
         record: PathBuf,
+        /// Its signature, with its record and length.
+        sig: Option<(PathBuf, PathBuf, u64)>,
+        /// Its length and its signature's.
         len: u64,
         at: SystemTime,
         newest: bool,
     }
-    let remove = |f: &File| {
-        let gone = std::fs::remove_file(&f.path).is_ok();
-        if gone {
-            let _ = std::fs::remove_file(&f.record);
+    // What was removed: how many files, how many bytes. The package first: a task that finds
+    // its signature alone downloads the package itself, one that finds the package alone fails.
+    let remove = |f: &File| -> (usize, u64) {
+        if std::fs::remove_file(&f.path).is_err() {
+            return (0, 0);
+        }
+        let _ = std::fs::remove_file(&f.record);
+        let mut gone = (1, f.len);
+        if let Some((sig, record, len)) = &f.sig {
+            if std::fs::remove_file(sig).is_ok() {
+                let _ = std::fs::remove_file(record);
+                gone.0 += 1;
+            } else {
+                gone.1 -= len;
+            }
         }
         gone
     };
@@ -762,17 +1103,32 @@ pub fn prune_pacman(work_root: &Path, cap: u64) -> Pruned {
         let Ok(entries) = std::fs::read_dir(pacman_dir(work_root, arch)) else {
             continue;
         };
-        let mut by_package: BTreeMap<String, Vec<(String, File)>> = BTreeMap::new();
+        let records = merged_dir(work_root, arch);
+        let (mut files, mut sigs) = (Vec::new(), HashMap::new());
         for e in entries.flatten() {
             let Ok(md) = e.metadata() else { continue };
             if !md.file_type().is_file() {
                 continue;
             }
             let name = e.file_name().to_string_lossy().into_owned();
+            match name.strip_suffix(".sig") {
+                Some(package) => {
+                    sigs.insert(
+                        package.to_owned(),
+                        (e.path(), records.join(&name), md.len()),
+                    );
+                }
+                None => files.push((name, e.path(), md)),
+            }
+        }
+        let mut by_package: BTreeMap<String, Vec<(String, File)>> = BTreeMap::new();
+        for (name, path, md) in files {
+            let sig = sigs.remove(&name);
             let f = File {
-                path: e.path(),
-                record: merged_dir(work_root, arch).join(&name),
-                len: md.len(),
+                path,
+                record: records.join(&name),
+                len: md.len() + sig.as_ref().map_or(0, |s| s.2),
+                sig,
                 at: md.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                 newest: false,
             };
@@ -780,15 +1136,24 @@ pub fn prune_pacman(work_root: &Path, cap: u64) -> Pruned {
             let (pkg, ver) = package_of(&name).unwrap_or_else(|| (name.clone(), String::new()));
             by_package.entry(pkg).or_default().push((ver, f));
         }
+        // A signature beside no package.
+        for (path, record, len) in sigs.into_values() {
+            if std::fs::remove_file(&path).is_ok() {
+                let _ = std::fs::remove_file(record);
+                out.removed += 1;
+                out.freed += len;
+            }
+        }
         for (_, mut versions) in by_package {
             versions.sort_by(|(a, _), (b, _)| pkg_manifest::vercmp(b, a));
             for (i, (_, mut f)) in versions.into_iter().enumerate() {
                 if i < KEEP_VERSIONS {
                     f.newest = i == 0;
                     kept.push(f);
-                } else if remove(&f) {
-                    out.removed += 1;
-                    out.freed += f.len;
+                } else {
+                    let (n, freed) = remove(&f);
+                    out.removed += n;
+                    out.freed += freed;
                 }
             }
         }
@@ -799,11 +1164,10 @@ pub fn prune_pacman(work_root: &Path, cap: u64) -> Pruned {
         if total <= cap {
             break;
         }
-        if remove(f) {
-            out.removed += 1;
-            out.freed += f.len;
-            total -= f.len;
-        }
+        let (n, freed) = remove(f);
+        out.removed += n;
+        out.freed += freed;
+        total -= freed;
     }
     out.left = total;
     out
@@ -956,15 +1320,17 @@ impl Report {
         let m = &self.merged;
         if self.leases > 0 {
             parts.push(format!(
-                "the downloads of {} lease(s): {} merged into the shared pacman cache ({} MB), {} there already, {} discarded ({} not the bytes the pool's signed databases list, {} listed by none, {} listed twice with different bytes, {} no package file)",
+                "the downloads of {} lease(s): {} merged into the shared pacman cache ({} MB) and {} signature(s) of the pool's beside their package, {} there already, {} discarded ({} not the bytes the pool's signed databases list, {} listed by none, {} listed twice with different bytes, {} for a signature the pool does not keep as the one downloaded, {} no package file)",
                 self.leases,
                 m.merged,
                 m.bytes >> 20,
+                m.signed,
                 m.present,
                 m.discarded(),
                 m.mismatched,
                 m.unknown,
                 m.ambiguous,
+                m.unvouched,
                 m.refused
             ));
         }
@@ -972,6 +1338,12 @@ impl Report {
             parts.push(format!(
                 "{} listed download(s) could not be copied into the shared pacman cache (the disk, not the bytes; below)",
                 m.failed
+            ));
+        }
+        if m.withdrawn > 0 {
+            parts.push(format!(
+                "{} package(s) taken out of the shared pacman cache: there without the signature a task's pacman downloaded with them, and none of the pool's to put beside them",
+                m.withdrawn
             ));
         }
         let c = &self.rechecked;
@@ -1056,14 +1428,28 @@ pub fn upkeep(u: &Upkeep) -> Report {
         } else {
             r.rechecked.add(&recheck(w, arch, &index));
         }
+        let mut signatures = Signatures {
+            pool: &*u.pool,
+            pool_url: &u.pool_url,
+            arch,
+            tmp: tmp.clone(),
+            unanswered: None,
+        };
         for lease in leases {
-            let (m, err) = merge(w, arch, &lease, &index);
+            let (m, err) = merge(w, arch, &lease, &index, &mut |source, file| {
+                signatures.of(source, file)
+            });
             r.merged.add(&m);
             if failure.is_none() {
                 failure = err;
             }
             r.leases += 1;
             let _ = std::fs::remove_dir_all(&lease);
+        }
+        if let Some(e) = signatures.unanswered {
+            r.notes.push(format!(
+                "the pool's copies of the packages' signatures ({arch}): {e}; no package new to the shared cache is merged until it answers (asked again at the next pass)"
+            ));
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1084,10 +1470,13 @@ pub(crate) mod tests {
     //! The caches' own tests (#341): the merge-back against the fixture databases
     //! (`tests/fixtures/pool-dbs/`, signed by a key of their own, `write_the_fixtures`),
     //! with matching, mismatching, unknown and ambiguous files, and a file there already
-    //! with other bytes replaced; the shared cache checked again by a later snapshot of
-    //! the databases; a database that does not verify left unread; the pacman cache pruned
-    //! to two versions and its cap; the build caches least recently used first and never
-    //! one in use. (`refresh` against a pool is the dispatcher's tests', with its fake pool.)
+    //! with other bytes replaced; a package's signature merged only as the pool's own copy
+    //! and beside its package; the shared cache checked again by a later snapshot of the
+    //! databases, a signature beside no package or without its record removed; a database
+    //! that does not verify left unread; the pacman cache pruned to two versions and its
+    //! cap, a signature with its package; the build caches least recently used first and
+    //! never one in use. (`refresh` and [`Signatures`] against a pool are the dispatcher's
+    //! tests', with its fake pool.)
 
     use super::*;
 
@@ -1123,6 +1512,12 @@ pub(crate) mod tests {
 
     fn sha(b: &[u8]) -> String {
         hex::encode(Sha256::digest(b))
+    }
+
+    /// A pool that keeps no copy of any signature.
+    #[allow(clippy::unnecessary_wraps)] // a `Vouch`
+    fn none(_: &str, _: &str) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
     }
 
     fn names_in(dir: &Path) -> Vec<String> {
@@ -1162,7 +1557,7 @@ pub(crate) mod tests {
         // Another database under the signature of the real one: a planted listing.
         let mut other = Index::default();
         let planted = crate::build_database(&[], crate::Flavor::Db).unwrap();
-        other.add(&planted).unwrap();
+        other.add("core", &planted).unwrap();
         std::fs::write(&db, planted).unwrap();
         let (index, notes) = load(t.path(), "x86_64", &fixture_dir().join("pool.pub.asc"));
         assert_eq!(index.listed(&file("libfixture", "x86_64")), Listed::Unknown);
@@ -1205,6 +1600,7 @@ pub(crate) mod tests {
         let mut same_size = evil.clone();
         same_size[0] ^= 1;
         put(&file("evil", arch), &same_size);
+        // A signature beside a package that is not merged: discarded, the pool not asked.
         put(&format!("evil-1.0-1-{arch}.pkg.tar.zst.sig"), b"x");
         // Unknown: a recipe's own file, and pacman's half-downloaded one.
         put(&file("stranger", arch), b"planted");
@@ -1218,7 +1614,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let shared = pacman_dir(work, arch);
-        let (m, failure) = merge(work, arch, &incoming, &index);
+        let (m, failure) = merge(work, arch, &incoming, &index, &mut none);
         assert_eq!(
             m,
             Merged {
@@ -1226,10 +1622,13 @@ pub(crate) mod tests {
                 bytes: lib.len() as u64,
                 present: 0,
                 mismatched: 1,
-                unknown: 3,
+                unknown: 2,
                 ambiguous: 1,
+                signed: 0,
+                unvouched: 1,
                 refused: 2,
                 failed: 0,
+                withdrawn: 0,
             }
         );
         assert_eq!(failure, None);
@@ -1246,7 +1645,7 @@ pub(crate) mod tests {
             Some((sha(&lib), lib.len() as u64))
         );
         // The same file from a second lease is there already; nothing half-made is left behind.
-        let (m, _) = merge(work, arch, &incoming, &index);
+        let (m, _) = merge(work, arch, &incoming, &index, &mut none);
         assert_eq!((m.merged, m.present), (0, 1));
         assert_eq!(std::fs::read_dir(tmp_dir(work)).unwrap().count(), 0);
         // There with other bytes than the listed ones (merged by another listing, or not whole
@@ -1260,12 +1659,13 @@ pub(crate) mod tests {
             &file("libfixture", arch),
             &sha(&stale),
             stale.len() as u64,
-        );
-        let (m, _) = merge(work, arch, &incoming, &index);
+        )
+        .unwrap();
+        let (m, _) = merge(work, arch, &incoming, &index, &mut none);
         assert_eq!((m.merged, m.present), (1, 0));
         assert_eq!(std::fs::read(&merged).unwrap(), lib);
         std::fs::write(&merged, &lib[..10]).unwrap();
-        let (m, _) = merge(work, arch, &incoming, &index);
+        let (m, _) = merge(work, arch, &incoming, &index, &mut none);
         assert_eq!((m.merged, m.present), (1, 0));
         assert_eq!(std::fs::read(&merged).unwrap(), lib);
         // A copy that fails for the disk's sake is no mismatch: counted apart, and said.
@@ -1273,8 +1673,8 @@ pub(crate) mod tests {
         place_fixtures(t3.path(), arch);
         std::fs::create_dir_all(t3.path().join("cache")).unwrap();
         std::fs::write(tmp_dir(t3.path()), b"not a directory").unwrap();
-        let (m, failure) = merge(t3.path(), arch, &incoming, &index);
-        assert_eq!((m.merged, m.failed, m.mismatched, m.unknown), (0, 2, 0, 3));
+        let (m, failure) = merge(t3.path(), arch, &incoming, &index, &mut none);
+        assert_eq!((m.merged, m.failed, m.mismatched, m.unknown), (0, 2, 0, 2));
         assert!(
             failure
                 .as_deref()
@@ -1283,16 +1683,193 @@ pub(crate) mod tests {
         );
         // With no database read, everything is discarded.
         let t2 = tempfile::tempdir().unwrap();
-        let (m, _) = merge(t2.path(), arch, &incoming, &Index::default());
-        assert_eq!((m.merged, m.unknown), (0, 6));
+        let (m, _) = merge(t2.path(), arch, &incoming, &Index::default(), &mut none);
+        assert_eq!((m.merged, m.unknown, m.unvouched), (0, 5, 1));
         assert!(names_in(&pacman_dir(t2.path(), arch)).is_empty());
+    }
+
+    /// A package's signature (#341): pacman downloads one beside each package of a repository
+    /// whose `SigLevel` checks packages, and fails on a package in a cache without its `.sig`
+    /// beside it, or beside a wrong one. A package is merged with the pool's own copy of its
+    /// upstream signature beside it — which must be the very bytes its task downloaded, when it
+    /// downloaded one — or not at all; one the pool keeps none of goes alone.
+    #[test]
+    #[allow(clippy::too_many_lines)] // a vouched signature, then every way one is not
+    fn a_package_is_merged_with_the_pools_own_copy_of_its_signature_or_not_at_all() {
+        let t = tempfile::tempdir().unwrap();
+        let work = t.path();
+        let arch = "x86_64";
+        let key = fixture_dir().join("pool.pub.asc");
+        place_fixtures(work, arch);
+        let (index, _) = load(work, arch, &key);
+        let shared = pacman_dir(work, arch);
+        let lib = fixture_bytes("libfixture", "libfixture", arch);
+        let libname = file("libfixture", arch);
+        let sig_name = format!("{libname}.sig");
+        let upstream = b"libfixture's upstream signature".to_vec();
+        // The pool's copies, by source and file; and what was asked of it.
+        let pool: HashMap<(String, String), Vec<u8>> =
+            [(("core".to_owned(), libname.clone()), upstream.clone())].into();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let mut vouch = |source: &str, file: &str| {
+            asked.borrow_mut().push(format!("{source}/{file}"));
+            Ok(pool.get(&(source.to_owned(), file.to_owned())).cloned())
+        };
+        let leases = std::cell::Cell::new(0);
+        let lease = |files: &[(&str, &[u8])]| {
+            leases.set(leases.get() + 1);
+            let dir = work.join(format!("incoming-{}", leases.get()));
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, bytes) in files {
+                std::fs::write(dir.join(name), bytes).unwrap();
+            }
+            dir
+        };
+        let fresh = || {
+            let t = tempfile::tempdir().unwrap();
+            place_fixtures(t.path(), arch);
+            t
+        };
+        // The package and its signature, the one the pool keeps: both there, the signature
+        // asked of core (the source whose database lists the package), recorded.
+        let signed = lease(&[(&libname, &lib), (&sig_name, &upstream)]);
+        let (m, failure) = merge(work, arch, &signed, &index, &mut vouch);
+        assert_eq!((m.merged, m.signed, m.unvouched, failure), (1, 1, 0, None));
+        assert_eq!(*asked.borrow(), [format!("core/{libname}")]);
+        assert_eq!(std::fs::read(shared.join(&sig_name)).unwrap(), upstream);
+        assert_eq!(
+            std::fs::metadata(shared.join(&sig_name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o644
+        );
+        assert_eq!(
+            read_record(&merged_dir(work, arch).join(&sig_name)),
+            Some((sha(&upstream), upstream.len() as u64))
+        );
+        // A second lease's same two files: there already, the pool not asked again; and a
+        // signature a recipe forged beside the package there: the pool's stays.
+        let (m, _) = merge(work, arch, &signed, &index, &mut vouch);
+        assert_eq!((m.present, m.signed), (2, 0));
+        let forged = lease(&[(&libname, &lib), (&sig_name, b"forged by a recipe")]);
+        let (m, _) = merge(work, arch, &forged, &index, &mut vouch);
+        assert_eq!((m.present, m.signed, m.unvouched), (2, 0, 0));
+        assert_eq!(asked.borrow().len(), 1);
+        assert_eq!(std::fs::read(shared.join(&sig_name)).unwrap(), upstream);
+        // Into a shared cache that does not hold it: the forged one keeps the package out,
+        // since a task of its repository would fail on either.
+        let t2 = fresh();
+        let (m, _) = merge(t2.path(), arch, &forged, &index, &mut vouch);
+        assert_eq!((m.merged, m.signed, m.unvouched), (0, 0, 2));
+        assert!(names_in(&pacman_dir(t2.path(), arch)).is_empty());
+        // Downloaded without one (its recipe deleted it, or its repository checks none): the
+        // pool's copy goes beside it all the same.
+        let alone = lease(&[(&libname, &lib)]);
+        let (m, _) = merge(t2.path(), arch, &alone, &index, &mut vouch);
+        assert_eq!((m.merged, m.signed), (1, 1));
+        assert_eq!(
+            std::fs::read(pacman_dir(t2.path(), arch).join(&sig_name)).unwrap(),
+            upstream
+        );
+        // The pool keeps none: alone, unless its task downloaded one (then not at all).
+        let mut no_copy = |_: &str, _: &str| Ok(None);
+        let t3 = fresh();
+        let (m, _) = merge(t3.path(), arch, &signed, &index, &mut no_copy);
+        assert_eq!((m.merged, m.unvouched), (0, 2));
+        let (m, _) = merge(t3.path(), arch, &alone, &index, &mut no_copy);
+        assert_eq!((m.merged, m.signed), (1, 0));
+        assert_eq!(names_in(&pacman_dir(t3.path(), arch)), [libname.as_str()]);
+        // There alone, then a task's pacman downloads it with a signature (its repository
+        // checks them, and failed on it): the pool's copy goes beside it now ...
+        let (m, _) = merge(t3.path(), arch, &signed, &index, &mut vouch);
+        assert_eq!((m.present, m.signed), (1, 1));
+        assert_eq!(
+            names_in(&pacman_dir(t3.path(), arch)),
+            [libname.as_str(), sig_name.as_str()]
+        );
+        // ... or, with none of the pool's, it goes: every task of that repository fails on it.
+        let t4 = fresh();
+        merge(t4.path(), arch, &alone, &index, &mut no_copy);
+        let (m, _) = merge(t4.path(), arch, &signed, &index, &mut no_copy);
+        assert_eq!((m.withdrawn, m.unvouched, m.present), (1, 2, 0));
+        assert!(names_in(&pacman_dir(t4.path(), arch)).is_empty());
+        assert!(names_in(&merged_dir(t4.path(), arch)).is_empty());
+        // A pool that does not answer: nothing merged, and asked once for the package.
+        let calls = std::cell::Cell::new(0);
+        let mut deaf = |_: &str, _: &str| {
+            calls.set(calls.get() + 1);
+            Err("the pool is down".to_owned())
+        };
+        let t5 = fresh();
+        let (m, _) = merge(t5.path(), arch, &alone, &index, &mut deaf);
+        assert_eq!((m.merged, m.unvouched, calls.get()), (0, 1, 1));
+        assert!(names_in(&pacman_dir(t5.path(), arch)).is_empty());
+        // Listed once by two sources whose upstreams signed the bytes each: which one a task's
+        // keyring takes is its repository's, so neither goes, nor the package. One copy: it.
+        let mut two = Index::default();
+        let core_db = std::fs::read(fixture_dir().join(db_name("core"))).unwrap();
+        two.add("core", &core_db).unwrap();
+        two.add("extra", &core_db).unwrap();
+        assert!(matches!(two.listed(&libname), Listed::Once(..)));
+        let mut differ = |source: &str, _: &str| Ok(Some(source.as_bytes().to_vec()));
+        let t6 = fresh();
+        let (m, _) = merge(t6.path(), arch, &alone, &two, &mut differ);
+        assert_eq!((m.merged, m.unvouched), (0, 1));
+        let mut agree = |_: &str, _: &str| Ok(Some(upstream.clone()));
+        let (m, _) = merge(t6.path(), arch, &signed, &two, &mut agree);
+        assert_eq!((m.merged, m.signed), (1, 1));
+        // Beside a package not merged (other bytes) or with none (one no database lists, one
+        // listed twice at odds, none in the lease), or as a link: discarded, the pool not asked.
+        let before = asked.borrow().len();
+        let mut evil = fixture_bytes("evil", "evil", arch);
+        evil[0] ^= 1;
+        let odd = lease(&[
+            (&file("evil", arch), &evil),
+            (&format!("{}.sig", file("evil", arch)), b"sig"),
+            (&file("stranger", arch), b"x"),
+            (&format!("{}.sig", file("stranger", arch)), b"sig"),
+            (&format!("{}.sig", file("twin", arch)), b"sig"),
+        ]);
+        std::os::unix::fs::symlink(
+            shared.join(&sig_name),
+            odd.join(format!("{}.sig", file("linked", arch))),
+        )
+        .unwrap();
+        let (m, _) = merge(work, arch, &odd, &index, &mut vouch);
+        assert_eq!(
+            (m.mismatched, m.unknown, m.unvouched, m.refused, m.signed),
+            (1, 1, 3, 1, 0),
+            "{m:?}"
+        );
+        assert_eq!(asked.borrow().len(), before);
+        // A signature past 16 KiB is none of the pool's: the package stays out.
+        let long = lease(&[(&libname, &lib), (&sig_name, &vec![b'x'; 16 * 1024 + 1])]);
+        let t7 = fresh();
+        let (m, _) = merge(t7.path(), arch, &long, &index, &mut vouch);
+        assert_eq!((m.merged, m.unvouched), (0, 2));
+        // A package replaced (there with other bytes than the databases list now): the old
+        // package goes, then its signature, and the new bytes come with the pool's copy.
+        let mut stale = lib.clone();
+        stale[3] ^= 1;
+        std::fs::write(shared.join(&libname), &stale).unwrap();
+        write_record(work, arch, &libname, &sha(&stale), stale.len() as u64).unwrap();
+        std::fs::write(shared.join(&sig_name), b"the old bytes' signature").unwrap();
+        let (m, _) = merge(work, arch, &alone, &index, &mut vouch);
+        assert_eq!((m.merged, m.signed), (1, 1));
+        assert_eq!(std::fs::read(shared.join(&libname)).unwrap(), lib);
+        assert_eq!(std::fs::read(shared.join(&sig_name)).unwrap(), upstream);
+        assert_eq!(std::fs::read_dir(tmp_dir(work)).unwrap().count(), 0);
     }
 
     /// The shared cache against the databases of the day (#341): a file merged when one
     /// snapshot listed it goes once another lists its name with other bytes, or twice at
     /// odds, or once it is not whole; a file without a record is kept only as the listed
-    /// bytes; one no database lists any more stays for the versions' pruning.
+    /// bytes; one no database lists any more stays for the versions' pruning; a signature
+    /// stays only beside its package, whole and recorded, or takes its package with it.
     #[test]
+    #[allow(clippy::too_many_lines)] // one shared cache through four snapshots of the databases
     fn every_pass_checks_the_shared_cache_again_by_the_databases_of_the_day() {
         let t = tempfile::tempdir().unwrap();
         let work = t.path();
@@ -1312,7 +1889,10 @@ pub(crate) mod tests {
         let (core_only, _) = load(work, arch, &key);
         std::fs::write(incoming.join(file("libfixture", arch)), &lib).unwrap();
         std::fs::write(incoming.join(file("twin", arch)), &twin_core).unwrap();
-        assert_eq!(merge(work, arch, &incoming, &core_only).0.merged, 2);
+        assert_eq!(
+            merge(work, arch, &incoming, &core_only, &mut none).0.merged,
+            2
+        );
         // A file with no record but the listed bytes (a crash before its record was written),
         // one with no record and other bytes of the listed size, two no database lists, and a
         // record of nothing.
@@ -1323,35 +1903,75 @@ pub(crate) mod tests {
         std::fs::write(shared.join("libfixture-0.9-1-x86_64.pkg.tar.zst"), b"old").unwrap();
         std::fs::write(shared.join(file("stranger", arch)), b"by hand").unwrap();
         std::fs::write(records.join("gone-1.0-1-x86_64.pkg.tar.zst"), "x 1\n").unwrap();
+        // Signatures: libfixture's as a merge leaves it (with its record), one beside no
+        // package (with its record), and twin's without a record (a crash before it was written).
+        let lib_sig = b"libfixture's upstream signature".to_vec();
+        let sig_of = |name: &str| format!("{name}.sig");
+        std::fs::write(shared.join(sig_of(&file("libfixture", arch))), &lib_sig).unwrap();
+        write_record(
+            work,
+            arch,
+            &sig_of(&file("libfixture", arch)),
+            &sha(&lib_sig),
+            lib_sig.len() as u64,
+        )
+        .unwrap();
+        std::fs::write(shared.join(sig_of("gone-1.0-1-x86_64.pkg.tar.zst")), b"sig").unwrap();
+        write_record(
+            work,
+            arch,
+            &sig_of("gone-1.0-1-x86_64.pkg.tar.zst"),
+            &sha(b"sig"),
+            3,
+        )
+        .unwrap();
+        // A signature without its record (none of the dispatcher's: it writes the record
+        // first) takes its package with it, the package first.
+        std::fs::write(shared.join(file("felix", arch)), b"felix").unwrap();
+        std::fs::write(shared.join(sig_of(&file("felix", arch))), b"unrecorded").unwrap();
         let c = recheck(work, arch, &core_only);
         assert_eq!(
             (c.removed, c.freed, c.adopted),
-            (1, evil.len() as u64, 1),
+            (4, evil.len() as u64 + 3 + 5 + 10, 1),
             "{c:?}"
         );
         assert!(!shared.join(file("evil", arch)).exists());
+        assert!(!shared
+            .join(sig_of("gone-1.0-1-x86_64.pkg.tar.zst"))
+            .exists());
+        assert!(!shared.join(file("felix", arch)).exists());
+        assert!(!shared.join(sig_of(&file("felix", arch))).exists());
         assert_eq!(
             names_in(&records),
-            [file("libfixture", arch), file("twin", arch)]
+            [
+                file("libfixture", arch),
+                sig_of(&file("libfixture", arch)),
+                file("twin", arch)
+            ]
         );
-        // libfixture-0.9 is listed by none: kept, as the stranger. Now cut short, a recorded file goes.
+        // libfixture-0.9 is listed by none: kept, as the stranger. Now cut short, a recorded
+        // file goes, and its signature with it.
         std::fs::write(shared.join(file("libfixture", arch)), &lib[..7]).unwrap();
         let c = recheck(work, arch, &core_only);
-        assert_eq!((c.removed, c.freed), (1, 7));
-        assert!(!records.join(file("libfixture", arch)).exists());
+        assert_eq!((c.removed, c.freed), (2, 7 + lib_sig.len() as u64));
+        assert!(!shared.join(sig_of(&file("libfixture", arch))).exists());
+        assert_eq!(names_in(&records), [file("twin", arch)]);
         // The next snapshot lists twin twice at odds: no task can trust it, it goes.
         place_only(work, arch, &["core", "packages"]);
         let (both, _) = load(work, arch, &key);
         assert_eq!(recheck(work, arch, &both).removed, 1);
         assert!(!shared.join(file("twin", arch)).exists());
         // Merged again by core's listing, then a snapshot where only packages lists the name, otherwise.
-        assert_eq!(merge(work, arch, &incoming, &core_only).0.merged, 2);
+        assert_eq!(
+            merge(work, arch, &incoming, &core_only, &mut none).0.merged,
+            2
+        );
         place_only(work, arch, &["packages"]);
         let (packages_only, _) = load(work, arch, &key);
         assert_eq!(recheck(work, arch, &packages_only).removed, 1);
         assert!(!shared.join(file("twin", arch)).exists());
         std::fs::write(incoming.join(file("twin", arch)), &twin_packages).unwrap();
-        let (m, _) = merge(work, arch, &incoming, &packages_only);
+        let (m, _) = merge(work, arch, &incoming, &packages_only, &mut none);
         assert_eq!(m.merged, 1);
         assert_eq!(
             std::fs::read(shared.join(file("twin", arch))).unwrap(),
@@ -1396,17 +2016,28 @@ pub(crate) mod tests {
         ] {
             let f = format!("zlib-{v}-aarch64.pkg.tar.zst");
             write_at(&a.join(&f), 1000, ago);
-            write_record(work, "aarch64", &f, &"0".repeat(64), 1000);
+            write_record(work, "aarch64", &f, &"0".repeat(64), 1000).unwrap();
         }
         write_at(&a.join("felix-2.0-1-any.pkg.tar.zst"), 1000, 300);
         write_at(&x.join("zlib-1:1.3.2-3-x86_64.pkg.tar.zst"), 1000, 200);
+        // Signatures: no version of their own. The oldest version's goes with it, the newest's
+        // stays with it, and one beside no package goes.
+        for (f, ago) in [
+            ("zlib-1:1.3.1-1-aarch64.pkg.tar.zst.sig", 400),
+            ("zlib-1:1.3.2-10-aarch64.pkg.tar.zst.sig", 50),
+            ("gone-1.0-1-aarch64.pkg.tar.zst.sig", 10),
+        ] {
+            write_at(&a.join(f), 100, ago);
+            write_record(work, "aarch64", f, &"0".repeat(64), 100).unwrap();
+        }
         let p = prune_pacman(work, u64::MAX);
-        assert_eq!((p.removed, p.freed, p.left), (2, 2000, 4000));
+        assert_eq!((p.removed, p.freed, p.left), (4, 2200, 4100));
         assert_eq!(
             names_in(&a),
             [
                 "felix-2.0-1-any.pkg.tar.zst",
                 "zlib-1:1.3.2-10-aarch64.pkg.tar.zst",
+                "zlib-1:1.3.2-10-aarch64.pkg.tar.zst.sig",
                 "zlib-1:1.3.2-3-aarch64.pkg.tar.zst"
             ]
         );
@@ -1415,17 +2046,19 @@ pub(crate) mod tests {
             names_in(&merged_dir(work, "aarch64")),
             [
                 "zlib-1:1.3.2-10-aarch64.pkg.tar.zst",
+                "zlib-1:1.3.2-10-aarch64.pkg.tar.zst.sig",
                 "zlib-1:1.3.2-3-aarch64.pkg.tar.zst"
             ]
         );
         // Above the cap: the older version goes before any newest one, then the oldest merged.
         let p = prune_pacman(work, 2500);
-        assert_eq!((p.removed, p.left), (2, 2000));
+        assert_eq!((p.removed, p.left), (2, 2100));
         assert!(!a.join("zlib-1:1.3.2-3-aarch64.pkg.tar.zst").exists());
         assert!(!a.join("felix-2.0-1-any.pkg.tar.zst").exists());
         assert!(a.join("zlib-1:1.3.2-10-aarch64.pkg.tar.zst").exists());
         assert!(x.join("zlib-1:1.3.2-3-x86_64.pkg.tar.zst").exists());
         assert_eq!(prune_pacman(work, 0).left, 0);
+        assert!(names_in(&a).is_empty());
         assert!(names_in(&merged_dir(work, "aarch64")).is_empty());
         assert_eq!(
             package_of("zlib-1:1.3.2-3-x86_64.pkg.tar.zst"),
