@@ -220,13 +220,60 @@ pub fn lint_compose(
     }
 }
 
+/// agent.toml's variables as the lint stands them in, a rootless host's as install writes
+/// them: what the set may interpolate.
+pub fn reference_variables() -> Vec<(String, String)> {
+    [
+        ("OMARCHY_WORK_ROOT", "/srv/omarchy-pool/host"),
+        ("OMARCHY_SECRETS_DIR", "/srv/omarchy-pool/host-secrets"),
+        ("OMARCHY_SOCKET", "/run/user/1000/podman/podman.sock"),
+        ("OMARCHY_TASK_SUBNETS", crate::install::TASK_SUBNETS),
+    ]
+    .iter()
+    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+    .collect()
+}
+
+/// The set as the Quadlet driver renders it (#330, design v2 §15, [`crate::quadlet`]): one
+/// `quadlet` violation saying what it cannot render as compose would run it. The same bundle
+/// serves both drivers, so `lint-set` holds every template to it, and a Quadlet host its
+/// owner's override too; `variables` stand in for agent.toml's. A file that is not YAML is
+/// [`lint_compose`]'s violation, not this one's.
+pub fn lint_quadlet(
+    template: &str,
+    override_yaml: Option<&str>,
+    variables: &[(String, String)],
+) -> Result<(), Vec<Violation>> {
+    if yaml::parse(template).is_err() || override_yaml.is_some_and(|o| yaml::parse(o).is_err()) {
+        return Ok(());
+    }
+    let mut sources = vec![crate::quadlet::Source {
+        name: "compose.yml",
+        text: template,
+    }];
+    if let Some(text) = override_yaml {
+        sources.push(crate::quadlet::Source {
+            name: "compose.override.yml",
+            text,
+        });
+    }
+    crate::quadlet::render(
+        "omarchy-host",
+        Path::new("/srv/omarchy-pool/set"),
+        &sources,
+        variables,
+    )
+    .map(drop)
+    .map_err(|e| vec![violation("quadlet", e)])
+}
+
 // ---------------------------------------------------------------------------------------
 // Merging an override the way compose would, conservatively: mappings merge by key (the
 // override wins), and sequences add up, so whatever either file adds is checked.
 
 /// Service fields compose also accepts in list form, turned into mappings first so the two
 /// forms merge and check alike.
-fn normalize(doc: Node) -> Node {
+pub(crate) fn normalize(doc: Node) -> Node {
     map_entries(doc, |key, value| match key {
         "services" => map_entries(value, |_, service| {
             map_entries(service, |field, v| match field {

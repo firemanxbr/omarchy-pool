@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 
 use super::{
-    lint_compose, lint_set_toml, parse_set_toml, references, Engine, Envelope, Needs, Ready,
-    Reference, SetToml, Violation,
+    lint_compose, lint_quadlet, lint_set_toml, parse_set_toml, reference_variables, references,
+    Engine, Envelope, Needs, Ready, Reference, SetToml, Violation,
 };
 
 fn fixtures() -> PathBuf {
@@ -565,4 +565,44 @@ fn a_set_toml_that_breaks_schema_3_or_disagrees_with_the_template_is_refused() {
         &template,
     )
     .unwrap();
+}
+
+#[test]
+fn the_same_set_renders_for_the_quadlet_driver() {
+    // #330: one bundle for both drivers. The real template and the fixture render as they
+    // are written, placeholders and all.
+    let vars = reference_variables();
+    lint_quadlet(&real_set("compose.yml"), None, &vars).unwrap();
+    lint_quadlet(HOST, None, &vars).unwrap();
+    // What compose accepts but one rootless Quadlet service cannot mean the same way is a
+    // `quadlet` violation, in the template or an owner's override; compose's lint says
+    // nothing of it.
+    let over = "services:\n  dispatcher:\n    networks: [default]\n";
+    lint_compose(HOST, Some(over), &Envelope::reference(), Engine::Rootful).unwrap();
+    refused_for(
+        lint_quadlet(HOST, Some(over), &vars),
+        "quadlet",
+        "a set network",
+    );
+    let e = lint_quadlet(HOST, Some(over), &vars).unwrap_err();
+    assert!(
+        e[0].message
+            .contains("networks is not rendered for Quadlet"),
+        "{e:?}"
+    );
+    let profiled = mutate(
+        HOST,
+        "    restart: unless-stopped\n",
+        "    restart: unless-stopped\n    profiles: [x]\n",
+    );
+    refused_for(lint_quadlet(&profiled, None, &vars), "quadlet", "a profile");
+    // A variable agent.toml does not set, with no default.
+    let unset = "services:\n  dispatcher:\n    user: ${OMARCHY_UID}\n";
+    refused_for(
+        lint_quadlet(HOST, Some(unset), &vars),
+        "quadlet",
+        "an unset variable",
+    );
+    // A file that is not YAML is compose's lint's to say, once.
+    assert_eq!(lint_quadlet(HOST, Some("a: ["), &vars), Ok(()));
 }

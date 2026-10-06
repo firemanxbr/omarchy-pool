@@ -34,6 +34,7 @@ pub mod lint;
 pub mod manifest;
 pub mod owner;
 pub mod pool;
+pub mod quadlet;
 pub mod run;
 pub mod statement;
 pub mod verify;
