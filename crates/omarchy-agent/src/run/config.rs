@@ -125,9 +125,10 @@ pub struct Config {
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
     pub engine: Engine,
     /// The engine the compose driver talks to (`set.runtime`, `docker` or `podman`): what
-    /// `runtime switch` moved the bundle to (#325). Absent, `docker`'s API, which podman's
-    /// socket speaks too.
-    pub runtime: Runtime,
+    /// `runtime switch` moved the bundle to (#325). Absent — install writes none: it finds
+    /// a socket, and podman's speaks docker's API — the run loop asks the engine behind
+    /// the socket which it is ([`super::agent::Agent::identify_runtime`]).
+    pub runtime: Option<Runtime>,
     /// The envelope's bounds on what the pool may narrow and ask (#325).
     pub policy: Policy,
 }
@@ -306,10 +307,10 @@ impl Config {
             }
         };
         let runtime = match f.set.runtime.as_deref() {
-            None => Runtime::Docker,
-            Some(r) => Runtime::parse(r).ok_or_else(|| {
+            None => None,
+            Some(r) => Some(Runtime::parse(r).ok_or_else(|| {
                 format!("agent.toml: set.runtime {r:?} is neither \"docker\" nor \"podman\"")
-            })?,
+            })?),
         };
         if let Some(bad) = f
             .envelope
@@ -488,7 +489,8 @@ max_units = 3
         );
         assert!(c.policy.allows_lane("x86_64") && !c.policy.allows_lane("aarch64"));
         assert!(c.policy.allows_driver(Runtime::Podman));
-        assert_eq!(c.runtime, Runtime::Docker);
+        // No set.runtime (install writes none): the engine is asked which it is.
+        assert_eq!(c.runtime, None);
         // No emulate key: detection decides; [] turns every emulated lane off.
         let open = Config::parse(&format!(
             "worker_id = \"w_1\"\n{}",
@@ -532,7 +534,7 @@ max_units = 3
             )
         ))
         .unwrap();
-        assert_eq!(podman.runtime.driver(), "compose/podman");
+        assert_eq!(podman.runtime, Some(Runtime::Podman));
     }
 
     #[test]

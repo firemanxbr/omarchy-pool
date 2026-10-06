@@ -73,7 +73,8 @@ impl Agent {
         // The pool keeps `runtime` whole only within 2 KiB: the words are cut to fit.
         let short = |t: &str| -> String { t.chars().take(RUNTIME_WORDS_MAX).collect() };
         body["runtime"] = serde_json::json!({
-            "driver": self.cfg.runtime.driver(),
+            // `null` until the engine said which it is (agent.toml without `set.runtime`).
+            "driver": self.cfg.runtime.map(super::config::Runtime::driver),
             "switch": self.state.switch.as_ref().map(|w| serde_json::json!({
                 "to": format!("compose/{}", w.to.runtime), "since": iso(w.started), "step": w.step,
                 "why": w.why.as_deref().map(short),

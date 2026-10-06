@@ -106,7 +106,7 @@ fn a_runtime_switch_moves_the_bundle_from_docker_to_podman_with_the_guard() {
             cfg.socket_mount.clone()
         ),
         (
-            Runtime::Podman,
+            Some(Runtime::Podman),
             PathBuf::from(PODMAN),
             PathBuf::from(PODMAN)
         )
@@ -152,7 +152,7 @@ fn a_switch_whose_guard_fails_goes_back_to_docker_and_quarantines_nothing() {
     assert_eq!(running_dispatcher(&w.engine).as_deref(), Some("v1.0.0"));
     assert!(podman.borrow().dispatcher().is_none());
     assert!(w.agent.state.quarantine.is_empty());
-    assert_eq!(w.agent.cfg.runtime, Runtime::Docker);
+    assert_eq!(w.agent.cfg.runtime, Some(Runtime::Docker));
     assert_eq!(
         fs::read_to_string(w.agent.paths.agent_toml()).unwrap(),
         toml
@@ -222,7 +222,7 @@ fn a_switch_whose_agent_toml_cannot_be_written_goes_back() {
     // second dispatcher.
     assert_eq!(running_dispatcher(&w.engine).as_deref(), Some("v1.0.0"));
     assert!(podman.borrow().dispatcher().is_none());
-    assert_eq!(w.agent.cfg.runtime, Runtime::Docker);
+    assert_eq!(w.agent.cfg.runtime, Some(Runtime::Docker));
     assert_eq!(
         fs::read_to_string(w.agent.paths.agent_toml()).unwrap(),
         toml
@@ -255,7 +255,7 @@ fn a_task_claimed_before_the_old_dispatcher_stopped_sends_the_switch_back() {
     assert_eq!(running_dispatcher(&w.engine).as_deref(), Some("v1.0.0"));
     assert!(w.engine.borrow().tasks().iter().any(|c| c.id == task));
     assert!(podman.borrow().dispatcher().is_none());
-    assert_eq!(w.agent.cfg.runtime, Runtime::Docker);
+    assert_eq!(w.agent.cfg.runtime, Some(Runtime::Docker));
 }
 
 #[test]
@@ -274,11 +274,81 @@ fn a_restart_mid_switch_resumes_on_the_engine_it_was_on() {
     assert_eq!(w.step(), "pull");
     // The agent dies mid-pull on podman; agent.toml still names docker.
     w.restart_reading_agent_toml();
-    assert_eq!(w.agent.cfg.runtime, Runtime::Podman);
+    assert_eq!(w.agent.cfg.runtime, Some(Runtime::Podman));
     through(&mut w);
     assert_eq!(w.agent.state.switch_last.as_ref().unwrap().outcome, "done");
     assert_eq!(running_dispatcher(&podman).as_deref(), Some("v1.0.0"));
     assert!(w.engine.borrow().dispatcher().is_none());
+}
+
+#[test]
+fn a_host_installed_on_podman_says_so_and_a_switch_to_its_own_socket_changes_nothing() {
+    // install writes no `set.runtime` (it finds a socket, and podman's speaks docker's
+    // API): the engine behind the socket says which it is.
+    let mut w = World::new();
+    w.engine.borrow_mut().runtime = Some(Runtime::Podman);
+    let toml = super::super::config::tests::example(
+        &w.set_dir(),
+        &w.dir.join("work"),
+        &w.dir.join("secrets"),
+    );
+    fs::write(w.agent.paths.agent_toml(), &toml).unwrap();
+    assert_eq!(w.agent.cfg.runtime, None);
+    w.release("v1.0.0");
+    w.target("v1.0.0", None);
+    w.round();
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    assert_eq!(w.agent.cfg.runtime, Some(Runtime::Podman));
+    w.tick(300);
+    assert_eq!(w.last_report()["runtime"]["driver"], "compose/podman");
+    // A switch to the socket it uses is refused before anything stops, whichever driver
+    // it names: one socket is one engine.
+    let socket = w.agent.cfg.socket_cli.display().to_string();
+    let changes = w.changes().len();
+    for driver in ["compose/podman", "compose/docker"] {
+        ask(&w, driver, &socket);
+        through(&mut w);
+        let end = w.agent.state.switch_last.clone().unwrap();
+        assert_eq!(
+            (end.outcome.as_str(), end.detail.as_str()),
+            (
+                "refused",
+                format!("the bundle runs on compose/podman at {socket} already; nothing changed")
+                    .as_str()
+            )
+        );
+        assert_eq!(w.changes().len(), changes, "{driver}");
+        assert_eq!(running_dispatcher(&w.engine).as_deref(), Some("v1.0.0"));
+    }
+    // agent.toml is the owner's: it names no runtime still, and a restart asks again.
+    assert_eq!(
+        fs::read_to_string(w.agent.paths.agent_toml()).unwrap(),
+        toml
+    );
+    w.restart_reading_agent_toml();
+    assert_eq!(w.agent.cfg.runtime, None);
+    w.tick(3);
+    assert_eq!(w.agent.cfg.runtime, Some(Runtime::Podman));
+}
+
+#[test]
+fn one_socket_by_two_paths_is_one_socket() {
+    let dir = crate::run::state::tempdir();
+    fs::create_dir_all(dir.join("run")).unwrap();
+    fs::write(dir.join("run/docker.sock"), "").unwrap();
+    std::os::unix::fs::symlink(dir.join("run"), dir.join("var-run")).unwrap();
+    assert!(super::same_socket(
+        &dir.join("var-run/docker.sock"),
+        &dir.join("run/docker.sock")
+    ));
+    assert!(!super::same_socket(
+        &dir.join("var-run/podman.sock"),
+        &dir.join("run/docker.sock")
+    ));
+    assert!(super::same_socket(
+        &PathBuf::from("/nowhere/a.sock"),
+        &PathBuf::from("/nowhere/a.sock")
+    ));
 }
 
 #[test]

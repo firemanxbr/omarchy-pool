@@ -121,9 +121,11 @@ pub(crate) fn default_socket(r: Runtime, xdg_runtime_dir: Option<&Path>) -> Vec<
     out
 }
 
-fn place_of(cfg: &Config) -> Place {
-    Place {
-        runtime: cfg.runtime.word().to_owned(),
+/// Where `cfg` says the bundle runs; `None` while the engine behind its socket has not
+/// said which it is (agent.toml without `set.runtime`).
+fn place_of(cfg: &Config) -> Option<Place> {
+    Some(Place {
+        runtime: cfg.runtime?.word().to_owned(),
         socket_cli: cfg.socket_cli.clone(),
         socket_mount: cfg.socket_mount.clone(),
         engine: match cfg.engine {
@@ -131,12 +133,18 @@ fn place_of(cfg: &Config) -> Place {
             Engine::Rootless => "rootless",
         }
         .to_owned(),
-    }
+    })
+}
+
+/// Whether two socket paths name one socket: equal, or the same once their links are
+/// followed (`/var/run` is a link to `/run` on most hosts).
+fn same_socket(a: &Path, b: &Path) -> bool {
+    a == b || matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// `cfg` pointed at `p`, in memory.
 pub(crate) fn point(cfg: &mut Config, p: &Place) {
-    cfg.runtime = Runtime::parse(&p.runtime).unwrap_or(Runtime::Docker);
+    cfg.runtime = Runtime::parse(&p.runtime);
     cfg.socket_cli.clone_from(&p.socket_cli);
     cfg.socket_mount.clone_from(&p.socket_mount);
     cfg.engine = if p.engine == "rootless" {
@@ -169,7 +177,7 @@ pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
     ];
     let names = |t: &str| {
         Config::parse(t).is_ok_and(|c| {
-            place_of(&c) == *p
+            place_of(&c).as_ref() == Some(p)
                 && toml::from_str::<toml::Table>(t).is_ok_and(|t| {
                     t.get("set")
                         .and_then(|s| s.get("driver"))
@@ -348,7 +356,7 @@ impl Agent {
                 return self.switch_end("?", "refused", &format!("{REQUEST}: {e}"), now);
             }
         };
-        let (to, version) = match self.switch_ready(&req) {
+        let (from, to, version) = match self.switch_ready(&req) {
             Ok(ready) => ready,
             Err(why) => {
                 return self.switch_end(
@@ -359,11 +367,10 @@ impl Agent {
                 )
             }
         };
-        let from = place_of(&self.cfg);
         self.journal.write(
             now,
             "runtime-switch",
-            serde_json::json!({"to": format!("compose/{}", to.runtime), "socket": req.socket, "engine": to.engine, "version": version, "from": self.cfg.runtime.driver(), "step": "stopping the dispatcher on the old engine"}),
+            serde_json::json!({"to": format!("compose/{}", to.runtime), "socket": req.socket, "engine": to.engine, "version": version, "from": format!("compose/{}", from.runtime), "step": "stopping the dispatcher on the old engine"}),
         );
         self.state.switch = Some(Switch {
             from,
@@ -375,10 +382,24 @@ impl Agent {
         });
     }
 
-    /// Where a request moves the bundle, and the new engine's version — or why it is
-    /// refused: [`Agent::switch_check`]'s reasons, a socket that does not answer as the
-    /// engine named, or a task container still running on the engine the bundle runs on.
-    fn switch_ready(&mut self, req: &Request) -> Result<(Place, String), String> {
+    /// agent.toml names no `set.runtime` (install writes none: it finds a socket, and
+    /// podman's speaks docker's API): the engine behind the socket says which it is, once
+    /// it answers, so the report and a switch name the engine the bundle runs on (#325).
+    /// Asked again each tick until it answers; in memory only, agent.toml is the owner's.
+    pub(super) fn identify_runtime(&mut self) {
+        if self.cfg.runtime.is_some() {
+            return;
+        }
+        if let Some(Answer::Yes(id)) = self.driver.as_deref_mut().map(Driver::engine) {
+            self.cfg.runtime = Some(id.runtime);
+        }
+    }
+
+    /// Where the bundle runs and where a request moves it, and the new engine's version —
+    /// or why it is refused: [`Agent::switch_check`]'s reasons, a socket that does not
+    /// answer as the engine named, or a task container still running on the engine the
+    /// bundle runs on.
+    fn switch_ready(&mut self, req: &Request) -> Result<(Place, Place, String), String> {
         self.switch_check(req)?;
         let r = Runtime::parse(&req.driver)
             .ok_or_else(|| format!("{:?} is not a driver this agent carries", req.driver))?;
@@ -414,10 +435,13 @@ impl Agent {
             Some(Answer::NotFound) => 0,
             None => return Err("the pinned engine tools are not installed yet".into()),
         };
+        // The old engine answered: which it is is known by now (`identify_runtime`).
+        let from = place_of(&self.cfg)
+            .ok_or("the engine it runs on now has not said which it is (docker or podman)")?;
         if tasks > 0 {
             return Err(format!(
-                "{tasks} task container(s) run on {}: task containers, named volumes and caches do not move between engines — drain the host first (Drain on its registration's page), let its tasks finish, then switch",
-                self.cfg.runtime.driver()
+                "{tasks} task container(s) run on compose/{}: task containers, named volumes and caches do not move between engines — drain the host first (Drain on its registration's page), let its tasks finish, then switch",
+                from.runtime
             ));
         }
         let to = Place {
@@ -426,7 +450,7 @@ impl Agent {
             socket_mount: req.socket.clone(),
             engine: if id.rootless { "rootless" } else { "rootful" }.to_owned(),
         };
-        Ok((to, id.version))
+        Ok((from, to, id.version))
     }
 
     /// What refuses a request before any engine is asked.
@@ -450,12 +474,14 @@ impl Agent {
                 req.socket.display()
             ));
         }
-        if req.socket == self.cfg.socket_cli && r == self.cfg.runtime {
-            return Err(format!(
-                "the bundle runs on {} at {} already",
-                r.driver(),
-                req.socket.display()
-            ));
+        // The socket alone decides: one socket is one engine, whichever driver is named
+        // (the engine's own answer refuses a mismatch on another socket).
+        if same_socket(&req.socket, &self.cfg.socket_cli) {
+            let at = req.socket.display();
+            return Err(match self.cfg.runtime {
+                Some(on) => format!("the bundle runs on {} at {at} already", on.driver()),
+                None => format!("the bundle runs at {at} already"),
+            });
         }
         if self.state.applied.is_none()
             || !self

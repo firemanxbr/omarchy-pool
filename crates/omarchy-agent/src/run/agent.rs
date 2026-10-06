@@ -365,6 +365,7 @@ impl Agent {
                 // A step that cannot write (a set directory, a full disk) is retried every
                 // tick; a retire-legacy in flight goes on meanwhile, and the report still
                 // says what the host knows, its answers above all.
+                self.identify_runtime();
                 let stepped = self.step(now);
                 self.switch_step(now);
                 self.retire_step(now);

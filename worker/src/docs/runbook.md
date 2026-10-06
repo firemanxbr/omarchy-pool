@@ -902,12 +902,13 @@ it is not the engine's usual one — rootless first, then rootful) moves the
 bundle to the other driver this binary carries. Nothing the pool sends names
 a driver. The running agent takes the request between rounds and refuses it,
 with nothing changed, unless the envelope's `drivers` name the new one
-(`compose` names both), its socket answers as that engine, a release runs,
-and no task container runs on the old engine — task containers, named
-volumes and caches do not move between engines, so drain the host's
-registration first and let its tasks finish. Then it stops the dispatcher on
-the old engine, brings the release that runs up on the new one through a
-whole round — lint (a rootful engine still needs `rootful_ack` and
+(`compose` names both), its socket answers as that engine and is not the
+one the bundle runs on already (one socket is one engine, by any path to
+it), a release runs, and no task container runs on the old engine — task
+containers, named volumes and caches do not move between engines, so
+drain the host's registration first and let its tasks finish. Then it stops
+the dispatcher on the old engine, brings the release that runs up on the new
+one through a whole round — lint (a rootful engine still needs `rootful_ack` and
 `dedicated`), pull, replace, guard — and only once that round is `ok` writes
 the new socket, runtime and engine into `agent.toml`, changing only those
 `[set]` lines (the owner's comments and layout stay). A guard or ready wait
@@ -918,7 +919,10 @@ end within 20 minutes stops the new dispatcher and brings it back on the old
 engine (`rolled-back`, with why; the release is not quarantined for the
 engine's fault, and `agent.toml` was never changed).
 A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
-and `logs` follow it.
+and `logs` follow it. Install writes no runtime into `agent.toml` (it finds
+a socket, and podman's speaks docker's API): until a switch names one there,
+the agent asks the engine behind the socket which it is, and its report says
+that one (`null` until the engine answers).
 
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the

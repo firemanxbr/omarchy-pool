@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use crate::run::agent::{Agent, Drivers};
 use crate::run::compose::Compose;
-use crate::run::config::{Config, Paths};
+use crate::run::config::{Config, Paths, Runtime};
 use crate::run::driver::Driver;
 use crate::run::fake::{
     relay_statement, FakePool, PoolState, Remote, TestVerifier, HOST_COMPOSE, HOST_SET,
@@ -1013,7 +1013,13 @@ fn real_engine_runtime_switch_moves_the_dispatcher_to_the_other_engine() {
     );
     let (d0, _) = h.dispatcher();
     let from = h.socket.clone();
-    let from_driver = h.agent.cfg.runtime.driver();
+    // Which engine it runs on, as that engine said (the host's agent.toml names none).
+    let from_driver = h
+        .agent
+        .cfg
+        .runtime
+        .map(Runtime::driver)
+        .expect("the engine said which it is");
     let to_driver = match try_docker(
         &h.tools,
         &to,
@@ -1097,11 +1103,11 @@ fn real_engine_runtime_switch_moves_the_dispatcher_to_the_other_engine() {
     let cfg = Config::parse(&fs::read_to_string(h.agent.paths.agent_toml()).unwrap()).unwrap();
     assert_eq!(
         (
-            cfg.runtime.driver(),
+            cfg.runtime.map(Runtime::driver),
             cfg.socket_cli.clone(),
             cfg.socket_mount.clone()
         ),
-        (to_driver.to_owned(), to.clone(), to.clone())
+        (Some(to_driver.to_owned()), to.clone(), to.clone())
     );
     // The task container of the old engine was never part of it.
     assert!(h.task_state().starts_with("true "));
