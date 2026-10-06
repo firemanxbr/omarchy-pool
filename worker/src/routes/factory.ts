@@ -13,8 +13,8 @@ import { isRevoked, lastGoodMessage, updateMessage, updateState, type HostSoak, 
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, requeueRevoked, revokedRefusal, stopError } from "../lease";
-import { asleepNow, freshSince, parseCapacity, sandboxApplied, sandboxAppliedOf, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, HOST_REPORT_FRESH_MIN, hostClaimRefusal, MAX_SIZE, MIN_HOST, poolBehindOf, REVERTED_COLUMNS, revertedOf, SOAK_COLUMNS, soakOf, TASK_UNITS, type Capacity, type HostClaimRow, type PoolBehind, type RevertedColumns } from "../hosts";
-import { largestSize, ownerCap, ownersLeased, placementOf, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules } from "../selection";
+import { asleepNow, freshSince, parseCapacity, poolJobsOn, sandboxApplied, sandboxAppliedOf, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, HOST_REPORT_FRESH_MIN, hostClaimRefusal, MAX_SIZE, MIN_HOST, poolBehindOf, REVERTED_COLUMNS, revertedOf, SOAK_COLUMNS, soakOf, TASK_UNITS, type Capacity, type HostClaimRow, type PoolBehind, type RevertedColumns } from "../hosts";
+import { largestSize, ownerCap, ownersLeased, placementOf, reserve, roomOf, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
@@ -419,7 +419,9 @@ export function workerReady(w: { last_seen: string; kinds: string | null; agent:
 const ALL_KINDS = ["build", "sync", "promote", "rollback", "render", "health", "security", "metrics", "gc", "enqueue", "audit", "verify", "relayout", "publish", "trial"];
 /**
  * Jobs any architecture can run: they read the index or the staging area, not packages of one arch. A legacy registration's
- * rule; a host's is wider (design v2 §7.4, §8.6): every kind but builds, trials and jobs with helper containers (selection.ts).
+ * rule; a host's is wider (design v2 §7.4, §8.6; #340): every kind but builds, trials and jobs with helper containers
+ * (`HOST_ANY_ARCH_KINDS`, selection.ts) — sync, render, rollback, gc, verify, relayout, enqueue and publish run in its dispatcher's own
+ * native process whatever their row's arch, as today's pool-x86_64 (the native aarch64 image registered for x86_64) runs them.
  */
 export const LEGACY_ANY_ARCH: readonly string[] = ["metrics", "gc", "security", "promote", "audit", "verify", "relayout"];
 const ANY_ARCH_KINDS = LEGACY_ANY_ARCH.map((k) => `'${k}'`).join(", ");
@@ -513,7 +515,7 @@ function afterClaim(row: OrdersRow, facts: ClaimFacts, step: InstanceStep | null
 async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell: string | null }, o: { agent: string | null; needsAgent: boolean; at: string; host?: boolean }): Promise<OrderOut | null> {
   const now = Date.parse(o.at);
   const { scale } = rulesScale(env);
-  const input = { row: x.row, claim: x.claim, status: x.status, error: x.error, spell: x.spell, instanceSince: x.instanceSince, conflict: x.conflict, needsAgent: o.needsAgent };
+  const input = { row: x.row, claim: x.claim, status: x.status, error: x.error, spell: x.spell, instanceSince: x.instanceSince, conflict: x.conflict, needsAgent: o.needsAgent, host: o.host };
   let d: Decision = decideAuto(input, now, scale);
   if (d.kind === null) return null;
   const w = x.row;
@@ -521,6 +523,10 @@ async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell
     await giveUp(env, w, x.spell, d.next, d.summary);
     return null;
   }
+  // A host's agent fault is answered by a re-check only (design v2 §8.6, #340): decideAuto proposes nothing else for it, and the
+  // site's pacing and election (siblingsAnswering, siteVerdict) are a legacy set's — a host's agent is a fresh probe sidecar, shared
+  // with no other registration.
+  if (o.host && d.kind !== "recheck-agent") return null;
   let reason = d.reason;
   if (d.kind !== "recheck-agent") {
     if (await breakerHolds(env, { id: w.id, site: w.site, agent: o.agent, cls: d.cls, trust: w.trust }, now)) return null;
@@ -569,8 +575,13 @@ async function giveUp(env: Env, w: OrdersRow, spell: string | null, next: AutoSt
 
 // ---------- host registrations (#334) ----------
 
-/** The kinds a host registration takes (design v2 §8.2, §22): builds of every trust, trials and audits; pool jobs join with #340. */
-export const HOST_KINDS = ["build", "trial", "audit"];
+/**
+ * The kinds a host registration takes (design v2 §8.2, §22): builds of every trust, trials and audits, and — from P2 (#340) — the pool
+ * jobs, which its dispatcher runs each in a child process of its own on the unit kept for them (selection.ts noRoom): the arch-neutral
+ * ones on any host (`HOST_ANY_ARCH_KINDS`), those with helper containers on a host with a lane of each architecture they check (`HELPER_KINDS`,
+ * `RING_JOBS`). `metrics` is the pool's own (its cron), never a task; listed, it is never handed.
+ */
+export const HOST_KINDS = [...ALL_KINDS];
 /** An unfenced lease that two consecutive claims of its host do not list goes back to the queue once it is this old (§8.1). */
 export const HOST_LEASE_GRACE_MIN = 2;
 /** `lost` gives the attempt back at most this many times per task (D54). */
@@ -1088,10 +1099,11 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
 
   // The claimer's room now, as selection.ts counts it (noRoom), for the statements: a legacy registration is one build.
   const held = host ? leases.filter((l) => l.by === me.id) : [];
-  const used = held.reduce((n, l) => n + l.units, 0);
   const offer = me.offer ?? Number.POSITIVE_INFINITY;
-  const roomTask = host ? Math.min(me.units - rules.job_reserved - used, offer) : rules.build_per_size;
-  const roomJob = host ? Math.min(me.units - used, offer) : rules.build_per_size;
+  // A pool job it holds takes the unit kept for them, never a task's (#340, roomOf).
+  const room = roomOf(me, held, rules);
+  const roomTask = host ? Math.min(room.task, offer) : rules.build_per_size;
+  const roomJob = host ? Math.min(room.job, offer) : rules.build_per_size;
   const slotFree = !host || held.filter((l) => l.model).length < me.agent_slots;
   const diskFree = host && me.disk ? Math.min(me.disk.work, me.disk.engine) - held.reduce((n, l) => n + (l.kind === "build" ? l.disk_gb : 0), 0) - rules.floor_gb : null;
   const largest = largestSize(fleet, nowMs, rules);
@@ -1285,10 +1297,15 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   }
   const choices = select(me, fleet, all, nowMs, rules);
   const hostOk = k.hostId ? ` AND ${HOST_MAY_LEASE_SQL} AND ${HOST_AWAKE_SQL}` : "";
-  // A host's units, again in the statement itself: what it holds plus this task within its count (the reserved unit for pool jobs only).
-  const guard = host ? " AND (SELECT COALESCE(SUM(l.units), 0) FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ?) + ? <= ?" : "";
+  // A host's units, again in the statement itself, as roomOf counts them: the tasks it holds, plus the unit kept for pool jobs or what
+  // its pool jobs hold when they hold more, plus this one, within its count — for a pool job, nothing kept (the kept unit is its own).
+  const tasksIn = TASK_KINDS.map((x) => `'${x}'`).join(", ");
+  const guard = host
+    ? ` AND (SELECT COALESCE(SUM(CASE WHEN l.kind IN (${tasksIn}) THEN l.units END), 0) + MAX(?, COALESCE(SUM(CASE WHEN l.kind IN (${tasksIn}) THEN NULL ELSE l.units END), 0))
+         FROM build_tasks l WHERE l.status = 'leased' AND l.lease_owner = ?) + ? <= ?`
+    : "";
   for (const c of choices.slice(0, LEASE_TRIES)) {
-    const limit = TASK_KINDS.includes(all.find((x) => x.id === c.id)!.kind) ? me.units - rules.job_reserved : me.units;
+    const kept = TASK_KINDS.includes(all.find((x) => x.id === c.id)!.kind) ? rules.job_reserved : 0;
     // One statement leases it: D1 serialises writes, so two claims never get the same task. A fence belongs to one lease (#277): a
     // queued task never carries one — the requeue clears it — but one a Worker from before the fence requeued would stop the new
     // lease on a worker nobody stopped, so the lease starts without it. A host's lease (#334) carries a new generation, its lane,
@@ -1304,7 +1321,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     )
       .bind(
         k.workerId, plusMinutes(LEASE_MINUTES), at, host ? leaseGen() : null, c.lane, c.size, c.units, c.disk_gb, k.version, host ? k.hc!.claimId : null, c.independent, c.id,
-        ...(hostOk ? [k.hostId, k.hostId, freshSince(nowMs)] : []), ...(guard ? [k.workerId, c.units, limit] : []),
+        ...(hostOk ? [k.hostId, k.hostId, freshSince(nowMs)] : []), ...(guard ? [kept, k.workerId, c.units, me.units] : []),
       )
       .first<TaskRow>();
     if (!task) continue;
@@ -1353,9 +1370,10 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // joined with the list at this very claim, between two syncs too — claims nothing, and is told why. Its running leases are not this
   // door's: a suspension fenced them; a removal lets them finish and upload. One read by the primary key, for host registrations only.
   // Its soak (#326), and what its host's reports say of a release it reverted (#342), ride the same read: the update gate below weighs
-  // both.
+  // both. So does whether the maintainers let it take pool jobs yet (#340, the `host-pool-jobs` setting).
   let soak: HostSoak | null = null;
   let reverted: ReturnType<typeof revertedOf> = null;
+  let poolJobs = false;
   if (actor.w.host_id) {
     const h = await env.DB.prepare(HOST_CLAIM_SQL).bind(actor.w.host_id).first<HostClaimRow>();
     const no = h ? hostClaimRefusal(h) : { code: "host_status", error: "its host is gone" };
@@ -1368,6 +1386,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     if (said !== undefined && said !== (h!.sandbox_applied ?? null)) {
       await env.DB.prepare("UPDATE hosts SET sandbox_applied = ? WHERE id = ?").bind(said, actor.w.host_id).run();
     }
+    poolJobs = poolJobsOn(h!.pool_jobs, { worker: workerId, name: h!.name });
   }
   const trust = actor.w.trust === "project" ? "project" : "community";
   // What this worker may claim. Project trust takes any kind it declares,
@@ -1379,8 +1398,8 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // anyone's, so a contributor never ends up building strangers' packages
   // by accident. Community results never reach the pool either way.
   const wanted = (Array.isArray(b.kinds) ? b.kinds.filter((k): k is string => typeof k === "string" && ALL_KINDS.includes(k)) : trust === "project" ? ALL_KINDS : ["build"]);
-  // A host takes what the phase enables, of what it declares (§8.2).
-  const kinds = host ? (Array.isArray(b.kinds) ? wanted : HOST_KINDS).filter((k) => HOST_KINDS.includes(k)) : trust === "project" ? wanted : ["build"];
+  // A host takes what the phase enables, of what it declares (§8.2): the pool jobs once the `host-pool-jobs` setting names it (#340).
+  const kinds = host ? (Array.isArray(b.kinds) ? wanted : HOST_KINDS).filter((k) => HOST_KINDS.includes(k) && (poolJobs || TASK_KINDS.includes(k))) : trust === "project" ? wanted : ["build"];
   // A worker started with --shared donates its compute to everyone's
   // requests — any contributor's, since 2026-09-17: the shared workers are
   // the queue a request lands in. Community results never reach the pool
@@ -2034,6 +2053,8 @@ function poolWaits(w: WorkerRow): string | null {
   const cls = (w.agent_error_class ?? null) as (typeof NOTHING_CLASSES)[number] | null;
   if (cls && NOTHING_CLASSES.includes(cls)) return `the pool does nothing for this error (${cls}): a restart cannot help — its own re-check runs every 30 min`;
   if (w.order_kinds === null || w.order_kinds === undefined) return "its image takes no orders: its host's updater replaces it";
+  // A host's (#340): its agent is a fresh probe sidecar, so the pool re-checks it and never restarts its dispatcher for it.
+  if (w.kind === "host") return "a host's agent is a fresh probe sidecar: the pool re-checks it, never restarts its dispatcher for it — its own probe goes on, and a person looks";
   if (cls === "unknown") return "an error the pool does not know: it re-checks it at most once and does not restart on it — a person looks";
   return null;
 }

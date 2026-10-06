@@ -19,8 +19,8 @@
  *   selection needs it — a health check on the head of its ring's arch, a
  *   promotion beside the arch-neutral kinds with the arch it names — and an
  *   aarch64 host's emulated x86_64 lane takes the x86_64 health check at once;
- *   hosts claim pool jobs from #340 (HOST_KINDS), so the claim itself hands
- *   them none yet.
+ *   hosts claim pool jobs since #340 (HOST_KINDS), so the claim itself hands
+ *   the Studio that health check, on its emulated lane.
  *
  * Tokens: workers omw_<id>, jobs the claim's.
  */
@@ -266,15 +266,18 @@ describe("a job with helper containers on a host's lanes (#338, design v2 §7.4,
     // A host with no x86_64 lane: no x86_64 health check, and no promotion whose helpers check x86_64 (one without params.arch checks both).
     expect(chosen(plain)).toEqual([]);
 
-    // The claim itself: hosts take builds, trials and audits until #340 brings pool jobs to them (HOST_KINDS), whatever kinds the
-    // dispatcher lists — so this criterion's run end to end lands with #340.
+    // The claim itself: hosts take pool jobs since #340 (HOST_KINDS) once the maintainers let them (the host-pool-jobs setting) — the
+    // Studio's dispatcher is handed the x86_64 health check, on its emulated lane, the job running in its own process and the check's
+    // container through omarchy-task-run.
+    await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('host-pool-jobs', 'studio-5')").run();
     await seedHost("studio-5", STUDIO);
     const c = await call("POST", "/factory/claim", { token: "omw_studio-5", body: {
       arch: "aarch64", version: "v1.0.2", hostname: "studio-5", kinds: ["build", "trial", "audit", "health", "promote"], claim_id: "c_emuhelp0001", want: 1,
       leases: [], capacity: capOf(STUDIO), labels: { role: "dispatcher" }, agent: { provider: "anthropic", model: "claude-test", probe: "ok", checked_at: "2026-10-01T00:00:00Z" },
     } });
-    expect(c.status).toBe(204);
-    expect(HOST_KINDS).toEqual(["build", "trial", "audit"]);
-    expect((await taskOf(health)).status).toBe("queued");
+    expect(c.status, JSON.stringify(c.json)).toBe(200);
+    expect(HOST_KINDS).toEqual(expect.arrayContaining(["build", "trial", "audit", "health", "promote"]));
+    expect(c.json.task.id).toBe(health);
+    expect(await taskOf(health)).toMatchObject({ status: "leased", lane: "emulated" });
   });
 });

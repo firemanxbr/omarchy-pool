@@ -18,6 +18,10 @@
 //!   published into `lab`, `lab` rendered — then the helper container, which
 //!   installs from the public lab URL with no token; its transcript attached
 //!   as `trial.log`.
+//! - a **pool job** (#340, [`super::jobs`]): no container of its own — its
+//!   directory and the release's checkout prepared here, the job run in a
+//!   child process of the dispatcher, and what it returned reported by
+//!   [`finish_job`] once that process is gone.
 //!
 //! Seam: a correction of a failed draft runs today inside the build's own
 //! container (the script's attempts), with the build's own agent sidecar
@@ -161,8 +165,14 @@ fn s(v: &Value, key: &str) -> String {
 pub fn prepare(ctx: &Ctx, l: &Lease, stop: &AtomicBool) -> Result<Value, Prep> {
     let dir = ctx.task_dir(l);
     let _ = std::fs::remove_dir_all(&dir);
-    // `agent`: the agent sidecar's usage file (#336), which the task container never mounts.
-    for sub in ["in", "out", "log", "build", "pkgcache", "agent"] {
+    // `agent`: the agent sidecar's usage file (#336), which the task container never mounts. A
+    // pool job (#340) has its scripts' scratch only (`tmp`), beside its files.
+    let subs: &[&str] = if super::jobs::is_job(&l.task.kind) {
+        &["tmp"]
+    } else {
+        &["in", "out", "log", "build", "pkgcache", "agent"]
+    };
+    for sub in subs {
         std::fs::create_dir_all(dir.join(sub)).map_err(retry_of)?;
     }
     // Only the dispatcher walks into tasks/: what a task's root leaves in its mounts (a set-id
@@ -173,6 +183,10 @@ pub fn prepare(ctx: &Ctx, l: &Lease, stop: &AtomicBool) -> Result<Value, Prep> {
     }
     let rel = ctx.release_dir(&l.release);
     ensure_checkout(&rel, &l.release).map_err(retry_of)?;
+    // A pool job's inputs are the release's checkout (its scripts) and its task's parameters.
+    if super::jobs::is_job(&l.task.kind) {
+        return Ok(json!({}));
+    }
     let input = dir.join("in");
     let notes = match l.task.kind.as_str() {
         "build" => stage_build(ctx, l, &input)?,
@@ -797,6 +811,64 @@ pub fn finish(ctx: &Ctx, l: &Lease, state: &State, now: u64) -> Result<String, R
             took,
             &log,
         ),
+    }
+}
+
+/// Reports a pool job whose child ended (#340): what it returned, as `pkg-repo work` reports it
+/// — done with its summary and result, or its failure — or, when it returned nothing (killed at
+/// its timeout, a crash, its memory limit), how its process ended. `Err` when the pool did not
+/// answer: the loop tries again.
+pub fn finish_job(ctx: &Ctx, l: &Lease, now: u64) -> Result<String, Retry> {
+    let end: super::jobs::End = l
+        .notes
+        .get("job")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let took = now.saturating_sub(l.started_at.unwrap_or(l.claimed_at)) * 1000;
+    let kind = &l.task.kind;
+    let fail = |mut body: Value| -> Result<String, Retry> {
+        if let Some(o) = body.as_object_mut() {
+            // A pool job never needs a native host: its own process is arch-neutral.
+            o.insert("needs_native".into(), json!(false));
+            o.entry("duration_ms").or_insert_with(|| json!(took));
+        }
+        let error = clean_line(
+            body.get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("failed"),
+        );
+        sent("failure", l, ctx.pool.fail(l.task.id, &l.token, &body))?;
+        Ok(format!("failed — {error}"))
+    };
+    if end.timed_out {
+        return fail(
+            json!({ "error": format!("{kind} {}", end.words()), "timed_out": true, "final": false }),
+        );
+    }
+    match super::jobs::read_result(&ctx.task_dir(l)) {
+        Some(super::jobs::Outcome::Done {
+            summary,
+            result,
+            duration_ms,
+        }) => {
+            let field = |k: &str, d: Value| result.get(k).cloned().unwrap_or(d);
+            let body = json!({
+                "summary": summary, "result": result, "duration_ms": duration_ms,
+                "sha256": field("sha256", json!("-")), "filename": field("filename", json!("-")), "version": field("version", Value::Null),
+            });
+            sent(
+                "completion",
+                l,
+                ctx.pool.complete(l.task.id, &l.token, &body),
+            )?;
+            Ok(format!("done — {summary}"))
+        }
+        Some(super::jobs::Outcome::Failed(body)) => fail(body),
+        None => fail(json!({
+            "error": format!("{kind}: {} before it reported", end.words()),
+            "final": false,
+        })),
     }
 }
 

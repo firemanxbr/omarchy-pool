@@ -18,7 +18,9 @@ use super::kinds::Ctx;
 use super::lease::{Lease, Phase, Store};
 use super::pool::Pool;
 use super::spec::{self, HOST_LABEL};
-use super::{Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS, MEM_RAMP, SANDBOX_HOLD};
+use super::{
+    jobs, shim, Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS, MEM_RAMP, SANDBOX_HOLD,
+};
 use crate::stop::Beat;
 use crate::RepoError;
 
@@ -559,6 +561,48 @@ impl Pool for FakePool {
     }
 }
 
+// ---------- pool jobs' children (#340) ----------
+
+/// What a pool job's child runs, by its task's id: a shell with its job directory in `JOB_DIR`;
+/// one not set writes a render's result. It also hands the child the host's worker token and a
+/// job token in its environment, which the dispatcher must take out.
+#[derive(Default, Clone)]
+struct FakeLaunch(Arc<Mutex<HashMap<u64, String>>>);
+
+/// A job that returned what a render returns, and wrote down its environment.
+const JOB_DONE: &str = r#"env > "$JOB_DIR/env.txt"; printf '%s' '{"ok":true,"summary":"edge/x86_64 rendered: omarchy-core-edge","result":{"repos":["omarchy-core-edge"]},"duration_ms":5}' > "$JOB_DIR/result.json""#;
+
+impl FakeLaunch {
+    fn set(&self, id: u64, script: &str) {
+        self.0.lock().unwrap().insert(id, script.to_owned());
+    }
+}
+
+impl jobs::Launch for FakeLaunch {
+    fn command(&self, dir: &Path) -> std::process::Command {
+        let id: u64 = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split('-').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        let script = self
+            .0
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| JOB_DONE.to_owned());
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c")
+            .arg(script)
+            .env("JOB_DIR", dir)
+            .env("OMARCHY_WORKER_TOKEN", "omw_host-secret")
+            .env("OMARCHY_TOKEN", "omj.stale");
+        c
+    }
+}
+
 // ---------- the clock and the host ----------
 
 struct FakeProbes {
@@ -583,6 +627,8 @@ impl Probes for FakeProbes {
 
 struct H {
     _t: tempfile::TempDir,
+    /// What each pool job's child runs (#340).
+    launch: FakeLaunch,
     work: PathBuf,
     checkout: PathBuf,
     capacity: PathBuf,
@@ -606,7 +652,15 @@ impl H {
             "#!/bin/bash\n",
         )
         .unwrap();
+        // The images the release pins: what a pool job's helpers may run (#340).
+        std::fs::create_dir_all(checkout.join("tests")).unwrap();
+        std::fs::write(
+            checkout.join("tests/images.env"),
+            format!("ARCHLINUX_BASE=\"{IMAGE}\"\n"),
+        )
+        .unwrap();
         let h = Self {
+            launch: FakeLaunch::default(),
             capacity: root.join("capacity.json"),
             work,
             checkout,
@@ -667,6 +721,8 @@ impl H {
         )
         .unwrap();
         d.net = net();
+        d.jobs.launch = Arc::new(self.launch.clone());
+        d.jobs.engine = PathBuf::from("/usr/bin/docker");
         d.readopt().unwrap();
         d
     }
@@ -873,7 +929,14 @@ fn the_claim_lists_the_leases_with_the_capacity_and_reuses_its_claim_id_after_a_
     let first = h.pool.last_claim();
     assert_eq!(first["want"], 1);
     assert_eq!(first["capacity"]["units"], 11);
-    assert_eq!(first["kinds"], json!(["build", "trial", "audit"]));
+    assert_eq!(
+        first["kinds"],
+        json!([
+            "build", "trial", "audit", "sync", "render", "promote", "rollback", "security", "gc",
+            "verify", "relayout", "enqueue", "publish", "health"
+        ]),
+        "its tasks, and the pool jobs while their unit is free (#340)"
+    );
     assert_eq!(
         first["orders"],
         json!([
@@ -899,8 +962,8 @@ fn the_claim_lists_the_leases_with_the_capacity_and_reuses_its_claim_id_after_a_
         "a new claim after an answer"
     );
     assert_eq!(next["leases"], json!([{ "task": 7, "gen": GEN }]));
-    // Full: claims only with want 0, every 30 s.
-    h.units(3);
+    // Full, the pool jobs' unit too: claims only with want 0, every 30 s.
+    h.units(2);
     let n = h.pool.claim_bodies.lock().unwrap().len();
     h.ticks(&mut d, 10);
     assert_eq!(
@@ -922,11 +985,21 @@ fn gen_of(n: u64) -> String {
     format!("g_{:016x}", 0xc000 + n)
 }
 
+/// A claim's kinds while the pool jobs' unit is free (#340): these tasks, and the pool's kinds.
+fn with_jobs(tasks: &[&str]) -> Value {
+    json!(tasks
+        .iter()
+        .chain(jobs::POOL_KINDS.iter())
+        .copied()
+        .collect::<Vec<_>>())
+}
+
 #[test]
-fn a_host_takes_as_many_tasks_as_its_units_hold_one_container_each_then_claims_want_0() {
+fn a_host_takes_as_many_tasks_as_its_units_hold_one_container_each_then_wants_only_a_pool_job() {
     // The pool hands one task per claim (D29); the dispatcher claims again at the next tick while units
     // are free, starts each lease in its own container at once (no queue on the host), and once its 11
-    // units hold five builds and the pool jobs' unit is all that is left, claims with want 0 every 30 s.
+    // units hold five builds and the pool jobs' unit is all that is left, claims every 30 s for a pool
+    // job only (#340): no task unit offered, the pool's kinds listed.
     let h = H::new();
     let mut d = h.dispatcher();
     for n in 0..6 {
@@ -935,7 +1008,14 @@ fn a_host_takes_as_many_tasks_as_its_units_hold_one_container_each_then_claims_w
     h.ticks(&mut d, 12);
     let bodies = h.pool.claim_bodies.lock().unwrap().clone();
     let wants: Vec<u64> = bodies.iter().map(|b| b["want"].as_u64().unwrap()).collect();
-    assert_eq!(&wants[..6], &[1, 1, 1, 1, 1, 0], "{wants:?}");
+    assert_eq!(&wants[..6], &[1, 1, 1, 1, 1, 1], "{wants:?}");
+    assert!(
+        bodies[5]["kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("sync")),
+        "the sixth claim wants the pool jobs' unit"
+    );
     assert_eq!(h.leases().len(), 5);
     for n in 0..5 {
         assert!(
@@ -945,13 +1025,14 @@ fn a_host_takes_as_many_tasks_as_its_units_hold_one_container_each_then_claims_w
         );
     }
     assert_eq!(h.engine.runs.lock().unwrap().len(), 5);
-    // The sixth was handed to a claim that offered nothing: given back, never started.
+    // The sixth was handed to a claim that offered no task unit: given back, never started.
     assert_eq!(h.pool.fails_of(105)[0]["lost"], true);
-    // Full: one claim in 30 s, with want 0, listing all five.
+    // Every task unit held: one claim in 30 s, listing all five, for the pool jobs' unit only.
     let n = h.pool.claim_bodies.lock().unwrap().len();
     h.ticks(&mut d, 10);
     assert_eq!(h.pool.claim_bodies.lock().unwrap().len(), n + 1);
-    assert_eq!(h.pool.last_claim()["want"], 0);
+    assert_eq!(h.pool.last_claim()["want"], 1);
+    assert!(h.pool.last_claim().get("offer").is_none());
     assert_eq!(h.pool.last_claim()["leases"].as_array().unwrap().len(), 5);
     // One ends: a build's units are free again, and the next claim wants a task.
     h.leave(100, &gen_of(0), &built_ok(), "==> Finished making: felix\n");
@@ -2284,8 +2365,8 @@ fn a_build_starts_only_with_its_budget_plus_the_floor_free() {
     assert_eq!(f["lost"], true);
     assert!(f["error"].as_str().unwrap().contains("not started"));
     // The pool would hand the same build straight back: the claims leave builds out until its
-    // budget fits; trials and audits are still claimed.
-    let held = json!(["trial", "audit"]);
+    // budget fits; trials, audits and pool jobs are still claimed.
+    let held = with_jobs(&["trial", "audit"]);
     h.give(community(7, GEN2));
     h.advance(31);
     h.ticks(&mut d, 3);
@@ -2305,7 +2386,7 @@ fn a_build_starts_only_with_its_budget_plus_the_floor_free() {
     h.ticks(&mut d, 1);
     assert_eq!(
         h.pool.last_claim()["kinds"],
-        json!(KINDS),
+        with_jobs(&KINDS),
         "its budget plus the floor is free again"
     );
     // A budget this host never fits holds builds out for DISK_HOLD at most: the host is not stranded.
@@ -2320,7 +2401,11 @@ fn a_build_starts_only_with_its_budget_plus_the_floor_free() {
     assert_eq!(h.pool.last_claim()["kinds"], held);
     h.advance(61);
     h.ticks(&mut d, 1);
-    assert_eq!(h.pool.last_claim()["kinds"], json!(KINDS), "the hold ended");
+    assert_eq!(
+        h.pool.last_claim()["kinds"],
+        with_jobs(&KINDS),
+        "the hold ended"
+    );
     assert_eq!(h.pool.last_claim()["want"], 1);
 }
 
@@ -2338,14 +2423,15 @@ fn a_task_above_the_units_the_claim_offered_is_given_back_never_started() {
         (f["lost"].clone(), f["final"].clone()),
         (json!(true), json!(false))
     );
-    // A full host says `want: 0`; a task the pool hands it anyway is given back too.
+    // A host whose one unit is the pool jobs' wants a pool job only; a task the pool hands it anyway is
+    // given back too.
     h.units(1);
     h.give(community(8, GEN2));
     h.advance(31);
     h.ticks(&mut d, 2);
     assert_eq!(
         h.pool.claim_bodies.lock().unwrap().last().unwrap()["want"],
-        0
+        1
     );
     assert_eq!(h.pool.fails_of(8).len(), 1);
     assert!(h.engine.runs.lock().unwrap().is_empty() && h.leases().is_empty());
@@ -3762,4 +3848,620 @@ fn a_dispatcher_whose_own_release_is_revoked_here_takes_no_task_and_still_claims
     h.give(json!({ "task": null, "orders": [{ "id": format!("wo_{}", "5".repeat(32)), "kind": "restart", "reason": "test", "issued_by": "maintainer" }] }));
     d.tick();
     assert_eq!(d.exit, Some(75));
+}
+
+// ---------- pool jobs (#340) ----------
+
+/// A pool job as a host's claim answer carries it: one unit, no disk, its kind's name.
+#[allow(clippy::needless_pass_by_value)] // the call sites read better with json!(…) inline
+fn job(id: u64, kind: &str, arch: &str, params: Value, gen: &str) -> Value {
+    json!({
+        "task": { "id": id, "kind": kind, "name": kind, "arch": arch, "trust": "project", "pkgbuild_ref": "-", "params": params,
+                  "attempts": 1, "max_attempts": 3, "publish": 1, "lease_gen": gen, "units": 1, "disk_gb": 0, "release": "v1.2.3" },
+        "token": format!("omj.secret-of-{id}"),
+        "lease_minutes": 30,
+    })
+}
+
+impl H {
+    /// Turns the loop (3 s of the fake clock each) until `done` holds, within 10 s of real time: a
+    /// pool job's child is a real process.
+    fn until(&self, d: &mut Dispatcher, what: &str, done: impl Fn(&H) -> bool) {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            d.tick();
+            self.advance(3);
+            if done(self) {
+                return;
+            }
+            assert!(std::time::Instant::now() < until, "{what}: not within 10 s");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Beside the work root, outside every task directory: what a job's child leaves for the test.
+    fn out(&self, name: &str) -> PathBuf {
+        self.work.parent().unwrap().join(name)
+    }
+
+    fn beats_of(&self, id: u64) -> usize {
+        self.pool
+            .beat_tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| *t == id)
+            .count()
+    }
+}
+
+/// A process the test's job started and left running in the background, by its pid file.
+fn alive(pid_file: &Path) -> bool {
+    let Some(pid) = std::fs::read_to_string(pid_file)
+        .ok()
+        .and_then(|p| p.trim().parse::<i32>().ok())
+    else {
+        return false;
+    };
+    let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .is_ok_and(|s| s.split_whitespace().nth(2) == Some("Z"));
+    !zombie
+        && rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
+}
+
+fn gone(pid_file: &Path) -> bool {
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while alive(pid_file) && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    !alive(pid_file)
+}
+
+#[test]
+fn an_arch_neutral_pool_job_runs_in_a_child_process_of_its_own_and_reports_what_it_returned() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    // A render of the x86_64 ring on this aarch64-only host: arch-neutral, in the dispatcher's own
+    // native process tree, as today's pool-x86_64 runs it.
+    let (env, spec, token) = (h.out("env-40"), h.out("job-40.json"), h.out("token-40"));
+    h.launch.set(
+        40,
+        &format!(
+            "env > {}; cp \"$JOB_DIR/job.json\" {}; cp \"$JOB_DIR/token\" {}; {JOB_DONE}",
+            env.display(),
+            spec.display(),
+            token.display()
+        ),
+    );
+    h.give(job(
+        40,
+        "render",
+        "x86_64",
+        json!({ "ring": "edge", "arch": "x86_64" }),
+        GEN,
+    ));
+    h.until(&mut d, "the render's report", |h| {
+        !h.pool.completes_of(40).is_empty()
+    });
+    let done = &h.pool.completes_of(40)[0];
+    assert_eq!(done["summary"], "edge/x86_64 rendered: omarchy-core-edge");
+    assert_eq!(done["result"], json!({ "repos": ["omarchy-core-edge"] }));
+    assert_eq!(
+        (done["sha256"].clone(), done["filename"].clone()),
+        (json!("-"), json!("-"))
+    );
+    // No container, no network of its own: a job without helpers reaches no engine (the probe sidecar's are the host's).
+    assert!(h.engine.runs.lock().unwrap().is_empty());
+    assert!(!h
+        .engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.iter().any(|x| x.contains("omarchy-task-40-"))));
+    // Its environment: the shim first on PATH and as RUNTIME, its own scratch, no worker token, no
+    // stale job token (its token is in its directory), no helper context (a render starts none).
+    let env = std::fs::read_to_string(&env).unwrap();
+    let var = |k: &str| {
+        env.lines()
+            .find_map(|l| l.strip_prefix(&format!("{k}=")))
+            .map(str::to_owned)
+    };
+    let bin = h.work.join("state/bin");
+    assert!(var("PATH")
+        .unwrap()
+        .starts_with(&format!("{}:", bin.display())));
+    assert_eq!(
+        var("RUNTIME"),
+        Some(bin.join("omarchy-task-run").display().to_string())
+    );
+    assert_eq!(
+        var("TMPDIR"),
+        Some(h.tdir(40, GEN).join("tmp").display().to_string())
+    );
+    for k in [
+        "OMARCHY_WORKER_TOKEN",
+        "OMARCHY_TOKEN",
+        "OMARCHY_TASK_RUN",
+        "OMARCHY_TASK_ID",
+    ] {
+        assert_eq!(var(k), None, "{k} is not a job's: {env}");
+    }
+    let spec: Value = serde_json::from_slice(&std::fs::read(&spec).unwrap()).unwrap();
+    assert_eq!(
+        (
+            spec["task"]["id"].clone(),
+            spec["arch"].clone(),
+            spec["repo_dir"].clone(),
+            spec["work_dir"].clone()
+        ),
+        (
+            json!(40),
+            json!("aarch64"),
+            json!(h.checkout.display().to_string()),
+            json!(h.work.join("jobs").display().to_string())
+        )
+    );
+    assert_eq!(std::fs::read_to_string(&token).unwrap(), "omj.secret-of-40");
+    assert!(
+        h.leases().is_empty() && !h.tdir(40, GEN).exists(),
+        "cleaned up"
+    );
+}
+
+#[test]
+fn a_hanging_job_is_killed_at_its_timeout_and_failed_while_the_loop_and_another_leases_heartbeats_go_on(
+) {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    // A build in its container, then a health check whose job hangs, with a process it started.
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(7, GEN));
+    let pid = h.out("hung.pid");
+    h.launch.set(
+        41,
+        &format!("sleep 600 & echo $! > {}; wait", pid.display()),
+    );
+    h.give(job(
+        41,
+        "health",
+        "aarch64",
+        json!({ "ring": "rc", "arch": "aarch64" }),
+        GEN2,
+    ));
+    h.until(&mut d, "the job started", |_| alive(&pid));
+    let lease = h.leases().into_iter().find(|l| l.task.id == 41).unwrap();
+    assert_eq!(lease.phase, Phase::Running);
+    assert!(lease.net_slot.is_some(), "its helpers' /28 is held");
+    let (beats, claims) = (h.beats_of(7), h.pool.claim_bodies.lock().unwrap().len());
+    // 44 minutes: the loop turns, both leases beat, the build runs on, and so does the job.
+    for _ in 0..(44 * 2) {
+        d.tick();
+        h.advance(30);
+    }
+    assert!(h.beats_of(7) >= beats + 8, "the build's heartbeats go on");
+    assert!(h.beats_of(41) >= 8, "and the job's");
+    assert!(h.pool.claim_bodies.lock().unwrap().len() > claims + 40);
+    assert!(alive(&pid) && h.pool.fails_of(41).is_empty());
+    // Past its 45 minutes: its process group killed, what its helpers left removed, failed — not final.
+    for _ in 0..4 {
+        d.tick();
+        h.advance(30);
+    }
+    let f = h.pool.fails_of(41);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(
+        f[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("health ran past its timeout of 45 min"),
+        "{f:?}"
+    );
+    assert_eq!(
+        (f[0]["timed_out"].clone(), f[0]["final"].clone()),
+        (json!(true), json!(false))
+    );
+    assert!(gone(&pid), "the job's own processes die with it");
+    assert!(h
+        .engine
+        .removed
+        .lock()
+        .unwrap()
+        .contains(&(41, GEN2.to_owned())));
+    // The build runs on; the job's unit is free again.
+    assert!(h.engine.has(7, GEN));
+    assert_eq!(
+        h.leases().iter().map(|l| l.task.id).collect::<Vec<_>>(),
+        [7]
+    );
+    h.advance(31);
+    d.tick();
+    assert!(h.pool.last_claim()["kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("health")));
+}
+
+#[test]
+fn a_crashing_job_is_failed_with_how_it_ended_and_the_loop_goes_on() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.launch.set(42, "kill -SEGV $$");
+    h.give(job(42, "gc", "x86_64", json!({ "keep": 3 }), GEN));
+    h.until(&mut d, "the crash's report", |h| {
+        !h.pool.fails_of(42).is_empty()
+    });
+    let f = &h.pool.fails_of(42)[0];
+    let e = f["error"].as_str().unwrap();
+    assert!(
+        e.contains("gc: its process ended on signal 11 (SIGSEGV: a crash) before it reported"),
+        "{e}"
+    );
+    assert_eq!(
+        (f["final"].clone(), f.get("lost")),
+        (json!(false), None),
+        "a crash spends its attempt"
+    );
+    // The loop goes on: the next claim wants a pool job again, and gets one.
+    h.give(job(43, "render", "x86_64", json!({ "ring": "edge" }), GEN2));
+    h.advance(31);
+    h.until(&mut d, "the next job's report", |h| {
+        !h.pool.completes_of(43).is_empty()
+    });
+}
+
+#[test]
+fn a_failure_the_job_reports_is_the_pools_word_for_it_and_never_needs_a_native_host() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.launch.set(
+        44,
+        r#"printf '%s' '{"ok":false,"fail":{"error":"health check of rc/aarch64 failed (see the health event)","final":false,"needs_native":true,"duration_ms":9}}' > "$JOB_DIR/result.json""#,
+    );
+    h.give(job(
+        44,
+        "health",
+        "aarch64",
+        json!({ "ring": "rc", "arch": "aarch64" }),
+        GEN,
+    ));
+    h.until(&mut d, "the failure's report", |h| {
+        !h.pool.fails_of(44).is_empty()
+    });
+    let f = &h.pool.fails_of(44)[0];
+    assert_eq!(
+        f["error"],
+        "health check of rc/aarch64 failed (see the health event)"
+    );
+    assert_eq!(
+        (
+            f["final"].clone(),
+            f["needs_native"].clone(),
+            f["duration_ms"].clone()
+        ),
+        (json!(false), json!(false), json!(9))
+    );
+    assert!(h.leases().is_empty());
+}
+
+#[test]
+fn a_sync_runs_while_every_build_unit_and_every_other_unit_holds_model_work() {
+    // Five units, one kept for pool jobs: two drafts (model builds, two units each) hold the other four.
+    let h = H::new();
+    h.units(5);
+    let mut d = h.dispatcher();
+    for (n, id) in [(0, 60), (1, 61)] {
+        h.give(task(
+            id,
+            "build",
+            "felix",
+            "draft:felix",
+            "community",
+            json!({}),
+            &gen_of(n),
+        ));
+    }
+    h.ticks(&mut d, 6);
+    assert!(h.engine.has(60, &gen_of(0)) && h.engine.has(61, &gen_of(1)));
+    // Every task unit held: the claim wants the pool jobs' unit only.
+    h.advance(31);
+    d.tick();
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], 1);
+    assert!(c.get("offer").is_none(), "no task unit offered: {c}");
+    assert!(c["kinds"].as_array().unwrap().contains(&json!("sync")));
+    // The pool hands it a sync: it runs, beside the model work.
+    let pid = h.out("sync.pid");
+    h.launch
+        .set(62, &format!("echo $$ > {}; sleep 600", pid.display()));
+    h.give(job(
+        62,
+        "sync",
+        "x86_64",
+        json!({ "arch": "x86_64", "sources": "[]" }),
+        &gen_of(2),
+    ));
+    h.advance(31);
+    h.until(&mut d, "the sync started", |_| alive(&pid));
+    assert_eq!(h.leases().len(), 3);
+    // Every unit held, the pool jobs' too: want 0, and none of the pool's kinds (one job at a time).
+    h.advance(31);
+    h.ticks(&mut d, 1);
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], 0);
+    assert!(!c["kinds"].as_array().unwrap().contains(&json!("sync")));
+    d.kill_jobs();
+    assert!(gone(&pid));
+}
+
+#[test]
+fn a_job_holds_the_job_unit_never_a_tasks_and_a_second_job_handed_meanwhile_is_given_back() {
+    // The minimum host (design v2 §7.3): 3 units, one build and the job unit. A sync leased first
+    // holds the job unit; the build still starts beside it, whichever came first.
+    let h = H::new();
+    h.units(3);
+    let mut d = h.dispatcher();
+    let pid = h.out("sync-min.pid");
+    h.launch
+        .set(64, &format!("echo $$ > {}; sleep 600", pid.display()));
+    h.give(job(
+        64,
+        "sync",
+        "x86_64",
+        json!({ "arch": "x86_64", "sources": "[]" }),
+        &gen_of(0),
+    ));
+    h.until(&mut d, "the sync started", |_| alive(&pid));
+    // The claim offers a build's two units, and none of the pool's kinds (one job at a time).
+    h.advance(31);
+    d.tick();
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], 1);
+    assert!(c.get("offer").is_none(), "every task unit offered: {c}");
+    assert!(!c["kinds"].as_array().unwrap().contains(&json!("render")));
+    // A second job handed anyway (a stale answer, a pool that did not read `kinds`): given back with
+    // its attempt, never started — the jobs share one work directory.
+    let second = h.out("render-66.started");
+    h.launch
+        .set(66, &format!("touch {}; {JOB_DONE}", second.display()));
+    h.give(job(
+        66,
+        "render",
+        "x86_64",
+        json!({ "ring": "edge", "arch": "x86_64" }),
+        &gen_of(1),
+    ));
+    h.advance(31);
+    h.ticks(&mut d, 2);
+    let f = h.pool.fails_of(66);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0]["lost"], true);
+    assert!(h.leases().iter().all(|l| l.task.id != 66));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!second.exists(), "the second job never ran");
+    // The build: started beside the sync.
+    h.give(community(65, &gen_of(2)));
+    h.advance(31);
+    h.ticks(&mut d, 4);
+    assert!(h.pool.fails_of(65).is_empty(), "{:?}", h.pool.fails_of(65));
+    assert!(
+        h.engine.has(65, &gen_of(2)),
+        "the build runs beside the sync"
+    );
+    let mut held: Vec<(u64, u32)> = h.leases().iter().map(|l| (l.task.id, l.units)).collect();
+    held.sort_unstable();
+    assert_eq!(held, [(64, 1), (65, 2)]);
+    assert!(alive(&pid), "the sync goes on");
+    // Every unit held now: want 0.
+    h.advance(31);
+    d.tick();
+    assert_eq!(h.pool.last_claim()["want"], 0);
+    d.kill_jobs();
+    assert!(gone(&pid));
+}
+
+#[test]
+fn a_health_check_gets_the_shims_context_on_a_lane_of_its_ring_and_one_without_such_a_lane_is_given_back(
+) {
+    let h = H::new();
+    emulated_lanes(&h);
+    let mut d = h.dispatcher();
+    let (env, ctx) = (h.out("env-50"), h.out("helper-50.json"));
+    h.launch.set(
+        50,
+        &format!(
+            "env > {}; cp \"$JOB_DIR/helper.json\" {}; {JOB_DONE}",
+            env.display(),
+            ctx.display()
+        ),
+    );
+    // The x86_64 ring's health check on the Studio's emulated x86_64 lane: no preference, no wait.
+    h.give(job(
+        50,
+        "health",
+        "x86_64",
+        json!({ "ring": "rc", "arch": "x86_64" }),
+        GEN,
+    ));
+    h.until(&mut d, "the health check's report", |h| {
+        !h.pool.completes_of(50).is_empty()
+    });
+    let c: shim::Context = serde_json::from_slice(&std::fs::read(&ctx).unwrap()).unwrap();
+    assert_eq!((c.task, c.gen.as_str(), c.host.as_str()), (50, GEN, HOST));
+    assert_eq!(c.arches, ["aarch64", "x86_64"]);
+    assert_eq!(c.images, [IMAGE], "the release's pins (tests/images.env)");
+    assert_eq!(c.scratch, h.tdir(50, GEN).join("tmp"));
+    assert_eq!(
+        (c.units, c.unit_cpus, c.unit_mem_gb),
+        (1, 1, 2),
+        "the job's unit"
+    );
+    assert_eq!(
+        (c.worker_image.as_str(), c.engine.as_path()),
+        (WORKER, Path::new("/usr/bin/docker"))
+    );
+    assert!(spec::Subnets::parse(&c.subnets)
+        .unwrap()
+        .slot(c.slot)
+        .is_some());
+    let env = std::fs::read_to_string(&env).unwrap();
+    assert!(env.lines().any(|l| l
+        == format!(
+            "OMARCHY_TASK_RUN={}",
+            h.tdir(50, GEN).join("helper.json").display()
+        )));
+    // A host with no x86_64 lane: the same check, and a promotion that checks both rings' arches,
+    // are given back with their attempts, never started.
+    h.units(11);
+    let mut d = h.dispatcher();
+    h.give(job(
+        51,
+        "health",
+        "x86_64",
+        json!({ "ring": "rc", "arch": "x86_64" }),
+        GEN2,
+    ));
+    h.advance(31);
+    h.ticks(&mut d, 2);
+    h.give(job(
+        52,
+        "promote",
+        "x86_64",
+        json!({ "from": "rc", "to": "stable" }),
+        GEN2,
+    ));
+    h.advance(31);
+    h.ticks(&mut d, 2);
+    for id in [51, 52] {
+        let f = h.pool.fails_of(id);
+        assert_eq!(f.len(), 1, "{id}: {f:?}");
+        assert_eq!(f[0]["lost"], true);
+        assert!(
+            f[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("runs no lane of it"),
+            "{f:?}"
+        );
+    }
+    assert!(h.leases().is_empty());
+}
+
+#[test]
+fn an_enqueue_reads_its_recipes_through_the_shim_on_the_hosts_own_arch() {
+    // Its PKGBUILD reader sources recipes — package code — so it is a helper through the spec
+    // (reconcile.rs), on the dispatcher's native arch: an x86_64 row's enqueue on this aarch64-only
+    // host gets the shim's context, never a refusal for want of one.
+    let h = H::new();
+    let mut d = h.dispatcher();
+    let (env, ctx) = (h.out("env-80"), h.out("helper-80.json"));
+    h.launch.set(
+        80,
+        &format!(
+            "env > {}; cp \"$JOB_DIR/helper.json\" {}; {JOB_DONE}",
+            env.display(),
+            ctx.display()
+        ),
+    );
+    h.give(job(80, "enqueue", "x86_64", json!({}), GEN));
+    h.until(&mut d, "the enqueue's report", |h| {
+        !h.pool.completes_of(80).is_empty()
+    });
+    let c: shim::Context = serde_json::from_slice(&std::fs::read(&ctx).unwrap()).unwrap();
+    assert_eq!((c.task, c.gen.as_str()), (80, GEN));
+    assert_eq!(c.arches, ["aarch64"]);
+    assert_eq!(c.scratch, h.tdir(80, GEN).join("tmp"));
+    let env = std::fs::read_to_string(&env).unwrap();
+    assert!(env.lines().any(|l| l
+        == format!(
+            "OMARCHY_TASK_RUN={}",
+            h.tdir(80, GEN).join("helper.json").display()
+        )));
+    assert!(env.lines().any(|l| l
+        == format!(
+            "RUNTIME={}",
+            h.work.join("state/bin/omarchy-task-run").display()
+        )));
+}
+
+#[test]
+fn a_job_does_not_outlive_its_dispatcher_one_running_is_lost_and_one_that_ended_is_reported() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    let (hung, ended) = (h.out("hung.pid"), h.out("ended.pid"));
+    h.launch
+        .set(70, &format!("echo $$ > {}; sleep 600", hung.display()));
+    h.give(job(70, "verify", "x86_64", json!({}), GEN));
+    h.until(&mut d, "the job started", |_| alive(&hung));
+    // The dispatcher exits (a restart order, a release): its jobs' process groups go with it.
+    d.kill_jobs();
+    assert!(gone(&hung));
+    let mut d = h.dispatcher();
+    let f = h.pool.fails_of(70);
+    assert_eq!(f.len(), 0, "reported once its kill is seen");
+    h.ticks(&mut d, 1);
+    let f = h.pool.fails_of(70);
+    assert_eq!((f.len(), f[0]["lost"].clone()), (1, json!(true)), "{f:?}");
+    assert!(f[0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("ended with the dispatcher"));
+    // One that had written its result when its dispatcher went: reported from it.
+    h.launch.set(
+        71,
+        &format!("{JOB_DONE}; echo $$ > {}; sleep 600", ended.display()),
+    );
+    h.give(job(71, "render", "x86_64", json!({ "ring": "edge" }), GEN2));
+    h.advance(31);
+    h.until(&mut d, "the job returned", |_| alive(&ended));
+    d.kill_jobs();
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 1);
+    assert_eq!(h.pool.completes_of(71).len(), 1);
+    assert!(h.leases().is_empty());
+}
+
+#[test]
+fn a_stop_at_a_heartbeat_kills_a_jobs_process_group_and_a_renewed_token_reaches_the_job() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    let pid = h.out("stop.pid");
+    h.launch.set(
+        80,
+        &format!("sleep 600 & echo $! > {}; wait", pid.display()),
+    );
+    h.pool
+        .beats
+        .lock()
+        .unwrap()
+        .insert(80, BeatMode::Renew("omj.fresh-80".into()));
+    h.give(job(80, "relayout", "x86_64", json!({}), GEN));
+    h.until(&mut d, "the job started", |_| alive(&pid));
+    for _ in 0..12 {
+        d.tick();
+        h.advance(30);
+    }
+    assert_eq!(
+        std::fs::read_to_string(h.tdir(80, GEN).join("token")).unwrap(),
+        "omj.fresh-80",
+        "the job's next script and its next page take the renewed token"
+    );
+    h.pool
+        .beats
+        .lock()
+        .unwrap()
+        .insert(80, BeatMode::Stop("stopping".into()));
+    for _ in 0..12 {
+        d.tick();
+        h.advance(30);
+    }
+    assert!(gone(&pid), "its process group killed");
+    let f = h.pool.fails_of(80);
+    assert_eq!(f.len(), 1);
+    assert!(f[0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("was stopped by the pool"));
+    assert!(h.leases().is_empty());
 }
