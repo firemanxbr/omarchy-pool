@@ -15,8 +15,7 @@
 //! **Its network** (#336, D38, D49) is its own: an `--internal` network
 //! `omarchy-task-<id>-<gen>` on a /28 of `OMARCHY_TASK_SUBNETS`, which no
 //! other task, the host, its LAN, the dispatcher or the pool is on, with no
-//! address of the host as its gateway where the engine can be asked
-//! ([`Gateway`]). Its one
+//! address of the host as its gateway ([`Gateway`]). Its one
 //! way out is its **egress sidecar** (`<network>-egress`, the worker image's
 //! `egress` role: `pkg-repo egress`), which listens on its own address of
 //! that network and is also attached to the shared `omarchy-egress` bridge,
@@ -294,13 +293,11 @@ impl Slot {
 pub enum Gateway {
     /// Docker 28 or newer: `com.docker.network.bridge.gateway_mode_ipv4=isolated`, no address on the bridge.
     Isolated,
-    /// podman's own CLI: `--disable-dns`, which leaves netavark's bridge without the gateway address.
+    /// podman: `--disable-dns`, an internal network without DNS, which has no gateway and leaves
+    /// netavark's bridge without an address. Its own CLI takes the flag; behind docker's CLI, whose
+    /// podman API forces DNS on and drops docker's option, the engine makes that call through
+    /// libpod's own API (`/libpod/networks/create`, `dns_enabled: false`; #372).
     NoDns,
-    /// podman behind docker's API, which forces DNS on and drops docker's option: the address stays.
-    /// prep-root.sh's INPUT drop for the task subnets keeps a task off it on a rootful host, and the
-    /// install's preflight probe refuses a host where a task reaches it (#367); seam: #372 makes the
-    /// network through libpod's own API, with DNS off.
-    Engine,
 }
 
 /// A model kind's agent sidecar: where its keys are, and its per-task caps (D45).
@@ -431,7 +428,6 @@ impl Side<'_> {
                     "com.docker.network.bridge.gateway_mode_ipv4=isolated".into(),
                 ]),
                 Gateway::NoDns => a.push("--disable-dns".into()),
-                Gateway::Engine => {}
             }
         }
         a.extend(["--subnet".into(), self.slot.cidr()]);
@@ -1822,9 +1818,9 @@ mod tests {
             .any(|x| x == "omarchy-task-0-g_0123456789abcdef"));
     }
 
-    /// The internal network's gateway, per engine: docker's isolated mode, podman's CLI without DNS,
-    /// nothing podman's docker API would take (prep-root.sh's INPUT drop is the seam there); a
-    /// signed exception's bridge keeps its gateway, its way out.
+    /// The internal network's gateway, per engine: docker's isolated mode, podman's without DNS (its
+    /// own CLI's flag, which the engine says to libpod's API behind docker's CLI); a signed
+    /// exception's bridge keeps its gateway, its way out.
     #[test]
     fn the_gateway_is_no_address_of_the_host_where_the_engine_can_say_so() {
         let (tdir, rel, _) = dirs();
@@ -1834,7 +1830,6 @@ mod tests {
                 &["-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated"][..],
             ),
             (Gateway::NoDns, &["--disable-dns"][..]),
-            (Gateway::Engine, &[][..]),
         ] {
             let mut s = spec(Kind::Build, &tdir, &rel);
             s.gateway = gateway;

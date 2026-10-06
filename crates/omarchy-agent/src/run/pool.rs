@@ -6,11 +6,12 @@
 //! (`POST /api/v1/hosts/self/report`, signed), a new host worker token
 //! (`POST /api/v1/hosts/self/token`, signed, for `rotate-token`), the dispatcher's
 //! scrubbed log lines (`POST /api/v1/hosts/self/diagnostics`, signed, for `diagnostics`),
-//! and the release assets on GitHub (a bundle's co-signatures among them, each of which
-//! may not exist). Answers are read leniently and sorted three ways; none
-//! of them ever stops the agent: no answer, a 5xx or a malformed body changes nothing; a
-//! 401/403 changes nothing and slows the polls to hourly. The host state's answer, whatever
-//! its status, also gives the pool's clock (its `Date`), which a Mac's VM is held to (#320).
+//! the release assets on GitHub (a bundle's co-signatures among them, each of which may
+//! not exist), and (#326's freeze detection) the tag of GitHub's latest release, nothing
+//! more of it. Answers are read leniently and sorted three ways; none of them ever stops
+//! the agent: no answer, a 5xx or a malformed body changes nothing; a 401/403 changes
+//! nothing and slows the polls to hourly. The host state's answer, whatever its status,
+//! also gives the pool's clock (its `Date`), which a Mac's VM is held to (#320).
 //!
 //! From this agent on the target is the host state's, never `follow.latest`: the pool's
 //! public `GET /factory/follow` is read by the legacy sets' updaters and the agents before
@@ -214,6 +215,9 @@ pub(crate) trait Pool {
     /// The public address the pool's edge sees this host come from over IPv4 (#371): the
     /// one its tasks leave from too, through the same NAT.
     fn public_address(&mut self) -> Net<IpAddr>;
+    /// The tag of GitHub's latest release (#326's freeze detection), unauthenticated: only
+    /// ever compared with the pool's, never acted on.
+    fn github_latest(&mut self) -> Net<Release>;
 }
 
 const STATE_MAX: u64 = 64 << 10;
@@ -230,6 +234,12 @@ const BUNDLE_MAX: u64 = 64 << 20;
 /// maintainers).
 const MAX_COSIGNATURES: usize = 16;
 pub(crate) const RELEASES: &str = "https://github.com/firemanxbr/omarchy-pool/releases/download";
+/// GitHub's public API for the latest release (not a draft, not a prerelease): its
+/// `tag_name` is all the agent reads of it.
+pub(crate) const LATEST_RELEASE: &str =
+    "https://api.github.com/repos/firemanxbr/omarchy-pool/releases/latest";
+/// The latest release's JSON lists its assets and notes; a body larger than this is not one.
+const LATEST_MAX: u64 = 1 << 20;
 /// At most this many host orders and Update ids are read from one answer.
 const MAX_ORDERS: usize = 32;
 
@@ -353,6 +363,23 @@ pub(crate) fn parse_follow(body: &[u8], worker_id: &str) -> Result<Follow, Strin
     })
 }
 
+/// The tag of GitHub's latest release from its API's answer: `tag_name`, a release
+/// (`vX.Y.Z`); everything else in it is ignored.
+pub(crate) fn parse_latest(body: &[u8]) -> Result<Release, String> {
+    let raw: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("GitHub's latest release: {e}"))?;
+    let tag = raw
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("GitHub's latest release: no tag_name")?;
+    Release::parse(tag.trim()).ok_or_else(|| {
+        format!(
+            "GitHub's latest release: {:?} is not vX.Y.Z",
+            tag.chars().take(40).collect::<String>()
+        )
+    })
+}
+
 /// Reads the relay's body: `{to, statement, bundle, cosignatures?}`, the statement as the
 /// signed text. `cosignatures` (login → `ssh-keygen -Y sign`'s armored text, #330) is read
 /// leniently: an entry that is no login and a string is left out, never the statement.
@@ -415,6 +442,9 @@ pub(crate) struct Https {
     host: Option<(HostKey, String)>,
     /// IPv4 only and never through a proxy: the way a task's egress leaves the host.
     direct_v4: ureq::Agent,
+    /// GitHub's API, for the latest release's tag (#326): a short deadline, so a GitHub
+    /// that does not answer holds one tick for seconds, not a minute.
+    api: ureq::Agent,
     /// The `Date` of the host state's last answer ([`Pool::date`]).
     date: Option<i64>,
     /// The watchdog's clock, moved on as a body's bytes arrive: a long download is
@@ -447,6 +477,7 @@ impl Https {
                 .proxy(None)
                 .build()
                 .into(),
+            api: config(Duration::from_secs(20), 3).build().into(),
             date: None,
             progress: None,
         }
@@ -680,6 +711,20 @@ impl Pool for Https {
                 crate::dispatcher_env::addresses::from_trace(&String::from_utf8_lossy(&body))
                     .map_or_else(|| Net::NoAnswer(format!("{url}: no ip= line")), Net::Ok)
             }
+            Net::NoAnswer(e) => Net::NoAnswer(e),
+            Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
+    }
+
+    fn github_latest(&mut self) -> Net<Release> {
+        let res = self
+            .api
+            .get(LATEST_RELEASE)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28")
+            .call();
+        match ok_body(self.read(res, LATEST_MAX)) {
+            Net::Ok(body) => parse_latest(&body).map_or_else(Net::NoAnswer, Net::Ok),
             Net::NoAnswer(e) => Net::NoAnswer(e),
             Net::Unauthorized(s) => Net::Unauthorized(s),
         }
@@ -960,6 +1005,36 @@ mod tests {
         for s in [500, 502, 503, 404, 426, 429, 302] {
             assert!(matches!(classify(s), Net::NoAnswer(_)), "{s}");
         }
+    }
+
+    #[test]
+    fn only_the_tag_of_githubs_latest_release_is_read() {
+        // The API's answer, cut down: the tag is read, the rest (assets, notes) ignored.
+        let body = br#"{"url":"https://api.github.com/repos/firemanxbr/omarchy-pool/releases/1",
+            "tag_name":"v1.21.0","name":"v1.21.0","draft":false,"prerelease":false,
+            "assets":[{"name":"omarchy-host-v1.21.0.tar.gz","size":1}],"body":"notes"}"#;
+        assert_eq!(
+            parse_latest(body).unwrap(),
+            Release::parse("v1.21.0").unwrap()
+        );
+        assert_eq!(
+            parse_latest(br#"{"tag_name":" v1.2.3 "}"#).unwrap(),
+            Release::parse("v1.2.3").unwrap()
+        );
+        for bad in [
+            &br#"{"tag_name":"latest"}"#[..],
+            br#"{"tag_name":1}"#,
+            br#"{"message":"Not Found"}"#,
+            b"[]",
+            b"<html>",
+        ] {
+            assert!(
+                parse_latest(bad).is_err(),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        assert!(LATEST_RELEASE.starts_with("https://api.github.com/repos/firemanxbr/omarchy-pool/"));
     }
 
     #[test]

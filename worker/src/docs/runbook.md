@@ -569,7 +569,12 @@ origins, the images by digest, the container tools by URL and SHA-256 and
 the **capacity constants** that bound how many tasks a host may run. They
 come from [`factory/bundle/manifest.toml`](../factory/bundle/manifest.toml):
 changing one changes every host at the next release, without an agent
-release, and needs another maintainer's review (CODEOWNERS).
+release, and needs another maintainer's review (CODEOWNERS). Its
+`urgent_agent` marks a security release's agent (#326): set it, in the
+fixing release's pull request, to the agent version that release ships, and
+the manifest's `agent.urgent` lets hosts take that agent at once, past their
+owners' soak (*Soak*, below); it lapses by itself with the next agent version,
+and one above the agent shipped is refused.
 
 `install.sh` is always at its canonical URL, the latest release's:
 
@@ -886,10 +891,13 @@ gateway is reached on a plain bridge (the host itself on rootful docker, the
 engine's namespace on rootless podman) and not behind an `INPUT` drop for
 one test /28 (the rule prep-root.sh's `OMARCHY-TASKS-HOST` holds for each
 task subnet), which the script adds on a rootful engine where it may (root,
-or `sudo -n`); a task's own network has no gateway a task reaches on docker,
-and keeps one behind podman's docker API; rootless podman's network stack is
-seen in `/proc` while the probe tasks run, and maps nothing to the host's
-loopback. What needs a VM, by hand on Ubuntu LTS, Fedora and
+or `sudo -n`); a task's own network, made as the dispatcher makes it (on
+podman through libpod's own API, internal with DNS off, #372), has no gateway
+a task reaches on either engine, and the dispatcher's own code makes the same
+network there through docker's CLI; rootless podman's network stack is seen
+in `/proc` while the probe tasks run, and maps nothing to the host's loopback;
+on rootless podman behind pasta a service of the host's answers through
+pasta's guest-mapped address exactly when pasta maps it. What needs a VM, by hand on Ubuntu LTS, Fedora and
 Arch (Asahi on the Studio's hardware) before P1 is called done: install
 from nothing with the pasted command and confirm on the site, then
 `sudo reboot` and check `systemctl --user status omarchy-agent` and
@@ -907,9 +915,11 @@ slirp4netns for rootless podman). prep-root.sh installs no firewall there
 network's gateway is the engine's namespace, not the host. What can still
 reach the host from a bridge is the stack's **host loopback**: an address in
 the namespace that the stack forwards to the host's `127.0.0.1`, where
-services that trust local callers listen. Every engine below has it off by
-default. Whether it is on is on the stack's command line, which the engine's
-own user (the agent's, design v2 §19.3) reads in `/proc/<pid>/cmdline`:
+services that trust local callers listen. Every engine below keeps the host's
+loopback off by default; pasta's guest-mapped address (from podman 5.3, the
+table's third row, below) is on. Whether the loopback is mapped is on the
+stack's command line, which the engine's own user (the agent's, design v2
+§19.3) reads in `/proc/<pid>/cmdline`:
 preflight reads it there while both probe tasks run (rootless podman starts
 its stack with the first container on a bridge network and stops it with the
 last), and refuses the install with the setting to change when any of this
@@ -921,23 +931,43 @@ own network; the latter is internal, with no route to these addresses, and
 so is reached only through the former and the shared `omarchy-egress`
 bridge, whose sidecars refuse private addresses by what a name resolves to.
 
-| Engine | Where the host's loopback appears, when on | Default | What turns it off |
-|---|---|---|---|
-| rootless Docker (`dockerd-rootless.sh`, RootlessKit) | by RootlessKit's `--net` (its docs/network.md): `10.0.2.2` (slirp4netns, the default), `192.168.65.2` (vpnkit), `10.0.2.1` (gvisor-tap-vsock), the namespace's gateway (pasta) | off: RootlessKit runs with `--disable-host-loopback` | remove `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` from `docker.service`'s environment (`systemctl --user edit docker.service`), and any `--disable-host-loopback=false` from `DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS`, then `systemctl --user restart docker.service` |
-| rootless podman, pasta (podman 5's default) | the namespace's gateway (podman's `--map-gw`), or the address given to `--map-host-loopback` | off: podman passes `--no-map-gw` | in `containers.conf` (`~/.config/containers/containers.conf`, `/etc/containers/containers.conf`, or a file in their `containers.conf.d`), remove `--map-gw` and any `--map-host-loopback` from `pasta_options` under `[network]`; then stop every container of the user, so its namespace starts again without them |
-| rootless podman, slirp4netns (podman 4's default) | `10.0.2.2` | off: podman passes `--disable-host-loopback` (`allow_host_loopback=false`) | in `containers.conf`, remove `allow_host_loopback=true` from `network_cmd_options` under `[engine]`; then stop every container of the user |
+pasta can also map an address to the host's **own** address, which reaches
+every service of the host that listens on its interfaces: its guest-mapped
+address (`--map-guest-addr`), which rootless podman passes as `169.254.1.2`
+(what `host.containers.internal` names) from podman 5.3 on, unless
+`pasta_options` names one. On rootless podman behind pasta (libpod's `/info`
+says which stack it runs) the probe task on a bridge tries `169.254.1.2` on
+22, 53 and the pool's ports, and preflight refuses the install when anything
+answers there, with the setting to change; an address that pasta's command
+line maps and the probe did not try (one an owner set) is refused as it is. A
+task's own network is internal and has no route to it, so the probe task on
+one does not try it (an unreachable address that fails at once reads as a
+refusal to `nc -z`); a signed exception's bridge has one, and so does the
+shared `omarchy-egress` bridge, whose sidecars refuse link-local addresses.
 
-With the host loopback off, a rootless host still fails the probe until two
-follow-ups land, and preflight says which:
-- a signed exception's bridge reaches the LAN and the router through the
-  user-mode stack, and its gateway (the engine's namespace) refuses
-  connections, which counts as reached: #373 runs the probe the way a task
-  runs, on an internal network behind its egress sidecar;
-- behind rootless podman's docker API a task network keeps a gateway, where
-  aardvark-dns answers on 53 and the namespace refuses every other port:
-  #372 makes the dispatcher's task networks through libpod's own API with DNS
-  off, and checks pasta's guest-mapped address (`--map-guest-addr`,
-  `169.254.1.2` by default) too.
+| Engine | What maps the host into its networks, where, when on | Default | What turns it off |
+|---|---|---|---|
+| rootless Docker (`dockerd-rootless.sh`, RootlessKit) | the host's loopback, by RootlessKit's `--net` (its docs/network.md): `10.0.2.2` (slirp4netns, the default), `192.168.65.2` (vpnkit), `10.0.2.1` (gvisor-tap-vsock), the namespace's gateway (pasta) | off: RootlessKit runs with `--disable-host-loopback` | remove `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` from `docker.service`'s environment (`systemctl --user edit docker.service`), and any `--disable-host-loopback=false` from `DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS`, then `systemctl --user restart docker.service` |
+| rootless podman, pasta (podman 5's default) | the host's loopback at the namespace's gateway (podman's `--map-gw`), or at the address given to `--map-host-loopback` | off: podman passes `--no-map-gw` | in `containers.conf` (`~/.config/containers/containers.conf`, `/etc/containers/containers.conf`, or a file in their `containers.conf.d`), remove `--map-gw` and any `--map-host-loopback` from `pasta_options` under `[network]`; then stop every container of the user, so its namespace starts again without them |
+| rootless podman, pasta, from podman 5.3 | the host's own address at pasta's guest-mapped address, `169.254.1.2` (`--map-guest-addr`), or the one `pasta_options` names | **on**: podman passes `--map-guest-addr 169.254.1.2`; preflight refuses the install only when the host answers there on a port it tries (sshd on 22, a resolver on 53, …) | in `containers.conf`, `pasta_options = ["--map-guest-addr", "none"]` under `[network]` (beside any other option there); then stop every container of the user |
+| rootless podman, slirp4netns (podman 4's default) | the host's loopback at `10.0.2.2` | off: podman passes `--disable-host-loopback` (`allow_host_loopback=false`) | in `containers.conf`, remove `allow_host_loopback=true` from `network_cmd_options` under `[engine]`; then stop every container of the user |
+
+On every rootless engine above, a task's own network has no gateway: the
+dispatcher makes it on podman through libpod's own API, internal with DNS
+off (its docker-compatible API would turn DNS on and keep a gateway at `.1`,
+where aardvark-dns answers on 53 and the namespace refuses every other
+port), and on Docker with its isolated gateway mode (#372); preflight's
+second probe task, on a network made the same way, passes with the defaults
+above. podman 4's docker-compatible API shows such a network with
+`"Gateway": "<nil>"`, which docker's CLI from 29 on cannot read: on a podman 4
+host (rootful too) with a task running, an owner's own docker CLI 29 or newer
+on podman's socket fails `docker network ls` and `docker network inspect` with
+`ParseAddr("<nil>")`; podman's own CLI, or the docker CLI the worker image and
+the agent pin (27.5.1), lists them. A rootless host still fails the first
+probe task until #373 lands, and preflight says so: a signed exception's bridge reaches the LAN and the
+router through the user-mode stack, and its gateway (the engine's namespace)
+refuses connections, which counts as reached; #373 runs the probe the way a
+task runs, on an internal network behind its egress sidecar.
 
 ### Installing a Mac
 
@@ -1200,7 +1230,7 @@ engine leave the round at `engine-unreachable` until a newer release.
 | The last round says | What it means |
 |---|---|
 | `ok`, `no-change` | the set runs the target |
-| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again) |
+| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again); or the release waits for the owner's soak (`… waits for the owner's soak until …`, #326, *Soak* below) |
 | `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
 | `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep` (deeper than 14 days without the maintainers' co-signature over the statement), `cosignature` (the bundle lacks the co-signatures this agent pins, #330), `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
@@ -1219,8 +1249,9 @@ given on the host's page:
 - **Reconcile now** (`reconcile-now`), its owner or any maintainer: a round
   now, as `omarchy-agent round` starts one — the release the pool names,
   checked and rolled out as any round, no quarantine lifted (an Update or
-  `retry-release` does), and never past the owner's soak once its issue
-  brings one. It waits while a commit or a revert finishes.
+  `retry-release` does), and never past the owner's soak (#326: the round it
+  asks for is held like any other, and its answer says so). It waits while a
+  commit or a revert finishes.
 - **Retire legacy set** (`retire-legacy`), its owner only, with a passkey:
   the agent reads `legacy.json` (the project `install --legacy` recorded)
   and finds the project's directory — the one recorded, or the one compose's
@@ -1347,6 +1378,13 @@ before its dispatcher stopped (only a dispatcher there re-adopts it) or no
 end within 20 minutes stops the new dispatcher and brings it back on the old
 engine (`rolled-back`, with why; the release is not quarantined for the
 engine's fault, and `agent.toml` was never changed).
+On the new engine the dispatcher makes its task networks as it does on any
+host of that engine (#372): on podman through libpod's own API on the socket
+it mounts, internal with DNS off; where libpod does not answer there, the
+dispatcher does not start, so the round's guard fails and the switch goes
+back. The switch runs none of install's preflight probes on the new engine
+(the gateway, the host loopback, pasta's guest-mapped address: *Rootless
+engines*, above).
 A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
 and `logs` follow it. Install writes no runtime into `agent.toml` (it finds
 a socket, and podman's speaks docker's API): until a switch names one there,
@@ -1357,7 +1395,9 @@ agent keeps, and the drivers it carries are a Linux host's.
 
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the
-release applied, targeted and its floor, the rollout and the last round, the
+release applied, targeted and its floor — with the owner's soak and until
+when it holds the target, GitHub's latest tag and `pool_behind_github`
+(#326) —, the rollout and the last round, the
 legacy set, the last answers and whether the Mac sleeps, `asleep`, #329),
 which closes the order on the site — one
 the site expired meanwhile too (a retire-legacy answers only at its end); an
@@ -1465,7 +1505,84 @@ under `versions/`. `omarchy-agent status` shows an update in flight and a
 skipped version; `state.json` is read leniently, so the agent rolled back to
 reads what the newer one wrote. `tests/agent-self-update.sh` runs deliberately
 broken builds (a panic at start, a hang before ready, a hang after it) under a
-real `systemd --user` in CI.
+real `systemd --user` in CI. With an owner's soak (*Soak*, below) the agent
+a release ships waits with its release, unless the manifest sets
+`agent.urgent`: then the agent updates itself at once and the release still
+waits.
+
+### Soak
+
+An owner may make a host take a new release later than the pool names it
+(#326; design v2 D16), so a bad one can be caught on another host first:
+`soak_minutes = 30` under `[envelope]` in `agent.toml`, at the host (0, the
+default, takes it at once; at most 100 — more is refused at the agent's
+start, exit 78: the soak, the poll that first names the release and the
+round after it fit inside the pool's two-hour grace), then
+`systemctl --user restart omarchy-agent`. A release
+the pool names above the one that runs waits that long from when the agent
+first saw the pool name it (its own clock, kept in `state.json` across
+restarts); its bundle is fetched and verified meanwhile, so the host still
+learns of a revocation. A newer release named meanwhile waits its own soak
+from then, but the soak never keeps the host more than 100 minutes behind
+the release it ran when it fell behind: when releases land faster than the
+soak, the one named then is taken at that bound. The last round says `held`
+with `… waits for the owner's soak until <time>`, once; `omarchy-agent
+status` says `soak:` with the seconds left. What the soak does not hold: a
+rollback statement (applied at once, as everywhere), a round to the release
+that runs (a changed input, drift), and the first release a host applies.
+What never skips it: **Reconcile now**, an Update order, `omarchy-agent
+round`. The agent a release ships waits with it unless the manifest sets
+`agent.urgent` — set only by a security release —: then the agent updates
+itself at once and the release itself still waits.
+
+The pool follows the soak at its claim (`worker/src/update.ts`): the report
+says when the soak of the release the pool names ends
+(`release.soaking_until`, kept until the host runs it, so its round is
+covered too), and the host's registration is kept out of the 426 gate until
+then and `SOAK_ROUND_MINUTES` (15) after it, whatever the releases behind —
+never more than `SOAK_GRACE_MAX_MINUTES` (120) after the deploy, and not at
+all while its report holds the pool's release in quarantine (a quarantine
+past its end, or of another release, does not count): it reverted it, and
+its claim on last-good is a rule of its own. The pool reads the report's
+soak and freeze detection with its own JSON reader when it comes and keeps
+them in columns of the host (`soaking_until`, `soak_quarantine`,
+`pool_behind_github`, migration 0048): no claim nor listing parses a
+report.
+The host's page says where its registration stands at the gate and why
+(*Claims*): claiming through its soak, within the plain grace, or `refused
+with 426` with what ended the grace — the soak over, the two hours after
+the deploy, the quarantine. A host whose agent was down through a deploy
+and comes back more than two hours later is refused for the rest of its soak:
+lower `soak_minutes`, or let it run its soak out.
+
+### Freeze detection
+
+A compromised pool could hold its hosts on an old release (#326; design v2
+§5.5). Every six hours each agent reads the tag of GitHub's latest release
+(`api.github.com/repos/firemanxbr/omarchy-pool/releases/latest`,
+unauthenticated, an hour later when it does not answer) and nothing else of
+it. When GitHub has shown a release newer than the one the pool names for
+more than a day — counted from when the agent first saw both, since a tag
+carries no time —, that release is not in the merged `revoked`, and no
+rollback statement the pool relays for its release (verified as any)
+retracts it, the agent reports `pool-behind-github`: on the host's page (a
+warning anyone sees), on Status (*Workers*, while the report is fresh) and
+once on the journal when it starts and when it ends. **It acts on nothing**:
+no round, no fetch of that release, nothing changes on the host, which goes
+on following the pool and what is signed. `omarchy-agent status` says
+`github:` with the latest tag and, while it lasts, `pool-behind-github`.
+
+When Status warns `pool-behind-github`: compare the pool's release (the
+chip in the dashboard header, `/api/v1/version`) with GitHub's latest
+release. A deploy that failed after the release was published (the `deploy`
+job of `release.yml`) leaves exactly this — run it again (*Releasing the
+pool itself*). A rollback leaves GitHub's latest where it was on purpose; the
+hosts verify the statement the pool relays for its release and say nothing,
+so a warning after one means a host could not verify it (`omarchy-agent
+verify --statement` by hand says why). Otherwise the pool may be held back:
+check its `deploy` events on the journal and who deployed what before
+anything else, and treat it as an incident (the security model's
+*Maintainer hosts*, the owner's soak and freeze detection).
 
 ### How the pool hands a host work
 
@@ -1543,6 +1660,65 @@ so a size-4 build waits for memory rather than run smaller.
   need a lane of each ring architecture they check, native or emulated, with
   no wait: a health check its own, a promotion (its ABI gates and health
   checks) each it promotes, a security job's fast-track both.
+- **The project's copy is not built on its requester's host (#339, D35).**
+  A review rebuild of a package a maintainer asked for (the rebuild's owner,
+  and the owner of the contributor's build it answers) is handed to none of
+  that maintainer's hosts while another maintainer's host has a lane
+  allowed for it — native, or emulated unless it is `needs_native` — and
+  could hold it idle: its units within the pool cap for the rebuild's size
+  (the size its page, the sizing file or a Retry asks, clamped only to the
+  largest host alive), an agent slot, its disk budget; it waits for that
+  host however busy it is, and their other work goes on. Busy is judged as
+  idle: the disk its running builds fill (their budgets count as free again,
+  a report below the minimum for its disk alone included) and the builds its
+  dispatcher leaves out of its claims during a disk hold do not make it
+  none to wait for; a host short of disk with nothing running, below the
+  minimum for its CPUs or memory, or whose agent says it sleeps (#329: a
+  Mac with its lid shut, until it reports itself awake), is. When only the
+  requester's hosts have one (a single maintainer's hosts, a `needs_native`
+  rebuild with the other host's lane emulated, or a size only the
+  requester's host holds — the rebuild is never run smaller there), Review's
+  rebuild pane says at once *waits for a host — only @m1's can build it*,
+  with **Release to any host** for another maintainer: confirmed with their
+  passkey, written on the task (`params.any_host`), the journal (a `review`
+  line, *released to any host by …*) and the record; any host takes it at
+  its next claim, the requester's included. Bringing another maintainer's
+  host with that lane online (or resuming a drained one, or raising a pool
+  cap of 0 — or one below the rebuild's units — on its page) builds it
+  without a release. A claim never pins a rebuild to the requester's host:
+  naming one is refused (`requester_host`), and another architecture's
+  same-agent pick goes to another maintainer's worker with that agent, or
+  unpinned when there is none.
+- **The second opinion (#339, D36).** An audit runs in a fresh container
+  with its own agent sidecar. It leaves the machine that built what it
+  audits to another that can take it now, for 3 minutes. The pool tells
+  machines apart by owner and host: two registrations are on different
+  machines only when their owners differ or they are two hosts'
+  registrations of different hosts. A maintainer's legacy role containers
+  (the Studio's `community-*` and `review-*`, until #343), and a host's
+  registration beside its own legacy set during the canary, are one
+  machine, so an audit one takes of another's build says `none`, never
+  `host`. An audit of the project's
+  copy takes another model (the claim's `agent`: provider and model) than
+  the one that built it whenever a registration that takes audits with
+  another model answered in the last 24 hours — however long that host is
+  busy, and for a day after it went quiet or its agent began failing (a host
+  whose agent has failed for a day holds nothing, however often it claims);
+  otherwise it runs on the same model. A host that is handed nothing —
+  drained, below the signed minimum, or behind the pool's release past the
+  grace — holds none, however often it claims. A claim reads those audits
+  apart from the rest, so a pile of them waiting for another model never
+  hides a contributor build's audit the claimer can take. Each audit says
+  how independent it was beside its verdict on Review (`independent:
+  model`, `host` or `none`; nothing while it is queued, again too). Audits
+  held for a host that is gone for good: retire it, or drain its
+  registration, and the next claim hands them to the model alive. What
+  counts, and how the last week went:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, agent, agent_status, agent_error_since, last_seen, drained_at FROM build_workers WHERE last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') AND revoked_at IS NULL AND agent IS NOT NULL"
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT independent, COUNT(*) AS n FROM build_tasks WHERE kind = 'audit' AND started_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') GROUP BY independent"
+  ```
 - **Contributors take turns.** Community builds are handed round-robin by
   owner (fewest leased first), and a contributor holds at most
   ceil(the alive fleet's builds / 4) at once. The divisor is a setting: 0
@@ -1591,7 +1767,10 @@ so a size-4 build waits for memory rather than run smaller.
 - **A sleeping host has zero free units** (#329). A Mac's agent reports
   `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
   meanwhile its claims are handed nothing, it makes no emulated lane wait,
-  holds no reservation mark and counts in no size alive; its leases stay
+  is not the other maintainer's host a project's copy waits for (Review
+  offers the release if only the requester's hosts are left) nor a machine
+  an audit is left to, holds no reservation mark and counts in no size
+  alive; its leases stay
   its own until they expire. The pool holds it only while that report is
   fresh (15 minutes): a dispatcher that claims after that is on a Mac that
   woke. The host's page says *asleep*.
@@ -1785,7 +1964,9 @@ wrong version and linking the wrong objects while looking alive): the
 pool compares the release a worker reports at each claim with its own
 and, past the rollout's grace (`UPDATE_GRACE_MINUTES` = 45 after the
 deploy), hands it nothing — `426`, *outdated* on the Workers page, one
-journal line per release — until it updates. Every set carries an
+journal line per release — until it updates; a soaking host's
+registration claims on through its owner's soak, at most two hours after
+the deploy (#326, *Soak*). Every set carries an
 **updater** container of the same image (`OMARCHY_WORKER_ROLE=updater`,
 `factory/bin/omarchy-rollout`: the same rolling replacement, itself
 last) — contributors' sets since `omarchy-worker start` writes one, this

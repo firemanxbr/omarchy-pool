@@ -217,6 +217,26 @@ slower and shares the host's units; on a 16K-page kernel the lane stays on,
 and a build whose toolchain cannot start under qemu goes back to the queue
 for a native host without spending its attempt.
 
+**Where the project's copies and their audits go (#339).** The project's
+copy of a package you asked for — its review rebuild, the one that is
+signed and published — is never built on your hosts while another
+maintainer's host has a lane for it and room to hold it at its size: it
+waits for that host, however busy. When only your hosts can build it, it
+waits, and Review offers another maintainer **Release to any host**, which
+they confirm with their passkey; then your host may take it. A host whose
+pool cap is 0, or too small for the copy's size, is none to wait for; one
+whose disk its running builds fill is busy, and waited for.
+Every audit prefers a machine other than the one that built what it
+audits, and an audit of the project's copy takes a model other than the
+one that built it whenever a host with another one answered in the last
+24 hours. So the model your host's agent runs matters: the provider is the
+first key `agent.env` holds, or `FACTORY_PROVIDER`, and `FACTORY_MODEL`
+overrides its model. If every host runs one model, those audits record
+`independent: none` on Review. A different provider or model on one host
+(another key, or `FACTORY_PROVIDER` / `FACTORY_MODEL` in that host's
+`agent.env`) makes them `independent: model`. The runbook's *How the pool
+hands a host work* has the rules.
+
 The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
 isolation level, the release it applied, the pool cap, the large task it
 reserves for when it does, and its leases with their lane and units. Every later call of
@@ -271,6 +291,29 @@ rollback under a signed statement excepted); beyond that it answers
 much of each the last hour spent. On a Mac, a restart of its VM counts as
 one of those restarts, though the brake never holds it. Restarting the
 agent resets none of it.
+
+**A soak is the owner's, at the host** (#326): `soak_minutes = 30` under
+`[envelope]` in `agent.toml` (0, the default, takes a release at once; at
+most 100, so the soak and its round fit inside the pool's two-hour grace)
+makes the host take a new release that long after its agent first saw the
+pool name it, so a bad one can be caught on another host first — a release
+that lands meanwhile waits its own soak, but the host is never kept more
+than 100 minutes behind. It covers the agent's own update
+too, unless the release's manifest sets `agent.urgent` (only a security
+release does). A rollback statement skips it and applies at once;
+**Reconcile now** never does. Meanwhile the pool keeps the host's
+registration out of the 426 gate until the soak ends (and the round's 15
+minutes after it), at most two hours after the deploy, unless the host
+holds the pool's release in quarantine; its page says where it stands at
+the gate and why, to its owner and the maintainers ([Runbook](/docs/runbook#a-new-maintainer-host), *Soak*).
+
+**The host watches the pool** (#326, freeze detection): every six hours
+its agent reads the tag of GitHub's latest release, and nothing else. If
+GitHub has shown a newer release than the pool names for more than a day
+(and no revocation or signed rollback explains it), the host's page and
+Status warn `pool-behind-github`: the pool may be held on an old release.
+The agent changes nothing for it — it follows only the pool and what is
+signed ([Runbook](/docs/runbook#a-new-maintainer-host), *Freeze detection*).
 
 **The runtime is the owner's, at the host** (#325): `omarchy-agent runtime
 switch compose/podman` (or `compose/docker`) moves the dispatcher to the

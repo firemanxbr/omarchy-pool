@@ -3,8 +3,8 @@
 //!
 //! - `reconcile-now`: a round now, as an Update order or SIGUSR1 starts one. It waits while
 //!   a commit or a revert finishes (the next poll sees it again), lifts no quarantine (an
-//!   Update does; P4's `retry-release` will), and never skips the owner's soak once P4
-//!   gives the host one: it only starts a round, which the soak holds like any other.
+//!   Update does, and P4's `retry-release`), and never skips the owner's soak (#326,
+//!   [`super::soak`]): it only starts a round, which the soak holds like any other.
 //! - `retire-legacy`: stop and then remove the legacy compose project `legacy.json`
 //!   records, and nothing else — never a project it does not record, never a container
 //!   that carries the agent's host label (this host's bundle or one of its tasks), never a

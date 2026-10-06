@@ -37,11 +37,11 @@
 //! envelope records the VM (`[vm]`) and the two sockets; the plist replaces the unit.
 //!
 //! Seams left for later issues, by name: the egress probe behind the egress sidecar on a
-//! task's internal network (#373), and on podman the task network made through libpod's own
-//! API with DNS off (#372), until which a rootless host fails the probe ([`egress`]); the
-//! `subuid` level for rootless podman, once the dispatcher (#335) starts task containers with
-//! `--userns=auto` (until then rootless podman reads as `user`); task containers and sidecars
-//! carry `org.omarchy-pool.agent.host=<host>` (design v2 §9.3), which uninstall removes by.
+//! task's internal network (#373), until which a rootless host fails the probe on a signed
+//! exception's bridge ([`egress`]); the `subuid` level for rootless podman, once the
+//! dispatcher (#335) starts task containers with `--userns=auto` (until then rootless podman
+//! reads as `user`); task containers and sidecars carry `org.omarchy-pool.agent.host=<host>`
+//! (design v2 §9.3), which uninstall removes by.
 
 pub mod checks;
 
@@ -51,6 +51,7 @@ pub(crate) mod envelope;
 pub(crate) mod files;
 pub(crate) mod launchd;
 pub(crate) mod legacy;
+pub(crate) mod libpod;
 pub(crate) mod loopback;
 pub(crate) mod mac;
 pub(crate) mod net;
@@ -1030,17 +1031,32 @@ pub(crate) fn measure_as(
                         egress::unprepared(fw, &task),
                     )
                 };
+                let podman = server == Ok(engine::Server::Podman);
+                // Rootless podman behind pasta maps its guest address to the host (#372), or to
+                // its VM where a Mac runs one: libpod's /info says which stack it runs.
+                let guest = if podman && !rootful {
+                    match libpod::Libpod::on(&d.socket).and_then(|l| l.info()) {
+                        Ok(i) => i.pasta().then_some(egress::PASTA_GUEST),
+                        Err(e) => {
+                            r.blockers.push(format!("egress: which network stack rootless podman runs (libpod's /info): {e}"));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 let host = egress::Host {
                     router: gateway,
                     lan: net::lan_address(),
                     pool: pool.as_deref(),
                     advice: egress::Advice {
                         rootful,
-                        podman: server == Ok(engine::Server::Podman),
+                        podman,
                         firewall,
                         vm,
                     },
                     server,
+                    guest,
                     unprepared,
                     proc: &p.proc,
                     uid: rustix::process::getuid().as_raw(),

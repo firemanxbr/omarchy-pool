@@ -184,7 +184,7 @@ pid = "0123456789abcdef0123456789abcdef"
 common = {"arch": "aarch64", "mode": "project", "trust": "project", "kind": "legacy", "instance": pid, "instance_finished": pid}
 worker = seed("build_workers", {**common, "id": "w-1", "revoked_at": None})
 revoked = seed("build_workers", {**common, "id": "w-2"})  # /users/:login lists revoked workers too
-task = seed("build_tasks", {"id": 1, "arch": "aarch64", "status": "leased", "trust": "project", "kind": "build", "lease_owner": "w-1", "stop_order": "o-1"})
+task = seed("build_tasks", {"id": 1, "arch": "aarch64", "status": "leased", "trust": "project", "kind": "build", "lease_owner": "w-1", "stop_order": "o-1", "independent": None})  # a build's lease records no independence
 db.commit()
 withheld = ["instance", "instance_prev", "instance_since", "instance_conflict_at", "instance_other_at", "instance_churn", "instance_finished",
             "site", "auto_orders", "agent_error_class", "agent_probed_at", "rollout", "order_kinds", "watchdog_exits", "agent_error_since"]

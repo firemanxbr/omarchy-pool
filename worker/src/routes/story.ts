@@ -1,6 +1,6 @@
 /**
  * A package's story in the factory, as chains: a contributor's build with
- * its audit, the project's build of it with its gate and trial, the
+ * its audit, the project's build of it with its gate, its audit and trial, the
  * decision — and the score each chain earns (score.ts). Read by a build's
  * page (the chain its task is in), by the package page (every chain, the
  * class the package has today) and by Review (the class column). One
@@ -44,6 +44,8 @@ export interface TaskBrief {
   error: string | null;
   params: Record<string, unknown>;
   result: Record<string, unknown> | null;
+  /** An audit's independence of what it audits (#339, D36): model, host or none, written at its lease; null for every other task. */
+  independent?: string | null;
 }
 
 /** An approvals row — one architecture of a review (#242): `review_id` is the review, null for a row a Worker older than reviews wrote. */
@@ -63,6 +65,8 @@ export interface Chain {
   contributor: TaskBrief | null;
   project: TaskBrief | null;
   audit: TaskBrief | null;
+  /** The audit of the project's build (#339): the publish-bound second opinion, another model's whenever one was alive (D36). */
+  project_audit: TaskBrief | null;
   trial: TaskBrief | null;
   publish: TaskBrief | null;
   /** The standing decision; a withdrawn approval is none. */
@@ -74,7 +78,7 @@ export interface Chain {
   recipes: { contributor: string | null; project: string | null };
 }
 
-const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, priority, shared_after, created_at, started_at, finished_at, duration_ms, error, params, result";
+const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, priority, shared_after, created_at, started_at, finished_at, duration_ms, error, params, result, independent";
 
 function brief(r: Record<string, unknown>): TaskBrief {
   const parse = (s: unknown) => { try { return s ? (JSON.parse(s as string) as Record<string, unknown>) : null; } catch { return null; } };
@@ -119,6 +123,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
   const category = (pkg?.category as string | null) ?? null;
   const make = (contributor: TaskBrief | null, project: TaskBrief | null): Chain => {
     const audit = contributor ? of("audit", "task", contributor.id) : null;
+    const projectAudit = project ? of("audit", "task", project.id) : null;
     const trial = project ? of("trial", "task", project.id) : null;
     const publish = project ? of("publish", "task", project.id) : contributor ? of("publish", "task", contributor.id) : null;
     const ids = [contributor?.id, project?.id].filter((x): x is number => typeof x === "number");
@@ -140,7 +145,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
       category,
     });
     const recipe = (t: TaskBrief | null) => (t && (t.status === "staged" || t.status === "done") ? `/api/v1/factory/tasks/${t.id}/artifacts/PKGBUILD` : null);
-    return { contributor, project, audit, trial, publish, approval, withdrawn, score, recipes: { contributor: recipe(contributor), project: recipe(project) } };
+    return { contributor, project, audit, project_audit: projectAudit, trial, publish, approval, withdrawn, score, recipes: { contributor: recipe(contributor), project: recipe(project) } };
   };
   const out: Chain[] = [];
   const used = new Set<number>();
@@ -162,7 +167,7 @@ export async function placeInQueue(env: Env, tasks: TaskBrief[]): Promise<void> 
 
 /** The chain a task is in, or null: a build's page asks for its own. */
 export function chainOf(all: Chain[], taskId: number): Chain | null {
-  return all.find((c) => [c.contributor?.id, c.project?.id, c.audit?.id, c.trial?.id, c.publish?.id].includes(taskId)) ?? null;
+  return all.find((c) => [c.contributor?.id, c.project?.id, c.audit?.id, c.project_audit?.id, c.trial?.id, c.publish?.id].includes(taskId)) ?? null;
 }
 
 /**

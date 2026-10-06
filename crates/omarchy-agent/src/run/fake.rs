@@ -584,6 +584,10 @@ pub(crate) struct PoolState {
     /// The diagnostics posted (#325), as JSON, and what posting answers.
     pub diagnostics: Vec<serde_json::Value>,
     pub diagnostics_answer: Option<Net<()>>,
+    /// What GitHub says its latest release is (#326); `None` answers nothing. How many
+    /// times it was read.
+    pub github: Option<Net<Release>>,
+    pub github_reads: u32,
     /// The `Date` the host state's answer carries, whatever its status (#320).
     pub date: Option<i64>,
     /// GitHub does not answer for release assets (#330: a co-signature that may exist).
@@ -682,6 +686,14 @@ impl Pool for FakePool {
         s.publics += 1;
         s.public.clone().unwrap_or(Net::NoAnswer("no pool".into()))
     }
+
+    fn github_latest(&mut self) -> Net<Release> {
+        let mut s = self.0.borrow_mut();
+        s.github_reads += 1;
+        s.github
+            .clone()
+            .unwrap_or(Net::NoAnswer("no GitHub".into()))
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -754,8 +766,15 @@ pub(crate) struct Ships<'a> {
 
 /// Publishes `r` (created a day before T0) shipping `agent`.
 pub(crate) fn publish_agent(remote: &Remote, r: &str, agent: &Ships) {
+    publish_agent_as(remote, r, agent, false);
+}
+
+/// The same, its manifest's `agent.urgent` as given (#326: only a security release sets
+/// it, and its agent does not wait for the owner's soak).
+pub(crate) fn publish_agent_as(remote: &Remote, r: &str, agent: &Ships, urgent: bool) {
     let mut m = tests_support::manifest_json(r, "v1.0.0", &[]);
     m["agent"]["version"] = agent.version.into();
+    m["agent"]["urgent"] = urgent.into();
     m["min_agent"] = agent.min_agent.into();
     let platform = super::tools::platform().expect("a platform with an agent build");
     m["agent"][platform]["sha256"] = super::tools::sha256_hex(agent.binary).into();

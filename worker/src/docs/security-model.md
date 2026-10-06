@@ -163,16 +163,25 @@ secret). Everything travels in the `Authorization` header over TLS only.
   and keys only, never another contributor's draft or an audit's verdict,
   and an audit's agent belongs to the audit, whose container runs no recipe.
   The audit quotes the build's output as data, has no tool with side
-  effects, and its report is evidence for a maintainer, never a gate.
+  effects, and its report is evidence for a maintainer, never a gate. The
+  second opinion runs elsewhere (#339, D36): an audit leaves the machine
+  that built what it audits to another that can take it, and an audit of the
+  project's copy takes another model than the one that built it whenever a
+  host with one was alive in the last 24 hours; every audit records how
+  independent it was (`model`, `host`, `none`), shown on Review beside its
+  verdict, so a maintainer reads whether the same model judged its own work.
+  It errs low: `host` only when the two registrations are certainly on
+  different machines (different owners, or two hosts' registrations of
+  different hosts), so one maintainer's legacy role containers, which share a
+  machine, say `none`.
   An internal network's bridge address is otherwise the host itself, so
   the dispatcher asks the engine to leave it off: Docker's isolated gateway
-  mode (Docker 28 or newer; an older daemon is refused) or, on podman's own
-  CLI, a network without DNS. Stated plainly: podman behind docker's API
-  cannot be asked (it forces DNS on and drops docker's option), so there a
-  service of the host listening on all addresses is reachable from a task
-  unless the host's firewall (`prep-root.sh`'s INPUT drop for the task
-  subnets) closes it; and a signed exception's bridge always has its gateway,
-  the host itself on a rootful engine, where the `DOCKER-USER` rules (in
+  mode (Docker 28 or newer; an older daemon is refused) or, on podman, a
+  network without DNS, which has no gateway — by podman's own CLI, or behind
+  docker's CLI (whose podman API forces DNS on and drops docker's option)
+  through libpod's own API on the socket that CLI talks to, which must answer
+  as podman (#372). Stated plainly: a signed exception's bridge always has
+  its gateway, the host itself on a rootful engine, where the `DOCKER-USER` rules (in
   `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
   preflight checks it rather than trusting it (#367): on a rootful Linux
   engine it refuses a host whose prep-root.sh firewall script (world-readable) does
@@ -188,7 +197,13 @@ secret). Everything travels in the `Authorization` header over TLS only.
   reads the stack's command line in `/proc` while its probe tasks run and
   refuses one that maps it, with the setting that turns it off (the runbook's
   *Rootless engines*). It reads rather than listening for a connection: the
-  agent listens on nothing (design v2 §11.2).
+  agent listens on nothing (design v2 §11.2). pasta can also forward an
+  address to the host's own (`--map-guest-addr`, `169.254.1.2` by rootless
+  podman's default from 5.3 on), which a bridge reaches: on rootless podman
+  behind pasta the probe task on a bridge tries it (a task's own network,
+  internal, has no route to it), and an answer there, or an address pasta
+  maps that the probe did not try, refuses the install with containers.conf's
+  `--map-guest-addr none` (#372).
   A signed `factory/sizing` exception is per package:
   it also covers a contributor's recipe of that package, so its reviewer
   approves exactly that.
@@ -702,6 +717,38 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
   the host declared.
+- **The owner's soak and freeze detection** (#326, design v2 D16, §5.5).
+  An owner may make a host wait `soak_minutes` (at most 100) before it takes
+  a new release, from when its agent first saw the pool name it — its own
+  clock, never the pool's word on when it deployed, which would let a
+  compromised pool skip the soak; the agent's own update waits with it
+  unless the signed manifest sets `agent.urgent` (only a security release
+  does). Nothing the pool sends skips it (`reconcile-now`, an Update); a
+  rollback statement does, since only `rollback.yml` signs one, and the
+  soaking host still learns each verified release's `revoked` and
+  `min_release` while it waits. The pool keeps a soaking host's
+  registration out of the 426 gate until the soak its agent reports ends,
+  15 minutes more for the round, never more than two hours after the
+  deploy and not at all while the host holds the pool's release in
+  quarantine — so an agent that reports a soak it is not in gains at most
+  that window of claims on the release it runs, which the 426 gate let any
+  worker have for 45 minutes before. The longest soak (100 minutes), the
+  poll that starts its clock and the round after it fit inside those two
+  hours, so a soak never ends at the gate. The pool reads the soak and
+  `pool-behind-github` from a report with its own JSON reader, once, and
+  keeps them in columns of the host: no claim nor listing parses a report
+  in SQL, whose JSON parser refuses nesting V8's accepts — one maintainer
+  host's report cannot fail every claim and listing of the pool. Freeze detection is the host's check
+  on a pool that holds it on an old release: every six hours the agent
+  reads the tag of GitHub's latest release (`api.github.com`,
+  unauthenticated) and nothing else, and when GitHub has shown a newer
+  release than the pool names for more than a day — neither in the merged
+  `revoked` nor retracted by a rollback statement the pool relays and the
+  agent verifies — it reports `pool-behind-github`, which the host's page,
+  Status and the journal show. It never acts on GitHub's word alone: no
+  round, no fetch, no change on the host; the tag is no signed word, only a
+  second opinion on the pool's, and a compromised pool could already idle
+  the fleet with 426, so this is a warning, not a guarantee.
 - **A Mac** (#320, design v2 §19.2, §19.3) runs its tasks in the agent's own
   `omarchy` Colima VM (isolation `vm`): a container escape lands in the VM,
   which mounts only the work root (writable), the secrets directory and the
@@ -737,6 +784,19 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   they hold (a job token). The `asleep` its report carries can only make the pool
   hand the host less (zero free units), never more, and a stale one (no
   report for 15 minutes) holds nothing.
+- **Never the copy of their own package** (#339, design v2 §8.4, D35). The
+  project's copy of a package — the review rebuild that is signed and
+  published once another maintainer approves it — is never handed to a host
+  its requester owns while another maintainer's host has a lane allowed for
+  it (native, or emulated unless it needs native), so the bytes that ship
+  of a package a maintainer asked for are not their own machine's. When only
+  their hosts can build it, it waits, and Review offers another maintainer
+  — never the requester — a release to any host with their passkey
+  (`any-host:<task>`), on the task, the journal and the record. A claim
+  never pins a rebuild to its requester's host. Another maintainer's host
+  whose agent says it sleeps (#329) has no lane for it until it wakes, so
+  the rebuild may be offered for release meanwhile; the release still takes
+  another maintainer's passkey, and a sleeping host is never where it runs.
 
 ## Stopping a host
 
