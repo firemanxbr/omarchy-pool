@@ -714,11 +714,9 @@ fn check_volumes(
             Node::Scalar(spec) => match split_short(spec).as_slice() {
                 [_target] => None,
                 [source, target] => short_bind(source).then_some((*source, *target, false)),
-                [source, target, mode] => short_bind(source).then_some((
-                    *source,
-                    *target,
-                    mode.split(',').any(|o| o == "ro"),
-                )),
+                [source, target, mode] => {
+                    short_bind(source).then_some((*source, *target, read_only_mode(mode)))
+                }
                 _ => {
                     out.push(violation(
                         "bind_path",
@@ -769,6 +767,12 @@ fn check_volumes(
             check_bind(name, (source, target, read_only), envelope, engine, out);
         }
     }
+}
+
+/// Whether a short-syntax volume's mode mounts it read-only: as compose reads it, the last
+/// of `ro` and `rw` wins (`ro,rw` is writable).
+fn read_only_mode(mode: &str) -> bool {
+    mode.split(',').rev().find(|o| matches!(*o, "ro" | "rw")) == Some("ro")
 }
 
 /// Whether a short-syntax volume's source is a host path (not a named volume).

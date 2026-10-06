@@ -385,6 +385,9 @@ fn set_dir() -> (PathBuf, PathBuf) {
     let d = tempdir();
     fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
     let env = path_in(&d);
+    // 0700 whatever the umask, as the agent's own etc/ is.
+    fs::create_dir(env.parent().unwrap()).unwrap();
+    fs::set_permissions(env.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
     crate::host::private_dir(env.parent().unwrap()).unwrap();
     (d, env)
 }
@@ -564,6 +567,106 @@ fn a_rotation_writes_the_token_where_every_release_here_reads_it() {
     // Never anything but one token on one line.
     assert!(write_token(&env, "m1-rack-0a9z", "omw_a\nBASH_ENV=/tmp/x", &r).is_err());
     assert_eq!(read_token(&file).unwrap(), Some((OMW.to_owned(), 0o400)));
+}
+
+#[test]
+fn a_token_write_stopped_between_any_two_of_its_writes_leaves_the_new_token_with_its_registration()
+{
+    // A crash, a kill or a full disk between the env file and the token file: whatever the
+    // host held, the next refresh finds the new token in its file beside its own
+    // registration, and no older token anywhere (an env line is taken for the newest).
+    let old = format!("omw_{}", "a1".repeat(24));
+    let new = format!("omw_{}", "b2".repeat(24));
+    let with_old_line = format!("# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={old}\nTZ=UTC\n");
+    // What the env file held, whether the token file held the older token, and whether an
+    // older release is here.
+    let hosts = [
+        // A first enrollment: nothing yet.
+        (None, false, false),
+        // The env file lost, the token file kept.
+        (None, true, false),
+        // A rotation on a host past its move.
+        (
+            Some("# worker: m1-rack-0a9z\nTZ=UTC\n".to_owned()),
+            true,
+            false,
+        ),
+        // The older token's line not taken out yet: a suspended host, or the minute after
+        // the last older release left.
+        (Some(with_old_line.clone()), true, false),
+        // Another registration's: a retired host's machine enrolled again.
+        (
+            Some("# worker: m1-old-0000\nTZ=UTC\n".to_owned()),
+            true,
+            false,
+        ),
+        // An older release here: the token in both.
+        (Some(with_old_line), true, true),
+    ];
+    for (held, file_held, plain) in hosts {
+        let r = Rendered {
+            addresses: Vec::new(),
+            envelope: None,
+            plain,
+        };
+        let steps = token_steps(
+            held.as_deref(),
+            Path::new("etc/dispatcher.env"),
+            "m1-rack-0a9z",
+            &new,
+            &r,
+        )
+        .unwrap();
+        for stop in 1..=steps.len() {
+            let (d, env) = set_dir();
+            let file = token_path_in(&d);
+            if let Some(t) = &held {
+                fs::write(&env, t).unwrap();
+                fs::set_permissions(&env, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            if file_held {
+                write_token_file(&file, &old).unwrap();
+            }
+            for step in &steps[..stop] {
+                apply(&env, &file, &new, step).unwrap();
+            }
+            let what = format!("{held:?}, stopped after {stop} of {steps:?}");
+            assert_ne!(refresh(&env, &r).unwrap(), Refresh::NoFile, "{what}");
+            assert_eq!(
+                read_token(&file).unwrap(),
+                Some((new.clone(), 0o400)),
+                "{what}"
+            );
+            let text = fs::read_to_string(&env).unwrap();
+            assert_eq!(worker_line(&text), Some("m1-rack-0a9z"), "{what}: {text}");
+            assert_eq!(
+                token_line(&text, &env).unwrap(),
+                plain.then(|| new.clone()),
+                "{what}: {text}"
+            );
+            assert!(!text.contains(&old), "{what}: {text}");
+            assert!(holds_token(&env), "{what}");
+        }
+    }
+    // A rotation on a settled host writes no token into the env file, even for a moment.
+    let r = Rendered {
+        addresses: Vec::new(),
+        envelope: None,
+        plain: false,
+    };
+    let settled = "# worker: m1-rack-0a9z\nTZ=UTC\n";
+    let steps = token_steps(
+        Some(settled),
+        Path::new("etc/dispatcher.env"),
+        "m1-rack-0a9z",
+        &new,
+        &r,
+    )
+    .unwrap();
+    assert!(
+        matches!(steps.as_slice(), [Step::File, Step::Env(t)] if !t.contains(&new)),
+        "{steps:?}"
+    );
 }
 
 #[test]

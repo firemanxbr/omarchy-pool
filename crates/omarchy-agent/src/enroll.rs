@@ -195,7 +195,10 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
     say(out, &format!("host key fingerprint: {}", key.fingerprint()));
     let state = wait_for_confirm(o, &key, &pool, &id, out)?;
     let env = o.paths.dispatcher_env();
-    if !state["token"].is_null() && dispatcher_env::holds_token(&env) {
+    // A token is kept only with its registration (the env file's `# worker:` line), which
+    // install names in agent.toml: a token file without it — an env file lost, or a write
+    // stopped half-way — finishes no install, so a new token is fetched.
+    if !state["token"].is_null() && worker_of(&env).is_some() {
         say(
             out,
             &format!(
@@ -211,7 +214,9 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
                 said_rendered(out, &env, &r);
             }
             Refresh::Written => said_rendered(out, &env, &r),
-            Refresh::Unchanged | Refresh::NoFile => {}
+            Refresh::Unchanged => {}
+            // The env file went in the meantime: as above, a new token.
+            Refresh::NoFile => return fetch_token(o, &key, &pool, &id, out),
         }
         return Ok(());
     }
@@ -871,6 +876,72 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out)
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_enrollment_run_again_over_a_token_without_its_registration_fetches_one() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        // An earlier run stopped with the token file written and no etc/dispatcher.env (or the
+        // file was lost since): a token with no registration finishes no install, so running
+        // the enrollment again fetches one, and writes both.
+        let d = std::env::temp_dir().join(format!("omarchy-agent-halfway-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let fetched = Arc::new(AtomicUsize::new(0));
+        let pool = pool_scripted({
+            let fetched = Arc::clone(&fetched);
+            move |method, path, _, _| match (method, path) {
+                ("GET", "/api/v1/hosts/self/state") => (
+                    200,
+                    r#"{"status":"active","owner":"m1","token":"held"}"#.into(),
+                ),
+                ("POST", "/api/v1/hosts/self/token") => {
+                    fetched.fetch_add(1, Ordering::Relaxed);
+                    (
+                        200,
+                        serde_json::json!({"worker": "m1-rack-0a9z", "token": format!("omw_{}", "c3".repeat(24)), "rotate_after": "later"})
+                            .to_string(),
+                    )
+                }
+                _ => (404, "{}".into()),
+            }
+        });
+        let o = Options {
+            pool: None,
+            paths: Paths::under(&d),
+            token: None,
+            wait: Duration::from_secs(5),
+            poll: Duration::from_millis(10),
+            sources: fixture(),
+        };
+        host::private_dir(&o.paths.state).unwrap();
+        HostKey::load_or_create(&o.paths.state.join(host::KEY_FILE)).unwrap();
+        Identity {
+            pool,
+            host: "h_0123456789".into(),
+        }
+        .write(&o.paths.state)
+        .unwrap();
+        let env = o.paths.dispatcher_env();
+        host::private_dir(env.parent().unwrap()).unwrap();
+        crate::run::fake::write_token_file(&o.paths.set, &format!("omw_{}", "0f".repeat(24)));
+        assert!(dispatcher_env::holds_token(&env) && worker_of(&env).is_none());
+        let mut out = Vec::new();
+        run(&o, &mut out).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out)));
+        let said = String::from_utf8_lossy(&out);
+        assert!(!said.contains("keeps its worker token"), "{said}");
+        assert_eq!(fetched.load(Ordering::Relaxed), 1);
+        assert_eq!(worker_of(&env).as_deref(), Some("m1-rack-0a9z"));
+        assert_eq!(
+            token_in_its_file_only(&o),
+            format!("omw_{}", "c3".repeat(24))
+        );
+        // Run again, it keeps that one.
+        let mut out = Vec::new();
+        run(&o, &mut out).unwrap();
+        assert!(String::from_utf8_lossy(&out).contains("keeps its worker token"));
+        assert_eq!(fetched.load(Ordering::Relaxed), 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 

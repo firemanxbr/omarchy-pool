@@ -500,6 +500,10 @@ fn with_the_dispatcher_env_or_its_token_file_missing_the_dispatcher_is_held_and_
     // The env file alone (its token not written yet): still held, for the token file —
     // compose would make a directory where it belongs.
     fs::write(&env, format!("# worker: {WORKER}\n")).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&env, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     w.round();
     let (outcome, detail) = w.outcome();
     assert_eq!(outcome, "held");

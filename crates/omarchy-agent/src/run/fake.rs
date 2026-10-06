@@ -649,6 +649,14 @@ impl World {
             format!("# worker: {WORKER}\n"),
         )
         .unwrap();
+        // 0600 in a 0700 etc/, as the agent writes them, whatever the umask: a round refuses
+        // an env file others may write, and a rotation an etc/ they may write.
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for (path, mode) in [("etc/dispatcher.env", 0o600), ("etc", 0o700)] {
+                fs::set_permissions(set.join(path), fs::Permissions::from_mode(mode)).unwrap();
+            }
+        }
         write_token_file(&set, TOKEN);
         fs::write(set.join("run/capacity.json"), r#"{"schema":2,"units":3}"#).unwrap();
         let cfg = Config::parse(&super::config::tests::example(

@@ -756,16 +756,22 @@ The host worker token as a read-only file (#327, design v2 §14, D15) is
 tested at every layer. `omarchy-agent`'s unit tests: `lint-set` refuses a
 service mounting another service's secret file (`run/host/<service>/token`,
 in the template and through an override, by relative or absolute path,
-however spelt), its own writable, a directory holding them, and the token's
-value in its environment, while a template from before #327 still passes (a
-rollback may name it); `dispatcher_env` writes the token 0400 in 0700
+however spelt), its own writable (`:ro,rw` too: compose takes the last of
+the two), a directory holding them, and the token's value in its
+environment, while a template from before #327 still passes (a rollback may
+name it); `dispatcher_env` writes the token 0400 in 0700
 directories, never through a link or another user's file, moves a token an
 older agent left in `etc/dispatcher.env` to its file without losing it (the
 env file's line taken as the newest), keeps it there too only while a release
-from before #327 is applied or staged, and writes the two files in the order
-that loses no token; the run loop against the fake engine holds the
-dispatcher while the token file is missing, recreates only the dispatcher
-after a rotation while the task runs on and the journal scrubs the new token,
+from before #327 is applied or staged, and writes the two files in an order
+that, stopped after any of its writes (a first enrollment, a rotation, an
+older token's line not taken out yet, another registration's file, an older
+release here), leaves the next refresh the new token in its file beside its
+own registration and no older one anywhere; an enrollment run again over a
+token file without its registration fetches a new one; the run loop against
+the fake engine holds the dispatcher while the token file is missing,
+recreates only the dispatcher after a rotation while the task runs on and the
+journal scrubs the new token,
 and on a host upgraded from #371's layout keeps the token in the env file
 for an older release, takes it out once a release that reads the file is
 committed, and puts it back for a rollback to the older one. `bash

@@ -294,6 +294,15 @@ fn the_dispatcher_mounts_its_own_token_file_read_only_and_nothing_else_of_the_se
             svc("    volumes: [\"./run/host/dispatcher/token:/t:rw\"]\n"),
             "secret_file",
         ),
+        // Compose takes the last of ro and rw: writable.
+        (
+            svc("    volumes: [\"./run/host/dispatcher/token:/t:ro,rw\"]\n"),
+            "secret_file",
+        ),
+        (
+            svc("    volumes: [\"./run/host/dispatcher/token:/run/omarchy/worker-token:z,ro,rw\"]\n"),
+            "secret_file",
+        ),
         (
             svc("    volumes: [{type: bind, source: ./run/host/dispatcher/token, target: /t}]\n"),
             "secret_file",
@@ -358,6 +367,7 @@ fn the_dispatcher_mounts_its_own_token_file_read_only_and_nothing_else_of_the_se
     for over in [
         svc("    volumes: [\"./run/host/dispatcher/token:/run/omarchy/worker-token:ro\"]\n"),
         svc("    volumes: [\"./run/host/dispatcher/token:/t:ro,z\"]\n"),
+        svc("    volumes: [\"./run/host/dispatcher/token:/t:rw,ro\"]\n"),
         svc(&format!("    volumes: [\"{set}/run/host/dispatcher/token:/t:ro\"]\n")),
         svc("    volumes: [\"./run/capacity.json:/c:ro\", \"./etc/extra.conf:/e:ro\", \"./files:/f:ro\"]\n"),
     ] {

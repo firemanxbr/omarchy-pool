@@ -42,7 +42,10 @@
 //! An `OMARCHY_WORKER_TOKEN` line found here is the newest token there is — one the agent of
 //! an older release wrote, before the upgrade or after a self-update it rolled back — so the
 //! token file takes it (the move of an existing host, which loses no token), and the line
-//! stays only while an older release needs it.
+//! stays only while an older release needs it. The agent's own writes keep that true when
+//! one stops half-way (a crash, a kill, a full disk): a new token goes into an env line before
+//! its file whenever a line, or another registration's `# worker:` line, could be left
+//! behind ([`token_steps`]).
 
 pub mod addresses;
 
@@ -501,8 +504,9 @@ fn lock(path: &Path) -> Result<Option<OwnedFd>, String> {
     }
 }
 
-/// Both files written, in the order that loses no token if the writer stops between them:
-/// the env file first when it carries the token too, else the token file first.
+/// Both files written by a refresh, which keeps the token it found: the env file first when
+/// it carries the token too, else the token file first. Wherever the writer stops between
+/// them, an env line left behind holds the token the file holds or gets, never an older one.
 fn put(env: &Path, text: &str, file: Option<(&Path, &str)>, plain: bool) -> Result<(), String> {
     if plain {
         crate::host::replace(env, text.as_bytes())?;
@@ -516,23 +520,75 @@ fn put(env: &Path, text: &str, file: Option<(&Path, &str)>, plain: bool) -> Resu
     Ok(())
 }
 
+/// One write of a new token's: the env file with this text, or the token file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Step {
+    Env(String),
+    File,
+}
+
+/// The registration the env file's `# worker:` line names.
+fn worker_line(text: &str) -> Option<&str> {
+    text.lines()
+        .find_map(|l| l.trim_start().strip_prefix(WORKER))
+        .map(str::trim)
+}
+
+/// The writes of a new token, in an order that, wherever the writer stops between two of
+/// them (a crash, a kill, a full disk), leaves the new token on the host beside its own
+/// registration, and never an older token in an env line, which a refresh takes for the
+/// newest ([`sync`]) and would put back into the file:
+/// - with an older release here (`r.plain`), the env file (its line the new token), then the
+///   token file;
+/// - when the env file already names this registration and holds no token line (a rotation
+///   on a host past its move), the token file, then the env file;
+/// - else (no env file yet at a first enrollment, another registration's, or an older
+///   token's line: the minute before the refresh that takes it out, a suspended host), the
+///   env file with this registration and the new token as its line, then the token file,
+///   then the env file without the line.
+fn token_steps(
+    existing: Option<&str>,
+    path: &Path,
+    worker: &str,
+    token: &str,
+    r: &Rendered,
+) -> Result<Vec<Step>, String> {
+    let text = existing.unwrap_or_default();
+    let last = render(text, Some(worker), r.plain.then_some(token), Some(r))?;
+    if r.plain {
+        return Ok(vec![Step::Env(last), Step::File]);
+    }
+    let settled = existing
+        .is_some_and(|t| worker_line(t) == Some(worker) && matches!(token_line(t, path), Ok(None)));
+    if settled {
+        return Ok(vec![Step::File, Step::Env(last)]);
+    }
+    let first = render(text, Some(worker), Some(token), Some(r))?;
+    Ok(vec![Step::Env(first), Step::File, Step::Env(last)])
+}
+
+fn apply(env: &Path, file: &Path, token: &str, step: &Step) -> Result<(), String> {
+    match step {
+        Step::Env(text) => crate::host::replace(env, text.as_bytes()),
+        Step::File => write_token_file(file, token),
+    }
+}
+
 /// A new host worker token (enrollment and every rotation): its file (0400), and the env
 /// file with its registration and the rest rendered by `r` — the token there too only while
-/// an older release needs it (`r.plain`). An env file that is not the agent's own is
-/// replaced, never read.
+/// an older release needs it (`r.plain`), in the order [`token_steps`] gives. An env file
+/// that is not the agent's own is replaced, never read.
 pub fn write_token(path: &Path, worker: &str, token: &str, r: &Rendered) -> Result<(), String> {
     let file = token_path(path)?;
     if !plain_token(token) {
         return Err("a host worker token is one word of printable characters".into());
     }
     let _held = lock(path)?;
-    let existing = read(path)
-        .ok()
-        .flatten()
-        .map(|(t, _)| t)
-        .unwrap_or_default();
-    let text = render(&existing, Some(worker), r.plain.then_some(token), Some(r))?;
-    put(path, &text, Some((&file, token)), r.plain)
+    let existing = read(path).ok().flatten().map(|(t, _)| t);
+    for step in token_steps(existing.as_deref(), path, worker, token, r)? {
+        apply(path, &file, token, &step)?;
+    }
+    Ok(())
 }
 
 /// What [`refresh`] did.

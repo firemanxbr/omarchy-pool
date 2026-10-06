@@ -521,10 +521,13 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   plainly: while a release from before #327 runs or is being rolled out on a
   host, its dispatcher reads only `OMARCHY_WORKER_TOKEN`, so the agent keeps
   the token in `etc/dispatcher.env` too (and the dispatcher's environment
-  shows it) until no such release is left; and on a rootful engine the socket
-  makes the dispatcher root-equivalent anyway — the file protects against
-  leaks through `inspect`, logs, crash dumps and bugs, not against a
-  compromised dispatcher.
+  shows it) until no such release is left; a new token also passes through
+  that file for the moment between two of its writes when the file names no
+  registration yet, another one, or still holds an older token's line, so a
+  writer stopped half-way never leaves an older token that looks newer; and on
+  a rootful engine the socket makes the dispatcher root-equivalent anyway —
+  the file protects against leaks through `inspect`, logs, crash dumps and
+  bugs, not against a compromised dispatcher.
 - **The host report** is at most 16 KiB (its `runtime` at most 2 KiB) and
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
@@ -535,7 +538,7 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
 | Secret | Where it comes from | At rest | Which container gets it |
 |---|---|---|---|
 | Host key | generated at install | 0600 `state/host.ed25519` in the agent's data directory | none, ever |
-| Host worker token `omw_` | minted by the pool for the confirmed host, fetched with a host-key-signed request, rotated every 30 days | 0400 `run/host/dispatcher/token` in the set directory (and in 0600 `etc/dispatcher.env` only while a release from before #327 is applied or staged) | the dispatcher only, as a read-only file mount (`OMARCHY_WORKER_TOKEN_FILE`), never in its environment |
+| Host worker token `omw_` | minted by the pool for the confirmed host, fetched with a host-key-signed request, rotated every 30 days | 0400 `run/host/dispatcher/token` in the set directory (and in 0600 `etc/dispatcher.env` only while a release from before #327 is applied or staged, or for the moment between two writes of a first enrollment) | the dispatcher only, as a read-only file mount (`OMARCHY_WORKER_TOKEN_FILE`), never in its environment |
 | Job tokens `omj.` | the claim answer, per lease, carrying the lease generation | the dispatcher's memory and `work/state/leases/` (0600) | the dispatcher and its pool-job children only; never a task |
 | Agent keys, `GITHUB_TOKEN` (public read only), `CLAUDE_CODE_OAUTH_TOKEN` | typed at install on `/dev/tty`, or copied from an existing file with confirmation | 0600 `OMARCHY_SECRETS_DIR/agent.env`, outside the work root and the set directory | a task's agent sidecar only, as a read-only file mount (`OMARCHY_AGENT_ENV`), never in its environment |
 
