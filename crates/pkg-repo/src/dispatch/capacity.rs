@@ -3,6 +3,12 @@
 //! the same file: worker/src/hosts.ts) and the agent's `run/capacity.json`
 //! (schema 2, #333), read read-only before every claim.
 //!
+//! Its `sandbox` (#330, D43) is the sandboxed runtime the agent found — gVisor's `runsc` or
+//! Kata Containers, after a smoke run on a kernel that is not the engine's — which the
+//! dispatcher starts community tasks on the native lane in. One it cannot read makes the
+//! whole file unread (no claim): a community task never runs outside a sandbox the host
+//! may have.
+//!
 //! Seams: the agent's run loop (#315) refreshes the file; its free engine
 //! disk is the agent's last probe, in 10 GB steps, so the disk watcher's
 //! engine value is only as fresh as that: it kills on it once per probe (the
@@ -109,8 +115,40 @@ pub struct File {
     /// each on after binfmt and a smoke run, within the owner's envelope.
     pub emulated: Vec<String>,
     pub engine_free_gb: u64,
+    /// The sandboxed runtime community tasks on the native lane run in (#330); `None` when the
+    /// host has none (`null`, or a file from an agent before #330).
+    pub sandbox: Option<Sandbox>,
     /// The claim's `capacity`, as the pool reads it (worker/src/hosts.ts parseCapacity).
     pub claim: Value,
+}
+
+/// The host's sandboxed runtime, as the agent wrote it: the engine's name for it (what
+/// `--runtime` takes, in the spec's grammar) and which sandbox it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sandbox {
+    pub runtime: String,
+    /// `gvisor` or `kata`.
+    pub kind: String,
+}
+
+/// The file's `sandbox`: `Ok(None)` when it has none, `Err` when it says one that does not read.
+fn sandbox_of(v: Option<&Value>) -> Result<Option<Sandbox>, String> {
+    let s = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(s) => s,
+    };
+    let field = |k: &str| s.get(k).and_then(Value::as_str);
+    match (field("runtime"), field("kind")) {
+        (Some(runtime), Some(kind))
+            if super::spec::runtime_ok(runtime) && matches!(kind, "gvisor" | "kata") =>
+        {
+            Ok(Some(Sandbox {
+                runtime: runtime.to_owned(),
+                kind: kind.to_owned(),
+            }))
+        }
+        _ => Err(format!("a sandbox that does not read: {s}")),
+    }
 }
 
 /// Reads the agent's file; `None` when it is missing or not schema 2 (the dispatcher then claims nothing).
@@ -138,6 +176,7 @@ pub fn read(path: &Path) -> Option<File> {
         .map(str::to_owned)
         .collect();
     let disk = v.get("disk_free_gb")?;
+    let sandbox = sandbox_of(v.get("sandbox")).ok()?;
     let claim = serde_json::json!({
         "cpus": v.get("cpus")?, "mem_gb": v.get("mem_gb")?,
         "disk_free_gb": { "work": disk.get("work")?, "engine": disk.get("engine")? },
@@ -161,6 +200,7 @@ pub fn read(path: &Path) -> Option<File> {
         arch,
         emulated,
         engine_free_gb: disk.get("engine")?.as_u64()?,
+        sandbox,
         claim,
     })
 }
@@ -299,5 +339,49 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("needs a person: prep-root.sh installs qemu-user-static-binfmt"));
+        assert_eq!(f.sandbox, None, "`sandbox: null`: none");
+        // The Studio with gVisor (#330): the runtime its community tasks start in.
+        agent("sandboxed.json");
+        let f = read(&p).unwrap();
+        assert_eq!(
+            f.sandbox,
+            Some(Sandbox {
+                runtime: "runsc".into(),
+                kind: "gvisor".into()
+            })
+        );
+        assert!(
+            f.claim.get("sandbox").is_none(),
+            "the pool reads it from the agent's report, not the claim"
+        );
+    }
+
+    /// A sandbox that does not read stops the claims: never a community task outside it.
+    #[test]
+    fn a_sandbox_the_dispatcher_cannot_read_leaves_the_whole_file_unread() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("capacity.json");
+        let with = |sandbox: &str| {
+            std::fs::write(&p, format!(r#"{{"schema":2,"at":"t","cpus":12,"mem_gb":32,"disk_free_gb":{{"work":200,"engine":150}},"units":11,"lanes":[{{"arch":"aarch64","mode":"native"}}],"below_minimum":false{sandbox}}}"#)).unwrap();
+            read(&p)
+        };
+        assert_eq!(with("").unwrap().sandbox, None, "an agent before #330");
+        assert_eq!(with(r#","sandbox":null"#).unwrap().sandbox, None);
+        assert_eq!(
+            with(r#","sandbox":{"runtime":"kata-qemu","kind":"kata"}"#)
+                .unwrap()
+                .sandbox
+                .unwrap()
+                .runtime,
+            "kata-qemu"
+        );
+        for bad in [
+            r#","sandbox":{"runtime":"--privileged","kind":"gvisor"}"#,
+            r#","sandbox":{"runtime":"runsc","kind":"runc"}"#,
+            r#","sandbox":{"runtime":"runsc"}"#,
+            r#","sandbox":"runsc""#,
+        ] {
+            assert!(with(bad).is_none(), "{bad}");
+        }
     }
 }

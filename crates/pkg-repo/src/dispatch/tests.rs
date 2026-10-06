@@ -1540,6 +1540,122 @@ fn a_lease_prepared_again_after_a_restart_is_given_back_when_its_emulated_lane_w
     );
 }
 
+/// The Studio's file with gVisor (#330): the agent's own fixture, `runsc` for the community
+/// tasks of its native lane, `x86_64` emulated beside it.
+fn sandboxed_file(h: &H) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../omarchy-agent/tests/fixtures/capacity/sandboxed.json");
+    std::fs::copy(fixture, &h.capacity).unwrap();
+}
+
+#[test]
+fn a_community_task_on_its_native_lane_starts_in_the_sandbox_and_nothing_else_does() {
+    let h = H::new();
+    sandboxed_file(&h);
+    let mut d = h.dispatcher();
+    let gen3 = "g_00000000000000c3";
+    // A contributor's build on the native lane, one on the emulated lane, and the project's
+    // recipe on main.
+    h.give(on_lane(community(7, GEN), "aarch64", Some("native")));
+    h.give(on_lane(community(8, GEN2), "x86_64", Some("emulated")));
+    h.give(task(
+        9,
+        "build",
+        "felix",
+        "0123abcd",
+        "project",
+        json!({}),
+        gen3,
+    ));
+    h.ticks(&mut d, 6);
+    assert_eq!(value_of(&h.engine.args(7, GEN), "--runtime"), Some("runsc"));
+    assert_eq!(
+        value_of(&h.engine.args(8, GEN2), "--runtime"),
+        None,
+        "an emulated lane runs through the host kernel's binfmt handler"
+    );
+    assert_eq!(
+        value_of(&h.engine.args(9, gen3), "--runtime"),
+        None,
+        "the project's own recipe"
+    );
+    // Its sidecars, and every other call, on the engine's own runtime.
+    let calls = h.engine.calls.lock().unwrap().clone();
+    let with: Vec<&Vec<String>> = calls
+        .iter()
+        .filter(|c| c.iter().any(|x| x == "--runtime"))
+        .collect();
+    assert_eq!(with.len(), 1, "{with:?}");
+    assert_eq!(
+        value_of(with[0], "--name"),
+        Some(spec::container_name(7, GEN).as_str())
+    );
+    // The file says none now (the owner's `sandbox = "off"`, a runtime that failed its
+    // smoke run): the next community task runs on the engine's own runtime, as on any host
+    // without one.
+    h.units(11);
+    h.give(on_lane(
+        community(10, "g_00000000000000d4"),
+        "aarch64",
+        Some("native"),
+    ));
+    h.advance(30); // the claim after one that brought nothing
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(10, "g_00000000000000d4"));
+    assert_eq!(
+        value_of(&h.engine.args(10, "g_00000000000000d4"), "--runtime"),
+        None
+    );
+}
+
+#[test]
+fn a_runtime_the_engine_refuses_fails_the_start_and_nothing_runs_outside_it() {
+    let h = H::new();
+    sandboxed_file(&h);
+    // The engine no longer has the runtime the file names: `docker run --runtime` refuses.
+    *h.engine.refuse.lock().unwrap() = Some(format!("7-{GEN}"));
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 4);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(
+        (f["lost"].clone(), f["final"].clone()),
+        (json!(true), json!(false)),
+        "{f}"
+    );
+    assert!(h.engine.runs.lock().unwrap().is_empty(), "nothing started");
+    assert!(!h.engine.has(7, GEN));
+}
+
+#[test]
+fn a_community_lease_prepared_again_while_the_file_does_not_read_is_handed_back() {
+    let h = H::new();
+    sandboxed_file(&h);
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    d.tick(); // claimed, Preparing
+    drop(d);
+    // A dispatcher started while the agent's file does not read (a sandbox it cannot read):
+    // the lease it re-adopts is handed back before anything starts, never run without it.
+    let text = std::fs::read_to_string(&h.capacity).unwrap();
+    std::fs::write(
+        &h.capacity,
+        text.replace(r#""kind": "gvisor""#, r#""kind": "runc""#),
+    )
+    .unwrap();
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 3);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(f["lost"], json!(true), "{f}");
+    assert!(
+        f["error"].as_str().unwrap().contains("does not read now"),
+        "{f}"
+    );
+    assert!(h.engine.runs.lock().unwrap().is_empty());
+    // Nor is anything claimed while it does not read.
+    assert_eq!(h.pool.last_claim()["want"], json!(0));
+}
+
 #[test]
 fn an_output_outside_the_kinds_list_or_above_its_cap_is_not_uploaded_and_fails_the_task() {
     let h = H::new();

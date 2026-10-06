@@ -52,6 +52,14 @@
 //! A probe sidecar ([`probe`]) says who this host's agent is with every
 //! claim (`agent`) and answers `recheck-agent` and `restart-agent`.
 //!
+//! **The sandbox** (#330, design v2 §10.4; D43): a community task on its
+//! native lane starts in the sandboxed runtime `run/capacity.json` names —
+//! gVisor's `runsc` or Kata Containers, which the agent found after a smoke
+//! run on a kernel that is not the engine's — read again before each start;
+//! its sidecars, the project's tasks and an emulated lane's run on the
+//! engine's own runtime. A runtime the engine no longer has fails the start,
+//! `lost`: nothing runs outside the sandbox the file says the host has.
+//!
 //! **Lanes** (#338, design v2 §7.4, §7.5): a build or a trial runs on the
 //! lane the pool leased it on — its architecture's `--platform`, natively
 //! or emulated through the host's binfmt handler when `run/capacity.json`
@@ -1027,6 +1035,20 @@ impl Dispatcher {
                 return live;
             }
         };
+        // A community task on its native lane runs in the host's sandboxed runtime when the
+        // agent found one (#330, D43), read now as the lane is. A file that does not read now
+        // hands the lease back: a community task never runs outside a sandbox the host may have.
+        let runtime = if spec::sandboxed(&live.lease.task.trust, live.lease.emulated()) {
+            if let Some(c) = capacity::read(&self.capacity_file) {
+                c.sandbox.map(|s| s.runtime)
+            } else {
+                let why = "run/capacity.json does not read now: a community task waits for the sandbox this host may have".to_owned();
+                lost(self, &mut live, why);
+                return live;
+            }
+        } else {
+            None
+        };
         let Some(slot) = self.free_slot() else {
             let why = format!(
                 "every task network of {} is in use",
@@ -1077,6 +1099,7 @@ impl Dispatcher {
                 tokens: self.net.caps.tokens_per_task,
                 wall_s: self.net.caps.minutes_per_task * 60,
             }),
+            runtime: runtime.as_deref(),
         });
         let plan = match plan {
             Ok(p) => p,
@@ -1122,7 +1145,7 @@ impl Dispatcher {
             return live;
         }
         say(format!(
-            "task {}: {} {} started ({cpus} CPUs, {mem_gb} GB, {} network {}{})",
+            "task {}: {} {} started ({cpus} CPUs, {mem_gb} GB, {} network {}{}{})",
             live.lease.task.id,
             live.lease.task.kind,
             live.lease.task.name,
@@ -1134,7 +1157,8 @@ impl Dispatcher {
                 .unwrap_or_default(),
             agent_calls.map_or(String::new(), |c| format!(
                 ", an agent sidecar of {c} calls"
-            ))
+            )),
+            runtime.map_or(String::new(), |r| format!(", in the sandbox {r}"))
         ));
         live
     }

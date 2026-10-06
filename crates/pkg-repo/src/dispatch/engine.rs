@@ -6,6 +6,12 @@
 //! that is what answers), each call with a deadline, and behind docker's CLI on
 //! podman a task network through libpod's own API ([`libpod`], #372). A trait,
 //! so the loop's tests run on a fake engine.
+//!
+//! A sandboxed task's `--runtime <name>` (#330) is `run`'s option on docker's
+//! CLI and a global one on podman's ([`argv_of`]). Behind docker's CLI podman's
+//! API does not pass it on (podman 4.9 runs its default runtime): the agent's
+//! smoke run sees that kernel and names no sandbox there, so the dispatcher is
+//! never told to rely on it.
 
 use std::time::{Duration, Instant};
 
@@ -212,6 +218,21 @@ pub fn gateway_of(json: &str) -> Result<spec::Gateway, String> {
     }
 }
 
+/// The spec's call as this CLI takes it: podman's takes `--runtime <name>` before the verb
+/// (`podman --runtime runsc run -d …`), docker's after it, where the spec puts it (#330).
+pub fn argv_of(cli: &str, args: &[String]) -> Vec<String> {
+    let at = args.iter().position(|a| a == "--runtime").filter(|&i| {
+        cli == "podman" && i + 1 < args.len() && matches!(args[0].as_str(), "run" | "create")
+    });
+    let Some(i) = at else {
+        return args.to_vec();
+    };
+    let mut out = args[i..i + 2].to_vec();
+    out.extend_from_slice(&args[..i]);
+    out.extend_from_slice(&args[i + 2..]);
+    out
+}
+
 /// Whether `inspect`'s error says the container does not exist — docker: "No such container: …"
 /// (or "No such object"), podman: "no such container" — and not that the engine did not answer
 /// ("dial unix …: connect: no such file or directory" is a socket that is not there).
@@ -235,6 +256,7 @@ impl Engine for Cli {
         if let Some(l) = self.libpod.as_ref().filter(|_| libpod::wants(args)) {
             return l.create_network(args);
         }
+        let args = argv_of(&self.runtime, args);
         let a: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = self.call(&a)?;
         if out.status.success() {
@@ -498,6 +520,49 @@ mod tests {
             5,
             "{out}"
         );
+    }
+
+    #[test]
+    fn podmans_cli_takes_the_sandboxs_runtime_before_the_verb() {
+        let call: Vec<String> = [
+            "run",
+            "-d",
+            "--name",
+            "t",
+            "--runtime",
+            "runsc",
+            "--platform",
+            "linux/arm64",
+            "img",
+            "bash",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(argv_of("docker", &call), call);
+        assert_eq!(
+            argv_of("podman", &call),
+            [
+                "--runtime",
+                "runsc",
+                "run",
+                "-d",
+                "--name",
+                "t",
+                "--platform",
+                "linux/arm64",
+                "img",
+                "bash"
+            ]
+        );
+        // Nothing else moves: a call without it, another verb, a flag without its value.
+        let plain: Vec<String> = ["run", "-d", "img"].map(str::to_owned).to_vec();
+        assert_eq!(argv_of("podman", &plain), plain);
+        let net: Vec<String> = ["network", "create", "--runtime", "x"]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(argv_of("podman", &net), net);
+        let dangling: Vec<String> = ["run", "--runtime"].map(str::to_owned).to_vec();
+        assert_eq!(argv_of("podman", &dangling), dangling);
     }
 
     #[test]
