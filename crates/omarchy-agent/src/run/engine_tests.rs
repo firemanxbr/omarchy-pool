@@ -23,7 +23,8 @@
 //! sealed to the host that the dispatcher never sees. The owner's runtime switch from one
 //! real engine to another is `tests/agent-runtime-switch.sh`'s. The same rollouts on the
 //! Quadlet driver (#330) — the set as a unit of the user's own systemd, on rootless podman,
-//! with no compose — are `tests/agent-quadlet.sh`'s.
+//! with no compose — and #327's token file and its rotation there are
+//! `tests/agent-quadlet.sh`'s.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -1533,6 +1534,17 @@ fn real_engine_quadlet_rollouts_keep_the_task_running() {
         systemctl(&["is-active", &format!("{}.service", unit.name)]),
         "active"
     );
+    // #327 on Quadlet: the token moved to its file, which the unit mounts read-only and
+    // podman's env file no longer carries; a rotation restarts the dispatcher's unit alone.
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, TOKEN);
+    let rotated = a_rotation_recreates_the_dispatcher_alone(&mut h);
+    assert_eq!(h.task_state(), task0, "the task container kept running");
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, &rotated);
+    let text = fs::read_to_string(&h.unit.as_ref().unwrap().file).unwrap();
+    assert!(
+        !text.contains(TOKEN) && !text.contains(&rotated),
+        "the unit holds a worker token"
+    );
     a_broken_release_is_reverted(&mut h);
     assert_eq!(h.task_state(), task0);
     a_statement_preempts_and_goes_down(&mut h);
@@ -1541,7 +1553,7 @@ fn real_engine_quadlet_rollouts_keep_the_task_running() {
         task0,
         "the task container survived every rollout"
     );
-    nothing_but_the_pinned_tools_and_no_secret_on_disk(&h, &decoys, TOKEN);
+    nothing_but_the_pinned_tools_and_no_secret_on_disk(&h, &decoys, &rotated);
     // The unit podman's generator made runs what last-good says, under this user's systemd.
     let unit = h.unit.as_ref().unwrap();
     assert!(fs::read_to_string(&unit.file)

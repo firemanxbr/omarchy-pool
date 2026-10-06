@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::run::config::{Config, DriverKind, Runtime};
-use crate::run::fake::{Engine, World, QUADLET_SOCKET};
+use crate::run::fake::{Engine, World, QUADLET_SOCKET, TOKEN};
 
 use super::{Request, SwitchStep, REQUEST};
 
@@ -506,6 +506,22 @@ fn a_runtime_switch_moves_the_bundle_to_quadlet_and_back_with_the_guard() {
     assert_eq!(running_dispatcher(&w.engine), None);
     assert_eq!(on_quadlet(&q).as_deref(), Some("v1.0.0"));
     assert!(q.borrow().units.join(format!("{UNIT}.container")).exists());
+    // #327's token file goes with the bundle as it is: the unit mounts it read-only, and
+    // neither the unit nor the env file podman reads holds the token.
+    let unit = fs::read_to_string(q.borrow().units.join(format!("{UNIT}.container"))).unwrap();
+    let token = w.token_file();
+    assert!(
+        unit.lines()
+            .any(|l| l == format!("Volume={}:/run/omarchy/worker-token:ro", token.display()))
+            && !unit.contains(TOKEN),
+        "{unit}"
+    );
+    assert_eq!(
+        crate::dispatcher_env::read_token(&token).unwrap(),
+        Some((TOKEN.to_owned(), 0o400))
+    );
+    let env = fs::read_to_string(w.set_dir().join("etc/dispatcher.env")).unwrap();
+    assert!(!env.contains(TOKEN), "{env}");
     // agent.toml names the driver, its engine and its socket from now on, the owner's
     // comment kept; the agent that starts next reads it.
     let text = fs::read_to_string(w.agent.paths.agent_toml()).unwrap();

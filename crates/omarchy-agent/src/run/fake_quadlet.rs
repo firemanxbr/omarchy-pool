@@ -3,8 +3,10 @@
 //! API socket says of the containers those units start. Like Quadlet's `--rm` units, a
 //! container is replaced at every restart, so a unit's restarts are the service's count,
 //! never the container's; a unit stopped by hand is not restarted; a broken one (its
-//! `Exec=` says `broken`) exits 1 at every look and is restarted at once. Task containers
-//! are the dispatcher's: the fake panics if anything removes one.
+//! `Exec=` says `broken`) exits 1 at every look and is restarted at once, and so is one
+//! whose bind source is missing, which podman refuses to start, making nothing (#327's
+//! token file). Task containers are the dispatcher's: the fake panics if anything removes
+//! one.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -168,8 +170,33 @@ impl QState {
     }
 
     /// Starts the unit's container from what systemd loaded; `/ready` after `ready_in`.
+    /// podman never creates a bind's missing source (#327's token file): `podman run` stops
+    /// with exit 125, no container, nothing made, and systemd (`Restart=always`) tries
+    /// again at its next look.
     fn start(&mut self, name: &str, ready_in: i64) {
         let text = self.loaded.get(name).cloned().unwrap_or_default();
+        let at = self.clock;
+        // The engine's own API socket is there while its podman answers.
+        let missing = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("Volume="))
+            .filter_map(|v| v.split(':').next().filter(|s| s.starts_with('/')))
+            .map(std::path::Path::new)
+            .filter(|source| source.extension().is_none_or(|e| e != "sock"))
+            .any(|source| !source.exists());
+        let s = self.services.entry(name.to_owned()).or_insert(Svc {
+            active: String::new(),
+            sub: String::new(),
+            restarts: 0,
+            status: 0,
+        });
+        if missing {
+            s.active = "activating".into();
+            s.sub = "auto-restart".into();
+            s.status = 125;
+            self.exits.push((name.to_owned(), Exit { at, code: 125 }));
+            return;
+        }
         let mut labels = BTreeMap::new();
         let mut broken = false;
         for line in text.lines() {
@@ -186,7 +213,7 @@ impl QState {
         }
         broken |= self.broken;
         let id = self.id();
-        let (at, tasks) = (self.clock, self.tasks().len());
+        let tasks = self.tasks().len();
         self.containers.push(Ctr {
             id,
             name: name.to_owned(),
@@ -210,7 +237,7 @@ impl QState {
     }
 
     /// A broken container exits 1 at every look, and its unit (`Restart=always`) starts the
-    /// next one at once.
+    /// next one at once; so does a unit whose last start podman refused.
     fn crash_loop(&mut self) {
         let broken: Vec<String> = self
             .containers
@@ -223,6 +250,18 @@ impl QState {
             if let Some(s) = self.services.get_mut(&name) {
                 s.restarts += 1;
                 s.status = 1;
+            }
+            self.start(&name, 0);
+        }
+        let refused: Vec<String> = self
+            .services
+            .iter()
+            .filter(|(n, s)| s.sub == "auto-restart" && self.loaded.contains_key(*n))
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in refused {
+            if let Some(s) = self.services.get_mut(&name) {
+                s.restarts += 1;
             }
             self.start(&name, 0);
         }
@@ -285,6 +324,13 @@ impl QState {
                     s.restarts = 0;
                 }
                 self.start(&name, 0);
+                if self.services[&name].sub == "auto-restart" {
+                    return output(
+                        1,
+                        "",
+                        &format!("Job for {svc} failed because the control process exited with error code."),
+                    );
+                }
                 output(0, "", "")
             }
             ["stop", "--no-block", svc] => {

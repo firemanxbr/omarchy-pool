@@ -6,14 +6,17 @@
 #     agent renders it — the template as release.yml renders it, the agent's
 #     label overlay, a stand-in's script with `$`, `%`, quotes and newlines —
 #     and the `podman run` it writes carries what compose would run: the image,
-#     the mounts, the env file, the stop timeout, the labels, the same argv;
+#     the mounts (the host worker token's own file read-only, #327), the env
+#     file, the stop timeout, the labels, the same argv;
 #   - the run loop rolls a stand-in dispatcher out as a unit of the user's
 #     systemd (`~/.config/containers/systemd/omarchy-it-<pid>-dispatcher.container`,
 #     daemon-reload and restart): a first release, one with two ordered
 #     restarts (exit 75) during its guard, counted as the service's restarts,
 #     a broken one never ready and one that crashes in its guard, both reverted
-#     and quarantined, and a rollback statement preempting a round — while a
-#     long-running task container keeps running throughout; podman's
+#     and quarantined, a rollback statement preempting a round, the token
+#     moved from etc/dispatcher.env to its read-only file (in no container's
+#     environment, nor the unit) and a rotation restarting the unit alone —
+#     while a long-running task container keeps running throughout; podman's
 #     AutoUpdate= is never written. Decoy docker, compose, podman and systemctl
 #     first in PATH prove the agent runs only the pinned docker CLI and the
 #     system's systemctl.

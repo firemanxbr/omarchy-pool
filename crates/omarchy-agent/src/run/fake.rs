@@ -1032,6 +1032,9 @@ impl World {
         }
         write_token_file(&set, TOKEN);
         fs::write(set.join("run/capacity.json"), r#"{"schema":2,"units":3}"#).unwrap();
+        // The work root, as install makes it: the dispatcher binds it, and podman (the
+        // Quadlet driver's, #330) binds only a source that is there.
+        fs::create_dir_all(dir.join("work")).unwrap();
         let cfg = Config::parse(&edit(
             super::config::tests::example(&set, &dir.join("work"), &dir.join("secrets")),
             &dir,

@@ -4,8 +4,11 @@
 //! that survives an ordered restart in its guard while a task keeps running, a broken one
 //! reverted and quarantined, a crash loop the guard catches, the safety timer bringing back
 //! a unit stopped by hand, a user manager that does not answer changing nothing, and an
-//! owner's override Quadlet cannot render refused at the lint. The same rounds on a real
-//! rootless podman under a real user manager are `tests/agent-quadlet.sh`'s.
+//! owner's override Quadlet cannot render refused at the lint; and #327's token file on
+//! it — a rotation restarting the dispatcher's unit alone, a dispatcher held while its
+//! file is missing, which podman never makes in its place, and an override mounting a
+//! secret file not its own refused. The same rounds on a real rootless podman under a real
+//! user manager are `tests/agent-quadlet.sh`'s.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -13,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::run::compose::Compose;
-use crate::run::fake::{publish, World, QUADLET_SOCKET};
+use crate::run::fake::{publish, World, QUADLET_SOCKET, TOKEN, WORKER};
 use crate::run::state::{tempdir, Step, ToolPins};
 use crate::run::tools::Tools;
 use crate::version::Release;
@@ -523,4 +526,217 @@ fn a_quadlet_host_s_lint_holds_the_owner_s_override_to_what_it_renders() {
         "{detail}"
     );
     assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
+}
+
+// ---------------------------------------------------------------------------------------
+// #327's token file on the Quadlet driver.
+
+/// The unit's line mounting the set's token file read-only.
+fn token_volume(w: &World) -> String {
+    format!(
+        "Volume={}:/run/omarchy/worker-token:ro",
+        w.token_file().display()
+    )
+}
+
+/// What `omarchy-agent token` (and #325's rotate-token order) does: the pool's answer
+/// written through `enroll::write_worker_token`.
+fn rotate(w: &World, token: &str) {
+    let r = crate::dispatcher_env::Rendered {
+        addresses: Vec::new(),
+        envelope: None,
+        plain: false,
+    };
+    crate::enroll::write_worker_token(
+        &w.set_dir().join("etc/dispatcher.env"),
+        &serde_json::json!({"worker": WORKER, "token": token}),
+        &r,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_rotation_on_quadlet_restarts_the_dispatcher_s_unit_alone_and_the_task_runs_on() {
+    let mut w = World::quadlet_running_v1();
+    let q = w.quadlet_host();
+    let unit = q.borrow().units.join(format!("{NAME}.container"));
+    let before = fs::read_to_string(&unit).unwrap();
+    // The file by path, read-only, and its name for the dispatcher: never the token.
+    assert!(
+        before.lines().any(|l| l == token_volume(&w))
+            && before.contains("\"OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token\"")
+            && !before.contains(TOKEN),
+        "{before}"
+    );
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let env_before = fs::read_to_string(&env).unwrap();
+    let (task, started, old) = {
+        let s = q.borrow();
+        let t = s.tasks()[0];
+        (
+            t.id.clone(),
+            t.started_at,
+            s.running(NAME).unwrap().id.clone(),
+        )
+    };
+    let changes = q.borrow().changes.len();
+    let new = format!("omw_{}", "5e".repeat(24));
+    rotate(&w, &new);
+    assert_eq!(
+        crate::dispatcher_env::read_token(&w.token_file()).unwrap(),
+        Some((new.clone(), 0o400))
+    );
+    // The next tick sees the changed input: a round that restarts the unit, and only it.
+    w.tick(3);
+    assert!(
+        w.agent.state.rollout.why.contains("an input changed"),
+        "{:?}",
+        w.agent.state.rollout
+    );
+    to_idle(&mut w);
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    let s = q.borrow();
+    let d = s.running(NAME).unwrap();
+    assert_ne!(
+        d.id, old,
+        "the dispatcher was started again with the new token"
+    );
+    assert!(s.saved.contains(&old), "the old one saved its leases");
+    assert_eq!(d.readopted, 1);
+    assert_eq!(
+        d.labels["org.omarchy-pool.agent.release"].as_str(),
+        "v1.0.0"
+    );
+    assert_eq!(s.tasks().len(), 1);
+    assert_eq!(
+        (s.tasks()[0].id.as_str(), s.tasks()[0].started_at),
+        (task.as_str(), started),
+        "the task runs on, never restarted"
+    );
+    let since = &s.changes[changes..];
+    assert!(
+        since.contains(&format!("restart {NAME}"))
+            && since.iter().all(|c| c == "daemon-reload"
+                || c == &format!("stop {NAME}")
+                || c == &format!("restart {NAME}")
+                || c.starts_with("pull ")),
+        "{since:?}"
+    );
+    drop(s);
+    // The unit changed by its inputs label alone; it holds neither token, and podman's env
+    // file none either.
+    let after = fs::read_to_string(&unit).unwrap();
+    assert_ne!(after, before);
+    assert!(
+        after.lines().any(|l| l == token_volume(&w))
+            && !after.contains(&new)
+            && !after.contains(TOKEN),
+        "{after}"
+    );
+    assert_eq!(fs::read_to_string(&env).unwrap(), env_before);
+    // The round read the token file again: the journal scrubs the new token.
+    crate::run::rollout::report(
+        &mut w.agent.state,
+        &w.agent.journal,
+        w.now,
+        crate::run::rollout::Outcome::EngineUnreachable,
+        None,
+        &format!("systemctl --user: echoed {new}"),
+    );
+    assert!(!w.agent.state.round.detail.contains(&new));
+    assert!(!w.journal().contains(&new));
+}
+
+#[test]
+fn a_quadlet_host_holds_its_dispatcher_while_the_token_file_is_missing_and_podman_makes_nothing_there(
+) {
+    // Enrolled, the token not written yet: held, and no unit written.
+    let mut w = World::quadlet();
+    let q = w.quadlet_host();
+    let file = w.token_file();
+    let unit = q.borrow().units.join(format!("{NAME}.container"));
+    fs::remove_file(&file).unwrap();
+    w.release("v1.0.0");
+    w.target("v1.0.0", None);
+    w.round();
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "held");
+    assert!(
+        detail.contains("awaiting the owner's Confirm: run/host/dispatcher/token is missing"),
+        "{detail}"
+    );
+    assert!(q.borrow().changes.is_empty(), "{:?}", q.borrow().changes);
+    assert!(!unit.exists() && !file.exists());
+    assert_eq!(w.applied(), None);
+    // The token arrives as the enrollment writes it: the next round starts the unit.
+    rotate(&w, &format!("omw_{}", "4d".repeat(24)));
+    w.round();
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    assert!(q.borrow().running(NAME).is_some());
+    let task = q.borrow_mut().start_task();
+
+    // The file gone on a running host, and the dispatcher's container restarts (the pool's
+    // ordered restart): podman refuses to start it without its bind's source — nothing is
+    // made where the file belongs — and systemd keeps trying.
+    fs::remove_file(&file).unwrap();
+    let changes = q.borrow().changes.len();
+    let good = fs::read_to_string(&unit).unwrap();
+    q.borrow_mut().ordered_restart(NAME);
+    assert!(q.borrow().running(NAME).is_none());
+    assert!(!file.exists(), "a directory where the token file belongs");
+    // The run loop sees the input change: its round is held, and touches no unit.
+    w.tick(3);
+    to_idle(&mut w);
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "held", "{detail}");
+    assert!(
+        detail.contains("run/host/dispatcher/token is missing"),
+        "{detail}"
+    );
+    {
+        let s = q.borrow();
+        assert_eq!(s.changes.len(), changes, "{:?}", &s.changes[changes..]);
+        assert!(s.running(NAME).is_none());
+        // podman's exit 125, and systemd trying again (`Restart=always`).
+        assert_eq!(s.service(NAME).unwrap().sub, "auto-restart");
+        assert!(
+            s.exits.iter().any(|(n, e)| n == NAME && e.code == 125),
+            "{:?}",
+            s.exits
+        );
+        assert_eq!(s.tasks().len(), 1);
+        assert_eq!(s.tasks()[0].id, task);
+    }
+    assert!(!file.exists());
+    assert_eq!(fs::read_to_string(&unit).unwrap(), good);
+    assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
+    // A new token (`omarchy-agent token`): the next round restarts the unit with it.
+    rotate(&w, &format!("omw_{}", "6f".repeat(24)));
+    w.tick(3);
+    to_idle(&mut w);
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    let s = q.borrow();
+    assert_eq!(s.running(NAME).unwrap().readopted, 1);
+    assert_eq!(s.tasks()[0].id, task);
+}
+
+#[test]
+fn a_quadlet_host_s_override_mounting_a_secret_file_not_its_own_is_refused() {
+    let mut w = World::quadlet_running_v1();
+    let q = w.quadlet_host();
+    // Quadlet would render it as any bind; the round's compose lint, which a Quadlet host
+    // runs too, refuses another service's token file and its own mounted writable.
+    for over in [
+        "services:\n  dispatcher:\n    volumes:\n      - ./run/host/agent/token:/run/omarchy/agent-token:ro\n",
+        "services:\n  dispatcher:\n    volumes:\n      - ./run/host/dispatcher/token:/run/omarchy/worker-token\n",
+    ] {
+        fs::write(w.set_dir().join("compose.override.yml"), over).unwrap();
+        let changes = q.borrow().changes.len();
+        w.round();
+        let (outcome, detail) = w.outcome();
+        assert_eq!(outcome, "refused", "{detail}");
+        assert!(detail.contains("lint: secret_file: dispatcher: "), "{detail}");
+        assert_eq!(q.borrow().changes.len(), changes);
+        assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
+    }
 }
