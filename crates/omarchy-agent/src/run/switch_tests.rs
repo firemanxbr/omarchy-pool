@@ -351,6 +351,39 @@ fn one_socket_by_two_paths_is_one_socket() {
     ));
 }
 
+/// The sockets a switch with no `--socket` tries (#330): Quadlet's is this user's rootless
+/// podman's alone, and without `XDG_RUNTIME_DIR` the refusal says where that socket is
+/// looked up, not an empty list.
+#[test]
+fn a_switch_without_a_socket_tries_the_engines_own_and_quadlet_names_xdg_runtime_dir() {
+    let xdg = PathBuf::from("/run/user/1000");
+    let quadlet = super::switch_sockets(DriverKind::Quadlet, Runtime::Podman, Some(&xdg));
+    assert_eq!(
+        quadlet,
+        Ok(vec![PathBuf::from("/run/user/1000/podman/podman.sock")])
+    );
+    let e = super::switch_sockets(DriverKind::Quadlet, Runtime::Podman, None).unwrap_err();
+    for want in [
+        "XDG_RUNTIME_DIR is not set",
+        "$XDG_RUNTIME_DIR/podman/podman.sock",
+        "give --socket",
+    ] {
+        assert!(e.contains(want), "{want}: {e}");
+    }
+    // Compose takes the engine's sockets in v1 §10.5's order, rootless first when there is one.
+    assert_eq!(
+        super::switch_sockets(DriverKind::Compose, Runtime::Podman, Some(&xdg)),
+        Ok(vec![
+            PathBuf::from("/run/user/1000/podman/podman.sock"),
+            PathBuf::from(PODMAN)
+        ])
+    );
+    assert_eq!(
+        super::switch_sockets(DriverKind::Compose, Runtime::Podman, None),
+        Ok(vec![PathBuf::from(PODMAN)])
+    );
+}
+
 #[test]
 fn what_refuses_a_switch_changes_nothing() {
     let (mut w, podman) = drained_beside_podman();

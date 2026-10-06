@@ -163,6 +163,26 @@ pub(crate) fn default_socket(r: Runtime, xdg_runtime_dir: Option<&Path>) -> Vec<
     out
 }
 
+/// The sockets `runtime switch` tries, in order, when no `--socket` is given: the engine's
+/// own ([`default_socket`]). Quadlet runs this user's own podman (#330), so its rootless
+/// socket only, which `XDG_RUNTIME_DIR` locates: without it (an `su` or `sudo -u` shell, an
+/// ssh login without `pam_systemd`) there is none to try, and the refusal says why rather
+/// than naming no socket.
+pub(crate) fn switch_sockets(
+    kind: DriverKind,
+    r: Runtime,
+    xdg_runtime_dir: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut list = default_socket(r, xdg_runtime_dir);
+    if kind == DriverKind::Quadlet {
+        if xdg_runtime_dir.is_none() {
+            return Err("XDG_RUNTIME_DIR is not set: the Quadlet driver runs this user's rootless podman under this user's systemd, and its API socket is $XDG_RUNTIME_DIR/podman/podman.sock; run the switch in this user's own login session, or give --socket".into());
+        }
+        list.truncate(1);
+    }
+    Ok(list)
+}
+
 /// Where `cfg` says the bundle runs; `None` while the engine behind its socket has not
 /// said which it is (agent.toml without `set.runtime`).
 fn place_of(cfg: &Config) -> Option<Place> {
@@ -754,11 +774,7 @@ pub fn request(data: &Path, driver: &str, socket: Option<&Path>) -> Result<Strin
     let socket = if let Some(s) = socket {
         s.to_owned()
     } else {
-        let mut list = default_socket(r, xdg.as_deref());
-        // Quadlet runs the user's own podman: its rootless socket only.
-        if kind == DriverKind::Quadlet {
-            list.truncate(usize::from(xdg.is_some()));
-        }
+        let list = switch_sockets(kind, r, xdg.as_deref())?;
         list.iter()
             .find(|p| crate::install::engine::connect(p) == crate::install::engine::Socket::Answers)
             .cloned()

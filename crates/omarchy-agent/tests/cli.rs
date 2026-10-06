@@ -418,8 +418,9 @@ fn usage_errors_exit_2() {
     );
 }
 
-/// `runtime switch` (#325, #330): a driver this binary does not carry, or a socket nothing
-/// answers on, is refused at the host with nothing asked of the running agent.
+/// `runtime switch` (#325, #330): a driver this binary does not carry, a socket nothing
+/// answers on, or Quadlet's with no `XDG_RUNTIME_DIR` to find it by, is refused at the host
+/// with nothing asked of the running agent.
 #[test]
 fn a_runtime_switch_the_host_cannot_make_is_refused_and_asks_nothing() {
     let data = scratch("runtime-switch");
@@ -464,6 +465,22 @@ fn a_runtime_switch_the_host_cannot_make_is_refused_and_asks_nothing() {
         assert_eq!(o.status.code(), Some(1), "{args:?}: {}", text(&o));
         assert!(text(&o).contains(why), "{args:?}: {}", text(&o));
     }
+    // #330: Quadlet with no --socket outside the user's login session (an `su` shell, no
+    // XDG_RUNTIME_DIR) says where its socket is looked up, not an empty list.
+    let o = Command::new(env!("CARGO_BIN_EXE_omarchy-agent"))
+        .args(["runtime", "switch", "quadlet"])
+        .env("XDG_DATA_HOME", &data)
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains(
+            "XDG_RUNTIME_DIR is not set: the Quadlet driver runs this user's rootless podman"
+        ),
+        "{}",
+        text(&o)
+    );
     assert!(
         !data.join("omarchy-agent/runtime-switch.json").exists(),
         "nothing was asked of the agent"

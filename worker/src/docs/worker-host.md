@@ -428,8 +428,11 @@ podman host. The unit holds `agent.toml`'s paths and variables, and names
   driver; to change a running host's, switch it.
 - **Or switch to it later**, at the host: name `quadlet` in the envelope's
   `drivers`, drain the host's registration, then `omarchy-agent runtime
-  switch quadlet` (refused, with nothing changed, below podman 4.6). The
-  agent stops the dispatcher where it runs, brings the
+  switch quadlet` (refused, with nothing changed, below podman 4.6). Run
+  it in your own login session: like install, it asks
+  `$XDG_RUNTIME_DIR/podman/podman.sock` unless you give `--socket`, and a
+  shell without `XDG_RUNTIME_DIR` (`su`, `sudo -u`) is refused. The agent
+  stops the dispatcher where it runs, brings the
   same release up as the unit through a whole round, and writes the driver
   into `agent.toml` only once that round is `ok`; it goes back otherwise.
   From compose on the same rootless podman this keeps the engine (and its

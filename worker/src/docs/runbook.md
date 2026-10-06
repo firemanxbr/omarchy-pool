@@ -1592,9 +1592,11 @@ refuse them —, the socket answering as rootless podman —
 user manager and linger); a re-run
 keeps the driver `agent.toml` names, and refuses another on an installed host:
 `omarchy-agent runtime switch quadlet` (the envelope's `drivers` naming
-`quadlet`) moves a running host, stopping the old dispatcher before the unit
-starts, and `runtime switch compose/podman` goes back — on one rootless
-podman, compose and Quadlet are two drivers of one engine. Uninstall stops
+`quadlet`; the same socket unless `--socket` names another, so a shell
+without `XDG_RUNTIME_DIR` is refused) moves a running host, stopping the old
+dispatcher before the unit starts, and `runtime switch compose/podman` goes
+back — on one rootless podman, compose and Quadlet are two drivers of one
+engine. Uninstall stops
 the unit and removes its file before it removes the containers — also on a
 host a switch to Quadlet is still moving (`agent.toml` names compose until
 the switch's round is `ok`), and a unit systemd never loaded (no round made
