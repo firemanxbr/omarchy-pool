@@ -67,8 +67,9 @@ const PRIMARY: [&str; 9] = [
 ];
 /// The host key's attributes: made in the TPM, never duplicated, signs and does nothing else.
 const KEY_ATTRIBUTES: &str = "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|noda|sign";
-/// What the probe at the key's making signs.
-const PROBE: &[u8] = b"omarchy-host-tpm-probe-v1";
+/// What the probe at the key's making signs, and [`super::HostKey::check`]'s: no message the
+/// pool takes.
+pub(crate) const PROBE: &[u8] = b"omarchy-host-tpm-probe-v1";
 
 // TPM 2.0 constants (TCG TPM 2.0 Library, Part 2).
 const ALG_ECC: u16 = 0x0023;
@@ -85,9 +86,10 @@ const SIGN: u32 = 1 << 18;
 
 /// The TPM's tools, as the agent runs them.
 pub trait Tools: Send + Sync {
-    /// Whether the TPM at `tcti` can be reached from here: the tools are installed and, for
-    /// a device, it is there and this user may open it for reading and writing. Why not,
-    /// otherwise.
+    /// Whether the TPM at `tcti` can be reached by the agent: for a device, it is there, and
+    /// this user — and its user manager, which runs the agent's service, when one runs — may
+    /// open it for reading and writing; the tools are installed. Why not, otherwise: "no TPM"
+    /// first when there is no device.
     fn reachable(&self, tcti: &str) -> Result<(), String>;
     /// Runs `tpm2_<tool>` with `args` against the TPM at `tcti`: what it said, on a failure.
     fn run(&self, tool: &str, args: &[OsString], tcti: &str) -> Result<(), String>;
@@ -97,18 +99,29 @@ pub trait Tools: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct Cli {
     pub bin: PathBuf,
+    /// Where the processes are read (`/proc`): this one's groups, and its user manager's.
+    pub proc: PathBuf,
 }
 
 impl Default for Cli {
     fn default() -> Self {
         Self {
             bin: PathBuf::from(BIN),
+            proc: PathBuf::from("/proc"),
         }
     }
 }
 
 impl Tools for Cli {
     fn reachable(&self, tcti: &str) -> Result<(), String> {
+        // No device is no TPM, whatever is installed: a machine without one (a VPS, most
+        // often) is told so, not sent to install tools that would not help.
+        let dev = tcti.strip_prefix("device:");
+        if let Some(dev) = dev {
+            if fs::symlink_metadata(dev).is_err() {
+                return Err(format!("no TPM: {dev} is not there"));
+            }
+        }
         for t in TOOLS {
             let tool = self.bin.join(format!("tpm2_{t}"));
             if !tool.is_file() {
@@ -118,22 +131,19 @@ impl Tools for Cli {
                 ));
             }
         }
-        if let Some(dev) = tcti.strip_prefix("device:") {
-            let path = Path::new(dev);
-            if fs::symlink_metadata(path).is_err() {
-                return Err(format!("no TPM: {dev} is not there"));
-            }
+        if let Some(dev) = dev {
+            let uid = rustix::process::getuid().as_raw();
             if rustix::fs::access(
-                path,
+                dev,
                 rustix::fs::Access::READ_OK | rustix::fs::Access::WRITE_OK,
             )
             .is_err()
             {
                 return Err(format!(
-                    "{dev} is there, but this user (uid {}) may not open it: the tss group gives it (sudo usermod -aG tss \"$USER\", then log in again)",
-                    rustix::process::getuid().as_raw()
+                    "{dev} is there, but this user (uid {uid}) may not open it: the tss group gives it (sudo usermod -aG tss \"$USER\", then reboot, or log in again and restart its user manager: sudo systemctl restart user@{uid}.service)"
                 ));
             }
+            manager_opens(&self.proc, Path::new(dev), uid)?;
         }
         Ok(())
     }
@@ -199,6 +209,93 @@ impl Tools for Cli {
                 .map_or_else(|| "by a signal".to_owned(), |c| c.to_string())
         ))
     }
+}
+
+/// Whether the user manager that runs the agent's service (`systemd --user`,
+/// `user@<uid>.service`) may open the TPM's device too, when one runs. It keeps the groups it
+/// started with: a user put in tss after it started — by linger (prep-root.sh), or a login
+/// still open — gets the group in a new login's shell, where install runs, but not in the
+/// service, whose every signature would then be refused until the manager restarts. Told
+/// by the device's mode bits against each one's groups (`/proc/<pid>/status`); where the
+/// bits do not explain this process's own access (an ACL), or nothing is read, nothing is
+/// said.
+fn manager_opens(proc: &Path, dev: &Path, uid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(m) = fs::metadata(dev) else {
+        return Ok(());
+    };
+    let opens = |ids: &Ids| mode_opens(m.mode(), m.uid(), m.gid(), ids);
+    let Some(me) = read_ids(&proc.join("self/status")) else {
+        return Ok(());
+    };
+    if !opens(&me) {
+        return Ok(());
+    }
+    match user_manager(proc, uid) {
+        Some(manager) if !opens(&manager) => Err(format!(
+            "{} is there and this login may open it, but the user manager that runs the agent's service (user@{uid}.service) started before this user had its group: restart it (sudo systemctl restart user@{uid}.service) or reboot",
+            dev.display()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// A process's real uid and its groups (its gid and the supplementary ones).
+#[derive(Debug, PartialEq, Eq)]
+struct Ids {
+    uid: u32,
+    groups: Vec<u32>,
+}
+
+/// The ids of `/proc/<pid>/status`: `Uid:`, `Gid:` and `Groups:` (real ids, the first of each).
+fn read_ids(status: &Path) -> Option<Ids> {
+    parse_ids(&fs::read_to_string(status).ok()?)
+}
+
+fn parse_ids(status: &str) -> Option<Ids> {
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .map(str::split_whitespace)
+    };
+    let uid = field("Uid:")?.next()?.parse().ok()?;
+    let mut groups = vec![field("Gid:")?.next()?.parse().ok()?];
+    for g in field("Groups:")? {
+        groups.push(g.parse().ok()?);
+    }
+    Some(Ids { uid, groups })
+}
+
+/// Whether a process of these ids opens a file of this mode and owner for reading and
+/// writing, by the mode bits as the kernel reads them: the owner's, else the group's, else
+/// the others'.
+fn mode_opens(mode: u32, owner: u32, group: u32, ids: &Ids) -> bool {
+    let bits = if ids.uid == owner {
+        mode >> 6
+    } else if ids.groups.contains(&group) {
+        mode >> 3
+    } else {
+        mode
+    };
+    bits & 0o6 == 0o6
+}
+
+/// The ids of `uid`'s user manager: the process of that uid in its `user@<uid>.service`'s
+/// `init.scope`. `None` when none runs (no linger, no login), or it cannot be read.
+fn user_manager(proc: &Path, uid: u32) -> Option<Ids> {
+    let scope = format!("/user@{uid}.service/init.scope");
+    fs::read_dir(proc).ok()?.flatten().find_map(|e| {
+        let name = e.file_name();
+        if !name.to_str()?.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let cgroup = fs::read_to_string(e.path().join("cgroup")).ok()?;
+        if !cgroup.lines().any(|l| l.trim_end().ends_with(&scope)) {
+            return None;
+        }
+        read_ids(&e.path().join("status")).filter(|ids| ids.uid == uid)
+    })
 }
 
 /// A TCTI the agent takes: a resource manager in front of the TPM — the kernel's
@@ -354,6 +451,31 @@ impl Key {
         )
     }
 
+    /// Whether the key is gone from the TPM for good, asked once it did not sign: the TPM is
+    /// reached and makes the storage key as ever, but refuses the key's blob under it — it
+    /// was cleared (its seed is another), or the files are another machine's. What the TPM
+    /// said, then; `None` when the key loads, and when the TPM could not be asked at all (a
+    /// device this user may not open, tpm2-abrmd not running): no answer is not a verdict.
+    pub fn lost(&self) -> Option<String> {
+        self.tools.reachable(&self.tcti).ok()?;
+        let work = Work::new(&self.state).ok()?;
+        self.tools
+            .run("createprimary", &primary_args(&work.0), &self.tcti)
+            .ok()?;
+        self.tools
+            .run(
+                "load",
+                &load_args(
+                    &work.0.join("primary.ctx"),
+                    &self.state.join(PUBLIC_FILE),
+                    &self.state.join(PRIVATE_FILE),
+                    &work.0.join("key.ctx"),
+                ),
+                &self.tcti,
+            )
+            .err()
+    }
+
     fn signature(
         &self,
         work: &Work,
@@ -369,20 +491,11 @@ impl Key {
         );
         self.tools
             .run("createprimary", &primary_args(&work.0), &self.tcti)?;
-        let load: Vec<OsString> = vec![
-            "-Q".into(),
-            "-C".into(),
-            primary.into(),
-            "-u".into(),
-            public.into(),
-            "-r".into(),
-            private.into(),
-            "-c".into(),
-            ctx.clone().into(),
-        ];
-        self.tools.run("load", &load, &self.tcti).map_err(|e| {
-            format!("{e} — the TPM does not load the host key: was it cleared, or is this another machine's?")
-        })?;
+        self.tools
+            .run("load", &load_args(&primary, public, private, &ctx), &self.tcti)
+            .map_err(|e| {
+                format!("{e} — the TPM does not load the host key: was it cleared, or is this another machine's?")
+            })?;
         fs::write(&digest, Sha256::digest(message))
             .map_err(|e| format!("{}: {e}", digest.display()))?;
         let sign: Vec<OsString> = vec![
@@ -408,6 +521,20 @@ impl Key {
             })?;
         Ok(raw)
     }
+}
+
+fn load_args(primary: &Path, public: &Path, private: &Path, ctx: &Path) -> Vec<OsString> {
+    vec![
+        "-Q".into(),
+        "-C".into(),
+        primary.into(),
+        "-u".into(),
+        public.into(),
+        "-r".into(),
+        private.into(),
+        "-c".into(),
+        ctx.into(),
+    ]
 }
 
 fn primary_args(work: &Path) -> Vec<OsString> {
@@ -968,8 +1095,18 @@ mod tests {
         *tpm.wrong_key.lock().unwrap() = true;
         assert!(k.sign(b"x").unwrap_err().contains("not the host key's"));
         *tpm.wrong_key.lock().unwrap() = false;
+        // A key that loads is not lost; one the TPM could not be asked about is not either.
+        assert_eq!(k.lost(), None);
+        *tpm.unreachable.lock().unwrap() = Some("tabrmd is not running".into());
+        assert_eq!(k.lost(), None);
+        *tpm.unreachable.lock().unwrap() = None;
         tpm.clear();
         assert!(k.sign(b"x").unwrap_err().contains("was it cleared"));
+        // Cleared: the TPM makes its storage key, and refuses the host key's blob under it.
+        assert!(k.lost().unwrap().contains("integrity check failed"));
+        *tpm.fails.lock().unwrap() = Some(("createprimary".into(), "Permission denied".into()));
+        assert_eq!(k.lost(), None);
+        *tpm.fails.lock().unwrap() = None;
         fs::set_permissions(d.join(PRIVATE_FILE), fs::Permissions::from_mode(0o640)).unwrap();
         assert!(Key::load(&d, tpm.clone())
             .err()
@@ -1027,25 +1164,132 @@ mod tests {
     }
 
     #[test]
-    fn the_real_tools_are_looked_for_where_the_distribution_puts_them() {
-        let c = Cli {
+    fn a_machine_without_a_tpm_is_told_so_whatever_is_installed_and_the_tools_are_looked_for_in_usr_bin(
+    ) {
+        assert_eq!(Cli::default().bin, Path::new("/usr/bin"));
+        let none = Cli {
             bin: PathBuf::from("/nonexistent/bin"),
+            ..Cli::default()
         };
-        assert!(c
-            .reachable(DEFAULT_TCTI)
-            .unwrap_err()
-            .contains("tpm2-tools is not installed"));
+        // No device and no tools (a VPS, most often): no TPM — a note at preflight — never a
+        // package to install that would not help.
+        assert_eq!(
+            none.reachable("device:/dev/tpmrm97").unwrap_err(),
+            "no TPM: /dev/tpmrm97 is not there"
+        );
+        // tpm2-abrmd and no tools: the tools.
+        assert!(none.reachable("tabrmd").unwrap_err().contains(
+            "tpm2-tools is not installed (/nonexistent/bin/tpm2_createprimary is not there)"
+        ));
         // A device that is not there, with tools that are (stand-ins).
         let d = state();
         for t in TOOLS {
             fs::write(d.join(format!("tpm2_{t}")), b"").unwrap();
         }
-        let c = Cli { bin: d.clone() };
-        assert!(c
-            .reachable("device:/dev/tpmrm97")
-            .unwrap_err()
-            .contains("no TPM: /dev/tpmrm97 is not there"));
+        let c = Cli {
+            bin: d.clone(),
+            ..Cli::default()
+        };
+        assert_eq!(
+            c.reachable("device:/dev/tpmrm97").unwrap_err(),
+            "no TPM: /dev/tpmrm97 is not there"
+        );
         assert!(c.reachable("tabrmd").is_ok());
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_user_manager_that_started_before_its_user_joined_the_device_s_group_is_said() {
+        use std::os::unix::fs::MetadataExt;
+        let d = state();
+        let dev = d.join("tpmrm0");
+        fs::write(&dev, b"").unwrap();
+        fs::set_permissions(&dev, fs::Permissions::from_mode(0o660)).unwrap();
+        let m = fs::metadata(&dev).unwrap();
+        // The agent's user: not the device's owner, so its group decides.
+        let (uid, tss) = (m.uid() + 1000, m.gid());
+        let status = |gid: u32, groups: &str| {
+            format!("Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\nGroups:\t{groups}\n")
+        };
+        let proc = d.join("proc");
+        let process = |pid: &str, cgroup: &str, st: &str| {
+            fs::create_dir_all(proc.join(pid)).unwrap();
+            fs::write(proc.join(pid).join("cgroup"), cgroup).unwrap();
+            fs::write(proc.join(pid).join("status"), st).unwrap();
+        };
+        let other = tss + 1;
+        let manager_cgroup =
+            format!("0::/user.slice/user-{uid}.slice/user@{uid}.service/init.scope\n");
+        // This login has the group; its user manager, started before, does not.
+        process("self", "", &status(other, &format!("{other} {tss} ")));
+        process(
+            "4242",
+            &manager_cgroup,
+            &status(other, &format!("{other} ")),
+        );
+        // A process of the user's in an app's scope is not its manager.
+        process(
+            "4300",
+            &format!("0::/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/x.scope\n"),
+            &status(other, &format!("{other} {tss}")),
+        );
+        let why = manager_opens(&proc, &dev, uid).unwrap_err();
+        assert!(
+            why.contains(&format!(
+                "restart it (sudo systemctl restart user@{uid}.service) or reboot"
+            )),
+            "{why}"
+        );
+        // The manager restarted, with the group: nothing to say.
+        process(
+            "4242",
+            &manager_cgroup,
+            &status(other, &format!("{other} {tss}")),
+        );
+        assert_eq!(manager_opens(&proc, &dev, uid), Ok(()));
+        // The group is the manager's primary one: it opens it too.
+        process("4242", &manager_cgroup, &status(tss, ""));
+        assert_eq!(manager_opens(&proc, &dev, uid), Ok(()));
+        // No manager runs (no linger, no login): nothing to say.
+        fs::remove_dir_all(proc.join("4242")).unwrap();
+        assert_eq!(manager_opens(&proc, &dev, uid), Ok(()));
+        // This login opens it through something else than its groups (an ACL): nothing is told.
+        process("4242", &manager_cgroup, &status(other, ""));
+        process("self", "", &status(other, ""));
+        assert_eq!(manager_opens(&proc, &dev, uid), Ok(()));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn ids_and_mode_bits_are_read_as_the_kernel_reads_them() {
+        let ids = parse_ids("Name:\tsystemd\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nGroups:\t998 27 \n").unwrap();
+        assert_eq!(
+            ids,
+            Ids {
+                uid: 1000,
+                groups: vec![1000, 998, 27]
+            }
+        );
+        assert_eq!(
+            parse_ids("Uid:\t7\t7\t7\t7\nGid:\t8\t8\t8\t8\nGroups:\n").unwrap(),
+            Ids {
+                uid: 7,
+                groups: vec![8]
+            }
+        );
+        assert!(parse_ids("Uid:\t7\nGroups:\t1\n").is_none());
+        assert!(parse_ids("Uid:\tx\nGid:\t8\nGroups:\n").is_none());
+        let user = Ids {
+            uid: 1000,
+            groups: vec![1000, 998],
+        };
+        // crw-rw---- tss tss: the group opens it, others do not.
+        assert!(mode_opens(0o20660, 59, 998, &user));
+        assert!(!mode_opens(0o20660, 59, 59, &user));
+        // The owner's bits are the owner's, even when the group's would open it.
+        assert!(!mode_opens(0o20060, 1000, 998, &user));
+        // Read only is not enough: the agent writes commands to it.
+        assert!(!mode_opens(0o20640, 59, 998, &user));
+        assert!(mode_opens(0o20666, 59, 59, &user));
     }
 }

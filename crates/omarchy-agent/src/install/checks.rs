@@ -334,8 +334,9 @@ pub(crate) fn github_token(scopes: Result<Option<String>, String>) -> Result<(),
 /// Where the enrollment will make the host key (#330, design v2 §14), said before anything
 /// is made, since a host keeps the key it enrolled with: in the TPM where this user may open
 /// one; else a file — a note on a machine with no TPM (or a Mac), a warning where one is
-/// there but out of the agent's reach (the tss group, tpm2-tools), which the owner may fix
-/// first. `OMARCHY_HOST_KEY=tpm` makes a TPM out of reach a blocker.
+/// there but out of the agent's reach (tpm2-tools, the tss group, or a running user manager
+/// that started without it and so would run the agent's service without it), which the
+/// owner may fix first. `OMARCHY_HOST_KEY=tpm` makes a TPM out of reach a blocker.
 pub(crate) fn host_key(choice: &crate::host::KeyChoice, linux: bool, r: &mut Report) {
     use crate::host::Want;
     let tpm = if linux {

@@ -111,7 +111,9 @@ const USAGE: &str = "usage:
   omarchy-agent envelope pin-passkey [<pin> | -] [--data-dir <dir>]
   omarchy-agent envelope unpin-passkey [--data-dir <dir>]
   omarchy-agent --version
-The enrollment token is read from OMARCHY_ENROLL, never from an argument.";
+The enrollment token is read from OMARCHY_ENROLL, never from an argument.
+Where enroll and install make the host key: OMARCHY_HOST_KEY=auto|tpm|file,
+OMARCHY_TPM_TCTI=device:/dev/tpmrm<N>|tabrmd[:<options>] (#330).";
 
 const REFUSED: u8 = 1;
 const USAGE_ERROR: u8 = 2;

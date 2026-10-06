@@ -43,6 +43,30 @@ impl Answer {
     }
 }
 
+/// Why a signed call has no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallError {
+    /// Nothing was sent: the host key did not sign the call — a key in a TPM that was
+    /// cleared, or that this user may no longer open (#330) — so no wait brings an answer.
+    NotSent(String),
+    /// The pool did not answer.
+    NoAnswer(String),
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallError::NotSent(s) | CallError::NoAnswer(s) => f.write_str(s),
+        }
+    }
+}
+
+impl From<CallError> for String {
+    fn from(e: CallError) -> Self {
+        e.to_string()
+    }
+}
+
 /// A string the pool sent, as the terminal may print it: no control character, so no
 /// escape sequence of the pool's can move the cursor or rewrite a line the owner reads
 /// (the fingerprint above all).
@@ -115,7 +139,8 @@ impl Pool {
         answer(res)
     }
 
-    /// A call signed with the host key (`Omarchy-Host`, design v2 D7).
+    /// A call signed with the host key (`Omarchy-Host`, design v2 D7). A key that does not
+    /// sign is [`CallError::NotSent`], never taken for a pool that does not answer.
     pub fn signed(
         &self,
         key: &HostKey,
@@ -123,12 +148,14 @@ impl Pool {
         method: &str,
         path: &str,
         body: Option<&serde_json::Value>,
-    ) -> Result<Answer, String> {
+    ) -> Result<Answer, CallError> {
         let bytes = match body {
-            Some(b) => serde_json::to_vec(b).map_err(|e| e.to_string())?,
+            Some(b) => serde_json::to_vec(b).map_err(|e| CallError::NotSent(e.to_string()))?,
             None => Vec::new(),
         };
-        let header = key.header(host, method, path, &bytes)?;
+        let header = key
+            .header(host, method, path, &bytes)
+            .map_err(CallError::NotSent)?;
         let url = format!("{}{path}", self.origin);
         let res = match method {
             "GET" => self
@@ -142,9 +169,13 @@ impl Pool {
                 .header(crate::host::HEADER, &header)
                 .header("content-type", "application/json")
                 .send(&bytes[..]),
-            _ => return Err(format!("{method}: not a method the agent uses")),
+            _ => {
+                return Err(CallError::NotSent(format!(
+                    "{method}: not a method the agent uses"
+                )))
+            }
         };
-        answer(res)
+        answer(res).map_err(CallError::NoAnswer)
     }
 }
 

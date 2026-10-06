@@ -310,6 +310,28 @@ impl HostKey {
         }
     }
 
+    /// Whether the key signs now, before anything is sent with it: a file key does; a key in
+    /// the TPM signs a probe, checked ([`tpm::PROBE`], no message the pool takes). Why not,
+    /// otherwise, as [`HostKey::sign`] says it.
+    pub fn check(&self) -> Result<(), String> {
+        match &self.inner {
+            Inner::File(_) => Ok(()),
+            Inner::Tpm(k) => k
+                .sign(tpm::PROBE)
+                .map(drop)
+                .map_err(|e| format!("the host key in the TPM did not sign: {e}")),
+        }
+    }
+
+    /// Whether a key in the TPM is gone from it for good — cleared, or another machine's
+    /// ([`tpm::Key::lost`]): what the TPM said. A file key is never lost here.
+    pub fn lost(&self) -> Option<String> {
+        match &self.inner {
+            Inner::File(_) => None,
+            Inner::Tpm(k) => k.lost(),
+        }
+    }
+
     /// The `Omarchy-Host` header for one request: a fresh nonce, the time now.
     pub fn header(
         &self,

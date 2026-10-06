@@ -14,7 +14,10 @@
 #   a TPM-signed request → a rotation, without the TCTI in the environment
 #   (the key's own file names its TPM) → `status` says where the key lives →
 #   the key's two files, copied, load in no other TPM → a cleared TPM signs
-#   nothing more, and the agent says why, changing nothing → with no TPM in
+#   nothing more, and the agent says why, changing nothing → `enroll` says at
+#   once that the key is gone and what to do, sending nothing → retired, a new
+#   command enrolls the machine as a new host with a new key in the TPM, the
+#   old identity kept beside (host.json.lost-<host>) → with no TPM in
 #   reach (auto) a file key, and the page says why not the TPM → asked for the
 #   TPM with none in reach, nothing is enrolled and the token is still good.
 #
@@ -192,6 +195,37 @@ if XDG_DATA_HOME="$DATA" "$AGENT" token > "$E2E/cleared.log" 2>&1; then
 fi
 grep -q "the TPM does not load the host key: was it cleared" "$E2E/cleared.log" || fail "the agent does not say why: $(cat "$E2E/cleared.log")"
 [[ $(cat "$TOKEN_FILE") == "$ROTATED" ]] || fail "the token file changed"
+
+step "Cleared: enroll says what to do at once, sending nothing; retired, a new command enrolls the machine as a new host"
+started=$SECONDS
+if XDG_DATA_HOME="$DATA" "$AGENT" enroll --wait-minutes 3 > "$E2E/lost.log" 2>&1; then
+  fail "an enrollment with a cleared TPM and no new command"
+fi
+((SECONDS - started < 60)) || fail "it waited for a Confirm with a key that does not sign"
+grep -qF "host $HOST's key is gone from the TPM" "$E2E/lost.log" || fail "the agent does not say the key is gone: $(cat "$E2E/lost.log")"
+grep -qF "Retire $HOST on its page, add the host again" "$E2E/lost.log" || fail "the agent does not say what to do: $(cat "$E2E/lost.log")"
+ret=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/retire" -H "cookie: $SESSION" -H "$ORIGIN_HDR" -H 'content-type: application/json' -d '{"reason":"e2e: its TPM was cleared"}')
+[[ $(jq -r .status <<<"$ret") == retired ]] || fail "retire: $ret"
+TOKEN2=$(mint e2e-tpm-again)
+XDG_DATA_HOME="$DATA" OMARCHY_ENROLL="$TOKEN2" OMARCHY_HOST_KEY=tpm OMARCHY_TPM_TCTI="$TCTI" \
+  "$AGENT" enroll --wait-minutes 3 > "$E2E/again.log" 2>&1 &
+AGENT_PID=$!
+for _ in $(seq 1 60); do grep -q "waiting for e2e" "$E2E/again.log" && break; sleep 1; done
+grep -qF "host $HOST's key is gone from the TPM, which was cleared or is another machine's (" "$E2E/again.log" \
+  || fail "the re-enrollment does not say why: $(cat "$E2E/again.log")"
+[[ -e "$STATE_DIR/host.json.lost-$HOST" ]] || fail "the old identity is not kept beside"
+h2=$(host_named e2e-tpm-again)
+HOST2=$(jq -r .id <<<"$h2")
+FP2=$(sed -n 's/^omarchy-agent: host key fingerprint: //p' "$E2E/again.log")
+[[ $HOST2 == h_* && $HOST2 != "$HOST" ]] || fail "no new host: $h2"
+[[ $FP2 == SHA256:* && $FP2 != "$FP" && $(jq -r .fingerprint <<<"$h2") == "$FP2" ]] || fail "the new host's key: $FP2, $h2"
+[[ $(jq -c .host_key <<<"$h2") == '{"store":"tpm","alg":"p256","held":null}' ]] || fail "host_key: $h2"
+curl -fs -o /dev/null -X POST "$POOL/api/v1/hosts/$HOST2/confirm" -H "cookie: $SESSION" -H "$ORIGIN_HDR" -H 'content-type: application/json' -d '{}' \
+  || fail "confirm the new host"
+wait "$AGENT_PID" || fail "the re-enrollment did not finish"
+AGENT_PID=
+AGAIN=$(cat "$TOKEN_FILE")
+[[ $AGAIN =~ ^omw_[0-9a-f]{48}$ && $AGAIN != "$ROTATED" ]] || fail "the new host's token was not written"
 
 step "No TPM in reach (auto): a file key, and the page says why not the TPM"
 FDATA="$E2E/data-file"
