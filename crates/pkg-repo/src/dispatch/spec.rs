@@ -40,6 +40,15 @@
 //! script probe the toolchains a recipe installs and fail at once with
 //! `needs_native` when one cannot start (a 16K-page host's qemu, D33).
 //!
+//! **A pool job's helper** (#340, design v2 §9.2, §10.3; D34) is made here
+//! too: the scripts a pool job runs (`tests/health-check.sh`, the ABI gate's
+//! references) start their check containers through the `omarchy-task-run`
+//! shim ([`super::shim`]), which reads the one shape they use and asks
+//! [`helper_plan`] for the rest — the job's own internal network and egress
+//! sidecar, the job's share less the sidecar's, the task container's
+//! capabilities and flags, one of the job's scratch directories at `/repo`
+//! and nothing else: no token, no socket, no other mount.
+//!
 //! Seams left for later issues, by name: P2's task caches child issue
 //! mounts the read-only shared pacman cache and the per-package build
 //! caches.
@@ -132,6 +141,34 @@ pub const ENV_ALLOWLIST: [&str; 14] = [
 /// What a container on an emulated lane is told, as the build script reads it
 /// (`emulated_worker`) and as `pkg-repo work`'s emulated workers have always said it.
 pub const EMULATED_LABELS: &str = r#"{"emulated":true}"#;
+
+/// A pool job's helper container (#340): `omarchy-task-<id>-<gen>-helper`, on its job's network.
+pub const HELPER_SUFFIX: &str = "-helper";
+/// The one variable a helper is given besides its proxy: the base image's keyring its check
+/// populates (`tests/health-check.sh`, `tests/trial.sh`), one of the two base images'.
+pub const HELPER_ENV: &str = "KEYRING";
+pub const HELPER_KEYRINGS: [&str; 2] = ["archlinux", "archlinuxarm"];
+
+/// A script a pool job's helper runs from its scratch directory: `[a-z0-9][a-z0-9-]{0,31}.sh`.
+pub fn script_ok(s: &str) -> bool {
+    s.strip_suffix(".sh").is_some_and(|n| {
+        let b = n.as_bytes();
+        !b.is_empty()
+            && b.len() <= 32
+            && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+            && b.iter()
+                .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    })
+}
+
+/// A scratch directory a pool job's script made (`mktemp -d`: `tmp.XXXXXXXXXX`): letters, digits, `.`, `_`, `-`.
+pub fn scratch_name_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && !s.starts_with('.')
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
 
 /// A name that reaches `docker` argv — a package, a release, a host: `[a-z0-9][a-z0-9._+-]{0,63}`.
 pub fn name_ok(s: &str) -> bool {
@@ -303,6 +340,23 @@ pub enum Gateway {
     Engine,
 }
 
+impl Gateway {
+    /// Its word in a pool job's helper context (#340), which the shim reads back.
+    pub fn word(self) -> &'static str {
+        match self {
+            Gateway::Isolated => "isolated",
+            Gateway::NoDns => "no-dns",
+            Gateway::Engine => "engine",
+        }
+    }
+
+    pub fn of_word(w: &str) -> Option<Self> {
+        [Gateway::Isolated, Gateway::NoDns, Gateway::Engine]
+            .into_iter()
+            .find(|g| g.word() == w)
+    }
+}
+
 /// A model kind's agent sidecar: where its keys are, and its per-task caps (D45).
 #[derive(Debug, Clone, Copy)]
 pub struct Agent<'a> {
@@ -360,6 +414,7 @@ pub fn owner_of_name(name: &str) -> Option<(u64, String)> {
     let base = name
         .strip_suffix("-egress")
         .or_else(|| name.strip_suffix("-agent"))
+        .or_else(|| name.strip_suffix(HELPER_SUFFIX))
         .unwrap_or(name);
     let rest = base.strip_prefix(NAME_PREFIX)?;
     let (id, gen) = rest.split_once('-')?;
@@ -691,6 +746,167 @@ pub fn probe_plan(p: &Probe<'_>) -> Result<(Vec<Vec<String>>, Vec<String>), Stri
     setup.extend(side.egress());
     let mut run = side.agent(&agent, None);
     Ok((setup, run.remove(0)))
+}
+
+/// A pool job's helper container (#340, design v2 §9.2, §10.3; D34): what the
+/// `omarchy-task-run` shim read of a script's `run` — the architecture, the
+/// image, the scratch directory it mounts at `/repo` and the script it runs
+/// there — on the job's own lease, /28 and share. Every field is checked by
+/// [`helper_plan`].
+#[derive(Debug, Clone)]
+pub struct Helper<'a> {
+    pub task: u64,
+    pub gen: &'a str,
+    pub host: &'a str,
+    /// The ring's architecture its check runs (`--platform`): a lane of this host, native or emulated.
+    pub arch: &'a str,
+    pub image: &'a str,
+    /// One of the job's own scratch directories, mounted at `/repo`: directly under `scratch`.
+    pub dir: &'a Path,
+    /// The job's scratch root (`<task dir>/tmp`, its scripts' `TMPDIR`).
+    pub scratch: &'a Path,
+    pub read_only: bool,
+    /// `<name>.sh` in `dir`, which `bash` runs.
+    pub script: &'a str,
+    /// The base image's keyring its check populates (`KEYRING`).
+    pub keyring: Option<&'a str>,
+    /// The CPUs and the memory of the job's units; the egress sidecar's come out of them.
+    pub cpus: u32,
+    pub mem_gb: u32,
+    pub worker_image: &'a str,
+    pub subnets: Subnets,
+    pub slot: u32,
+    pub gateway: Gateway,
+    pub deny: &'a [String],
+}
+
+/// The engine calls that make a pool job's helper (#340): the job's internal
+/// network and its egress sidecar (`network create`, `create`, `network
+/// connect omarchy-egress`, `start`), then the helper's own `run` — attached,
+/// so its output and exit code reach the script that asked for it, and never
+/// `--rm`: the shim removes it with the rest of the lease's (an engine
+/// `--rm` would race the removal), and the dispatcher removes what a killed
+/// shim left when the job ends. Every value is checked against the closed
+/// grammar first; a value outside it runs nothing.
+#[allow(clippy::too_many_lines)] // every check of a value, then every flag, mount and variable, in the spec's order
+pub fn helper_plan(h: &Helper<'_>) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
+    if h.task == 0 || !gen_ok(h.gen) || !host_ok(h.host) {
+        return Err("a helper's task, generation or host is outside the grammar".into());
+    }
+    let platform =
+        platform_of(h.arch).ok_or_else(|| format!("arch {:?} is not a lane's", h.arch))?;
+    if !digest_ok(h.image) {
+        return Err(format!(
+            "image {:?} is not an image by digest (repository@sha256:…)",
+            h.image
+        ));
+    }
+    if !script_ok(h.script) {
+        return Err(format!("script {:?} is not <name>.sh", h.script));
+    }
+    if h.keyring.is_some_and(|k| !HELPER_KEYRINGS.contains(&k)) {
+        return Err(format!(
+            "keyring {:?} is not a base image's ({})",
+            h.keyring,
+            HELPER_KEYRINGS.join(", ")
+        ));
+    }
+    if !path_ok(h.dir) || !path_ok(h.scratch) {
+        return Err(format!(
+            "host path {} is outside the grammar",
+            h.dir.display()
+        ));
+    }
+    if h.dir.parent() != Some(h.scratch)
+        || !h
+            .dir
+            .file_name()
+            .is_some_and(|n| scratch_name_ok(&n.to_string_lossy()))
+    {
+        return Err(format!(
+            "{} is not one of this job's scratch directories ({}/<name>)",
+            h.dir.display(),
+            h.scratch.display()
+        ));
+    }
+    if h.cpus == 0 || h.mem_gb == 0 || h.cpus > 4096 || h.mem_gb > 65_536 {
+        return Err(format!(
+            "share {} CPUs, {} GB is outside 1..4096 CPUs and 1..65536 GB",
+            h.cpus, h.mem_gb
+        ));
+    }
+    side_ok(h.worker_image, h.deny, None)?;
+    let side = Side {
+        task: h.task,
+        gen: h.gen,
+        host: h.host,
+        image: h.worker_image,
+        subnets: h.subnets,
+        slot: h
+            .subnets
+            .slot(h.slot)
+            .ok_or_else(|| format!("slot {} is outside {}", h.slot, h.subnets.cidr()))?,
+        direct: false,
+        gateway: h.gateway,
+        deny: h.deny,
+    };
+    let mut setup = vec![side.network()];
+    setup.extend(side.egress());
+    let net = side.net();
+    let mem = format!("{}m", h.mem_gb * 1024 - EGRESS_MEM_MB);
+    let mut a: Vec<String> = vec![
+        "run".into(),
+        "--name".into(),
+        format!("{net}{HELPER_SUFFIX}"),
+    ];
+    a.extend(side.labels(Some("helper")));
+    a.extend(
+        [
+            "--platform",
+            platform,
+            "--network",
+            &net,
+            "--cpus",
+            &millis(h.cpus * 1000 - EGRESS_MILLICPUS),
+            "--memory",
+            &mem,
+            "--memory-swap",
+            &mem,
+            "--pids-limit",
+            &PIDS_LIMIT.to_string(),
+            "--cap-drop",
+            "ALL",
+            // Its output goes to the script that asked for it, attached: nothing on the engine's disk.
+            "--log-driver",
+            "none",
+        ]
+        .map(str::to_owned),
+    );
+    for c in CAPS {
+        a.push("--cap-add".into());
+        a.push(c.into());
+    }
+    a.push("--security-opt".into());
+    a.push("no-new-privileges".into());
+    a.push("-v".into());
+    a.push(format!(
+        "{}:/repo{}",
+        h.dir.display(),
+        if h.read_only { ":ro" } else { "" }
+    ));
+    let mut env: Vec<(&str, String)> = Vec::new();
+    if let Some(k) = h.keyring {
+        env.push((HELPER_ENV, k.to_owned()));
+    }
+    env.extend(side.proxy_env("localhost,127.0.0.1"));
+    for (k, v) in env {
+        a.push("-e".into());
+        a.push(format!("{k}={v}"));
+    }
+    a.push(h.image.to_owned());
+    a.push("bash".into());
+    a.push(format!("/repo/{}", h.script));
+    Ok((setup, a))
 }
 
 /// The task container's `docker` arguments, after `docker` (`run -d …`):
@@ -1031,7 +1247,8 @@ mod tests {
             let lower = k.to_ascii_lowercase();
             // The placeholder a model kind sends as its key, and the sidecar's token cap (a number), are not credentials.
             let placeholder = k == "ANTHROPIC_API_KEY" && v == AGENT_KEY_PLACEHOLDER
-                || k == "BROKER_AGENT_TOKENS" && v.parse::<u64>().is_ok();
+                || k == "BROKER_AGENT_TOKENS" && v.parse::<u64>().is_ok()
+                || k == HELPER_ENV && HELPER_KEYRINGS.contains(&v);
             if !placeholder
                 && (lower.contains("token")
                     || lower.contains("key")
@@ -1151,6 +1368,76 @@ mod tests {
         }
         if r.rest[1..] != ENTRYPOINT {
             return Err(format!("command outside the spec: {:?}", &r.rest[1..]));
+        }
+        Ok(())
+    }
+
+    /// A pool job's helper (#340): attached, never `--rm` (the shim removes it), the task container's
+    /// capabilities and limits, one of its job's scratch directories at `/repo` and nothing else, its
+    /// keyring and its proxy only, a script of that directory run by bash.
+    fn check_helper(r: &Read<'_>, work: &Path, slot: Slot) -> Result<(), String> {
+        check_side_labels(r, "helper")?;
+        if r.verb != "run" || !r.bare.is_empty() {
+            return Err(format!(
+                "{}: a helper is an attached `run`: {} {:?}",
+                r.name, r.verb, r.bare
+            ));
+        }
+        if r.ip.is_some() {
+            return Err(format!("{}: its address is the engine's", r.name));
+        }
+        if flag(r, "--log-driver") != Some("none") || flag(r, "--pids-limit") != Some("8192") {
+            return Err(format!("{}: its log driver and pids limit", r.name));
+        }
+        if flag(r, "--cpus").is_none()
+            || flag(r, "--memory").is_none()
+            || flag(r, "--memory-swap") != flag(r, "--memory")
+        {
+            return Err(format!("{}: its share", r.name));
+        }
+        for c in &r.caps {
+            if !CAPS.contains(c) {
+                return Err(format!("{}: capability outside the spec: {c}", r.name));
+            }
+        }
+        let (id, gen) = owner_of_name(r.name).ok_or("name")?;
+        let scratch = task_dir(work, id, &gen).join("tmp");
+        let [m] = r.mounts.as_slice() else {
+            return Err(format!("{}: mounts {:?}", r.name, r.mounts));
+        };
+        let from = m
+            .strip_suffix(":/repo:ro")
+            .or_else(|| m.strip_suffix(":/repo"))
+            .map(Path::new)
+            .ok_or_else(|| format!("{}: mount outside the spec: {m}", r.name))?;
+        if from.parent() != Some(scratch.as_path())
+            || !from
+                .file_name()
+                .is_some_and(|n| scratch_name_ok(&n.to_string_lossy()))
+        {
+            return Err(format!(
+                "{}: {m} is not one of its job's scratch directories",
+                r.name
+            ));
+        }
+        for e in &r.env {
+            let (k, v) = e.split_once('=').ok_or("env without =")?;
+            let ok = match k {
+                HELPER_ENV => HELPER_KEYRINGS.contains(&v),
+                k => proxy_ok(k, v, slot),
+            };
+            if !ok {
+                return Err(format!("{}: variable outside the spec: {k}={v}", r.name));
+            }
+        }
+        let (image, cmd) = r.rest.split_first().ok_or("no image")?;
+        if !digest_ok(image) {
+            return Err(format!("{}: image not by digest: {image}", r.name));
+        }
+        match cmd {
+            [bash, script]
+                if *bash == "bash" && script.strip_prefix("/repo/").is_some_and(script_ok) => {}
+            _ => return Err(format!("{}: command outside the spec: {cmd:?}", r.name)),
         }
         Ok(())
     }
@@ -1289,7 +1576,7 @@ mod tests {
         let range = subnets();
         let mut net: Option<(String, Slot)> = None;
         let mut made: Vec<String> = Vec::new();
-        let (mut tasks, mut egress, mut agents) = (0, 0, 0);
+        let (mut tasks, mut egress, mut agents, mut helpers) = (0, 0, 0, 0);
         for c in calls {
             let words: Vec<&str> = c.iter().map(String::as_str).collect();
             match words.as_slice() {
@@ -1378,6 +1665,9 @@ mod tests {
                     } else if r.name.ends_with("-agent") {
                         agents += 1;
                         check_agent(&r, *slot, work)?;
+                    } else if r.name.ends_with(HELPER_SUFFIX) {
+                        helpers += 1;
+                        check_helper(&r, work, *slot)?;
                     } else {
                         tasks += 1;
                         check_task(&r, work, *slot)?;
@@ -1387,9 +1677,16 @@ mod tests {
                 other => return Err(format!("a call outside the spec: {other:?}")),
             }
         }
-        if tasks > 1 || egress > 1 || agents > 1 || (egress == 1) == direct {
+        // A pool job's helper is its lease's one container: never beside a task container or an agent.
+        if tasks > 1
+            || egress > 1
+            || agents > 1
+            || helpers > 1
+            || (helpers == 1 && tasks + agents > 0)
+            || (egress == 1) == direct
+        {
             return Err(format!(
-                "{tasks} task(s), {egress} egress, {agents} agent(s), direct {direct}"
+                "{tasks} task(s), {helpers} helper(s), {egress} egress, {agents} agent(s), direct {direct}"
             ));
         }
         Ok(())
@@ -1995,5 +2292,298 @@ mod tests {
             .unwrap();
         agent_url[last][j] = "ANTHROPIC_BASE_URL=https://api.anthropic.com".into();
         assert!(check_plan(&agent_url, &work, false).is_err());
+    }
+
+    // ---------- a pool job's helpers (#340) ----------
+
+    /// The ring's image the scripts pin (tests/images.env), by digest.
+    const ARCH_BASE: &str = "docker.io/library/archlinux:base@sha256:b944cc65c5f28665dfd5fdbf5ed2997c88f5bb4a0aefac7ee8a7ef01893e5ed9";
+
+    fn helper<'a>(dir: &'a Path, scratch: &'a Path, script: &'a str, ro: bool) -> Helper<'a> {
+        Helper {
+            task: 812,
+            gen: GEN,
+            host: "h_studio-1",
+            arch: "x86_64",
+            image: ARCH_BASE,
+            dir,
+            scratch,
+            read_only: ro,
+            script,
+            keyring: ro.then_some("archlinux"),
+            cpus: 1,
+            mem_gb: 2,
+            worker_image: WORKER,
+            subnets: subnets(),
+            slot: 7,
+            gateway: Gateway::Isolated,
+            deny: &[],
+        }
+    }
+
+    fn helper_calls(h: &Helper<'_>) -> Vec<Vec<String>> {
+        let (mut setup, run) = helper_plan(h).unwrap();
+        setup.push(run);
+        setup
+    }
+
+    #[test]
+    fn every_helper_the_scripts_start_renders_inside_the_spec() {
+        let (tdir, _, work) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        // The health check's (and a trial's), read-only; the ABI gate's references, writable.
+        for (script, ro) in [
+            ("check.sh", true),
+            ("export.sh", false),
+            ("build.sh", false),
+        ] {
+            let p = helper_calls(&helper(&dir, &scratch, script, ro));
+            check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{script}: {e}\n{p:#?}"));
+            let run = p.last().unwrap();
+            let has = |s: &str| run.iter().any(|x| x == s);
+            assert!(
+                !has("--rm") && !has("-d") && !has("--privileged"),
+                "{run:?}"
+            );
+            assert_eq!(value(run, "--platform"), Some("linux/amd64"));
+            assert_eq!(
+                value(run, "--network"),
+                Some("omarchy-task-812-g_0123456789abcdef"),
+                "the job's own internal network"
+            );
+            assert_eq!(
+                (value(run, "--cpus"), value(run, "--memory")),
+                (Some("0.900"), Some("1984m")),
+                "the job's unit, less its egress sidecar's"
+            );
+            assert_eq!(
+                run[run.len() - 2..],
+                ["bash".to_owned(), format!("/repo/{script}")]
+            );
+            // No token, no socket, no host path but its own scratch directory.
+            let all = run.join(" ");
+            assert!(!all.contains("omj.") && !all.contains("omw_") && !all.contains(".sock"));
+            assert_eq!(
+                run.iter().filter(|x| *x == "-v").count(),
+                1,
+                "one mount: {run:?}"
+            );
+        }
+    }
+
+    fn value<'a>(a: &'a [String], f: &str) -> Option<&'a str> {
+        a.iter()
+            .position(|x| x == f)
+            .and_then(|i| a.get(i + 1))
+            .map(String::as_str)
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one case per line, as rustfmt lays them out
+    fn a_helper_value_outside_the_grammar_runs_nothing() {
+        let (tdir, _, _) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        let base = helper(&dir, &scratch, "check.sh", true);
+        assert!(helper_plan(&base).is_ok());
+        let other = tdir.join("in");
+        let deep = scratch.join("a/b");
+        let root = PathBuf::from("/");
+        let quoted = scratch.join("tmp.a:b");
+        let task_dir_itself = tdir.clone();
+        for (what, h) in [
+            (
+                "a tag",
+                Helper {
+                    image: "docker.io/library/archlinux:base",
+                    ..base.clone()
+                },
+            ),
+            (
+                "another arch",
+                Helper {
+                    arch: "riscv64",
+                    ..base.clone()
+                },
+            ),
+            (
+                "a script with a path",
+                Helper {
+                    script: "../x.sh",
+                    ..base.clone()
+                },
+            ),
+            (
+                "a script that is not .sh",
+                Helper {
+                    script: "check",
+                    ..base.clone()
+                },
+            ),
+            (
+                "a keyring with a space",
+                Helper {
+                    keyring: Some("arch linux"),
+                    ..base.clone()
+                },
+            ),
+            (
+                "another keyring",
+                Helper {
+                    keyring: Some("omarchy"),
+                    ..base.clone()
+                },
+            ),
+            (
+                "the task dir's own in/",
+                Helper {
+                    dir: &other,
+                    ..base.clone()
+                },
+            ),
+            (
+                "a directory deeper down",
+                Helper {
+                    dir: &deep,
+                    ..base.clone()
+                },
+            ),
+            (
+                "the root",
+                Helper {
+                    dir: &root,
+                    ..base.clone()
+                },
+            ),
+            (
+                "a colon",
+                Helper {
+                    dir: &quoted,
+                    ..base.clone()
+                },
+            ),
+            (
+                "the task dir, where the token is",
+                Helper {
+                    dir: &task_dir_itself,
+                    ..base.clone()
+                },
+            ),
+            (
+                "task 0",
+                Helper {
+                    task: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "a generation",
+                Helper {
+                    gen: "g_1",
+                    ..base.clone()
+                },
+            ),
+            (
+                "a slot outside the range",
+                Helper {
+                    slot: 1 << 20,
+                    ..base.clone()
+                },
+            ),
+            (
+                "a worker image by tag",
+                Helper {
+                    worker_image: "ghcr.io/x/y:latest",
+                    ..base.clone()
+                },
+            ),
+            (
+                "no share",
+                Helper {
+                    cpus: 0,
+                    ..base.clone()
+                },
+            ),
+        ] {
+            assert!(helper_plan(&h).is_err(), "{what} must be refused");
+        }
+    }
+
+    #[test]
+    fn the_check_refuses_a_helper_outside_the_spec() {
+        let (tdir, _, work) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        let good = helper_calls(&helper(&dir, &scratch, "check.sh", true));
+        check_plan(&good, &work, false).unwrap();
+        let with = |extra: &[&str]| {
+            let mut p = good.clone();
+            let last = p.len() - 1;
+            let at = p[last].iter().position(|x| x == ARCH_BASE).unwrap();
+            for (k, x) in extra.iter().enumerate() {
+                p[last].insert(at + k, (*x).to_owned());
+            }
+            p
+        };
+        let tdir_s = tdir.display().to_string();
+        let mut forbidden = vec![
+            with(&["-v", "/var/run/docker.sock:/var/run/docker.sock"]),
+            with(&["-v", &format!("{tdir_s}:/job")]),
+            with(&["-e", "OMARCHY_TOKEN=omj.x"]),
+            with(&["-e", "OMARCHY_API=https://pkgs.omarchy-pool.org"]),
+            with(&["-e", "KEYRING=a b"]),
+            with(&["-e", "KEYRING=omw_0123"]),
+            with(&["--cap-add", "SYS_ADMIN"]),
+            with(&["--privileged"]),
+            with(&["--rm"]),
+            with(&["-d"]),
+            with(&["--network", "bridge"]),
+            with(&["--label", "x=y"]),
+        ];
+        // Its mount anywhere but its job's scratch: the task dir (the token file), another lease's.
+        for m in [
+            format!("{tdir_s}:/repo:ro"),
+            format!("{}/tmp/tmp.x:/repo", tdir_s.replace("812-", "813-")),
+            "/srv/omarchy/work/jobs:/repo".to_owned(),
+        ] {
+            let mut p = good.clone();
+            let last = p.len() - 1;
+            let i = p[last].iter().position(|x| x == "-v").unwrap();
+            p[last][i + 1] = m;
+            forbidden.push(p);
+        }
+        // Another command, a tag.
+        let mut cmd = good.clone();
+        let last = cmd.len() - 1;
+        *cmd[last].last_mut().unwrap() = "-c".into();
+        forbidden.push(cmd);
+        let mut tag = good.clone();
+        let i = tag[last].iter().position(|x| x == ARCH_BASE).unwrap();
+        tag[last][i] = "docker.io/library/archlinux:base".into();
+        forbidden.push(tag);
+        // Beside a task container: a lease runs one or the other.
+        let (rel, task_dir) = (work.join("releases/v1.2.3"), tdir.clone());
+        let mut beside = plan(&spec(Kind::Build, &task_dir, &rel)).unwrap();
+        beside.push(good[good.len() - 1].clone());
+        forbidden.push(beside);
+        for p in forbidden {
+            assert!(
+                check_plan(&p, &work, false).is_err(),
+                "must be refused: {p:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gateway_reads_back_from_its_word() {
+        for g in [Gateway::Isolated, Gateway::NoDns, Gateway::Engine] {
+            assert_eq!(Gateway::of_word(g.word()), Some(g));
+        }
+        assert_eq!(Gateway::of_word("nat"), None);
+        assert_eq!(
+            owner_of_name("omarchy-task-812-g_0123456789abcdef-helper"),
+            Some((812, GEN.to_owned()))
+        );
     }
 }
