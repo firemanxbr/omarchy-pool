@@ -296,7 +296,7 @@ impl Agent {
             }
             let refusal = match (&o.kind, o.not_after) {
                 (OrderKind::Unknown(k), _) => Some(format!(
-                    "unknown kind {k:?}: agent {} takes retire-legacy, reconcile-now, set-units, set-emulate, rotate-token, retry-release and diagnostics",
+                    "unknown kind {k:?}: agent {} takes retire-legacy, reconcile-now, set-units, set-emulate, rotate-token, retry-release, diagnostics, widen-envelope and set-agent-keys",
                     self.version
                 )),
                 (_, None) => Some("it carries no not_after the agent can read".to_owned()),
@@ -306,6 +306,9 @@ impl Agent {
                 }
                 (OrderKind::SetEmulate(Arg::Malformed), _) => Some(
                     "its emulate is not a list of architectures this agent can read".to_owned(),
+                ),
+                (OrderKind::WidenEnvelope(None) | OrderKind::SetAgentKeys(None), _) => Some(
+                    "it carries no document the owner's passkey signed (its doc and the passkey's assertion): nothing was changed".to_owned(),
                 ),
                 _ => None,
             };
@@ -329,8 +332,11 @@ impl Agent {
                     &[Ask::Narrowing, Ask::Restart][..]
                 }
                 // retry-release's round meets the brake again where every round does, and
-                // its replace and its revert's count there as they happen.
-                OrderKind::RotateToken | OrderKind::RetryRelease => &[Ask::Restart][..],
+                // its replace and its revert's count there as they happen. A signed widening
+                // recreates the dispatcher with its new capacity or budget (#328).
+                OrderKind::RotateToken | OrderKind::RetryRelease | OrderKind::WidenEnvelope(_) => {
+                    &[Ask::Restart][..]
+                }
                 _ => &[][..],
             });
             // One that would lift a quarantine gives that release a round, which needs room
@@ -388,7 +394,11 @@ impl Agent {
             OrderKind::SetEmulate(_) => self.narrow_to(&Narrow::Emulate(None), now),
             OrderKind::RotateToken => self.rotate_token(now),
             OrderKind::Diagnostics => self.diagnostics(&o.id, now),
-            OrderKind::Unknown(_) => return,
+            OrderKind::WidenEnvelope(Some(s)) => self.widen_envelope(&o.id, &s, now),
+            OrderKind::SetAgentKeys(Some(s)) => self.set_agent_keys(&o.id, &s, now),
+            OrderKind::WidenEnvelope(None)
+            | OrderKind::SetAgentKeys(None)
+            | OrderKind::Unknown(_) => return,
         };
         match done {
             Ok(detail) => self.answer(&o.id, &kind, "done", &detail, now),
@@ -512,7 +522,10 @@ impl Agent {
         crate::enroll::write_worker_token(&env, &a, &r).map_err(|e| {
             format!("{e} (the old token keeps working for ten minutes only: rotate again)")
         })?;
-        self.journal.set_secrets(env_secrets(&self.cfg.set_dir));
+        self.journal.set_secrets(super::agent::secrets_of(
+            &self.cfg.set_dir,
+            &self.cfg.secrets_dir,
+        ));
         self.state.brake.record(now, &[Ask::Restart]);
         Ok(format!(
             "a new host worker token is in etc/dispatcher.env (next rotation after {}); the dispatcher is recreated with it at once, and the one it replaces works ten more minutes",

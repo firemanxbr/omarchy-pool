@@ -4,6 +4,8 @@
 //! ```text
 //! omarchy-agent verify --bundle <omarchy-host-vX.Y.Z.tar.gz> --sig <bundle.sigstore.json>
 //! omarchy-agent verify --statement <statement.json> --sig <bundle.sigstore.json>
+//!     (and the maintainers' co-signatures found beside the file, `<file>.<login>.sshsig`
+//!     for each maintainer this agent pins, #330: said, never a refusal by hand)
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
 //!     (<dir>/compose.yml and <dir>/set.toml)
 //! omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
@@ -16,8 +18,9 @@
 //! omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
 //!     [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
 //!     [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
-//!     [--legacy <project>] [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>]
-//!     [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>] [--yes]
+//!     [--direct-network | --no-direct-network] [--legacy <project>] [--agent-env-from <file>]
+//!     [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta]
+//!     [--wait-minutes <n>] [--yes]
 //!     (#317, what install.sh runs once the binary is in place: preflight, the envelope,
 //!     the enrollment below, agent.toml, the agent keys, the unit and linger, the service;
 //!     on a Mac, #320, the omarchy Colima VM and the LaunchAgent)
@@ -44,6 +47,11 @@
 //! omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
 //!     (#325: the owner moves the bundle to another driver this binary carries, with the
 //!     same guard and revert; never the pool's to choose)
+//! omarchy-agent envelope pin-passkey [<pin> | -] [--data-dir <dir>]
+//! omarchy-agent envelope unpin-passkey [--data-dir <dir>]
+//!     (#328: the owner's passkey pinned at the host, from the pin the site prints — read
+//!     from stdin without one —, so a widening of the envelope and the agent keys signed
+//!     with it on the site are taken here; or no passkey pinned any more)
 //!
 //! Every command's data directory is `--data-dir`, `$OMARCHY_AGENT_DATA`,
 //! `$XDG_DATA_HOME/omarchy-agent` or `~/.local/share/omarchy-agent` (install.sh's).
@@ -66,6 +74,7 @@ use omarchy_agent::enroll::{self, Failure, Options, Paths};
 use omarchy_agent::install;
 use omarchy_agent::lint::{self, Engine, Envelope};
 use omarchy_agent::run;
+use omarchy_agent::verify::cosignature::{self, Policy};
 use omarchy_agent::verify::{self, BundleOutcome, StatementOutcome};
 
 const USAGE: &str = "usage:
@@ -78,8 +87,9 @@ const USAGE: &str = "usage:
   omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
       [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
       [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
-      [--legacy <project>] [--agent-env-from <file>] [--max-units <n>] [--max-cpus <n>]
-      [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>] [--yes]
+      [--direct-network | --no-direct-network] [--legacy <project>] [--agent-env-from <file>]
+      [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta]
+      [--wait-minutes <n>] [--yes]
   omarchy-agent preflight <install's options>
   omarchy-agent uninstall [--data-dir <dir>]
   omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
@@ -91,6 +101,8 @@ const USAGE: &str = "usage:
   omarchy-agent logs [--data-dir <dir>] [-n <lines>]
   omarchy-agent self-test --release <vX.Y.Z> [--data-dir <dir>]
   omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
+  omarchy-agent envelope pin-passkey [<pin> | -] [--data-dir <dir>]
+  omarchy-agent envelope unpin-passkey [--data-dir <dir>]
   omarchy-agent --version
 The enrollment token is read from OMARCHY_ENROLL, never from an argument.";
 
@@ -111,6 +123,7 @@ fn main() -> ExitCode {
         Some("enroll") => enroll_cmd(&args[1..]),
         Some("token") => token_cmd(&args[1..]),
         Some("runtime") => runtime_cmd(&args[1..]),
+        Some("envelope") => envelope_cmd(&args[1..]),
         Some("dispatcher-env") => dispatcher_env_cmd(&args[1..]),
         Some("--version" | "version") => {
             println!("omarchy-agent {}", omarchy_agent::AGENT_VERSION);
@@ -161,6 +174,25 @@ fn read(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{path}: {e}"))
 }
 
+/// The maintainers' co-signatures of `path` this agent pins, from the files beside it
+/// (`<path>.<login>.sshsig`: `ssh-keygen -Y sign`'s `<path>.sig`, renamed for its
+/// signer), checked over the file in `namespace` (#330).
+fn cosignatures_beside(path: &str, namespace: &str) -> Result<cosignature::Cosigned, String> {
+    let policy = Policy::pinned();
+    if policy.logins().next().is_none() {
+        return Ok(cosignature::Cosigned::default());
+    }
+    let message = read(path)?;
+    let found = policy
+        .logins()
+        .filter_map(|login| {
+            let sig = std::fs::read(cosignature::file_name(path, login)).ok()?;
+            Some((login.to_owned(), sig))
+        })
+        .collect();
+    Ok(policy.check(namespace, &message, &found))
+}
+
 fn verify_cmd(args: &[String]) -> Result<u8, String> {
     let mut rest = Vec::new();
     let f = flags(args, &["--bundle", "--statement", "--sig"], &mut rest)?;
@@ -173,6 +205,11 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
         (Some(path), None) => match verify::bundle(&read(path)?, &sig) {
             Ok(BundleOutcome::Current(b)) => {
                 let m = b.manifest();
+                let need = Policy::pinned().threshold();
+                let c = cosignatures_beside(path, cosignature::BUNDLE_NAMESPACE)?;
+                if let Err(why) = c.require(need, "this bundle") {
+                    eprintln!("not yet what a host takes: {why}");
+                }
                 let line = serde_json::json!({
                     "verified": "bundle",
                     "sha256": b.sha256(),
@@ -182,6 +219,7 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
                     "min_agent": m.outer().min_agent().to_string(),
                     "signer": b.signer().identity(),
                     "signed_at": b.signer().signed_at(),
+                    "cosignatures": {"required": need, "by": c.by(), "refused": c.refused()},
                 });
                 println!("{line}");
                 Ok(0)
@@ -199,6 +237,7 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
         (None, Some(path)) => match verify::statement(&read(path)?, &sig) {
             Ok(StatementOutcome::Current(s)) => {
                 let st = s.statement();
+                let c = cosignatures_beside(path, cosignature::ROLLBACK_NAMESPACE)?;
                 let line = serde_json::json!({
                     "verified": "statement",
                     "seq": st.seq(),
@@ -207,6 +246,7 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
                     "agent_to": st.agent_to().map(|v| v.to_string()),
                     "signer": s.signer().identity(),
                     "signed_at": s.signer().signed_at(),
+                    "cosignatures": {"deeper_than_14_days_needs": Policy::pinned().deep_rollback(), "by": c.by(), "refused": c.refused()},
                 });
                 println!("{line}");
                 Ok(0)
@@ -267,6 +307,19 @@ fn runtime_cmd(args: &[String]) -> Result<u8, String> {
         driver,
         get("--socket"),
     ))
+}
+
+/// `envelope pin-passkey [<pin> | -]` and `envelope unpin-passkey` (#328).
+fn envelope_cmd(args: &[String]) -> Result<u8, String> {
+    let mut rest = Vec::new();
+    let f = flags(args, &["--data-dir"], &mut rest)?;
+    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    match rest.as_slice() {
+        ["pin-passkey"] => Ok(run::envelope(get("--data-dir"), "pin-passkey", None)),
+        ["pin-passkey", pin] => Ok(run::envelope(get("--data-dir"), "pin-passkey", Some(pin))),
+        ["unpin-passkey"] => Ok(run::envelope(get("--data-dir"), "unpin-passkey", None)),
+        _ => Err(USAGE.to_owned()),
+    }
 }
 
 fn refused(r: &verify::Rejection) -> u8 {
@@ -365,14 +418,31 @@ fn switches(args: &[String], known: &[&'static str]) -> (Vec<String>, Vec<&'stat
     (rest, on)
 }
 
+/// A switch and its opposite among `on`: `Some(true)`, `Some(false)`, or `None` for neither,
+/// which keeps what agent.toml says; both is a usage error.
+fn either(on: &[&str], yes: &str, no: &str) -> Result<Option<bool>, String> {
+    match (on.contains(&yes), on.contains(&no)) {
+        (true, true) => Err(format!("{yes} or {no}, not both\n{USAGE}")),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    }
+}
+
 fn install_options(args: &[String]) -> Result<install::Options, String> {
-    let (args, on) = switches(args, &["--yes", "--dedicated", "--rosetta", "--no-rosetta"]);
-    let rosetta = match (on.contains(&"--rosetta"), on.contains(&"--no-rosetta")) {
-        (true, true) => return Err(format!("--rosetta or --no-rosetta, not both\n{USAGE}")),
-        (true, false) => Some(true),
-        (false, true) => Some(false),
-        (false, false) => None,
-    };
+    let (args, on) = switches(
+        args,
+        &[
+            "--yes",
+            "--dedicated",
+            "--direct-network",
+            "--no-direct-network",
+            "--rosetta",
+            "--no-rosetta",
+        ],
+    );
+    let direct_network = either(&on, "--direct-network", "--no-direct-network")?;
+    let rosetta = either(&on, "--rosetta", "--no-rosetta")?;
     let mut rest = Vec::new();
     let f = flags(
         &args,
@@ -432,6 +502,7 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
         rosetta,
         task_subnets: get("--task-subnets").map(str::to_owned),
         dedicated: on.contains(&"--dedicated"),
+        direct_network,
         legacy: get("--legacy").map(str::to_owned),
         agent_env_from: path("--agent-env-from"),
         max_units: num("--max-units")?,

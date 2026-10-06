@@ -20,6 +20,25 @@
     "state": "running"
   },
   "orders": [],
+  "owner": {
+    "agent_keys": [],
+    "envelope": {
+      "agent_budget": null,
+      "agent_slots": null,
+      "diagnostics": null,
+      "emulate": null,
+      "max_cpus": null,
+      "max_mem_gb": null,
+      "max_units": null,
+      "paths": null
+    },
+    "passkey": null,
+    "seal": {
+      "fingerprint": "SHA256:wIwZGH0JYi29ol7KfewxDD04AEppH3Sn1BWJ8Ci2GsI",
+      "key": "kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0"
+    },
+    "version": 0
+  },
   "quarantine": [],
   "release": {
     "applied": "v1.0.0",

@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+"""co-sign: the maintainers' co-signature (#330, design v2 D1 b and D25), checked and made.
+
+A host bundle carries, beside release.yml's keyless signature, the signature of
+`threshold` maintainers' FIDO security keys over the archive's bytes; a rollback
+statement that goes back more than 14 days carries at least one over the
+statement's bytes. Each is an OpenSSH signature (`ssh-keygen -Y sign`, made
+offline with a touch of the key), named for its signer:
+`<file>.<login>.sshsig`. The keys and the threshold are factory/MAINTAINERS.toml's
+`[cosignature]` table (a key per maintainer, or a list: a backup security key
+beside their own, either of which is their one co-signature), which
+factory/bin/check-governance pins into the host
+agent (crates/omarchy-agent/src/verify/maintainers.toml): the agent requires
+what the release it shipped in said, and verifies in Rust what this script
+checks here with ssh-keygen (tests/cosignature.sh holds the two to the same
+fixtures).
+
+  co-sign check <file> --namespace <ns> --signatures <dir> --policy <label>=<MAINTAINERS.toml>...
+      every policy met: its threshold of its keys signed <file> (each
+      <dir>/<file's name>.<login>.sshsig, verified by ssh-keygen with a touch).
+      publish-release runs it with the release's own policy and that of every
+      release of the last 30 days (their agents verify the new bundle first).
+  co-sign signers <MAINTAINERS.toml>
+      the keys as an ssh-keygen allowed_signers file, for a check by hand.
+  co-sign release vX.Y.Z [--key <private key>] [--login <login>] [--yes]
+      a maintainer co-signs the draft release's host bundle: downloaded, its
+      keyless signature checked (omarchy-agent verify, or cosign), shown,
+      signed with the key after a touch, checked, and uploaded to the draft.
+  co-sign rollback vX.Y.Z [--key <private key>] [--login <login>] [--yes]
+      a maintainer co-signs the rollback statement the pool relays for going
+      back to vX.Y.Z (needed when it goes back more than 14 days, or when its
+      target was published without the co-signature the agents now require),
+      and hands it to the pool with their token (OMARCHY_TOKEN), which relays
+      it beside the statement, once it is still the statement signed (the
+      pool answers 409 when rollback.yml signed another since).
+
+Exit status: 0 met or done, 1 not met or refused, 2 usage.
+"""
+
+import argparse
+import base64
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import tomllib
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+BUNDLE_NAMESPACE = "host-bundle@omarchy-pool.org"
+ROLLBACK_NAMESPACE = "rollback@omarchy-pool.org"
+FIDO = ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
+LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
+REPO = "firemanxbr/omarchy-pool"
+IDENTITY = "https://github.com/firemanxbr/omarchy-pool/.github/workflows/{}.yml@refs/heads/main"
+ISSUER = "https://token.actions.githubusercontent.com"
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class Refused(Exception):
+    pass
+
+
+def _strings(blob):
+    """The SSH wire format's strings, in order, and what is left."""
+    out = []
+    while len(blob) >= 4:
+        n = int.from_bytes(blob[:4], "big")
+        if len(blob) < 4 + n:
+            break
+        out.append(blob[4 : 4 + n])
+        blob = blob[4 + n :]
+    return out, blob
+
+
+def parse_key(line):
+    """`<type> <base64> [comment]` of a FIDO key: (type, base64), or ValueError."""
+    parts = line.split()
+    if len(parts) < 2:
+        raise ValueError("a public key is `<type> <base64> [comment]`")
+    kind, b64 = parts[0], parts[1]
+    if kind not in FIDO:
+        raise ValueError(f"a {kind} key is not a FIDO key ({' or '.join(FIDO)}): a key in a file is not offline")
+    try:
+        blob = base64.b64decode(b64, validate=True)
+    except ValueError:
+        raise ValueError("the key's blob is not base64") from None
+    strings, rest = _strings(blob)
+    if rest or not strings or strings[0] != kind.encode():
+        raise ValueError(f"the key says {kind} but its blob is not one")
+    if kind == FIDO[0]:
+        ok = len(strings) == 3 and len(strings[1]) == 32
+    else:
+        ok = len(strings) == 4 and strings[1] == b"nistp256" and len(strings[2]) == 65 and strings[2][0] == 4
+    if not ok:
+        raise ValueError(f"a {kind} key of the wrong shape")
+    return kind, b64
+
+
+def policy(doc):
+    """A parsed MAINTAINERS.toml's `[cosignature]`: (threshold, {login: ["<type> <base64>", ...]}).
+    No table asks nothing. Raises ValueError for a table the agent would refuse."""
+    maintainers = doc.get("maintainers")
+    if not isinstance(maintainers, list):
+        maintainers = []
+    table = doc.get("cosignature", {})
+    if not isinstance(table, dict):
+        raise ValueError("[cosignature] must be a table")
+    unknown = set(table) - {"threshold", "keys"}
+    if unknown:
+        raise ValueError(f"[cosignature] has unknown field(s) {sorted(unknown)}")
+    threshold = table.get("threshold", 0)
+    if not isinstance(threshold, int) or isinstance(threshold, bool) or threshold < 0:
+        raise ValueError("[cosignature] threshold must be a whole number, 0 or more")
+    raw = table.get("keys", {})
+    if not isinstance(raw, dict):
+        raise ValueError("[cosignature.keys] must be a table of login = key, or login = [key, key]")
+    keys, seen = {}, {}
+    for login, lines in sorted(raw.items(), key=lambda kv: kv[0].lower()):
+        if not LOGIN.match(login):
+            raise ValueError(f"[cosignature.keys]: {login!r} is not a login")
+        if login not in maintainers:
+            raise ValueError(f"[cosignature.keys]: {login} is not in `maintainers`: only a maintainer co-signs")
+        if isinstance(lines, str):
+            lines = [lines]
+        if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+            raise ValueError(f"[cosignature.keys]: {login}'s key must be a string, or a list of them")
+        if not lines:
+            raise ValueError(f"[cosignature.keys]: {login} lists no key")
+        theirs = []
+        for line in lines:
+            try:
+                kind, b64 = parse_key(line)
+            except ValueError as e:
+                raise ValueError(f"[cosignature.keys]: {login}'s key: {e}") from None
+            if seen.get(b64) == login:
+                raise ValueError(f"[cosignature.keys]: {login} lists the same key twice")
+            if b64 in seen:
+                raise ValueError(f"[cosignature.keys]: {login} and {seen[b64]} have the same key: one person, one co-signature")
+            seen[b64] = login
+            theirs.append(f"{kind} {b64}")
+        keys[login] = theirs
+    if threshold > len(keys):
+        raise ValueError(f"[cosignature]: a threshold of {threshold} with {len(keys)} maintainer(s) holding a key is never met")
+    return threshold, keys
+
+
+def stranded(threshold, keys):
+    """Why one lost security key would leave `threshold` out of reach, or None.
+
+    An agent requires its own pinned policy of the next release, so the release that drops a
+    lost key must still be co-signed under the old one: with as many maintainers required as
+    hold a key, a maintainer whose only key is lost can never co-sign again, and every host
+    stays on its agent until it is reinstalled. A backup key beside their own (a list) or a
+    threshold below the number of maintainers with a key keeps a way back
+    (factory/bin/check-governance refuses the rest)."""
+    if threshold == 0 or threshold < len(keys):
+        return None
+    single = [login for login, theirs in keys.items() if len(theirs) < 2]
+    if not single:
+        return None
+    return (
+        f"[cosignature]: a threshold of {threshold} with {len(keys)} maintainer(s) holding a key is "
+        f"stranded by one lost security key ({', '.join(single)} hold(s) one key only): every host "
+        "would refuse every release until it is reinstalled. Lower the threshold below the "
+        "number of maintainers with a key, or give each of them a backup key "
+        '(login = ["<key>", "<backup key>"]); the runbook, *Co-signing a release*'
+    )
+
+
+def load_policy(path):
+    try:
+        return policy(tomllib.loads(Path(path).read_text()))
+    except (OSError, tomllib.TOMLDecodeError, ValueError) as e:
+        raise Refused(f"{path}: {e}") from None
+
+
+def pinned_toml(threshold, keys):
+    """The host agent's copy (crates/omarchy-agent/src/verify/maintainers.toml)."""
+    lines = [
+        "# Generated from factory/MAINTAINERS.toml by factory/bin/check-governance --write; CI fails",
+        "# when the two disagree. The maintainers' co-signature this agent requires (#330, design v2",
+        "# D1 b): `threshold` of these FIDO keys over every host bundle it takes (0 asks nothing),",
+        "# and at least one over a rollback statement deeper than 14 days (D25). A change here is a",
+        "# change of the agent: its version rises (factory/bin/agent-version-check).",
+        f"threshold = {threshold}",
+        "",
+        "[keys]",
+    ]
+    for login, theirs in keys.items():
+        if len(theirs) == 1:
+            lines.append(f'{login} = "{theirs[0]}"')
+        else:
+            lines.append(f"{login} = [" + ", ".join(f'"{key}"' for key in theirs) + "]")
+    return "\n".join(lines) + "\n"
+
+
+def signers(keys, namespace=None):
+    """An ssh-keygen allowed_signers file for `keys`: a line per key."""
+    ns = namespace or f"{BUNDLE_NAMESPACE},{ROLLBACK_NAMESPACE}"
+    return "".join(f'{login} namespaces="{ns}" {key}\n' for login, theirs in keys.items() for key in theirs)
+
+
+def touched(armored):
+    """Whether a FIDO signature carries the authenticator's user-presence flag (a touch):
+    the agent counts none without it, and `ssh-keygen -Y verify` does not look."""
+    text = armored.decode("ascii", "replace").strip()
+    begin, end = "-----BEGIN SSH SIGNATURE-----", "-----END SSH SIGNATURE-----"
+    if not (text.startswith(begin) and text.endswith(end)):
+        return False
+    try:
+        blob = base64.b64decode("".join(text[len(begin) : -len(end)].split()), validate=True)
+    except ValueError:
+        return False
+    if blob[:6] != b"SSHSIG" or len(blob) < 10:
+        return False
+    strings, _ = _strings(blob[10:])
+    if len(strings) < 5:
+        return False
+    sig = strings[4]
+    head, rest = _strings(sig)
+    # type, signature, then the flags byte and the counter (u32).
+    if len(head) < 2 or head[0].decode(errors="replace") not in FIDO:
+        return False
+    tail = sig[sum(4 + len(s) for s in head[:2]) :]
+    return len(tail) == 5 and bool(tail[0] & 0x01)
+
+
+def verify_one(file, namespace, login, theirs, sig_path):
+    """None when `sig_path` is a touch signature over `file` by one of `login`'s keys
+    (`theirs`); else why."""
+    armored = Path(sig_path).read_bytes()
+    with tempfile.TemporaryDirectory() as d:
+        allowed = Path(d) / "allowed_signers"
+        allowed.write_text(signers({login: theirs}, namespace))
+        with open(file, "rb") as message:
+            r = subprocess.run(
+                ["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", login, "-n", namespace, "-s", str(sig_path)],
+                stdin=message,
+                capture_output=True,
+                text=True,
+            )
+    if r.returncode != 0:
+        return (r.stderr.strip() or r.stdout.strip() or "does not verify").splitlines()[-1]
+    if not touched(armored):
+        return "made without a touch (the security key's user-presence flag is off)"
+    return None
+
+
+def check(file, namespace, sigdir, policies):
+    """[(label, ok, line)] for each policy: its threshold of its keys signed `file`."""
+    out = []
+    name = Path(file).name
+    for label, (threshold, keys) in policies:
+        by, why = [], []
+        for login, theirs in keys.items():
+            sig = Path(sigdir) / f"{name}.{login}.sshsig"
+            if not sig.exists():
+                continue
+            refused = verify_one(file, namespace, login, theirs, sig)
+            if refused is None:
+                by.append(login)
+            else:
+                why.append(f"{login}: {refused}")
+        ok = len(by) >= threshold
+        line = f"{label}: {len(by)} of the {threshold} maintainer co-signature(s) it requires verify"
+        if by:
+            line += f" ({', '.join(by)})"
+        if why:
+            line += "; " + "; ".join(why)
+        out.append((label, ok, line))
+    return out
+
+
+def cmd_check(a):
+    policies = []
+    for p in a.policy:
+        label, sep, path = p.partition("=")
+        if not sep:
+            raise SystemExit(f"co-sign: --policy {p!r} is not <label>=<file>")
+        try:
+            policies.append((label, load_policy(path)))
+        except Refused as e:
+            print(f"co-sign: {label}: {e}", file=sys.stderr)
+            return 1
+    results = check(a.file, a.namespace, a.signatures, policies)
+    for _, ok, line in results:
+        print(f"co-sign: {line}" if ok else f"co-sign: NOT MET: {line}")
+    return 0 if all(ok for _, ok, _ in results) else 1
+
+
+def cmd_signers(a):
+    try:
+        _, keys = load_policy(a.maintainers)
+    except Refused as e:
+        print(f"co-sign: {e}", file=sys.stderr)
+        return 1
+    sys.stdout.write(signers(keys))
+    return 0
+
+
+# ---------------------------------------------------------------------------------------
+# A maintainer's side.
+
+
+def run(args, **kw):
+    return subprocess.run(args, check=False, capture_output=True, text=True, **kw)
+
+
+def whoami(a):
+    if a.login:
+        return a.login
+    r = run(["gh", "api", "user", "--jq", ".login"])
+    if r.returncode != 0 or not LOGIN.match(r.stdout.strip()):
+        raise Refused("who are you? `gh auth login`, or --login <your GitHub login>")
+    return r.stdout.strip()
+
+
+def my_key(a, login):
+    """The private key to sign with, once its public half is one MAINTAINERS.toml pins
+    for `login`."""
+    _, keys = load_policy(ROOT / "factory" / "MAINTAINERS.toml")
+    if login not in keys:
+        raise Refused(f"{login} has no key in factory/MAINTAINERS.toml's [cosignature.keys]: add it in a pull request first")
+    candidates = [Path(a.key).expanduser()] if a.key else [Path("~/.ssh/id_ed25519_sk").expanduser(), Path("~/.ssh/id_ecdsa_sk").expanduser()]
+    for k in candidates:
+        pub = Path(f"{k}.pub")
+        if k.exists() and pub.exists():
+            kind, b64 = parse_key(pub.read_text())
+            if f"{kind} {b64}" in keys[login]:
+                return k, f"{kind} {b64}"
+    raise Refused(f"no key at {', '.join(map(str, candidates))} is one MAINTAINERS.toml pins for {login}: --key <your security key's private key file>")
+
+
+def keyless(kind, file, sigstore):
+    """The keyless signature (release.yml's, rollback.yml's) checked before anything is
+    co-signed: with omarchy-agent if it is installed, else cosign."""
+    agent = shutil.which("omarchy-agent")
+    if agent:
+        flag = "--bundle" if kind == "release" else "--statement"
+        r = run([agent, "verify", flag, str(file), "--sig", str(sigstore)])
+        if r.returncode != 0:
+            raise Refused(f"omarchy-agent verify refuses it: {(r.stderr or r.stdout).strip()}")
+        return f"omarchy-agent: {r.stdout.strip()}"
+    cosign = shutil.which("cosign")
+    if cosign:
+        r = run([cosign, "verify-blob", str(file), "--bundle", str(sigstore), "--certificate-identity", IDENTITY.format(kind), "--certificate-oidc-issuer", ISSUER])
+        if r.returncode != 0:
+            raise Refused(f"cosign verify-blob refuses it: {(r.stderr or r.stdout).strip()}")
+        return f"cosign: {r.stderr.strip() or 'Verified OK'}"
+    raise Refused("neither omarchy-agent nor cosign is installed: install one, so what you co-sign is first what the workflow signed")
+
+
+def sign(key, namespace, file, login):
+    print("co-sign: touch your security key when it blinks", file=sys.stderr)
+    r = subprocess.run(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", namespace, str(file)], check=False)
+    made = Path(f"{file}.sig")
+    if r.returncode != 0 or not made.exists():
+        raise Refused("ssh-keygen -Y sign did not sign")
+    out = Path(f"{file}.{login}.sshsig")
+    made.rename(out)
+    return out
+
+
+def confirm(a, text):
+    print(text)
+    if a.yes:
+        return
+    if input("Co-sign it? [y/N] ").strip().lower() not in ("y", "yes"):
+        raise Refused("not co-signed")
+
+
+def cmd_release(a):
+    v = a.version
+    login = whoami(a)
+    key, pinned = my_key(a, login)
+    with tempfile.TemporaryDirectory() as d:
+        bundle = Path(d) / f"omarchy-host-{v}.tar.gz"
+        r = run(["gh", "release", "download", v, "--repo", REPO, "--dir", d, "--pattern", bundle.name, "--pattern", f"{bundle.name}.sigstore.json"])
+        if r.returncode != 0 or not bundle.exists():
+            raise Refused(f"cannot download {v}'s host bundle: {r.stderr.strip()}")
+        said = keyless("release", bundle, f"{bundle}.sigstore.json")
+        data = bundle.read_bytes()
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
+            names = t.getnames()
+            member = next((n for n in ("manifest.json", "./manifest.json") if n in names), None)
+            if member is None:
+                raise Refused(f"{bundle.name} has no manifest.json")
+            m = json.load(t.extractfile(member))
+        inner = m.get("inner", {})
+        confirm(a, "\n".join([
+            f"{bundle.name}  sha256:{hashlib.sha256(data).hexdigest()}",
+            f"  {said}",
+            f"  release {m.get('release')}, created {m.get('created')}, agent {m.get('agent', {}).get('version')} (min_agent {m.get('min_agent')})",
+            f"  min_release {inner.get('min_release')}, revoked {inner.get('revoked')}, pools {inner.get('pools')}",
+            f"  co-signed by {login} with {pinned.split()[0]}",
+        ]))
+        sig = sign(key, BUNDLE_NAMESPACE, bundle, login)
+        for _, ok, line in check(bundle, BUNDLE_NAMESPACE, d, [("your key", (1, {login: [pinned]}))]):
+            if not ok:
+                raise Refused(line)
+        r = run(["gh", "release", "upload", v, str(sig), "--repo", REPO, "--clobber"])
+        if r.returncode != 0:
+            raise Refused(f"the upload to the draft failed: {r.stderr.strip()}")
+    print(f"co-sign: {sig.name} is on the draft {v}. Once as many maintainers as MAINTAINERS.toml's threshold have co-signed, re-run the release run's failed jobs (gh run rerun <run> --failed): publish-release checks every co-signature, then publishes.")
+    return 0
+
+
+def cmd_rollback(a):
+    v = a.version
+    login = whoami(a)
+    key, pinned = my_key(a, login)
+    token = os.environ.get("OMARCHY_TOKEN", "")
+    if not token:
+        raise Refused("OMARCHY_TOKEN is not set: your token, from your page on the pool (Token)")
+    api = os.environ.get("OMARCHY_API", "https://pkgs.omarchy-pool.org").rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{api}/api/v1/factory/rollback/{v}", timeout=30) as res:
+            relayed = json.load(res)
+    except (urllib.error.URLError, ValueError) as e:
+        raise Refused(f"the pool relays no rollback statement to {v}: {e}") from None
+    signed = relayed["statement"].encode()
+    digest = hashlib.sha256(signed).hexdigest()
+    with tempfile.TemporaryDirectory() as d:
+        st = Path(d) / "statement.json"
+        st.write_bytes(signed)
+        Path(f"{st}.sigstore.json").write_text(relayed["bundle"])
+        said = keyless("rollback", st, f"{st}.sigstore.json")
+        s = json.loads(relayed["statement"])
+        confirm(a, "\n".join([
+            f"rollback statement {s.get('seq')}: back to {s.get('to')}, retracting everything through {s.get('retracts_through')}",
+            f"  agent_to {s.get('agent_to')}, issued {s.get('issued')}, run {s.get('run')}",
+            f"  {said}",
+            f"  co-signed by {login} with {pinned.split()[0]}",
+        ]))
+        sig = sign(key, ROLLBACK_NAMESPACE, st, login)
+        for _, ok, line in check(st, ROLLBACK_NAMESPACE, d, [("your key", (1, {login: [pinned]}))]):
+            if not ok:
+                raise Refused(line)
+        req = urllib.request.Request(
+            f"{api}/api/v1/factory/rollback/{v}/cosignature",
+            data=sig.read_bytes(),
+            method="PUT",
+            # The statement this signature is over: the pool keeps it beside that one only,
+            # and answers 409 when rollback.yml signed another since it was fetched.
+            headers={"authorization": f"Bearer {token}", "content-type": "text/plain", "x-omarchy-statement-sha256": digest},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                answer = res.read().decode()
+        except urllib.error.HTTPError as e:
+            raise Refused(f"the pool refused it (HTTP {e.code}): {e.read().decode(errors='replace')}") from None
+        except urllib.error.URLError as e:
+            raise Refused(f"the pool did not answer: {e}") from None
+    try:
+        kept = json.loads(answer).get("statement_sha256")
+    except (ValueError, AttributeError):
+        kept = None
+    if kept != digest:
+        raise Refused(f"the pool kept the co-signature beside another statement (sha256 {kept}, not {digest}): run co-sign rollback {v} again")
+    print(f"co-sign: the pool relays your co-signature beside the statement to {v} (sha256 {digest}): {answer}")
+    return 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="co-sign", description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("check")
+    c.add_argument("file")
+    c.add_argument("--namespace", required=True, choices=[BUNDLE_NAMESPACE, ROLLBACK_NAMESPACE])
+    c.add_argument("--signatures", required=True)
+    c.add_argument("--policy", action="append", required=True)
+    s = sub.add_parser("signers")
+    s.add_argument("maintainers")
+    for name in ("release", "rollback"):
+        m = sub.add_parser(name)
+        m.add_argument("version")
+        m.add_argument("--key")
+        m.add_argument("--login")
+        m.add_argument("--yes", action="store_true")
+    a = p.parse_args(argv)
+    if getattr(a, "version", None) is not None and not re.fullmatch(r"v\d+\.\d+\.\d+", a.version):
+        p.error(f"{a.version} is not vX.Y.Z")
+    try:
+        return {"check": cmd_check, "signers": cmd_signers, "release": cmd_release, "rollback": cmd_rollback}[a.cmd](a)
+    except Refused as e:
+        print(f"co-sign: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

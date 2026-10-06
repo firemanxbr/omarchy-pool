@@ -12,8 +12,10 @@
 //! then `retire-legacy`, which stops and removes that project and nothing else and writes
 //! the marker into its directory — are `tests/agent-host-orders.sh`'s, on the same host;
 //! so are #325's settings, narrowed into the file the dispatcher mounts while the task runs
-//! on, and `diagnostics` reading the stand-in's own log, scrubbed. The owner's runtime
-//! switch from one real engine to another is `tests/agent-runtime-switch.sh`'s.
+//! on, and `diagnostics` reading the stand-in's own log, scrubbed; and #328's widening the
+//! owner's passkey signed, counted into the file the dispatcher mounts, with an agent key
+//! sealed to the host that the dispatcher never sees. The owner's runtime switch from one
+//! real engine to another is `tests/agent-runtime-switch.sh`'s.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -329,7 +331,7 @@ dedicated = true
         paths,
         State::default(),
         Box::new(FakePool(Rc::clone(&remote))),
-        Box::new(TestVerifier(signed)),
+        Box::new(TestVerifier(signed, Rc::default())),
         Drivers::Fixed,
     );
     agent.driver = Some(Box::new(Compose::new(
@@ -987,6 +989,157 @@ fn real_engine_settings_narrow_the_mounted_capacity_and_diagnostics_are_scrubbed
         "{lines:?}"
     );
     assert!(!posted.to_string().contains(TOKEN));
+    assert_eq!(h.task_state(), task0);
+}
+
+/// #328 on a real engine: the owner's passkey, pinned at the host, raises its unit cap
+/// from the site — the dispatcher is recreated with the file counted again under it while
+/// the task runs on, and the same document again is refused; then an agent key sealed to
+/// the host's seal key lands in `OMARCHY_SECRETS_DIR/agent.env` and nowhere the dispatcher
+/// reads: not its env, not its mounts. The owner is a virtual authenticator signing at the
+/// wall clock's time (`owner::tests::Authenticator`).
+#[test]
+#[ignore = "needs a real engine: tests/agent-host-orders.sh"]
+#[allow(clippy::too_many_lines)] // one host, one story: pinned, widened, replayed, keyed
+fn real_engine_owner_widens_the_mounted_capacity_and_seals_keys_the_dispatcher_never_sees() {
+    use crate::owner::tests::Authenticator;
+    use crate::run::pool::Signed;
+    const CANARY: &str = "sk-ant-engine-canary-7f3a9c";
+    let mut h = host();
+    // As install writes it under a cap of 2 units, and detection counted under that cap.
+    let path = h.agent.paths.agent_toml();
+    let toml = fs::read_to_string(&path)
+        .unwrap()
+        .replace("[envelope]\n", "[envelope]\nmax_units = 2\n");
+    fs::write(&path, &toml).unwrap();
+    h.agent.cfg = Config::parse(&toml).unwrap();
+    let mut detected = detected_capacity();
+    detected["cpus"] = 12.into();
+    detected["mem_gb"] = 32.into();
+    detected["units"] = 2.into();
+    fs::write(
+        h.agent.cfg.set_dir.join("run/capacity.json"),
+        detected.to_string(),
+    )
+    .unwrap();
+    h.publish("v1.0.0", "ok");
+    h.target("v1.0.0");
+    h.round("v1.0.0");
+    assert_eq!(
+        h.agent.state.round.outcome, "ok",
+        "{:?}",
+        h.agent.state.round
+    );
+    let (d0, _) = h.dispatcher();
+    let task0 = h.task_state();
+    assert_eq!(h.mounted_capacity().unwrap()["units"], 2);
+
+    // The owner pins a passkey at the host, once (`omarchy-agent envelope pin-passkey`).
+    let host_id = h.agent.cfg.host_id.clone();
+    let owner = Authenticator::new();
+    let now = crate::run::now();
+    let state = h.agent.paths.data.join("state");
+    let said = crate::owner::pin(
+        &state,
+        &host_id,
+        &h.agent.cfg.pool,
+        &owner.pin(&host_id, now),
+        now,
+    )
+    .unwrap();
+    assert!(said.contains("EdDSA"), "{said}");
+
+    // Then raises the cap from the browser: 2 → 6 units, signed.
+    let (doc, assertion) = owner.sign(
+        "widen-envelope",
+        &host_id,
+        1,
+        now,
+        &serde_json::json!({"envelope": {"max_units": 6}}),
+    );
+    let widening = Signed { doc, assertion };
+    h.give(&[(
+        OrderKind::WidenEnvelope(Some(widening.clone())),
+        "ho_it_widen",
+    )]);
+    let (outcome, detail) = h.answer("ho_it_widen").unwrap();
+    assert_eq!(outcome, "done", "{detail}");
+    assert!(detail.contains("max_units 2 → 6"), "{detail}");
+    assert!(detail.contains("units 2 → 6"), "{detail}");
+    assert!(fs::read_to_string(&path)
+        .unwrap()
+        .contains("max_units = 6\n"));
+    let mounted = h.mounted_capacity().unwrap();
+    assert_eq!(mounted["units"], 6, "{mounted}");
+    assert_ne!(h.dispatcher().0, d0, "recreated with the widened file");
+    assert_eq!(
+        h.task_state(),
+        task0,
+        "a running task is never stopped for it"
+    );
+
+    // The same document again — the pool replaying it — is refused, nothing changed.
+    let (d1, _) = h.dispatcher();
+    let before = h.capacity_on_disk();
+    h.give(&[(OrderKind::WidenEnvelope(Some(widening)), "ho_it_replay")]);
+    let (outcome, detail) = h.answer("ho_it_replay").unwrap();
+    assert_eq!(outcome, "refused");
+    assert!(detail.contains("a replay"), "{detail}");
+    assert_eq!(h.capacity_on_disk(), before);
+    assert_eq!(h.dispatcher().0, d1);
+
+    // An agent key sealed in the browser to the seal key the host reports.
+    let public = h.agent.seal_key(now).unwrap().public_b64u();
+    let raw = crate::owner::webauthn::unb64(&public, "the seal key", 64).unwrap();
+    let sealed = crate::owner::seal::seal(&raw, &host_id, "ANTHROPIC_API_KEY", CANARY);
+    let (doc, assertion) = owner.sign(
+        "set-agent-keys",
+        &host_id,
+        2,
+        now,
+        &serde_json::json!({"seal_key": public, "keys": [sealed]}),
+    );
+    h.give(&[(
+        OrderKind::SetAgentKeys(Some(Signed { doc, assertion })),
+        "ho_it_keys",
+    )]);
+    let (outcome, detail) = h.answer("ho_it_keys").unwrap();
+    assert_eq!(outcome, "done", "{detail}");
+    assert!(!detail.contains(CANARY));
+    let env = h.dir.join("secrets/agent.env");
+    assert!(fs::read_to_string(&env)
+        .unwrap()
+        .contains(&format!("ANTHROPIC_API_KEY={CANARY}\n")));
+    assert_eq!(
+        fs::metadata(&env).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // The dispatcher never sees it: not in its env, not in what it mounts (it is told the
+    // directory's path, OMARCHY_SECRETS_DIR, to mount into agent sidecars, and nothing
+    // more), and the file is not there inside it.
+    let (d2, _) = h.dispatcher();
+    let env_of = h.docker(&["inspect", "-f", "{{json .Config.Env}}", &d2]);
+    assert!(!env_of.contains(CANARY), "{env_of}");
+    let secrets = h.dir.join("secrets");
+    let mounts: serde_json::Value =
+        serde_json::from_str(&h.docker(&["inspect", "-f", "{{json .Mounts}}", &d2])).unwrap();
+    for m in mounts.as_array().unwrap() {
+        let source = Path::new(m["Source"].as_str().unwrap());
+        assert!(
+            !source.starts_with(&secrets) && !secrets.starts_with(source),
+            "the dispatcher mounts {}",
+            source.display()
+        );
+    }
+    let inside = h.docker(&["exec", &d2, "env"]);
+    assert!(!inside.contains(CANARY));
+    let read = try_docker(
+        &h.tools,
+        &h.socket,
+        &h.dir.join("data/docker-config"),
+        &["exec", &d2, "cat", &env.display().to_string()],
+    );
+    assert_eq!(read, None, "the dispatcher reads agent.env");
     assert_eq!(h.task_state(), task0);
 }
 
