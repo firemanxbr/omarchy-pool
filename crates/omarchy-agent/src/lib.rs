@@ -21,6 +21,8 @@
 //! (#320): the `LaunchAgent` and the `omarchy` Colima VM [`vm`] sizes and keeps.
 //! [`dispatcher_env`] (#371) renders the dispatcher's `etc/dispatcher.env` beside its
 //! worker token: the host's own addresses, the secrets directory and the agent budget.
+//! [`owner`] (#328) is the owner's control without a visit: the passkey pinned at the
+//! host, the widenings and agent keys it signed on the site, and the host's seal key.
 
 pub mod capacity;
 pub mod dispatcher_env;
@@ -29,6 +31,7 @@ pub mod host;
 pub mod install;
 pub mod lint;
 pub mod manifest;
+pub mod owner;
 pub mod pool;
 pub mod run;
 pub mod statement;
@@ -67,6 +70,8 @@ pub mod fuzz {
             };
             let _ = b.narrowed(&s, &crate::run::config::Policy::default());
         }
+        // The owner's signed documents, pins, COSE keys and assertions (#328).
+        crate::owner::fuzz(data);
     }
 
     /// The bundle archive, then its manifest, as `verify --bundle` reads them once signed.

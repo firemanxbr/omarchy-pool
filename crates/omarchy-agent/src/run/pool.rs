@@ -111,8 +111,39 @@ pub(crate) enum OrderKind {
     RetryRelease,
     /// The dispatcher's last log lines, scrubbed, if the envelope allows it (#325, M10).
     Diagnostics,
+    /// Keys of the envelope set as the owner's passkey signed them (#328, design v2 D6 b);
+    /// `None`: no signed document this agent can read (refused).
+    WidenEnvelope(Option<Signed>),
+    /// Agent keys sealed to the host, as the owner's passkey signed them (#328).
+    SetAgentKeys(Option<Signed>),
     /// Any other word, kept to say what was refused.
     Unknown(String),
+}
+
+/// A document the owner's passkey signed (#328), as an order carries it: its exact bytes
+/// (what the assertion's challenge commits to) and the assertion. The host checks both
+/// against the passkey pinned at the host ([`crate::owner::verify_signed`]); the pool only
+/// relays them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Signed {
+    pub doc: String,
+    pub assertion: crate::owner::webauthn::Assertion,
+}
+
+impl Signed {
+    /// The order's `doc` (at most [`crate::owner::DOC_MAX`] bytes) and `assertion`; `None`
+    /// when either is missing or does not read.
+    fn read(o: &serde_json::Value) -> Option<Self> {
+        let doc = o
+            .get("doc")?
+            .as_str()
+            .filter(|d| d.len() <= crate::owner::DOC_MAX)?;
+        let assertion = serde_json::from_value(o.get("assertion")?.clone()).ok()?;
+        Some(Signed {
+            doc: doc.to_owned(),
+            assertion,
+        })
+    }
 }
 
 /// At most this many architectures in a `set-emulate`.
@@ -128,6 +159,8 @@ impl OrderKind {
             "rotate-token" => OrderKind::RotateToken,
             "retry-release" => OrderKind::RetryRelease,
             "diagnostics" => OrderKind::Diagnostics,
+            "widen-envelope" => OrderKind::WidenEnvelope(None),
+            "set-agent-keys" => OrderKind::SetAgentKeys(None),
             other => {
                 OrderKind::Unknown(other.chars().filter(|c| !c.is_control()).take(64).collect())
             }
@@ -155,6 +188,8 @@ impl OrderKind {
                     .map_or(Arg::Malformed, Arg::Set),
                 _ => Arg::Malformed,
             }),
+            OrderKind::WidenEnvelope(_) => OrderKind::WidenEnvelope(Signed::read(o)),
+            OrderKind::SetAgentKeys(_) => OrderKind::SetAgentKeys(Signed::read(o)),
             k => k,
         }
     }
@@ -168,6 +203,8 @@ impl OrderKind {
             OrderKind::RotateToken => "rotate-token",
             OrderKind::RetryRelease => "retry-release",
             OrderKind::Diagnostics => "diagnostics",
+            OrderKind::WidenEnvelope(_) => "widen-envelope",
+            OrderKind::SetAgentKeys(_) => "set-agent-keys",
             OrderKind::Unknown(k) => k,
         }
     }
@@ -210,6 +247,10 @@ pub(crate) trait Pool {
     /// The tag of GitHub's latest release (#326's freeze detection), unauthenticated: only
     /// ever compared with the pool's, never acted on.
     fn github_latest(&mut self) -> Net<Release>;
+    /// The scopes GitHub names for `token` (`X-OAuth-Scopes`; `None` when it names none, as
+    /// for a fine-grained token): a `GITHUB_TOKEN` the owner sealed (#328) is public read
+    /// only, as install checks one (design v2 §20 item 7). The token goes to GitHub alone.
+    fn github_scopes(&mut self, token: &str) -> Net<Option<String>>;
 }
 
 const STATE_MAX: u64 = 64 << 10;
@@ -227,6 +268,8 @@ pub(crate) const RELEASES: &str = "https://github.com/firemanxbr/omarchy-pool/re
 /// `tag_name` is all the agent reads of it.
 pub(crate) const LATEST_RELEASE: &str =
     "https://api.github.com/repos/firemanxbr/omarchy-pool/releases/latest";
+/// GitHub's API for the user a token is: its `X-OAuth-Scopes` say what the token may do.
+const GITHUB_USER: &str = "https://api.github.com/user";
 /// The latest release's JSON lists its assets and notes; a body larger than this is not one.
 const LATEST_MAX: u64 = 1 << 20;
 /// At most this many host orders and Update ids are read from one answer.
@@ -669,6 +712,30 @@ impl Pool for Https {
             }
             Net::NoAnswer(e) => Net::NoAnswer(e),
             Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
+    }
+
+    fn github_scopes(&mut self, token: &str) -> Net<Option<String>> {
+        let res = self
+            .api
+            .get(GITHUB_USER)
+            .header("authorization", &format!("Bearer {token}"))
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28")
+            .call();
+        match res {
+            Ok(r) => match r.status().as_u16() {
+                200 => Net::Ok(
+                    r.headers()
+                        .get("x-oauth-scopes")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned),
+                ),
+                s @ (401 | 403) => Net::Unauthorized(s),
+                s => Net::NoAnswer(format!("GitHub answered HTTP {s}")),
+            },
+            // Never the error's own words: they could carry the request.
+            Err(_) => Net::NoAnswer("GitHub did not answer".into()),
         }
     }
 

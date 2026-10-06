@@ -1,7 +1,8 @@
 //! The commands: `run` (the loop), `status` (works with the pool down), `round`
 //! (SIGUSR1 to the running agent), `logs` (the journal's tail), `self-test` (what a
-//! self-update asks of a new agent before it hands over, #316) and `runtime switch` (the
-//! owner's move of the bundle to another driver, #325).
+//! self-update asks of a new agent before it hands over, #316), `runtime switch` (the
+//! owner's move of the bundle to another driver, #325) and `envelope pin-passkey` (the
+//! owner's passkey pinned at the host, #328).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -303,6 +304,11 @@ fn setup(
     agent.progress = Some(Arc::clone(progress));
     agent.exe = std::env::current_exe().ok();
     agent.host_env = Some(HostEnv::new(Sources::system()));
+    // The seal key (#328): made at the first start that has none, its fingerprint on the
+    // journal, kept in the login keychain on a Mac. One that cannot be loaded now is no
+    // reason to stop: the loop tries again, and takes no sealed key meanwhile.
+    agent.keychain = super::owner::keychain();
+    let _ = agent.seal_key(super::now());
     agent.resume(super::now());
     agent.journal.write(
         super::now(),
@@ -379,6 +385,59 @@ fn loop_forever(agent: &mut Agent, usr1: &AtomicBool, progress: &AtomicI64) -> u
     }
 }
 
+/// `omarchy-agent envelope pin-passkey [<pin> | -]` and `envelope unpin-passkey` (#328), at
+/// the host, as the agent's user: the owner's passkey pinned from the pin the site printed
+/// (read from stdin when it is not given), or no passkey pinned any more. The running agent
+/// reads the pin at the next signed order; nothing needs restarting.
+pub fn envelope(data: Option<&str>, cmd: &str, pin: Option<&str>) -> u8 {
+    let paths = match paths(data) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("omarchy-agent envelope: {e}");
+            return 2;
+        }
+    };
+    let state = paths.data.join("state");
+    let said = match cmd {
+        "pin-passkey" => {
+            let uid = rustix::process::geteuid().as_raw();
+            match Config::load(&paths.agent_toml(), uid) {
+                Err(e) => Err(format!(
+                    "{e}: a passkey is pinned on a host that is installed and confirmed"
+                )),
+                Ok(cfg) => {
+                    let text = match pin {
+                        Some(t) if t != "-" => Ok(t.to_owned()),
+                        _ => {
+                            use std::io::Read as _;
+                            let mut t = String::new();
+                            std::io::stdin()
+                                .take(64 << 10)
+                                .read_to_string(&mut t)
+                                .map(|_| t)
+                                .map_err(|e| format!("stdin: {e}"))
+                        }
+                    };
+                    text.and_then(|t| {
+                        crate::owner::pin(&state, &cfg.host_id, &cfg.pool, &t, super::now())
+                    })
+                }
+            }
+        }
+        _ => crate::owner::unpin(&state),
+    };
+    match said {
+        Ok(s) => {
+            println!("{s}");
+            0
+        }
+        Err(e) => {
+            eprintln!("omarchy-agent envelope {cmd}: {e}");
+            1
+        }
+    }
+}
+
 /// `omarchy-agent self-test --release vX.Y.Z [--data-dir <dir>]`: prints `ok`, or why not.
 pub fn self_test(data: Option<&str>, release: &str) -> u8 {
     let result = Release::parse(release)
@@ -436,7 +495,52 @@ pub fn status(data: Option<&str>) -> u8 {
         Some((Err(_), p)) => println!("capacity:  {} is missing", p.display()),
         None => println!("capacity:  agent.toml does not name the set directory"),
     }
+    print!("{}", owner_lines(&paths.data.join("state")));
     0
+}
+
+/// `status`'s lines for #328: the passkey pinned at this host and the last signed version
+/// it took, and the seal key's fingerprint, which its owner compares on the site once.
+fn owner_lines(state: &Path) -> String {
+    let mut out = String::new();
+    match crate::owner::Record::load(state) {
+        Ok(r) => match &r.passkey {
+            Some(p) => {
+                let _ = writeln!(
+                    out,
+                    "{:<10} {}'s passkey pinned ({}, credential {}…) for {} on {} since {}; last signed version {}",
+                    "owner:",
+                    p.by,
+                    crate::owner::webauthn::alg_name(p.alg),
+                    p.credential.chars().take(12).collect::<String>(),
+                    p.rp_id,
+                    p.origin,
+                    p.pinned_at,
+                    r.version
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "{:<10} no passkey pinned: the site widens nothing and sets no agent key here (`omarchy-agent envelope pin-passkey`)",
+                    "owner:"
+                );
+            }
+        },
+        Err(e) => {
+            let _ = writeln!(out, "{:<10} {e}", "owner:");
+        }
+    }
+    if let Some(k) = crate::owner::seal::read_public(state) {
+        let raw = crate::owner::webauthn::unb64(&k, "", 64).unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{:<10} {} (the host's page shows the same before its owner confirms it)",
+            "seal key:",
+            crate::owner::seal::fingerprint_of(&raw)
+        );
+    }
+    out
 }
 
 /// A self-update in flight (#316), from `pending`.

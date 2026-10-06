@@ -489,6 +489,74 @@ impl Config {
     }
 }
 
+/// `text` with `[<table>]`'s `keys` set line by line — each `key = <TOML value>`, or taken
+/// out when its value is `None` —: a key's line replaced (or dropped) where it is, a
+/// missing one added after the section's last key, a missing section added at the end;
+/// every other line as it was. agent.toml is the owner's policy document (design v2 §12),
+/// so the runtime switch (#325, `[set]`) and a signed widening (#328, `[envelope]`) change
+/// only their keys' lines, and the owner's comments and layout stay. A caller reads the
+/// result back: a layout the line edit cannot name a value in (a dotted key, a sub-table, a
+/// value over several lines) is written again from its table instead.
+pub(crate) fn table_lines(text: &str, table: &str, keys: &[(&str, Option<String>)]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    // A key to take out needs no line added when the file lacks it.
+    let mut done: Vec<bool> = keys.iter().map(|(_, v)| v.is_none()).collect();
+    // While in the table: the index of its last line that is a key or its header.
+    let mut last: Option<usize> = None;
+    let mut seen = false;
+    let add = |out: &mut Vec<String>, done: &mut [bool], at: usize| {
+        let missing: Vec<String> = keys
+            .iter()
+            .zip(done.iter())
+            .filter(|(_, d)| !**d)
+            .filter_map(|((k, v), _)| v.as_ref().map(|v| format!("{k} = {v}")))
+            .collect();
+        out.splice(at..at, missing);
+        done.fill(true);
+    };
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with('[') {
+            if let Some(i) = last.take() {
+                add(&mut out, &mut done, i + 1);
+            }
+            let name = t.trim_start_matches('[').split(']').next().unwrap_or("");
+            if !t.starts_with("[[") && name.trim() == table {
+                seen = true;
+                last = Some(out.len());
+            }
+            out.push(line.to_owned());
+            continue;
+        }
+        if let Some(i) = last.as_mut() {
+            if !t.is_empty() && !t.starts_with('#') {
+                let key = t.split_once('=').map(|(k, _)| k.trim().trim_matches('"'));
+                if let Some(k) = key.and_then(|k| keys.iter().position(|(n, _)| *n == k)) {
+                    done[k] = true;
+                    if let Some(v) = &keys[k].1 {
+                        *i = out.len();
+                        let indent = &line[..line.len() - t.len()];
+                        out.push(format!("{indent}{} = {v}", keys[k].0));
+                    }
+                    continue;
+                }
+                *i = out.len();
+            }
+        }
+        out.push(line.to_owned());
+    }
+    if let Some(i) = last {
+        add(&mut out, &mut done, i + 1);
+    }
+    if !seen && done.iter().any(|d| !d) {
+        out.push(String::new());
+        out.push(format!("[{table}]"));
+        let at = out.len();
+        add(&mut out, &mut done, at);
+    }
+    out.join("\n") + "\n"
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

@@ -352,6 +352,16 @@ impl Keeper {
         self.docker = true;
     }
 
+    /// A new size from agent.toml, as a signed widening of `max_cpus` or `max_mem_gb` wrote
+    /// it (#328): held to the same bounds as at start, and the VM restarted with it as any
+    /// size change is — at once only when no task runs, within the rate limit.
+    pub fn resize(&mut self, size: vm::Size) {
+        if self.want.size != size {
+            self.want.size = size;
+            self.next_look = 0;
+        }
+    }
+
     /// The applied release's signed minimum (CPUs, GB): a size below it is refused.
     pub fn minimum(&mut self, min: (u32, u32)) {
         self.minimum = Some(min);

@@ -588,6 +588,10 @@ pub(crate) struct PoolState {
     pub github_reads: u32,
     /// The `Date` the host state's answer carries, whatever its status (#320).
     pub date: Option<i64>,
+    /// What GitHub says a token may do (#328's sealed `GITHUB_TOKEN`): none (no scope)
+    /// unless a test says otherwise; how many tokens were asked about.
+    pub scopes: Option<Net<Option<String>>>,
+    pub scopes_asked: u32,
 }
 
 pub(crate) type Remote = Rc<RefCell<PoolState>>;
@@ -668,6 +672,12 @@ impl Pool for FakePool {
         let mut s = self.0.borrow_mut();
         s.publics += 1;
         s.public.clone().unwrap_or(Net::NoAnswer("no pool".into()))
+    }
+
+    fn github_scopes(&mut self, _token: &str) -> Net<Option<String>> {
+        let mut s = self.0.borrow_mut();
+        s.scopes_asked += 1;
+        s.scopes.clone().unwrap_or(Net::Ok(Some(String::new())))
     }
 
     fn github_latest(&mut self) -> Net<Release> {

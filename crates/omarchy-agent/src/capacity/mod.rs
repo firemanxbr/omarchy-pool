@@ -265,6 +265,9 @@ impl fmt::Display for Shortfall {
 pub struct Capacity {
     cpus: u32,
     mem_gb: u32,
+    /// The totals detection found before the owner's `max_cpus` and `max_mem_gb` (#328): a
+    /// signed widening of those counts the units again from them, never above them.
+    hardware: (u32, u32),
     mem_available_gb: Option<u32>,
     page_kb: u32,
     disk_free_gb: DiskFree,
@@ -291,6 +294,7 @@ impl Capacity {
     pub fn new(facts: &Facts, caps: &Caps, constants: &manifest::Capacity) -> Self {
         let c = constants.constants();
         let (cpus, mem_gb) = facts.totals();
+        let hardware = (cpus, mem_gb);
         let cpus = caps.max_cpus.map_or(cpus, |m| cpus.min(m));
         let mem_gb = caps.max_mem_gb.map_or(mem_gb, |m| mem_gb.min(m));
         let disk = facts.disk_free_gb();
@@ -319,16 +323,11 @@ impl Capacity {
             }
         }
 
-        let usable_cpus = cpus.saturating_sub(c.reserve.cpus);
-        let usable_mem = mem_gb.saturating_sub(c.reserve.mem_gb);
-        // The constants are verified non-zero (manifest::Capacity::validate).
-        let mut units = (usable_cpus / c.unit.cpus).min(usable_mem / c.unit.mem_gb);
-        if let Some(m) = caps.max_units {
-            units = units.min(m);
-        }
-        if !shortfalls.is_empty() {
-            units = 0;
-        }
+        let units = if shortfalls.is_empty() {
+            units_of(cpus, mem_gb, caps.max_units, c)
+        } else {
+            0
+        };
         // The emulated lanes detection turned on, within the owner's envelope: one it leaves
         // out is held, whatever the probe that found it was told (design v2 §7.5, §12).
         let (mut emulated, mut held) = facts
@@ -345,6 +344,7 @@ impl Capacity {
         Capacity {
             cpus,
             mem_gb,
+            hardware,
             mem_available_gb: facts.mem_available_gb(),
             page_kb: facts.page_kb(),
             disk_free_gb: disk,
@@ -427,6 +427,10 @@ impl Capacity {
             at: at.to_owned(),
             cpus: self.cpus,
             mem_gb: self.mem_gb,
+            hardware: (self.hardware != (self.cpus, self.mem_gb)).then_some(Totals {
+                cpus: self.hardware.0,
+                mem_gb: self.hardware.1,
+            }),
             page_kb: self.page_kb,
             disk_free_gb: DiskFree {
                 work: self.disk_free_gb.work / DISK_STEP_GB * DISK_STEP_GB,
@@ -466,6 +470,9 @@ pub struct CapacityFile {
     pub at: String,
     pub cpus: u32,
     pub mem_gb: u32,
+    /// The detected totals, when the owner's caps lowered `cpus` or `mem_gb` (#328).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<Totals>,
     pub page_kb: u32,
     pub disk_free_gb: DiskFree,
     pub units: u32,
@@ -478,6 +485,31 @@ pub struct CapacityFile {
     pub dedicated: bool,
     pub limits: Limits,
     pub below_minimum: bool,
+}
+
+/// A host's CPUs and memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Totals {
+    pub cpus: u32,
+    pub mem_gb: u32,
+}
+
+/// The units `cpus` and `mem_gb` give under the signed constants (design v2 §7.3): what is
+/// left after the reserve, in whole units of CPU and memory, the smaller of the two, and
+/// at most the owner's `max_units`. Detection counts them so, and so does a signed widening
+/// of the envelope (#328, `run::settings::recap`), which therefore never gives more than
+/// the constants and the detected hardware allow.
+pub(crate) fn units_of(
+    cpus: u32,
+    mem_gb: u32,
+    max_units: Option<u32>,
+    c: &manifest::CapacityConstants,
+) -> u32 {
+    let usable_cpus = cpus.saturating_sub(c.reserve.cpus);
+    let usable_mem = mem_gb.saturating_sub(c.reserve.mem_gb);
+    // The constants are verified non-zero (manifest::Capacity::validate).
+    let units = (usable_cpus / c.unit.cpus.max(1)).min(usable_mem / c.unit.mem_gb.max(1));
+    max_units.map_or(units, |m| units.min(m))
 }
 
 /// What stops an install (design v2 §13.3, the capacity part): below the minimum, with

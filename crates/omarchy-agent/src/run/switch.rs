@@ -189,7 +189,9 @@ pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
                 })
         })
     };
-    let mut new = set_lines(&text, &keys);
+    let keys: Vec<(&str, Option<String>)> =
+        keys.iter().map(|(k, v)| (*k, Some(v.clone()))).collect();
+    let mut new = super::config::table_lines(&text, "set", &keys);
     if !names(&new) {
         new = reserialized(&text, p)?;
     }
@@ -198,65 +200,6 @@ pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
     state::write_atomic(path, new.as_bytes())?;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .map_err(|e| format!("{}: {e}", path.display()))
-}
-
-/// `text` with `[set]`'s `keys` (each `key = <TOML value>`) set line by line: a key's line
-/// replaced where it is, a missing one added after the section's last key, a missing
-/// section added at the end; every other line as it was.
-fn set_lines(text: &str, keys: &[(&str, String)]) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut done = vec![false; keys.len()];
-    // While in `[set]`: the index of its last line that is a key or its header.
-    let mut last: Option<usize> = None;
-    let mut seen = false;
-    let add = |out: &mut Vec<String>, done: &mut [bool], at: usize| {
-        let missing: Vec<String> = keys
-            .iter()
-            .zip(done.iter())
-            .filter(|(_, d)| !**d)
-            .map(|((k, v), _)| format!("{k} = {v}"))
-            .collect();
-        out.splice(at..at, missing);
-        done.fill(true);
-    };
-    for line in text.lines() {
-        let t = line.trim_start();
-        if t.starts_with('[') {
-            if let Some(i) = last.take() {
-                add(&mut out, &mut done, i + 1);
-            }
-            let name = t.trim_start_matches('[').split(']').next().unwrap_or("");
-            if !t.starts_with("[[") && name.trim() == "set" {
-                seen = true;
-                last = Some(out.len());
-            }
-            out.push(line.to_owned());
-            continue;
-        }
-        if let Some(i) = last.as_mut() {
-            if !t.is_empty() && !t.starts_with('#') {
-                *i = out.len();
-                let key = t.split_once('=').map(|(k, _)| k.trim().trim_matches('"'));
-                if let Some(k) = key.and_then(|k| keys.iter().position(|(n, _)| *n == k)) {
-                    let indent = &line[..line.len() - t.len()];
-                    out.push(format!("{indent}{} = {}", keys[k].0, keys[k].1));
-                    done[k] = true;
-                    continue;
-                }
-            }
-        }
-        out.push(line.to_owned());
-    }
-    if let Some(i) = last {
-        add(&mut out, &mut done, i + 1);
-    }
-    if !seen {
-        out.push(String::new());
-        out.push("[set]".to_owned());
-        let at = out.len();
-        add(&mut out, &mut done, at);
-    }
-    out.join("\n") + "\n"
 }
 
 /// agent.toml written again from its table, `[set]` naming `p`, its leading comment kept.

@@ -26,7 +26,7 @@ use super::brake::{Ask, ROUND_RESTARTS};
 use super::compose::Compose;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver};
-use super::journal::{env_secrets, Journal};
+use super::journal::{env_secrets, env_values, Journal};
 use super::orders::Taken;
 use super::pool::{HostState, Net, Order, Pool};
 use super::report::Reported;
@@ -154,6 +154,13 @@ pub(crate) struct Agent {
     /// `etc/dispatcher.env` rendered again from the host and agent.toml (#371); `None`
     /// leaves the file alone (the tests that play other parts).
     pub host_env: Option<HostEnv>,
+    /// The host's seal key (#328), loaded (made the first time) when first needed, and when
+    /// it was last tried and failed (a locked keychain: tried again ten minutes on).
+    pub(super) seal: Option<crate::owner::seal::SealKey>,
+    pub(super) seal_tried: Option<(i64, String)>,
+    /// A Mac's login keychain, where the seal key's private half lives (#328); `None` on
+    /// Linux, where it is a 0600 file beside the host key.
+    pub keychain: Option<Box<dyn crate::owner::keychain::Security>>,
 }
 
 /// The run loop's half of `etc/dispatcher.env` (#371): at its start, then every
@@ -164,7 +171,7 @@ pub(crate) struct Agent {
 /// file that changed starts a round (an input of the set), which recreates the dispatcher.
 pub(crate) struct HostEnv {
     pub sources: Sources,
-    next_at: i64,
+    pub(super) next_at: i64,
     public_at: i64,
     /// The wait after the next ask the edge does not answer.
     public_retry: i64,
@@ -207,6 +214,17 @@ pub(super) fn rendered(cfg: &Config, paths: &Paths, sources: &Sources) -> Render
     Rendered::now(sources, &paths.data, Some(envelope))
 }
 
+/// The values the journal and the report never carry: those of the set's `etc/*.env` (the
+/// worker token) and of the secrets directory's `*.env` — the agent keys, typed at install
+/// or sealed from the site (#328).
+pub(super) fn secrets_of(set_dir: &std::path::Path, secrets_dir: &std::path::Path) -> Vec<String> {
+    let mut v = env_secrets(set_dir);
+    v.extend(env_values(secrets_dir));
+    v.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    v.dedup();
+    v
+}
+
 /// The cached names of release `r`'s bundle and its signature.
 pub(crate) fn bundle_names(r: Release) -> (String, String) {
     let name = format!("omarchy-host-{r}.tar.gz");
@@ -224,7 +242,7 @@ impl Agent {
         drivers: Drivers,
     ) -> Self {
         let mut journal = Journal::new(&paths.journal());
-        journal.set_secrets(env_secrets(&cfg.set_dir));
+        journal.set_secrets(secrets_of(&cfg.set_dir, &cfg.secrets_dir));
         Agent {
             cfg,
             paths,
@@ -263,6 +281,9 @@ impl Agent {
             #[cfg(test)]
             drivers_on: None,
             host_env: None,
+            seal: None,
+            seal_tried: None,
+            keychain: None,
         }
     }
 
@@ -1150,7 +1171,8 @@ impl Agent {
     /// Starts (or preempts) a round, with the env files' values read again so the journal
     /// scrubs a token written since (the owner's Confirm, a rotation).
     fn start(&mut self, now: i64, target: Release, rollback: bool, why: &str) {
-        self.journal.set_secrets(env_secrets(&self.cfg.set_dir));
+        self.journal
+            .set_secrets(secrets_of(&self.cfg.set_dir, &self.cfg.secrets_dir));
         rollout::start(&mut self.state, &self.journal, now, target, rollback, why);
     }
 
