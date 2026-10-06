@@ -861,6 +861,40 @@ work after its threshold, or at once with no native x86_64 host eligible,
 #337, and the dispatcher runs it with `--platform linux/amd64`); and over SSH
 with nobody logged in at the Mac, the Terminal instruction.
 
+**Sleep (#329).** A sleeping Mac has zero free units: the agent holds off
+idle sleep while a task runs, and tells the pool before the Mac sleeps and
+after it wakes ([A Mac as a maintainer host](/docs/worker-host#a-mac-as-a-maintainer-host)).
+What the journal (`omarchy-agent logs`, event `sleep`) says: "the Mac's sleep
+and wake are heard" once after each start (or why not: then the Mac sleeps as
+before, and the agent tries again every ten minutes); "a task runs: the Mac
+does not idle-sleep until none runs" and "no task runs: the Mac may idle-sleep
+again" as tasks start and end; "the Mac goes to sleep: the host reports
+asleep" before a sleep and "the Mac woke: the host reports itself awake"
+after it. While a task runs, `pmset -g assertions` lists
+`caffeinate` holding `PreventUserIdleSystemSleep`; with none, it does not.
+The host's page says *asleep* while the Mac sleeps (its *Units* stat: none
+free until it wakes). A Mac that reports asleep is handed nothing; a lease the
+sleep caught is requeued by the pool when it expires, and the woken
+dispatcher removes that task's containers itself — nothing to do at the Mac.
+
+What needs the laptop, by hand, before #329 is called done (with the Mac's
+idle sleep set short, `sudo pmset -a sleep 2`, and set back after):
+1. A task running across an idle period: queue a build the Mac takes (its
+   host page lists the lease), leave the Mac untouched past its idle-sleep
+   time — it stays awake, and the build finishes; once no task runs the Mac
+   idle-sleeps within its idle time, and the host's page says *asleep* until
+   you wake it.
+2. A lid close mid-task: with a build running, close the lid for at least 35
+   minutes. The journal says the Mac went to sleep before it did; the host's
+   page says *asleep* and the pool hands it nothing; once the lease expires
+   the build is requeued (its line on the build's page) and another host, or
+   this one after the wake, runs it.
+3. A wake: open the lid. Within a minute the journal says the Mac woke and the
+   VM's clock is within five seconds of the pool's, the host's page no longer
+   says *asleep*, the dispatcher claims again with nobody's action, and no
+   container of the requeued task is left in the VM (`docker ps` against the
+   Mac's `socket_cli`).
+
 ### The run loop
 
 `omarchy-agent run` (#315; design v2 §16) keeps the host on the pool's
@@ -974,7 +1008,8 @@ given on the host's page:
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the
 release applied, targeted and its floor, the rollout and the last round, the
-legacy set and the last answers), which closes the order on the site — one
+legacy set, the last answers and whether the Mac sleeps, `asleep`, #329),
+which closes the order on the site — one
 the site expired meanwhile too (a retire-legacy answers only at its end); an
 order its agent does not take within its hour expires there. A report that
 does not get through is sent again a minute later, or hourly while the pool
@@ -1027,8 +1062,12 @@ does not hold. A Mac whose own clock is more than six seconds off the pool's
 is said ("needs a person"), never set; the VM is then held to the Mac's
 clock, so the pool's answer never moves it further than that from the
 Mac's own. The clock is checked whatever else waits (a resize held back by a
-task, a `colima.yaml` that cannot be read). The journal's `vm`, `vm-clock`
-and `capacity` lines say what it did. The memory check before every claim is
+task, a `colima.yaml` that cannot be read). It also keeps the Mac awake
+while a task container runs and reports `asleep` around a sleep (#329, *Sleep*
+under *Installing a Mac*): a wake macOS announces after a sleep too short to
+leave a gap in the ticks asks the pool and checks the clock the same way.
+The journal's `vm`, `vm-clock`, `capacity` and `sleep` lines say what it
+did. The memory check before every claim is
 the dispatcher's, which runs inside the VM: the `/proc/meminfo` it reads
 there is the VM's own.
 
@@ -1153,6 +1192,13 @@ so a size-4 build waits for memory rather than run smaller.
   sets it on the host's page, with a reason — the Studio canary runs at 3
   units, one build (§21.1). Lowered below what the host runs, nothing ends;
   it claims nothing until its leases fit. Lifted, the host's count decides.
+- **A sleeping host has zero free units** (#329). A Mac's agent reports
+  `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
+  meanwhile its claims are handed nothing, it makes no emulated lane wait,
+  holds no reservation mark and counts in no size alive; its leases stay
+  its own until they expire. The pool holds it only while that report is
+  fresh (15 minutes): a dispatcher that claims after that is on a Mac that
+  woke. The host's page says *asleep*.
 
 ## The Studio host
 

@@ -565,7 +565,13 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   own clock agrees with it: a pool's answer never moves the VM's clock more
   than six seconds from the Mac's (a lying pool cannot take the VM's TLS
   checks back to a time whose certificates expired), and a Mac that is off
-  is said, never set.
+  is said, never set. Its sleep (#329) is two unprivileged macOS tools the
+  agent starts and ends — `caffeinate -i -w <the agent's pid>` while a task
+  runs, and an `osascript` watcher of AppKit's sleep and wake notifications
+  that dies with the agent —, not code of the agent's own: its `unsafe`
+  stays forbidden. The `asleep` its report carries can only make the pool
+  hand the host less (zero free units), never more, and a stale one (no
+  report for 15 minutes) holds nothing.
 
 ## Stopping a host
 
