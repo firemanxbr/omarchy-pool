@@ -103,6 +103,9 @@ pub(crate) struct Agent {
     pub progress: Option<Arc<AtomicI64>>,
     /// This agent's own version (a test plays another).
     pub version: Version,
+    /// Built for a Mac (#320): `cfg!(target_os = "macos")`. Read where a Linux host and a
+    /// Mac part, so a test plays either on any OS.
+    pub mac: bool,
     /// The binary that runs (`current_exe`): a self-update starts only from the one
     /// install.sh installed, so the way back is there.
     pub exe: Option<PathBuf>,
@@ -238,6 +241,7 @@ impl Agent {
             announced: None,
             progress: None,
             version: version::agent(),
+            mac: cfg!(target_os = "macos"),
             exe: None,
             exit: None,
             gate: None,
