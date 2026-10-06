@@ -760,7 +760,8 @@ const SCRIPT = String.raw`
       $("#w-cmd").textContent =
         "# a legacy registration (#343): its token, shown once, for a set you already run — the Studio's role containers, or an omarchy-worker set:\n" +
         "OMARCHY_WORKER_TOKEN=" + d.token + "\n" +
-        "# put it in the set's .env (or etc/<service>.env on the Studio) and start the set again; an omarchy-worker set, in its directory:\n" +
+        "# put it in the set's .env (or etc/<service>.env on the Studio) and start the set again; an omarchy-worker set, in its directory, with the\n" +
+        "# repository's factory/host/omarchy-worker (a copy the pool served fetches a compose file it no longer serves):\n" +
         "./omarchy-worker start --token " + d.token + "\n" +
         "# a new machine joins the pool as a host instead (+ add a host, below): " + location.origin + "/docs/worker-host";
       $("#worker-form").reset(); $("#worker-form").hidden = true; acted(); load(); loadWorkers();

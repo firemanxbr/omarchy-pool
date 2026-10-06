@@ -1713,6 +1713,22 @@ A maintainer's worker that is listed gets its owner as the file spells it
 command), then the query again comes back without it. Any other row is a
 contributor's, which builds nothing from then on: revoke it on its page.
 
+The same deploy widens what a maintainer's set takes: a community legacy
+registration that was dedicated (its owner's builds only, and the ones
+pinned to it) takes any contributor's build from then on, as a host does
+(design v2 D56, §8.2), with the agent key and the `GITHUB_TOKEN` its broker
+holds. Nothing asks its owner, so list those sets (`mode` is the last one
+a claim reported, kept as history and written no more; a row that never
+claimed says `project`):
+
+```bash
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, owner, mode, last_seen FROM build_workers WHERE kind = 'legacy' AND trust != 'project' AND revoked_at IS NULL AND owner IN (SELECT login FROM factory_maintainers) AND mode IS NOT 'shared' AND last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')"
+```
+
+and tell each owner before the deploy (maralcbr's sets among them, design
+§21.2): a set that should not build strangers' recipes is drained
+(`./omarchy-worker stop`) or revoked on its page first.
+
 ### A host reverted a release
 
 One bundle runs on every host, so a release that fails its guard on one
@@ -1875,18 +1891,34 @@ before this release, paste the block in *Once: the updater* again: it takes
 the release's `setup.sh`, which on a host whose updater already runs only
 installs the new host files (keeping the ones it replaces) and wakes the
 updater. `grep -q omarchy-agent /srv/omarchy-pool/rollout.sh` then says the
-copy has the guard. An `omarchy-worker` downloaded before #313 has none, and
-the pool no longer serves the command (#343): take the repository's,
-`factory/host/omarchy-worker` (it reads the pool's address from
-`OMARCHY_API`, `https://pkgs.omarchy-pool.org` by default), into the set's
-directory once. An old `rollout.sh` that is missed brings back only the
+copy has the guard. An old `rollout.sh` that is missed brings back only the
 updater, which stands down.
 
-A CLI set's compose file is the one its last `start` before #343 wrote:
-neither `omarchy-worker` (`start`, `update`) nor the updater fetches it any
-more, so a release that changes `factory/image/compose.yml` before P3 (the
-broker's, say) reaches a CLI set only by hand. After such a release, in the
-set's directory ([Workers](/docs/workers#contributor), *A changed compose file*):
+**Every CLI set replaces its `omarchy-worker`, once, at the deploy that
+carries #343** (the copy reaches `main` with it), whenever its copy was
+downloaded: one from before #313 has no guard, and every copy the pool
+served (one from after #313 too) fetches the compose file at `start` and
+`update` (a `curl -f` of the one the pool served beside it), which answers
+410 from that deploy on, so its `start` (a changed option, a new agent key)
+and `update` die with *could not fetch the compose file*, the 410's pointer
+unseen; the running containers keep going, as the updater pulls images only.
+The pool no longer serves the command (#343): take the repository's,
+`factory/host/omarchy-worker` (it reads the pool's address from
+`OMARCHY_API`, `https://pkgs.omarchy-pool.org` by default, and fetches no
+compose file), into the set's directory, maralcbr's sets included:
+
+```bash
+cd ~/.config/omarchy-worker     # the set's directory
+curl -fsSo omarchy-worker https://raw.githubusercontent.com/firemanxbr/omarchy-pool/main/factory/host/omarchy-worker && chmod +x omarchy-worker
+grep -q 'fetch_compose' omarchy-worker || echo replaced   # the repository's copy has no fetch_compose
+```
+
+With that copy, a CLI set's compose file is the one its last `start` before
+#343 wrote: neither `omarchy-worker` (`start`, `update`) nor the updater
+fetches it any more, so a release that changes `factory/image/compose.yml`
+before P3 (the broker's, say) reaches a CLI set only by hand. After such a
+release, in the set's directory ([Workers](/docs/workers#contributor), *A
+changed compose file*):
 
 ```bash
 tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"

@@ -56,8 +56,9 @@ const BODY = String.raw`
   <section id="contributor">
     <h2>A community set, on a maintainer's host, until P3</h2>
     <div class="steps">
-      <div class="step"><h3>1. The set, and its command</h3><p>The pool no longer serves a command that starts a new set, nor its compose file (#343): a new machine joins as a host. A set a maintainer already runs keeps running until P3 retires it, from its own directory (<code>~/.config/omarchy-worker</code> by default) — the compose file and the <code>.env</code> (mode 600) an earlier start wrote there — and <code>omarchy-worker</code>, which now lives in the repository (<a href="${REPO_URL}/blob/main/factory/host/omarchy-worker">factory/host/omarchy-worker</a>), runs it: three containers — the broker and the builder on a network of their own, the updater beside them. The <b>broker</b> holds what is yours — the worker token, your agent's key, a GitHub token — and only receives, processes and answers. The <b>builder</b> beside it is born with nothing: it asks the broker for a contributor's build — anyone's, as a host takes them (#343) — builds it, uploads the package, the PKGBUILD and the log to that contributor's staging workspace through the broker, and exits; the restart policy starts the next one. The <b>updater</b> keeps both on the pool's latest image (<a href="#update">every worker follows it</a>).</p>
-<pre>./omarchy-worker start --github-token &lt;github_pat_…, no permissions&gt;   # in the set's directory: start it again, or apply a changed option
+      <div class="step"><h3>1. The set, and its command</h3><p>The pool no longer serves a command that starts a new set, nor its compose file (#343): a new machine joins as a host. A set a maintainer already runs keeps running until P3 retires it, from its own directory (<code>~/.config/omarchy-worker</code> by default) — the compose file and the <code>.env</code> (mode 600) an earlier start wrote there — and <code>omarchy-worker</code>, which now lives in the repository (<a href="${REPO_URL}/blob/main/factory/host/omarchy-worker">factory/host/omarchy-worker</a>), runs it. Every set takes that copy into its directory once, whenever its own was downloaded: a copy the pool served fetches the compose file at <code>start</code> and <code>update</code>, and that answers 410 since #343, so they stop there with <em>could not fetch the compose file</em> (what runs keeps running). A set is three containers — the broker and the builder on a network of their own, the updater beside them. The <b>broker</b> holds what is yours — the worker token, your agent's key, a GitHub token — and only receives, processes and answers. The <b>builder</b> beside it is born with nothing: it asks the broker for a contributor's build — anyone's, as a host takes them (#343) — builds it, uploads the package, the PKGBUILD and the log to that contributor's staging workspace through the broker, and exits; the restart policy starts the next one. The <b>updater</b> keeps both on the pool's latest image (<a href="#update">every worker follows it</a>).</p>
+<pre>curl -fsSo omarchy-worker https://raw.githubusercontent.com/firemanxbr/omarchy-pool/main/factory/host/omarchy-worker &amp;&amp; chmod +x omarchy-worker   # once, in the set's directory
+./omarchy-worker start --github-token &lt;github_pat_…, no permissions&gt;   # in the set's directory: start it again, or apply a changed option
 ./omarchy-worker status        # what runs here, what the pool thinks of it
 ./omarchy-worker logs          # the builder's log (logs broker | updater)
 ./omarchy-worker stop          # a drain: the build in hand finishes first</pre>
@@ -217,15 +218,13 @@ export function docsWorkersHtml(poolUrl: string, version: RunningVersion): strin
 /**
  * What /docs/workers is made of. A chapter is prose: every section, table
  * and step card gets its anchor and nothing changes with the role. Three
- * things reach
- * past the page and are checked as such: the one command the contributor
- * step tells the reader to curl is served by the Worker, with the compose
- * file beside it; the trust call the maintainer section names is routed
- * and a maintainer's alone (asked for the trust the project's worker
- * already has, so the fixture stays as it was); and the docs search
- * carries this chapter's map. The header and the footer are the shell's
- * entries. The "Screenshot to add" box in step 4 is an authoring note,
- * not a component: it has no anchor here, so removing it breaks nothing.
+ * things reach past the page and are checked as such: the command the
+ * community set step points at is the repository's (the pool serves none
+ * since #343); the trust call the maintainer section names answers 410 to
+ * everyone, a maintainer too (#343); and the docs search carries this
+ * chapter's map. The header and the footer are the shell's entries. The
+ * "Screenshot to add" box in step 4 is an authoring note, not a
+ * component: it has no anchor here, so removing it breaks nothing.
  */
 export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
   {
@@ -308,6 +307,8 @@ export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     anchor: [
       '<section id="contributor">', "<h2>A community set, on a maintainer's host, until P3</h2>", "<h3>1. The set, and its command</h3>",
       "The pool no longer serves a command that starts a new set, nor its compose file (#343)", `href="${REPO_URL}/blob/main/factory/host/omarchy-worker"`,
+      "Every set takes that copy into its directory once, whenever its own was downloaded", "<em>could not fetch the compose file</em>",
+      "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/main/factory/host/omarchy-worker &amp;&amp; chmod +x omarchy-worker",
       "./omarchy-worker start --github-token", `href="${REPO_URL}/blob/main/factory/image/compose.yml"`,
       "COMPOSE_PROFILES=community", "docker compose up -d",
       "<b>A changed compose file</b> reaches the set by hand only", "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/image/compose.yml",

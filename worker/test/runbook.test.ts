@@ -74,11 +74,25 @@ describe("the runbook's After a release (AC4 of #277)", () => {
     expect(text).toContain("`stands-down`");
     expect(text).toContain("`omarchy-agent status`");
     // The host's installed copies learn the marker only from a new setup.sh run or a new copy — the CLI's from the repository since
-    // the pool no longer serves it (#343).
+    // the pool no longer serves it (#343). Every CLI set takes it, a copy served after #313 too: each one the pool served fetches
+    // the compose file at start and update, which answers 410 from that deploy on.
     expect(text).toContain("`grep -q omarchy-agent /srv/omarchy-pool/rollout.sh`");
-    expect(text).toContain("An `omarchy-worker` downloaded before #313 has none, and\nthe pool no longer serves the command (#343)");
+    expect(text).toContain("**Every CLI set replaces its `omarchy-worker`, once, at the deploy that\ncarries #343**");
+    expect(text).toContain("every copy the pool\nserved (one from after #313 too) fetches the compose file at `start` and\n`update`");
     expect(text).toContain("`factory/host/omarchy-worker`");
+    expect(text).toContain("https://raw.githubusercontent.com/firemanxbr/omarchy-pool/main/factory/host/omarchy-worker && chmod +x omarchy-worker");
     expect(cut(runbook, "after-a-release")).toContain("on a host the agent manages, nothing needs\nto be run");
+  });
+
+  it("lists, once before the deploy that carries #343, the registrations the owner test turns away and the maintainers' sets that were dedicated", () => {
+    const text = cut(runbook, "how-the-pool-hands-a-host-work");
+    const step = text.slice(text.indexOf("**Once, before the deploy that carries #343.**"));
+    expect(step.startsWith("**Once, before the deploy that carries #343.**")).toBe(true);
+    // The rows the claim refuses from then on: no owner, or one the maintainer list does not spell so.
+    expect(step).toContain("AND (owner IS NULL OR owner NOT IN (SELECT login FROM factory_maintainers))");
+    // A maintainer's set that took its owner's builds only takes anyone's from then on: its owner is told first.
+    expect(step).toContain("AND owner IN (SELECT login FROM factory_maintainers) AND mode IS NOT 'shared'");
+    expect(step).toContain("and tell each owner before the deploy");
   });
 
   it("carries none of #278's paragraph, which asked for an install and restarts on the host", () => {
