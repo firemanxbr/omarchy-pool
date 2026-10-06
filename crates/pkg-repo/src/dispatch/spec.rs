@@ -2405,6 +2405,42 @@ mod tests {
     }
 
     #[test]
+    fn a_helpers_network_and_egress_sidecar_are_a_tasks_and_never_a_bridge() {
+        // A pool job's helper runs package code: on the same slot it gets the very internal network
+        // and egress sidecar a task gets, held to the fixture install's egress probe shares (#373).
+        // A signed exception's bridge is a package's build, never a helper's, whatever the owner's
+        // envelope grants (`direct_network`): `Helper` has no such field, and its plan is internal.
+        let (tdir, rel, work) = dirs();
+        let scratch = tdir.join("tmp");
+        let dir = scratch.join("tmp.Ab3dE5gH9k");
+        let own = ["203.0.113.10".to_owned()];
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        s.deny = &own;
+        let task = plan(&s).unwrap();
+        let helper = helper_calls(&Helper {
+            slot: s.slot,
+            deny: &own,
+            ..helper(&dir, &scratch, "check.sh", true)
+        });
+        check_plan(&helper, &work, false).unwrap_or_else(|e| panic!("{e}\n{helper:#?}"));
+        assert_eq!(helper[..4], task[..4], "the network and the egress sidecar");
+        let want = egress_fixture(&[
+            ("{name}", "omarchy-task-812-g_0123456789abcdef-egress"),
+            (
+                "{labels}",
+                "--label com.omarchy.task=812 --label org.omarchy-pool.task.gen=g_0123456789abcdef --label org.omarchy-pool.agent.host=h_studio-1 --label org.omarchy-pool.task.role=egress",
+            ),
+            ("{out}", EGRESS_NETWORK),
+            ("{image}", WORKER),
+            ("{ip}", "10.231.0.50"),
+            ("{net}", "omarchy-task-812-g_0123456789abcdef"),
+            ("{deny}", "--deny 10.231.0.0/16 --deny 203.0.113.10"),
+        ]);
+        assert_eq!(helper[1..4], want[..]);
+        assert!(check_plan(&helper, &work, true).is_err(), "never a bridge");
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // one case per line, as rustfmt lays them out
     fn a_helper_value_outside_the_grammar_runs_nothing() {
         let (tdir, _, _) = dirs();

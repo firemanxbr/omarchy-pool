@@ -550,7 +550,8 @@ jobs       a pool job (#340): one at a time, in a child process of its own (pkg-
            relayout 240) and failed; a job running when the dispatcher is replaced fails `lost`; its scripts' only
            engine omarchy-task-run (RUNTIME, and docker and podman first on its PATH): `run --rm --platform …
            [-e KEYRING=…] -v <scratch dir>:/repo[:ro] <an image tests/images.env pins> bash /repo/<script>.sh` as a
-           helper <network>-helper on the job's own internal network beside its egress sidecar (health, promote,
+           helper <network>-helper on the job's own internal network beside its egress sidecar, made as a task's
+           and never a sizing exception's bridge, whatever OMARCHY_DIRECT_NETWORK grants (health, promote,
            security and enqueue — its PKGBUILD reader, on the host's native arch — get a /28), anything else
            refused (125); the job holds the unit kept for pool jobs, never a task's (a build starts beside it)
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check

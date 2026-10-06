@@ -145,7 +145,9 @@ secret). Everything travels in the `Authorization` header over TLS only.
   one shape the scripts use — `run --rm --platform … [-e KEYRING=…] -v
   <the job's scratch dir>:/repo[:ro] <an image the release pins> bash
   /repo/<script>.sh` — and runs it on the job's own internal network behind
-  its egress sidecar, with the job's unit, the task container's
+  its egress sidecar, made as a task's are (never a signed exception's
+  bridge, whatever the owner's envelope grants: `direct_network` is a
+  package build's, #373), with the job's unit, the task container's
   capabilities, that one directory and no token; any other shape, verb or
   flag is refused before the engine is asked. The spec's CI test renders
   every helper the scripts start, and the shim's tests every shape refused.
