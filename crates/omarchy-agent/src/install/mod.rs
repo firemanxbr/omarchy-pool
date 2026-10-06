@@ -79,6 +79,7 @@ use crate::dispatcher_env::{self, addresses, Envelope, Refresh, Rendered, Source
 use crate::enroll;
 use crate::host::{HostKey, Identity};
 use crate::manifest::Manifest;
+use crate::run::config::DriverKind;
 use crate::run::{tools, Verifier};
 use crate::verify::{cosignature, BundleOutcome};
 use crate::version::Release;
@@ -135,6 +136,9 @@ pub struct Places {
     pub docker_daemon: PathBuf,
     /// Where processes are read (`/proc`): a rootless engine's network stack (#367).
     pub proc: PathBuf,
+    /// podman's Quadlet generator, where systemd finds a user generator (#330): what the
+    /// Quadlet driver needs.
+    pub quadlet_generator: Option<PathBuf>,
 }
 
 impl Places {
@@ -178,6 +182,7 @@ impl Places {
             systemd_system: PathBuf::from("/etc/systemd/system"),
             docker_daemon: PathBuf::from("/etc/docker/daemon.json"),
             proc: PathBuf::from("/proc"),
+            quadlet_generator: crate::run::quadlet::generator(),
         })
     }
 
@@ -202,6 +207,11 @@ impl Places {
     }
     pub fn unit_dir(&self) -> PathBuf {
         self.config_home.join("systemd").join("user")
+    }
+    /// Where the Quadlet driver's units go (#330): podman's generator reads the user's
+    /// `containers/systemd/`.
+    pub fn quadlet_dir(&self) -> PathBuf {
+        self.config_home.join("containers").join("systemd")
     }
     /// The agent's own `DOCKER_CONFIG`, the run loop's: a Mac's Colima writes its Docker
     /// context there, never into the person's `~/.docker` (#320).
@@ -274,6 +284,10 @@ pub struct Options {
     /// grant back; neither keeps what agent.toml says.
     pub direct_network: Option<bool>,
     pub legacy: Option<String>,
+    /// The driver that runs the set (`--driver`, #330): compose, or Quadlet on rootless
+    /// podman under this user's systemd. `None` keeps what agent.toml says (compose at
+    /// first).
+    pub driver: Option<DriverKind>,
     pub agent_env_from: Option<PathBuf>,
     pub max_units: Option<u32>,
     pub max_cpus: Option<u32>,
@@ -574,6 +588,33 @@ pub(crate) fn measure_as(
     }
     let existing = std::fs::read_to_string(p.agent_toml()).ok();
     let ex = existing.as_deref();
+    // The driver (#330): the flag, else agent.toml's, else compose. Another than the one an
+    // installed host runs is the runtime switch's, which stops the dispatcher first: a
+    // second install would leave the first one running beside the new one.
+    let had = envelope::set_str(ex, "driver").and_then(|d| DriverKind::parse(&d));
+    let driver = o.driver.or(had).unwrap_or_default();
+    if let Some(had) = had.filter(|h| *h != driver) {
+        let installed = ex
+            .and_then(|t| toml::from_str::<toml::Table>(t).ok())
+            .is_some_and(|t| t.contains_key("host_id"));
+        if installed {
+            r.blockers.push(format!(
+                "this host runs the {} driver: `omarchy-agent runtime switch {}` moves it, stopping the dispatcher where it runs and guarding it where it goes",
+                had.word(),
+                match driver {
+                    DriverKind::Quadlet => "quadlet",
+                    DriverKind::Compose => "compose/podman",
+                }
+            ));
+        }
+    }
+    if driver == DriverKind::Quadlet {
+        if mac {
+            r.blockers.push("--driver quadlet runs the set under a Linux user's systemd; a Mac's bundle runs in its VM".into());
+        } else if p.quadlet_generator.is_none() {
+            r.blockers.push("--driver quadlet: podman's Quadlet generator is not installed (the driver needs podman 4.6 or later)".into());
+        }
+    }
     let enrolled = Identity::read(&p.data.join("state")).ok().flatten();
     if enrolled.is_none() && o.token.is_none() {
         r.blockers.push(
@@ -839,10 +880,14 @@ pub(crate) fn measure_as(
         (None, None) => None,
     };
     // The engine: on a Mac in its VM, started and sized here when it is the omarchy one.
-    let given = o
-        .socket
-        .clone()
-        .or_else(|| envelope::set_path(ex, "socket_cli"));
+    // Quadlet runs this user's own podman: its rootless API socket unless one is given.
+    let given = o.socket.clone().or_else(|| match driver {
+        DriverKind::Quadlet if had != Some(DriverKind::Quadlet) => p
+            .xdg_runtime_dir
+            .as_ref()
+            .map(|x| x.join("podman/podman.sock")),
+        _ => envelope::set_path(ex, "socket_cli"),
+    });
     let caps = (
         o.max_cpus.or_else(|| envelope_u32(ex, "max_cpus")),
         o.max_mem_gb.or_else(|| envelope_u32(ex, "max_mem_gb")),
@@ -1007,6 +1052,31 @@ pub(crate) fn measure_as(
             &mut r,
         );
     }
+    if driver == DriverKind::Quadlet && !mac {
+        // podman's own version: the units the driver writes need its Quadlet to read every
+        // key of them (`crate::quadlet::PODMAN_MIN`).
+        let podman = docker.as_ref().and_then(|d| d.podman().ok().flatten());
+        match (&docker, &facts, podman) {
+            (Some(d), Some(f), Some(v)) if f.rootless() => {
+                if let Some(e) = crate::quadlet::podman_refused(&v) {
+                    r.blockers.push(format!(
+                        "--driver quadlet: {e}; upgrade podman, or install without --driver quadlet"
+                    ));
+                } else {
+                    r.notes.push(format!(
+                        "driver: quadlet on {}, its units in {} (the user's systemd runs the dispatcher)",
+                        d.socket.display(),
+                        p.quadlet_dir().display()
+                    ));
+                }
+            }
+            (Some(d), Some(_), _) => r.blockers.push(format!(
+                "--driver quadlet runs rootless podman under this user's systemd: {} is not rootless podman's API socket (`systemctl --user enable --now podman.socket`, or give --socket)",
+                d.socket.display()
+            )),
+            _ => {}
+        }
+    }
     let creds = checks::credentials(&p.home);
     if found.as_ref().and_then(|f| f.kind).is_some() {
         // A Mac: an escape lands in the VM, which sees nothing of the home directory.
@@ -1169,6 +1239,7 @@ pub(crate) fn measure_as(
                 });
             let values = envelope::Values {
                 pool: pool.clone(),
+                driver,
                 set_dir,
                 work_root,
                 secrets_dir,
@@ -1665,6 +1736,28 @@ pub fn uninstall(
         .as_deref()
         .and_then(|t| toml::from_str::<toml::Table>(t).ok())
         .and_then(|t| t.get("host_id").and_then(|h| h.as_str().map(str::to_owned)));
+    // The Quadlet driver's units (#330), before the containers: stopped, their files gone and
+    // systemd told, or their restart policy would bring the dispatcher back. On a host that
+    // runs Quadlet, and on one a runtime switch to Quadlet is still moving: agent.toml names
+    // compose until the switch's round is `ok`, while the unit's file is already there.
+    let (unit_dir, units) = quadlet_units(places, cfg.as_deref(), &project);
+    let quadlet = envelope::set_str(cfg.as_deref(), "driver").as_deref() == Some("quadlet");
+    if quadlet
+        || units
+            .iter()
+            .any(|n| unit_dir.join(format!("{n}.container")).exists())
+    {
+        match remove_quadlet_units(&unit_dir, &units, sys) {
+            Ok(()) => say(
+                out,
+                &format!("stopped and removed the Quadlet unit(s) {}", units.join(", ")),
+            ),
+            Err(e) => left.push(format!(
+                "needs a person: the Quadlet units were not all removed ({e}); `systemctl --user stop` them and remove their files from {}",
+                unit_dir.display()
+            )),
+        }
+    }
     // Containers that could not be removed keep their set (its dispatcher.env) until a
     // later uninstall removes them.
     let mut keep_set = false;
@@ -1832,6 +1925,61 @@ fn labelled(
         })
         .filter(|(id, _)| !id.is_empty())
         .collect())
+}
+
+/// The set's Quadlet units (#330): their directory, and their names, one per service of the
+/// bundle that ran (the dispatcher when that is gone).
+fn quadlet_units(places: &Places, cfg: Option<&str>, project: &str) -> (PathBuf, Vec<String>) {
+    let dir = envelope::set_path(cfg, "unit_dir").unwrap_or_else(|| places.quadlet_dir());
+    let services = std::fs::read_to_string(places.data.join("last-good/host/compose.yml"))
+        .ok()
+        .and_then(|t| crate::lint::service_names(&t))
+        .unwrap_or_else(|| vec!["dispatcher".to_owned()]);
+    let names = services
+        .iter()
+        .map(|s| crate::quadlet::unit_name(project, s))
+        .collect();
+    (dir, names)
+}
+
+/// The units `names` in `dir` stopped, their files removed and systemd told, whatever one of
+/// them said: a unit systemd never loaded — no round created it yet (the dispatcher waits
+/// for the owner's Confirm), or its generator did not take the file — has nothing to stop
+/// (`systemctl stop` would exit 5, "not loaded"), and its file goes all the same. One still
+/// running from a file already gone is stopped.
+fn remove_quadlet_units(dir: &Path, names: &[String], sys: &mut dyn Sys) -> Result<(), String> {
+    let mut failed = Vec::new();
+    for name in names {
+        let service = format!("{name}.service");
+        let shown = sys.run(
+            "systemctl",
+            &[
+                "--user",
+                "show",
+                "--property=LoadState",
+                "--property=ActiveState",
+                &service,
+            ],
+        );
+        let unloaded = shown.is_ok_and(|s| {
+            s.lines().any(|l| l.trim() == "LoadState=not-found")
+                && s.lines().any(|l| l.trim() == "ActiveState=inactive")
+        });
+        if !unloaded {
+            if let Err(e) = sys.run("systemctl", &["--user", "stop", &service]) {
+                failed.push(format!("{service}: {e}"));
+            }
+        }
+        if let Err(e) = files::remove(dir, &format!("{name}.container")) {
+            failed.push(e);
+        }
+    }
+    unit::reload(sys);
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
 }
 
 fn remove_containers(

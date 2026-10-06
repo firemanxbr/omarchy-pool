@@ -8,12 +8,13 @@
  * - The numbers: CPUs and memory, the units the pool counts from them, free
  *   disk on the work root and the engine's data root, and the agent slots —
  *   as its agent last reported them; its lanes (native, emulated); its
- *   isolation level and its sandboxed runtime (#330, design v2 §10.4; D43:
- *   gVisor or Kata, as its dispatcher's claims say it applies it — what a
- *   contributor wrote runs in it on the native lane, and its emulated lanes
- *   take the project's own recipes only — or none, with why one its engine
- *   has is not used or why its claims hold); the release it applied against
- *   the pool's, and the last round's outcome.
+ *   isolation level; its runtime (its driver: compose, or Quadlet,
+ *   #330); its sandboxed runtime (#330, design v2 §10.4; D43: gVisor or
+ *   Kata, as its dispatcher's claims say it applies it — what a contributor
+ *   wrote runs in it on the native lane, and its emulated lanes take the
+ *   project's own recipes only — or none, with why one its engine has is
+ *   not used or why its claims hold); the release it applied against the
+ *   pool's, and the last round's outcome.
  * - Its leases: what its registration holds now, each with its lane and
  *   units (#337).
  * - The pool's cap on its units (#337, design v2 §7.2): its owner or any
@@ -294,6 +295,7 @@ const SCRIPT = String.raw`
         kv("Host key", '<span class="mono">' + esc(h.fingerprint) + '</span><br>' + keyWords(h)),
         kv("Machine", esc((h.hostname || "?") + " · " + (h.os || "?") + " " + (h.arch || "?") + (h.page_kb ? ", " + h.page_kb + "K pages" : ""))),
         kv("Isolation", esc(h.isolation || "?") + (h.dedicated ? " (dedicated)" : "")),
+        kv("Runtime", runtimeWords(h)),
         kv("Sandbox", sandboxWords(h)),
         kv("Lanes", lanes || "—"),
         kv("Capacity", h.below_minimum ? esc(h.below_minimum) : c ? "meets the minimum to join" : "—"),
@@ -309,6 +311,14 @@ const SCRIPT = String.raw`
       ].join("");
     $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + (t.size > 1 ? " · size " + esc(t.size) : "") + '</td><td>' + esc(t.name) + (t.fenced ? ' ' + pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : '') + '</td><td>' + esc(t.arch) + '</td><td>' + esc(t.lane || "—") + '</td><td>' + esc(t.units === null || t.units === undefined ? "—" : t.units) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="7" class="muted">no lease — nothing runs on it now</td></tr>';
     endSkeleton();
+  }
+  // Its runtime (#325, #330): the driver its agent reports — compose on docker or on podman, or Quadlet, a unit of its owner's own
+  // systemd on rootless podman — and the owner's switch in flight, which only the owner starts, at the host.
+  function runtimeWords(h) {
+    var r = h.runtime || {}, words = { "compose/docker": "compose on docker", "compose/podman": "compose on podman", quadlet: "Quadlet: a unit of its owner's systemd, on rootless podman" };
+    if (!r.driver) return '<span class="muted">not said yet by its agent</span>';
+    var name = function (d) { return esc(words[d] || d); };
+    return name(r.driver) + (r.switch && r.switch.to ? " — switching to " + name(r.switch.to) + (r.switch.step ? " (" + esc(r.switch.step) + ")" : "") : "");
   }
   // Its sandboxed runtime (#330, D43): the one its dispatcher applies, as its last claim said — what a contributor wrote (their builds,
   // the project's review rebuilds of them, trials, audits) runs in it on the native lane, so a container escape lands in the sandbox's

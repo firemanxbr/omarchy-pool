@@ -403,12 +403,88 @@ The agent changes nothing for it — it follows only the pool and what is
 signed ([Runbook](/docs/runbook#a-new-maintainer-host), *Freeze detection*).
 
 **The runtime is the owner's, at the host** (#325): `omarchy-agent runtime
-switch compose/podman` (or `compose/docker`) moves the dispatcher to the
-other engine with the same guard as a release, and back if it fails there;
-the pool cannot choose it. Drain the host's registration and let its tasks
-finish first: task containers and caches do not move between engines
-([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*). A Mac's
-bundle stays in its VM's engine: the switch is refused there.
+switch compose/podman` (or `compose/docker`, or `quadlet`: below) moves the
+dispatcher to the other engine with the same guard as a release, and back if
+it fails there; the pool cannot choose it. Drain the host's registration and
+let its tasks finish first: task containers and caches do not move between
+engines ([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*). A
+Mac's bundle stays in its VM's engine: the switch is refused there.
+
+## A host on Quadlet
+
+A Linux host with rootless podman and no compose can run its dispatcher as
+a unit of your own systemd (#330, design v2 §15): the **Quadlet driver**
+(an agent from 0.5.0).
+The bundle is the same as every other host's — the release's signed
+`compose.yml`, the agent's labels and your `compose.override.yml` — and the
+agent renders it, as compose would load it, into
+`~/.config/containers/systemd/omarchy-host-dispatcher.container`. podman's
+generator turns that file into `omarchy-host-dispatcher.service` at
+`systemctl --user daemon-reload`, and the agent applies a release with
+`daemon-reload` and `restart`, behind the same guard, revert and quarantine
+as compose's rounds. The unit restarts the dispatcher the way the
+template's `restart: unless-stopped` does (every exit, a second later, for
+as long as it takes: the guard, not systemd's start limit, judges a release
+that keeps restarting), stops it with the template's `stop_grace_period`,
+and starts it at boot (linger, which install enables). podman's
+`AutoUpdate=` is never written: only the agent moves the host to a release,
+and only to one release.yml signed. Task containers stay the dispatcher's,
+on podman's API socket, which the dispatcher mounts as on any rootless
+podman host. The unit holds `agent.toml`'s paths and variables and names
+files by path, never a secret: the worker token's own file,
+`run/host/dispatcher/token`, is a read-only mount the dispatcher reads
+through `OMARCHY_WORKER_TOKEN_FILE`, as on compose (#327), and
+`etc/dispatcher.env` its env file. podman never makes a mount's missing
+source, so without the token file the unit does not start (the agent holds
+the dispatcher until it wrote the file); a rotation (`omarchy-agent token`)
+restarts the dispatcher's unit alone, its tasks running on.
+
+- **Choose it at install**: `install.sh … | OMARCHY_ENROLL=… sh -s --
+  --driver quadlet` (or `omarchy-agent install --driver quadlet`). It needs
+  podman 4.6 or later (its Quadlet generator reads every key the agent
+  writes, `Pull=` and `PodmanArgs=` among them: 4.4 and 4.5 ship a
+  generator that would make no service of the unit, and preflight refuses
+  them), its rootless API socket
+  (`systemctl --user enable --now podman.socket`; install asks
+  `$XDG_RUNTIME_DIR/podman/podman.sock` unless you give `--socket`) and
+  your systemd user manager with linger; preflight says what is missing.
+  `agent.toml` then says `driver = "quadlet"` under `[set]`, and its
+  envelope's `drivers` name `quadlet`. Running install again keeps the
+  driver; to change a running host's, switch it.
+- **Or switch to it later**, at the host: name `quadlet` in the envelope's
+  `drivers`, drain the host's registration, then `omarchy-agent runtime
+  switch quadlet` (refused, with nothing changed, below podman 4.6). Run
+  it in your own login session: like install, it asks
+  `$XDG_RUNTIME_DIR/podman/podman.sock` unless you give `--socket`, and a
+  shell without `XDG_RUNTIME_DIR` (`su`, `sudo -u`) is refused. The agent
+  stops the dispatcher where it runs, brings the
+  same release up as the unit through a whole round, and writes the driver
+  into `agent.toml` only once that round is `ok`; it goes back otherwise.
+  From compose on the same rootless podman this keeps the engine (and its
+  images); `omarchy-agent runtime switch compose/podman` goes back to
+  compose.
+- **On the host**: `omarchy-agent status` says `driver: quadlet` and where
+  its units are; `systemctl --user status omarchy-host-dispatcher` and
+  `journalctl --user -u omarchy-host-dispatcher` show the unit. Change the
+  dispatcher through `compose.override.yml`, never the unit file: the next
+  round writes it again. An override the driver cannot render as compose
+  would run it — a service network, `depends_on`, `profiles`, a string
+  command with quotes, a variable `agent.toml` does not set, a bind with
+  `create_host_path: true` — is refused at
+  the round's lint (`quadlet: …`) and the host keeps running what it ran. A
+  unit you stop by hand is started again within 15 minutes, as a stopped
+  compose container is. Uninstall stops the unit and removes its file.
+- **Your own lines in `etc/dispatcher.env`** reach the dispatcher as
+  podman's `--env-file` reads them, not as compose does: `$` is not
+  expanded, a ` #` after the value is part of it, and podman 4 keeps
+  quotes (`FOO="a b"` gives `"a b"`), where compose's reader expands
+  `$VAR`, drops the comment and strips the quotes. Write a line
+  unquoted, with no `$` and no comment after its value (`FOO=a b`), and
+  it means the same on both drivers; the lines the agent writes are
+  already so.
+
+The host's report says `quadlet` as its driver, and the host's page shows
+it beside its isolation level.
 
 ## Owner control without a visit
 

@@ -21,7 +21,10 @@
 //! on, and `diagnostics` reading the stand-in's own log, scrubbed; and #328's widening the
 //! owner's passkey signed, counted into the file the dispatcher mounts, with an agent key
 //! sealed to the host that the dispatcher never sees. The owner's runtime switch from one
-//! real engine to another is `tests/agent-runtime-switch.sh`'s.
+//! real engine to another is `tests/agent-runtime-switch.sh`'s. The same rollouts on the
+//! Quadlet driver (#330) — the set as a unit of the user's own systemd, on rootless podman,
+//! with no compose — and #327's token file and its rotation there are
+//! `tests/agent-quadlet.sh`'s.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -121,6 +124,25 @@ struct Host {
     project: String,
     image: String,
     task: String,
+    /// The Quadlet driver's unit (#330), when the host runs on it.
+    unit: Option<Unit>,
+}
+
+/// A Quadlet host's unit: its name and its file.
+struct Unit {
+    name: String,
+    file: PathBuf,
+}
+
+/// `systemctl --user` as the test runs it, the system's own (the agent's own calls are its
+/// driver's).
+fn systemctl(args: &[&str]) -> String {
+    let out = Command::new(crate::run::quadlet::systemctl_path())
+        .arg("--user")
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
 impl Host {
@@ -228,6 +250,16 @@ impl Host {
     }
 
     fn dispatcher(&self) -> (String, String) {
+        if let Some(u) = &self.unit {
+            let out = self.docker(&[
+                "inspect",
+                "-f",
+                "{{.Id}} {{index .Config.Labels \"org.omarchy-pool.agent.release\"}}",
+                &u.name,
+            ]);
+            let (id, release) = out.split_once(' ').unwrap();
+            return (id.to_owned(), release.to_owned());
+        }
         let id = self.docker(&[
             "ps",
             "-q",
@@ -245,6 +277,26 @@ impl Host {
         (id, release)
     }
 
+    /// How many times the engine restarted the dispatcher: its container's count, or (a
+    /// Quadlet unit's containers are new at each restart) its service's.
+    fn restarts(&self) -> Option<u64> {
+        let out = match &self.unit {
+            Some(u) => systemctl(&[
+                "show",
+                "--property=NRestarts",
+                "--value",
+                &format!("{}.service", u.name),
+            ]),
+            None => try_docker(
+                &self.tools,
+                &self.socket,
+                &self.dir.join("data/docker-config"),
+                &["inspect", "-f", "{{.RestartCount}}", &self.dispatcher().0],
+            )?,
+        };
+        out.trim().parse().ok()
+    }
+
     fn task_state(&self) -> String {
         self.docker(&[
             "inspect",
@@ -257,6 +309,12 @@ impl Host {
 
 impl Drop for Host {
     fn drop(&mut self) {
+        if let Some(u) = &self.unit {
+            systemctl(&["stop", &format!("{}.service", u.name)]);
+            let _ = fs::remove_file(&u.file);
+            systemctl(&["daemon-reload"]);
+            systemctl(&["reset-failed", &format!("{}.service", u.name)]);
+        }
         let ids = Command::new(&self.tools.docker)
             .env_clear()
             .env("DOCKER_HOST", format!("unix://{}", self.socket.display()))
@@ -281,6 +339,13 @@ impl Drop for Host {
 }
 
 fn host() -> Host {
+    host_on(false)
+}
+
+/// A host on the engine `OMARCHY_AGENT_ENGINE_SOCKET` names: through compose, or through
+/// the Quadlet driver (#330) under this user's own systemd.
+#[allow(clippy::too_many_lines)] // one host, set up as install sets one up
+fn host_on(quadlet: bool) -> Host {
     let socket = PathBuf::from(env("OMARCHY_AGENT_ENGINE_SOCKET"));
     let image = env("OMARCHY_STANDIN_IMAGE");
     let dir = crate::run::state::tempdir();
@@ -318,7 +383,7 @@ dir = "{}"
 work_root = "{}"
 secrets_dir = "{}"
 project = "{project}"
-socket_cli = "{}"
+socket_cli = "{}"{}
 [envelope]
 allow_socket = true
 rootful_ack = true
@@ -327,7 +392,12 @@ dedicated = true
         set.display(),
         dir.join("work").display(),
         dir.join("secrets").display(),
-        socket.display()
+        socket.display(),
+        if quadlet {
+            "\ndriver = \"quadlet\"\nengine = \"rootless\""
+        } else {
+            ""
+        }
     );
     let cfg = Config::parse(&toml).unwrap();
     // On disk as install writes it: the owner's runtime switch rewrites it at its end (#325).
@@ -354,11 +424,25 @@ dedicated = true
         Box::new(TestVerifier(signed, Rc::default())),
         Drivers::Fixed,
     );
-    agent.driver = Some(Box::new(Compose::new(
-        tools.clone(),
-        &socket,
-        &dir.join("data/docker-config"),
-    )));
+    let compose = Compose::new(tools.clone(), &socket, &dir.join("data/docker-config"));
+    let unit = quadlet.then(|| {
+        // Where the user's generator reads them: `set.unit_dir` is left to its default.
+        let units = agent.cfg.quadlet_dir().unwrap();
+        let name = crate::quadlet::unit_name(&project, "dispatcher");
+        Unit {
+            file: units.join(format!("{name}.container")),
+            name,
+        }
+    });
+    agent.driver = Some(if quadlet {
+        Box::new(crate::run::quadlet::Quadlet::new(
+            Box::new(compose),
+            Box::new(crate::run::quadlet::Systemctl::from_env()),
+            &agent.cfg.quadlet_dir().unwrap(),
+        ))
+    } else {
+        Box::new(compose)
+    });
     let mut h = Host {
         agent,
         remote,
@@ -368,6 +452,7 @@ dedicated = true
         project,
         image,
         task: String::new(),
+        unit,
     };
     // A task the dispatcher started, holding a lease: not part of the compose project.
     h.docker(&["pull", "--quiet", &h.image]);
@@ -543,12 +628,11 @@ fn releases_with_ordered_restarts(h: &mut Host) {
     h.until("the v1.1.0 guard", Duration::from_secs(300), |h| {
         matches!(h.agent.state.rollout.step, Step::Guard(_))
     });
+    let r0 = h.restarts().expect("the dispatcher's restarts");
     for n in 1..=2 {
         fs::write(h.work().join("exit75"), "").unwrap();
         h.until("the ordered restart", Duration::from_secs(60), |h| {
-            let id = h.dispatcher().0;
-            !h.work().join("exit75").exists()
-                && h.docker(&["inspect", "-f", "{{.RestartCount}}", &id]) == n.to_string()
+            !h.work().join("exit75").exists() && h.restarts() == Some(r0 + n)
         });
         assert!(
             matches!(h.agent.state.rollout.step, Step::Guard(_)),
@@ -565,6 +649,24 @@ fn releases_with_ordered_restarts(h: &mut Host) {
         h.agent.state.round
     );
     assert_eq!(h.agent.state.applied, Release::parse("v1.1.0"));
+    // Once it answers again after its second restart.
+    h.until("the v1.1.0 dispatcher", Duration::from_secs(60), |h| {
+        try_docker(
+            &h.tools,
+            &h.socket,
+            &h.dir.join("data/docker-config"),
+            &[
+                "exec",
+                &h.dispatcher().0,
+                "wget",
+                "-q",
+                "-O",
+                "/dev/null",
+                "http://127.0.0.1:8791/ready",
+            ],
+        )
+        .is_some()
+    });
     let (d2, rel) = h.dispatcher();
     assert_eq!(rel, "v1.1.0");
     assert_ne!(d1, d2);
@@ -1278,8 +1380,8 @@ fn real_engine_runtime_switch_moves_the_dispatcher_to_the_other_engine() {
     let _cleanup = Projects(h.tools.clone(), to.clone(), vec![h.project.clone()]);
     // The driver on another socket: the same pinned tools.
     let (tools, cfgdir) = (h.tools.clone(), config.clone());
-    h.agent.drivers_on = Some(Box::new(move |socket: &Path| {
-        Some(Box::new(Compose::new(tools.clone(), socket, &cfgdir)) as Box<dyn Driver>)
+    h.agent.drivers_on = Some(Box::new(move |p: &crate::run::switch::Place| {
+        Some(Box::new(Compose::new(tools.clone(), &p.socket_cli, &cfgdir)) as Box<dyn Driver>)
     }));
     h.publish("v1.0.0", "ok");
     h.target("v1.0.0");
@@ -1389,4 +1491,73 @@ fn real_engine_runtime_switch_moves_the_dispatcher_to_the_other_engine() {
     );
     // The task container of the old engine was never part of it.
     assert!(h.task_state().starts_with("true "));
+}
+
+// ---------------------------------------------------------------------------------------
+// #330: the Quadlet driver, on a real rootless podman under this user's own systemd.
+
+#[test]
+#[ignore = "needs rootless podman under a user manager: tests/agent-quadlet.sh"]
+fn real_engine_quadlet_rollouts_keep_the_task_running() {
+    // The agent runs no docker, compose, podman or systemctl but the pinned CLI and the
+    // system's own systemctl: decoys first in PATH would leave a mark.
+    let decoys = crate::run::state::tempdir();
+    for name in ["docker", "docker-compose", "podman", "systemctl"] {
+        let p = decoys.join(name);
+        fs::write(
+            &p,
+            format!("#!/bin/sh\ntouch {}/ran-{name}\nexit 1\n", decoys.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            decoys.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    let mut h = host_on(true);
+    let task0 = h.task_state();
+    releases_with_ordered_restarts(&mut h);
+    assert_eq!(h.task_state(), task0, "the task container kept running");
+    let unit = h.unit.as_ref().unwrap();
+    let text = fs::read_to_string(&unit.file).unwrap();
+    assert!(
+        text.contains("WantedBy=default.target") && !text.contains("AutoUpdate"),
+        "{text}"
+    );
+    assert!(!text.contains(TOKEN), "the unit holds the worker token");
+    assert_eq!(
+        systemctl(&["is-active", &format!("{}.service", unit.name)]),
+        "active"
+    );
+    // #327 on Quadlet: the token moved to its file, which the unit mounts read-only and
+    // podman's env file no longer carries; a rotation restarts the dispatcher's unit alone.
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, TOKEN);
+    let rotated = a_rotation_recreates_the_dispatcher_alone(&mut h);
+    assert_eq!(h.task_state(), task0, "the task container kept running");
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, &rotated);
+    let text = fs::read_to_string(&h.unit.as_ref().unwrap().file).unwrap();
+    assert!(
+        !text.contains(TOKEN) && !text.contains(&rotated),
+        "the unit holds a worker token"
+    );
+    a_broken_release_is_reverted(&mut h);
+    assert_eq!(h.task_state(), task0);
+    a_statement_preempts_and_goes_down(&mut h);
+    assert_eq!(
+        h.task_state(),
+        task0,
+        "the task container survived every rollout"
+    );
+    nothing_but_the_pinned_tools_and_no_secret_on_disk(&h, &decoys, &rotated);
+    // The unit podman's generator made runs what last-good says, under this user's systemd.
+    let unit = h.unit.as_ref().unwrap();
+    assert!(fs::read_to_string(&unit.file)
+        .unwrap()
+        .contains("Label=\"org.omarchy-pool.agent.release=v1.0.0\""));
+    assert_eq!(h.dispatcher().1, "v1.0.0");
 }

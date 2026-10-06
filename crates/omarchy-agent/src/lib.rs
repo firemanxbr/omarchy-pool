@@ -37,6 +37,7 @@ pub mod lint;
 pub mod manifest;
 pub mod owner;
 pub mod pool;
+pub mod quadlet;
 pub mod run;
 pub mod statement;
 pub mod verify;
@@ -119,17 +120,19 @@ pub mod fuzz {
     }
 
     /// A set template, and an override after the first NUL byte; the same second part read
-    /// as the template's `set.toml`.
+    /// as the template's `set.toml`; and both rendered for the Quadlet driver (#330).
     pub fn set(data: &[u8]) {
         let Ok(text) = std::str::from_utf8(data) else {
             return;
         };
-        match text.split_once('\0') {
-            Some((template, over)) => {
-                crate::lint::fuzz(template, Some(over));
-                let _ = crate::lint::lint_set_toml(over, template);
-            }
-            None => crate::lint::fuzz(text, None),
+        let vars = crate::lint::reference_variables();
+        if let Some((template, over)) = text.split_once('\0') {
+            crate::lint::fuzz(template, Some(over));
+            let _ = crate::lint::lint_set_toml(over, template);
+            let _ = crate::lint::lint_quadlet(template, Some(over), &vars);
+        } else {
+            crate::lint::fuzz(text, None);
+            let _ = crate::lint::lint_quadlet(text, None, &vars);
         }
     }
 }

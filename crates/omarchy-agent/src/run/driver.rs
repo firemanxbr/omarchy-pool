@@ -136,6 +136,12 @@ pub(crate) trait Driver {
     /// `poll_pull` means no pull is in flight (the agent restarted): start again.
     fn start_pull(&mut self, p: &Project, services: &[String]) -> Answer<()>;
     fn poll_pull(&mut self) -> Answer<PullState>;
+    /// Starts pulling `images` by reference, one after the other, outside any compose
+    /// project (the Quadlet driver's, #330); `poll_pull` follows them as one pull.
+    fn pull_images(&mut self, images: &[String]) -> Answer<()> {
+        let _ = images;
+        Answer::NoAnswer("this driver pulls through compose only".into())
+    }
     /// Sends the stop signal, the engine waiting up to `grace_s` before it kills.
     fn begin_drain(&mut self, u: &Unit, grace_s: u64) -> Answer<()>;
     fn drained(&mut self, u: &Unit) -> Answer<bool>;

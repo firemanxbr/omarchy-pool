@@ -31,6 +31,9 @@ pub(crate) struct Compose {
     /// An empty docker config directory: no credential helper, no context, no plugin.
     config_dir: PathBuf,
     pull: Option<Background>,
+    /// Images still to pull after the one `pull` runs (`pull_images`, the Quadlet
+    /// driver's): one child at a time.
+    queue: Vec<String>,
     stops: Vec<(String, Background)>,
 }
 
@@ -41,6 +44,7 @@ impl Compose {
             socket: socket.to_owned(),
             config_dir: config_dir.to_owned(),
             pull: None,
+            queue: Vec::new(),
             stops: Vec::new(),
         }
     }
@@ -103,8 +107,24 @@ impl Compose {
         }
     }
 
+    /// `docker pull --quiet <image>` as the polled child.
+    fn pull_one(&mut self, image: &str) -> Answer<()> {
+        let mut c = self.docker();
+        c.args(["pull", "--quiet", image]);
+        match Background::start(c, PULL_LIMIT) {
+            Ok(b) => {
+                self.pull = Some(b);
+                Answer::Yes(())
+            }
+            Err(e) => {
+                self.queue.clear();
+                Answer::NoAnswer(e)
+            }
+        }
+    }
+
     fn inspect_many(&self, ids: &[&str]) -> Answer<Vec<Unit>> {
-        if let Some(bad) = ids.iter().find(|i| !is_container_id(i)) {
+        if let Some(bad) = ids.iter().find(|i| !is_container_ref(i)) {
             return Answer::NoAnswer(format!("{bad:?} is not a container id"));
         }
         if ids.is_empty() {
@@ -127,12 +147,15 @@ impl Compose {
     }
 }
 
-/// What `inspect` reads of a container: never `.Config.Env`.
+/// What `inspect` reads of a container: never `.Config.Env`. A container the Quadlet driver
+/// started (#330) has no compose labels: its service and its config hash are the agent's.
 const INSPECT: &str = concat!(
     r#"{"id":{{json .Id}},"status":{{json .State.Status}},"exit_code":{{json .State.ExitCode}},"#,
     r#""restarts":{{json .RestartCount}},"#,
     r#""service":{{json (index .Config.Labels "com.docker.compose.service")}},"#,
     r#""config_hash":{{json (index .Config.Labels "com.docker.compose.config-hash")}},"#,
+    r#""agent_service":{{json (index .Config.Labels "org.omarchy-pool.agent.service")}},"#,
+    r#""agent_hash":{{json (index .Config.Labels "org.omarchy-pool.agent.config-hash")}},"#,
     r#""release":{{json (index .Config.Labels "org.omarchy-pool.agent.release")}}}"#
 );
 
@@ -180,18 +203,25 @@ struct Inspected {
     restarts: u64,
     service: Option<String>,
     config_hash: Option<String>,
+    #[serde(default)]
+    agent_service: Option<String>,
+    #[serde(default)]
+    agent_hash: Option<String>,
     release: Option<String>,
 }
 
 fn parse_unit(line: &str) -> Result<Unit, String> {
     let i: Inspected = serde_json::from_str(line).map_err(|e| format!("inspect: {e}"))?;
+    let first = |a: Option<String>, b: Option<String>| {
+        a.filter(|v| !v.is_empty()).or(b).unwrap_or_default()
+    };
     Ok(Unit {
         id: i.id,
-        service: i.service.unwrap_or_default(),
+        service: first(i.service, i.agent_service),
         status: i.status,
         restarts: i.restarts,
         exit_code: i.exit_code,
-        config_hash: i.config_hash.unwrap_or_default(),
+        config_hash: first(i.config_hash, i.agent_hash),
         release: i.release.unwrap_or_default(),
     })
 }
@@ -221,6 +251,17 @@ fn failed(o: &exec::Output) -> String {
 
 fn is_container_id(s: &str) -> bool {
     (12..=64).contains(&s.len()) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A container as a command may name it: its id, or its name (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`,
+/// docker's and podman's rule: never an option). The Quadlet driver's containers are named
+/// after their unit and replaced at every restart, so it follows them by name (#330).
+pub(crate) fn is_container_ref(s: &str) -> bool {
+    is_container_id(s)
+        || (1..=128).contains(&s.len())
+            && s.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
 /// A network id as docker and podman's compatible API print one: hex, like a container's.
@@ -359,6 +400,7 @@ impl Driver for Compose {
             Err(e) => return Answer::NoAnswer(e),
         };
         c.args(["pull", "--quiet"]).args(services);
+        self.queue.clear();
         match Background::start(c, PULL_LIMIT) {
             Ok(b) => {
                 self.pull = Some(b);
@@ -366,6 +408,18 @@ impl Driver for Compose {
             }
             Err(e) => Answer::NoAnswer(e),
         }
+    }
+
+    fn pull_images(&mut self, images: &[String]) -> Answer<()> {
+        if let Some(bad) = images.iter().find(|i| !is_image(i)) {
+            return Answer::NoAnswer(format!("{bad:?} is not an image reference"));
+        }
+        let Some((first, rest)) = images.split_first() else {
+            return Answer::NoAnswer("no image to pull".into());
+        };
+        self.queue = rest.to_vec();
+        self.queue.reverse();
+        self.pull_one(first)
     }
 
     fn poll_pull(&mut self) -> Answer<PullState> {
@@ -381,11 +435,22 @@ impl Driver for Compose {
             }
         };
         self.pull = None;
+        // The next image of `pull_images`, one child at a time.
+        if state == PullState::Done {
+            if let Some(next) = self.queue.pop() {
+                return Answer::Yes(match self.pull_one(&next) {
+                    Answer::Yes(()) => PullState::Running,
+                    Answer::NotFound => PullState::Failed(format!("{next}: no pull started")),
+                    Answer::NoAnswer(e) => PullState::Failed(e),
+                });
+            }
+        }
+        self.queue.clear();
         Answer::Yes(state)
     }
 
     fn begin_drain(&mut self, u: &Unit, grace_s: u64) -> Answer<()> {
-        if !is_container_id(&u.id) {
+        if !is_container_ref(&u.id) {
             return Answer::NoAnswer(format!("{:?} is not a container id", u.id));
         }
         self.stops
@@ -416,7 +481,7 @@ impl Driver for Compose {
     }
 
     fn remove(&mut self, u: &Unit, force: bool) -> Answer<()> {
-        if !is_container_id(&u.id) {
+        if !is_container_ref(&u.id) {
             return Answer::NoAnswer(format!("{:?} is not a container id", u.id));
         }
         let mut c = self.docker();
@@ -459,7 +524,7 @@ impl Driver for Compose {
     }
 
     fn exits_since(&mut self, id: &str, since: i64) -> Answer<Vec<Exit>> {
-        if !is_container_id(id) {
+        if !is_container_ref(id) {
             return Answer::NoAnswer(format!("{id:?} is not a container id"));
         }
         // Bounded by --until, so the engine sends what it has and closes. One second past
@@ -484,7 +549,7 @@ impl Driver for Compose {
     }
 
     fn ready(&mut self, id: &str, http: &str) -> Answer<bool> {
-        if !is_container_id(id) || !is_ready_http(http) {
+        if !is_container_ref(id) || !is_ready_http(http) {
             return Answer::NoAnswer(format!("refusing to ask {id:?} for {http:?}"));
         }
         let url = format!("http://{http}");
@@ -601,7 +666,7 @@ impl Driver for Compose {
     }
 
     fn logs(&mut self, id: &str, lines: u32) -> Answer<String> {
-        if !is_container_id(id) {
+        if !is_container_ref(id) {
             return Answer::NoAnswer(format!("{id:?} is not a container id"));
         }
         let mut c = self.docker();
@@ -639,12 +704,14 @@ impl Driver for Compose {
         {
             return Answer::NoAnswer(format!("{host:?} is not a host id"));
         }
+        // A bundle container carries a compose project, or (the Quadlet driver's, #330) the
+        // agent's set label: neither is a task.
         let mut c = self.docker();
         c.args([
             "ps",
             "--no-trunc",
             "--format",
-            "{{.ID}}\t{{.Label \"com.docker.compose.project\"}}",
+            "{{.ID}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"org.omarchy-pool.agent.set\"}}",
             "--filter",
         ])
         .arg(format!("label=org.omarchy-pool.agent.host={host}"));
@@ -652,8 +719,11 @@ impl Driver for Compose {
             Answer::Yes(o) => Answer::Yes(
                 o.stdout
                     .lines()
-                    .filter_map(|l| l.trim_end().split_once('\t').or(Some((l.trim(), ""))))
-                    .filter(|(id, project)| is_container_id(id.trim()) && project.trim().is_empty())
+                    .filter(|l| {
+                        let mut f = l.split('\t').map(str::trim);
+                        let id = f.next().unwrap_or("");
+                        is_container_id(id) && f.all(str::is_empty)
+                    })
                     .count(),
             ),
             Answer::NotFound => Answer::Yes(0),
@@ -770,6 +840,15 @@ fn parse_die(line: &str) -> Option<Exit> {
 }
 
 impl<T> Answer<T> {
+    /// `f` of a `Yes` value; `NotFound` and `NoAnswer` kept.
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> Answer<U> {
+        match self {
+            Answer::Yes(v) => Answer::Yes(f(v)),
+            Answer::NotFound => Answer::NotFound,
+            Answer::NoAnswer(e) => Answer::NoAnswer(e),
+        }
+    }
+
     /// Keeps `NotFound` and `NoAnswer`, dropping a `Yes` value's type.
     pub(crate) fn map_none<U: Default>(self) -> Answer<U> {
         match self {
@@ -1085,6 +1164,91 @@ mod tests {
             }
         );
         assert!(parse_engine("<html>", "[]").is_err());
+    }
+
+    #[test]
+    fn the_quadlet_driver_s_containers_are_named_counted_as_the_bundle_s_and_pulled_by_image() {
+        // #330: a unit's container has the agent's labels, not compose's.
+        let u = parse_unit(
+            r#"{"id":"abc","status":"running","exit_code":0,"restarts":0,"service":null,"config_hash":null,"agent_service":"dispatcher","agent_hash":"h2","release":"v1.0.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (u.service.as_str(), u.config_hash.as_str()),
+            ("dispatcher", "h2")
+        );
+        // compose's own labels first, where a container has both.
+        let u = parse_unit(
+            r#"{"id":"abc","status":"running","exit_code":0,"restarts":0,"service":"dispatcher","config_hash":"h1","agent_service":"other","agent_hash":"h2","release":null}"#,
+        )
+        .unwrap();
+        assert_eq!(u.config_hash, "h1");
+        // Named, never an option.
+        for ok in ["omarchy-host-dispatcher", "a", &"f".repeat(64)] {
+            assert!(is_container_ref(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "-x",
+            "--privileged",
+            ".x",
+            "a b",
+            "a/b",
+            &"a".repeat(129),
+        ] {
+            assert!(!is_container_ref(bad), "{bad}");
+        }
+        // A task is a container of the host with neither a compose project nor the agent's
+        // set label: the Quadlet dispatcher is not one.
+        let (id1, id2, id3) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let mut d = docker_doing(&format!(
+            "printf '{id1}\\t\\t\\n{id2}\\tomarchy-host\\thost\\n{id3}\\t\\thost\\n'"
+        ));
+        assert_eq!(d.host_tasks("h_1"), Answer::Yes(1));
+        // Images pulled one after the other, as one pull.
+        let (mut d, log) = recording();
+        assert_eq!(
+            d.pull_images(&["busybox:1.37.0".into(), "alpine:3.21".into()]),
+            Answer::Yes(())
+        );
+        let mut polls = 0;
+        while d.poll_pull() == Answer::Yes(PullState::Running) {
+            polls += 1;
+            assert!(polls < 500, "the pull did not end");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pulls: Vec<String> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .step_by(2)
+            .map(|l| l.split_once(' ').unwrap().1.to_owned())
+            .collect();
+        assert_eq!(
+            pulls,
+            ["pull --quiet busybox:1.37.0", "pull --quiet alpine:3.21"]
+        );
+        assert_eq!(d.poll_pull(), Answer::NotFound);
+        assert!(matches!(
+            d.pull_images(&["--all".into()]),
+            Answer::NoAnswer(_)
+        ));
+        // A failure stops the rest.
+        let mut d = docker_doing("echo 'manifest unknown' >&2; exit 1");
+        assert_eq!(
+            d.pull_images(&["busybox:1.37.0".into(), "alpine:3.21".into()]),
+            Answer::Yes(())
+        );
+        let state = loop {
+            match d.poll_pull() {
+                Answer::Yes(PullState::Running) => std::thread::sleep(Duration::from_millis(10)),
+                other => break other,
+            }
+        };
+        assert!(
+            matches!(&state, Answer::Yes(PullState::Failed(e)) if e.contains("manifest unknown")),
+            "{state:?}"
+        );
+        assert_eq!(d.poll_pull(), Answer::NotFound);
     }
 
     #[test]
