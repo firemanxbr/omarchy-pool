@@ -264,9 +264,35 @@ overrides its model. If every host runs one model, those audits record
 `agent.env`) makes them `independent: model`. The runbook's *How the pool
 hands a host work* has the rules.
 
-The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
-isolation level, the release it applied, the pool cap, the large task it
-reserves for when it does, and its leases with their lane and units. Every later call of
+The host's page, `/hosts/<id>` (#324), shows you and the other maintainers
+everything its agent reports: the runtime and its versions (the agent's,
+the compose plugin and docker CLI the release pins), the isolation level
+and whether the machine is dedicated; CPUs, memory, the free disk on the
+work root and on the engine's data root, the units the pool counts — busy,
+free for a task, the one kept for pool jobs —, the agent slots, your caps
+(the envelope's) and the pool's cap, which you or any maintainer edit there
+(never above its units: it would cap nothing, and it never touches your
+envelope); its lanes, native or emulated (with `via` and 16K pages) or
+held with why; the large task it reserves for, when it does; the release
+it applied, its target and its floor, the rollout's state and the last
+round; and its leases — kind, package, arch, lane, units, since when —,
+each with a **Stop** that fences that task only: its dispatcher stops it
+and it goes back to the queue, the others run on. A **Needs a person** box
+says what only someone at the machine (or you, on the site) can fix: your
+Confirm, a suspension, below the minimum, the disk under the floor, an
+emulated lane held for binfmt, limits the runtime does not enforce
+(cgroup delegation), the hosting requirement its isolation level does not
+meet, the engine refusing the agent's user (the docker group), and what
+the agent says of itself (linger, credentials within its user's reach).
+Its buttons are there too: Reconcile now (an Update of its registration
+while its agent takes no host order), **Drain** and **Resume claims** —
+your drain is lifted by you only —, Suspend and Retire. Anyone else sees
+its name, architectures, release and whether its agent reports; the
+[Workers page](/workers) lists every host with its owner, lanes, units busy
+and free, tasks, release and isolation level for anyone, and Status says
+when a host needs looking at and which architecture needs a host next
+([Runbook](/docs/runbook#a-new-maintainer-host), *What Status says of the hosts*).
+Every later call of
 the host to the pool is signed with its key (`Omarchy-Host`); the pool
 refuses a replay, a changed body and a clock more than 120 s off
 ([Security model](/docs/security-model#maintainer-hosts)). The agent asks

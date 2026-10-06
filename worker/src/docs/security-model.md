@@ -684,6 +684,20 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
   the host declared.
+- **Who sees what of a host** (#324, design v2 §18.1). Its page gives
+  anyone its name, architectures, release and whether its agent reports
+  (with whose it is and who stopped it, as the journal says), and the
+  Workers page's fleet row its lanes, units busy and free, tasks, release
+  and isolation level. The rest — its capacity and disks, its hostname and
+  key's fingerprint, its leases and the packages they build, its runtime
+  and versions, its "needs a person" box (which may say credentials were
+  found within the agent's user's reach), its settings, orders and legacy
+  set — is its owner's and the maintainers'. A **Stop** on one of its
+  leases is the worker orders' `stop-task` of that task (#334): its owner
+  or a maintainer, capped per login (thirty an hour), fencing that task
+  only. The pool's **cap** on its units (#337) lowers what the pool hands it
+  and is refused above the units the pool counts on it; it is never sent to
+  the host and never touches the envelope its owner wrote.
 - **The owner's soak and freeze detection** (#326, design v2 D16, §5.5).
   An owner may make a host wait `soak_minutes` (at most 100) before it takes
   a new release, from when its agent first saw the pool name it — its own
