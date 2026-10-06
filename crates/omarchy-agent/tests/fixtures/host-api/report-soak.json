@@ -11,6 +11,7 @@
     "restarts_hour": 0
   },
   "legacy": null,
+  "needs_person": [],
   "orders": [],
   "owner": {
     "agent_keys": [],

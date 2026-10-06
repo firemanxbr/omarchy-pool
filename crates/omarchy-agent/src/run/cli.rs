@@ -307,6 +307,8 @@ fn setup(
     agent.progress = Some(Arc::clone(progress));
     agent.exe = std::env::current_exe().ok();
     agent.host_env = Some(HostEnv::new(Sources::system()));
+    // What only a person fixes that it sees of itself (#324), in its report.
+    agent.self_check = super::needs::SelfCheck::system(agent.mac);
     // The seal key (#328): made at the first start that has none, its fingerprint on the
     // journal, kept in the login keychain on a Mac. One that cannot be loaded now is no
     // reason to stop: the loop tries again, and takes no sealed key meanwhile.

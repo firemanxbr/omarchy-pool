@@ -48,7 +48,7 @@ let F: Fixture;
 let PAGES: string[];
 beforeAll(async () => {
   F = await seedDashboard(env);
-  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff"];
+  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff", `/hosts/${F.host}`];
 });
 
 describe("dashboard pages", () => {
@@ -481,7 +481,7 @@ describe("dashboard pages", () => {
   it("serves the sections everyone gets without hidden — a role that cannot act sees the control grey, never nothing", async () => {
     const ALWAYS: Record<string, string[]> = {
       "/review": ["rv-queue", "rv-tiles", "rv-tabs", "rv-rows", "rv-maint", "brake"],
-      "/status": ["releases", "history", "sources", "workers", "checks", "advisories", "advisory-list", "journal", "numbers"],
+      "/status": ["releases", "history", "sources", "workers", "fleet", "checks", "advisories", "advisory-list", "journal", "numbers"],
       [`/build/${F.projectTask}`]: ["acts"],
       [`/user/${F.owner}`]: ["pk-request", "w-own", "w-pool", "share-btn"],
       "/factory": ["tiles", "request", "fx-form", "fx-name", "fx-url", "fx-license", "fx-desc", "fx-checklist", "fx-send", "workers", "fx-wlist", "line", "board"],
@@ -503,12 +503,14 @@ describe("dashboard pages", () => {
   it("reaches every routed page from the header or the footer in at most one hop, and names the shortest way", async () => {
     const fixed = [...routerSource.matchAll(/path === "(\/[^"]*)"[^\n]*return html\(/g)].map((m) => m[1]);
     // The chapters written in markdown are one route (mdChapterAt); the fixture's examples of the parametric pages stand for their kind.
-    const families: Record<string, string> = { "/build/": `/build/${F.projectTask}`, "/user/": `/user/${F.owner}`, "/package/": `/package/${F.pkg}` };
+    const families: Record<string, string> = { "/build/": `/build/${F.projectTask}`, "/user/": `/user/${F.owner}`, "/package/": `/package/${F.pkg}`, "/hosts/": `/hosts/${F.host}` };
     // What writes a family's address in a page's own script: a hand-written href for a build, or the shell's one writer of it — a package's page has one address (pkgHref), a person one (userHref, and the renderers that write it: personLink, personChip, avatar, avatarIcon, and the worker row's owner through wtPerson).
     const writes: Record<string, RegExp> = {
       "/build/": /href=\\?["']\/build\//,
       "/user/": /\b(?:userHref|personLink|personChip|avatar|avatarIcon|wtPerson|workerRow)\(/,
       "/package/": /\bpkgHref\(/,
+      // A host's page (#324): the rows Status's own script draws of the fleet link each host.
+      "/hosts/": /href=\\?["']\/hosts\//,
     };
     const routed = new Set<string>([...fixed, ...PAGES, ...Object.values(families)]);
     for (const p of fixed) expect(PAGES, `${p} is routed but not in PAGES — the served-frame rules would not read it`).toContain(p);

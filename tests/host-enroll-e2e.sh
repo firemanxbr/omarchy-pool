@@ -20,7 +20,9 @@
 #   no widening is signed before a passkey is pinned at the host; the host's
 #   page makes a pin of the owner's passkey and the real agent pins it, a pin
 #   changed on the way refused → Retire burns it, and a new enrollment with a
-#   new token enrolls the machine as a new host, with a new key.
+#   new token enrolls the machine as a new host, with a new key. Between them
+#   (#324), its page as its owner and as a visitor sees it, the fleet's row
+#   and lines, and the pages a browser gets.
 #
 # The agent runs `omarchy-agent enroll`, the enrollment step `install` runs
 # after its preflight and the envelope's confirm (#317): the same code
@@ -175,6 +177,26 @@ host_claim() { # token
 code=$(host_claim "$OMW")
 [[ $code == 204 ]] || fail "the claim: $code"
 [[ $(curl -fs "$POOL/api/v1/factory/workers/self" -H "authorization: Bearer $OMW" | jq -r .id) == "$WORKER" ]] || fail "the token is not $WORKER's"
+
+step "The host page and the fleet (#324): its owner sees its units, its leases and what needs a person, a visitor the public fields; the Workers page and Status read it"
+page=$(curl -fs "$POOL/api/v1/hosts/$HOST" -H "cookie: $SESSION")
+# Its units as the pool counts them (7, the job unit kept: 6 free for a task while its dispatcher claims), no lease, its Drain live.
+jq -e '.host.units == 7 and .host.units_busy == 0 and .host.units_free == 6 and .host.job_reserved == 1 and .host.state == "claiming" and .leases == [] and .registration.can.drain == true' <<<"$page" >/dev/null || fail "the owner's host page: $page"
+# A rootful daemon on a new host: the hosting requirement, in the box.
+jq -e '.host.needs_person | map(.what) | index("hosting") != null' <<<"$page" >/dev/null || fail "the box: $page"
+visitor=$(curl -fs "$POOL/api/v1/hosts/$HOST")
+[[ $(jq -r '.host | keys | join(",")' <<<"$visitor") == alive,arches,asleep,asleep_since,claims_stopped_at,confirmed_at,enrolled_at,id,name,owner,pool_behind_github,release_applied,silent,status,status_at,status_by,status_reason,worker ]] || fail "a visitor's fields: $visitor"
+[[ $(jq -r '.leases' <<<"$visitor") == null && $(jq -r '.registration' <<<"$visitor") == null ]] || fail "a visitor's leases: $visitor"
+fleet=$(curl -fs "$POOL/api/v1/hosts/fleet")
+jq -e --arg h "$HOST" --arg a "$ARCH" '.hosts[] | select(.id == $h) | select(.owner == "e2e" and .units == 7 and .units_free == 6 and .tasks == 0 and .isolation == "root" and .lanes == [{arch: $a, mode: "native"}])' <<<"$fleet" >/dev/null || fail "the fleet: $fleet"
+jq -e '.capacity | map(.arch) == ["x86_64", "aarch64"]' <<<"$fleet" >/dev/null || fail "the capacity rows: $fleet"
+jq -e '.lines | map(.kind) | index("new-host") != null' <<<"$fleet" >/dev/null || fail "no new-host line: $fleet"
+# The pages, as a browser gets them: the host page's sections, the Workers page's hosts and Status's card. (Their themes are the
+# shared frame's, the same on every page; #324's views in both themes are its screenshots, taken from a pool seeded like this one.)
+html=$(curl -fs "$POOL/hosts/$HOST")
+for id in hp-needs hp-facts hp-operate hp-orders hp-leases; do grep -q "id=\"$id\"" <<<"$html" || fail "the host page has no #$id"; done
+grep -q 'id="hosts-table"' <<<"$(curl -fs "$POOL/workers")" || fail "the Workers page has no hosts table"
+grep -q 'id="fleet"' <<<"$(curl -fs "$POOL/status")" || fail "Status has no hosts and capacity card"
 
 step "A rotation: a new token, the old one still good for ten minutes; the rest kept, agent.toml's keys written"
 # What install writes after the Confirm (the envelope's secrets directory and a budget), and an owner's own line.

@@ -261,7 +261,7 @@ const SCRIPT = String.raw`
       var detail = h.fingerprint ? '<div class="muted h-detail" style="font-size:12px">' + esc((h.hostname || "") + (h.where ? " · " + h.where : "")) + (h.capacity ? " · " + esc(hostCaps(h)) : "") + '<br><span class="mono">' + esc(h.fingerprint) + '</span>' + keyWhere(h) + (h.below_minimum ? '<br>' + esc(h.below_minimum) : '') + '</div>' : '';
       // Who stopped it and why, readable on a phone too (the pill's title is a hover).
       if ((h.status === "suspended" || h.status === "retired") && h.status_by) detail += '<div class="muted" style="font-size:12px">' + esc(h.status + " by " + h.status_by + (h.status_reason ? ": " + h.status_reason : "")) + '</div>';
-      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1], h.status_reason ? h.status + " by " + (h.status_by || "?") + ": " + h.status_reason : "") + (h.claims_stopped_at && h.status !== "retired" ? " " + pillHtml("error", "claims stopped", NOT_LISTED) : "") + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + confirm + '</td></tr>';
+      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1], h.status_reason ? h.status + " by " + (h.status_by || "?") + ": " + h.status_reason : "") + (h.claims_stopped_at && h.status !== "retired" ? " " + pillHtml("error", "claims stopped", NOT_LISTED) : "") + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.fleet && h.fleet.units !== null && h.fleet.units !== undefined ? num(h.fleet.units) + ' <span class="muted" title="the units its leases hold, and the ones free for a task now">' + num(h.fleet.units_busy) + ' busy · ' + num(h.fleet.units_free) + ' free</span>' : h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + confirm + '</td></tr>';
     });
     $("#hosts-table tbody").innerHTML = rows.join("");
     renderHostStop(hs);
@@ -1079,13 +1079,13 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The hosts under this name for everyone; the fingerprint and the capacity for their owner and the maintainers; Confirm on one that waits, its owner's; a maintainer's notices of the others' new hosts.
+      // The hosts under this name for everyone, each with its units busy and free (#324, its fleet row); the fingerprint, where its key lives (#330) and the capacity for their owner and the maintainers; Confirm on one that waits, its owner's; a maintainer's notices of the others' new hosts.
       id: "user.hosts-table",
       page: `/user/${F.m1}`,
       anchor: ['id="hosts-table"', 'id="h-none"'],
-      script: ['"/api/v1/hosts?owner=" + encodeURIComponent(login)', "function renderHosts()", "h.fingerprint", "function keyWhere(h)", "hostCaps(h)", "data-host-confirm", '"only " + h.owner + " confirms their host"', '"/api/v1/hosts/" + encodeURIComponent(id) + "/confirm"', "HOSTS.notices", "n.line", 'href="/hosts/'],
+      script: ['"/api/v1/hosts?owner=" + encodeURIComponent(login)', "function renderHosts()", "h.fingerprint", "function keyWhere(h)", "hostCaps(h)", "data-host-confirm", '"only " + h.owner + " confirms their host"', '"/api/v1/hosts/" + encodeURIComponent(id) + "/confirm"', "HOSTS.notices", "n.line", 'href="/hosts/', "h.fleet.units_busy", "h.fleet.units_free"],
       reads: [
-        { path: `/api/v1/hosts?owner=${F.m1}`, fields: ["hosts", "hosts.0.id", "hosts.0.name", "hosts.0.owner", "hosts.0.status", "hosts.0.arches", "hosts.0.release_applied", "hosts.0.alive", "notices", "minimum"] },
+        { path: `/api/v1/hosts?owner=${F.m1}`, fields: ["hosts", "hosts.0.id", "hosts.0.name", "hosts.0.owner", "hosts.0.status", "hosts.0.arches", "hosts.0.release_applied", "hosts.0.alive", "hosts.0.fleet.units", "hosts.0.fleet.units_busy", "hosts.0.fleet.units_free", "notices", "minimum"] },
         { path: `/api/v1/hosts?owner=${F.m1}`, as: "maintainer", fields: ["hosts.0.fingerprint", "hosts.0.host_key", "hosts.0.capacity", "hosts.0.units", "hosts.0.lanes", "hosts.0.isolation", "hosts.0.hostname" ] },
       ],
       acts: [{ method: "POST", path: `/api/v1/hosts/${F.host}/confirm`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],

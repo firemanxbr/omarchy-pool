@@ -29,7 +29,9 @@
  * packages with it while the numbers are open, the rollbacks and the
  * fast-tracks every five minutes (the Pipeline's promotions chart), a
  * journal filter's newest lines once a minute while it is picked (the
- * Journal's pace, and fewer rows: see the journal below), and an advisories
+ * Journal's pace, and fewer rows: see the journal below), the fleet's read
+ * once a minute (#324: the hosts' lines and the capacity per architecture,
+ * a minute at the edge), and an advisories
  * report once per ring and architecture looked at (half an hour at the
  * edge; the Pool reads the same address).
  */
@@ -124,7 +126,12 @@ const CSS = String.raw`
   .st-alert { margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--line); border-left: 3px solid var(--red); font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
   .st-pair { display: flex; flex-wrap: wrap; gap: 16px; align-items: stretch; }
   .st-src { flex: 1 1 560px; } .st-wk { flex: 1 1 360px; display: grid; grid-template-rows: auto 1fr auto; }
-  .st-chk { flex: 1 1 520px; } .st-adv { flex: 1 1 400px; display: grid; grid-template-rows: auto auto 1fr auto; grid-template-columns: minmax(0, 1fr); }
+  .st-chk { flex: 1 1 520px; }
+  /* Hosts and capacity (#324): the fleet's lines, one each — its mark, the host linked, the words wrapped, never cut — the table per architecture, and the second opinion. */
+  .st-fl { margin: 0; padding: 10px 16px; display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 10px; align-items: baseline; border-bottom: 1px solid var(--line); font-size: 13px; overflow-wrap: anywhere; }
+  .st-fl .st-dot { margin: 0; } .st-fl a { color: var(--text); text-decoration: none; font-weight: 600; } .st-fl a:hover { color: var(--green); }
+  .st-fl.fail > span:last-child { color: var(--red); } .st-fl.fail a { color: var(--red); }
+  .st-cap-t { min-width: 640px; } .st-cap-t td, .st-cap-t th { white-space: nowrap; } .st-adv { flex: 1 1 400px; display: grid; grid-template-rows: auto auto 1fr auto; grid-template-columns: minmax(0, 1fr); }
   .st-h { display: flex; align-items: center; gap: 10px; color: var(--dim); }
   /* A card's title is a heading (the outline: Releases, Sources, Workers, … each an h2, a fold inside a section an h3), drawn as the kit's card title (.op-card-h > b). */
   .st .st-t { margin: 0; font: 600 15px var(--font-display); color: var(--text); letter-spacing: normal; text-transform: none; }
@@ -244,6 +251,13 @@ const BODY = String.raw`
       <div class="op-card-f"><span class="st-note" id="workers-note"></span><a class="st-link" href="/workers">Every worker →</a></div>
     </section>
   </div>
+
+  <section class="op-card st-fleet" id="fleet" aria-labelledby="fleet-h">
+    <div class="op-card-h"><span class="st-h">${lucide("hard-drive", 16)}<h2 class="st-t" id="fleet-h">Hosts and capacity</h2></span><small id="fleet-note">which architecture needs a host next, and whether native matters</small></div>
+    <div id="fleet-lines"></div>
+    <div class="st-scroll"><table class="op-table st-cap-t"><thead><tr><th>Arch</th><th class="num">Queued</th><th class="num">Oldest waited</th><th class="num">Free native</th><th class="num">Free emulated</th><th class="num">Waiting for native</th><th class="num" title="the share of the week's unit-hours its native lanes spent busy">Busy 7 d native</th><th class="num" title="the share of the week's unit-hours its emulated lanes spent busy">Busy 7 d emulated</th></tr></thead><tbody id="fleet-capacity"></tbody></table></div>
+    <div class="op-card-f"><span class="st-note" id="fleet-second"></span><a class="st-link" href="/workers">Every host →</a></div>
+  </section>
 
   <div class="st-pair">
     <section class="op-card st-chk" id="checks" aria-labelledby="checks-h">
@@ -606,6 +620,26 @@ __CHARTS__
     if (notes.length && !WC_DOWN) $("#workers-note").innerHTML = notes.map(function (n) { return '<span class="st-dot ' + (n[0] === "info" ? "run" : n[0]) + '" aria-hidden="true"></span>' + n[1]; }).join("<br>");
     $("#workers-list").innerHTML = ws.map(function (w) { return workerLine(w, tasks[w.current_task]); }).join("") || '<p class="st-empty">no project worker registered</p>';
   }
+  // ---- hosts and capacity (#324, design v2 §18.3): the fleet's lines — each host's errors, warnings and info, the capacity per architecture (the
+  // scaling signal: how many wait, the oldest, the free units native and emulated, and the week's busy ratio per lane) and the second opinion —
+  // from one read once a minute, a minute at the edge. A line names its host by its page; the words are the server's, escaped.
+  var FLEET = null, LINE_DOT = { error: "fail", warn: "warn", info: "run" };
+  function pct(v) { return v === null || v === undefined ? "—" : Math.round(v * 100) + "%"; }
+  function fleetLine(l) {
+    return '<p class="st-fl ' + (l.level === "error" ? "fail" : l.level) + '"><span class="st-dot ' + LINE_DOT[l.level] + '" aria-hidden="true"></span><span>' + (l.level === "error" ? "<b>error</b> · " : "") + (l.host ? '<a href="/hosts/' + encodeURIComponent(l.host.id) + '">' + esc(l.host.name) + "</a> of " + esc(l.host.owner) + ": " : "") + esc(l.text) + "</span></p>";
+  }
+  function drawFleet(f) {
+    var said = f.lines || [], second = said.filter(function (l) { return l.kind === "second-opinion"; })[0];
+    var shown = said.filter(function (l) { return l.kind !== "second-opinion"; });
+    var errors = shown.filter(function (l) { return l.level === "error"; }).length, warns = shown.filter(function (l) { return l.level === "warn"; }).length;
+    $("#fleet-note").textContent = num((f.hosts || []).length) + " host" + ((f.hosts || []).length === 1 ? "" : "s") + (errors ? " · " + num(errors) + " error" + (errors === 1 ? "" : "s") : "") + (warns ? " · " + num(warns) + " warning" + (warns === 1 ? "" : "s") : "") + " · which architecture needs a host next";
+    $("#fleet-lines").innerHTML = shown.map(fleetLine).join("") || '<p class="st-empty">every host reports, on the pool\'s release, with room for what waits</p>';
+    $("#fleet-capacity").innerHTML = (f.capacity || []).map(function (c) {
+      return "<tr><td>" + esc(c.arch) + '</td><td class="num">' + num(c.queued) + '</td><td class="num">' + (c.oldest_wait_min === null || c.oldest_wait_min === undefined ? "—" : esc(span(c.oldest_wait_min * 60000))) + '</td><td class="num">' + num(c.free_native) + '</td><td class="num">' + num(c.free_emulated) + '</td><td class="num">' + num(c.needs_native) + '</td><td class="num">' + pct(c.busy_7d && c.busy_7d.native) + '</td><td class="num">' + pct(c.busy_7d && c.busy_7d.emulated) + "</td></tr>";
+    }).join("");
+    $("#fleet-second").innerHTML = second ? '<span class="st-dot ' + LINE_DOT[second.level] + '" aria-hidden="true"></span>' + esc("Second opinion: " + second.text) : "";
+  }
+  function loadFleet() { api("GET", "/api/v1/hosts/fleet").then(function (f) { FLEET = f; drawFleet(f); }).catch(function (e) { var why = noAnswer("host listing", e, "#fleet-note"); if (!FLEET) $("#fleet-lines").innerHTML = '<p class="st-empty">' + esc(why) + "</p>"; }); }
   function workerById(id) { return ((FACTORY || {}).workers || []).filter(function (w) { return w.id === id; })[0] || null; }
   // The listing once a minute, at the stats' pace — the one read of the Workers card, the syncing marks, the journal's agents and the numbers' jobs (a hundred rows while the numbers are open, ten otherwise: leased tasks come first). Its edge copy lives 10 s and a miss reads the tasks table whole, so the page asks no more often than the Status page before #248 did (once per stats poll).
   function loadFactory() {
@@ -1084,6 +1118,7 @@ __CHARTS__
   whoami(function () { if (STATS) { drawRings(STATS); drawHistory(STATS); } });
   drawChips(); loadJournal(); setInterval(refreshJournal, 60000);
   loadFactory(); setInterval(loadFactory, 60000);
+  loadFleet(); setInterval(loadFleet, 60000);
   loadEvidence(); setInterval(loadEvidence, 300000);
   loadSolo(); setInterval(loadSolo, 300000);
   loadStableTile(); loadAdvisories();
@@ -1246,6 +1281,17 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
         { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "workers.0.set_rollout", "pool.version", "pool.deployed_at", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at", "pool_behind_github"] },
         { path: "/workers", json: false },
       ],
+      visible: EVERYONE,
+    },
+    {
+      // Hosts and capacity (#324, design v2 §18.3): the fleet's lines — a host silent, behind after a deploy, rolled back, a lost task, the
+      // disk low, a lane held, a task clamped, a long reservation; a verify failure as an error naming the check; a new host and an agent's
+      // self-rollback as info —, the capacity per architecture with its warning and the native waits, the week's busy ratio, the second opinion.
+      id: "status.fleet",
+      page: "/status",
+      anchor: ['id="fleet"', 'id="fleet-lines"', 'id="fleet-capacity"', 'id="fleet-note"', 'id="fleet-second"', "<th>Arch</th>", "Busy 7 d native", "Free emulated", "Waiting for native"],
+      script: ['api("GET", "/api/v1/hosts/fleet")', "setInterval(loadFleet, 60000)", "function drawFleet(f)", "function fleetLine(l)", 'l.kind === "second-opinion"', "c.free_native", "c.free_emulated", "c.needs_native", "c.oldest_wait_min", "c.busy_7d.native", "c.busy_7d.emulated", 'href="/hosts/', 'noAnswer("host listing", e, "#fleet-note")', '"Second opinion: "'],
+      reads: [{ path: "/api/v1/hosts/fleet", fields: ["hosts", "lines", "lines.0.level", "lines.0.kind", "lines.0.text", "capacity", "capacity.0.arch", "capacity.0.queued", "capacity.0.oldest_wait_min", "capacity.0.free_native", "capacity.0.free_emulated", "capacity.0.needs_native", "capacity.0.busy_7d", "second_opinion", "second_opinion.mix", "second_opinion.share_none"] }],
       visible: EVERYONE,
     },
     {

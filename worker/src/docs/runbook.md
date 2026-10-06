@@ -2477,6 +2477,111 @@ verified (design v2 §5.2). From that release's deploy on:
 Tasks of every other older release run on and complete normally: a release
 never interrupts a build, a revoked one is the one exception.
 
+### What Status says of the hosts
+
+Status's *Hosts and capacity* card (#324, design v2 §18.3) is read from
+`GET /api/v1/hosts/fleet` once a minute (a minute at the edge). Each line
+names its host, linked to its page; errors come first.
+
+- **Error — `refused`, a verify failure**: the host's agent refused the
+  bundle the pool named because its verify failed, and the line names the
+  check (`signature`, a signer pin such as `repository` or `workflow`,
+  `bundle`, `content`). The agent applied nothing and runs what it ran.
+  Treat it as possible tampering: compare the release's assets with the
+  GitHub release, check the trust pins (*The GitHub settings the signature
+  relies on*), and do not lift anything until it is understood. A refusal
+  by the floor, a revoked release or a statement is the agent keeping its
+  own rules, and no line. The pool's own `GITHUB_TOKEN` probe finding a
+  write scope is Status's red headline (#308): replace the token.
+- **`silent`**: nothing of the host reached the pool for ten minutes (its
+  agent reports every five and polls every two). Check the machine, its
+  agent (`omarchy-agent status`, `omarchy-agent logs`) and
+  its network. A Mac whose last report said it sleeps is not silent for a
+  day (`ASLEEP_QUIET_H`): past that it is, the line saying its last report
+  was of its sleep — it lost power, or its agent died asleep. The Workers
+  page says the same host asleep, then silent, and never alive while
+  silent; its own page and its owner's page say it by the same rule
+  (`fleet.ts` `aliveOf`): alive is a report within fifteen minutes and
+  not silent.
+- **`behind`**: 45 minutes after the pool's deploy (the 426 gate's grace)
+  the host still runs an older release, with its last round beside it; a
+  host its owner's soak holds says nothing. Read the round on its page;
+  Reconcile now runs a round at once.
+- **`rolled-back`**: its guard reverted a release (*A host reverted a
+  release*); the six hours on its last-good have a line of their own.
+- **`readopt-failed`**: a task was lost on the host in the last hour —
+  its container gone when its dispatcher came back (a reboot, an engine
+  restart, the disk watcher). Each is back in the queue with its attempt
+  given back, at most twice per task; more than one host at once points at
+  the release.
+- **`disk-low`**: the free disk on its work root or its engine's data root
+  is under the signed floor (`capacity.disk.floor_gb`): its dispatcher
+  claims no build until there is room. Prune the engine, or grow the disk.
+- **a lane held**: an emulated lane the agent holds off, in the pool's
+  words (Status is public): *binfmt missing* is `factory/host/prep-root.sh`'s
+  to fix; *its smoke run failed* and *not checked* send you to its page,
+  whose box has the agent's own reason (an engine's error, a path); the
+  envelope's own `emulate` (*off: …*) is the owner's choice and no line.
+- **`clamped`**: a task asked a size larger than every host alive runs and
+  runs at the largest (D31): the package's page sets its size.
+- **`reserving`**: a host has held its units for one large task for over
+  an hour (it takes nothing else but pool jobs until they fit; the
+  reservation's window is two hours).
+- **Capacity, per architecture — the prompt to add a host**: *"N tasks
+  queued, the oldest waited X; free native units: 0, free emulated units:
+  M"* once an architecture's oldest queued build or trial waited 60
+  minutes (from its creation, a requeued task's run counted) with no free
+  build of it — no host that claims has a build's units and disk free on a
+  lane of it (a native one for the builds an emulated lane sent back), as a
+  claim's own room test judges them: a build's two units free for a task,
+  and its 20 GB budget plus the 10 GB floor within the smaller free disk
+  less the budgets of the builds the host already runs. Units free on a
+  host whose disk holds no further build still warn (its free units are in
+  the line; its page has its disk). One that waited beside a free build is
+  an info line saying so: its placement (a project's copy kept off its
+  requester's host), a pin or its size (a larger build's units or disk)
+  holds it, and a new host would not take it sooner. *"Tasks waiting for a
+  native <arch> host: K"* while builds
+  an emulated lane sent back (`needs_native`) wait — only a native host of
+  that architecture takes those. The table under the lines has the queue,
+  the free units native and emulated, and the week's busy ratio per lane
+  (the unit-hours its leases held, against the units the hosts that run it
+  have had since they were confirmed). A busy native lane and a long wait
+  ask for a native host of that architecture; free emulated units with
+  `needs_native` waits say emulation is not enough.
+- **Second opinion**: the models the registrations alive run, and the
+  share of last week's audits of the project's copies that were
+  `independent: none` — the model that wrote the recipe judged it. Any
+  share asks for a different model on one host (another provider's key, or
+  `FACTORY_PROVIDER` / `FACTORY_MODEL` in that host's `agent.env`; *How the
+  pool hands a host work*).
+- **Info**: a host confirmed this week, and an agent's self-rollback (the
+  version it skips until a higher one; *Self-update*).
+
+The host's own page has the same facts for its owner and the maintainers,
+with a **Needs a person** box: the owner's Confirm, a suspension, the
+maintainer list's stop, below the minimum, the disk under the floor, a lane
+held for binfmt, limits the runtime does not enforce (a rootless runtime
+needs systemd to delegate cpu, memory and pids to the agent's user), the
+hosting requirement its isolation level does not meet as a new host would
+(`root` is the Studio's recorded exception until P6), the engine refusing
+the agent's user (log out and back in, or reboot, so the docker group
+applies), and what the agent says of itself in its report's
+`needs_person` (from agent 0.5.0, looked at again hourly: linger off —
+`sudo loginctl enable-linger <user>` —, and credentials within its user's
+reach, by path: an SSH private key, a `gh` login, stored git credentials,
+a browser profile; install's preflight warns of the same once, or refuses
+them on a shared machine). A Mac's agent says neither: launchd starts it at
+its user's login, and its engine runs in the VM, which mounts nothing of
+the home directory, so the person's own keys there are no one's to move
+(install only notes how many it found).
+
+The pool writes a host's own row only when its report changed, or once the
+row is five minutes old (`HOST_ROW_TOUCH_MIN`): the state poll every two
+minutes writes nothing in between. Its registration's row keeps its own
+pace (`HOST_TOUCH_MINUTES`, a minute: selection counts a host alive by its
+last claim).
+
 ## The Studio host
 
 The project's workers run on one machine — `omarchy-studio`, a Mac Studio

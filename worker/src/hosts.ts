@@ -31,7 +31,7 @@ export interface MinHost extends Resources { work_disk_gb: number; engine_disk_g
 interface TaskUnits { build_per_size: number; trial: number; audit: number; job: number; job_reserved: number }
 interface SignedCapacity { max_size: number; community_max_size: number; min: MinHost; reserve: Resources; unit: Resources; units: TaskUnits; disk: { build_gb_per_size: number; floor_gb: number }; emulated: { share_when_native_waits: number } }
 
-const MANIFEST = parse(manifestToml) as unknown as { min_release: string; revoked: string[]; capacity: SignedCapacity };
+const MANIFEST = parse(manifestToml) as unknown as { min_release: string; revoked: string[]; capacity: SignedCapacity; tools?: Record<string, Record<string, { url?: string }>> };
 const SIGNED = MANIFEST.capacity;
 /** The minimum a host must have to join (D30), as the release signs it. */
 export const MIN_HOST: Readonly<MinHost> = Object.freeze({ ...SIGNED.min });
@@ -56,6 +56,18 @@ export const EMULATED_SHARE = SIGNED.emulated.share_when_native_waits;
  */
 export const RELEASE_POLICY: { min_release: string; revoked: string[] } = { min_release: MANIFEST.min_release, revoked: [...MANIFEST.revoked] };
 
+/**
+ * The docker CLI and the compose plugin the release pins for each platform (manifest.toml's `[tools]`, D21), by version as their URLs
+ * name it: what a host that applied the pool's own release runs (the host page, #324). `x86_64-linux`, `aarch64-linux`,
+ * `aarch64-darwin`.
+ */
+export const PINNED_TOOLS: Readonly<Record<string, { docker: string | null; compose: string | null }>> = Object.freeze(
+  Object.fromEntries(Object.entries(MANIFEST.tools ?? {}).map(([platform, t]) => [platform, {
+    docker: /docker-(\d+\.\d+\.\d+)\.tgz$/.exec(t.docker?.url ?? "")?.[1] ?? null,
+    compose: /\/download\/v?(\d+\.\d+\.\d+)\//.exec(t["docker-compose"]?.url ?? "")?.[1] ?? null,
+  }])),
+);
+
 /** An enrollment token lives this long, and is spent once. */
 export const ENROLL_TTL_MIN = 15;
 /** A signed request's time may differ from the pool's by this much. */
@@ -69,6 +81,14 @@ export const OLD_TOKEN_GRACE_MIN = 10;
 export const REPORT_MAX_BYTES = 16 * 1024;
 /** A host whose agent reported within this long is one whose agent reports: an Update for its registration is taken (§8.6). */
 export const HOST_REPORT_FRESH_MIN = 15;
+/**
+ * The host's own row is written on a change, or when what it holds is this old (#324, design v2 §18): a report that says what the
+ * last one said, or the host state's poll every two minutes, writes nothing within it. The agent reports every five minutes and
+ * polls every two, so `last_seen` is at most this and a poll old for a host whose agent runs — Status says a host silent after ten.
+ * Its registration's row keeps HOST_TOUCH_MINUTES (routes/factory.ts, #337): selection counts a host alive by its last claim, two
+ * minutes, not by this row.
+ */
+export const HOST_ROW_TOUCH_MIN = 5;
 
 /**
  * Whether a host sleeps now (#329, design v2 §19.2): its last report said `asleep: true` — a Mac's agent says so before the Mac

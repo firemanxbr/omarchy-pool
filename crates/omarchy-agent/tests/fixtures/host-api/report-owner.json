@@ -11,6 +11,7 @@
     "restarts_hour": 0
   },
   "legacy": null,
+  "needs_person": [],
   "orders": [
     {
       "at": "2027-01-15T08:02:16Z",

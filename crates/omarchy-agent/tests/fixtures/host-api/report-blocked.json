@@ -19,6 +19,7 @@
     "since": "2027-01-01T08:00:00Z",
     "state": "running"
   },
+  "needs_person": [],
   "orders": [],
   "owner": {
     "agent_keys": [],

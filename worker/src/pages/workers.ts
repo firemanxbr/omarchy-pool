@@ -1,17 +1,25 @@
 /**
- * Workers: every machine that builds for the pool, by kind — the project's
- * (the pool's own jobs: sync, render, promote, health, security, gc), the
- * review ones (the maintainers' side: trusted by a maintainer, they build
- * again what a maintainer asked for, publish what is approved and write
- * the audit) and the legacy community sets (any contributor's packages,
- * as a host builds them, #343). Each table says, per worker: the id whole (two
- * workers of one host share a name, never an id), its state in one word,
- * the release it runs, who keeps it, what its machine uses and what it
- * last did; above them, how many builds wait for a native worker (an
- * emulated one sent them back). Public, from /api/v1/factory (its live
- * read) and /api/v1/stats. Running one is a chapter of the docs.
+ * Workers: the maintainers' hosts first (#324, design v2 §18.2) — each with
+ * its owner, its architectures and lanes, its units busy and free, the tasks
+ * it runs, its release, its isolation level and whether its agent reports,
+ * from /api/v1/hosts/fleet — then the legacy registrations, as such, until
+ * P3 retires them: the role containers of the sets from before hosts, by
+ * kind — the project's (the pool's own jobs: sync, render, promote, health,
+ * security, gc), the review ones (the maintainers' side: trusted by a
+ * maintainer, they build again what a maintainer asked for, publish what is
+ * approved and write the audit) and the legacy community sets (any
+ * contributor's packages, as a host builds them, #343). A host's own
+ * registration is its row among the hosts, never a legacy one. Each legacy
+ * table says, per worker: the id whole (two workers of one host share a
+ * name, never an id), its state in one word, the release it runs, who keeps
+ * it, what its machine uses and what it last did; above them, how many
+ * builds wait for a native worker (an emulated one sent them back). Public,
+ * from /api/v1/factory (its live read), /api/v1/hosts/fleet and
+ * /api/v1/stats. Running a host is a chapter of the docs.
  */
 import { page, workerPanels } from "./layout";
+import { HOST_REPORT_FRESH_MIN } from "../hosts";
+import { SILENT_MIN } from "../fleet";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
@@ -20,9 +28,14 @@ import { JOB_KINDS } from "../jobs";
 const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">Workers</p>
-    <h1>Three kinds of worker, and whose they are</h1>
-    <p class="lede">The project's take the pool's jobs. The review ones — the project's trust, given on two maintainers' word before a host's trust came from the maintainer list — build again what a maintainer asked for, and write the audit. The community ones, legacy sets until they retire, build any contributor's packages, as a host does. All run on the maintainers' hosts — contributors run none. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one (maintainers only) →</a></p>
+    <h1>The pool's hosts, and the legacy registrations until they retire</h1>
+    <p class="lede">The project's compute is its maintainers' hosts — contributors run none: each runs as many tasks at once as its units allow, on its native lane and on an emulated one. Below them, the legacy registrations — the role containers of the sets from before hosts — until they retire: the project's take the pool's jobs; the review ones, the project's trust given on two maintainers' word, build again what a maintainer asked for and write the audit; the community ones build any contributor's packages, as a host does. <a href="/docs/workers">Run one (maintainers only) →</a></p>
   </div>
+
+  <section id="hosts" style="margin-top:28px">
+    <div class="h2row"><h2>Hosts</h2><span class="hint" id="hosts-note"></span></div>
+    <div class="table-wrap"><table id="hosts-table"><thead><tr><th>Host</th><th>Owner</th><th>Arches and lanes</th><th class="num" title="the units its leases hold, and the units free for a task now: none while it does not claim">Units busy / free</th><th class="num">Tasks</th><th>Release</th><th title="where a task-container escape lands: root, user, subuid, vm, vm-shared">Isolation</th><th>Alive</th></tr></thead><tbody></tbody></table></div>
+  </section>
 
   <div class="tiles four" id="tiles"></div>
   <p class="notice warn" id="native-wait" hidden></p>
@@ -35,7 +48,8 @@ const BODY = String.raw`
   </div>
 
   <section style="margin-top:44px">
-    <div class="h2row"><h2>Every worker</h2><span class="hint" id="lists-note"></span><label class="dim" style="font-size:13px"><input type="checkbox" id="all-workers"> show workers not seen recently</label></div>
+    <div class="h2row"><h2>Legacy registrations</h2><span class="hint" id="lists-note"></span><label class="dim" style="font-size:13px"><input type="checkbox" id="all-workers"> show workers not seen recently</label></div>
+    <p class="sub" style="margin:0 0 12px;font-size:12.5px">The role containers of the sets from before hosts — the Studio's — until P3 retires them; a host's own registration is its row among the hosts.</p>
     ${workerPanels([
       { kind: "project", blurb: "the pool's own jobs — sync, render, promote, health, security, gc — on the host a maintainer keeps" },
       { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits — the agent through a proxy that holds the key" },
@@ -49,8 +63,24 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
 __CHARTS__
   // FACTORY is the listing once it answered; DOWN the reason it did not — the tiles the listing feeds then read "—" (the shell's tilesUnanswered; the note by Every worker says why), never "0 / 0" alive; the minutes tile is the stats poll's and keeps its number.
-  var FACTORY = null, STATS = null, DOWN = null;
-  skeletonTiles("#tiles", 4); wtTables();
+  var FACTORY = null, STATS = null, DOWN = null, FLEET = null;
+  skeletonTiles("#tiles", 4); wtTables(); skeletonRows("#hosts-table", 8, 2);
+  // The hosts (#324, design v2 §18.2): the fleet's read — owner, arches and lanes, units busy and free, tasks, release, isolation, alive.
+  var FRESH_MIN = ${HOST_REPORT_FRESH_MIN};
+  // A host's row says Alive "no" once it is silent too (#324, fleet.ts fleetHostOf): never "silent" beside "yes".
+  var SILENT_MIN = ${SILENT_MIN};
+  function laneWords(h) { return (h.lanes || []).map(function (l) { return esc(l.arch) + ' <span class="muted">' + esc(l.mode + (l.via ? " (" + l.via + (l.page16k ? ", 16K pages" : "") + ")" : "")) + "</span>"; }).join("<br>") || '<span class="muted">—</span>'; }
+  var HOST_STATE = { claiming: ["ok", "claiming"], full: ["blue", "full"], asleep: ["none", "asleep"], silent: ["warn", "silent"], drained: ["warn", "drained"], suspended: ["error", "suspended"], "pending-owner": ["warn", "waits for Confirm"], "below-minimum": ["warn", "below the minimum"], "not-claiming": ["warn", "not claiming"], stopped: ["error", "claims stopped"] };
+  function drawHosts(f) {
+    var hs = f.hosts || [], alive = hs.filter(function (h) { return h.alive; }).length;
+    var used = hs.reduce(function (n, h) { return n + (h.units_busy || 0); }, 0), units = hs.reduce(function (n, h) { return n + (h.units || 0); }, 0), tasks = hs.reduce(function (n, h) { return n + (h.tasks || 0); }, 0);
+    $("#hosts-note").textContent = hs.length ? num(hs.length) + (hs.length === 1 ? " host · " : " hosts · ") + num(alive) + " alive · " + num(used) + " of " + num(units) + " units busy · " + num(tasks) + (tasks === 1 ? " task" : " tasks") : "";
+    $("#hosts-table tbody").innerHTML = hs.map(function (h) {
+      var st = HOST_STATE[h.state] || ["none", h.state];
+      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + "</a> " + pillHtml(st[0], st[1]) + "</td><td>" + personLink(h.owner) + "</td><td>" + laneWords(h) + '</td><td class="num">' + (h.units === null || h.units === undefined ? "—" : num(h.units_busy) + " / " + num(h.units_free)) + '</td><td class="num">' + num(h.tasks) + '</td><td><span class="mono">' + esc(h.release || "—") + '</span></td><td><span class="mono">' + esc(h.isolation || "?") + "</span>" + (h.dedicated ? ' <span class="muted">dedicated</span>' : "") + "</td><td>" + (h.alive ? "yes" : '<span class="muted" title="' + (h.state === "silent" ? "silent: nothing of it reached the pool in the last " + SILENT_MIN + " minutes" : "its agent has not reported in the last " + FRESH_MIN + " minutes") + '">no</span>') + "</td></tr>";
+    }).join("") || '<tr><td colspan="8" class="muted">no host yet — a maintainer adds one on their page</td></tr>';
+  }
+  function loadFleet() { api("GET", "/api/v1/hosts/fleet").then(function (f) { FLEET = f; drawHosts(f); }).catch(function (e) { noAnswer("host listing", e, "#hosts-note"); if (!FLEET) $("#hosts-table tbody").innerHTML = ""; }); }
   // The kind's colour on every chart of the page: the card's line, the bar per worker, the legend.
   var COLOR = { project: C.green, review: C.blue, community: C.lilac };
   // What each kind finished per day over the last week, from the stats series: the pool's jobs are the
@@ -70,9 +100,10 @@ __CHARTS__
     return { days: days, P: P };
   }
   // The four tiles, from the shell's counts (workerCounts), the workers building now, the load and the week's minutes — one list, so the tiles over a listing that did not answer carry the same labels.
-  function tilesOf(wc, bz, load, wm) {
+  function tilesOf(wc, wcl, bz, load, wm) {
     return [
-      ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " community", wc.alive ? "ok" : "warn"],
+      // The registrations alive: the hosts' (their dispatchers) and the legacy ones by kind (#324).
+      ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.alive - wcl.alive) + " host · " + num(wcl.byKind.project.alive) + " project · " + num(wcl.byKind.review.alive) + " review · " + num(wcl.byKind.community.alive) + " community", wc.alive ? "ok" : "warn"],
       ["Building now", num(wc.building), wc.building ? bz.map(function (w) { return "#" + w.current_task; }).join(" · ") : "every worker idle"],
       ["Load · 24 h", load + "%", "of the last day with a lease, across the alive ones"],
       // The stats poll's, not the listing's: marked so, it keeps its number when the listing did not answer — the chart below draws the same series.
@@ -82,22 +113,24 @@ __CHARTS__
   // The load: what each worker did in the last day, from the stats series (finished tasks by duration, a running one by its start).
   function loadOf() { var L = {}; ((STATS && STATS.series && STATS.series.workers_daily) || []).forEach(function (r) { L[r.worker] = { ms: Number(r.ms || 0) + Number(r.running_ms || 0), done: Number(r.done || 0) }; }); return L; }
   function render() {
-    var d = FACTORY; if (!d) { if (DOWN) setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN)); return; }
+    var d = FACTORY; if (!d) { if (DOWN) setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN)); return; }
     var showAll = $("#all-workers").checked, LOAD = loadOf();
     var busyOf = function (w) { var l = LOAD[w.id]; return l ? Math.min(100, Math.round(100 * l.ms / 86400000)) : 0; };
     var kinds = { project: [], review: [], community: [] };
-    d.workers.forEach(function (w) { kinds[wtKind(w)].push(w); });
+    // A host's own registration is its row among the hosts (#324): the cards and the tables below are the legacy registrations'.
+    var legacy = d.workers.filter(function (w) { return w.kind !== "host"; });
+    legacy.forEach(function (w) { kinds[wtKind(w)].push(w); });
     // The numbers are the shell's (workerCounts: registered, alive, building, and the same per kind); the rows behind them stay here for the load and the task ids.
-    var wc = workerCounts(d.workers), al = d.workers.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; });
+    var wc = workerCounts(d.workers), wcl = workerCounts(legacy), al = d.workers.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; });
     // Worker minutes: the sum of the series the chart below draws (workerMinutes over jobs_daily), the number the Status page and the Pipeline say — not the metrics snapshot.
     var wm = STATS ? workerMinutes(STATS.series, 7) : null;
     var load = al.length ? Math.round(al.reduce(function (n, w) { return n + busyOf(w); }, 0) / al.length) : 0;
-    setTiles("#tiles", tilesOf(wc, bz, load, wm));
+    setTiles("#tiles", tilesOf(wc, wcl, bz, load, wm));
     drawNativeWait(d);
     // One card per kind: one line on what it is for, the tasks it finished per day over a week (the Pool page's growth line, in the kind's colour), four numbers.
     var PD = perDay();
     var card = function (cls, name, ws, blurb) {
-      var k = wc.byKind[cls], alv = ws.filter(function (w) { return w.alive; });
+      var k = wcl.byKind[cls], alv = ws.filter(function (w) { return w.alive; });
       var busyPct = alv.length ? Math.round(alv.reduce(function (n, w) { return n + busyOf(w); }, 0) / alv.length) : 0;
       var pd = PD.P[cls], pts = PD.days.map(function (d) { return { t: Date.parse(d), v: pd[d].done + pd[d].failed }; });
       var done7 = PD.days.reduce(function (n, d) { return n + pd[d].done; }, 0), failed7 = PD.days.reduce(function (n, d) { return n + pd[d].failed; }, 0);
@@ -145,7 +178,7 @@ __CHARTS__
   function load() { api("GET", "/api/v1/factory?live=1&limit=" + LISTED).then(function (d) { FACTORY = d; DOWN = null; $("#lists-note").textContent = ""; render(); }).catch(function (e) { DOWN = noAnswer("worker listing", e, "#lists-note"); render(); }); }
   $("#all-workers").onchange = render;
   // Who is looking decides what the rows show (the log icon is the owner's and the maintainers'): the session first, then the rows.
-  whoami(function () { load(); }); setInterval(load, 20000);
+  whoami(function () { load(); loadFleet(); }); setInterval(load, 20000); setInterval(loadFleet, 60000);
   liveStats(function (d) { STATS = d; renderMinutes(d); render(); }, 60000);
 `;
 
@@ -153,7 +186,7 @@ export function workersHtml(poolUrl: string, version: RunningVersion): string {
   return page({
     path: "/workers",
     title: "Workers · omarchy-pool",
-    description: "Every worker building for the pool, by kind — the project's, the review ones two maintainers vouched for, the legacy community sets — alive or gone, how busy, what it built.",
+    description: "The pool's hosts — their lanes, units busy and free, tasks, release and isolation level — and the legacy registrations by kind until they retire: the project's, the review ones, the community sets.",
     // The machines are the Factory's: they build what contributors ask for, and the footer no longer names them (#240).
     active: "factory",
     body: BODY,
@@ -176,7 +209,17 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "workers.hero",
     page: "/workers",
-    anchor: ["<h1>Three kinds of worker, and whose they are</h1>", "contributors run none", '<a href="/docs/workers">Run one (maintainers only) →</a>'],
+    anchor: ["<h1>The pool's hosts, and the legacy registrations until they retire</h1>", "contributors run none", '<a href="/docs/workers">Run one (maintainers only) →</a>'],
+    visible: EVERYONE,
+  },
+  {
+    // The hosts (#324, design v2 §18.2): owner, arches and lanes, units busy and free, tasks running, release, isolation level and whether its
+    // agent reports — public, from the fleet's read; a host's own registration is its row here, never a legacy one.
+    id: "workers.hosts",
+    page: "/workers",
+    anchor: ['id="hosts"', 'id="hosts-table"', 'id="hosts-note"', "<th>Arches and lanes</th>", "<h2>Legacy registrations</h2>"],
+    script: ['api("GET", "/api/v1/hosts/fleet")', "function drawHosts(f)", "function laneWords(h)", "HOST_STATE", "h.units_busy", "h.units_free", "num(h.tasks)", "h.isolation", "h.alive", 'href="/hosts/', 'noAnswer("host listing", e, "#hosts-note")', "setInterval(loadFleet, 60000)"],
+    reads: [{ path: "/api/v1/hosts/fleet", fields: ["hosts", "hosts.0.id", "hosts.0.name", "hosts.0.owner", "hosts.0.lanes", "hosts.0.units", "hosts.0.units_busy", "hosts.0.units_free", "hosts.0.tasks", "hosts.0.release", "hosts.0.isolation", "hosts.0.dedicated", "hosts.0.alive", "hosts.0.state"] }],
     visible: EVERYONE,
   },
   {
@@ -184,7 +227,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     page: "/workers",
     anchor: ['id="tiles"'],
     // The counts are the shell's (workerCounts over the listing), the same the Pool's tiles say; over a listing that did not answer the three it feeds read "—" (the shell's tilesUnanswered) and the minutes tile, the stats poll's, keeps its number.
-    script: ['"#tiles"', "workerCounts(d.workers)", "function tilesOf(wc, bz, load, wm)", 'setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN))', '"", null, "stats"]', '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
+    script: ['"#tiles"', "workerCounts(d.workers)", "function tilesOf(wc, wcl, bz, load, wm)", 'setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN))', '"", null, "stats"]', '"Alive"', "wc.alive", "wc.registered", "wc.alive - wcl.alive", "wcl.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
     reads: [
       { path: "/api/v1/factory?live=1&limit=200", fields: ["workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels"] },
       { path: "/api/v1/stats", fields: ["series.workers_daily", "series.jobs_daily"] },
@@ -204,9 +247,9 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.kind-cards",
     page: "/workers",
     anchor: ['id="kinds"'],
-    script: ['"#kinds"', `POOL_KINDS = ${JSON.stringify(JOB_KINDS)}`, "POOL_KINDS.indexOf(r.kind)", "jobBucket(r.status)", 'class="kchart"', 'class="mini four"', "builds_daily", "wc.byKind[cls]", "k.registered", "k.alive", "k.building"],
+    script: ['"#kinds"', `POOL_KINDS = ${JSON.stringify(JOB_KINDS)}`, "POOL_KINDS.indexOf(r.kind)", "jobBucket(r.status)", 'class="kchart"', 'class="mini four"', "builds_daily", "wcl.byKind[cls]", "k.registered", "k.alive", "k.building", 'w.kind !== "host"'],
     reads: [
-      { path: "/api/v1/factory?live=1&limit=200", fields: ["workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at"] },
+      { path: "/api/v1/factory?live=1&limit=200", fields: ["workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.kind"] },
       {
         path: "/api/v1/stats",
         fields: [
@@ -263,7 +306,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.log",
     page: "/workers",
     anchor: ['id="w-project"', 'id="w-community"'],
-    script: ["workerRow(w", "whoami(function () { load(); })"],
+    script: ["workerRow(w", "whoami(function () { load(); loadFleet(); })"],
     reads: [
       { path: `/api/v1/factory/workers/${F.worker}/log`, status: 401 },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "contributor", status: 403 },

@@ -24,7 +24,8 @@
  * `sealAgentKey.toString()`), so the browser seals with exactly the code the tests run.
  * That is why it is written the way it is: WebCrypto and the runtime's globals only — no
  * import, no helper, no function defined inside it (the bundler would wrap one in a
- * helper of its own that a page does not have).
+ * helper of its own that a page does not have) — and no template literal: a served page
+ * carries no `${` (pages.test reads the host page too, #324).
  */
 export const SEAL_INFO = "omarchy-agent/seal/1";
 /** The longest value a sealed key may hold (bytes), as the agent opens one. */
@@ -33,7 +34,7 @@ export const SEAL_VALUE_MAX = 1024;
 export interface SealedKey { name: string; epk: string; nonce: string; ct: string }
 
 export async function sealAgentKey(sealKey: string, host: string, name: string, value: string): Promise<SealedKey> {
-  if (!/^[\x21-\x7e]{1,1024}$/.test(value)) throw new Error(`${name}: one line of printable characters, no space, at most 1024`);
+  if (!/^[\x21-\x7e]{1,1024}$/.test(value)) throw new Error(name + ": one line of printable characters, no space, at most 1024");
   const raw = atob(sealKey.replace(/-/g, "+").replace(/_/g, "/"));
   const pub = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) pub[i] = raw.charCodeAt(i);
