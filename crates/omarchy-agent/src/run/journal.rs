@@ -90,13 +90,14 @@ impl Journal {
 /// addresses, the secrets directory's path, the budget), which an engine's error may name;
 /// and the host worker token from its own file (#327).
 pub(crate) fn env_secrets(set_dir: &Path) -> Vec<String> {
-    let mut out = env_values(&set_dir.join("etc"));
+    let mut out = Vec::new();
     if let Ok(t) = fs::read_to_string(crate::dispatcher_env::token_path_in(set_dir)) {
         let t = t.trim();
         if t.len() >= 8 {
             out.push(t.to_owned());
         }
     }
+    out.extend(env_values(&set_dir.join("etc")));
     out.sort_by_key(|s| std::cmp::Reverse(s.len()));
     out.dedup();
     out

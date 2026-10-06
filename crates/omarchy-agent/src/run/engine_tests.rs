@@ -51,8 +51,11 @@ const TOKEN: &str = "omw_engine_test_token_0123456789";
 const STANDIN: &str = r#"set -eu
 root="$${OMARCHY_WORK_ROOT}"
 me="$$(hostname)"
-# A careless dispatcher: its token in its log, for #325's diagnostics to scrub.
-echo "stand-in: up as $$me with worker token $${OMARCHY_WORKER_TOKEN:-none}"
+# A careless dispatcher: its token in its log, for #325's diagnostics to scrub — read from
+# its file (#327), or the plain variable an older release's template gives.
+tok="$${OMARCHY_WORKER_TOKEN:-none}"
+if [ -n "$${OMARCHY_WORKER_TOKEN_FILE:-}" ]; then tok="$$(cat "$$OMARCHY_WORKER_TOKEN_FILE" || echo unreadable)"; fi
+echo "stand-in: up as $$me with worker token $$tok"
 if [ "$${1:-ok}" = broken ]; then echo "stand-in: a broken release" >&2; exit 1; fi
 n=0
 for f in "$$root"/leases/*; do [ -e "$$f" ] && n=$$((n + 1)); done
