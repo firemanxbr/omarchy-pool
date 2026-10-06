@@ -12,9 +12,11 @@
 //! - the `# worker:` line: the registration the token belongs to (agent.toml's `worker_id`);
 //! - `OMARCHY_WORKER_TOKEN` only while a release from before #327 is applied or staged here
 //!   ([`older_release_here`]): its template reads the token from this file alone, so the
-//!   agent keeps it here too until that release is gone (a rollback to one puts it back);
-//!   once none is left the next refresh takes it out, and that change recreates the
-//!   dispatcher, as any change of an input does;
+//!   agent keeps it here too until that release is gone (a rollback to one puts it back,
+//!   and a rollback statement's `agent_to` puts it back before the agent moves down, the
+//!   agent below being one that may write no such line); once none is left the next
+//!   refresh takes it out, and that change recreates the dispatcher, as any change of an
+//!   input does;
 //! - `OMARCHY_HOST_ADDRESSES`: the host's own addresses ([`addresses`]), which every task's
 //!   egress sidecar refuses besides the private ranges;
 //! - `OMARCHY_SECRETS_DIR`: the directory install chose (agent.toml's `set.secrets_dir`),
@@ -613,7 +615,8 @@ pub fn refresh(path: &Path, r: &Rendered) -> Result<Refresh, String> {
 /// The token put into the env file or taken out of it as `plain` says, every other line as
 /// it is: a round that staged a release does this before it hashes the set's inputs, so a
 /// rollback to a release from before #327 starts its dispatcher with the token where it
-/// reads it.
+/// reads it; and so does the run loop before a rollback statement's `agent_to` moves the
+/// agent down to run such a rollback.
 pub fn refresh_token(path: &Path, plain: bool) -> Result<Refresh, String> {
     sync(path, None, plain)
 }

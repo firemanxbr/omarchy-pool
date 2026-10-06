@@ -770,12 +770,17 @@ always taken as the newest one (an older agent wrote it). While a release
 from before #327 runs or is being rolled out — its dispatcher reads only
 `OMARCHY_WORKER_TOKEN` — the agent keeps the token in `etc/dispatcher.env`
 too, and a round that rolls back to such a release puts it back before it
-creates that dispatcher; once none is left the next minute's refresh takes it
-out, which recreates the dispatcher once more. A token line the agent cannot
-move (not one word) stops it with a `dispatcher-env` line in the journal
-until you fix or remove the line. The image reads `OMARCHY_WORKER_TOKEN_FILE`
-before `OMARCHY_WORKER_TOKEN`, and a file it names but cannot read stops the
-container instead of falling back.
+creates that dispatcher. A rollback statement whose `agent_to` moves the agent
+down hands that round to the agent below, which may be from before #327 and
+keep a token line without writing one, so the agent puts the line back before
+it moves when the target's template reads the token there: a line it cannot
+write holds the statement (`held`, "the dispatcher's token: …"), and a move
+that fails takes the line out again. Once no such release is left the next
+minute's refresh takes it out, which recreates the dispatcher once more. A
+token line the agent cannot move (not one word) stops it with a
+`dispatcher-env` line in the journal until you fix or remove the line. The
+image reads `OMARCHY_WORKER_TOKEN_FILE` before `OMARCHY_WORKER_TOKEN`, and a
+file it names but cannot read stops the container instead of falling back.
 
 Each round goes `render → lint → plan → pull → replace → guard → commit`,
 or `revert`, each step written to `state.json` before it acts, so a restart

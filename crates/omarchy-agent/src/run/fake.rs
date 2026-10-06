@@ -518,6 +518,20 @@ pub(crate) struct Ships<'a> {
 
 /// Publishes `r` (created a day before T0) shipping `agent`.
 pub(crate) fn publish_agent(remote: &Remote, r: &str, agent: &Ships) {
+    let m = agent_manifest(remote, r, agent);
+    publish_manifest(remote, r, "2027-01-14T08:00:00Z", m, "");
+}
+
+/// The same, with the template of a release from before #327 ([`before_token_file`]).
+pub(crate) fn publish_agent_before_token_file(remote: &Remote, r: &str, agent: &Ships) {
+    let mut m = agent_manifest(remote, r, agent);
+    m["created"] = "2027-01-14T08:00:00Z".into();
+    m["inner"]["pools"] = serde_json::json!(["https://pkgs.omarchy-pool.org"]);
+    publish_compose(remote, r, m, &before_token_file(&rendered_compose("")));
+}
+
+/// `r`'s manifest shipping `agent`, whose binary is published as its asset.
+fn agent_manifest(remote: &Remote, r: &str, agent: &Ships) -> serde_json::Value {
     let mut m = tests_support::manifest_json(r, "v1.0.0", &[]);
     m["agent"]["version"] = agent.version.into();
     m["min_agent"] = agent.min_agent.into();
@@ -528,7 +542,7 @@ pub(crate) fn publish_agent(remote: &Remote, r: &str, agent: &Ships) {
         .borrow_mut()
         .assets
         .insert(format!("{r}/{asset}"), agent.binary.to_vec());
-    publish_manifest(remote, r, "2027-01-14T08:00:00Z", m, "");
+    m
 }
 
 /// Publishes `r` (created a day before T0) with the template of a release from before #327

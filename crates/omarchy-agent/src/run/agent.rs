@@ -530,7 +530,7 @@ impl Agent {
                     if let Some(down) = st.agent_to().filter(|v| *v < self.version) {
                         let ships = b.manifest().outer().agent();
                         let moved = if ships.version() == down {
-                            self.move_agent(target, ships, now)
+                            self.move_agent_down(target, &b, now)
                         } else {
                             Err(format!(
                                 "agent_to {down}, but {target} ships agent {}",
@@ -573,6 +573,46 @@ impl Agent {
             }
             Err(e) => self.say(now, Outcome::Refused, &format!("{target}: {e}")),
         }
+    }
+
+    /// A rollback statement's `agent_to` (#316): the agent moved down to the one `b` ships,
+    /// with the host worker token put back into `etc/dispatcher.env` first when the target's
+    /// template reads it there (#327). The agent below runs the rollback round, and this one
+    /// stages nothing before it exits; one from before #327 keeps a token line it finds but
+    /// never writes one, so without it that round would create the older release's
+    /// dispatcher with no token. A file that cannot be written holds the statement; a move
+    /// that fails leaves the file as the releases here need it.
+    fn move_agent_down(
+        &mut self,
+        target: Release,
+        b: &VerifiedBundle,
+        now: i64,
+    ) -> Result<(), String> {
+        let env = dispatcher_env::path_in(&self.cfg.set_dir);
+        // A template that cannot be read counts as an older one, as `older_release_here`
+        // counts it: the token stays.
+        let older = b
+            .file(&format!("sets/{}/compose.yml", self.cfg.set_name))
+            .and_then(|c| std::str::from_utf8(c).ok())
+            .is_none_or(|t| !crate::lint::reads_token_file(t));
+        if older {
+            dispatcher_env::refresh_token(&env, true)
+                .map_err(|e| format!("the dispatcher's token: {e}"))?;
+        }
+        let moved = self.move_agent(target, b.manifest().outer().agent(), now);
+        if moved.is_err() && older {
+            // Out again while no release here needs it (the minute's refresh would do it
+            // too), so the drift check does not recreate the dispatcher for it.
+            let plain = dispatcher_env::older_release_here(&self.paths.data);
+            if let Err(e) = dispatcher_env::refresh_token(&env, plain) {
+                self.journal.write(
+                    now,
+                    "dispatcher-env",
+                    serde_json::json!({"detail": format!("the token line was not taken out again: {e}")}),
+                );
+            }
+        }
+        moved
     }
 
     /// A bundle only a higher agent reads: the agent updates itself from its (signed)

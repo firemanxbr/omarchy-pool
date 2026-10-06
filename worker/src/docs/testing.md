@@ -778,7 +778,11 @@ recreates only the dispatcher after a rotation while the task runs on and the
 journal scrubs the new token,
 and on a host upgraded from #371's layout keeps the token in the env file
 for an older release, takes it out once a release that reads the file is
-committed, and puts it back for a rollback to the older one. `bash
+committed, and puts it back for a rollback to the older one, and before a
+rollback statement's `agent_to` moves the agent down to run such a rollback
+(and out again when that move fails); `pkg-repo`'s unit tests give a
+dispatcher's helper (the trial's staging, the keyrings' fetch) neither a token
+nor the token file's name. `bash
 tests/agent-run-loop.sh` (CI, rootful docker and rootless podman) starts from
 #371's layout on a real engine: after the first round `docker inspect`
 shows the token in neither the dispatcher's nor the task's environment, the
