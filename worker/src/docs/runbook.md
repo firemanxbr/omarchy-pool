@@ -1137,8 +1137,14 @@ order beyond them is answered `refused` with `brake: …` and when the next
 would fit; a release change beyond them is `held` and asked again at the
 next poll. What the agent
 does on its own — a changed input, drift, `omarchy-agent round` — is never
-braked. The counters are in `state.json`, so restarting the agent resets
-nothing; `omarchy-agent status` and the host page show the last window.
+braked. On a Mac (#320) a restart of the `omarchy` VM by the run loop (a
+size or mount change, an exposure, a clock that would not hold) stops the
+dispatcher in it: it counts as one of the six restarts, so the pool's orders
+and rounds get only the room left, but the brake never holds it — the VM's
+own rate limit (one action per 10 minutes, six a day) does. A start of a
+stopped VM is not one. The counters are in `state.json`, so restarting the
+agent resets nothing; `omarchy-agent status` and the host page show the last
+window.
 
 **Changing the runtime is the owner's, at the host** (#325): `omarchy-agent
 runtime switch compose/podman` (or `compose/docker`; `--socket <path>` when
@@ -1166,7 +1172,9 @@ A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
 and `logs` follow it. Install writes no runtime into `agent.toml` (it finds
 a socket, and podman's speaks docker's API): until a switch names one there,
 the agent asks the engine behind the socket which it is, and its report says
-that one (`null` until the engine answers).
+that one (`null` until the engine answers). On a Mac (#320) the switch is
+refused with nothing changed: the bundle runs in the VM's engine, which the
+agent keeps, and the drivers it carries are a Linux host's.
 
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the

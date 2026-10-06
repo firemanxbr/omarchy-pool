@@ -28,6 +28,12 @@
 //! then. Running tasks keep their job tokens valid that way; a task a restart ended is the
 //! pool's to requeue when its lease expires. The clock is checked whatever else the profile
 //! waits for (a resize held back by a running task, a `colima.yaml` that cannot be read).
+//!
+//! A restart of the running profile stops the dispatcher in it, so the loop records each
+//! as one of the dispatcher's restarts on the host-side brake (#325,
+//! [`Keeper::take_restarts`]): the pool's orders and rounds get only the room left. The
+//! brake never holds the keeper — M7's rate limit governs it, and an exposure must not
+//! wait — just as it never holds what the agent does on its own.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -297,6 +303,9 @@ pub(crate) struct Keeper {
     next_firewall: i64,
     /// What was last said, so each state is journalled once.
     said: Option<String>,
+    /// Restarts of a running profile since the loop last asked: each recreated the
+    /// dispatcher, which the brake counts (#325).
+    restarted: u32,
 }
 
 impl Keeper {
@@ -326,7 +335,15 @@ impl Keeper {
             next_clock: 0,
             next_firewall: 0,
             said: None,
+            restarted: 0,
         }
+    }
+
+    /// How many times a running profile was stopped for a restart since the last ask: the
+    /// dispatcher in it stopped with it, so the brake counts each as one of its restarts.
+    /// A start of a stopped profile is not one (nothing ran to restart).
+    pub fn take_restarts(&mut self) -> u32 {
+        std::mem::take(&mut self.restarted)
     }
 
     /// The pinned docker CLI (the loop's tools, whenever they open or change).
@@ -684,6 +701,7 @@ impl Keeper {
             self.say(journal, now, "vm", &format!("colima stop: {e}"));
             return false;
         }
+        self.restarted += 1;
         self.start(now, journal, want, why, true);
         true
     }

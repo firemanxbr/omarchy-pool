@@ -458,6 +458,11 @@ impl Agent {
         if k.step(now, self.pool_date, &mut tasks, gate, &self.journal) {
             self.vm_recount_at = Some(now);
         }
+        // A restart of the VM recreated the dispatcher: one of the brake's restarts (#325),
+        // never held by it.
+        for _ in 0..k.take_restarts() {
+            self.state.brake.record(now, &[Ask::Restart]);
+        }
         // A new agent's health gate touches nothing but the VM's start.
         if !gate && self.vm_recount_at.is_some_and(|t| now >= t) {
             self.vm_recount_at = (!self.recount(now)).then_some(now + RECOUNT_AGAIN_S);

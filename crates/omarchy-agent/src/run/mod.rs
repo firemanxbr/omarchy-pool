@@ -38,7 +38,10 @@
 //! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
 //! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
 //! agent only when it exits, so the progress watchdog ([`cli`]) also ends a self-update's
-//! candidate that hangs past its health gate's deadline.
+//! candidate that hangs past its health gate's deadline. A restart of the VM recreates the
+//! dispatcher, so the brake counts it as one of its restarts (it never holds the keeper,
+//! whose own rate limit governs it), and the runtime switch, which moves between Linux
+//! engines, is refused there.
 
 pub mod brake;
 pub mod config;

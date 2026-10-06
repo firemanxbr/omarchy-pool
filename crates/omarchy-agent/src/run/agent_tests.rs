@@ -1416,6 +1416,41 @@ mod on_a_mac {
         assert_eq!(*tries.borrow(), 2);
     }
 
+    /// A restart of the VM stops the dispatcher in it: the brake counts it as one of its
+    /// restarts, so the pool's orders get only the room left, but never holds it (#325);
+    /// a start of a stopped VM restarts nothing.
+    #[test]
+    fn a_restart_of_the_vm_is_one_of_the_brakes_restarts_and_never_held_by_it() {
+        use crate::run::brake::{Ask, RESTARTS_PER_HOUR};
+        let (mut w, colima) = mac(Colima::default());
+        w.agent.docker_cli = Some(PathBuf::from("/data/tools/0a/docker"));
+        w.tick(3);
+        w.tick(3);
+        assert!(colima.borrow().running);
+        assert_eq!(w.agent.state.brake.count(Ask::Restart, w.now), 0);
+        // The pool spent every restart of the hour; then agent.toml's size differs from
+        // the saved profile, and no task runs.
+        w.engine
+            .borrow_mut()
+            .containers
+            .retain(|c| !c.project.is_empty());
+        for _ in 0..RESTARTS_PER_HOUR {
+            w.agent.state.brake.record(w.now, &[Ask::Restart]);
+        }
+        let mut smaller = want();
+        smaller.size = crate::vm::Size { cpus: 4, mem_gb: 8 };
+        colima.borrow_mut().saved = Some(saved_for(&smaller));
+        let stops =
+            |c: &Rc<RefCell<Colima>>| c.borrow().calls.iter().filter(|c| *c == "stop").count();
+        assert_eq!(stops(&colima), 0);
+        w.tick(crate::vm::COOLDOWN_S);
+        assert_eq!(stops(&colima), 1, "{}", w.journal());
+        assert_eq!(
+            w.agent.state.brake.count(Ask::Restart, w.now),
+            RESTARTS_PER_HOUR + 1
+        );
+    }
+
     #[test]
     fn the_applied_releases_signed_minimum_holds_the_vms_size() {
         // agent.toml edited down to 2 CPUs and 4 GB: below the release's minimum.

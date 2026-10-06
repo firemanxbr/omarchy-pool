@@ -581,7 +581,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   the pool's target, an Update or a `retry-release` that lifted a quarantine
   started it (the same release tried again included: such a round needs
   room for two, and an Update or a `retry-release` that would lift a
-  quarantine waits or is refused without it); at most 4 capacity
+  quarantine waits or is refused without it; on a Mac, a restart of its VM
+  by the agent counts among them, never held by the brake but by the VM's
+  own rate limit); at most 4 capacity
   narrowings an hour; at most one release change every 10 minutes, a
   rollback under a signed statement exempt (the pool cannot forge one).
   Beyond that an order is answered `refused: brake`, an Update waits and a

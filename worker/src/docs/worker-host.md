@@ -268,14 +268,17 @@ release again after an Update or **Retry release** counts its restarts too,
 its revert's included — and at most one release change every ten minutes (a
 rollback under a signed statement excepted); beyond that it answers
 `refused: brake` (an Update waits for the next poll), and the page shows how
-much of each the last hour spent. Restarting the agent resets none of it.
+much of each the last hour spent. On a Mac, a restart of its VM counts as
+one of those restarts, though the brake never holds it. Restarting the
+agent resets none of it.
 
 **The runtime is the owner's, at the host** (#325): `omarchy-agent runtime
 switch compose/podman` (or `compose/docker`) moves the dispatcher to the
 other engine with the same guard as a release, and back if it fails there;
 the pool cannot choose it. Drain the host's registration and let its tasks
 finish first: task containers and caches do not move between engines
-([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
+([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*). A Mac's
+bundle stays in its VM's engine: the switch is refused there.
 
 ## Stopping a host
 
