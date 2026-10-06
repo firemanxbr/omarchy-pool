@@ -71,7 +71,9 @@ const MAX_CACHE_GB: u64 = 1 << 20;
 
 /// The registration the token belongs to: what install puts in agent.toml's `worker_id`.
 pub const WORKER: &str = "# worker: ";
-const HEADER: &str = "# The dispatcher's environment (omarchy-agent, #321, #371): the host worker token (rotated every 30 days), the host's own addresses, the secrets directory and the agent budget; the agent renders its own lines and keeps every other one.";
+const HEADER: &str = "# The dispatcher's environment (omarchy-agent, #321, #371, #341): the host worker token (rotated every 30 days), the host's own addresses, and from agent.toml alone the secrets directory, the agent budget, the grant of a signed exception's bridge and the cache caps (a line of yours for one of those is replaced); the agent renders its own lines and keeps every other one.";
+/// How every heading of the agent's since #371 begins: one an older agent wrote is written anew too.
+const HEADER_START: &str = "# The dispatcher's environment (omarchy-agent";
 /// The first line the agent of #321 wrote, before there was more than the token.
 const OLD_HEADER: &str = "# The host worker token (omarchy-agent";
 /// No env file of the agent's is longer.
@@ -359,7 +361,7 @@ pub fn render(existing: &str, token: Option<(&str, &str)>, r: &Rendered) -> Resu
     let (mut kept, mut others) = (Vec::new(), Vec::new());
     for line in existing.lines() {
         let t = line.trim_start();
-        if t == HEADER || t.starts_with(OLD_HEADER) {
+        if t.starts_with(HEADER_START) || t.starts_with(OLD_HEADER) {
             // The agent's own heading, written anew.
             continue;
         }

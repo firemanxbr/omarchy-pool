@@ -382,6 +382,14 @@ fn rendering_keeps_the_token_and_every_line_the_agent_does_not_own() {
     );
     // Rendered again with the same: the same bytes.
     assert_eq!(render(&text, None, &r).unwrap(), text);
+    // The heading of the agent of #371, before the cache caps (#341), is the agent's too: written anew, not kept as an owner's line.
+    let older = text.replacen(
+        HEADER,
+        "# The dispatcher's environment (omarchy-agent, #321, #371): the host worker token (rotated every 30 days), the host's own addresses, the secrets directory and the agent budget; the agent renders its own lines and keeps every other one.",
+        1,
+    );
+    assert_ne!(older, text);
+    assert_eq!(render(&older, None, &r).unwrap(), text);
     // A rotation: a new token and registration, everything else kept.
     let new = format!("omw_{}", "a1".repeat(24));
     let rotated = render(&text, Some(("m1-rack-0a9z", &new)), &r).unwrap();
