@@ -9,6 +9,12 @@
 # The oldest agent that may apply a bundle of this layout; an older agent
 # updates itself first (outer layer, frozen).
 min_agent = "0.1.0"
+# The agent version a security release marks urgent (#326; the manifest's
+# agent.urgent): a host takes that agent at once, past its owner's soak — the
+# release itself still waits for it. Set it to the agent version the fixing
+# release ships, in that release's pull request; it lapses by itself with the
+# next agent version. "" marks none.
+urgent_agent = ""
 # The anti-downgrade floor every host merges in (design v2 §5.2): a target
 # below it is refused even with a rollback statement. Raise it to retire
 # releases for good; never above the release being cut (the writer refuses).

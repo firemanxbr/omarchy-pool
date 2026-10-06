@@ -7,8 +7,9 @@
 //! (capacity caps are #333's), but `[envelope].agent_budget` and
 //! `[envelope].direct_network`, which reach the dispatcher (#371, #373), are read strictly.
 //! What the pool may narrow inside it — units, emulated lanes — and what it allows the pool
-//! to ask — diagnostics — is [`Policy`] (#325, design v2 §12). Any problem here is a local
-//! configuration error: the loop exits 78 and says why.
+//! to ask — diagnostics — is [`Policy`] (#325, design v2 §12), with the owner's soak
+//! (`soak_minutes`, #326). Any problem here is a local configuration error: the loop exits
+//! 78 and says why.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -199,6 +200,10 @@ pub struct Policy {
     /// `drivers`: the drivers `runtime switch` may move the bundle to (`compose` names
     /// both of this binary's).
     pub drivers: Vec<String>,
+    /// `soak_minutes` (#326, design v2 D16): how long a new release waits before this host
+    /// takes it, from when the pool first names it; 0 (the default) takes it at once. A
+    /// rollback statement skips it; nothing the pool sends does.
+    pub soak_minutes: u32,
 }
 
 impl Policy {
@@ -261,10 +266,20 @@ struct EnvelopePart {
     #[serde(default)]
     diagnostics: bool,
     drivers: Option<Vec<String>>,
+    #[serde(default)]
+    soak_minutes: u32,
 }
 
 /// The architectures a lane may be (design v2 §7.4): detection's own list (#338).
 pub(crate) use crate::capacity::emulation::ARCHES;
+
+/// The longest soak an owner may set (#326): the pool's claim grace for a soaking host ends
+/// two hours after a deploy (worker/src/update.ts `SOAK_GRACE_MAX_MINUTES`), and the last 15
+/// minutes of it are the round's — the pull, the replace, the guard — after the soak ends
+/// (`SOAK_ROUND_MINUTES`); the 5 left cover the poll that first names the release, which
+/// starts the soak's clock after the deploy. A longer soak would meet the 426 gate at its
+/// end and idle the host it meant to protect.
+pub const MAX_SOAK_MINUTES: u32 = 100;
 
 /// An id the pool hands out (host and worker ids).
 fn is_id(s: &str) -> bool {
@@ -290,7 +305,7 @@ fn is_https_origin(s: &str) -> bool {
 
 impl Policy {
     /// The envelope's bounds as agent.toml says them; an architecture the pool does not
-    /// build is refused.
+    /// build, or a soak longer than the pool's grace for one (#326), is refused.
     fn of(e: &EnvelopePart) -> Result<Self, String> {
         if let Some(bad) = e
             .emulate
@@ -302,6 +317,12 @@ impl Policy {
                 "agent.toml: envelope.emulate names {bad:?}, which is neither x86_64 nor aarch64"
             ));
         }
+        if e.soak_minutes > MAX_SOAK_MINUTES {
+            return Err(format!(
+                "agent.toml: envelope.soak_minutes {}: at most {MAX_SOAK_MINUTES} (the pool's claim grace for a soaking host ends two hours after a deploy, its round included)",
+                e.soak_minutes
+            ));
+        }
         Ok(Policy {
             max_units: e.max_units,
             emulate: e.emulate.clone(),
@@ -310,6 +331,7 @@ impl Policy {
                 .drivers
                 .clone()
                 .unwrap_or_else(|| vec!["compose".to_owned()]),
+            soak_minutes: e.soak_minutes,
         })
     }
 }
@@ -604,8 +626,22 @@ max_units = 3
                 emulate: Some(vec!["x86_64".into()]),
                 diagnostics: false,
                 drivers: vec!["compose".into()],
+                soak_minutes: 0,
             }
         );
+        // The owner's soak (#326): up to 100 minutes, so that it, its first poll and its round
+        // fit in the pool's two-hour grace for a soaking host.
+        let soak = |m: &str| {
+            Config::parse(&format!(
+                "worker_id = \"w_1\"\n{}",
+                studio.replace("soak_minutes = 0", &format!("soak_minutes = {m}"))
+            ))
+        };
+        assert_eq!(soak("30").unwrap().policy.soak_minutes, 30);
+        assert_eq!(soak("100").unwrap().policy.soak_minutes, 100);
+        assert!(soak("101").unwrap_err().contains("at most 100"));
+        assert!(soak("120").unwrap_err().contains("at most 100"));
+        assert!(soak("-5").is_err());
         assert!(c.policy.allows_lane("x86_64") && !c.policy.allows_lane("aarch64"));
         assert!(c.policy.allows_driver(Runtime::Podman));
         // No set.runtime (install writes none): the engine is asked which it is.

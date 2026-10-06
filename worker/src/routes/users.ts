@@ -7,6 +7,7 @@ import { asReviews, stands, wholeReviews } from "./review";
 import { aliveSince, workerView, type WorkerRow } from "./factory";
 import { standsSql } from "./story";
 import { parseTargets } from "../targets";
+import { SOAK_COLUMNS } from "../hosts";
 
 /**
  * A person's public page: what they contribute and what they maintain,
@@ -101,7 +102,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       .first<{ staged: number; published: number; failed: number; total: number }>(),
     env.DB.prepare(`${DECISIONS} WHERE a.by = ? ORDER BY a.id DESC LIMIT 50`).bind(login).all<DecisionOf>(),
     // Every worker under this name, the revoked ones too (the page says so on the row): the whole row, served through the listing's own view (workerView) so the page's tile and tables count the same rows by the same words.
-    env.DB.prepare("SELECT * FROM build_workers WHERE owner = ? ORDER BY last_seen DESC").bind(login).all<WorkerRow>(),
+    env.DB.prepare(`SELECT w.*, ${SOAK_COLUMNS("h")} FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.owner = ? ORDER BY w.last_seen DESC`).bind(login).all<WorkerRow>(),
     maintainersOf(env),
     recordOf(env, login),
   ]);

@@ -3,10 +3,12 @@
 //! settings), check the target against the trust rules and the brake, start or preempt a
 //! round, and take one step of it; the next queued host order the brake lets through;
 //! `run/capacity.json` kept as the settings say; one step of a `retire-legacy` in flight
-//! and of the owner's runtime switch; the host report when it is due. Network answers
-//! never stop the agent (§16.4): no answer, a 5xx or a malformed body changes nothing and
-//! backs off to 10 minutes; a 401/403 changes nothing and polls hourly; both recover by
-//! themselves at the next answer.
+//! and of the owner's runtime switch; GitHub's latest release read when it is time (#326's
+//! freeze detection, [`super::freeze`]); the host report when it is due. A new release
+//! waits for the owner's soak (#326, [`super::soak`]) unless a rollback statement brings
+//! it. Network answers never stop the agent (§16.4): no answer, a 5xx or a malformed body
+//! changes nothing and backs off to 10 minutes; a 401/403 changes nothing and polls hourly;
+//! both recover by themselves at the next answer.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
@@ -450,6 +452,7 @@ impl Agent {
                 let stepped = self.step(now);
                 self.switch_step(now);
                 self.retire_step(now);
+                self.freeze(now);
                 self.report(now);
                 stepped?;
             }
@@ -621,7 +624,7 @@ impl Agent {
     }
 
     /// Says what a poll found when no round is in flight; a round's own report is kept.
-    fn say(&mut self, now: i64, outcome: Outcome, detail: &str) {
+    pub(super) fn say(&mut self, now: i64, outcome: Outcome, detail: &str) {
         if self.state.rollout.step == Step::Idle {
             rollout::report(&mut self.state, &self.journal, now, outcome, None, detail);
         } else {
@@ -828,6 +831,8 @@ impl Agent {
             return;
         };
         self.state.target = Some(target);
+        // The owner's soak (#326) counts from the first poll that names a new release.
+        self.note_soak(target, now);
         // The owner's runtime switch moves the dispatcher: the pool's target waits for it
         // to end (the next poll names it again).
         if self.state.switch.is_some() {
@@ -945,12 +950,27 @@ impl Agent {
             },
             Err(r) => return self.refuse(now, &r),
         };
+        // The owner's soak (#326): a new release waits, its verified bundle's revocations
+        // learnt meanwhile; a rollback statement skips it.
+        let soak = if rollback {
+            None
+        } else {
+            self.soaking(target, now)
+        };
         // Only upward (D8): a higher agent first, before the round touches anything. One
         // that cannot be had now leaves this agent to apply the release (its min_agent
-        // admits it) and is tried again later.
+        // admits it) and is tried again later. It waits for the soak with its release,
+        // unless the manifest sets agent.urgent (a security release).
         let ships = b.manifest().outer().agent().clone();
-        if let Ok(true) = self.upgrade(target, &ships, now) {
-            return;
+        if soak.is_none() || ships.urgent() {
+            if let Ok(true) = self.upgrade(target, &ships, now) {
+                return;
+            }
+        }
+        if let Some(until) = soak {
+            let waits =
+                (ships.version() > self.version && !ships.urgent()).then(|| ships.version());
+            return self.soak_held(target, until, waits, now);
         }
         if let Err(e) = self.ensure_tools(b.manifest(), now) {
             let detail = format!("the pinned tools: {e}");
@@ -997,6 +1017,15 @@ impl Agent {
     fn needs_newer_agent(&mut self, target: Release, outer: &Outer, why: &str, now: i64) {
         if let Err(r) = trust::admit(&self.state, target) {
             return self.refuse(now, &r);
+        }
+        // The agent it needs waits for the owner's soak with its release (#326), unless the
+        // manifest sets agent.urgent.
+        if let Some(until) = self
+            .soaking(target, now)
+            .filter(|_| !outer.agent().urgent())
+        {
+            let waits = (outer.agent().version() > self.version).then(|| outer.agent().version());
+            return self.soak_held(target, until, waits, now);
         }
         let detail = match self.upgrade(target, outer.agent(), now) {
             Ok(true) => return,
