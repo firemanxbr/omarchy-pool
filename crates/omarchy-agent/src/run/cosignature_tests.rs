@@ -1,7 +1,8 @@
 //! #330's acceptance criteria in the run loop, against the fake engine and pool: a bundle
 //! without the maintainers' co-signature is refused once the agent requires it (1-of-N and
 //! 2-of-N, a wrong key, someone not pinned, GitHub not answering), a higher agent is not
-//! taken from one, and a rollback statement deeper than 14 days is taken only with it.
+//! taken from one, a rollback statement deeper than 14 days is taken only with it, and a
+//! co-signed statement does not wait for GitHub to answer for the bundle's.
 
 use crate::run::fake::{
     cosign, cosign_statement, publish, publish_agent, relay_statement, Ships, World, T0,
@@ -400,4 +401,57 @@ fn a_co_signed_rollback_whose_first_round_fails_is_tried_again_under_its_stateme
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.3.0"), "{:?}", w.outcome());
     assert_eq!(w.agent.state.vouched, None);
+}
+
+#[test]
+fn a_co_signed_rollback_to_a_cached_release_goes_while_github_does_not_answer() {
+    let mut w = World::running_v1();
+    let alice = TestKey::ed25519("alice", 1);
+    // v1.0.0, published before the threshold rose, ran before v1.2.0: its bundle is kept
+    // in the cache (the previous release's), with no co-signature beside it.
+    w.release("v1.2.0");
+    w.target("v1.2.0", None);
+    w.round();
+    assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
+    *w.cosign.borrow_mut() = policy(1, &[&alice]);
+    relay_statement(&w.remote, 1, "v1.0.0", "v1.2.0", b"signed");
+
+    // GitHub does not answer. A statement without the co-signature leaves the bundle's to
+    // decide, which GitHub may still have: the rollback waits, nothing is refused.
+    w.remote.borrow_mut().assets_unanswered = true;
+    w.target("v1.0.0", None);
+    w.round_now();
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "pool-unreachable", "{detail}");
+    assert!(
+        detail.contains("v1.0.0's co-signatures: omarchy-host-v1.0.0.tar.gz.alice.sshsig: github.com did not answer"),
+        "{detail}"
+    );
+    assert_eq!(w.agent.state.statement_seq, None);
+    assert_eq!(w.step(), "idle");
+
+    // Alice co-signs the statement: it stands in for the bundle's co-signatures, so GitHub
+    // not answering for them holds nothing. The first round starts, and fails (a pull).
+    cosign_statement(&w.remote, "v1.0.0", &alice);
+    w.engine.borrow_mut().pull_fails = true;
+    w.round();
+    assert_eq!(w.outcome().0, "pull-failed", "{:?}", w.outcome());
+    assert_eq!(w.agent.state.floor, r("v1.0.0"));
+    assert_eq!(w.agent.state.vouched, r("v1.0.0"));
+
+    // Its retry, under the statement it was accepted with, goes while GitHub still does not
+    // answer for the bundle's co-signatures it was asked for again.
+    w.engine.borrow_mut().pull_fails = false;
+    let asked = w.remote.borrow().asked_if_any.len();
+    w.tick(601);
+    w.poll();
+    for _ in 0..400 {
+        if w.step() == "idle" {
+            break;
+        }
+        w.tick(3);
+    }
+    assert!(w.remote.borrow().asked_if_any.len() > asked);
+    assert_eq!(w.applied().as_deref(), Some("v1.0.0"), "{:?}", w.outcome());
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
 }

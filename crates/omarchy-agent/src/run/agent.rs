@@ -198,10 +198,21 @@ pub(crate) type Count = dyn FnMut(&super::vm::Counting<'_>) -> Result<String, St
 
 /// A target's bundle, verified, with the maintainers' co-signatures over it (#330).
 enum Fetched {
-    Bundle(Box<VerifiedBundle>, Cosigned),
+    Bundle(Box<VerifiedBundle>, Cosignatures),
     /// Signed for this host, but only an agent above this one reads it: its outer layer.
-    NewerAgent(Box<Outer>, String, Cosigned),
+    NewerAgent(Box<Outer>, String, Cosignatures),
     Stop,
+}
+
+/// A bundle's co-signatures as far as GitHub answered (#330): those that verified, and,
+/// when they fall short of the threshold, why GitHub did not answer for one that could
+/// still count. The round waits for GitHub only where the bundle's own co-signatures
+/// decide: a co-signed rollback statement, or the one a retried rollback was accepted
+/// under, stands in for them, and a release from before the threshold rose has none to
+/// wait for.
+pub(super) struct Cosignatures {
+    pub(super) cosigned: Cosigned,
+    pub(super) unanswered: Option<String>,
 }
 
 /// What `etc/dispatcher.env` gets beside the token now (#371): the host's own addresses
@@ -637,23 +648,25 @@ impl Agent {
             return Some(Ok(()));
         }
         let (archive, _) = self.cached_archive(r)?;
-        let cosigned = self.cosignatures(r, &archive, now)?;
-        Some(cosigned.require(need, &format!("{r}'s bundle")))
+        let found = self.cosignatures(r, &archive, now);
+        if !self.answered(r, &found, now) {
+            return None;
+        }
+        Some(found.cosigned.require(need, &format!("{r}'s bundle")))
     }
 
     /// Release `r`'s co-signatures (#330, D1 b), when this agent requires any: those kept
     /// beside its bundle, then the pinned maintainers' others asked of GitHub
-    /// (`omarchy-host-<r>.tar.gz.<login>.sshsig`, which may not exist) and kept too.
-    /// `None`: GitHub did not answer for one that could still count, so no decision now.
-    pub(super) fn cosignatures(
-        &mut self,
-        r: Release,
-        archive: &[u8],
-        now: i64,
-    ) -> Option<Cosigned> {
+    /// (`omarchy-host-<r>.tar.gz.<login>.sshsig`, which may not exist) and kept too. GitHub
+    /// not answering for one that could still count is carried, not said: only where the
+    /// bundle's own co-signatures decide is it the round's answer ([`Agent::answered`]).
+    pub(super) fn cosignatures(&mut self, r: Release, archive: &[u8], now: i64) -> Cosignatures {
         let policy = self.verifier.cosignature();
         if policy.threshold() == 0 {
-            return Some(Cosigned::default());
+            return Cosignatures {
+                cosigned: Cosigned::default(),
+                unanswered: None,
+            };
         }
         let (name, _) = bundle_names(r);
         let dir = self.paths.bundles();
@@ -666,7 +679,10 @@ impl Agent {
             .collect();
         let cosigned = policy.check(cosignature::BUNDLE_NAMESPACE, archive, &sigs);
         if cosigned.count() >= policy.threshold() {
-            return Some(cosigned);
+            return Cosignatures {
+                cosigned,
+                unanswered: None,
+            };
         }
         let others: Vec<String> = policy
             .logins()
@@ -696,14 +712,23 @@ impl Agent {
             }
         }
         let cosigned = policy.check(cosignature::BUNDLE_NAMESPACE, archive, &sigs);
-        if cosigned.count() < policy.threshold() {
-            if let Some(e) = unanswered {
-                let detail = format!("{r}'s co-signatures: {e}");
-                self.say(now, Outcome::PoolUnreachable, &detail);
-                return None;
-            }
+        let unanswered = unanswered.filter(|_| cosigned.count() < policy.threshold());
+        Cosignatures {
+            cosigned,
+            unanswered,
         }
-        Some(cosigned)
+    }
+
+    /// Whether release `r`'s bundle co-signatures can decide now: not when they fall short
+    /// and GitHub did not answer for one that could still count, which is said as the
+    /// pool's (no decision now, nothing refused).
+    fn answered(&mut self, r: Release, found: &Cosignatures, now: i64) -> bool {
+        let Some(e) = &found.unanswered else {
+            return true;
+        };
+        let detail = format!("{r}'s co-signatures: {e}");
+        self.say(now, Outcome::PoolUnreachable, &detail);
+        false
     }
 
     /// Says what a poll found when no round is in flight; a round's own report is kept.
@@ -990,7 +1015,7 @@ impl Agent {
         // its co-signature moves them neither: a release signed by release.yml alone cannot
         // raise min_release past every release to come (#330).
         let need = self.verifier.cosignature().threshold();
-        if cosigned.count() >= need {
+        if cosigned.cosigned.count() >= need {
             trust::merge(&mut self.state, b.manifest());
         }
         let ours = self.cfg.pool.trim_end_matches('/');
@@ -1005,49 +1030,24 @@ impl Agent {
         let rollback = match trust::admit(&self.state, target) {
             Ok(()) => {
                 // A co-signed rollback whose first round did not finish: the floor stands at
-                // its target now, and what its statement vouched for is what was kept (#330).
+                // its target now, and what its statement vouched for is what was kept, so
+                // GitHub not answering for the bundle's holds nothing (#330).
                 if !trust::vouched(&self.state, target) {
-                    if let Err(r) = trust::cosigned(target, need, &cosigned, None) {
+                    if !self.answered(target, &cosigned, now) {
+                        return;
+                    }
+                    if let Err(r) = trust::cosigned(target, need, &cosigned.cosigned, None) {
                         return self.refuse(now, &r);
                     }
                 }
                 false
             }
-            Err(Refusal::BelowFloor { .. }) => match self.statement(target, &b, now) {
-                Some(Ok((st, st_cosigned))) => {
-                    if let Err(r) = trust::cosigned(target, need, &cosigned, Some(&st_cosigned)) {
-                        return self.refuse(now, &r);
-                    }
-                    let vouches = cosigned.count() < need;
-                    // A statement with `agent_to` moves the agent down first, through the
-                    // same steps; the statement is accepted only once the swap is done
-                    // (the agent below then applies the release), or with no move.
-                    if let Some(down) = st.agent_to().filter(|v| *v < self.version) {
-                        let ships = b.manifest().outer().agent();
-                        let moved = if ships.version() == down {
-                            self.move_agent(target, ships, now)
-                        } else {
-                            Err(format!(
-                                "agent_to {down}, but {target} ships agent {}",
-                                ships.version()
-                            ))
-                        };
-                        if let Err(e) = moved {
-                            let detail = format!(
-                                "the rollback statement to {target} moves the agent down to {down}: {e}; the statement waits"
-                            );
-                            return self.say(now, Outcome::Held, &detail);
-                        }
-                    }
-                    self.accept(target, &st, &st_cosigned, vouches, now);
-                    if self.exit.is_some() {
-                        return;
-                    }
-                    true
+            Err(Refusal::BelowFloor { .. }) => {
+                if !self.roll_back(target, &b, &cosigned, now) {
+                    return;
                 }
-                Some(Err(r)) => return self.refuse(now, &r),
-                None => return,
-            },
+                true
+            }
             Err(r) => return self.refuse(now, &r),
         };
         // Only upward (D8): a higher agent first, before the round touches anything. One
@@ -1097,6 +1097,62 @@ impl Agent {
         }
     }
 
+    /// A target below the floor, under the rollback statement the pool relays (design v2
+    /// §5.3) and the maintainers' co-signatures (#330): `true` once the statement is
+    /// accepted and the round may start; otherwise said why not.
+    fn roll_back(
+        &mut self,
+        target: Release,
+        b: &VerifiedBundle,
+        cosigned: &Cosignatures,
+        now: i64,
+    ) -> bool {
+        let (st, st_cosigned) = match self.statement(target, b, now) {
+            Some(Ok(found)) => found,
+            Some(Err(r)) => {
+                self.refuse(now, &r);
+                return false;
+            }
+            None => return false,
+        };
+        // The bundle's co-signatures decide only when the statement's fall short: a
+        // co-signed rollback to a release from before the threshold rose waits for nothing
+        // GitHub has.
+        let need = self.verifier.cosignature().threshold();
+        if st_cosigned.count() < need && !self.answered(target, cosigned, now) {
+            return false;
+        }
+        let bundle = &cosigned.cosigned;
+        if let Err(r) = trust::cosigned(target, need, bundle, Some(&st_cosigned)) {
+            self.refuse(now, &r);
+            return false;
+        }
+        let vouches = bundle.count() < need;
+        // A statement with `agent_to` moves the agent down first, through the same steps;
+        // the statement is accepted only once the swap is done (the agent below then
+        // applies the release), or with no move.
+        if let Some(down) = st.agent_to().filter(|v| *v < self.version) {
+            let ships = b.manifest().outer().agent();
+            let moved = if ships.version() == down {
+                self.move_agent(target, ships, now)
+            } else {
+                Err(format!(
+                    "agent_to {down}, but {target} ships agent {}",
+                    ships.version()
+                ))
+            };
+            if let Err(e) = moved {
+                let detail = format!(
+                    "the rollback statement to {target} moves the agent down to {down}: {e}; the statement waits"
+                );
+                self.say(now, Outcome::Held, &detail);
+                return false;
+            }
+        }
+        self.accept(target, &st, &st_cosigned, vouches, now);
+        self.exit.is_none()
+    }
+
     /// A bundle only a higher agent reads: the agent updates itself from its (signed and,
     /// where this agent requires it, co-signed) outer layer, or says why it cannot.
     fn needs_newer_agent(
@@ -1104,14 +1160,17 @@ impl Agent {
         target: Release,
         outer: &Outer,
         why: &str,
-        cosigned: &Cosigned,
+        cosigned: &Cosignatures,
         now: i64,
     ) {
         if let Err(r) = trust::admit(&self.state, target) {
             return self.refuse(now, &r);
         }
+        if !self.answered(target, cosigned, now) {
+            return;
+        }
         let need = self.verifier.cosignature().threshold();
-        if let Err(r) = trust::cosigned(target, need, cosigned, None) {
+        if let Err(r) = trust::cosigned(target, need, &cosigned.cosigned, None) {
             return self.refuse(now, &r);
         }
         let detail = match self.upgrade(target, outer.agent(), now) {
@@ -1141,7 +1200,8 @@ impl Agent {
     }
 
     /// The target's bundle: from the cache, or GitHub, verified either way; then its
-    /// co-signatures (#330).
+    /// co-signatures (#330), as far as GitHub answers: whether the round waits for the
+    /// rest is `go_to`'s to say, after the trust rules and any rollback statement.
     fn fetch(&mut self, target: Release, now: i64) -> Fetched {
         let Some((archive, outcome)) = self
             .cached_archive(target)
@@ -1149,9 +1209,7 @@ impl Agent {
         else {
             return Fetched::Stop;
         };
-        let Some(cosigned) = self.cosignatures(target, &archive, now) else {
-            return Fetched::Stop;
-        };
+        let cosigned = self.cosignatures(target, &archive, now);
         match outcome {
             BundleOutcome::Current(b) => Fetched::Bundle(b, cosigned),
             BundleOutcome::NeedsNewerAgent { outer, why, .. } => {

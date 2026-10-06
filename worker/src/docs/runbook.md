@@ -747,7 +747,9 @@ threshold rose is refused with *or the rollback statement to it does
 (factory/bin/co-sign rollback vX.Y.Z)*: it is the statement that takes more
 co-signatures, never the published release. Once a host accepted a
 co-signed statement, a round to its target that did not finish (a pull, the
-tools, a quarantine) is tried again under the same co-signatures.
+tools, a quarantine) is tried again under the same co-signatures. A
+statement co-signed enough waits for nothing GitHub has: its rollback to a
+cached bundle goes, and is tried again, while GitHub does not answer.
 
 ### Installing a host
 
