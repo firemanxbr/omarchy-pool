@@ -16,12 +16,16 @@
 //! - **Self-updates too** (v1 §11.3, D8): a release that ships a higher agent waits with
 //!   that agent, unless its manifest sets `agent.urgent` — only a security release does —:
 //!   then the agent updates itself at once, and the release itself still waits.
-//! - **Never more than two hours behind.** The soak never keeps this host more than
-//!   [`MAX_BEHIND_S`] behind the release it ran when it fell behind: when releases land
+//! - **Never behind for longer than the longest soak.** The soak never keeps this host more
+//!   than [`MAX_BEHIND_S`] behind the release it ran when it fell behind: when releases land
 //!   faster than the soak, the release named then is taken at that bound. The pool's claim
-//!   grace for a soaking host ends at most two hours after its deploy
-//!   (worker/src/update.ts), so a longer wait would idle the host it meant to protect —
-//!   which is also why `soak_minutes` is at most [`super::config::MAX_SOAK_MINUTES`].
+//!   grace for a soaking host ends at most two hours after its deploy, the round's 15
+//!   minutes included (worker/src/update.ts), so a longer wait would idle the host it meant
+//!   to protect — which is also why `soak_minutes` is at most [`MAX_SOAK_MINUTES`]. Either
+//!   bound leaves the round inside the pool's two hours: a soak ends at most 100 minutes
+//!   after the poll that first named its release, which comes minutes after its deploy;
+//!   and a release the pool names once the host is behind was deployed after the host saw
+//!   the one before it, so no earlier than when the host fell behind.
 //! - **The pool's grace follows it.** The report says until when (`release.soaking_until`)
 //!   for the release the pool names, until the host runs it; the pool keeps that host's
 //!   registration out of the 426 gate until then, and the round's margin after it, at most
@@ -33,12 +37,14 @@ use serde::{Deserialize, Serialize};
 use crate::version::{Release, Version};
 
 use super::agent::Agent;
+use super::config::MAX_SOAK_MINUTES;
 use super::orders::iso;
 use super::rollout::{self, Outcome};
 use super::state::Step;
 
-/// The longest a soak keeps a host behind the release it ran when it fell behind.
-pub(crate) const MAX_BEHIND_S: i64 = 2 * 3600;
+/// The longest a soak keeps a host behind the release it ran when it fell behind: the
+/// longest soak an owner may set.
+pub(crate) const MAX_BEHIND_S: i64 = MAX_SOAK_MINUTES as i64 * 60;
 
 /// The soak of the release the pool names, in `state.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

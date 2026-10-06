@@ -2,7 +2,7 @@
 //! owner's minutes from when the pool first names it — another landing meanwhile waits its
 //! own —, the report says until when for the pool's claim grace, a rollback statement
 //! applies at once, `reconcile-now`, an Update and SIGUSR1 never skip it, and no soak keeps
-//! a host more than two hours behind. The agent's own update waits with its release unless
+//! a host more than `MAX_BEHIND_S` (100 minutes) behind. The agent's own update waits with its release unless
 //! `agent.urgent` (`selfupdate_tests.rs`).
 
 use crate::run::fake::{publish, relay_statement, World};
@@ -273,9 +273,10 @@ fn a_quarantined_release_reports_no_soak() {
 }
 
 #[test]
-fn releases_landing_faster_than_the_soak_keep_a_host_at_most_two_hours_behind() {
+fn releases_landing_faster_than_the_soak_keep_a_host_at_most_100_minutes_behind() {
     // An hour's soak, and a release every forty minutes: each would wait its hour, so none
-    // would ever go; the host takes the one named when it has been behind for two hours.
+    // would ever go; the host takes the one named when it has been behind for 100 minutes,
+    // the longest soak an owner may set — inside the pool's two-hour grace with its round.
     let mut w = soaking(60);
     let mut behind_since = None;
     for (i, rel) in ["v1.1.0", "v1.2.0", "v1.3.0"].iter().enumerate() {
@@ -288,6 +289,7 @@ fn releases_landing_faster_than_the_soak_keep_a_host_at_most_two_hours_behind() 
         behind_since.get_or_insert(w.now);
         assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
     }
+    assert_eq!(MAX_BEHIND_S, 100 * 60);
     let bound = behind_since.unwrap() + MAX_BEHIND_S;
     assert_eq!(w.agent.state.soak.as_ref().unwrap().until, bound);
     w.tick(20);

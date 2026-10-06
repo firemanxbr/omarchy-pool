@@ -265,8 +265,12 @@ struct EnvelopePart {
 pub(crate) use crate::capacity::emulation::ARCHES;
 
 /// The longest soak an owner may set (#326): the pool's claim grace for a soaking host ends
-/// two hours after a deploy, so a longer one would idle the host it meant to protect.
-pub const MAX_SOAK_MINUTES: u32 = 120;
+/// two hours after a deploy (worker/src/update.ts `SOAK_GRACE_MAX_MINUTES`), and the last 15
+/// minutes of it are the round's — the pull, the replace, the guard — after the soak ends
+/// (`SOAK_ROUND_MINUTES`); the 5 left cover the poll that first names the release, which
+/// starts the soak's clock after the deploy. A longer soak would meet the 426 gate at its
+/// end and idle the host it meant to protect.
+pub const MAX_SOAK_MINUTES: u32 = 100;
 
 /// An id the pool hands out (host and worker ids).
 fn is_id(s: &str) -> bool {
@@ -306,7 +310,7 @@ impl Policy {
         }
         if e.soak_minutes > MAX_SOAK_MINUTES {
             return Err(format!(
-                "agent.toml: envelope.soak_minutes {}: at most {MAX_SOAK_MINUTES} (the pool's claim grace for a soaking host ends two hours after a deploy)",
+                "agent.toml: envelope.soak_minutes {}: at most {MAX_SOAK_MINUTES} (the pool's claim grace for a soaking host ends two hours after a deploy, its round included)",
                 e.soak_minutes
             ));
         }
@@ -571,7 +575,8 @@ max_units = 3
                 soak_minutes: 0,
             }
         );
-        // The owner's soak (#326): up to two hours, the pool's grace for a soaking host.
+        // The owner's soak (#326): up to 100 minutes, so that it, its first poll and its round
+        // fit in the pool's two-hour grace for a soaking host.
         let soak = |m: &str| {
             Config::parse(&format!(
                 "worker_id = \"w_1\"\n{}",
@@ -579,8 +584,9 @@ max_units = 3
             ))
         };
         assert_eq!(soak("30").unwrap().policy.soak_minutes, 30);
-        assert_eq!(soak("120").unwrap().policy.soak_minutes, 120);
-        assert!(soak("121").unwrap_err().contains("at most 120"));
+        assert_eq!(soak("100").unwrap().policy.soak_minutes, 100);
+        assert!(soak("101").unwrap_err().contains("at most 100"));
+        assert!(soak("120").unwrap_err().contains("at most 100"));
         assert!(soak("-5").is_err());
         assert!(c.policy.allows_lane("x86_64") && !c.policy.allows_lane("aarch64"));
         assert!(c.policy.allows_driver(Runtime::Podman));
