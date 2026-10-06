@@ -3,7 +3,8 @@
 # this one, the sizing recipes and what the hosts' trust relies on (#308):
 # the workflows that sign, the host agent, the dispatcher that starts task
 # containers, the host sets, and the host bundle's capacity constants, pins,
-# install.sh and writer. With main requiring a code-owner review,
+# install.sh and writer, and the check of the maintainers' co-signature
+# a release is published with (#330). With main requiring a code-owner review,
 # a change here is a decision another maintainer approves.
 factory/MAINTAINERS.toml          @firemanxbr @maralcbr
 .github/CODEOWNERS                @firemanxbr @maralcbr
@@ -14,3 +15,4 @@ crates/pkg-repo/src/dispatch*     @firemanxbr @maralcbr
 factory/sets/                     @firemanxbr @maralcbr
 factory/bundle/                   @firemanxbr @maralcbr
 factory/bin/host-bundle           @firemanxbr @maralcbr
+factory/bin/co-sign               @firemanxbr @maralcbr

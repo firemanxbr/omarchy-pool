@@ -35,7 +35,8 @@
  *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
  *   GET  /api/v1/factory/workers/:id[/orders|/can] · POST /factory/workers/:id/orders · DELETE /factory/workers/:id/orders/:oid · POST /factory/workers/self/orders/:id   orders to a worker (#277, routes/orders.ts)
  *   GET  /api/v1/factory/follow?ids=a,b          the pool's release and those workers' open Updates: what each set's updater polls (#277)
- *   GET  /api/v1/factory/rollback/:to            the latest rollback statement rollback.yml signed for going back to :to, and its bundle, from R2 (#314)
+ *   GET  /api/v1/factory/rollback/:to            the latest rollback statement rollback.yml signed for going back to :to, and its bundle, from R2 (#314), with the maintainers' co-signatures over it (#330)
+ *   PUT  /api/v1/factory/rollback/:to/cosignature   a maintainer's co-signature of that statement (ssh-keygen -Y sign's output, #330), relayed beside it
  *   POST /api/v1/hosts/enrollments · POST /hosts/enroll · GET /hosts[/:id] · POST /hosts/:id/confirm   maintainer hosts: a one-time token, the machine's enrollment, the owner's Confirm (#321, routes/hosts.ts)
  *   GET  /api/v1/hosts/self/state · POST /hosts/self/token · POST /hosts/self/report   a host's calls, signed with its key (Omarchy-Host); the state
  *                                                  carries its release target, its open Updates and its host orders, the report answers them (#344);
@@ -88,7 +89,7 @@ import {
 } from "./routes/contributors";
 import { handleSourceRead } from "./routes/sources";
 import { handleAnswerOrder, handleCancelOrder, handleFollow, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
-import { handleRollbackStatement } from "./routes/rollback";
+import { handleRollbackCosignature, handleRollbackStatement } from "./routes/rollback";
 import { handleCapHost, handleConfirmHost, handleEnroll, handleHostDiagnostics, handleHostDiagnosticsGet, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleOwnerChallenge, handleOwnerPin, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSealKeyConfirm, handleSuspendHost, signedHost } from "./routes/hosts";
 import { DIAGNOSTICS_MAX_BYTES } from "./hosts";
 import type { Actor } from "./routes/factory";
@@ -666,6 +667,11 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/factory/follow") return handleFollow(url, env);
   // A rollback statement rollback.yml signed, relayed from R2 as stored (#314): a host's agent verifies it; the pool cannot forge one. Public, cached briefly.
   if ((m = path.match(/^\/factory\/rollback\/([^/]+)$/)) && method === "GET") return handleRollbackStatement(m[1], env);
+  // A maintainer's co-signature of that statement (#330): kept beside it and relayed; the hosts verify it, never the pool.
+  if ((m = path.match(/^\/factory\/rollback\/([^/]+)\/cosignature$/)) && method === "PUT") {
+    const c = await maintainerOf(request, env);
+    return c instanceof Response ? c : handleRollbackCosignature(c, m[1], request, env);
+  }
   if ((m = path.match(/^\/users\/([A-Za-z0-9-]{1,39})$/)) && method === "GET") return handleUser(m[1], env);
   // The page is cached for everyone (public, max-age); what one caller may do on it is theirs alone, so it rides on a no-store answer of its own.
   if ((m = path.match(/^\/users\/([A-Za-z0-9-]{1,39})\/can$/)) && method === "GET") return handleUserCan(await contributorOf(request, env), m[1], env);

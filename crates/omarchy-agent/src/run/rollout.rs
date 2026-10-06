@@ -1036,6 +1036,10 @@ fn commit(state: &mut State, ctx: &mut Ctx) -> Result<(), String> {
         // The statement set the floor to `to`; nothing above it stays the floor.
         state.floor = Some(target);
     }
+    // What a co-signed statement vouched for holds only while the floor stands there (#330).
+    if state.vouched != state.floor {
+        state.vouched = None;
+    }
     state.applied = Some(target);
     state.quarantine.remove(&target);
     prune(state, ctx, target, from);
@@ -1076,6 +1080,19 @@ fn prune(state: &mut State, ctx: &mut Ctx, target: Release, from: Option<Release
         }
         for ext in ["tar.gz", "tar.gz.sigstore.json"] {
             let _ = fs::remove_file(ctx.paths.bundles().join(format!("omarchy-host-{r}.{ext}")));
+        }
+        // And its maintainers' co-signatures (#330), one file each.
+        let cosigned = format!("omarchy-host-{r}.tar.gz.");
+        for e in fs::read_dir(ctx.paths.bundles())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            if n.starts_with(&cosigned) && n.ends_with(".sshsig") {
+                let _ = fs::remove_file(e.path());
+            }
         }
         ctx.journal.write(
             ctx.now,

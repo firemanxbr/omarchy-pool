@@ -4,7 +4,8 @@
 //!
 //! - [`verify`]: check a signed host bundle or rollback statement against the pinned
 //!   `release.yml` / `rollback.yml` identity, then parse it: the manifest's outer layer
-//!   leniently, `inner` strictly, into types nothing unverified can build.
+//!   leniently, `inner` strictly, into types nothing unverified can build; and the
+//!   maintainers' co-signature this binary pins (#330, [`verify::cosignature`]).
 //! - [`lint`]: check the host set template (and the owner's override) against its
 //!   invariants, on variable references, before any interpolation.
 //! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
@@ -81,6 +82,35 @@ pub mod fuzz {
                 let _ = crate::manifest::parse(m);
             }
         }
+    }
+
+    /// The maintainers' co-signature (#330): a policy as `maintainers.toml` pins one, then,
+    /// after the first NUL byte, an armored SSH signature, checked as Alice's and as Bob's
+    /// (the fixtures' Ed25519 and P-256 security keys) over what follows a second NUL, as a
+    /// bundle's and as a statement's.
+    pub fn cosignature(data: &[u8]) {
+        use crate::verify::cosignature::{Policy, BUNDLE_NAMESPACE, ROLLBACK_NAMESPACE};
+        let mut parts = data.splitn(3, |b| *b == 0);
+        let policy = parts.next().unwrap_or_default();
+        let sig = parts.next().unwrap_or_default();
+        let message = parts.next().unwrap_or_default();
+        if let Ok(text) = std::str::from_utf8(policy) {
+            let _ = Policy::parse(text);
+        }
+        let keys = Policy::parse(concat!(
+            "threshold = 2\n[keys]\nalice = '''",
+            include_str!("../tests/fixtures/cosignature/alice.pub"),
+            "'''\nbob = '''",
+            include_str!("../tests/fixtures/cosignature/bob.pub"),
+            "'''\n"
+        ))
+        .expect("the fixtures' keys read");
+        let sigs = ["alice", "bob"]
+            .into_iter()
+            .map(|l| (l.to_owned(), sig.to_vec()))
+            .collect();
+        let _ = keys.check(BUNDLE_NAMESPACE, message, &sigs);
+        let _ = keys.check(ROLLBACK_NAMESPACE, message, &sigs);
     }
 
     /// A set template, and an override after the first NUL byte; the same second part read

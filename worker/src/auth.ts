@@ -1,5 +1,8 @@
 import { json, type Env } from "./index";
 import { jobOf, type JobClaims } from "./jobtoken";
+import { RELEASE_POLICY } from "./hosts";
+import { revokedRefusal } from "./lease";
+import { version } from "./meta";
 import { contributorOf, isMaintainer, type Contributor } from "./routes/contributors";
 
 /**
@@ -25,14 +28,19 @@ export async function authorize(request: Request, env: Env, scope: string): Prom
  * Stop. The pool-wide scopes a project build or a trial carries (pool:write,
  * release:<ring>, artifacts:*:<ring>) are refused to the old container of a
  * lease stopped and claimed again, as its task routes are (owned()). A
- * legacy token (no `g`) is unchanged.
+ * legacy token (no `g`) is unchanged — but for a lease claimed on a release
+ * the pool's release revokes (#342): nothing it sends reaches the pool,
+ * whichever token sends it. Read for a legacy token only while the signed
+ * manifest revokes something, so a pool with nothing revoked pays nothing.
  */
 async function leaseGone(env: Env, job: JobClaims): Promise<Response | null> {
-  if (!job.g) return null;
-  const held = await env.DB.prepare("SELECT 1 AS ok FROM build_tasks WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_gen = ? AND stop_order IS NULL")
-    .bind(job.t, job.w, job.g)
-    .first<{ ok: number }>();
-  return held ? null : json({ error: `task ${job.t}'s lease this token was issued for is over: it writes nothing`, stop: true }, 409);
+  if (!job.g && !RELEASE_POLICY.revoked.length) return null;
+  const held = await env.DB.prepare("SELECT id, release FROM build_tasks WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_gen IS ? AND stop_order IS NULL")
+    .bind(job.t, job.w, job.g ?? null)
+    .first<{ id: number; release: string | null }>();
+  if (!held) return job.g ? json({ error: `task ${job.t}'s lease this token was issued for is over: it writes nothing`, stop: true }, 409) : null;
+  const revoked = revokedRefusal(held, version(env).version);
+  return revoked ? json(revoked, 409) : null;
 }
 
 /** The signed-in maintainer, or the 401/403 to send. */

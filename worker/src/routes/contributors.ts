@@ -16,6 +16,7 @@ import { CHECKLIST, LICENSE, PKGNAME, PKGNAME_RULE, forgeOf, sourceHasPath } fro
 import { ALGORITHMS } from "../webauthn";
 import { parseTargets, settleTargets } from "../targets";
 import { throughWords, type Through } from "../agents";
+import { revokedRefusal } from "../lease";
 
 /**
  * Contributors: anyone with a GitHub identity. No permission needed to
@@ -1207,8 +1208,14 @@ const staleLease = (id: number) => json({ error: `this token is of an earlier le
 /** A task stopped from its worker's page (#277): its uploads are refused, as its heartbeats and reports are — the worker stops on it. */
 const STOPPING = { error: "stopped from its worker's page: nothing of this task is taken any more — it goes back to the queue once its worker has stopped it", stop: true, state: "stopping" };
 
+/** A lease of a revoked release (#342): its uploads are refused, as its heartbeats and its completion are — its host kills it. */
+const revokedUpload = (task: { id: number; release: string | null }, env: Env) => {
+  const no = revokedRefusal(task, version(env).version);
+  return no ? json(no, 409) : null;
+};
+
 export async function handleStagingPut(taskId: number, filename: string, request: Request, env: Env, w: WorkerIdentity): Promise<Response> {
-  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order, lease_gen FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null; lease_gen: string | null }>();
+  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order, lease_gen, release FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null; lease_gen: string | null; release: string | null }>();
   if (!task) return json({ error: "no such task" }, 404);
   const space = stagingOwner(task);
   if (!space) return json({ error: "project tasks publish to the pool, not to staging" }, 400);
@@ -1221,14 +1228,18 @@ export async function handleStagingPut(taskId: number, filename: string, request
     if (!allowed.includes(filename)) return json({ error: `a ${w.job} uploads ${allowed.join(" and ")}` }, 400);
     // …and only while the job's own task is still this worker's (#277): the path names the staged build, not the job, so a stopped
     // or requeued audit's token — valid until its lease's end — would otherwise overwrite the report its next run attaches.
-    const own = w.job_task ? await env.DB.prepare("SELECT status, lease_owner, stop_order, lease_gen FROM build_tasks WHERE id = ?").bind(w.job_task).first<{ status: string; lease_owner: string | null; stop_order: string | null; lease_gen: string | null }>() : null;
+    const own = w.job_task ? await env.DB.prepare("SELECT status, lease_owner, stop_order, lease_gen, release FROM build_tasks WHERE id = ?").bind(w.job_task).first<{ status: string; lease_owner: string | null; stop_order: string | null; lease_gen: string | null; release: string | null }>() : null;
     if (!own || own.status !== "leased" || own.lease_owner !== w.id) return json({ error: `the ${w.job}'s own task${w.job_task ? ` (${w.job_task})` : ""} is ${own?.status ?? "unknown"}: the lease is not yours`, stop: true, state: own?.status ?? "gone" }, 409);
     if ((own.lease_gen ?? null) !== (w.job_gen ?? null)) return staleLease(w.job_task!);
     if (own.stop_order) return json(STOPPING, 409);
+    const revoked = revokedUpload({ id: w.job_task!, release: own.release }, env);
+    if (revoked) return revoked;
   } else {
     if (task.status !== "leased" || task.lease_owner !== w.id) return json({ error: "the lease is not yours" }, 409);
     if ((task.lease_gen ?? null) !== (w.job_gen ?? null)) return staleLease(task.id);
     if (task.stop_order) return json(STOPPING, 409);
+    const revoked = revokedUpload(task, env);
+    if (revoked) return revoked;
     // The builder never writes the report about its own build.
     if (AUDIT_FILES.includes(filename) || TRIAL_FILES.includes(filename)) return json({ error: `${filename} is written by the audit or trial job, not by the build` }, 403);
   }
@@ -1260,12 +1271,14 @@ export async function handleStagingPut(taskId: number, filename: string, request
 }
 
 export async function handleStagingMultipart(taskId: number, filename: string, url: URL, request: Request, env: Env, w: WorkerIdentity): Promise<Response> {
-  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order, lease_gen FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null; lease_gen: string | null }>();
+  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order, lease_gen, release FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null; lease_gen: string | null; release: string | null }>();
   const space = task ? stagingOwner(task) : null;
   if (!task || !space) return json({ error: "no such staging task" }, 404);
   if (task.status !== "leased" || task.lease_owner !== w.id) return json({ error: "the lease is not yours" }, 409);
   if ((task.lease_gen ?? null) !== (w.job_gen ?? null)) return staleLease(task.id);
   if (task.stop_order) return json(STOPPING, 409);
+  const revoked = revokedUpload(task, env);
+  if (revoked) return revoked;
   if (!/^[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$/.test(filename) || AUDIT_FILES.includes(filename)) return json({ error: "bad filename" }, 400);
   // Text evidence is checked whole at the single PUT (leak.ts); a multipart upload of it would go around that.
   if (isTextEvidence(filename)) return json({ error: `${filename} is text evidence: one PUT, up to ${TEXT_EVIDENCE_MAX} bytes` }, 400);
