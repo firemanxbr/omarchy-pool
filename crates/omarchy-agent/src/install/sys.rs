@@ -1,5 +1,6 @@
 //! The machine install runs on (#317): `/dev/tty` for the person (install.sh's stdin is
-//! the script itself), HTTPS to GitHub, and `systemctl` / `loginctl`.
+//! the script itself), HTTPS to GitHub, and `systemctl` / `loginctl` (a Mac's `launchctl`,
+//! `sysctl`, `route` and `colima`, #320).
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -47,12 +48,17 @@ fn read_line(r: &mut impl BufRead) -> Result<String, String> {
 const MAX_BODY: u64 = 256 << 20;
 
 impl Sys for Machine {
-    fn run(&mut self, prog: &str, args: &[&str]) -> Result<String, String> {
-        let o = Command::new(prog)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("{prog}: {e}"))?;
+    fn run_env(
+        &mut self,
+        prog: &str,
+        args: &[&str],
+        env: &[(&'static str, String)],
+    ) -> Result<String, String> {
+        let mut c = Command::new(prog);
+        c.args(args)
+            .envs(env.iter().map(|(k, v)| (*k, v)))
+            .stdin(Stdio::null());
+        let o = crate::run::exec::retry_busy(|| c.output()).map_err(|e| format!("{prog}: {e}"))?;
         if o.status.success() {
             Ok(String::from_utf8_lossy(&o.stdout).into_owned())
         } else {

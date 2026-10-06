@@ -59,7 +59,9 @@ jobs:
     # ship it for (#311): two builds of this commit give one binary, and its
     # Sigstore check holds against the conformance suite at a pinned commit (not
     # copied here: that repository carries no license file). Its unit tests run
-    # in the rust job.
+    # in the rust job on Linux, and here on macOS (#320): a Mac runs the same
+    # agent, so its tests — the LaunchAgent's plist through plutil among them —
+    # run on the platform it ships for.
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -95,6 +97,9 @@ jobs:
         run: cargo test --locked -p omarchy-agent --lib -- --ignored conformance
         env:
           OMARCHY_SIGSTORE_CONFORMANCE: ${{ github.workspace }}/sigstore-conformance
+      - name: The agent's tests on macOS — the plist plutil reads, the omarchy VM's size, mounts, clock and rate limit, install and uninstall on a played Mac
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p omarchy-agent
 
   agent-run-loop:
     name: Host agent run loop on a real engine (${{ matrix.engine }})
@@ -312,6 +317,12 @@ jobs:
       - name: shellcheck of prep-root.sh
         working-directory: .
         run: shellcheck factory/host/prep-root.sh
+      - name: A Mac's one-time steps — prep-mac.sh installs Colima and Lima only and makes the omarchy VM's three directories outside the home directory, no sudo — against stubs, under dash
+        working-directory: .
+        run: bash tests/prep-mac.sh
+      - name: shellcheck of prep-mac.sh
+        working-directory: .
+        run: shellcheck factory/host/prep-mac.sh
       - name: The rollback — images and Worker back to a tag — against stubbed buildx and wrangler
         working-directory: .
         run: bash tests/rollback-workflow.sh

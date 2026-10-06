@@ -60,6 +60,22 @@ pub enum Isolation {
     User,
     /// Task root mapped away from the daemon's user (`userns-remap`).
     Subuid,
+    /// macOS: the dedicated `omarchy` Colima VM, which mounts only the work root, the
+    /// secrets directory and the set directory (#320): an escape lands in the VM.
+    Vm,
+    /// macOS: Docker Desktop's or `OrbStack`'s VM, shared with the person's own containers
+    /// and mounting the home directory by default; used if present, never installed.
+    #[serde(rename = "vm-shared")]
+    VmShared,
+}
+
+/// The VM a macOS engine runs in (#320, design v2 §19.2, §19.3), as install found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmKind {
+    /// The `omarchy` Colima profile the agent starts, stops and sizes (M7).
+    Dedicated,
+    /// Docker Desktop or `OrbStack`.
+    Shared,
 }
 
 /// Whether the runtime enforces the hard limits every task gets (D32).
@@ -112,6 +128,11 @@ pub struct AgentToml {
     pub caps: Caps,
     pub work_root: Option<String>,
     pub socket_cli: Option<String>,
+    /// A Mac's VM (#320, `[vm]`): its runtime (`colima`, `docker-desktop`, `orbstack`) and
+    /// whether it runs `x86_64` through Rosetta.
+    pub vm: Option<(String, bool)>,
+    /// The emulated lanes the owner allows (`[envelope] emulate`); absent, every lane.
+    pub emulate: Option<Vec<String>>,
 }
 
 impl AgentToml {
@@ -122,6 +143,13 @@ impl AgentToml {
             set: SetPart,
             #[serde(default)]
             envelope: EnvelopePart,
+            vm: Option<VmPart>,
+        }
+        #[derive(Deserialize)]
+        struct VmPart {
+            runtime: String,
+            #[serde(default)]
+            rosetta: bool,
         }
         #[derive(Deserialize, Default)]
         struct SetPart {
@@ -136,6 +164,7 @@ impl AgentToml {
             agent_slots: Option<u32>,
             #[serde(default)]
             dedicated: bool,
+            emulate: Option<Vec<String>>,
         }
         let raw: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
         if let Some(env) = raw.get("envelope").and_then(toml::Value::as_table) {
@@ -162,6 +191,8 @@ impl AgentToml {
             },
             work_root: f.set.work_root,
             socket_cli: f.set.socket_cli,
+            vm: f.vm.map(|v| (v.runtime, v.rosetta)),
+            emulate: e.emulate,
         })
     }
 }
@@ -217,6 +248,8 @@ pub struct Capacity {
     job_reserved: u32,
     agent_slots: u32,
     arch: String,
+    /// Emulated lanes a probe turned on (a Mac's Rosetta lane, #320).
+    emulated: Vec<Lane>,
     isolation: Isolation,
     dedicated: bool,
     limits: Limits,
@@ -282,6 +315,7 @@ impl Capacity {
             job_reserved: c.units.job_reserved.min(units),
             agent_slots: caps.agent_slots,
             arch: facts.arch().to_owned(),
+            emulated: facts.emulated.clone(),
             isolation: facts.isolation(),
             dedicated: caps.dedicated,
             limits: facts.limits(),
@@ -306,6 +340,10 @@ impl Capacity {
     }
     pub fn isolation(&self) -> Isolation {
         self.isolation
+    }
+    /// The emulated lanes, after the native one.
+    pub fn emulated(&self) -> &[Lane] {
+        &self.emulated
     }
     pub fn limits(&self) -> Limits {
         self.limits
@@ -339,10 +377,13 @@ impl Capacity {
             units: self.units,
             job_reserved: self.job_reserved,
             agent_slots: self.agent_slots,
-            lanes: vec![Lane {
+            lanes: std::iter::once(Lane {
                 arch: self.arch.clone(),
                 mode: "native",
-            }],
+                via: None,
+            })
+            .chain(self.emulated.iter().cloned())
+            .collect(),
             isolation: self.isolation,
             dedicated: self.dedicated,
             limits: self.limits,
@@ -352,11 +393,14 @@ impl Capacity {
 }
 
 /// One architecture the host runs. P1 has the native lane only; emulated lanes come with
-/// #338.
+/// #338, except a Mac's `x86_64` lane through Rosetta (#320), which a smoke run turned on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Lane {
     pub arch: String,
     pub mode: &'static str,
+    /// How an emulated lane runs: `rosetta` in a Colima VM started with `--vz-rosetta`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<&'static str>,
 }
 
 /// `run/capacity.json`, schema 2 (design v2 §7.3).

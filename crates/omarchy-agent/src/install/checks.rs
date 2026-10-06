@@ -57,6 +57,11 @@ impl Report {
 /// existing compose project named with `--legacy` grants it: it is meant for the Studio's
 /// recorded set only, the warning and `rootful_exception` in `legacy.json` record it, and
 /// P6 removes it.
+///
+/// On macOS (#320) the escape lands in a VM, not in the person's account: the `omarchy`
+/// Colima VM is dedicated (`vm`, whatever runs inside it); Docker Desktop's or `OrbStack`'s
+/// VM (`vm-shared`) qualifies only with the home mount removed — the caller probes that —
+/// and `--dedicated`, the person's word that nothing else runs in it.
 pub(crate) fn hosting(
     isolation: Isolation,
     rootful: bool,
@@ -64,6 +69,25 @@ pub(crate) fn hosting(
     legacy: bool,
     r: &mut Report,
 ) {
+    match isolation {
+        Isolation::Vm => {
+            r.notes.push(
+                "isolation: vm (the dedicated omarchy VM; the Mac's files are not mounted into it)"
+                    .into(),
+            );
+            return;
+        }
+        Isolation::VmShared => {
+            if !dedicated {
+                r.blockers.push(
+                    "hosting: Docker Desktop's or OrbStack's VM is shared with your own containers: it qualifies only with the home mount removed and --dedicated, your word that nothing else runs in it (the omarchy Colima profile needs neither: factory/host/prep-mac.sh)".into(),
+                );
+            }
+            r.notes.push("isolation: vm-shared (Docker Desktop's or OrbStack's VM, used because it is here; never installed)".into());
+            return;
+        }
+        Isolation::Root | Isolation::User | Isolation::Subuid => {}
+    }
     // Each requirement on its own, so a fresh rootful VM sees both of its blockers at once.
     if rootful && !dedicated {
         r.blockers.push(
@@ -100,6 +124,8 @@ pub(crate) fn level(i: Isolation) -> &'static str {
         Isolation::Root => "root",
         Isolation::User => "user",
         Isolation::Subuid => "subuid",
+        Isolation::Vm => "vm",
+        Isolation::VmShared => "vm-shared",
     }
 }
 

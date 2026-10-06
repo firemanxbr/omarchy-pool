@@ -485,6 +485,18 @@ impl Driver for FakeDriver {
         e.networks.retain(|n| n.0 != id);
         Answer::Yes(())
     }
+
+    fn tasks_running(&mut self) -> Answer<bool> {
+        let e = self.0.borrow();
+        if e.down {
+            return Answer::NoAnswer("down".into());
+        }
+        Answer::Yes(
+            e.containers
+                .iter()
+                .any(|c| c.project.is_empty() && c.status == "running"),
+        )
+    }
 }
 
 impl EngineState {
@@ -515,6 +527,8 @@ pub(crate) struct PoolState {
     /// The public `follow` a pool from before #344 answers, and the workers it was asked for.
     pub follow: Option<Net<Follow>>,
     pub follows: Vec<String>,
+    /// The `Date` the host state's answer carries, whatever its status (#320).
+    pub date: Option<i64>,
 }
 
 pub(crate) type Remote = Rc<RefCell<PoolState>>;
@@ -526,6 +540,10 @@ impl Pool for FakePool {
         let mut s = self.0.borrow_mut();
         s.polls += 1;
         s.state.clone().unwrap_or(Net::NoAnswer("no pool".into()))
+    }
+
+    fn date(&self) -> Option<i64> {
+        self.0.borrow().date
     }
 
     fn follow(&mut self, worker_id: &str) -> Net<Follow> {

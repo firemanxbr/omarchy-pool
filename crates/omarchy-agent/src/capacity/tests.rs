@@ -547,7 +547,9 @@ dedicated = true
         }
     );
     assert_eq!(a.work_root.as_deref(), Some("/srv/omarchy-pool/host"));
+    assert_eq!(a.emulate, Some(vec!["x86_64".to_owned()]));
     assert_eq!(AgentToml::parse("").unwrap().caps, Caps::default());
+    assert_eq!(AgentToml::parse("").unwrap().emulate, None);
     assert!(AgentToml::parse("[envelope]\nmax_units = -1\n").is_err());
     assert!(AgentToml::parse("[envelope]\nmax_units = \"all\"\n").is_err());
     // A misspelt cap is refused, not silently dropped; every key of §12 reads.
@@ -562,6 +564,61 @@ dedicated = true
     // The work root is a plain absolute path, as lint-set reads it.
     assert!(AgentToml::parse("[set]\nwork_root = \"srv/pool\"\n").is_err());
     assert!(AgentToml::parse("[set]\nwork_root = \"/srv/../etc\"\n").is_err());
+}
+
+#[test]
+fn a_macs_vm_gives_its_level_its_own_memory_and_the_rosetta_lane_the_envelope_allows() {
+    // One way for install, `capacity --write` and the run loop's count (#320).
+    use super::probe::{in_mac_vm, LaneSaid, MacVm};
+    use super::VmKind;
+    static NONE: [String; 0] = [];
+    let meminfo = "MemTotal: 32000000 kB\nMemAvailable: 30000000 kB\n";
+    let vm = |emulate: Option<&'static [String]>, rosetta: bool| MacVm {
+        kind: VmKind::Dedicated,
+        meminfo: Some(meminfo),
+        rosetta,
+        emulate,
+        x86_64_image: Some("ghcr.io/o/build@sha256:00"),
+    };
+    let mut smokes = Vec::new();
+    let mut smoke = |img: &str| {
+        smokes.push(img.to_owned());
+        Ok(())
+    };
+    let (f, said) = in_mac_vm(host(8, 32), &vm(None, true), &mut smoke);
+    assert_eq!(said, None);
+    assert_eq!(f.isolation(), Isolation::Vm);
+    assert_eq!(f.mem_available, Some(30_000_000 * 1024));
+    let c = Capacity::new(&f, &Caps::default(), &constants());
+    let lanes = serde_json::to_value(c.file("t").lanes).unwrap();
+    assert_eq!(
+        lanes,
+        serde_json::json!([{"arch": "aarch64", "mode": "native"}, {"arch": "x86_64", "mode": "emulated", "via": "rosetta"}])
+    );
+    // `emulate = []` leaves the lane off, whatever the VM runs: no count widens it.
+    let (f, said) = in_mac_vm(host(8, 32), &vm(Some(&NONE), true), &mut smoke);
+    assert!(f.emulated.is_empty());
+    assert_eq!(
+        said,
+        Some(LaneSaid::Note(
+            "the x86_64 lane is off: the envelope's emulate leaves it out".into()
+        ))
+    );
+    assert_eq!(smokes.len(), 1, "no smoke run for a lane left out");
+    // A smoke run that fails: no lane, a warning.
+    let (f, said) = in_mac_vm(host(8, 32), &vm(None, true), &mut |_| Err("exit 1".into()));
+    assert!(f.emulated.is_empty());
+    assert!(matches!(said, Some(LaneSaid::Warning(w)) if w.contains("exit 1")));
+    // Docker Desktop's VM: its level only; its memory and lanes are not the agent's.
+    let shared = MacVm {
+        kind: VmKind::Shared,
+        ..vm(None, true)
+    };
+    let (f, said) = in_mac_vm(host(8, 32), &shared, &mut |_| panic!("no smoke run"));
+    assert_eq!(
+        (f.isolation(), said, f.mem_available),
+        (Isolation::VmShared, None, None)
+    );
 }
 
 #[test]
