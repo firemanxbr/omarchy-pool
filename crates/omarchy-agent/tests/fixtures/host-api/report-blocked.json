@@ -3,6 +3,7 @@
     "skip": null,
     "version": "0.3.0"
   },
+  "asleep": false,
   "legacy": {
     "blocked": "the marker cannot be written: /srv/omarchy-pool: group- or world-writable (mode 775)",
     "containers": 3,

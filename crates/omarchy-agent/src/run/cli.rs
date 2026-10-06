@@ -290,8 +290,13 @@ fn setup(
         .as_ref()
         .map(|v| keeper(&cfg, v, &paths))
         .transpose()?;
+    // A Mac's sleep (#329) is the agent's to hold off and report: its config has a VM.
+    let power = vm
+        .is_some()
+        .then(|| super::power::Sleep::new(Box::<super::power::Mac>::default()));
     let mut agent = Agent::new(cfg, paths, state, pool, Box::new(Sigstore), Drivers::Pinned);
     agent.vm = vm;
+    agent.power = power;
     if let Some(e) = key_error {
         agent.journal.write(
             super::now(),

@@ -30,7 +30,9 @@
 //! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
 //! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
 //! agent only when it exits, so the progress watchdog ([`cli`]) also ends a self-update's
-//! candidate that hangs past its health gate's deadline.
+//! candidate that hangs past its health gate's deadline. It keeps the Mac awake while a
+//! task runs, and reports `asleep` before the Mac sleeps and again after it woke (#329,
+//! [`power`]): a sleeping host has zero free units.
 
 pub mod config;
 pub mod state;
@@ -41,6 +43,7 @@ pub(crate) mod exec;
 pub(crate) mod journal;
 pub(crate) mod orders;
 pub(crate) mod pool;
+pub(crate) mod power;
 pub(crate) mod report;
 pub(crate) mod rollout;
 pub(crate) mod selfupdate;

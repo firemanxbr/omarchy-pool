@@ -3,6 +3,7 @@
     "skip": null,
     "version": "0.3.0"
   },
+  "asleep": false,
   "legacy": {
     "dir": "/srv/omarchy-pool",
     "order": "ho_11111111111111111111111111111111",

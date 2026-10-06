@@ -1,9 +1,13 @@
 //! The host report (design v2 §17.2; #344's part of it): `POST /api/v1/hosts/self/report`,
 //! signed with the host key, on every change and at least every [`EVERY_S`]. It carries
 //! what the agent knows of itself — its version, the release applied, targeted and its
-//! floor, the rollout and the last round, the legacy set (`legacy`), and the answers to
-//! the last host orders (`orders`), which the pool closes the orders with. Capacity,
-//! runtime, bundle and task fields stay with the issues that read them.
+//! floor, the rollout and the last round, the legacy set (`legacy`), the answers to the
+//! last host orders (`orders`), which the pool closes the orders with, and whether the Mac
+//! sleeps (`asleep`, #329; `false` on every other host), which the pool counts as zero free
+//! units. Capacity, runtime, bundle and task fields stay with the issues that read them.
+//!
+//! A Mac about to sleep reports at once ([`Agent::report_now`]), whatever the spacing or a
+//! retry's wait: the sleep waits for it.
 //!
 //! A report that does not get through changes nothing and is tried again a minute later —
 //! an hour later when the pool refuses the host's calls (401/403: suspended, retired, a
@@ -53,20 +57,34 @@ impl Agent {
             })).collect::<Vec<_>>(),
         });
         body["legacy"] = self.legacy_view(now).unwrap_or(serde_json::Value::Null);
+        body["asleep"] = self
+            .power
+            .as_ref()
+            .is_some_and(super::power::Sleep::asleep)
+            .into();
         body
     }
 
     /// Posts the report when something changed or one is due.
     pub(super) fn report(&mut self, now: i64) {
-        if now < self.reported.at + SPACING_S {
+        self.post_report(now, false);
+    }
+
+    /// Posts the report now: the Mac goes to sleep, and waits for it (#329).
+    pub(super) fn report_now(&mut self, now: i64) {
+        self.post_report(now, true);
+    }
+
+    fn post_report(&mut self, now: i64, at_once: bool) {
+        if !at_once && now < self.reported.at + SPACING_S {
             return;
         }
         let body = self.report_body(now).to_string();
         let changed = self.reported.body.as_deref() != Some(body.as_str());
-        if !changed && now < self.reported.next_at {
+        if !at_once && !changed && now < self.reported.next_at {
             return;
         }
-        if changed && now < self.reported.next_at && self.reported.body.is_none() {
+        if !at_once && changed && now < self.reported.next_at && self.reported.body.is_none() {
             // A report that did not get through waits for its retry.
             return;
         }
