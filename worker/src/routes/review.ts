@@ -11,6 +11,7 @@ import { putRecord, recordKey, recordUrl } from "../record";
 import { packageRows, parseTargets, settleTargets, targetsOf, type PackageRows, type Target, type Targets } from "../targets";
 import { throughWords, type Through } from "../agents";
 import { decidedWith, justNowWords, type PasskeyGate } from "./passkeys";
+import { placements, type PlacementView } from "./factory";
 
 /**
  * Review: what maintainers do with staged builds (docs/GOVERNANCE.md). A
@@ -51,6 +52,11 @@ import { decidedWith, justNowWords, type PasskeyGate } from "./passkeys";
  *                                           every rebuild of the claim is cancelled — the ones staged beside it too —
  *                                           and the package waits for a claim again (a claim whose rebuilds all staged
  *                                           is decided, not released)
+ *   POST /factory/tasks/:id/any-host {assertion} a maintainer, never its requester, on the project's rebuild still queued
+ *                                           that only its requester's hosts have a lane for (#339, D35: the project's
+ *                                           copy is not built on its requester's host while another maintainer's can) →
+ *                                           released to any host, with their passkey (any-host:<task>): on the task
+ *                                           (params.any_host), the journal and the record
  *   POST /factory/packages/:name/adopt {reason?} Review's No maintainer tab posts to the one Adopt (routes/adopt.ts): a
  *                                           package its owner left unmaintained, with nothing of it in review, becomes
  *                                           the adopter's — its maintainer in the pool, and the registration theirs
@@ -130,6 +136,16 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     const from = Number(p.review);
     if (from) projectOf.set(from, { id: b.id, status: b.status, error: b.error, worker: b.lease_owner ?? b.pinned_to, attempts: b.attempts, result: b.result, trial_status: b.trial_status, trial_result: b.trial_result, by: p.by ?? null, agent: p.agent ?? null, at: b.created_at });
   }
+  // The project's copy of a package while it is queued (#339, D35): where it may run — kept off its requester's hosts, held when only
+  // theirs can build it — and whether the caller may release it to any host (anyHostVerdict). The fleet is read only when one is queued.
+  const queuedCopies = [...projectOf.values()].filter((b) => b.status === "queued").map((b) => b.id);
+  const placed = queuedCopies.length ? await placements(env, queuedCopies) : new Map<number, PlacementView>();
+  const placementOf = (name: string, from: number, pb: { id: number; status: string }) => {
+    const pl = placed.get(pb.id);
+    if (!pl) return null;
+    const v = anyHostVerdict(c, { id: pb.id, name, kind: "build", trust: "project", status: pb.status, params: JSON.stringify({ review: from }) }, pl);
+    return { ...pl, any_host: { ok: v.ok, why: v.ok ? null : v.why } };
+  };
   // The package's other architectures, from what the list holds and the
   // queue: one review covers every architecture (packageFacts), so a row's
   // decision reads its package's builds — the contributors' still queued or
@@ -252,7 +268,7 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     // contributor: evidence, a maintainer has the project build it · project: the project's own build, a maintainer approves it
     kind: r.trust === "project" ? "project" : "contributor",
     from: r.trust === "project" && r.params ? ((JSON.parse(r.params as string) as { review?: number }).review ?? null) : null,
-    project_build: r.trust === "community" ? (() => { const pb = projectOf.get(r.id as number); return pb ? { id: pb.id, status: pb.status, error: pb.error, worker: pb.worker, by: pb.by, agent: pb.agent, at: pb.at } : null; })() : null,
+    project_build: r.trust === "community" ? (() => { const pb = projectOf.get(r.id as number); return pb ? { id: pb.id, status: pb.status, error: pb.error, worker: pb.worker, by: pb.by, agent: pb.agent, at: pb.at, placement: placementOf(r.name as string, r.id as number, pb) } : null; })() : null,
     // The claim the row is under (#247): the project's rebuild a maintainer asked for — the contributor's row's, or the project's row itself — while it is queued, running or staged; who asked, the agent they chose, since when. Review's queue says "claimed by", and Release reads it.
     claim: claimRow(r),
     built_by: builtBy(r),
@@ -820,8 +836,10 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   // Where it runs: one of the project's workers that builds this architecture, when the maintainer says which (the native one, not the emulated one).
   let pinned: string | null = null, agent: string | null = null;
   if (typeof b.worker === "string" && b.worker.trim()) {
-    const w = await env.DB.prepare("SELECT id, arch, kinds, agent, agent_status, drained_at, drained_by, drain_reason FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string; kinds: string | null; agent: string | null; agent_status: string | null; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
+    const w = await env.DB.prepare("SELECT id, arch, owner, kinds, agent, agent_status, drained_at, drained_by, drain_reason FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string; owner: string | null; kinds: string | null; agent: string | null; agent_status: string | null; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
     if (!w || w.arch !== t.arch) return json({ error: `${b.worker} is not a project worker for ${t.arch}` }, 400);
+    // The project's copy of a package is not built on its requester's host (#339, D35): pinned to one, it would wait for a release.
+    if (w.owner && f.requesters.includes(w.owner)) return json({ error: `${w.id} is ${w.owner}'s, who brought ${t.name}: the project's copy of a package is not built on its requester's host — choose another maintainer's`, code: "requester_host" }, 409);
     // A drained worker is handed nothing until it is resumed (#277): pinned to it, the rebuild would wait for it.
     if (w.drained_at) return json({ error: drainedRefusal(w) }, 409);
     // The claim gives a review build only to a worker that declares builds and whose agent answered; pinned to another, it would wait forever.
@@ -839,8 +857,13 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   const pkg = await env.DB.prepare("SELECT request_id, project, source, release, description, license FROM factory_packages WHERE name = ?").bind(t.name).first<{ request_id: number | null; project: string | null; source: string | null; release: string | null; description: string | null; license: string | null }>();
   // The same agent on the other architectures: a live project worker of that architecture that builds, whose agent answered — an idle one first. build_workers is the project's and the contributors' machines, a few dozen rows.
   const alive = new Date(Date.now() - WORKER_ALIVE_MINUTES * 60000).toISOString();
-  const sameAgent = async (arch: string): Promise<string | null> =>
-    agent ? ((await env.DB.prepare(SAME_AGENT_SQL).bind(arch, agent, alive).first<{ id: string }>())?.id ?? null) : null;
+  // Never a worker of the package's requester (#339, D35): the project's copy is not built on its requester's host, so pinned to one it
+  // would wait for a release — the rebuild of that architecture goes unpinned instead, to any other maintainer's host that runs it.
+  const sameAgent = async (arch: string): Promise<string | null> => {
+    const id = agent ? ((await env.DB.prepare(SAME_AGENT_SQL).bind(arch, agent, alive).first<{ id: string }>())?.id ?? null) : null;
+    const whose = id ? (await env.DB.prepare("SELECT owner FROM build_workers WHERE id = ?").bind(id).first<{ owner: string | null }>())?.owner ?? null : null;
+    return id && !(whose && f.requesters.includes(whose)) ? id : null;
+  };
   const queued: { task: number; arch: string; from: number; pinned_to: string | null; agent: string | null }[] = [];
   for (const s of from) {
     const pin = s.id === id ? pinned : await sameAgent(s.arch);
@@ -884,6 +907,67 @@ export const CLAIM_SQL = `INSERT INTO build_tasks (name, arch, version, pkgbuild
   SELECT ?, ?, ?, ?, ?, 30, 0, 'project', ?, 'build', ?, ?
    WHERE NOT EXISTS (SELECT 1 FROM build_tasks r WHERE r.name = ? AND +r.kind = 'build' AND +r.trust = 'project' AND +r.status IN ('queued', 'leased', 'staged') AND json_extract(r.params, '$.review') IN (SELECT value FROM json_each(?)))
   RETURNING id`;
+
+// ---------- the project's copy, released to any host (#339, design v2 §8.4; D35) ----------
+
+/**
+ * Who may release the project's copy of a package to any host (D35), and
+ * when: a maintainer — never one of its requesters, whose hosts it is kept
+ * off — on a review rebuild still queued and not released yet, that only its
+ * requesters' hosts have a lane allowed for (`placement.held`). While
+ * another maintainer's host has one, it waits for that host, not for a
+ * release; a rebuild no host can run now waits for one as any build does.
+ * The same predicate draws Review's button and refuses at the door.
+ */
+export function anyHostVerdict(c: Contributor | null, t: { id: number; name: string; kind: string; trust: string; status: string; params: string | null }, p: PlacementView | null): Verdict {
+  const no = (status: 401 | 403 | 409, why: string, code?: "sign_in" | "maintainer_only" | "conflict_of_interest"): Verdict => ({ ok: false, status, why, ...(code ? { code } : {}) });
+  if (!c) return no(401, SIGN_IN, "sign_in");
+  if (!isMaintainer(c)) return no(403, MAINTAINER_DECIDES, "maintainer_only");
+  if (t.kind !== "build" || t.trust !== "project" || reviewOf(t.params) === null) return no(409, `task ${t.id} is not the project's copy of a package: only a review rebuild is kept off its requester's hosts`);
+  if (t.status !== "queued" || !p) return no(409, `task ${t.id} is ${t.status === "leased" ? "building" : t.status}: only a rebuild still queued waits for a host`);
+  if (p.requesters.includes(c.login)) return no(403, `you brought ${t.name} — another maintainer releases its rebuild to any host, as another decides on it`, "conflict_of_interest");
+  if (p.released) return no(409, `released to any host by ${p.released.by} already`);
+  if (p.others.length) return no(409, `${p.others.join(", ")} — another maintainer's — can build it: the project's copy waits for that host, not for a release`);
+  if (!p.mine.length) return no(409, "no host can build it now, its requester's included: it waits for one as any build does — nothing to release");
+  return { ok: true };
+}
+
+/** A release to any host, written once: only while the rebuild is still queued and nobody released it (two maintainers at once write one). */
+export const ANY_HOST_SQL = "UPDATE build_tasks SET params = json_set(COALESCE(params, '{}'), '$.any_host', json(?)) WHERE id = ? AND status = 'queued' AND json_extract(params, '$.any_host') IS NULL";
+
+/**
+ * POST /factory/tasks/:id/any-host {assertion} — the project's copy of a
+ * maintainer's package, held off their hosts while no other maintainer's
+ * host has a lane allowed for it (D35), released to any host by another
+ * maintainer with their passkey for exactly this rebuild (`any-host:<task>`,
+ * routes/passkeys.ts webGate): any host may take it from then on, its
+ * requester's included. On the task (`params.any_host`: who, when, the
+ * passkey), the journal and the record.
+ */
+export async function handleAnyHost(c: Contributor, id: number, request: Request, env: Env, gate?: PasskeyGate): Promise<Response> {
+  const b = (await request.json().catch(() => ({}))) as { assertion?: unknown };
+  const t = await env.DB.prepare("SELECT id, name, arch, kind, trust, status, params FROM build_tasks WHERE id = ?").bind(id).first<{ id: number; name: string; arch: string; kind: string; trust: string; status: string; params: string | null }>();
+  if (!t) return json({ error: "no such task" }, 404);
+  const p = (await placements(env, [id])).get(id) ?? null;
+  const no = refused(anyHostVerdict(c, t, p));
+  if (no || !p) return no ?? json({ error: "nothing to release" }, 409);
+  // Fail closed: a door that forgets the gate releases nothing.
+  if (!gate) return json({ error: "a release to any host is confirmed with a passkey, and this door asks for none: nothing was released", code: "passkey_required" }, 403);
+  const confirmed = await gate(b.assertion);
+  if (confirmed instanceof Response) return confirmed;
+  const at = new Date().toISOString();
+  const set = await env.DB.prepare(ANY_HOST_SQL).bind(JSON.stringify({ by: c.login, at, passkey: confirmed.passkey }), id).run();
+  if (!set.meta.changes) return json({ error: `${t.name}'s rebuild (task ${id}) was released, or left the queue, a moment ago: nothing was released` }, 409);
+  const via = viaOf(request);
+  const record = await decisionRecord(env, t.name, "any-host", id, { task: id, arch: t.arch, requesters: p.requesters, hosts: p.mine, by: c.login, via, passkey: confirmed.passkey, at });
+  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('review', NULL, 'factory', 'warn', ?, ?)")
+    .bind(
+      `${t.name} for ${t.arch} (task ${id}): released to any host by ${c.login}${justNowWords(confirmed)} — only ${p.requesters.join(", ")}'s hosts can build it, and the project's copy is not built on its requester's host while another maintainer's can`,
+      JSON.stringify({ task: id, name: t.name, arch: t.arch, action: "any_host", by: c.login, via, passkey: confirmed.passkey, requesters: p.requesters, hosts: p.mine, record: record.url, ...(record.error ? { record_error: record.error } : {}) }),
+    )
+    .run();
+  return json({ task: id, any_host: { by: c.login, at }, passkey: confirmed.passkey, hosts: p.mine, record: record.url });
+}
 
 /**
  * Approve: a maintainer, never the owner, on the project's staged build —
