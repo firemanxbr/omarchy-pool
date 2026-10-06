@@ -388,7 +388,9 @@ beats() { jq -c --arg p "/api/v1/factory/tasks/$1/heartbeat" 'select(.path == $p
 b21="$(beats 21)"
 until_ 60 "task 22 failed at its timeout" reported 22 fail
 jq -e '.timed_out == true and .final == false and (.error | contains("ran past its timeout"))' <<<"$(report 22 fail)" >/dev/null || fail "task 22: $(report 22 fail)"
-kill -0 "$(cat "$tmp/work/jobs/hang.pid")" 2>/dev/null && fail "the hung job's script survived its kill"
+# Killed, or a zombie its new parent has not reaped yet.
+script_gone() { local p; p="$(cat "$tmp/work/jobs/hang.pid")"; ! kill -0 "$p" 2>/dev/null || [[ "$(awk '{ print $3 }' "/proc/$p/stat" 2>/dev/null)" == Z ]]; }
+until_ 10 "the hung job's script killed with it" script_gone
 [[ "$(beats 21)" -gt "$b21" ]] || fail "task 21's heartbeats stopped while task 22 hung"
 running 21 || fail "task 21 was touched by task 22's kill"
 finish 21
