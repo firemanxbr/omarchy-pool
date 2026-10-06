@@ -187,6 +187,12 @@ jobs:
     # API socket. pasta's guest-mapped address is tried only where rootless
     # podman runs pasta with it (5.3 on): the runner's podman 4.9 does not, so
     # that part is skipped here with a note and runs by hand on such a host.
+    # #373: the probe runs the way a task runs — a network made like a task's,
+    # behind an egress sidecar with the dispatcher's deny list (here a stand-in
+    # the script builds from this commit's pkg-repo egress on the pinned Arch
+    # base; the worker-image job runs it again with the worker image) — and
+    # passes on both engines, while a network made without --internal, or a
+    # sidecar not given a public address of the host's, fails it.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -199,7 +205,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The egress probe (a task network's gateway, made as the dispatcher makes it, and the host's loopback too) and a legacy project on ${{ matrix.engine }}
+      - name: The egress probe the way a task runs, behind its egress sidecar (a task network's gateway, made as the dispatcher makes it, and the host's loopback too) and a legacy project on ${{ matrix.engine }}
         run: bash tests/agent-install.sh ${{ matrix.engine }}
 
   emulated-lane:
@@ -450,3 +456,9 @@ jobs:
           WORKER_IMAGE: omarchy-worker:ci
           PKG_REPO: target/release/pkg-repo
           OMARCHY_AGENT: target/release/omarchy-agent
+      # #373: the install's egress probe behind the egress sidecar this image runs, as every
+      # task's (agent-install's own jobs use a stand-in built from the same pkg-repo).
+      - name: The install's egress probe the way a task runs, behind the worker image's own egress sidecar, on docker
+        run: bash tests/agent-install.sh docker
+        env:
+          WORKER_IMAGE: omarchy-worker:ci

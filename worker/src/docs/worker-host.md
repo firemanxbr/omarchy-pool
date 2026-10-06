@@ -149,7 +149,8 @@ to copy.
    minutes, so only the dispatcher is recreated and its tasks run on. Beside
    the token the agent writes the host's own addresses for every task's
    egress to refuse (`OMARCHY_HOST_ADDRESSES`), and once `agent.toml` is
-   there, the secrets directory and the envelope's agent budget (#371); a
+   there, the secrets directory, the envelope's agent budget (#371) and its
+   grant of a signed exception's bridge (`OMARCHY_DIRECT_NETWORK`, #373); a
    rotation keeps them, and the lines you add to the file yourself stay.
 5. Only then does it write `agent.toml` with the host and its registration,
    take the agent keys, write the systemd --user unit, enable linger and start
@@ -189,6 +190,15 @@ private-repository read (a fine-grained token, "public repositories,
 read-only"). A package that truly needs direct network access (raw sockets,
 its own name resolution) gets `network = "direct"` with a `reason` in
 `factory/sizing/tasks.toml`, in a pull request another maintainer approves.
+A host runs such a package's tasks only where its owner granted that bridge
+(`--direct-network` at install, `direct_network = true` in `agent.toml`;
+`--no-direct-network` takes it back), which preflight's egress probe then
+checks too; any other host hands them back (#373) as a lost lease, whose
+attempt the pool gives back twice per task and spends after that: until the
+claim says whether a host runs such packages, a package with the exception
+needs a host that grants it among those that claim its tasks. A rootless host cannot grant it: its bridges reach the LAN through
+the engine's user-mode network stack, while its tasks, behind their egress
+sidecars, never do.
 
 **A host runs as many tasks at once as its units hold (#337).** The pool
 hands it one task per claim and its dispatcher claims again at once while
@@ -374,9 +384,10 @@ macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
   agent starts, stops and sizes the profile itself, at most once every ten
   minutes and six times a day, and never restarts it for a new size while a
   task runs; after a resize it reports the VM's new size to the pool.
-- **Tasks reach only the internet.** The agent puts the same task firewall
-  in the VM as on a Linux host: a task reaches no address of your LAN, your
-  router or the Mac itself, which preflight's egress probe checks.
+- **Tasks reach only the internet.** A task leaves only through its egress
+  sidecar, and the agent puts the same task firewall in the VM as on a Linux
+  host: a task reaches no address of your LAN, your router or the Mac
+  itself, which preflight's egress probe checks the way a task runs (#373).
 - **An x86_64 lane through Rosetta.** With Rosetta 2 installed the VM runs
   with `--vz-rosetta` (4K pages): x86_64 builds run on a lane that reports
   `via: rosetta`, faster than qemu.

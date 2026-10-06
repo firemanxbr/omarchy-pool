@@ -4,11 +4,12 @@
 //! `worker_id` the enrollment gave, #321), by a person at the host and by the person's
 //! `omarchy-agent runtime switch` there (#325), never by the pool. It is refused when
 //! group- or world-writable or owned by another user. Unknown keys are left alone
-//! (capacity caps are #333's), but `[envelope].agent_budget`, which reaches the
-//! dispatcher (#371), is read strictly. What the pool may narrow inside it — units,
-//! emulated lanes — and what it allows the pool to ask — diagnostics — is [`Policy`]
-//! (#325, design v2 §12), with the owner's soak (`soak_minutes`, #326). Any problem here is
-//! a local configuration error: the loop exits 78 and says why.
+//! (capacity caps are #333's), but `[envelope].agent_budget` and
+//! `[envelope].direct_network`, which reach the dispatcher (#371, #373), are read strictly.
+//! What the pool may narrow inside it — units, emulated lanes — and what it allows the pool
+//! to ask — diagnostics — is [`Policy`] (#325, design v2 §12), with the owner's soak
+//! (`soak_minutes`, #326). Any problem here is a local configuration error: the loop exits
+//! 78 and says why.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -120,6 +121,9 @@ pub struct Config {
     pub task_subnets: Option<String>,
     /// `[envelope].agent_budget` (#371): what `etc/dispatcher.env` gives the dispatcher.
     pub agent_budget: Budget,
+    /// `[envelope].direct_network` (#373): the owner grants a signed exception's bridge
+    /// network, which `etc/dispatcher.env` tells the dispatcher.
+    pub direct_network: bool,
     pub envelope: Envelope,
     /// What install detected behind the socket (`set.engine`, #317): the lint holds a
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
@@ -256,6 +260,7 @@ struct EnvelopePart {
     max_cpus: Option<u32>,
     max_mem_gb: Option<u32>,
     agent_budget: Option<toml::Value>,
+    direct_network: Option<bool>,
     max_units: Option<u32>,
     emulate: Option<Vec<String>>,
     #[serde(default)]
@@ -441,6 +446,7 @@ impl Config {
             socket_mount,
             task_subnets: f.envelope.task_subnets,
             agent_budget: Budget::from_envelope(f.envelope.agent_budget.as_ref())?,
+            direct_network: f.envelope.direct_network.unwrap_or(false),
             envelope,
             engine,
             runtime,
@@ -566,6 +572,46 @@ max_units = 3
             let text = format!("worker_id = \"w_1\"\n{}", studio.replacen(from, to, 1));
             let e = Config::parse(&text).unwrap_err();
             assert!(e.contains(why), "{why}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_grant_of_a_signed_exception_s_bridge_is_read_strictly_and_reaches_the_dispatcher() {
+        let studio = include_str!("../../tests/fixtures/lint/envelope/studio.toml");
+        let with = |line: &str| {
+            format!(
+                "worker_id = \"w_1\"\n{}",
+                studio.replacen("[envelope]\n", &format!("[envelope]\n{line}\n"), 1)
+            )
+        };
+        let rendered = |c: &Config| {
+            crate::dispatcher_env::Rendered {
+                addresses: Vec::new(),
+                envelope: Some(crate::dispatcher_env::Envelope::of_config(c)),
+            }
+            .lines()
+            .unwrap()
+        };
+        // No key: no grant, and no line for the dispatcher, which hands such a package back.
+        let c = Config::parse(&with("")).unwrap();
+        assert!(!c.direct_network);
+        assert!(!rendered(&c)
+            .iter()
+            .any(|l| l.starts_with("OMARCHY_DIRECT_NETWORK")));
+        // The grant (#373): the run loop writes it into etc/dispatcher.env.
+        let c = Config::parse(&with("direct_network = true")).unwrap();
+        assert!(c.direct_network);
+        assert!(rendered(&c).contains(&"OMARCHY_DIRECT_NETWORK=1".to_owned()));
+        let c = Config::parse(&with("direct_network = false")).unwrap();
+        assert!(!c.direct_network);
+        assert!(!rendered(&c)
+            .iter()
+            .any(|l| l.starts_with("OMARCHY_DIRECT_NETWORK")));
+        // Anything but true or false is a configuration error (the loop exits 78), never read
+        // as a grant or as none.
+        for bad in ["direct_network = \"yes\"", "direct_network = 1"] {
+            let e = Config::parse(&with(bad)).unwrap_err();
+            assert!(e.contains("direct_network"), "{bad}: {e}");
         }
     }
 

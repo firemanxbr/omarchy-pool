@@ -336,6 +336,13 @@ fn usage_errors_exit_2() {
         ],
         &["install", "--release", "v1.2.3", "--any-option"],
         &["install", "--release", "v1.2.3", "--max-units", "many"],
+        &[
+            "install",
+            "--release",
+            "v1.2.3",
+            "--direct-network",
+            "--no-direct-network",
+        ],
         &["enroll", "--token", "ome_x"],
         &["token", "extra"],
         &["status", "--data", "/tmp"],

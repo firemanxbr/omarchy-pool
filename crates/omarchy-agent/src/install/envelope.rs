@@ -14,6 +14,7 @@ use toml::{Table, Value};
 
 /// What install decides; `None` keeps an existing file's value (or leaves the key out).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // the envelope's own switches, one for one
 pub(crate) struct Values {
     pub pool: String,
     pub set_dir: PathBuf,
@@ -31,6 +32,9 @@ pub(crate) struct Values {
     /// Rootful with `userns-remap`: the dispatcher alone runs with `userns_mode: host`.
     pub userns_remap: bool,
     pub dedicated: bool,
+    /// The owner grants a signed exception's bridge network (#373): the dispatcher runs a
+    /// package with `network = "direct"` in `factory/sizing` only where this is true.
+    pub direct_network: bool,
     pub max_units: Option<u32>,
     pub max_cpus: Option<u32>,
     pub max_mem_gb: Option<u32>,
@@ -111,6 +115,7 @@ pub(crate) fn render(
     env.insert("rootful_ack".into(), Value::Boolean(v.rootful));
     env.insert("userns_remap".into(), Value::Boolean(v.userns_remap));
     env.insert("dedicated".into(), Value::Boolean(v.dedicated));
+    env.insert("direct_network".into(), Value::Boolean(v.direct_network));
     env.entry("drivers")
         .or_insert_with(|| Value::Array(vec![Value::String("compose".into())]));
     for (k, cap) in [
