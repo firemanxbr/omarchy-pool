@@ -120,6 +120,9 @@ pub(crate) struct Agent {
     pub(super) upward_checked: Option<Release>,
     /// A Mac's `omarchy` VM (#320), kept running, sized, walled and on time.
     pub vm: Option<super::vm::Keeper>,
+    /// A Mac's sleep (#329): held off while a task runs, reported before it happens and
+    /// after the wake.
+    pub power: Option<super::power::Sleep>,
     /// The `Date` of the host state's last answer, whatever its status, and when it came
     /// (the Mac's clock): the VM's is held to it.
     pool_date: Option<(i64, i64)>,
@@ -267,6 +270,7 @@ impl Agent {
             retry: None,
             upward_checked: None,
             vm: None,
+            power: None,
             pool_date: None,
             vm_release: None,
             vm_recount_at: None,
@@ -397,11 +401,34 @@ impl Agent {
         // A new agent touches nothing until its health gate passed; once a self-update
         // swapped `current`, the state is saved and the agent exits before anything
         // else (#316).
-        let asks = self
+        let mut asks = self
             .vm
             .as_mut()
             .map(|k| k.before_poll(now, &self.journal))
             .unwrap_or_default();
+        // A Mac's sleep (#329): one heard is reported before anything else, and only then let
+        // happen; a wake asks the pool for the target now and the VM's clock is checked, even
+        // after a sleep too short to leave a gap in the ticks.
+        let hears = self
+            .power
+            .as_mut()
+            .map(|p| p.hear(now, &self.journal))
+            .unwrap_or_default();
+        if hears.woke && !asks.poll_now {
+            if let Some(k) = self.vm.as_mut() {
+                k.woke(now, &self.journal);
+            }
+            asks.poll_now = true;
+        }
+        if hears.slept {
+            // A new agent behind its health gate reports nothing: the Mac sleeps as today.
+            if self.gate.is_none() && self.exit.is_none() {
+                self.report_now(now);
+            }
+            if let Some(p) = self.power.as_mut() {
+                p.let_sleep();
+            }
+        }
         if asks.poll_now {
             // A Mac that woke may be on another network: its addresses, and the public one
             // its tasks leave from, are read again at once, not at the hour (#371).
@@ -412,6 +439,7 @@ impl Agent {
         }
         if self.gate.is_some() {
             self.keep_vm(now, true);
+            self.keep_awake(now);
             self.gate_step(now);
         } else if self.exit.is_none() {
             self.dispatcher_env(now);
@@ -428,6 +456,7 @@ impl Agent {
             // it again in the same tick, before drift looks at the set's inputs.
             self.keep_vm(now, false);
             self.narrow(now);
+            self.keep_awake(now);
             // Never while the owner's runtime switch moves the dispatcher (#325): it stops
             // the old one on purpose.
             if self.state.rollout.step == Step::Idle
@@ -495,6 +524,27 @@ impl Agent {
         if !gate && self.vm_recount_at.is_some_and(|t| now >= t) {
             self.vm_recount_at = (!self.recount(now)).then_some(now + RECOUNT_AGAIN_S);
         }
+    }
+
+    /// A Mac kept awake while a task runs, and let idle-sleep once none does (#329). A task
+    /// runs from its claim to its report: while the dispatcher holds its lease (a lease file,
+    /// read first: no engine call while one is held), and while its container runs, the
+    /// engine asked through the pinned CLI, as the VM's keeper asks it before a resize.
+    fn keep_awake(&mut self, now: i64) {
+        let Some(p) = self.power.as_mut() else {
+            return;
+        };
+        let (driver, work_root) = (&mut self.driver, &self.cfg.work_root);
+        let mut tasks = || {
+            if super::power::leases_held(work_root, now) {
+                return Some(true);
+            }
+            match driver.as_deref_mut().map(Driver::tasks_running) {
+                Some(Answer::Yes(b)) => Some(b),
+                _ => None,
+            }
+        };
+        p.keep(now, &mut tasks, &self.journal);
     }
 
     /// The host's capacity counted again after a start of the VM, as `omarchy-agent

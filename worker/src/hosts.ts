@@ -60,6 +60,26 @@ export const REPORT_MAX_BYTES = 16 * 1024;
 /** A host whose agent reported within this long is one whose agent reports: an Update for its registration is taken (§8.6). */
 export const HOST_REPORT_FRESH_MIN = 15;
 
+/**
+ * Whether a host sleeps now (#329, design v2 §19.2): its last report said `asleep: true` — a Mac's agent says so before the Mac
+ * sleeps and says `asleep: false` after the wake — and that report is fresh (HOST_REPORT_FRESH_MIN). A sleeping host has zero
+ * free units (selection.ts). A stale one says nothing: an agent reports at least every five minutes while its Mac is awake, so a
+ * dispatcher that claims past it is on a host that woke whose agent has not said so, and is handed work as any other.
+ */
+export function asleepNow(h: { asleep_at: string | null; reported_at: string | null }, now: number): boolean {
+  return h.asleep_at !== null && h.reported_at !== null && Date.parse(h.reported_at) > now - HOST_REPORT_FRESH_MIN * 60_000;
+}
+
+/**
+ * The lease's own check that its host does not sleep (#329), asleepNow in SQL: the claim's UPDATE takes a task only while no fresh
+ * report of the host says `asleep`, in the same statement beside HOST_MAY_LEASE_SQL — an asleep report that commits between the
+ * claim's read of its host and its lease leaves it nothing. Two bindings: the host's id, and the time HOST_REPORT_FRESH_MIN before
+ * the claim (ISO, as `reported_at` is written: the strings order as the times do).
+ */
+export const HOST_AWAKE_SQL = "NOT EXISTS (SELECT 1 FROM hosts WHERE id = ? AND asleep_at IS NOT NULL AND reported_at > ?)";
+/** HOST_AWAKE_SQL's second binding: the time HOST_REPORT_FRESH_MIN before `now`. */
+export const freshSince = (now: number): string => new Date(now - HOST_REPORT_FRESH_MIN * 60_000).toISOString();
+
 export const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 export const HOST_ID = /^h_[0-9a-z]{10}$/;
 const ARCHES = ["x86_64", "aarch64"] as const;
@@ -407,7 +427,7 @@ export const isHostOrderKind = (k: unknown): k is HostOrderKind => typeof k === 
 /** P5's kinds (#328): a document the owner's passkey signed, which an agent from HOST_OWNER_AGENT takes when the passkey pinned at the host made it. */
 export const OWNER_ORDER_KINDS: readonly HostOrderKind[] = ["widen-envelope", "set-agent-keys"];
 /** The first agent that takes them (#328): an older one refuses them as unknown. */
-export const HOST_OWNER_AGENT = "0.6.0";
+export const HOST_OWNER_AGENT = "0.4.0";
 /** P4's kinds (#325): an agent from HOST_SETTINGS_AGENT takes them. */
 export const SETTINGS_ORDER_KINDS: readonly HostOrderKind[] = ["set-units", "set-emulate", "rotate-token", "retry-release", "diagnostics"];
 /** The first agent that takes P4's settings and orders (#325): an older one refuses them as unknown. */

@@ -438,16 +438,23 @@ impl Keeper {
             .is_some_and(|last| now - last > vm::WAKE_GAP_S);
         self.last_tick = Some(now);
         if woke {
-            journal.write(
-                now,
-                "vm",
-                serde_json::json!({"detail": "the Mac woke: the pool is asked now and the VM's clock checked"}),
-            );
-            self.clock_due = true;
-            self.next_look = now;
-            self.next_firewall = now;
+            self.woke(now, journal);
         }
         Asks { poll_now: woke }
+    }
+
+    /// The Mac woke: a gap in the ticks, or a wake macOS announced after a sleep too short
+    /// to leave one (#329). The VM is looked at, walled and its clock checked now; the
+    /// caller asks the pool at once, for a fresh `Date`.
+    pub fn woke(&mut self, now: i64, journal: &Journal) {
+        journal.write(
+            now,
+            "vm",
+            serde_json::json!({"detail": "the Mac woke: the pool is asked now and the VM's clock checked"}),
+        );
+        self.clock_due = true;
+        self.next_look = now;
+        self.next_firewall = now;
     }
 
     /// After the poll: the profile kept running, sized and walled, and its clock checked

@@ -1,8 +1,9 @@
 {
   "agent": {
     "skip": null,
-    "version": "0.6.0"
+    "version": "0.4.0"
   },
+  "asleep": false,
   "brake": {
     "narrowings_hour": 0,
     "orders_hour": 1,

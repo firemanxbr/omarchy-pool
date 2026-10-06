@@ -27,7 +27,7 @@
  *   GET  /api/v1/security/components              what the rings' packages embed (Go modules, crates), for OSV
  *   PUT  /api/v1/security/advisories|matches       vulnerability data from the Security workflow
  *   POST /api/v1/security/prune                  {advisories, matches}: the run's keys; the rest goes
- *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,retry,artifacts/<file>}
+ *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,retry,any-host,artifacts/<file>}
  *   POST /api/v1/factory/drafts · GET /factory/drafts/:id · POST /factory/grants/:id/revoke   an agent's drafts and grants (#252, routes/agents.ts)
  *   GET|POST /auth/agent · POST /auth/agent/token · POST /auth/agent/revoke · GET|POST /auth/confirm/:id   the grant, the swap, logout, a draft confirmed
  *   POST /auth/confirm/:id/challenge · POST /auth/passkeys/challenge · POST /auth/passkeys · POST /auth/passkeys/:id/remove   passkeys: approve and block confirmed with one (#257, routes/passkeys.ts)
@@ -98,7 +98,7 @@ import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
-import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
+import { handleReviewList, handleAnyHost, handleApprove, handleReject, handleChanges, handleRelease, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAdoptPackage } from "./routes/adopt";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
@@ -494,6 +494,13 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (!c) return nobody();
     // Approve is decided with the maintainer's passkey, in the browser (#271): webGate, run by the handler once the predicate allowed it.
     return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env, undefined, webGate(request, url, env, c.login, `approve:${Number(m[1])}`)) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
+  }
+  // The project's copy of a maintainer's package, kept off their hosts while another maintainer's can build it (#339, D35), released to
+  // any host by another maintainer when only theirs can: with the passkey, in the browser (webGate), once the predicate allowed it.
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/any-host$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return nobody();
+    return handleAnyHost(c, Number(m[1]), request, env, webGate(request, url, env, c.login, `any-host:${Number(m[1])}`));
   }
   // Retry at size (#337): a maintainer queues a build that ran out of memory again, at the size they choose.
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/retry$/)) && method === "POST") {

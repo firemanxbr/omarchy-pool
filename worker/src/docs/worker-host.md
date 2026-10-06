@@ -217,6 +217,26 @@ slower and shares the host's units; on a 16K-page kernel the lane stays on,
 and a build whose toolchain cannot start under qemu goes back to the queue
 for a native host without spending its attempt.
 
+**Where the project's copies and their audits go (#339).** The project's
+copy of a package you asked for — its review rebuild, the one that is
+signed and published — is never built on your hosts while another
+maintainer's host has a lane for it and room to hold it at its size: it
+waits for that host, however busy. When only your hosts can build it, it
+waits, and Review offers another maintainer **Release to any host**, which
+they confirm with their passkey; then your host may take it. A host whose
+pool cap is 0, or too small for the copy's size, is none to wait for; one
+whose disk its running builds fill is busy, and waited for.
+Every audit prefers a machine other than the one that built what it
+audits, and an audit of the project's copy takes a model other than the
+one that built it whenever a host with another one answered in the last
+24 hours. So the model your host's agent runs matters: the provider is the
+first key `agent.env` holds, or `FACTORY_PROVIDER`, and `FACTORY_MODEL`
+overrides its model. If every host runs one model, those audits record
+`independent: none` on Review. A different provider or model on one host
+(another key, or `FACTORY_PROVIDER` / `FACTORY_MODEL` in that host's
+`agent.env`) makes them `independent: model`. The runbook's *How the pool
+hands a host work* has the rules.
+
 The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
 isolation level, the release it applied, the pool cap, the large task it
 reserves for when it does, and its leases with their lane and units. Every later call of
@@ -310,7 +330,7 @@ bundle stays in its VM's engine: the switch is refused there.
 Its owner widens a host's envelope and sets its agent keys from the host's
 page (#328, design v2 §14, D6 b) — with no visit to the machine, and only
 with the one passkey they pinned at the host. The pool relays; the host
-checks. An agent 0.6.0 or later takes these; the page's **Owner control**
+checks. An agent 0.4.0 or later takes these; the page's **Owner control**
 card shows what its agent reports (the pinned passkey, the seal key, the
 envelope a widening starts from, the agent keys' names) and greys each
 button with why.
@@ -420,10 +440,37 @@ macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
 - **A LaunchAgent is login-scoped.** The agent starts at your login, again
   after a reboot once you log in, and after the Mac wakes; a headless Mac
   sitting at the login window after a boot runs no agent, and that is not
-  supported. While the Mac sleeps it claims nothing: running tasks' leases
-  expire and the pool requeues them, as on any host that goes away. After a
-  wake the agent holds the VM's clock to the pool's, so tasks that run on
-  keep valid job tokens.
+  supported. After a wake the agent holds the VM's clock to the pool's, so
+  tasks that run on keep valid job tokens.
+- **A sleeping Mac has zero free units** (#329, design v2 §19.2), whatever
+  runtime its engine is in (Colima, Docker Desktop, OrbStack). While a task
+  runs — from its claim to its report: a container labelled
+  `com.omarchy.task` runs, or the dispatcher holds its lease while it stages
+  the inputs or uploads the outputs (one file per lease in `<work
+  root>/state/leases/`, rewritten at every heartbeat) — the agent holds a
+  `PreventUserIdleSystemSleep` assertion (`caffeinate -i -w <its pid>`,
+  which `pmset -g assertions` lists): the Mac does not idle into sleep under
+  a task, and may again once none runs. An engine that stops answering keeps
+  it 30 minutes at most, a lease's length: past that the pool requeues what
+  nobody can confirm, and a laptop is not kept awake on its battery for it.
+  When it goes to sleep
+  anyway — idle with no task, the lid, the Apple menu — the agent hears it
+  first, reports `asleep: true` and only then lets it sleep (macOS waits up
+  to 30 s for it): the pool hands the host nothing more, and the host's page
+  says *asleep*. After the wake it reports `asleep: false`, asks the pool
+  for its target at once and, on Colima, checks the VM's clock; the dispatcher claims
+  again with nobody's action. **Closing the lid still sleeps the Mac**, task
+  or not: a task the sleep caught is requeued by the pool when its lease
+  expires (30 minutes without a heartbeat), as on any host that goes away,
+  and nothing on the Mac needs you — once awake, the dispatcher finds no
+  heartbeat accepted within the lease and removes that task's containers
+  itself. The agent hears the sleep through AppKit's
+  `NSWorkspaceWillSleepNotification` (a small `osascript -l JavaScript`
+  watcher it starts and ends; no `unsafe` code, no Apple SDK in the agent):
+  a watcher that does not start is said once in the journal, and the Mac
+  then sleeps as before — the assertion still holds while a task runs. The
+  pool holds `asleep` only while the report that said it is fresh (15
+  minutes): a dispatcher that claims after that is on a Mac that woke.
 - **Docker Desktop and OrbStack** are never installed by the agent; one that
   is already there may be used (isolation `vm-shared`), only with its home
   mount removed and `--dedicated`, your word that nothing else runs in it:

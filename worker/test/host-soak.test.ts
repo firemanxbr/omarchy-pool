@@ -69,7 +69,7 @@ async function activeHost(owner: string, name: string): Promise<{ k: Key; host: 
   const k = await newKey();
   const m = await call("POST", "/hosts/enrollments", { session: owner, body: { name } });
   expect(m.status, JSON.stringify(m.json)).toBe(201);
-  const e = await call("POST", "/hosts/enroll", { body: { token: m.json.token, pubkey: k.pub, sig: await sign(k, enrollMessage(m.json.token, k.pub)), hostname: "box-1", os: "linux", arch: "aarch64", page_kb: 16, isolation: "root", dedicated: true, agent_version: "0.5.0", capacity: STUDIO } });
+  const e = await call("POST", "/hosts/enroll", { body: { token: m.json.token, pubkey: k.pub, sig: await sign(k, enrollMessage(m.json.token, k.pub)), hostname: "box-1", os: "linux", arch: "aarch64", page_kb: 16, isolation: "root", dedicated: true, agent_version: "0.4.0", capacity: STUDIO } });
   expect(e.status, JSON.stringify(e.json)).toBe(201);
   const c = await call("POST", `/hosts/${e.json.host}/confirm`, { session: owner, body: {} });
   expect(c.status, JSON.stringify(c.json)).toBe(200);
@@ -105,12 +105,12 @@ describe("a soaking host's claim grace (POST /factory/claim, #326)", () => {
     const { k, host, worker, token } = await activeHost("m1", "soaker");
     // The pool deployed v1.0.4 ten minutes ago; the host's dispatcher runs v1.0.2: two behind, refused at once without a soak.
     const pool = deployed("v1.0.4", 10);
-    await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: null }, quarantine: [] });
+    await report(k, host, { agent: { version: "0.4.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: null }, quarantine: [] });
     const refused = await claim(token, "v1.0.2", pool);
     expect(refused.status, JSON.stringify(refused.json)).toBe(426);
     expect(refused.json).toMatchObject({ yours: "v1.0.2", latest: "v1.0.4", behind: 2 });
     // Its agent soaks v1.0.4 for 30 minutes (two releases landed meanwhile): the registration claims, and is handed a build.
-    await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: isoIn(20) }, quarantine: [] });
+    await report(k, host, { agent: { version: "0.4.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: isoIn(20) }, quarantine: [] });
     const task = await seed(worker, "soaked-pkg");
     const c = await claim(token, "v1.0.2", pool);
     expect(c.status, JSON.stringify(c.json)).toBe(200);
@@ -130,10 +130,10 @@ describe("a soaking host's claim grace (POST /factory/claim, #326)", () => {
     expect(own).toMatchObject({ required: false });
     expect(own.soaking_until).toBeUndefined();
     // The soak ended, its round running: the agent still says when, and the round's margin covers it...
-    await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: isoIn(-(SOAK_ROUND_MINUTES - 2)) }, quarantine: [] });
+    await report(k, host, { agent: { version: "0.4.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: isoIn(-(SOAK_ROUND_MINUTES - 2)) }, quarantine: [] });
     expect((await claim(token, "v1.0.2", pool)).status).not.toBe(426);
     // ... and no more: refused, and the page says why.
-    await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: isoIn(-(SOAK_ROUND_MINUTES + 1)) }, quarantine: [] });
+    await report(k, host, { agent: { version: "0.4.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: isoIn(-(SOAK_ROUND_MINUTES + 1)) }, quarantine: [] });
     expect((await claim(token, "v1.0.2", pool)).status).toBe(426);
     const after = (await call("GET", `/hosts/${host}`, { session: "m1", env: pool })).json;
     expect(after.update).toMatchObject({ required: true });
@@ -142,7 +142,7 @@ describe("a soaking host's claim grace (POST /factory/claim, #326)", () => {
 
   it("never past two hours after the deploy, and none for a host that holds the pool's release in quarantine", async () => {
     const { k, host, token } = await activeHost("m1", "soaker-b");
-    const soaking = (until: string, quarantine: string[] = []) => report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 120, soaking_until: until }, quarantine: quarantine.map((r) => ({ release: r, until: null })) });
+    const soaking = (until: string, quarantine: string[] = []) => report(k, host, { agent: { version: "0.4.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 120, soaking_until: until }, quarantine: quarantine.map((r) => ({ release: r, until: null })) });
     // A soak that runs on: within two hours of the deploy it claims, past them it does not.
     await soaking(isoIn(60));
     expect((await claim(token, "v1.0.2", deployed("v1.0.4", SOAK_GRACE_MAX_MINUTES - 5))).status).not.toBe(426);
@@ -160,7 +160,7 @@ describe("a soaking host's claim grace (POST /factory/claim, #326)", () => {
     await soaking(isoIn(20), ["v1.0.5"]);
     expect((await claim(token, "v1.0.2", deployed("v1.0.4", 10))).status).not.toBe(426);
     // Nor a quarantine of the pool's release that ended.
-    await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 100, soaking_until: isoIn(20) }, quarantine: [{ release: "v1.0.4", until: isoIn(-1) }] });
+    await report(k, host, { agent: { version: "0.4.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 100, soaking_until: isoIn(20) }, quarantine: [{ release: "v1.0.4", until: isoIn(-1) }] });
     expect((await claim(token, "v1.0.2", deployed("v1.0.4", 10))).status).not.toBe(426);
   });
 
@@ -169,7 +169,7 @@ describe("a soaking host's claim grace (POST /factory/claim, #326)", () => {
     const deep = await activeHost("m1", "deep-report");
     const healthy = await activeHost("m2", "healthy-host");
     const pool = deployed("v1.0.4", 10);
-    const nested = `{"agent":{"version":"0.5.0"},"release":{"applied":"v1.0.2","target":"v1.0.4","soak_minutes":30,"soaking_until":"${isoIn(20)}","pool_behind_github":{"github":"v1.0.5","pool":"v1.0.4","since":"2027-01-14T08:00:56Z"}},"quarantine":[],"x":${"[".repeat(1500)}${"]".repeat(1500)}}`;
+    const nested = `{"agent":{"version":"0.4.0"},"release":{"applied":"v1.0.2","target":"v1.0.4","soak_minutes":30,"soaking_until":"${isoIn(20)}","pool_behind_github":{"github":"v1.0.5","pool":"v1.0.4","since":"2027-01-14T08:00:56Z"}},"quarantine":[],"x":${"[".repeat(1500)}${"]".repeat(1500)}}`;
     const r = await report(deep.k, deep.host, nested);
     expect(r.status, JSON.stringify(r.json)).toBe(200);
     // Its own claim reads its soak, and claims through it; another host's claim selects over the fleet with it in; the listings answer.
@@ -208,7 +208,7 @@ describe("freeze detection on the host page, Status and the journal (#326)", () 
   it("a report saying pool_behind_github: on its page for anyone, on Status while fresh, on the journal when it starts and ends", async () => {
     const { k, host } = await activeHost("m2", "frozen");
     const behind = { github: "v1.2.0", pool: "v1.1.0", since: "2027-01-14T08:00:56Z" };
-    const r = await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.1.0", target: "v1.1.0", github_latest: "v1.2.0", pool_behind_github: behind } });
+    const r = await report(k, host, { agent: { version: "0.4.0" }, release: { applied: "v1.1.0", target: "v1.1.0", github_latest: "v1.2.0", pool_behind_github: behind } });
     expect(r.status, JSON.stringify(r.json)).toBe(200);
     // Anyone sees it on the host's page: it is about the pool.
     expect((await call("GET", `/hosts/${host}`)).json.host.pool_behind_github).toEqual(behind);
@@ -217,7 +217,7 @@ describe("freeze detection on the host page, Status and the journal (#326)", () 
     const f = (await call("GET", "/factory?limit=10")).json;
     expect(f.pool_behind_github).toEqual(expect.arrayContaining([{ host, name: "frozen", owner: "m2", ...behind }]));
     // The journal says it once, however many reports carry it.
-    await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.1.0", target: "v1.1.0", github_latest: "v1.2.0", pool_behind_github: behind } });
+    await report(k, host, { agent: { version: "0.4.0" }, release: { applied: "v1.1.0", target: "v1.1.0", github_latest: "v1.2.0", pool_behind_github: behind } });
     let l = await lines(host);
     expect(l.map((x) => x.status)).toEqual(["warn"]);
     expect(l[0].summary).toContain("frozen of m2: its agent reports the pool behind GitHub — GitHub's latest release has been v1.2.0 for more than a day");
@@ -226,7 +226,7 @@ describe("freeze detection on the host page, Status and the journal (#326)", () 
     // (Another limit: the listing's edge copy lives ten seconds.)
     expect((await call("GET", "/factory?limit=11")).json.pool_behind_github.some((b: { host: string }) => b.host === host)).toBe(false);
     // The pool names GitHub's latest again: over, said once.
-    await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.2.0", target: "v1.2.0", github_latest: "v1.2.0", pool_behind_github: null } });
+    await report(k, host, { agent: { version: "0.4.0" }, release: { applied: "v1.2.0", target: "v1.2.0", github_latest: "v1.2.0", pool_behind_github: null } });
     l = await lines(host);
     expect(l.map((x) => x.status)).toEqual(["warn", "ok"]);
     expect((await call("GET", `/hosts/${host}`)).json.host.pool_behind_github).toBeNull();

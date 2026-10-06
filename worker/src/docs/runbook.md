@@ -954,6 +954,44 @@ work after its threshold, or at once with no native x86_64 host eligible,
 #337, and the dispatcher runs it with `--platform linux/amd64`); and over SSH
 with nobody logged in at the Mac, the Terminal instruction.
 
+**Sleep (#329).** A sleeping Mac has zero free units, whatever runtime its
+engine is in (Colima, Docker Desktop, OrbStack): the agent holds off idle
+sleep while a task runs — from its claim to its report, a task container
+running or the dispatcher holding its lease file — and tells the pool before
+the Mac sleeps and after it wakes ([A Mac as a maintainer host](/docs/worker-host#a-mac-as-a-maintainer-host)).
+What the journal (`omarchy-agent logs`, event `sleep`) says: "the Mac's sleep
+and wake are heard" once after each start (or why not: then the Mac sleeps as
+before, and the agent tries again every ten minutes); "a task runs: the Mac
+does not idle-sleep until none runs" and "no task runs: the Mac may idle-sleep
+again" as tasks start and end; "the engine has not said whether a task
+runs for 30 minutes" when the engine stopped answering under a task (the
+assertion is let go: the pool requeues what nobody can confirm); "the Mac
+goes to sleep: the host reports asleep" before a sleep and "the Mac woke:
+the host reports itself awake" after it. While a task runs, `pmset -g assertions` lists
+`caffeinate` holding `PreventUserIdleSystemSleep`; with none, it does not.
+The host's page says *asleep* while the Mac sleeps (its *Units* stat: none
+free until it wakes). A Mac that reports asleep is handed nothing; a lease the
+sleep caught is requeued by the pool when it expires, and the woken
+dispatcher removes that task's containers itself — nothing to do at the Mac.
+
+What needs the laptop, by hand, before #329 is called done (with the Mac's
+idle sleep set short, `sudo pmset -a sleep 2`, and set back after):
+1. A task running across an idle period: queue a build the Mac takes (its
+   host page lists the lease), leave the Mac untouched past its idle-sleep
+   time — it stays awake, and the build finishes; once no task runs the Mac
+   idle-sleeps within its idle time, and the host's page says *asleep* until
+   you wake it.
+2. A lid close mid-task: with a build running, close the lid for at least 35
+   minutes. The journal says the Mac went to sleep before it did; the host's
+   page says *asleep* and the pool hands it nothing; once the lease expires
+   the build is requeued (its line on the build's page) and another host, or
+   this one after the wake, runs it.
+3. A wake: open the lid. Within a minute the journal says the Mac woke and the
+   VM's clock is within five seconds of the pool's, the host's page no longer
+   says *asleep*, the dispatcher claims again with nobody's action, and no
+   container of the requeued task is left in the VM (`docker ps` against the
+   Mac's `socket_cli`).
+
 ### The run loop
 
 `omarchy-agent run` (#315; design v2 §16) keeps the host on the pool's
@@ -1187,7 +1225,8 @@ signed, on every change and at least every five minutes: its version, the
 release applied, targeted and its floor — with the owner's soak and until
 when it holds the target, GitHub's latest tag and `pool_behind_github`
 (#326) —, the rollout and the last round, the
-legacy set and the last answers), which closes the order on the site — one
+legacy set, the last answers and whether the Mac sleeps, `asleep`, #329),
+which closes the order on the site — one
 the site expired meanwhile too (a retire-legacy answers only at its end); an
 order its agent does not take within its hour expires there. A report that
 does not get through is sent again a minute later, or hourly while the pool
@@ -1241,8 +1280,12 @@ does not hold. A Mac whose own clock is more than six seconds off the pool's
 is said ("needs a person"), never set; the VM is then held to the Mac's
 clock, so the pool's answer never moves it further than that from the
 Mac's own. The clock is checked whatever else waits (a resize held back by a
-task, a `colima.yaml` that cannot be read). The journal's `vm`, `vm-clock`
-and `capacity` lines say what it did. The memory check before every claim is
+task, a `colima.yaml` that cannot be read). It also keeps the Mac awake
+while a task runs and reports `asleep` around a sleep (#329, *Sleep*
+under *Installing a Mac*): a wake macOS announces after a sleep too short to
+leave a gap in the ticks asks the pool and checks the clock the same way.
+The journal's `vm`, `vm-clock`, `capacity` and `sleep` lines say what it
+did. The memory check before every claim is
 the dispatcher's, which runs inside the VM: the `/proc/meminfo` it reads
 there is the VM's own.
 
@@ -1296,7 +1339,7 @@ waits.
 
 ### Owner control
 
-From agent 0.6.0 a host's owner widens its envelope and sets its agent keys
+From agent 0.4.0 a host's owner widens its envelope and sets its agent keys
 from the host's page (#328, design v2 §14; [The project's
 host](/docs/worker-host#owner-control-without-a-visit) says what each does).
 Two things are done at the host, once:
@@ -1503,6 +1546,65 @@ so a size-4 build waits for memory rather than run smaller.
   need a lane of each ring architecture they check, native or emulated, with
   no wait: a health check its own, a promotion (its ABI gates and health
   checks) each it promotes, a security job's fast-track both.
+- **The project's copy is not built on its requester's host (#339, D35).**
+  A review rebuild of a package a maintainer asked for (the rebuild's owner,
+  and the owner of the contributor's build it answers) is handed to none of
+  that maintainer's hosts while another maintainer's host has a lane
+  allowed for it — native, or emulated unless it is `needs_native` — and
+  could hold it idle: its units within the pool cap for the rebuild's size
+  (the size its page, the sizing file or a Retry asks, clamped only to the
+  largest host alive), an agent slot, its disk budget; it waits for that
+  host however busy it is, and their other work goes on. Busy is judged as
+  idle: the disk its running builds fill (their budgets count as free again,
+  a report below the minimum for its disk alone included) and the builds its
+  dispatcher leaves out of its claims during a disk hold do not make it
+  none to wait for; a host short of disk with nothing running, below the
+  minimum for its CPUs or memory, or whose agent says it sleeps (#329: a
+  Mac with its lid shut, until it reports itself awake), is. When only the
+  requester's hosts have one (a single maintainer's hosts, a `needs_native`
+  rebuild with the other host's lane emulated, or a size only the
+  requester's host holds — the rebuild is never run smaller there), Review's
+  rebuild pane says at once *waits for a host — only @m1's can build it*,
+  with **Release to any host** for another maintainer: confirmed with their
+  passkey, written on the task (`params.any_host`), the journal (a `review`
+  line, *released to any host by …*) and the record; any host takes it at
+  its next claim, the requester's included. Bringing another maintainer's
+  host with that lane online (or resuming a drained one, or raising a pool
+  cap of 0 — or one below the rebuild's units — on its page) builds it
+  without a release. A claim never pins a rebuild to the requester's host:
+  naming one is refused (`requester_host`), and another architecture's
+  same-agent pick goes to another maintainer's worker with that agent, or
+  unpinned when there is none.
+- **The second opinion (#339, D36).** An audit runs in a fresh container
+  with its own agent sidecar. It leaves the machine that built what it
+  audits to another that can take it now, for 3 minutes. The pool tells
+  machines apart by owner and host: two registrations are on different
+  machines only when their owners differ or they are two hosts'
+  registrations of different hosts. A maintainer's legacy role containers
+  (the Studio's `community-*` and `review-*`, until #343), and a host's
+  registration beside its own legacy set during the canary, are one
+  machine, so an audit one takes of another's build says `none`, never
+  `host`. An audit of the project's
+  copy takes another model (the claim's `agent`: provider and model) than
+  the one that built it whenever a registration that takes audits with
+  another model answered in the last 24 hours — however long that host is
+  busy, and for a day after it went quiet or its agent began failing (a host
+  whose agent has failed for a day holds nothing, however often it claims);
+  otherwise it runs on the same model. A host that is handed nothing —
+  drained, below the signed minimum, or behind the pool's release past the
+  grace — holds none, however often it claims. A claim reads those audits
+  apart from the rest, so a pile of them waiting for another model never
+  hides a contributor build's audit the claimer can take. Each audit says
+  how independent it was beside its verdict on Review (`independent:
+  model`, `host` or `none`; nothing while it is queued, again too). Audits
+  held for a host that is gone for good: retire it, or drain its
+  registration, and the next claim hands them to the model alive. What
+  counts, and how the last week went:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, agent, agent_status, agent_error_since, last_seen, drained_at FROM build_workers WHERE last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') AND revoked_at IS NULL AND agent IS NOT NULL"
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT independent, COUNT(*) AS n FROM build_tasks WHERE kind = 'audit' AND started_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') GROUP BY independent"
+  ```
 - **Contributors take turns.** Community builds are handed round-robin by
   owner (fewest leased first), and a contributor holds at most
   ceil(the alive fleet's builds / 4) at once. The divisor is a setting: 0
@@ -1548,6 +1650,16 @@ so a size-4 build waits for memory rather than run smaller.
   sets it on the host's page, with a reason — the Studio canary runs at 3
   units, one build (§21.1). Lowered below what the host runs, nothing ends;
   it claims nothing until its leases fit. Lifted, the host's count decides.
+- **A sleeping host has zero free units** (#329). A Mac's agent reports
+  `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
+  meanwhile its claims are handed nothing, it makes no emulated lane wait,
+  is not the other maintainer's host a project's copy waits for (Review
+  offers the release if only the requester's hosts are left) nor a machine
+  an audit is left to, holds no reservation mark and counts in no size
+  alive; its leases stay
+  its own until they expire. The pool holds it only while that report is
+  fresh (15 minutes): a dispatcher that claims after that is on a Mac that
+  woke. The host's page says *asleep*.
 
 ## The Studio host
 
@@ -1680,7 +1792,7 @@ list), then ask Diagnostics while `agent.toml` says `diagnostics = false`:
 refused, saying so.
 
 **Rehearse owner control on the P1 host** (#328) once its agent reports
-0.6.0 (`tests/agent-host-orders.sh` widens and sets a key against a stand-in
+0.4.0 (`tests/agent-host-orders.sh` widens and sets a key against a stand-in
 in CI, with a virtual authenticator; `tests/host-enroll-e2e.sh` pins one
 made on a local pool's page): pin your passkey at the host and confirm its
 seal key (*Owner control*, above). Then, from the page alone: **Widen the

@@ -1,5 +1,6 @@
 /**
- * Approve and block as the web decides them since #271, for the tests —
+ * Approve and block as the web decides them since #271 — and the release of
+ * the project's copy of a package to any host, since #339 — for the tests —
  * and the fixture — that need one decided on their way to what they test:
  * the maintainer's browser session on the relying party's address
  * (localhost: pool.test, the other tests' address, is not one), a passkey of
@@ -24,14 +25,16 @@ export const WEB = "http://localhost:8787";
 
 type Authenticator = Awaited<ReturnType<typeof createAuthenticator>>;
 
-/** The act a path decides, as the door binds its challenge: approve:<task>, block:package:<name>, block:contributor:<login>. */
+/** The act a path decides, as the door binds its challenge: approve:<task>, block:package:<name>, block:contributor:<login>, any-host:<task> (#339). */
 export function subjectOf(path: string): string {
   const p = path.replace(/^\/api\/v1/, "");
   const approve = /^\/factory\/tasks\/(\d+)\/approve$/.exec(p);
   if (approve) return `approve:${Number(approve[1])}`;
+  const anyHost = /^\/factory\/tasks\/(\d+)\/any-host$/.exec(p);
+  if (anyHost) return `any-host:${Number(anyHost[1])}`;
   const block = /^\/factory\/(packages|contributors)\/([^/]+)\/block$/.exec(p);
   if (block) return `block:${block[1] === "packages" ? "package" : "contributor"}:${block[2]}`;
-  throw new Error(`decide: ${path} is neither an approval nor a block`);
+  throw new Error(`decide: ${path} is neither an approval, a block nor a release to any host`);
 }
 
 /**

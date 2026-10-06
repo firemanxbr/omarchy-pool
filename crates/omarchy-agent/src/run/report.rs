@@ -6,12 +6,16 @@
 //! `capacity` (`run/capacity.json` as the dispatcher reads it, narrowed), `settings` (what
 //! the pool narrowed, the envelope it narrows inside and what applies: the host page's
 //! controls), `brake` (how much of each limit the last window spent) and `runtime` (the
-//! driver, and the owner's switch in flight or its last end). #326 adds to `release` the
-//! owner's soak — `soak_minutes`, and `soaking_until`, which the pool's claim grace follows
-//! — and freeze detection's `github_latest` and `pool_behind_github`. #328 adds `owner`:
-//! the passkey pinned at the host and the last signed version taken, the seal key, the
-//! envelope's keys a signed widening may set, and the names of the agent keys. Bundle and
-//! task fields stay with the issues that read them.
+//! driver, and the owner's switch in flight or its last end). It also says whether the Mac
+//! sleeps (`asleep`, #329; `false` on every other host), which the pool counts as zero free
+//! units. #326 adds to `release` the owner's soak — `soak_minutes`, and `soaking_until`, which
+//! the pool's claim grace follows — and freeze detection's `github_latest` and
+//! `pool_behind_github`. #328 adds `owner`: the passkey pinned at the host and the last
+//! signed version taken, the seal key, the envelope's keys a signed widening may set, and
+//! the names of the agent keys. Bundle and task fields stay with the issues that read them.
+//!
+//! A Mac about to sleep reports at once ([`Agent::report_now`]), whatever the spacing or a
+//! retry's wait: the sleep waits for it.
 //!
 //! A report that does not get through changes nothing and is tried again a minute later —
 //! an hour later when the pool refuses the host's calls (401/403: suspended, retired, a
@@ -94,6 +98,11 @@ impl Agent {
                 "to": e.to, "outcome": e.outcome, "detail": short(&e.detail), "at": iso(e.at),
             })),
         });
+        body["asleep"] = self
+            .power
+            .as_ref()
+            .is_some_and(super::power::Sleep::asleep)
+            .into();
         body
     }
 
@@ -135,15 +144,24 @@ impl Agent {
 
     /// Posts the report when something changed or one is due.
     pub(super) fn report(&mut self, now: i64) {
-        if now < self.reported.at + SPACING_S {
+        self.post_report(now, false);
+    }
+
+    /// Posts the report now: the Mac goes to sleep, and waits for it (#329).
+    pub(super) fn report_now(&mut self, now: i64) {
+        self.post_report(now, true);
+    }
+
+    fn post_report(&mut self, now: i64, at_once: bool) {
+        if !at_once && now < self.reported.at + SPACING_S {
             return;
         }
         let body = self.report_body(now).to_string();
         let changed = self.reported.body.as_deref() != Some(body.as_str());
-        if !changed && now < self.reported.next_at {
+        if !at_once && !changed && now < self.reported.next_at {
             return;
         }
-        if changed && now < self.reported.next_at && self.reported.body.is_none() {
+        if !at_once && changed && now < self.reported.next_at && self.reported.body.is_none() {
             // A report that did not get through waits for its retry.
             return;
         }

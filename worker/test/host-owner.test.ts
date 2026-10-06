@@ -13,7 +13,7 @@
  * - A widening and agent keys: the document the pool writes (a version above
  *   every one the host was given or took), signed by the passkey pinned at
  *   the host alone, relayed whole in the signed host state; the doors refuse
- *   a contributor, another maintainer, an agent before 0.6.0, a document the
+ *   a contributor, another maintainer, an agent before 0.4.0, a document the
  *   pool did not write or changed, another host's, an assertion for another
  *   act, keys sealed to a key nobody confirmed.
  * - The pool's database holds only ciphertext for agent keys: a key sealed in
@@ -76,7 +76,7 @@ async function signed(k: Key, host: string, method: string, path: string, body =
 const state = (k: Key, host: string) => signed(k, host, "GET", "/hosts/self/state");
 const report = (k: Key, host: string, r: unknown) => signed(k, host, "POST", "/hosts/self/report", JSON.stringify(r));
 
-async function activeHost(owner: string, name: string, agent = "0.6.0"): Promise<{ k: Key; host: string; worker: string }> {
+async function activeHost(owner: string, name: string, agent = "0.4.0"): Promise<{ k: Key; host: string; worker: string }> {
   const k = await newKey();
   const m = await call("POST", "/hosts/enrollments", { session: owner, body: { name } });
   expect(m.status, JSON.stringify(m.json)).toBe(201);
@@ -129,7 +129,7 @@ async function openSealed(priv: CryptoKey, hostPub: string, host: string, s: Sea
 
 /** The agent's report with its owner part: the passkey pinned at it (`credential`, made on this page), and its seal key. */
 const ownerPart = (credential: string | null, seal: string, version = 0) => ({
-  agent: { version: "0.6.0" }, release: { applied: "v1.20.0" }, orders: [],
+  agent: { version: "0.4.0" }, release: { applied: "v1.20.0" }, orders: [],
   owner: {
     passkey: credential ? { credential, alg: "ES256", rp_id: "localhost", origin: ORIGIN, by: "m1", pinned_at: "2027-01-15T08:00:00Z" } : null,
     version, seal: { key: seal, fingerprint: "SHA256:x" },
@@ -367,12 +367,12 @@ describe("an owner widens the envelope and sets agent keys from the browser", ()
     }
     // Nothing reached the host state.
     expect((await state(h.k, h.host)).json.orders).toEqual([]);
-    // An agent before 0.6.0 is given none: it would refuse them as unknown.
-    const old = await activeHost("m1", "box-old", "0.5.0");
+    // An agent before 0.4.0 is given none: it would refuse them as unknown.
+    const old = await activeHost("m1", "box-old", "0.3.0");
     const verdict = (await call("GET", `/hosts/${old.host}`, { session: "m1" })).json;
     expect(verdict.can.owner).toBe(false);
-    expect(verdict.can.why.owner).toContain("agent 0.6.0");
-    expect(hostVerdicts({ login: "m2", maintainer: true, github_id: 1002 }, { name: "x", status: "active", owner_login: "m1", owner_github_id: 1001, agent_version: "0.6.0" }).owner.ok).toBe(false);
+    expect(verdict.can.why.owner).toContain("agent 0.4.0");
+    expect(hostVerdicts({ login: "m2", maintainer: true, github_id: 1002 }, { name: "x", status: "active", owner_login: "m1", owner_github_id: 1001, agent_version: "0.4.0" }).owner.ok).toBe(false);
     // The pinned passkey moved on: a passkey of m1's that is not pinned there is not offered.
     await report(h.k, h.host, ownerPart("bm90LXRoZS1waW5uZWQtb25l", seal.pub));
     expect((await call("POST", `/hosts/${h.host}/owner/challenge`, { session: "m1", body })).json.code).toBe("not_pinned");
