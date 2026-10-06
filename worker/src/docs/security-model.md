@@ -982,10 +982,16 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   engine reports to the host's dispatcher (`OOMKilled`, never the
   container's own verdict), one step per kill, each spending the build an
   attempt and writing a journal line: a recipe that runs itself out of
-  memory on purpose gets a contributor's build to size 2 at most
-  (`community_max_size`), the project's copy of it to 4 (`max_size`), and
-  the claim still clamps every build to the largest host alive. It falls
-  on the build's own memory peak (`resources.json`, read inside the
+  memory on purpose gets its package to size 2 at most
+  (`community_max_size`) — through a contributor's build or through the
+  project's copy of it, whose recipe the project's drafter wrote from the
+  contributor's evidence and whose source is the one the requester named
+  (decided by what runs, not by the trust label, as for the sandbox) —
+  and only the project's recipe on main, reviewed and merged, learns up to
+  4 (`max_size`); above 2, a requester's package goes by a maintainer's
+  word (the page, `factory/sizing`, Retry at size). The claim still clamps
+  every build to the largest host alive. It falls on the build's own
+  memory peak (`resources.json`'s `ram_anon_peak_mb`, sampled inside the
   container), which a recipe may forge — but only to lower its own
   package's size, which its next kill raises again, or to keep it, which a
   kill on purpose gets it anyway; never to raise one. A maintainer's size,

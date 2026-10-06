@@ -2659,13 +2659,21 @@ fn a_review_rebuild_learns_from_staged_evidence_and_stages_for_a_maintainer() {
 #[test]
 fn a_builds_completion_says_the_memory_peak_its_resources_json_measured_and_nothing_it_cannot_read()
 {
-    // #330: the pool's size learning counts the peak; 0 (a kernel with no memory.peak), a file that
-    // does not read, or none at all says nothing — never a guess.
-    let measured = br#"{"schema":"omarchy-pool/resources/1","wall_s":42,"cpu_s":80,"ram_peak_mb":3100,"disk_mb":300,"cores":4}"#;
-    let cases: [(Option<&[u8]>, Option<u64>); 4] = [
+    // #330: the pool's size learning counts what the build held that reclaim cannot free
+    // (`ram_anon_peak_mb`), never the high-water mark its page cache filled (`ram_peak_mb`); 0 (a
+    // container with no memory.stat of its own), a file that does not read, one of a script that
+    // samples nothing (only `ram_peak_mb`), or none at all says nothing — never a guess.
+    let measured = br#"{"schema":"omarchy-pool/resources/1","wall_s":42,"cpu_s":80,"ram_peak_mb":8128,"ram_anon_peak_mb":3100,"disk_mb":300,"cores":4}"#;
+    let cases: [(Option<&[u8]>, Option<u64>); 5] = [
         (Some(measured), Some(3100)),
         (
-            Some(br#"{"schema":"omarchy-pool/resources/1","ram_peak_mb":0}"#),
+            Some(
+                br#"{"schema":"omarchy-pool/resources/1","ram_peak_mb":8128,"ram_anon_peak_mb":0}"#,
+            ),
+            None,
+        ),
+        (
+            Some(br#"{"schema":"omarchy-pool/resources/1","ram_peak_mb":3100}"#),
             None,
         ),
         (Some(b"not json"), None),
@@ -2685,10 +2693,11 @@ fn a_builds_completion_says_the_memory_peak_its_resources_json_measured_and_noth
         h.ticks(&mut d, 2);
         let done = &h.pool.completes_of(7)[0];
         assert_eq!(
-            done.get("ram_peak_mb").and_then(Value::as_u64),
+            done.get("ram_anon_peak_mb").and_then(Value::as_u64),
             peak,
             "{resources:?}: {done}"
         );
+        assert!(done.get("ram_peak_mb").is_none(), "{done}");
         assert_eq!(
             h.pool.staged_of(7).contains(&"resources.json".to_owned()),
             resources.is_some(),
@@ -2713,7 +2722,7 @@ fn a_builds_completion_says_the_memory_peak_its_resources_json_measured_and_noth
     h.leave(7, GEN, &files, "log\n");
     h.engine.exit(7, GEN, 0, false);
     h.ticks(&mut d, 2);
-    assert_eq!(h.pool.completes_of(7)[0]["ram_peak_mb"], 3100);
+    assert_eq!(h.pool.completes_of(7)[0]["ram_anon_peak_mb"], 3100);
 }
 
 #[test]

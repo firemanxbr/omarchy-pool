@@ -424,6 +424,9 @@ jobs:
       - name: A build container runs make, ninja and cargo with the job count the dispatcher set for its share
         working-directory: .
         run: bash tests/worker-build-jobs.sh
+      - name: A build's resources.json says what it held that reclaim cannot free, not the page cache its files filled, in a container at its memory limit
+        working-directory: .
+        run: bash tests/worker-resources.sh
       - name: The build script's task mode — no pool call, the log cut at its cap, verdict.json always JSON — in a container with the task's mounts
         working-directory: .
         run: bash tests/worker-task-mode.sh

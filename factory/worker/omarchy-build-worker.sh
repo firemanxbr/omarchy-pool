@@ -648,23 +648,63 @@ namcap_package_warnings() { # stdin: `namcap -m -i` on a built package → the w
 # `warn` is for the audit and the maintainer to weigh. The checks follow
 # the ones the omarchy-aur-factory (Adam Jacob) runs; none is skipped.
 VET_JSON=/build/vet.json; VET_LOG=/build/tests.log
-# What the build cost this container, from its own cgroup (v2): CPU seconds
-# and the memory high-water mark since it started, the disk the sources,
-# the package and the cache took, wall time — resources.json beside the
-# evidence, so a build's page can say what it took, not only how long. The
-# peak is cgroup v2's memory.peak (a kernel from 5.19), else cgroup v1's
-# memory.max_usage_in_bytes (a rootful docker on a v1 host mounts the
-# container's own there), else 0 — measured nowhere; the pool's size
-# learning counts it (#330, D31) and a 0 counts nothing.
-RES_JSON=/build/resources.json; RES_T0=0; RES_CPU0=0
-resources_begin() { RES_T0=$(date +%s); RES_CPU0=$(awk '/^usage_usec/ { print $2 }' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0); }
+# What the build cost this container, from its own cgroup: CPU seconds
+# (v2), its memory peaks since it started, the disk the sources, the
+# package and the cache took, wall time — resources.json beside the
+# evidence, so a build's page can say what it took, not only how long.
+#
+# Two memory peaks. ram_peak_mb, the page's, is the cgroup's high-water mark:
+# v2's memory.peak (a kernel from 5.19), else v1's memory.max_usage_in_bytes
+# (a rootful docker on a v1 host mounts the container's own there), else 0.
+# It counts page cache, which a container keeps up to its limit, so a build
+# that reads or writes more files than its memory holds peaks at its limit
+# whatever it needed. ram_anon_peak_mb, the pool's size learning's (#330,
+# D31), counts only what reclaim cannot free — what an out-of-memory kill is
+# about: anonymous and shared memory (v2's memory.stat anon and shmem, with
+# the kernel's own stacks, page tables and unreclaimable slab; v1's
+# total_rss and total_shmem), sampled every second from resources_begin to
+# resources_end, since no counter keeps its maximum; 0 where the container
+# has no memory.stat of its own, and a 0 counts nothing.
+# tests/worker-resources.sh runs these in a container at its memory limit.
+RES_JSON=/build/resources.json; RES_ANON=/build/.ram-anon-peak; RES_T0=0; RES_CPU0=0; RES_SAMPLER=""; RES_NOW=0
+ram_anon() { # → RES_NOW: the bytes the container's cgroup holds that reclaim cannot free
+  local f keys k v
+  RES_NOW=0
+  # v2: the container's own cgroup (the root one — a host's cgroup namespace — has no memory.current); v1: its memory controller's.
+  if [[ -r /sys/fs/cgroup/memory.current ]]; then f=/sys/fs/cgroup/memory.stat; keys=" anon shmem kernel_stack pagetables slab_unreclaimable "
+  elif [[ -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]]; then f=/sys/fs/cgroup/memory/memory.stat; keys=" total_rss total_shmem "
+  else return 0; fi
+  while read -r k v; do
+    if [[ "$keys" == *" $k "* && "$v" =~ ^[0-9]+$ ]]; then RES_NOW=$((RES_NOW + v)); fi
+  done < "$f" 2>/dev/null || true
+}
+resources_begin() {
+  RES_T0=$(date +%s); RES_CPU0=$(awk '/^usage_usec/ { print $2 }' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0)
+  ram_anon; echo "$RES_NOW" > "$RES_ANON" 2>/dev/null || true
+  # The sampler writes the largest it saw each time it grows. Its own stdio, so no log pipe waits on it, and it ends with the
+  # shell that started it should that one end without resources_end.
+  local parent=$BASHPID
+  (
+    max=$RES_NOW
+    while sleep 1 && kill -0 "$parent" 2>/dev/null; do
+      ram_anon
+      if (( RES_NOW > max )); then max=$RES_NOW; echo "$max" > "$RES_ANON" 2>/dev/null || true; fi
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  RES_SAMPLER=$!
+}
 resources_end() {
-  local t1 cpu1 peak disk
+  local t1 cpu1 peak anon disk
+  if [[ -n "$RES_SAMPLER" ]]; then kill "$RES_SAMPLER" 2>/dev/null || true; wait "$RES_SAMPLER" 2>/dev/null || true; RES_SAMPLER=""; fi
   t1=$(date +%s); cpu1=$(awk '/^usage_usec/ { print $2 }' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0)
   peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo 0)
+  [[ "$peak" =~ ^[0-9]+$ ]] || peak=0
+  anon=$(cat "$RES_ANON" 2>/dev/null || echo 0); [[ "$anon" =~ ^[0-9]+$ ]] || anon=0
+  ram_anon; if (( RES_NOW > anon )); then anon=$RES_NOW; fi
   disk=$(du -sm /build/pkg /build/out /build/cache 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
-  jq -cn --argjson wall "$((t1 - RES_T0))" --argjson cpu "$(( (cpu1 - RES_CPU0) / 1000000 ))" --argjson peak "$(( peak / 1048576 ))" --argjson disk "${disk:-0}" --argjson cores "$(nproc)" \
-    '{schema: "omarchy-pool/resources/1", wall_s: $wall, cpu_s: $cpu, ram_peak_mb: $peak, disk_mb: $disk, cores: $cores}' > "$RES_JSON" 2>/dev/null || true
+  # Whole numbers only, written with printf as task_verdict writes verdict.json.
+  printf '{"schema":"omarchy-pool/resources/1","wall_s":%d,"cpu_s":%d,"ram_peak_mb":%d,"ram_anon_peak_mb":%d,"disk_mb":%d,"cores":%d}\n' \
+    "$((t1 - RES_T0))" "$(( (cpu1 - RES_CPU0) / 1000000 ))" "$(( peak / 1048576 ))" "$(( anon / 1048576 ))" "${disk:-0}" "$(nproc)" > "$RES_JSON" 2>/dev/null || true
 }
 vet_add() { # name status detail
   local name="$1" status="$2" detail="$3"

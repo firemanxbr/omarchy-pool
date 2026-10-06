@@ -6,10 +6,11 @@
 -- - learned_size: 2 up to the signed max_size, or NULL — nothing learned, size
 --   1. Raised one step after the engine killed one of its builds at its memory
 --   limit (a host's `oom`, handleFail), never above community_max_size for a
---   contributor's build nor max_size for the project's; one step lower after
---   DECAY_AFTER (5) builds in a row that completed with a memory peak below
---   what the size under it gives (handleComplete, the dispatcher's
---   `ram_peak_mb`). worker/src/sizing.ts afterOom / afterBuild.
+--   contributor's build or the project's copy of it, nor max_size for the
+--   project's recipe on main; one step lower after DECAY_AFTER (5) builds in
+--   a row that completed having held less than what the size under it gives
+--   (handleComplete, the dispatcher's `ram_anon_peak_mb`: never the page
+--   cache). worker/src/sizing.ts afterOom / afterBuild.
 -- - learned_lower: those builds in a row so far; an out-of-memory kill, or a
 --   build that peaked at or above it, starts the count over.
 -- - learned_task, learned_why ('oom' | 'decay'), learned_at: the report that

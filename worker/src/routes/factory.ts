@@ -1628,7 +1628,7 @@ async function withheld(env: Env, id: number, field: string, text: string | unde
 }
 
 export async function handleComplete(id: number, request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = await readJson<{ sha256?: string; filename?: string; version?: string; duration_ms?: number; log_tail?: string; result?: unknown; summary?: string; ram_peak_mb?: unknown }>(request);
+  const b = await readJson<{ sha256?: string; filename?: string; version?: string; duration_ms?: number; log_tail?: string; result?: unknown; summary?: string; ram_anon_peak_mb?: unknown }>(request);
   if (b instanceof Response) return b;
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
@@ -1731,7 +1731,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     // The evidence outlives staging: on the record, signed.
     await recordEvidence(env, task.name, await requestOf(env, task.name), id, prefix);
     await workerFinished(env, who, task, "staged", b.version);
-    await learnFromPeak(env, task, who, b.ram_peak_mb);
+    await learnFromPeak(env, task, who, b.ram_anon_peak_mb);
     // A newer build of the same package and architecture supersedes the
     // staged ones before it: one row per package in the review queue, the
     // audits of the old ones cancelled with them. Their text evidence stays;
@@ -1795,7 +1795,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     .run();
   if (!done.meta.changes) return leaseMoved(env, id, actor);
   await workerFinished(env, who, task, "done", b.version);
-  await learnFromPeak(env, task, who, b.ram_peak_mb);
+  await learnFromPeak(env, task, who, b.ram_anon_peak_mb);
   if (task.publish !== 0) {
     // What users get. A contributor's registration of this name is now
     // published, and the approval that led here keeps the task — the seal
@@ -1887,9 +1887,10 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
     .run();
   if (!failed.meta.changes) return leaseMoved(env, id, actor);
   // The engine's out-of-memory kill of a build raises the size its package remembers, one step (#330, D31): its next attempt — queued
-  // again just above — and every build of it after asks that size, unless a maintainer's size says otherwise. Written before anything
-  // else, so a claim between the two statements is the only one that can still take that attempt at the size that ran out.
-  if (oom && learnsSize(task)) await learnSize(env, task, who, (cur) => afterOom(cur, { ran: task.size ?? 1, trust: task.trust, task: id, at: now() }));
+  // again just above — and every build of it after asks that size, unless a maintainer's size says otherwise; a contributor's build and
+  // the project's copy of it no further than 2 (learnCap). Written before anything else, so a claim between the two statements is the
+  // only one that can still take that attempt at the size that ran out.
+  if (oom && learnsSize(task)) await learnSize(env, task, who, (cur) => afterOom(cur, { ran: task.size ?? 1, trust: task.trust, review: review !== undefined, task: id, at: now() }));
   // What the worker uploaded before giving up — the log, the PKGBUILD, the
   // gate's verdict — is evidence too: a failed attempt is on the record (a
   // report the pool took: not one of a lease stopped meanwhile).
@@ -1927,7 +1928,10 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
 const learnsSize = (task: TaskRow): boolean =>
   task.kind === "build" && task.lease_gen !== null && !(task.trust === "project" && task.publish === 0 && jsonOr<{ review?: unknown }>(task.params, {}).review === undefined);
 
-/** A memory high-water mark a dispatcher reports with a build's completion (`ram_peak_mb`): whole MB from 1, else none (0 is a cgroup that measured none). */
+/**
+ * A memory peak a dispatcher reports with a build's completion (`ram_anon_peak_mb`: what its container held that reclaim cannot free,
+ * never the page cache — omarchy-build-worker.sh resources_end): whole MB from 1, else none (0 is a cgroup that measured none).
+ */
 function peakOf(v: unknown): number | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 1 << 30 ? v : null;
 }
@@ -1949,6 +1953,18 @@ const LEARNED_SQL = "SELECT name, size, disk_gb, learned_size, learned_lower, le
  * its builds ask from now on (a maintainer's size, on the page or in factory/sizing, still wins); a lower peak counted is not.
  */
 async function learnSize(env: Env, task: TaskRow, who: string, step: (cur: Learned) => Learned | null, peak: number | null = null): Promise<void> {
+  // Best effort, like the seal: what a package's builds ask is an optimisation, never part of the report it rides on — a D1 error here
+  // is a warn line, and the completion or failure goes on whole (its staging, audit and trial, its package's status, its targets).
+  try {
+    await moveLearned(env, task, who, step, peak);
+  } catch (e) {
+    await event(env, "build", "warn", `${task.name}: size not learned from task ${task.id} — ${String(e)}`, { name: task.name, task: task.id, arch: task.arch, worker: who })
+      .catch((e2: unknown) => console.error(`size learning of ${task.name} (task ${task.id}): ${String(e)}; its warn line: ${String(e2)}`));
+  }
+}
+
+/** learnSize's read, compare-and-set and journal line. */
+async function moveLearned(env: Env, task: TaskRow, who: string, step: (cur: Learned) => Learned | null, peak: number | null): Promise<void> {
   for (let i = 0; i < 3; i++) {
     const row = await env.DB.prepare(LEARNED_SQL).bind(task.name).first<{ name: string; size: number | null; disk_gb: number | null; learned_size: number | null; learned_lower: number; learned_task: number | null; learned_why: string | null; learned_at: string | null }>();
     if (!row) return;

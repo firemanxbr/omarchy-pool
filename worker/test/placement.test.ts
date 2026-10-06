@@ -253,6 +253,21 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
     expect((await reviewRow(small.contributor, "m3")).project_build.placement).toMatchObject({ held: true, others: [], mine: ["m1-big"], any_host: { ok: true } });
   });
 
+  it("the size the pool learned from its package's builds (#330) counts as the page's: a host too small for it is none to wait for", async () => {
+    await seedHost("m1-studio-l", "m1", STUDIO);
+    await seedHost("m2-arm-l", "m2", ARM);
+    const { name, contributor } = await seedCopy("m1");
+    // Learned 4 (the recipe on main ran out of memory at 3), no maintainer's size: only m1's Studio holds it, as with a size 4 set on
+    // the page — m2's 7-unit host takes nothing, m1's own waits as the requester's.
+    await env.DB.prepare("UPDATE factory_packages SET learned_size = 4, learned_why = 'oom' WHERE name = ?").bind(name).run();
+    expect((await claim("m2-arm-l")).status).toBe(204);
+    expect((await claim("m1-studio-l")).status).toBe(204);
+    expect((await reviewRow(contributor, "m3")).project_build.placement).toMatchObject({ held: true, others: [], mine: ["m1-studio-l"], any_host: { ok: true } });
+    // Decayed to 2 (four units): m2's host holds it again.
+    await env.DB.prepare("UPDATE factory_packages SET learned_size = 2, learned_why = 'decay' WHERE name = ?").bind(name).run();
+    expect((await reviewRow(contributor, "m3")).project_build.placement).toMatchObject({ held: false, others: ["m2-arm-l"], mine: ["m1-studio-l"] });
+  });
+
   it("another maintainer's emulated lane counts, at once — no wait for the requester's native host; with needs_native only the requester's host has a lane, and the rebuild is held", async () => {
     await seedHost("m1-vps86", "m1", VPS86);
     await seedHost("m2-studio", "m2", STUDIO);

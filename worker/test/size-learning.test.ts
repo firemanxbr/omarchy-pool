@@ -1,28 +1,34 @@
 /**
  * Automatic task-size learning (#330, design v2 §7.4; D31, P6): the size a
  * package's builds ask is raised after the engine killed one at its memory
- * limit, never above 2 for a contributor's build nor 4 for any, and decays
- * after five builds in a row that peaked lower; a maintainer's size, on the
- * package's page or in factory/sizing, wins over it.
+ * limit, never above 2 for a build whose recipe or source is a requester's
+ * (a contributor's, and the project's copy of it) nor 4 for any, and decays
+ * after five builds in a row that peaked lower — what they held that reclaim
+ * cannot free, never the page cache; a maintainer's size, on the package's
+ * page or in factory/sizing, wins over it.
  *
  * - the rules alone (src/sizing.ts `afterOom`, `afterBuild`), replayed over
  *   recorded out-of-memory histories, report by report as the pool receives
  *   them: a one-off out-of-memory kill that decays back to size 1, a
  *   contributor's recipe running itself out of memory on purpose and stopping
- *   at 2, the project's copy climbing one step per kill to 4 and no further,
- *   a peak that needed the size starting the count over, a kill while
- *   counting, a contributor's kill below what the project's copy learned, a
- *   kill at a clamped size, the edge of "lower";
+ *   at 2, the project's copy of it stopping at 2 as well, the project's
+ *   recipe on main climbing one step per kill to 4 and no further, a peak
+ *   that needed the size starting the count over, a kill while counting, a
+ *   contributor's or the copy's kill below what the recipe on main learned,
+ *   a kill at a clamped size, the edge of "lower";
  * - through the Worker (routes/factory.ts handleFail, handleComplete,
  *   selectAndLease; migration 0050), inside workerd with a real D1: a
  *   contributor's build that ran out of memory at size 1 queued again and
  *   leased at 2, its journal line, its story, and no further than 2; the
  *   project's copy whose size a maintainer set on the page keeps asking that
- *   size while the pool learns under it, then climbs to 4 once the page's
- *   size is cleared; five builds in a row that peaked lower bring the size
+ *   size while the pool learns under it, then, the page's size cleared, runs
+ *   at 2 and learns no further; the project's recipe on main climbing one
+ *   step per kill to 4; five builds in a row that peaked lower bring the size
  *   back to 1 — a build that needed the size starting the count over, one
- *   that says no peak counting nothing; two builds ending at once both
- *   counted; a maintainer's dry run teaching nothing;
+ *   that says only the high-water mark (page cache) or no peak counting
+ *   nothing — on the staged path and on the published one; two builds ending
+ *   at once both counted; a D1 error while learning a warn line, the
+ *   completion it rode on whole; a maintainer's dry run teaching nothing;
  * - the package page: the size fact says the learned size, under a
  *   maintainer's or as the one its builds ask, and a build queued again after
  *   running out of memory says the size it now waits at.
@@ -43,9 +49,10 @@ import { toB64url } from "../src/webauthn";
 const NOTHING: Learned = { size: null, lower: 0, task: null, why: null, at: null };
 
 /**
- * One report per line, as the pool receives them: `oom <ran> <trust>` — the engine killed a build running at that size; `peak <mb>` —
- * a build completed with that memory high-water mark; `peak ?` — one completed without saying. After each, the size its package
- * remembers (1: nothing learned) and the builds in a row counted lower.
+ * One report per line, as the pool receives them: `oom <ran> <whose>` — the engine killed a build running at that size, a
+ * contributor's (`community`), the project's copy of one (`copy`, a review rebuild) or the project's recipe on main (`main`); `peak <mb>`
+ * — a build completed having held that much; `peak ?` — one completed without saying. After each, the size its package remembers (1:
+ * nothing learned) and the builds in a row counted lower.
  */
 type Line = [report: string, size: number, lower: number];
 const HISTORIES: { what: string; from?: Learned; lines: Line[] }[] = [
@@ -58,29 +65,33 @@ const HISTORIES: { what: string; from?: Learned; lines: Line[] }[] = [
     lines: [["oom 1 community", 2, 0], ["oom 2 community", 2, 0], ["oom 2 community", 2, 0], ["oom 2 community", 2, 0]],
   },
   {
-    what: "the project's copy of a large C++ build climbs one step per kill, to the signed maximum and no further",
-    lines: [["oom 1 project", 2, 0], ["oom 2 project", 3, 0], ["oom 3 project", 4, 0], ["oom 4 project", 4, 0], ["peak 11500", 4, 1]],
+    what: "the project's copy of a contributor's recipe stops at 2 as well: what it runs is still the requester's to shape",
+    lines: [["oom 1 copy", 2, 0], ["oom 2 copy", 2, 0], ["oom 2 copy", 2, 0]],
+  },
+  {
+    what: "the project's recipe on main of a large C++ build climbs one step per kill, to the signed maximum and no further",
+    lines: [["oom 1 main", 2, 0], ["oom 2 main", 3, 0], ["oom 3 main", 4, 0], ["oom 4 main", 4, 0], ["peak 11500", 4, 1]],
   },
   {
     what: "a build that needed the size starts the count over; size 3 decays to 2, then 2 to 1, each after five lower peaks in a row",
     lines: [
-      ["oom 1 project", 2, 0], ["oom 2 project", 3, 0], ["peak 2000", 3, 1], ["peak 3000", 3, 2], ["peak 8000", 3, 0],
+      ["oom 1 main", 2, 0], ["oom 2 main", 3, 0], ["peak 2000", 3, 1], ["peak 3000", 3, 2], ["peak 8000", 3, 0],
       ["peak 5000", 3, 1], ["peak 5100", 3, 2], ["peak 4900", 3, 3], ["peak 5050", 3, 4], ["peak 5000", 2, 0],
       ["peak 5000", 2, 0], ["peak 3000", 2, 1], ["peak 3100", 2, 2], ["peak 2900", 2, 3], ["peak 3050", 2, 4], ["peak 3000", 1, 0],
     ],
   },
   {
     what: "an out-of-memory kill while counting starts the count over, and raises",
-    lines: [["oom 1 project", 2, 0], ["peak 1000", 2, 1], ["peak 1000", 2, 2], ["peak 1000", 2, 3], ["oom 2 project", 3, 0]],
+    lines: [["oom 1 main", 2, 0], ["peak 1000", 2, 1], ["peak 1000", 2, 2], ["peak 1000", 2, 3], ["oom 2 main", 3, 0]],
   },
   {
-    what: "a contributor's kill never lowers what the project's copy learned; it only starts the count over",
-    lines: [["oom 1 project", 2, 0], ["oom 2 project", 3, 0], ["peak 2500", 3, 1], ["oom 2 community", 3, 0]],
+    what: "a contributor's kill, or the copy's, never lowers what the project's recipe on main learned; it only starts the count over",
+    lines: [["oom 1 main", 2, 0], ["oom 2 main", 3, 0], ["peak 2500", 3, 1], ["oom 2 community", 3, 0], ["peak 2500", 3, 1], ["oom 2 copy", 3, 0]],
   },
   {
     what: "a kill at a size the claim clamped below the remembered one changes nothing but the count",
     from: { size: 3, lower: 2, task: 7, why: "oom", at: "2026-10-01T00:00:00.000Z" },
-    lines: [["oom 2 project", 3, 0], ["oom 1 community", 3, 0]],
+    lines: [["oom 2 main", 3, 0], ["oom 1 community", 3, 0], ["oom 1 copy", 3, 0]],
   },
   {
     what: "a peak at what the size under it gives is no lower peak; one megabyte under it is",
@@ -89,9 +100,9 @@ const HISTORIES: { what: string; from?: Learned; lines: Line[] }[] = [
 ];
 
 describe("the rules, replayed over recorded out-of-memory histories (#330, D31)", () => {
-  it("the size under a remembered one gives its units' memory less both sidecars; a contributor's build learns up to 2, any other up to 4", () => {
+  it("the size under a remembered one gives its units' memory less both sidecars; a contributor's build and the project's copy of it learn up to 2, the recipe on main up to 4", () => {
     expect([peakBelowMb(2), peakBelowMb(3), peakBelowMb(4)]).toEqual([4096 - 64 - 256, 8192 - 64 - 256, 12288 - 64 - 256]);
-    expect([learnCap("community"), learnCap("project")]).toEqual([2, 4]);
+    expect([learnCap("community"), learnCap("project", true), learnCap("project"), learnCap("project", false)]).toEqual([2, 2, 4, 4]);
     expect(DECAY_AFTER).toBe(5);
   });
 
@@ -101,7 +112,9 @@ describe("the rules, replayed over recorded out-of-memory histories (#330, D31)"
       h.lines.forEach(([report, size, lower], i) => {
         const [what, a, b] = report.split(" ");
         const task = 100 + i, at = `2026-10-06T00:00:${String(i).padStart(2, "0")}.000Z`;
-        const next = what === "oom" ? afterOom(cur, { ran: Number(a), trust: b, task, at }) : a === "?" ? null : afterBuild(cur, { peak_mb: Number(a), task, at });
+        const next = what === "oom"
+          ? afterOom(cur, { ran: Number(a), trust: b === "community" ? "community" : "project", review: b === "copy", task, at })
+          : a === "?" ? null : afterBuild(cur, { peak_mb: Number(a), task, at });
         // null is "nothing changes": nothing is written.
         if (next === null) expect({ size: cur.size ?? 1, lower: cur.lower }, `${report} (line ${i + 1}) changed nothing`).toEqual({ size, lower });
         else {
@@ -151,11 +164,27 @@ async function lease(id: number, leases: { task: number; gen: string }[] = []): 
 }
 /** The engine killed it at its memory limit, as the dispatcher reports it. */
 const oom = (id: number, token: string) => call("POST", `/factory/tasks/${id}/fail`, { token, body: { error: "the engine killed it at its memory limit (4 GB, exit 137)", oom: true, final: false } });
-/** A build that staged its package and completed, with the memory peak its dispatcher read from resources.json (or none). */
-async function staged(id: number, name: string, token: string, peak?: number): Promise<void> {
+/**
+ * What a completion says of memory: the peak its dispatcher read from resources.json (`ram_anon_peak_mb`, what the build held that
+ * reclaim cannot free), a number of MB; `{ watermark }`, a completion that says only the cgroup's high-water mark (`ram_peak_mb`,
+ * page cache and all — what no dispatcher sends, and the pool never reads); none.
+ */
+type Said = number | { watermark: number } | undefined;
+const memoryOf = (peak: Said) => (peak === undefined ? {} : typeof peak === "number" ? { ram_anon_peak_mb: peak } : { ram_peak_mb: peak.watermark });
+/** A build that staged its package and completed, saying `peak`. */
+async function staged(id: number, name: string, token: string, peak?: Said): Promise<void> {
   for (const f of ["PKGBUILD", "build.log", `${name}-1.0-1-aarch64.pkg.tar.zst`]) expect((await call("PUT", `/factory/tasks/${id}/artifacts/${f}`, { token, raw: `${name} ${f}` })).status).toBe(201);
-  const done = await call("POST", `/factory/tasks/${id}/complete`, { token, body: { sha256: "c".repeat(64), filename: `${name}-1.0-1-aarch64.pkg.tar.zst`, version: "1.0-1", duration_ms: 60000, ...(peak === undefined ? {} : { ram_peak_mb: peak }) } });
+  const done = await call("POST", `/factory/tasks/${id}/complete`, { token, body: { sha256: "c".repeat(64), filename: `${name}-1.0-1-aarch64.pkg.tar.zst`, version: "1.0-1", duration_ms: 60000, ...memoryOf(peak) } });
   expect(done.status, JSON.stringify(done.json)).toBe(200);
+}
+/** The project's recipe on main that published its package into edge (the pool indexed it first) and completed, saying `peak`. */
+async function published(id: number, name: string, token: string, peak?: Said): Promise<void> {
+  const filename = `${name}-1.0-1-aarch64.pkg.tar.zst`, sha256 = await sha256Hex(filename);
+  await env.DB.prepare(`INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+    VALUES (?, ?, '1.0-1', 'aarch64', ?, 1, 1, 1, '{}', 'factory', ?, 'aarch64') ON CONFLICT DO NOTHING`).bind(sha256, name, filename, `factory/aarch64/${name}`).run();
+  const done = await call("POST", `/factory/tasks/${id}/complete`, { token, body: { sha256, filename, version: "1.0-1", duration_ms: 60000, ...memoryOf(peak) } });
+  expect(done.status, JSON.stringify(done.json)).toBe(200);
+  expect(done.json.status).toBe("done");
 }
 
 /** A queued build. */
@@ -219,7 +248,7 @@ describe("raised after the engine's out-of-memory kill (#330, D31)", () => {
     expect((await lease(t)).size).toBe(2);
   });
 
-  it("the project's copy whose size a maintainer set keeps asking it while the pool learns under it; cleared, it climbs one step per kill to 4", async () => {
+  it("the project's copy whose size a maintainer set keeps asking it while the pool learns under it; cleared, it runs at 2 and learns no further, as its contributor's build", async () => {
     await register("big");
     const from = await seedTask({ name: "big", trust: "community", status: "staged" });
     expect((await call("POST", "/factory/packages/big/size", { token: "omc_m1", body: { size: 1 } })).status).toBe(200);
@@ -234,18 +263,31 @@ describe("raised after the engine's out-of-memory kill (#330, D31)", () => {
     l = await lease(t);
     expect(l.size).toBe(1);
     await call("POST", `/factory/tasks/${t}/fail`, { token: l.token, body: { error: "a mirror timed out", final: false } });
-    // Cleared, the learned size stands; each kill raises it one step, to the signed maximum (4) and no further.
+    // Cleared, the learned size stands. What the copy runs is the contributor's recipe redrafted and the source they named: out of
+    // memory at 2, it learns no further (a maintainer's size or Retry at size takes it above).
     const cleared = await call("POST", "/factory/packages/big/size", { token: "omc_m1", body: { size: null } });
     expect(cleared.json.sizing).toMatchObject({ size: 2, disk_gb: 40, from: "learned", learned: { size: 2 } });
-    for (const [ran, after] of [[2, 3], [3, 4], [4, 4]]) {
-      l = await lease(t);
+    l = await lease(t);
+    expect(l).toMatchObject({ size: 2, units: 4 });
+    await oom(t, l.token);
+    expect(await learned("big")).toEqual({ size: 2, lower: 0, task: t, why: "oom" });
+    expect(await lines("big")).toHaveLength(1);
+    expect((await lease(t)).size).toBe(2);
+  });
+
+  it("the project's recipe on main climbs one step per kill to the signed maximum, 4, and no further", async () => {
+    await register("huge");
+    const t = await seedTask({ name: "huge", trust: "project", publish: 1 });
+    for (const [ran, after] of [[1, 2], [2, 3], [3, 4], [4, 4]]) {
+      const l = await lease(t);
       expect(l).toMatchObject({ size: ran, units: 2 * ran });
       await oom(t, l.token);
-      expect((await learned("big")).size).toBe(after);
+      expect((await learned("huge")).size).toBe(after);
     }
-    expect((await lines("big")).map((x: any) => x.summary).slice(1)).toEqual([
-      `big: learned size 3 (was 2) — task ${t} for aarch64 ran out of memory at size 2 on ${HOST}; its builds ask size 3 from now on`,
-      `big: learned size 4 (was 3) — task ${t} for aarch64 ran out of memory at size 3 on ${HOST}; its builds ask size 4 from now on`,
+    expect((await lines("huge")).map((x: any) => x.summary)).toEqual([
+      `huge: learned size 2 (was 1) — task ${t} for aarch64 ran out of memory at size 1 on ${HOST}; its builds ask size 2 from now on`,
+      `huge: learned size 3 (was 2) — task ${t} for aarch64 ran out of memory at size 2 on ${HOST}; its builds ask size 3 from now on`,
+      `huge: learned size 4 (was 3) — task ${t} for aarch64 ran out of memory at size 3 on ${HOST}; its builds ask size 4 from now on`,
     ]);
     expect((await lease(t)).size).toBe(4);
   });
@@ -261,20 +303,21 @@ describe("raised after the engine's out-of-memory kill (#330, D31)", () => {
 });
 
 describe("decays after five builds in a row that peaked lower (#330, D31)", () => {
-  it("back to size 1 after five lower peaks in a row; a build that needed the size starts the count over, one that says no peak counts nothing", async () => {
+  it("back to size 1 after five lower peaks in a row; a build that needed the size starts the count over, one that says only its high-water mark or no peak counts nothing", async () => {
     await register("lean");
     const t = await seedTask({ name: "lean", trust: "community" });
     const l = await lease(t);
     await oom(t, l.token);
     expect((await learned("lean")).size).toBe(2);
-    // Then its builds, each at size 2, report their peaks: 3776 MB is what size 1 gives a build's container.
-    const peaks: [number | undefined, number][] = [[1500, 1], [1400, 2], [5000, 0], [undefined, 0], [1500, 1], [1600, 2], [1450, 3], [1500, 4]];
+    // Then its builds, each at size 2, report what they held: 3776 MB is what size 1 gives a build's container. A high-water mark alone
+    // (page cache and all) is not what was held: it counts nothing either way.
+    const peaks: [Said, number][] = [[1500, 1], [1400, 2], [5000, 0], [undefined, 0], [{ watermark: 1500 }, 0], [1500, 1], [{ watermark: 8128 }, 1], [1600, 2], [1450, 3], [1500, 4]];
     for (const [peak, lower] of peaks) {
       const id = await seedTask({ name: "lean", trust: "community" });
       const b = await lease(id);
       expect(b.size).toBe(2);
       await staged(id, "lean", b.token, peak);
-      expect(await learned("lean"), `after a peak of ${peak ?? "nothing said"}`).toMatchObject({ size: 2, lower });
+      expect(await learned("lean"), `after a peak of ${JSON.stringify(peak) ?? "nothing said"}`).toMatchObject({ size: 2, lower });
     }
     expect(await lines("lean")).toHaveLength(1);
     const last = await seedTask({ name: "lean", trust: "community" });
@@ -285,6 +328,43 @@ describe("decays after five builds in a row that peaked lower (#330, D31)", () =
     expect((await story("lean")).package.sizing).toEqual({ size: 1, disk_gb: 20, from: null, disk_from: null });
     const next = await seedTask({ name: "lean", trust: "community" });
     expect((await lease(next)).size).toBe(1);
+  });
+
+  it("the project's recipe on main, published into edge, counts its peaks too: five lower ones in a row bring its size back down", async () => {
+    await register("steady");
+    const t = await seedTask({ name: "steady", trust: "project", publish: 1 });
+    await oom(t, (await lease(t)).token);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(t).run();
+    expect((await learned("steady")).size).toBe(2);
+    let last = 0;
+    for (const lower of [1, 2, 3, 4, 0]) {
+      last = await seedTask({ name: "steady", trust: "project", publish: 1 });
+      const b = await lease(last);
+      expect(b.size).toBe(2);
+      await published(last, "steady", b.token, 2900);
+      expect(await learned("steady")).toMatchObject({ size: lower ? 2 : null, lower });
+    }
+    expect(await learned("steady")).toEqual({ size: null, lower: 0, task: last, why: "decay" });
+    expect((await lines("steady"))[1]).toEqual({ status: "ok", summary: `steady: learned size 1 (was 2) — 5 builds in a row peaked below the 3776 MB size 1 gives, the last task ${last} for aarch64 at 2900 MB on ${HOST}; its builds ask size 1 from now on` });
+  });
+
+  it("a D1 error while learning is a warn line, and the completion it rode on goes on whole: staged, its audit queued, its package staged", async () => {
+    await register("brittle");
+    const t = await seedTask({ name: "brittle", trust: "community" });
+    const l = await lease(t);
+    // The remembered size's columns out of reach for the length of one completion: every read of them fails.
+    await env.DB.prepare("ALTER TABLE factory_packages RENAME COLUMN learned_lower TO learned_lower_away").run();
+    try {
+      await staged(t, "brittle", l.token, 1500);
+    } finally {
+      await env.DB.prepare("ALTER TABLE factory_packages RENAME COLUMN learned_lower_away TO learned_lower").run();
+    }
+    expect((await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(t).first<any>()).status).toBe("staged");
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE kind = 'audit' AND json_extract(params, '$.task') = ?").bind(t).first<any>()).n).toBe(1);
+    expect((await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'brittle'").first<any>()).status).toBe("staged");
+    const warn = await env.DB.prepare("SELECT summary FROM events WHERE kind = 'build' AND status = 'warn' AND json_extract(payload, '$.task') = ?").bind(t).first<any>();
+    expect(warn?.summary).toMatch(new RegExp(`^brittle: size not learned from task ${t} — .*learned_lower`));
+    expect(await learned("brittle")).toEqual({ size: null, lower: 0, task: null, why: null });
   });
 
   it("two builds ending at once are both counted: the remembered size is written compare-and-set", async () => {

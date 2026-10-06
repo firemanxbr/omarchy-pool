@@ -412,6 +412,29 @@ describe("sizes and the reservation for large tasks (D31)", () => {
     expect((await env.DB.prepare("SELECT reserving_task FROM hosts WHERE id = ?").bind(host).first<any>()).reserving_task).toBeNull();
   });
 
+  it("a size learned from its package's builds (#330) is reserved for as a size set on its page: after 30 minutes the host reserves for it, takes nothing else, and leases it at that size once its units fit", async () => {
+    const host = await seedHost("studio-k", { ...STUDIO, lanes: [{ arch: "aarch64", mode: "native" }] });
+    for (let i = 0; i < 5; i++) await seedTask({ ago: 40 });
+    const running = await fill("studio-k");
+    expect(running).toHaveLength(5);
+    // Its package learned size 2 from an out-of-memory kill; no maintainer set one.
+    await env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, learned_size, learned_task, learned_why, learned_at) VALUES ('llvm', 'm1', 'https://llvm.org', '[\"aarch64\"]', 'waiting', 2, 1, 'oom', ?)").bind(new Date().toISOString()).run();
+    const big = await seedTask({ name: "llvm", ago: 31 });
+    const small = await seedTask({ priority: 50 });
+    const ended: number[] = [];
+    const held = () => running.filter((r) => !ended.includes(r.task)).map(({ task, gen }) => ({ task, gen }));
+    // One build ends: 2 units free — size 2 needs 4. The host reserves for it, and the more urgent small build waits.
+    await finish(running[0].task); ended.push(running[0].task);
+    expect((await claim("studio-k", { leases: held() })).status).toBe(204);
+    expect((await env.DB.prepare("SELECT reserving_task FROM hosts WHERE id = ?").bind(host).first<any>()).reserving_task).toBe(big);
+    expect((await taskOf(big)).reserved_at).not.toBeNull();
+    expect((await taskOf(small)).status).toBe("queued");
+    // A second ends: 4 units free — leased at its learned size.
+    await finish(running[1].task); ended.push(running[1].task);
+    const c = await claim("studio-k", { leases: held() });
+    expect(c.json.task).toMatchObject({ id: big, size: 2, units: 4 });
+  });
+
   it("an older build that waits for another reason (needs_native on an aarch64-only fleet) turns nothing off; its two hours spent, the task is not marked again for 30 minutes, then is", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const t0 = Date.now();

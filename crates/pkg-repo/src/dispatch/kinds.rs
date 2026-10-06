@@ -11,8 +11,8 @@
 //!   rebuild go to the task's staging; the project's recipe on main is
 //!   published into edge with the lease's `pool:write`, as `pkg-repo work`
 //!   does; a dry run stays on the host (#284). Its completion carries the
-//!   memory high-water mark its `resources.json` measured (`ram_peak_mb`),
-//!   which the pool's size learning counts (#330).
+//!   memory peak its `resources.json` measured of what reclaim cannot free
+//!   (`ram_anon_peak_mb`), which the pool's size learning counts (#330).
 //! - an **audit**: the staged PKGBUILD, log, gate and `.PKGINFO` in
 //!   `/task/in`, read as data; `audit.json` and `audit.md` attached to the
 //!   staged build.
@@ -689,8 +689,8 @@ fn report_done(
     report_done_with(ctx, l, summary, result, took, log, None)
 }
 
-/// [`report_done`] for a build: with its container's memory high-water mark beside the result
-/// (`ram_peak_mb`, [`peak_of`]), which the pool's size learning counts (#330, design v2 §7.4; D31).
+/// [`report_done`] for a build: with its container's memory peak beside the result
+/// (`ram_anon_peak_mb`, [`peak_of`]), which the pool's size learning counts (#330, design v2 §7.4; D31).
 fn report_done_with(
     ctx: &Ctx,
     l: &Lease,
@@ -706,7 +706,7 @@ fn report_done_with(
         "sha256": field("sha256", json!("-")), "filename": field("filename", json!("-")), "version": field("version", Value::Null),
     });
     if let Some(mb) = peak {
-        body["ram_peak_mb"] = json!(mb);
+        body["ram_anon_peak_mb"] = json!(mb);
     }
     sent(
         "completion",
@@ -900,16 +900,17 @@ fn dry_run_kept(ctx: &Ctx, l: &Lease) -> Option<PathBuf> {
     })
 }
 
-/// The memory high-water mark of a build's container, in MB: what its `resources.json` says
-/// (the build script reads its own cgroup's `memory.peak`, or cgroup v1's
-/// `memory.max_usage_in_bytes`, omarchy-build-worker.sh `resources_end`), for the pool's size
-/// learning (#330, D31). None when the file is missing or does not read, or says 0 — a cgroup
-/// that measures no peak — never a guess. It is the task's own word: a recipe can only lower its
-/// own package's remembered size with it, never raise any.
+/// The memory peak of a build's container, in MB, for the pool's size learning (#330, D31): what
+/// its `resources.json` says it held that reclaim cannot free, `ram_anon_peak_mb` (the build
+/// script samples its own cgroup's `memory.stat`, omarchy-build-worker.sh `resources_end`) —
+/// never `ram_peak_mb`, the cgroup's high-water mark, which counts the page cache its files
+/// filled up to the container's limit. None when the file is missing or does not read, or says
+/// 0 — a cgroup that measures nothing — never a guess. It is the task's own word: a recipe can
+/// only lower its own package's remembered size with it, never raise any.
 fn peak_of(files: &[(String, PathBuf)]) -> Option<u64> {
     let (_, p) = files.iter().find(|(n, _)| n == "resources.json")?;
     let v: Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;
-    v.get("ram_peak_mb")?.as_u64().filter(|&mb| mb > 0)
+    v.get("ram_anon_peak_mb")?.as_u64().filter(|&mb| mb > 0)
 }
 
 /// Where a build's evidence goes: the task's own staging, for a contributor's build and the project's review rebuild.

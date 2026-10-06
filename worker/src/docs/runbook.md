@@ -2121,24 +2121,34 @@ so a size-4 build waits for memory rather than run smaller.
   pool remembers one per package from its own builds on hosts
   (`factory_packages.learned_*`). When the engine kills a build at its
   memory limit (`oom`), the size goes one step above the size it ran at —
-  never above 2 for a contributor's build, nor above 4 for the project's
-  copy — and that build's next attempt, queued again at once, already asks
-  it; a `build` warn line says *learned size 2 (was 1) — task N … ran out
-  of memory at size 1*. Each build that completes says its container's
-  memory high-water mark (`ram_peak_mb`, from its `resources.json`); five
-  in a row below what the size under the remembered one gives (its units'
+  never above 2 for a build whose recipe or source is a requester's (a
+  contributor's build, and the project's copy of it, the review rebuild),
+  nor above 4 for the project's recipe on main — and that build's next
+  attempt, queued again at once, already asks it; a `build` warn line says
+  *learned size 2 (was 1) — task N … ran out of memory at size 1*. A
+  requester's package that needs more than 2 gets it from a maintainer: a
+  size on its page or in `factory/sizing`, or **Retry at size N**. Each
+  build that completes says what its container held that reclaim cannot
+  free (`ram_anon_peak_mb`, from its `resources.json`: anonymous and shared
+  memory, sampled every second from its cgroup's `memory.stat` — never the
+  page cache its files filled, which keeps the cgroup's high-water mark,
+  `ram_peak_mb`, at the container's limit for any build that reads or
+  writes more files than its memory; the build page shows both); five in a
+  row below what the size under the remembered one gives (its units'
   memory less both sidecars: 3776 MB under size 2) lower it one step, and
-  a build that peaked at or above that, or ran out of memory, starts the
-  count over (a build that says no peak counts nothing). A maintainer's
-  dry run teaches nothing. The package page's *size* fact says the learned
-  size, the build that last moved it and the count; a size set on the page
-  or in `factory/sizing` wins over it, and clearing that size lets the
-  learned one stand again. The peak is the build's own word (its cgroup's
-  `memory.peak`, or cgroup v1's `memory.max_usage_in_bytes`; both count the
-  page cache too, so a build that reads a lot keeps its size longer; a
-  cgroup v2 kernel before 5.19 measures neither, and its builds count
-  nothing): a recipe can only lower or keep its own package's remembered
-  size with it, never raise it.
+  a build that held at or above that, or ran out of memory, starts the
+  count over (a build that says nothing held counts nothing: a container
+  with no `memory.stat` of its own — a host's cgroup namespace —, or a
+  dispatcher of a release before this one). A maintainer's dry run teaches
+  nothing. The package page's *size* fact says the learned size, the
+  build that last moved it and the count; a size set on the page or in
+  `factory/sizing` wins over it, and clearing that size lets the learned
+  one stand again. A learned size of 2 or more is reserved for like one
+  set on the page (a host holds back for it, two hours at most), and
+  Review's placement reads it. The peak is the build's own word: a recipe
+  can only lower or keep its own package's remembered size with it, never
+  raise it. A best-effort write: a database error while learning is a
+  `build` warn line (*size not learned from task N*), never a lost report.
   To forget what the pool learned for a package:
 
   ```bash

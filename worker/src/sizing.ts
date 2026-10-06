@@ -23,7 +23,8 @@
  *
  * Below both, the size the pool learned from a package's own builds (#330,
  * design v2 §7.4; D31): raised after an out-of-memory kill the engine
- * reported, never above a contributor's 2 for a contributor's build nor the
+ * reported, never above a contributor's 2 for a build whose recipe or source
+ * is a requester's (a contributor's, and the project's copy of it) nor the
  * signed maximum, and decayed after five builds in a row that peaked lower
  * (factory_packages.learned_*; the rules are `afterOom` and `afterBuild`
  * below, the writes routes/factory.ts `learnSize`). A maintainer's size, on
@@ -111,31 +112,38 @@ export function peakBelowMb(size: number): number {
   return (size - 1) * TASK_UNITS.build_per_size * UNIT.mem_gb * 1024 - SIDECARS_MEM_MB.egress - SIDECARS_MEM_MB.agent;
 }
 
-/** The largest size learning gives a build of this trust: a contributor's 2 (community_max_size), the signed maximum otherwise. */
-export const learnCap = (trust: string): number => (trust === "community" ? COMMUNITY_MAX_SIZE : MAX_SIZE);
+/**
+ * The largest size learning gives a build: a contributor's 2 (community_max_size) for a contributor's build and for the project's copy
+ * of it (`review`: its recipe the project's drafter wrote from the contributor's evidence, its source the one the requester named —
+ * what runs is still the requester's to shape, security-model *Sizes a recipe can move*), the signed maximum for the project's recipe
+ * on main alone. Above 2, a requester's package goes by a maintainer's word: a size on its page or in factory/sizing, a Retry at size.
+ */
+export const learnCap = (trust: string, review = false): number => (trust === "community" || review ? COMMUNITY_MAX_SIZE : MAX_SIZE);
 
 /**
  * After the engine killed a build at its memory limit, running at size
- * `ran`: the remembered size becomes `ran` + 1 — never above the cap of the
- * build's trust (learnCap: a recipe that runs itself out of memory on purpose
- * gets a contributor's build no further than 2), never lower than it was —
- * and the lower peaks counted start over. One step, not a doubling (D31):
- * each step costs the build an attempt and a maintainer sees it. null when
- * nothing changes.
+ * `ran`: the remembered size becomes `ran` + 1 — never above the build's cap
+ * (learnCap: a recipe that runs itself out of memory on purpose gets a
+ * requester's package no further than 2), never lower than it was — and the
+ * lower peaks counted start over. One step, not a doubling (D31): each step
+ * costs the build an attempt and a maintainer sees it. null when nothing
+ * changes.
  */
-export function afterOom(cur: Learned, o: { ran: number; trust: string; task: number; at: string }): Learned | null {
+export function afterOom(cur: Learned, o: { ran: number; trust: string; review?: boolean; task: number; at: string }): Learned | null {
   const was = cur.size ?? 1;
-  const size = Math.max(was, Math.min(learnCap(o.trust), Math.max(1, o.ran) + 1));
+  const size = Math.max(was, Math.min(learnCap(o.trust, o.review), Math.max(1, o.ran) + 1));
   if (size === was) return cur.lower ? { ...cur, lower: 0 } : null;
   return { size, lower: 0, task: o.task, why: "oom", at: o.at };
 }
 
 /**
- * After a build completed with its memory high-water mark, `peak_mb`: below
- * what the size under the remembered one gives (peakBelowMb), one more lower
- * peak, and the fifth in a row lets the size decay one step — from 2 to
- * nothing learned; at or above it, the count starts over (that build needed
- * the size). null when nothing changes, and always when nothing is learned.
+ * After a build completed with its memory peak, `peak_mb` — what it held
+ * that reclaim cannot free (the dispatcher's `ram_anon_peak_mb`, never the
+ * page cache its files filled): below what the size under the remembered one
+ * gives (peakBelowMb), one more lower peak, and the fifth in a row lets the
+ * size decay one step — from 2 to nothing learned; at or above it, the count
+ * starts over (that build needed the size). null when nothing changes, and
+ * always when nothing is learned.
  */
 export function afterBuild(cur: Learned, o: { peak_mb: number; task: number; at: string }): Learned | null {
   if (cur.size === null) return null;

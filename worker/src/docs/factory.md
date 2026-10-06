@@ -531,9 +531,11 @@ jobs: the arch-neutral ones whatever their row's arch, a health check or a promo
 lane of each arch its helpers check; which one comes next is the selection's (below). A Stop is per lease (`task` names it; several open at once, 30 an hour per
 login), and `fail` takes `lost: true` (a host event: the attempt given back, twice per task at
 most) and `oom: true` (the engine's kill: the attempt spent, the reason kept). A build's `oom`
-raises the size its package remembers one step, and a build's `complete` carries `ram_peak_mb`,
-its container's memory high-water mark, five of which in a row below what the size under the
-remembered one gives lower it one step (#330, D31; the runbook's *Sizes*).
+raises the size its package remembers one step (to 2 at most for a contributor's build and the
+project's copy of it, 4 for the project's recipe on main), and a build's `complete` carries
+`ram_anon_peak_mb`, what its container held that reclaim cannot free (never the page cache), five
+of which in a row below what the size under the remembered one gives lower it one step (#330, D31;
+the runbook's *Sizes*).
 
 On the host, the dispatcher (`pkg-repo dispatch`, #335, design v2 §9) holds those leases and runs
 each in one task container it starts through one function (`crates/pkg-repo/src/dispatch/spec.rs`):
@@ -569,7 +571,9 @@ jobs       a pool job (#340): one at a time, in a child process of its own (pkg-
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
 out        /task/out: the kind's closed list under its caps (a build: packages, PKGBUILD, vet.json, tests.log,
            resources.json, verdict.json), uploaded by the dispatcher with the job token — a build's completion
-           says the ram_peak_mb its resources.json measured, none when it says 0 or does not read (#330);
+           says the ram_anon_peak_mb its resources.json measured (what it held that reclaim cannot free, sampled
+           from its cgroup's memory.stat; never ram_peak_mb, the high-water mark page cache fills), none when it
+           says 0 or does not read (#330);
            /task/log/task.log, ≤ 64 MiB
            (the engine keeps no log of a task container); exited with no verdict.json, or a verdict of a
            SIGTERM or SIGKILL, fails `lost` (a reboot, a shutdown): the attempt is given back
