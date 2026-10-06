@@ -308,7 +308,9 @@ jobs:
     # would; then the run loop rolls a stand-in dispatcher out as that unit —
     # releases, ordered restarts (exit 75) during a guard counted as the
     # service's restarts, broken releases reverted and quarantined, a
-    # rollback statement — while a task container keeps running. The
+    # rollback statement, the host worker token in its read-only file (#327)
+    # and a rotation restarting the unit alone — while a task container keeps
+    # running. The
     # runner's user manager is started by lingering, as the installer does
     # on a host.
     runs-on: ubuntu-latest
