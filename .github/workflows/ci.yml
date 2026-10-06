@@ -180,8 +180,13 @@ jobs:
     # of reach behind an INPUT drop for a test /28, as prep-root.sh's
     # OMARCHY-TASKS-HOST holds one, which the script adds with sudo) and
     # rootless podman's network stack, read in /proc as preflight reads it;
-    # with the pinned docker CLI, on rootful docker and rootless podman's API
-    # socket.
+    # #372: a task's own network made as the dispatcher makes it — on podman
+    # through libpod's API, internal with DNS off — has no gateway a task
+    # reaches, the dispatcher's own (pkg-repo, the pinned docker CLI) the
+    # same; with the pinned docker CLI, on rootful docker and rootless podman's
+    # API socket. pasta's guest-mapped address is tried only where rootless
+    # podman runs pasta with it (5.3 on): the runner's podman 4.9 does not, so
+    # that part is skipped here with a note and runs by hand on such a host.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -194,7 +199,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The egress probe (a task network's gateway and the host's loopback too) and a legacy project on ${{ matrix.engine }}
+      - name: The egress probe (a task network's gateway, made as the dispatcher makes it, and the host's loopback too) and a legacy project on ${{ matrix.engine }}
         run: bash tests/agent-install.sh ${{ matrix.engine }}
 
   emulated-lane:
@@ -433,6 +438,9 @@ jobs:
       # The agent renders the dispatcher's etc/dispatcher.env there (#371); built on its own, so the
       # image's binaries above are built with their own features.
       - run: cargo build --release -p omarchy-agent
+      # On docker only: the script's podman run (RUNTIME=podman, the dispatcher's docker CLI on
+      # podman's socket) is by hand; in CI a task network the dispatcher makes on podman is covered
+      # by agent-install's pkg-repo test on rootless podman (#372).
       - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own
         run: bash tests/task-networks.sh
         env:
