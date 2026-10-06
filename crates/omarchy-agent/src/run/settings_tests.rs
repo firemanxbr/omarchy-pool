@@ -540,6 +540,7 @@ fn rotate_token_writes_a_new_token_for_the_dispatcher_which_is_recreated_with_it
         ..Budget::default()
     };
     let env = w.set_dir().join("etc/dispatcher.env");
+    let file = crate::dispatcher_env::token_path_in(&w.set_dir());
     w.tick(3);
     let mut owners = fs::read_to_string(&env).unwrap();
     owners.push_str("# the owner's own\nOWNER_NOTE=kept\n");
@@ -560,21 +561,18 @@ fn rotate_token_writes_a_new_token_for_the_dispatcher_which_is_recreated_with_it
     assert_eq!(outcome, "done", "{detail}");
     assert!(
         detail.starts_with(
-            "a new host worker token is in etc/dispatcher.env (next rotation after 2027-02-14T08:00:00.000Z)"
+            "a new host worker token is in run/host/dispatcher/token (next rotation after 2027-02-14T08:00:00.000Z)"
         ),
         "{detail}"
     );
     let text = fs::read_to_string(&env).unwrap();
     let token = format!("omw_{:048x}", 1);
-    // Only the token changed: the addresses, the secrets directory, the budget and the
-    // owner's lines are as they were, byte for byte.
-    assert_eq!(
-        text,
-        rendered.replace(
-            &format!("OMARCHY_WORKER_TOKEN={}\n", crate::run::fake::TOKEN),
-            &format!("# worker: m1-test-0a9z\nOMARCHY_WORKER_TOKEN={token}\n")
-        )
-    );
+    // Only the token changed, in its own file (#327): etc/dispatcher.env — the registration,
+    // the addresses, the secrets directory, the budget and the owner's lines — is as it was,
+    // byte for byte, and holds no token.
+    assert_eq!(fs::read_to_string(&file).unwrap().trim(), token);
+    assert_eq!(text, rendered);
+    assert!(!text.contains("OMARCHY_WORKER_TOKEN"), "{text}");
     settle(&mut w);
     assert_ne!(dispatcher_id(&w), before);
     assert_eq!(w.engine.borrow().tasks()[0].id, task);
@@ -596,6 +594,7 @@ fn rotate_token_writes_a_new_token_for_the_dispatcher_which_is_recreated_with_it
         "{detail}"
     );
     assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    assert_eq!(fs::read_to_string(&file).unwrap().trim(), token);
     // One with a newline in its token: nothing written either.
     w.remote.borrow_mut().token_answer = Some(Net::Ok(
         json!({"worker": "m1-test-0a9z", "token": "omw_x\nEVIL=1"}),
@@ -603,6 +602,7 @@ fn rotate_token_writes_a_new_token_for_the_dispatcher_which_is_recreated_with_it
     let (outcome, _) = order(&mut w, &json!({"id": "ho_rt3", "kind": "rotate-token"}));
     assert_eq!(outcome, "refused");
     assert_eq!(fs::read_to_string(&env).unwrap(), text);
+    assert_eq!(fs::read_to_string(&file).unwrap().trim(), token);
 }
 
 #[test]

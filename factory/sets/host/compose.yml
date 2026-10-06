@@ -21,10 +21,18 @@ services:
       OMARCHY_BUILD_IMAGE_X86_64: "@BUILD_X86_64@"
       OMARCHY_WORKER_IMAGE: "@RELEASE_IMAGE@"          # sidecars run the same signed image
       OMARCHY_TASK_SUBNETS: ${OMARCHY_TASK_SUBNETS:-10.231.0.0/16}
-    env_file: [etc/dispatcher.env]       # the host worker token, and the host's addresses and agent budget beside it (#371): written by the agent
+      OMARCHY_WORKER_TOKEN_FILE: /run/omarchy/worker-token   # the host worker token, a read-only file (#327)
+    env_file: [etc/dispatcher.env]       # the token's registration, the host's addresses and agent budget (#371): written by the agent
     volumes:
       - ${OMARCHY_SOCKET}:/var/run/docker.sock
       - ${OMARCHY_WORK_ROOT}:${OMARCHY_WORK_ROOT}      # same path inside and outside
       - ./run/capacity.json:/run/omarchy/capacity.json:ro
+      # Its own token file and nothing else of the set's secrets (design v2 §14, D15): the agent
+      # writes it (0400) and rotates it; never a value in the environment `docker inspect` shows.
+      - type: bind
+        source: ./run/host/dispatcher/token
+        target: /run/omarchy/worker-token
+        read_only: true
+        bind: { create_host_path: false }
     restart: unless-stopped
     stop_grace_period: 60s               # stop claiming, save leases, exit; tasks keep running

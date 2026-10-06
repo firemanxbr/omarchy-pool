@@ -144,10 +144,16 @@ to copy.
    journal and Status get an info line, and the other maintainers see a
    notice. Nothing claims before that.
 4. The agent fetches the host worker token with a request signed by the host
-   key and writes it to `etc/dispatcher.env` (0600) for the dispatcher. It
-   rotates the token every 30 days; the one it replaces works ten more
-   minutes, so only the dispatcher is recreated and its tasks run on. Beside
-   the token the agent writes the host's own addresses for every task's
+   key and writes it to `run/host/dispatcher/token` in the set directory
+   (0400, in directories only the agent enters, #327). The host set mounts
+   that one file read-only into the dispatcher and names it in
+   `OMARCHY_WORKER_TOKEN_FILE`, so the token is in no container's
+   environment, which anyone who can talk to the engine's socket reads with
+   `docker inspect`. It rotates the token every 30 days (`omarchy-agent
+   token` does it at once): the file is rewritten, the one it replaces works
+   ten more minutes, and only the dispatcher is recreated — its tasks run on
+   and it re-adopts them. `etc/dispatcher.env` (0600) names the token's
+   registration (`# worker:`), the host's own addresses for every task's
    egress to refuse (`OMARCHY_HOST_ADDRESSES`), and once `agent.toml` is
    there, the secrets directory, the envelope's agent budget (#371), its
    grant of a signed exception's bridge (`OMARCHY_DIRECT_NETWORK`, #373) and
@@ -155,7 +161,12 @@ to copy.
    it has a `cache_caps`, #341). Those come from `agent.toml` alone: a line
    of yours for one of their keys is replaced, so set them in the envelope. A
    rotation keeps them, and every other line you add to the file yourself
-   stays.
+   stays. A host that ran the agent before #327 had the token in that file:
+   the agent moves it to its own file at its first start, losing nothing,
+   and keeps it in `etc/dispatcher.env` too only while a release from before
+   #327 is running or being rolled out (its dispatcher reads it there), so a
+   rollback to one still works; once none is left it takes it out, which
+   recreates the dispatcher once.
 5. Only then does it write `agent.toml` with the host and its registration,
    take the agent keys, write the systemd --user unit, enable linger and start
    the agent, whose first round starts the dispatcher (on a Mac, the
@@ -369,7 +380,8 @@ host ([Owner control without a visit](#owner-control-without-a-visit)). A
 narrowing needs no signature. The page's **Host orders** card gives the rest, its
 owner's or any maintainer's: **Retry release** lifts the quarantine of a
 release its guard reverted and tries it again; **Rotate token** gives the
-dispatcher a new worker token (the old one works ten more minutes);
+dispatcher a new worker token, in its file (#327; the old one works ten more
+minutes);
 **Diagnostics** brings the dispatcher's last 500 log lines, scrubbed of the
 host's secrets, read on the page — only when the envelope says
 `diagnostics = true`. Every order and its agent's answer are on the page's

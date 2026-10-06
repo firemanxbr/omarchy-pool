@@ -237,9 +237,9 @@ pub(super) fn rendered(cfg: &Config, paths: &Paths, sources: &Sources) -> Render
     Rendered::now(sources, &paths.data, Some(envelope))
 }
 
-/// The values the journal and the report never carry: those of the set's `etc/*.env` (the
-/// worker token) and of the secrets directory's `*.env` — the agent keys, typed at install
-/// or sealed from the site (#328).
+/// The values the journal and the report never carry: the worker token's file (#327), those
+/// of the set's `etc/*.env` and of the secrets directory's `*.env` — the agent keys, typed at
+/// install or sealed from the site (#328).
 pub(super) fn secrets_of(set_dir: &std::path::Path, secrets_dir: &std::path::Path) -> Vec<String> {
     let mut v = env_secrets(set_dir);
     v.extend(env_values(secrets_dir));
@@ -1175,7 +1175,7 @@ impl Agent {
         if let Some(down) = st.agent_to().filter(|v| *v < self.version) {
             let ships = b.manifest().outer().agent();
             let moved = if ships.version() == down {
-                self.move_agent(target, ships, now)
+                self.move_agent_down(target, b, now)
             } else {
                 Err(format!(
                     "agent_to {down}, but {target} ships agent {}",
@@ -1192,6 +1192,46 @@ impl Agent {
         }
         self.accept(target, &st, &st_cosigned, vouches, now);
         self.exit.is_none()
+    }
+
+    /// A rollback statement's `agent_to` (#316): the agent moved down to the one `b` ships,
+    /// with the host worker token put back into `etc/dispatcher.env` first when the target's
+    /// template reads it there (#327). The agent below runs the rollback round, and this one
+    /// stages nothing before it exits; one from before #327 keeps a token line it finds but
+    /// never writes one, so without it that round would create the older release's
+    /// dispatcher with no token. A file that cannot be written holds the statement; a move
+    /// that fails leaves the file as the releases here need it.
+    fn move_agent_down(
+        &mut self,
+        target: Release,
+        b: &VerifiedBundle,
+        now: i64,
+    ) -> Result<(), String> {
+        let env = dispatcher_env::path_in(&self.cfg.set_dir);
+        // A template that cannot be read counts as an older one, as `older_release_here`
+        // counts it: the token stays.
+        let older = b
+            .file(&format!("sets/{}/compose.yml", self.cfg.set_name))
+            .and_then(|c| std::str::from_utf8(c).ok())
+            .is_none_or(|t| !crate::lint::reads_token_file(t));
+        if older {
+            dispatcher_env::refresh_token(&env, true)
+                .map_err(|e| format!("the dispatcher's token: {e}"))?;
+        }
+        let moved = self.move_agent(target, b.manifest().outer().agent(), now);
+        if moved.is_err() && older {
+            // Out again while no release here needs it (the minute's refresh would do it
+            // too), so the drift check does not recreate the dispatcher for it.
+            let plain = dispatcher_env::older_release_here(&self.paths.data);
+            if let Err(e) = dispatcher_env::refresh_token(&env, plain) {
+                self.journal.write(
+                    now,
+                    "dispatcher-env",
+                    serde_json::json!({"detail": format!("the token line was not taken out again: {e}")}),
+                );
+            }
+        }
+        moved
     }
 
     /// A bundle only a higher agent reads: the agent updates itself from its (signed and,
@@ -1468,13 +1508,19 @@ impl Agent {
         match dispatcher_env::refresh(&path, &r) {
             Ok(done) => {
                 h.failing = None;
-                if done == Refresh::Written {
+                let detail = match done {
+                    Refresh::Written if r.plain => "etc/dispatcher.env rendered again (the host's addresses, agent.toml, or a release here from before the token file, which reads the token there too, #327), its token kept: the next round recreates the dispatcher",
+                    Refresh::Written => "etc/dispatcher.env rendered again (the host's addresses or agent.toml changed, or the token left it: no release here reads it there any more, #327), its token kept in run/host/dispatcher/token: the next round recreates the dispatcher",
+                    Refresh::TokenMoved => "the host worker token moved from etc/dispatcher.env to run/host/dispatcher/token (0400), which the dispatcher reads as a read-only file (#327); it stays in etc/dispatcher.env too only while a release from before it is here: the next round recreates the dispatcher",
+                    Refresh::Unchanged | Refresh::NoFile => "",
+                };
+                if !detail.is_empty() {
                     let addresses: Vec<String> =
                         r.addresses.iter().map(ToString::to_string).collect();
                     self.journal.write(
                         now,
                         "dispatcher-env",
-                        serde_json::json!({"addresses": addresses, "detail": "etc/dispatcher.env rendered again (the host's addresses or agent.toml changed), its token kept: the next round recreates the dispatcher"}),
+                        serde_json::json!({"addresses": addresses, "detail": detail}),
                     );
                 }
             }
@@ -1490,8 +1536,9 @@ impl Agent {
         }
     }
 
-    /// When idle: a changed input (the override, `etc/`, `run/capacity.json`) starts a
-    /// round at once; the running set is compared with `last-good/` every 15 minutes.
+    /// When idle: a changed input (the override, `etc/`, `run/capacity.json`, the token
+    /// file) starts a round at once; the running set is compared with `last-good/` every 15
+    /// minutes.
     fn drift(&mut self, now: i64) {
         let Some(applied) = self.state.applied else {
             return;
@@ -1503,7 +1550,7 @@ impl Agent {
         let inputs = rollout::inputs_hash(&self.cfg.set_dir);
         if !overlay.contains(&inputs) && self.last_inputs.as_ref() != Some(&inputs) {
             self.last_inputs = Some(inputs);
-            let why = "an input changed (the override, etc/ or run/capacity.json)";
+            let why = "an input changed (the override, etc/, run/capacity.json or the token file)";
             return self.start(now, applied, false, why);
         }
         if now - self.last_drift < DRIFT_S {

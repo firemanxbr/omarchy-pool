@@ -2,17 +2,18 @@
 //! §16.1, §16.2, §16.4, §18.4; #315): the run loop that rolls the host bundle's one
 //! service, the dispatcher, out to this host — verify, lint, plan, pull, replace, guard,
 //! commit or revert — on the pinned compose driver. At its start and every minute it also
-//! renders the dispatcher's `etc/dispatcher.env` beside the token (#371,
+//! renders the dispatcher's `etc/dispatcher.env` beside the token's file (#371, #327,
 //! [`crate::dispatcher_env`]): the host's addresses when they change (the public one asked
 //! of the pool's edge every hour), agent.toml's secrets directory and budget as agent.toml
-//! says them now; a file that changed starts a round like any input.
+//! says them now, and the token too only while a release from before #327 is here; a file
+//! that changed starts a round like any input, the token's file (a rotation) included.
 //!
 //! Seams left for later issues, each named where it sits:
 //! - install, preflight and runtime discovery (#317, `crate::install`): agent.toml (with
 //!   `host_id` and `worker_id` from enrollment, and `set.engine`, the engine kind the
 //!   lint holds the set to) and the first tools arrive from there. Preflight checks who
-//!   owns (and may write) agent.toml, `compose.override.yml`, `.env` and
-//!   `etc/dispatcher.env`;
+//!   owns (and may write) agent.toml, `compose.override.yml`, `.env`,
+//!   `etc/dispatcher.env` and `run/host/dispatcher/token`;
 //! - enrollment and the host report (#321): `agent.toml`'s `worker_id`, and
 //!   `POST /hosts/self/report` built from `state.json`'s `round` and `rollout`;
 //! - capacity detection (#333): `run/capacity.json`, hashed as an input of the set, so a

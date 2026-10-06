@@ -515,9 +515,9 @@ fn stage_trial(
         .arg(built.to_string())
         .args(&names)
         .env("TRIAL_STAGE", &input)
-        .env("OMARCHY_API", ctx.pool.api_url())
-        .env_remove("OMARCHY_TOKEN")
-        .env_remove("OMARCHY_WORKER_TOKEN");
+        .env("OMARCHY_API", ctx.pool.api_url());
+    // No token of the dispatcher's reaches it, nor its token file's name (#327).
+    crate::worker_token::withhold(&mut cmd);
     if let Some(k) = keyrings {
         cmd.env("OMARCHY_KEYRINGS", k);
     }

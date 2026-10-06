@@ -225,6 +225,10 @@ def sets(worker, build, root=SETS):
         compose = files["compose.yml"].decode()
         if setdir.name == "host" and "@RELEASE@" not in compose:
             fail("host/compose.yml does not name the worker image as @RELEASE@")
+        # The dispatcher's host worker token reaches it as a read-only file, never as a value in
+        # its environment, which `docker inspect` shows (#327, design v2 §14, D15).
+        if setdir.name == "host" and not ("OMARCHY_WORKER_TOKEN_FILE:" in compose and "./run/host/dispatcher/token" in compose):
+            fail("host/compose.yml does not mount the dispatcher's token file (./run/host/dispatcher/token as OMARCHY_WORKER_TOKEN_FILE)")
         files["compose.yml"] = render(compose, worker, build).encode()
         for path, data in files.items():
             left = PLACEHOLDER.findall(data.decode(errors="replace"))
