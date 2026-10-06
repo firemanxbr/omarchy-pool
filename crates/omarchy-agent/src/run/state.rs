@@ -43,6 +43,11 @@ pub struct State {
     pub revoked: BTreeSet<Release>,
     /// `seq` of the last accepted rollback statement.
     pub statement_seq: Option<u64>,
+    /// The `to` of that statement when its maintainers' co-signatures vouched for `to`'s
+    /// bundle (#330): a round to it that did not finish the first time is tried again under
+    /// them while the floor stands there (`trust::vouched`). Lenient: an unreadable one is
+    /// none, which asks the bundle's own co-signatures again.
+    pub vouched: Option<Release>,
     /// The release whose set the host runs (`last-good/`).
     pub applied: Option<Release>,
     /// What the pool named last.
@@ -86,6 +91,7 @@ impl Default for State {
             min_release: None,
             revoked: BTreeSet::new(),
             statement_seq: None,
+            vouched: None,
             applied: None,
             target: None,
             quarantine: BTreeMap::new(),
@@ -368,6 +374,7 @@ const LENIENT: &[&str] = &[
     "brake",
     "switch",
     "switch_last",
+    "vouched",
     "soak",
     "github",
 ];
@@ -575,7 +582,8 @@ mod tests {
                 "settings",
                 "soak",
                 "switch",
-                "switch_last"
+                "switch_last",
+                "vouched"
             ]
         );
     }

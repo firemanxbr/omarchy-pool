@@ -282,7 +282,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz@0.13.2
-      - name: The manifest, statement, bundle, set and state parsers, 60 seconds each
+      - name: The manifest, statement, bundle, set, state and co-signature parsers, 60 seconds each
         run: bash tests/agent-fuzz.sh 60
 
   supply-chain:
@@ -394,6 +394,9 @@ jobs:
       - name: What the hosts' trust relies on — one exact cosign, signing only in reviewed environments, the exact identity, pinned images
         working-directory: .
         run: bash tests/trust-pins.sh
+      - name: The maintainers' co-signature — ssh-keygen and the agent read one format, governance pins it, and a release stays a draft without it
+        working-directory: .
+        run: bash tests/cosignature.sh
       - name: busybox, for install.sh's run under busybox sh
         working-directory: .
         run: sudo apt-get update && sudo apt-get install -y busybox

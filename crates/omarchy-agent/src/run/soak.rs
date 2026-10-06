@@ -7,12 +7,15 @@
 //!   would let a compromised pool skip the soak. A newer release named meanwhile waits its
 //!   own soak from then. The bundle is fetched, verified and its `min_release` and
 //!   `revoked` merged while it waits (design v2 §5.2): a soaking host still learns of a
-//!   revocation.
-//! - **What does not.** A rollback statement skips it and applies at once (§5.3); a round
-//!   to the release that runs (an input that changed, drift, a `reconcile-now` when nothing
-//!   is new) has nothing to wait for, and nor has the first release a host applies: nothing
-//!   runs that the soak would protect. `reconcile-now`, an Update and SIGUSR1 never skip
-//!   it: they start a round, which the soak holds like any other.
+//!   revocation. The soak only delays: a bundle without the maintainers' co-signature this
+//!   agent requires (#330) is refused, soaking or not, and merges nothing.
+//! - **What does not.** A rollback statement skips it and applies at once (§5.3), under
+//!   the rollback rules as ever — one deeper than 14 days only with the maintainers'
+//!   co-signature over it (#330); a round to the release that runs (an input that changed,
+//!   drift, a `reconcile-now` when nothing is new) has nothing to wait for, and nor has the
+//!   first release a host applies: nothing runs that the soak would protect.
+//!   `reconcile-now`, an Update and SIGUSR1 never skip it: they start a round, which the
+//!   soak holds like any other.
 //! - **Self-updates too** (v1 §11.3, D8): a release that ships a higher agent waits with
 //!   that agent, unless its manifest sets `agent.urgent` — only a security release does —:
 //!   then the agent updates itself at once, and the release itself still waits.

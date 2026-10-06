@@ -11,16 +11,43 @@ left the repository on 2026-09-17: packages are requested on the dashboard
 and bumped by the pool, never through pull requests.) CI runs this without --write and fails when the two
 disagree; a maintainer runs it with --write in the pull request that
 changes the file.
+
+The same file's `[cosignature]` table (#330, design v2 D1 b) is the maintainers'
+co-signature the host agent requires: `threshold` maintainers' FIDO keys under
+`[cosignature.keys]` (a key per maintainer under their login, or a list: a
+backup key beside their own) over every host bundle, and at least one over a
+rollback statement deeper than 14 days. The agent pins it as
+crates/omarchy-agent/src/verify/maintainers.toml, which this writes too and CI
+holds to the file the same way: a key that is not a FIDO key, a login that is
+not a maintainer, one key listed twice, or a threshold the keys cannot meet is
+refused (factory/bin/co-sign reads it) — and so is a threshold one lost key
+would leave out of reach (as many maintainers required as hold a key, one of
+them with a single key): no release could be co-signed under the old pin
+again, and every host would need a reinstall.
 """
+import importlib.machinery
+import importlib.util
 import re
 import sys
 import tomllib
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parents[2]
 GOV = ROOT / "factory" / "MAINTAINERS.toml"
 CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
+PINNED = ROOT / "crates" / "omarchy-agent" / "src" / "verify" / "maintainers.toml"
 LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
+
+
+def co_sign():
+    """factory/bin/co-sign, the one reader of `[cosignature]` (a script without .py)."""
+    path = Path(__file__).with_name("co-sign")
+    loader = importlib.machinery.SourceFileLoader("co_sign", str(path))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader("co_sign", loader))
+    loader.exec_module(module)
+    return module
 
 
 def load():
@@ -30,7 +57,15 @@ def load():
         sys.exit(f"{GOV.name}: `maintainers` must be a non-empty list of GitHub logins")
     if "groups" in doc:
         sys.exit(f"{GOV.name}: groups are gone — one `maintainers` list (docs/GOVERNANCE.md)")
-    return sorted(dict.fromkeys(ms), key=str.lower)
+    cs = co_sign()
+    try:
+        threshold, keys = cs.policy(doc)
+    except ValueError as e:
+        sys.exit(f"{GOV.name}: {e}")
+    why = cs.stranded(threshold, keys)
+    if why:
+        sys.exit(f"{GOV.name}: {why}")
+    return sorted(dict.fromkeys(ms), key=str.lower), cs.pinned_toml(threshold, keys), threshold, keys
 
 
 def expected(maintainers):
@@ -41,7 +76,8 @@ def expected(maintainers):
         "# this one, the sizing recipes and what the hosts' trust relies on (#308):",
         "# the workflows that sign, the host agent, the dispatcher that starts task",
         "# containers, the host sets, and the host bundle's capacity constants, pins,",
-        "# install.sh and writer. With main requiring a code-owner review,",
+        "# install.sh and writer, and the check of the maintainers' co-signature",
+        "# a release is published with (#330). With main requiring a code-owner review,",
         "# a change here is a decision another maintainer approves.",
         f"factory/MAINTAINERS.toml          {owners}",
         f".github/CODEOWNERS                {owners}",
@@ -52,21 +88,29 @@ def expected(maintainers):
         f"factory/sets/                     {owners}",
         f"factory/bundle/                   {owners}",
         f"factory/bin/host-bundle           {owners}",
+        f"factory/bin/co-sign               {owners}",
     ]
     return "\n".join(lines) + "\n"
 
 
 def main():
-    maintainers = load()
+    maintainers, pinned, threshold, keys = load()
     want = expected(maintainers)
     have = CODEOWNERS.read_text() if CODEOWNERS.exists() else ""
+    have_pinned = PINNED.read_text() if PINNED.exists() else ""
     if "--write" in sys.argv:
         CODEOWNERS.write_text(want)
+        PINNED.write_text(pinned)
         print(f"{CODEOWNERS.relative_to(ROOT)} written for {len(maintainers)} maintainer(s)")
+        changed = "; the agent changed: raise its version (crates/omarchy-agent/Cargo.toml)" if have_pinned != pinned else ", unchanged"
+        print(f"{PINNED.relative_to(ROOT)} written: {threshold} of {len(keys)} maintainer(s) with a key{changed}")
         return
     if have != want:
         sys.exit(f"{CODEOWNERS.relative_to(ROOT)} does not match {GOV.relative_to(ROOT)}; run factory/bin/check-governance --write")
-    print(f"governance ok: {len(maintainers)} maintainer(s): {', '.join(maintainers)}")
+    if have_pinned != pinned:
+        sys.exit(f"{PINNED.relative_to(ROOT)} does not match {GOV.relative_to(ROOT)}'s [cosignature]; run factory/bin/check-governance --write (and raise the agent's version)")
+    held = ", ".join(f"{login}: {len(theirs)} keys" if len(theirs) > 1 else login for login, theirs in keys.items())
+    print(f"governance ok: {len(maintainers)} maintainer(s): {', '.join(maintainers)}; co-signature: {threshold} of {len(keys)} maintainer(s) with a key ({held or 'none yet'})")
 
 
 if __name__ == "__main__":
