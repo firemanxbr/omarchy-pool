@@ -102,7 +102,10 @@ jobs:
     # out — two releases, ordered restarts (exit 75) during a guard, broken
     # releases reverted and quarantined, a rollback statement preempting a
     # round — while a task container keeps running throughout; on rootful
-    # docker and on rootless podman's API socket.
+    # docker and on rootless podman's API socket. #327: the host worker token
+    # moves from etc/dispatcher.env to its read-only file, `docker inspect`
+    # shows it in neither the dispatcher's nor the task's environment, and a
+    # rotation recreates the dispatcher alone.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -115,7 +118,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The run loop on ${{ matrix.engine }}, with only the pinned tools and a task that survives every rollout
+      - name: The run loop on ${{ matrix.engine }}, with only the pinned tools and a task that survives every rollout and a token rotation, the token in no container's environment
         run: bash tests/agent-run-loop.sh ${{ matrix.engine }}
 
   agent-install:
@@ -346,7 +349,7 @@ jobs:
       # The agent renders the dispatcher's etc/dispatcher.env there (#371); built on its own, so the
       # image's binaries above are built with their own features.
       - run: cargo build --release -p omarchy-agent
-      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge; a stop removes only its own
+      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env and its read-only token file, no token or key in any container's environment; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge; a stop removes only its own
         run: bash tests/task-networks.sh
         env:
           WORKER_IMAGE: omarchy-worker:ci
