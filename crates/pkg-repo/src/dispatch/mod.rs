@@ -68,6 +68,15 @@
 //! restart makes the dispatcher exit 75 (tasks survive), recheck-agent and
 //! restart-agent run a fresh probe.
 //!
+//! **Revoked releases** (#342, design v2 §9.1, §16.2; D55): a new release
+//! never interrupts a task — a re-adopted lease finishes on the release it
+//! started with — except a revoked one. A lease whose release is in this
+//! host's merged revoked set ([`revoked`]: the signed manifest built in, with
+//! every list a dispatcher of this host kept) is killed in whatever phase and
+//! reported `revoked`; the pool refuses what it would upload or report, and
+//! requeues it. The pool's own word at a heartbeat (409 `stop`, state
+//! `revoked`) does the same for that lease, and is not kept.
+//!
 //! **Its environment** (#371): the agent writes `etc/dispatcher.env` (0600,
 //! the host set's `env_file`) with the host's worker token, the host's own
 //! addresses for the egress to refuse (`OMARCHY_HOST_ADDRESSES`: its
@@ -89,12 +98,13 @@ pub mod kinds;
 pub mod lease;
 pub mod pool;
 pub mod probe;
+pub mod revoked;
 pub mod sizing;
 pub mod spec;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -404,6 +414,8 @@ pub struct Dispatcher {
     pub net: Net,
     ledger: budget::Ledger,
     probe: Prober,
+    /// This host's merged revoked set (#342, [`revoked`]): a lease of one of these is killed and reported.
+    revoked: BTreeSet<String>,
 }
 
 /// The probe sidecar's standing: its last answer, the probe running now, when the next one is due, the orders waiting for it.
@@ -461,9 +473,24 @@ impl Dispatcher {
             terminating: Arc::new(AtomicBool::new(false)),
             exit: None,
             net: Net::default(),
+            revoked: revoked::merged(&ctx_work_root, &revoked::signed()),
             ledger: budget::Ledger::new(&ctx_work_root),
             probe: Prober::default(),
         })
+    }
+
+    /// Merges a signed `revoked` list into this host's set (the manifest built into this binary
+    /// does at start; the tests hand a stub manifest's): it is kept for every later dispatcher.
+    pub fn revoke_signed(&mut self, signed: &BTreeSet<String>) {
+        self.revoked = revoked::merged(
+            &self.ctx.work_root,
+            &self.revoked.union(signed).cloned().collect(),
+        );
+    }
+
+    /// Whether a lease's release is revoked here.
+    fn revoked(&self, l: &Lease) -> bool {
+        self.revoked.contains(&l.release)
     }
 
     fn pool(&self) -> &dyn Pool {
@@ -502,6 +529,9 @@ impl Dispatcher {
 
     /// Re-adopts what a previous dispatcher left; `/ready` answers only after it.
     pub fn readopt(&mut self) -> Result<()> {
+        if self.revoked.contains(pkg_manifest::BUILD_VERSION) {
+            say(format!("this dispatcher runs {}, a revoked release: its tasks are killed, and the pool hands it nothing (426) until the agent applies another", pkg_manifest::BUILD_VERSION));
+        }
         let found = self.store.load().context("reading the lease files")?;
         for p in &found.unreadable {
             say(format!("readopt-failed: {} does not read; its container goes, and the pool requeues the lease", p.display()));
@@ -714,6 +744,7 @@ impl Dispatcher {
                 Ending::Stopped(state) => format!("the pool took it back ({state}); killing its containers"),
                 Ending::Expired => "its lease expired here (no heartbeat accepted for the lease and its grace); killing its containers, reporting nothing".into(),
                 Ending::Lost(why) => format!("lost: {why}"),
+                Ending::Revoked(release) => format!("its release {release} is revoked; killing its containers — the pool takes nothing of it and requeues it"),
             }
         ));
         l.ending = Some(end);
@@ -730,6 +761,10 @@ impl Dispatcher {
                 json!({ "error": format!("task {} was stopped by the pool ({state}); stopped its containers", l.task.id), "final": false }),
             ),
             Some(Ending::Lost(why)) => Some(json!({ "error": why, "lost": true, "final": false })),
+            // The pool decides by its own revoked list; `lost` is what a pool from before #342 reads (the attempt back).
+            Some(Ending::Revoked(release)) => Some(
+                json!({ "error": format!("release {release} is revoked: task {}'s containers were killed before it ended, and nothing of it is taken", l.task.id), "revoked": true, "lost": true, "final": false }),
+            ),
             Some(Ending::Expired) | None => None,
         };
         if let Some(body) = body {
@@ -828,6 +863,13 @@ impl Dispatcher {
             self.engine.remove_name(&name);
             return Some(live);
         }
+        // A lease of a revoked release (#342, §9.1): killed and reported, in every phase — what it
+        // would upload or report is refused anyway. A task of any other release runs on.
+        if self.revoked(&live.lease) {
+            let release = live.lease.release.clone();
+            self.begin_ending(&mut live, Ending::Revoked(release));
+            return Some(live);
+        }
         // The heartbeat: the lease and its job token move together.
         if now >= live.beat_at + self.timing.heartbeat.as_secs() && Instant::now() < self.pool_until
         {
@@ -839,6 +881,12 @@ impl Dispatcher {
                         live.lease.token = t;
                     }
                     self.save(&live.lease);
+                }
+                // The pool's word that its release is revoked (#342): this lease only, never kept.
+                Beat::Stop(state) if state == "revoked" => {
+                    let release = live.lease.release.clone();
+                    self.begin_ending(&mut live, Ending::Revoked(release));
+                    return Some(live);
                 }
                 Beat::Stop(state) => {
                     self.begin_ending(&mut live, Ending::Stopped(state));
