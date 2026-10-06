@@ -30,6 +30,14 @@
  *   reports them, and Retire legacy set — its owner's, with a passkey: the
  *   agent stops and removes that project and leaves the .omarchy-agent
  *   marker in its directory.
+ * - Its settings (#325, design v2 §12, §17.1, §18.1): the units it gives and
+ *   its emulated lanes, narrowed from the site inside the envelope its owner
+ *   wrote at the host — the envelope shown, every value above it greyed (the
+ *   agent refuses one anyway, and the answer shows) —, whether the envelope
+ *   allows diagnostics, and the brake's last hour; P4's orders beside
+ *   Reconcile now — Retry release, Rotate token, Diagnostics — and each
+ *   order's value and answer on the journal, a diagnostics order's lines
+ *   read in place.
  *
  * Anyone sees the name, the owner, the status, the architectures and the
  * release; the capacity, the hostname and the host key's fingerprint are its
@@ -39,7 +47,7 @@
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
-import { HOST_ORDER_TTL_MIN, HOST_REPORT_FRESH_MIN, OWNER_NOT_MAINTAINER } from "../hosts";
+import { HOST_ORDER_TTL_MIN, HOST_REPORT_FRESH_MIN, HOST_SETTINGS_AGENT, OWNER_NOT_MAINTAINER } from "../hosts";
 import { lucide } from "./kit";
 
 const CSS = String.raw`
@@ -68,7 +76,13 @@ const CSS = String.raw`
   .hp .mono { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
   .hp-cap { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
   .hp-cap:empty { display: none; }
-  @media (max-width: 520px) { .hp-ops .op-btn { flex: 1 1 100%; justify-content: center; } }
+  .hp-field { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .hp-field select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 0; background: var(--bg-deep); color: var(--text); font: 13px var(--font-mono); }
+  .hp-lanes { display: inline-flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+  .hp-lanes label { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); }
+  .hp-diag { margin: 0; padding: 12px 16px; max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.5 var(--font-mono); border-top: 1px solid var(--line); }
+  .hp-diag:empty { display: none; }
+  @media (max-width: 520px) { .hp-ops .op-btn { flex: 1 1 100%; justify-content: center; } .hp-field { flex: 1 1 100%; } }
   @media (max-width: 520px) { .hp-kv { grid-template-columns: 1fr; gap: 2px 0; } .hp-kv dd { margin-bottom: 8px; } }
 `;
 
@@ -103,15 +117,29 @@ const BODY = String.raw`
       <div class="op-card-f"><a href="/docs/security-model#stopping-a-host">Suspend, retire, drain →</a></div>
     </section>
 
+    <section class="op-card" id="hp-settings" aria-labelledby="hp-settings-h" hidden>
+      <div class="op-card-h"><b id="hp-settings-h">Settings</b><small>narrowed from the site, inside the envelope its owner wrote at the host</small></div>
+      <dl class="hp-kv" id="hp-settings-kv"></dl>
+      <div class="op-card-b">
+        <div class="hp-ops" id="hp-settings-ops"></div>
+        <p class="hp-note">The pool only narrows: fewer units, an emulated lane off. Its agent takes the setting at its next poll and the dispatcher claims by it from its next claim; a task already running above it finishes. Anything above the envelope — greyed here — its agent refuses: only its owner widens the envelope, at the host. The host brakes how fast it changes: four narrowings, six dispatcher restarts and twenty orders an hour, one release change every ten minutes.</p>
+      </div>
+      <div class="op-card-f"><a href="/docs/worker-host#settings-and-host-orders">Settings, host orders and the brake →</a></div>
+    </section>
+
     <section class="op-card" id="hp-orders" aria-labelledby="hp-orders-h">
       <div class="op-card-h"><b id="hp-orders-h">Host orders</b><small>what only its agent can do, each with its answer</small></div>
       <div class="op-card-b">
         <div class="hp-ops" id="hp-order-ops">
           <button type="button" class="op-btn" data-host-act="reconcile" disabled>${lucide("refresh-cw", 14)}Reconcile now</button>
+          <button type="button" class="op-btn" data-host-act="retry-release" disabled>${lucide("package-check", 14)}Retry release</button>
+          <button type="button" class="op-btn" data-host-act="rotate-token" disabled>${lucide("key-round", 14)}Rotate token</button>
+          <button type="button" class="op-btn" data-host-act="diagnostics" disabled>${lucide("scroll-text", 14)}Diagnostics</button>
         </div>
-        <p class="hp-note">Reconcile now: its agent runs a round at its next poll — the release the pool names, checked and rolled out as any round — and answers. An order its agent has not taken within ${HOST_ORDER_TTL_MIN} minutes expires.</p>
+        <p class="hp-note">Reconcile now: its agent runs a round at its next poll — the release the pool names, checked and rolled out as any round — and answers. Retry release lifts the quarantine of a release its guard reverted and tries it again. Rotate token: a new worker token for its dispatcher, recreated with it; the old one works ten more minutes. Diagnostics: the dispatcher's last 500 log lines, scrubbed of its secrets, when its envelope allows them. An order its agent has not taken within ${HOST_ORDER_TTL_MIN} minutes expires.</p>
       </div>
       <div class="hp-table"><table class="op-table"><thead><tr><th>Order</th><th>By</th><th>Given</th><th>State</th><th>Its agent's answer</th></tr></thead><tbody id="hp-order-rows"></tbody></table></div>
+      <pre class="hp-diag" id="hp-diag" aria-live="polite"></pre>
     </section>
 
     <section class="op-card" id="hp-legacy" aria-labelledby="hp-legacy-h" hidden>
@@ -140,7 +168,8 @@ const SCRIPT = String.raw`
   var BASE = "/api/v1/hosts/" + encodeURIComponent(ID);
   var FRESH_MIN = ${HOST_REPORT_FRESH_MIN};
   var PILL = { active: ["ok", "active"], "pending-owner": ["warn", "waits for its owner's Confirm"], suspended: ["fail", "suspended"], retired: ["na", "retired"] };
-  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14), reconcile: lucide("refresh-cw", 14), legacy: lucide("file-archive", 14) })};
+  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14), reconcile: lucide("refresh-cw", 14), legacy: lucide("file-archive", 14), units: lucide("hard-drive", 14), lanes: lucide("git-fork", 14), retry: lucide("package-check", 14), token: lucide("key-round", 14), diag: lucide("scroll-text", 14) })};
+  var SETTINGS_AGENT = ${JSON.stringify(HOST_SETTINGS_AGENT)};
   var ORDER_PILL = { open: ["warn", "waits for its agent"], done: ["ok", "done"], refused: ["fail", "refused"], failed: ["fail", "failed"], expired: ["na", "expired"], cancelled: ["na", "cancelled"] };
   var LEGACY_PILL = { running: ["warn", "running"], stopped: ["na", "stopped"], gone: ["na", "no container left"], retiring: ["warn", "being retired"], retired: ["ok", "retired"], unknown: ["na", "not seen"] };
   var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)};
@@ -157,6 +186,7 @@ const SCRIPT = String.raw`
       H = d.host; PK = d.passkey || {};
       draw(d.host, d.leases || [], d.pool || {});
       drawOps(d.host, d.can || { why: {} });
+      drawSettings(d.host, d.can || { why: {} });
       drawOrders(d.host, d.orders, d.can || { why: {} });
       drawLegacy(d.host, d.can || { why: {} });
       TIMER = setTimeout(function () { if (!document.hidden) load(); }, 30000);
@@ -216,14 +246,68 @@ const SCRIPT = String.raw`
       gate('<button type="button" class="op-btn danger" data-host-act="retire">' + ICON.retire + 'Retire</button>', can.retire === true, why.retire || ""),
     ].join("") + (h.worker && h.status !== "retired" ? '<a class="op-btn" href="/worker/' + encodeURIComponent(h.worker) + '#wk-operate">' + ICON.drain + 'Drain or resume its claims</a>' : "");
   }
-  // Host orders (#344): Reconcile now as the door answers it for this reader, and the last orders with their agent's answers.
+  function lanesText(a) { return a && a.length ? a.map(esc).join(", ") : "none"; }
+  // Its settings (#325): what its agent reports — the units it gives and its emulated lanes, the envelope they narrow inside, what of
+  // them the envelope leaves out — and the controls: the units up to what it detected, greyed above its envelope; a lane per detected
+  // or allowed architecture, greyed where its envelope excludes it; the brake's last hour.
+  function drawSettings(h, can) {
+    var why = can.why || {}, s = h.settings;
+    $("#hp-settings").hidden = h.fingerprint === undefined;
+    if (h.fingerprint === undefined) return;
+    if (!s) {
+      $("#hp-settings-kv").innerHTML = kv("Settings", '<span class="muted">its agent reports none yet: agent ' + esc(SETTINGS_AGENT) + ' or later does</span>');
+      $("#hp-settings-ops").innerHTML = "";
+      return;
+    }
+    var env = s.envelope || {}, eff = s.effective || {}, max = env.max_units, det = env.detected_units, b = h.brake;
+    $("#hp-settings-kv").innerHTML = [
+      kv("Units", (eff.units === null || eff.units === undefined ? "—" : num(eff.units)) + (s.units === null || s.units === undefined ? " — its envelope's" : " — narrowed from the site") + (max === null || max === undefined ? "" : "; its envelope gives " + num(max) + (det !== null && det !== undefined && det !== max ? " of the " + num(det) + " detected" : ""))),
+      kv("Emulated lanes", lanesText(eff.emulated) + (s.emulate === null || s.emulate === undefined ? " — its envelope's" : " — set from the site") + "; detected " + lanesText(env.detected_lanes) + (env.emulate === null || env.emulate === undefined ? "" : "; its envelope allows " + lanesText(env.emulate))),
+      kv("Diagnostics", env.diagnostics === true ? "its envelope allows them" : env.diagnostics === false ? '<span class="muted">its envelope does not allow them: diagnostics = true in agent.toml, at the host</span>' : "—"),
+    ].concat((s.above || []).length ? [kv("Above its envelope", '<span class="hp-blocked">' + s.above.map(esc).join("; ") + "</span>")] : [])
+      .concat(b ? [kv("Brake", num(b.orders_hour) + " of 20 orders, " + num(b.restarts_hour) + " of 6 dispatcher restarts, " + num(b.narrowings_hour) + " of 4 narrowings in the last hour" + (b.release_change_at ? "; a release change " + when(b.release_change_at) : ""))] : [])
+      .join("");
+    var ok = can.settings === true, w = why.settings || "";
+    var top = det !== null && det !== undefined ? det : max !== null && max !== undefined ? max : 0;
+    var opts = '<option value="">its envelope\'s' + (max === null || max === undefined ? "" : " (" + max + ")") + "</option>";
+    for (var i = 1; i <= top; i++) {
+      var over = max !== null && max !== undefined && i > max;
+      opts += '<option value="' + i + '"' + (over ? ' disabled title="above its envelope (' + max + '): only its owner widens that, at the host"' : "") + (s.units === i ? " selected" : "") + ">" + i + (over ? " — above its envelope" : "") + "</option>";
+    }
+    var lanes = [];
+    (env.detected_lanes || []).concat(env.emulate || [], s.emulate || []).forEach(function (a) { if (lanes.indexOf(a) < 0) lanes.push(a); });
+    var boxes = lanes.map(function (a) {
+      var excluded = env.emulate !== null && env.emulate !== undefined && env.emulate.indexOf(a) < 0;
+      var on = (eff.emulated || []).indexOf(a) >= 0;
+      return "<label" + (excluded ? ' class="muted" title="its envelope excludes it: only its owner widens that, at the host"' : "") + '><input type="checkbox" data-lane="' + esc(a) + '"' + (on ? " checked" : "") + (excluded ? " disabled" : "") + "> " + esc(a) + "</label>";
+    }).join("");
+    $("#hp-settings-ops").innerHTML = gate('<label class="hp-field">Units <select id="hp-units">' + opts + "</select></label>", ok, w)
+      + gate('<button type="button" class="op-btn" data-host-act="set-units">' + ICON.units + "Narrow units</button>", ok, w)
+      + (lanes.length ? gate('<span class="hp-lanes">' + boxes + "</span>", ok, w) + gate('<button type="button" class="op-btn" data-host-act="set-emulate">' + ICON.lanes + "Set emulated lanes</button>", ok, w) : '<span class="muted">no emulated lane detected</span>');
+  }
+  // An order's value, as the journal row says it: "set-units 4", "set-emulate none".
+  function argText(o) {
+    var a = o.arg;
+    if (!a) return "";
+    if ("units" in a) return " " + (a.units === null ? "(its envelope's)" : a.units);
+    if ("emulate" in a) return " " + (a.emulate === null ? "(its envelope's)" : lanesText(a.emulate));
+    return "";
+  }
+  // Host orders (#344, #325): Reconcile now and P4's orders as the door answers them for this reader — Retry release greyed while its
+  // agent reports nothing quarantined, Diagnostics while its envelope does not allow them — and the last orders with their answers.
   function drawOrders(h, orders, can) {
-    var why = can.why || {};
-    $("#hp-order-ops").innerHTML = gate('<button type="button" class="op-btn" data-host-act="reconcile">' + ICON.reconcile + 'Reconcile now</button>', can.reconcile === true, why.reconcile || "");
+    var why = can.why || {}, q = h.quarantine || [], env = (h.settings || {}).envelope || {};
+    $("#hp-order-ops").innerHTML = [
+      gate('<button type="button" class="op-btn" data-host-act="reconcile">' + ICON.reconcile + "Reconcile now</button>", can.reconcile === true, why.reconcile || ""),
+      gate('<button type="button" class="op-btn" data-host-act="retry-release">' + ICON.retry + "Retry release</button>", can.retry_release === true && q.length > 0, why.retry_release || "its agent reports no release in quarantine: there is nothing to lift"),
+      gate('<button type="button" class="op-btn" data-host-act="rotate-token">' + ICON.token + "Rotate token</button>", can.rotate_token === true, why.rotate_token || ""),
+      gate('<button type="button" class="op-btn" data-host-act="diagnostics">' + ICON.diag + "Diagnostics</button>", can.diagnostics === true && env.diagnostics !== false, why.diagnostics || "its envelope does not allow diagnostics: diagnostics = true in agent.toml, at the host"),
+    ].join("");
     if (orders === undefined) { $("#hp-order-rows").innerHTML = '<tr><td colspan="5" class="muted">its owner\'s and the maintainers\'</td></tr>'; return; }
     $("#hp-order-rows").innerHTML = orders.map(function (o) {
       var p = ORDER_PILL[o.state] || ["na", o.state];
-      return '<tr><td><span class="mono">' + esc(o.kind) + '</span></td><td>' + personLink(o.issued_by) + '</td><td>' + when(o.issued_at) + '</td><td>' + pillHtml(p[0], p[1], o.state === "open" ? "until " + o.not_after : o.answered_at || "") + '</td><td>' + (o.detail ? esc(o.detail) : '<span class="muted">—</span>') + '</td></tr>';
+      var lines = o.lines ? ' <button type="button" class="op-btn sm" data-diag="' + esc(o.id) + '">' + ICON.diag + "Its lines</button>" : "";
+      return '<tr><td><span class="mono">' + esc(o.kind) + esc(argText(o)) + "</span></td><td>" + personLink(o.issued_by) + "</td><td>" + when(o.issued_at) + "</td><td>" + pillHtml(p[0], p[1], o.state === "open" ? "until " + o.not_after : o.answered_at || "") + "</td><td>" + (o.detail ? esc(o.detail) : '<span class="muted">—</span>') + lines + "</td></tr>";
     }).join("") || '<tr><td colspan="5" class="muted">no host order yet</td></tr>';
   }
   // The legacy set (#344): what its agent reports of it, and Retire legacy set — the owner's, with a passkey.
@@ -244,6 +328,15 @@ const SCRIPT = String.raw`
     if (d.error) { toast(esc(d.error), "error"); return; }
     toast(esc(d.line || "done")); load();
   }
+  // A diagnostics order's lines (#325), read in place: its owner's and the maintainers'.
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("button[data-diag]") : null;
+    if (!b || b.disabled) return;
+    api("GET", BASE + "/diagnostics/" + encodeURIComponent(b.getAttribute("data-diag"))).then(function (d) {
+      if (d.error) { toast(esc(d.error), "error"); return; }
+      $("#hp-diag").textContent = "# " + d.order + ", " + d.at + (d.dropped ? " — " + d.dropped + " line(s) left out: they looked like a secret" : "") + "\n" + (d.lines || []).join("\n");
+    }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+  });
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-host-act]") : null;
     if (!b || b.disabled || !H) return;
@@ -274,6 +367,21 @@ const SCRIPT = String.raw`
       });
     } else if (act === "reconcile") {
       api("POST", BASE + "/orders", { kind: "reconcile-now" }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "set-units") {
+      var u = $("#hp-units") ? $("#hp-units").value : "";
+      api("POST", BASE + "/orders", { kind: "set-units", units: u === "" ? null : Number(u) }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "set-emulate") {
+      var on = [].slice.call(document.querySelectorAll("#hp-settings-ops input[data-lane]")).filter(function (c) { return c.checked; }).map(function (c) { return c.getAttribute("data-lane"); });
+      api("POST", BASE + "/orders", { kind: "set-emulate", emulate: on }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "retry-release") {
+      api("POST", BASE + "/orders", { kind: "retry-release" }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "rotate-token") {
+      ask({ title: "Rotate the worker token of " + H.name, text: "Its agent fetches a new worker token and recreates its dispatcher with it; the one it replaces works ten more minutes. Its running tasks never notice.", confirm: "Rotate token" }).then(function (go) {
+        if (go === null) return;
+        api("POST", BASE + "/orders", { kind: "rotate-token" }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+    } else if (act === "diagnostics") {
+      api("POST", BASE + "/orders", { kind: "diagnostics" }).then(done).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     } else if (act === "retire-legacy") {
       var l = H.legacy || {};
       ask({ title: "Retire the legacy set of " + H.name, text: "Its agent writes the .omarchy-agent marker into " + esc(l.dir || "the legacy set's directory") + ", then stops and removes the compose project " + esc(l.project || "") + " — its containers and networks, nothing else. From then on rollout.sh, setup.sh, omarchy-worker and the updater refuse there: the way back through the legacy set is over.", held: "Your passkey confirms it.", confirm: "Retire legacy set", first: "Register a passkey and retire the legacy set", nothing: "Nothing was retired.", danger: true }).then(function (go) {
@@ -289,7 +397,7 @@ export function hostHtml(id: string, poolUrl: string, version: RunningVersion): 
   return page({
     path: `/hosts/${id}`,
     title: "Host · omarchy-pool",
-    description: "One maintainer host of the pool: its status and whether it sleeps, its capacity and units, its lanes and isolation level, the release it applied, its host orders, its legacy set and its leases.",
+    description: "One maintainer host of the pool: its status and whether it sleeps, its capacity and units, its lanes and isolation level, the release it applied, its settings inside its envelope, its host orders, its legacy set and its leases.",
     active: "factory",
     body: BODY,
     script: SCRIPT,
@@ -335,15 +443,35 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.orders",
     page: `/hosts/${F.host}`,
     anchor: ['id="hp-orders"', 'id="hp-order-ops"', 'data-host-act="reconcile"', 'id="hp-order-rows"'],
-    script: ["function drawOrders(h, orders, can)", "can.reconcile === true", 'kind: "reconcile-now"', 'BASE + "/orders"', "ORDER_PILL", "o.detail", "no host order yet"],
+    script: ["function drawOrders(h, orders, can)", "can.reconcile === true", 'kind: "reconcile-now"', 'BASE + "/orders"', "ORDER_PILL", "o.detail", "no host order yet", "can.retry_release === true", "can.rotate_token === true", "can.diagnostics === true", 'kind: "retry-release"', 'kind: "rotate-token"', 'kind: "diagnostics"', "argText(o)", 'BASE + "/diagnostics/"', "data-diag"],
     reads: [
-      { path: `/api/v1/hosts/${F.host}`, fields: ["can.reconcile", "can.why"] },
+      { path: `/api/v1/hosts/${F.host}`, fields: ["can.reconcile", "can.retry_release", "can.rotate_token", "can.diagnostics", "can.why"] },
       { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["orders", "can.reconcile"] },
+      // A diagnostics order's lines (#325): none for this order — its owner's and the maintainers' to read.
+      { path: `/api/v1/hosts/${F.host}/diagnostics/ho_00000000000000000000000000000000`, as: "maintainer", status: 404 },
     ],
     acts: [
       { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "reconcile-now" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "rotate-token" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "retry-release" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "diagnostics" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
     ],
     visible: EVERYONE,
+  },
+  {
+    // Its settings (#325): the units and emulated lanes its agent reports, inside its envelope, greyed above it; the narrowing orders.
+    // Its owner's and the maintainers' (the details); the door refuses everyone else server-side, and a session's write without the
+    // page's own Origin for every role.
+    id: "host.settings",
+    page: `/hosts/${F.host}`,
+    anchor: ['id="hp-settings"', 'id="hp-settings-kv"', 'id="hp-settings-ops"', 'href="/docs/worker-host#settings-and-host-orders"'],
+    script: ["function drawSettings(h, can)", "can.settings === true", '"Units"', '"Emulated lanes"', '"Diagnostics"', '"Above its envelope"', '"Brake"', 'kind: "set-units"', 'kind: "set-emulate"', "above its envelope", "its envelope excludes it", "SETTINGS_AGENT"],
+    reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.settings", "host.pool_settings", "host.brake", "host.quarantine", "can.settings", "can.why"] }],
+    acts: [
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "set-units", units: 2 }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "set-emulate", emulate: [] }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+    ],
+    visible: ["maintainer"],
   },
   {
     // The legacy set (#344): what the agent reports of it, and Retire legacy set — its owner's, with a passkey.

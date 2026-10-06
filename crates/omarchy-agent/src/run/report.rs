@@ -1,10 +1,14 @@
 //! The host report (design v2 §17.2; #344's part of it): `POST /api/v1/hosts/self/report`,
 //! signed with the host key, on every change and at least every [`EVERY_S`]. It carries
 //! what the agent knows of itself — its version, the release applied, targeted and its
-//! floor, the rollout and the last round, the legacy set (`legacy`), the answers to the
-//! last host orders (`orders`), which the pool closes the orders with, and whether the Mac
+//! floor, the rollout and the last round, the legacy set (`legacy`), and the answers to
+//! the last host orders (`orders`), which the pool closes the orders with. P4 (#325) adds
+//! `capacity` (`run/capacity.json` as the dispatcher reads it, narrowed), `settings` (what
+//! the pool narrowed, the envelope it narrows inside and what applies: the host page's
+//! controls), `brake` (how much of each limit the last window spent) and `runtime` (the
+//! driver, and the owner's switch in flight or its last end). It also says whether the Mac
 //! sleeps (`asleep`, #329; `false` on every other host), which the pool counts as zero free
-//! units. Capacity, runtime, bundle and task fields stay with the issues that read them.
+//! units. Bundle and task fields stay with the issues that read them.
 //!
 //! A Mac about to sleep reports at once ([`Agent::report_now`]), whatever the spacing or a
 //! retry's wait: the sleep waits for it.
@@ -28,6 +32,8 @@ const SPACING_S: i64 = 10;
 const RETRY_S: i64 = 60;
 /// A round's detail in the report is cut to this many characters (the report's 16 KiB).
 const ROUND_DETAIL_MAX: usize = 1000;
+/// The runtime switch's words, so `runtime` stays within the 2 KiB the pool keeps whole.
+const RUNTIME_WORDS_MAX: usize = 400;
 
 /// When the report was last sent, what it said, and when one is due again.
 #[derive(Debug, Default)]
@@ -57,12 +63,72 @@ impl Agent {
             })).collect::<Vec<_>>(),
         });
         body["legacy"] = self.legacy_view(now).unwrap_or(serde_json::Value::Null);
+        body["settings"] = super::settings::view(
+            self.state.settings.as_ref(),
+            &self.cfg.set_dir,
+            &self.cfg.policy,
+        );
+        body["brake"] = self.state.brake.view(now);
+        // Only a whole one: a pool refuses the report (and the answers it carries) whose
+        // capacity it cannot read, `null` too before #325.
+        if let Some(c) = self.capacity_view() {
+            body["capacity"] = c;
+        }
+        // The pool keeps `runtime` whole only within 2 KiB: the words are cut to fit.
+        let short = |t: &str| -> String { t.chars().take(RUNTIME_WORDS_MAX).collect() };
+        body["runtime"] = serde_json::json!({
+            // `null` until the engine said which it is (agent.toml without `set.runtime`).
+            "driver": self.cfg.runtime.map(super::config::Runtime::driver),
+            "switch": self.state.switch.as_ref().map(|w| serde_json::json!({
+                "to": format!("compose/{}", w.to.runtime), "since": iso(w.started), "step": w.step,
+                "why": w.why.as_deref().map(short),
+            })),
+            "switch_last": self.state.switch_last.as_ref().map(|e| serde_json::json!({
+                "to": e.to, "outcome": e.outcome, "detail": short(&e.detail), "at": iso(e.at),
+            })),
+        });
         body["asleep"] = self
             .power
             .as_ref()
             .is_some_and(super::power::Sleep::asleep)
             .into();
         body
+    }
+
+    /// `run/capacity.json` as the dispatcher reads it, for the pool's units and the host
+    /// page; only one whole as the pool takes one (its totals, its free disk, one to four
+    /// lanes with exactly one native, of this machine's architecture) — the pool refuses a
+    /// report whose capacity it cannot read, and the answers it carries with it.
+    fn capacity_view(&self) -> Option<serde_json::Value> {
+        use serde_json::Value;
+        let Ok(Some(_)) = super::settings::Base::read(&self.cfg.set_dir) else {
+            return None;
+        };
+        let mut c = std::fs::read(self.cfg.set_dir.join("run/capacity.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())?;
+        let lanes = c["lanes"].as_array().cloned().unwrap_or_default();
+        let natives: Vec<&Value> = lanes.iter().filter(|l| l["mode"] == "native").collect();
+        let whole = c["cpus"].as_u64().is_some_and(|n| (1..=4096).contains(&n))
+            && c["mem_gb"].is_number()
+            && c["disk_free_gb"]["work"].is_number()
+            && c["disk_free_gb"]["engine"].is_number()
+            && (1..=4).contains(&lanes.len())
+            && lanes.iter().all(|l| {
+                super::config::ARCHES.contains(&l["arch"].as_str().unwrap_or(""))
+                    && (l["mode"] == "native" || l["mode"] == "emulated")
+            })
+            && natives.len() == 1
+            && natives[0]["arch"] == std::env::consts::ARCH;
+        if !whole {
+            return None;
+        }
+        // The narrowing's own record stays on the host.
+        if let Some(o) = c.as_object_mut() {
+            o.remove("detected");
+            o.remove("settings");
+        }
+        Some(c)
     }
 
     /// Posts the report when something changed or one is due.

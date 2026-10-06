@@ -7,8 +7,11 @@
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
 //!     (<dir>/compose.yml and <dir>/set.toml)
 //! omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
-//!     [--probe-image <image>] [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
-//!     (what the host has; with a verified release, its units, the preflight blockers, and
+//!     [--probe-image <image>] [--emulate-image <image>]
+//!     [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
+//!     (what the host has, the foreign architecture's lane included (#338: binfmt, then a
+//!     smoke run of the release's build image of that architecture, or --emulate-image);
+//!     with a verified release, its units, the preflight blockers, and
 //!     <set dir>/run/capacity.json rewritten when it changed)
 //! omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
 //!     [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
@@ -38,6 +41,9 @@
 //! omarchy-agent logs [--data-dir <dir>] [-n <lines>]
 //! omarchy-agent self-test --release <vX.Y.Z> [--data-dir <dir>]
 //!     (what a self-update asks of the new agent before it hands over: prints `ok`)
+//! omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
+//!     (#325: the owner moves the bundle to another driver this binary carries, with the
+//!     same guard and revert; never the pool's to choose)
 //!
 //! Every command's data directory is `--data-dir`, `$OMARCHY_AGENT_DATA`,
 //! `$XDG_DATA_HOME/omarchy-agent` or `~/.local/share/omarchy-agent` (install.sh's).
@@ -67,7 +73,8 @@ const USAGE: &str = "usage:
   omarchy-agent verify --statement <json> --sig <sigstore.json>
   omarchy-agent lint-set <dir> [--override <file>] [--envelope <agent.toml>]
   omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
-      [--probe-image <image>] [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
+      [--probe-image <image>] [--emulate-image <image>]
+      [--bundle <tar.gz> --sig <sigstore.json> [--write <set dir>]]
   omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
       [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
       [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
@@ -83,6 +90,7 @@ const USAGE: &str = "usage:
   omarchy-agent round [--data-dir <dir>]
   omarchy-agent logs [--data-dir <dir>] [-n <lines>]
   omarchy-agent self-test --release <vX.Y.Z> [--data-dir <dir>]
+  omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
   omarchy-agent --version
 The enrollment token is read from OMARCHY_ENROLL, never from an argument.";
 
@@ -102,6 +110,7 @@ fn main() -> ExitCode {
         Some("uninstall") => uninstall_cmd(&args[1..]),
         Some("enroll") => enroll_cmd(&args[1..]),
         Some("token") => token_cmd(&args[1..]),
+        Some("runtime") => runtime_cmd(&args[1..]),
         Some("dispatcher-env") => dispatcher_env_cmd(&args[1..]),
         Some("--version" | "version") => {
             println!("omarchy-agent {}", omarchy_agent::AGENT_VERSION);
@@ -243,6 +252,21 @@ fn run_cmd(cmd: &str, args: &[String]) -> Result<u8, String> {
             run::logs(data, n)
         }
     })
+}
+
+/// `runtime switch <driver> [--socket <path>] [--data-dir <dir>]` (#325).
+fn runtime_cmd(args: &[String]) -> Result<u8, String> {
+    let mut rest = Vec::new();
+    let f = flags(args, &["--data-dir", "--socket"], &mut rest)?;
+    let ["switch", driver] = rest.as_slice() else {
+        return Err(USAGE.to_owned());
+    };
+    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    Ok(run::runtime_switch(
+        get("--data-dir"),
+        driver,
+        get("--socket"),
+    ))
 }
 
 fn refused(r: &verify::Rejection) -> u8 {
@@ -501,7 +525,7 @@ fn mac_facts(
         kind,
         meminfo: meminfo.as_deref(),
         rosetta: *rosetta,
-        emulate: toml.emulate.as_deref(),
+        emulate: toml.caps.emulate.as_deref(),
         x86_64_image: x86.as_deref(),
     };
     let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img| probe::rosetta_lane(how, img));
@@ -609,6 +633,7 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
             "--work-root",
             "--docker",
             "--probe-image",
+            "--emulate-image",
             "--bundle",
             "--sig",
             "--write",
@@ -652,11 +677,20 @@ fn capacity_cmd(args: &[String]) -> Result<u8, String> {
         .as_ref()
         .and_then(|m| m.build_image(std::env::consts::ARCH))
         .map(ToString::to_string);
+    // The build images the emulated lane's smoke run may start (#338): detection picks the
+    // engine's foreign architecture's.
+    let images = capacity::emulation::images(get("--emulate-image"), manifest.as_ref());
     let how = probe::Probe {
         docker: get("--docker").unwrap_or("docker"),
         host: host.as_deref(),
         work_root: Path::new(&work_root),
         image: get("--probe-image").or(build_image.as_deref()),
+        // A Mac's VM (`[vm]`) has its own binfmt table: its lane is Rosetta's (`mac_facts`).
+        emulation: toml.vm.is_none().then_some(capacity::emulation::Probe {
+            binfmt: Path::new(probe::BINFMT),
+            images: &images,
+            emulate: toml.caps.emulate.as_deref(),
+        }),
     };
     let facts = match probe::detect(&how) {
         Ok(f) => f,

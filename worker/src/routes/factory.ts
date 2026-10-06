@@ -14,7 +14,7 @@ import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALI
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
 import { asleepNow, freshSince, parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
-import { largestSize, ownerCap, ownersLeased, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Rules } from "../selection";
+import { largestSize, ownerCap, ownersLeased, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
@@ -29,7 +29,7 @@ import {
  *   POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, agent?} → a task with a lease and its job token, or 204
  *   POST /factory/tasks/:id/heartbeat                                  extend the lease (a fresh job token)
  *   POST /factory/tasks/:id/complete    {sha256, filename, version, duration_ms?, log_tail?} · {result, summary} for jobs
- *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?, needs_native?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's; needs_native, from an emulated worker: back in the queue for a native worker — unpinned, the attempt given back)
+ *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?, needs_native?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's; needs_native, from a lease on an emulated lane: back in the queue for a native lane — unpinned, the attempt given back; from a native lane it is refused, a failure like any other)
  * The worker is its registered token (POST /factory/workers); a task's
  * writes use the job token the claim issued.
  *
@@ -82,6 +82,8 @@ interface TaskRow {
   units: number | null;
   /** #337: a build's size at lease. */
   size: number | null;
+  /** The lane the lease runs on (#337, #338): native | emulated, NULL for a kind that carries none — and a legacy lease from before #337. */
+  lane: string | null;
   claim_id: string | null;
   host_losses: number;
 }
@@ -419,6 +421,8 @@ export const LEGACY_ANY_ARCH: readonly string[] = ["metrics", "gc", "security", 
 const ANY_ARCH_KINDS = LEGACY_ANY_ARCH.map((k) => `'${k}'`).join(", ");
 /** What a host runs on no lane of its own: every kind but those selection schedules by lane or by a helper's arch. */
 const HOST_ANY_ARCH_KINDS = ALL_KINDS.filter((k) => !LANE_KINDS.includes(k) && !HELPER_KINDS.includes(k)).map((k) => `'${k}'`).join(", ");
+/** The ring jobs whose helpers need a lane of each architecture they check (selection.ts RING_JOBS): their row says which (`params.arch`). */
+const RING_JOB_KINDS = RING_JOBS.map((k) => `'${k}'`).join(", ");
 
 /** The signed constants selection runs with (factory/bundle/manifest.toml, hosts.ts), and the per-owner cap's divisor (the `owner-cap-divisor` setting). */
 export function selectionRules(ownerDivisor: number = OWNER_DIVISOR): Rules {
@@ -736,8 +740,8 @@ const ringLock = (t: string) => ` AND NOT (${t}.kind IN (${RING_MOVERS}) AND EXI
 /** A task's own size (a Retry at size, `params.size`) when it is a number (`t` the alias): candidateOf keeps it when it is whole and from 1. */
 const ownSize = (t: string) => `CASE WHEN json_type(${t}.params, '$.size') IN ('integer', 'real') THEN json_extract(${t}.params, '$.size') END`;
 /** A candidate as selection reads it (`t` the alias). */
-const candidateCols = (t: string) => `${t}.id, ${t}.name, ${t}.arch, ${t}.kind, ${t}.trust, ${t}.owner, ${t}.priority, ${t}.created_at, ${t}.pinned_to, ${t}.reserved_at, json_extract(${t}.params, '$.needs_native') AS needs_native, ${ownSize(t)} AS asked, ${agentScope(`${t}.`)} AS model`;
-interface CandidateRow { id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; priority: number; created_at: string; pinned_to: string | null; reserved_at: string | null; needs_native: number | null; asked: number | null; model: number }
+const candidateCols = (t: string) => `${t}.id, ${t}.name, ${t}.arch, ${t}.kind, ${t}.trust, ${t}.owner, ${t}.priority, ${t}.created_at, ${t}.pinned_to, ${t}.reserved_at, json_extract(${t}.params, '$.needs_native') AS needs_native, ${ownSize(t)} AS asked, ${agentScope(`${t}.`)} AS model, CASE WHEN ${t}.kind IN (${RING_JOB_KINDS}) THEN json_extract(${t}.params, '$.arch') END AS job_arch`;
+interface CandidateRow { id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; priority: number; created_at: string; pinned_to: string | null; reserved_at: string | null; needs_native: number | null; asked: number | null; model: number; job_arch: string | null }
 
 /**
  * A build's size before any clamp, in SQL (`t` the alias; one binding: factory/sizing's sizes, `{name: [size, disk_gb]}`), as
@@ -848,7 +852,7 @@ function candidateOf(r: CandidateRow, sizes: Map<string, Sizing>, nativeMs: Map<
     needs_native: r.needs_native === 1, model: r.model === 1,
     size: build ? (Number.isInteger(r.asked) && (r.asked as number) >= 1 ? (r.asked as number) : page?.size ?? file?.size ?? null) : null,
     disk_gb: build ? page?.disk_gb ?? file?.disk_gb ?? null : null, native_ms: nativeMs.get(`${r.name}\0${r.arch}`) ?? null,
-    reserved_at: r.reserved_at ? Date.parse(r.reserved_at) : null,
+    reserved_at: r.reserved_at ? Date.parse(r.reserved_at) : null, job_arch: r.job_arch,
   };
 }
 
@@ -1349,7 +1353,10 @@ async function leaseMoved(env: Env, id: number, actor: Actor): Promise<Response>
   return again instanceof Response ? again : json({ error: `task ${id}'s lease moved meanwhile; send it again` }, 409);
 }
 
-/** What the worker registered about itself: x86_64 under qemu on an aarch64 host, or not. */
+/**
+ * What a legacy worker registered about itself: x86_64 under qemu on an aarch64 host, or not. Read only for a legacy lease the claim
+ * wrote no lane for (one taken before #337 wrote lanes): every other lease's lane is its own (handleFail, #338).
+ */
 async function emulated(env: Env, workerId: string): Promise<boolean> {
   const w = await env.DB.prepare("SELECT labels FROM build_workers WHERE id = ?").bind(workerId).first<{ labels: string | null }>();
   try { return !!(w?.labels && (JSON.parse(w.labels) as { emulated?: boolean }).emulated); } catch { return false; }
@@ -1607,12 +1614,19 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // worker says which is which (`final`); the contributor fixes and queues
   // a new build. A toolchain that cannot start on the worker (rustc under
   // qemu on a 16 KB-page host, `needs_native`) is the worker's fault, not
-  // the recipe's: the build goes back to the queue for a native worker of
-  // its architecture (the claim hands it to no emulated one again), and the
-  // attempt is given back — a build no worker ran is not an attempt. The
-  // word counts from an emulated worker only: a native one that says it
-  // would be handed the same build back for ever.
-  const needsNative = !lost && b.needs_native === true && (await emulated(env, who));
+  // the recipe's: the build goes back to the queue for a native lane of
+  // its architecture (selection hands it to no emulated lane again), and
+  // the attempt is given back — a build no worker ran is not an attempt.
+  // The word counts from a lease on an emulated lane only (#338, design v2
+  // §8.6): the lane the claim wrote on this very lease, never the
+  // registration's labels — one host runs a native and an emulated lane
+  // under one registration. From a native lane it is refused (a failure
+  // like any other, its attempt spent): that lane would be handed the same
+  // build back for ever. A legacy lease the claim wrote no lane for (taken
+  // before #337 wrote them) is read as its registration said, as before.
+  const emulatedLane = task.lane === "emulated" || (task.lane === null && task.lease_gen === null && (await emulated(env, who)));
+  const needsNative = !lost && b.needs_native === true && emulatedLane;
+  const nativeRefused = !lost && b.needs_native === true && !emulatedLane;
   const exhausted = !needsNative && !lost && (b.final === true || task.attempts >= task.max_attempts);
   const review = task.kind === "build" && task.params ? (JSON.parse(task.params) as { review?: number }).review : undefined;
   // A requeued task goes behind its peers (priority + 10) so one broken
@@ -1648,8 +1662,9 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   }
   if (task.kind === "build") await settleTargets(env, task.name);
   const attempts = needsNative || lost ? task.attempts - 1 : task.attempts;
-  const tale = lost ? ` lost on ${who} (a host event, ${task.host_losses + 1} of ${HOST_LOSSES_MAX}) — back in the queue, the attempt given back` : needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
-  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative, ...(hostLease ? { lost: b.lost === true, oom } : {}) });
+  const refused = nativeRefused ? ` (its needs_native refused: it ran on ${task.lane === "native" ? "the native lane" : "a native worker"})` : "";
+  const tale = lost ? ` lost on ${who} (a host event, ${task.host_losses + 1} of ${HOST_LOSSES_MAX}) — back in the queue, the attempt given back` : needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${refused}${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
+  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative, ...(nativeRefused ? { needs_native_refused: true, lane: task.lane } : {}), ...(hostLease ? { lost: b.lost === true, oom } : {}) });
   return json({ task: id, status: exhausted ? "failed" : "queued", attempts });
 }
 

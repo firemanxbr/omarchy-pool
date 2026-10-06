@@ -52,6 +52,17 @@
 //! A probe sidecar ([`probe`]) says who this host's agent is with every
 //! claim (`agent`) and answers `recheck-agent` and `restart-agent`.
 //!
+//! **Lanes** (#338, design v2 §7.4, §7.5): a build or a trial runs on the
+//! lane the pool leased it on — its architecture's `--platform`, natively
+//! or emulated through the host's binfmt handler when `run/capacity.json`
+//! lists that emulated lane — and only a container on an emulated lane is
+//! told so (`WORKER_LABELS={"emulated":true}`); an audit runs natively. A
+//! lease on a lane the host does not run now is handed back `lost` before
+//! anything starts — checked when it is taken and again before its
+//! container starts (a lease prepared across a restart, or while the file
+//! changed) — and the claim offers no emulated lane without its build image
+//! by digest.
+//!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
 //! restart makes the dispatcher exit 75 (tasks survive), recheck-agent and
@@ -98,7 +109,7 @@ use serde_json::{json, Value};
 use self::capacity::Constants;
 use self::engine::Engine;
 use self::kinds::{Ctx, Prep, Retry};
-use self::lease::{Ending, Lease, Phase, Store};
+use self::lease::{Ending, Lane, Lease, Phase, Store};
 use self::pool::Pool;
 use crate::orders::{self, clean_line, ClaimAnswer, Order, OrderKind};
 use crate::stop::Beat;
@@ -106,6 +117,9 @@ use crate::work::{say, Task};
 use crate::RepoError;
 
 /// What a host claims in P1 (design v2 §8.2): builds of every trust, trials and audits.
+/// Seam (#340): pool jobs join here, the pool's `HOST_KINDS` with them; those with helper
+/// containers (`health`, `promote`'s ABI gates and health checks) then take a lane of each
+/// ring architecture they check, native or emulated, as selection already decides (#338).
 pub const KINDS: [&str; 3] = ["build", "trial", "audit"];
 /// The orders the dispatcher executes: drain (a notice), stop-task (the heartbeat's 409), restart (exit 75),
 /// recheck-agent and restart-agent (a fresh probe).
@@ -334,6 +348,10 @@ struct HostTask {
     task: Task,
     #[serde(default)]
     lease_gen: Option<String>,
+    /// The lane the pool leased it on (`build_tasks.lane`, #338): `native`, `emulated`, or
+    /// none for a kind that carries no lane.
+    #[serde(default)]
+    lane: Option<String>,
     #[serde(default)]
     units: Option<u32>,
     #[serde(default)]
@@ -469,7 +487,7 @@ impl Dispatcher {
                 .map(|v| {
                     let l = &v.lease;
                     json!({ "task": l.task.id, "gen": l.gen, "kind": l.task.kind, "name": l.task.name, "arch": l.task.arch,
-                        "units": l.units, "release": l.release, "phase": l.phase, "ending": l.ending,
+                        "lane": l.lane, "units": l.units, "release": l.release, "phase": l.phase, "ending": l.ending,
                         "last_beat": l.last_beat, "started_at": l.started_at })
                 })
                 .collect(),
@@ -953,6 +971,20 @@ impl Dispatcher {
             self.begin_ending(&mut live, Ending::Lost("no container kind".into()));
             return live;
         };
+        // Its lane against what `run/capacity.json` says now (#338), as `take` checked it: a
+        // lease on an emulated lane the agent has since turned off (the owner's `emulate`,
+        // binfmt gone) — prepared again after a dispatcher restart, or while the file changed —
+        // goes back lost before anything starts, its attempt with it.
+        if live.lease.emulated() {
+            let arch = live.lease.arch().to_owned();
+            if !capacity::read(&self.capacity_file).is_some_and(|c| c.emulated.contains(&arch)) {
+                let why = format!(
+                    "this host runs no emulated lane of {arch} now (run/capacity.json): handed back"
+                );
+                self.begin_ending(&mut live, Ending::Lost(why));
+                return live;
+            }
+        }
         if live.lease.task.kind == "build" {
             let need = live.lease.disk_gb + self.floor_gb;
             let work = self.probes.work_free_gb();
@@ -976,7 +1008,8 @@ impl Dispatcher {
             }
         }
         let (cpus, mem_gb) = self.ctx.constants.share(live.lease.units);
-        let image = self.images.of(&live.lease.task.arch).to_owned();
+        // The lane's build image: the task's architecture on its lane, the host's own for an audit.
+        let image = self.images.of(live.lease.arch()).to_owned();
         let tdir = self.ctx.task_dir(&live.lease);
         let rdir = self.ctx.release_dir(&live.lease.release);
         let lost = |this: &Self, live: &mut Live, why: String| {
@@ -1022,7 +1055,8 @@ impl Dispatcher {
             gen: &live.lease.gen,
             host: &self.host,
             release: &live.lease.release,
-            arch: &live.lease.task.arch,
+            arch: live.lease.arch(),
+            emulated: live.lease.emulated(),
             name: &live.lease.task.name,
             kind,
             cpus,
@@ -1292,6 +1326,16 @@ impl Dispatcher {
         }
         if let Some(c) = &cap {
             body["capacity"] = c.claim.clone();
+            // An emulated lane whose build image this host was not given by digest is not offered:
+            // its tasks would only be given back (#338).
+            if let Some(lanes) = body["capacity"]["lanes"].as_array_mut() {
+                lanes.retain(|l| {
+                    l["mode"] != "emulated"
+                        || l["arch"].as_str().is_some_and(|a| {
+                            spec::platform_of(a).is_some() && spec::digest_ok(self.images.of(a))
+                        })
+                });
+            }
             // The work root as measured now, when it has less than the agent's last probe said.
             if let (Some(w), Some(f)) = (
                 self.probes.work_free_gb(),
@@ -1328,7 +1372,7 @@ impl Dispatcher {
                 match orders::read_claim::<HostTask>(&v) {
                     ClaimAnswer::Task(t, token) => {
                         self.brake.after(false, self.timing.idle_claim);
-                        self.take(t, token, staging_full, room, now);
+                        self.take(t, token, staging_full, room, cap.as_ref(), now);
                         self.next_claim = now;
                     }
                     ClaimAnswer::Orders(list) => {
@@ -1386,7 +1430,16 @@ impl Dispatcher {
         }
     }
 
-    fn take(&mut self, t: HostTask, token: String, staging_full: bool, room: u32, now: u64) {
+    #[allow(clippy::too_many_lines)] // every refusal of a lease, then the lease
+    fn take(
+        &mut self,
+        t: HostTask,
+        token: String,
+        staging_full: bool,
+        room: u32,
+        cap: Option<&capacity::File>,
+        now: u64,
+    ) {
         let task = t.task;
         let refuse = |this: &Self, why: &str, is_final: bool| {
             say(format!("task {}: refused — {why}", task.id));
@@ -1435,13 +1488,33 @@ impl Dispatcher {
                 false,
             );
         }
+        // Its lane (#338, design v2 §7.4): one this host runs now, or it is given back, its
+        // attempt with it — never started on a lane the agent has since turned off.
+        let lane = match lane_of(&task, t.lane.as_deref(), cap, &self.images) {
+            Ok(l) => l,
+            Err(why) => {
+                say(format!("task {}: refused — {why}", task.id));
+                let _ = self.pool().fail(
+                    task.id,
+                    &token,
+                    &json!({ "error": why, "lost": true, "final": false }),
+                );
+                return;
+            }
+        };
         let release = t
             .release
             .filter(|r| spec::name_ok(r))
             .unwrap_or_else(|| pkg_manifest::BUILD_VERSION.to_owned());
         say(format!(
-            "task {}: {} {} for {} (attempt {}/{}), lease {gen}",
-            task.id, task.kind, task.name, task.arch, task.attempts, task.max_attempts
+            "task {}: {} {} for {}{} (attempt {}/{}), lease {gen}",
+            task.id,
+            task.kind,
+            task.name,
+            task.arch,
+            if lane.emulated { ", emulated" } else { "" },
+            task.attempts,
+            task.max_attempts
         ));
         let lease = Lease {
             task,
@@ -1459,6 +1532,7 @@ impl Dispatcher {
             notes: Value::Null,
             net_slot: None,
             agent_calls: None,
+            lane: Some(lane),
         };
         self.save(&lease);
         let mut live = Live::new(lease);
@@ -1554,6 +1628,73 @@ fn what(c: &[String]) -> String {
             .unwrap_or_else(|| "the container".into()),
     }
 }
+
+/// The lane a leased task runs on (#338, design v2 §7.4, §7.5): a build or a trial runs
+/// its own architecture — natively when it is this host's (`lane` `native`, or none from a
+/// pool that leased before lanes), emulated when the pool leased it on an emulated lane this
+/// host runs now (`run/capacity.json`) with that architecture's build image by digest.
+/// Every other kind (an audit reads its build as data) runs on this host's own. Anything
+/// else is not this host's to start.
+fn lane_of(
+    task: &Task,
+    lane: Option<&str>,
+    cap: Option<&capacity::File>,
+    images: &Images,
+) -> Result<Lane, String> {
+    let native = cap.map_or_else(native_arch, |c| c.arch.clone());
+    if !LANE_KINDS.contains(&task.kind.as_str()) {
+        return Ok(Lane {
+            arch: native,
+            emulated: false,
+        });
+    }
+    match lane {
+        None | Some("native") if task.arch == native => Ok(Lane {
+            arch: native,
+            emulated: false,
+        }),
+        Some("emulated")
+            if task.arch != native && cap.is_some_and(|c| c.emulated.contains(&task.arch)) =>
+        {
+            // The host's image, not the task: given back like any lane it cannot run.
+            let image = images.of(&task.arch);
+            if !spec::digest_ok(image) {
+                return Err(format!(
+                    "build image {image:?} of the {} lane is not an image by digest (repository@sha256:…)",
+                    task.arch
+                ));
+            }
+            Ok(Lane {
+                arch: task.arch.clone(),
+                emulated: true,
+            })
+        }
+        other => {
+            let word = match other {
+                None | Some("native") => "native",
+                Some("emulated") => "emulated",
+                Some(_) => "such",
+            };
+            let emulated = cap.map_or_else(
+                || "unknown".to_owned(),
+                |c| {
+                    if c.emulated.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        c.emulated.join(", ")
+                    }
+                },
+            );
+            Err(format!(
+                "this host runs no {word} lane of {} (its native lane is {native}, its emulated ones {emulated}): handed back",
+                task.arch
+            ))
+        }
+    }
+}
+
+/// The kinds that run a task's own architecture, on the lane the pool leased (design v2 §7.4).
+pub const LANE_KINDS: [&str; 2] = ["build", "trial"];
 
 /// The lanes' build images, as the release renders them into the host set
 /// (`OMARCHY_BUILD_IMAGE_AARCH64`, `OMARCHY_BUILD_IMAGE_X86_64`, by digest, #353). No tag

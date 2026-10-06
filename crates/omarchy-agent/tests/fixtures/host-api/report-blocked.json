@@ -1,7 +1,13 @@
 {
   "agent": {
     "skip": null,
-    "version": "0.3.0"
+    "version": "0.4.0"
+  },
+  "brake": {
+    "narrowings_hour": 0,
+    "orders_hour": 0,
+    "release_change_at": null,
+    "restarts_hour": 0
   },
   "asleep": false,
   "legacy": {
@@ -32,5 +38,26 @@
     "from": null,
     "outcome": "ok",
     "step": "commit"
+  },
+  "runtime": {
+    "driver": "compose/docker",
+    "switch": null,
+    "switch_last": null
+  },
+  "settings": {
+    "above": [],
+    "effective": {
+      "emulated": [],
+      "units": 3
+    },
+    "emulate": null,
+    "envelope": {
+      "detected_lanes": [],
+      "detected_units": 3,
+      "diagnostics": false,
+      "emulate": null,
+      "max_units": 3
+    },
+    "units": null
   }
 }

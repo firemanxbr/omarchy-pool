@@ -205,14 +205,28 @@ the **pool cap** on its page — the Studio canary runs at one build that way
 — and raise it again; nothing running ends when you lower it. The
 runbook's *How the pool hands a host work* has the rules.
 
+**The other architecture runs emulated when the host can (#338).** The
+agent turns on an emulated lane for it when your envelope allows it
+(`emulate` in `agent.toml`: absent allows it, `emulate = []` keeps it off),
+the kernel has qemu's binfmt handler with the `F` flag (`prep-root.sh`
+installs it) and the release's build image of that architecture starts
+there; otherwise it says why the lane is held (`held_lanes` in
+`run/capacity.json`) and the native lane runs on (a Mac's x86_64 lane is
+Rosetta's in its VM, below). An emulated build is
+slower and shares the host's units; on a 16K-page kernel the lane stays on,
+and a build whose toolchain cannot start under qemu goes back to the queue
+for a native host without spending its attempt.
+
 The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
 isolation level, the release it applied, the pool cap, the large task it
 reserves for when it does, and its leases with their lane and units. Every later call of
 the host to the pool is signed with its key (`Omarchy-Host`); the pool
 refuses a replay, a changed body and a clock more than 120 s off
 ([Security model](/docs/security-model#maintainer-hosts)). The agent asks
-for the host's state every two minutes or so — the release to run, and the
-host orders (#344) — and reports what it did.
+for the host's state every two minutes or so — the release to run, its
+settings and the host orders (#344, #325) — and reports what it did.
+
+## Settings and host orders
 
 **Host orders** (#344) are given on the host's page. **Reconcile now** (its
 owner or any maintainer) makes its agent run a round at its next poll.
@@ -228,6 +242,45 @@ directory the agent's user does not own: the button stays greyed until the
 agent's next report says it is fixed), and each order with its agent's
 answer after
 ([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
+
+**Settings** (#325): its page narrows the units the host gives and turns
+its emulated lanes off (or on again), always inside the envelope its owner
+wrote in `agent.toml` at the host — the page shows that envelope and greys
+every value above it. The agent takes a setting at its next poll, and the
+dispatcher claims by it from its next claim; a task already running above
+the new count finishes, nothing is stopped for it. Whatever the pool asks,
+the agent itself refuses a value above the envelope, and the page shows the
+refusal; only the owner widens the envelope, by editing `[envelope]` in
+`agent.toml` at the host and restarting the agent (`systemctl --user restart
+omarchy-agent`). The page's **Host orders** card gives the rest, its
+owner's or any maintainer's: **Retry release** lifts the quarantine of a
+release its guard reverted and tries it again; **Rotate token** gives the
+dispatcher a new worker token (the old one works ten more minutes);
+**Diagnostics** brings the dispatcher's last 500 log lines, scrubbed of the
+host's secrets, read on the page — only when the envelope says
+`diagnostics = true`. Every order and its agent's answer are on the page's
+journal of orders and the pool's journal.
+
+**The host brakes the pool** (#325): whatever the pool sends, the agent
+takes host orders at least two seconds apart and at most 20 an hour, at most
+4 narrowings and 6 dispatcher restarts an hour — a round that tries a
+release again after an Update or **Retry release** counts its restarts too,
+its revert's included — and at most one release change every ten minutes (a
+rollback under a signed statement excepted); beyond that it answers
+`refused: brake` (an Update waits for the next poll), and the page shows how
+much of each the last hour spent. On a Mac, a restart of its VM counts as
+one of those restarts, though the brake never holds it. Restarting the
+agent resets none of it.
+
+**The runtime is the owner's, at the host** (#325): `omarchy-agent runtime
+switch compose/podman` (or `compose/docker`) moves the dispatcher to the
+other engine with the same guard as a release, and back if it fails there;
+the pool cannot choose it. Drain the host's registration and let its tasks
+finish first: task containers and caches do not move between engines
+([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*). A Mac's
+bundle stays in its VM's engine: the switch is refused there.
+
+## Stopping a host
 
 To stop a host, use its page, `/hosts/<id>` (#322). **Suspend** (its
 owner or any maintainer, with a reason) stops its claims at once and

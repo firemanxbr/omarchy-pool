@@ -1040,12 +1040,26 @@ fn a_newer_release_preempts_a_round_before_its_commit() {
     w.release("v1.1.0");
     w.release("v1.2.0");
     w.target("v1.1.0", None);
+    // A pull that takes ten minutes: the brake takes one release change every ten minutes
+    // (#325), so v1.2.0 waits for that before it preempts.
+    w.engine.borrow_mut().pull_polls = 1000;
     w.round_now();
     while w.step() != "pull" {
         w.tick(3);
     }
     w.target("v1.2.0", None);
     w.round_now();
+    assert_eq!(w.agent.state.rollout.target, r("v1.1.0"));
+    assert!(
+        w.journal().contains(
+            "v1.2.0 waits: brake: at most one release change every 10 minutes (a rollback is exempt)"
+        ),
+        "{}",
+        w.journal()
+    );
+    // Ten minutes on, the next poll preempts the pull still in flight.
+    w.engine.borrow_mut().pull_polls = 0;
+    w.tick(600);
     assert_eq!(w.agent.state.rollout.target, r("v1.2.0"));
     // Preempted at pull: the new round rendered v1.2.0 in the same tick.
     assert_eq!(w.agent.state.rollout.step, Step::Lint);
@@ -1591,6 +1605,41 @@ mod on_a_mac {
         assert_eq!(played.borrow().let_sleeps, 1);
         assert_eq!(w.remote.borrow().reports.len(), reports);
         assert!(played.borrow().held);
+    }
+
+    /// A restart of the VM stops the dispatcher in it: the brake counts it as one of its
+    /// restarts, so the pool's orders get only the room left, but never holds it (#325);
+    /// a start of a stopped VM restarts nothing.
+    #[test]
+    fn a_restart_of_the_vm_is_one_of_the_brakes_restarts_and_never_held_by_it() {
+        use crate::run::brake::{Ask, RESTARTS_PER_HOUR};
+        let (mut w, colima) = mac(Colima::default());
+        w.agent.docker_cli = Some(PathBuf::from("/data/tools/0a/docker"));
+        w.tick(3);
+        w.tick(3);
+        assert!(colima.borrow().running);
+        assert_eq!(w.agent.state.brake.count(Ask::Restart, w.now), 0);
+        // The pool spent every restart of the hour; then agent.toml's size differs from
+        // the saved profile, and no task runs.
+        w.engine
+            .borrow_mut()
+            .containers
+            .retain(|c| !c.project.is_empty());
+        for _ in 0..RESTARTS_PER_HOUR {
+            w.agent.state.brake.record(w.now, &[Ask::Restart]);
+        }
+        let mut smaller = want();
+        smaller.size = crate::vm::Size { cpus: 4, mem_gb: 8 };
+        colima.borrow_mut().saved = Some(saved_for(&smaller));
+        let stops =
+            |c: &Rc<RefCell<Colima>>| c.borrow().calls.iter().filter(|c| *c == "stop").count();
+        assert_eq!(stops(&colima), 0);
+        w.tick(crate::vm::COOLDOWN_S);
+        assert_eq!(stops(&colima), 1, "{}", w.journal());
+        assert_eq!(
+            w.agent.state.brake.count(Ask::Restart, w.now),
+            RESTARTS_PER_HOUR + 1
+        );
     }
 
     #[test]

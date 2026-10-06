@@ -52,8 +52,8 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  alive, buildsOf, cooling, diskOf, largestSize, nativeCapacity, noRoom, ownerCap, ownersLeased, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
-  ALIVE_MS, HELPER_KINDS, LANE_KINDS, MIN, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
+  alive, buildsOf, cooling, diskOf, helperArches, largestSize, nativeCapacity, noRoom, ownerCap, ownersLeased, reserve, select, sizeOf, takes, thresholdMs, unitsOf,
+  ALIVE_MS, HELPER_KINDS, LANE_KINDS, MIN, RING_ARCHES, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
   type Candidate, type Fleet, type Held, type Member, type Mode,
 } from "../src/selection";
 import { selectionRules, HEAD_LIMIT, OWNERS_LIMIT, RESERVE_CANDIDATES, RESERVE_WINDOW } from "../src/routes/factory";
@@ -421,6 +421,61 @@ describe("mixed backlogs: native preferred, emulated after T", () => {
     s.members.push(box);
     s.run(1);
     expect(s.startOf(t)).toMatchObject({ by: "box", lane: "native" });
+  });
+});
+
+describe("emulated lanes per lane (#338, design v2 §7.4, §8.6)", () => {
+  const JOBS = ["build", "trial", "audit", "sync", "health", "promote", "security"];
+
+  it("needs_native is a lane's word: a host with both lanes takes such a task of its native arch natively and none of its emulated arch", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"] });
+    const box = host("box", "x86_64", 7, { emulated: ["aarch64"] });
+    const fleet: Fleet = { members: [studio, box], leases: [] };
+    // Each sent back by the other's emulated lane, long enough ago for any T.
+    const fromBox = task({ arch: "aarch64", needs_native: true, queued_at: T0 - 120 * MIN });
+    const fromStudio = task({ arch: "x86_64", needs_native: true, queued_at: T0 - 120 * MIN });
+    expect(select(studio, fleet, [fromBox, fromStudio], T0, R).map((c) => [c.id, c.lane])).toEqual([[fromBox.id, "native"]]);
+    expect(select(box, fleet, [fromBox, fromStudio], T0, R).map((c) => [c.id, c.lane])).toEqual([[fromStudio.id, "native"]]);
+    // Without the mark the emulated lane takes it (no native host of its arch alive but the other, which is busy here).
+    const plain = task({ arch: "x86_64", queued_at: T0 - 120 * MIN });
+    expect(select(studio, { members: [studio], leases: [] }, [plain], T0, R).map((c) => c.lane)).toEqual(["emulated"]);
+  });
+
+  it("a health check of the x86_64 ring runs on an aarch64 host's emulated lane at once: no wait, no preference for a native host", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"], kinds: JOBS });
+    // A native x86_64 host alive, idle and eligible makes no job with helpers wait.
+    const box = host("box", "x86_64", 7, { kinds: JOBS });
+    const fleet: Fleet = { members: [studio, box], leases: [] };
+    const health = task({ arch: "x86_64", kind: "health", queued_at: T0 });
+    expect(select(studio, fleet, [health], T0, R)).toEqual([expect.objectContaining({ id: health.id, lane: "emulated", units: R.job, share: false })]);
+    // On the reserved job unit: the Studio's task units all held by builds, the health check still starts.
+    const busy: Held[] = Array.from({ length: 5 }, (_, i) => ({ task: 900 + i, by: "studio", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: "project", owner: null, disk_gb: 20 }));
+    expect(select(studio, { members: [studio, box], leases: busy }, [health], T0, R).map((c) => c.id)).toEqual([health.id]);
+    // The native host's lane is native for it; a host with no x86_64 lane at all takes none.
+    expect(select(box, fleet, [health], T0, R).map((c) => c.lane)).toEqual(["native"]);
+    const plain = host("plain", "aarch64", 7, { kinds: JOBS });
+    expect(select(plain, { members: [plain], leases: [] }, [health], T0, R)).toEqual([]);
+    expect(HELPER_KINDS).toEqual(["health"]);
+  });
+
+  it("a promotion's ABI gates and health checks need a lane of every architecture it promotes, a security job's fast-track both; the job itself has no lane", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"], kinds: JOBS });
+    const plain = host("plain", "aarch64", 7, { kinds: JOBS });
+    const fleet: Fleet = { members: [studio, plain], leases: [] };
+    const both = task({ arch: "x86_64", kind: "promote" });
+    const arm = task({ arch: "x86_64", kind: "promote", job_arch: "aarch64" });
+    const sec = task({ arch: "x86_64", kind: "security" });
+    const sync = task({ arch: "x86_64", kind: "sync" });
+    expect(helperArches(both)).toEqual(RING_ARCHES);
+    expect(helperArches(arm)).toEqual(["aarch64"]);
+    expect(helperArches(sync)).toBeNull();
+    const ids = (m: Member) => select(m, fleet, [both, arm, sec, sync], T0, R).map((c) => [c.id, c.lane]);
+    expect(ids(studio)).toEqual([[both.id, null], [arm.id, null], [sec.id, null], [sync.id, null]]);
+    // An aarch64 host that runs no x86_64 lane: the promotion of aarch64 alone, and the arch-neutral sync.
+    expect(ids(plain)).toEqual([[arm.id, null], [sync.id, null]]);
+    // A legacy registration keeps today's rule: its any-arch kinds go to it whatever its lane (the Studio's pool-x86_64).
+    const pool86 = legacy("pool-x86_64", "x86_64", { kinds: JOBS });
+    expect(select(pool86, { members: [pool86], leases: [] }, [both], T0, R).map((c) => c.id)).toEqual([both.id]);
   });
 });
 

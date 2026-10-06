@@ -9,7 +9,9 @@
 //!    rootful daemon), fetches the release's pinned docker CLI and compose plugin into the
 //!    agent's own `tools/` (hash-checked; preflight measures through them), and runs
 //!    **preflight**: any blocker stops it, with one screen listing everything to fix,
-//!    before anything else is written;
+//!    before anything else is written. The foreign architecture's lane (#338, design v2
+//!    §7.5) is detected there too — binfmt, then a smoke run of the release's build image
+//!    of that architecture — and only reported: a held lane never stops an install;
 //! 3. prints the envelope (agent.toml) for the person to confirm on `/dev/tty` (`--yes`
 //!    skips) and writes `run/capacity.json`;
 //! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into
@@ -34,11 +36,11 @@
 //! Docker Desktop's or `OrbStack`'s VM when one is here and its home mount is removed; the
 //! envelope records the VM (`[vm]`) and the two sockets; the plist replaces the unit.
 //!
-//! Seams left for later issues, by name: the egress probe
-//! behind the egress sidecar on an internal network, once the worker image has it
-//! ([`egress`]); the `subuid` level for rootless podman, once the dispatcher (#335) starts
-//! task containers with `--userns=auto` (until then rootless podman reads as `user`); the
-//! emulated lane's smoke run (#338, reported only here); task containers and sidecars
+//! Seams left for later issues, by name: the egress probe behind the egress sidecar on a
+//! task's internal network (#373), and on podman the task network made through libpod's own
+//! API with DNS off (#372), until which a rootless host fails the probe ([`egress`]); the
+//! `subuid` level for rootless podman, once the dispatcher (#335) starts task containers with
+//! `--userns=auto` (until then rootless podman reads as `user`); task containers and sidecars
 //! carry `org.omarchy-pool.agent.host=<host>` (design v2 §9.3), which uninstall removes by.
 
 pub mod checks;
@@ -49,6 +51,7 @@ pub(crate) mod envelope;
 pub(crate) mod files;
 pub(crate) mod launchd;
 pub(crate) mod legacy;
+pub(crate) mod loopback;
 pub(crate) mod mac;
 pub(crate) mod net;
 pub(crate) mod secrets;
@@ -57,7 +60,6 @@ pub(crate) mod unit;
 
 pub use sys::Machine;
 
-use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -113,6 +115,16 @@ pub struct Places {
     /// (#320).
     pub proc_net: PathBuf,
     pub ifconfig: Option<PathBuf>,
+    /// prep-root.sh's firewall script (world-readable): whether its INPUT drop for the task
+    /// subnets is installed, and which command a rootful host without it is told to run (#367).
+    pub task_firewall: PathBuf,
+    /// `/etc/systemd/system` (world-readable): whether the unit that runs that script at boot
+    /// is there and enabled, or a reboot takes the drop away (#367).
+    pub systemd_system: PathBuf,
+    /// Docker's `daemon.json` (world-readable): the address pool that command carries (#367).
+    pub docker_daemon: PathBuf,
+    /// Where processes are read (`/proc`): a rootless engine's network stack (#367).
+    pub proc: PathBuf,
 }
 
 impl Places {
@@ -152,6 +164,10 @@ impl Places {
             home,
             proc_net: sources.proc_net,
             ifconfig: sources.ifconfig,
+            task_firewall: PathBuf::from("/usr/local/libexec/omarchy-task-firewall"),
+            systemd_system: PathBuf::from("/etc/systemd/system"),
+            docker_daemon: PathBuf::from("/etc/docker/daemon.json"),
+            proc: PathBuf::from("/proc"),
         })
     }
 
@@ -801,6 +817,17 @@ pub(crate) fn measure_as(
         .as_ref()
         .and_then(|m| m.build_image(std::env::consts::ARCH))
         .map(ToString::to_string);
+    // The emulated lane (#338): the release's build images for its smoke run (the foreign
+    // one of the engine's architecture), within the envelope an earlier install's owner may
+    // have narrowed (`emulate`).
+    let images = capacity::emulation::images(None, manifest.as_ref());
+    let emulate: Option<Vec<String>> = envelope::envelope_value(ex, "emulate").map(|v| {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str().map(str::to_owned))
+            .collect()
+    });
     let facts = docker.as_ref().and_then(|d| {
         let host = d.host();
         let how = probe::Probe {
@@ -808,6 +835,12 @@ pub(crate) fn measure_as(
             host: Some(&host),
             work_root: &existing_ancestor(&work_root),
             image: image.as_deref(),
+            // A Mac's VM has its own binfmt table: its lane is Rosetta's ([`mac_facts`]).
+            emulation: (!mac).then_some(capacity::emulation::Probe {
+                binfmt: &p.binfmt,
+                images: &images,
+                emulate: emulate.as_deref(),
+            }),
         };
         match probe::detect(&how) {
             Ok(f) => Some(f),
@@ -844,6 +877,7 @@ pub(crate) fn measure_as(
         max_cpus: o.max_cpus,
         max_mem_gb: o.max_mem_gb,
         dedicated,
+        emulate,
         ..Caps::default()
     };
     let capacity = facts.as_ref().zip(manifest.as_ref()).map(|(f, m)| {
@@ -852,7 +886,7 @@ pub(crate) fn measure_as(
         let emulated: Vec<String> = c
             .emulated()
             .iter()
-            .map(|l| format!(", the {} lane through {}", l.arch, l.via.unwrap_or("emulation")))
+            .map(|l| format!(", the {} lane through {}", l.arch, l.via))
             .collect();
         r.notes.push(format!(
             "capacity: {} CPUs, {} GB, disks {} GB (work root) and {} GB (engine), {} units on the {} lane{}",
@@ -864,6 +898,7 @@ pub(crate) fn measure_as(
             f.arch(),
             emulated.concat()
         ));
+        checks::emulation(&c, &mut r);
         c
     });
     if let Some(f) = &facts {
@@ -874,9 +909,6 @@ pub(crate) fn measure_as(
             rootful_exception,
             &mut r,
         );
-        if !mac {
-            checks::emulation(f.arch(), Some(f.page_kb()), &p.binfmt, &mut r);
-        }
     }
     let creds = checks::credentials(&p.home);
     if found.as_ref().and_then(|f| f.kind).is_some() {
@@ -927,30 +959,44 @@ pub(crate) fn measure_as(
         }
         match (task.first().and_then(|t| t.last_28()), &image) {
             (Some(subnet), Some(img)) => {
-                let mut t =
-                    egress::Targets::of_host(gateway, net::lan_address()).asking(pool.as_deref());
-                if found.as_ref().and_then(|f| f.kind) == Some(VmKind::Dedicated) {
-                    // The Mac as the omarchy VM reaches it, past Colima's NAT.
-                    t.forbidden
-                        .push(("vm-host", crate::vm::VM_HOST.to_owned(), 22));
-                }
-                match egress::probe(d, img, subnet, &t) {
-                    Ok(out) => {
-                        let b = egress::verdict(&out, &t);
-                        if b.is_empty() {
-                            r.notes
-                                .push("egress: a task reaches public addresses only".into());
-                        }
-                        r.blockers.extend(b);
-                        public = egress::seen(&out);
-                        r.notes.push(match (public, &t.seen) {
-                            (Some(ip), _) => format!("egress: tasks leave from {ip}, which every task's egress refuses with the host's own addresses"),
-                            (None, Some(url)) => format!("egress: the address tasks leave from was not seen ({url} gave none); every task's egress refuses the interfaces' addresses"),
-                            (None, None) => "egress: the address tasks leave from was not asked (the pool is not HTTPS)".into(),
-                        });
-                    }
-                    Err(e) => r.blockers.push(format!("egress: {e}")),
-                }
+                let rootful = facts.as_ref().is_none_or(|f| !f.rootless());
+                let server = d.server();
+                let vm = found.as_ref().and_then(|f| f.kind);
+                // prep-root.sh's firewall is a Linux host's; a Mac's VM gets the agent's own
+                // ([`mac`], before this probe), and none of prep-root.sh's files is on a Mac.
+                let (firewall, unprepared) = if mac {
+                    (String::new(), None)
+                } else {
+                    let script = std::fs::read_to_string(&p.task_firewall).ok();
+                    let fw = egress::Firewall::read(script.as_deref(), &p.systemd_system);
+                    (
+                        egress::firewall_command(
+                            fw,
+                            std::fs::read_to_string(&p.docker_daemon).ok().as_deref(),
+                            &task,
+                            &p.user,
+                            &work_root,
+                            &task_subnets,
+                        ),
+                        egress::unprepared(fw, &task),
+                    )
+                };
+                let host = egress::Host {
+                    router: gateway,
+                    lan: net::lan_address(),
+                    pool: pool.as_deref(),
+                    advice: egress::Advice {
+                        rootful,
+                        podman: server == Ok(engine::Server::Podman),
+                        firewall,
+                        vm,
+                    },
+                    server,
+                    unprepared,
+                    proc: &p.proc,
+                    uid: rustix::process::getuid().as_raw(),
+                };
+                public = egress::check(d, img, subnet, &host, &mut r);
             }
             _ => r
                 .blockers
@@ -1030,6 +1076,7 @@ pub(crate) fn measure_as(
                     .map(|s| s.mem_gb)
                     .or(o.max_mem_gb),
                 vm,
+                emulate: capacity::emulation::foreign_of(facts.arch()).map(|f| vec![f.to_owned()]),
             };
             Some(Ready {
                 manifest,
@@ -1106,6 +1153,7 @@ fn mac_facts(
             host: Some(&host),
             work_root: &o.places.home,
             image: None,
+            emulation: None,
         };
         probe::rosetta_lane(&how, img)
     });
@@ -1339,24 +1387,23 @@ pub(crate) fn apply(
     let fingerprint = HostKey::load_or_create(&eo.paths.state.join(KEY_FILE))
         .map_or_else(|e| e, |k| k.fingerprint());
     let c = &ready.capacity;
-    let emulated = c.emulated().iter().fold(String::new(), |mut s, l| {
-        let _ = write!(
-            s,
-            ", lane {} through {}",
-            l.arch,
-            l.via.unwrap_or("emulation")
-        );
-        s
-    });
+    let lanes = c
+        .lanes()
+        .iter()
+        .map(|l| match l.via {
+            Some(via) => format!("{} {} through {via}", l.arch, l.mode),
+            None => format!("{} {}", l.arch, l.mode),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     say(
         out,
         &format!(
-            "host {} on {}: {} CPUs, {} GB, lane {} native{emulated}, {} units ({} kept for pool jobs), isolation {}, host key {fingerprint}",
+            "host {} on {}: {} CPUs, {} GB, lanes {lanes}, {} units ({} kept for pool jobs), isolation {}, host key {fingerprint}",
             id.host,
             ready.pool,
             c.cpus(),
             c.mem_gb(),
-            ready.facts.arch(),
             c.units(),
             c.job_reserved(),
             checks::level(c.isolation()),
