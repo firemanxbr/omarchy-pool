@@ -502,7 +502,9 @@ dispatcher never ran on this host — is acted on at the lease's next
 heartbeat, by the pool's word. A Worker rolled back
 to a release before the revocation forgets it (its manifest did not have
 it): the hosts do not, and their dispatchers still kill such tasks, which
-that Worker then requeues as `lost`.
+that Worker then requeues as `lost`; a dispatcher whose own release is in
+its set takes no new task (`want: 0`), so such a Worker does not hand it one
+task after another to kill, each a host loss.
 
 The one exception to the update gate rests on the host's own signed
 reports: a host whose agent says it reverted the pool's release claims on

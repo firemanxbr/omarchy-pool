@@ -3132,3 +3132,54 @@ fn the_pools_word_at_a_heartbeat_kills_a_lease_and_reports_it_revoked_and_is_not
         "a pool cannot revoke a release on this host for good"
     );
 }
+
+#[test]
+fn a_dispatcher_whose_own_release_is_revoked_here_takes_no_task_and_still_claims_for_its_orders() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    d.tick();
+    assert_eq!(
+        h.pool.last_claim()["want"],
+        1,
+        "a release not revoked takes work"
+    );
+    drop(d);
+    // A later release's dispatcher kept this one in the host's set, then the agent's guard reverted the
+    // host to it, and the pool was rolled back onto it: its manifest does not revoke it, so it would lease.
+    std::fs::create_dir_all(h.work.join("state")).unwrap();
+    std::fs::write(
+        h.work.join("state/revoked.json"),
+        json!([pkg_manifest::BUILD_VERSION]).to_string(),
+    )
+    .unwrap();
+    let before = h.pool.claim_bodies.lock().unwrap().len();
+    let mut d = h.dispatcher();
+    h.advance(31);
+    // A pool that hands it a task anyway, leased on this release: given back, never started.
+    h.give(on_release(community(7, GEN), pkg_manifest::BUILD_VERSION));
+    h.ticks(&mut d, 3);
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    let bodies = h.pool.claim_bodies.lock().unwrap()[before..].to_vec();
+    assert!(bodies.len() >= 2, "it claims on: {bodies:?}");
+    assert!(
+        bodies
+            .iter()
+            .all(|b| b["want"] == 0 && b.get("offer").is_none()),
+        "every claim says want 0: {bodies:?}"
+    );
+    assert!(
+        h.engine.runs.lock().unwrap().is_empty(),
+        "no container started"
+    );
+    assert!(h.leases().is_empty());
+    let f = h.pool.fails_of(7);
+    assert_eq!(f.len(), 1, "given back once: {f:?}");
+    assert_eq!(f[0]["final"], false);
+    assert!(h.pool.completes_of(7).is_empty());
+    // Its claims still carry its orders.
+    h.advance(121);
+    h.give(json!({ "task": null, "orders": [{ "id": format!("wo_{}", "5".repeat(32)), "kind": "restart", "reason": "test", "issued_by": "maintainer" }] }));
+    d.tick();
+    assert_eq!(d.exit, Some(75));
+}

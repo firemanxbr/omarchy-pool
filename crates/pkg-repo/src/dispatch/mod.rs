@@ -75,7 +75,9 @@
 //! every list a dispatcher of this host kept) is killed in whatever phase and
 //! reported `revoked`; the pool refuses what it would upload or report, and
 //! requeues it. The pool's own word at a heartbeat (409 `stop`, state
-//! `revoked`) does the same for that lease, and is not kept.
+//! `revoked`) does the same for that lease, and is not kept. A dispatcher
+//! whose own release is in that set takes no new task: it claims with
+//! `want: 0`, for its leases and orders only.
 //!
 //! **Its environment** (#371): the agent writes `etc/dispatcher.env` (0600,
 //! the host set's `env_file`) with the host's worker token, the host's own
@@ -530,7 +532,7 @@ impl Dispatcher {
     /// Re-adopts what a previous dispatcher left; `/ready` answers only after it.
     pub fn readopt(&mut self) -> Result<()> {
         if self.revoked.contains(pkg_manifest::BUILD_VERSION) {
-            say(format!("this dispatcher runs {}, a revoked release: its tasks are killed, and the pool hands it nothing (426) until the agent applies another", pkg_manifest::BUILD_VERSION));
+            say(format!("this dispatcher runs {}, a revoked release: its tasks are killed, and it takes no new work (its claims say `want: 0`, for its leases and orders) until the agent applies another", pkg_manifest::BUILD_VERSION));
         }
         let found = self.store.load().context("reading the lease files")?;
         for p in &found.unreadable {
@@ -1342,12 +1344,17 @@ impl Dispatcher {
         } else {
             self.mem_held = None;
         }
+        // A dispatcher whose own release is in its revoked set (#342) takes no task: one leased on its
+        // release would be killed at the next tick, and a pool whose release does not revoke it (a Worker
+        // rolled back past the revocation) would hand it another each round, each a host loss. Its claims
+        // go on with `want: 0`, for its leases and its orders (said once, at re-adoption).
         let want = cap.as_ref().is_some_and(|c| {
             !c.below_minimum
                 && offer > 0
                 && c.engine_free_gb >= self.floor_gb
                 && spec::digest_ok(self.images.of(&c.arch))
-        }) && !self.disk_low;
+        }) && !self.disk_low
+            && !self.revoked.contains(pkg_manifest::BUILD_VERSION);
         // What a task may take: the units this claim offered, none when it said `want: 0`.
         let room = if want { offer } else { 0 };
         let claim_id = self

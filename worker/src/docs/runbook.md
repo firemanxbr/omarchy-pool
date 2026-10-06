@@ -1570,7 +1570,10 @@ of every list they verified (design v2 §5.2). From that release's deploy on:
   `<work root>/state/revoked.json` (written synced, 0600), so one of an
   older release after a rollback kills them too; a file there that does not
   read is said in the dispatcher's journal and kept aside as
-  `revoked.json.bad`, and one that cannot be read now is left alone;
+  `revoked.json.bad`, and one that cannot be read now is left alone; a
+  dispatcher whose own release is in that set takes no new task (its
+  claims say `want: 0`, for its leases and orders only), so a pool rolled
+  back onto a release a host revoked hands that host nothing to kill;
 - the pool requeues each such task at its place, its attempt given back
   and no host loss counted, the packages it staged reclaimed (its text
   evidence is replaced by its next run's). A host that dropped one without
