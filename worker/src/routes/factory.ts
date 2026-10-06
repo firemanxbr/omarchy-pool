@@ -769,10 +769,13 @@ const builtWithSql = `COALESCE(json_extract(au.params, '$.built_with'), bw.agent
  * What placement reads of a candidate (#339, design v2 §8.4; `t` the alias), each by a primary key: the project's copy's requesters —
  * its owner and the owner of the contributor's build of the same package it answers — and who released it to any host (D35); an
  * audit's build — the registration that built it, the model it was built with, that registration's owner and its host when it is a
- * host's (the machine, as far as the pool tells machines apart: selection.ts `apart`), and whether it is the project's copy (D36).
+ * host's (the machine, as far as the pool tells machines apart: selection.ts `apart`), and whether it is the project's copy (D36) — and,
+ * for the project's copy, the maintainer the solo-maintainer exception names while it is in force (#394: the governance file's [solo],
+ * as the last sync wrote it beside the list — one row by its key).
  */
 const placementCols = (t: string) => `CASE WHEN ${projectCopySql(t)} THEN json_array(${t}.owner, (SELECT rq.owner FROM build_tasks rq WHERE rq.id = json_extract(${t}.params, '$.review') AND rq.name = ${t}.name)) END AS requesters,
     CASE WHEN ${projectCopySql(t)} THEN json_extract(${t}.params, '$.any_host.by') END AS any_host,
+    CASE WHEN ${projectCopySql(t)} THEN (${SOLO_LOGIN_SQL}) END AS solo,
     CASE WHEN ${t}.kind = 'audit' THEN (SELECT json_object('by', au.lease_owner, 'with', ${builtWithSql}, 'owner', bw.owner, 'host', CASE WHEN bw.kind = 'host' THEN bw.host_id END, 'copy', ${projectCopySql("au")})
       FROM build_tasks au LEFT JOIN build_workers bw ON bw.id = au.lease_owner WHERE au.id = json_extract(${t}.params, '$.task')) END AS audited`;
 /**
@@ -786,9 +789,11 @@ const sameModelAuditOf = (t: string, model: string | null): { sql: string; binds
       WHERE au.id = json_extract(${t}.params, '$.task') AND ${projectCopySql("au")}${model ? ` AND COALESCE(${builtWithSql}, '') IN ('', ?)` : ""}))`,
   binds: model ? [model] : [],
 });
+/** The maintainer the solo-maintainer exception names (#394), as a scalar subquery by its one row's key: NULL without the table. */
+const SOLO_LOGIN_SQL = "SELECT gs.maintainer FROM governance_solo gs WHERE gs.id = 1";
 /** A candidate as selection reads it (`t` the alias). */
 const candidateCols = (t: string) => `${t}.id, ${t}.name, ${t}.arch, ${t}.kind, ${t}.trust, ${t}.owner, ${t}.priority, ${t}.created_at, ${t}.pinned_to, ${t}.reserved_at, json_extract(${t}.params, '$.needs_native') AS needs_native, ${ownSize(t)} AS asked, ${agentScope(`${t}.`)} AS model, CASE WHEN ${t}.kind IN (${RING_JOB_KINDS}) THEN json_extract(${t}.params, '$.arch') END AS job_arch, ${placementCols(t)}`;
-interface CandidateRow { id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; priority: number; created_at: string; pinned_to: string | null; reserved_at: string | null; needs_native: number | null; asked: number | null; model: number; job_arch: string | null; requesters: string | null; any_host: string | null; audited: string | null }
+interface CandidateRow { id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; priority: number; created_at: string; pinned_to: string | null; reserved_at: string | null; needs_native: number | null; asked: number | null; model: number; job_arch: string | null; requesters: string | null; any_host: string | null; solo: string | null; audited: string | null }
 
 /**
  * A build's size before any clamp, in SQL (`t` the alias; one binding: factory/sizing's sizes, `{name: [size, disk_gb]}`), as
@@ -971,14 +976,15 @@ function candidateOf(r: CandidateRow, sizes: Map<string, Sizing>, nativeMs: Map<
   };
 }
 
-/** What placement knows of a candidate's row (#339): the project's copy's requesters and its release (D35), an audit's build (D36). */
-function placementOfRow(r: Pick<CandidateRow, "requesters" | "any_host" | "audited">): Pick<Candidate, "publish_bound" | "requesters" | "any_host" | "built_by" | "built_with" | "built_on"> {
+/** What placement knows of a candidate's row (#339): the project's copy's requesters and its release (D35) — and the solo-maintainer exception (#394) —, an audit's build (D36). */
+function placementOfRow(r: Pick<CandidateRow, "requesters" | "any_host" | "solo" | "audited">): Pick<Candidate, "publish_bound" | "requesters" | "any_host" | "solo" | "built_by" | "built_with" | "built_on"> {
   const audited = jsonOr<{ by?: unknown; with?: unknown; owner?: unknown; host?: unknown; copy?: unknown } | null>(r.audited, null);
   const text = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
   return {
     publish_bound: r.requesters !== null || audited?.copy === 1,
     requesters: [...new Set(jsonOr<unknown[]>(r.requesters, []).map(text).filter((x): x is string => x !== null))],
     any_host: r.any_host,
+    solo: r.solo ?? null,
     built_by: text(audited?.by),
     built_with: text(audited?.with),
     built_on: audited ? { owner: text(audited.owner), host_id: text(audited.host) } : null,
@@ -986,7 +992,7 @@ function placementOfRow(r: Pick<CandidateRow, "requesters" | "any_host" | "audit
 }
 
 /** The project's copy of a package as Review shows it while it is queued (#339, D35): where it may run, its requesters, who released it. */
-export interface PlacementView extends Placement { requesters: string[]; released: { by: string; at: string | null } | null }
+export interface PlacementView extends Omit<Placement, "solo"> { requesters: string[]; released: { by: string; at: string | null } | null; solo?: { maintainer: string; hosts: string[]; since: string } }
 
 /**
  * Where each queued project's copy among `ids` may run (D35): the fleet
@@ -1011,18 +1017,21 @@ export async function placements(env: Env, ids: number[], at = Date.now()): Prom
   const pool = running(env);
   const rules = selectionRules();
   const fleet: Fleet = { members: (fleetRows.results as FleetRow[]).map((r) => memberOf(r, pool, at)), leases: (leaseRows.results as LeaseRow[]).map((l) => heldOf(l, rules)) };
-  const placed = rows.results as (CandidateRow & { any_host_at: string | null; page_size: number | null; page_disk_gb: number | null })[];
+  const placed = rows.results as (CandidateRow & { any_host_at: string | null; solo_since: string | null; page_size: number | null; page_disk_gb: number | null })[];
   // The size and budget its package's page sets, as the claim reads them (PACKAGE_SIZES_SQL): a host too small for them is none to wait for.
   const sizes = new Map(placed.filter((r) => r.page_size !== null || r.page_disk_gb !== null).map((r) => [r.name, { size: r.page_size, disk_gb: r.page_disk_gb }]));
   for (const r of placed) {
     const c = candidateOf(r, sizes, new Map());
     if (c.kind !== "build" || !c.publish_bound) continue;
-    out.set(c.id, { ...placementOf(fleet, c, at, rules), requesters: c.requesters ?? [], released: c.any_host ? { by: c.any_host, at: r.any_host_at } : null });
+    const where = placementOf(fleet, c, at, rules);
+    // The solo-maintainer exception (#394), when it holds for this copy: who, since when — Review says why its owner's host builds it.
+    const { solo, ...rest } = where;
+    out.set(c.id, { ...rest, ...(solo ? { solo: { ...solo, since: r.solo_since ?? "" } } : {}), requesters: c.requesters ?? [], released: c.any_host ? { by: c.any_host, at: r.any_host_at } : null });
   }
   return out;
 }
 /** The queued tasks Review asks the placement of, by their primary keys, as the claim reads them — with their package page's size and budget. */
-export const PLACEMENTS_SQL = `SELECT ${candidateCols("c")}, json_extract(c.params, '$.any_host.at') AS any_host_at, p.size AS page_size, p.disk_gb AS page_disk_gb
+export const PLACEMENTS_SQL = `SELECT ${candidateCols("c")}, json_extract(c.params, '$.any_host.at') AS any_host_at, (SELECT gs.since FROM governance_solo gs WHERE gs.id = 1) AS solo_since, p.size AS page_size, p.disk_gb AS page_disk_gb
   FROM build_tasks c LEFT JOIN factory_packages p ON p.name = c.name WHERE c.id IN (SELECT value FROM json_each(?)) AND +c.status = 'queued'`;
 
 /** What the claim knows of the claimer for selection: a host's capacity and lanes, or a legacy registration's one lane and its trust. */
@@ -1133,10 +1142,11 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     sql += ringLock(t);
     // The project's copy of a package is not built on its requester's host (D35, selection.ts requesterHost): a head of them never
     // hides the claimer's other work. Its requesters are its owner and the owner of the contributor's build it answers (by the key).
+    // The maintainer the solo-maintainer exception names (#394) takes the copy of their own package: for their claims, nothing is left out.
     if (k.owner) {
       // IS, never =: a requester not known (NULL) must not turn the whole NOT into NULL and hide every other rebuild.
-      sql += ` AND NOT (${projectCopySql(t)} AND json_extract(${t}.params, '$.any_host') IS NULL AND (${t}.owner IS ? OR (SELECT rq.owner FROM build_tasks rq WHERE rq.id = json_extract(${t}.params, '$.review') AND rq.name = ${t}.name) IS ?))`;
-      binds.push(k.owner, k.owner);
+      sql += ` AND NOT (${projectCopySql(t)} AND json_extract(${t}.params, '$.any_host') IS NULL AND NOT EXISTS (SELECT 1 FROM governance_solo gs WHERE gs.id = 1 AND gs.maintainer = ?) AND (${t}.owner IS ? OR (SELECT rq.owner FROM build_tasks rq WHERE rq.id = json_extract(${t}.params, '$.review') AND rq.name = ${t}.name) IS ?))`;
+      binds.push(k.owner, k.owner, k.owner);
     }
     // A legacy registration's trust (selection.ts takes, #343): a project one takes any kind it declares but never a contributor's
     // build — project workers do the work a maintainer would, pool jobs and the rebuild of an approved package, never a recipe with no
@@ -2226,6 +2236,9 @@ export async function handleBuilt(env: Env): Promise<Response> {
   return json({ built: rows.results }, 200, { "cache-control": "no-store" });
 }
 
+/** A decision's mark (#394): taken by its requester under the solo-maintainer exception — who and since when — or null. */
+const soloOfApproval = (a: { by: string; solo_since: string | null }) => (a.solo_since ? { maintainer: a.by, since: a.solo_since } : null);
+
 /**
  * One task, whole — what a build's page shows and what an agent reads in
  * one call: the row with the log's tail it kept (a pool job has no other
@@ -2258,7 +2271,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
     isBuild ? rel("publish", "task", task.id) : null,
     isBuild
       ? env.DB.prepare(
-          `SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, r.status AS rebuild_status, r.result_filename AS rebuild_result, COALESCE(v.changes, 0) = 1 AS changes
+          `SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, r.status AS rebuild_status, r.result_filename AS rebuild_result, COALESCE(v.changes, 0) = 1 AS changes, v.solo_since
              FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task LEFT JOIN reviews v ON v.id = a.review_id WHERE a.task_id = ? OR a.rebuild_task = ? ORDER BY a.id DESC LIMIT 1`,
         ).bind(task.id, task.id).first()
       : null,
@@ -2292,7 +2305,8 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
       project_builds: projectBuilds?.results.map(brief) ?? [],
       publish: publishes?.results.map(brief) ?? [],
       // The approval on this build, with `standing` (approved, not withdrawn — stands()) as every approval row the server hands out carries it: the page reads the word, it does not derive it.
-      approval: approval ? { ...approval, standing: stands(approval as { decision: string; withdrawn_at: string | null }), changes: (approval as { changes?: number }).changes === 1 } : null,
+      // Self-reviewed (#394): its requester took it under the solo-maintainer exception — who and since when, as the record says; null under the two-person rule.
+      approval: approval ? { ...approval, solo_since: undefined, standing: stands(approval as { decision: string; withdrawn_at: string | null }), changes: (approval as { changes?: number }).changes === 1, solo_exception: soloOfApproval(approval as { by: string; solo_since: string | null }) } : null,
       chain,
       score: chain?.score ?? null,
       rings,
