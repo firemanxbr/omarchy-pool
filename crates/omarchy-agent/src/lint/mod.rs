@@ -897,18 +897,8 @@ fn check_bind(
                 return;
             }
         }
-        if let Some(set) = &envelope.set_dir {
-            let refused = match path.strip_prefix(set) {
-                Ok(rel) => check_secret_file(name, source, rel, read_only, out),
-                Err(_) if set.join(SECRET_FILES).starts_with(path) => {
-                    out.push(holds_secret_files(name, source));
-                    true
-                }
-                Err(_) => false,
-            };
-            if refused {
-                return;
-            }
+        if check_absolute_secret_file(name, source, path, read_only, envelope, out) {
+            return;
         }
         let allowed = envelope
             .paths
@@ -966,6 +956,30 @@ fn check_vm_mount(
                     .join(", ")
             ),
         ));
+    }
+}
+
+/// An absolute bind source against the set's secret files (#327): one in the envelope's set
+/// directory is checked as the path relative to it, and one that holds them is refused.
+/// `true` when it was refused.
+fn check_absolute_secret_file(
+    name: &str,
+    source: &str,
+    path: &Path,
+    read_only: bool,
+    envelope: &Envelope,
+    out: &mut Vec<Violation>,
+) -> bool {
+    let Some(set) = &envelope.set_dir else {
+        return false;
+    };
+    match path.strip_prefix(set) {
+        Ok(rel) => check_secret_file(name, source, rel, read_only, out),
+        Err(_) if set.join(SECRET_FILES).starts_with(path) => {
+            out.push(holds_secret_files(name, source));
+            true
+        }
+        Err(_) => false,
     }
 }
 
