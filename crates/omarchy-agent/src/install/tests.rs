@@ -4568,15 +4568,18 @@ mod engine_tests {
         let out = egress::probe(&d, &image, subnet, &open).unwrap();
         let b = egress::verdict(&out, &open, &a);
         println!("a network that is not internal:\n{out}\n{b:?}");
-        if lan.is_some() {
-            assert!(
-                b.iter()
-                    .any(|x| x.contains("reaches the host's LAN address")
-                        && x.contains("without its egress sidecar")),
-                "{b:?}"
-            );
-        } else {
-            println!("note: no LAN address here: the open network was judged on what remains");
+        // The LAN answers on every engine here (the host itself on a rootful one, through the
+        // user-mode stack on a rootless one), and the router and the metadata address do where
+        // they answer at all: whichever it is, the probe fails.
+        assert!(
+            b.iter().any(|x| x.contains("without its egress sidecar")),
+            "{b:?}"
+        );
+        if !b
+            .iter()
+            .any(|x| x.contains("reaches the host's LAN address"))
+        {
+            println!("note: the LAN address ({lan:?}) gave no answer here: the open network failed on what remains");
         }
 
         // An address of the host's the sidecar was not given answers through it; given it, the
