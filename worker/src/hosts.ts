@@ -92,6 +92,14 @@ export interface Lane { arch: Arch; mode: "native" | "emulated"; via?: string; p
 export interface HeldLane { arch: Arch; reason: string }
 /** A held lane's reason is shown as the agent wrote it, cut at this length. */
 export const HELD_REASON_MAX = 300;
+/** The sandboxed runtimes a host's agent finds (#330, design v2 §10.4; D43): gVisor's `runsc`, Kata Containers. */
+export const SANDBOX_KINDS = ["gvisor", "kata"] as const;
+/**
+ * The sandboxed runtime a host's community tasks on its native lane run in (#330): the engine's name for it, as `--runtime` takes
+ * it, and which sandbox it is. A container escape of a contributor's recipe then lands in its kernel, not on the host.
+ */
+export interface Sandbox { runtime: string; kind: (typeof SANDBOX_KINDS)[number] }
+const RUNTIME_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** A capacity report (design v2 §7.3, `run/capacity.json`), as the pool keeps it: the totals it can check, nothing it takes on trust. */
 export interface Capacity {
   cpus: number;
@@ -103,6 +111,13 @@ export interface Capacity {
   agent_slots: number | null;
   /** What the host said it runs; the pool's own count is unitsOf(). */
   units: number | null;
+  /**
+   * Its sandboxed runtime for community tasks (#330): `null` when it has none; absent from an agent before #330. For the host
+   * page: kept, never selected on.
+   */
+  sandbox?: Sandbox | null;
+  /** Why a sandboxed runtime its engine has, or its envelope names, is not used (#330), cut at HELD_REASON_MAX. */
+  sandbox_held?: string;
 }
 
 const num = (v: unknown, min: number, max: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
@@ -136,6 +151,15 @@ export function parseCapacity(v: unknown): Capacity | string {
       held.push({ arch: x.arch as Arch, reason: x.reason.trim().slice(0, HELD_REASON_MAX) });
     }
   }
+  // Its sandbox (#330): shown on the host page, never selected on — one that does not read is left out (as an agent before #330
+  // says nothing) rather than refuse the report it rides on.
+  const sb = c.sandbox as Record<string, unknown> | null | undefined;
+  const sandbox: Sandbox | null | undefined =
+    sb === null ? null
+    : sb && typeof sb === "object" && typeof sb.runtime === "string" && RUNTIME_NAME.test(sb.runtime) && SANDBOX_KINDS.includes(sb.kind as Sandbox["kind"])
+      ? { runtime: sb.runtime, kind: sb.kind as Sandbox["kind"] }
+      : undefined;
+  const sandboxHeld = typeof c.sandbox_held === "string" && c.sandbox_held.trim() ? c.sandbox_held.trim().slice(0, HELD_REASON_MAX) : undefined;
   return {
     cpus: c.cpus,
     mem_gb: c.mem_gb,
@@ -144,6 +168,8 @@ export function parseCapacity(v: unknown): Capacity | string {
     held_lanes: held,
     agent_slots: int(c.agent_slots, 0, 64) ? c.agent_slots : null,
     units: int(c.units, 0, 4096) ? c.units : null,
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(sandboxHeld === undefined ? {} : { sandbox_held: sandboxHeld }),
   };
 }
 

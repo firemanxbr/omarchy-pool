@@ -8,8 +8,10 @@
  * - The numbers: CPUs and memory, the units the pool counts from them, free
  *   disk on the work root and the engine's data root, and the agent slots —
  *   as its agent last reported them; its lanes (native, emulated); its
- *   isolation level; the release it applied against the pool's, and the last
- *   round's outcome.
+ *   isolation level and its sandboxed runtime (#330, design v2 §10.4; D43:
+ *   gVisor or Kata, which its community tasks on the native lane run in, or
+ *   none, with why one its engine has is not used); the release it applied
+ *   against the pool's, and the last round's outcome.
  * - Its leases: what its registration holds now, each with its lane and
  *   units (#337).
  * - The pool's cap on its units (#337, design v2 §7.2): its owner or any
@@ -173,6 +175,7 @@ const SCRIPT = String.raw`
   var ORDER_PILL = { open: ["warn", "waits for its agent"], done: ["ok", "done"], refused: ["fail", "refused"], failed: ["fail", "failed"], expired: ["na", "expired"], cancelled: ["na", "cancelled"] };
   var LEGACY_PILL = { running: ["warn", "running"], stopped: ["na", "stopped"], gone: ["na", "no container left"], retiring: ["warn", "being retired"], retired: ["ok", "retired"], unknown: ["na", "not seen"] };
   var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)};
+  var SANDBOX_KINDS = { gvisor: "gVisor", kata: "Kata Containers" };
   // A sleeping host (#329): what its sleep means for the pool, in the head's words.
   var SLEEPS = "the pool hands it nothing until it wakes, and a task the sleep caught goes back to the queue when its lease expires.";
   var H = null, PK = {}, TIMER = 0;
@@ -221,6 +224,7 @@ const SCRIPT = String.raw`
         kv("Host key", '<span class="mono">' + esc(h.fingerprint) + '</span>'),
         kv("Machine", esc((h.hostname || "?") + " · " + (h.os || "?") + " " + (h.arch || "?") + (h.page_kb ? ", " + h.page_kb + "K pages" : ""))),
         kv("Isolation", esc(h.isolation || "?") + (h.dedicated ? " (dedicated)" : "")),
+        kv("Sandbox", sandboxWords(h)),
         kv("Lanes", lanes || "—"),
         kv("Capacity", h.below_minimum ? esc(h.below_minimum) : c ? "meets the minimum to join" : "—"),
         kv("Pool cap", capWords(h)),
@@ -232,6 +236,18 @@ const SCRIPT = String.raw`
       ].join("");
     $("#hp-lease-rows").innerHTML = leases.map(function (t) { return '<tr><td><a href="/build/' + esc(t.id) + '">#' + esc(t.id) + '</a></td><td>' + esc(t.kind || "build") + (t.size > 1 ? " · size " + esc(t.size) : "") + '</td><td>' + esc(t.name) + (t.fenced ? ' ' + pillHtml("warn", "fenced", "stopped by the pool: back to the queue when its lease ends") : '') + '</td><td>' + esc(t.arch) + '</td><td>' + esc(t.lane || "—") + '</td><td>' + esc(t.units === null || t.units === undefined ? "—" : t.units) + '</td><td>' + when(t.started_at) + '</td></tr>'; }).join("") || '<tr><td colspan="7" class="muted">no lease — nothing runs on it now</td></tr>';
     endSkeleton();
+  }
+  // Its sandboxed runtime (#330, D43): which its community tasks on the native lane run in, so a container escape lands in the
+  // sandbox's kernel, not on the host; an emulated lane's run on the engine's own (its binfmt handler is the host kernel's).
+  function sandboxWords(h) {
+    var c = h.capacity || {}, s = c.sandbox;
+    var held = c.sandbox_held ? '<br><span class="muted">' + esc(c.sandbox_held) + '</span>' : "";
+    if (s === undefined) return '<span class="muted">its agent does not say (one before the sandbox, #330)</span>' + held;
+    if (s === null) return "none — its community tasks run on the engine's own runtime, at its isolation level" + held;
+    var lanes = h.lanes || [], native = lanes.filter(function (l) { return l.mode === "native"; }).map(function (l) { return l.arch; });
+    var emulated = lanes.filter(function (l) { return l.mode === "emulated"; }).map(function (l) { return l.arch; });
+    return esc((SANDBOX_KINDS[s.kind] || s.kind) + " (" + s.runtime + ")") + " — its community tasks on the " + esc(native.join(", ") || "native") + " lane run in it: a container escape lands in its kernel, not on the host"
+      + (emulated.length ? "; on its emulated " + esc(emulated.join(", ")) + " lane they run on the engine's own runtime" : "") + held;
   }
   // The pool's cap (#337): what the pool hands it at most, whatever its envelope says; none lets its count decide.
   function capWords(h) { return h.pool_cap_units === null || h.pool_cap_units === undefined ? '<span class="muted">none — its count decides</span>' : esc(String(h.pool_cap_units)) + " unit" + (h.pool_cap_units === 1 ? "" : "s") + (h.units !== null && h.units !== undefined ? " of its " + esc(String(h.units)) : ""); }
@@ -397,7 +413,7 @@ export function hostHtml(id: string, poolUrl: string, version: RunningVersion): 
   return page({
     path: `/hosts/${id}`,
     title: "Host · omarchy-pool",
-    description: "One maintainer host of the pool: its status and whether it sleeps, its capacity and units, its lanes and isolation level, the release it applied, its settings inside its envelope, its host orders, its legacy set and its leases.",
+    description: "One maintainer host of the pool: its status and whether it sleeps, its capacity and units, its lanes, isolation level and sandbox, the release it applied, its settings inside its envelope, its host orders, its legacy set and its leases.",
     active: "factory",
     body: BODY,
     script: SCRIPT,
@@ -414,10 +430,10 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.head-facts",
     page: `/hosts/${F.host}`,
     anchor: ['<p class="op-eyebrow">Host</p>', 'id="hp-name"', 'id="hp-status"', 'id="hp-lede"', 'id="hp-stats"', 'id="hp-kv"'],
-    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS"],
+    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Sandbox"', "function sandboxWords(h)", "c.sandbox_held", '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS"],
     reads: [
       { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.asleep", "host.asleep_since", "leases", "pool.version"] },
-      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
+      { path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.fingerprint", "host.capacity", "host.capacity.sandbox", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version"] },
       { path: "/api/v1/hosts/h_nobody0000", status: 404 },
     ],
     visible: EVERYONE,

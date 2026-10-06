@@ -494,7 +494,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   await env.DB.prepare(
     `INSERT INTO hosts (id, owner_login, owner_github_id, name, "where", pubkey, status, hostname, os, arch, page_kb, isolation, dedicated, capacity, lanes, units, agent_slots, disk_free, agent_version)
      VALUES (?, 'm1', 101, 'rack', 'a rack at home', ?, 'pending-owner', 'rack-1', 'linux', 'aarch64', 16, 'root', 1, ?, ?, 11, 2, '{"work":410,"engine":220}', '0.2.0')`,
-  ).bind(host, "A".repeat(42) + "E", JSON.stringify({ cpus: 12, mem_gb: 32, disk_free_gb: { work: 410, engine: 220 }, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: true }], agent_slots: 2, units: 11, below_minimum: null }), JSON.stringify([{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: true }])).run();
+  ).bind(host, "A".repeat(42) + "E", JSON.stringify({ cpus: 12, mem_gb: 32, disk_free_gb: { work: 410, engine: 220 }, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: true }], agent_slots: 2, units: 11, below_minimum: null, sandbox: { runtime: "runsc", kind: "gvisor" } }), JSON.stringify([{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: true }])).run();
 
   await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('cost_latest', ?)").bind(JSON.stringify({ estimated_at: "2026-09-16T12:00:00Z", status: "ok", month: "2026-09", month_to_date_usd: 8.86, projected_usd: 17.5 })).run();
 
