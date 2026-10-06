@@ -2,8 +2,9 @@
 # Every parser the agent runs on a signed bundle, a statement, an owner's
 # files or its own state, fuzzed for a short budget (design v2 §11.3): the
 # manifest, the statement, the bundle archive, the set template with its
-# override, and state.json with the pool's host state and the follow answer
-# of a pool from before it (#315, #344). Each
+# override, state.json with the pool's host state and the follow answer
+# of a pool from before it (#315, #344), and the maintainers' co-signature
+# (#330: the pinned policy and an armored SSH signature). Each
 # target starts from the crate's fixtures as its corpus; a crash, a leak or a
 # timeout fails the run and leaves the input under
 # crates/omarchy-agent/fuzz/artifacts/.
@@ -19,7 +20,7 @@ fixtures="$crate/tests/fixtures"
 corpus="$crate/fuzz/corpus"
 
 rm -rf "$corpus"
-mkdir -p "$corpus"/{manifest,statement,bundle,set,state}
+mkdir -p "$corpus"/{manifest,statement,bundle,set,state,cosignature}
 cp "$fixtures"/manifest/*.json "$corpus/manifest/"
 printf '%s' '{"schema":1,"seq":7,"to":"v1.13.4","retracts_through":"v1.14.2","issued":"2026-10-20T14:00:00Z","agent_to":null,"run":"https://github.com/firemanxbr/omarchy-pool/actions/runs/1"}' \
   >"$corpus/statement/example.json"
@@ -45,6 +46,15 @@ done
 # The template with its set.toml after the NUL: the target reads the second part as both.
 { cat "$fixtures/lint/host/compose.yml"; printf '\0'; cat "$fixtures/lint/host/set.toml"; } >"$corpus/set/with-set-toml.yml"
 
+# The co-signature's fixtures as the target reads them: a policy, NUL, a
+# signature, NUL, the bytes it signs.
+c="$fixtures/cosignature"
+for sig in "$c"/bundle.*.sshsig; do
+  { printf 'threshold = 1\n[keys]\nalice = "%s"\n' "$(cut -d' ' -f1,2 "$c/alice.pub")"; printf '\0'; cat "$sig"; printf '\0'; cat "$c/bundle"; } \
+    >"$corpus/cosignature/$(basename "$sig")"
+done
+{ printf '\0'; cat "$c/statement.json.alice.sshsig"; printf '\0'; cat "$c/statement.json"; } >"$corpus/cosignature/statement"
+
 cd "$crate"
 # cargo fuzz has no --locked: fail here if fuzz/Cargo.lock would have to change.
 cargo "+$toolchain" metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 >/dev/null
@@ -52,7 +62,7 @@ cargo "+$toolchain" metadata --locked --manifest-path fuzz/Cargo.toml --format-v
 # and a prebuilt cargo-fuzz (ci.yml's) is a musl binary: the sanitizers need the
 # toolchain's own host triple.
 host="$(rustc "+$toolchain" -vV | sed -n 's/^host: //p')"
-for target in manifest statement bundle set state; do
+for target in manifest statement bundle set state cosignature; do
   echo "fuzz: $target for ${seconds}s"
   cargo "+$toolchain" fuzz run --target "$host" "$target" "fuzz/corpus/$target" -- \
     -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=10 -print_final_stats=1 2>&1 | tail -n 12
