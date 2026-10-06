@@ -1927,7 +1927,7 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
 const learnsSize = (task: TaskRow): boolean =>
   task.kind === "build" && task.lease_gen !== null && !(task.trust === "project" && task.publish === 0 && jsonOr<{ review?: unknown }>(task.params, {}).review === undefined);
 
-/** A memory high-water mark a dispatcher reports with a build's completion (`ram_peak_mb`): whole MB from 1, else none (0 is a kernel without memory.peak). */
+/** A memory high-water mark a dispatcher reports with a build's completion (`ram_peak_mb`): whole MB from 1, else none (0 is a cgroup that measured none). */
 function peakOf(v: unknown): number | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 1 << 30 ? v : null;
 }

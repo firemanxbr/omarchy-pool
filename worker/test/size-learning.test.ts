@@ -331,6 +331,11 @@ describe("the package page (#330)", () => {
     const copy = { ...b, trust: "project" };
     d.setST({ ...st, chains: [{ contributor: copy }] });
     expect(d.buildPanel()).toContain('data-oom="1" data-retry-size="41" data-size="2" data-max="4">Retry at size 3</button>');
+    // No host alive runs size 2 now: it waits at 1, as the claim clamps it, and Retry at size has nothing larger to offer.
+    d.sizesAlive({ ...st, largest_size: 1 });
+    d.setST({ ...st, largest_size: 1, chains: [{ contributor: copy }] });
+    expect(d.buildMark(copy)).toEqual(["wait", "queued again", "out of memory at 4 GB (size 1); queued again at the same size"]);
+    expect(d.buildPanel()).not.toContain("data-retry-size");
     // A maintainer's size of 1 on the page wins: queued again at the same size, Retry at size offers 2.
     d.sizesAlive({ ...st, package: { ...st.package, sizing: { size: 1, disk_gb: 20, from: "page", disk_from: "page", learned: learnedAt } } });
     expect(d.buildMark(b)).toEqual(["wait", "queued again", "out of memory at 4 GB (size 1); queued again at the same size"]);
