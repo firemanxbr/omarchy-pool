@@ -27,6 +27,10 @@
 #   an address pool with host bits set, a work root that is a symlink.
 # - The firewall script, run against a stubbed iptables: its own chains
 #   flushed and rebuilt in order, the jumps added once.
+# - A TPM (/dev/tpmrm0, #330): tpm2-tools installed and the user in the tss
+#   group; again, nothing changes. Added while the user's manager runs: said
+#   under "needs a person" (exit 1), the manager not restarted. No TPM: no
+#   tpm2-tools, no tss.
 #
 # prep-root.sh runs as root on a real host: here its root check is lifted in
 # a copy, OMARCHY_PREP_FS points it at a temporary root, and pacman, apt-get,
@@ -47,7 +51,7 @@ stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$tmp/bin/$1"; chmod +x "$tmp
 log='echo "$(basename "$0") $*" >> "$STUB_LOG"'
 stub pacman "$log"
 stub apt-get "$log"
-stub usermod "$log"'; [[ "$1 $2" == "-aG docker" ]] && echo " docker" >> "$STATE/groups"'
+stub usermod "$log"'; [[ "$1" == -aG ]] && echo " $2" >> "$STATE/groups"'
 stub loginctl "$log"'; mkdir -p "$OMARCHY_PREP_FS/var/lib/systemd/linger"; touch "$OMARCHY_PREP_FS/var/lib/systemd/linger/$2"'
 stub btrfs "$log"'; mkdir -p "$3"'
 stub chown "$log"'; echo "$1" > "$STATE/owner"'
@@ -128,6 +132,8 @@ grep -qxF 'ExecStart=/usr/local/libexec/omarchy-task-firewall' "$tmp/fs/etc/syst
 logged "systemctl enable omarchy-task-firewall.service"
 logged "systemctl restart omarchy-task-firewall.service"
 not_logged "apt-get"
+not_logged "usermod -aG tss"
+grep -q tpm2-tools "$STUB_LOG" && fail "tpm2-tools on a machine with no TPM"
 only pacman systemctl usermod btrfs chown chmod loginctl
 before="$(tree)"
 
@@ -267,5 +273,31 @@ PATH="$tmp/ipt:$PATH" sh "$fw"; PATH="$tmp/ipt:$PATH" sh "$fw"
 [[ "$(grep -c -- '-F OMARCHY-TASKS$' "$tmp/ipt/log")" == 2 ]] || fail "firewall: its chain not flushed at each start"
 first="$(grep -n -- '-A OMARCHY-TASKS -s 10.232.0.0/16' "$tmp/ipt/log" | head -1)"
 [[ "$first" == *"-d 10.232.0.0/16 -j RETURN" ]] || fail "firewall: the subnet's own RETURN is not first: $first"
+
+# --- A TPM (#330): tpm2-tools, the tss group, before linger starts the user manager.
+fresh ubuntu x86_64 ext4
+mkdir -p "$tmp/fs/dev" && : > "$tmp/fs/dev/tpmrm0"
+prep --user omarchy --work-root "$wr" --runtime rootless
+[[ $status -eq 0 ]] || fail "a TPM: exit $status"
+logged "apt-get install -y --no-install-recommends qemu-user-static binfmt-support btrfs-progs jq podman uidmap tpm2-tools"
+logged "usermod -aG tss omarchy"
+logged "systemctl is-active --quiet user@1000.service"
+[[ "$(grep -n 'usermod -aG tss' "$STUB_LOG" | cut -d: -f1)" -lt "$(grep -n '^loginctl' "$STUB_LOG" | cut -d: -f1)" ]] \
+  || fail "a TPM: the tss group after linger"
+before="$(tree)"
+prep --user omarchy --work-root "$wr" --runtime rootless
+[[ $status -eq 0 && "$(tree)" == "$before" ]] || fail "a TPM, again: exit $status or files changed"
+not_logged "usermod"
+grep -q "omarchy is in it" "$tmp/out" || fail "a TPM, again: the tss group not said"
+# The user's manager already runs (linger was on): said, not restarted.
+fresh arch aarch64 btrfs
+mkdir -p "$tmp/fs/dev" && : > "$tmp/fs/dev/tpmrm0"
+touch "$STATE/active-user@1000"
+prep --user omarchy --work-root "$wr"
+[[ $status -eq 1 ]] || fail "a TPM, manager running: exit $status, want 1"
+logged "pacman -S --needed --noconfirm qemu-user-static qemu-user-static-binfmt btrfs-progs jq docker tpm2-tools"
+grep -q "needs a person" "$tmp/out" && grep -qF "systemctl restart user@1000.service (it stops omarchy's processes), or reboot" "$tmp/out" \
+  || fail "a TPM, manager running: not said"
+not_logged "systemctl restart user@"
 
 echo "prep-root.sh: every root-only step, idempotent, nothing else"

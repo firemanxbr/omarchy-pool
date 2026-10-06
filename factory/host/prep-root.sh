@@ -22,8 +22,12 @@
 #
 # Each step, idempotent (a second run changes nothing), and nothing else:
 #   1. packages: the runtime, qemu-user-static with its binfmt handlers,
-#      btrfs-progs, jq (and the runtime's service enabled)
-#   2. rootful: the user in the docker group
+#      btrfs-progs, jq (and the runtime's service enabled); tpm2-tools where
+#      the machine has a TPM (/dev/tpmrm0), for the host key (#330)
+#   2. rootful: the user in the docker group; a TPM: the user in the tss
+#      group, which opens /dev/tpmrm0 — before linger (7.) starts its user
+#      manager, which keeps the groups it started with; one already running
+#      is said under "needs a person" (restart it, or reboot)
 #   3. binfmt: the foreign architecture's qemu handler, with the F flag so
 #      containers use it (for the emulated lane, design v2 §7.5)
 #   4. rootful: docker's default address pools (daemon.json), so its own
@@ -141,14 +145,20 @@ case "$arch" in
   *) echo "prep-root.sh: $arch hosts are not supported" >&2; exit 2 ;;
 esac
 
+# A TPM behind the kernel's resource manager: the agent makes the host key in it (#330).
+tpm=0
+[[ -e "$fs/dev/tpmrm0" ]] && tpm=1
+
 echo "==> 1. packages ($distro, $runtime)"
 if [[ "$distro" == arch ]]; then
   pkgs=(qemu-user-static qemu-user-static-binfmt btrfs-progs jq)
   if [[ "$runtime" == rootful ]]; then pkgs+=(docker); else pkgs+=(podman); fi
+  if ((tpm)); then pkgs+=(tpm2-tools); fi
   run pacman -S --needed --noconfirm "${pkgs[@]}"
 else
   pkgs=(qemu-user-static binfmt-support btrfs-progs jq)
   if [[ "$runtime" == rootful ]]; then pkgs+=(docker.io); else pkgs+=(podman uidmap); fi
+  if ((tpm)); then pkgs+=(tpm2-tools); fi
   run apt-get update
   run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${pkgs[@]}"
 fi
@@ -161,6 +171,22 @@ if [[ "$runtime" == rootful ]]; then
   else
     run usermod -aG docker "$user"
     changed "$user added (a new login picks it up)"
+  fi
+fi
+
+if ((tpm)); then
+  echo "==> 2. the tss group (the TPM, where the host key is made)"
+  if id -nG "$user" | tr ' ' '\n' | grep -qx tss; then
+    echo "    $user is in it"
+  else
+    run usermod -aG tss "$user"
+    changed "$user added (a new login picks it up)"
+    # The user manager runs the agent's service and keeps the groups it started with: one
+    # already running (linger on, or a login open) never opens the TPM until it restarts.
+    uid="$(id -u "$user")"
+    if systemctl is-active --quiet "user@$uid.service"; then
+      attention+=("tss: $user's user manager already runs, without the group: systemctl restart user@$uid.service (it stops $user's processes), or reboot, so the agent's service opens the TPM")
+    fi
   fi
 fi
 
