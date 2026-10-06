@@ -724,9 +724,12 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   compromised pool skip the soak; the agent's own update waits with it
   unless the signed manifest sets `agent.urgent` (only a security release
   does). Nothing the pool sends skips it (`reconcile-now`, an Update); a
-  rollback statement does, since only `rollback.yml` signs one, and the
-  soaking host still learns each verified release's `revoked` and
-  `min_release` while it waits. The pool keeps a soaking host's
+  rollback statement does, since only `rollback.yml` signs one — under the
+  rollback rules above as ever, so one deeper than 14 days still needs the
+  maintainers' co-signature (#330) — and the soaking host still learns each
+  verified release's `revoked` and `min_release` while it waits. The soak
+  only delays: a release without the co-signature the agent requires is
+  refused, soaking or not, and moves neither. The pool keeps a soaking host's
   registration out of the 426 gate until the soak its agent reports ends,
   15 minutes more for the round, never more than two hours after the
   deploy and not at all while the host holds the pool's release in

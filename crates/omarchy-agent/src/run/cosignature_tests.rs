@@ -1,8 +1,9 @@
 //! #330's acceptance criteria in the run loop, against the fake engine and pool: a bundle
 //! without the maintainers' co-signature is refused once the agent requires it (1-of-N and
 //! 2-of-N, a wrong key, someone not pinned, GitHub not answering), a higher agent is not
-//! taken from one, a rollback statement deeper than 14 days is taken only with it, and a
-//! co-signed statement does not wait for GitHub to answer for the bundle's.
+//! taken from one, a rollback statement deeper than 14 days is taken only with it, a
+//! co-signed statement does not wait for GitHub to answer for the bundle's, and the
+//! owner's soak (#326) delays only what these rules admit.
 
 use crate::run::fake::{
     cosign, cosign_statement, publish, publish_agent, relay_statement, Ships, World, T0,
@@ -454,4 +455,95 @@ fn a_co_signed_rollback_to_a_cached_release_goes_while_github_does_not_answer() 
     assert!(w.remote.borrow().asked_if_any.len() > asked);
     assert_eq!(w.applied().as_deref(), Some("v1.0.0"), "{:?}", w.outcome());
     assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+}
+
+#[test]
+fn the_owners_soak_delays_only_what_the_co_signature_rules_admit() {
+    // #326's soak beside #330: a release that soaked is checked as any once its soak ends,
+    // and a rollback statement, which skips the soak, still meets the 14-day rule.
+    let mut w = World::running_v1();
+    let alice = TestKey::ed25519("alice", 1);
+    let bob = TestKey::ecdsa("bob");
+    *w.cosign.borrow_mut() = policy(1, &[&alice, &bob]);
+    w.agent.cfg.policy.soak_minutes = 30;
+    let settle = |w: &mut World| {
+        for _ in 0..400 {
+            if w.step() == "idle" {
+                return;
+            }
+            w.tick(3);
+        }
+        panic!("the round did not end: {:?}", w.agent.state.rollout);
+    };
+
+    // v1.1.0 without a co-signature: refused while it soaks, and again once its soak is
+    // over — the soak waited, it vouched for nothing.
+    w.release("v1.1.0");
+    w.target("v1.1.0", None);
+    w.poll();
+    let named = w.now;
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "refused", "{detail}");
+    assert!(detail.contains("refused (cosignature)"), "{detail}");
+    assert_eq!(
+        w.agent.state.soak.as_ref().map(|s| s.until),
+        Some(named + 1800)
+    );
+    for _ in 0..32 {
+        w.tick(60);
+    }
+    assert!(w.now > named + 1800);
+    w.poll();
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "refused", "{detail}");
+    assert!(detail.contains("refused (cosignature)"), "{detail}");
+    assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
+
+    // Alice co-signs it: past its soak, the next poll takes it.
+    cosign(&w.remote, "v1.1.0", &alice);
+    w.poll();
+    settle(&mut w);
+    assert_eq!(w.applied().as_deref(), Some("v1.1.0"), "{:?}", w.outcome());
+
+    // v1.2.0, co-signed, lands: co-signed or not, it waits for the soak.
+    w.release("v1.2.0");
+    cosign(&w.remote, "v1.2.0", &alice);
+    w.target("v1.2.0", None);
+    w.poll();
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "held", "{detail}");
+    assert!(
+        detail.starts_with("v1.2.0 waits for the owner's soak"),
+        "{detail}"
+    );
+
+    // During that soak rollback.yml goes back 20 days, to v1.0.1: the statement skips the
+    // soak, not the depth rule — refused without a maintainer's co-signature over it.
+    publish(
+        &w.remote,
+        "v1.0.1",
+        "2026-12-26T08:00:00Z",
+        "v1.0.0",
+        &[],
+        "",
+    );
+    relay_statement(&w.remote, 5, "v1.0.1", "v1.2.0", b"signed");
+    w.target("v1.0.1", None);
+    w.poll();
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "refused", "{detail}");
+    assert!(detail.contains("refused (statement-too-deep)"), "{detail}");
+    assert_eq!(w.agent.state.statement_seq, None);
+    assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
+
+    // Alice co-signs the statement: applied at once, its soak gone; v1.0.1's own bundle,
+    // published without one, is vouched for by the statement.
+    cosign_statement(&w.remote, "v1.0.1", &alice);
+    w.poll();
+    assert!(w.agent.state.rollout.rollback, "{:?}", w.outcome());
+    settle(&mut w);
+    assert_eq!(w.applied().as_deref(), Some("v1.0.1"), "{:?}", w.outcome());
+    assert_eq!(w.agent.state.floor, r("v1.0.1"));
+    assert_eq!(w.agent.state.statement_seq, Some(5));
+    assert_eq!(w.agent.state.soak, None);
 }

@@ -1522,13 +1522,17 @@ round after it fit inside the pool's two-hour grace), then
 the pool names above the one that runs waits that long from when the agent
 first saw the pool name it (its own clock, kept in `state.json` across
 restarts); its bundle is fetched and verified meanwhile, so the host still
-learns of a revocation. A newer release named meanwhile waits its own soak
+learns of a revocation, and one without the maintainers' co-signature the
+agent requires is refused then, not when the soak ends (*Co-signing a
+release*, #330). A newer release named meanwhile waits its own soak
 from then, but the soak never keeps the host more than 100 minutes behind
 the release it ran when it fell behind: when releases land faster than the
 soak, the one named then is taken at that bound. The last round says `held`
 with `… waits for the owner's soak until <time>`, once; `omarchy-agent
 status` says `soak:` with the seconds left. What the soak does not hold: a
-rollback statement (applied at once, as everywhere), a round to the release
+rollback statement (applied at once, as everywhere, under the same rules: one
+that goes back more than 14 days needs a maintainer's co-signature over it),
+a round to the release
 that runs (a changed input, drift), and the first release a host applies.
 What never skips it: **Reconcile now**, an Update order, `omarchy-agent
 round`. The agent a release ships waits with it unless the manifest sets
