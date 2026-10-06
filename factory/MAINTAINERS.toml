@@ -29,6 +29,27 @@
 # other's. Added 2026-09-17.
 maintainers = ["firemanxbr", "maralcbr"]
 
+# The solo-maintainer exception (#394, a maintainer decision of 2026-10-06).
+# While this table is here, the one maintainer it names builds, reviews and
+# approves their own packages: the review's doors (claim, approve with their
+# passkey, request changes, reject, release, cancel), the adoption of their
+# own package and the requester-host rule (D35: their own host builds the
+# project's copy, with no release) let them through, where the two-person
+# rule would answer conflict_of_interest. Nothing is hidden: every decision
+# taken this way carries `solo_exception` in its signed record, says
+# "self-reviewed (solo-maintainer exception)" in the journal, and is marked
+# on Review, the build and package pages and Status, which lists them
+# (/docs/governance#solo). Every other maintainer keeps the rules as they
+# are, and nobody decides on anyone else's package differently. It ends by
+# deleting this table in a pull request like any other change here: the next
+# sync brings the two-person rule back for everyone, unchanged.
+# factory/bin/check-governance refuses a table that is not exactly this: one
+# maintainer of the list, a date written "YYYY-MM-DD", a reason on one line.
+[solo]
+maintainer = "firemanxbr"
+since = "2026-10-06"
+reason = "maralcbr has no time or machines for the pool (#332): one active maintainer and one host until more maintainers join"
+
 # The maintainers' co-signature (#330, design v2 D1 b and D25). Beside
 # release.yml's keyless signature, every host bundle a host agent takes
 # carries the signature of `threshold` of the keys below, and a rollback
