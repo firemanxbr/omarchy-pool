@@ -833,9 +833,12 @@ pub(crate) fn measure_as(
     // earlier install's owner may have set: absent tries what the engine has.
     let sandbox = match envelope::envelope_value(ex, "sandbox") {
         None => Ok(capacity::sandbox::Setting::Auto),
-        Some(v) => capacity::sandbox::Setting::parse(Some(v.as_str().unwrap_or("")))
-            .map_err(|e| format!("{e}; nothing was changed")),
-    };
+        Some(toml::Value::String(s)) => capacity::sandbox::Setting::parse(Some(&s)),
+        Some(v) => Err(format!(
+            "agent.toml: [envelope] sandbox = {v} is not \"auto\", \"off\" or a runtime's name"
+        )),
+    }
+    .map_err(|e| format!("{e}; nothing was changed"));
     let sandbox = sandbox.unwrap_or_else(|e| {
         r.blockers.push(e);
         capacity::sandbox::Setting::Off

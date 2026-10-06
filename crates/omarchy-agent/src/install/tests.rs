@@ -1875,7 +1875,11 @@ fn preflight_says_the_sandbox_and_never_stops_on_one_it_cannot_use() {
 
     // The owner's envelope from an earlier install turns it off: nothing is run for it; one
     // that does not read stops the install with its words.
-    for (envelope, ok) in [("sandbox = \"off\"", true), ("sandbox = \"Runsc\"", false)] {
+    for (envelope, ok) in [
+        ("sandbox = \"off\"", true),
+        ("sandbox = \"Runsc\"", false),
+        ("sandbox = true", false),
+    ] {
         let h = host(INFO_RUNSC, EGRESS_OK);
         fs::write(h.root.join("uname"), "4.19.0-gvisor\n").unwrap();
         fs::create_dir_all(h.root.join("data")).unwrap();
@@ -1893,7 +1897,8 @@ fn preflight_says_the_sandbox_and_never_stops_on_one_it_cannot_use() {
         assert_eq!(r.ok(), ok, "{}", r.screen());
         if !ok {
             assert!(
-                r.screen().contains("[envelope] sandbox = \"Runsc\""),
+                r.screen()
+                    .contains(&format!("[envelope] {envelope} is not")),
                 "{}",
                 r.screen()
             );
