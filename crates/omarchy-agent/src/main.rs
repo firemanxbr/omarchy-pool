@@ -4,6 +4,8 @@
 //! ```text
 //! omarchy-agent verify --bundle <omarchy-host-vX.Y.Z.tar.gz> --sig <bundle.sigstore.json>
 //! omarchy-agent verify --statement <statement.json> --sig <bundle.sigstore.json>
+//!     (and the maintainers' co-signatures found beside the file, `<file>.<login>.sshsig`
+//!     for each maintainer this agent pins, #330: said, never a refusal by hand)
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
 //!     (<dir>/compose.yml and <dir>/set.toml)
 //! omarchy-agent capacity [--envelope <agent.toml>] [--work-root <dir>] [--docker <cli>]
@@ -67,6 +69,7 @@ use omarchy_agent::enroll::{self, Failure, Options, Paths};
 use omarchy_agent::install;
 use omarchy_agent::lint::{self, Engine, Envelope};
 use omarchy_agent::run;
+use omarchy_agent::verify::cosignature::{self, Policy};
 use omarchy_agent::verify::{self, BundleOutcome, StatementOutcome};
 
 const USAGE: &str = "usage:
@@ -163,6 +166,25 @@ fn read(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{path}: {e}"))
 }
 
+/// The maintainers' co-signatures of `path` this agent pins, from the files beside it
+/// (`<path>.<login>.sshsig`: `ssh-keygen -Y sign`'s `<path>.sig`, renamed for its
+/// signer), checked over the file in `namespace` (#330).
+fn cosignatures_beside(path: &str, namespace: &str) -> Result<cosignature::Cosigned, String> {
+    let policy = Policy::pinned();
+    if policy.logins().next().is_none() {
+        return Ok(cosignature::Cosigned::default());
+    }
+    let message = read(path)?;
+    let found = policy
+        .logins()
+        .filter_map(|login| {
+            let sig = std::fs::read(cosignature::file_name(path, login)).ok()?;
+            Some((login.to_owned(), sig))
+        })
+        .collect();
+    Ok(policy.check(namespace, &message, &found))
+}
+
 fn verify_cmd(args: &[String]) -> Result<u8, String> {
     let mut rest = Vec::new();
     let f = flags(args, &["--bundle", "--statement", "--sig"], &mut rest)?;
@@ -175,6 +197,11 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
         (Some(path), None) => match verify::bundle(&read(path)?, &sig) {
             Ok(BundleOutcome::Current(b)) => {
                 let m = b.manifest();
+                let need = Policy::pinned().threshold();
+                let c = cosignatures_beside(path, cosignature::BUNDLE_NAMESPACE)?;
+                if let Err(why) = c.require(need, "this bundle") {
+                    eprintln!("not yet what a host takes: {why}");
+                }
                 let line = serde_json::json!({
                     "verified": "bundle",
                     "sha256": b.sha256(),
@@ -184,6 +211,7 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
                     "min_agent": m.outer().min_agent().to_string(),
                     "signer": b.signer().identity(),
                     "signed_at": b.signer().signed_at(),
+                    "cosignatures": {"required": need, "by": c.by(), "refused": c.refused()},
                 });
                 println!("{line}");
                 Ok(0)
@@ -201,6 +229,7 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
         (None, Some(path)) => match verify::statement(&read(path)?, &sig) {
             Ok(StatementOutcome::Current(s)) => {
                 let st = s.statement();
+                let c = cosignatures_beside(path, cosignature::ROLLBACK_NAMESPACE)?;
                 let line = serde_json::json!({
                     "verified": "statement",
                     "seq": st.seq(),
@@ -209,6 +238,7 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
                     "agent_to": st.agent_to().map(|v| v.to_string()),
                     "signer": s.signer().identity(),
                     "signed_at": s.signer().signed_at(),
+                    "cosignatures": {"deeper_than_14_days_needs": Policy::pinned().deep_rollback(), "by": c.by(), "refused": c.refused()},
                 });
                 println!("{line}");
                 Ok(0)

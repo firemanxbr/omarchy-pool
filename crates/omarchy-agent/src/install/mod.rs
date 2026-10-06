@@ -67,6 +67,7 @@ pub(crate) mod unit;
 
 pub use sys::Machine;
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -77,7 +78,7 @@ use crate::enroll;
 use crate::host::{HostKey, Identity, KEY_FILE};
 use crate::manifest::Manifest;
 use crate::run::{tools, Verifier};
-use crate::verify::BundleOutcome;
+use crate::verify::{cosignature, BundleOutcome};
 use crate::version::Release;
 
 pub use checks::Report;
@@ -305,6 +306,9 @@ pub trait Sys {
     fn github_scopes(&mut self, token: &str) -> Result<Option<String>, String>;
     /// A release asset or a pinned tool, over HTTPS.
     fn download(&mut self, url: &str) -> Result<Vec<u8>, String>;
+    /// The same for an asset the release may not carry (a maintainer's co-signature,
+    /// #330): `Ok(None)` when the server answers 404, an error when it does not answer.
+    fn download_if_any(&mut self, url: &str) -> Result<Option<Vec<u8>>, String>;
 }
 
 #[derive(Debug)]
@@ -352,11 +356,27 @@ fn say(out: &mut dyn Write, line: &str) {
     let _ = writeln!(out, "omarchy-agent: {line}");
 }
 
-/// The verified release: its manifest.
+/// The verified release: its manifest, once it carries the maintainers' co-signatures
+/// this agent requires (#330, D1 b): the release's `<bundle>.<login>.sshsig` assets, or the
+/// files of those names beside `--bundle`.
 fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Manifest, Failure> {
+    let policy = verifier.cosignature();
+    let mut cosignatures = BTreeMap::new();
     let (archive, sig) = match &o.source {
         Some(Source::Files(b, s)) => {
             let read = |p: &Path| std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
+            if policy.threshold() > 0 {
+                let name = b.file_name().map(|n| n.to_string_lossy().into_owned());
+                for login in policy.logins() {
+                    let beside = b.with_file_name(cosignature::file_name(
+                        name.as_deref().unwrap_or_default(),
+                        login,
+                    ));
+                    if let Ok(found) = std::fs::read(beside) {
+                        cosignatures.insert(login.to_owned(), found);
+                    }
+                }
+            }
             (
                 read(b).map_err(Failure::Refused)?,
                 read(s).map_err(Failure::Refused)?,
@@ -365,6 +385,24 @@ fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Ma
         Some(Source::Release(r)) => {
             let (name, sig) = crate::run::bundle_names(*r);
             let url = |n: &str| format!("{}/{r}/{n}", crate::run::RELEASES);
+            if policy.threshold() > 0 {
+                // One a maintainer did not make answers 404, which counts as none; GitHub not
+                // answering is said as that, never as a release without its co-signature.
+                for login in policy.logins() {
+                    let asset = url(&cosignature::file_name(&name, login));
+                    match sys.download_if_any(&asset) {
+                        Ok(Some(found)) => {
+                            cosignatures.insert(login.to_owned(), found);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            return Err(Failure::Refused(format!(
+                                "GitHub did not answer for the maintainers' co-signature {asset}: {e}; run it again"
+                            )))
+                        }
+                    }
+                }
+            }
             (
                 sys.download(&url(&name)).map_err(Failure::Refused)?,
                 sys.download(&url(&sig)).map_err(Failure::Refused)?,
@@ -376,8 +414,19 @@ fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Ma
             ))
         }
     };
+    let cosigned = || {
+        policy
+            .check(cosignature::BUNDLE_NAMESPACE, &archive, &cosignatures)
+            .require(policy.threshold(), "the release bundle")
+            .map_err(|e| {
+                Failure::Refused(format!("the release bundle is refused (cosignature): {e}"))
+            })
+    };
     match verifier.bundle(&archive, &sig) {
-        Ok(BundleOutcome::Current(b)) => Ok(b.manifest().clone()),
+        Ok(BundleOutcome::Current(b)) => {
+            cosigned()?;
+            Ok(b.manifest().clone())
+        }
         Ok(BundleOutcome::NeedsNewerAgent { why, .. }) => Err(Failure::NeedsNewerAgent(format!(
             "needs a newer agent: {why}"
         ))),

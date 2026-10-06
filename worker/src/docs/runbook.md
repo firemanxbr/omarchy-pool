@@ -147,8 +147,13 @@ A release is `main` at the moment a maintainer dispatches one
    then added to the draft with the agent binaries and `install.sh`; only then
    is the release published, which makes it immutable
    (`factory/bin/publish-release` checks every asset is there, with the bytes
-   the run made, first). A release that stops before then stays a draft, the
-   pool stays on the previous release, and so does every host.
+   the run made, first). Once `factory/MAINTAINERS.toml` sets a co-signature
+   threshold (#330), it also waits for the maintainers' co-signatures of the
+   host bundle, which each maintainer adds to the draft offline (*Co-signing
+   a release*, below): without them the job fails and the release stays a
+   draft until they are there and the job is re-run. A release that stops
+   before then stays a draft, the pool stays on the previous release, and so
+   does every host.
 5. **This is when hosts move** (#359): once the release is published, one
    job (`worker-image-tags`) moves `:x86_64` and `:aarch64` to the version's
    images, then `:latest`, each signed; it runs in the `release`
@@ -200,7 +205,8 @@ statement (#314) before anything moves and stores it in R2 once that Worker
 is deployed (`rollback/<to>.json` and its `.sigstore.json` in
 `omarchy-packages`, relayed at `GET /api/v1/factory/rollback/<to>`): a host
 under the host agent goes below its floor only on one, within 14 days of the
-target's release (security-model, *Rollback statements*). A statement that
+target's release — deeper only once maintainers co-signed the statement
+(*Co-signing a release*, #330) — (security-model, *Rollback statements*). A statement that
 did not reach R2 fails the run after the rest is done; running it again
 stores a freshly signed one. The updaters follow the
 pool's release down as they follow it up, within two minutes, and so do the
@@ -552,6 +558,7 @@ Every release carries what a maintainer host takes from it (#311, design v2
 |---|---|
 | `omarchy-host-vX.Y.Z.tar.gz` | `manifest.json` and every set under `sets/<name>/`: `factory/sets/host` with the worker image and the task build images rendered to digests |
 | `omarchy-host-vX.Y.Z.tar.gz.sigstore.json` | its keyless signature (a Sigstore bundle) by `release.yml` on main |
+| `omarchy-host-vX.Y.Z.tar.gz.<login>.sshsig` | a maintainer's co-signature (#330): their FIDO security key's `ssh-keygen -Y sign` over the bundle, added to the draft by hand (*Co-signing a release*); as many as `MAINTAINERS.toml`'s threshold, none while it is 0 |
 | `omarchy-agent-x86_64-linux-musl`, `omarchy-agent-aarch64-linux-musl`, `omarchy-agent-aarch64-darwin` | the agent, the same bytes as long as the agent does not change; their provenance is attested |
 | `install.sh` | the one command, with that release's agent version and the three binaries' SHA-256 embedded; its provenance is attested |
 | `build-images.json` | the task build images by digest (#312), attached when the draft is created: the same two the bundle's `inner.images.build` names and its host set's dispatcher is given |
@@ -614,6 +621,140 @@ days before it publishes anything. An earlier agent runs only once
 `gh attestation verify` proved it came from `release.yml` on `refs/heads/main`
 (a release that ships any other one stops, for a person to look), and in a
 job of its own that holds no signing identity and no token that writes.
+`verify` also says which maintainers' co-signatures it found beside the file
+(`<file>.<login>.sshsig`) and how many its agent requires; it refuses
+nothing for them by hand (the release verifies before anyone co-signs), while
+the run loop and install refuse a bundle without them.
+By hand, with OpenSSH: `factory/bin/co-sign signers factory/MAINTAINERS.toml
+> allowed_signers`, then `ssh-keygen -Y verify -f allowed_signers -I <login>
+-n host-bundle@omarchy-pool.org -s omarchy-host-$v.tar.gz.<login>.sshsig <
+omarchy-host-$v.tar.gz` (it does not check the touch flag; the agent does).
+
+### Co-signing a release
+
+The maintainers' co-signature (#330, design v2 D1 b; security model, *The
+maintainers' co-signature*): beside `release.yml`'s keyless signature, a
+host takes a bundle only once `threshold` maintainers signed it offline with
+a FIDO security key, and a rollback statement deeper than 14 days only once
+at least one did. The keys and the threshold are `factory/MAINTAINERS.toml`'s
+`[cosignature]`; the agent pins them from it at build time
+(`crates/omarchy-agent/src/verify/maintainers.toml`, written by
+`factory/bin/check-governance --write`), so it is the agent of a release, not
+the pool, that requires them.
+
+**Once per maintainer: a key.** On the laptop, with the security key
+plugged in (OpenSSH 8.2 or later; a key without Ed25519 support takes
+`-t ecdsa-sk`):
+
+```bash
+ssh-keygen -t ed25519-sk -C "$(gh api user --jq .login)@security-key" -f ~/.ssh/id_ed25519_sk
+cat ~/.ssh/id_ed25519_sk.pub     # the line that goes into MAINTAINERS.toml
+```
+
+Add it under `[cosignature.keys]` as `<login> = "<that line>"` in a pull
+request, with `factory/bin/check-governance --write` (it rewrites the agent's
+pin) and the agent's version raised (`crates/omarchy-agent/Cargo.toml`; CI's
+`agent-version-check` says so). Keys may come with the threshold still at
+0: bundles are not asked for anything yet, and a deep rollback can already
+be co-signed.
+
+**A backup key.** A second security key, made the same way (`-f
+~/.ssh/id_ed25519_sk_backup`) and kept apart from the first, goes beside it
+as a list: `<login> = ["<first line>", "<backup line>"]`. A signature by
+either is that maintainer's one co-signature (it never counts twice). Keep
+the backup in a safe place; it is what lets you replace a lost or broken key
+without a visit to every host.
+
+**Switching it on** is a pull request that sets `threshold = 1` (1-of-N) or
+`2` (2-of-N), the same `--write` and version raise, approved by another
+maintainer. The release that carries it is the first one asked for
+co-signatures: its new agent requires them, and so does
+`publish-release`. Every agent requires its own pinned policy of the next
+release, so a release that changes the policy is always co-signed under the
+old one (`publish-release` checks this release's policy, the latest
+published release's whatever its age, and that of every release of the last
+30 days, whose agents verify the bundle before they update).
+
+That is why **a lost key must never strand the threshold**. With as many
+maintainers required as hold a key (2-of-2 with the project's two
+maintainers, or 1-of-1), a maintainer whose only key is lost can never
+co-sign under the old pin again: every host would refuse every later release
+(`refused (cosignature)`) until it is reinstalled. `check-governance` refuses
+such a table: keep the threshold below the number of maintainers with a key
+(1-of-2), or give every one of them a backup key (2-of-2 with two keys
+each).
+
+**Rotating a key, or replacing a lost one,** takes two releases, one change
+each, so each is co-signed under the pin before it:
+
+1. A release that adds the new key beside the old (`<login> = ["<old>",
+   "<new>"]`), co-signed with a key the agents already pin: the old one, the
+   backup, or the other maintainers' under 1-of-N. A lost key stays listed
+   here; nobody can sign with it.
+2. Once that release is out, one that drops the old key, co-signed with the
+   new.
+
+Never change two keys a co-signature needs in one release. Lowering the
+threshold is one release too (co-signed under the old threshold); raising
+it, likewise.
+
+**Each release.** The release run stops at *Publish the release* with
+`vX.Y.Z lacks the maintainers' co-signature its agents require; it stays a
+draft`. Each maintainer who co-signs runs, from a checkout of `main`, with
+`gh` signed in and `omarchy-agent` (or `cosign`) installed:
+
+```bash
+factory/bin/co-sign release vX.Y.Z      # --key <file> when the key is not ~/.ssh/id_ed25519_sk or id_ecdsa_sk
+```
+
+It downloads the draft's bundle, checks `release.yml`'s signature, shows the
+manifest (release, created, agent, `min_release`, `revoked`, pools) and the
+archive's SHA-256, signs it with `ssh-keygen -Y sign -n
+host-bundle@omarchy-pool.org` after a touch, checks the signature against
+your key in `MAINTAINERS.toml`, and uploads
+`omarchy-host-vX.Y.Z.tar.gz.<login>.sshsig` to the draft. Once enough have,
+**Re-run failed jobs** on the release run (`gh run rerun <run> --failed`):
+`publish-release` verifies every co-signature (with `ssh-keygen` and the
+touch flag), publishes the release and the run goes on to the tags and the
+deploy. A run re-run more than 30 days after it started cannot be: dispatch
+a new release instead (the draft is made again).
+
+**A rollback deeper than 14 days** (or one whose target was published before
+the threshold rose, which carries no bundle co-signature: an immutable
+release takes no asset later) needs the statement co-signed. Dispatch
+`rollback.yml` as usual; hosts refuse the statement (`statement-too-deep`, or
+`cosignature`) and stay where they are. Then each co-signing maintainer, with
+their pool token (their page, *Token*):
+
+```bash
+OMARCHY_TOKEN=omc_... factory/bin/co-sign rollback vX.Y.Z
+```
+
+It fetches the statement the pool relays, checks `rollback.yml`'s signature,
+shows it, signs it with `ssh-keygen -Y sign -n rollback@omarchy-pool.org`
+and hands it to the pool (`PUT /api/v1/factory/rollback/vX.Y.Z/cosignature`),
+which relays it beside the statement: hosts take it at their next poll. A
+re-run of `rollback.yml` signs a new statement, and it needs co-signing
+again.
+
+The pool keeps a co-signature beside the statement it signed only:
+`co-sign` names it by SHA-256, and when `rollback.yml` signed another since
+you fetched yours the pool answers 409 (*signed again since you fetched it*):
+run `co-sign rollback` again, on the new statement.
+
+**On a host**, a bundle refused for want of co-signatures says `refused
+(cosignature)` with the count and each signature that did not verify; the
+co-signatures are asked of GitHub (`<bundle>.<login>.sshsig`, for every
+maintainer the agent pins) and kept beside the cached bundle. GitHub not
+answering is `pool-unreachable`, never a refusal (install says *GitHub did
+not answer*, and is run again). A rollback target published before the
+threshold rose is refused with *or the rollback statement to it does
+(factory/bin/co-sign rollback vX.Y.Z)*: it is the statement that takes more
+co-signatures, never the published release. Once a host accepted a
+co-signed statement, a round to its target that did not finish (a pull, the
+tools, a quarantine) is tried again under the same co-signatures. A
+statement co-signed enough waits for nothing GitHub has: its rollback to a
+cached bundle goes, and is tried again, while GitHub does not answer.
 
 ### Installing a host
 
@@ -1150,7 +1291,7 @@ engine leave the round at `engine-unreachable` until a newer release.
 | `ok`, `no-change` | the set runs the target |
 | `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again); or the release waits for the owner's soak (`… waits for the owner's soak until …`, #326, *Soak* below) |
 | `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
-| `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep`, `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
+| `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep` (deeper than 14 days without the maintainers' co-signature over the statement), `cosignature` (the bundle lacks the co-signatures this agent pins, #330), `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
 | `engine-unreachable`, `pull-failed` | nothing changes; the step or the next poll tries again |
 | `needs-newer-agent` | the release needs an agent this one is not and the update to it did not happen (why is in `detail`; *Self-update*, below) |
@@ -1445,13 +1586,17 @@ round after it fit inside the pool's two-hour grace), then
 the pool names above the one that runs waits that long from when the agent
 first saw the pool name it (its own clock, kept in `state.json` across
 restarts); its bundle is fetched and verified meanwhile, so the host still
-learns of a revocation. A newer release named meanwhile waits its own soak
+learns of a revocation, and one without the maintainers' co-signature the
+agent requires is refused then, not when the soak ends (*Co-signing a
+release*, #330). A newer release named meanwhile waits its own soak
 from then, but the soak never keeps the host more than 100 minutes behind
 the release it ran when it fell behind: when releases land faster than the
 soak, the one named then is taken at that bound. The last round says `held`
 with `… waits for the owner's soak until <time>`, once; `omarchy-agent
 status` says `soak:` with the seconds left. What the soak does not hold: a
-rollback statement (applied at once, as everywhere), a round to the release
+rollback statement (applied at once, as everywhere, under the same rules: one
+that goes back more than 14 days needs a maintainer's co-signature over it),
+a round to the release
 that runs (a changed input, drift), and the first release a host applies.
 What never skips it: **Reconcile now**, an Update order, `omarchy-agent
 round`. The agent a release ships waits with it unless the manifest sets
