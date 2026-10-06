@@ -13,7 +13,7 @@ import { isRevoked, lastGoodMessage, updateMessage, updateState, type UpdateStat
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, requeueRevoked, revokedRefusal, stopError } from "../lease";
-import { asleepNow, freshSince, parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, MIN_HOST, REVERTED_COLUMNS, revertedOf, TASK_UNITS, type Capacity, type HostClaimRow, type RevertedColumns } from "../hosts";
+import { asleepNow, freshSince, parseCapacity, poolJobsOn, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, MIN_HOST, REVERTED_COLUMNS, revertedOf, TASK_UNITS, type Capacity, type HostClaimRow, type RevertedColumns } from "../hosts";
 import { largestSize, ownerCap, ownersLeased, placementOf, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
@@ -1346,13 +1346,16 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // A host's registration (#322, design v2 §6.2, §6.4): its host suspended or retired, or its owner no longer a maintainer — the owner's id
   // joined with the list at this very claim, between two syncs too — claims nothing, and is told why. Its running leases are not this
   // door's: a suspension fenced them; a removal lets them finish and upload. One read by the primary key, for host registrations only.
-  // What its host's reports say of a release it reverted rides the same read (#342): the update gate below weighs it.
+  // What its host's reports say of a release it reverted rides the same read (#342): the update gate below weighs it. So does whether the
+  // maintainers let it take pool jobs yet (#340, the `host-pool-jobs` setting).
   let reverted: ReturnType<typeof revertedOf> = null;
+  let poolJobs = false;
   if (actor.w.host_id) {
     const h = await env.DB.prepare(HOST_CLAIM_SQL).bind(actor.w.host_id).first<HostClaimRow>();
     const no = h ? hostClaimRefusal(h) : { code: "host_status", error: "its host is gone" };
     if (no) return json(no, 403);
     reverted = revertedOf(h);
+    poolJobs = poolJobsOn(h!.pool_jobs, { worker: workerId, name: h!.name });
   }
   const trust = actor.w.trust === "project" ? "project" : "community";
   // What this worker may claim. Project trust takes any kind it declares,
@@ -1364,8 +1367,8 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // anyone's, so a contributor never ends up building strangers' packages
   // by accident. Community results never reach the pool either way.
   const wanted = (Array.isArray(b.kinds) ? b.kinds.filter((k): k is string => typeof k === "string" && ALL_KINDS.includes(k)) : trust === "project" ? ALL_KINDS : ["build"]);
-  // A host takes what the phase enables, of what it declares (§8.2).
-  const kinds = host ? (Array.isArray(b.kinds) ? wanted : HOST_KINDS).filter((k) => HOST_KINDS.includes(k)) : trust === "project" ? wanted : ["build"];
+  // A host takes what the phase enables, of what it declares (§8.2): the pool jobs once the `host-pool-jobs` setting names it (#340).
+  const kinds = host ? (Array.isArray(b.kinds) ? wanted : HOST_KINDS).filter((k) => HOST_KINDS.includes(k) && (poolJobs || TASK_KINDS.includes(k))) : trust === "project" ? wanted : ["build"];
   // A worker started with --shared donates its compute to everyone's
   // requests — any contributor's, since 2026-09-17: the shared workers are
   // the queue a request lands in. Community results never reach the pool

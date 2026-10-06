@@ -311,8 +311,23 @@ export function revertedOf(r: RevertedColumns | null | undefined): Reverted | nu
 }
 
 /** A host as every claim of its registration reads it: one row by the primary key, the owner joined with the maintainer list, the release it reverted (#342). */
-export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed, ${REVERTED_COLUMNS("hosts")} FROM hosts WHERE id = ?`;
-export interface HostClaimRow extends RevertedColumns { name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number }
+/**
+ * The setting that lets hosts take pool jobs (#340, design v2 §22): `*` every host, or a comma-separated list of hosts' names or their
+ * registrations' ids; absent, none — the rollout's order is the maintainers' (the P1 host first, the Studio canary a week later), and a
+ * release that brings pool jobs to the dispatcher moves no ring off the legacy pool workers by itself.
+ */
+export const POOL_JOBS_KEY = "host-pool-jobs";
+
+/** Whether the `host-pool-jobs` setting lets this host's registration take pool jobs. */
+export function poolJobsOn(setting: string | null | undefined, who: { worker: string; name: string }): boolean {
+  const v = (setting ?? "").trim();
+  if (v === "*") return true;
+  return v.split(",").map((x) => x.trim()).some((x) => x !== "" && (x === who.worker || x === who.name));
+}
+
+export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed, ${REVERTED_COLUMNS("hosts")},
+    (SELECT value FROM settings WHERE key = '${POOL_JOBS_KEY}') AS pool_jobs FROM hosts WHERE id = ?`;
+export interface HostClaimRow extends RevertedColumns { name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number; pool_jobs: string | null }
 
 /**
  * The lease's own check of a host registration (#322): the claim's UPDATE takes a task only while its host is active and its owner

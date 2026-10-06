@@ -266,8 +266,10 @@ describe("a job with helper containers on a host's lanes (#338, design v2 §7.4,
     // A host with no x86_64 lane: no x86_64 health check, and no promotion whose helpers check x86_64 (one without params.arch checks both).
     expect(chosen(plain)).toEqual([]);
 
-    // The claim itself: hosts take pool jobs since #340 (HOST_KINDS) — the Studio's dispatcher is handed the x86_64 health check, on its
-    // emulated lane, the job running in its own process and the check's container through omarchy-task-run.
+    // The claim itself: hosts take pool jobs since #340 (HOST_KINDS) once the maintainers let them (the host-pool-jobs setting) — the
+    // Studio's dispatcher is handed the x86_64 health check, on its emulated lane, the job running in its own process and the check's
+    // container through omarchy-task-run.
+    await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('host-pool-jobs', 'studio-5')").run();
     await seedHost("studio-5", STUDIO);
     const c = await call("POST", "/factory/claim", { token: "omw_studio-5", body: {
       arch: "aarch64", version: "v1.0.2", hostname: "studio-5", kinds: ["build", "trial", "audit", "health", "promote"], claim_id: "c_emuhelp0001", want: 1,

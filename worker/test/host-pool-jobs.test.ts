@@ -2,6 +2,9 @@
  * Pool jobs on host registrations (#340, epic #307, design v2 §7.3, §7.4,
  * §8.2, §8.6, §9.2; D34), inside workerd with a real D1:
  *
+ * - pool jobs reach a host once the `host-pool-jobs` setting names it (its
+ *   name or its registration's id, or `*`), never before: the rollout's
+ *   order is the maintainers';
  * - a host takes the pool jobs (`HOST_KINDS`): the arch-neutral ones —
  *   sync, render, rollback, gc, verify, relayout, enqueue, publish — on any
  *   host whatever their row's arch (`ANY_ARCH_KINDS` widened for host rows,
@@ -23,6 +26,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { HOST_KINDS } from "../src/routes/factory";
+import { poolJobsOn, HOST_CLAIM_SQL, POOL_JOBS_KEY } from "../src/hosts";
 import { decideAuto, type ClaimFacts, type OrdersRow, type RuleInput } from "../src/orders";
 
 const API = "http://pool.test/api/v1";
@@ -87,11 +91,50 @@ beforeAll(async () => {
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1')`),
     env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role, github_id) VALUES ('m1', ?, ?, 'maintainer', 1001)`).bind(await h("omc_m1"), await h("oms_m1")),
   ]);
+  await setPoolJobs("*");
 });
+
+/** The `host-pool-jobs` setting, as a maintainer writes it (the runbook's wrangler command); null removes it. */
+async function setPoolJobs(v: string | null) {
+  if (v === null) await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(POOL_JOBS_KEY).run();
+  else await env.DB.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").bind(POOL_JOBS_KEY, v).run();
+}
 
 afterEach(async () => {
   vi.useRealTimers();
   await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE status IN ('queued', 'leased')").run();
+});
+
+describe("the rollout: pool jobs reach a host once the maintainers let them", () => {
+  it("no host takes one while the host-pool-jobs setting names none of it — its name, its registration, or *", async () => {
+    await seedHost("pj-gated");
+    const sync = await seedJob("sync", "x86_64", { arch: "x86_64", sources: "[]" }, "pj-gated");
+    const kindsOf = async () => JSON.parse((await env.DB.prepare("SELECT kinds FROM build_workers WHERE id = 'pj-gated'").first<{ kinds: string }>())!.kinds) as string[];
+    for (const v of [null, "", "pj-other, studio", " , "]) {
+      await setPoolJobs(v);
+      expect((await claim("pj-gated")).status, `setting ${JSON.stringify(v)}`).toBe(204);
+      expect((await taskOf(sync)).status).toBe("queued");
+      // What it takes, as its row says it: its tasks, not the pool jobs its dispatcher lists.
+      expect(await kindsOf()).toEqual(["build", "trial", "audit"]);
+    }
+    // By its host's name (the P1 host first)…
+    await setPoolJobs("studio, pj-gated");
+    const c = await claim("pj-gated");
+    expect(c.json?.task?.id, JSON.stringify(c.json)).toBe(sync);
+    expect(await kindsOf()).toEqual(expect.arrayContaining(["sync", "health", "promote"]));
+    // … by its registration's id, and every host.
+    expect(poolJobsOn("pj-gated", { worker: "pj-gated", name: "box" })).toBe(true);
+    expect(poolJobsOn(" * ", { worker: "w", name: "n" })).toBe(true);
+    expect(poolJobsOn("pj-gated2", { worker: "pj-gated", name: "box" })).toBe(false);
+    expect(poolJobsOn(null, { worker: "pj-gated", name: "box" })).toBe(false);
+    await setPoolJobs("*");
+  });
+
+  it("the setting rides the claim's one read of its host, by the settings' primary key", async () => {
+    const plan = (await env.DB.prepare(`EXPLAIN QUERY PLAN ${HOST_CLAIM_SQL}`).bind("h_0123456789").all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
+    expect(plan).toMatch(/SEARCH settings USING INDEX sqlite_autoindex_settings_1 \(key=\?\)/);
+    expect(plan).not.toMatch(/SCAN settings/);
+  });
 });
 
 describe("the kinds a host takes (HOST_KINDS)", () => {
