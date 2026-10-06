@@ -220,6 +220,56 @@ fn lint_set_is_clean_on_the_host_set_and_names_each_violation() {
     assert!(text(&o).contains("socket:"), "{}", text(&o));
 }
 
+/// #330: the same bundle serves both drivers, so `lint-set` renders the set for Quadlet
+/// too — an override with it when the host is a Quadlet one (no envelope given, or one
+/// naming the driver); a compose host's override is compose's lint's alone.
+#[test]
+fn lint_set_holds_the_set_to_what_the_quadlet_driver_renders() {
+    let o = run(&[
+        "lint-set",
+        &fx("lint/host"),
+        "--override",
+        &fx("lint/override/set-network.yml"),
+    ]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("quadlet: dispatcher: networks is not rendered for Quadlet"),
+        "{}",
+        text(&o)
+    );
+    let o = run(&[
+        "lint-set",
+        &fx("lint/host"),
+        "--override",
+        &fx("lint/override/set-network.yml"),
+        "--envelope",
+        &fx("lint/envelope/studio.toml"),
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let quadlet = std::env::temp_dir().join(format!(
+        "omarchy-agent-cli-quadlet-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(
+        &quadlet,
+        std::fs::read_to_string(fixtures().join("lint/envelope/studio.toml"))
+            .unwrap()
+            .replace("driver       = \"compose\"", "driver       = \"quadlet\""),
+    )
+    .unwrap();
+    let o = run(&[
+        "lint-set",
+        &fx("lint/host"),
+        "--override",
+        &fx("lint/override/set-network.yml"),
+        "--envelope",
+        &quadlet.to_string_lossy(),
+    ]);
+    std::fs::remove_file(&quadlet).unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("quadlet: "), "{}", text(&o));
+}
+
 #[test]
 fn lint_set_is_clean_on_the_real_host_set_and_reads_its_set_toml() {
     let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../factory/sets/host");
@@ -368,15 +418,26 @@ fn usage_errors_exit_2() {
     );
 }
 
-/// `runtime switch` (#325): a driver this binary does not carry, or a socket nothing
+/// `runtime switch` (#325, #330): a driver this binary does not carry, or a socket nothing
 /// answers on, is refused at the host with nothing asked of the running agent.
 #[test]
 fn a_runtime_switch_the_host_cannot_make_is_refused_and_asks_nothing() {
     let data = scratch("runtime-switch");
     for (args, why) in [
         (
-            &["runtime", "switch", "quadlet"][..],
-            "\"quadlet\" is not a driver this agent carries: compose/docker or compose/podman",
+            &["runtime", "switch", "kube"][..],
+            "\"kube\" is not a driver this agent carries: compose/docker, compose/podman or quadlet",
+        ),
+        // #330: Quadlet is carried; its socket must answer all the same.
+        (
+            &[
+                "runtime",
+                "switch",
+                "quadlet",
+                "--socket",
+                "/nonexistent/podman.sock",
+            ],
+            "nothing answers on /nonexistent/podman.sock",
         ),
         (
             &[

@@ -1684,6 +1684,7 @@ fn the_registration_comes_from_the_token_file_enrollment_wrote() {
 
 fn values(root: &Path) -> envelope::Values {
     envelope::Values {
+        driver: crate::run::config::DriverKind::Compose,
         pool: "https://pkgs.omarchy-pool.org".into(),
         set_dir: root.join("data/sets/host"),
         work_root: root.join("work"),
@@ -1911,6 +1912,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
             systemd_system: root.join("systemd"),
             docker_daemon: root.join("daemon.json"),
             proc: root.join("proc"),
+            quadlet_generator: Some(root.join("podman-user-generator")),
         },
         source: Some(Source::Files(
             root.join("bundle.tar.gz"),
@@ -1926,6 +1928,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
         dedicated: true,
         direct_network: None,
         legacy: None,
+        driver: None,
         agent_env_from: None,
         max_units: None,
         max_cpus: None,
@@ -5326,4 +5329,167 @@ mod engine_tests {
             println!("note: no INPUT drop for a test subnet here (rootless, or no sudo): not tried behind one");
         }
     }
+}
+
+// --- #330: the Quadlet driver, chosen at install ------------------------------------
+
+/// A host on rootless podman behind its docker API (slirp4netns), podman's Quadlet
+/// generator installed, install asked for the Quadlet driver.
+fn quadlet_host() -> Host {
+    let mut h = host(INFO, EGRESS_OK);
+    fs::remove_dir_all(h.root.join("proc")).unwrap();
+    process(&h.root.join("proc"), 77, SLIRP4NETNS);
+    fs::write(h.root.join("version"), PODMAN).unwrap();
+    fs::write(h.root.join("podman-user-generator"), "").unwrap();
+    h.options.driver = Some(crate::run::config::DriverKind::Quadlet);
+    h
+}
+
+#[test]
+fn install_with_the_quadlet_driver_writes_it_into_the_envelope_and_keeps_it_on_a_re_run() {
+    use crate::run::config::{Config, DriverKind, Runtime};
+    let h = quadlet_host();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    let units = h.options.places.config_home.join("containers/systemd");
+    assert!(
+        r.notes.iter().any(|n| n
+            == &format!(
+                "driver: quadlet on {}, its units in {} (the user's systemd runs the dispatcher)",
+                h.root.join("engine.sock").display(),
+                units.display()
+            )),
+        "{}",
+        r.screen()
+    );
+    let ready = ready.unwrap();
+    let text = envelope::render(None, &ready.values, Some(("h_1", "w_1"))).unwrap();
+    let c = Config::parse(&text).unwrap();
+    assert_eq!(
+        (c.driver, c.runtime, c.engine),
+        (
+            DriverKind::Quadlet,
+            Some(Runtime::Podman),
+            crate::lint::Engine::Rootless
+        )
+    );
+    // The owner chose it here: the envelope's drivers name it, beside the owner's own.
+    assert_eq!(c.policy.drivers, ["quadlet"]);
+    let owned = text.replace("drivers = [\"quadlet\"]", "drivers = [\"compose/podman\"]");
+    let again = envelope::render(Some(&owned), &ready.values, Some(("h_1", "w_1"))).unwrap();
+    assert_eq!(
+        Config::parse(&again).unwrap().policy.drivers,
+        ["compose/podman", "quadlet"]
+    );
+    // A re-run without the flag keeps the driver agent.toml names.
+    let mut h = quadlet_host();
+    h.options.driver = None;
+    fs::create_dir_all(&h.options.places.data).unwrap();
+    fs::write(
+        h.options.places.data.join("agent.toml"),
+        "[set]\ndriver = \"quadlet\"\n",
+    )
+    .unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    assert_eq!(ready.unwrap().values.driver, DriverKind::Quadlet);
+}
+
+#[test]
+fn the_quadlet_driver_is_refused_where_it_cannot_run_and_a_running_host_is_switched_instead() {
+    use crate::run::config::DriverKind;
+    // Rootful docker: no user's systemd runs its containers.
+    let mut h = host(&rootful_info(), EGRESS_OK);
+    prepare(&h.root);
+    fs::write(h.root.join("podman-user-generator"), "").unwrap();
+    h.options.driver = Some(DriverKind::Quadlet);
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    let s = r.screen();
+    assert!(
+        s.contains("--driver quadlet runs rootless podman under this user's systemd")
+            && s.contains("is not rootless podman's API socket"),
+        "{s}"
+    );
+    // podman without its generator (older than 4.4).
+    let mut h = quadlet_host();
+    h.options.places.quadlet_generator = None;
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(
+        r.screen()
+            .contains("--driver quadlet: podman's Quadlet generator is not installed"),
+        "{}",
+        r.screen()
+    );
+    // A host installed on compose: the runtime switch moves it, stopping the old dispatcher
+    // first; a second install would leave it running.
+    let h = quadlet_host();
+    fs::create_dir_all(&h.options.places.data).unwrap();
+    fs::write(
+        h.options.places.data.join("agent.toml"),
+        "host_id = \"h_1\"\n[set]\ndriver = \"compose\"\n",
+    )
+    .unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    assert!(
+        r.screen().contains(
+            "this host runs the compose driver: `omarchy-agent runtime switch quadlet` moves it"
+        ),
+        "{}",
+        r.screen()
+    );
+    // Without a socket given, it asks this user's rootless podman.
+    let mut h = quadlet_host();
+    h.options.socket = None;
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(
+        r.screen().contains(&format!(
+            "{}",
+            h.root.join("run/podman/podman.sock").display()
+        )),
+        "{}",
+        r.screen()
+    );
+}
+
+#[test]
+fn uninstall_stops_the_quadlet_unit_and_removes_its_file_before_the_containers() {
+    let h = quadlet_host();
+    let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+    apply(&h.options, &ready, &mut Fake::default(), &mut Vec::new())
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let p = &h.options.places;
+    // The run loop's unit, as its Quadlet driver writes it.
+    let units = p.quadlet_dir();
+    fs::create_dir_all(&units).unwrap();
+    fs::write(
+        units.join("omarchy-host-dispatcher.container"),
+        "[Container]\n",
+    )
+    .unwrap();
+    fs::write(units.join("owners-own.container"), "[Container]\n").unwrap();
+    let mut sys = Fake::default();
+    let mut out = Vec::new();
+    uninstall(p, &mut sys, &mut out).unwrap();
+    let said = String::from_utf8(out).unwrap();
+    assert!(
+        said.contains("stopped and removed the Quadlet unit(s) omarchy-host-dispatcher"),
+        "{said}"
+    );
+    assert!(!units.join("omarchy-host-dispatcher.container").exists());
+    // Never the owner's own units.
+    assert!(units.join("owners-own.container").exists());
+    let stop = sys
+        .calls
+        .iter()
+        .position(|c| c == "systemctl --user stop omarchy-host-dispatcher.service")
+        .unwrap_or_else(|| panic!("{:?}", sys.calls));
+    let reload = sys
+        .calls
+        .iter()
+        .rposition(|c| c == "systemctl --user daemon-reload")
+        .unwrap();
+    assert!(stop < reload, "{:?}", sys.calls);
 }

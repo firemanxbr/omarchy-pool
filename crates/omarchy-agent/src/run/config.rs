@@ -131,8 +131,15 @@ pub struct Config {
     /// The engine the compose driver talks to (`set.runtime`, `docker` or `podman`): what
     /// `runtime switch` moved the bundle to (#325). Absent — install writes none: it finds
     /// a socket, and podman's speaks docker's API — the run loop asks the engine behind
-    /// the socket which it is ([`super::agent::Agent::identify_runtime`]).
+    /// the socket which it is ([`super::agent::Agent::identify_runtime`]). Podman's on a
+    /// Quadlet host.
     pub runtime: Option<Runtime>,
+    /// The driver that runs the set (`set.driver`): compose, or Quadlet (#330), chosen at
+    /// install or by the owner's runtime switch at the host, never by the pool.
+    pub driver: DriverKind,
+    /// Where the Quadlet driver writes its units (`set.unit_dir`): podman's generator reads
+    /// the user's `$XDG_CONFIG_HOME/containers/systemd/` (`~/.config/...`) when absent.
+    pub unit_dir: Option<PathBuf>,
     /// The envelope's bounds on what the pool may narrow and ask (#325).
     pub policy: Policy,
     /// A Mac's `omarchy` Colima VM (#320, `[vm] runtime = "colima"`), which the loop keeps
@@ -186,6 +193,34 @@ impl Runtime {
     }
 }
 
+/// The drivers this binary carries (design v2 §15): compose — against docker's socket or
+/// podman's API socket, [`Runtime`] — and Quadlet (#330): the set as systemd user units
+/// podman's generator makes, on a rootless podman host with no compose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DriverKind {
+    #[default]
+    Compose,
+    Quadlet,
+}
+
+impl DriverKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "compose" => Some(DriverKind::Compose),
+            "quadlet" => Some(DriverKind::Quadlet),
+            _ => None,
+        }
+    }
+
+    /// `set.driver`'s word.
+    pub fn word(self) -> &'static str {
+        match self {
+            DriverKind::Compose => "compose",
+            DriverKind::Quadlet => "quadlet",
+        }
+    }
+}
+
 /// What the envelope says the pool may narrow and ask (design v2 §12, #325): the owner's
 /// own words at the host. The pool's settings only ever narrow inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -198,7 +233,8 @@ pub struct Policy {
     /// `diagnostics`: whether the pool may ask for the dispatcher's last log lines (M10).
     pub diagnostics: bool,
     /// `drivers`: the drivers `runtime switch` may move the bundle to (`compose` names
-    /// both of this binary's).
+    /// both compose ones, `compose/docker` and `compose/podman`; `quadlet` the Quadlet
+    /// driver, #330).
     pub drivers: Vec<String>,
     /// `soak_minutes` (#326, design v2 D16): how long a new release waits before this host
     /// takes it, from when the pool first names it; 0 (the default) takes it at once. A
@@ -207,11 +243,17 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// Whether the envelope lets the bundle run on `r`'s driver.
+    /// Whether the envelope lets the bundle run on `r`'s compose driver.
     pub fn allows_driver(&self, r: Runtime) -> bool {
+        self.allows(&r.driver())
+    }
+
+    /// Whether the envelope lets the bundle run on `driver` (`compose/docker`,
+    /// `compose/podman` or `quadlet`).
+    pub fn allows(&self, driver: &str) -> bool {
         self.drivers
             .iter()
-            .any(|d| d == "compose" || *d == r.driver())
+            .any(|d| d == driver || (d == "compose" && driver.starts_with("compose/")))
     }
 
     /// Whether the envelope lets an emulated lane of `arch` run.
@@ -252,6 +294,7 @@ struct SetPart {
     socket_mount: Option<PathBuf>,
     engine: Option<String>,
     runtime: Option<String>,
+    unit_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Default)]
@@ -396,31 +439,22 @@ impl Config {
                 return Err(format!("agent.toml: {k} {v:?} is not an id"));
             }
         }
+        let (driver, engine, runtime) = Self::driver_of(&f.set, f.vm.is_some())?;
         let set_name = f.set.name.unwrap_or_else(|| "host".into());
         if set_name != "host" {
             return Err(format!(
                 "agent.toml: set.name {set_name:?}: this agent runs the host set only"
             ));
         }
-        if let Some(d) = f.set.driver.filter(|d| d != "compose") {
-            return Err(format!(
-                "agent.toml: set.driver {d:?}: this agent has the compose driver only"
-            ));
-        }
-        let engine = match f.set.engine.as_deref() {
-            None | Some("rootful") => Engine::Rootful,
-            Some("rootless") => Engine::Rootless,
-            Some(other) => {
+        let unit_dir = match f.set.unit_dir {
+            None => None,
+            Some(d) if is_plain_absolute(&d) => Some(d),
+            Some(d) => {
                 return Err(format!(
-                    "agent.toml: set.engine {other:?} is neither \"rootful\" nor \"rootless\""
+                    "agent.toml: set.unit_dir {} is not a plain absolute path",
+                    d.display()
                 ))
             }
-        };
-        let runtime = match f.set.runtime.as_deref() {
-            None => None,
-            Some(r) => Some(Runtime::parse(r).ok_or_else(|| {
-                format!("agent.toml: set.runtime {r:?} is neither \"docker\" nor \"podman\"")
-            })?),
         };
         let policy = Policy::of(&f.envelope)?;
         let socket_cli = need_path(f.set.socket_cli, "set.socket_cli")?;
@@ -450,10 +484,79 @@ impl Config {
             envelope,
             engine,
             runtime,
+            driver,
+            unit_dir,
             policy,
             vm,
             mac,
         })
+    }
+
+    /// `[set]`'s driver, engine and runtime, held together: a Quadlet host (#330) runs
+    /// rootless podman under a Linux user's systemd.
+    fn driver_of(set: &SetPart, vm: bool) -> Result<(DriverKind, Engine, Option<Runtime>), String> {
+        let driver = match set.driver.as_deref() {
+            None => DriverKind::Compose,
+            Some(d) => DriverKind::parse(d).ok_or_else(|| {
+                format!("agent.toml: set.driver {d:?}: this agent carries the compose and quadlet drivers")
+            })?,
+        };
+        let engine = match set.engine.as_deref() {
+            // A Quadlet host's podman runs as the user, under the user's systemd.
+            None if driver == DriverKind::Quadlet => Engine::Rootless,
+            None | Some("rootful") => Engine::Rootful,
+            Some("rootless") => Engine::Rootless,
+            Some(other) => {
+                return Err(format!(
+                    "agent.toml: set.engine {other:?} is neither \"rootful\" nor \"rootless\""
+                ))
+            }
+        };
+        let runtime = match set.runtime.as_deref() {
+            None => None,
+            Some(r) => Some(Runtime::parse(r).ok_or_else(|| {
+                format!("agent.toml: set.runtime {r:?} is neither \"docker\" nor \"podman\"")
+            })?),
+        };
+        if driver == DriverKind::Compose {
+            return Ok((driver, engine, runtime));
+        }
+        if vm {
+            return Err("agent.toml: set.driver \"quadlet\" runs under a Linux user's systemd; a Mac's bundle runs in its VM (#320)".into());
+        }
+        if engine != Engine::Rootless || runtime == Some(Runtime::Docker) {
+            return Err("agent.toml: set.driver \"quadlet\" is rootless podman's: set.engine \"rootless\", set.runtime \"podman\" or none".into());
+        }
+        Ok((driver, engine, Some(Runtime::Podman)))
+    }
+
+    /// The driver as the report and `runtime switch` say it: `quadlet`, or
+    /// `compose/<runtime>` once the engine said which it is.
+    pub fn driver_name(&self) -> Option<String> {
+        match self.driver {
+            DriverKind::Quadlet => Some(DriverKind::Quadlet.word().to_owned()),
+            DriverKind::Compose => self.runtime.map(Runtime::driver),
+        }
+    }
+
+    /// Where the Quadlet driver's units go: `set.unit_dir`, else where podman's generator
+    /// reads a user's (`$XDG_CONFIG_HOME/containers/systemd`, `~/.config/...`).
+    pub fn quadlet_dir(&self) -> Result<PathBuf, String> {
+        if let Some(d) = &self.unit_dir {
+            return Ok(d.clone());
+        }
+        let var = |k: &str| {
+            std::env::var_os(k)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
+        var("XDG_CONFIG_HOME")
+            .or_else(|| var("HOME").map(|h| h.join(".config")))
+            .map(|c| c.join("containers/systemd"))
+            .ok_or_else(|| {
+                "neither set.unit_dir, XDG_CONFIG_HOME nor HOME says where the Quadlet units go"
+                    .into()
+            })
     }
 
     /// Reads agent.toml, refusing one another user owns or others may write. `uid` is
@@ -623,8 +726,8 @@ max_units = 3
             ),
             (
                 "driver       = \"compose\"",
-                "driver = \"quadlet\"",
-                "compose driver only",
+                "driver = \"kube\"",
+                "carries the compose and quadlet drivers",
             ),
             (
                 "/var/run/docker.sock\"\nsocket_mount",

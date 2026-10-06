@@ -486,10 +486,10 @@ pub fn status(data: Option<&str>) -> u8 {
     };
     print!("{}", summary(&s, crate::run::now()));
     print_pending(&paths);
-    let capacity = fs::read_to_string(paths.agent_toml())
+    let cfg = fs::read_to_string(paths.agent_toml())
         .ok()
-        .and_then(|t| Config::parse(&t).ok())
-        .map(|c| c.set_dir.join("run/capacity.json"));
+        .and_then(|t| Config::parse(&t).ok());
+    let capacity = cfg.as_ref().map(|c| c.set_dir.join("run/capacity.json"));
     match capacity.map(|p| (fs::read_to_string(&p), p)) {
         Some((Ok(text), _)) => println!(
             "capacity:  {}",
@@ -498,8 +498,25 @@ pub fn status(data: Option<&str>) -> u8 {
         Some((Err(_), p)) => println!("capacity:  {} is missing", p.display()),
         None => println!("capacity:  agent.toml does not name the set directory"),
     }
+    if let Some(c) = &cfg {
+        println!("driver:    {}", driver_line(c));
+    }
     print!("{}", owner_lines(&paths.data.join("state")));
     0
+}
+
+/// The driver agent.toml names and where it runs the set (#330: the Quadlet driver's units).
+fn driver_line(c: &Config) -> String {
+    let on = c.socket_cli.display();
+    match (c.driver, c.driver_name()) {
+        (super::config::DriverKind::Quadlet, _) => format!(
+            "quadlet on {on}, its units in {}",
+            c.quadlet_dir()
+                .map_or_else(|e| e, |d| d.display().to_string())
+        ),
+        (_, Some(name)) => format!("{name} on {on}"),
+        (_, None) => format!("compose on {on} (the engine says which at the agent's start)"),
+    }
 }
 
 /// `status`'s lines for #328: the passkey pinned at this host and the last signed version
@@ -754,10 +771,10 @@ fn p4_lines(s: &State, now: i64) -> String {
         line(
             "switching:",
             format!(
-                "to compose/{} at {} from compose/{}, at its {} step for {} s{}",
-                sw.to.runtime,
+                "to {} at {} from {}, at its {} step for {} s{}",
+                sw.to.name(),
                 sw.to.socket_cli.display(),
-                sw.from.runtime,
+                sw.from.name(),
                 match sw.step {
                     super::switch::SwitchStep::Stop => "stop",
                     super::switch::SwitchStep::Up => "up",

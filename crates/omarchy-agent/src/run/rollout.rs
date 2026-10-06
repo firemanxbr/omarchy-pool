@@ -520,6 +520,14 @@ fn violations(cfg: &Config, pins: &Pins, compose: &str, set: &str) -> Result<Vec
         .err()
         .unwrap_or_default();
     v.extend(lint::lint_set_toml(set, &compose).err().unwrap_or_default());
+    // A Quadlet host (#330) runs what its driver renders: the owner's override with it.
+    if cfg.driver == super::config::DriverKind::Quadlet {
+        v.extend(
+            lint::lint_quadlet(&compose, over.as_deref(), &cfg.interpolation())
+                .err()
+                .unwrap_or_default(),
+        );
+    }
     Ok(v.iter().map(ToString::to_string).collect())
 }
 

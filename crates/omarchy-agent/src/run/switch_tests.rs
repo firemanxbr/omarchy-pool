@@ -6,8 +6,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::run::config::Runtime;
-use crate::run::fake::{Engine, World};
+use crate::run::config::{Config, DriverKind, Runtime};
+use crate::run::fake::{Engine, World, QUADLET_SOCKET};
 
 use super::{Request, SwitchStep, REQUEST};
 
@@ -369,8 +369,20 @@ fn what_refuses_a_switch_changes_nothing() {
         assert_eq!(running_dispatcher(&w.engine).as_deref(), Some("v1.0.0"));
         end.detail
     };
-    assert!(refused(&mut w, "quadlet", PODMAN)
-        .starts_with("\"quadlet\" is not a driver this agent carries"));
+    assert!(refused(&mut w, "kube", PODMAN).starts_with(
+        "\"kube\" is not a driver this agent carries (compose/docker, compose/podman or quadlet)"
+    ));
+    // Quadlet (#330) only where the envelope names it, and only on rootless podman.
+    assert!(refused(&mut w, "quadlet", QUADLET_SOCKET)
+        .starts_with("the envelope's drivers (compose) do not name quadlet"));
+    w.agent.cfg.policy.drivers = vec!["compose".into(), "quadlet".into()];
+    w.add_quadlet(QUADLET_SOCKET).borrow_mut().rootful = true;
+    assert!(
+        refused(&mut w, "quadlet", QUADLET_SOCKET).starts_with(&format!(
+        "{QUADLET_SOCKET} answers as rootful podman 4.9.3: the Quadlet driver runs rootless podman"
+    ))
+    );
+    w.agent.cfg.policy.drivers = vec!["compose".into()];
     assert!(refused(&mut w, "compose/docker", "/var/run/docker.sock")
         .starts_with("the bundle runs on compose/docker at /var/run/docker.sock already"));
     assert!(refused(&mut w, "compose/podman", "/run/nothing.sock")
@@ -414,4 +426,136 @@ fn what_refuses_a_switch_changes_nothing() {
     // The pool cannot ask for one: nothing it sends names a driver, and the request is the
     // agent's own file.
     assert!(!w.agent.paths.data.join(REQUEST).exists());
+}
+
+// ---------------------------------------------------------------------------------------
+// #330: the Quadlet driver, the owner's to switch to at the host.
+
+const UNIT: &str = "omarchy-host-dispatcher";
+
+/// The release the Quadlet unit runs now, if one runs.
+fn on_quadlet(q: &crate::run::fake_quadlet::QHost) -> Option<String> {
+    q.borrow()
+        .running(UNIT)
+        .map(|c| c.labels["org.omarchy-pool.agent.release"].clone())
+}
+
+#[test]
+fn a_runtime_switch_moves_the_bundle_to_quadlet_and_back_with_the_guard() {
+    let (mut w, _) = drained_beside_podman();
+    let q = w.add_quadlet(QUADLET_SOCKET);
+    w.agent.cfg.policy.drivers = vec!["compose".into(), "quadlet".into()];
+    let before = fs::read_to_string(w.agent.paths.agent_toml()).unwrap();
+    ask(&w, "quadlet", QUADLET_SOCKET);
+    through(&mut w);
+    let end = w.agent.state.switch_last.clone().unwrap();
+    assert_eq!(
+        (end.to.as_str(), end.outcome.as_str()),
+        ("quadlet", "done"),
+        "{}",
+        end.detail
+    );
+    assert_eq!(
+        end.detail,
+        format!("the bundle runs on quadlet at {QUADLET_SOCKET}; agent.toml says so")
+    );
+    // Off docker; the same release as the user's systemd unit, which a reboot starts.
+    assert_eq!(running_dispatcher(&w.engine), None);
+    assert_eq!(on_quadlet(&q).as_deref(), Some("v1.0.0"));
+    assert!(q.borrow().units.join(format!("{UNIT}.container")).exists());
+    // agent.toml names the driver, its engine and its socket from now on, the owner's
+    // comment kept; the agent that starts next reads it.
+    let text = fs::read_to_string(w.agent.paths.agent_toml()).unwrap();
+    assert!(text.starts_with("# The agent's envelope.\n"), "{text}");
+    let c = Config::parse(&text).unwrap();
+    assert_eq!(
+        (
+            c.driver,
+            c.runtime,
+            c.engine,
+            c.socket_cli.display().to_string()
+        ),
+        (
+            DriverKind::Quadlet,
+            Some(Runtime::Podman),
+            crate::lint::Engine::Rootless,
+            QUADLET_SOCKET.to_owned()
+        )
+    );
+    assert_ne!(text, before);
+    w.restart_reading_agent_toml();
+    w.agent.cfg.policy.drivers = vec!["compose".into(), "quadlet".into()];
+    w.tick(300);
+    assert_eq!(w.last_report()["runtime"]["driver"], "quadlet");
+    assert_eq!(w.last_report()["runtime"]["switch_last"]["to"], "quadlet");
+    // The same switch again is the bundle where it is already.
+    ask(&w, "quadlet", QUADLET_SOCKET);
+    through(&mut w);
+    let end = w.agent.state.switch_last.clone().unwrap();
+    assert_eq!(end.outcome, "refused");
+    assert!(end.detail.starts_with(&format!(
+        "the bundle runs on quadlet at {QUADLET_SOCKET} already"
+    )));
+
+    // And back to compose on docker: the unit stopped, its file gone, so nothing starts it.
+    ask(&w, "compose/docker", "/var/run/docker.sock");
+    through(&mut w);
+    let end = w.agent.state.switch_last.clone().unwrap();
+    assert_eq!(end.outcome, "done", "{}", end.detail);
+    assert_eq!(running_dispatcher(&w.engine).as_deref(), Some("v1.0.0"));
+    assert_eq!(on_quadlet(&q), None);
+    assert!(!q.borrow().units.join(format!("{UNIT}.container")).exists());
+    let c = Config::parse(&fs::read_to_string(w.agent.paths.agent_toml()).unwrap()).unwrap();
+    assert_eq!(c.driver, DriverKind::Compose);
+}
+
+#[test]
+fn compose_on_rootless_podman_and_quadlet_are_two_drivers_on_one_engine() {
+    let (mut w, _) = drained_beside_podman();
+    w.add_engine(QUADLET_SOCKET, Runtime::Podman, true);
+    let q = w.add_quadlet(QUADLET_SOCKET);
+    w.agent.cfg.policy.drivers = vec!["compose".into(), "quadlet".into()];
+    ask(&w, "compose/podman", QUADLET_SOCKET);
+    through(&mut w);
+    assert_eq!(w.agent.state.switch_last.clone().unwrap().outcome, "done");
+    // The same socket, another driver: a switch, not the bundle where it is.
+    ask(&w, "quadlet", QUADLET_SOCKET);
+    through(&mut w);
+    let end = w.agent.state.switch_last.clone().unwrap();
+    assert_eq!(end.outcome, "done", "{}", end.detail);
+    assert_eq!(on_quadlet(&q).as_deref(), Some("v1.0.0"));
+    assert_eq!(w.agent.cfg.driver, DriverKind::Quadlet);
+}
+
+#[test]
+fn a_switch_to_quadlet_whose_guard_fails_goes_back_with_nothing_quarantined() {
+    let (mut w, _) = drained_beside_podman();
+    let q = w.add_quadlet(QUADLET_SOCKET);
+    q.borrow_mut().broken = true;
+    w.agent.cfg.policy.drivers = vec!["compose".into(), "quadlet".into()];
+    let before = fs::read_to_string(w.agent.paths.agent_toml()).unwrap();
+    ask(&w, "quadlet", QUADLET_SOCKET);
+    through(&mut w);
+    let end = w.agent.state.switch_last.clone().unwrap();
+    assert_eq!(
+        (end.to.as_str(), end.outcome.as_str()),
+        ("quadlet", "rolled-back"),
+        "{}",
+        end.detail
+    );
+    assert!(
+        end.detail
+            .starts_with("the switch to quadlet was rolled back"),
+        "{}",
+        end.detail
+    );
+    assert!(w.agent.state.quarantine.is_empty());
+    assert_eq!(running_dispatcher(&w.engine).as_deref(), Some("v1.0.0"));
+    assert_eq!(on_quadlet(&q), None);
+    assert!(!q.borrow().units.join(format!("{UNIT}.container")).exists());
+    assert_eq!(
+        fs::read_to_string(w.agent.paths.agent_toml()).unwrap(),
+        before
+    );
+    assert_eq!(w.agent.cfg.driver, DriverKind::Compose);
 }

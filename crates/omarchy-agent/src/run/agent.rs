@@ -25,11 +25,12 @@ use crate::version::{self, Release, Version};
 
 use super::brake::{Ask, ROUND_RESTARTS};
 use super::compose::Compose;
-use super::config::{Config, Paths};
+use super::config::{Config, DriverKind, Paths};
 use super::driver::{Answer, Driver};
 use super::journal::{env_secrets, env_values, Journal};
 use super::orders::Taken;
 use super::pool::{HostState, Net, Order, Pool};
+use super::quadlet::{Quadlet, Systemctl};
 use super::report::Reported;
 use super::rollout::{self, Ctx, Outcome};
 use super::selfupdate::Pending;
@@ -161,7 +162,7 @@ pub(crate) struct Agent {
     /// Tests: the fake engine behind another socket (the runtime switch, #325).
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
-    pub drivers_on: Option<Box<dyn FnMut(&std::path::Path) -> Option<Box<dyn Driver>>>>,
+    pub drivers_on: Option<Box<dyn FnMut(&super::switch::Place) -> Option<Box<dyn Driver>>>>,
     /// `etc/dispatcher.env` rendered again from the host and agent.toml (#371); `None`
     /// leaves the file alone (the tests that play other parts).
     pub host_env: Option<HostEnv>,
@@ -246,6 +247,25 @@ pub(super) fn secrets_of(set_dir: &std::path::Path, secrets_dir: &std::path::Pat
     v.sort_by_key(|s| std::cmp::Reverse(s.len()));
     v.dedup();
     v
+}
+
+/// The driver agent.toml names (`set.driver`) on its socket, through the pinned tools: compose,
+/// or Quadlet (#330), which asks the engine through the same pinned docker CLI and runs the
+/// set as the user's systemd units.
+pub(super) fn driver_of(
+    cfg: &Config,
+    paths: &Paths,
+    t: tools::Tools,
+) -> Result<Box<dyn Driver>, String> {
+    let compose = Compose::new(t, &cfg.socket_cli, &paths.docker_config());
+    Ok(match cfg.driver {
+        DriverKind::Compose => Box::new(compose),
+        DriverKind::Quadlet => Box::new(Quadlet::new(
+            Box::new(compose),
+            Box::new(Systemctl::from_env()),
+            &cfg.quadlet_dir()?,
+        )),
+    })
 }
 
 /// The cached names of release `r`'s bundle and its signature.
@@ -367,11 +387,14 @@ impl Agent {
             k.use_docker(&t.docker);
         }
         self.docker_cli = Some(t.docker.clone());
-        self.driver = Some(Box::new(Compose::new(
-            t,
-            &self.cfg.socket_cli,
-            &self.paths.docker_config(),
-        )));
+        match driver_of(&self.cfg, &self.paths, t) {
+            Ok(d) => self.driver = Some(d),
+            Err(e) => self.journal.write(
+                super::now(),
+                "tools",
+                serde_json::json!({"detail": format!("no driver: {e}")}),
+            ),
+        }
     }
 
     /// The pinned tools of a verified manifest: installed if missing, and the driver
