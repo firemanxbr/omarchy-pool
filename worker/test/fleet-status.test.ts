@@ -28,7 +28,7 @@ import { capacityLines, capacityOf, fleetHostOf, hostLines, secondOpinionOf, spa
 import { selectionRules } from "../src/routes/factory";
 import { AUDITS_7D_SQL, BUSY_7D_SQL, FLEET_EVENTS_SQL, FLEET_LEASES_SQL, HOST_LEASES_SQL, MODEL_MIX_SQL, QUEUE_BY_ARCH_SQL } from "../src/routes/hosts";
 import { DISK_FLOOR_GB } from "../src/hosts";
-import { runScript, scriptOf } from "./fixture";
+import { declared, runScript, scriptOf } from "./fixture";
 import { toB64url } from "../src/webauthn";
 
 const ORIGIN = "http://pool.test";
@@ -299,6 +299,18 @@ describe("Status draws the fleet's lines (#324)", () => {
     expect(d.nodes["#fleet-capacity"].innerHTML).toContain("<tr><td>x86_64</td><td class=\"num\">3</td>");
     expect(d.nodes["#fleet-second"].innerHTML).toContain("Second opinion: the fleet runs");
     expect(d.nodes["#fleet-note"].textContent).toBe("2 hosts · 1 error · 5 warnings · which architecture needs a host next");
+  });
+
+  it("at 1280 a line wraps, never cut, and the table per architecture scrolls in its card; its colours are the themes' tokens", async () => {
+    const html = await page("/status");
+    expect(declared(html, ".st-fl")).toMatchObject({ "overflow-wrap": "anywhere", "grid-template-columns": "8px minmax(0, 1fr)" });
+    expect(declared(html, ".st-scroll")).toMatchObject({ "overflow-x": "auto" });
+    expect(declared(html, ".st-cap-t")).toMatchObject({ "min-width": "640px" });
+    const rules = [...html.matchAll(/^\s*\.st-(fl|cap-t)\b[^\n]*$/gm)].map((m) => m[0]).join("\n");
+    expect(rules).toContain("var(--");
+    expect(rules).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/);
+    // The section is served to everyone, not hidden; its heading names it.
+    expect(html).toMatch(/<section class="op-card st-fleet" id="fleet" aria-labelledby="fleet-h">/);
   });
 });
 
