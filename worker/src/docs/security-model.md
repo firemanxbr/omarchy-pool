@@ -1067,7 +1067,14 @@ What that changes, and what it does not:
   signs, its journal line says *self-reviewed (solo-maintainer exception)*,
   and Review, the build's page, the package's page and Status mark it;
   `GET /api/v1/factory/self-reviewed` lists them all, and the list outlives
-  the exception.
+  the exception. An adoption stays marked on the package page and in
+  `maintenance.maintainer.solo_exception` for as long as it stands. The
+  list and Status's count read journal lines of the kinds only the pool's
+  own doors write — `review`, `approve`, `adopt`, `role` — and
+  `POST /api/v1/events` refuses those kinds to every job token
+  (`reserved_kind`), so no job can add a decision nobody took; a record is
+  passed on, and the governance chapter links it, only as the pool's own
+  address.
 - **The switch is the governance file only**: the brain reads `[solo]` on
   `main` with the list, every ten minutes; no route, setting or database row
   turns it on (the table it writes, `governance_solo`, is the sync's copy of

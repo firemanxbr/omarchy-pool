@@ -100,7 +100,7 @@ fn write_tools() -> Vec<Value> {
           "outputSchema": out(json!({ "name": { "type": "string" }, "status": { "type": ["string", "null"] }, "builds": { "type": "array" }, "requests": { "type": "array" }, "drafts": { "type": "array" } })),
           "annotations": { "readOnlyHint": true, "openWorldHint": true } }),
         json!({ "name": "review_claim", "title": "Claim a package for review",
-          "description": "Claims a package that is ready for review: the project builds it again from scratch on a review worker, every architecture its contributor built. The note is kept for people on the record and never becomes a hint to the project's agent. Takes the package it is given; never the requester's own package.",
+          "description": "Claims a package that is ready for review: the project builds it again from scratch on a review worker, every architecture its contributor built. The note is kept for people on the record and never becomes a hint to the project's agent. Takes the package it is given; never the requester's own package, unless the pool's solo-maintainer exception names them — then the claim is marked self-reviewed.",
           "inputSchema": { "type": "object", "properties": {
               "name": { "type": "string", "pattern": NAME },
               "worker": { "type": "string", "description": "A project review worker, whose agent drafts the rebuild." },

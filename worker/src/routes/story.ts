@@ -17,6 +17,7 @@ import { parseTargets } from "../targets";
 import { sizingView } from "../sizing";
 import { queueOfStory } from "./review";
 import { largestAlive, OOM_ERROR } from "./factory";
+import { soloOf } from "../governance";
 
 export interface TaskBrief {
   id: number;
@@ -185,7 +186,11 @@ export async function handlePackageStory(name: string, env: Env): Promise<Respon
   if (!pkg && !tasks.length) return json({ error: `${name} is not a factory package` }, 404);
   await placeInQueue(env, tasks);
   const all = chains(tasks, approvals, pkg, request);
-  const rings = (await env.DB.prepare(`SELECT DISTINCT rp.ring, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN (${ringsSql(RINGS)}) WHERE p.source = 'factory' AND p.name = ?`).bind(name).all<{ ring: string; arch: string }>()).results;
+  const [ringRows, solo] = await Promise.all([
+    env.DB.prepare(`SELECT DISTINCT rp.ring, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN (${ringsSql(RINGS)}) WHERE p.source = 'factory' AND p.name = ?`).bind(name).all<{ ring: string; arch: string }>(),
+    soloOf(env),
+  ]);
+  const rings = ringRows.results;
   const decided = all.find((c) => c.approval?.standing) ?? null;
   const current = decided ?? all[0] ?? null;
   // Retry at size (#337) offers no size above the largest a host alive runs: the fleet is read only when a build here ran out of memory.
@@ -205,6 +210,9 @@ export async function handlePackageStory(name: string, env: Env): Promise<Respon
       review: queueOfStory(tasks, approvals, parseTargets(pkg?.targets)),
       // The largest size a host alive runs (D31), for Retry at size; null when no build of it ran out of memory.
       largest_size: oom ? await largestAlive(env) : null,
+      // The solo-maintainer exception in force (#394; null without it), the same for every reader: the package page's You card tells the
+      // maintainer it names that they decide on their own package — self-reviewed — and offers them its Adopt. The doors stay the authority.
+      solo,
     },
     200,
     { "cache-control": "public, max-age=30" },

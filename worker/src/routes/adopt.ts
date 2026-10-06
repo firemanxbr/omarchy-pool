@@ -74,7 +74,7 @@ export async function handleAdoptPackage(c: Contributor, name: string, request: 
   const [moved] = await env.DB.batch([
     env.DB.prepare(ADOPT_SQL).bind(c.login, status, `adopted by ${c.login} from ${from}, who left it unmaintained${self ? `, ${SELF_REVIEWED}` : ""}${reason ? `: ${reason}` : ""}`, name, name),
     // The row only where the registration just became theirs: a second maintainer's batch finds it taken and writes nothing.
-    env.DB.prepare(MAINTAINER_SQL).bind(name, c.login),
+    env.DB.prepare(MAINTAINER_SQL).bind(name, c.login, self?.since ?? null),
   ]);
   if (!moved.meta.changes) return json({ error: `${name} was taken a moment ago, or a build of it went into review: look again` }, 409);
   const now = await env.DB.prepare("SELECT since FROM package_maintainers WHERE name = ? AND login = ?").bind(name, c.login).first<{ since: string }>();
@@ -98,7 +98,7 @@ async function adoptServed(c: Contributor, name: string, source: string, via: Re
   // A package the factory built has its maintainer already: the one whose approval it is served under.
   const approval = await env.DB.prepare(`SELECT by FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id DESC LIMIT 1`).bind(name).first<{ by: string }>();
   if (approval) return json({ error: `${name} is maintained by ${approval.by}, whose approval it is served under` }, 409);
-  const took = await env.DB.prepare("INSERT INTO package_maintainers (name, login) VALUES (?, ?) ON CONFLICT (name) DO NOTHING").bind(name, c.login).run();
+  const took = await env.DB.prepare("INSERT INTO package_maintainers (name, login, solo_since) VALUES (?, ?, ?) ON CONFLICT (name) DO NOTHING").bind(name, c.login, self?.since ?? null).run();
   const now = await env.DB.prepare("SELECT login, since FROM package_maintainers WHERE name = ?").bind(name).first<{ login: string; since: string }>();
   if (!took.meta.changes) return json({ error: `${name} is maintained by ${now?.login ?? "another maintainer"} (since ${now?.since ?? "a moment ago"})` }, 409);
   const record = self ? await decisionRecord(env, name, "adopt", c.login, { maintainer: c.login, source, by: c.login, via, agent: null, at: now?.since ?? new Date().toISOString(), reason, solo_exception: self }) : null;
@@ -120,7 +120,11 @@ const ROUND_OPEN = `t.name = ? AND +t.kind = 'build' AND +t.status IN ('queued',
 /** The registration taken, by its primary key: only while it is unmaintained, not blocked, and nothing of it is open (ROUND_OPEN). */
 export const ADOPT_SQL = `UPDATE factory_packages SET owner = ?, status = ?, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   WHERE name = ? AND status = 'unmaintained' AND blocked_at IS NULL AND NOT EXISTS (SELECT 1 FROM build_tasks t WHERE ${ROUND_OPEN})`;
-/** The maintainer of record beside it, in the same batch: only where the registration is now the adopter's and no longer unmaintained — so it is written by the batch whose ADOPT_SQL took the registration, and by no other. */
-export const MAINTAINER_SQL = `INSERT INTO package_maintainers (name, login)
-  SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM factory_packages WHERE name = ?1 AND owner = ?2 AND status != 'unmaintained')
+/**
+ * The maintainer of record beside it, in the same batch: only where the registration is now the adopter's and no longer unmaintained — so
+ * it is written by the batch whose ADOPT_SQL took the registration, and by no other. `?3`, the solo-maintainer exception's `since` when
+ * its maintainer adopted their own package under it (#394), else NULL: the package page marks the adoption self-reviewed while it stands.
+ */
+export const MAINTAINER_SQL = `INSERT INTO package_maintainers (name, login, solo_since)
+  SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM factory_packages WHERE name = ?1 AND owner = ?2 AND status != 'unmaintained')
   ON CONFLICT (name) DO NOTHING`;

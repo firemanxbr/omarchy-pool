@@ -998,8 +998,10 @@ const PACKAGE_SCRIPT = String.raw`
     if (m && m.login) return m;
     if (unmaintained()) return null;
     var c = ARCHES.map(approvedChain).filter(Boolean)[0];
-    return c ? { login: c.approval.by, since: c.approval.created_at, adopted: false } : null;
+    return c ? { login: c.approval.by, since: c.approval.created_at, adopted: false, solo_exception: c.approval.solo_exception || null } : null;
   }
+  // A decision its requester took under the solo-maintainer exception (#394) — an approval, an adoption — said where the person is named.
+  var SELF_WORDS = "self-reviewed (solo-maintainer exception)";
   function person(role, label, note, av) { return '<div class="pkg-person">' + av + '<div><span class="r">' + esc(role) + '</span><span class="l">' + label + (note ? '<span> · ' + esc(note) + '</span>' : '') + '</span></div></div>'; }
   function renderPeople() {
     var fac = isFactory(), rows = [], mt = maintainerOf(), nobody = glyph("—", "", "—");
@@ -1013,20 +1015,21 @@ const PACKAGE_SCRIPT = String.raw`
       var built = cs.map(function (c) { return c.contributor && c.contributor.lease_owner; }).filter(Boolean)[0], rebuilt = cs.map(function (c) { return c.project && c.project.lease_owner; }).filter(Boolean)[0];
       // Undecided: Review's word, the chip's (#282).
       var rv = reviewOf();
-      // A registration a maintainer adopted is theirs (#247): the maintainer row below names them, adopted — they did not request it.
-      if (pk.owner && !(mt && mt.adopted && mt.login === pk.owner)) rows.push(person("requested by", atLink(pk.owner), "", avatar(pk.owner)));
+      // A registration a maintainer adopted is theirs (#247): the maintainer row below names them, adopted — they did not request it. One its
+      // own requester adopted back under the solo-maintainer exception (#394) is said as it is: they requested it, and adopted it themselves.
+      if (pk.owner && !(mt && mt.adopted && mt.login === pk.owner && !mt.solo_exception)) rows.push(person("requested by", atLink(pk.owner), "", avatar(pk.owner)));
       if (sb && sb.agent) rows.push(person("drafted & built by", esc(sb.agent), built ? wtShort(built) : "", glyph(sb.agent, "agent")));
       else if (built || !rebuilt) rows.push(person("built on", built ? esc(wtShort(built)) : "not yet", built ? "its contributor's worker" : "", glyph("W", "", "W")));
-      rows.push(ap ? person("reviewed by", atLink(ap.by), ap.decision === "approved" ? "rebuilt from scratch" : ap.decision, avatar(ap.by)) : person("reviewed by", rv ? STATE[rv][1] : "not yet", "", nobody));
+      rows.push(ap ? person("reviewed by", atLink(ap.by), (ap.decision === "approved" ? "rebuilt from scratch" : ap.decision) + (ap.solo_exception ? " · " + SELF_WORDS : ""), avatar(ap.by)) : person("reviewed by", rv ? STATE[rv][1] : "not yet", "", nobody));
       if (au) rows.push(person("audit agent", esc(au), "second opinion", glyph(au, "agent")));
       if (rebuilt) rows.push(person("rebuilt on", esc(wtShort(rebuilt)), "a project worker", glyph("▣", "pool", "▣")));
-      rows.push(mt ? person("maintainer", atLink(mt.login), mt.adopted ? "adopted " + since(mt.since) + " ago" : "", avatar(mt.login)) : person("maintainer", "none yet", "", nobody));
+      rows.push(mt ? person("maintainer", atLink(mt.login), mt.adopted ? "adopted " + since(mt.since) + " ago" + (mt.solo_exception ? " · " + SELF_WORDS : "") : "", avatar(mt.login)) : person("maintainer", "none yet", "", nobody));
     } else {
       var pi = (D && D.manifest && D.manifest.pkginfo) || {}, packager = pi.packager ? pi.packager.replace(/<.*>/, "").trim() : "";
       rows.push(person("packaged by", esc(packager || upstreamName()), packager ? upstreamName() : "", glyph(packager || upstreamName())));
       rows.push(person("mirrored by", "the pool", "not rebuilt", glyph("▣", "pool", "▣")));
       rows.push(person("agents", "none", "the factory's alone", nobody));
-      rows.push(mt ? person("pool maintainer", atLink(mt.login), "adopted " + since(mt.since) + " ago", avatar(mt.login)) : person("pool maintainer", "none yet", "", nobody));
+      rows.push(mt ? person("pool maintainer", atLink(mt.login), "adopted " + since(mt.since) + " ago" + (mt.solo_exception ? " · " + SELF_WORDS : ""), avatar(mt.login)) : person("pool maintainer", "none yet", "", nobody));
     }
     $("#who").innerHTML = rows.join("");
   }
@@ -1075,9 +1078,12 @@ const PACKAGE_SCRIPT = String.raw`
   function reviewBuild() { var cs = ARCHES.map(chainFor).filter(Boolean), c = cs.filter(function (x) { return x.project && x.project.status === "staged"; })[0] || cs.filter(function (x) { return x.contributor && x.contributor.status === "staged"; })[0]; return c ? (c.project && c.project.status === "staged" ? c.project : c.contributor).id : null; }
   // The reason typed into the brake's form, kept across a redraw (a refusal, a second render): the form is drawn again, the words are not lost.
   var DRAFT = "";
+  // The solo-maintainer exception (#394), as the story says it (ST.solo, the same for every reader): whether the viewer is the maintainer it
+  // names — who decides on their own package, each decision self-reviewed. The page's words and its Adopt only: the doors stay the authority.
+  function selfReviewer() { var s = ST && ST.solo; return !!(s && WHO.login && s.maintainer === WHO.login && isMaintainer()); }
   function renderYou() {
     var me = WHO.me, login = WHO.login, fac = isFactory(), b = blockedBy(), st = stateOf(), pk = (ST && ST.package) || {}, mt = maintainerOf();
-    var icon = "eye", who = "not signed in", text = "", btns = [], lock = "";
+    var icon = "eye", who = "not signed in", text = "", btns = [], lock = "", self = "";
     var blockBtn = gate(btn("Block", 'data-act="block"', "danger"), fac && !b, !fac ? "a synced package is served as its source publishes it; the brake blocks what the factory built" : "blocked already");
     var request = btn("Request " + name, 'href="/factory?name=' + encodeURIComponent(name) + '#request"', "primary");
     // text is HTML: every login in it is atLink's, everything else escaped here.
@@ -1089,11 +1095,17 @@ const PACKAGE_SCRIPT = String.raw`
       icon = "user"; who = "@" + login + (took ? " · maintainer" : " · requester");
       var req = (ST && ST.request) || {}, why = b ? "blocked: another maintainer lifts the block first" : req.busy ? "a build of it is running (#" + req.busy + "); ask again when it ends" : ["approved", "published"].indexOf(pk.status) >= 0 ? "approved: a new upstream release is built as a bump, by itself" : "not while it is " + (pk.status || "in the factory");
       text = took ? "You adopted this package: its registration is yours, and its bumps come to your workers." : "You requested this package.";
+      // Under the solo-maintainer exception (#394) the maintainer it names reviews their own package and adopts it back once they left it
+      // unmaintained, as Review's No maintainer tab offers — each self-reviewed, on the record; the lock is not theirs while it holds.
+      var mine = selfReviewer();
+      if (mine && !b && !mt && unmaintained() && servedAnywhere()) { text = "You requested this package and left it unmaintained. The solo-maintainer exception lets you adopt it back yourself: you look after it in the pool again, self-reviewed."; btns.push(btn("Adopt · self-review", 'data-act="adopt"', "primary")); }
+      else if (mine && !b && (st === "ready" || st === "in-review")) { var ownRb = reviewBuild(); btns.push(btn("Open review · self-review", 'href="' + (ownRb ? "/build/" + ownRb : "/review") + '"', "primary")); }
       // A block is refused by the server before anything else (routes/contributors.ts): the renewal is grey while it holds, whatever the registration's status says.
       btns.push(gate(btn("Request an update", 'href="/factory?renew=' + encodeURIComponent(name) + '#request"', "primary"), !!req.renewable && !b, why));
       btns.push(btn("Your requests", 'href="' + userHref(login) + '"'));
       if (isMaintainer()) btns.push(blockBtn);
-      lock = took ? "You can't review its builds: another maintainer does." : "You can't review your own request.";
+      if (mine) self = 'Self-reviewed: the solo-maintainer exception names you, so you decide on your own package — every decision marked so, in public. <a href="/docs/governance#solo">The rule</a>';
+      else lock = took ? "You can't review its builds: another maintainer does." : "You can't review your own request.";
     } else if (isMaintainer()) {
       icon = "shield"; who = "@" + login + " · maintainer";
       if (b) { text = b.blocked_by === login ? "You blocked it. Another maintainer lifts the block." : "Blocked by " + atLink(b.blocked_by) + ". You can lift the block; the reason goes on the record."; btns.push(gate(btn("Lift the block", 'data-act="unblock"', "primary"), b.blocked_by !== login, login + " blocked " + name + "; another maintainer lifts it")); }
@@ -1109,7 +1121,7 @@ const PACKAGE_SCRIPT = String.raw`
     } else { icon = "user"; who = "@" + login + " · contributor"; text = "Something wrong with it?"; btns.push(btn("Report a problem", 'href="https://github.com/firemanxbr/omarchy-pool/issues/new?title=' + encodeURIComponent(name + ": ") + '"')); }
     $("#you-icon").innerHTML = lucide(icon, 15);
     $("#you-who").textContent = who;
-    $("#you").innerHTML = '<p>' + text + '</p>' + (btns.length ? '<div class="pkg-btns">' + btns.join("") + '</div>' : '') + (lock ? '<span class="pkg-lock">' + lucide("lock", 13) + esc(lock) + '</span>' : '') +
+    $("#you").innerHTML = '<p>' + text + '</p>' + (btns.length ? '<div class="pkg-btns">' + btns.join("") + '</div>' : '') + (lock ? '<span class="pkg-lock">' + lucide("lock", 13) + esc(lock) + '</span>' : '') + (self ? '<span class="pkg-lock">' + lucide("user-check", 13) + self + '</span>' : '') +
       (ASK ? '<form class="pkg-ask" id="you-ask"><input id="you-why" placeholder="Why? This goes on the record." aria-label="the reason, on the record" aria-describedby="you-err" autocomplete="off" value="' + esc(DRAFT) + '"><p class="err" id="you-err" role="alert" hidden></p>' + (ASK === "block" && (needsPasskey() || PK_SAID) ? '<p class="pk' + (PK_SAID && PK_OK ? " ok" : "") + '" role="status" aria-live="polite">' + (PK_SAID || esc("You hold no passkey yet. Your device makes one now, then confirms the block with it.")) + '</p>' : '') + '<div class="pkg-btns"><button type="submit" class="op-btn ' + (ASK === "block" ? "danger" : "primary") + '">' + (ASK === "block" ? lucide("key-round", 14) + esc(needsPasskey() ? "Register a passkey and block" : "Block " + name + " with your passkey") : esc("Lift the block")) + '</button><button type="button" class="op-btn" data-act="cancel">Cancel</button></div></form>' : '');
     var f = $("#you-ask");
     if (f) {
@@ -1157,9 +1169,9 @@ const PACKAGE_SCRIPT = String.raw`
       if (d.error) { toast(refusalHtml(d), "error"); renderYou(); if (!ASK) refocus(what); return; }
       // Adopt makes you its maintainer in the pool: the package stays what it was, synced or built here — and a registration left unmaintained is yours as well (d.registration: whom it was taken from, where it stands now).
       if (what === "adopt") {
-        var box = D || D404; box.maintenance = box.maintenance || {}; box.maintenance.maintainer = { login: WHO.login, since: d.since || new Date().toISOString(), adopted: true };
+        var box = D || D404; box.maintenance = box.maintenance || {}; box.maintenance.maintainer = { login: WHO.login, since: d.since || new Date().toISOString(), adopted: true, solo_exception: d.solo_exception || null };
         if (d.registration && ST && ST.package) { ST.package.owner = WHO.login; ST.package.status = d.registration.status; }
-        toast("You now look after " + esc(name) + " in the pool" + (d.registration ? ", and its registration is yours." : ".")); renderAll(); refocus(what); return;
+        toast("You now look after " + esc(name) + " in the pool" + (d.registration ? ", and its registration is yours." : ".") + (d.solo_exception ? " Self-reviewed under the solo-maintainer exception, on the record." : "")); renderAll(); refocus(what); return;
       }
       // The brake is a factory package's (Block is grey on any other): its story, as the next read will tell it.
       ST = ST || { package: { name: name }, chains: [], rings: [] };
@@ -1379,13 +1391,19 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // A decision its requester took under the solo-maintainer exception (#394): self-reviewed on the record's line, the review stage's summary
-      // and the gates' word on who approved it — who and since when, as the story's approval carries it.
+      // A decision its requester took under the solo-maintainer exception (#394): self-reviewed on the record's line, the review stage's summary,
+      // the gates' word on who approved it and the people's reviewed-by row — who and since when, as the story's approval carries it — and an
+      // adoption of their own package on the maintainer row, the requester still named (maintenance.maintainer.solo_exception). The maintainer
+      // the exception names (the story's `solo`) is told on You that they decide on their own package, and offered its Adopt once they left it
+      // unmaintained, as Review's No maintainer tab offers it.
       id: "package.self-reviewed",
       page,
-      anchor: ['id="stage-panel"'],
-      script: ['" · self-reviewed (solo-maintainer exception)"', "approval.solo_exception", '" · self-reviewed"', "ap.solo_exception.since", "self-reviewed under the solo-maintainer exception"],
-      reads: [{ path: shipped, fields: ["chains.0.approval.solo_exception", "chains.0.approval.by"] }],
+      anchor: ['id="stage-panel"', 'id="who"', 'id="you"'],
+      script: ['" · self-reviewed (solo-maintainer exception)"', "approval.solo_exception", '" · self-reviewed"', "ap.solo_exception.since", "self-reviewed under the solo-maintainer exception", 'var SELF_WORDS = "self-reviewed (solo-maintainer exception)"', "ap.solo_exception ? \" · \" + SELF_WORDS", "mt.solo_exception ? \" · \" + SELF_WORDS", "!mt.solo_exception", "function selfReviewer()", "ST && ST.solo", '"Adopt · self-review"', '"Open review · self-review"', 'href="/docs/governance#solo"', "solo_exception: d.solo_exception || null"],
+      reads: [
+        { path: shipped, fields: ["chains.0.approval.solo_exception", "chains.0.approval.by", "solo"] },
+        { path: built, fields: ["maintenance.maintainer.solo_exception"] },
+      ],
       visible: EVERYONE,
     },
     {

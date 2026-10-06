@@ -115,7 +115,7 @@ ${sourceRows()}
         <li><b>The evidence in front of you.</b> The contributor's build, the gate's verdict, the audit, the log and the recipe on one row — and <em>Build by the project</em> one press away. What the gate checks and what the agents are told is one page: <a href="/docs/what-we-test">What we test</a>.</li>
         <li><b>The project builds it again.</b> A trusted worker with the project's own agent writes the project's recipe from the project's sources, learning from the contributor's evidence; the same gate runs; its own audit is queued.</li>
         <li><b>The trial installs it before you decide.</b> A real pacman installs the project's build from the lab in a clean container; the transcript sits beside the audit. You approve what installed, not what compiled.</li>
-        <li><b>Nobody decides on their own package</b> — not even the only maintainer. A build the trial installed goes to stable with edge; one it did not waits for the gates like everything else.</li>
+        <li><b>Nobody decides on their own package</b> — not even the only maintainer, unless the maintainers name them in <code>factory/MAINTAINERS.toml</code>'s solo-maintainer exception: then each such decision is marked self-reviewed, in public (<a href="/docs/governance#solo">the exception</a>). A build the trial installed goes to stable with edge; one it did not waits for the gates like everything else.</li>
         <li><b>A rollback is one job away</b>, and so is every pipeline step by hand (<code>pkg-repo job …</code>), with a per-job token that can do that and nothing else.</li>
       </ul></div>
     </div>

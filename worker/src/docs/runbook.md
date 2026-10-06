@@ -2839,9 +2839,11 @@ reason = "maralcbr has no time or machines for the pool (#332): one active maint
 **Turning it on** is a governance pull request adding the table, like any
 change to the file: `factory/bin/check-governance` (CI) refuses a table that
 is not exactly one maintainer of `maintainers` (never a list), a `since`
-written `"YYYY-MM-DD"`, and a `reason` on one line of 300 characters at most,
-and nothing else in it; it changes neither `.github/CODEOWNERS` nor the host
-agent's pin (`check-governance --write` says so). Within ten minutes of the
+written `"YYYY-MM-DD"`, and a `reason` on one line of 300 characters at most
+(no tab, control or format character; counted as the brain counts them, so a
+table CI takes is one the brain applies), and nothing else in it; it changes
+neither `.github/CODEOWNERS` nor the host agent's pin (`check-governance
+--write` says so). Within ten minutes of the
 merge the brain applies it (`worker/src/governance.ts`, the table
 `governance_solo` is its copy) and writes one `role` line, *… under the
 solo-maintainer exception since …*; `GET /api/v1/factory/maintainers` says
@@ -2853,14 +2855,18 @@ solo-maintainer exception since …*; `GET /api/v1/factory/maintainers` says
   self-review* on their row), **Approve** with their passkey as always,
   **Request changes**, **Reject**, **Release claim**; the cancel door sends
   them to the release, as it sends anyone; the *No maintainer* tab's
-  **Adopt** on a package of their own. An agent's draft of their own verdict
+  **Adopt** on a package of their own, and the package page's (*Adopt ·
+  self-review*, where its You card says they decide on their own package
+  instead of the lock). An agent's draft of their own verdict
   is taken too, and confirmed in the browser as any draft.
 - Their own host builds the project's copy (D35 above): nothing waits for
   *Release to any host*.
 - Each such decision says *self-reviewed (solo-maintainer exception)* on its
   journal line, carries `solo_exception` (who, since, why) in its signed
   record and its answer, and is marked *self-reviewed* on Review (the claim,
-  the workspace, the decision), the build's page and the package's page.
+  the workspace, the decision), the build's page and the package's page —
+  an adoption on its maintainer row, with its requester still named, for as
+  long as it stands.
   Status's line counts them and links the list on `/docs/governance#solo`
   (`GET /api/v1/factory/self-reviewed`).
 - Everyone else is under the rule as before: another maintainer is refused

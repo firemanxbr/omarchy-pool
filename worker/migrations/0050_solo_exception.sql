@@ -15,6 +15,11 @@
 -- - reviews.solo_since: a decision its requester took under the exception —
 --   the exception's `since` when it was taken; NULL for every decision taken
 --   under the two-person rule. The review's `by` is who took it.
+-- - package_maintainers.solo_since: an adoption its own requester took under
+--   the exception — the exception's `since` when it was taken; NULL for every
+--   other adoption. The row's `login` is who adopted it. The package page
+--   and GET /package/:name mark it (maintenance.maintainer.solo_exception)
+--   for as long as the adoption stands.
 --
 -- The Worker that runs during the deploy minute reads and writes neither:
 -- with no row the exception is simply not in force.
@@ -26,3 +31,4 @@ CREATE TABLE IF NOT EXISTS governance_solo (
     applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 ALTER TABLE reviews ADD COLUMN solo_since TEXT;
+ALTER TABLE package_maintainers ADD COLUMN solo_since TEXT;
