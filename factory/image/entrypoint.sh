@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# omarchy-worker — one image, one command, for contributors and maintainers.
+# omarchy-worker — one image, one command, for a maintainer's legacy sets
+# until P3 (contributors run no worker since #343; a new machine is a host).
 #
 # The registration behind OMARCHY_WORKER_TOKEN decides what this container
-# does; nothing else differs between a contributor's machine and a
-# maintainer's:
+# does:
 #
-#   community trust  → the contributor's worker: one task per container,
-#                      built right here, the result into the contributor's
-#                      staging workspace (WORKER_SHARED=1 builds anyone's,
-#                      an agent key — ANTHROPIC_API_KEY, OPENAI_API_KEY,
-#                      GEMINI_API_KEY or XAI_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN for
-#                      a Claude subscription — brings the owner's agent).
+#   community trust  → a community worker: one task per container, built
+#                      right here, any contributor's package (#343: the
+#                      pool ignores WORKER_SHARED), the result into that
+#                      contributor's staging workspace; an agent key —
+#                      ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY or
+#                      XAI_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN for a Claude
+#                      subscription — brings the owner's agent.
 #   project trust    → the project's worker: the pool's jobs and the rebuild
 #                      of approved packages, each in a fresh sibling
 #                      container through the runtime's socket mounted at
@@ -28,9 +29,9 @@
 #   review     a project worker for the maintainers' work only — the rebuild
 #              of approved packages and the audit of staged builds (the
 #              second agent, so it wants an agent key); never a pool job.
-#   community  a shared community worker: builds anyone's community
-#              packages, drafts PKGBUILDs for package requests with its
-#              owner's agent key (WORKER_SHARED=1 is implied).
+#   community  a community worker: builds any contributor's package,
+#              drafts PKGBUILDs for package requests with its owner's
+#              agent key (WORKER_SHARED=1 is set, and ignored since #343).
 #   broker     no build here: the one process on this host that holds the
 #              credentials (factory/bin/broker, :8790) — the worker's token,
 #              the agent's key, GITHUB_TOKEN — and only receives, processes

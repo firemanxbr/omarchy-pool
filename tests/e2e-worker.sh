@@ -430,20 +430,22 @@ echo "factory queue, lease, requeue, guard and completion OK"
 
 step "Factory: one name, one package — built on x86_64, not on aarch64, reviewed once, published on x86_64 alone"
 # A package is its name (#242): x86_64 and aarch64 are two targets of one
-# package. A contributor requests it for both; their x86_64 worker builds
-# it, their aarch64 worker gives up on it (the recipe's fault, final): that
-# architecture is not supported and x86_64 goes on to the review alone. A
-# maintainer who did not request it has the project build it again — the
-# project's x86_64 worker, nothing for aarch64 — and approves it once; the
-# publish job is x86_64's only, and what it carries into edge is the
-# project's build, published here with the job's own token as work.rs does.
+# package. A contributor requests it for both; a maintainer's legacy
+# community registration builds it on x86_64 (contributors run no worker,
+# #343), the maintainer's aarch64 one gives up on it (the recipe's fault,
+# final): that architecture is not supported and x86_64 goes on to the
+# review alone. A maintainer who did not request it has the project build
+# it again — the project's x86_64 worker, nothing for aarch64 — and
+# approves it once; the publish job is x86_64's only, and what it carries
+# into edge is the project's build, published here with the job's own token
+# as work.rs does.
 command -v zstd >/dev/null || { echo "zstd is needed to make the package the project builds"; exit 1; }
 REQ_HASH=$(printf %s omc_e2e_req | sha256sum | cut -d' ' -f1)
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command \
   "INSERT INTO contributors (login, token_hash, role) VALUES ('e2e-req', '$REQ_HASH', 'contributor');
    INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
-     ('wrx', 'x86_64', 'e2e-req', '$(printf %s omw_e2e_wrx | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
-     ('wra', 'aarch64', 'e2e-req', '$(printf %s omw_e2e_wra | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
+     ('wrx', 'x86_64', 'e2e', '$(printf %s omw_e2e_wrx | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
+     ('wra', 'aarch64', 'e2e', '$(printf %s omw_e2e_wra | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
      ('wpx', 'x86_64', 'e2e', '$(printf %s omw_e2e_wpx | sha256sum | cut -d' ' -f1)', 'shared', 'project', 'e2e', '2000-01-01T00:00:00Z')" >/dev/null)
 d1n() { (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --json --command "$1") | jq -r '.[0].results[0].n'; }
 reqauth=(-H "authorization: Bearer omc_e2e_req" -H "content-type: application/json")
@@ -460,7 +462,7 @@ taken=$(curl -s -w '\n%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/package
 # The Factory's live check says the same, in the same words: reserved, whose, and why.
 named=$(curl -s "$OMARCHY_API/api/v1/factory/names/e2e-ident?arches=x86_64,aarch64")
 [[ "$(jq -r '.state + " " + .owner + " " + .why' <<<"$named")" == "reserved e2e-req e2e-ident is waiting, requested by e2e-req" ]] || { echo "the live check must call e2e-ident reserved, in the request's words: $named"; exit 1; }
-# x86_64: the requester's worker builds it and hands the evidence in; staged.
+# x86_64: a maintainer's community registration builds the requester's package and hands the evidence in; staged.
 cx=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wrx[@]}" -d "{\"arch\":\"x86_64\",$agent}")
 [[ "$(jq -r '.task.name + " " + .task.arch' <<<"$cx")" == "e2e-ident x86_64" ]] || { echo "the x86_64 worker did not get the x86_64 build: $cx"; exit 1; }
 x86=$(jq -r .task.id <<<"$cx"); cxj=(-H "authorization: Bearer $(jq -r .token <<<"$cx")")
@@ -468,7 +470,7 @@ x86=$(jq -r .task.id <<<"$cx"); cxj=(-H "authorization: Bearer $(jq -r .token <<
 live=$(curl -s "$OMARCHY_API/api/v1/factory?live=1&limit=20&t=$x86")
 [[ "$(jq -r --argjson id "$x86" '[.tasks[] | select(.id == $id) | .status] | join(",")' <<<"$live") $(jq -r '[.tasks[].status | select(. != "leased" and . != "queued")] | length' <<<"$live") $(jq -r '.counts | length' <<<"$live")" == "leased 0 0" ]] || { echo "the live read must show the x86_64 build leased, and nothing but tasks in flight: $live"; exit 1; }
 for f in PKGBUILD build.log PKGINFO e2e-ident-1.0-1-x86_64.pkg.tar.zst; do
-  [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/factory/tasks/$x86/artifacts/$f" "${cxj[@]}" --data-binary "the contributor's $f")" == 201 ]] || { echo "the contributor's build could not stage $f"; exit 1; }
+  [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/factory/tasks/$x86/artifacts/$f" "${cxj[@]}" --data-binary "the community build's $f")" == 201 ]] || { echo "the community build could not stage $f"; exit 1; }
 done
 curl -s -o /dev/null -X PUT "$OMARCHY_API/api/v1/factory/tasks/$x86/artifacts/vet.json" "${cxj[@]}" --data-binary '{"schema":"omarchy-pool/vet/1","verdict":"pass","checks":[{"name":"smoke","status":"pass","detail":""}]}'
 st=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/complete" "${cxj[@]}" -H "content-type: application/json" -d '{"sha256":"2222","filename":"e2e-ident-1.0-1-x86_64.pkg.tar.zst","version":"1.0-1"}')
@@ -476,7 +478,7 @@ st=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/complete" "${cxj[@]
 # One review covers every architecture: none starts while aarch64 still builds.
 early=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/build" "${mauth[@]}" -d '{}')
 [[ "$(jq -r .error <<<"$early")" == "aarch64 is still building (task "*"): one review covers every architecture — it starts once each is built or not supported" ]] || { echo "the review must wait for aarch64: $early"; exit 1; }
-# aarch64: the requester's other worker gives up on the recipe (final) — not supported.
+# aarch64: the maintainer's other community registration gives up on the recipe (final) — not supported.
 ca=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wra[@]}" -d "{\"arch\":\"aarch64\",$agent}")
 [[ "$(jq -r '.task.name + " " + .task.arch' <<<"$ca")" == "e2e-ident aarch64" ]] || { echo "the aarch64 worker did not get the aarch64 build: $ca"; exit 1; }
 arm=$(jq -r .task.id <<<"$ca")

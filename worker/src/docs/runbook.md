@@ -1697,6 +1697,22 @@ so a size-4 build waits for memory rather than run smaller.
   fresh (15 minutes): a dispatcher that claims after that is on a Mac that
   woke. The host's page says *asleep*.
 
+**Once, before the deploy that carries #343.** The owner test is exact:
+a community legacy registration with no owner (one registered before the
+pool kept owners, migration 0010), or whose owner is spelled otherwise than
+in `factory/MAINTAINERS.toml`, claims nothing from that deploy on. List the
+live ones it would turn away; none of the Studio's community pair or
+maralcbr's workers may be among them:
+
+```bash
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, owner, last_seen FROM build_workers WHERE kind = 'legacy' AND trust != 'project' AND revoked_at IS NULL AND (owner IS NULL OR owner NOT IN (SELECT login FROM factory_maintainers)) AND last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')"
+```
+
+A maintainer's worker that is listed gets its owner as the file spells it
+(`UPDATE build_workers SET owner = '<login>' WHERE id = '<id>'`, the same
+command), then the query again comes back without it. Any other row is a
+contributor's, which builds nothing from then on: revoke it on its page.
+
 ### A host reverted a release
 
 One bundle runs on every host, so a release that fails its guard on one
@@ -1865,6 +1881,18 @@ the pool no longer serves the command (#343): take the repository's,
 `OMARCHY_API`, `https://pkgs.omarchy-pool.org` by default), into the set's
 directory once. An old `rollout.sh` that is missed brings back only the
 updater, which stands down.
+
+A CLI set's compose file is the one its last `start` before #343 wrote:
+neither `omarchy-worker` (`start`, `update`) nor the updater fetches it any
+more, so a release that changes `factory/image/compose.yml` before P3 (the
+broker's, say) reaches a CLI set only by hand. After such a release, in the
+set's directory ([Workers](/docs/workers#contributor), *A changed compose file*):
+
+```bash
+tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
+curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/image/compose.yml" | diff -u compose.yml -
+curl -fsSo compose.yml "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/image/compose.yml" && ./omarchy-worker start
+```
 
 **Rehearse `retire-legacy` before the Studio's** (#344), on the P1 host,
 with a stand-in legacy set the agent's user owns:
@@ -2046,9 +2074,15 @@ What `setup.sh` does, in order, and what a failure leaves:
    before anything else, when the new files are in already (a killed step:
    see below). Any of these fails with exit 4
    and changes none of the host's files, units or containers (only the
-   updater image may have been pulled): the timer runs on. Fix what it names (for a
-   missing token: `register.sh`, or leave that service's profile out of
-   `COMPOSE_PROFILES`), then paste again. It also warns about a container
+   updater image may have been pulled): the timer runs on. Fix what it names, then
+   paste again. A community service's missing token: `register.sh`, or
+   leave its profile out of `COMPOSE_PROFILES` where it has one. A project service (pool,
+   review, review2) can no longer be registered (#343: per-worker trust is
+   gone, so `register.sh` skips it): leave its profile out where it has one
+   (`emulated` holds review-x86_64, `review2` the second pair). pool-* and
+   review-aarch64 have none, so keep the env files that hold their tokens;
+   a lost one is the maintainer host's work from then on
+   ([Maintainer hosts](/docs/worker-host#maintainer-hosts)). It also warns about a container
    of this project whose service the new `compose.yml` does not run under
    this host's profiles (a registered review2, now behind a profile of its
    own): no rollout reaches it until its profile is in `COMPOSE_PROFILES`.
@@ -2207,9 +2241,12 @@ the review2 pair with no profile, which would start it unregistered.
 ### After a release
 
 Nothing to do on any host, and on a host the agent manages, nothing needs
-to be run either. The pool is deployed once the images exist. Within two
+to be run either; one exception until P3: a release that changes
+`factory/image/compose.yml` reaches a maintainer's CLI set only once its
+owner takes the file in (*The Studio host* above: a CLI set's compose
+file). The pool is deployed once the images exist. Within two
 minutes, every updater sees the pool's new release and rolls its set out:
-every contributor's set, and the Studio's since its one-time step above.
+every maintainer's legacy set, and the Studio's since its one-time step above.
 `agent-proxy` and the brokers go first, each answering before the workers
 that call them (#278), then the workers, each stop a drain.
 
@@ -2615,9 +2652,15 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   with its own `omw_` token; the project trust a legacy registration holds
   was given on two maintainers' word, and is given that way no more (#343:
   a host's trust is the maintainer list). The Studio's tokens live in `/srv/omarchy-pool/etc/*.env`
-  on the host (`factory/host/register.sh` writes them); to rotate one,
-  revoke the worker, blank its env file, run `register.sh` again,
-  `docker compose up -d`.
+  on the host (`factory/host/register.sh` writes them). Only the community
+  pair's rotate: revoke the worker, blank its env file, run `register.sh`
+  again, `docker compose up -d`. A project service's token (pool, review,
+  review2) cannot be rotated since #343: no new registration can be given
+  project trust (the trust door answers 410), so `register.sh` skips that
+  service and revoking its token ends it for good (blank its env file and
+  its role container exits at start, holding the updater back). Revoke one
+  only when it leaks, and move its work to the maintainer's host first
+  ([Maintainer hosts](/docs/worker-host#maintainer-hosts)).
 
 ## Costs
 

@@ -20,6 +20,10 @@
 # nothing, and the updater that keeps both on the pool's latest image —
 # every worker follows it, the pool hands nothing to one that is behind. A
 # directory without that compose file is refused: a new machine is a host.
+# Neither start nor update fetches that file any more, and the updater pulls
+# images only: a release that changes factory/image/compose.yml reaches the
+# set once you take that release's file into its directory and start again
+# (https://omarchy-pool.org/docs/workers#contributor, A changed compose file).
 # A project set: --project (with --role pool|review); back to a community
 # set with --community. Options are remembered.
 #

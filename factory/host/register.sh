@@ -14,8 +14,9 @@
 #
 # A service whose etc/*.env already holds a token is left alone, so the
 # script is safe to run again after adding a worker or losing one. To
-# replace a registration, revoke it on the dashboard (or DELETE
-# /factory/workers/<id>), blank the token in its env file, run again.
+# replace a community registration, revoke it on the dashboard (or DELETE
+# /factory/workers/<id>), blank the token in its env file, run again; a
+# project service's cannot be replaced since #343 (runbook, *Tokens*).
 set -euo pipefail
 : "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
 : "${OMARCHY_CONTRIBUTOR_TOKEN:?OMARCHY_CONTRIBUTOR_TOKEN is required: the contributor token of a maintainer, from the profile page (never paste it anywhere else)}"

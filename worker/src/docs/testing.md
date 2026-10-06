@@ -266,8 +266,9 @@ job token and its evidence served, the audit it queues (a community worker
 never gets it; the builder cannot write `audit.*`; a project worker declaring
 the `audit` kind attaches the report with the audit's own token, and only
 that; Review shows the verdict; the agent the worker reported at claim time
-is listed on the Factory API), any community registration taking any
-contributor's build (#343),
+is listed on the Factory API), any community registration of a maintainer
+taking any contributor's build (#343: the one-name scenario's two are a
+maintainer's too),
 the governance table and maintainers API, the profile page and API (with
 the track record), the browser session (`/auth/me` with the
 cookie, sign-out invalidating it on the server while the CLI token keeps
