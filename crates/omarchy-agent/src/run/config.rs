@@ -7,8 +7,8 @@
 //! (capacity caps are #333's), but `[envelope].agent_budget`, which reaches the
 //! dispatcher (#371), is read strictly. What the pool may narrow inside it — units,
 //! emulated lanes — and what it allows the pool to ask — diagnostics — is [`Policy`]
-//! (#325, design v2 §12). Any problem here is a local configuration error: the loop exits
-//! 78 and says why.
+//! (#325, design v2 §12), with the owner's soak (`soak_minutes`, #326). Any problem here is
+//! a local configuration error: the loop exits 78 and says why.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -177,9 +177,41 @@ pub struct Policy {
     /// `drivers`: the drivers `runtime switch` may move the bundle to (`compose` names
     /// both of this binary's).
     pub drivers: Vec<String>,
+    /// `soak_minutes` (#326, design v2 D16): how long a new release waits before this host
+    /// takes it, from when the pool first names it; 0 (the default) takes it at once. A
+    /// rollback statement skips it; nothing the pool sends does.
+    pub soak_minutes: u32,
 }
 
 impl Policy {
+    /// The envelope's bounds as `agent.toml` says them: an architecture `emulate` cannot
+    /// run, or a soak longer than the pool's grace, is refused.
+    fn of(e: EnvelopePart) -> Result<Self, String> {
+        if let Some(bad) = e
+            .emulate
+            .iter()
+            .flatten()
+            .find(|a| !ARCHES.contains(&a.as_str()))
+        {
+            return Err(format!(
+                "agent.toml: envelope.emulate names {bad:?}, which is neither x86_64 nor aarch64"
+            ));
+        }
+        if e.soak_minutes > MAX_SOAK_MINUTES {
+            return Err(format!(
+                "agent.toml: envelope.soak_minutes {}: at most {MAX_SOAK_MINUTES} (the pool's claim grace for a soaking host ends two hours after a deploy)",
+                e.soak_minutes
+            ));
+        }
+        Ok(Policy {
+            max_units: e.max_units,
+            emulate: e.emulate,
+            diagnostics: e.diagnostics,
+            drivers: e.drivers.unwrap_or_else(|| vec!["compose".to_owned()]),
+            soak_minutes: e.soak_minutes,
+        })
+    }
+
     /// Whether the envelope lets the bundle run on `r`'s driver.
     pub fn allows_driver(&self, r: Runtime) -> bool {
         self.drivers
@@ -229,10 +261,16 @@ struct EnvelopePart {
     #[serde(default)]
     diagnostics: bool,
     drivers: Option<Vec<String>>,
+    #[serde(default)]
+    soak_minutes: u32,
 }
 
 /// The architectures a lane may be (design v2 §7.4).
 pub(crate) const ARCHES: [&str; 2] = ["x86_64", "aarch64"];
+
+/// The longest soak an owner may set (#326): the pool's claim grace for a soaking host ends
+/// two hours after a deploy, so a longer one would idle the host it meant to protect.
+pub const MAX_SOAK_MINUTES: u32 = 120;
 
 /// An id the pool hands out (host and worker ids).
 fn is_id(s: &str) -> bool {
@@ -312,26 +350,9 @@ impl Config {
                 format!("agent.toml: set.runtime {r:?} is neither \"docker\" nor \"podman\"")
             })?),
         };
-        if let Some(bad) = f
-            .envelope
-            .emulate
-            .iter()
-            .flatten()
-            .find(|a| !ARCHES.contains(&a.as_str()))
-        {
-            return Err(format!(
-                "agent.toml: envelope.emulate names {bad:?}, which is neither x86_64 nor aarch64"
-            ));
-        }
-        let policy = Policy {
-            max_units: f.envelope.max_units,
-            emulate: f.envelope.emulate,
-            diagnostics: f.envelope.diagnostics,
-            drivers: f
-                .envelope
-                .drivers
-                .unwrap_or_else(|| vec!["compose".to_owned()]),
-        };
+        let task_subnets = f.envelope.task_subnets.clone();
+        let agent_budget = Budget::from_envelope(f.envelope.agent_budget.as_ref())?;
+        let policy = Policy::of(f.envelope)?;
         let socket_cli = need_path(f.set.socket_cli, "set.socket_cli")?;
         let socket_mount = match f.set.socket_mount {
             None => socket_cli.clone(),
@@ -348,8 +369,8 @@ impl Config {
             project: f.set.project,
             socket_cli,
             socket_mount,
-            task_subnets: f.envelope.task_subnets,
-            agent_budget: Budget::from_envelope(f.envelope.agent_budget.as_ref())?,
+            task_subnets,
+            agent_budget,
             envelope,
             engine,
             runtime,
@@ -485,8 +506,20 @@ max_units = 3
                 emulate: Some(vec!["x86_64".into()]),
                 diagnostics: false,
                 drivers: vec!["compose".into()],
+                soak_minutes: 0,
             }
         );
+        // The owner's soak (#326): up to two hours, the pool's grace for a soaking host.
+        let soak = |m: &str| {
+            Config::parse(&format!(
+                "worker_id = \"w_1\"\n{}",
+                studio.replace("soak_minutes = 0", &format!("soak_minutes = {m}"))
+            ))
+        };
+        assert_eq!(soak("30").unwrap().policy.soak_minutes, 30);
+        assert_eq!(soak("120").unwrap().policy.soak_minutes, 120);
+        assert!(soak("121").unwrap_err().contains("at most 120"));
+        assert!(soak("-5").is_err());
         assert!(c.policy.allows_lane("x86_64") && !c.policy.allows_lane("aarch64"));
         assert!(c.policy.allows_driver(Runtime::Podman));
         // No set.runtime (install writes none): the engine is asked which it is.

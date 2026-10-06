@@ -393,6 +393,56 @@ pub(crate) fn summary(s: &State, now: i64) -> String {
     );
     out.push_str(&orders_lines(s, now));
     out.push_str(&p4_lines(s, now));
+    out.push_str(&soak_lines(s, now));
+    out
+}
+
+/// `status`'s lines for #326: the owner's soak of the release the pool names, and what
+/// GitHub showed last (freeze detection).
+fn soak_lines(s: &State, now: i64) -> String {
+    let mut out = String::new();
+    let mut line = |k: &str, v: String| {
+        let _ = writeln!(out, "{k:<10} {v}");
+    };
+    if let Some(k) = s
+        .soak
+        .as_ref()
+        .filter(|k| s.target == Some(k.release) && s.applied.is_some_and(|a| a < k.release))
+    {
+        line(
+            "soak:",
+            if k.until > now {
+                format!(
+                    "{} waits {} s more (named {} s ago; a rollback statement skips it)",
+                    k.release,
+                    k.until - now,
+                    (now - k.seen).max(0)
+                )
+            } else {
+                format!("{} soaked: its round goes", k.release)
+            },
+        );
+    }
+    let g = &s.github;
+    if let Some(latest) = g.latest {
+        let behind = if g.behind {
+            format!(
+                "; pool-behind-github: the pool names {} since {} s",
+                opt(s.target),
+                g.ahead_since.map_or(0, |a| (now - a).max(0))
+            )
+        } else {
+            String::new()
+        };
+        line(
+            "github:",
+            format!(
+                "latest release {latest}, read {} s ago; next in {} s{behind}",
+                (now - g.read_at).max(0),
+                (g.next_at - now).max(0)
+            ),
+        );
+    }
     out
 }
 

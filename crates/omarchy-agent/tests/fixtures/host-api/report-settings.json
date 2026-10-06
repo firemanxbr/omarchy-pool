@@ -58,7 +58,11 @@
   "release": {
     "applied": "v1.21.0",
     "floor": "v1.21.0",
+    "github_latest": null,
     "min_release": "v1.20.0",
+    "pool_behind_github": null,
+    "soak_minutes": 0,
+    "soaking_until": null,
     "target": "v1.21.0"
   },
   "rollout": {

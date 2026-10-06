@@ -6,8 +6,10 @@
 //! `capacity` (`run/capacity.json` as the dispatcher reads it, narrowed), `settings` (what
 //! the pool narrowed, the envelope it narrows inside and what applies: the host page's
 //! controls), `brake` (how much of each limit the last window spent) and `runtime` (the
-//! driver, and the owner's switch in flight or its last end). Bundle and task fields stay
-//! with the issues that read them.
+//! driver, and the owner's switch in flight or its last end). #326 adds to `release` the
+//! owner's soak — `soak_minutes`, and `soaking_until`, which the pool's claim grace follows
+//! — and freeze detection's `github_latest` and `pool_behind_github`. Bundle and task
+//! fields stay with the issues that read them.
 //!
 //! A report that does not get through changes nothing and is tried again a minute later —
 //! an hour later when the pool refuses the host's calls (401/403: suspended, retired, a
@@ -48,7 +50,11 @@ impl Agent {
         let detail: String = round.detail.chars().take(ROUND_DETAIL_MAX).collect();
         let mut body = serde_json::json!({
             "agent": {"version": self.version.to_string(), "skip": s.agent_skip.map(|v| v.to_string())},
-            "release": {"applied": r(s.applied), "target": r(s.target), "floor": r(s.floor), "min_release": r(s.min_release)},
+            "release": {
+                "applied": r(s.applied), "target": r(s.target), "floor": r(s.floor), "min_release": r(s.min_release),
+                "soak_minutes": self.cfg.policy.soak_minutes, "soaking_until": self.soak_view(now),
+                "github_latest": r(s.github.latest), "pool_behind_github": self.freeze_view(now),
+            },
             "rollout": {"state": s.rollout.step.name(), "since": iso(s.rollout.since), "target": r(s.rollout.target)},
             "round": if round.outcome.is_empty() { serde_json::Value::Null } else { serde_json::json!({
                 "at": iso(round.at), "outcome": round.outcome, "from": r(round.from), "step": round.step, "detail": detail,
