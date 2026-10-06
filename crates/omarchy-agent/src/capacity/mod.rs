@@ -497,7 +497,7 @@ pub struct Totals {
 /// The units `cpus` and `mem_gb` give under the signed constants (design v2 §7.3): what is
 /// left after the reserve, in whole units of CPU and memory, the smaller of the two, and
 /// at most the owner's `max_units`. Detection counts them so, and so does a signed widening
-/// of the envelope (#328, `run::settings::recap`), which therefore never gives more than
+/// of the envelope (#328, `run::settings::recount`), which therefore never gives more than
 /// the constants and the detected hardware allow.
 pub(crate) fn units_of(
     cpus: u32,

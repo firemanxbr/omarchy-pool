@@ -6,7 +6,7 @@
 //! - `widen-envelope`: the document's keys replace agent.toml's in `[envelope]`, line by
 //!   line; the loop takes the new envelope at once — the bounds the pool narrows inside, the
 //!   agent budget `etc/dispatcher.env` carries, a Mac's VM size — and counts the host's
-//!   capacity again under it ([`super::settings::recap`]): never more units than the signed
+//!   capacity again under it ([`super::settings::recount`]): never more units than the signed
 //!   constants and the detected hardware give. The changed `run/capacity.json` or
 //!   `etc/dispatcher.env` recreates the dispatcher, as any change of an input does.
 //! - `set-agent-keys`: each key opened with the seal key and written to

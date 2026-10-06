@@ -26,7 +26,7 @@
 //!   `agent_budget`, `diagnostics`, `paths`, and nothing else: never the socket, the
 //!   isolation acknowledgements, the task subnets, the soak or a `[set]` path — line by
 //!   line, so the owner's comments stay. Units never rise above what the signed capacity
-//!   constants and the detected hardware give (`run::settings::recap`).
+//!   constants and the detected hardware give (`run::settings::recount`).
 //! - **Agent keys** ([`seal`]) arrive sealed to the host's X25519 key, each named from
 //!   [`AGENT_KEYS`] (the six the dispatcher refuses to hold, `pkg-repo dispatch`); they are
 //!   opened here and written to `OMARCHY_SECRETS_DIR/agent.env` alone (0600, the owner's

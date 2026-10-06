@@ -648,7 +648,7 @@ export const WIDENABLE = ["max_units", "max_cpus", "max_mem_gb", "emulate", "age
 /** The agent keys a sealed document may set: the ones agent sidecars read and the dispatcher refuses to hold (owner::AGENT_KEYS). */
 export const AGENT_KEY_NAMES = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "GITHUB_TOKEN"] as const;
 const BUDGET_KEYS = ["calls_per_task", "tokens_per_task", "minutes_per_task", "calls_per_day"];
-/** Each budget key's top as the agent reads it (dispatcher_env `Budget::from_envelope`: the calls a u32; owner::Widening at most 2^40). */
+/** Each budget key's top as the agent takes it: the calls a u32 (dispatcher_env `Budget::from_envelope`), the tokens and minutes 1e12 here, below owner::Widening's 2^40. */
 const BUDGET_MAX: Record<string, number> = { calls_per_task: 4294967295, tokens_per_task: 1e12, minutes_per_task: 1e12, calls_per_day: 4294967295 };
 const B64U = /^[A-Za-z0-9_-]+$/;
 
