@@ -183,7 +183,7 @@ describe("the documents, the widening and the sealed keys (pure)", () => {
   it("checks a proposed envelope as the agent does: its keys, their types and ranges", () => {
     expect(widening({ max_units: 8, emulate: ["x86_64"], agent_budget: { calls_per_day: 9000 }, diagnostics: true, paths: ["/srv/a"], max_cpus: null })).toEqual({ max_units: 8, emulate: ["x86_64"], agent_budget: { calls_per_day: 9000 }, diagnostics: true, paths: ["/srv/a"], max_cpus: null });
     for (const [v, says] of [
-      [{}, "at least one key"], [{ allow_socket: true }, "allow_socket is no key"], [{ soak_minutes: 0 }, "soak_minutes is no key"], [{ direct_network: true }, "direct_network is no key"], [{ max_units: 0 }, "1 to 4096"],
+      [{}, "at least one key"], [{ allow_socket: true }, "allow_socket is no key"], [{ soak_minutes: 0 }, "soak_minutes is no key"], [{ direct_network: true }, "direct_network is no key"], [{ sandbox: "off" }, "sandbox is no key"], [{ max_units: 0 }, "1 to 4096"],
       [{ max_units: 5000 }, "1 to 4096"], [{ emulate: ["riscv64"] }, "distinct architectures"], [{ diagnostics: null }, "null is not"],
       [{ agent_budget: { calls_per_hour: 1 } }, "calls_per_hour"], [{ paths: ["/"] }, "plain absolute"], [{ paths: ["/srv/../etc"] }, "plain absolute"], [[], "an object"],
       // The agent's own bounds per budget key: the calls a u32 (dispatcher_env Budget::from_envelope), the tokens and minutes at most 1e12.

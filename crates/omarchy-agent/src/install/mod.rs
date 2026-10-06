@@ -894,6 +894,20 @@ pub(crate) fn measure_as(
             .filter_map(|a| a.as_str().map(str::to_owned))
             .collect()
     });
+    // The sandboxed runtime for community tasks (#330), within the envelope's `sandbox` an
+    // earlier install's owner may have set: absent tries what the engine has.
+    let sandbox = match envelope::envelope_value(ex, "sandbox") {
+        None => Ok(capacity::sandbox::Setting::Auto),
+        Some(toml::Value::String(s)) => capacity::sandbox::Setting::parse(Some(&s)),
+        Some(v) => Err(format!(
+            "agent.toml: [envelope] sandbox = {v} is not \"auto\", \"off\" or a runtime's name"
+        )),
+    }
+    .map_err(|e| format!("{e}; nothing was changed"));
+    let sandbox = sandbox.unwrap_or_else(|e| {
+        r.blockers.push(e);
+        capacity::sandbox::Setting::Off
+    });
     let facts = docker.as_ref().and_then(|d| {
         let host = d.host();
         let how = probe::Probe {
@@ -906,6 +920,11 @@ pub(crate) fn measure_as(
                 binfmt: &p.binfmt,
                 images: &images,
                 emulate: emulate.as_deref(),
+            }),
+            // A Mac's VM holds the engine's files: the smoke run alone decides there.
+            sandbox: Some(capacity::sandbox::Probe {
+                setting: &sandbox,
+                local: !mac,
             }),
         };
         match probe::detect(&how) {
@@ -944,6 +963,7 @@ pub(crate) fn measure_as(
         max_mem_gb: o.max_mem_gb,
         dedicated,
         emulate,
+        sandbox,
         ..Caps::default()
     };
     let capacity = facts.as_ref().zip(manifest.as_ref()).map(|(f, m)| {
@@ -965,6 +985,7 @@ pub(crate) fn measure_as(
             emulated.concat()
         ));
         checks::emulation(&c, &mut r);
+        checks::sandbox(&c, &mut r);
         c
     });
     if let Some(f) = &facts {
@@ -1245,6 +1266,7 @@ fn mac_facts(
             work_root: &o.places.home,
             image: None,
             emulation: None,
+            sandbox: None,
         };
         probe::rosetta_lane(&how, img)
     });

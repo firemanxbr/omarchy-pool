@@ -1873,7 +1873,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
     fs::write(
         &docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" network connect \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *\" create --name omarchy-egress-probe-\"*|*\" start omarchy-egress-probe-\"*) ;;\n  *omarchy-egress-probe-*-task\" \"*\" public@egress \"*) {r}/probe-answers {r}/task-egress \"$@\" ;;\n  *omarchy-egress-probe-*-task\" \"*) {r}/probe-answers {r}/task-seen \"$@\" ;;\n  *omarchy-egress-probe-*) {r}/probe-answers {r}/egress \"$@\" ;;\n  *\" --entrypoint pacman \"*) cat {r}/pacman 2>/dev/null || exit 125 ;;\n  *\" --entrypoint /usr/bin/true \"*) test -e {r}/pacman || exit 125 ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" network connect \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *\" create --name omarchy-egress-probe-\"*|*\" start omarchy-egress-probe-\"*) ;;\n  *omarchy-egress-probe-*-task\" \"*\" public@egress \"*) {r}/probe-answers {r}/task-egress \"$@\" ;;\n  *omarchy-egress-probe-*-task\" \"*) {r}/probe-answers {r}/task-seen \"$@\" ;;\n  *omarchy-egress-probe-*) {r}/probe-answers {r}/egress \"$@\" ;;\n  *\" --entrypoint pacman \"*) cat {r}/pacman 2>/dev/null || exit 125 ;;\n  *\" --entrypoint uname \"*) cat {r}/uname 2>/dev/null || exit 125 ;;\n  *\" --entrypoint /usr/bin/true \"*) test -e {r}/pacman || exit 125 ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = root.display()
         ),
     )
@@ -2237,6 +2237,99 @@ fn preflight_reports_the_emulated_lane_and_never_stops_on_a_held_one() {
     );
     let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
     assert!(!log.contains("--platform"), "{log}");
+}
+
+/// `INFO` with gVisor registered (`runsc install`) and the engine's kernel said (#330).
+const INFO_RUNSC: &str = r#"{"NCPU":12,"MemTotal":33443418112,"DockerRootDir":"/nonexistent/storage","Architecture":"aarch64","SecurityOptions":["name=rootless"],"CgroupVersion":"2","MemoryLimit":true,"CpuCfsQuota":true,"PidsLimit":true,"KernelVersion":"6.16.8-asahi","Runtimes":{"runc":{"path":"runc"},"runsc":{"runtimeType":"io.containerd.runsc.v1"}}}"#;
+
+#[test]
+fn preflight_says_the_sandbox_and_never_stops_on_one_it_cannot_use() {
+    // The probe container's image: the release's build image of this machine's architecture.
+    let image = tests_support::manifest("v1.20.0", "v1.0.0", &[])
+        .build_image(std::env::consts::ARCH)
+        .unwrap()
+        .to_string();
+    // gVisor registered with the engine: its smoke run, on the release's build image of the
+    // native lane, shows a kernel that is not the engine's — the sandbox, said in the notes.
+    let h = host(INFO_RUNSC, EGRESS_OK);
+    fs::write(h.root.join("uname"), "4.19.0-gvisor\n").unwrap();
+    fs::write(h.root.join("pacman"), "Pacman v7.0.0 - libalpm v15.0.0\n").unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.notes.iter().any(|n| n.starts_with(
+            "sandbox: gVisor (runsc) — community tasks on the aarch64 lane run in it"
+        )),
+        "{}",
+        r.screen()
+    );
+    let ready = ready.expect("ready");
+    assert_eq!(
+        ready.capacity.sandbox().map(|s| s.runtime.as_str()),
+        Some("runsc")
+    );
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(
+        log.contains(&format!(
+            "run --rm --network none --runtime runsc --entrypoint uname {image} -r"
+        )),
+        "{log}"
+    );
+
+    // Under `--runtime runsc` the engine's own kernel (docker's CLI on podman): none, a
+    // warning with why, and the install goes on.
+    let h = host(INFO_RUNSC, EGRESS_OK);
+    fs::write(h.root.join("uname"), "6.16.8-asahi\n").unwrap();
+    fs::write(h.root.join("pacman"), "Pacman v7.0.0 - libalpm v15.0.0\n").unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    assert!(ready.unwrap().capacity.sandbox().is_none());
+    assert!(
+        r.warnings.iter().any(|w| w.starts_with(
+            "sandbox: runsc: its container ran on the engine's own kernel (6.16.8-asahi)"
+        )),
+        "{}",
+        r.screen()
+    );
+    assert!(
+        r.notes.iter().any(|n| n.starts_with("sandbox: none")),
+        "{}",
+        r.screen()
+    );
+
+    // The owner's envelope from an earlier install turns it off: nothing is run for it; one
+    // that does not read stops the install with its words.
+    for (envelope, ok) in [
+        ("sandbox = \"off\"", true),
+        ("sandbox = \"Runsc\"", false),
+        ("sandbox = true", false),
+    ] {
+        let h = host(INFO_RUNSC, EGRESS_OK);
+        fs::write(h.root.join("uname"), "4.19.0-gvisor\n").unwrap();
+        fs::create_dir_all(h.root.join("data")).unwrap();
+        fs::write(
+            h.root.join("data/agent.toml"),
+            format!("[envelope]\n{envelope}\n"),
+        )
+        .unwrap();
+        fs::set_permissions(
+            h.root.join("data/agent.toml"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let (r, _) = measure_on(&h, &mut Fake::default());
+        assert_eq!(r.ok(), ok, "{}", r.screen());
+        if !ok {
+            assert!(
+                r.screen()
+                    .contains(&format!("[envelope] {envelope} is not")),
+                "{}",
+                r.screen()
+            );
+        }
+        let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+        assert!(!log.contains("--runtime"), "{log}");
+    }
 }
 
 #[test]

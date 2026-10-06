@@ -4,6 +4,7 @@ use std::cell::RefCell;
 
 use super::emulation::{self, Binfmt, Emulated, Held, Lanes, Smoke};
 use super::probe::{self, CgroupLimits, Engine, Facts};
+use super::sandbox;
 use super::{preflight, write_if_changed, AgentToml, Capacity, Caps, Isolation, Limits, Written};
 use crate::manifest::{self, Parsed};
 
@@ -38,6 +39,8 @@ fn engine(cpus: u32, mem_bytes: u64) -> Engine {
         cpus_hard: true,
         memory_hard: true,
         pids: true,
+        kernel: "6.8.0-1017-azure".into(),
+        runtimes: Vec::new(),
     }
 }
 
@@ -408,6 +411,7 @@ fn a_limited_probe_run_that_fails_once_is_retried_before_the_limits_read_as_refu
             work_root: &dir,
             image: Some("build-image"),
             emulation: None,
+            sandbox: None,
         };
         let out = probe::detect(&p);
         let _ = std::fs::remove_dir_all(&dir);
@@ -476,7 +480,8 @@ fn capacity_json_is_rewritten_only_when_something_changed() {
             "held_lanes": [],
             "isolation": "root", "dedicated": true,
             "limits": {"cpus_hard": true, "memory_hard": true, "pids": true},
-            "below_minimum": false
+            "below_minimum": false,
+            "sandbox": null
         })
     );
 
@@ -576,6 +581,7 @@ dedicated = true
             agent_slots: 1,
             dedicated: true,
             emulate: Some(vec!["x86_64".into()]),
+            sandbox: sandbox::Setting::Auto,
         }
     );
     assert_eq!(a.work_root.as_deref(), Some("/srv/omarchy-pool/host"));
@@ -600,9 +606,27 @@ dedicated = true
         "[envelope]\nallow_socket = true\nrootful_ack = true\nuserns_remap = false\n\
          paths = []\ndrivers = [\"compose\"]\ncache_caps = { build_gb = 120 }\n\
          agent_budget = { calls_per_task = 200 }\ntask_subnets = \"10.232.0.0/16\"\n\
-         diagnostics = false\nsoak_minutes = 0\n"
+         diagnostics = false\nsoak_minutes = 0\nsandbox = \"auto\"\n"
     )
     .is_ok());
+    // The sandbox (#330): auto, off or a runtime's name; anything else refused, not ignored.
+    let sb = |t: &str| AgentToml::parse(t).map(|a| a.caps.sandbox);
+    assert_eq!(sb(""), Ok(sandbox::Setting::Auto));
+    assert_eq!(
+        sb("[envelope]\nsandbox = \"off\"\n"),
+        Ok(sandbox::Setting::Off)
+    );
+    assert_eq!(
+        sb("[envelope]\nsandbox = \"kata-qemu\"\n"),
+        Ok(sandbox::Setting::Named("kata-qemu".into()))
+    );
+    for bad in [
+        "sandbox = true",
+        "sandbox = \"--privileged\"",
+        "sandbox = \"Runsc\"",
+    ] {
+        assert!(sb(&format!("[envelope]\n{bad}\n")).is_err(), "{bad}");
+    }
     // The work root is a plain absolute path, as lint-set reads it.
     assert!(AgentToml::parse("[set]\nwork_root = \"srv/pool\"\n").is_err());
     assert!(AgentToml::parse("[set]\nwork_root = \"/srv/../etc\"\n").is_err());
@@ -1015,6 +1039,7 @@ fn the_smoke_run_starts_true_then_pacman_under_the_lane_platform_by_digest() {
         work_root: &dir,
         image: None,
         emulation: None,
+        sandbox: None,
     };
     p.emulation("x86_64", X86_IMAGE).unwrap();
     let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
@@ -1074,6 +1099,7 @@ fn detection_runs_the_emulated_lane_through_the_engine_with_the_envelope() {
             images: &images,
             emulate: None,
         }),
+        sandbox: None,
     };
     // The fake engine prints no pacman: the lane is held with what the smoke run saw.
     let f = probe::detect(&p).unwrap();
@@ -1173,6 +1199,247 @@ fn capacity_json_with_its_lanes_is_the_file_the_dispatcher_tests_against() {
             &dedicated,
             &constants(),
         ),
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---------- the sandboxed runtime for community tasks (#330, D43) ----------
+
+/// The Studio after `runsc install`: docker lists gVisor beside its runc, and says its kernel.
+const ROOTFUL_RUNSC: &str = r#"{"ID":"x","NCPU":12,"MemTotal":33443418112,"DockerRootDir":"/var/lib/docker",
+ "Architecture":"aarch64","OSType":"linux","CgroupDriver":"systemd","CgroupVersion":"2",
+ "MemoryLimit":true,"CpuCfsQuota":true,"PidsLimit":true,"KernelVersion":"6.16.8-asahi",
+ "SecurityOptions":["name=seccomp,profile=builtin","name=cgroupns"],
+ "Runtimes":{"io.containerd.runc.v2":{"path":"runc","status":{"x":"y"}},"runc":{"path":"runc"},
+   "runsc":{"path":"/usr/local/bin/runsc"},"kata":{"runtimeType":"io.containerd.kata.v2"}}}"#;
+
+const AARCH64_IMAGE: &str = "docker.io/menci/archlinuxarm@sha256:0b3df26cb6b6b9cb26d8d2e3cbd9a8fcbb83d1db0dd0c3cd4f6e2ca7c4c5d6e7";
+
+#[test]
+fn docker_info_lists_the_runtimes_and_says_its_kernel() {
+    let e = probe::parse_info(ROOTFUL_RUNSC).unwrap();
+    assert_eq!(e.kernel, "6.16.8-asahi");
+    let names: Vec<(&str, &str, &str)> = e
+        .runtimes
+        .iter()
+        .map(|l| (l.name.as_str(), l.path.as_str(), l.shim.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("io.containerd.runc.v2", "runc", ""),
+            ("kata", "", "io.containerd.kata.v2"),
+            ("runc", "runc", ""),
+            ("runsc", "/usr/local/bin/runsc", ""),
+        ]
+    );
+    // An engine that lists none (an older docker, a test's): nothing to look for.
+    let e = probe::parse_info(ROOTFUL).unwrap();
+    assert!(e.runtimes.is_empty() && e.kernel.is_empty());
+}
+
+/// A docker CLI that keeps its calls: `uname -r` prints `kernel` under `--runtime`, the
+/// host's without; `pacman --version` answers.
+fn sandbox_docker(dir: &Path, kernel: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    put(dir, "info.json", ROOTFUL_RUNSC);
+    let d = dir.display();
+    let docker = dir.join("docker");
+    put(
+        dir,
+        "docker",
+        &format!(
+            r#"#!/bin/sh
+case "$1" in
+info) cat '{d}/info.json'; exit 0 ;;
+esac
+echo "$*" >> '{d}/calls'
+case " $* " in
+  *" --entrypoint uname "*) case " $* " in *" --runtime "*) echo '{kernel}' ;; *) echo 6.16.8-asahi ;; esac ;;
+  *" --entrypoint pacman "*) echo 'Pacman v7.0.0 - libalpm v15.0.0' ;;
+  *" --entrypoint sh "*) printf 'cpu.max=50000 100000\nmemory.max=67108864\npids.max=32\npagesize=16384\n'; printf 'overlay 1 1 52428800 1%% /\n' ;;
+  *) exit 2 ;;
+esac
+"#
+        ),
+    );
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    docker
+}
+
+#[test]
+fn the_sandboxs_smoke_run_prints_its_kernel_under_the_runtime_by_digest() {
+    use sandbox::Run as _;
+    let dir = tmp("sandbox-smoke");
+    let docker = sandbox_docker(&dir, "4.19.0-gvisor");
+    let p = probe::Probe {
+        docker: docker.to_str().unwrap(),
+        host: Some("unix:///run/docker.sock"),
+        work_root: &dir,
+        image: None,
+        emulation: None,
+        sandbox: None,
+    };
+    assert_eq!(p.sandbox("runsc", AARCH64_IMAGE).unwrap(), "4.19.0-gvisor");
+    let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [
+            format!("--host unix:///run/docker.sock run --rm --network none --runtime runsc --entrypoint uname {AARCH64_IMAGE} -r"),
+            format!("--host unix:///run/docker.sock run --rm --network none --runtime runsc --entrypoint pacman {AARCH64_IMAGE} --version"),
+        ]
+    );
+    // Nothing outside the grammar reaches the argv: a flag for a name, an image by tag.
+    std::fs::remove_file(dir.join("calls")).unwrap();
+    assert!(p.sandbox("--privileged", AARCH64_IMAGE).is_err());
+    assert!(p
+        .sandbox("runsc", "docker.io/library/archlinux:latest")
+        .is_err());
+    assert!(!dir.join("calls").exists(), "refused before docker ran");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn detection_finds_gvisor_through_the_engine_and_the_file_carries_it() {
+    let dir = tmp("sandbox-detect");
+    let probe_with = |docker: &Path, setting: &sandbox::Setting| -> Facts {
+        probe::detect(&probe::Probe {
+            docker: docker.to_str().unwrap(),
+            host: None,
+            work_root: &dir,
+            image: Some(AARCH64_IMAGE),
+            emulation: None,
+            sandbox: Some(sandbox::Probe {
+                setting,
+                local: false,
+            }),
+        })
+        .unwrap()
+    };
+    let docker = sandbox_docker(&dir, "4.19.0-gvisor");
+    let f = probe_with(&docker, &sandbox::Setting::Auto);
+    let want = sandbox::Sandbox {
+        runtime: "runsc".into(),
+        kind: sandbox::Kind::Gvisor,
+    };
+    assert_eq!(f.sandbox().unwrap().on.as_ref(), Some(&want));
+    assert_eq!(
+        f.report()["sandbox"],
+        serde_json::json!({"runtime": "runsc", "kind": "gvisor"})
+    );
+    let c = Capacity::new(&f, &Caps::default(), &constants());
+    assert_eq!(c.sandbox(), Some(&want));
+    let file = serde_json::to_value(c.file("t")).unwrap();
+    assert_eq!(
+        file["sandbox"],
+        serde_json::json!({"runtime": "runsc", "kind": "gvisor"})
+    );
+    assert!(file.get("sandbox_held").is_none());
+    assert!(
+        !preflight(&c).iter().any(|b| b.contains("sandbox")),
+        "a sandbox is never a blocker"
+    );
+    // The envelope's `off`: nothing run for it, `sandbox: null` in the file.
+    std::fs::remove_file(dir.join("calls")).unwrap();
+    let f = probe_with(&docker, &sandbox::Setting::Off);
+    assert!(!std::fs::read_to_string(dir.join("calls"))
+        .unwrap()
+        .contains("--runtime"));
+    let file =
+        serde_json::to_value(Capacity::new(&f, &Caps::default(), &constants()).file("t")).unwrap();
+    assert_eq!(file["sandbox"], serde_json::Value::Null);
+    // docker's CLI on podman runs podman's own runtime under `--runtime runsc`: the host's kernel, no sandbox.
+    let podman = sandbox_docker(&tmp("sandbox-podman"), "6.16.8-asahi");
+    let f = probe_with(&podman, &sandbox::Setting::Auto);
+    let c = Capacity::new(&f, &Caps::default(), &constants());
+    assert_eq!(c.sandbox(), None);
+    assert!(
+        c.sandbox_held()
+            .unwrap()
+            .starts_with("runsc: its container ran on the engine's own kernel (6.16.8-asahi)"),
+        "{:?}",
+        c.sandbox_held()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(podman.parent().unwrap());
+}
+
+#[test]
+fn the_envelope_keeps_a_sandbox_detection_found_out_whatever_the_probe_was_told() {
+    let found = sandbox::Found {
+        on: Some(sandbox::Sandbox {
+            runtime: "runsc".into(),
+            kind: sandbox::Kind::Gvisor,
+        }),
+        held: None,
+    };
+    let f = facts(ROOTFUL).with_sandbox(found);
+    let with = |s: sandbox::Setting| {
+        Capacity::new(
+            &f,
+            &Caps {
+                sandbox: s,
+                ..Caps::default()
+            },
+            &constants(),
+        )
+    };
+    assert_eq!(
+        with(sandbox::Setting::Auto).sandbox().unwrap().runtime,
+        "runsc"
+    );
+    assert_eq!(
+        with(sandbox::Setting::Named("runsc".into()))
+            .sandbox()
+            .unwrap()
+            .runtime,
+        "runsc"
+    );
+    let off = with(sandbox::Setting::Off);
+    assert!(off.sandbox().is_none() && off.sandbox_held().is_none());
+    let other = with(sandbox::Setting::Named("kata".into()));
+    assert!(other.sandbox().is_none());
+    assert_eq!(
+        other.sandbox_held(),
+        Some("runsc: not the runtime the envelope's sandbox names (kata)")
+    );
+    // Detection that did not look (no probe for it): `sandbox: null`.
+    let none = Capacity::new(&facts(ROOTFUL), &Caps::default(), &constants());
+    assert_eq!(
+        serde_json::to_value(none.file("t")).unwrap()["sandbox"],
+        serde_json::Value::Null
+    );
+}
+
+/// The Studio with gVisor (#330): its `x86_64` lane emulated as before, `runsc` for the
+/// community tasks of its native lane. The dispatcher's tests and the pool's read this file.
+const SANDBOXED_FILE: &str = include_str!("../../tests/fixtures/capacity/sandboxed.json");
+
+#[test]
+fn capacity_json_with_its_sandbox_is_the_file_the_dispatcher_and_the_pool_test_against() {
+    let want: serde_json::Value = serde_json::from_str(SANDBOXED_FILE).unwrap();
+    let d = binfmt_tree("sandbox-file", &[("qemu-x86_64", QEMU_X86_F)]);
+    let lanes = studio(&d, None, 16, &FakeSmoke::passing());
+    let f = facts(ROOTFUL)
+        .with_emulation(16, lanes)
+        .with_sandbox(sandbox::Found {
+            on: Some(sandbox::Sandbox {
+                runtime: "runsc".into(),
+                kind: sandbox::Kind::Gvisor,
+            }),
+            held: None,
+        });
+    let c = Capacity::new(
+        &f,
+        &Caps {
+            dedicated: true,
+            ..Caps::default()
+        },
+        &constants(),
+    );
+    assert_eq!(
+        serde_json::to_value(c.file(want["at"].as_str().unwrap())).unwrap(),
+        want
     );
     let _ = std::fs::remove_dir_all(&d);
 }
