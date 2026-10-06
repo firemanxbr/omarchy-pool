@@ -3,13 +3,15 @@
 //! (its exit code and `OOMKilled` survive a dispatcher restart, since nothing
 //! is started with `--rm`), list this host's task containers and networks,
 //! remove one lease's. Through the engine's CLI (`docker`, or `podman` where
-//! that is what answers), each call with a deadline. A trait, so the loop's
-//! tests run on a fake engine.
+//! that is what answers), each call with a deadline, and behind docker's CLI on
+//! podman a task network through libpod's own API ([`libpod`], #372). A trait,
+//! so the loop's tests run on a fake engine.
 
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use super::libpod;
 use super::spec::{self, EGRESS_NETWORK, GEN_LABEL, HOST_LABEL};
 use crate::stop::{self, TASK_LABEL};
 
@@ -34,7 +36,8 @@ impl State {
 
 pub trait Engine: Send + Sync {
     /// `<engine> <args…>`, one of the spec's calls (`network create`, `create`, `network connect`,
-    /// `start`, `run -d`): `Ok` when the engine did it.
+    /// `start`, `run -d`): `Ok` when the engine did it. A `network create` with podman's
+    /// `--disable-dns` is made through libpod's API where docker's CLI talks to podman (#372).
     fn run(&self, args: &[String]) -> Result<(), String>;
     /// `<engine> <args…>` for its output: (stdout, stderr), whatever its exit code; `Err` when the engine did not answer.
     fn output(&self, args: &[String]) -> Result<(String, String), String>;
@@ -76,6 +79,9 @@ pub fn ensure_bridge(engine: &dyn Engine, host: &str) -> Result<(), String> {
 /// The engine's CLI.
 pub struct Cli {
     pub runtime: String,
+    /// libpod's API on the socket docker's CLI talks to, when podman answers there: the task
+    /// networks docker's CLI cannot make on it (#372). Set by [`Cli::gateway`].
+    pub libpod: Option<libpod::Libpod>,
 }
 
 /// How long one engine call may take: a `run` pulls nothing (the image is pinned and
@@ -97,14 +103,17 @@ impl Cli {
             .find(|r| answers(r))
             .map(|r| Self {
                 runtime: r.to_owned(),
+                libpod: None,
             })
     }
 
-    /// How this engine keeps a task network's gateway off the host ([`spec::Gateway`]): podman's own
-    /// CLI by `--disable-dns`; docker's by its isolated gateway mode, from Docker 28 (an older daemon
-    /// is refused, in its own words: it would make the network with the host's address on it); podman
-    /// behind docker's CLI (its API forces DNS on and drops docker's option) cannot be asked.
-    pub fn gateway(&self) -> Result<spec::Gateway, String> {
+    /// How this engine keeps a task network's gateway off the host ([`spec::Gateway`]): podman by a
+    /// network without DNS — its own CLI's `--disable-dns`, or behind docker's CLI (whose API forces
+    /// DNS on and drops docker's option) libpod's own API on the socket that CLI talks to, which
+    /// must answer as podman ([`libpod::Libpod::on`]); docker by its isolated gateway mode, from
+    /// Docker 28 (an older daemon is refused, in its own words: it would make the network with the
+    /// host's address on it).
+    pub fn gateway(&mut self) -> Result<spec::Gateway, String> {
         if self.runtime == "podman" {
             return Ok(spec::Gateway::NoDns);
         }
@@ -116,7 +125,29 @@ impl Cli {
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
-        gateway_of(&String::from_utf8_lossy(&out.stdout))
+        let gateway = gateway_of(&String::from_utf8_lossy(&out.stdout))?;
+        if gateway == spec::Gateway::NoDns {
+            // The endpoint docker's CLI uses, DOCKER_HOST's or its context's: libpod is asked there.
+            let out = self.call(&[
+                "context",
+                "inspect",
+                "--format",
+                "{{.Endpoints.docker.Host}}",
+            ])?;
+            if !out.status.success() {
+                return Err(format!(
+                    "{} context inspect: {}",
+                    self.runtime,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+            let socket = libpod::socket_of(&String::from_utf8_lossy(&out.stdout))
+                .map_err(|e| format!("podman behind docker's CLI: {e}"))?;
+            self.libpod = Some(libpod::Libpod::on(&socket, CALL).map_err(|e| {
+                format!("podman behind docker's CLI, whose task networks are made through libpod's API: {e}")
+            })?);
+        }
+        Ok(gateway)
     }
 
     /// SIGKILL, then removed: podman's `rm -f` stops with SIGTERM and waits ten seconds first, and a
@@ -147,7 +178,8 @@ struct RawState {
     oom_killed: bool,
 }
 
-/// `version --format '{{json .Server}}'` of docker's CLI, read: whose engine answers, and which Docker.
+/// `version --format '{{json .Server}}'` of docker's CLI, read: whose engine answers, and which
+/// Docker. podman, which names itself among the components, makes its task networks without DNS.
 pub fn gateway_of(json: &str) -> Result<spec::Gateway, String> {
     #[derive(Deserialize)]
     struct Component {
@@ -164,7 +196,7 @@ pub fn gateway_of(json: &str) -> Result<spec::Gateway, String> {
     let s: Server = serde_json::from_str(json.trim())
         .map_err(|_| format!("the engine's version does not read: {:?}", json.trim()))?;
     if s.components.iter().any(|c| c.name.contains("Podman")) {
-        return Ok(spec::Gateway::Engine);
+        return Ok(spec::Gateway::NoDns);
     }
     let major = s
         .version
@@ -200,6 +232,9 @@ pub fn parse_state(json: &str) -> Option<State> {
 
 impl Engine for Cli {
     fn run(&self, args: &[String]) -> Result<(), String> {
+        if let Some(l) = self.libpod.as_ref().filter(|_| libpod::wants(args)) {
+            return l.create_network(args);
+        }
         let a: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = self.call(&a)?;
         if out.status.success() {
@@ -350,8 +385,119 @@ mod tests {
         let old = r#"{"Components":[{"Name":"Engine","Version":"27.5.1"}],"Version":"27.5.1"}"#;
         assert!(gateway_of(old).unwrap_err().contains("Docker 28"));
         let podman = r#"{"Platform":{"Name":"linux/amd64/fedora-42"},"Components":[{"Name":"Podman Engine","Version":"5.6.1"},{"Name":"Conmon","Version":"2.1.13"}],"Version":"5.6.1","ApiVersion":"1.41"}"#;
-        assert_eq!(gateway_of(podman), Ok(spec::Gateway::Engine));
+        assert_eq!(gateway_of(podman), Ok(spec::Gateway::NoDns));
         assert!(gateway_of("null").is_err() && gateway_of("").is_err());
+    }
+
+    /// Removes a network when dropped, however the test ends.
+    struct Gone<'a>(&'a Cli, &'a str);
+
+    impl Drop for Gone<'_> {
+        fn drop(&mut self) {
+            self.0.remove_network(self.1);
+        }
+    }
+
+    fn stdout(cli: &Cli, args: &[&str]) -> String {
+        let out = cli.call(args).unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// The network as the engine keeps it: internal, and with no gateway — through libpod, DNS off
+    /// and none in its subnet; on Docker, its isolated gateway mode.
+    fn assert_no_gateway(cli: &Cli, gateway: spec::Gateway, net: &str, host: &str) {
+        if let Some(l) = &cli.libpod {
+            assert_eq!(gateway, spec::Gateway::NoDns);
+            let path = format!("/v{}/libpod/networks/{net}/json", l.version);
+            let a = libpod::request(&l.socket, "GET", &path, None, Instant::now() + CALL).unwrap();
+            let n: serde_json::Value = serde_json::from_slice(&a.body).unwrap();
+            println!(
+                "podman {} behind docker's CLI, through libpod: {n}",
+                l.version
+            );
+            assert_eq!(n["internal"], true, "{n}");
+            assert_eq!(n["dns_enabled"], false, "{n}");
+            assert!(n["subnets"][0]["gateway"].is_null(), "{n}");
+            assert_eq!(n["labels"][HOST_LABEL], host, "{n}");
+            return;
+        }
+        let out = stdout(cli, &["network", "inspect", "--format", "{{json .}}", net]);
+        let n: serde_json::Value = serde_json::from_str(&out).unwrap();
+        println!("{}: {n}", cli.runtime);
+        let internal = n["Internal"].as_bool().or(n["internal"].as_bool());
+        assert_eq!(internal, Some(true), "{n}");
+        if gateway == spec::Gateway::Isolated {
+            let mode = &n["Options"]["com.docker.network.bridge.gateway_mode_ipv4"];
+            assert_eq!(mode, "isolated", "{n}");
+        }
+    }
+
+    /// A task network as this dispatcher makes it, on a real engine (tests/agent-install.sh runs it
+    /// beside the install's probe, with `DOCKER_HOST` on that engine's socket and
+    /// `OMARCHY_STANDIN_IMAGE`): by docker's CLI, which on podman makes it through libpod's API
+    /// (#372). It is internal with no gateway, and a task on it reaches nothing at its `.1` on 22, 53
+    /// or the pool's ports: nothing answers there, nor refuses (busybox's `nc -z` prints nothing for
+    /// a refusal and returns at once, while an address no neighbour holds takes about 3 s).
+    #[test]
+    #[ignore = "needs a real engine: tests/agent-install.sh"]
+    fn real_engine_a_task_network_made_here_has_no_gateway() {
+        let image = std::env::var("OMARCHY_STANDIN_IMAGE")
+            .expect("OMARCHY_STANDIN_IMAGE (tests/agent-install.sh sets it)");
+        let mut cli = Cli {
+            runtime: std::env::var("OMARCHY_DISPATCH_CLI").unwrap_or_else(|_| "docker".into()),
+            libpod: None,
+        };
+        let gateway = cli.gateway().unwrap();
+        let pid = std::process::id();
+        let (gen, host) = (format!("g_{pid:016x}"), format!("h_libpod-test-{pid}"));
+        let (setup, _) = spec::probe_plan(&spec::Probe {
+            gen: &gen,
+            host: &host,
+            worker_image: "docker.io/library/busybox@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            subnets: spec::Subnets::parse("10.197.10.0/24").unwrap(),
+            slot: 15,
+            gateway,
+            deny: &[],
+            env_file: std::path::Path::new("/nonexistent/agent.env"),
+        })
+        .unwrap();
+        let net = spec::container_name(0, &gen);
+        cli.remove_network(&net);
+        cli.run(&setup[0]).unwrap();
+        let _gone = Gone(&cli, &net);
+        assert_no_gateway(&cli, gateway, &net, &host);
+        // All at once, as install's probe does: a port tried after the first found no neighbour
+        // at .1 would fail at once, as a refusal does.
+        let script = "for p in 22 53 3128 8790 8791; do (s=$(date +%s); if nc -z -w 3 10.197.10.241 $p; then echo \"$p open\"; elif [ $(( $(date +%s) - s )) -lt 2 ]; then echo \"$p refused\"; else echo \"$p blocked\"; fi) & done; wait";
+        let label = format!("{HOST_LABEL}={host}");
+        let out = stdout(
+            &cli,
+            &[
+                "run",
+                "--rm",
+                "--label",
+                &label,
+                "--network",
+                &net,
+                "--ip",
+                "10.197.10.254",
+                &image,
+                "sh",
+                "-c",
+                script,
+            ],
+        );
+        println!("a task on it:\n{out}");
+        assert_eq!(
+            out.lines().filter(|l| l.ends_with(" blocked")).count(),
+            5,
+            "{out}"
+        );
     }
 
     #[test]

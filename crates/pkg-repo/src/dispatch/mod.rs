@@ -66,6 +66,7 @@ pub mod capacity;
 pub mod engine;
 pub mod kinds;
 pub mod lease;
+pub mod libpod;
 pub mod pool;
 pub mod probe;
 pub mod sizing;
@@ -1669,11 +1670,15 @@ pub fn run(opts: &Options) -> Result<()> {
     }
     std::fs::create_dir_all(&opts.work_root)
         .with_context(|| format!("creating {}", opts.work_root.display()))?;
-    let engine = engine::Cli::find()
+    let mut engine = engine::Cli::find()
         .ok_or_else(|| anyhow!("no container engine answers (docker, or podman)"))?;
     let gateway = engine.gateway().map_err(|e| anyhow!("{e}"))?;
-    if gateway == spec::Gateway::Engine {
-        say("podman behind docker's API: a task network's gateway is the host's own address on its bridge; prep-root.sh's INPUT drop for the task subnets (rootful) is what keeps tasks off it");
+    if let Some(l) = &engine.libpod {
+        say(format!(
+            "podman {} behind docker's CLI: task networks are made through libpod's API on {}, internal with DNS off, so none has a gateway",
+            l.version,
+            l.socket.display()
+        ));
     }
     let terminating = Arc::new(AtomicBool::new(false));
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
