@@ -328,10 +328,37 @@ macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
 - **A LaunchAgent is login-scoped.** The agent starts at your login, again
   after a reboot once you log in, and after the Mac wakes; a headless Mac
   sitting at the login window after a boot runs no agent, and that is not
-  supported. While the Mac sleeps it claims nothing: running tasks' leases
-  expire and the pool requeues them, as on any host that goes away. After a
-  wake the agent holds the VM's clock to the pool's, so tasks that run on
-  keep valid job tokens.
+  supported. After a wake the agent holds the VM's clock to the pool's, so
+  tasks that run on keep valid job tokens.
+- **A sleeping Mac has zero free units** (#329, design v2 §19.2), whatever
+  runtime its engine is in (Colima, Docker Desktop, OrbStack). While a task
+  runs — from its claim to its report: a container labelled
+  `com.omarchy.task` runs, or the dispatcher holds its lease while it stages
+  the inputs or uploads the outputs (one file per lease in `<work
+  root>/state/leases/`, rewritten at every heartbeat) — the agent holds a
+  `PreventUserIdleSystemSleep` assertion (`caffeinate -i -w <its pid>`,
+  which `pmset -g assertions` lists): the Mac does not idle into sleep under
+  a task, and may again once none runs. An engine that stops answering keeps
+  it 30 minutes at most, a lease's length: past that the pool requeues what
+  nobody can confirm, and a laptop is not kept awake on its battery for it.
+  When it goes to sleep
+  anyway — idle with no task, the lid, the Apple menu — the agent hears it
+  first, reports `asleep: true` and only then lets it sleep (macOS waits up
+  to 30 s for it): the pool hands the host nothing more, and the host's page
+  says *asleep*. After the wake it reports `asleep: false`, asks the pool
+  for its target at once and, on Colima, checks the VM's clock; the dispatcher claims
+  again with nobody's action. **Closing the lid still sleeps the Mac**, task
+  or not: a task the sleep caught is requeued by the pool when its lease
+  expires (30 minutes without a heartbeat), as on any host that goes away,
+  and nothing on the Mac needs you — once awake, the dispatcher finds no
+  heartbeat accepted within the lease and removes that task's containers
+  itself. The agent hears the sleep through AppKit's
+  `NSWorkspaceWillSleepNotification` (a small `osascript -l JavaScript`
+  watcher it starts and ends; no `unsafe` code, no Apple SDK in the agent):
+  a watcher that does not start is said once in the journal, and the Mac
+  then sleeps as before — the assertion still holds while a task runs. The
+  pool holds `asleep` only while the report that said it is fresh (15
+  minutes): a dispatcher that claims after that is on a Mac that woke.
 - **Docker Desktop and OrbStack** are never installed by the agent; one that
   is already there may be used (isolation `vm-shared`), only with its home
   mount removed and `--dedicated`, your word that nothing else runs in it:

@@ -578,7 +578,12 @@ they check (`health` its own, `promote` each it promotes, `security` both),
 native or emulated, with no wait; every other kind is arch-neutral. A legacy registration is selected as a
 host with one lane (its arch, emulated when its labels say so) and one
 build, its own scope (project or community, shared or its owner's) kept
-until #343. The runbook's *How the pool hands a host work* has the rules. Only the lease
+until #343. A host whose agent reports `asleep` (#329: a Mac about to sleep,
+or asleep, while that report is fresh) has zero free units: its claims are
+handed nothing (the lease's own statement checks it again, as it checks a
+suspension), and it is no native capacity an emulated lane waits for,
+holds no reservation mark and counts in no size alive until a report says it
+woke. The runbook's *How the pool hands a host work* has the rules. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron
 requeues leases past `lease_expires_at` — the way out for a worker that
 vanished, not the way a worker reports: the community worker's shell has

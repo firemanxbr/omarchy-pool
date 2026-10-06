@@ -44,6 +44,10 @@
  *   bounds that claim only;
  * - a drained, below-minimum, suspended or behind native host never makes an
  *   emulated lane wait;
+ * - a host that sleeps (#329) has zero free units: it takes nothing, makes
+ *   no emulated lane wait and leaves the guaranteed share to one that runs
+ *   its arch emulated, keeps no reservation mark and counts in no size or
+ *   cap; awake again, it takes what waited at once;
  * - and a legacy registration as a host with one lane and one build.
  */
 import { describe, expect, it } from "vitest";
@@ -845,6 +849,42 @@ describe("eligible native capacity", () => {
     const [x] = s.add({ arch: "x86_64" });
     s.run(1);
     expect(s.startOf(x)).toMatchObject({ by: "studio", lane: "emulated", at: T0 });
+  });
+});
+
+describe("a host that sleeps (#329)", () => {
+  it("has zero free units: it takes nothing, makes no emulated lane wait, keeps no mark and counts in no size or cap; awake again, it takes what waited at once", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"] });
+    const box = host("box", "x86_64", 7);
+    const sleeping = { ...box, asleep: true };
+    const t86 = task({ arch: "x86_64" });
+    // Whatever waits, a sleeping host takes none of it.
+    expect(select(sleeping, { members: [sleeping], leases: [] }, [task({ arch: "x86_64" })], T0, R)).toEqual([]);
+    // Its native lane is no capacity an emulated one waits for, and the Studio's x86_64 lane takes the build at once, as the share.
+    expect(nativeCapacity({ members: [studio, box], leases: [] }, t86, T0, R, "studio")).toBe(true);
+    expect(nativeCapacity({ members: [studio, sleeping], leases: [] }, t86, T0, R, "studio")).toBe(false);
+    const older = task({ arch: "aarch64", queued_at: T0 - 20 * MIN });
+    expect(select(studio, { members: [studio, box], leases: [] }, [older, t86], T0, R).map((c) => c.id)).toEqual([older.id]);
+    expect(select(studio, { members: [studio, sleeping], leases: [] }, [older, t86], T0, R)).toMatchObject([{ id: t86.id, lane: "emulated", share: true }, { id: older.id }]);
+    // No size alive is a sleeping host's, nor its builds in the per-owner cap.
+    const p1 = host("p1", "aarch64", 7);
+    expect(largestSize({ members: [studio, p1], leases: [] }, T0, R)).toBe(4);
+    expect(largestSize({ members: [{ ...studio, asleep: true }, p1], leases: [] }, T0, R)).toBe(3);
+    expect(ownerCap({ members: [studio, p1], leases: [] }, T0, R)).toBe(2);
+    expect(ownerCap({ members: [{ ...studio, asleep: true }, p1], leases: [] }, T0, R)).toBe(1);
+    // A mark it held is cleared, and another host may be marked meanwhile.
+    const marked = { ...studio, asleep: true, reserving: { task: 4242, since: T0 } };
+    expect(reserve({ members: [marked, p1], leases: [] }, [], () => true, T0, R).clear).toEqual(["studio"]);
+    // On a fake clock: a host that sleeps half an hour starts nothing; the minute it reports itself awake it takes the queue.
+    const mac = host("mac", "aarch64", 7);
+    const s = new Sim([mac]);
+    const queued = s.add({ arch: "aarch64" }, 3);
+    mac.asleep = true;
+    s.run(30);
+    expect(s.ran).toEqual([]);
+    mac.asleep = false;
+    s.run(1);
+    expect(s.ran.map((r) => r.task.id)).toEqual(queued.map((t) => t.id));
   });
 });
 
