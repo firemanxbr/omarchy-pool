@@ -347,7 +347,7 @@ fn a_task_that_reaches_its_networks_gateway_on_any_port_fails_the_probe_with_wha
 
     // A task's own network: its gateway only, and no public address to reach (its egress
     // sidecar is its way out).
-    let task = egress::Targets::of_task(net, vec!["--internal"]);
+    let task = egress::Targets::of_task(net, engine::TaskNetwork::Libpod);
     assert!(task.public.is_none() && task.seen.is_none());
     assert!(task
         .forbidden
@@ -362,16 +362,105 @@ fn a_task_that_reaches_its_networks_gateway_on_any_port_fails_the_probe_with_wha
             && b[0].contains(
                 "a task on its own network reaches its gateway 10.231.255.241 (port 53: open)"
             )
-            && b[0].contains("DNS on"),
+            && b[0].contains("made through libpod's API with DNS off"),
         "{b:?}"
     );
-    // Rootful podman behind its docker API: the host's own address, closed by prep-root.sh.
+    // Rootful podman: the host's own address, closed by prep-root.sh.
     let b = egress::verdict(&out, &task, &advice(true, true));
     assert!(b[0].contains("prep-root.sh --user omarchy"), "{b:?}");
     // No answer at all is no pass.
     let b = egress::verdict("", &task, &advice(true, false));
     assert_eq!(b.len(), egress::GATEWAY_PORTS.len(), "{b:?}");
     assert!(b.iter().all(|x| x.contains("no answer")), "{b:?}");
+}
+
+#[test]
+fn pasta_s_guest_mapped_address_is_tried_on_every_network_and_refused_when_it_answers() {
+    let net = Cidr::parse(PROBE_NET).unwrap();
+    let guest = Some(egress::PASTA_GUEST);
+    // Tried only where asked: rootless podman behind pasta.
+    assert_eq!(
+        egress::Targets::of_host(None, None, net).guest(None),
+        egress::Targets::of_host(None, None, net)
+    );
+    for t in [
+        egress::Targets::of_host(None, None, net).guest(guest),
+        egress::Targets::of_task(net, engine::TaskNetwork::Libpod).guest(guest),
+    ] {
+        let g: Vec<String> = t
+            .forbidden
+            .iter()
+            .filter(|x| x.what == egress::What::Guest)
+            .map(|x| format!("{} {}:{}", x.name(), x.host, x.port))
+            .collect();
+        assert_eq!(
+            g,
+            [
+                "guest-22 169.254.1.2:22",
+                "guest-53 169.254.1.2:53",
+                "guest-3128 169.254.1.2:3128",
+                "guest-8790 169.254.1.2:8790",
+                "guest-8791 169.254.1.2:8791"
+            ]
+        );
+        let ok = format!("{}egress public open\n", all_blocked(&t));
+        assert!(egress::verdict(&ok, &t, &advice(false, true)).is_empty());
+        // Every port that answered, one blocker, with containers.conf's setting.
+        let out = ok
+            .replace("guest-53 blocked", "guest-53 refused")
+            .replace("guest-22 blocked", "guest-22 open");
+        let b = egress::verdict(&out, &t, &advice(false, true));
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert!(
+            b[0].contains("reaches pasta's guest-mapped address 169.254.1.2 (port 22: open, port 53: refused), which pasta forwards to this host's own address")
+                && b[0].contains(r#""--map-guest-addr", "none""#)
+                && b[0].contains("pasta_options under [network]"),
+            "{b:?}"
+        );
+        // No answer is no pass.
+        let b = egress::verdict(
+            &ok.replace("egress guest-3128 blocked\n", ""),
+            &t,
+            &advice(false, true),
+        );
+        assert!(
+            b.len() == 1
+                && b[0].contains("no answer for pasta's guest-mapped address 169.254.1.2:3128"),
+            "{b:?}"
+        );
+    }
+
+    // pasta's command line: the address it maps, if any; one the probe did not try is refused.
+    let parse = |argv: &[&str]| {
+        loopback::Stack::parse(9, format!("{}\0", argv.join("\0")).as_bytes()).unwrap()
+    };
+    let default = parse(PASTA);
+    assert_eq!(default.guest_addr(), Some("169.254.1.2"));
+    let setting = egress::GUEST_SETTING;
+    assert_eq!(
+        loopback::guest_verdict(std::slice::from_ref(&default), guest, setting),
+        None
+    );
+    let b = loopback::guest_verdict(std::slice::from_ref(&default), None, setting).unwrap();
+    assert!(
+        b.contains("(pasta (pid 9) at 169.254.1.2), which the probe did not try")
+            && b.contains(setting),
+        "{b}"
+    );
+    let mut owners = PASTA.to_vec();
+    owners.extend(["--map-guest-addr=10.0.2.9"]);
+    let owners = parse(&owners);
+    assert_eq!(owners.guest_addr(), Some("10.0.2.9"));
+    assert!(loopback::guest_verdict(&[owners], guest, setting).is_some());
+    let mut none = PASTA.to_vec();
+    let at = none.len() - 1;
+    none[at] = "none";
+    assert_eq!(parse(&none).guest_addr(), None);
+    let older: Vec<&str> = PASTA[..PASTA.len() - 2].to_vec();
+    assert_eq!(parse(&older).guest_addr(), None);
+    // Only pasta has one.
+    let slirp = parse(&[SLIRP4NETNS, &["--map-guest-addr", "10.0.2.9"]].concat());
+    assert_eq!(slirp.guest_addr(), None);
 }
 
 /// prep-root.sh's firewall script for the default task subnets, as it writes it (step 9).
@@ -779,27 +868,46 @@ fn a_tasks_network_is_made_as_the_dispatcher_makes_it_on_this_engine() {
     }
     assert_eq!(
         engine::task_network(Server::Docker(28)).unwrap(),
-        [
+        engine::TaskNetwork::Cli(vec![
             "--internal",
             "-o",
             "com.docker.network.bridge.gateway_mode_ipv4=isolated"
-        ]
+        ])
     );
-    // podman's docker API drops docker's option and turns DNS on: nothing more to ask.
+    // podman's docker API drops docker's option and turns DNS on: through libpod's own (#372).
     assert_eq!(
         engine::task_network(Server::Podman).unwrap(),
-        ["--internal"]
+        engine::TaskNetwork::Libpod
     );
     let e = engine::task_network(Server::Docker(27)).unwrap_err();
     assert!(
         e.contains("Docker 28") && e.contains("dispatcher refuses"),
         "{e}"
     );
-    // The dispatcher's own spec asks for the same option, and reads podman the same way.
+    // The dispatcher's own spec asks for the same option, and reads podman the same way; on
+    // podman it asks libpod for the same network (internal, DNS off), as the probe does.
     let spec = include_str!("../../../pkg-repo/src/dispatch/spec.rs");
     assert!(spec.contains("\"com.docker.network.bridge.gateway_mode_ipv4=isolated\""));
     let dispatch = include_str!("../../../pkg-repo/src/dispatch/engine.rs");
     assert!(dispatch.contains("c.name.contains(\"Podman\")") && dispatch.contains("m >= 28"));
+    let theirs = include_str!("../../../pkg-repo/src/dispatch/libpod.rs");
+    assert!(
+        theirs.contains("\"/v{}/libpod/networks/create\"")
+            && theirs.contains("\"driver\": \"bridge\"")
+            && theirs.contains("\"internal\": internal")
+            && theirs.contains("\"dns_enabled\": dns")
+    );
+    let body: serde_json::Value = serde_json::from_str(&libpod::network_body(
+        "n",
+        Cidr::parse("10.231.255.240/28").unwrap(),
+        &[("org.omarchy-pool.probe", "egress")],
+    ))
+    .unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"name": "n", "driver": "bridge", "internal": true, "dns_enabled": false,
+            "subnets": [{"subnet": "10.231.255.240/28"}], "labels": {"org.omarchy-pool.probe": "egress"}})
+    );
 }
 
 #[test]
@@ -1124,12 +1232,77 @@ fn values(root: &Path) -> envelope::Values {
 }
 
 /// A host for preflight: its places under `root`, a release signed for the test verifier
-/// whose agent is `root/agent`, a socket that answers, and a docker CLI stand-in.
+/// whose agent is `root/agent`, a socket that answers (libpod's API, [`serve_libpod`]), and a
+/// docker CLI stand-in.
 struct Host {
     root: PathBuf,
     options: Options,
     docker: PathBuf,
-    _socket: std::os::unix::net::UnixListener,
+}
+
+/// libpod's API on `root/engine.sock`, as podman answers it, for as long as the test runs:
+/// `/_ping` with its version (as Docker's, without one, when `root/libpod-off` is there),
+/// `/libpod/info` from `root/libpod-info`, and networks made (or refused with
+/// `root/libpod-refuses`), every request kept in `root/libpod.log`. A connection that only says
+/// the socket answers gets nothing.
+fn serve_libpod(root: &Path) {
+    use std::io::{Read, Write};
+    let l = std::os::unix::net::UnixListener::bind(root.join("engine.sock")).unwrap();
+    let root = root.to_owned();
+    std::thread::spawn(move || {
+        for mut c in l.incoming().flatten() {
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            let request = loop {
+                let n = c.read(&mut buf).unwrap_or(0);
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                let Some(end) = text.find("\r\n\r\n") else {
+                    if n == 0 {
+                        break None;
+                    }
+                    continue;
+                };
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Content-Length: "))
+                    .map_or(0, |n| n.parse::<usize>().unwrap_or(0));
+                if raw.len() >= end + 4 + len || n == 0 {
+                    break Some(text);
+                }
+            };
+            let Some(request) = request else { continue };
+            let first = request.lines().next().unwrap_or_default().to_owned();
+            let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+            let mut log = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(root.join("libpod.log"))
+                .unwrap();
+            let _ = writeln!(log, "{first} {body}");
+            let answer = if first.starts_with("GET /_ping ") {
+                if root.join("libpod-off").exists() {
+                    "HTTP/1.0 200 OK\r\nApi-Version: 1.51\r\n\r\nOK".to_owned()
+                } else {
+                    "HTTP/1.0 200 OK\r\nLibpod-Api-Version: 4.9.3\r\n\r\nOK".to_owned()
+                }
+            } else if first.starts_with("GET /v4.9.3/libpod/info ") {
+                let info = fs::read_to_string(root.join("libpod-info"))
+                    .unwrap_or_else(|_| r#"{"host":{"security":{"rootless":true}}}"#.into());
+                format!("HTTP/1.0 200 OK\r\n\r\n{info}")
+            } else if first.starts_with("POST /v4.9.3/libpod/networks/create ") {
+                match fs::read_to_string(root.join("libpod-refuses")) {
+                    Ok(why) => {
+                        format!("HTTP/1.0 500 Internal Server Error\r\n\r\n{{\"message\":{why:?}}}")
+                    }
+                    Err(_) => "HTTP/1.0 200 OK\r\n\r\n{}".to_owned(),
+                }
+            } else {
+                "HTTP/1.0 404 Not Found\r\n\r\nNot Found".to_owned()
+            };
+            let _ = c.write_all(answer.as_bytes());
+        }
+    });
 }
 
 const INFO: &str = r#"{"NCPU":12,"MemTotal":33443418112,"DockerRootDir":"/nonexistent/storage","Architecture":"aarch64","SecurityOptions":["name=rootless"],"CgroupVersion":"2","MemoryLimit":true,"CpuCfsQuota":true,"PidsLimit":true}"#;
@@ -1143,6 +1316,9 @@ const TASK_EGRESS_OK: &str = "egress gateway-22 blocked\negress gateway-53 block
 /// `version` of a Docker that keeps a task network's gateway off the host.
 const DOCKER_28: &str =
     r#"{"Version":"28.5.1","Components":[{"Name":"Engine","Version":"28.5.1"}]}"#;
+/// `version` of podman behind its docker API.
+const PODMAN: &str =
+    r#"{"Version":"4.9.3","Components":[{"Name":"Podman Engine","Version":"4.9.3"}]}"#;
 
 fn host(info: &str, egress: &str) -> Host {
     host_min(info, egress, 1)
@@ -1207,7 +1383,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
     )
     .unwrap();
     fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
-    let socket = std::os::unix::net::UnixListener::bind(root.join("engine.sock")).unwrap();
+    serve_libpod(&root);
     let options = Options {
         places: Places {
             data: root.join("data"),
@@ -1250,7 +1426,6 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
         root,
         options,
         docker,
-        _socket: socket,
     }
 }
 
@@ -1582,15 +1757,34 @@ fn a_rootful_host_with_prep_roots_input_drop_passes_and_its_task_networks_are_pr
         assert!(r.notes.iter().any(|n| n == note), "{note}: {:?}", r.notes);
     }
 
-    // podman behind its docker API, rootful: a task's own network keeps a gateway on the
-    // host, which the same drop closes.
+    // podman behind its docker API, rootful: a task's own network is made through libpod's
+    // API, internal with DNS off, as the dispatcher makes it (#372), and has no gateway; the
+    // probe runs on it through the CLI. libpod is not asked which stack it runs: a rootful
+    // engine runs none.
     let h = host(&rootful_info(), EGRESS_OK);
     prepare(&h.root);
-    fs::write(
-        h.root.join("version"),
-        r#"{"Version":"4.9.3","Components":[{"Name":"Podman Engine","Version":"4.9.3"}]}"#,
-    )
-    .unwrap();
+    fs::write(h.root.join("version"), PODMAN).unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok() && ready.is_some(), "{}", r.screen());
+    let libpod = fs::read_to_string(h.root.join("libpod.log")).unwrap();
+    assert!(
+        libpod.contains("POST /v4.9.3/libpod/networks/create HTTP/1.0 {")
+            && libpod.contains(r#""dns_enabled":false"#)
+            && libpod.contains(r#""internal":true"#)
+            && libpod.contains(r#""subnets":[{"subnet":"10.231.255.240/28"}]"#)
+            && libpod.contains(r#""labels":{"org.omarchy-pool.probe":"egress"}"#)
+            && !libpod.contains("/libpod/info"),
+        "{libpod}"
+    );
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(
+        !log.contains("network create --internal") && log.contains("-task --ip 10.231.255.254"),
+        "{log}"
+    );
+    // An engine that put an address there all the same: the host itself, behind the same drop.
+    let h = host(&rootful_info(), EGRESS_OK);
+    prepare(&h.root);
+    fs::write(h.root.join("version"), PODMAN).unwrap();
     fs::write(
         h.root.join("task-egress"),
         TASK_EGRESS_OK.replace("gateway-53 blocked", "gateway-53 open"),
@@ -1603,11 +1797,30 @@ fn a_rootful_host_with_prep_roots_input_drop_passes_and_its_task_networks_are_pr
             && s.contains("run sudo systemctl restart omarchy-task-firewall.service"),
         "{s}"
     );
-    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
-    assert!(
-        log.contains("network create --internal --subnet 10.231.255.240/28"),
-        "{log}"
-    );
+    // libpod refuses the network, or the socket is not libpod's although the CLI said podman:
+    // not probed, and said.
+    for (file, why) in [
+        (
+            "libpod-refuses",
+            "libpod's networks/create answered 500: subnet in use",
+        ),
+        (
+            "libpod-off",
+            "answers without Libpod-Api-Version: not podman's API",
+        ),
+    ] {
+        let h = host(&rootful_info(), EGRESS_OK);
+        prepare(&h.root);
+        fs::write(h.root.join("version"), PODMAN).unwrap();
+        fs::write(h.root.join(file), "subnet in use").unwrap();
+        let (r, ready) = measure_on(&h, &mut Fake::default());
+        let s = r.screen();
+        assert!(ready.is_none() && r.blockers.len() == 1, "{s}");
+        assert!(
+            s.contains("egress: the egress probe's network 10.231.255.240/28: ") && s.contains(why),
+            "{s}"
+        );
+    }
 
     // A Docker older than 28 cannot keep the gateway off: refused, as the dispatcher refuses it.
     let h = host(&rootful_info(), EGRESS_OK);
@@ -1672,9 +1885,10 @@ fn a_rootless_host_whose_stack_maps_its_loopback_or_whose_tasks_reach_their_gate
         r.screen()
     );
 
-    // Rootless podman: its docker API gives a task's network a gateway, which its namespace
-    // answers; its slirp4netns with allow_host_loopback=true maps the host's loopback, and
-    // the setting is containers.conf's.
+    // Rootless podman 4 (slirp4netns; libpod's /info names no network command): its task
+    // network, made through libpod with DNS off, should have no gateway, and one that answers
+    // is the engine's doing; its slirp4netns with allow_host_loopback=true maps the host's
+    // loopback, and the setting is containers.conf's. pasta's guest address is not tried.
     let h = host(INFO, EGRESS_OK);
     fs::remove_dir_all(h.root.join("proc")).unwrap();
     process(
@@ -1686,11 +1900,7 @@ fn a_rootless_host_whose_stack_maps_its_loopback_or_whose_tasks_reach_their_gate
             .filter(|a| *a != "--disable-host-loopback")
             .collect::<Vec<_>>(),
     );
-    fs::write(
-        h.root.join("version"),
-        r#"{"Version":"4.9.3","Components":[{"Name":"Podman Engine","Version":"4.9.3"}]}"#,
-    )
-    .unwrap();
+    fs::write(h.root.join("version"), PODMAN).unwrap();
     fs::write(
         h.root.join("task-egress"),
         TASK_EGRESS_OK.replace("gateway-22 blocked", "gateway-22 refused"),
@@ -1699,15 +1909,190 @@ fn a_rootless_host_whose_stack_maps_its_loopback_or_whose_tasks_reach_their_gate
     let (r, _) = measure_on(&h, &mut Fake::default());
     let s = r.screen();
     assert!(
-        s.contains("a task on its own network reaches its gateway 10.231.255.241 (port 22: refused); that is rootless podman's own namespace"),
+        s.contains("a task on its own network reaches its gateway 10.231.255.241 (port 22: refused); the engine put an address on a task's network although it was made through libpod's API with DNS off"),
         "{s}"
     );
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert!(!log.contains("guest-"), "{log}");
+    assert!(fs::read_to_string(h.root.join("libpod.log"))
+        .unwrap()
+        .contains("GET /v4.9.3/libpod/info HTTP/1.0"),);
     assert!(
         s.contains("(slirp4netns (pid 77) at 10.0.2.2)") && s.contains("allow_host_loopback=true"),
         "{s}"
     );
     assert_eq!(r.blockers.len(), 2, "{s}");
     assert!(!s.contains("prep-root.sh --user"), "{s}");
+}
+
+/// What libpod's /info says of rootless podman 5 behind pasta.
+const PASTA_INFO: &str = r#"{"host":{"rootlessNetworkCmd":"pasta","security":{"rootless":true},"pasta":{"executable":"/usr/bin/pasta"}}}"#;
+
+/// `out` with pasta's guest-mapped address blocked on every port, as a probe that tried it says.
+fn with_guest(out: &str) -> String {
+    let mut out = out.to_owned();
+    for p in egress::GATEWAY_PORTS {
+        let _ = write!(out, "\negress guest-{p} blocked");
+    }
+    out
+}
+
+#[test]
+fn rootless_podman_behind_pasta_is_refused_when_its_guest_address_reaches_the_host() {
+    let pasta_host = || {
+        let h = host(INFO, &with_guest(EGRESS_OK));
+        fs::remove_dir_all(h.root.join("proc")).unwrap();
+        process(&h.root.join("proc"), 88, PASTA);
+        fs::write(h.root.join("version"), PODMAN).unwrap();
+        fs::write(h.root.join("libpod-info"), PASTA_INFO).unwrap();
+        fs::write(h.root.join("task-egress"), with_guest(TASK_EGRESS_OK)).unwrap();
+        h
+    };
+    // podman's defaults (5.3 on): pasta maps 169.254.1.2, which both probe tasks try on 22, 53
+    // and the pool's ports; nothing answers there, so it passes, and says so.
+    let h = pasta_host();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok() && ready.is_some(), "{}", r.screen());
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    assert_eq!(log.matches("guest-22 169.254.1.2 22").count(), 2, "{log}");
+    assert!(log.contains("guest-8791 169.254.1.2 8791"), "{log}");
+    for note in [
+        "egress: a task reaches public addresses only, not its network's gateway, nor pasta's guest-mapped address 169.254.1.2",
+        "egress: a task's own network has no gateway the task reaches, nor pasta's guest-mapped address 169.254.1.2",
+        "egress: the rootless engine's network stack maps nothing to the host's loopback (pasta (pid 88))",
+    ] {
+        assert!(r.notes.iter().any(|n| n == note), "{note}: {:?}", r.notes);
+    }
+
+    // The host's sshd answers there: refused, with containers.conf's setting.
+    let h = pasta_host();
+    fs::write(
+        h.root.join("egress"),
+        with_guest(EGRESS_OK)
+            .replace("guest-22 blocked", "guest-22 open")
+            .replace("guest-8790 blocked", "guest-8790 refused"),
+    )
+    .unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    let s = r.screen();
+    assert!(ready.is_none() && r.blockers.len() == 1, "{s}");
+    assert!(
+        s.contains("egress: a task on a signed exception's bridge network reaches pasta's guest-mapped address 169.254.1.2 (port 22: open, port 8790: refused), which pasta forwards to this host's own address")
+            && s.contains(r#"pasta_options = ["--map-guest-addr", "none"]"#)
+            && s.contains("containers.conf")
+            && !s.contains("prep-root.sh --user"),
+        "{s}"
+    );
+
+    // An address of the owner's own (pasta_options' --map-guest-addr): not tried, so refused
+    // from pasta's command line; and with `none`, nothing is mapped and it passes.
+    for (addr, refused) in [("10.0.2.9", true), ("none", false)] {
+        let h = pasta_host();
+        let mut argv: Vec<&str> = PASTA.to_vec();
+        let at = argv.len() - 1;
+        argv[at] = addr;
+        process(&h.root.join("proc"), 88, &argv);
+        let (r, _) = measure_on(&h, &mut Fake::default());
+        let s = r.screen();
+        if refused {
+            assert!(
+                r.blockers.len() == 1
+                    && s.contains("pasta maps a guest address to this host's own address (pasta (pid 88) at 10.0.2.9), which the probe did not try")
+                    && s.contains("--map-guest-addr"),
+                "{s}"
+            );
+        } else {
+            assert!(r.ok(), "{s}");
+        }
+    }
+
+    // podman's slirp4netns, or a podman that names no network command (4.x): not tried.
+    for info in [
+        r#"{"host":{"rootlessNetworkCmd":"slirp4netns","security":{"rootless":true}}}"#,
+        r#"{"host":{"security":{"rootless":true}}}"#,
+    ] {
+        let h = host(INFO, EGRESS_OK);
+        fs::remove_dir_all(h.root.join("proc")).unwrap();
+        process(&h.root.join("proc"), 77, SLIRP4NETNS);
+        fs::write(h.root.join("version"), PODMAN).unwrap();
+        fs::write(h.root.join("libpod-info"), info).unwrap();
+        let (r, _) = measure_on(&h, &mut Fake::default());
+        assert!(r.ok(), "{info}: {}", r.screen());
+        let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+        assert!(!log.contains("guest-"), "{log}");
+    }
+
+    // libpod's /info does not answer: nothing says which stack it runs.
+    let h = pasta_host();
+    fs::write(h.root.join("libpod-info"), "not json").unwrap();
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(
+        r.blockers
+            .iter()
+            .any(|b| b.contains("which network stack rootless podman runs (libpod's /info): libpod's info does not read")),
+        "{}",
+        r.screen()
+    );
+}
+
+#[test]
+fn libpod_answers_are_read_whole_and_its_info_says_which_stack() {
+    let a = libpod::parse(
+        b"HTTP/1.0 200 OK\r\nLibpod-Api-Version: 5.6.1\r\nContent-Length: 2\r\n\r\nOKjunk",
+    )
+    .unwrap();
+    assert_eq!(
+        (a.status, a.header("libpod-api-version"), &a.body[..]),
+        (200, Some("5.6.1"), &b"OK"[..])
+    );
+    for bad in [
+        &b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n"[..],
+        b"SSH-2.0-OpenSSH\r\n\r\n",
+        b"HTTP/1.0 200 OK\r\nContent-Length: 9\r\n\r\nshort",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nOK\r\n0\r\n\r\n",
+    ] {
+        assert!(
+            libpod::parse(bad).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+    }
+    let i = libpod::parse_info(PASTA_INFO).unwrap();
+    assert!(i.pasta() && i.rootless);
+    // Rootful podman names its default all the same: no pasta runs for it.
+    let rootful = libpod::parse_info(
+        r#"{"host":{"rootlessNetworkCmd":"pasta","security":{"rootless":false}}}"#,
+    )
+    .unwrap();
+    assert!(!rootful.pasta());
+    let old = libpod::parse_info(
+        r#"{"host":{"security":{"rootless":true},"pasta":{"executable":"/usr/bin/pasta"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        old,
+        libpod::Info {
+            rootless: true,
+            network_cmd: None
+        }
+    );
+    for bad in ["", "null", "{}", "[1]"] {
+        assert!(libpod::parse_info(bad).is_err(), "{bad}");
+    }
+    // A socket that never answers runs out of its call; one that is not there says so.
+    let d = tempdir();
+    let _quiet = std::os::unix::net::UnixListener::bind(d.join("quiet.sock")).unwrap();
+    let t = std::time::Instant::now();
+    let e = libpod::request(
+        &d.join("quiet.sock"),
+        "GET",
+        "/_ping",
+        None,
+        t + Duration::from_millis(300),
+    )
+    .unwrap_err();
+    assert!(t.elapsed() < Duration::from_secs(5), "{e}");
+    assert!(libpod::Libpod::on(&d.join("none.sock")).is_err());
 }
 
 #[test]
@@ -2522,16 +2907,20 @@ mod engine_tests {
         let _ = d.run(&["rm", "-f", tgt.trim()]);
     }
 
-    /// A task's network's gateway and the host's loopback (#367), on this engine: a signed
-    /// exception's bridge reaches its gateway — the host itself on a rootful engine without
-    /// an INPUT drop for the task subnets, the engine's namespace on a rootless one — and
-    /// behind the drop (`OMARCHY_TEST_INPUT_DROP`, the /28 tests/agent-install.sh gave it, on a
-    /// rootful engine only) it does not; a task's own network, made as the dispatcher makes
-    /// it, has no gateway a task reaches on Docker, and one behind podman's docker API; a
-    /// rootless engine's network stack, read while both probe tasks run, maps nothing to the
-    /// host's loopback (the engines' defaults).
+    /// A task's network's gateway and the host's loopback (#367, #372), on this engine: a
+    /// signed exception's bridge reaches its gateway — the host itself on a rootful engine
+    /// without an INPUT drop for the task subnets, the engine's namespace on a rootless one —
+    /// and behind the drop (`OMARCHY_TEST_INPUT_DROP`, the /28 tests/agent-install.sh gave it,
+    /// on a rootful engine only) it does not; a task's own network, made as the dispatcher
+    /// makes it (on podman through libpod's API: internal, DNS off, no gateway), has no
+    /// gateway a task reaches, on Docker and podman alike; a rootless engine's network stack,
+    /// read while both probe tasks run, maps nothing to the host's loopback (the engines'
+    /// defaults); and on rootless podman behind pasta, a service of the host's on every
+    /// address answers through pasta's guest-mapped address exactly when pasta's command line
+    /// maps it, which preflight refuses with containers.conf's setting.
     #[test]
     #[ignore = "needs a real engine: tests/agent-install.sh"]
+    #[allow(clippy::too_many_lines)] // one engine, one story: each network a task may run on
     fn real_engine_a_tasks_gateway_and_the_hosts_loopback() {
         let d = docker();
         let image = env("OMARCHY_STANDIN_IMAGE");
@@ -2580,16 +2969,82 @@ mod engine_tests {
         stacks.extend(seen);
         let b = egress::verdict(&out, &task, &a);
         println!("a task's own network:\n{out}");
-        match (server, rootless) {
-            (engine::Server::Docker(_), _) => assert!(b.is_empty(), "{out}\n{b:?}"),
-            (engine::Server::Podman, true) => assert!(
-                b.len() == 1 && b[0].contains("rootless podman's own namespace"),
-                "{out}\n{b:?}"
-            ),
-            (engine::Server::Podman, false) => assert!(
-                b.len() == 1 && b[0].contains("OMARCHY-TASKS-HOST"),
-                "{out}\n{b:?}"
-            ),
+        assert!(
+            b.is_empty(),
+            "{server:?}, rootless {rootless}: {out}\n{b:?}"
+        );
+        if server == engine::Server::Podman {
+            // As libpod keeps it: internal, DNS off, no gateway in its subnet.
+            let l = libpod::Libpod::on(&d.socket).unwrap();
+            let net = format!("omarchy-libpod-test-{}", std::process::id());
+            let _gone = Cleanup(d.clone(), Vec::new(), vec![net.clone()]);
+            l.create_network(&net, open, &[("org.omarchy-pool.probe", "egress")])
+                .unwrap();
+            let path = format!("/v{}/libpod/networks/{net}/json", l.version);
+            let got = libpod::request(
+                &d.socket,
+                "GET",
+                &path,
+                None,
+                std::time::Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
+            let n: serde_json::Value = serde_json::from_slice(&got.body).unwrap();
+            println!("podman {}: {n}", l.version);
+            assert!(
+                n["internal"] == true
+                    && n["dns_enabled"] == false
+                    && n["subnets"][0]["gateway"].is_null(),
+                "{n}"
+            );
+        }
+
+        // pasta's guest-mapped address (#372): a service of the host on every address, and a
+        // probe task on a bridge tries it there, while pasta runs.
+        let pasta = (server == engine::Server::Podman && rootless)
+            .then(|| {
+                libpod::Libpod::on(&d.socket)
+                    .and_then(|l| l.info())
+                    .unwrap()
+            })
+            .is_some_and(|i| i.pasta());
+        if pasta {
+            let host_service = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+            let port = host_service.local_addr().unwrap().port();
+            let guest = egress::Targets {
+                network: egress::Network::Bridge,
+                forbidden: vec![egress::Target::new(
+                    egress::What::Guest,
+                    egress::PASTA_GUEST,
+                    port,
+                )],
+                public: None,
+                seen: None,
+            };
+            let (out, seen) = loopback::watching(Path::new("/proc"), me, || {
+                egress::probe(&d, &image, open, &guest).unwrap()
+            });
+            let mapped = seen
+                .iter()
+                .filter_map(loopback::Stack::guest_addr)
+                .collect::<Vec<_>>();
+            let b = egress::verdict(&out, &guest, &a);
+            println!("pasta's guest-mapped address ({mapped:?} on its command line):\n{out}");
+            if mapped.contains(&"169.254.1.2") {
+                assert!(
+                    b.len() == 1
+                        && b[0].contains("reaches pasta's guest-mapped address 169.254.1.2")
+                        && b[0].contains(r#""--map-guest-addr", "none""#),
+                    "{out}\n{b:?}"
+                );
+            } else {
+                assert!(b.is_empty(), "{out}\n{b:?}");
+            }
+            stacks.extend(seen);
+        } else {
+            println!(
+                "note: not rootless podman behind pasta: its guest-mapped address is not tried"
+            );
         }
 
         // A rootless engine's network stack, as preflight reads it: seen while the probe tasks

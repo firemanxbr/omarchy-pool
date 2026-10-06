@@ -14,6 +14,11 @@
 //! `Libpod-Api-Version` on every answer, `/_ping`'s included, which Docker never sends. One
 //! request per connection, in HTTP/1.0, so the answer is never chunked and ends with the
 //! connection (reqwest speaks no unix socket, and this is all the dispatcher asks of libpod).
+//!
+//! podman's docker API shows such a network with `"Gateway": "<nil>"` (podman 4), which the
+//! worker image's docker CLI (27.5.1) lists and removes as text; docker's CLI from 29 on reads
+//! the gateway as an address and fails on it, so a newer CLI in the image needs a podman that
+//! omits it.
 
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};

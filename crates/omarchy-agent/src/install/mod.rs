@@ -29,9 +29,9 @@
 //! Every owner file is written through [`files`] (`openat`, `O_NOFOLLOW`).
 //!
 //! Seams left for later issues, by name: macOS (launchd, Colima) is P3; the egress probe
-//! behind the egress sidecar on a task's internal network (#373), and on podman the task
-//! network made through libpod's own API with DNS off (#372), until which a rootless host
-//! fails the probe ([`egress`]); the `subuid` level for rootless podman, once the dispatcher (#335) starts
+//! behind the egress sidecar on a task's internal network (#373), until which a rootless host
+//! fails the probe on a signed exception's bridge ([`egress`]); the `subuid` level for
+//! rootless podman, once the dispatcher (#335) starts
 //! task containers with `--userns=auto` (until then rootless podman reads as `user`); the
 //! emulated lane's smoke run (#338, reported only here); task containers and sidecars
 //! carry `org.omarchy-pool.agent.host=<host>` (design v2 §9.3), which uninstall removes by.
@@ -43,6 +43,7 @@ pub(crate) mod engine;
 pub(crate) mod envelope;
 pub(crate) mod files;
 pub(crate) mod legacy;
+pub(crate) mod libpod;
 pub(crate) mod loopback;
 pub(crate) mod net;
 pub(crate) mod secrets;
@@ -718,16 +719,31 @@ pub(crate) fn measure(
                     &work_root,
                     &task_subnets,
                 );
+                let podman = server == Ok(engine::Server::Podman);
+                // Rootless podman behind pasta maps its guest address to the host (#372):
+                // libpod's /info says which stack it runs.
+                let guest = if podman && !rootful {
+                    match libpod::Libpod::on(&d.socket).and_then(|l| l.info()) {
+                        Ok(i) => i.pasta().then_some(egress::PASTA_GUEST),
+                        Err(e) => {
+                            r.blockers.push(format!("egress: which network stack rootless podman runs (libpod's /info): {e}"));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 let host = egress::Host {
                     router,
                     lan: net::lan_address(),
                     pool: pool.as_deref(),
                     advice: egress::Advice {
                         rootful,
-                        podman: server == Ok(engine::Server::Podman),
+                        podman,
                         firewall,
                     },
                     server,
+                    guest,
                     unprepared: egress::unprepared(fw, &task),
                     proc: &p.proc,
                     uid: rustix::process::getuid().as_raw(),

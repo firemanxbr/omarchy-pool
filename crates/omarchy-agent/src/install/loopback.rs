@@ -11,6 +11,11 @@
 //! listens on nothing (design v2 §11.2). The agent runs as the rootless engine's user (design
 //! v2 §19.3), so a rootless host whose stack is not seen is refused: nothing then says the
 //! mapping is off.
+//!
+//! pasta can also forward an address to the host's own (`--map-guest-addr`, which rootless
+//! podman passes from 5.3 on, #372): the egress probe tries podman's default one, and an
+//! address the command line maps that the probe did not try is refused here
+//! ([`guest_verdict`]).
 
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
@@ -109,6 +114,19 @@ impl Stack {
         }
     }
 
+    /// The address pasta forwards to the host's own (`--map-guest-addr`, which rootless podman
+    /// passes as `169.254.1.2` from 5.3 on unless `pasta_options` names one; #372), `None` when
+    /// it maps none. The last one given is the one pasta keeps.
+    pub fn guest_addr(&self) -> Option<&str> {
+        if self.kind != Kind::Pasta {
+            return None;
+        }
+        values(&self.args, "--map-guest-addr")
+            .last()
+            .copied()
+            .filter(|a| *a != "none")
+    }
+
     fn describe(&self) -> String {
         let name = match self.kind {
             Kind::RootlessKit => "RootlessKit",
@@ -200,4 +218,30 @@ pub(crate) fn verdict(seen: &[Stack], setting: &str) -> Result<String, String> {
             mapped.join(", ")
         ))
     }
+}
+
+/// pasta's guest-mapped addresses among the stacks seen that the probe did not try (#372): each
+/// is forwarded to this host's own address, so a task on a bridge reaches every service there,
+/// and nothing probed says otherwise. The blocker, with `setting`, what turns the mapping off; none
+/// when every mapped address was `tried` (the probe's answers decide those).
+pub(crate) fn guest_verdict(
+    seen: &[Stack],
+    tried: Option<std::net::Ipv4Addr>,
+    setting: &str,
+) -> Option<String> {
+    let tried = tried.map(|t| t.to_string());
+    let untried: Vec<String> = seen
+        .iter()
+        .filter_map(|s| {
+            s.guest_addr()
+                .filter(|a| tried.as_deref() != Some(*a))
+                .map(|a| format!("{} at {a}", s.describe()))
+        })
+        .collect();
+    (!untried.is_empty()).then(|| {
+        format!(
+            "egress: the rootless engine's pasta maps a guest address to this host's own address ({}), which the probe did not try, so a task on a bridge reaches every service of the host there; {setting}",
+            untried.join(", ")
+        )
+    })
 }
