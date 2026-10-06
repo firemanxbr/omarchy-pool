@@ -665,9 +665,14 @@ Then it prints the envelope (`agent.toml`) to confirm, writes
 `run/capacity.json`, enrolls ([Maintainer hosts](/docs/worker-host#maintainer-hosts):
 the fingerprint, your Confirm on the site, the host worker token) and only then writes `agent.toml` with
 the `host_id` and `worker_id` the enrollment gave — before your Confirm
-there is no run loop, no dispatcher and nothing that claims. Then
-`etc/dispatcher.env` (0600) holds, beside the worker token, what the
-dispatcher takes from the agent (#371): `OMARCHY_HOST_ADDRESSES` (every
+there is no run loop, no dispatcher and nothing that claims. The host worker
+token is `run/host/dispatcher/token` in the set directory (0400, its
+directories 0700, #327), the one secret file the host set mounts, read-only,
+into the dispatcher (`OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token`):
+`docker inspect` of the dispatcher, a sidecar or a task shows no token or
+key in its environment. Then `etc/dispatcher.env` (0600) holds the token's
+registration (`# worker:`) and what the dispatcher takes from the agent
+(#371): `OMARCHY_HOST_ADDRESSES` (every
 address of the host's interfaces but loopback's and a container bridge's the
 egress refuses anyway — private, link-local, unique local or in the task
 subnets —, an IPv6 one as its /64, and the public address the probe saw, which
@@ -744,6 +749,30 @@ keeps the list its egress sidecar was started with); the journal says
 rename, so none puts back what another just wrote. `omarchy-agent
 dispatcher-env` prints what it would write; `--write` writes it now.
 
+**Rotating the host worker token** (#327): `omarchy-agent token` fetches a
+new one with a request signed by the host key and rewrites
+`run/host/dispatcher/token` (every rotation writes there alone: the 30-day
+rotation, and the pool's `rotate-token` host order once it lands, #325).
+The token file is an input of the set, so the next tick starts a round that
+recreates the dispatcher, and only it: the old one saves its leases and
+exits, the new one reads the new file and re-adopts every task, which runs
+on (the old token works ten more minutes, more than the round takes). The
+journal scrubs the token from its file as it does `etc/*.env` values.
+
+**A host from before #327** had the token in `etc/dispatcher.env`. The agent
+moves it to its file at its first start (`dispatcher-env` in the journal:
+"the host worker token moved …"), losing nothing; a token line there is
+always taken as the newest one (an older agent wrote it). While a release
+from before #327 runs or is being rolled out — its dispatcher reads only
+`OMARCHY_WORKER_TOKEN` — the agent keeps the token in `etc/dispatcher.env`
+too, and a round that rolls back to such a release puts it back before it
+creates that dispatcher; once none is left the next minute's refresh takes it
+out, which recreates the dispatcher once more. A token line the agent cannot
+move (not one word) stops it with a `dispatcher-env` line in the journal
+until you fix or remove the line. The image reads `OMARCHY_WORKER_TOKEN_FILE`
+before `OMARCHY_WORKER_TOKEN`, and a file it names but cannot read stops the
+container instead of falling back.
+
 Each round goes `render → lint → plan → pull → replace → guard → commit`,
 or `revert`, each step written to `state.json` before it acts, so a restart
 anywhere resumes it (a ready wait or a guard in flight starts its clock again:
@@ -754,7 +783,8 @@ origin must be in its `pools`, and the target must be at or above the floor
 merged from every verified manifest and never lowered) — or covered by a
 rollback statement (*Rollback statements* in the security model), which
 preempts a round in flight, as a newer release does, at any step before
-`commit` (an older release waits for the round to end). The dispatcher alone is replaced: stopped (it saves its leases
+`commit` (an older release waits for the round to end). Before it hashes the set's inputs, a round puts the token into
+`etc/dispatcher.env` or takes it out as the releases staged and applied need (#327). The dispatcher alone is replaced: stopped (it saves its leases
 and exits within 60 s), created from the new files and waited for on
 `/ready`; task containers are never part of a plan and keep running. The
 guard then samples it for `guard_s`: a restart streak, two restarts that
@@ -762,8 +792,9 @@ were not ordered, an exit other than 0 and 75 (#277's ordered restart) or a
 lost `/ready` revert to `last-good/` and quarantine the release for an hour
 (one retry, then until a newer release); an Update order on the host's
 worker lifts every quarantine and starts a round. A changed
-`compose.override.yml`, `etc/` file or `run/capacity.json` starts a round
-too, and the running set is compared with `last-good/` every 15 minutes.
+`compose.override.yml`, `etc/` file, `run/capacity.json` or the token file
+starts a round too, and the running set is compared with `last-good/` every
+15 minutes.
 Two known gaps: a round preempted during its replace leaves the dispatcher
 stopped (its leases saved) until the new round's replace, and a release's
 pinned docker and compose roll forward only — tools that cannot talk to the
@@ -772,7 +803,7 @@ engine leave the round at `engine-unreachable` until a newer release.
 | The last round says | What it means |
 |---|---|
 | `ok`, `no-change` | the set runs the target |
-| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined |
+| `held` | the dispatcher waits for a file: `etc/dispatcher.env` and `run/host/dispatcher/token` until the owner confirms the host (#321, #327), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined |
 | `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
 | `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep`, `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |

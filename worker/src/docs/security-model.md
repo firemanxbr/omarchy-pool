@@ -106,7 +106,8 @@ secret). Everything travels in the `Authorization` header over TLS only.
   same package, on the same side, wrote.
 - **On a maintainer host, one container per task, born with nothing
   (#335).** The host's one service, the dispatcher (`pkg-repo dispatch`),
-  holds the host's worker token and each lease's job token, and starts every
+  holds the host's worker token (a read-only file, never its environment,
+  #327) and each lease's job token, and starts every
   task — a build, an audit, a trial's helper — in a container made by one
   function: no socket, no token of any kind, no agent key, not the work root
   nor another task's directory, `--cap-drop ALL` with the few capabilities
@@ -492,24 +493,57 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   five minutes), so nothing is replayable. A signed request reads the host's
   state, fetches or rotates its worker token and reports; it cannot claim,
   change the maintainer list or widen anything.
-- **The host worker token** (`omw_…`) is the dispatcher's only, written
-  0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
-  id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
-  digits and dashes), so a pool cannot add a variable to the dispatcher's
-  environment (#371: the secrets directory's path and the agent budget come
-  from `agent.toml`, the host's addresses from its interfaces and from the
-  address the pool's edge saw the probe task or the agent come from, which is
-  read as one IP address, so a pool can at most add one address to the deny
-  list, never a variable); strings the pool sends reach the terminal without control
-  characters. It is a new one at every fetch; the agent
-  rotates it every 30 days. The one it replaces works ten more minutes (kept
+- **The host worker token** (`omw_…`) is the dispatcher's only, and reaches
+  it as a read-only file, never as a value in its environment (#327, design
+  v2 §14, D15): container environment is readable through `docker inspect` by
+  anyone who can talk to the engine's socket. The agent writes it to
+  `run/host/dispatcher/token` in the set directory (0400, owned by the agent's
+  user, in 0700 directories); the host set mounts that file read-only into the
+  dispatcher and names it in `OMARCHY_WORKER_TOKEN_FILE`, which the image's
+  entrypoint and `pkg-repo` read before `OMARCHY_WORKER_TOKEN` (a file named
+  but unreadable stops the container; it never falls back). `lint-set`
+  refuses a service mounting anything under the secrets directory, another
+  service's secret file (`run/host/<service>/token`), its own writable, or a
+  directory that holds them. The agent writes the token, and the
+  registration's id (`# worker:` in `etc/dispatcher.env`, 0600), only in the
+  shapes the pool mints (`omw_` and 48 hex digits; letters, digits and
+  dashes), so a pool cannot add a variable to the dispatcher's environment
+  (#371: the secrets directory's path and the agent budget come from
+  `agent.toml`, the host's addresses from its interfaces and from the address
+  the pool's edge saw the probe task or the agent come from, which is read as
+  one IP address, so a pool can at most add one address to the deny list,
+  never a variable); strings the pool sends reach the terminal without control
+  characters. It is a new one at every fetch; the agent rotates it every 30
+  days by rewriting the file. The one it replaces works ten more minutes (kept
   on the host's row, never on the registration that older Workers list), so
-  only the dispatcher is recreated, and a running task — whose job token does
-  not depend on it — never notices.
+  only the dispatcher is recreated — the file is an input of the set — and a
+  running task, whose job token does not depend on it, never notices. Stated
+  plainly: while a release from before #327 runs or is being rolled out on a
+  host, its dispatcher reads only `OMARCHY_WORKER_TOKEN`, so the agent keeps
+  the token in `etc/dispatcher.env` too (and the dispatcher's environment
+  shows it) until no such release is left; and on a rootful engine the socket
+  makes the dispatcher root-equivalent anyway — the file protects against
+  leaks through `inspect`, logs, crash dumps and bugs, not against a
+  compromised dispatcher.
 - **The host report** is at most 16 KiB (its `runtime` at most 2 KiB) and
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
   the host declared.
+
+### Where secrets live on a maintainer host
+
+| Secret | Where it comes from | At rest | Which container gets it |
+|---|---|---|---|
+| Host key | generated at install | 0600 `state/host.ed25519` in the agent's data directory | none, ever |
+| Host worker token `omw_` | minted by the pool for the confirmed host, fetched with a host-key-signed request, rotated every 30 days | 0400 `run/host/dispatcher/token` in the set directory (and in 0600 `etc/dispatcher.env` only while a release from before #327 is applied or staged) | the dispatcher only, as a read-only file mount (`OMARCHY_WORKER_TOKEN_FILE`), never in its environment |
+| Job tokens `omj.` | the claim answer, per lease, carrying the lease generation | the dispatcher's memory and `work/state/leases/` (0600) | the dispatcher and its pool-job children only; never a task |
+| Agent keys, `GITHUB_TOKEN` (public read only), `CLAUDE_CODE_OAUTH_TOKEN` | typed at install on `/dev/tty`, or copied from an existing file with confirmation | 0600 `OMARCHY_SECRETS_DIR/agent.env`, outside the work root and the set directory | a task's agent sidecar only, as a read-only file mount (`OMARCHY_AGENT_ENV`), never in its environment |
+
+So `docker inspect` of the dispatcher, of every sidecar and of every task
+container shows no token or key in its environment: the egress sidecar and
+the task container hold none at all. `tests/agent-run-loop.sh` checks the
+dispatcher's and a task's on a real engine, `tests/task-networks.sh` every
+sidecar's and task's the real dispatcher makes.
 
 ## Stopping a host
 

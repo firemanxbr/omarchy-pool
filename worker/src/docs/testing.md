@@ -723,9 +723,13 @@ answer), the broker answering on `:8790`, the builder's and the updater's
 sidecar's role refusing cloud metadata and a POST. `bash tests/task-networks.sh` (CI, on that local build; #336) runs the
 dispatcher with the real egress and agent sidecars and two probe tasks at
 once, its environment being the `etc/dispatcher.env` that `omarchy-agent
-dispatcher-env --write` rendered (#371: the token and an owner's line kept,
-0600, the machine's own addresses with a stand-in public one, the secrets
-directory, a budget): a public mirror answers through the egress only; cloud metadata, a
+dispatcher-env --write` rendered (#371: an owner's line kept, 0600, the
+machine's own addresses with a stand-in public one, the secrets directory, a
+budget; #327: the worker token an older agent left there moved to
+`run/host/dispatcher/token`, 0400, which the dispatcher reads through
+`OMARCHY_WORKER_TOKEN_FILE`, the stub pool naming the host to that token
+only), and `docker inspect` of every task, egress and agent sidecar showing
+no token or key in its environment: a public mirror answers through the egress only; cloud metadata, a
 public name resolving to loopback, a raw socket ("Network is unreachable"),
 the host's LAN address and gateway, and the other task's container, egress
 and agent are out of reach; through the egress the host's LAN address is
@@ -747,6 +751,34 @@ lease, a new public address asked hourly and again within minutes after no
 answer, agent.toml read again and refused when others may write it or it is
 a link), and `tests/host-enroll-e2e.sh` (the E2E
 workflow) checks its keys after the Confirm and a rotation.
+
+The host worker token as a read-only file (#327, design v2 §14, D15) is
+tested at every layer. `omarchy-agent`'s unit tests: `lint-set` refuses a
+service mounting another service's secret file (`run/host/<service>/token`,
+in the template and through an override, by relative or absolute path,
+however spelt), its own writable, a directory holding them, and the token's
+value in its environment, while a template from before #327 still passes (a
+rollback may name it); `dispatcher_env` writes the token 0400 in 0700
+directories, never through a link or another user's file, moves a token an
+older agent left in `etc/dispatcher.env` to its file without losing it (the
+env file's line taken as the newest), keeps it there too only while a release
+from before #327 is applied or staged, and writes the two files in the order
+that loses no token; the run loop against the fake engine holds the
+dispatcher while the token file is missing, recreates only the dispatcher
+after a rotation while the task runs on and the journal scrubs the new token,
+and on a host upgraded from #371's layout keeps the token in the env file
+for an older release, takes it out once a release that reads the file is
+committed, and puts it back for a rollback to the older one. `bash
+tests/agent-run-loop.sh` (CI, rootful docker and rootless podman) starts from
+#371's layout on a real engine: after the first round `docker inspect`
+shows the token in neither the dispatcher's nor the task's environment, the
+dispatcher reads it through a read-only mount it cannot write, and a rotation
+recreates the dispatcher alone, which re-adopts the task. `bash
+tests/host-set.sh` checks `docker compose config` of the template: the token
+file bound read-only with `create_host_path: false`,
+`OMARCHY_WORKER_TOKEN_FILE`, no token in the environment; `python3
+tests/host-bundle.py` that the bundle's template keeps the mount and that the
+writer refuses a host set without it.
 
 What the build sees is checked by hand in the worker image (SECURITY.md,
 *Isolation*): `hold_secrets` leaves a child with no secret, `as_builder`
