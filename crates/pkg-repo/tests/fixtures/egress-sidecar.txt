@@ -1,0 +1,13 @@
+# A task's egress sidecar as the dispatcher starts it (pkg-repo's dispatch::spec, its egress
+# calls) and as install's egress probe starts its own (omarchy-agent's install::egress::sidecar,
+# #373): one engine call a line, its words split on spaces. Both crates' tests fill the
+# placeholders with their own values and compare the calls they make with these, so a change to
+# the sidecar's limits, flags or role on one side fails a test until the other follows.
+#
+# {name}: the sidecar; {labels}: its --label pairs; {out}: the bridge it leaves through (the
+# shared omarchy-egress, the probe's own stand-in for it); {image}: the release's worker image;
+# {ip}: its address on the task's network {net}; {deny}: its --deny pairs, the task subnets
+# first, then the host's own addresses (OMARCHY_HOST_ADDRESSES).
+create --name {name} {labels} --network {out} --cpus 0.100 --memory 64m --memory-swap 64m --pids-limit 256 --cap-drop ALL --security-opt no-new-privileges --read-only --log-driver none -e OMARCHY_WORKER_ROLE=egress {image} --listen {ip}:3128 {deny}
+network connect --ip {ip} {net} {name}
+start {name}

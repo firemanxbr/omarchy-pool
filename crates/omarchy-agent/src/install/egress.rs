@@ -368,8 +368,11 @@ impl Targets {
 ///
 /// Through the egress sidecar (a target whose name ends in `@egress`, after the `proxy <address>
 /// <port>` it is told first), a `CONNECT` and the sidecar's answer: `open` (200), `denied` (403,
-/// the sidecar's refusal), `refused` (502 with the target's refusal), `blocked` (502 otherwise,
-/// or nothing within 6 s) or `error`; and `egress proxy none` when the sidecar never answered.
+/// the sidecar's refusal), `refused` (502 with the target's refusal: pkg-repo's egress words it
+/// `<host>:<port> does not answer: Connection refused`), `blocked` (any other 502 — one it could
+/// not connect to, or a name it could not resolve, which it words `refused: <host> does not
+/// resolve` like its own refusals, though nothing answered — or nothing within 6 s) or `error`;
+/// and `egress proxy none` when the sidecar never answered.
 /// Its status line is read alone (and a 502's words after it): a tunnel that opened stays open,
 /// and a reader killed waiting on it would lose what it had not written out.
 ///
@@ -395,7 +398,7 @@ via() {
   case "$out" in
     "HTTP/1."?" 200"*) r=open ;;
     "HTTP/1."?" 403"*) r=denied ;;
-    "HTTP/1."?" 502"*efused*) r=refused ;;
+    "HTTP/1."?" 502"*"does not answer"*efused*) r=refused ;;
     "HTTP/1."?" 502"*|"") r=blocked ;;
     *) r=error ;;
   esac
@@ -448,7 +451,9 @@ pub(crate) fn sweep(docker: &Docker) -> Result<(), String> {
 /// starts a task's (pkg-repo's `dispatch::spec`, `Side::egress`): created on `out` (the bridge it
 /// leaves through), with the dispatcher's limits, flags, role and `--deny`s, attached to the task
 /// network `net` at `ip`, started. The bridge comes first: podman (netavark) gives a container
-/// whose first network is internal no way out through a second one.
+/// whose first network is internal no way out through a second one. Both are held to one
+/// fixture, `crates/pkg-repo/tests/fixtures/egress-sidecar.txt`, which both crates' tests read:
+/// a change on either side fails until the other follows.
 pub(crate) fn sidecar(
     name: &str,
     out: &str,

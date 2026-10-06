@@ -641,8 +641,9 @@ fn the_probe_runs_the_way_a_task_runs_behind_its_egress_sidecar() {
 
 #[test]
 fn the_probe_s_sidecar_is_started_as_the_dispatcher_starts_a_task_s() {
-    // pkg-repo's dispatch::spec, Side::egress: the shared bridge first, then the task's network
-    // at its .2, the same limits, flags and role, the task subnets then the host's addresses.
+    // pkg-repo's dispatch::spec, its egress calls: the shared bridge first, then the task's
+    // network at its .2, the same limits, flags and role, the task subnets then the host's
+    // addresses. Both are held to one fixture (#373), which pkg-repo's spec tests read too.
     let calls = egress::sidecar(
         "omarchy-egress-probe-7-egress",
         "omarchy-egress-probe-7-out",
@@ -653,15 +654,118 @@ fn the_probe_s_sidecar_is_started_as_the_dispatcher_starts_a_task_s() {
             deny: vec!["10.231.0.0/16".into(), "203.0.113.10".into()],
         },
     );
-    assert_eq!(
-        calls,
-        [
-            format!("create --name omarchy-egress-probe-7-egress --label org.omarchy-pool.probe=egress --network omarchy-egress-probe-7-out --cpus 0.100 --memory 64m --memory-swap 64m --pids-limit 256 --cap-drop ALL --security-opt no-new-privileges --read-only --log-driver none -e OMARCHY_WORKER_ROLE=egress {WORKER} --listen 10.231.255.242:3128 --deny 10.231.0.0/16 --deny 203.0.113.10"),
-            "network connect --ip 10.231.255.242 omarchy-egress-probe-7-task omarchy-egress-probe-7-egress".to_owned(),
-            "start omarchy-egress-probe-7-egress".to_owned(),
-        ]
-        .map(|c| c.split(' ').map(str::to_owned).collect::<Vec<_>>())
-    );
+    let want: Vec<Vec<String>> =
+        include_str!("../../../pkg-repo/tests/fixtures/egress-sidecar.txt")
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                [
+                    ("{name}", "omarchy-egress-probe-7-egress"),
+                    ("{labels}", "--label org.omarchy-pool.probe=egress"),
+                    ("{out}", "omarchy-egress-probe-7-out"),
+                    ("{image}", WORKER),
+                    ("{ip}", "10.231.255.242"),
+                    ("{net}", "omarchy-egress-probe-7-task"),
+                    ("{deny}", "--deny 10.231.0.0/16 --deny 203.0.113.10"),
+                ]
+                .iter()
+                .fold(l.to_owned(), |l, (k, v)| l.replace(k, v))
+                .split(' ')
+                .map(str::to_owned)
+                .collect()
+            })
+            .collect();
+    assert_eq!(calls, want);
+}
+
+/// The probe script's answers through a stand-in egress sidecar on loopback, which answers each
+/// `CONNECT` as pkg-repo's egress words it, by the port asked for; `bash` and `timeout` as the
+/// build image has them, so Linux only.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_probe_script_reads_a_502_as_refused_only_when_the_target_refused_the_connection() {
+    use std::io::{Read, Write};
+    // pkg-repo's egress answers its own refusals `refused: <why>` whatever their status: a name
+    // it cannot resolve is a 502 too, though nothing answered (#373).
+    let answers = [
+        (1, "403 Forbidden", "omarchy egress: refused: 10.0.0.1 resolves to 10.0.0.1: a private address", "denied"),
+        (2, "502 Bad Gateway", "omarchy egress: refused: host.lima.internal does not resolve: failed to lookup address information: Name or service not known", "blocked"),
+        (3, "502 Bad Gateway", "omarchy egress: refused: host.lima.internal does not resolve", "blocked"),
+        (4, "502 Bad Gateway", "omarchy egress: 192.0.2.1:4 does not answer: Connection refused (os error 111)", "refused"),
+        (5, "502 Bad Gateway", "omarchy egress: 192.0.2.1:5 does not answer: connection timed out", "blocked"),
+        (6, "200 Connection established", "", "open"),
+        (7, "400 Bad Request", "omarchy egress: \"\" is not a host name", "error"),
+    ];
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for c in l.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut c = c;
+                let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
+                // The whole request, as the egress reads it: a socket closed with unread bytes
+                // is reset, and the reset can overtake the answer.
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match c.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => raw.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let asked = String::from_utf8_lossy(&raw).into_owned();
+                // `CONNECT 192.0.2.1:<port> HTTP/1.1`; the script's first connection only
+                // checks the sidecar answers.
+                let Some((_, status, words, _)) = asked
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|a| a.rsplit_once(':'))
+                    .and_then(|(_, p)| p.parse::<u16>().ok())
+                    .and_then(|p| answers.iter().find(|a| a.0 == p))
+                else {
+                    return;
+                };
+                let body = if words.is_empty() {
+                    String::new()
+                } else {
+                    format!("{words}\n")
+                };
+                let _ = write!(
+                    c,
+                    "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    let mut args = vec![
+        "-c".to_owned(),
+        egress::SCRIPT.to_owned(),
+        "sh".to_owned(),
+        "proxy".to_owned(),
+        "127.0.0.1".to_owned(),
+        port.to_string(),
+    ];
+    for (p, ..) in answers {
+        args.extend([
+            format!("t{p}@egress"),
+            "192.0.2.1".to_owned(),
+            p.to_string(),
+        ]);
+    }
+    let out = std::process::Command::new("sh")
+        .args(&args)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    for (p, _, _, want) in answers {
+        assert!(
+            out.lines()
+                .any(|l| l == format!("egress t{p}@egress {want}")),
+            "port {p}: {want}\n{out}"
+        );
+    }
+    assert!(!out.contains("proxy none"), "{out}");
 }
 
 #[test]
