@@ -357,6 +357,10 @@ struct FakePool {
     refuse_uploads: Mutex<Option<u16>>,
     /// Each heartbeat takes this long (a pool that holds the connection open).
     slow_beat: Mutex<Duration>,
+    /// The pool's public files by URL (#341: its signed databases); every other is a 404.
+    public: Mutex<HashMap<String, Vec<u8>>>,
+    /// The public files asked for.
+    public_asked: Mutex<Vec<String>>,
 }
 
 fn down() -> RepoError {
@@ -531,6 +535,19 @@ impl Pool for FakePool {
     fn api_url(&self) -> &'static str {
         "http://127.0.0.1:1"
     }
+    fn public_file(&self, url: &str, dest: &Path) -> Result<bool, RepoError> {
+        self.public_asked.lock().unwrap().push(url.into());
+        if self.down.load(Ordering::SeqCst) {
+            return Err(down());
+        }
+        match self.public.lock().unwrap().get(url) {
+            Some(b) => {
+                std::fs::write(dest, b).unwrap();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 // ---------- pool jobs' children (#340) ----------
@@ -675,6 +692,7 @@ impl H {
             pool_url: "https://pool.example".into(),
             checkout: Some(self.checkout.clone()),
             constants: Constants::signed(),
+            pool_key: Some(super::cache::tests::fixture_dir().join("pool.pub.asc")),
         };
         let mut d = Dispatcher::new(
             ctx,
@@ -708,6 +726,7 @@ impl H {
             pool_url: "https://pool.example".into(),
             checkout: Some(self.checkout.clone()),
             constants: Constants::signed(),
+            pool_key: Some(super::cache::tests::fixture_dir().join("pool.pub.asc")),
         };
         let mut d = Dispatcher::new(
             ctx,
@@ -761,6 +780,33 @@ impl H {
 
     fn leases(&self) -> Vec<Lease> {
         Store::open(&self.work).unwrap().load().unwrap().leases
+    }
+
+    /// The pool serves the fixture databases (#341) for `arch`, signed by the key the harness's dispatchers verify with.
+    fn serve_fixture_dbs(&self, arch: &str) {
+        let dir = super::cache::tests::fixture_dir();
+        let mut public = self.pool.public.lock().unwrap();
+        for source in ["core", "packages"] {
+            for f in [
+                format!("omarchy-{source}-edge.db"),
+                format!("omarchy-{source}-edge.db.sig"),
+            ] {
+                public.insert(
+                    format!("https://pool.example/{source}/{arch}/{f}"),
+                    std::fs::read(dir.join(&f)).unwrap(),
+                );
+            }
+        }
+    }
+
+    /// The `-v` mounts a lease's task container was started with.
+    fn mounts(&self, id: u64, gen: &str) -> Vec<String> {
+        self.engine
+            .args(id, gen)
+            .windows(2)
+            .filter(|w| w[0] == "-v")
+            .map(|w| w[1].clone())
+            .collect()
     }
 }
 
@@ -890,6 +936,184 @@ fn a_community_build_runs_staged_in_and_out_and_its_container_holds_nothing() {
         h.leases().is_empty() && !h.engine.has(7, GEN) && !h.tdir(7, GEN).exists(),
         "cleaned up"
     );
+}
+
+/// The task caches (#341, design v2 §9.3, D52): two builds at once, of two packages that need
+/// the same dependency, on the two sides — each mounts its own package's build cache on its own
+/// side and the shared pacman cache read-only, and downloads into a cache of its own. After them
+/// only the bytes the pool's signed databases list are merged into the shared cache, once; a
+/// planted file and one with other bytes are discarded; the next build mounts what was merged.
+#[test]
+#[allow(clippy::too_many_lines)] // two leases from their start to the merge-back of what they downloaded, then the next
+fn two_builds_at_once_download_into_their_own_caches_and_only_the_signed_bytes_are_merged_back() {
+    use super::cache::tests::fixture_bytes;
+    let h = H::new();
+    h.serve_fixture_dbs("aarch64");
+    let mut d = h.dispatcher();
+    let gen2 = "g_00000000000000c3";
+    h.give(task(
+        1,
+        "build",
+        "alpha",
+        "https://github.com/a/alpha@v1:PKGBUILD",
+        "community",
+        json!({}),
+        GEN,
+    ));
+    h.give(task(
+        2,
+        "build",
+        "beta",
+        "https://github.com/b/beta@v1:PKGBUILD",
+        "project",
+        json!({}),
+        gen2,
+    ));
+    h.ticks(&mut d, 4);
+    assert!(
+        h.engine.has(1, GEN) && h.engine.has(2, gen2),
+        "both run at once"
+    );
+    let cache = h.work.join("cache");
+    let shared = format!(
+        "{}:/var/cache/pacman/shared:ro",
+        cache.join("pacman/aarch64").display()
+    );
+    let (m1, m2) = (h.mounts(1, GEN), h.mounts(2, gen2));
+    assert!(m1.contains(&shared) && m2.contains(&shared), "{m1:?}");
+    assert!(m1.contains(&format!(
+        "{}:/build/cache",
+        cache.join("build/community/aarch64/alpha").display()
+    )));
+    assert!(m2.contains(&format!(
+        "{}:/build/cache",
+        cache.join("build/project/aarch64/beta").display()
+    )));
+    for (m, id, gen) in [(&m1, 1, GEN), (&m2, 2, gen2)] {
+        assert!(m.contains(&format!(
+            "{}:/var/cache/pacman/pkg",
+            h.tdir(id, gen).join("pkgcache").display()
+        )));
+        // Nothing else of the cache tree: its lane's pacman cache and its own package's build cache.
+        assert_eq!(
+            m.iter()
+                .filter(|x| x.starts_with(&cache.display().to_string()))
+                .count(),
+            2,
+            "{m:?}"
+        );
+    }
+    assert!(cache.join("build/community/aarch64/alpha").is_dir());
+    assert!(!cache.join("build/project/aarch64/alpha").exists());
+
+    // What their pacman downloaded, each into its own cache: the dependency both need, and in
+    // alpha's a file its recipe planted under a listed name and one no database lists.
+    let lib = fixture_bytes("libfixture", "libfixture", "aarch64");
+    let libname = "libfixture-1.0-1-aarch64.pkg.tar.zst";
+    for (id, gen) in [(1, GEN), (2, gen2)] {
+        std::fs::write(h.tdir(id, gen).join("pkgcache").join(libname), &lib).unwrap();
+    }
+    std::fs::write(
+        h.tdir(1, GEN)
+            .join("pkgcache/evil-1.0-1-aarch64.pkg.tar.zst"),
+        b"planted by alpha's recipe",
+    )
+    .unwrap();
+    std::fs::write(
+        h.tdir(1, GEN)
+            .join("pkgcache/stranger-1.0-1-aarch64.pkg.tar.zst"),
+        b"x",
+    )
+    .unwrap();
+    for (id, gen) in [(1, GEN), (2, gen2)] {
+        h.leave(id, gen, &built_ok(), "==> Finished making\n");
+        h.engine.exit(id, gen, 0, false);
+    }
+    h.ticks(&mut d, 3);
+    assert!(h.leases().is_empty(), "both ended");
+    let mut merged: Vec<String> = std::fs::read_dir(cache.join("pacman/aarch64"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    merged.sort();
+    assert_eq!(
+        merged,
+        [libname],
+        "only the bytes the signed databases list"
+    );
+    assert_eq!(
+        std::fs::read(cache.join("pacman/aarch64").join(libname)).unwrap(),
+        lib
+    );
+    assert_eq!(
+        std::fs::read_dir(cache.join("incoming/aarch64"))
+            .unwrap()
+            .count(),
+        0,
+        "both leases' downloads were taken or discarded"
+    );
+    assert!(
+        h.pool
+            .public_asked
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| u == "https://pool.example/core/aarch64/omarchy-core-edge.db"),
+        "the databases were asked of the pool's repositories"
+    );
+    // The next build mounts it, read-only, beside a cache of its own.
+    h.give(community(3, GEN2));
+    h.ticks(&mut d, 12);
+    assert!(h.mounts(3, GEN2).contains(&shared));
+}
+
+/// The caches stay under the envelope's caps (#341): the pacman cache keeps the two newest
+/// versions of each package and drops an older one first; the build caches go least recently
+/// used first, and the cache of a build that runs stays whatever the cap.
+#[test]
+fn the_caches_stay_under_their_caps_and_a_running_builds_cache_is_kept() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    d.cache_caps = super::cache::Caps {
+        pacman: 2500,
+        build: 1,
+    };
+    let pacman = h.work.join("cache/pacman/aarch64");
+    std::fs::create_dir_all(&pacman).unwrap();
+    for v in ["1.0-1", "1.1-1", "1.2-1"] {
+        std::fs::write(
+            pacman.join(format!("zlib-{v}-aarch64.pkg.tar.zst")),
+            vec![0u8; 1000],
+        )
+        .unwrap();
+    }
+    std::fs::write(pacman.join("felix-1.0-1-any.pkg.tar.zst"), vec![0u8; 1000]).unwrap();
+    let old = h.work.join("cache/build/community/aarch64/old");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("ccache"), vec![1u8; 8192]).unwrap();
+    // A build of felix starts (its cache made then); the first pass ran before it.
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(7, GEN));
+    let felix = h.work.join("cache/build/community/aarch64/felix");
+    std::fs::write(felix.join("ccache"), vec![1u8; 8192]).unwrap();
+    h.advance(super::cache::EVERY);
+    h.ticks(&mut d, 1);
+    let mut left: Vec<String> = std::fs::read_dir(&pacman)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            "felix-1.0-1-any.pkg.tar.zst",
+            "zlib-1.2-1-aarch64.pkg.tar.zst"
+        ],
+        "two versions at most, then the older one first under the cap"
+    );
+    assert!(!old.exists(), "the least recently used build cache went");
+    assert!(felix.join("ccache").is_file(), "the running build's stays");
 }
 
 #[test]

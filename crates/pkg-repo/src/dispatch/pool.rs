@@ -21,6 +21,8 @@ use crate::RepoError;
 /// `client::longest_call` of this, about two minutes with their retries: a pool that
 /// does not answer never holds the loop near its watchdog's 15 minutes.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// One attempt at a database of the pool's repositories (`extra`'s is a few MB), in the caches' own thread.
+const PUBLIC_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub trait Pool: Send + Sync {
     /// `POST /factory/claim` with the host's worker token: `None` on 204.
@@ -54,6 +56,9 @@ pub trait Pool: Send + Sync {
     ) -> anyhow::Result<Vec<String>>;
     /// The pool's public URL (`OMARCHY_API`): what a trial's include is read from.
     fn api_url(&self) -> &str;
+    /// A public file of the pool's package repositories — a signed database, its `.sig` —
+    /// into `dest`, with no token (#341): `Ok(false)` when the pool serves none there (404).
+    fn public_file(&self, url: &str, dest: &Path) -> Result<bool, RepoError>;
 }
 
 /// The pool over HTTPS.
@@ -193,5 +198,21 @@ impl Pool for Http {
 
     fn api_url(&self) -> &str {
         &self.api
+    }
+
+    fn public_file(&self, url: &str, dest: &Path) -> Result<bool, RepoError> {
+        // No token at all: the databases are public, and the package domain is not the API's.
+        let api = Api::with_timeout(&self.api, "", PUBLIC_TIMEOUT).map(|a| self.stopping(a))?;
+        match api.download(url, dest) {
+            Ok(_) => Ok(true),
+            Err(RepoError::Api { status: 404, .. }) => {
+                let _ = std::fs::remove_file(dest);
+                Ok(false)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(dest);
+                Err(e)
+            }
+        }
     }
 }

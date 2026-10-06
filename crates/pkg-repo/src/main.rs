@@ -434,6 +434,18 @@ enum Command {
             value_parser = clap::builder::FalseyValueParser::new()
         )]
         direct_network: bool,
+        /// The task caches' caps in GB (#341, D52): the envelope's `cache_caps`, which the agent
+        /// writes into `etc/dispatcher.env`, or these defaults. The shared pacman cache keeps
+        /// the two newest versions of each package within its cap; the build caches go least
+        /// recently used first within theirs.
+        #[arg(long, env = "OMARCHY_CACHE_PACMAN_GB", default_value_t = dispatch::cache::DEFAULT_PACMAN_GB)]
+        cache_pacman_gb: u64,
+        #[arg(long, env = "OMARCHY_CACHE_BUILD_GB", default_value_t = dispatch::cache::DEFAULT_BUILD_GB)]
+        cache_build_gb: u64,
+        /// The key the pool's databases are verified with before a download is merged into the
+        /// shared pacman cache, instead of the pool's own built in (the engine tests' own pool).
+        #[arg(long, hide = true)]
+        pool_key: Option<PathBuf>,
     },
     /// A task's egress sidecar (#336, design v2 §9.4): a forward proxy that
     /// allows CONNECT, GET and HEAD to public addresses only, judged by the
@@ -785,6 +797,9 @@ fn main() -> Result<()> {
             agent_minutes_per_task,
             agent_calls_per_day,
             direct_network,
+            cache_pacman_gb,
+            cache_build_gb,
+            pool_key,
         } => {
             use std::time::Duration;
             let lease = Duration::from_secs(lease_s);
@@ -808,6 +823,8 @@ fn main() -> Result<()> {
                 },
                 disk_floor_gb,
                 job_timeout: job_timeout_s.map(|s| Duration::from_secs(s.max(1))),
+                cache_caps: dispatch::cache::Caps::gb(cache_pacman_gb, cache_build_gb),
+                pool_key,
                 net: dispatch::Net {
                     worker_image: worker_image.trim().to_owned(),
                     subnets,
