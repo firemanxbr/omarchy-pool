@@ -8,7 +8,9 @@
 #   filled as release.yml and the agent fill them: one service, the
 #   dispatcher, its role label, the worker image by digest, the env file, the
 #   socket, the work root at the same path inside and outside, capacity.json
-#   read-only, no port, and no variable left unset;
+#   read-only, its host worker token as a read-only file
+#   (OMARCHY_WORKER_TOKEN_FILE, #327) and no token in its environment, no
+#   port, and no variable left unset;
 # - factory/sizing/tasks.toml is schema 1, and every network exception in it
 #   is "direct" with its reason (the dispatcher reads them, #336).
 #
@@ -35,10 +37,11 @@ cp -R factory/sets/host "$tmp/set"
 sed -e "s|@RELEASE_IMAGE@|$worker|" -e "s|@BUILD_AARCH64@|$aarch64|" -e "s|@BUILD_X86_64@|$x86_64|" \
   -e "s|@RELEASE@|@${worker#*@}|" factory/sets/host/compose.yml > "$tmp/set/compose.yml"
 ! grep -q '@[A-Z_0-9]*@' "$tmp/set/compose.yml" || fail "a placeholder left: $(grep '@[A-Z_0-9]*@' "$tmp/set/compose.yml")"
-# What the agent writes before compose loads the set (set.toml [needs] env_files, capacity.json).
-mkdir -p "$tmp/set/etc" "$tmp/set/run"
-echo 'OMARCHY_WORKER_TOKEN=omw_test' > "$tmp/set/etc/dispatcher.env"
+# What the agent writes before compose loads the set (set.toml [needs] env_files, capacity.json, the token file, #327).
+mkdir -p "$tmp/set/etc" "$tmp/set/run/host/dispatcher"
+printf '# worker: m1-rack-0a9z\nOMARCHY_HOST_ADDRESSES=192.168.1.20\n' > "$tmp/set/etc/dispatcher.env"
 echo '{"schema":2}' > "$tmp/set/run/capacity.json"
+printf 'omw_test\n' > "$tmp/set/run/host/dispatcher/token"; chmod 400 "$tmp/set/run/host/dispatcher/token"
 project="$(sed -n 's/^project_default = "\(.*\)"$/\1/p' factory/sets/host/set.toml)"
 [[ "$project" == omarchy-host ]] || fail "set.toml project_default: $project"
 work=/srv/omarchy-pool/host
@@ -68,13 +71,19 @@ check(env["OMARCHY_CAPACITY_FILE"] == "/run/omarchy/capacity.json", "OMARCHY_CAP
 check(env["OMARCHY_BUILD_IMAGE_AARCH64"] == aarch64 and env["OMARCHY_BUILD_IMAGE_X86_64"] == x86_64, "the build images")
 check(env["OMARCHY_WORKER_IMAGE"] == worker, "OMARCHY_WORKER_IMAGE")
 check(env["OMARCHY_TASK_SUBNETS"] == "10.231.0.0/16", "OMARCHY_TASK_SUBNETS's default")
-check(env.get("OMARCHY_WORKER_TOKEN") == "omw_test", "the env file etc/dispatcher.env loaded")
+check(env.get("OMARCHY_HOST_ADDRESSES") == "192.168.1.20", "the env file etc/dispatcher.env loaded")
+check(env["OMARCHY_WORKER_TOKEN_FILE"] == "/run/omarchy/worker-token", "OMARCHY_WORKER_TOKEN_FILE, the token's read-only file")
+check("OMARCHY_WORKER_TOKEN" not in env and not any("omw_" in str(v) for v in env.values()), "no worker token in the environment (#327)")
 check(not any(k.startswith(("ANTHROPIC_", "OPENAI_", "GEMINI_", "XAI_")) or k in ("CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN") for k in env), "no agent key or GitHub token")
 vols = {(v["source"], v["target"], v.get("read_only", False)) for v in d["volumes"]}
 check(vols == {("/var/run/docker.sock", "/var/run/docker.sock", False),
                (work, work, False),
-               (f"{setdir}/run/capacity.json", "/run/omarchy/capacity.json", True)},
-      f"the volumes: the socket, the work root at its own path, capacity.json read-only (got {vols})")
+               (f"{setdir}/run/capacity.json", "/run/omarchy/capacity.json", True),
+               (f"{setdir}/run/host/dispatcher/token", "/run/omarchy/worker-token", True)},
+      f"the volumes: the socket, the work root at its own path, capacity.json and the token file read-only (got {vols})")
+token = next(v for v in d["volumes"] if v["target"] == "/run/omarchy/worker-token")
+check(token["type"] == "bind" and token.get("bind", {}).get("create_host_path") is False,
+      f"the token file is a bind compose never makes a directory for (got {token})")
 check(not any("host-secrets" in v["source"] for v in d["volumes"]), "the secrets directory is not mounted")
 check("ports" not in d and not d.get("privileged") and "cap_add" not in d and "network_mode" not in d, "no port, privilege, capability or host network")
 check(d["restart"] == "unless-stopped", "restart: unless-stopped")

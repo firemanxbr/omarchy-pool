@@ -1106,18 +1106,30 @@ fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_
     let text = fs::read_to_string(&env).unwrap();
     let secrets = h.root.join("secrets");
     for want in [
-        format!("\nOMARCHY_WORKER_TOKEN=omw_{}\n", "0f".repeat(24)),
+        "\n# worker: m1-rack-0a9z\n".to_owned(),
         "\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,198.51.100.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n".into(),
         format!("\nOMARCHY_SECRETS_DIR={}\n", secrets.display()),
     ] {
         assert!(text.contains(&want), "{want:?} in:\n{text}");
     }
+    // The token in its own file, read-only to the dispatcher (#327), not in its environment.
+    let token = format!("omw_{}", "0f".repeat(24));
+    assert!(
+        !text.contains(&token) && !text.contains("OMARCHY_WORKER_TOKEN"),
+        "{text}"
+    );
+    let file = p.set_dir().join("run/host/dispatcher/token");
+    assert_eq!(fs::read_to_string(&file).unwrap(), format!("{token}\n"));
+    assert_eq!(mode(&file), 0o400);
+    assert_eq!(mode(file.parent().unwrap()), 0o700);
     // No agent_budget in the envelope: the dispatcher's defaults.
     assert!(!text.contains("OMARCHY_AGENT_"), "{text}");
     assert_eq!(mode(&env), 0o600);
     let said = String::from_utf8_lossy(&out).into_owned();
     assert!(
-        said.contains("dispatcher.env (0600): the worker token, OMARCHY_HOST_ADDRESSES=10.8.0.2,"),
+        said.contains("dispatcher.env (0600): the registration, OMARCHY_HOST_ADDRESSES=10.8.0.2,")
+            && said.contains("; the worker token in ")
+            && said.contains("run/host/dispatcher/token (0400)"),
         "{said}"
     );
     let seen: crate::dispatcher_env::addresses::Seen =

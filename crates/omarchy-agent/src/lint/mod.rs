@@ -9,6 +9,15 @@
 //!
 //! `set.toml` beside the template is checked too ([`lint_set_toml`]): schema 3, strict,
 //! naming only the template's services.
+//!
+//! The set's secret files (#327, design v2 §14, D15) are `run/host/<service>/token` in the
+//! set directory, which the agent writes (mode 0400) for that service alone: the
+//! dispatcher's host worker token reaches it as a read-only file, never as a value in its
+//! environment, which `docker inspect` shows. A service may mount its own token file,
+//! read-only, and nothing else there — not another service's, nor a directory that holds
+//! them — and nothing mounts `OMARCHY_SECRETS_DIR` (P0). A release from before #327 reads
+//! the token from `etc/dispatcher.env` and mounts no secret file: its template still passes,
+//! since a rollback may name it.
 
 mod set_toml;
 mod yaml;
@@ -272,6 +281,17 @@ const ROLE_LABEL: &str = "org.omarchy-pool.role";
 const ROLE: &str = "dispatcher";
 const WORKER_REPO: &str = "ghcr.io/firemanxbr/omarchy-worker";
 const ENV_FILE: &str = "etc/dispatcher.env";
+/// Where the set's secret files are, relative to the set directory: one directory per
+/// service (#327).
+pub const SECRET_FILES: &str = "run/host";
+/// The variable a service reads its token file's path from (#327).
+pub const TOKEN_FILE_VAR: &str = "OMARCHY_WORKER_TOKEN_FILE";
+
+/// A service's own token file, relative to the set directory: the only secret file it may
+/// mount (#327).
+pub fn token_file_of(service: &str) -> String {
+    format!("{SECRET_FILES}/{service}/token")
+}
 
 /// v1 §4.3's allowed service fields, plus `userns_mode` (checked on its own).
 const FIELDS: &[&str] = &[
@@ -316,6 +336,7 @@ const ENVIRONMENT: &[&str] = &[
     "OMARCHY_BUILD_IMAGE_X86_64",
     "OMARCHY_WORKER_IMAGE",
     "OMARCHY_TASK_SUBNETS",
+    TOKEN_FILE_VAR,
 ];
 /// The build images every task container starts from (#312), each as its placeholder: the
 /// release renders it to the manifest's digest (`inner.images.build`). Missing, empty, a
@@ -687,15 +708,17 @@ fn check_volumes(
         return;
     };
     for item in items {
-        // (source, target) of a host bind; named and anonymous volumes and tmpfs pass.
-        let bind: Option<(&str, &str)> = match item {
+        // (source, target, read-only) of a host bind; named and anonymous volumes and tmpfs
+        // pass.
+        let bind: Option<(&str, &str, bool)> = match item {
             Node::Scalar(spec) => match split_short(spec).as_slice() {
                 [_target] => None,
-                [source, target] | [source, target, _] => {
-                    let path_like =
-                        source.starts_with(['/', '.', '~', '$']) || source.contains('/');
-                    path_like.then_some((*source, *target))
-                }
+                [source, target] => short_bind(source).then_some((*source, *target, false)),
+                [source, target, mode] => short_bind(source).then_some((
+                    *source,
+                    *target,
+                    mode.split(',').any(|o| o == "ro"),
+                )),
                 _ => {
                     out.push(violation(
                         "bind_path",
@@ -721,8 +744,9 @@ fn check_volumes(
                     continue;
                 }
                 let target = item.get("target").and_then(Node::as_str).unwrap_or("");
+                let read_only = item.get("read_only").and_then(Node::as_str) == Some("true");
                 match (kind, item.get("source").and_then(Node::as_str)) {
-                    (Some("bind"), Some(source)) => Some((source, target)),
+                    (Some("bind"), Some(source)) => Some((source, target, read_only)),
                     (Some("bind"), None) => {
                         out.push(violation(
                             "bind_path",
@@ -741,16 +765,20 @@ fn check_volumes(
                 continue;
             }
         };
-        if let Some((source, target)) = bind {
-            check_bind(name, source, target, envelope, engine, out);
+        if let Some((source, target, read_only)) = bind {
+            check_bind(name, (source, target, read_only), envelope, engine, out);
         }
     }
 }
 
+/// Whether a short-syntax volume's source is a host path (not a named volume).
+fn short_bind(source: &str) -> bool {
+    source.starts_with(['/', '.', '~', '$']) || source.contains('/')
+}
+
 fn check_bind(
     name: &str,
-    source: &str,
-    target: &str,
+    (source, target, read_only): (&str, &str, bool),
     envelope: &Envelope,
     engine: Engine,
     out: &mut Vec<Violation>,
@@ -826,6 +854,19 @@ fn check_bind(
                 return;
             }
         }
+        if let Some(set) = &envelope.set_dir {
+            let refused = match path.strip_prefix(set) {
+                Ok(rel) => check_secret_file(name, source, rel, read_only, out),
+                Err(_) if set.join(SECRET_FILES).starts_with(path) => {
+                    out.push(holds_secret_files(name, source));
+                    true
+                }
+                Err(_) => false,
+            };
+            if refused {
+                return;
+            }
+        }
         let allowed = envelope
             .paths
             .iter()
@@ -834,12 +875,133 @@ fn check_bind(
         if !allowed {
             out.push(violation("bind_path", format!("{name}: {source:?} is neither in the set directory nor under a path the envelope lists")));
         }
-    } else if !is_relative_inside(path) {
+    } else if let Some(rel) = normalized(path) {
+        check_secret_file(name, source, &rel, read_only, out);
+    } else {
         out.push(violation(
             "bind_path",
             format!("{name}: {source:?} leaves the set directory"),
         ));
     }
+}
+
+/// A bind of `rel` (relative to the set directory) against the set's secret files: a
+/// service's own token file read-only passes; anything else under them, or a directory
+/// that holds them, is refused. `true` when it was refused.
+fn check_secret_file(
+    name: &str,
+    source: &str,
+    rel: &Path,
+    read_only: bool,
+    out: &mut Vec<Violation>,
+) -> bool {
+    let root = Path::new(SECRET_FILES);
+    if rel == Path::new(&token_file_of(name)) {
+        if read_only {
+            return false;
+        }
+        out.push(violation(
+            "secret_file",
+            format!("{name}: {source:?} is its token file, which it mounts read-only only"),
+        ));
+    } else if rel.starts_with(root) {
+        out.push(violation(
+            "secret_file",
+            format!(
+                "{name}: {source:?} is under {SECRET_FILES}/, the set's secret files: a service mounts its own token file only, {}",
+                token_file_of(name)
+            ),
+        ));
+    } else if root.starts_with(rel) {
+        out.push(holds_secret_files(name, source));
+    } else {
+        return false;
+    }
+    true
+}
+
+fn holds_secret_files(name: &str, source: &str) -> Violation {
+    violation(
+        "secret_file",
+        format!("{name}: {source:?} holds {SECRET_FILES}/, the set's secret files (every service's token)"),
+    )
+}
+
+/// A relative path with `.` and `..` resolved; `None` when it leaves its base.
+fn normalized(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::Normal(p) => out.push(p),
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------------------
+// What the run loop reads of a template (#327).
+
+fn services_of(template: &str) -> Vec<(String, Node)> {
+    let Ok(node @ Node::Map(_)) = yaml::parse(template) else {
+        return Vec::new();
+    };
+    match normalize(node).get("services") {
+        Some(Node::Map(entries)) => entries.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether every service of a template reads the host worker token from its file (#327):
+/// [`TOKEN_FILE_VAR`] in its environment. A release from before #327 reads
+/// `OMARCHY_WORKER_TOKEN` from `etc/dispatcher.env`, where the agent then keeps the token
+/// too; a template that does not parse reads as one of those.
+pub fn reads_token_file(template: &str) -> bool {
+    let services = services_of(template);
+    !services.is_empty()
+        && services.iter().all(|(_, s)| {
+            s.get("environment")
+                .and_then(|e| e.get(TOKEN_FILE_VAR))
+                .is_some()
+        })
+}
+
+/// The secret files a template mounts, relative to the set directory (#327): what the
+/// agent must have written before compose creates the service, which would otherwise make
+/// a directory where the file belongs.
+pub fn secret_files(template: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, service) in services_of(template) {
+        let Some(Node::Seq(items)) = service.get("volumes") else {
+            continue;
+        };
+        for item in items {
+            let source = match item {
+                Node::Scalar(spec) => match split_short(spec).as_slice() {
+                    [source, _] | [source, _, _] => Some(*source),
+                    _ => None,
+                },
+                Node::Map(_) => item.get("source").and_then(Node::as_str),
+                _ => None,
+            };
+            let rel = source
+                .filter(|s| !s.starts_with(['/', '~', '$']))
+                .and_then(|s| normalized(Path::new(s)))
+                .filter(|r| r.starts_with(SECRET_FILES));
+            if let Some(r) = rel.and_then(|r| r.to_str().map(str::to_owned)) {
+                if !out.contains(&r) {
+                    out.push(r);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// A relative path that stays inside its base, component by component.

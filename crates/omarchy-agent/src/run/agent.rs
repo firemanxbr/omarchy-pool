@@ -801,13 +801,19 @@ impl Agent {
         match dispatcher_env::refresh(&path, &r) {
             Ok(done) => {
                 h.failing = None;
-                if done == Refresh::Written {
+                let detail = match done {
+                    Refresh::Written if r.plain => "etc/dispatcher.env rendered again (the host's addresses, agent.toml, or a release here from before the token file, which reads the token there too, #327), its token kept: the next round recreates the dispatcher",
+                    Refresh::Written => "etc/dispatcher.env rendered again (the host's addresses or agent.toml changed, or the token left it: no release here reads it there any more, #327), its token kept in run/host/dispatcher/token: the next round recreates the dispatcher",
+                    Refresh::TokenMoved => "the host worker token moved from etc/dispatcher.env to run/host/dispatcher/token (0400), which the dispatcher reads as a read-only file (#327); it stays in etc/dispatcher.env too only while a release from before it is here: the next round recreates the dispatcher",
+                    Refresh::Unchanged | Refresh::NoFile => "",
+                };
+                if !detail.is_empty() {
                     let addresses: Vec<String> =
                         r.addresses.iter().map(ToString::to_string).collect();
                     self.journal.write(
                         now,
                         "dispatcher-env",
-                        serde_json::json!({"addresses": addresses, "detail": "etc/dispatcher.env rendered again (the host's addresses or agent.toml changed), its token kept: the next round recreates the dispatcher"}),
+                        serde_json::json!({"addresses": addresses, "detail": detail}),
                     );
                 }
             }
@@ -823,8 +829,9 @@ impl Agent {
         }
     }
 
-    /// When idle: a changed input (the override, `etc/`, `run/capacity.json`) starts a
-    /// round at once; the running set is compared with `last-good/` every 15 minutes.
+    /// When idle: a changed input (the override, `etc/`, `run/capacity.json`, the token
+    /// file) starts a round at once; the running set is compared with `last-good/` every 15
+    /// minutes.
     fn drift(&mut self, now: i64) {
         let Some(applied) = self.state.applied else {
             return;
@@ -836,7 +843,7 @@ impl Agent {
         let inputs = rollout::inputs_hash(&self.cfg.set_dir);
         if !overlay.contains(&inputs) && self.last_inputs.as_ref() != Some(&inputs) {
             self.last_inputs = Some(inputs);
-            let why = "an input changed (the override, etc/ or run/capacity.json)";
+            let why = "an input changed (the override, etc/, run/capacity.json or the token file)";
             return self.start(now, applied, false, why);
         }
         if now - self.last_drift < DRIFT_S {

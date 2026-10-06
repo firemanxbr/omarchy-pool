@@ -204,6 +204,8 @@ try:
     ok(f'OMARCHY_WORKER_IMAGE: "{REPO}@{INDEX}"' in compose, "the sidecars' image by the index digest")
     ok(f'OMARCHY_BUILD_IMAGE_AARCH64: "{ARM_BUILD}"' in compose and f'OMARCHY_BUILD_IMAGE_X86_64: "{X86_BUILD}"' in compose,
        "the build images by digest")
+    ok("OMARCHY_WORKER_TOKEN_FILE: /run/omarchy/worker-token" in compose and "source: ./run/host/dispatcher/token" in compose
+       and "OMARCHY_WORKER_TOKEN:" not in compose, "the dispatcher's token as its read-only file, never a value in its environment (#327)")
     template = (ROOT / "factory/sets/host/compose.yml").read_text()
     ok(compose == hb.render(template, worker, {"aarch64": ARM_BUILD, "x86_64": X86_BUILD}), "only the placeholders change")
     ok(files["sets/host/set.toml"] == (ROOT / "factory/sets/host/set.toml").read_bytes(), "set.toml as written")
@@ -253,9 +255,11 @@ try:
     refused(lambda: hb.build(args("x", sets=sets)), "unknown placeholder @SOMETHING_ELSE@", "an unknown placeholder")
     (sets / "host/compose.yml").write_text(template.replace("omarchy-worker@RELEASE@", "omarchy-worker:latest"))
     refused(lambda: hb.build(args("x", sets=sets)), "does not name the worker image as @RELEASE@", "a host set off the release image")
+    (sets / "host/compose.yml").write_text(template.replace("OMARCHY_WORKER_TOKEN_FILE:", "OMARCHY_NO_TOKEN_FILE:"))
+    refused(lambda: hb.build(args("x", sets=sets)), "does not mount the dispatcher's token file", "a host set whose dispatcher has no token file")
     (agents / hb.AGENTS["aarch64-darwin"]).unlink()
     refused(lambda: hb.build(args("x")), "the agent for aarch64-darwin is missing", "a missing agent binary")
-    print("ok: refused: min_release or min_agent above, self-revoked, a misspelt key, a build image by tag, a stray placeholder, a missing agent")
+    print("ok: refused: min_release or min_agent above, self-revoked, a misspelt key, a build image by tag, a stray placeholder, no token file, a missing agent")
 
     # --- the tools' downloads ----------------------------------------------------------
     blobs = {"https://x/a": b"a", "https://x/b": b"b"}

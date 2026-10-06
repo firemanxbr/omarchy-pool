@@ -29,6 +29,20 @@ claims nothing. `omarchy-agent capacity --work-root <dir>` prints what the
 probes see on a host; with `--bundle`/`--sig` of a release, the units, the
 preflight blockers and, with `--write <set dir>`, the file.
 
+`etc/dispatcher.env` and `run/host/dispatcher/token` are the agent's too,
+written once the owner confirmed the host (#321): the env file names the
+host worker token's registration, the host's own addresses, the secrets
+directory and the agent budget (#371); the token itself is the file (0400,
+in 0700 directories), which the template mounts read-only into the
+dispatcher as `OMARCHY_WORKER_TOKEN_FILE` (#327, design v2 §14, D15), so it is
+in no container's environment. A rotation rewrites the file, and the run loop
+recreates the dispatcher alone. `run/host/<service>/token` is every service's
+own secret file; `lint-set` refuses a service mounting another's, its own
+writable, or a directory holding them, as it refuses any mount of
+`OMARCHY_SECRETS_DIR`. The bind sets `create_host_path: false`: compose never
+makes a directory where the file belongs, and the run loop holds the
+dispatcher until the file is there.
+
 On a rootful daemon with `userns-remap` on (what prep-root.sh turns on for a
 new daemon, design v2 §19.1), the dispatcher alone needs `userns_mode: host`
 to use the socket and the work root. The template leaves it out (design v2

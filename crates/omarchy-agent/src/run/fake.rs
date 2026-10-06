@@ -456,6 +456,21 @@ impl Verifier for TestVerifier {
 pub(crate) const HOST_COMPOSE: &str = include_str!("../../../../factory/sets/host/compose.yml");
 pub(crate) const HOST_SET: &str = include_str!("../../../../factory/sets/host/set.toml");
 
+/// The host template as a release from before #327 had it: the dispatcher reads its token
+/// from `etc/dispatcher.env` and mounts no token file.
+pub(crate) fn before_token_file(compose: &str) -> String {
+    let env = "      OMARCHY_WORKER_TOKEN_FILE: /run/omarchy/worker-token   # the host worker token, a read-only file (#327)\n";
+    let mount = "      # Its own token file and nothing else of the set's secrets (design v2 §14, D15): the agent\n      # writes it (0400) and rotates it; never a value in the environment `docker inspect` shows.\n      - type: bind\n        source: ./run/host/dispatcher/token\n        target: /run/omarchy/worker-token\n        read_only: true\n        bind: { create_host_path: false }\n";
+    assert!(
+        compose.contains(env) && compose.contains(mount),
+        "the host template's token file changed: this helper follows it"
+    );
+    let older = compose.replacen(env, "", 1).replacen(mount, "", 1);
+    assert!(!crate::lint::reads_token_file(&older));
+    assert!(crate::lint::secret_files(&older).is_empty());
+    older
+}
+
 /// The host template rendered as release.yml renders it, with the example manifest's
 /// images; `extra` lines are appended to the dispatcher (`command: [broken]`).
 pub(crate) fn rendered_compose(extra: &str) -> String {
@@ -516,6 +531,15 @@ pub(crate) fn publish_agent(remote: &Remote, r: &str, agent: &Ships) {
     publish_manifest(remote, r, "2027-01-14T08:00:00Z", m, "");
 }
 
+/// Publishes `r` (created a day before T0) with the template of a release from before #327
+/// ([`before_token_file`]).
+pub(crate) fn publish_before_token_file(remote: &Remote, r: &str) {
+    let mut m = tests_support::manifest_json(r, "v1.0.0", &[]);
+    m["created"] = "2027-01-14T08:00:00Z".into();
+    m["inner"]["pools"] = serde_json::json!(["https://pkgs.omarchy-pool.org"]);
+    publish_compose(remote, r, m, &before_token_file(&rendered_compose("")));
+}
+
 fn publish_manifest(
     remote: &Remote,
     r: &str,
@@ -525,7 +549,10 @@ fn publish_manifest(
 ) {
     m["created"] = created.into();
     m["inner"]["pools"] = serde_json::json!(["https://pkgs.omarchy-pool.org"]);
-    let compose = rendered_compose(extra);
+    publish_compose(remote, r, m, &rendered_compose(extra));
+}
+
+fn publish_compose(remote: &Remote, r: &str, m: serde_json::Value, compose: &str) {
     let archive = tests_support::bundle_archive(
         m,
         &[
@@ -580,6 +607,23 @@ use super::state::{self, State, Step};
 
 pub(crate) const TOKEN: &str = "omw_test_token_0123456789";
 
+/// `<set>/run/host/dispatcher/token` as the agent writes it (#327): 0400 in 0700
+/// directories.
+pub(crate) fn write_token_file(set: &std::path::Path, token: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let file = crate::dispatcher_env::token_path_in(set);
+    let dir = file.parent().unwrap();
+    fs::create_dir_all(dir).unwrap();
+    for d in [dir, dir.parent().unwrap()] {
+        fs::set_permissions(d, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _ = fs::remove_file(&file);
+    fs::write(&file, format!("{token}\n")).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).unwrap();
+}
+/// The registration the token belongs to, as the env file names it.
+pub(crate) const WORKER: &str = "m1-rack-0a9z";
+
 pub(crate) struct World {
     pub agent: Agent,
     pub engine: Engine,
@@ -598,11 +642,14 @@ impl World {
         let set = dir.join("set");
         fs::create_dir_all(set.join("etc")).unwrap();
         fs::create_dir_all(set.join("run")).unwrap();
+        // What the enrollment wrote (#327): the registration in the env file, the token in
+        // its own file, 0400.
         fs::write(
             set.join("etc/dispatcher.env"),
-            format!("OMARCHY_WORKER_TOKEN={TOKEN}\n"),
+            format!("# worker: {WORKER}\n"),
         )
         .unwrap();
+        write_token_file(&set, TOKEN);
         fs::write(set.join("run/capacity.json"), r#"{"schema":2,"units":3}"#).unwrap();
         let cfg = Config::parse(&super::config::tests::example(
             &set,
@@ -691,6 +738,16 @@ impl World {
 
     pub fn set_dir(&self) -> PathBuf {
         self.dir.join("set")
+    }
+
+    /// The set's token file (#327).
+    pub fn token_file(&self) -> PathBuf {
+        crate::dispatcher_env::token_path_in(&self.set_dir())
+    }
+
+    /// Publishes `r` with the template of a release from before #327.
+    pub fn release_before_token_file(&self, r: &str) {
+        publish_before_token_file(&self.remote, r);
     }
 
     pub fn follow(&self, latest: &str, update: Option<&str>) {

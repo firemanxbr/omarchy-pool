@@ -12,10 +12,13 @@
 //! off a running dispatcher). Rotation is `omarchy-agent token`, and the run loop's
 //! (#315).
 //!
-//! The token goes into `etc/dispatcher.env` with what the agent renders beside it
-//! ([`crate::dispatcher_env`], #371): the host's own addresses, and once install wrote
-//! agent.toml, the secrets directory and the agent budget. Both an enrollment and a
-//! rotation render them again; one that keeps its token renders them too.
+//! The token goes into its own file, `run/host/dispatcher/token` (0400, #327), which the
+//! host set mounts read-only into the dispatcher, and its registration into
+//! `etc/dispatcher.env` with what the agent renders beside it ([`crate::dispatcher_env`],
+//! #371): the host's own addresses, and once install wrote agent.toml, the secrets directory
+//! and the agent budget. Both an enrollment and a rotation render them again; one that keeps
+//! its token renders them too. Every write of a token goes through
+//! [`write_worker_token`], the one place that knows where it lives.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -33,7 +36,7 @@ pub struct Paths {
     pub data: PathBuf,
     /// The host key and `host.json`.
     pub state: PathBuf,
-    /// The host set: `etc/dispatcher.env`, `run/capacity.json`.
+    /// The host set: `etc/dispatcher.env`, `run/capacity.json`, `run/host/dispatcher/token`.
     pub set: PathBuf,
 }
 
@@ -50,6 +53,9 @@ impl Paths {
     }
     pub fn dispatcher_env(&self) -> PathBuf {
         dispatcher_env::path_in(&self.set)
+    }
+    pub fn token(&self) -> PathBuf {
+        dispatcher_env::token_path_in(&self.set)
     }
 }
 
@@ -189,18 +195,23 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
     say(out, &format!("host key fingerprint: {}", key.fingerprint()));
     let state = wait_for_confirm(o, &key, &pool, &id, out)?;
     let env = o.paths.dispatcher_env();
-    if !state["token"].is_null() && holds_token(&env) {
+    if !state["token"].is_null() && dispatcher_env::holds_token(&env) {
         say(
             out,
             &format!(
                 "host {} keeps its worker token ({}); `omarchy-agent token` rotates it",
                 id.host,
-                env.display()
+                o.paths.token().display()
             ),
         );
         let r = rendered(o, out);
-        if dispatcher_env::refresh(&env, &r)? == Refresh::Written {
-            said_rendered(out, &env, &r);
+        match dispatcher_env::refresh(&env, &r)? {
+            Refresh::TokenMoved => {
+                said_moved(out, o);
+                said_rendered(out, &env, &r);
+            }
+            Refresh::Written => said_rendered(out, &env, &r),
+            Refresh::Unchanged | Refresh::NoFile => {}
         }
         return Ok(());
     }
@@ -225,6 +236,17 @@ fn rendered(o: &Options, out: &mut impl Write) -> Rendered {
         }
     };
     Rendered::now(&o.sources, &o.paths.data, envelope)
+}
+
+fn said_moved(out: &mut impl Write, o: &Options) {
+    say(
+        out,
+        &format!(
+            "the host worker token moved from {} to {} (0400), which the dispatcher reads as a read-only file (#327)",
+            o.paths.dispatcher_env().display(),
+            o.paths.token().display()
+        ),
+    );
 }
 
 fn said_rendered(out: &mut impl Write, env: &Path, r: &Rendered) {
@@ -262,20 +284,11 @@ fn retire_identity(state: &Path, host_id: &str) -> Result<(), Failure> {
     std::fs::rename(&from, &to).map_err(|e| Failure::Refused(format!("{}: {e}", from.display())))
 }
 
-/// Whether the dispatcher's env file holds a worker token already.
-fn holds_token(env: &Path) -> bool {
-    std::fs::read_to_string(env).is_ok_and(|s| {
-        s.lines()
-            .filter_map(|l| l.strip_prefix("OMARCHY_WORKER_TOKEN="))
-            .any(valid_worker_token)
-    })
-}
-
-/// The registration a valid worker token in the dispatcher's env file belongs to (the
-/// `# worker:` line [`fetch_token`] writes): what install puts in agent.toml's
-/// `worker_id` (#317).
+/// The registration the host's worker token belongs to (the `# worker:` line of the
+/// dispatcher's env file, which [`write_worker_token`] writes beside the token's file): what
+/// install puts in agent.toml's `worker_id` (#317). `None` without a valid token.
 pub fn worker_of(env: &Path) -> Option<String> {
-    if !holds_token(env) {
+    if !dispatcher_env::holds_token(env) {
         return None;
     }
     std::fs::read_to_string(env).ok()?.lines().find_map(|l| {
@@ -440,8 +453,8 @@ fn wait_for_confirm(
 }
 
 /// `POST /api/v1/hosts/self/token`, signed: a new host worker token, written for the
-/// dispatcher (`etc/dispatcher.env`, 0600). The one it replaces works ten more minutes,
-/// in which the run loop recreates the dispatcher (#315).
+/// dispatcher (its file, 0400, #327). The one it replaces works ten more minutes, in which
+/// the run loop recreates the dispatcher, and only it (#315).
 pub fn fetch_token(
     o: &Options,
     key: &HostKey,
@@ -456,34 +469,53 @@ pub fn fetch_token(
             a.why()
         )));
     }
-    // Both go into the dispatcher's env_file: anything but the pool's own shapes — a
-    // newline above all, which would add a variable of the pool's choosing to a
-    // container that holds the engine's socket — is refused, and nothing is written.
-    let worker = a.json["worker"]
-        .as_str()
-        .filter(|w| valid_worker_id(w))
-        .ok_or("the answer names no registration (letters, digits and dashes)")?;
-    let token = a.json["token"]
-        .as_str()
-        .filter(|t| valid_worker_token(t))
-        .ok_or("the answer carries no worker token (omw_ and 48 hex digits)")?;
     let env = o.paths.dispatcher_env();
-    host::private_dir(env.parent().ok_or("no etc directory")?)?;
-    // The rest of the file is rendered again (#371): a rotation keeps the host's addresses,
-    // the secrets directory, the agent budget and the owner's own lines.
+    // The rest of the env file is rendered again (#371): a rotation keeps the host's
+    // addresses, the secrets directory, the agent budget and the owner's own lines.
     let r = rendered(o, out);
-    dispatcher_env::write_token(&env, worker, token, &r)?;
+    let worker = write_worker_token(&env, &a.json, &r)?;
     say(
         out,
         &format!(
-            "host {} is registration {worker}; its token is in {} (0600), next rotation after {}",
+            "host {} is registration {worker}; its token is in {} (0400), next rotation after {}",
             id.host,
-            env.display(),
+            o.paths.token().display(),
             shown(a.json["rotate_after"].as_str().unwrap_or("?"))
         ),
     );
     said_rendered(out, &env, &r);
     Ok(())
+}
+
+/// Writes the host worker token of the pool's answer to `POST /hosts/self/token` for the
+/// dispatcher, and nowhere else: its file, `run/host/dispatcher/token` (0400, in directories
+/// only the agent enters, #327), which the host set mounts read-only — and `env` (the set's
+/// `etc/dispatcher.env`, 0600) gets the registration it names, the rest rendered again by
+/// `r` (#371), and the token too only while a release from before #327 is here (`r.plain`).
+/// The registration is returned. Enrollment's first fetch and every rotation —
+/// `omarchy-agent token`, and the run loop's `rotate-token` host order (#325) — write
+/// through here alone; the changed files recreate the dispatcher, and only it, at the run
+/// loop's next round.
+pub fn write_worker_token(
+    env: &Path,
+    answer: &serde_json::Value,
+    r: &Rendered,
+) -> Result<String, String> {
+    // Anything but the pool's own shapes is refused, and nothing is written: the
+    // registration goes into the dispatcher's env_file, where a newline would add a variable
+    // of the pool's choosing to a container that holds the engine's socket, and the token
+    // goes there too for an older release.
+    let worker = answer["worker"]
+        .as_str()
+        .filter(|w| valid_worker_id(w))
+        .ok_or("the answer names no registration (letters, digits and dashes)")?;
+    let token = answer["token"]
+        .as_str()
+        .filter(|t| valid_worker_token(t))
+        .ok_or("the answer carries no worker token (omw_ and 48 hex digits)")?;
+    host::private_dir(env.parent().ok_or("no etc directory")?)?;
+    dispatcher_env::write_token(env, worker, token, r)?;
+    Ok(worker.to_owned())
 }
 
 /// The machine's name as the pool takes it: a DNS label's characters, at most 63.
@@ -705,8 +737,9 @@ mod tests {
             .exists());
         let (key, _, _) = open(&o).unwrap();
         assert_ne!(key.public_b64u(), old_key);
-        assert!(holds_token(&o.paths.dispatcher_env()));
-        // Beside the token, the host's own addresses (#371); no agent.toml yet, so no
+        assert!(dispatcher_env::holds_token(&o.paths.dispatcher_env()));
+        assert!(valid_worker_token(&token_in_its_file_only(&o)));
+        // Beside the registration, the host's own addresses (#371); no agent.toml yet, so no
         // secrets directory and no budget.
         let env = std::fs::read_to_string(o.paths.dispatcher_env()).unwrap();
         assert!(
@@ -721,6 +754,17 @@ mod tests {
             "{said}"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The host's token: in its file (0400, #327), and none in the env file, which no release
+    /// here reads it from.
+    fn token_in_its_file_only(o: &Options) -> String {
+        let (token, mode) = dispatcher_env::read_token(&o.paths.token())
+            .unwrap()
+            .unwrap();
+        let env = std::fs::read_to_string(o.paths.dispatcher_env()).unwrap();
+        assert!(mode == 0o400 && !env.contains("omw_"), "{mode:o} {env}");
+        token
     }
 
     #[test]
@@ -781,13 +825,13 @@ mod tests {
         let text = std::fs::read_to_string(&env).unwrap();
         let token = format!("omw_{:048x}", 1);
         for want in [
-            format!("\n# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={token}\n"),
-            "\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n".into(),
-            "\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_DAY=900\nTZ=UTC\n".into(),
+            "\n# worker: m1-rack-0a9z\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n",
+            "\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_DAY=900\nTZ=UTC\n",
         ] {
-            assert!(text.contains(&want), "{want:?} in:\n{text}");
+            assert!(text.contains(want), "{want:?} in:\n{text}");
         }
-        assert!(!text.contains(&first), "{text}");
+        assert_eq!(token_in_its_file_only(&o), token);
+        assert!(String::from_utf8_lossy(&out).contains("run/host/dispatcher/token (0400)"));
         assert_eq!(
             std::fs::metadata(&env).unwrap().permissions().mode() & 0o777,
             0o600
@@ -817,10 +861,7 @@ mod tests {
         let mut out = Vec::new();
         rotate(&o, &mut out).unwrap();
         let third = std::fs::read_to_string(&env).unwrap();
-        assert!(
-            third.contains(&format!("OMARCHY_WORKER_TOKEN=omw_{:048x}\n", 2)),
-            "{third}"
-        );
+        assert_eq!(token_in_its_file_only(&o), format!("omw_{:048x}", 2));
         assert!(
             third.contains("OMARCHY_AGENT_CALLS_PER_DAY=800\n"),
             "{third}"
@@ -942,23 +983,34 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_token_in_the_env_file_is_kept_and_anything_else_is_not() {
+    fn a_worker_token_in_its_file_or_the_env_file_is_kept_and_anything_else_is_not() {
         let d = std::env::temp_dir().join(format!("omarchy-agent-holds-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let env = d.join("dispatcher.env");
-        assert!(!holds_token(&env));
+        let paths = Paths::under(&d);
+        let env = paths.dispatcher_env();
+        host::private_dir(env.parent().unwrap()).unwrap();
+        let holds = || dispatcher_env::holds_token(&env);
+        assert!(!holds());
         std::fs::write(&env, "# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN=\n").unwrap();
-        assert!(!holds_token(&env));
+        assert!(!holds());
+        assert_eq!(worker_of(&env), None);
+        // Where an agent from before #327 wrote it.
+        let omw = format!("omw_{}", "0f".repeat(24));
         std::fs::write(
             &env,
-            format!(
-                "# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN=omw_{}\n",
-                "0f".repeat(24)
-            ),
+            format!("# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={omw}\n"),
         )
         .unwrap();
-        assert!(holds_token(&env));
+        assert!(holds());
+        // In its own file, the env file naming the registration only.
+        std::fs::write(&env, "# worker: m1-rack-0a9z\n").unwrap();
+        assert!(!holds());
+        std::fs::create_dir_all(paths.token().parent().unwrap()).unwrap();
+        std::fs::write(paths.token(), "omw_short\n").unwrap();
+        assert!(!holds(), "a token of another shape");
+        std::fs::write(paths.token(), format!("{omw}\n")).unwrap();
+        assert!(holds());
+        assert_eq!(worker_of(&env).as_deref(), Some("m1-rack-0a9z"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
