@@ -14,6 +14,12 @@
 //! Only signed lists go into the file. The pool's word arrives per lease, at
 //! its heartbeat (409 `stop`, state `revoked`), and is acted on, never kept:
 //! a pool cannot widen what this host refuses for good.
+//!
+//! The agent's own union (§5.2: every manifest it verified, applied or not)
+//! is not handed over: the agent writes nothing of it for the dispatcher. A
+//! revocation in a manifest whose dispatcher never ran on this host (its
+//! pull failed, its plan is held) therefore reaches this dispatcher by the
+//! pool's word, at the lease's next heartbeat, and not before.
 
 use std::collections::BTreeSet;
 use std::path::Path;
