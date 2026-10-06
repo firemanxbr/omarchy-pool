@@ -484,6 +484,31 @@ signature in Rekor over bytes anyone can rebuild; a pool could serve that
 statement although that rollback never took effect, but a maintainer
 approved that dispatch and every rule above still applies to it.
 
+**Revoked releases, and a host on its last-good** (#342, design v2 §8.6,
+§9.1; D55). `revoked` and `min_release` reach the pool the way they reach
+the hosts: the Worker reads `factory/bundle/manifest.toml` of the release it
+was deployed from, the file `release.yml` signs into that release's bundle.
+A lease records the release it was claimed on (`build_tasks.release`, the
+claim's `version`); once the pool's release revokes it, nothing of that
+lease is taken — heartbeat, staging upload, pool or ring write, completion —
+whichever token sends it, and a claim on it is refused (`426`). Its host's
+dispatcher kills its containers on the merged set it keeps (the signed
+lists of every dispatcher release it ran, never the pool's word), or on the
+pool's `409 {stop, state: "revoked"}` for that lease alone, which gives the
+pool no more than a Stop already does and is not kept. A Worker rolled back
+to a release before the revocation forgets it (its manifest did not have
+it): the hosts do not, and their dispatchers still kill such tasks, which
+that Worker then requeues as `lost`.
+
+The one exception to the update gate rests on the host's own signed
+reports: a host whose agent says it reverted the pool's release claims on
+the release it applied for six hours from the first such report, never
+below the signed `min_release`, never on a revoked release, and Status and
+the host's page say so. A host that lies about a revert (a stolen host key,
+a modified agent) gains claims on an older release that is neither revoked
+nor below the floor — work any release in that range could do anyway, on a
+registration whose worker token that key fetches anyway — and in public.
+
 ## Maintainer hosts
 
 Only a maintainer provides a host, and the host is trusted by the act that

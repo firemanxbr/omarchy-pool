@@ -1345,6 +1345,66 @@ so a size-4 build waits for memory rather than run smaller.
   units, one build (§21.1). Lowered below what the host runs, nothing ends;
   it claims nothing until its leases fit. Lifted, the host's count decides.
 
+### A host reverted a release
+
+One bundle runs on every host, so a release that fails its guard on one
+architecture only (a 16K-page problem, say) sends that architecture's hosts
+back to `last-good/`, quarantined (the round says `rolled-back`, `from` the
+release it left). The 426 gate would then hand them nothing — every native
+build of that architecture stopped by one bad release — so the pool makes
+an exception (#342, design v2 §8.6, D55): a host whose reports say its
+agent reverted **the pool's own release**, and whose dispatcher claims on
+the release its agent applied (its last-good), keeps claiming past the
+rollout's grace for **six hours** after the pool first heard of the revert
+(`hosts.rolled_back_at`; a retry that reverts again, or an Update that
+lifts the quarantine, does not start them again). Never on a release below
+the signed `min_release`, never on a revoked one. While it does, Status
+warns *"<host>: its agent reverted vX — claiming on last-good vY until …"*,
+the host's page says the same beside its release, and the journal says it
+once. Then the registration is refused with `426` like any other behind the
+pool's release, told once, until it runs the pool's release.
+
+What to do within the six hours: read the round's `detail` on the host's
+page (the step that failed and why), then fix forward with a release, or
+roll the pool back (`rollback.yml`, *Releasing the pool itself*) — a host
+of another architecture that applied the release is not affected either
+way. An Update on the host's worker retries the release at once. The pool
+keeps the reverted release while the host's reports still hold it in
+quarantine or roll out toward it again, and forgets it once the host
+applies it or a later one.
+
+### Revoking a release
+
+A release found bad after the fact (it builds wrong packages, a dispatcher
+that mishandles a credential) is revoked by the next release: add it to
+`revoked` in `factory/bundle/manifest.toml` (and raise `min_release` when
+everything older should go too), in the pull request of the fix, and
+release. Never take a release out of `revoked` again: hosts keep the union
+of every list they verified (design v2 §5.2). From that release's deploy on:
+
+- the agents refuse to apply the revoked release, whatever a rollback
+  statement says;
+- the pool refuses every claim on it (`426` with `revoked: true`, whatever
+  the grace) and every heartbeat, staging upload (single and multipart),
+  pool or ring write and completion of a lease claimed on it
+  (`build_tasks.release`, written for every lease) with `409 {stop: true,
+  state: "revoked"}`;
+- each host's new dispatcher kills the task containers of the revoked
+  release it re-adopts, whatever their phase, and reports them `revoked`
+  (and `lost`, for a pool from before #342); a dispatcher still on an older
+  release kills them at the next heartbeat, on the pool's `409`. A
+  dispatcher keeps every signed list it ran with in
+  `<work root>/state/revoked.json`, so one of an older release after a
+  rollback kills them too;
+- the pool requeues each such task at its place, its attempt given back
+  and no host loss counted, the packages it staged reclaimed (its text
+  evidence is replaced by its next run's). A host that dropped one without
+  its report getting through has it requeued the same way by its next two
+  claims.
+
+Tasks of every other older release run on and complete normally: a release
+never interrupts a build, a revoked one is the one exception.
+
 ## The Studio host
 
 The project's workers run on one machine — `omarchy-studio`, a Mac Studio
