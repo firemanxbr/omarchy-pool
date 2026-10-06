@@ -8,7 +8,7 @@
  *   15 minutes after — two releases behind included —, never past two hours
  *   after the deploy, and not at all while it holds the pool's release in
  *   quarantine; the same registration with no soak is refused. The host page
- *   says where it stands at the gate, and why.
+ *   says where it stands at the gate, and why; the listings agree.
  * - Freeze detection: a report that says `pool_behind_github` puts the host
  *   on Status (GET /factory's `pool_behind_github`, while the report is
  *   fresh) and on its page — for anyone —, and on the journal once when it
@@ -117,6 +117,12 @@ describe("a soaking host's claim grace (POST /factory/claim, #326)", () => {
     expect(page.update).toMatchObject({ outdated: true, required: false, behind: 2, yours: "v1.0.2", latest: "v1.0.4" });
     expect(page.update.words).toContain("it claims through its owner's soak");
     expect(page.host.soak).toMatchObject({ minutes: 30 });
+    // The listings (Status, the Workers page, its own page) say the same: behind, but not handed nothing.
+    const listed = (await call("GET", "/factory?limit=13", { env: pool })).json.workers.find((w: { id: string }) => w.id === worker);
+    expect(listed.update).toMatchObject({ outdated: true, required: false });
+    expect(listed.update.soaking_until).toBeTruthy();
+    expect(listed.quarantine).toBeUndefined();
+    expect((await call("GET", `/factory/workers/${worker}`, { env: pool })).json.worker.update).toMatchObject({ required: false });
     // The soak ended, its round running: the agent still says when, and the round's margin covers it...
     await report(k, host, { agent: { version: "0.5.0" }, release: { applied: "v1.0.2", target: "v1.0.4", soak_minutes: 30, soaking_until: isoIn(-(SOAK_ROUND_MINUTES - 2)) }, quarantine: [] });
     expect((await claim(token, "v1.0.2", pool)).status).not.toBe(426);

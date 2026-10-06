@@ -1770,6 +1770,8 @@ export interface WorkerRow {
   drained_at?: string | null; drained_by?: string | null; drain_reason?: string | null; auto_orders?: string | null;
   // #321: a host's registration.
   kind?: string | null; host_id?: string | null;
+  // #326: its host's soak, where the listing joins it (SOAK_COLUMNS): the 426 gate's own view of it.
+  soaking_until?: unknown; quarantine?: unknown;
 }
 
 /**
@@ -1853,8 +1855,10 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
     alive: Date.parse(w.last_seen) > since,
     // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
     ready: workerReady(w, since),
-    // Where its image stands against the pool's release (update.ts): behind past the grace, it is handed nothing.
-    update: updateState(w.version, pool),
+    // Where its image stands against the pool's release (update.ts): behind past the grace, it is handed nothing — a soaking host's
+    // registration claims through its soak, as its claim does (#326).
+    update: updateState(w.version, pool, Date.now(), w.kind === "host" ? soakOf({ soaking_until: w.soaking_until, quarantine: w.quarantine }) : null),
+    soaking_until: undefined, quarantine: undefined,
     kinds: w.kinds ? JSON.parse(w.kinds) : null,
     // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).
     usage: w.usage ? JSON.parse(w.usage) : null,
@@ -1868,6 +1872,10 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
 function parseJson(text: string | null): unknown {
   try { return text ? JSON.parse(text) : null; } catch { return null; }
 }
+
+/** The workers every listing serves (workerView), with a host registration's soak beside it (#326): the 426 gate's own view of it. */
+export const WORKERS_LISTING_SQL = `SELECT w.*, ${SOAK_COLUMNS("h")} FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id
+  WHERE w.revoked_at IS NULL ORDER BY (w.last_seen > ?) DESC, w.last_seen DESC LIMIT 200`;
 
 /**
  * The hosts whose agent reports the pool behind GitHub (#326, design v2 §5.5): an active host, its report fresh, saying
@@ -1892,9 +1900,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   const alive = aliveSince();
   // Every worker belongs to someone: the project (trust project, granted by
   // a maintainer) or a contributor.
-  const workers = await env.DB.prepare(
-    "SELECT * FROM build_workers WHERE revoked_at IS NULL ORDER BY (last_seen > ?) DESC, last_seen DESC LIMIT 200",
-  )
+  const workers = await env.DB.prepare(WORKERS_LISTING_SQL)
     .bind(new Date(alive).toISOString())
     .all<WorkerRow>();
   const tasks = await env.DB.prepare(`SELECT * FROM build_tasks ${live ? "WHERE status IN ('leased', 'queued') " : ""}ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?`).bind(limit).all<TaskRow>();

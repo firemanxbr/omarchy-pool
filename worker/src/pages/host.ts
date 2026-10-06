@@ -203,7 +203,8 @@ const SCRIPT = String.raw`
   }
   // Where its registration stands at the 426 gate (#326): claiming through its soak, within the grace, or refused, and why.
   function gateLine(u) {
-    if (!u || !u.outdated) return '<span class="muted">it runs the pool\'s release</span>';
+    if (!u) return '<span class="muted">its registration has not claimed with a release yet</span>';
+    if (!u.outdated) return '<span class="muted">it runs the pool\'s release</span>';
     return u.required ? '<span class="hp-blocked">' + esc(u.words || "refused with 426") + "</span>" : esc(u.words || "");
   }
   function draw(h, leases, pool, update) {
