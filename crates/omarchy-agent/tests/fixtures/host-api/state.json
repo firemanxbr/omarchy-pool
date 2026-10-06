@@ -12,6 +12,9 @@
   "updates": ["wo_0123456789abcdef0123456789abcdef"],
   "orders": [
     { "id": "ho_11111111111111111111111111111111", "kind": "retire-legacy", "not_after": "2027-01-15T09:00:00.000Z" },
-    { "id": "ho_22222222222222222222222222222222", "kind": "reconcile-now", "not_after": "2027-01-15T09:05:00.000Z" }
-  ]
+    { "id": "ho_22222222222222222222222222222222", "kind": "reconcile-now", "not_after": "2027-01-15T09:05:00.000Z" },
+    { "id": "ho_33333333333333333333333333333333", "kind": "set-units", "not_after": "2027-01-15T09:06:00.000Z", "units": 4 },
+    { "id": "ho_44444444444444444444444444444444", "kind": "set-emulate", "not_after": "2027-01-15T09:07:00.000Z", "emulate": [] }
+  ],
+  "settings": { "units": 6, "emulate": ["x86_64"] }
 }

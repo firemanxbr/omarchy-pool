@@ -377,10 +377,14 @@ fn a_vm_that_differs_from_agent_toml_is_restarted_only_while_no_task_runs() {
     h.tasks = None;
     h.tick(40, false);
     assert!(h.acts().is_empty());
+    assert_eq!(h.keeper.take_restarts(), 0);
     h.tasks = Some(false);
     h.tick(40, false);
     assert_eq!(h.acts()[0], "stop");
     assert_eq!(h.acts()[1], vm::start_args(&want()).join(" "));
+    // The dispatcher stopped with the VM: one restart for the brake (#325), told once.
+    assert_eq!(h.keeper.take_restarts(), 1);
+    assert_eq!(h.keeper.take_restarts(), 0);
     // The action was recorded before the stop: one for the stop and the start.
     assert_eq!(
         vm::read_actions(&std::fs::read_to_string(h.dir.join(vm::ACTIONS_FILE)).unwrap()).len(),
@@ -833,4 +837,66 @@ fn a_count_after_a_start_writes_the_vms_capacity_and_the_lane_the_envelope_allow
         std::fs::read(set.join("run/capacity.json")).unwrap(),
         before
     );
+}
+
+/// The pool's settings turned the Rosetta lane off (#325): the narrowed file lists it under
+/// `detected` only, and a count after a start that finds no `x86_64` image keeps it as
+/// counted; the loop narrows the new file again.
+#[test]
+fn a_count_keeps_the_rosetta_lane_a_narrowing_turned_off() {
+    let dir = tempdir();
+    let docker = engine_in_the_vm(&dir);
+    let set = dir.join("set");
+    std::fs::create_dir_all(&set).unwrap();
+    let manifest = crate::verify::tests_support::manifest("v1.20.0", "v1.0.0", &[]);
+    let toml =
+        "[envelope]\nmax_cpus = 8\nmax_mem_gb = 32\n[vm]\nruntime = \"colima\"\nrosetta = true\n";
+    let count = || {
+        super::count(&Counting {
+            docker: &docker,
+            socket: Path::new("/Users/maintainer/.colima/omarchy/docker.sock"),
+            work_root: &dir,
+            set_dir: &set,
+            manifest: &manifest,
+            agent_toml: toml,
+            meminfo: Some("MemTotal: 32000000 kB\nMemAvailable: 30000000 kB\n"),
+        })
+    };
+    let read = || -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(set.join("run/capacity.json")).unwrap()).unwrap()
+    };
+    assert!(count().unwrap().contains("x86_64 via rosetta"));
+    let off = crate::run::settings::Settings {
+        units: None,
+        emulate: Some(Vec::new()),
+    };
+    let policy = crate::run::config::Policy::default();
+    let narrow = || {
+        crate::run::settings::apply(&set, &off, &policy)
+            .unwrap()
+            .unwrap()
+            .0
+    };
+    assert!(narrow());
+    assert_eq!(read()["lanes"].as_array().map(Vec::len), Some(1));
+    // A resize, and the release's x86_64 image not in the VM's store.
+    let x86 = manifest.build_image("x86_64").unwrap().to_string();
+    std::fs::write(dir.join("missing"), &x86).unwrap();
+    std::fs::write(
+        dir.join("info.json"),
+        std::fs::read_to_string(dir.join("info.json"))
+            .unwrap()
+            .replace(r#""NCPU":8"#, r#""NCPU":7"#),
+    )
+    .unwrap();
+    let said = count().unwrap();
+    assert!(
+        said.contains("7 CPUs")
+            && said.contains("x86_64 via rosetta")
+            && said.contains("kept as run/capacity.json had it"),
+        "{said}"
+    );
+    assert_eq!(read()["lanes"][1]["via"], "rosetta");
+    assert!(narrow());
+    assert_eq!(read()["detected"]["lanes"][1]["via"], "rosetta");
 }

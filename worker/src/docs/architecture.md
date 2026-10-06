@@ -364,8 +364,9 @@ when an Update it has not acted on appears, and every fifteen minutes when
 the pool does not answer. A Worker from before #277 knows no follow: the
 updater reads its release from `/api/v1/version` instead. (A maintainer
 host's agent, from 0.3.0, reads none of this: its signed host state names
-the release, its registration's open Updates and its host orders — #344,
-the runbook's *The run loop* — except from a Worker from before #344, whose
+the release, its registration's open Updates and its host orders — #344;
+from agent 0.4.0 its settings and the rest of the host orders, behind the
+host's own brake, #325; the runbook's *The run loop* — except from a Worker from before #344, whose
 state names no release: only a rollback below it deploys one, and the agent
 then reads its `follow` as the agents before it did.) It names
 its workers by id from inside the set: a project worker's entrypoint writes

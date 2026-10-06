@@ -1,12 +1,14 @@
 //! One tick of the run loop (design v2 §16.1): ask the pool for the host state when a poll
-//! is due (#344: the release target, the open Updates and the host orders), check the
-//! target against the trust rules, start or preempt a round, and take one step of it; one
-//! step of a `retire-legacy` in flight; the host report when it is due. Network answers
+//! is due (#344: the release target, the open Updates and the host orders; #325: the
+//! settings), check the target against the trust rules and the brake, start or preempt a
+//! round, and take one step of it; the next queued host order the brake lets through;
+//! `run/capacity.json` kept as the settings say; one step of a `retire-legacy` in flight
+//! and of the owner's runtime switch; the host report when it is due. Network answers
 //! never stop the agent (§16.4): no answer, a 5xx or a malformed body changes nothing and
 //! backs off to 10 minutes; a 401/403 changes nothing and polls hourly; both recover by
 //! themselves at the next answer.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -18,11 +20,13 @@ use crate::statement::Statement;
 use crate::verify::{self, BundleOutcome, Rejection, StatementOutcome, VerifiedBundle};
 use crate::version::{self, Release, Version};
 
+use super::brake::{Ask, ROUND_RESTARTS};
 use super::compose::Compose;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver};
 use super::journal::{env_secrets, Journal};
-use super::pool::{HostState, Net, Pool};
+use super::orders::Taken;
+use super::pool::{HostState, Net, Order, Pool};
 use super::report::Reported;
 use super::rollout::{self, Ctx, Outcome};
 use super::selfupdate::Pending;
@@ -97,6 +101,9 @@ pub(crate) struct Agent {
     pub progress: Option<Arc<AtomicI64>>,
     /// This agent's own version (a test plays another).
     pub version: Version,
+    /// Built for a Mac (#320): `cfg!(target_os = "macos")`. Read where a Linux host and a
+    /// Mac part, so a test plays either on any OS.
+    pub mac: bool,
     /// The binary that runs (`current_exe`): a self-update starts only from the one
     /// install.sh installed, so the way back is there.
     pub exe: Option<PathBuf>,
@@ -133,6 +140,15 @@ pub(crate) struct Agent {
     /// Said once per process: the pool predates the host state's release (#344), so its
     /// `follow` names the target.
     older_pool_said: bool,
+    /// The host orders of the last host state not taken yet: the brake paces them (#325).
+    pub(super) queue: VecDeque<Order>,
+    /// What was said once per process (#325: a narrowing that could not be written, the
+    /// pool's settings held by the brake).
+    pub(super) said: BTreeSet<String>,
+    /// Tests: the fake engine behind another socket (the runtime switch, #325).
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub drivers_on: Option<Box<dyn FnMut(&std::path::Path) -> Option<Box<dyn Driver>>>>,
     /// `etc/dispatcher.env` rendered again from the host and agent.toml (#371); `None`
     /// leaves the file alone (the tests that play other parts).
     pub host_env: Option<HostEnv>,
@@ -176,6 +192,19 @@ enum Fetched {
     Stop,
 }
 
+/// What `etc/dispatcher.env` gets beside the token now (#371): the host's own addresses
+/// from `sources`, and agent.toml as it is now, as `omarchy-agent token` and
+/// `dispatcher-env --write` read it, so the loop never puts back what they wrote; one that
+/// does not read now (an edit half done) leaves what the loop started with. The run loop's
+/// refresh and its `rotate-token` (#325) both render it so.
+pub(super) fn rendered(cfg: &Config, paths: &Paths, sources: &Sources) -> Rendered {
+    let envelope = match Envelope::of_data_dir(&paths.data) {
+        Some(Ok(e)) if dispatcher_env::dispatcher_path(&e.secrets_dir) => e,
+        _ => Envelope::of_config(cfg),
+    };
+    Rendered::now(sources, &paths.data, Some(envelope))
+}
+
 /// The cached names of release `r`'s bundle and its signature.
 pub(crate) fn bundle_names(r: Release) -> (String, String) {
     let name = format!("omarchy-host-{r}.tar.gz");
@@ -210,6 +239,7 @@ impl Agent {
             announced: None,
             progress: None,
             version: version::agent(),
+            mac: cfg!(target_os = "macos"),
             exe: None,
             exit: None,
             gate: None,
@@ -226,6 +256,10 @@ impl Agent {
             legacy_seen: None,
             reported: Reported::default(),
             older_pool_said: false,
+            queue: VecDeque::new(),
+            said: BTreeSet::new(),
+            #[cfg(test)]
+            drivers_on: None,
             host_env: None,
         }
     }
@@ -236,6 +270,8 @@ impl Agent {
     /// a good release. The guard begins again at the ready wait, so its evidence (exits,
     /// `RestartCount`) counts from when the agent is back to watch.
     pub fn resume(&mut self, now: i64) {
+        // A runtime switch in flight goes on with the engine it was on (#325).
+        self.resume_switch();
         let step = &mut self.state.rollout.step;
         match step {
             Step::Replace {
@@ -358,16 +394,32 @@ impl Agent {
             self.dispatcher_env(now);
             if round_now || asks.poll_now || now >= self.state.poll.next_at {
                 self.poll(now, round_now);
+            } else if !self.queue.is_empty() {
+                // The orders the brake paced: the next one, two seconds after the last.
+                let taken = self.take_orders(now, self.busy());
+                if !taken.rounds.is_empty() {
+                    self.after_orders(taken, self.state.target, None, now);
+                }
             }
+            // A recount after the VM started rewrites detection's file: the settings narrow
+            // it again in the same tick, before drift looks at the set's inputs.
             self.keep_vm(now, false);
-            if self.state.rollout.step == Step::Idle && self.exit.is_none() {
+            self.narrow(now);
+            // Never while the owner's runtime switch moves the dispatcher (#325): it stops
+            // the old one on purpose.
+            if self.state.rollout.step == Step::Idle
+                && self.exit.is_none()
+                && self.state.switch.is_none()
+            {
                 self.drift(now);
             }
             if self.exit.is_none() {
                 // A step that cannot write (a set directory, a full disk) is retried every
                 // tick; a retire-legacy in flight goes on meanwhile, and the report still
                 // says what the host knows, its answers above all.
+                self.identify_runtime();
                 let stepped = self.step(now);
+                self.switch_step(now);
                 self.retire_step(now);
                 self.report(now);
                 stepped?;
@@ -409,6 +461,11 @@ impl Agent {
         };
         if k.step(now, self.pool_date, &mut tasks, gate, &self.journal) {
             self.vm_recount_at = Some(now);
+        }
+        // A restart of the VM recreated the dispatcher: one of the brake's restarts (#325),
+        // never held by it.
+        for _ in 0..k.take_restarts() {
+            self.state.brake.record(now, &[Ask::Restart]);
         }
         // A new agent's health gate touches nothing but the VM's start.
         if !gate && self.vm_recount_at.is_some_and(|t| now >= t) {
@@ -613,14 +670,21 @@ impl Agent {
         Net::Ok(s)
     }
 
-    /// The host state (#344): its Update orders, its host orders, then its target.
+    /// Whether a round cannot start now: a commit or a revert is finishing (a revert
+    /// quarantines again), or the owner's runtime switch is in flight (#325).
+    fn busy(&self) -> bool {
+        (self.state.rollout.step != Step::Idle && !rollout::preemptible(&self.state.rollout.step))
+            || self.state.switch.is_some()
+    }
+
+    /// The host state (#344): its Update orders, its settings (#325), its host orders, then
+    /// its target.
     fn on_state(&mut self, s: HostState, now: i64, round_now: bool) {
         let mut force: Option<String> =
             round_now.then(|| "a round was asked for (SIGUSR1)".to_owned());
         // An Update order waits while commit or a revert finishes (a revert quarantines
-        // again): the next poll sees it unconsumed.
-        let busy = self.state.rollout.step != Step::Idle
-            && !rollout::preemptible(&self.state.rollout.step);
+        // again), or the owner's runtime switch: the next poll sees it unconsumed.
+        let busy = self.busy();
         // The last Update an agent before 0.3.0 took (`update_seen`) counts as seen.
         if let Some(id) = s
             .updates
@@ -632,25 +696,58 @@ impl Agent {
             })
             .cloned()
         {
-            if !self.state.quarantine.is_empty() {
-                self.journal.write(
-                    now,
-                    "quarantine-lifted",
-                    serde_json::json!({"by": id, "releases": self.state.quarantine.keys().map(ToString::to_string).collect::<Vec<_>>()}),
-                );
+            // An Update lifts every quarantine, and the round it gives the release the guard
+            // reverted recreates the dispatcher, and again if it reverts: without the room
+            // for both on the brake (#325) the Update waits, unconsumed and the quarantine
+            // kept, for a poll that has it — so a pool that keeps sending Updates for a
+            // release this host reverts gets no more restarts than the brake's.
+            let room = if self.state.quarantine.is_empty() {
+                Ok(())
+            } else {
+                self.state
+                    .brake
+                    .check_room(now, &[Ask::Restart], ROUND_RESTARTS)
+            };
+            match room {
+                Ok(()) => {
+                    self.lift_quarantine(&id, now);
+                    force = Some(format!("Update order {id}"));
+                    self.state.orders.remember(&id);
+                    self.state.update_seen = Some(id);
+                }
+                Err(why) => {
+                    if self.said.insert(format!("update:{id}:{why}")) {
+                        self.journal.write(
+                            now,
+                            "update",
+                            serde_json::json!({"id": id, "detail": format!("waits, the quarantine kept: {why}")}),
+                        );
+                    }
+                }
             }
-            self.state.quarantine.clear();
-            force = Some(format!("Update order {id}"));
-            self.state.orders.remember(&id);
-            self.state.update_seen = Some(id);
         }
-        let taken = self.take_orders(s.orders, now, busy);
-        if let (None, Some(id)) = (&force, taken.reconcile.first()) {
-            force = Some(format!("host order {id} (reconcile-now)"));
+        self.restore_settings(s.settings, now);
+        self.queue_orders(s.orders);
+        let taken = self.take_orders(now, busy);
+        self.after_orders(taken, s.target, force, now);
+    }
+
+    /// The round the orders taken ask for (`reconcile-now`, `retry-release`), or the one
+    /// `force` says why, toward `target`; then their answers, which say what the round is.
+    fn after_orders(
+        &mut self,
+        taken: Taken,
+        target: Option<Release>,
+        force: Option<String>,
+        now: i64,
+    ) {
+        let mut force = force;
+        if let (None, Some((id, kind, _))) = (&force, taken.rounds.first()) {
+            force = Some(format!("host order {id} ({kind})"));
         }
-        let named = s.target.is_some();
-        self.follow_target(s.target, force, now);
-        for id in taken.reconcile {
+        let named = target.is_some();
+        self.follow_target(target, force, now);
+        for (id, kind, said) in taken.rounds {
             let detail = if self.state.rollout.step != Step::Idle {
                 format!(
                     "a round now: {} ({})",
@@ -670,7 +767,7 @@ impl Agent {
                     self.state.round.outcome, self.state.round.detail
                 )
             };
-            self.answer(&id, "reconcile-now", "done", &detail, now);
+            self.answer(&id, kind, "done", &format!("{said}{detail}"), now);
         }
     }
 
@@ -681,6 +778,11 @@ impl Agent {
             return;
         };
         self.state.target = Some(target);
+        // The owner's runtime switch moves the dispatcher: the pool's target waits for it
+        // to end (the next poll names it again).
+        if self.state.switch.is_some() {
+            return;
+        }
         let step = self.state.rollout.step.clone();
         let in_flight = (step != Step::Idle)
             .then_some(self.state.rollout.target)
@@ -806,7 +908,34 @@ impl Agent {
         }
         match Target::from_bundle(&b, &self.cfg.set_name) {
             Ok(t) => {
+                // The brake (#325): another release than the one that runs at most every ten
+                // minutes, and within the dispatcher's restarts; a rollback under a signed
+                // statement is exempt (the pool cannot forge one), and so is the first
+                // release a host applies (nothing ran before it). A round to the release the
+                // last change went to (a pull that failed, a quarantine lifted) is that change
+                // tried again: no new release change, but it recreates the dispatcher like
+                // any, so it needs room for its restarts too — which its replace and its
+                // revert's count as they happen (`Rollout::braked`).
+                let braked = !rollback && self.state.applied.is_some_and(|a| a != target);
+                if braked {
+                    let again =
+                        self.state.brake.last_release.as_deref() == Some(&target.to_string());
+                    let asks: &[Ask] = if again {
+                        &[Ask::Restart]
+                    } else {
+                        &[Ask::Release, Ask::Restart]
+                    };
+                    if let Err(why) = self.state.brake.check_room(now, asks, ROUND_RESTARTS) {
+                        let detail = format!("{target} waits: {why}");
+                        return self.say(now, Outcome::Held, &detail);
+                    }
+                    if !again {
+                        self.state.brake.record(now, &[Ask::Release]);
+                        self.state.brake.last_release = Some(target.to_string());
+                    }
+                }
                 self.start(now, target, rollback, why);
+                self.state.rollout.braked = braked;
                 self.pending = Some(t);
             }
             Err(e) => self.say(now, Outcome::Refused, &format!("{target}: {e}")),
@@ -1027,14 +1156,7 @@ impl Agent {
                 h.public_retry = (h.public_retry * 2).min(PUBLIC_RETRY_S);
             }
         }
-        // agent.toml as it is now, as `omarchy-agent token` and `dispatcher-env --write`
-        // read it, so the loop never puts back what they wrote; one that does not read now
-        // (an edit half done) leaves what the loop started with.
-        let envelope = match Envelope::of_data_dir(&self.paths.data) {
-            Some(Ok(e)) if dispatcher_env::dispatcher_path(&e.secrets_dir) => e,
-            _ => Envelope::of_config(&self.cfg),
-        };
-        let r = Rendered::now(&h.sources, &self.paths.data, Some(envelope));
+        let r = rendered(&self.cfg, &self.paths, &h.sources);
         let path = dispatcher_env::path_in(&self.cfg.set_dir);
         match dispatcher_env::refresh(&path, &r) {
             Ok(done) => {

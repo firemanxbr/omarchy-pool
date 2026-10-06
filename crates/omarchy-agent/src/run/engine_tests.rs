@@ -10,7 +10,10 @@
 //!
 //! The host orders of #344 against a stand-in legacy compose project — `reconcile-now`,
 //! then `retire-legacy`, which stops and removes that project and nothing else and writes
-//! the marker into its directory — are `tests/agent-host-orders.sh`'s, on the same host.
+//! the marker into its directory — are `tests/agent-host-orders.sh`'s, on the same host;
+//! so are #325's settings, narrowed into the file the dispatcher mounts while the task runs
+//! on, and `diagnostics` reading the stand-in's own log, scrubbed. The owner's runtime
+//! switch from one real engine to another is `tests/agent-runtime-switch.sh`'s.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -23,11 +26,12 @@ use std::time::{Duration, Instant};
 
 use crate::run::agent::{Agent, Drivers};
 use crate::run::compose::Compose;
-use crate::run::config::{Config, Paths};
+use crate::run::config::{Config, Paths, Runtime};
+use crate::run::driver::Driver;
 use crate::run::fake::{
     relay_statement, FakePool, PoolState, Remote, TestVerifier, HOST_COMPOSE, HOST_SET,
 };
-use crate::run::pool::{HostState, Https, Net, Order, OrderKind, Pool};
+use crate::run::pool::{Arg, HostState, Https, Net, Order, OrderKind, Pool};
 use crate::run::state::{State, Step};
 use crate::run::tools::{self, Tools};
 use crate::verify::tests_support;
@@ -39,6 +43,8 @@ const TOKEN: &str = "omw_engine_test_token_0123456789";
 const STANDIN: &str = r#"set -eu
 root="$${OMARCHY_WORK_ROOT}"
 me="$$(hostname)"
+# A careless dispatcher: its token in its log, for #325's diagnostics to scrub.
+echo "stand-in: up as $$me with worker token $${OMARCHY_WORKER_TOKEN:-none}"
 if [ "$${1:-ok}" = broken ]; then echo "stand-in: a broken release" >&2; exit 1; fi
 n=0
 for f in "$$root"/leases/*; do [ -e "$$f" ] && n=$$((n + 1)); done
@@ -165,7 +171,12 @@ impl Host {
         );
     }
 
-    fn target(&self, latest: &str) {
+    /// The pool names `latest`. The host-side brake (#325) would hold a second release
+    /// change within ten minutes: these stories roll releases out back to back on purpose,
+    /// so its window starts again here (its own tests are `run::brake`'s and
+    /// `run::settings_tests`').
+    fn target(&mut self, latest: &str) {
+        self.agent.state.brake = crate::run::brake::Brake::default();
         self.remote.borrow_mut().state = Some(Net::Ok(HostState {
             target: Release::parse(latest),
             poll_s: Some(60),
@@ -276,7 +287,7 @@ fn host() -> Host {
     .unwrap();
     fs::write(set.join("run/capacity.json"), r#"{"schema":2,"units":3}"#).unwrap();
     let project = format!("omarchy-it-{}", std::process::id());
-    let cfg = Config::parse(&format!(
+    let toml = format!(
         r#"pool = "https://pkgs.omarchy-pool.org"
 host_id = "h_engine_test"
 worker_id = "w_engine_test"
@@ -295,7 +306,14 @@ dedicated = true
         dir.join("work").display(),
         dir.join("secrets").display(),
         socket.display()
-    ))
+    );
+    let cfg = Config::parse(&toml).unwrap();
+    // On disk as install writes it: the owner's runtime switch rewrites it at its end (#325).
+    fs::write(dir.join("data/agent.toml"), &toml).unwrap();
+    fs::set_permissions(
+        dir.join("data/agent.toml"),
+        fs::Permissions::from_mode(0o600),
+    )
     .unwrap();
     let tools = pinned_tools(
         &std::env::var("OMARCHY_AGENT_TOOLS")
@@ -767,4 +785,330 @@ fn real_engine_host_orders_reconcile_and_retire_the_legacy_set() {
         )),
         "{marker}"
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// #325: the host's settings and diagnostics, and the owner's runtime switch.
+
+/// `run/capacity.json` as detection writes it: three units, one of them reserved for pool
+/// jobs, this machine's native lane and the other architecture's emulated one.
+fn detected_capacity() -> serde_json::Value {
+    let native = std::env::consts::ARCH;
+    let other = if native == "x86_64" {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    serde_json::json!({
+        "schema": 2, "at": "2027-01-15T08:00:00Z", "cpus": 4, "mem_gb": 16,
+        "disk_free_gb": {"work": 100, "engine": 100}, "units": 3, "job_reserved": 1,
+        "agent_slots": 1,
+        "lanes": [{"arch": native, "mode": "native"}, {"arch": other, "mode": "emulated", "via": "qemu"}]
+    })
+}
+
+/// The docker CLI against `socket`, its output when it succeeded (a container being
+/// replaced may not answer `exec`).
+fn try_docker(tools: &Tools, socket: &Path, config: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new(&tools.docker)
+        .env_clear()
+        .env("DOCKER_HOST", format!("unix://{}", socket.display()))
+        .env("DOCKER_CONFIG", config)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+impl Host {
+    /// The one running dispatcher of the set on `socket`, if there is exactly one.
+    fn dispatcher_on(&self, socket: &Path) -> Option<String> {
+        let ids = try_docker(
+            &self.tools,
+            socket,
+            &self.dir.join("data/docker-config"),
+            &[
+                "ps",
+                "-q",
+                "--no-trunc",
+                "--filter",
+                &format!("label=com.docker.compose.project={}", self.project),
+            ],
+        )?;
+        (ids.lines().count() == 1).then_some(ids)
+    }
+
+    /// The capacity file the running dispatcher reads: its own bind mount, from inside it.
+    fn mounted_capacity(&self) -> Option<serde_json::Value> {
+        let id = self.dispatcher_on(&self.socket)?;
+        let text = try_docker(
+            &self.tools,
+            &self.socket,
+            &self.dir.join("data/docker-config"),
+            &["exec", &id, "cat", "/run/omarchy/capacity.json"],
+        )?;
+        serde_json::from_str(&text).ok()
+    }
+
+    fn capacity_on_disk(&self) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(self.agent.cfg.set_dir.join("run/capacity.json")).unwrap())
+            .unwrap()
+    }
+
+    /// Whether the set that runs was rendered from the inputs on disk now: no change of
+    /// `run/capacity.json` (or `etc/`) waits for a round.
+    fn inputs_applied(&self) -> bool {
+        let inputs = crate::run::rollout::inputs_hash(&self.agent.cfg.set_dir);
+        fs::read_to_string(
+            self.agent
+                .paths
+                .last_good(&self.agent.cfg.set_name)
+                .join("agent.yml"),
+        )
+        .is_ok_and(|o| o.contains(&inputs))
+    }
+
+    /// Gives `orders` at the next poll and ticks until each is answered, no round runs, the
+    /// set was rendered from the file on disk and the dispatcher mounts it — the rounds a
+    /// narrowing starts are over.
+    fn give(&mut self, orders: &[(OrderKind, &str)]) {
+        self.orders(orders);
+        self.agent.state.poll.next_at = 0;
+        self.tick(false);
+        let ids: Vec<String> = orders.iter().map(|(_, id)| (*id).to_owned()).collect();
+        self.until(
+            "the orders' answers and their rounds",
+            Duration::from_secs(300),
+            |h| {
+                ids.iter().all(|id| h.answer(id).is_some())
+                    && h.agent.state.rollout.step == Step::Idle
+                    && h.inputs_applied()
+                    && h.mounted_capacity() == Some(h.capacity_on_disk())
+            },
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs a real engine: tests/agent-host-orders.sh"]
+#[allow(clippy::too_many_lines)] // one host, one story: narrowed, refused above, then read
+fn real_engine_settings_narrow_the_mounted_capacity_and_diagnostics_are_scrubbed() {
+    let mut h = host();
+    let detected = detected_capacity();
+    let file = h.agent.cfg.set_dir.join("run/capacity.json");
+    fs::write(&file, detected.to_string()).unwrap();
+    h.publish("v1.0.0", "ok");
+    h.target("v1.0.0");
+    h.round("v1.0.0");
+    assert_eq!(
+        h.agent.state.round.outcome, "ok",
+        "{:?}",
+        h.agent.state.round
+    );
+    let (d0, _) = h.dispatcher();
+    let task0 = h.task_state();
+    assert_eq!(h.mounted_capacity(), Some(detected.clone()));
+
+    // Narrowed from the site: two units and no emulated lane, two seconds apart (the
+    // brake's pace). The dispatcher is recreated with the narrowed file; the task runs on.
+    let native = std::env::consts::ARCH;
+    h.give(&[
+        (OrderKind::SetUnits(Arg::Set(2)), "ho_it_units"),
+        (OrderKind::SetEmulate(Arg::Set(Vec::new())), "ho_it_lanes"),
+    ]);
+    for id in ["ho_it_units", "ho_it_lanes"] {
+        let (outcome, detail) = h.answer(id).unwrap();
+        assert_eq!(outcome, "done", "{id}: {detail}");
+    }
+    assert!(h
+        .answer("ho_it_units")
+        .unwrap()
+        .1
+        .starts_with("units 3 → 2 (its envelope gives 3)"));
+    let mounted = h.mounted_capacity().unwrap();
+    assert_eq!(mounted["units"], 2, "{mounted}");
+    assert_eq!(mounted["job_reserved"], 1);
+    assert_eq!(
+        mounted["lanes"],
+        serde_json::json!([{"arch": native, "mode": "native"}])
+    );
+    assert_eq!(mounted["detected"]["units"], 3);
+    assert_ne!(h.dispatcher().0, d0, "recreated with the narrowed file");
+    assert_eq!(
+        h.task_state(),
+        task0,
+        "a running task is never stopped for it"
+    );
+    assert_eq!(h.agent.state.brake.narrowings.len(), 2);
+
+    // Above the envelope (it detected 3): refused on the host, nothing changed.
+    let (d1, _) = h.dispatcher();
+    let before = h.capacity_on_disk();
+    h.give(&[(OrderKind::SetUnits(Arg::Set(5)), "ho_it_above")]);
+    let (outcome, detail) = h.answer("ho_it_above").unwrap();
+    assert_eq!(
+        (outcome.as_str(), detail.as_str()),
+        (
+            "refused",
+            "5 units is above this host's envelope: it detected 3, and only its owner widens that, at the host"
+        )
+    );
+    assert_eq!(h.capacity_on_disk(), before);
+    assert_eq!(h.dispatcher().0, d1);
+
+    // Diagnostics: refused while the envelope does not allow them; then the stand-in's own
+    // log lines, its token scrubbed, posted for the host's page.
+    h.give(&[(OrderKind::Diagnostics, "ho_it_diag_no")]);
+    let (outcome, detail) = h.answer("ho_it_diag_no").unwrap();
+    assert_eq!(outcome, "refused");
+    assert!(
+        detail.starts_with("its envelope does not allow diagnostics"),
+        "{detail}"
+    );
+    assert!(h.remote.borrow().diagnostics.is_empty());
+    h.agent.cfg.policy.diagnostics = true;
+    h.give(&[(OrderKind::Diagnostics, "ho_it_diag")]);
+    let (outcome, detail) = h.answer("ho_it_diag").unwrap();
+    assert_eq!(outcome, "done", "{detail}");
+    let posted = h.remote.borrow().diagnostics[0].clone();
+    assert_eq!(posted["order"], "ho_it_diag");
+    let lines: Vec<String> = posted["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.ends_with("with worker token [redacted]")),
+        "{lines:?}"
+    );
+    assert!(!posted.to_string().contains(TOKEN));
+    assert_eq!(h.task_state(), task0);
+}
+
+#[test]
+#[ignore = "needs two real engines: tests/agent-runtime-switch.sh"]
+#[allow(clippy::too_many_lines)] // one host, one story: refused while a task runs, then moved
+fn real_engine_runtime_switch_moves_the_dispatcher_to_the_other_engine() {
+    let to = PathBuf::from(env("OMARCHY_AGENT_SWITCH_SOCKET"));
+    let mut h = host();
+    let config = h.dir.join("data/docker-config");
+    let _cleanup = Projects(h.tools.clone(), to.clone(), vec![h.project.clone()]);
+    // The driver on another socket: the same pinned tools.
+    let (tools, cfgdir) = (h.tools.clone(), config.clone());
+    h.agent.drivers_on = Some(Box::new(move |socket: &Path| {
+        Some(Box::new(Compose::new(tools.clone(), socket, &cfgdir)) as Box<dyn Driver>)
+    }));
+    h.publish("v1.0.0", "ok");
+    h.target("v1.0.0");
+    h.round("v1.0.0");
+    assert_eq!(
+        h.agent.state.round.outcome, "ok",
+        "{:?}",
+        h.agent.state.round
+    );
+    let (d0, _) = h.dispatcher();
+    let from = h.socket.clone();
+    // Which engine it runs on, as that engine said (the host's agent.toml names none).
+    let from_driver = h
+        .agent
+        .cfg
+        .runtime
+        .map(Runtime::driver)
+        .expect("the engine said which it is");
+    let to_driver = match try_docker(
+        &h.tools,
+        &to,
+        &config,
+        &["version", "--format", "{{json .Server}}"],
+    ) {
+        Some(v) if v.contains("Podman Engine") => "compose/podman",
+        Some(_) => "compose/docker",
+        None => panic!("nothing answers on {}", to.display()),
+    };
+
+    // A task container of this host on the engine it runs on: tasks do not move between
+    // engines, so the switch is refused and nothing changes.
+    let task = h.docker(&[
+        "run",
+        "-d",
+        "--label",
+        "org.omarchy-pool.agent.host=h_engine_test",
+        &h.image,
+        "sleep",
+        "3600",
+    ]);
+    crate::run::switch::request(&h.agent.paths.data, to_driver, Some(&to)).unwrap();
+    h.tick(false);
+    let end = h.agent.state.switch_last.clone().unwrap();
+    assert_eq!(end.outcome, "refused", "{}", end.detail);
+    assert!(
+        end.detail.starts_with(&format!(
+            "1 task container(s) run on {from_driver}: task containers, named volumes and caches do not move between engines"
+        )),
+        "{}",
+        end.detail
+    );
+    assert_eq!(h.dispatcher().0, d0);
+    h.docker(&["rm", "-f", &task]);
+
+    // Drained: the dispatcher stops on the old engine and comes up on the new one through
+    // a whole round — pull, replace, the guard — and agent.toml names it from then on.
+    crate::run::switch::request(&h.agent.paths.data, to_driver, Some(&to)).unwrap();
+    h.tick(false);
+    assert!(
+        h.agent.state.switch.is_some(),
+        "{:?}",
+        h.agent.state.switch_last
+    );
+    h.until("the switch", Duration::from_secs(600), |h| {
+        h.agent.state.switch.is_none() && h.agent.state.rollout.step == Step::Idle
+    });
+    let end = h.agent.state.switch_last.clone().unwrap();
+    assert_eq!(
+        (end.to.as_str(), end.outcome.as_str()),
+        (to_driver, "done"),
+        "{}",
+        end.detail
+    );
+    assert!(
+        h.dispatcher_on(&to).is_some(),
+        "the dispatcher runs on {}",
+        to.display()
+    );
+    assert!(
+        try_docker(
+            &h.tools,
+            &from,
+            &config,
+            &[
+                "ps",
+                "-aq",
+                "--filter",
+                &format!("label=com.docker.compose.project={}", h.project)
+            ]
+        )
+        .unwrap()
+        .is_empty(),
+        "nothing of the set is left on {}",
+        from.display()
+    );
+    assert!(fs::read_to_string(h.agent.paths.journal())
+        .unwrap()
+        .contains("\"from\":\"replace\",\"target\":\"v1.0.0\",\"to\":\"guard\""));
+    let cfg = Config::parse(&fs::read_to_string(h.agent.paths.agent_toml()).unwrap()).unwrap();
+    assert_eq!(
+        (
+            cfg.runtime.map(Runtime::driver),
+            cfg.socket_cli.clone(),
+            cfg.socket_mount.clone()
+        ),
+        (Some(to_driver.to_owned()), to.clone(), to.clone())
+    );
+    // The task container of the old engine was never part of it.
+    assert!(h.task_state().starts_with("true "));
 }
