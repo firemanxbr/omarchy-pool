@@ -398,6 +398,11 @@ fn a_widening_sets_only_the_keys_it_may_and_keeps_the_owners_lines() {
             serde_json::json!({"direct_network": true}),
             "\"direct_network\" is no key",
         ),
+        // So does #330's sandboxed runtime: a widening never turns it off or names another.
+        (
+            serde_json::json!({"sandbox": "off"}),
+            "\"sandbox\" is no key",
+        ),
         (
             serde_json::json!({"max_units": 0}),
             "max_units: a whole number from 1",

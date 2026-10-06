@@ -243,6 +243,39 @@ jobs:
       - name: The other architecture's lane — the agent's smoke run, the envelope, a disabled handler — and one emulated build through the dispatcher
         run: bash tests/emulated-lane.sh
 
+  sandboxed-runtime:
+    name: Sandboxed runtime on a real engine (gVisor)
+    # #330 (design v2 §10.4; D43): gVisor's runsc, from a pinned release checked against its
+    # SHA-512, registered with the runner's docker (`runsc install`) — the agent's detection
+    # finds it after its smoke run on a kernel that is not the engine's (the envelope's
+    # `sandbox = "off"`, and a runtime the engine does not list, keep it off); a community
+    # build through the dispatcher runs in it, reaching its egress sidecar, while the project's
+    # build beside it and every sidecar run on runc; a runtime the engine does not have fails
+    # the community task lost before it runs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: gVisor's runsc, release 20260928 checked against its SHA-512, registered with docker
+        run: |
+          set -euo pipefail
+          release=20260928
+          sha512=4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b
+          curl -fsSLo "$RUNNER_TEMP/gvisor.tar.zstd" "https://storage.googleapis.com/gvisor/releases/release/$release/x86_64/gvisor.tar.zstd"
+          echo "$sha512  $RUNNER_TEMP/gvisor.tar.zstd" | sha512sum -c -
+          # runsc finds its helpers in gvisor-bin/ beside it.
+          sudo mkdir -p /opt/gvisor
+          sudo tar --zstd -xf "$RUNNER_TEMP/gvisor.tar.zstd" -C /opt/gvisor
+          sudo /opt/gvisor/runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}' | jq -c 'with_entries(.value |= {path, runtimeType})'
+      - name: The sandboxed runtime — the agent finds runsc after its smoke run, a community build runs in it, the project's build and every sidecar on runc, a runtime the engine lacks never falls back
+        run: bash tests/sandboxed-runtime.sh
+
   agent-self-update:
     name: Host agent self-update under systemd --user
     # #316: deliberately broken builds of a higher agent — a panic while it

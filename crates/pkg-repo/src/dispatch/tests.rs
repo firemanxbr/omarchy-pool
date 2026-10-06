@@ -18,7 +18,9 @@ use super::kinds::Ctx;
 use super::lease::{Lease, Phase, Store};
 use super::pool::Pool;
 use super::spec::{self, HOST_LABEL};
-use super::{jobs, shim, Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS, MEM_RAMP};
+use super::{
+    jobs, shim, Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS, MEM_RAMP, SANDBOX_HOLD,
+};
 use crate::stop::Beat;
 use crate::RepoError;
 
@@ -60,6 +62,11 @@ struct FakeEngine {
     stuck: AtomicBool,
     /// The engine refuses to start the container whose name ends with this.
     refuse: Mutex<Option<String>>,
+    /// What it says then: `the engine refused <name>` when unset.
+    refuse_why: Mutex<Option<String>>,
+    /// The runtimes the engine has besides its own: a container that names another
+    /// (`--runtime`) is refused, as docker refuses it. `None`: whatever it names.
+    runtimes: Mutex<Option<Vec<String>>>,
     /// Each network's `--subnet`: a second network on a /28 still in use is refused, as the engines do.
     subnets: Mutex<BTreeMap<String, String>>,
     /// A lease's teardown leaves its network behind (a `network rm` past its deadline).
@@ -141,7 +148,25 @@ impl FakeEngine {
             .as_ref()
             .is_some_and(|r| name.ends_with(r.as_str()))
         {
-            return Err(format!("the engine refused {name}"));
+            return Err(self
+                .refuse_why
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| format!("the engine refused {name}")));
+        }
+        if let Some(r) = value_of(args, "--runtime") {
+            if self
+                .runtimes
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|has| !has.iter().any(|x| x == r))
+            {
+                return Err(format!(
+                    "docker: Error response from daemon: unknown or invalid runtime name: {r}"
+                ));
+            }
         }
         let host = label_of(args, HOST_LABEL).unwrap_or_default().to_owned();
         let mut c = self.containers.lock().unwrap();
@@ -357,6 +382,9 @@ struct FakePool {
     refuse_uploads: Mutex<Option<u16>>,
     /// Each heartbeat takes this long (a pool that holds the connection open).
     slow_beat: Mutex<Duration>,
+    /// Fetches fail as a pool that does not answer them, while claims go on: a preparation
+    /// that fetches tries again later.
+    deaf_fetch: AtomicBool,
 }
 
 fn down() -> RepoError {
@@ -478,7 +506,7 @@ impl Pool for FakePool {
         Ok(())
     }
     fn fetch(&self, _token: &str, of: u64, name: &str, dest: &Path) -> Result<bool, RepoError> {
-        if self.down.load(Ordering::SeqCst) {
+        if self.down.load(Ordering::SeqCst) || self.deaf_fetch.load(Ordering::SeqCst) {
             return Err(down());
         }
         match self.artifacts.lock().unwrap().get(&(of, name.to_owned())) {
@@ -1618,6 +1646,478 @@ fn a_lease_prepared_again_after_a_restart_is_given_back_when_its_emulated_lane_w
         value_of(&h.engine.args(8, GEN2), "--platform"),
         Some("linux/amd64")
     );
+}
+
+/// The Studio's file with gVisor (#330): the agent's own fixture, `runsc` for the community
+/// tasks of its native lane, `x86_64` emulated beside it.
+fn sandboxed_file(h: &H) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../omarchy-agent/tests/fixtures/capacity/sandboxed.json");
+    std::fs::copy(fixture, &h.capacity).unwrap();
+}
+
+/// Every `run` this engine was asked for the task container of `id`: what each named as its runtime.
+fn runtimes_of(h: &H, id: u64, gen: &str) -> Vec<Option<String>> {
+    let name = spec::container_name(id, gen);
+    h.engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c[0] == "run" && value_of(c, "--name") == Some(name.as_str()))
+        .map(|c| value_of(c, "--runtime").map(str::to_owned))
+        .collect()
+}
+
+/// The release checkout's trial scripts, as a trial's trusted steps run them: the packages it is
+/// to install, its check, the keyrings.
+fn trial_scripts(h: &H) {
+    std::fs::create_dir_all(h.checkout.join("tests")).unwrap();
+    std::fs::write(
+        h.checkout.join("tests/trial.sh"),
+        "#!/bin/bash\nset -e\nprintf '%s\\n' \"${@:3}\" > \"$TRIAL_STAGE/packages.txt\"\necho check > \"$TRIAL_STAGE/check.sh\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        h.checkout.join("tests/fetch-keyrings.sh"),
+        "#!/bin/bash\ntouch \"$1/archlinux.gpg\"\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn what_a_contributor_wrote_starts_in_the_sandbox_and_the_projects_own_recipe_does_not() {
+    let h = H::new();
+    sandboxed_file(&h);
+    trial_scripts(&h);
+    for (name, b) in [
+        ("felix-1.0-1-aarch64.pkg.tar.zst", package("felix")),
+        ("PKGBUILD", b"x".to_vec()),
+        ("build.log", b"x".to_vec()),
+    ] {
+        h.pool.artifacts.lock().unwrap().insert((5, name.into()), b);
+    }
+    let mut d = h.dispatcher();
+    let gens = [
+        GEN,
+        GEN2,
+        "g_00000000000000c3",
+        "g_00000000000000c4",
+        "g_00000000000000c5",
+    ];
+    // A contributor's build; the project's review rebuild of one (a recipe its drafter wrote from
+    // the contributor's evidence, before any approval); the trial that installs what that built;
+    // the audit that reads it; and the project's own recipe on main.
+    h.give(on_lane(community(7, gens[0]), "aarch64", Some("native")));
+    h.give(task(
+        8,
+        "build",
+        "felix",
+        "review:7",
+        "project",
+        json!({ "review": 7 }),
+        gens[1],
+    ));
+    h.give(task(
+        9,
+        "trial",
+        "felix",
+        "staging:8",
+        "project",
+        json!({ "task": 5, "files": ["felix-1.0-1-aarch64.pkg.tar.zst"] }),
+        gens[2],
+    ));
+    h.give(on_lane(
+        task(
+            10,
+            "audit",
+            "felix",
+            "staging:5",
+            "project",
+            json!({ "task": 5 }),
+            gens[3],
+        ),
+        "aarch64",
+        None,
+    ));
+    h.give(task(
+        11,
+        "build",
+        "felix",
+        "0123abcd",
+        "project",
+        json!({}),
+        gens[4],
+    ));
+    h.ticks(&mut d, 12);
+    for (id, gen) in (7..=10).zip(gens) {
+        assert_eq!(
+            runtimes_of(&h, id, gen),
+            [Some("runsc".to_owned())],
+            "task {id}: {:?}",
+            h.pool.fails_of(id)
+        );
+    }
+    assert_eq!(
+        runtimes_of(&h, 11, gens[4]),
+        [None],
+        "the project's own recipe, on the engine's own runtime"
+    );
+    // Their sidecars, and every other call, on the engine's own runtime.
+    let calls = h.engine.calls.lock().unwrap().clone();
+    let with: Vec<&Vec<String>> = calls
+        .iter()
+        .filter(|c| c.iter().any(|x| x == "--runtime"))
+        .collect();
+    assert_eq!(with.len(), 4, "{with:?}");
+    assert!(with.iter().all(|c| c[0] == "run"), "{with:?}");
+    // The claim says the runtime this dispatcher applies, for the pool's lanes and the host page.
+    assert_eq!(
+        h.pool.last_claim()["capacity"]["sandbox"],
+        json!({ "runtime": "runsc", "kind": "gvisor" })
+    );
+    // The file says none now (the owner's `sandbox = "off"`, a runtime that failed its smoke
+    // run): the next contributor's task runs on the engine's own runtime, as on any host
+    // without one, and the claim says none (units beside the five running).
+    h.units(20);
+    h.give(on_lane(
+        community(12, "g_00000000000000d4"),
+        "aarch64",
+        Some("native"),
+    ));
+    h.advance(30); // the claim after one that brought nothing
+    h.ticks(&mut d, 3);
+    assert_eq!(runtimes_of(&h, 12, "g_00000000000000d4"), [None]);
+    assert_eq!(h.pool.last_claim()["capacity"]["sandbox"], Value::Null);
+}
+
+#[test]
+fn a_contributors_task_on_an_emulated_lane_of_a_sandboxed_host_is_handed_back_before_it_runs() {
+    let h = H::new();
+    sandboxed_file(&h);
+    let mut d = h.dispatcher();
+    // The pool hands a sandboxed host's emulated lanes the project's own recipes only: a lease
+    // leased before the agent's count found the sandbox is the one that reaches it.
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
+    h.give(on_lane(
+        task(8, "build", "felix", "0123abcd", "project", json!({}), GEN2),
+        "x86_64",
+        Some("emulated"),
+    ));
+    h.ticks(&mut d, 6);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(f["lost"], json!(true), "{f}");
+    assert!(
+        f["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not cover its emulated x86_64 lane"),
+        "{f}"
+    );
+    assert!(runtimes_of(&h, 7, GEN).is_empty(), "nothing started");
+    // The project's own recipe runs there, on the engine's own runtime through binfmt.
+    assert_eq!(runtimes_of(&h, 8, GEN2), [None]);
+    assert_eq!(
+        value_of(&h.engine.args(8, GEN2), "--platform"),
+        Some("linux/amd64")
+    );
+}
+
+#[test]
+fn a_runtime_the_engine_refuses_fails_the_start_and_holds_the_claims_nothing_runs_outside_it() {
+    let h = H::new();
+    sandboxed_file(&h);
+    // The engine no longer has the runtime the file names (runsc removed, daemon.json reset):
+    // `docker run --runtime runsc` is refused, whatever the container.
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 4);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(
+        (f["lost"].clone(), f["final"].clone()),
+        (json!(true), json!(false)),
+        "{f}"
+    );
+    assert!(
+        f["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown or invalid runtime name: runsc"),
+        "{f}"
+    );
+    // Its one start named the sandbox, and none was tried without it.
+    assert_eq!(runtimes_of(&h, 7, GEN), [Some("runsc".to_owned())]);
+    assert!(h.engine.runs.lock().unwrap().is_empty(), "nothing started");
+    assert!(!h.engine.has(7, GEN));
+    // The claims hold, and say why: the pool would hand it task after task, each lost.
+    let held = |h: &H| {
+        let c = h.pool.last_claim();
+        (c["want"] == json!(0)).then(|| c["capacity"]["sandbox_held"].as_str().unwrap().to_owned())
+    };
+    let why = held(&h).expect("held");
+    assert!(why.starts_with("runsc refused task 7's start"), "{why}");
+    assert!(
+        why.ends_with("no claim for 30 minutes; the dispatcher's Restart ends it sooner"),
+        "{why}"
+    );
+    h.advance(SANDBOX_HOLD - 60);
+    h.ticks(&mut d, 1);
+    assert!(held(&h).is_some());
+    // Its hold over, it claims again; refused a second time in a row, it holds twice as long.
+    h.advance(60);
+    h.give(community(8, GEN2));
+    h.ticks(&mut d, 4);
+    assert_eq!(h.pool.fails_of(8)[0]["lost"], json!(true));
+    assert_eq!(runtimes_of(&h, 8, GEN2), [Some("runsc".to_owned())]);
+    let why = held(&h).expect("held");
+    assert!(
+        why.starts_with("runsc refused task 8's start")
+            && why.contains("no claim for 1 hour (2 refusals in a row)"),
+        "{why}"
+    );
+    h.advance(2 * SANDBOX_HOLD - 60);
+    h.ticks(&mut d, 1);
+    assert!(held(&h).is_some());
+    // A hold ends by itself, however the runtime was fixed (a count that finds the host as it
+    // was writes nothing): with nobody at the host it claims again.
+    h.advance(60);
+    h.ticks(&mut d, 1);
+    assert_eq!(h.pool.last_claim()["want"], json!(1));
+    assert!(h.pool.last_claim()["capacity"]
+        .get("sandbox_held")
+        .is_none());
+    // Two tasks lost in an hour and a half, not every one the pool had for it.
+    assert_eq!(h.pool.fails.lock().unwrap().len(), 2);
+    // Still refused: a third in a row, twice as long again.
+    h.give(community(9, "g_00000000000000c3"));
+    h.advance(30);
+    h.ticks(&mut d, 3);
+    assert!(
+        held(&h)
+            .expect("held")
+            .contains("no claim for 2 hours (3 refusals in a row)"),
+        "{:?}",
+        held(&h)
+    );
+    // The owner fixed the runtime; the agent's count found the host as it was and left
+    // `run/capacity.json` as it is, so the hold stays …
+    *h.engine.runtimes.lock().unwrap() = Some(vec!["runsc".to_owned()]);
+    h.advance(30 * 60);
+    h.ticks(&mut d, 2);
+    assert!(held(&h).is_some());
+    // … until the dispatcher restarts (Restart on its worker page): it claims at once, in the sandbox.
+    drop(d);
+    let mut d = h.dispatcher();
+    h.give(community(10, "g_00000000000000c4"));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(10, "g_00000000000000c4"));
+    assert_eq!(
+        runtimes_of(&h, 10, "g_00000000000000c4"),
+        [Some("runsc".to_owned())]
+    );
+    assert!(h.pool.last_claim()["capacity"]
+        .get("sandbox_held")
+        .is_none());
+    assert_eq!(h.pool.fails.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn leases_refused_while_a_sandbox_hold_is_in_effect_are_one_outage_and_do_not_double_it() {
+    let h = H::new();
+    sandboxed_file(&h);
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
+    // Three contributors' builds claimed one after the other while none could start yet (in
+    // production each prepares in a thread of its own; here a lesson the pool does not hand
+    // over keeps each preparing), then the three started in one round once the pool answers.
+    h.pool.deaf_fetch.store(true, Ordering::SeqCst);
+    let gens = [GEN, GEN2, "g_00000000000000c3"];
+    let mut d = h.dispatcher();
+    for (id, gen) in (7..).zip(gens) {
+        h.give(task(
+            id,
+            "build",
+            "felix",
+            "https://github.com/felix/felix@v1.0:PKGBUILD",
+            "community",
+            json!({ "lesson": 3 }),
+            gen,
+        ));
+    }
+    h.ticks(&mut d, 4);
+    let leases = h.leases();
+    assert_eq!(leases.len(), 3);
+    assert!(leases.iter().all(|l| l.phase == Phase::Preparing));
+    assert!((7..)
+        .zip(gens)
+        .all(|(id, gen)| runtimes_of(&h, id, gen).is_empty()));
+    h.pool.deaf_fetch.store(false, Ordering::SeqCst);
+    h.advance(super::RETRY_AFTER);
+    h.ticks(&mut d, 3);
+    // Each was refused in the sandbox and lost, none tried without it …
+    for (id, gen) in (7..).zip(gens) {
+        assert_eq!(runtimes_of(&h, id, gen), [Some("runsc".to_owned())]);
+        assert_eq!(h.pool.fails_of(id)[0]["lost"], json!(true));
+    }
+    assert!(h.engine.runs.lock().unwrap().is_empty(), "nothing started");
+    // … and the three are one refusal: the first's 30 minutes, not two hours.
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], json!(0), "{c}");
+    let why = c["capacity"]["sandbox_held"].as_str().unwrap();
+    assert!(why.starts_with("runsc refused task 7's start"), "{why}");
+    assert!(
+        why.ends_with("no claim for 30 minutes; the dispatcher's Restart ends it sooner"),
+        "{why}"
+    );
+    h.advance(SANDBOX_HOLD);
+    h.ticks(&mut d, 1);
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], json!(1), "{c}");
+    assert!(c["capacity"].get("sandbox_held").is_none(), "{c}");
+    // A refusal after the hold is the second in a row.
+    h.give(community(10, "g_00000000000000c4"));
+    h.advance(30);
+    h.ticks(&mut d, 3);
+    let c = h.pool.last_claim();
+    assert!(
+        c["capacity"]["sandbox_held"]
+            .as_str()
+            .is_some_and(|w| w.starts_with("runsc refused task 10's start")
+                && w.contains("no claim for 1 hour (2 refusals in a row)")),
+        "{c}"
+    );
+}
+
+#[test]
+fn a_count_that_finds_the_host_changed_ends_a_sandbox_hold_at_once() {
+    let h = H::new();
+    sandboxed_file(&h);
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 4);
+    assert_eq!(h.pool.last_claim()["want"], json!(0));
+    // The owner removed the runtime and counted the host again: the agent found no sandbox,
+    // so it wrote a new file (a new `at`) saying so. The dispatcher claims at once — the run
+    // loop's round would recreate it too — and runs the next one on the engine's own runtime.
+    let text = std::fs::read_to_string(&h.capacity).unwrap();
+    std::fs::write(
+        &h.capacity,
+        text.replace("2026-10-01T00:00:00Z", "2026-10-01T00:05:00Z")
+            .replace(
+                r#""sandbox": { "runtime": "runsc", "kind": "gvisor" }"#,
+                r#""sandbox": null, "sandbox_held": "none of the engine's runtimes starts a kernel of its own""#,
+            ),
+    )
+    .unwrap();
+    h.give(community(8, GEN2));
+    h.advance(30);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(8, GEN2));
+    assert_eq!(runtimes_of(&h, 8, GEN2), [None]);
+    let c = h.pool.last_claim();
+    assert_eq!(c["capacity"]["sandbox"], Value::Null, "{c}");
+    assert_eq!(c["want"], json!(1), "{c}");
+    assert!(c["capacity"].get("sandbox_held").is_none(), "{c}");
+}
+
+#[test]
+fn a_sandboxed_start_that_fails_for_another_reason_than_its_runtime_holds_no_claim() {
+    let h = H::new();
+    sandboxed_file(&h);
+    // A release's new build image, pulled within `run` (the spec does not pull ahead), meets
+    // the registry's rate limit: the start is lost, as on any host, but the runtime refused nothing.
+    *h.engine.refuse.lock().unwrap() = Some(spec::container_name(7, GEN));
+    *h.engine.refuse_why.lock().unwrap() = Some(format!(
+        "docker run: Unable to find image '{IMAGE}' locally\ndocker: Error response from daemon: toomanyrequests: You have reached your pull rate limit."
+    ));
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 4);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(f["lost"], json!(true), "{f}");
+    assert!(
+        f["error"].as_str().unwrap().contains("toomanyrequests"),
+        "{f}"
+    );
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], json!(1), "{c}");
+    assert!(c["capacity"].get("sandbox_held").is_none(), "{c}");
+    // The next one starts in the sandbox at once.
+    *h.engine.refuse.lock().unwrap() = None;
+    h.give(community(8, GEN2));
+    h.advance(30);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(8, GEN2));
+    assert_eq!(runtimes_of(&h, 8, GEN2), [Some("runsc".to_owned())]);
+}
+
+#[test]
+fn each_refused_sandboxed_start_in_a_row_doubles_the_hold_to_a_day_at_most() {
+    let minutes: Vec<u64> = (1..=9).map(|n| super::sandbox_hold_for(n) / 60).collect();
+    assert_eq!(minutes, [30, 60, 120, 240, 480, 960, 1440, 1440, 1440]);
+    assert_eq!(super::sandbox_hold_for(u32::MAX), super::SANDBOX_HOLD_MAX);
+    assert_eq!(super::span(SANDBOX_HOLD), "30 minutes");
+    assert_eq!(super::span(3600), "1 hour");
+    assert_eq!(super::span(super::SANDBOX_HOLD_MAX), "24 hours");
+}
+
+#[test]
+fn only_the_runtimes_own_errors_are_a_refusal_of_the_sandbox() {
+    let refused = [
+        // docker 29, a runtime daemon.json no longer has (its own words)
+        "docker run: docker: Error response from daemon: unknown or invalid runtime name: runsc",
+        // runsc registered by its path, the binary gone (containerd's runc shim runs it)
+        "docker run: docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: unable to retrieve OCI runtime error (open /run/containerd/io.containerd.runtime.v2.task/moby/x/log.json: no such file or directory): fork/exec /usr/local/bin/runsc: no such file or directory: unknown.",
+        // Kata's shim on a VM that lost /dev/kvm
+        "docker run: docker: Error response from daemon: failed to create task for container: failed to create shim task: Could not access KVM kernel module: No such file or directory: unknown.",
+        // podman's own CLI
+        "podman run: Error: default OCI runtime \"runsc\" not found: invalid argument",
+    ];
+    for e in refused {
+        assert!(super::runtime_refused("runsc", e), "{e}");
+    }
+    let not = [
+        "docker run: Unable to find image 'ghcr.io/x/build@sha256:00' locally\ndocker: Error response from daemon: toomanyrequests: You have reached your pull rate limit.",
+        "docker run: docker: Error response from daemon: manifest unknown.",
+        // docker 29's own words for a pull that cannot reach the registry
+        "docker run: Unable to find image 'nonexistent@sha256:00' locally\ndocker: Error response from daemon: failed to resolve reference \"docker.io/library/nonexistent@sha256:00\": failed to do request: Head \"https://registry-1.docker.io/v2/library/nonexistent/manifests/sha256:00\": proxyconnect tcp: dial tcp 127.0.0.1:37605: connect: connection refused",
+        "docker run did not answer",
+        "docker run: docker: Error response from daemon: Conflict. The container name \"/omarchy-task-7-g_0\" is already in use by container \"ab\".",
+        "docker run: docker: Error response from daemon: network omarchy-t-7 not found.",
+    ];
+    for e in not {
+        assert!(!super::runtime_refused("runsc", e), "{e}");
+    }
+}
+
+#[test]
+fn a_community_lease_prepared_again_while_the_file_does_not_read_is_handed_back() {
+    let h = H::new();
+    sandboxed_file(&h);
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    d.tick(); // claimed, Preparing
+    drop(d);
+    // A dispatcher started while the agent's file does not read (a sandbox it cannot read):
+    // the lease it re-adopts is handed back before anything starts, never run without it.
+    let text = std::fs::read_to_string(&h.capacity).unwrap();
+    std::fs::write(
+        &h.capacity,
+        text.replace(r#""kind": "gvisor""#, r#""kind": "runc""#),
+    )
+    .unwrap();
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 3);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(f["lost"], json!(true), "{f}");
+    assert!(
+        f["error"].as_str().unwrap().contains("does not read now"),
+        "{f}"
+    );
+    assert!(h.engine.runs.lock().unwrap().is_empty());
+    // Nor is anything claimed while it does not read.
+    assert_eq!(h.pool.last_claim()["want"], json!(0));
 }
 
 #[test]
@@ -2938,6 +3438,44 @@ fn a_package_with_its_signed_exception_gets_a_bridge_network_and_no_egress() {
         .contains("sizing"));
 }
 
+/// A package's signed network exception (#373) changes its network, never its runtime (#330):
+/// a contributor's on a sandboxed host's native lane runs on its bridge in the sandbox, as every
+/// other task of a contributor's there does; it never takes the exception as a way around it.
+#[test]
+fn a_contributors_package_with_its_signed_exception_runs_on_its_bridge_in_the_sandbox() {
+    let h = H::new();
+    sandboxed_file(&h);
+    std::fs::create_dir_all(h.checkout.join("factory/sizing")).unwrap();
+    std::fs::write(
+        h.checkout.join("factory/sizing/tasks.toml"),
+        "schema = 1\n[package.\"felix\"]\nnetwork = \"direct\"\nreason = \"its tests open raw sockets\"\n",
+    )
+    .unwrap();
+    let mut d = h.dispatcher();
+    d.net.direct = true;
+    h.give(on_lane(community(7, GEN), "aarch64", Some("native")));
+    h.ticks(&mut d, 3);
+    let net = spec::container_name(7, GEN);
+    assert!(h.engine.has(7, GEN) && h.engine.has_network(&net));
+    assert!(!h.engine.has_name(&sidecar(7, GEN, "egress")));
+    assert_eq!(
+        runtimes_of(&h, 7, GEN),
+        [Some("runsc".to_owned())],
+        "{:?}",
+        h.pool.fails_of(7)
+    );
+    // And the engine refusing its runtime fails it as any sandboxed start: never on runc.
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
+    h.give(on_lane(community(8, GEN2), "aarch64", Some("native")));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert!(!h.engine.has(8, GEN2));
+    assert!(runtimes_of(&h, 8, GEN2)
+        .iter()
+        .all(|r| r.as_deref() == Some("runsc")));
+    assert_eq!(h.pool.fails_of(8)[0]["lost"], true);
+}
+
 #[test]
 fn a_package_with_its_signed_exception_goes_back_from_a_host_whose_envelope_does_not_grant_it() {
     // A rootless host, say: its bridges reach the LAN through the engine's user-mode network
@@ -3724,6 +4262,46 @@ fn a_job_holds_the_job_unit_never_a_tasks_and_a_second_job_handed_meanwhile_is_g
     assert_eq!(h.pool.last_claim()["want"], 0);
     d.kill_jobs();
     assert!(gone(&pid));
+}
+
+/// A pool job is the project's own (#340): on a sandboxed host (#330) its helpers run on the
+/// engine's own runtime, on its emulated lane too — the `x86_64` ring's health check on the
+/// Studio's, which a sandbox's kernel could not run — and the shim's context names no runtime.
+/// A sandbox hold holds the job unit with the rest: one claim says `want` for both.
+#[test]
+fn a_pool_jobs_helpers_on_a_sandboxed_host_run_on_the_engines_own_runtime_and_a_sandbox_hold_holds_it_too(
+) {
+    let h = H::new();
+    sandboxed_file(&h);
+    let mut d = h.dispatcher();
+    let ctx = h.out("helper-50.json");
+    h.launch.set(
+        50,
+        &format!("cp \"$JOB_DIR/helper.json\" {}; {JOB_DONE}", ctx.display()),
+    );
+    h.give(job(
+        50,
+        "health",
+        "x86_64",
+        json!({ "ring": "rc", "arch": "x86_64" }),
+        GEN,
+    ));
+    h.until(&mut d, "the health check's report", |h| {
+        !h.pool.completes_of(50).is_empty()
+    });
+    let c: Value = serde_json::from_slice(&std::fs::read(&ctx).unwrap()).unwrap();
+    assert_eq!(c["arches"], json!(["aarch64", "x86_64"]));
+    assert!(c.get("runtime").is_none(), "{c}");
+    // The runtime breaks: a contributor's build is refused, and the claims hold, the pool's
+    // kinds with them, though the job unit is free.
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
+    h.give(on_lane(community(7, GEN2), "aarch64", Some("native")));
+    h.advance(31);
+    h.ticks(&mut d, 4);
+    assert_eq!(h.pool.fails_of(7)[0]["lost"], true);
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], 0, "{c}");
+    assert!(c["capacity"]["sandbox_held"].is_string(), "{c}");
 }
 
 #[test]
