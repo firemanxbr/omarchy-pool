@@ -84,7 +84,7 @@ export interface HostRow {
   seal_key: string | null; seal_confirmed: string | null;
   /** #330: the sandbox its dispatcher's last claim said it applies (migration 0049, hosts.ts sandboxApplied); NULL while its claims do not say. */
   sandbox_applied: string | null;
-  /** #330: where its key lives as its enrollment said — `file` or `tpm` — and why a file key is not in its TPM (migration 0050); NULL for a host enrolled before, whose Ed25519 key is a file. */
+  /** #330: where its key lives as its enrollment said — `file` or `tpm` — and why a file key is not in its TPM (migration 0051); NULL for a host enrolled before, whose Ed25519 key is a file. */
   key_store: string | null; key_held: string | null;
 }
 
