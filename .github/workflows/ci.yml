@@ -98,7 +98,7 @@ jobs:
         run: cargo test --locked -p omarchy-agent --lib -- --ignored conformance
         env:
           OMARCHY_SIGSTORE_CONFORMANCE: ${{ github.workspace }}/sigstore-conformance
-      - name: The agent's tests on macOS — the plist plutil reads, the omarchy VM's size, mounts, clock and rate limit, install and uninstall on a played Mac, caffeinate's PreventUserIdleSystemSleep as pmset lists it and the sleep watcher's start (#329)
+      - name: The agent's tests on macOS — the plist plutil reads, the omarchy VM's size, mounts, clock and rate limit, install and uninstall on a played Mac, caffeinate's PreventUserIdleSystemSleep as pmset lists it and the sleep watcher's start (#329), the seal key in a keychain of its own (#328)
         if: runner.os == 'macOS'
         run: cargo test --locked -p omarchy-agent
 
@@ -108,7 +108,10 @@ jobs:
     # out — two releases, ordered restarts (exit 75) during a guard, broken
     # releases reverted and quarantined, a rollback statement preempting a
     # round — while a task container keeps running throughout; on rootful
-    # docker and on rootless podman's API socket.
+    # docker and on rootless podman's API socket. #327: the host worker token
+    # moves from etc/dispatcher.env to its read-only file, `docker inspect`
+    # shows it in neither the dispatcher's nor the task's environment, and a
+    # rotation recreates the dispatcher alone.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -121,7 +124,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The run loop on ${{ matrix.engine }}, with only the pinned tools and a task that survives every rollout
+      - name: The run loop on ${{ matrix.engine }}, with only the pinned tools and a task that survives every rollout and a token rotation, the token in no container's environment
         run: bash tests/agent-run-loop.sh ${{ matrix.engine }}
 
   agent-host-orders:
@@ -133,7 +136,11 @@ jobs:
     # socket, with the pinned docker CLI and compose plugin. #325: set-units and
     # set-emulate narrow the run/capacity.json the recreated dispatcher mounts
     # while the task runs on, a value above the envelope is refused, and
-    # diagnostics read the stand-in's own log with its token scrubbed.
+    # diagnostics read the stand-in's own log with its token scrubbed. #328: a
+    # widening the owner's passkey (pinned at the host) signed raises the units
+    # the recreated dispatcher mounts, its replay is refused, and an agent key
+    # sealed to the host lands in agent.env, never in the dispatcher's env or
+    # mounts.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -146,7 +153,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The host orders on ${{ matrix.engine }}, beside a stand-in legacy compose project, and a narrowing of units end to end
+      - name: The host orders on ${{ matrix.engine }}, beside a stand-in legacy compose project, a narrowing of units and an owner's signed widening end to end
         run: bash tests/agent-host-orders.sh ${{ matrix.engine }}
 
   agent-runtime-switch:
@@ -187,6 +194,12 @@ jobs:
     # API socket. pasta's guest-mapped address is tried only where rootless
     # podman runs pasta with it (5.3 on): the runner's podman 4.9 does not, so
     # that part is skipped here with a note and runs by hand on such a host.
+    # #373: the probe runs the way a task runs — a network made like a task's,
+    # behind an egress sidecar with the dispatcher's deny list (here a stand-in
+    # the script builds from this commit's pkg-repo egress on the pinned Arch
+    # base; the worker-image job runs it again with the worker image) — and
+    # passes on both engines, while a network made without --internal, or a
+    # sidecar not given a public address of the host's, fails it.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -199,7 +212,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The egress probe (a task network's gateway, made as the dispatcher makes it, and the host's loopback too) and a legacy project on ${{ matrix.engine }}
+      - name: The egress probe the way a task runs, behind its egress sidecar (a task network's gateway, made as the dispatcher makes it, and the host's loopback too) and a legacy project on ${{ matrix.engine }}
         run: bash tests/agent-install.sh ${{ matrix.engine }}
 
   emulated-lane:
@@ -230,6 +243,39 @@ jobs:
       - name: The other architecture's lane — the agent's smoke run, the envelope, a disabled handler — and one emulated build through the dispatcher
         run: bash tests/emulated-lane.sh
 
+  sandboxed-runtime:
+    name: Sandboxed runtime on a real engine (gVisor)
+    # #330 (design v2 §10.4; D43): gVisor's runsc, from a pinned release checked against its
+    # SHA-512, registered with the runner's docker (`runsc install`) — the agent's detection
+    # finds it after its smoke run on a kernel that is not the engine's (the envelope's
+    # `sandbox = "off"`, and a runtime the engine does not list, keep it off); a community
+    # build through the dispatcher runs in it, reaching its egress sidecar, while the project's
+    # build beside it and every sidecar run on runc; a runtime the engine does not have fails
+    # the community task lost before it runs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: gVisor's runsc, release 20260928 checked against its SHA-512, registered with docker
+        run: |
+          set -euo pipefail
+          release=20260928
+          sha512=4ce35ca83aef7f96b06cde668e0b23aa98b05aa1829508e974196c2a1e02786c95f5bf79315fd7ddcfd88fe7a00f083ed8053e25eff7673d28d5256440caae8b
+          curl -fsSLo "$RUNNER_TEMP/gvisor.tar.zstd" "https://storage.googleapis.com/gvisor/releases/release/$release/x86_64/gvisor.tar.zstd"
+          echo "$sha512  $RUNNER_TEMP/gvisor.tar.zstd" | sha512sum -c -
+          # runsc finds its helpers in gvisor-bin/ beside it.
+          sudo mkdir -p /opt/gvisor
+          sudo tar --zstd -xf "$RUNNER_TEMP/gvisor.tar.zstd" -C /opt/gvisor
+          sudo /opt/gvisor/runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}' | jq -c 'with_entries(.value |= {path, runtimeType})'
+      - name: The sandboxed runtime — the agent finds runsc after its smoke run, a community build runs in it, the project's build and every sidecar on runc, a runtime the engine lacks never falls back
+        run: bash tests/sandboxed-runtime.sh
+
   agent-self-update:
     name: Host agent self-update under systemd --user
     # #316: deliberately broken builds of a higher agent — a panic while it
@@ -253,6 +299,37 @@ jobs:
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
       - name: A good build passes its health gate, broken ones are rolled back after three starts
         run: bash tests/agent-self-update.sh
+
+  agent-quadlet:
+    name: Host agent on the Quadlet driver (rootless podman, systemd --user)
+    # #330: the set as a unit of the user's own systemd on rootless podman,
+    # with no compose. podman's own generator reads what the agent renders
+    # from the same bundle every other host runs and writes the argv compose
+    # would; then the run loop rolls a stand-in dispatcher out as that unit —
+    # releases, ordered restarts (exit 75) during a guard counted as the
+    # service's restarts, broken releases reverted and quarantined, a
+    # rollback statement, the host worker token in its read-only file (#327)
+    # and a rotation restarting the unit alone — while a task container keeps
+    # running. The
+    # runner's user manager is started by lingering, as the installer does
+    # on a host.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Start the runner user's systemd manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          for _ in $(seq 1 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      - name: The generator reads the rendered set, and the run loop rolls it out as a Quadlet unit with a task that survives every rollout
+        run: |
+          command -v podman >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q podman; }
+          bash tests/agent-quadlet.sh
 
   agent-version:
     name: Host agent version (raised with every change to the agent)
@@ -282,7 +359,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz@0.13.2
-      - name: The manifest, statement, bundle, set and state parsers, 60 seconds each
+      - name: The manifest, statement, bundle, set, state and co-signature parsers, 60 seconds each
         run: bash tests/agent-fuzz.sh 60
 
   supply-chain:
@@ -362,6 +439,9 @@ jobs:
       - name: The image reinstalls a Claude Code that does not answer, so a restart of the agent service fixes a broken install
         working-directory: .
         run: bash tests/entrypoint-agent.sh
+      - name: The image takes the worker token from a read-only file over the plain variable, which still starts an older release's dispatcher
+        working-directory: .
+        run: bash tests/entrypoint-token-file.sh
       - name: The restart policy a worker counts on, on a real engine (on-failure:N runs out)
         working-directory: .
         run: bash tests/restart-policy.sh
@@ -394,6 +474,9 @@ jobs:
       - name: What the hosts' trust relies on — one exact cosign, signing only in reviewed environments, the exact identity, pinned images
         working-directory: .
         run: bash tests/trust-pins.sh
+      - name: The maintainers' co-signature — ssh-keygen and the agent read one format, governance pins it, and a release stays a draft without it
+        working-directory: .
+        run: bash tests/cosignature.sh
       - name: busybox, for install.sh's run under busybox sh
         working-directory: .
         run: sudo apt-get update && sudo apt-get install -y busybox
@@ -444,9 +527,15 @@ jobs:
       # On docker only: the script's podman run (RUNTIME=podman, the dispatcher's docker CLI on
       # podman's socket) is by hand; in CI a task network the dispatcher makes on podman is covered
       # by agent-install's pkg-repo test on rootless podman (#372).
-      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own
+      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env and its read-only token file, no token or key in any container's environment; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own
         run: bash tests/task-networks.sh
         env:
           WORKER_IMAGE: omarchy-worker:ci
           PKG_REPO: target/release/pkg-repo
           OMARCHY_AGENT: target/release/omarchy-agent
+      # #373: the install's egress probe behind the egress sidecar this image runs, as every
+      # task's (agent-install's own jobs use a stand-in built from the same pkg-repo).
+      - name: The install's egress probe the way a task runs, behind the worker image's own egress sidecar, on docker
+        run: bash tests/agent-install.sh docker
+        env:
+          WORKER_IMAGE: omarchy-worker:ci

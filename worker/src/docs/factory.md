@@ -559,7 +559,8 @@ jobs       a pool job (#340): one at a time, in a child process of its own (pkg-
            relayout 240) and failed; a job running when the dispatcher is replaced fails `lost`; its scripts' only
            engine omarchy-task-run (RUNTIME, and docker and podman first on its PATH): `run --rm --platform …
            [-e KEYRING=…] -v <scratch dir>:/repo[:ro] <an image tests/images.env pins> bash /repo/<script>.sh` as a
-           helper <network>-helper on the job's own internal network beside its egress sidecar (health, promote,
+           helper <network>-helper on the job's own internal network beside its egress sidecar, made as a task's
+           and never a sizing exception's bridge, whatever OMARCHY_DIRECT_NETWORK grants (health, promote,
            security and enqueue — its PKGBUILD reader, on the host's native arch — get a /28), anything else
            refused (125); the job holds the unit kept for pool jobs, never a task's (a build starts beside it)
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
@@ -577,7 +578,10 @@ network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a 
            a model kind's agent sidecar <network>-agent (the broker, agent.env read-only, its caps in BROKER_AGENT_*,
            its usage in <task dir>/agent); all removed with the lease, orphans of this host swept at start and
            before each /28 is chosen;
-           factory/sizing network = "direct" (with a reason): a bridge network of its own, no egress
+           factory/sizing network = "direct" (with a reason): a bridge network of its own, no egress — on a
+           host whose envelope grants it (OMARCHY_DIRECT_NETWORK, #373); elsewhere handed back lost (the attempt
+           given back for a task's first HOST_LOSSES_MAX losses, spent after: the claim does not say yet whether
+           a host runs such packages)
 agent      the claim's agent: {provider, model, probe, error, checked_at} from a probe sidecar on a network of its own
            (at start, every 30 min, sooner after a failure, and for recheck-agent / restart-agent); the day's agent
            calls (OMARCHY_AGENT_CALLS_PER_DAY) spent: agent_slots 0 in the claim and no model task starts

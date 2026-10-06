@@ -5,12 +5,16 @@
 # release checkout whose build script is a probe task. Two tasks run at once:
 # A, a draft (a model kind: an agent sidecar), and B, a contributor's build.
 #
-#   0. the dispatcher starts from what the agent wrote (#371): `omarchy-agent
-#      dispatcher-env --write` renders etc/dispatcher.env beside a worker
-#      token — this machine's own addresses (its interfaces', and a stand-in
-#      for the public address install's egress probe saw), the secrets
-#      directory and the envelope's agent budget — keeping the token and an
-#      owner's line, 0600; the dispatcher's environment is that file
+#   0. the dispatcher starts from what the agent wrote (#371, #327):
+#      `omarchy-agent dispatcher-env --write` renders etc/dispatcher.env —
+#      this machine's own addresses (its interfaces', and a stand-in for the
+#      public address install's egress probe saw), the secrets directory, the
+#      envelope's agent budget and its grant of a signed exception's bridge
+#      (OMARCHY_DIRECT_NETWORK=1, #373) — keeping an owner's line, 0600, and
+#      moves the worker token an older agent left there to its own file,
+#      run/host/dispatcher/token (0400); the dispatcher's environment is the
+#      env file and OMARCHY_WORKER_TOKEN_FILE naming that file, as the host
+#      set gives them, and the stub pool answers who it is only to that token
 #   1. from inside a task container: a public mirror answers through its
 #      egress sidecar (CONNECT and a plain GET); 169.254.169.254 is refused by
 #      the egress and unreachable directly; a public name that resolves to
@@ -35,7 +39,9 @@
 #   2. the probe sidecar's word reaches the claim (`agent`): with a key the
 #      provider refuses, it says so, which shows the agent sidecar's way out
 #   3. a package with a signed exception in factory/sizing gets a bridge
-#      network, and its raw socket reaches the internet; its bridge's gateway
+#      network on a host whose envelope grants it (this one's, step 0; a host
+#      without the grant hands it back, #373: pkg-repo's dispatch tests), and
+#      its raw socket reaches the internet; its bridge's gateway
 #      is the host itself on a rootful engine, out of reach behind an INPUT
 #      drop for its /28 (the rule prep-root.sh's OMARCHY-TASKS-HOST chain
 #      holds for each task subnet, #367), which this test adds for the run
@@ -43,6 +49,11 @@
 #      and 2 were judged, and a note where it may not
 #   4. stopping A removes its container, its egress and agent sidecars and its
 #      network, and nothing of B's
+#
+# And `docker inspect` of every container the dispatcher made — the task
+# containers, their egress and agent sidecars — shows no token or key in its
+# environment (#327): the agent sidecar names its keys' read-only file only,
+# and the draft's task names its key as the placeholder alone.
 #
 # Every container, network and image it makes is labelled with this run's own
 # host id and removed at the end; nothing else on the engine is touched.
@@ -222,25 +233,33 @@ socket_cli = "/var/run/docker.sock"
 allow_socket = true
 rootful_ack = true
 dedicated = true
+direct_network = true
 agent_budget = { calls_per_task = 37, tokens_per_task = 123456, minutes_per_task = 7, calls_per_day = 4000 }
 TOML
 chmod 600 "$agent_data/agent.toml"
 printf '{"public":"%s","at":"2026-10-03T00:00:00Z"}\n' "$host_public" > "$agent_data/egress.json"
 printf '# worker: net-test-0a9z\nOMARCHY_WORKER_TOKEN=%s\nTZ=UTC\n' "$token" > "$envfile"
 "$OMARCHY_AGENT" dispatcher-env --data-dir "$agent_data" --write > "$tmp/agent.out" 2>&1 || { cat "$tmp/agent.out" >&2; fail "omarchy-agent dispatcher-env --write"; }
+grep -q 'moved the worker token it held to run/host/dispatcher/token' "$tmp/agent.out" || fail "the token's move was not said: $(cat "$tmp/agent.out")"
 mode="$(stat -c %a "$envfile" 2>/dev/null || stat -f %Lp "$envfile")"
 [[ "$mode" == 600 ]] || fail "dispatcher.env is not 0600: $mode"
 key() { sed -n "s/^$1=//p" "$envfile"; }
-[[ "$(key OMARCHY_WORKER_TOKEN)" == "$token" && "$(key TZ)" == UTC ]] || fail "the token or the owner's line was not kept: $(sed 's/omw_[0-9a-f]*/omw_…/' "$envfile")"
+[[ -z "$(key OMARCHY_WORKER_TOKEN)" && "$(key TZ)" == UTC ]] || fail "the token left in the env file, or the owner's line lost: $(sed 's/omw_[0-9a-f]*/omw_…/' "$envfile")"
+grep -q "$token" "$envfile" && fail "the token is still in dispatcher.env"
+# The token in its own file (#327), as the host set mounts it read-only into the dispatcher.
+tokenfile="$agent_data/sets/host/run/host/dispatcher/token"
+mode="$(stat -c %a "$tokenfile" 2>/dev/null || stat -f %Lp "$tokenfile")"
+[[ "$mode" == 400 && "$(cat "$tokenfile")" == "$token" ]] || fail "run/host/dispatcher/token: mode $mode, or not the token"
 addresses=",$(key OMARCHY_HOST_ADDRESSES),"
 [[ -z "$lan_seen" || "$addresses" == *",$lan_seen,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($addresses) lacks the LAN address $lan_seen"
 [[ "$addresses" == *",$host_public,"* ]] || fail "OMARCHY_HOST_ADDRESSES ($addresses) lacks the public $host_public"
 [[ "$(key OMARCHY_SECRETS_DIR)" == "$tmp/secrets" ]] || fail "OMARCHY_SECRETS_DIR: $(key OMARCHY_SECRETS_DIR)"
 [[ "$(key OMARCHY_AGENT_CALLS_PER_TASK) $(key OMARCHY_AGENT_TOKENS_PER_TASK) $(key OMARCHY_AGENT_MINUTES_PER_TASK) $(key OMARCHY_AGENT_CALLS_PER_DAY)" == "37 123456 7 4000" ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$envfile")"
+[[ "$(key OMARCHY_DIRECT_NETWORK)" == 1 ]] || fail "the envelope's grant of a signed exception's bridge: $(grep OMARCHY_DIRECT_NETWORK "$envfile" || echo none)"
 # The dispatcher's environment is that file, as compose's env_file gives it.
 from_agent=()
 while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || from_agent+=("$line"); done < "$envfile"
-echo "ok: the agent wrote etc/dispatcher.env (0600): the token and the owner's line kept, OMARCHY_HOST_ADDRESSES=${addresses:1:${#addresses}-2}, the secrets directory, the budget"
+echo "ok: the agent wrote etc/dispatcher.env (0600): the owner's line kept, OMARCHY_HOST_ADDRESSES=${addresses:1:${#addresses}-2}, the secrets directory, the budget, the grant of a signed exception's bridge; the token moved to run/host/dispatcher/token (0400)"
 
 # The pool: who the host is, tasks one per claim (then 204), heartbeats by beats/<id>, every request kept.
 mkdir -p "$tmp/beats"; : > "$tmp/tasks.jsonl"; : > "$tmp/requests.jsonl"
@@ -305,9 +324,10 @@ net_gone() { ! "$RT" network inspect "$1" >/dev/null 2>&1; }
 
 give 1 probe-a "draft:probe-a"
 give 2 probe-b "https://example.invalid/b@v1:PKGBUILD"
-# The worker token, the host's addresses, the secrets directory and the budget: from the agent's file only.
+# The host's addresses, the secrets directory and the budget: from the agent's env file only; the worker token from its
+# file only (OMARCHY_WORKER_TOKEN_FILE, which the host set points at its read-only mount; here the file itself).
 env -u SIGNING_KEY -u GITHUB_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY \
-  -u OMARCHY_WORKER_TOKEN -u OMARCHY_HOST_ADDRESSES -u OMARCHY_SECRETS_DIR "${from_agent[@]}" "${disp_env[@]}" PATH="$disp_path" \
+  -u OMARCHY_WORKER_TOKEN -u OMARCHY_HOST_ADDRESSES -u OMARCHY_SECRETS_DIR "${from_agent[@]}" "${disp_env[@]}" PATH="$disp_path" OMARCHY_WORKER_TOKEN_FILE="$tokenfile" \
   OMARCHY_BUILD_IMAGE_AARCH64="$build_id" OMARCHY_BUILD_IMAGE_X86_64="$build_id" OMARCHY_WORKER_IMAGE="$worker_id" OMARCHY_TASK_SUBNETS="$subnets" \
   "$PKG_REPO" dispatch --api "http://127.0.0.1:$port" --pool "http://127.0.0.1:$port" \
     --work-root "$tmp/work" --capacity-file "$tmp/capacity.json" --checkout "$tmp/checkout" --ready "127.0.0.1:$ready_port" \
@@ -375,6 +395,24 @@ done
 caps="$("$RT" inspect "$A-agent" | jq -r '.[0].Config.Env[] | select(startswith("BROKER_AGENT_"))' | sort | tr '\n' ' ')"
 [[ "$caps" == "BROKER_AGENT_CALLS=37 BROKER_AGENT_TOKENS=123456 BROKER_AGENT_WALL_SECONDS=420 " ]] || fail "the agent sidecar's caps are not the envelope's budget: $caps"
 echo "ok: started from the agent's etc/dispatcher.env, every egress refuses the host's LAN address and its public one ($host_public: 'an address of this host', as [::ffff:$host_public] too), and the agent sidecar's caps are the envelope's budget"
+# Who the host is, asked with the token of its file: the stub answers that token only.
+jq -e 'select(.path == "/api/v1/factory/workers/self")' "$tmp/requests.jsonl" > /dev/null || fail "the dispatcher never asked who it is"
+# docker inspect shows no token or key in any container the dispatcher made (#327): the tasks, their egress and agent sidecars.
+# A model kind's task (A) names its key as a placeholder, the real one being its agent sidecar's: that one line is no key,
+# and any other ANTHROPIC_API_KEY is.
+placeholder="ANTHROPIC_API_KEY=via-agent-sidecar"
+for c in "$A" "$A-egress" "$A-agent" "$B" "$B-egress"; do
+  cenv="$("$RT" inspect "$c" | jq -c --arg p "$placeholder" '[.[0].Config.Env[] | select(. != $p)]')"
+  for secret in "$token" omw_ omj. sk-ant- OMARCHY_WORKER_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN; do
+    [[ "$cenv" != *"$secret"* ]] || fail "$c's environment holds $secret: $cenv"
+  done
+done
+"$RT" inspect "$A" | jq -e --arg p "$placeholder" '[.[0].Config.Env[] | select(startswith("ANTHROPIC_API_KEY="))] == [$p]' > /dev/null \
+  || fail "task A's key is not the placeholder alone: $("$RT" inspect "$A" | jq -c '[.[0].Config.Env[] | select(startswith("ANTHROPIC_"))]')"
+"$RT" inspect "$B" | jq -e '.[0].Config.Env | any(startswith("ANTHROPIC_")) | not' > /dev/null \
+  || fail "task B, a contributor's build, has an ANTHROPIC_ variable: $("$RT" inspect "$B" | jq -c '[.[0].Config.Env[] | select(startswith("ANTHROPIC_"))]')"
+"$RT" inspect "$A-agent" | jq -e '.[0].Config.Env | any(startswith("OMARCHY_AGENT_ENV="))' > /dev/null || fail "the agent sidecar names no keys file"
+echo "ok: docker inspect shows no token or key in the environment of a task, an egress or an agent sidecar (task A's key the placeholder alone, B none); the agent sidecar names its keys' read-only file"
 
 # ---------- 2. the probe sidecar ----------
 probe_said() { jq -c 'select(.path == "/api/v1/factory/claim") | .body.agent // empty' "$tmp/requests.jsonl" | tail -n1; }

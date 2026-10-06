@@ -10,6 +10,8 @@ use std::rc::Rc;
 
 use sha2::{Digest as _, Sha256};
 
+use crate::verify::cosignature::tests_support::TestKey;
+use crate::verify::cosignature::{self, Policy};
 use crate::verify::tests_support;
 use crate::verify::{BundleOutcome, Rejection, StatementOutcome};
 use crate::version::Release;
@@ -588,6 +590,14 @@ pub(crate) struct PoolState {
     pub github_reads: u32,
     /// The `Date` the host state's answer carries, whatever its status (#320).
     pub date: Option<i64>,
+    /// What GitHub says a token may do (#328's sealed `GITHUB_TOKEN`): none (no scope)
+    /// unless a test says otherwise; how many tokens were asked about.
+    pub scopes: Option<Net<Option<String>>>,
+    pub scopes_asked: u32,
+    /// GitHub does not answer for release assets (#330: a co-signature that may exist).
+    pub assets_unanswered: bool,
+    /// The release assets asked for that may not exist, by name.
+    pub asked_if_any: Vec<String>,
 }
 
 pub(crate) type Remote = Rc<RefCell<PoolState>>;
@@ -627,12 +637,23 @@ impl Pool for FakePool {
     }
 
     fn release_asset(&mut self, r: Release, name: &str) -> Net<Vec<u8>> {
-        self.0
-            .borrow()
-            .assets
+        let s = self.0.borrow();
+        if s.assets_unanswered {
+            return Net::NoAnswer("github.com did not answer".into());
+        }
+        s.assets
             .get(&format!("{r}/{name}"))
             .cloned()
             .map_or_else(|| Net::NoAnswer("HTTP 404".into()), Net::Ok)
+    }
+
+    fn release_asset_if_any(&mut self, r: Release, name: &str) -> Net<Option<Vec<u8>>> {
+        let mut s = self.0.borrow_mut();
+        s.asked_if_any.push(name.to_owned());
+        if s.assets_unanswered {
+            return Net::NoAnswer(format!("{name}: github.com did not answer"));
+        }
+        Net::Ok(s.assets.get(&format!("{r}/{name}")).cloned())
     }
 
     fn download(&mut self, url: &str) -> Net<Vec<u8>> {
@@ -670,6 +691,12 @@ impl Pool for FakePool {
         s.public.clone().unwrap_or(Net::NoAnswer("no pool".into()))
     }
 
+    fn github_scopes(&mut self, _token: &str) -> Net<Option<String>> {
+        let mut s = self.0.borrow_mut();
+        s.scopes_asked += 1;
+        s.scopes.clone().unwrap_or(Net::Ok(Some(String::new())))
+    }
+
     fn github_latest(&mut self) -> Net<Release> {
         let mut s = self.0.borrow_mut();
         s.github_reads += 1;
@@ -682,8 +709,10 @@ impl Pool for FakePool {
 // ---------------------------------------------------------------------------------------
 // Signed content.
 
-/// Verifies for real but for the cryptographic check, which vouches at `signed_at`.
-pub(crate) struct TestVerifier(pub Rc<RefCell<i64>>);
+/// Verifies for real but for the cryptographic check, which vouches at `signed_at`; the
+/// maintainers' co-signature policy is the test's (none unless it pins one, #330), never
+/// the one this build pins.
+pub(crate) struct TestVerifier(pub Rc<RefCell<i64>>, pub Rc<RefCell<Policy>>);
 
 impl Verifier for TestVerifier {
     fn bundle(&self, archive: &[u8], sig: &[u8]) -> Result<BundleOutcome, Rejection> {
@@ -692,10 +721,28 @@ impl Verifier for TestVerifier {
     fn statement(&self, json: &[u8], sig: &[u8]) -> Result<StatementOutcome, Rejection> {
         tests_support::verify_statement(json, sig, *self.0.borrow())
     }
+    fn cosignature(&self) -> Policy {
+        self.1.borrow().clone()
+    }
 }
 
 pub(crate) const HOST_COMPOSE: &str = include_str!("../../../../factory/sets/host/compose.yml");
 pub(crate) const HOST_SET: &str = include_str!("../../../../factory/sets/host/set.toml");
+
+/// The host template as a release from before #327 had it: the dispatcher reads its token
+/// from `etc/dispatcher.env` and mounts no token file.
+pub(crate) fn before_token_file(compose: &str) -> String {
+    let env = "      OMARCHY_WORKER_TOKEN_FILE: /run/omarchy/worker-token   # the host worker token, a read-only file (#327)\n";
+    let mount = "      # Its own token file and nothing else of the set's secrets (design v2 §14, D15): the agent\n      # writes it (0400) and rotates it; never a value in the environment `docker inspect` shows.\n      - type: bind\n        source: ./run/host/dispatcher/token\n        target: /run/omarchy/worker-token\n        read_only: true\n        bind: { create_host_path: false }\n";
+    assert!(
+        compose.contains(env) && compose.contains(mount),
+        "the host template's token file changed: this helper follows it"
+    );
+    let older = compose.replacen(env, "", 1).replacen(mount, "", 1);
+    assert!(!crate::lint::reads_token_file(&older));
+    assert!(crate::lint::secret_files(&older).is_empty());
+    older
+}
 
 /// The host template rendered as release.yml renders it, with the example manifest's
 /// images; `extra` lines are appended to the dispatcher (`command: [broken]`).
@@ -750,6 +797,21 @@ pub(crate) fn publish_agent(remote: &Remote, r: &str, agent: &Ships) {
 /// The same, its manifest's `agent.urgent` as given (#326: only a security release sets
 /// it, and its agent does not wait for the owner's soak).
 pub(crate) fn publish_agent_as(remote: &Remote, r: &str, agent: &Ships, urgent: bool) {
+    let m = agent_manifest(remote, r, agent, urgent);
+    publish_manifest(remote, r, "2027-01-14T08:00:00Z", m, "");
+}
+
+/// The same, with the template of a release from before #327 ([`before_token_file`]).
+pub(crate) fn publish_agent_before_token_file(remote: &Remote, r: &str, agent: &Ships) {
+    let mut m = agent_manifest(remote, r, agent, false);
+    m["created"] = "2027-01-14T08:00:00Z".into();
+    m["inner"]["pools"] = serde_json::json!(["https://pkgs.omarchy-pool.org"]);
+    publish_compose(remote, r, m, &before_token_file(&rendered_compose("")));
+}
+
+/// `r`'s manifest shipping `agent` (`agent.urgent` as given), whose binary is published as
+/// its asset.
+fn agent_manifest(remote: &Remote, r: &str, agent: &Ships, urgent: bool) -> serde_json::Value {
     let mut m = tests_support::manifest_json(r, "v1.0.0", &[]);
     m["agent"]["version"] = agent.version.into();
     m["agent"]["urgent"] = urgent.into();
@@ -761,7 +823,16 @@ pub(crate) fn publish_agent_as(remote: &Remote, r: &str, agent: &Ships, urgent: 
         .borrow_mut()
         .assets
         .insert(format!("{r}/{asset}"), agent.binary.to_vec());
-    publish_manifest(remote, r, "2027-01-14T08:00:00Z", m, "");
+    m
+}
+
+/// Publishes `r` (created a day before T0) with the template of a release from before #327
+/// ([`before_token_file`]).
+pub(crate) fn publish_before_token_file(remote: &Remote, r: &str) {
+    let mut m = tests_support::manifest_json(r, "v1.0.0", &[]);
+    m["created"] = "2027-01-14T08:00:00Z".into();
+    m["inner"]["pools"] = serde_json::json!(["https://pkgs.omarchy-pool.org"]);
+    publish_compose(remote, r, m, &before_token_file(&rendered_compose("")));
 }
 
 fn publish_manifest(
@@ -773,7 +844,10 @@ fn publish_manifest(
 ) {
     m["created"] = created.into();
     m["inner"]["pools"] = serde_json::json!(["https://pkgs.omarchy-pool.org"]);
-    let compose = rendered_compose(extra);
+    publish_compose(remote, r, m, &rendered_compose(extra));
+}
+
+fn publish_compose(remote: &Remote, r: &str, m: serde_json::Value, compose: &str) {
     let archive = tests_support::bundle_archive(
         m,
         &[
@@ -813,14 +887,35 @@ pub(crate) fn relay_statement_agent(
         Relayed {
             statement: json.into_bytes(),
             bundle: sig.to_vec(),
+            cosignatures: BTreeMap::new(),
         },
     );
+}
+
+/// A maintainer co-signs release `r`'s bundle as published: the asset
+/// `omarchy-host-<r>.tar.gz.<login>.sshsig` beside it (#330).
+pub(crate) fn cosign(remote: &Remote, r: &str, key: &TestKey) {
+    let name = format!("omarchy-host-{r}.tar.gz");
+    let mut s = remote.borrow_mut();
+    let archive = s.assets[&format!("{r}/{name}")].clone();
+    s.assets.insert(
+        format!("{r}/{}", cosignature::file_name(&name, &key.login)),
+        key.sign(cosignature::BUNDLE_NAMESPACE, &archive),
+    );
+}
+
+/// A maintainer co-signs the statement the pool relays for going back to `to` (#330).
+pub(crate) fn cosign_statement(remote: &Remote, to: &str, key: &TestKey) {
+    let mut s = remote.borrow_mut();
+    let relayed = s.statements.get_mut(&Release::parse(to).unwrap()).unwrap();
+    let sig = key.sign(cosignature::ROLLBACK_NAMESPACE, &relayed.statement);
+    relayed.cosignatures.insert(key.login.clone(), sig);
 }
 
 // ---------------------------------------------------------------------------------------
 // A host: the agent with its set directory, a fake engine and a fake pool.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::agent::{Agent, Drivers};
 use super::config::{Config, Paths};
@@ -828,39 +923,121 @@ use super::state::{self, State, Step};
 
 pub(crate) const TOKEN: &str = "omw_test_token_0123456789";
 
+/// `<set>/run/host/dispatcher/token` as the agent writes it (#327): 0400 in 0700
+/// directories.
+pub(crate) fn write_token_file(set: &std::path::Path, token: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let file = crate::dispatcher_env::token_path_in(set);
+    let dir = file.parent().unwrap();
+    fs::create_dir_all(dir).unwrap();
+    for d in [dir, dir.parent().unwrap()] {
+        fs::set_permissions(d, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _ = fs::remove_file(&file);
+    fs::write(&file, format!("{token}\n")).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).unwrap();
+}
+/// The registration the token belongs to, as the env file names it: the agent's own
+/// (`worker_id` in its agent.toml), which the pool's token answers name.
+pub(crate) const WORKER: &str = "m1-test-0a9z";
+
 pub(crate) struct World {
     pub agent: Agent,
     pub engine: Engine,
     pub remote: Remote,
     pub signed_at: Rc<RefCell<i64>>,
+    /// The maintainers' co-signature the agent requires (#330): none unless a test pins one.
+    pub cosign: Rc<RefCell<Policy>>,
     pub dir: PathBuf,
     pub now: i64,
     /// The engines by socket (#325's runtime switch): the agent's driver is the one its
     /// agent.toml names, and a switch reaches another through here.
     pub sockets: Sockets,
+    /// The rootless podmans under the user's systemd the Quadlet driver runs on (#330), by
+    /// their API socket.
+    pub quadlets: Quadlets,
 }
 
 pub(crate) type Sockets = Rc<RefCell<BTreeMap<PathBuf, Engine>>>;
+pub(crate) type Quadlets = Rc<RefCell<BTreeMap<PathBuf, super::fake_quadlet::QHost>>>;
 
 /// 2027-01-15T08:00:00Z.
 pub(crate) const T0: i64 = 1_800_000_000;
 
+/// Rootless podman's API socket on the Quadlet worlds (#330).
+pub(crate) const QUADLET_SOCKET: &str = "/run/user/1000/podman/podman.sock";
+
 impl World {
     pub fn new() -> Self {
+        Self::from_toml(|t, _| t)
+    }
+
+    /// A rootless podman host on the Quadlet driver (#330): the user's systemd runs the set,
+    /// its units in the test's own `config/containers/systemd`.
+    pub fn quadlet() -> Self {
+        Self::from_toml(|t, dir| {
+            t.replacen(
+                "socket_cli = \"/var/run/docker.sock\"\n",
+                &format!(
+                    "socket_cli = \"{QUADLET_SOCKET}\"\ndriver = \"quadlet\"\nengine = \"rootless\"\nunit_dir = \"{}\"\n",
+                    dir.join("config/containers/systemd").display()
+                ),
+                1,
+            )
+        })
+    }
+
+    /// The host's Quadlet podman and user systemd (#330).
+    pub fn quadlet_host(&self) -> super::fake_quadlet::QHost {
+        Rc::clone(
+            self.quadlets
+                .borrow()
+                .get(Path::new(QUADLET_SOCKET))
+                .expect("a Quadlet world"),
+        )
+    }
+
+    /// [`World::running_v1`] on the Quadlet driver.
+    pub fn quadlet_running_v1() -> Self {
+        let mut w = World::quadlet();
+        w.release("v1.0.0");
+        w.target("v1.0.0", None);
+        w.round();
+        assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+        w.quadlet_host().borrow_mut().start_task();
+        w
+    }
+
+    /// A host whose agent.toml is the example's as `edit` makes it, given the test's own
+    /// directory.
+    fn from_toml(edit: impl FnOnce(String, &Path) -> String) -> Self {
         let dir = super::state::tempdir();
         let set = dir.join("set");
         fs::create_dir_all(set.join("etc")).unwrap();
         fs::create_dir_all(set.join("run")).unwrap();
+        // What the enrollment wrote (#327): the registration in the env file, the token in
+        // its own file, 0400.
         fs::write(
             set.join("etc/dispatcher.env"),
-            format!("OMARCHY_WORKER_TOKEN={TOKEN}\n"),
+            format!("# worker: {WORKER}\n"),
         )
         .unwrap();
+        // 0600 in a 0700 etc/, as the agent writes them, whatever the umask: a round refuses
+        // an env file others may write, and a rotation an etc/ they may write.
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for (path, mode) in [("etc/dispatcher.env", 0o600), ("etc", 0o700)] {
+                fs::set_permissions(set.join(path), fs::Permissions::from_mode(mode)).unwrap();
+            }
+        }
+        write_token_file(&set, TOKEN);
         fs::write(set.join("run/capacity.json"), r#"{"schema":2,"units":3}"#).unwrap();
-        let cfg = Config::parse(&super::config::tests::example(
-            &set,
-            &dir.join("work"),
-            &dir.join("secrets"),
+        // The work root, as install makes it: the dispatcher binds it, and podman (the
+        // Quadlet driver's, #330) binds only a source that is there.
+        fs::create_dir_all(dir.join("work")).unwrap();
+        let cfg = Config::parse(&edit(
+            super::config::tests::example(&set, &dir.join("work"), &dir.join("secrets")),
+            &dir,
         ))
         .unwrap();
         let paths = Paths {
@@ -873,19 +1050,37 @@ impl World {
         }));
         let remote: Remote = Rc::new(RefCell::new(PoolState::default()));
         let signed_at = Rc::new(RefCell::new(T0));
+        let cosign = Rc::new(RefCell::new(Policy::default()));
         let sockets: Sockets = Rc::new(RefCell::new(BTreeMap::from([(
             cfg.socket_cli.clone(),
             Rc::clone(&engine),
         )])));
-        let agent = Self::agent(cfg, paths, State::default(), &sockets, &remote, &signed_at);
+        let quadlets: Quadlets = Rc::default();
+        if cfg.driver == super::config::DriverKind::Quadlet {
+            quadlets.borrow_mut().insert(
+                cfg.socket_cli.clone(),
+                super::fake_quadlet::host(cfg.quadlet_dir().unwrap(), T0),
+            );
+        }
+        let agent = Self::agent(
+            cfg,
+            paths,
+            State::default(),
+            (&sockets, &quadlets),
+            &remote,
+            &signed_at,
+            &cosign,
+        );
         World {
             agent,
             engine,
             remote,
             signed_at,
+            cosign,
             dir,
             now: T0,
             sockets,
+            quadlets,
         }
     }
 
@@ -893,40 +1088,67 @@ impl World {
         cfg: Config,
         paths: Paths,
         state: State,
-        sockets: &Sockets,
+        (sockets, quadlets): (&Sockets, &Quadlets),
         remote: &Remote,
         signed_at: &Rc<RefCell<i64>>,
+        cosign: &Rc<RefCell<Policy>>,
     ) -> Agent {
         let mut a = Agent::new(
             cfg,
             paths,
             state,
             Box::new(FakePool(Rc::clone(remote))),
-            Box::new(TestVerifier(Rc::clone(signed_at))),
+            Box::new(TestVerifier(Rc::clone(signed_at), Rc::clone(cosign))),
             Drivers::Fixed,
         );
         // A Linux host's agent, whichever OS runs the tests: a Mac (#320) is played with
         // `mac` and agent.toml's `[vm]`.
         a.mac = false;
-        let by_socket = Rc::clone(sockets);
-        a.drivers_on = Some(Box::new(move |socket| {
+        let (by_socket, by_quadlet) = (Rc::clone(sockets), Rc::clone(quadlets));
+        a.drivers_on = Some(Box::new(move |p: &super::switch::Place| {
+            if p.driver == "quadlet" {
+                return by_quadlet
+                    .borrow()
+                    .get(&p.socket_cli)
+                    .map(super::fake_quadlet::driver);
+            }
             by_socket
                 .borrow()
-                .get(socket)
+                .get(&p.socket_cli)
                 .map(|e| Box::new(FakeDriver(Rc::clone(e))) as Box<dyn Driver>)
         }));
-        Self::drive(&mut a, sockets);
+        Self::drive(&mut a, (sockets, quadlets));
         a
     }
 
-    /// The agent's driver: the engine its configuration names now.
-    fn drive(a: &mut Agent, sockets: &Sockets) {
+    /// The agent's driver: the engine its configuration names now, through the driver it
+    /// names (#330: Quadlet's on a rootless podman under the user's systemd).
+    fn drive(a: &mut Agent, (sockets, quadlets): (&Sockets, &Quadlets)) {
+        if a.cfg.driver == super::config::DriverKind::Quadlet {
+            let q = quadlets
+                .borrow()
+                .get(&a.cfg.socket_cli)
+                .cloned()
+                .expect("a user systemd and podman on the configured socket");
+            a.driver = Some(super::fake_quadlet::driver(&q));
+            return;
+        }
         let e = sockets
             .borrow()
             .get(&a.cfg.socket_cli)
             .cloned()
             .expect("an engine on the configured socket");
         a.driver = Some(Box::new(FakeDriver(e)));
+    }
+
+    /// A rootless podman under the user's systemd on `socket` (#330), its Quadlet
+    /// directory under the test's own.
+    pub fn add_quadlet(&self, socket: &str) -> super::fake_quadlet::QHost {
+        let q = super::fake_quadlet::host(self.dir.join("config/containers/systemd"), self.now);
+        self.quadlets
+            .borrow_mut()
+            .insert(PathBuf::from(socket), Rc::clone(&q));
+        q
     }
 
     /// Another engine on `socket` (#325): podman's API socket, say.
@@ -962,16 +1184,20 @@ impl World {
         for e in self.sockets.borrow().values() {
             e.borrow_mut().forget_pull();
         }
+        for q in self.quadlets.borrow().values() {
+            q.borrow_mut().forget_pull();
+        }
         self.agent = Self::agent(
             cfg,
             paths,
             state,
-            &self.sockets,
+            (&self.sockets, &self.quadlets),
             &self.remote,
             &self.signed_at,
+            &self.cosign,
         );
         self.agent.resume(self.now);
-        Self::drive(&mut self.agent, &self.sockets);
+        Self::drive(&mut self.agent, (&self.sockets, &self.quadlets));
     }
 
     /// The running agent installed as install.sh installs it (#316):
@@ -998,6 +1224,16 @@ impl World {
 
     pub fn set_dir(&self) -> PathBuf {
         self.dir.join("set")
+    }
+
+    /// The set's token file (#327).
+    pub fn token_file(&self) -> PathBuf {
+        crate::dispatcher_env::token_path_in(&self.set_dir())
+    }
+
+    /// Publishes `r` with the template of a release from before #327.
+    pub fn release_before_token_file(&self, r: &str) {
+        publish_before_token_file(&self.remote, r);
     }
 
     /// The pool's host state names `latest`, with an open Update `update` and no host
@@ -1058,6 +1294,9 @@ impl World {
         self.engine.borrow_mut().clock = self.now;
         for e in self.sockets.borrow().values() {
             e.borrow_mut().clock = self.now;
+        }
+        for q in self.quadlets.borrow().values() {
+            q.borrow_mut().clock = self.now;
         }
     }
 

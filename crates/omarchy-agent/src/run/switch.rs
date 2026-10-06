@@ -1,9 +1,11 @@
 //! The owner's runtime switch (#325, design v2 §15, v1 §10.4): `omarchy-agent runtime switch
 //! <driver>` at the host moves the bundle to another driver this binary carries —
-//! `compose/docker` or `compose/podman`, the compose driver against that engine's socket —
+//! `compose/docker` or `compose/podman`, the compose driver against that engine's socket,
+//! or `quadlet` (#330): the set as systemd user units on rootless podman, with no compose —
 //! with the same guard and revert as any round. The pool cannot select a driver: nothing it
 //! sends names one, and the request is a file in the agent's own data directory, which the
-//! command writes and the loop takes.
+//! command writes and the loop takes. Moving between compose on rootless podman and Quadlet
+//! keeps the engine: only the way the dispatcher is run changes.
 //!
 //! The steps, one per tick, persisted in `state.json` (`switch`) so a restart resumes:
 //!
@@ -35,7 +37,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::agent::Agent;
-use super::config::{Config, Runtime};
+use super::config::{Config, DriverKind, Runtime};
 use super::driver::{Answer, Driver};
 use super::rollout::{self, Outcome};
 use super::state::{self, Step};
@@ -48,16 +50,53 @@ pub(crate) const LIMIT_S: i64 = 20 * 60;
 /// The old dispatcher's grace, then its removal by force.
 const GRACE_S: i64 = super::rollout::GRACE_S + 30;
 
-/// Where the bundle runs: the engine, the socket the CLI talks to and the one the
-/// dispatcher mounts, and whether the engine is rootful.
+/// Where the bundle runs: the driver, the engine, the socket the CLI talks to and the one
+/// the dispatcher mounts, and whether the engine is rootful.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Place {
+    /// `compose` or `quadlet` (#330); a switch an older agent saved is compose's.
+    #[serde(default = "compose")]
+    pub driver: String,
     pub runtime: String,
     pub socket_cli: PathBuf,
     pub socket_mount: PathBuf,
     /// `rootful` or `rootless`, as agent.toml's `set.engine` says it.
     pub engine: String,
 }
+
+fn compose() -> String {
+    DriverKind::Compose.word().to_owned()
+}
+
+impl Place {
+    /// The driver as the report and the command say it: `quadlet`, `compose/<runtime>`.
+    pub fn name(&self) -> String {
+        if self.driver == DriverKind::Quadlet.word() {
+            self.driver.clone()
+        } else {
+            format!("compose/{}", self.runtime)
+        }
+    }
+}
+
+/// A driver this binary carries, by the name `runtime switch` takes: `compose/docker`,
+/// `compose/podman` (`docker`, `podman`), or `quadlet` (rootless podman's, #330).
+pub(crate) fn parse_driver(s: &str) -> Option<(DriverKind, Runtime)> {
+    match s {
+        "quadlet" => Some((DriverKind::Quadlet, Runtime::Podman)),
+        other => Runtime::parse(other).map(|r| (DriverKind::Compose, r)),
+    }
+}
+
+fn driver_name(kind: DriverKind, r: Runtime) -> String {
+    match kind {
+        DriverKind::Quadlet => kind.word().to_owned(),
+        DriverKind::Compose => r.driver(),
+    }
+}
+
+/// What every refusal of an unknown driver lists.
+const CARRIED: &str = "compose/docker, compose/podman or quadlet";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -124,10 +163,31 @@ pub(crate) fn default_socket(r: Runtime, xdg_runtime_dir: Option<&Path>) -> Vec<
     out
 }
 
+/// The sockets `runtime switch` tries, in order, when no `--socket` is given: the engine's
+/// own ([`default_socket`]). Quadlet runs this user's own podman (#330), so its rootless
+/// socket only, which `XDG_RUNTIME_DIR` locates: without it (an `su` or `sudo -u` shell, an
+/// ssh login without `pam_systemd`) there is none to try, and the refusal says why rather
+/// than naming no socket.
+pub(crate) fn switch_sockets(
+    kind: DriverKind,
+    r: Runtime,
+    xdg_runtime_dir: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut list = default_socket(r, xdg_runtime_dir);
+    if kind == DriverKind::Quadlet {
+        if xdg_runtime_dir.is_none() {
+            return Err("XDG_RUNTIME_DIR is not set: the Quadlet driver runs this user's rootless podman under this user's systemd, and its API socket is $XDG_RUNTIME_DIR/podman/podman.sock; run the switch in this user's own login session, or give --socket".into());
+        }
+        list.truncate(1);
+    }
+    Ok(list)
+}
+
 /// Where `cfg` says the bundle runs; `None` while the engine behind its socket has not
 /// said which it is (agent.toml without `set.runtime`).
 fn place_of(cfg: &Config) -> Option<Place> {
     Some(Place {
+        driver: cfg.driver.word().to_owned(),
         runtime: cfg.runtime?.word().to_owned(),
         socket_cli: cfg.socket_cli.clone(),
         socket_mount: cfg.socket_mount.clone(),
@@ -147,6 +207,7 @@ fn same_socket(a: &Path, b: &Path) -> bool {
 
 /// `cfg` pointed at `p`, in memory.
 pub(crate) fn point(cfg: &mut Config, p: &Place) {
+    cfg.driver = DriverKind::parse(&p.driver).unwrap_or_default();
     cfg.runtime = Runtime::parse(&p.runtime);
     cfg.socket_cli.clone_from(&p.socket_cli);
     cfg.socket_mount.clone_from(&p.socket_mount);
@@ -172,7 +233,7 @@ pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
         & 0o777;
     let v = |s: &str| toml::Value::String(s.to_owned()).to_string();
     let keys = [
-        ("driver", v("compose")),
+        ("driver", v(&p.driver)),
         ("runtime", v(&p.runtime)),
         ("socket_cli", v(&p.socket_cli.display().to_string())),
         ("socket_mount", v(&p.socket_mount.display().to_string())),
@@ -185,11 +246,13 @@ pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
                     t.get("set")
                         .and_then(|s| s.get("driver"))
                         .and_then(toml::Value::as_str)
-                        == Some("compose")
+                        == Some(p.driver.as_str())
                 })
         })
     };
-    let mut new = set_lines(&text, &keys);
+    let keys: Vec<(&str, Option<String>)> =
+        keys.iter().map(|(k, v)| (*k, Some(v.clone()))).collect();
+    let mut new = super::config::table_lines(&text, "set", &keys);
     if !names(&new) {
         new = reserialized(&text, p)?;
     }
@@ -198,65 +261,6 @@ pub(crate) fn write_agent_toml(path: &Path, p: &Place) -> Result<(), String> {
     state::write_atomic(path, new.as_bytes())?;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .map_err(|e| format!("{}: {e}", path.display()))
-}
-
-/// `text` with `[set]`'s `keys` (each `key = <TOML value>`) set line by line: a key's line
-/// replaced where it is, a missing one added after the section's last key, a missing
-/// section added at the end; every other line as it was.
-fn set_lines(text: &str, keys: &[(&str, String)]) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut done = vec![false; keys.len()];
-    // While in `[set]`: the index of its last line that is a key or its header.
-    let mut last: Option<usize> = None;
-    let mut seen = false;
-    let add = |out: &mut Vec<String>, done: &mut [bool], at: usize| {
-        let missing: Vec<String> = keys
-            .iter()
-            .zip(done.iter())
-            .filter(|(_, d)| !**d)
-            .map(|((k, v), _)| format!("{k} = {v}"))
-            .collect();
-        out.splice(at..at, missing);
-        done.fill(true);
-    };
-    for line in text.lines() {
-        let t = line.trim_start();
-        if t.starts_with('[') {
-            if let Some(i) = last.take() {
-                add(&mut out, &mut done, i + 1);
-            }
-            let name = t.trim_start_matches('[').split(']').next().unwrap_or("");
-            if !t.starts_with("[[") && name.trim() == "set" {
-                seen = true;
-                last = Some(out.len());
-            }
-            out.push(line.to_owned());
-            continue;
-        }
-        if let Some(i) = last.as_mut() {
-            if !t.is_empty() && !t.starts_with('#') {
-                *i = out.len();
-                let key = t.split_once('=').map(|(k, _)| k.trim().trim_matches('"'));
-                if let Some(k) = key.and_then(|k| keys.iter().position(|(n, _)| *n == k)) {
-                    let indent = &line[..line.len() - t.len()];
-                    out.push(format!("{indent}{} = {}", keys[k].0, keys[k].1));
-                    done[k] = true;
-                    continue;
-                }
-            }
-        }
-        out.push(line.to_owned());
-    }
-    if let Some(i) = last {
-        add(&mut out, &mut done, i + 1);
-    }
-    if !seen {
-        out.push(String::new());
-        out.push("[set]".to_owned());
-        let at = out.len();
-        add(&mut out, &mut done, at);
-    }
-    out.join("\n") + "\n"
 }
 
 /// agent.toml written again from its table, `[set]` naming `p`, its leading comment kept.
@@ -268,7 +272,7 @@ fn reserialized(text: &str, p: &Place) -> Result<String, String> {
         .as_table_mut()
         .ok_or("agent.toml: [set] is not a table")?;
     let s = |p: &Path| toml::Value::String(p.display().to_string());
-    set.insert("driver".into(), toml::Value::String("compose".into()));
+    set.insert("driver".into(), toml::Value::String(p.driver.clone()));
     set.insert("runtime".into(), toml::Value::String(p.runtime.clone()));
     set.insert("socket_cli".into(), s(&p.socket_cli));
     set.insert("socket_mount".into(), s(&p.socket_mount));
@@ -286,12 +290,12 @@ fn reserialized(text: &str, p: &Place) -> Result<String, String> {
 }
 
 impl Agent {
-    /// The driver on another socket: the pinned tools against it (tests: the fake engine
-    /// that socket names).
-    fn driver_on(&mut self, socket: &Path) -> Result<Box<dyn Driver>, String> {
+    /// The driver `p` names on its socket: the pinned tools against it (tests: the fake
+    /// engine that socket names).
+    fn driver_on(&mut self, p: &Place) -> Result<Box<dyn Driver>, String> {
         #[cfg(test)]
         if let Some(make) = self.drivers_on.as_mut() {
-            return make(socket).ok_or_else(|| format!("no engine at {}", socket.display()));
+            return make(p).ok_or_else(|| format!("no engine at {}", p.socket_cli.display()));
         }
         let pins = self
             .state
@@ -299,11 +303,15 @@ impl Agent {
             .clone()
             .ok_or("the pinned engine tools are not installed yet")?;
         let t = super::tools::open(&self.paths.tools(), &pins)?;
-        Ok(Box::new(super::compose::Compose::new(
-            t,
-            socket,
-            &self.paths.docker_config(),
-        )))
+        let mut cfg = self.cfg.clone();
+        point(&mut cfg, p);
+        if cfg.driver == DriverKind::Quadlet && super::quadlet::generator().is_none() {
+            return Err(
+                "podman's Quadlet generator is not installed here (the driver needs podman 4.6 or later)"
+                    .into(),
+            );
+        }
+        super::agent::driver_of(&cfg, &self.paths, t)
     }
 
     /// At start: a switch in flight is resumed on the engine it was on.
@@ -373,7 +381,7 @@ impl Agent {
         self.journal.write(
             now,
             "runtime-switch",
-            serde_json::json!({"to": format!("compose/{}", to.runtime), "socket": req.socket, "engine": to.engine, "version": version, "from": format!("compose/{}", from.runtime), "step": "stopping the dispatcher on the old engine"}),
+            serde_json::json!({"to": to.name(), "socket": req.socket, "engine": to.engine, "version": version, "from": from.name(), "step": "stopping the dispatcher on the old engine"}),
         );
         self.state.switch = Some(Switch {
             from,
@@ -404,9 +412,17 @@ impl Agent {
     /// bundle runs on.
     fn switch_ready(&mut self, req: &Request) -> Result<(Place, Place, String), String> {
         self.switch_check(req)?;
-        let r = Runtime::parse(&req.driver)
+        let (kind, r) = parse_driver(&req.driver)
             .ok_or_else(|| format!("{:?} is not a driver this agent carries", req.driver))?;
-        let mut new = self.driver_on(&req.socket)?;
+        let rootless = kind == DriverKind::Quadlet;
+        let mut to = Place {
+            driver: kind.word().to_owned(),
+            runtime: r.word().to_owned(),
+            socket_cli: req.socket.clone(),
+            socket_mount: req.socket.clone(),
+            engine: if rootless { "rootless" } else { "rootful" }.to_owned(),
+        };
+        let mut new = self.driver_on(&to)?;
         let id = match new.engine() {
             Answer::Yes(id) => id,
             Answer::NotFound => {
@@ -431,6 +447,21 @@ impl Agent {
                 r.word()
             ));
         }
+        if kind == DriverKind::Quadlet && !id.rootless {
+            return Err(format!(
+                "{} answers as rootful podman {}: the Quadlet driver runs rootless podman under this user's systemd",
+                req.socket.display(),
+                id.version
+            ));
+        }
+        // The units the driver writes need a podman whose Quadlet reads every key of them:
+        // an older one would make no service, and the switch's round would fail at create.
+        let old = (kind == DriverKind::Quadlet)
+            .then(|| crate::quadlet::podman_refused(&id.version))
+            .flatten();
+        if let Some(e) = old {
+            return Err(format!("{}: {e}", req.socket.display()));
+        }
         let host = self.cfg.host_id.clone();
         let tasks = match self.driver.as_deref_mut().map(|d| d.host_tasks(&host)) {
             Some(Answer::Yes(n)) => n,
@@ -443,16 +474,11 @@ impl Agent {
             .ok_or("the engine it runs on now has not said which it is (docker or podman)")?;
         if tasks > 0 {
             return Err(format!(
-                "{tasks} task container(s) run on compose/{}: task containers, named volumes and caches do not move between engines — drain the host first (Drain on its registration's page), let its tasks finish, then switch",
-                from.runtime
+                "{tasks} task container(s) run on {}: task containers, named volumes and caches do not move between engines — drain the host first (Drain on its registration's page), let its tasks finish, then switch",
+                from.name()
             ));
         }
-        let to = Place {
-            runtime: r.word().to_owned(),
-            socket_cli: req.socket.clone(),
-            socket_mount: req.socket.clone(),
-            engine: if id.rootless { "rootless" } else { "rootful" }.to_owned(),
-        };
+        if id.rootless { "rootless" } else { "rootful" }.clone_into(&mut to.engine);
         Ok((from, to, id.version))
     }
 
@@ -467,17 +493,17 @@ impl Agent {
         if self.cfg.mac || self.mac {
             return Err("this host's bundle runs in a Mac's VM (#320), whose engine the agent keeps: the runtime switch moves between a Linux host's engines only".into());
         }
-        let r = Runtime::parse(&req.driver).ok_or_else(|| {
+        let (kind, r) = parse_driver(&req.driver).ok_or_else(|| {
             format!(
-                "{:?} is not a driver this agent carries (compose/docker, compose/podman)",
+                "{:?} is not a driver this agent carries ({CARRIED})",
                 req.driver
             )
         })?;
-        if !self.cfg.policy.allows_driver(r) {
+        let name = driver_name(kind, r);
+        if !self.cfg.policy.allows(&name) {
             return Err(format!(
-                "the envelope's drivers ({}) do not name {}: only its owner widens that, in agent.toml",
+                "the envelope's drivers ({}) do not name {name}: only its owner widens that, in agent.toml",
                 self.cfg.policy.drivers.join(", "),
-                r.driver()
             ));
         }
         if !plain_absolute(&req.socket) {
@@ -486,12 +512,13 @@ impl Agent {
                 req.socket.display()
             ));
         }
-        // The socket alone decides: one socket is one engine, whichever driver is named
-        // (the engine's own answer refuses a mismatch on another socket).
-        if same_socket(&req.socket, &self.cfg.socket_cli) {
+        // One socket is one engine, whichever compose driver is named (the engine's own
+        // answer refuses a mismatch on another socket); on rootless podman's, compose and
+        // Quadlet (#330) are two ways to run the same engine's dispatcher.
+        if same_socket(&req.socket, &self.cfg.socket_cli) && kind == self.cfg.driver {
             let at = req.socket.display();
-            return Err(match self.cfg.runtime {
-                Some(on) => format!("the bundle runs on {} at {at} already", on.driver()),
+            return Err(match self.cfg.driver_name() {
+                Some(on) => format!("the bundle runs on {on} at {at} already"),
                 None => format!("the bundle runs at {at} already"),
             });
         }
@@ -550,7 +577,7 @@ impl Agent {
 
     /// Moves to `p`'s engine and starts a round of the release that runs there.
     fn round_on(&mut self, p: &Place, why: &str, now: i64) -> Result<(), String> {
-        let d = self.driver_on(&p.socket_cli)?;
+        let d = self.driver_on(p)?;
         point(&mut self.cfg, p);
         self.driver = Some(d);
         let applied = self.state.applied.ok_or("no release runs")?;
@@ -571,9 +598,9 @@ impl Agent {
             }
             Err(e) => {
                 return self.switch_end(
-                    &sw.to.runtime,
+                    &sw.to.name(),
                     "refused",
-                    &format!("the old engine did not stop the dispatcher ({e}): the switch is abandoned, the bundle stays on {}", sw.from.runtime),
+                    &format!("the old engine did not stop the dispatcher ({e}): the switch is abandoned, the bundle stays on {}", sw.from.name()),
                     now,
                 );
             }
@@ -586,8 +613,8 @@ impl Agent {
             Some(Answer::Yes(0) | Answer::NotFound) => {}
             Some(Answer::Yes(n)) => {
                 let why = format!(
-                    "{n} task container(s) were claimed on compose/{} before its dispatcher stopped, and only a dispatcher there re-adopts them: drain the host first (Drain on its registration's page), let its tasks finish, then switch",
-                    sw.from.runtime
+                    "{n} task container(s) were claimed on {} before its dispatcher stopped, and only a dispatcher there re-adopts them: drain the host first (Drain on its registration's page), let its tasks finish, then switch",
+                    sw.from.name()
                 );
                 return self.go_back(&sw, &why, now);
             }
@@ -602,8 +629,8 @@ impl Agent {
             }
         }
         let why = format!(
-            "runtime switch to compose/{} (the owner's, at the host)",
-            sw.to.runtime
+            "runtime switch to {} (the owner's, at the host)",
+            sw.to.name()
         );
         match self.round_on(&sw.to, &why, now) {
             Ok(()) => self.switch_to(SwitchStep::Up, None, now),
@@ -626,7 +653,7 @@ impl Agent {
         self.journal.write(
             now,
             "runtime-switch",
-            serde_json::json!({"to": format!("compose/{}", sw.to.runtime), "step": "going back", "detail": why}),
+            serde_json::json!({"to": sw.to.name(), "step": "going back", "detail": why}),
         );
         self.switch_to(SwitchStep::Back, Some(why), now);
     }
@@ -669,12 +696,11 @@ impl Agent {
                 return self.go_back(&sw, &why, now);
             }
             let detail = format!(
-                "the bundle runs on compose/{} at {}; agent.toml says so",
-                sw.to.runtime,
+                "the bundle runs on {} at {}; agent.toml says so",
+                sw.to.name(),
                 sw.to.socket_cli.display()
             );
-            let to = format!("compose/{}", sw.to.runtime);
-            return self.switch_end(&to, "done", &detail, now);
+            return self.switch_end(&sw.to.name(), "done", &detail, now);
         }
         let why = format!("{}: {}", r.outcome, r.detail);
         self.go_back(&sw, &why, now);
@@ -697,8 +723,9 @@ impl Agent {
             ),
         }
         let why = format!(
-            "back on compose/{}: the switch to compose/{} failed",
-            sw.from.runtime, sw.to.runtime
+            "back on {}: the switch to {} failed",
+            sw.from.name(),
+            sw.to.name()
         );
         match self.round_on(&sw.from, &why, now) {
             Ok(()) => self.switch_to(SwitchStep::Return, None, now),
@@ -708,12 +735,7 @@ impl Agent {
                     "{}; the way back could not start: {e}",
                     sw.why.clone().unwrap_or_default()
                 );
-                self.switch_end(
-                    &format!("compose/{}", sw.to.runtime),
-                    "rolled-back",
-                    &detail,
-                    now,
-                );
+                self.switch_end(&sw.to.name(), "rolled-back", &detail, now);
             }
         }
     }
@@ -727,8 +749,8 @@ impl Agent {
         }
         let back = format!("{}: {}", self.state.round.outcome, self.state.round.detail);
         let detail = format!(
-            "the switch to compose/{} was rolled back ({}); the way back: {back}",
-            sw.to.runtime,
+            "the switch to {} was rolled back ({}); the way back: {back}",
+            sw.to.name(),
             sw.why.clone().unwrap_or_default()
         );
         rollout::report(
@@ -739,26 +761,20 @@ impl Agent {
             None,
             &detail,
         );
-        self.switch_end(
-            &format!("compose/{}", sw.to.runtime),
-            "rolled-back",
-            &detail,
-            now,
-        );
+        self.switch_end(&sw.to.name(), "rolled-back", &detail, now);
     }
 }
 
 /// `omarchy-agent runtime switch <driver> [--socket <path>]`: the request for the running
 /// agent, which takes it between rounds; SIGUSR1 wakes it.
 pub fn request(data: &Path, driver: &str, socket: Option<&Path>) -> Result<String, String> {
-    let r = Runtime::parse(driver).ok_or_else(|| {
-        format!("{driver:?} is not a driver this agent carries: compose/docker or compose/podman")
-    })?;
+    let (kind, r) = parse_driver(driver)
+        .ok_or_else(|| format!("{driver:?} is not a driver this agent carries: {CARRIED}"))?;
     let xdg = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let socket = if let Some(s) = socket {
         s.to_owned()
     } else {
-        let list = default_socket(r, xdg.as_deref());
+        let list = switch_sockets(kind, r, xdg.as_deref())?;
         list.iter()
             .find(|p| crate::install::engine::connect(p) == crate::install::engine::Socket::Answers)
             .cloned()
@@ -785,16 +801,16 @@ pub fn request(data: &Path, driver: &str, socket: Option<&Path>) -> Result<Strin
             return Err(format!("nothing answers on {}", socket.display()))
         }
     }
+    let name = driver_name(kind, r);
     let req = Request {
-        driver: r.driver(),
+        driver: name.clone(),
         socket: socket.clone(),
         asked_at: super::now(),
     };
     let bytes = serde_json::to_vec_pretty(&req).map_err(|e| e.to_string())?;
     state::write_atomic(&data.join(REQUEST), &bytes)?;
     Ok(format!(
-        "asked the agent to move the bundle to {} at {}: it stops the dispatcher on the engine it runs on now, brings it up there and guards it, and goes back if it fails; `omarchy-agent status` and `omarchy-agent logs` follow it",
-        r.driver(),
+        "asked the agent to move the bundle to {name} at {}: it stops the dispatcher on the engine it runs on now, brings it up there and guards it, and goes back if it fails; `omarchy-agent status` and `omarchy-agent logs` follow it",
         socket.display()
     ))
 }

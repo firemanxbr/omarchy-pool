@@ -255,6 +255,26 @@ pub(crate) fn emulation(c: &Capacity, r: &mut Report) {
     }
 }
 
+/// The sandboxed runtime community tasks run in (#330, design v2 §10.4; D43): said, never
+/// a blocker — a host without one runs them on the engine's own runtime, as before.
+pub(crate) fn sandbox(c: &Capacity, r: &mut Report) {
+    match c.sandbox() {
+        Some(s) => r.notes.push(format!(
+            "sandbox: {} ({}) — community tasks on the {} lane run in it, so a container escape lands in its kernel, not on the host's",
+            s.kind.words(),
+            s.runtime,
+            c.lanes()[0].arch
+        )),
+        None => r.notes.push(
+            "sandbox: none — community tasks run on the engine's own runtime; gVisor (runsc) or Kata Containers registered with the engine would hold a container escape (the runbook's *A sandboxed runtime for community tasks*)"
+                .into(),
+        ),
+    }
+    if let Some(h) = c.sandbox_held() {
+        r.warnings.push(format!("sandbox: {h}"));
+    }
+}
+
 /// Linger and the user manager (design v2 §13.3): linger is enabled at install when polkit
 /// lets this user; without `XDG_RUNTIME_DIR` and its D-Bus socket there is no
 /// `systemctl --user` to run the agent.

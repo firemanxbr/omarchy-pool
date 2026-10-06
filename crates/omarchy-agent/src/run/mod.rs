@@ -2,17 +2,18 @@
 //! §16.1, §16.2, §16.4, §18.4; #315): the run loop that rolls the host bundle's one
 //! service, the dispatcher, out to this host — verify, lint, plan, pull, replace, guard,
 //! commit or revert — on the pinned compose driver. At its start and every minute it also
-//! renders the dispatcher's `etc/dispatcher.env` beside the token (#371,
+//! renders the dispatcher's `etc/dispatcher.env` beside the token's file (#371, #327,
 //! [`crate::dispatcher_env`]): the host's addresses when they change (the public one asked
 //! of the pool's edge every hour), agent.toml's secrets directory and budget as agent.toml
-//! says them now; a file that changed starts a round like any input.
+//! says them now, and the token too only while a release from before #327 is here; a file
+//! that changed starts a round like any input, the token's file (a rotation) included.
 //!
 //! Seams left for later issues, each named where it sits:
 //! - install, preflight and runtime discovery (#317, `crate::install`): agent.toml (with
 //!   `host_id` and `worker_id` from enrollment, and `set.engine`, the engine kind the
 //!   lint holds the set to) and the first tools arrive from there. Preflight checks who
-//!   owns (and may write) agent.toml, `compose.override.yml`, `.env` and
-//!   `etc/dispatcher.env`;
+//!   owns (and may write) agent.toml, `compose.override.yml`, `.env`,
+//!   `etc/dispatcher.env` and `run/host/dispatcher/token`;
 //! - enrollment and the host report (#321): `agent.toml`'s `worker_id`, and
 //!   `POST /hosts/self/report` built from `state.json`'s `round` and `rollout`;
 //! - capacity detection (#333): `run/capacity.json`, hashed as an input of the set, so a
@@ -38,7 +39,10 @@
 //!   too, unless `agent.urgent`), a rollback statement skips it, and the report's
 //!   `soaking_until` lets the pool keep the host out of its 426 gate meanwhile; freeze
 //!   detection (#326, [`freeze`]): GitHub's latest release tag every six hours, and
-//!   `pool-behind-github` when the pool has named an older one for more than a day.
+//!   `pool-behind-github` when the pool has named an older one for more than a day;
+//! - the owner's control without a visit (#328, [`owner`]): `widen-envelope` and
+//!   `set-agent-keys`, taken only when the passkey pinned at the host signed them
+//!   (`crate::owner`), and the host's seal key in the report.
 //!
 //! On a Mac (#320) the loop also keeps the `omarchy` Colima VM ([`vm`]): started, sized
 //! from agent.toml, its clock held to the pool's after a wake; and launchd restarts the
@@ -63,8 +67,10 @@ pub(crate) mod driver;
 pub(crate) mod exec;
 pub(crate) mod journal;
 pub(crate) mod orders;
+pub(crate) mod owner;
 pub(crate) mod pool;
 pub(crate) mod power;
+pub(crate) mod quadlet;
 pub(crate) mod report;
 pub(crate) mod rollout;
 pub(crate) mod selfupdate;
@@ -76,7 +82,7 @@ pub(crate) mod vm;
 mod agent;
 pub(crate) mod cli;
 
-pub use cli::{logs, round, run, runtime_switch, self_test, status};
+pub use cli::{envelope, logs, round, run, runtime_switch, self_test, status};
 
 // What install (#317) shares with the loop: the verifier, the release assets' names and
 // where they are, and the pinned tools.
@@ -94,5 +100,7 @@ pub(crate) fn now() -> i64 {
 mod engine_tests;
 #[cfg(test)]
 pub(crate) mod fake;
+#[cfg(test)]
+pub(crate) mod fake_quadlet;
 #[cfg(test)]
 mod settings_tests;

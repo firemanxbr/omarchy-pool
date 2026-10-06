@@ -7,17 +7,22 @@
 #   its host key, enrolls with a capacity report and prints the fingerprint →
 #   nothing is registered and the token is in no process's argv → the owner's
 #   page shows the same fingerprint, and Confirm → the agent fetches the host
-#   worker token with a host-key-signed request into etc/dispatcher.env (0600),
-#   beside the host's own addresses (#371) → that token claims → a rotation
-#   gives a new one while the old one still claims, keeping the addresses and
+#   worker token with a host-key-signed request into its own file,
+#   run/host/dispatcher/token (0400, #327), and its registration into
+#   etc/dispatcher.env (0600) beside the host's own addresses (#371), the env
+#   file holding no token → that token claims → a rotation rewrites the file
+#   with a new one while the old one still claims, keeping the addresses and
 #   an owner's own line, and writing agent.toml's secrets directory and agent
 #   budget → the journal has the new-host line → running it again keeps the
 #   identity and the worker token → (#322) a suspension refuses its claims,
 #   its follow and the agent's token call, changing nothing on the machine,
-#   and the owner's Resume with a passkey brings the same token back → Retire
-#   burns it, and a new enrollment with a new token enrolls the machine as a
-#   new host, with a new key. Between them (#324), its page as its owner and as
-#   a visitor sees it, the fleet's row and lines, and the pages a browser gets.
+#   and the owner's Resume with a passkey brings the same token back → (#328)
+#   no widening is signed before a passkey is pinned at the host; the host's
+#   page makes a pin of the owner's passkey and the real agent pins it, a pin
+#   changed on the way refused → Retire burns it, and a new enrollment with a
+#   new token enrolls the machine as a new host, with a new key. Between them
+#   (#324), its page as its owner and as a visitor sees it, the fleet's row
+#   and lines, and the pages a browser gets.
 #
 # The agent runs `omarchy-agent enroll`, the enrollment step `install` runs
 # after its preflight and the envelope's confirm (#317): the same code
@@ -125,9 +130,14 @@ WORKER=$(jq -r .worker <<<"$confirm")
 wait "$AGENT_PID" || fail "the agent did not finish its enrollment"
 AGENT_PID=
 ENV_FILE="$DATA/omarchy-agent/sets/host/etc/dispatcher.env"
-[[ $(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE") == 600 ]] || fail "dispatcher.env is not 0600"
-OMW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
-[[ $OMW == omw_* ]] || fail "no worker token in dispatcher.env"
+TOKEN_FILE="$DATA/omarchy-agent/sets/host/run/host/dispatcher/token"
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+[[ $(mode_of "$ENV_FILE") == 600 ]] || fail "dispatcher.env is not 0600"
+# The token in its own file (#327), which the host set mounts read-only into the dispatcher; none in the env file.
+[[ $(mode_of "$TOKEN_FILE") == 400 && $(mode_of "$(dirname "$TOKEN_FILE")") == 700 ]] || fail "run/host/dispatcher/token is not 0400 in a 0700 directory"
+OMW=$(cat "$TOKEN_FILE")
+[[ $OMW == omw_* ]] || fail "no worker token in run/host/dispatcher/token"
+grep -q 'OMARCHY_WORKER_TOKEN\|omw_' "$ENV_FILE" && fail "a worker token in dispatcher.env"
 # The registration beside it is what install writes into agent.toml's worker_id (#317).
 [[ $(sed -n 's/^# worker: //p' "$ENV_FILE") == "$WORKER" ]] || fail "dispatcher.env does not name $WORKER"
 # The host's own addresses beside the token (#371), its LAN address among them, where the agent reads
@@ -190,19 +200,19 @@ agent_budget = { calls_per_task = 50, calls_per_day = 900 }
 TOML
 echo 'TZ=UTC' >> "$ENV_FILE"
 XDG_DATA_HOME="$DATA" "$AGENT" token >> "$E2E/agent.log" 2>&1 || fail "the rotation"
-NEW=$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")
+NEW=$(cat "$TOKEN_FILE")
 [[ $NEW == omw_* && $NEW != "$OMW" ]] || fail "no new token"
 for t in "$OMW" "$NEW"; do
   code=$(host_claim "$t")
   [[ $code == 204 ]] || fail "a claim after the rotation: $code"
 done
-[[ $(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE") == 600 ]] || fail "dispatcher.env is not 0600 after the rotation"
+[[ $(mode_of "$ENV_FILE") == 600 && $(mode_of "$TOKEN_FILE") == 400 ]] || fail "dispatcher.env is not 0600, or the token file 0400, after the rotation"
 [[ $(sed -n 's/^OMARCHY_HOST_ADDRESSES=//p' "$ENV_FILE") == "$ADDRS" ]] || fail "the rotation did not keep the host's addresses"
 [[ $(sed -n 's/^TZ=//p' "$ENV_FILE") == UTC ]] || fail "the rotation did not keep the owner's line"
 [[ $(sed -n 's/^OMARCHY_SECRETS_DIR=//p' "$ENV_FILE") == "$DATA/omarchy-agent/secrets" ]] || fail "no OMARCHY_SECRETS_DIR from agent.toml"
 [[ $(sed -n 's/^OMARCHY_AGENT_CALLS_PER_TASK=//p' "$ENV_FILE")/$(sed -n 's/^OMARCHY_AGENT_CALLS_PER_DAY=//p' "$ENV_FILE") == 50/900 ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$ENV_FILE")"
 grep -Eq '^OMARCHY_AGENT_(TOKENS|MINUTES)_PER_TASK=' "$ENV_FILE" && fail "a budget key agent.toml does not set"
-[[ $(grep -c '^OMARCHY_WORKER_TOKEN=' "$ENV_FILE") == 1 ]] || fail "more than one token line"
+grep -q 'OMARCHY_WORKER_TOKEN\|omw_' "$ENV_FILE" && fail "the rotation wrote a token into dispatcher.env"
 
 step "The journal, the notice's words, and a second run that keeps the identity"
 curl -fs "$POOL/api/v1/events?kind=host" | jq -e --arg h "$HOST" '.events[] | select(.payload.host == $h) | select(.summary | startswith("new host of e2e: 8 cores, 16 GB, '"$ARCH"' native, isolation root (dedicated)"))' >/dev/null || fail "no journal line"
@@ -210,7 +220,7 @@ XDG_DATA_HOME="$DATA" "$AGENT" enroll > "$E2E/again.log" 2>&1 || { cat "$E2E/aga
 grep -q "this machine is host $HOST" "$E2E/again.log" || fail "the second run did not keep the identity"
 # ...and the worker token: a fetch rotates, so a second one would cut off the token a running dispatcher holds.
 grep -q "keeps its worker token" "$E2E/again.log" || fail "the second run fetched a token again"
-[[ $(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE") == "$NEW" ]] || fail "the second run replaced the worker token"
+[[ $(cat "$TOKEN_FILE") == "$NEW" ]] || fail "the second run replaced the worker token"
 [[ $(curl -fs "$POOL/api/v1/hosts?owner=e2e" -H "cookie: $SESSION" | jq '.hosts | length') == 1 ]] || fail "a second host"
 
 step "Suspend (#322): the claims and the agent's calls refused, nothing changed on the machine; the owner's Resume, with a passkey"
@@ -224,7 +234,7 @@ susp=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/suspend" "${WEB[@]}" -d '{"rea
 [[ $(curl -s -X POST "$POOL/api/v1/factory/claim" -H "authorization: Bearer $NEW" -H 'content-type: application/json' -d "$(host_claim_body)" | jq -r .code) == host_suspended ]] || fail "a suspended host claimed"
 XDG_DATA_HOME="$DATA" "$AGENT" token > "$E2E/suspended.log" 2>&1 && fail "a suspended host got a worker token"
 grep -q "e2e-vm is suspended (by e2e: e2e: the fans)" "$E2E/suspended.log" || { cat "$E2E/suspended.log"; fail "the agent did not say why"; }
-[[ $(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE") == "$NEW" ]] || fail "the suspension changed the dispatcher's token"
+[[ $(cat "$TOKEN_FILE") == "$NEW" ]] || fail "the suspension changed the dispatcher's token"
 [[ $(curl -s -o /dev/null -w '%{http_code}' "$POOL/api/v1/factory/follow?ids=$WORKER") == 403 ]] || fail "a suspended host's follow"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/hosts/$HOST/resume" "${WEB[@]}" -d '{}')
 [[ $code == 403 ]] || fail "a resume with no passkey: $code"
@@ -232,6 +242,46 @@ res=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/resume" "${WEB[@]}" -d "$(jq -n
 [[ $(jq -r .status <<<"$res") == active ]] || fail "resume: $res"
 [[ $(host_claim "$NEW") == 204 ]] || fail "the same token after the resume"
 [[ $(curl -s -o /dev/null -w '%{http_code}' "$POOL/api/v1/factory/follow?ids=$WORKER") == 200 ]] || fail "the follow after the resume"
+
+step "Owner control without a visit (#328): the owner's passkey pinned at the host, from a pin its page made"
+# Nothing is signed for a host before its agent says a passkey is pinned there.
+code=$(curl -s -o "$E2E/unpinned.json" -w '%{http_code}' -X POST "$POOL/api/v1/hosts/$HOST/owner/challenge" "${WEB[@]}" -d '{"act":"widen-envelope","envelope":{"max_units":8}}')
+[[ $code == 409 && $(jq -r .code "$E2E/unpinned.json") == not_pinned ]] || fail "a widening before a pin: $code $(cat "$E2E/unpinned.json")"
+# The page asks the pool for the pin's document, the owner's passkey signs it, the pool checks that and prints the pin.
+pinopts=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/owner/challenge" "${WEB[@]}" -d '{"act":"pin-passkey"}')
+pinsig=$(node "$ROOT/tests/passkey.mjs" assert "$E2E/passkey.json" "$RP_ORIGIN" json <<<"$pinopts")
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/hosts/$HOST/owner/pin" "${WEB[@]}" -d "$(jq -nc --arg d "$(jq -r .doc <<<"$pinopts" | sed 's/"by":"e2e"/"by":"e2f"/')" --argjson a "$pinsig" '{doc: $d, assertion: $a}')")
+[[ $code == 400 ]] || fail "a pin of a document the page was not given: $code"
+pinres=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/owner/pin" "${WEB[@]}" -d "$(jq -nc --arg d "$(jq -r .doc <<<"$pinopts")" --argjson a "$pinsig" '{doc: $d, assertion: $a}')")
+PIN=$(jq -r .pin <<<"$pinres")
+[[ $(jq -r .command <<<"$pinres") == "omarchy-agent envelope pin-passkey $PIN" ]] || fail "the pin: $pinres"
+# At the host, as the agent's user: the agent.toml install writes after the Confirm (the pool by its
+# production name, which wrangler dev answers as, so the pin's relying party is this host's pool's),
+# the one the token step wrote kept aside for the re-install below.
+cp "$DATA/omarchy-agent/agent.toml" "$E2E/agent.toml.kept"
+cat > "$DATA/omarchy-agent/agent.toml" <<TOML
+pool = "https://pkgs.omarchy-pool.org"
+host_id = "$HOST"
+worker_id = "$WORKER"
+[set]
+dir = "$DATA/omarchy-agent/sets/host"
+work_root = "$E2E/work"
+secrets_dir = "$DATA/omarchy-agent/secrets"
+socket_cli = "$E2E/no-engine.sock"
+TOML
+chmod 600 "$DATA/omarchy-agent/agent.toml"
+# A pin someone changed on the way (another document under the same signature) is refused, nothing pinned.
+unb64url() { local b; b=$(tr '_-' '/+' <<<"$1"); while (( ${#b} % 4 )); do b+="="; done; base64 -d <<<"$b"; }
+forged=$(unb64url "$PIN" | jq -c '.doc |= sub("\"by\":\"e2e\""; "\"by\":\"e2f\"")' | base64 | tr -d '\n=' | tr '/+' '_-')
+[[ $(unb64url "$forged" | jq -r .doc) == *'"by":"e2f"'* ]] || fail "the changed pin"
+XDG_DATA_HOME="$DATA" "$AGENT" envelope pin-passkey "$forged" > "$E2E/pin.log" 2>&1 && fail "the agent pinned a changed pin"
+[[ ! -e "$DATA/omarchy-agent/state/owner.json" ]] || fail "a changed pin left a record"
+XDG_DATA_HOME="$DATA" "$AGENT" envelope pin-passkey "$PIN" > "$E2E/pin.log" 2>&1 || { cat "$E2E/pin.log"; fail "the agent refused the pin"; }
+grep -q "^pinned e2e's passkey (ES256, credential $(jq -r .credentialId "$E2E/passkey.json" | cut -c1-12)…) for omarchy-pool.org on https://omarchy-pool.org" "$E2E/pin.log" || { cat "$E2E/pin.log"; fail "the agent's words"; }
+[[ $(stat -c %a "$DATA/omarchy-agent/state/owner.json" 2>/dev/null || stat -f %Lp "$DATA/omarchy-agent/state/owner.json") == 600 ]] || fail "owner.json is not 0600"
+[[ $(jq -r .passkey.credential "$DATA/omarchy-agent/state/owner.json") == $(jq -r .credentialId "$E2E/passkey.json") ]] || fail "the pinned credential is not the owner's passkey"
+XDG_DATA_HOME="$DATA" "$AGENT" envelope unpin-passkey | grep -q "^unpinned e2e's passkey" || fail "unpin"
+mv "$E2E/agent.toml.kept" "$DATA/omarchy-agent/agent.toml"
 
 step "Retire (#322): the key and the token burnt; a new enrollment enrolls the machine as a new host, with a new key"
 ret=$(curl -fs -X POST "$POOL/api/v1/hosts/$HOST/retire" "${WEB[@]}" -d '{"reason":"e2e: moving it"}')
@@ -249,6 +299,6 @@ FP2=$(sed -n 's/^omarchy-agent: host key fingerprint: //p' "$E2E/reinstall.log" 
 curl -fs -o /dev/null -X POST "$POOL/api/v1/hosts/$HOST2/confirm" "${WEB[@]}" -d '{}' || fail "confirm the new host"
 wait "$AGENT_PID" || { cat "$E2E/reinstall.log"; fail "the re-install did not finish"; }
 AGENT_PID=
-[[ $(host_claim "$(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE")") == 204 ]] || fail "the new host's token"
+[[ $(host_claim "$(cat "$TOKEN_FILE")") == 204 ]] || fail "the new host's token"
 
-printf '\n\033[1;32mhost enrollment: ok\033[0m (%s, %s, %s; suspended, resumed, retired, then %s)\n' "$HOST" "$WORKER" "$FP" "$HOST2"
+printf '\n\033[1;32mhost enrollment: ok\033[0m (%s, %s, %s; suspended, resumed, a passkey pinned, retired, then %s)\n' "$HOST" "$WORKER" "$FP" "$HOST2"

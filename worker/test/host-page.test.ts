@@ -80,6 +80,11 @@ const report = (k: Key, host: string, r: unknown) => signed(k, host, "POST", "/h
 // ---------- the recorded reports (run/report.rs, agent 0.4.0) ----------
 
 const STUDIO_LANES = [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: true }];
+/** A stock host's owner control (#328): no passkey pinned yet, its seal key, the envelope's own keys. */
+const OWNER = (key: string) => ({
+  agent_keys: [], passkey: null, version: 0, seal: { fingerprint: `SHA256:${key.slice(0, 43)}`, key },
+  envelope: { agent_budget: null, agent_slots: null, diagnostics: null, emulate: null, max_cpus: null, max_mem_gb: null, max_units: null, paths: null },
+});
 /** The Studio canary's report: aarch64, 12 cores, 32 GB, rootful docker without remapping beside its legacy set, an emulated x86_64 lane. */
 const STUDIO_REPORT = {
   agent: { version: "0.4.0", skip: null },
@@ -96,6 +101,7 @@ const STUDIO_REPORT = {
     lanes: STUDIO_LANES, held_lanes: [], isolation: "root", dedicated: true, limits: { cpus_hard: true, memory_hard: true, pids: true }, below_minimum: false,
   },
   runtime: { driver: "compose/docker", switch: null, switch_last: null },
+  owner: OWNER("kPbAQFkDOpRmd5cGfSxEvMCe1dsUZErtLxUWtV_s5W0"),
   asleep: false,
 };
 /** The P1 host's report: an x86_64 VPS, rootless podman at the subuid level, the aarch64 lane held for binfmt, --pids-limit ignored, a round the docker group stopped. */
@@ -115,6 +121,7 @@ const P1_REPORT = {
     isolation: "subuid", dedicated: true, limits: { cpus_hard: true, memory_hard: true, pids: false }, below_minimum: false,
   },
   runtime: { driver: "compose/podman", switch: null, switch_last: null },
+  owner: OWNER("Fq8MHTVhn3EHJ0P5yCbvJWAjm8ZLy9fKDn0z1cFgDXk"),
   asleep: false,
   // What only the agent sees of itself, when it says it (fleet.ts needsPersonOf).
   needs_person: [{ what: "linger", detail: "linger is off for omarchy: the agent does not start at boot — sudo loginctl enable-linger omarchy" }],
@@ -288,7 +295,7 @@ describe("the host page's controls (#324)", () => {
     };
     const m1 = await draw("m1");
     const kv = m1.nodes["#hp-kv"].innerHTML as string;
-    for (const s of ["<dt>Runtime</dt><dd>compose/docker", "<dt>Isolation</dt><dd>root (dedicated)", `agent 0.4.0 · compose ${PINNED_TOOLS["aarch64-linux"].compose} · docker CLI ${PINNED_TOOLS["aarch64-linux"].docker}`, "11 the pool counts — 4 busy on 2 tasks, 6 free for a task, 1 kept for pool jobs", "x86_64 emulated (qemu, 16K pages)", "<dt>Owner's caps</dt><dd>11 units of the 11 detected · 2 agent slots", "--cpus, --memory and --pids-limit enforced", "floor v1.18.0", "<dt>Rollout</dt><dd>idle"]) expect(kv).toContain(s);
+    for (const s of ["<dt>Runtime</dt><dd>compose on docker", "<dt>Isolation</dt><dd>root (dedicated)", `agent 0.4.0 · compose ${PINNED_TOOLS["aarch64-linux"].compose} · docker CLI ${PINNED_TOOLS["aarch64-linux"].docker}`, "11 the pool counts — 4 busy on 2 tasks, 6 free for a task, 1 kept for pool jobs", "x86_64 emulated (qemu, 16K pages)", "<dt>Owner's caps</dt><dd>11 units of the 11 detected · 2 agent slots", "--cpus, --memory and --pids-limit enforced", "floor v1.18.0", "<dt>Rollout</dt><dd>idle"]) expect(kv).toContain(s);
     const rows = m1.nodes["#hp-lease-rows"].innerHTML as string;
     expect(rows.match(/data-stop="\d+"/g)).toHaveLength(2);
     expect(rows).not.toContain("aria-disabled");

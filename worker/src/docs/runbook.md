@@ -147,8 +147,13 @@ A release is `main` at the moment a maintainer dispatches one
    then added to the draft with the agent binaries and `install.sh`; only then
    is the release published, which makes it immutable
    (`factory/bin/publish-release` checks every asset is there, with the bytes
-   the run made, first). A release that stops before then stays a draft, the
-   pool stays on the previous release, and so does every host.
+   the run made, first). Once `factory/MAINTAINERS.toml` sets a co-signature
+   threshold (#330), it also waits for the maintainers' co-signatures of the
+   host bundle, which each maintainer adds to the draft offline (*Co-signing
+   a release*, below): without them the job fails and the release stays a
+   draft until they are there and the job is re-run. A release that stops
+   before then stays a draft, the pool stays on the previous release, and so
+   does every host.
 5. **This is when hosts move** (#359): once the release is published, one
    job (`worker-image-tags`) moves `:x86_64` and `:aarch64` to the version's
    images, then `:latest`, each signed; it runs in the `release`
@@ -200,7 +205,8 @@ statement (#314) before anything moves and stores it in R2 once that Worker
 is deployed (`rollback/<to>.json` and its `.sigstore.json` in
 `omarchy-packages`, relayed at `GET /api/v1/factory/rollback/<to>`): a host
 under the host agent goes below its floor only on one, within 14 days of the
-target's release (security-model, *Rollback statements*). A statement that
+target's release — deeper only once maintainers co-signed the statement
+(*Co-signing a release*, #330) — (security-model, *Rollback statements*). A statement that
 did not reach R2 fails the run after the rest is done; running it again
 stores a freshly signed one. The updaters follow the
 pool's release down as they follow it up, within two minutes, and so do the
@@ -554,6 +560,7 @@ Every release carries what a maintainer host takes from it (#311, design v2
 |---|---|
 | `omarchy-host-vX.Y.Z.tar.gz` | `manifest.json` and every set under `sets/<name>/`: `factory/sets/host` with the worker image and the task build images rendered to digests |
 | `omarchy-host-vX.Y.Z.tar.gz.sigstore.json` | its keyless signature (a Sigstore bundle) by `release.yml` on main |
+| `omarchy-host-vX.Y.Z.tar.gz.<login>.sshsig` | a maintainer's co-signature (#330): their FIDO security key's `ssh-keygen -Y sign` over the bundle, added to the draft by hand (*Co-signing a release*); as many as `MAINTAINERS.toml`'s threshold, none while it is 0 |
 | `omarchy-agent-x86_64-linux-musl`, `omarchy-agent-aarch64-linux-musl`, `omarchy-agent-aarch64-darwin` | the agent, the same bytes as long as the agent does not change; their provenance is attested |
 | `install.sh` | the one command, with that release's agent version and the three binaries' SHA-256 embedded; its provenance is attested |
 | `build-images.json` | the task build images by digest (#312), attached when the draft is created: the same two the bundle's `inner.images.build` names and its host set's dispatcher is given |
@@ -616,6 +623,140 @@ days before it publishes anything. An earlier agent runs only once
 `gh attestation verify` proved it came from `release.yml` on `refs/heads/main`
 (a release that ships any other one stops, for a person to look), and in a
 job of its own that holds no signing identity and no token that writes.
+`verify` also says which maintainers' co-signatures it found beside the file
+(`<file>.<login>.sshsig`) and how many its agent requires; it refuses
+nothing for them by hand (the release verifies before anyone co-signs), while
+the run loop and install refuse a bundle without them.
+By hand, with OpenSSH: `factory/bin/co-sign signers factory/MAINTAINERS.toml
+> allowed_signers`, then `ssh-keygen -Y verify -f allowed_signers -I <login>
+-n host-bundle@omarchy-pool.org -s omarchy-host-$v.tar.gz.<login>.sshsig <
+omarchy-host-$v.tar.gz` (it does not check the touch flag; the agent does).
+
+### Co-signing a release
+
+The maintainers' co-signature (#330, design v2 D1 b; security model, *The
+maintainers' co-signature*): beside `release.yml`'s keyless signature, a
+host takes a bundle only once `threshold` maintainers signed it offline with
+a FIDO security key, and a rollback statement deeper than 14 days only once
+at least one did. The keys and the threshold are `factory/MAINTAINERS.toml`'s
+`[cosignature]`; the agent pins them from it at build time
+(`crates/omarchy-agent/src/verify/maintainers.toml`, written by
+`factory/bin/check-governance --write`), so it is the agent of a release, not
+the pool, that requires them.
+
+**Once per maintainer: a key.** On the laptop, with the security key
+plugged in (OpenSSH 8.2 or later; a key without Ed25519 support takes
+`-t ecdsa-sk`):
+
+```bash
+ssh-keygen -t ed25519-sk -C "$(gh api user --jq .login)@security-key" -f ~/.ssh/id_ed25519_sk
+cat ~/.ssh/id_ed25519_sk.pub     # the line that goes into MAINTAINERS.toml
+```
+
+Add it under `[cosignature.keys]` as `<login> = "<that line>"` in a pull
+request, with `factory/bin/check-governance --write` (it rewrites the agent's
+pin) and the agent's version raised (`crates/omarchy-agent/Cargo.toml`; CI's
+`agent-version-check` says so). Keys may come with the threshold still at
+0: bundles are not asked for anything yet, and a deep rollback can already
+be co-signed.
+
+**A backup key.** A second security key, made the same way (`-f
+~/.ssh/id_ed25519_sk_backup`) and kept apart from the first, goes beside it
+as a list: `<login> = ["<first line>", "<backup line>"]`. A signature by
+either is that maintainer's one co-signature (it never counts twice). Keep
+the backup in a safe place; it is what lets you replace a lost or broken key
+without a visit to every host.
+
+**Switching it on** is a pull request that sets `threshold = 1` (1-of-N) or
+`2` (2-of-N), the same `--write` and version raise, approved by another
+maintainer. The release that carries it is the first one asked for
+co-signatures: its new agent requires them, and so does
+`publish-release`. Every agent requires its own pinned policy of the next
+release, so a release that changes the policy is always co-signed under the
+old one (`publish-release` checks this release's policy, the latest
+published release's whatever its age, and that of every release of the last
+30 days, whose agents verify the bundle before they update).
+
+That is why **a lost key must never strand the threshold**. With as many
+maintainers required as hold a key (2-of-2 with the project's two
+maintainers, or 1-of-1), a maintainer whose only key is lost can never
+co-sign under the old pin again: every host would refuse every later release
+(`refused (cosignature)`) until it is reinstalled. `check-governance` refuses
+such a table: keep the threshold below the number of maintainers with a key
+(1-of-2), or give every one of them a backup key (2-of-2 with two keys
+each).
+
+**Rotating a key, or replacing a lost one,** takes two releases, one change
+each, so each is co-signed under the pin before it:
+
+1. A release that adds the new key beside the old (`<login> = ["<old>",
+   "<new>"]`), co-signed with a key the agents already pin: the old one, the
+   backup, or the other maintainers' under 1-of-N. A lost key stays listed
+   here; nobody can sign with it.
+2. Once that release is out, one that drops the old key, co-signed with the
+   new.
+
+Never change two keys a co-signature needs in one release. Lowering the
+threshold is one release too (co-signed under the old threshold); raising
+it, likewise.
+
+**Each release.** The release run stops at *Publish the release* with
+`vX.Y.Z lacks the maintainers' co-signature its agents require; it stays a
+draft`. Each maintainer who co-signs runs, from a checkout of `main`, with
+`gh` signed in and `omarchy-agent` (or `cosign`) installed:
+
+```bash
+factory/bin/co-sign release vX.Y.Z      # --key <file> when the key is not ~/.ssh/id_ed25519_sk or id_ecdsa_sk
+```
+
+It downloads the draft's bundle, checks `release.yml`'s signature, shows the
+manifest (release, created, agent, `min_release`, `revoked`, pools) and the
+archive's SHA-256, signs it with `ssh-keygen -Y sign -n
+host-bundle@omarchy-pool.org` after a touch, checks the signature against
+your key in `MAINTAINERS.toml`, and uploads
+`omarchy-host-vX.Y.Z.tar.gz.<login>.sshsig` to the draft. Once enough have,
+**Re-run failed jobs** on the release run (`gh run rerun <run> --failed`):
+`publish-release` verifies every co-signature (with `ssh-keygen` and the
+touch flag), publishes the release and the run goes on to the tags and the
+deploy. A run re-run more than 30 days after it started cannot be: dispatch
+a new release instead (the draft is made again).
+
+**A rollback deeper than 14 days** (or one whose target was published before
+the threshold rose, which carries no bundle co-signature: an immutable
+release takes no asset later) needs the statement co-signed. Dispatch
+`rollback.yml` as usual; hosts refuse the statement (`statement-too-deep`, or
+`cosignature`) and stay where they are. Then each co-signing maintainer, with
+their pool token (their page, *Token*):
+
+```bash
+OMARCHY_TOKEN=omc_... factory/bin/co-sign rollback vX.Y.Z
+```
+
+It fetches the statement the pool relays, checks `rollback.yml`'s signature,
+shows it, signs it with `ssh-keygen -Y sign -n rollback@omarchy-pool.org`
+and hands it to the pool (`PUT /api/v1/factory/rollback/vX.Y.Z/cosignature`),
+which relays it beside the statement: hosts take it at their next poll. A
+re-run of `rollback.yml` signs a new statement, and it needs co-signing
+again.
+
+The pool keeps a co-signature beside the statement it signed only:
+`co-sign` names it by SHA-256, and when `rollback.yml` signed another since
+you fetched yours the pool answers 409 (*signed again since you fetched it*):
+run `co-sign rollback` again, on the new statement.
+
+**On a host**, a bundle refused for want of co-signatures says `refused
+(cosignature)` with the count and each signature that did not verify; the
+co-signatures are asked of GitHub (`<bundle>.<login>.sshsig`, for every
+maintainer the agent pins) and kept beside the cached bundle. GitHub not
+answering is `pool-unreachable`, never a refusal (install says *GitHub did
+not answer*, and is run again). A rollback target published before the
+threshold rose is refused with *or the rollback statement to it does
+(factory/bin/co-sign rollback vX.Y.Z)*: it is the statement that takes more
+co-signatures, never the published release. Once a host accepted a
+co-signed statement, a round to its target that did not finish (a pull, the
+tools, a quarantine) is tried again under the same co-signatures. A
+statement co-signed enough waits for nothing GitHub has: its rollback to a
+cached bundle goes, and is tried again, while GitHub does not answer.
 
 ### Installing a host
 
@@ -632,6 +773,7 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | Option | What it does |
 |---|---|
 | `--dedicated` | this machine or VM is used only as a pool host (design v2 §19.1); without it the host must be a dedicated user at the `subuid` level holding no credentials |
+| `--direct-network`, `--no-direct-network` | grants a signed exception's bridge network (agent.toml's `direct_network = true`, #373): a package with `network = "direct"` in `factory/sizing` runs here on a plain bridge, which preflight's egress probe then checks too; without it such a task is handed back. Only a rootful Linux host with prep-root.sh's firewall (or the Mac's `omarchy` VM) can keep that bridge off the LAN. A re-run without either keeps the grant `agent.toml` holds; `--no-direct-network` takes it back (`direct_network = false`). Grant it this way, on an install or a re-run, so the bridge is probed: a grant written into `agent.toml` by hand reaches the dispatcher unprobed |
 | `--work-root <dir>`, `--secrets-dir <dir>` | where tasks work (default `<data>/work`) and where `agent.env` goes (default `<data>/secrets`); the secrets directory must be outside the work root and the set directory |
 | `--socket <path>` | the engine's socket; otherwise the first that answers of rootless podman's API socket, rootless docker, `/var/run/docker.sock` |
 | `--task-subnets <cidr>[,<cidr>]` | the task networks' range (default `10.231.0.0/16`, as prep-root.sh's) |
@@ -658,35 +800,77 @@ the `agent.env` a re-run keeps (public read only: a classic token with no scope;
 GitHub names no scopes for, is refused), a secrets directory with a character
 the dispatcher refuses (letters, digits and `/ . _ - +` only), an
 `agent_budget` the agent would refuse (an unknown key, or not a whole number
-from 1), and the **egress probe** (#317, #367): two probe tasks, one after
-the other, in the last /28 of the task subnets. The first, on a plain bridge
-(the network a signed `factory/sizing` exception gets), must fail to reach
-`169.254.169.254`, the default gateway, the host's LAN address and its own
-network's gateway (its `.1`) on 22, 53 and the pool's ports (3128, 8790,
-8791), and must reach GitHub, which on a rootful host is what prep-root.sh's
-`DOCKER-USER` rules give. The second, on a network made as the dispatcher
-makes a task's (internal and, on Docker, in its isolated gateway mode; a
-Docker older than 28 has no such mode and is refused here, as the dispatcher refuses
-it), must fail to reach its gateway on the same ports. A connection refused counts as reached: the
-refusal is the target's own answer. On a rootful engine a network's gateway,
-like the host's LAN address, is the host itself, and the `DOCKER-USER` rules
-sit in `FORWARD`, which traffic to the host never crosses (CVE-2024-29018):
-only prep-root.sh's `INPUT` drop for the task subnets (`OMARCHY-TASKS-HOST`)
-keeps a task off the host's own services. So on a rootful engine preflight
-checks it two ways, and either refuses the install with the command to run:
-the unit's script (`/usr/local/libexec/omarchy-task-firewall`,
+from 1), and the **egress probe** (#317, #367, #373), which runs the way a
+task runs, in the last /28 of the task subnets: a network made as the
+dispatcher makes a task's (internal and, on Docker, in its isolated gateway
+mode — a Docker older than 28 has no such mode and is refused here, as the
+dispatcher refuses it —; on podman through libpod's own API, internal with
+DNS off, #372), with its **egress sidecar** at its `.2`: the release's worker
+image in its `egress` role, started as the dispatcher starts one (on a bridge
+of the probe's own first, its stand-in for the shared `omarchy-egress`; the
+same limits and flags), refusing what the dispatcher's sidecars refuse — the
+task subnets and the host's own addresses, `OMARCHY_HOST_ADDRESSES` as the
+agent renders it now (#371). The probe task, at the network's last address,
+tries `169.254.169.254`, the default gateway, the host's LAN address, every
+IPv4 address of the host's own and its network's gateway (its `.1`) on 22,
+53 and the pool's ports (3128, 8790, 8791), each twice: straight from its
+network, where nothing may answer, and through its sidecar (`CONNECT`), which
+must refuse it or find nothing there; and it must reach GitHub through the
+sidecar. A connection refused counts as reached: the refusal is the target's
+own answer. It also asks the pool's origin (`/cdn-cgi/trace`, at Cloudflare's
+edge), through its sidecar, which address it comes from: that public address
+is kept in `egress.json` and every task's egress refuses it (#371); one the
+sidecar was not given yet (a first install) is tried once more, straight and
+through a sidecar given it, as the dispatcher's are from install on; not
+seen is a note, not a blocker. A rootless host passes it as a rootful one
+does: a task never leaves through the engine's user-mode network stack but
+by its sidecar, which refuses the LAN and the router.
+
+A **signed exception's bridge** — the plain bridge a package with `network =
+"direct"` in `factory/sizing` gets, for builds that open raw sockets — is
+probed too, and only, when the envelope grants it: `--direct-network` (agent.toml's
+`direct_network = true`, kept by a re-run; `--no-direct-network` takes it back),
+which the dispatcher reads as `OMARCHY_DIRECT_NETWORK=1` in `etc/dispatcher.env`.
+Without the grant the dispatcher hands such a package's task back to the pool
+before anything starts, and the probe says it probed no bridge. The hand-back is
+a lost lease: the pool gives the attempt back for the first two of a task's
+losses (`HOST_LOSSES_MAX`), and spends one for each after, so such a package
+fails ("lost too often on its host", then out of attempts) where only hosts
+without the grant claim it. The claim does not say yet whether a host runs such
+packages, which would keep them off the others (a follow-up of #373); no
+package in `factory/sizing/tasks.toml` has the exception today. With it, a probe task on that bridge must
+fail to reach the metadata address, the default gateway, the host's LAN
+address and the bridge's own gateway on the same ports, and must reach GitHub,
+which on a rootful Linux host is what prep-root.sh's `DOCKER-USER` rules and
+its `INPUT` drop give. A rootless engine's bridge reaches the LAN through its
+user-mode network stack, and its gateway is the engine's own namespace: such a
+host cannot grant the exception, and preflight says to take the grant off.
+
+On a rootful engine a network's gateway, like the host's LAN address, is the
+host itself, and the `DOCKER-USER` rules sit in `FORWARD`, which traffic to
+the host never crosses (CVE-2024-29018): only prep-root.sh's `INPUT` drop for
+the task subnets (`OMARCHY-TASKS-HOST`) keeps a task off the host's own
+services, the second layer under every task network. So on a rootful engine
+preflight checks it two ways, and either refuses the install with the command
+to run: the unit's script (`/usr/local/libexec/omarchy-task-firewall`,
 world-readable) must jump from `INPUT` to `OMARCHY-TASKS-HOST` and drop every
 task subnet there, and the unit that runs it at boot
 (`/etc/systemd/system/omarchy-task-firewall.service`) must be there and
 enabled (its link in `/etc/systemd/system/multi-user.target.wants`), whatever
 the probe says — a host whose own firewall drops the ports probed may leave
 its other services open to a task, and a unit that does not run at boot
-leaves the host open after the next reboot, when nothing probes again — and
-the probe must reach neither the gateway nor the LAN address, which shows the
-rule is in effect (the agent is never root and cannot read the firewall
-itself). The command is `sudo systemctl restart
-omarchy-task-firewall.service` when the script and the enabled unit are in
-place, the rule having been flushed since (a firewall reload); `sudo
+leaves the host open after the next reboot, when nothing probes again — and,
+where the envelope grants a signed exception's bridge, that bridge's probe
+must reach neither its gateway nor the LAN address, which shows the rule is in
+effect (the agent is never root and cannot read the firewall itself). Without
+the grant nothing a probe task tries crosses `INPUT`: a task's own network has
+no address of the host's (Docker's isolated gateway mode, libpod's network with
+DNS off) and no route off its subnet, and its sidecar refuses the LAN; so
+preflight checks the script and the unit only, and the drop is the second
+layer under task networks that reach nothing of the host's (#373). The command
+is `sudo systemctl restart omarchy-task-firewall.service` when the script and
+the enabled unit are in place, the rule having been flushed since (a firewall
+reload, which a granted bridge's probe shows); `sudo
 systemctl enable omarchy-task-firewall.service && sudo systemctl restart
 omarchy-task-firewall.service` when the unit is there but not enabled; and
 otherwise `sudo factory/host/prep-root.sh` with this install's `--user`,
@@ -694,15 +878,12 @@ otherwise `sudo factory/host/prep-root.sh` with this install's `--user`,
 `/etc/docker/daemon.json` names (prep-root.sh would set its own default
 otherwise; one it would not keep as it is, several pools or a size other
 than /24, is said). On a rootless engine there is no such rule, and what
-could reach the host is the engine's **host loopback**: while both probe
-tasks run, preflight reads the command line of the engine's user-mode network
-stack in `/proc` and refuses one that maps the host's loopback, with the
-setting to change (*Rootless engines*, below). The first task asks the pool's
-origin (`/cdn-cgi/trace`, at Cloudflare's edge) which
-address it comes from too: that public address is kept in `egress.json` and every
-task's egress refuses it (#371); not seen is a note, not a blocker. Until the
-probe runs behind an egress sidecar (#373), a rootless host is expected to
-fail it (below). The probe's answers decide, not the engine's kind. Leftovers of an interrupted
+could reach the host is the engine's **host loopback**: while the probe
+tasks run (the sidecar's bridge starts rootless podman's stack), preflight
+reads the command line of the engine's user-mode network stack in `/proc` and
+refuses one that maps the host's loopback, with the setting to change
+(*Rootless engines*, below). The probe's answers decide, not the engine's
+kind. Leftovers of an interrupted
 probe (labelled `org.omarchy-pool.probe=egress`) are removed before it
 runs. A work root that does not exist under a directory the user cannot
 write is a blocker naming prep-root.sh. A socket
@@ -713,9 +894,14 @@ Then it prints the envelope (`agent.toml`) to confirm, writes
 `run/capacity.json`, enrolls ([Maintainer hosts](/docs/worker-host#maintainer-hosts):
 the fingerprint, your Confirm on the site, the host worker token) and only then writes `agent.toml` with
 the `host_id` and `worker_id` the enrollment gave — before your Confirm
-there is no run loop, no dispatcher and nothing that claims. Then
-`etc/dispatcher.env` (0600) holds, beside the worker token, what the
-dispatcher takes from the agent (#371): `OMARCHY_HOST_ADDRESSES` (every
+there is no run loop, no dispatcher and nothing that claims. The host worker
+token is `run/host/dispatcher/token` in the set directory (0400, its
+directories 0700, #327), the one secret file the host set mounts, read-only,
+into the dispatcher (`OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token`):
+`docker inspect` of the dispatcher, a sidecar or a task shows no token or
+key in its environment. Then `etc/dispatcher.env` (0600) holds the token's
+registration (`# worker:`) and what the dispatcher takes from the agent
+(#371): `OMARCHY_HOST_ADDRESSES` (every
 address of the host's interfaces but loopback's and a container bridge's the
 egress refuses anyway — private, link-local, unique local or in the task
 subnets —, an IPv6 one as its /64, and the public address the probe saw, which
@@ -723,7 +909,8 @@ the run loop asks again every hour, and within minutes after no answer), `OMARCH
 (the path chosen here, never mounted into the dispatcher) and, when the
 envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
 `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK` and `…_CALLS_PER_DAY` (without one, the
-dispatcher's defaults). Every other line of that file is yours and kept. It writes the
+dispatcher's defaults), and `OMARCHY_DIRECT_NETWORK=1` when the envelope grants
+a signed exception's bridge (#373). Every other line of that file is yours and kept. It writes the
 agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
 `--legacy`, and the unit `~/.config/systemd/user/omarchy-agent.service`
 (`Type=notify`, `Restart=always`, `WatchdogSec=300`,
@@ -747,9 +934,14 @@ as "needs a person" before removing anything, since the agent would keep
 running under linger.
 
 `tests/agent-install.sh` runs the egress probe and the legacy project against
-a real engine in CI, rootful docker and rootless podman: a task network's
-gateway is reached on a plain bridge (the host itself on rootful docker, the
-engine's namespace on rootless podman) and not behind an `INPUT` drop for
+a real engine in CI, rootful docker and rootless podman: preflight's probe the
+way a task runs (#373) passes on both, behind an egress sidecar (a stand-in
+built from the commit's `pkg-repo egress`, and in the image job the worker
+image itself), and fails where a task could reach what it must not — a
+network made without `--internal` reaches the LAN, and a public address of
+the host's the sidecar was not given answers through it; a signed
+exception's bridge reaches its gateway (the host itself on rootful docker,
+the engine's namespace on rootless podman) and not behind an `INPUT` drop for
 one test /28 (the rule prep-root.sh's `OMARCHY-TASKS-HOST` holds for each
 task subnet), which the script adds on a rootful engine where it may (root,
 or `sudo -n`); a task's own network, made as the dispatcher makes it (on
@@ -781,9 +973,10 @@ loopback off by default; pasta's guest-mapped address (from podman 5.3, the
 table's third row, below) is on. Whether the loopback is mapped is on the
 stack's command line, which the engine's own user (the agent's, design v2
 §19.3) reads in `/proc/<pid>/cmdline`:
-preflight reads it there while both probe tasks run (rootless podman starts
-its stack with the first container on a bridge network and stops it with the
-last), and refuses the install with the setting to change when any of this
+preflight reads it there while the probe tasks run (rootless podman starts
+its stack with the first container on a bridge network — the probe's egress
+sidecar, on a bridge of its own, and a signed exception's bridge where the
+envelope grants one — and stops it with the last), and refuses the install with the setting to change when any of this
 user's `rootlesskit`, `slirp4netns` or `pasta` processes maps it — or when
 none was seen, since nothing then says it is off. The agent listens on
 nothing (design v2 §11.2), so it reads the setting rather than waiting for a
@@ -791,20 +984,25 @@ connection. The stack carries both a signed exception's bridge and a task's
 own network; the latter is internal, with no route to these addresses, and
 so is reached only through the former and the shared `omarchy-egress`
 bridge, whose sidecars refuse private addresses by what a name resolves to.
+That is why a rootless host passes the egress probe, which runs the way a task
+runs, behind its sidecar (#373), and cannot grant a signed exception's bridge
+(`--direct-network`): its bridges reach the LAN and the router through the
+stack, and their gateway is the engine's own namespace, which answers.
 
 pasta can also map an address to the host's **own** address, which reaches
 every service of the host that listens on its interfaces: its guest-mapped
 address (`--map-guest-addr`), which rootless podman passes as `169.254.1.2`
 (what `host.containers.internal` names) from podman 5.3 on, unless
 `pasta_options` names one. On rootless podman behind pasta (libpod's `/info`
-says which stack it runs) the probe task on a bridge tries `169.254.1.2` on
-22, 53 and the pool's ports, and preflight refuses the install when anything
-answers there, with the setting to change; an address that pasta's command
-line maps and the probe did not try (one an owner set) is refused as it is. A
-task's own network is internal and has no route to it, so the probe task on
-one does not try it (an unreachable address that fails at once reads as a
-refusal to `nc -z`); a signed exception's bridge has one, and so does the
-shared `omarchy-egress` bridge, whose sidecars refuse link-local addresses.
+says which stack it runs) the probe tries `169.254.1.2` on 22, 53 and the
+pool's ports, and preflight refuses the install when anything answers there,
+with the setting to change; an address that pasta's command line maps and
+the probe did not try (one an owner set) is refused as it is. A task's own
+network is internal and has no route to it (the probe task reads its routes
+to tell that from a refusal), and its sidecar, on the shared `omarchy-egress`
+bridge, refuses link-local addresses: with the defaults, the probe passes. A
+signed exception's bridge has a route there, which its probe tries when the
+envelope grants one.
 
 | Engine | What maps the host into its networks, where, when on | Default | What turns it off |
 |---|---|---|---|
@@ -818,17 +1016,112 @@ dispatcher makes it on podman through libpod's own API, internal with DNS
 off (its docker-compatible API would turn DNS on and keep a gateway at `.1`,
 where aardvark-dns answers on 53 and the namespace refuses every other
 port), and on Docker with its isolated gateway mode (#372); preflight's
-second probe task, on a network made the same way, passes with the defaults
-above. podman 4's docker-compatible API shows such a network with
+probe task, on a network made the same way behind its egress sidecar, passes
+with the defaults above (#373). podman 4's docker-compatible API shows such a network with
 `"Gateway": "<nil>"`, which docker's CLI from 29 on cannot read: on a podman 4
 host (rootful too) with a task running, an owner's own docker CLI 29 or newer
 on podman's socket fails `docker network ls` and `docker network inspect` with
 `ParseAddr("<nil>")`; podman's own CLI, or the docker CLI the worker image and
-the agent pin (27.5.1), lists them. A rootless host still fails the first
-probe task until #373 lands, and preflight says so: a signed exception's bridge reaches the LAN and the
-router through the user-mode stack, and its gateway (the engine's namespace)
-refuses connections, which counts as reached; #373 runs the probe the way a
-task runs, on an internal network behind its egress sidecar.
+the agent pin (27.5.1), lists them. A rootless host passes the egress probe
+with these defaults — rootless Docker with RootlessKit's
+`--disable-host-loopback`, rootless podman as it comes — since the probe runs
+the way a task runs, on an internal network behind its egress sidecar (#373);
+only a grant of a signed exception's bridge (`--direct-network`) would fail
+it there: that bridge reaches the LAN and the router through the user-mode
+stack, and its gateway (the engine's namespace) refuses connections, which
+counts as reached.
+
+#### A sandboxed runtime for community tasks
+
+A host whose engine has gVisor's `runsc` or Kata Containers runs what a
+contributor wrote in it (#330, design v2 §10.4; D43): the dispatcher starts a
+contributor's build, the project's review rebuild of one, its trial and its
+audit — everything but the project's own recipe on main or a maintainer's
+dry run — on the native lane with `--runtime <it>`, so a container escape
+lands in the sandbox's kernel, not on the host. Its sidecars, the
+project's own recipes and the check containers of the pool's jobs (#340:
+the release's scripts over what a ring serves, on any lane) run on the
+engine's own runtime. A package's signed network exception (#373) changes
+its task's network, never its runtime. An emulated lane needs
+the host kernel's binfmt handler, which a sandbox's kernel does not have: the
+pool hands a host whose dispatcher applies a sandbox only the project's own
+recipes for its emulated lanes, and a contributor's x86_64 work waits for a
+native x86_64 lane or another host's emulated one (on a pool whose only
+x86_64 lane is a sandboxed host's emulated one, it waits until the owner
+turns the sandbox off or another host joins). The agent looks for one at install and at each
+`omarchy-agent capacity … --write`: a runtime `docker info` lists whose name,
+path or shim type says `runsc` (gVisor, tried first) or `kata`, then a smoke
+run of the release's build image under it, which must print a kernel that is
+not the engine's own (`uname -r`) and answer `pacman --version`. The first
+that passes goes into `run/capacity.json`'s `sandbox`
+(`{"runtime":"runsc","kind":"gvisor"}`), which the dispatcher reads before
+each start and says with each claim (`capacity.sandbox`: the one it
+applies); the host page (*Sandbox*) shows what the claims say — a dispatcher
+from before #330 says nothing, and the page then says the agent found one
+its dispatcher does not apply — beside what the agent found. None reads
+`"sandbox": null`, and `sandbox_held` says why one the engine has, or the
+envelope names, is not used. A host without one runs its community tasks
+as before. To give a Linux host gVisor (at the host, as root; its release
+notes name the current release):
+
+```bash
+r=20260928 a="$(uname -m)"   # a gVisor release, the machine's architecture
+cd /tmp && curl -fsSLO "https://storage.googleapis.com/gvisor/releases/release/$r/$a/gvisor.tar.zstd" \
+  && curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/$r/$a/gvisor.tar.zstd.sha512" | sha512sum -c -
+sudo mkdir -p /opt/gvisor && sudo tar --zstd -xf gvisor.tar.zstd -C /opt/gvisor   # runsc and its gvisor-bin/
+sudo /opt/gvisor/runsc install       # "runsc" in /etc/docker/daemon.json's runtimes
+sudo systemctl reload docker         # a reload: running task containers keep running
+docker run --rm --runtime runsc busybox uname -r   # gVisor's kernel, not the host's
+```
+
+then count the host again with the owner's envelope and the applied release
+(the command under *How the pool hands a host work*, *Emulated lanes are
+detected*), or run install again; the run loop sees the file change and the
+recreated dispatcher starts the next community task in it. Check it with
+`jq '.sandbox, .sandbox_held' <set dir>/run/capacity.json`, or without a
+release `omarchy-agent capacity --work-root <dir> --probe-image <the build
+image by digest>`. The envelope's `sandbox` is the owner's, set at the
+host (a widening signed on the host page never sets it, #328): absent or
+`"auto"` takes the first that passes, `"off"` none (nothing is run for it),
+a runtime's name only that one (`sandbox = "kata"`). Where it does not apply:
+
+- **podman**: the dispatcher's docker CLI cannot pass `--runtime` through
+  podman's docker API, which runs podman's default runtime instead; the smoke
+  run sees the host's kernel and the agent names no sandbox (`sandbox_held`
+  says so).
+- **Kata** needs `/dev/kvm`: on a VM, nested virtualisation. Its docker
+  registration is a shim (`"runtimes": {"kata": {"runtimeType":
+  "io.containerd.kata.v2"}}`), which the agent reads the same way.
+- **A rootless engine, or a 16K-page kernel** (the Studio's Asahi): whether
+  gVisor runs there at all is its smoke run's to say; held, the host runs on
+  as before and the reason is on its page.
+- A runtime removed or broken after the count (runsc uninstalled,
+  `daemon.json` reset, Kata without `/dev/kvm` after a migration):
+  `docker run --runtime` refuses, and the task it was to start fails `lost`
+  — never on the engine's own runtime. Its attempt is given back, but the
+  pool spends one from a task's third loss on a host (`HOST_LOSSES_MAX`), so
+  the dispatcher holds its claims (`want: 0`, its pool jobs' unit with
+  them, #340) for 30 minutes after a first
+  refusal, twice as long after each further one in a row (1, 2, 4 … hours,
+  a day at most), and claims again when the hold is over — the leases it
+  claimed before a hold and refused while it holds are lost with it, and
+  count as that one refusal; the host page
+  says why under *Sandbox* ("its claims hold: runsc refused task … 's start
+  …: no claim for 1 hour (2 refusals in a row) …") and the dispatcher's log
+  says it once. Only the runtime's own error holds the claims (docker's
+  "unknown or invalid runtime name", an OCI runtime's or its shim's): a
+  start that fails for a pull or an engine that did not answer is lost as on
+  any host. Fix or remove the runtime, then press **Restart** on the
+  dispatcher's worker page (the host page's *Drain or resume its claims*
+  leads there): a new dispatcher has no hold, and claims again at once — in
+  the sandbox, or with `"sandbox": null` on the engine's own runtime once
+  the host is counted again without it (a count that finds something
+  changed writes a new `run/capacity.json`, which recreates the dispatcher
+  too). A count that finds the host as it was writes nothing (`capacity:
+  … unchanged`) and leaves the hold to run out.
+
+CI's `sandboxed-runtime` job runs all of it on docker with gVisor
+(`tests/sandboxed-runtime.sh`).
 
 ### Installing a Mac
 
@@ -913,12 +1206,14 @@ Preflight, before it starts any VM:
 - through the release's pinned CLI on `~/.colima/omarchy/docker.sock`: the
   capacity inside the VM (`MemAvailable` read inside it), the three
   directories visible in the VM at their own paths and your home directory
-  not, the x86_64 smoke run through Rosetta, and the egress probe, which the
-  firewall must pass (the Mac's default gateway from `route -n get default`,
-  its LAN address, and the Mac as the VM reaches it, `192.168.5.2`; and, as
-  on Linux, the probe network's gateway on 22, 53 and the pool's ports,
-  #367, which is the VM itself and which the firewall's `INPUT` drop
-  closes). prep-root.sh's files are not looked for on a Mac.
+  not, the x86_64 smoke run through Rosetta, and the egress probe, as on
+  Linux the way a task runs, behind its egress sidecar (#373), with one more
+  target: the Mac as the VM reaches it, `192.168.5.2`, beside the Mac's
+  default gateway from `route -n get default`, its LAN address and its own
+  addresses; with `--direct-network` a signed exception's bridge too, which
+  the firewall must keep off them, and off the probe network's gateway on
+  22, 53 and the pool's ports (#367), the VM itself, which the firewall's
+  `INPUT` drop closes. prep-root.sh's files are not looked for on a Mac.
 
 `agent.toml` records the VM (`[vm] runtime = "colima"`, `rosetta`,
 `disk_gb`) and the two sockets: `socket_cli` (the Mac's
@@ -926,8 +1221,10 @@ Preflight, before it starts any VM:
 (`/var/run/docker.sock`, inside the VM, which the dispatcher mounts). The
 lint then refuses any bind of the set (the owner's override included) whose
 source lies under none of the VM's three mounts. `etc/dispatcher.env` is in
-the set directory (`<root>/set/etc/dispatcher.env`, read-only in the VM), and
-its `OMARCHY_HOST_ADDRESSES` are the Mac's own: a Mac has no `/proc`, so they
+the set directory (`<root>/set/etc/dispatcher.env`, read-only in the VM), as
+is the host worker token's file (`<root>/set/run/host/dispatcher/token`,
+0400, #327), which the dispatcher in the VM mounts read-only; and the env
+file's `OMARCHY_HOST_ADDRESSES` are the Mac's own: a Mac has no `/proc`, so they
 are `/sbin/ifconfig -a`'s, by the same rules as on Linux (a vmnet bridge such
 as `bridge100`, the VMs' NAT, counts as a container bridge), and the public
 address the probe task in the VM saw. A task leaves through the Mac, so an
@@ -944,7 +1241,9 @@ your home directory shared with it — neither `~` nor any folder in it
 (Docker Desktop: Settings, Resources, File sharing; preflight probes `~`,
 the folders that hold credentials and the usual project folders); the agent
 never starts, stops or sizes their VM, and puts no firewall in it, so the
-egress probe decides as on any host.
+egress probe decides as on any host: a task behind its egress sidecar passes
+there, and a signed exception's bridge, which their NAT carries to the LAN,
+cannot be granted.
 
 **Resizing the VM.** Re-run `omarchy-agent install --max-cpus N
 --max-mem-gb M` (it holds the size to the release's minimum and to the Mac
@@ -1057,6 +1356,39 @@ keeps the list its egress sidecar was started with); the journal says
 rename, so none puts back what another just wrote. `omarchy-agent
 dispatcher-env` prints what it would write; `--write` writes it now.
 
+**Rotating the host worker token** (#327): `omarchy-agent token` fetches a
+new one with a request signed by the host key and rewrites
+`run/host/dispatcher/token` (every rotation writes there alone: the 30-day
+rotation, and the pool's `rotate-token` host order once it lands, #325).
+The token file is an input of the set, so the next tick starts a round that
+recreates the dispatcher, and only it: the old one saves its leases and
+exits, the new one reads the new file and re-adopts every task, which runs
+on (the old token works ten more minutes, more than the round takes). The
+journal scrubs the token from its file as it does `etc/*.env` values.
+
+**A host from before #327** had the token in `etc/dispatcher.env`. Its agent
+updates itself first: the bundle's `min_agent` is the first agent that writes
+the token file (0.3.0), since an older one refuses the template that mounts it
+and would report its lint, so a host whose self-update fails reports
+`needs-newer-agent` and stays on its release. The new agent
+moves the token to its file at its first start (`dispatcher-env` in the journal:
+"the host worker token moved …"), losing nothing; a token line there is
+always taken as the newest one (an older agent wrote it). While a release
+from before #327 runs or is being rolled out — its dispatcher reads only
+`OMARCHY_WORKER_TOKEN` — the agent keeps the token in `etc/dispatcher.env`
+too, and a round that rolls back to such a release puts it back before it
+creates that dispatcher. A rollback statement whose `agent_to` moves the agent
+down hands that round to the agent below, which may be from before #327 and
+keep a token line without writing one, so the agent puts the line back before
+it moves when the target's template reads the token there: a line it cannot
+write holds the statement (`held`, "the dispatcher's token: …"), and a move
+that fails takes the line out again. Once no such release is left the next
+minute's refresh takes it out, which recreates the dispatcher once more. A
+token line the agent cannot move (not one word) stops it with a
+`dispatcher-env` line in the journal until you fix or remove the line. The
+image reads `OMARCHY_WORKER_TOKEN_FILE` before `OMARCHY_WORKER_TOKEN`, and a
+file it names but cannot read stops the container instead of falling back.
+
 Each round goes `render → lint → plan → pull → replace → guard → commit`,
 or `revert`, each step written to `state.json` before it acts, so a restart
 anywhere resumes it (a ready wait or a guard in flight starts its clock again:
@@ -1072,7 +1404,8 @@ origin must be in its `pools`, and the target must be at or above the floor
 merged from every verified manifest and never lowered) — or covered by a
 rollback statement (*Rollback statements* in the security model), which
 preempts a round in flight, as a newer release does, at any step before
-`commit` (an older release waits for the round to end). The dispatcher alone is replaced: stopped (it saves its leases
+`commit` (an older release waits for the round to end). Before it hashes the set's inputs, a round puts the token into
+`etc/dispatcher.env` or takes it out as the releases staged and applied need (#327). The dispatcher alone is replaced: stopped (it saves its leases
 and exits within 60 s), created from the new files and waited for on
 `/ready`; task containers are never part of a plan and keep running. The
 guard then samples it for `guard_s`: a restart streak, two restarts that
@@ -1081,8 +1414,9 @@ lost `/ready` revert to `last-good/` and quarantine the release for an hour
 (one retry, then until a newer release); an Update order on the host's
 worker, or the host order `retry-release`, lifts every quarantine and starts
 a round. A changed
-`compose.override.yml`, `etc/` file or `run/capacity.json` starts a round
-too, and the running set is compared with `last-good/` every 15 minutes.
+`compose.override.yml`, `etc/` file, `run/capacity.json` or the token file
+starts a round too, and the running set is compared with `last-good/` every
+15 minutes.
 Two known gaps: a round preempted during its replace leaves the dispatcher
 stopped (its leases saved) until the new round's replace, and a release's
 pinned docker and compose roll forward only — tools that cannot talk to the
@@ -1091,9 +1425,9 @@ engine leave the round at `engine-unreachable` until a newer release.
 | The last round says | What it means |
 |---|---|
 | `ok`, `no-change` | the set runs the target |
-| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again); or the release waits for the owner's soak (`… waits for the owner's soak until …`, #326, *Soak* below) |
+| `held` | the dispatcher waits for a file: `etc/dispatcher.env` and `run/host/dispatcher/token` until the owner confirms the host (#321, #327), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined; or the brake holds a release change (`brake: …` in `detail`, #325: the next poll asks again); or the release waits for the owner's soak (`… waits for the owner's soak until …`, #326, *Soak* below) |
 | `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
-| `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep`, `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
+| `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep` (deeper than 14 days without the maintainers' co-signature over the statement), `cosignature` (the bundle lacks the co-signatures this agent pins, #330), `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
 | `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
 | `engine-unreachable`, `pull-failed` | nothing changes; the step or the next poll tries again |
 | `needs-newer-agent` | the release needs an agent this one is not and the update to it did not happen (why is in `detail`; *Self-update*, below) |
@@ -1167,22 +1501,24 @@ an agent from 0.4.0 (an older one is given none and the page says why):
   Mac the lane is the VM's Rosetta one (#320); a count after a start of the
   VM keeps it as detected, and the setting narrows the new file again.
 - **Rotate token** (`rotate-token`): a new host worker token from the pool
-  (`POST /hosts/self/token`, signed), written to `etc/dispatcher.env` as
-  enrollment writes it — the rest of the file rendered as the run loop
-  renders it (#371), so the host's addresses, the secrets directory, the
-  agent budget and the owner's own lines stay; the changed `etc/` recreates
-  the dispatcher within the ten minutes the old one still works. A token the
-  pool does not give, or one for another registration, is refused with
-  nothing written. (`*_FILE` secrets, #327, move where the token is written:
-  `enroll::write_worker_token` is the one place.)
+  (`POST /hosts/self/token`, signed), written as enrollment writes it
+  (`enroll::write_worker_token`, the one place): to its file,
+  `run/host/dispatcher/token` (0400, #327), with `etc/dispatcher.env` naming
+  its registration and rendered as the run loop renders it (#371), so the
+  host's addresses, the secrets directory, the agent budget and the owner's
+  own lines stay (and the token goes there too only while a release from
+  before #327 is here); the changed file recreates the dispatcher within the
+  ten minutes the old one still works. A token the pool does not give, or one
+  for another registration, is refused with nothing written.
 - **Retry release** (`retry-release`): lifts every quarantine and starts a
   round, as an Update does; the page greys it while the report says nothing
   is quarantined. Without room on the brake for that round's restarts (its
   own and a revert's) it is refused and the quarantine kept.
 - **Diagnostics** (`diagnostics`, design v2 M10): only when the envelope says
   `diagnostics = true`, the dispatcher's last 500 log lines, each cut to 300
-  characters, scrubbed of every value (8 characters or more) of the set's
-  `etc/*.env` and the secrets directory's `*.env`, and of anything shaped like a pool
+  characters, scrubbed of the host worker token's file (#327), of every value (8
+  characters or more) of the set's `etc/*.env` and the secrets directory's
+  `*.env`, and of anything shaped like a pool
   token (`omj.` job tokens and `oma_` agent tokens among them), GitHub, Anthropic or
   OpenAI token; the newest that fit 56 KiB as the JSON body carries them, posted to the
   pool (`POST /hosts/self/diagnostics`, signed, at most 64 KiB), which drops a
@@ -1244,8 +1580,13 @@ host of that engine (#372): on podman through libpod's own API on the socket
 it mounts, internal with DNS off; where libpod does not answer there, the
 dispatcher does not start, so the round's guard fails and the switch goes
 back. The switch runs none of install's preflight probes on the new engine
-(the gateway, the host loopback, pasta's guest-mapped address: *Rootless
-engines*, above).
+(the egress probe behind its sidecar, a granted bridge's probe, the gateway,
+the host loopback, pasta's guest-mapped address: *Rootless engines*, above).
+A grant of a signed exception's bridge (`direct_network`, #373) goes with
+it, unprobed there as one written by hand is: run `omarchy-agent preflight`
+again after the switch (its socket is the one `agent.toml` now names), which
+reads the grant and probes that engine's bridge, or take the grant back with
+install's `--no-direct-network`.
 A restart mid-switch resumes on the engine it was on; `omarchy-agent status`
 and `logs` follow it. Install writes no runtime into `agent.toml` (it finds
 a socket, and podman's speaks docker's API): until a switch names one there,
@@ -1253,6 +1594,83 @@ the agent asks the engine behind the socket which it is, and its report says
 that one (`null` until the engine answers). On a Mac (#320) the switch is
 refused with nothing changed: the bundle runs in the VM's engine, which the
 agent keeps, and the drivers it carries are a Linux host's.
+
+**The Quadlet driver** (#330, design v2 §15, v1 §10.2; an agent from 0.5.0):
+on rootless podman with no compose, the agent runs the dispatcher as a unit of
+the owner's own systemd. Each round renders the set — the release's `compose.yml`, its
+labels (`agent.yml`) and `compose.override.yml`, merged and interpolated as
+compose would, from `agent.toml`'s variables only — into
+`~/.config/containers/systemd/omarchy-host-dispatcher.container` (`set.unit_dir`
+in `agent.toml` names another place; the unit is `omarchy-<project>-<service>`,
+or `<project>-<service>` for a project that begins with `omarchy-`), then
+`systemctl --user daemon-reload` and `restart`: podman's generator makes the
+service, which runs the container with `--rm` and restarts it a second after
+any exit, with no start limit (the guard judges a release that keeps
+restarting, by the service's `NRestarts` and the engine's `die` events for
+the container's name, an exit 75 being an ordered restart as on compose). The
+agent stops a unit with `systemctl --user stop --no-block` (the template's
+`stop_grace_period` is the container's stop timeout, systemd's
+`TimeoutStopSec` 30 s more) and removes it by deleting its file and reloading,
+so a reboot between two rounds never starts a release the rollout left;
+everything it asks of the engine — state, labels, exits, `/ready`, the pull of
+the rendered image, an image's removal — goes through the pinned docker CLI on
+podman's API socket, as on compose, and it never runs the podman CLI. Its hash
+(the unit without its comments, as `org.omarchy-pool.agent.config-hash` on the
+container) is the plan's config hash. podman's `AutoUpdate=` is never
+written. `lint-set` renders every template for Quadlet too, so a release CI
+passes runs on both drivers, and on a Quadlet host a round lints the owner's
+override the same way: a service network, `depends_on`, `profiles`, a string
+command or entrypoint with quotes or backslashes (give a list), an
+entrypoint whose first word starts with `[`, a `restart: on-failure:N`, a
+named volume not declared at the top level, a home-relative bind, a bind
+whose `create_host_path` is `true` (a directory a unit cannot make) or a
+variable `agent.toml` does not set (compose would use a blank) is `refused`
+with `quadlet: …`, and the host keeps what it ran; compose's own lint runs
+there too, so a mount of a secret file not the service's own is `refused`
+with `secret_file: …` as on compose. The host worker token (#327) is
+`run/host/dispatcher/token`, which the unit mounts read-only
+(`Volume=<set>/run/host/dispatcher/token:/run/omarchy/worker-token:ro`, with
+`OMARCHY_WORKER_TOKEN_FILE` in its environment); `etc/dispatcher.env` carries
+the token too only while a release from before #327 is on the host, as on
+compose, and the unit file never does. podman never creates a mount's missing
+source — `podman run` stops with `statfs …: no such file or directory` (exit
+125) and systemd tries again each second — so a unit started without the token
+file makes no directory in its place, and a round holds the dispatcher
+(`awaiting the owner's Confirm: run/host/dispatcher/token is missing`) until
+the agent wrote it. A rotation changes the file, an input of the set: the next
+round restarts the dispatcher's unit alone, its tasks running on. The env files are
+podman's `--env-file`: in an owner's own line of `etc/dispatcher.env`, `$`
+is not expanded, a ` #` after the value stays in it and podman 4 keeps
+quotes, where compose expands `$VAR`, drops the comment and strips the
+quotes; the agent's own lines have no quotes, `$` or comment and mean the
+same on both, as does an owner's line written so. Install takes the
+driver with `--driver quadlet` (preflight: Linux, podman 4.6 or later with its
+Quadlet generator — 4.4 and 4.5 ship one that rejects the unit's `Pull=` and
+`PodmanArgs=` and would make no service of it, so preflight and the switch
+refuse them —, the socket answering as rootless podman —
+`$XDG_RUNTIME_DIR/podman/podman.sock` unless `--socket` names another —, the
+user manager and linger); a re-run
+keeps the driver `agent.toml` names, and refuses another on an installed host:
+`omarchy-agent runtime switch quadlet` (the envelope's `drivers` naming
+`quadlet`; the same socket unless `--socket` names another, so a shell
+without `XDG_RUNTIME_DIR` is refused) moves a running host, stopping the old
+dispatcher before the unit starts, and `runtime switch compose/podman` goes
+back — on one rootless podman, compose and Quadlet are two drivers of one
+engine. Uninstall stops
+the unit and removes its file before it removes the containers — also on a
+host a switch to Quadlet is still moving (`agent.toml` names compose until
+the switch's round is `ok`), and a unit systemd never loaded (no round made
+it yet, or the generator did not take it) is not stopped, its file removed
+all the same. On the host:
+`omarchy-agent status` (`driver: quadlet on <socket>, its units in <dir>`),
+`systemctl --user status omarchy-host-dispatcher`, `journalctl --user -u
+omarchy-host-dispatcher`. A unit the generator did not take fails the round's
+create (`podman's generator made no unit of …`, then the revert):
+`/usr/libexec/podman/quadlet -dryrun -user` says why. A user manager that does
+not answer (`Failed to connect to bus`: no linger, or a session without
+`XDG_RUNTIME_DIR`) is `engine-unreachable`, and nothing changes until it
+answers. `tests/agent-quadlet.sh` runs podman's generator on what the agent
+renders and the run loop on rootless podman under a real user manager in CI.
 
 The agent answers in its **host report** (`POST /api/v1/hosts/self/report`,
 signed, on every change and at least every five minutes: its version, the
@@ -1371,6 +1789,77 @@ a release ships waits with its release, unless the manifest sets
 `agent.urgent`: then the agent updates itself at once and the release still
 waits.
 
+### Owner control
+
+From agent 0.4.0 a host's owner widens its envelope and sets its agent keys
+from the host's page (#328, design v2 §14; [The project's
+host](/docs/worker-host#owner-control-without-a-visit) says what each does).
+Two things are done at the host, once:
+
+- **Pin a passkey.** On the host's page, *Owner control* → **Make a pin**,
+  with one of your passkeys; it prints a command good for ten minutes. At
+  the host, as the agent's user (on a Mac, in your own login session):
+
+  ```sh
+  omarchy-agent envelope pin-passkey <pin>      # or: … pin-passkey - < pin.txt
+  # pinned m1's passkey (ES256, credential AbCdEfGhIjKl…) for omarchy-pool.org on https://omarchy-pool.org: …
+  omarchy-agent status                          # owner:  m1's ES256 passkey AbCdEfGhIjKl… …  /  seal key: SHA256:…
+  ```
+
+  The agent refuses a pin for another host, for a relying party that is not
+  its pool's (`localhost` only when its pool is on the same machine), one
+  whose signature does not check, or one past its ten minutes; it then keeps the passkey's public key in `state/owner.json`
+  (0600), and the page shows it pinned after its next report (within its
+  poll). Pinning another passkey replaces it; `omarchy-agent envelope
+  unpin-passkey` removes it, and the site then widens nothing and sets no
+  key. A passkey you lost is replaced only at the host — by design, the
+  site has no way around the pin.
+- **Confirm the seal key.** The agent makes its X25519 seal key the first
+  time it runs (on Linux `state/seal.x25519`, 0600, with `state/seal.pub`;
+  on a Mac the login keychain, service `org.omarchy-pool.agent`, account
+  `seal-key-…`) and journals its fingerprint (`seal-key`). Compare the
+  page's fingerprint with `omarchy-agent status`'s `seal key:` line, then
+  **Confirm the seal key** with your passkey. On a Mac whose keychain is
+  locked (an SSH session with nobody logged in) the agent journals that the
+  seal key could not be loaded, tries again every ten minutes, and takes no
+  agent key meanwhile; everything else runs. A seal key made again (the file
+  removed, a new keychain) shows as changed on the page: confirm it again,
+  and seal the keys again — the agent refuses keys sealed to another key.
+
+Then, on the page: **Widen the envelope** (the agent answers `done` with
+what changed in `agent.toml` and in `run/capacity.json`, and recreates the
+dispatcher with the new count) and **Set agent keys** (written to
+`OMARCHY_SECRETS_DIR/agent.env`, 0600; your own lines there are kept, and
+the next agent sidecar reads it). Each is one order on the page's journal of
+orders; the agent's answer says why when it refuses:
+
+| The answer says | What it means |
+|---|---|
+| `no passkey is pinned at this host` | pin one first (above) |
+| `signed with another passkey (…), not the one pinned at this host` | sign with the pinned passkey, or pin this one |
+| `its version N is not above the last this host took` | a replay, or an older document: sign a new one |
+| `the document expired at …` / `… ahead of this host's clock` | signed more than an hour ago, or the host's clock is off: sign again, check the clock |
+| `the passkey's answer was made on …` / `the passkey signed for another relying party` / `the authenticator did not verify the user` | not signed on the pool's page, or without verifying you: sign again there |
+| `the keys were sealed to another seal key` | confirm the host's seal key on the page, then seal again |
+| `GITHUB_TOKEN carries the scopes …` | a `GITHUB_TOKEN` is public read only: make one with no scope |
+| `done`: `… was taken already: nothing changed again` | the agent stopped after making the change and before its answer reached the pool; the change is in place |
+| `done`, ending `; but …` | the change is in `agent.toml` or `agent.env`, and what failed after it is said — for `run/capacity.json was not counted again`, run `omarchy-agent capacity --write` at the host |
+
+The page refuses a second document signed at the same version (two tabs,
+or a widening and keys signed at once) with `409`, `version`: press again,
+and the passkey signs the next one. The page also refuses, before your
+passkey is asked, a document the pool answered that is not the one it
+asked for (another envelope, other keys, another seal key, a challenge
+that is not its SHA-256): that is a pool to look into, not a retry.
+
+A widening's `emulate` turns a lane on at the host's next count, which the
+loop does not run on Linux — **decision**: the loop never runs a capacity
+probe or an emulation smoke test on its own there, so on Linux it takes
+`omarchy-agent capacity --write` at the host, as the page's dialog says
+(on a Mac, the next start of its VM counts it); a Mac's VM takes a new
+`max_cpus` or `max_mem_gb` with a restart once no task runs. Narrowing
+(*Settings*) needs no signature.
+
 ### Soak
 
 An owner may make a host take a new release later than the pool names it
@@ -1383,13 +1872,17 @@ round after it fit inside the pool's two-hour grace), then
 the pool names above the one that runs waits that long from when the agent
 first saw the pool name it (its own clock, kept in `state.json` across
 restarts); its bundle is fetched and verified meanwhile, so the host still
-learns of a revocation. A newer release named meanwhile waits its own soak
+learns of a revocation, and one without the maintainers' co-signature the
+agent requires is refused then, not when the soak ends (*Co-signing a
+release*, #330). A newer release named meanwhile waits its own soak
 from then, but the soak never keeps the host more than 100 minutes behind
 the release it ran when it fell behind: when releases land faster than the
 soak, the one named then is taken at that bound. The last round says `held`
 with `… waits for the owner's soak until <time>`, once; `omarchy-agent
 status` says `soak:` with the seconds left. What the soak does not hold: a
-rollback statement (applied at once, as everywhere), a round to the release
+rollback statement (applied at once, as everywhere, under the same rules: one
+that goes back more than 14 days needs a maintainer's co-signature over it),
+a round to the release
 that runs (a changed input, drift), and the first release a host applies.
 What never skips it: **Reconcile now**, an Update order, `omarchy-agent
 round`. The agent a release ships waits with it unless the manifest sets
@@ -1670,7 +2163,10 @@ so a size-4 build waits for memory rather than run smaller.
   <scratch dir>:/repo[:ro] <image pinned in tests/images.env> bash
   /repo/<script>.sh`; anything else a job's script asks of the engine it
   refuses with 125 (`omarchy-task-run: refused — …` in the dispatcher's
-  log). The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
+  log). On a host with a sandboxed runtime (#330) they run on the engine's
+  own runtime all the same, its emulated lanes included, and a sandbox hold
+  (*A sandboxed runtime for community tasks*) holds its pool jobs with its
+  tasks until it ends or the dispatcher restarts. The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
   ABI gate's cached Omarchy reference), as a legacy pool worker's work
   directory. On the host, while one runs:
 
@@ -1767,8 +2263,10 @@ A release found bad after the fact (it builds wrong packages, a dispatcher
 that mishandles a credential) is revoked by the next release: add it to
 `revoked` in `factory/bundle/manifest.toml` (and raise `min_release` when
 everything older should go too), in the pull request of the fix, and
-release. Never take a release out of `revoked` again: hosts keep the union
-of every list they verified (design v2 §5.2). From that release's deploy on:
+release (co-signed once `MAINTAINERS.toml` sets a threshold: *Co-signing a
+release*; the pool deploys it only once it is published). Never take a
+release out of `revoked` again: hosts keep the union of every list they
+verified (design v2 §5.2). From that release's deploy on:
 
 - the agents refuse to apply the revoked release, whatever a rollback
   statement says;
@@ -2041,6 +2539,22 @@ start time), a task that was running finishes, and the page's units say the
 new count after the agent's next report. Give its envelope's units back (the first entry of the
 list), then ask Diagnostics while `agent.toml` says `diagnostics = false`:
 refused, saying so.
+
+**Rehearse owner control on the P1 host** (#328) once its agent reports
+0.4.0 (`tests/agent-host-orders.sh` widens and sets a key against a stand-in
+in CI, with a virtual authenticator; `tests/host-enroll-e2e.sh` pins one
+made on a local pool's page): pin your passkey at the host and confirm its
+seal key (*Owner control*, above). Then, from the page alone: **Widen the
+envelope** with `max_units` one above what `agent.toml` says (and no more
+than the machine has) — within two minutes the order says `done`,
+`agent.toml` says the new cap, `jq .units run/capacity.json` the new count
+and the dispatcher was recreated; **Set agent keys** with a scratch
+`OPENAI_API_KEY` — `done`, `agent.env` in the secrets directory holds it
+(0600), `docker inspect` of the dispatcher shows neither the value nor a
+mount of the secrets directory, and `omarchy-agent status` and the page name
+the key, never its value; take it out again the same way. A widening is
+counted under the release's signed constants and the detected hardware, so
+the units it gives are never more than the machine has.
 
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,

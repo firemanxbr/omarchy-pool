@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::emulation::{self, Emulated, Lanes, Smoke};
+use super::sandbox::{self, Listed};
 use super::{DiskFree, Isolation, Limits, VmKind};
 
 const GB: u64 = 1 << 30;
@@ -46,6 +47,12 @@ pub struct Engine {
     pub cpus_hard: bool,
     pub memory_hard: bool,
     pub pids: bool,
+    /// The engine's own kernel release (`KernelVersion`): a sandbox's smoke run must print
+    /// another (#330).
+    pub kernel: String,
+    /// The runtimes the engine lists (`Runtimes`), where a sandbox is looked for (#330).
+    #[serde(skip)]
+    pub runtimes: Vec<Listed>,
 }
 
 /// The agent's own cgroup limits (a VPS slice, a systemd slice with `CPUQuota` or
@@ -71,6 +78,8 @@ pub struct Facts {
     /// The foreign architecture's lane, when detection looked (design v2 §7.5), or a Mac's
     /// Rosetta lane once its smoke run passed (#320, [`in_mac_vm`]).
     pub(super) emulation: Option<Lanes>,
+    /// The sandboxed runtime for community tasks, when detection looked (#330, D43).
+    pub(super) sandbox: Option<sandbox::Found>,
 }
 
 impl Facts {
@@ -193,6 +202,12 @@ impl Facts {
         self.emulation.as_ref()
     }
 
+    /// The sandboxed runtime detection found for community tasks, and why one is not used,
+    /// when it looked (#330).
+    pub fn sandbox(&self) -> Option<&sandbox::Found> {
+        self.sandbox.as_ref()
+    }
+
     /// The facts as `omarchy-agent capacity` prints them without a release.
     pub fn report(&self) -> serde_json::Value {
         let (cpus, mem_gb) = self.totals();
@@ -220,6 +235,8 @@ impl Facts {
                 "mem_gb": self.cgroup.mem_bytes.map(|m| gb(m / GB)),
             },
             "emulation": lanes,
+            "sandbox": self.sandbox.as_ref().and_then(|s| s.on.as_ref()),
+            "sandbox_held": self.sandbox.as_ref().and_then(|s| s.held.as_deref()),
         })
     }
 }
@@ -246,6 +263,10 @@ pub struct Probe<'a> {
     /// architecture's build image and the envelope's `emulate`. `None` looks at none (a
     /// Mac's VM: [`in_mac_vm`]).
     pub emulation: Option<emulation::Probe<'a>>,
+    /// The sandboxed runtime's detection (#330, D43): the envelope's `sandbox` and whether
+    /// the engine's files are this machine's. Its smoke run starts `image`. `None` looks
+    /// for none.
+    pub sandbox: Option<sandbox::Probe<'a>>,
 }
 
 impl Probe<'_> {
@@ -337,6 +358,18 @@ pub fn detect(p: &Probe<'_>) -> Result<Facts, String> {
         let page_kb = u32::try_from(page_size / 1024).unwrap_or(u32::MAX);
         emulation::detect(&engine.arch, page_kb, e, p)
     });
+    // The sandbox's smoke run starts the same image as the probe container: the release's
+    // build image of the engine's own architecture (the native lane, which it covers alone).
+    let sandbox = p.sandbox.as_ref().map(|s| {
+        sandbox::detect(
+            &engine.runtimes,
+            &engine.kernel,
+            p.image,
+            s,
+            &|path| path.exists(),
+            p,
+        )
+    });
     Ok(Facts {
         engine,
         cgroup,
@@ -346,7 +379,51 @@ pub fn detect(p: &Probe<'_>) -> Result<Facts, String> {
         limits,
         vm: None,
         emulation,
+        sandbox,
     })
+}
+
+/// The smoke run of a sandboxed runtime through the engine's CLI (#330): `docker run --rm
+/// --network none --runtime <name> --entrypoint uname <image by digest> -r`, which prints
+/// the kernel the container ran on, then `pacman --version` the same way. The runtime's
+/// name and the image are checked against a closed grammar before they reach the argv.
+impl sandbox::Run for Probe<'_> {
+    fn sandbox(&self, runtime: &str, image: &str) -> Result<String, String> {
+        if !sandbox::runtime_ok(runtime) {
+            return Err(format!("{runtime:?} is not a runtime's name"));
+        }
+        if !emulation::image_ok(image) {
+            return Err(format!("{image:?} is not an image by digest"));
+        }
+        let mut kernel = String::new();
+        for (entry, args, says) in sandbox::STEPS {
+            let mut c = self.docker();
+            c.args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--runtime",
+                runtime,
+                "--entrypoint",
+                entry,
+                image,
+            ])
+            .args(args);
+            let out = run(c, PROBE_TIMEOUT).map_err(|e| format!("{entry}: {e}"))?;
+            if !out.contains(says) {
+                return Err(format!(
+                    "{entry} {}: printed {:?}, not {says:?}",
+                    args.join(" "),
+                    out.trim().chars().take(120).collect::<String>()
+                ));
+            }
+            if entry == "uname" {
+                kernel = out.trim().chars().take(120).collect();
+            }
+        }
+        Ok(kernel)
+    }
 }
 
 /// The smoke run of an emulated lane through the engine's CLI (design v2 §15's
@@ -497,6 +574,20 @@ struct InfoRaw {
     cpu_cfs_quota: bool,
     #[serde(rename = "PidsLimit", default)]
     pids_limit: bool,
+    #[serde(rename = "KernelVersion", default)]
+    kernel: String,
+    #[serde(rename = "Runtimes", default)]
+    runtimes: Option<std::collections::BTreeMap<String, RuntimeRaw>>,
+}
+
+/// One of `docker info`'s `Runtimes`: a runtime binary's `path`, or a containerd shim's
+/// `runtimeType` (podman's API gives the first path containers.conf lists).
+#[derive(Deserialize, Default)]
+struct RuntimeRaw {
+    #[serde(default)]
+    path: String,
+    #[serde(rename = "runtimeType", default)]
+    shim: String,
 }
 
 pub(super) fn parse_info(json: &str) -> Result<Engine, String> {
@@ -530,6 +621,17 @@ pub(super) fn parse_info(json: &str) -> Result<Engine, String> {
         cpus_hard: raw.cpu_cfs_quota,
         memory_hard: raw.memory_limit,
         pids: raw.pids_limit,
+        kernel: raw.kernel.trim().to_owned(),
+        runtimes: raw
+            .runtimes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, r)| Listed {
+                name,
+                path: r.path,
+                shim: r.shim,
+            })
+            .collect(),
     })
 }
 
@@ -703,6 +805,7 @@ impl Facts {
             limits,
             vm: None,
             emulation: None,
+            sandbox: None,
         }
     }
 
@@ -710,6 +813,12 @@ impl Facts {
     pub(super) fn with_emulation(mut self, page_kb: u64, lanes: Lanes) -> Self {
         self.page_size = page_kb * 1024;
         self.emulation = Some(lanes);
+        self
+    }
+
+    /// The same facts with what the sandbox's detection found (#330).
+    pub(super) fn with_sandbox(mut self, found: sandbox::Found) -> Self {
+        self.sandbox = Some(found);
         self
     }
 }

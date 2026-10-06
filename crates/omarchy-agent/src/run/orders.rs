@@ -30,14 +30,15 @@
 //!   envelope — more units than it allows, a lane its `emulate` excludes — is refused, with
 //!   nothing changed. `null` gives the envelope's own back.
 //! - `rotate-token`: a new host worker token from the pool (`POST /hosts/self/token`),
-//!   written for the dispatcher where enrollment writes it, the rest of
-//!   `etc/dispatcher.env` rendered as the loop's own refresh renders it (#371); the changed
-//!   `etc/` recreates the dispatcher with it within the ten minutes the old one still works.
+//!   written for the dispatcher where enrollment writes it — its file,
+//!   `run/host/dispatcher/token` (#327), with its registration in `etc/dispatcher.env`, the
+//!   rest of which is rendered as the loop's own refresh renders it (#371); the changed file
+//!   recreates the dispatcher with it within the ten minutes the old one still works.
 //! - `retry-release`: lifts every quarantine and starts a round, as an Update does — only
 //!   with room on the brake for that round's restarts (its own and a revert's).
 //! - `diagnostics`: the dispatcher's last [`DIAGNOSTIC_LINES`] log lines, scrubbed of every
-//!   secret the agent knows (the set's and the secrets directory's env values, and anything
-//!   shaped like a token), posted to the pool for the host's page — only when the envelope
+//!   secret the agent knows (the worker token's file, the set's and the secrets directory's
+//!   env values, and anything shaped like a token), posted to the pool for the host's page — only when the envelope
 //!   says `diagnostics = true` (M10); refused otherwise.
 //!
 //! Every order goes through the host-side brake ([`super::brake`]): at least two seconds
@@ -296,7 +297,7 @@ impl Agent {
             }
             let refusal = match (&o.kind, o.not_after) {
                 (OrderKind::Unknown(k), _) => Some(format!(
-                    "unknown kind {k:?}: agent {} takes retire-legacy, reconcile-now, set-units, set-emulate, rotate-token, retry-release and diagnostics",
+                    "unknown kind {k:?}: agent {} takes retire-legacy, reconcile-now, set-units, set-emulate, rotate-token, retry-release, diagnostics, widen-envelope and set-agent-keys",
                     self.version
                 )),
                 (_, None) => Some("it carries no not_after the agent can read".to_owned()),
@@ -306,6 +307,9 @@ impl Agent {
                 }
                 (OrderKind::SetEmulate(Arg::Malformed), _) => Some(
                     "its emulate is not a list of architectures this agent can read".to_owned(),
+                ),
+                (OrderKind::WidenEnvelope(None) | OrderKind::SetAgentKeys(None), _) => Some(
+                    "it carries no document the owner's passkey signed (its doc and the passkey's assertion): nothing was changed".to_owned(),
                 ),
                 _ => None,
             };
@@ -329,8 +333,11 @@ impl Agent {
                     &[Ask::Narrowing, Ask::Restart][..]
                 }
                 // retry-release's round meets the brake again where every round does, and
-                // its replace and its revert's count there as they happen.
-                OrderKind::RotateToken | OrderKind::RetryRelease => &[Ask::Restart][..],
+                // its replace and its revert's count there as they happen. A signed widening
+                // recreates the dispatcher with its new capacity or budget (#328).
+                OrderKind::RotateToken | OrderKind::RetryRelease | OrderKind::WidenEnvelope(_) => {
+                    &[Ask::Restart][..]
+                }
                 _ => &[][..],
             });
             // One that would lift a quarantine gives that release a round, which needs room
@@ -388,7 +395,11 @@ impl Agent {
             OrderKind::SetEmulate(_) => self.narrow_to(&Narrow::Emulate(None), now),
             OrderKind::RotateToken => self.rotate_token(now),
             OrderKind::Diagnostics => self.diagnostics(&o.id, now),
-            OrderKind::Unknown(_) => return,
+            OrderKind::WidenEnvelope(Some(s)) => self.widen_envelope(&o.id, &s, now),
+            OrderKind::SetAgentKeys(Some(s)) => self.set_agent_keys(&o.id, &s, now),
+            OrderKind::WidenEnvelope(None)
+            | OrderKind::SetAgentKeys(None)
+            | OrderKind::Unknown(_) => return,
         };
         match done {
             Ok(detail) => self.answer(&o.id, &kind, "done", &detail, now),
@@ -476,8 +487,8 @@ impl Agent {
         Ok(format!("{said}{tail}"))
     }
 
-    /// `rotate-token`: a new host worker token, written where enrollment writes it; the
-    /// changed `etc/` recreates the dispatcher with it at the next tick.
+    /// `rotate-token`: a new host worker token, written where enrollment writes it (its
+    /// file, #327); the changed file recreates the dispatcher with it at the next tick.
     fn rotate_token(&mut self, now: i64) -> Result<String, String> {
         let a = match self.pool.token() {
             Net::Ok(a) => a,
@@ -500,9 +511,10 @@ impl Agent {
                 self.cfg.worker_id
             ));
         }
-        // Where enrollment writes it, the rest of the file rendered as the loop's own
-        // refresh renders it (#371): the host's addresses, the secrets directory, the agent
-        // budget and the owner's lines stay. The seam #327's token file moves.
+        // Where enrollment writes it — its file (#327), and etc/dispatcher.env too only while
+        // a release here reads it there — the rest of etc/dispatcher.env rendered as the
+        // loop's own refresh renders it (#371): the host's addresses, the secrets directory,
+        // the agent budget and the owner's lines stay.
         let sources = self
             .host_env
             .as_ref()
@@ -512,10 +524,14 @@ impl Agent {
         crate::enroll::write_worker_token(&env, &a, &r).map_err(|e| {
             format!("{e} (the old token keeps working for ten minutes only: rotate again)")
         })?;
-        self.journal.set_secrets(env_secrets(&self.cfg.set_dir));
+        self.journal.set_secrets(super::agent::secrets_of(
+            &self.cfg.set_dir,
+            &self.cfg.secrets_dir,
+        ));
         self.state.brake.record(now, &[Ask::Restart]);
         Ok(format!(
-            "a new host worker token is in etc/dispatcher.env (next rotation after {}); the dispatcher is recreated with it at once, and the one it replaces works ten more minutes",
+            "a new host worker token is in {} (next rotation after {}); the dispatcher is recreated with it at once, and the one it replaces works ten more minutes",
+            dispatcher_env::TOKEN_FILE,
             cut(a["rotate_after"].as_str().unwrap_or("?"))
         ))
     }

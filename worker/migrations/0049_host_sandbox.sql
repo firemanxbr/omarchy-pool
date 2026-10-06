@@ -1,0 +1,18 @@
+-- The sandbox a host's dispatcher applies (#330, epic #307, design v2 §10.4;
+-- D43, P6): what each claim of its registration says, in its capacity, of the
+-- sandboxed runtime it starts a contributor's tasks in — not what its agent
+-- found, which its report keeps in hosts.capacity: a dispatcher from before
+-- #330 ignores the agent's word, and a page that showed only that word would
+-- say a sandbox holds where none does.
+--
+-- - hosts.sandbox_applied: {"sandbox": {"runtime", "kind"} | null, "held"?:
+--   why its claims hold for it}, as JSON; NULL while its claims do not say (a
+--   dispatcher before #330, or one that never claimed). Written by the claim
+--   (POST /factory/claim) when it says something new; read by the fleet each
+--   claim selects over (FLEET_SQL: a sandboxed host's emulated lanes take the
+--   project's own recipes only, worker/src/selection.ts laneFor) and by the
+--   host page.
+--
+-- Additive only: the Worker that runs during the deploy minute reads and
+-- writes none of it; each host's next claim fills it.
+ALTER TABLE hosts ADD COLUMN sandbox_applied TEXT;

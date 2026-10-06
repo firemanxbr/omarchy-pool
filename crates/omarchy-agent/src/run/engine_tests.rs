@@ -5,6 +5,12 @@
 //! rollout. The pool and GitHub are in-process fakes; signatures vouch (the real check is
 //! `verify`'s own tests).
 //!
+//! The host worker token (#327): the host starts as #371's agent left it, the token in
+//! `etc/dispatcher.env`; the first round moves it to `run/host/dispatcher/token`, and
+//! `docker inspect` then shows it in no container's environment — the dispatcher's, the
+//! task's — while the stand-in reads it through its read-only mount; a rotation rewrites
+//! the file and recreates the dispatcher alone, the task running on.
+//!
 //! `tests/agent-run-loop.sh` runs it (CI: rootful docker, and rootless podman's API
 //! socket); it needs `OMARCHY_AGENT_ENGINE_SOCKET` and `OMARCHY_STANDIN_IMAGE`.
 //!
@@ -12,8 +18,13 @@
 //! then `retire-legacy`, which stops and removes that project and nothing else and writes
 //! the marker into its directory — are `tests/agent-host-orders.sh`'s, on the same host;
 //! so are #325's settings, narrowed into the file the dispatcher mounts while the task runs
-//! on, and `diagnostics` reading the stand-in's own log, scrubbed. The owner's runtime
-//! switch from one real engine to another is `tests/agent-runtime-switch.sh`'s.
+//! on, and `diagnostics` reading the stand-in's own log, scrubbed; and #328's widening the
+//! owner's passkey signed, counted into the file the dispatcher mounts, with an agent key
+//! sealed to the host that the dispatcher never sees. The owner's runtime switch from one
+//! real engine to another is `tests/agent-runtime-switch.sh`'s. The same rollouts on the
+//! Quadlet driver (#330) — the set as a unit of the user's own systemd, on rootless podman,
+//! with no compose — and #327's token file and its rotation there are
+//! `tests/agent-quadlet.sh`'s.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -43,12 +54,20 @@ const TOKEN: &str = "omw_engine_test_token_0123456789";
 const STANDIN: &str = r#"set -eu
 root="$${OMARCHY_WORK_ROOT}"
 me="$$(hostname)"
-# A careless dispatcher: its token in its log, for #325's diagnostics to scrub.
-echo "stand-in: up as $$me with worker token $${OMARCHY_WORKER_TOKEN:-none}"
+# A careless dispatcher: its token in its log, for #325's diagnostics to scrub — read from
+# its file (#327), or the plain variable an older release's template gives.
+tok="$${OMARCHY_WORKER_TOKEN:-none}"
+if [ -n "$${OMARCHY_WORKER_TOKEN_FILE:-}" ]; then tok="$$(cat "$$OMARCHY_WORKER_TOKEN_FILE" || echo unreadable)"; fi
+echo "stand-in: up as $$me with worker token $$tok"
 if [ "$${1:-ok}" = broken ]; then echo "stand-in: a broken release" >&2; exit 1; fi
 n=0
 for f in "$$root"/leases/*; do [ -e "$$f" ] && n=$$((n + 1)); done
 echo "$$n" > "$$root/readopted.$$me"
+tf="$${OMARCHY_WORKER_TOKEN_FILE:-}"
+if [ -n "$$tf" ]; then
+  sha256sum < "$$tf" | cut -c1-16 > "$$root/token.$$me"
+  if (echo x >> "$$tf") 2>/dev/null; then echo writable >> "$$root/token.$$me"; fi
+fi
 mkdir -p /tmp/www
 echo ok > /tmp/www/ready
 httpd -p 127.0.0.1:8791 -h /tmp/www
@@ -105,6 +124,25 @@ struct Host {
     project: String,
     image: String,
     task: String,
+    /// The Quadlet driver's unit (#330), when the host runs on it.
+    unit: Option<Unit>,
+}
+
+/// A Quadlet host's unit: its name and its file.
+struct Unit {
+    name: String,
+    file: PathBuf,
+}
+
+/// `systemctl --user` as the test runs it, the system's own (the agent's own calls are its
+/// driver's).
+fn systemctl(args: &[&str]) -> String {
+    let out = Command::new(crate::run::quadlet::systemctl_path())
+        .arg("--user")
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
 impl Host {
@@ -212,6 +250,16 @@ impl Host {
     }
 
     fn dispatcher(&self) -> (String, String) {
+        if let Some(u) = &self.unit {
+            let out = self.docker(&[
+                "inspect",
+                "-f",
+                "{{.Id}} {{index .Config.Labels \"org.omarchy-pool.agent.release\"}}",
+                &u.name,
+            ]);
+            let (id, release) = out.split_once(' ').unwrap();
+            return (id.to_owned(), release.to_owned());
+        }
         let id = self.docker(&[
             "ps",
             "-q",
@@ -229,6 +277,26 @@ impl Host {
         (id, release)
     }
 
+    /// How many times the engine restarted the dispatcher: its container's count, or (a
+    /// Quadlet unit's containers are new at each restart) its service's.
+    fn restarts(&self) -> Option<u64> {
+        let out = match &self.unit {
+            Some(u) => systemctl(&[
+                "show",
+                "--property=NRestarts",
+                "--value",
+                &format!("{}.service", u.name),
+            ]),
+            None => try_docker(
+                &self.tools,
+                &self.socket,
+                &self.dir.join("data/docker-config"),
+                &["inspect", "-f", "{{.RestartCount}}", &self.dispatcher().0],
+            )?,
+        };
+        out.trim().parse().ok()
+    }
+
     fn task_state(&self) -> String {
         self.docker(&[
             "inspect",
@@ -241,6 +309,12 @@ impl Host {
 
 impl Drop for Host {
     fn drop(&mut self) {
+        if let Some(u) = &self.unit {
+            systemctl(&["stop", &format!("{}.service", u.name)]);
+            let _ = fs::remove_file(&u.file);
+            systemctl(&["daemon-reload"]);
+            systemctl(&["reset-failed", &format!("{}.service", u.name)]);
+        }
         let ids = Command::new(&self.tools.docker)
             .env_clear()
             .env("DOCKER_HOST", format!("unix://{}", self.socket.display()))
@@ -265,6 +339,13 @@ impl Drop for Host {
 }
 
 fn host() -> Host {
+    host_on(false)
+}
+
+/// A host on the engine `OMARCHY_AGENT_ENGINE_SOCKET` names: through compose, or through
+/// the Quadlet driver (#330) under this user's own systemd.
+#[allow(clippy::too_many_lines)] // one host, set up as install sets one up
+fn host_on(quadlet: bool) -> Host {
     let socket = PathBuf::from(env("OMARCHY_AGENT_ENGINE_SOCKET"));
     let image = env("OMARCHY_STANDIN_IMAGE");
     let dir = crate::run::state::tempdir();
@@ -280,9 +361,15 @@ fn host() -> Host {
     }
     // Rootful engines write as root into the work root; let the test clean up after it.
     fs::set_permissions(dir.join("work"), fs::Permissions::from_mode(0o777)).unwrap();
+    // As #371's agent left the host: the token in the env file, no token file yet (#327).
     fs::write(
         set.join("etc/dispatcher.env"),
-        format!("OMARCHY_WORKER_TOKEN={TOKEN}\n"),
+        format!("# worker: w-engine-test\nOMARCHY_WORKER_TOKEN={TOKEN}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(
+        set.join("etc/dispatcher.env"),
+        fs::Permissions::from_mode(0o600),
     )
     .unwrap();
     fs::write(set.join("run/capacity.json"), r#"{"schema":2,"units":3}"#).unwrap();
@@ -296,7 +383,7 @@ dir = "{}"
 work_root = "{}"
 secrets_dir = "{}"
 project = "{project}"
-socket_cli = "{}"
+socket_cli = "{}"{}
 [envelope]
 allow_socket = true
 rootful_ack = true
@@ -305,7 +392,12 @@ dedicated = true
         set.display(),
         dir.join("work").display(),
         dir.join("secrets").display(),
-        socket.display()
+        socket.display(),
+        if quadlet {
+            "\ndriver = \"quadlet\"\nengine = \"rootless\""
+        } else {
+            ""
+        }
     );
     let cfg = Config::parse(&toml).unwrap();
     // On disk as install writes it: the owner's runtime switch rewrites it at its end (#325).
@@ -329,14 +421,28 @@ dedicated = true
         paths,
         State::default(),
         Box::new(FakePool(Rc::clone(&remote))),
-        Box::new(TestVerifier(signed)),
+        Box::new(TestVerifier(signed, Rc::default())),
         Drivers::Fixed,
     );
-    agent.driver = Some(Box::new(Compose::new(
-        tools.clone(),
-        &socket,
-        &dir.join("data/docker-config"),
-    )));
+    let compose = Compose::new(tools.clone(), &socket, &dir.join("data/docker-config"));
+    let unit = quadlet.then(|| {
+        // Where the user's generator reads them: `set.unit_dir` is left to its default.
+        let units = agent.cfg.quadlet_dir().unwrap();
+        let name = crate::quadlet::unit_name(&project, "dispatcher");
+        Unit {
+            file: units.join(format!("{name}.container")),
+            name,
+        }
+    });
+    agent.driver = Some(if quadlet {
+        Box::new(crate::run::quadlet::Quadlet::new(
+            Box::new(compose),
+            Box::new(crate::run::quadlet::Systemctl::from_env()),
+            &agent.cfg.quadlet_dir().unwrap(),
+        ))
+    } else {
+        Box::new(compose)
+    });
     let mut h = Host {
         agent,
         remote,
@@ -346,6 +452,7 @@ dedicated = true
         project,
         image,
         task: String::new(),
+        unit,
     };
     // A task the dispatcher started, holding a lease: not part of the compose project.
     h.docker(&["pull", "--quiet", &h.image]);
@@ -390,6 +497,10 @@ fn real_engine_rollouts_keep_the_task_running() {
     let task0 = h.task_state();
     releases_with_ordered_restarts(&mut h);
     assert_eq!(h.task_state(), task0, "the task container kept running");
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, TOKEN);
+    let rotated = a_rotation_recreates_the_dispatcher_alone(&mut h);
+    assert_eq!(h.task_state(), task0, "the task container kept running");
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, &rotated);
     a_broken_release_is_reverted(&mut h);
     assert_eq!(h.task_state(), task0);
     a_statement_preempts_and_goes_down(&mut h);
@@ -398,7 +509,103 @@ fn real_engine_rollouts_keep_the_task_running() {
         task0,
         "the task container survived every rollout"
     );
-    nothing_but_the_pinned_tools_and_no_secret_on_disk(&h, &decoys);
+    nothing_but_the_pinned_tools_and_no_secret_on_disk(&h, &decoys, &rotated);
+}
+
+/// The first 16 hex digits of the SHA-256 of a token file holding `token`, as the stand-in
+/// writes what it read.
+fn token_sha(token: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    hex::encode(Sha256::digest(format!("{token}\n")))[..16].to_owned()
+}
+
+/// #327's acceptance: `docker inspect` of the dispatcher and of the task shows no token in
+/// their environment; the dispatcher reads `token` from its file through a read-only mount,
+/// and could not write it; the env file holds it no more, the file 0400 does.
+fn the_token_is_a_read_only_file_in_no_container_s_environment(h: &Host, token: &str) {
+    let (d, _) = h.dispatcher();
+    for id in [d.as_str(), h.task.as_str()] {
+        let env = h.docker(&["inspect", "-f", "{{json .Config.Env}}", id]);
+        assert!(
+            !env.contains(token) && !env.contains("OMARCHY_WORKER_TOKEN="),
+            "{id}'s environment: {env}"
+        );
+    }
+    let env = h.docker(&["inspect", "-f", "{{json .Config.Env}}", &d]);
+    assert!(
+        env.contains("\"OMARCHY_WORKER_TOKEN_FILE=/run/omarchy/worker-token\""),
+        "{env}"
+    );
+    let mounts: serde_json::Value =
+        serde_json::from_str(&h.docker(&["inspect", "-f", "{{json .Mounts}}", &d])).unwrap();
+    let file = crate::dispatcher_env::token_path_in(&h.dir.join("set"));
+    let m = mounts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["Destination"] == "/run/omarchy/worker-token")
+        .unwrap_or_else(|| panic!("no token mount: {mounts}"));
+    assert_eq!(
+        (m["Source"].as_str(), m["RW"].as_bool()),
+        (file.to_str(), Some(false)),
+        "{m}"
+    );
+    let read = fs::read_to_string(h.work().join(format!("token.{}", &d[..12]))).unwrap();
+    assert_eq!(
+        read,
+        format!("{}\n", token_sha(token)),
+        "what the dispatcher read"
+    );
+    assert_eq!(
+        crate::dispatcher_env::read_token(&file).unwrap(),
+        Some((token.to_owned(), 0o400))
+    );
+    let text = fs::read_to_string(h.dir.join("set/etc/dispatcher.env")).unwrap();
+    assert!(
+        !text.contains(token) && text.contains("# worker: w-engine-test\n"),
+        "{text}"
+    );
+}
+
+/// A rotation (`omarchy-agent token`, or #325's order, through `write_worker_token`): the
+/// file rewritten, and the next round recreates the dispatcher, and nothing else.
+fn a_rotation_recreates_the_dispatcher_alone(h: &mut Host) -> String {
+    let (before, release) = h.dispatcher();
+    let new = format!("omw_{}", "7a".repeat(24));
+    let r = crate::dispatcher_env::Rendered {
+        addresses: Vec::new(),
+        envelope: None,
+        plain: false,
+    };
+    crate::enroll::write_worker_token(
+        &h.dir.join("set/etc/dispatcher.env"),
+        &serde_json::json!({"worker": "w-engine-test", "token": new}),
+        &r,
+    )
+    .unwrap();
+    h.tick(false);
+    assert_ne!(
+        h.agent.state.rollout.step,
+        Step::Idle,
+        "the new token starts a round"
+    );
+    h.until("the rotation's round", Duration::from_secs(300), |h| {
+        h.agent.state.rollout.step == Step::Idle
+    });
+    assert_eq!(
+        h.agent.state.round.outcome, "ok",
+        "{:?}",
+        h.agent.state.round
+    );
+    let (after, same) = h.dispatcher();
+    assert_ne!(before, after, "the dispatcher was recreated");
+    assert_eq!(same, release, "on the same release");
+    // The old dispatcher saved its leases; the new one re-adopted the task.
+    assert!(h.work().join(format!("saved.{}", &before[..12])).exists());
+    let readopted =
+        fs::read_to_string(h.work().join(format!("readopted.{}", &after[..12]))).unwrap();
+    assert_eq!(readopted.trim(), "1");
+    new
 }
 
 /// The first release reaches the host with no human action; a second one survives two
@@ -421,12 +628,11 @@ fn releases_with_ordered_restarts(h: &mut Host) {
     h.until("the v1.1.0 guard", Duration::from_secs(300), |h| {
         matches!(h.agent.state.rollout.step, Step::Guard(_))
     });
+    let r0 = h.restarts().expect("the dispatcher's restarts");
     for n in 1..=2 {
         fs::write(h.work().join("exit75"), "").unwrap();
         h.until("the ordered restart", Duration::from_secs(60), |h| {
-            let id = h.dispatcher().0;
-            !h.work().join("exit75").exists()
-                && h.docker(&["inspect", "-f", "{{.RestartCount}}", &id]) == n.to_string()
+            !h.work().join("exit75").exists() && h.restarts() == Some(r0 + n)
         });
         assert!(
             matches!(h.agent.state.rollout.step, Step::Guard(_)),
@@ -443,6 +649,24 @@ fn releases_with_ordered_restarts(h: &mut Host) {
         h.agent.state.round
     );
     assert_eq!(h.agent.state.applied, Release::parse("v1.1.0"));
+    // Once it answers again after its second restart.
+    h.until("the v1.1.0 dispatcher", Duration::from_secs(60), |h| {
+        try_docker(
+            &h.tools,
+            &h.socket,
+            &h.dir.join("data/docker-config"),
+            &[
+                "exec",
+                &h.dispatcher().0,
+                "wget",
+                "-q",
+                "-O",
+                "/dev/null",
+                "http://127.0.0.1:8791/ready",
+            ],
+        )
+        .is_some()
+    });
     let (d2, rel) = h.dispatcher();
     assert_eq!(rel, "v1.1.0");
     assert_ne!(d1, d2);
@@ -498,8 +722,9 @@ fn a_statement_preempts_and_goes_down(h: &mut Host) {
     assert_eq!(h.dispatcher().1, "v1.0.0");
 }
 
-/// Only the pinned binaries ran, and no file holds the token or interpolated output.
-fn nothing_but_the_pinned_tools_and_no_secret_on_disk(h: &Host, decoys: &Path) {
+/// Only the pinned binaries ran, and no file holds a token (but the token's own file) or
+/// interpolated output.
+fn nothing_but_the_pinned_tools_and_no_secret_on_disk(h: &Host, decoys: &Path, rotated: &str) {
     let ran: Vec<_> = fs::read_dir(decoys)
         .unwrap()
         .flatten()
@@ -519,9 +744,13 @@ fn nothing_but_the_pinned_tools_and_no_secret_on_disk(h: &Host, decoys: &Path) {
             }
             if p.is_dir() {
                 stack.push(p);
-            } else if !p.ends_with("etc/dispatcher.env") {
+            } else if !p.ends_with(crate::dispatcher_env::TOKEN_FILE) {
                 let text = String::from_utf8_lossy(&fs::read(&p).unwrap()).into_owned();
-                assert!(!text.contains(TOKEN), "{} holds the token", p.display());
+                assert!(
+                    !text.contains(TOKEN) && !text.contains(rotated),
+                    "{} holds a token",
+                    p.display()
+                );
                 assert!(
                     !text.contains(&format!("{work}:{work}")),
                     "{} holds interpolated output",
@@ -990,6 +1219,157 @@ fn real_engine_settings_narrow_the_mounted_capacity_and_diagnostics_are_scrubbed
     assert_eq!(h.task_state(), task0);
 }
 
+/// #328 on a real engine: the owner's passkey, pinned at the host, raises its unit cap
+/// from the site — the dispatcher is recreated with the file counted again under it while
+/// the task runs on, and the same document again is refused; then an agent key sealed to
+/// the host's seal key lands in `OMARCHY_SECRETS_DIR/agent.env` and nowhere the dispatcher
+/// reads: not its env, not its mounts. The owner is a virtual authenticator signing at the
+/// wall clock's time (`owner::tests::Authenticator`).
+#[test]
+#[ignore = "needs a real engine: tests/agent-host-orders.sh"]
+#[allow(clippy::too_many_lines)] // one host, one story: pinned, widened, replayed, keyed
+fn real_engine_owner_widens_the_mounted_capacity_and_seals_keys_the_dispatcher_never_sees() {
+    use crate::owner::tests::Authenticator;
+    use crate::run::pool::Signed;
+    const CANARY: &str = "sk-ant-engine-canary-7f3a9c";
+    let mut h = host();
+    // As install writes it under a cap of 2 units, and detection counted under that cap.
+    let path = h.agent.paths.agent_toml();
+    let toml = fs::read_to_string(&path)
+        .unwrap()
+        .replace("[envelope]\n", "[envelope]\nmax_units = 2\n");
+    fs::write(&path, &toml).unwrap();
+    h.agent.cfg = Config::parse(&toml).unwrap();
+    let mut detected = detected_capacity();
+    detected["cpus"] = 12.into();
+    detected["mem_gb"] = 32.into();
+    detected["units"] = 2.into();
+    fs::write(
+        h.agent.cfg.set_dir.join("run/capacity.json"),
+        detected.to_string(),
+    )
+    .unwrap();
+    h.publish("v1.0.0", "ok");
+    h.target("v1.0.0");
+    h.round("v1.0.0");
+    assert_eq!(
+        h.agent.state.round.outcome, "ok",
+        "{:?}",
+        h.agent.state.round
+    );
+    let (d0, _) = h.dispatcher();
+    let task0 = h.task_state();
+    assert_eq!(h.mounted_capacity().unwrap()["units"], 2);
+
+    // The owner pins a passkey at the host, once (`omarchy-agent envelope pin-passkey`).
+    let host_id = h.agent.cfg.host_id.clone();
+    let owner = Authenticator::new();
+    let now = crate::run::now();
+    let state = h.agent.paths.data.join("state");
+    let said = crate::owner::pin(
+        &state,
+        &host_id,
+        &h.agent.cfg.pool,
+        &owner.pin(&host_id, now),
+        now,
+    )
+    .unwrap();
+    assert!(said.contains("EdDSA"), "{said}");
+
+    // Then raises the cap from the browser: 2 → 6 units, signed.
+    let (doc, assertion) = owner.sign(
+        "widen-envelope",
+        &host_id,
+        1,
+        now,
+        &serde_json::json!({"envelope": {"max_units": 6}}),
+    );
+    let widening = Signed { doc, assertion };
+    h.give(&[(
+        OrderKind::WidenEnvelope(Some(widening.clone())),
+        "ho_it_widen",
+    )]);
+    let (outcome, detail) = h.answer("ho_it_widen").unwrap();
+    assert_eq!(outcome, "done", "{detail}");
+    assert!(detail.contains("max_units 2 → 6"), "{detail}");
+    assert!(detail.contains("units 2 → 6"), "{detail}");
+    assert!(fs::read_to_string(&path)
+        .unwrap()
+        .contains("max_units = 6\n"));
+    let mounted = h.mounted_capacity().unwrap();
+    assert_eq!(mounted["units"], 6, "{mounted}");
+    assert_ne!(h.dispatcher().0, d0, "recreated with the widened file");
+    assert_eq!(
+        h.task_state(),
+        task0,
+        "a running task is never stopped for it"
+    );
+
+    // The same document again — the pool replaying it — is refused, nothing changed.
+    let (d1, _) = h.dispatcher();
+    let before = h.capacity_on_disk();
+    h.give(&[(OrderKind::WidenEnvelope(Some(widening)), "ho_it_replay")]);
+    let (outcome, detail) = h.answer("ho_it_replay").unwrap();
+    assert_eq!(outcome, "refused");
+    assert!(detail.contains("a replay"), "{detail}");
+    assert_eq!(h.capacity_on_disk(), before);
+    assert_eq!(h.dispatcher().0, d1);
+
+    // An agent key sealed in the browser to the seal key the host reports.
+    let public = h.agent.seal_key(now).unwrap().public_b64u();
+    let raw = crate::owner::webauthn::unb64(&public, "the seal key", 64).unwrap();
+    let sealed = crate::owner::seal::seal(&raw, &host_id, "ANTHROPIC_API_KEY", CANARY);
+    let (doc, assertion) = owner.sign(
+        "set-agent-keys",
+        &host_id,
+        2,
+        now,
+        &serde_json::json!({"seal_key": public, "keys": [sealed]}),
+    );
+    h.give(&[(
+        OrderKind::SetAgentKeys(Some(Signed { doc, assertion })),
+        "ho_it_keys",
+    )]);
+    let (outcome, detail) = h.answer("ho_it_keys").unwrap();
+    assert_eq!(outcome, "done", "{detail}");
+    assert!(!detail.contains(CANARY));
+    let env = h.dir.join("secrets/agent.env");
+    assert!(fs::read_to_string(&env)
+        .unwrap()
+        .contains(&format!("ANTHROPIC_API_KEY={CANARY}\n")));
+    assert_eq!(
+        fs::metadata(&env).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // The dispatcher never sees it: not in its env, not in what it mounts (it is told the
+    // directory's path, OMARCHY_SECRETS_DIR, to mount into agent sidecars, and nothing
+    // more), and the file is not there inside it.
+    let (d2, _) = h.dispatcher();
+    let env_of = h.docker(&["inspect", "-f", "{{json .Config.Env}}", &d2]);
+    assert!(!env_of.contains(CANARY), "{env_of}");
+    let secrets = h.dir.join("secrets");
+    let mounts: serde_json::Value =
+        serde_json::from_str(&h.docker(&["inspect", "-f", "{{json .Mounts}}", &d2])).unwrap();
+    for m in mounts.as_array().unwrap() {
+        let source = Path::new(m["Source"].as_str().unwrap());
+        assert!(
+            !source.starts_with(&secrets) && !secrets.starts_with(source),
+            "the dispatcher mounts {}",
+            source.display()
+        );
+    }
+    let inside = h.docker(&["exec", &d2, "env"]);
+    assert!(!inside.contains(CANARY));
+    let read = try_docker(
+        &h.tools,
+        &h.socket,
+        &h.dir.join("data/docker-config"),
+        &["exec", &d2, "cat", &env.display().to_string()],
+    );
+    assert_eq!(read, None, "the dispatcher reads agent.env");
+    assert_eq!(h.task_state(), task0);
+}
+
 #[test]
 #[ignore = "needs two real engines: tests/agent-runtime-switch.sh"]
 #[allow(clippy::too_many_lines)] // one host, one story: refused while a task runs, then moved
@@ -1000,8 +1380,8 @@ fn real_engine_runtime_switch_moves_the_dispatcher_to_the_other_engine() {
     let _cleanup = Projects(h.tools.clone(), to.clone(), vec![h.project.clone()]);
     // The driver on another socket: the same pinned tools.
     let (tools, cfgdir) = (h.tools.clone(), config.clone());
-    h.agent.drivers_on = Some(Box::new(move |socket: &Path| {
-        Some(Box::new(Compose::new(tools.clone(), socket, &cfgdir)) as Box<dyn Driver>)
+    h.agent.drivers_on = Some(Box::new(move |p: &crate::run::switch::Place| {
+        Some(Box::new(Compose::new(tools.clone(), &p.socket_cli, &cfgdir)) as Box<dyn Driver>)
     }));
     h.publish("v1.0.0", "ok");
     h.target("v1.0.0");
@@ -1111,4 +1491,73 @@ fn real_engine_runtime_switch_moves_the_dispatcher_to_the_other_engine() {
     );
     // The task container of the old engine was never part of it.
     assert!(h.task_state().starts_with("true "));
+}
+
+// ---------------------------------------------------------------------------------------
+// #330: the Quadlet driver, on a real rootless podman under this user's own systemd.
+
+#[test]
+#[ignore = "needs rootless podman under a user manager: tests/agent-quadlet.sh"]
+fn real_engine_quadlet_rollouts_keep_the_task_running() {
+    // The agent runs no docker, compose, podman or systemctl but the pinned CLI and the
+    // system's own systemctl: decoys first in PATH would leave a mark.
+    let decoys = crate::run::state::tempdir();
+    for name in ["docker", "docker-compose", "podman", "systemctl"] {
+        let p = decoys.join(name);
+        fs::write(
+            &p,
+            format!("#!/bin/sh\ntouch {}/ran-{name}\nexit 1\n", decoys.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            decoys.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    let mut h = host_on(true);
+    let task0 = h.task_state();
+    releases_with_ordered_restarts(&mut h);
+    assert_eq!(h.task_state(), task0, "the task container kept running");
+    let unit = h.unit.as_ref().unwrap();
+    let text = fs::read_to_string(&unit.file).unwrap();
+    assert!(
+        text.contains("WantedBy=default.target") && !text.contains("AutoUpdate"),
+        "{text}"
+    );
+    assert!(!text.contains(TOKEN), "the unit holds the worker token");
+    assert_eq!(
+        systemctl(&["is-active", &format!("{}.service", unit.name)]),
+        "active"
+    );
+    // #327 on Quadlet: the token moved to its file, which the unit mounts read-only and
+    // podman's env file no longer carries; a rotation restarts the dispatcher's unit alone.
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, TOKEN);
+    let rotated = a_rotation_recreates_the_dispatcher_alone(&mut h);
+    assert_eq!(h.task_state(), task0, "the task container kept running");
+    the_token_is_a_read_only_file_in_no_container_s_environment(&h, &rotated);
+    let text = fs::read_to_string(&h.unit.as_ref().unwrap().file).unwrap();
+    assert!(
+        !text.contains(TOKEN) && !text.contains(&rotated),
+        "the unit holds a worker token"
+    );
+    a_broken_release_is_reverted(&mut h);
+    assert_eq!(h.task_state(), task0);
+    a_statement_preempts_and_goes_down(&mut h);
+    assert_eq!(
+        h.task_state(),
+        task0,
+        "the task container survived every rollout"
+    );
+    nothing_but_the_pinned_tools_and_no_secret_on_disk(&h, &decoys, &rotated);
+    // The unit podman's generator made runs what last-good says, under this user's systemd.
+    let unit = h.unit.as_ref().unwrap();
+    assert!(fs::read_to_string(&unit.file)
+        .unwrap()
+        .contains("Label=\"org.omarchy-pool.agent.release=v1.0.0\""));
+    assert_eq!(h.dispatcher().1, "v1.0.0");
 }

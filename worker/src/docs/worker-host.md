@@ -147,13 +147,26 @@ to copy.
    journal and Status get an info line, and the other maintainers see a
    notice. Nothing claims before that.
 4. The agent fetches the host worker token with a request signed by the host
-   key and writes it to `etc/dispatcher.env` (0600) for the dispatcher. It
-   rotates the token every 30 days; the one it replaces works ten more
-   minutes, so only the dispatcher is recreated and its tasks run on. Beside
-   the token the agent writes the host's own addresses for every task's
+   key and writes it to `run/host/dispatcher/token` in the set directory
+   (0400, in directories only the agent enters, #327). The host set mounts
+   that one file read-only into the dispatcher and names it in
+   `OMARCHY_WORKER_TOKEN_FILE`, so the token is in no container's
+   environment, which anyone who can talk to the engine's socket reads with
+   `docker inspect`. It rotates the token every 30 days (`omarchy-agent
+   token` does it at once): the file is rewritten, the one it replaces works
+   ten more minutes, and only the dispatcher is recreated — its tasks run on
+   and it re-adopts them. `etc/dispatcher.env` (0600) names the token's
+   registration (`# worker:`), the host's own addresses for every task's
    egress to refuse (`OMARCHY_HOST_ADDRESSES`), and once `agent.toml` is
-   there, the secrets directory and the envelope's agent budget (#371); a
-   rotation keeps them, and the lines you add to the file yourself stay.
+   there, the secrets directory, the envelope's agent budget (#371) and its
+   grant of a signed exception's bridge (`OMARCHY_DIRECT_NETWORK`, #373); a
+   rotation keeps them, and the lines you add to the file yourself stay. A
+   host that ran the agent before #327 had the token in that file: the agent
+   moves it to its own file at its first start, losing nothing, and keeps it
+   in `etc/dispatcher.env` too only while a release from before #327 is
+   running or being rolled out (its dispatcher reads it there), so a
+   rollback to one still works; once none is left it takes it out, which
+   recreates the dispatcher once.
 5. Only then does it write `agent.toml` with the host and its registration,
    take the agent keys, write the systemd --user unit, enable linger and start
    the agent, whose first round starts the dispatcher (on a Mac, the
@@ -192,6 +205,15 @@ private-repository read (a fine-grained token, "public repositories,
 read-only"). A package that truly needs direct network access (raw sockets,
 its own name resolution) gets `network = "direct"` with a `reason` in
 `factory/sizing/tasks.toml`, in a pull request another maintainer approves.
+A host runs such a package's tasks only where its owner granted that bridge
+(`--direct-network` at install, `direct_network = true` in `agent.toml`;
+`--no-direct-network` takes it back), which preflight's egress probe then
+checks too; any other host hands them back (#373) as a lost lease, whose
+attempt the pool gives back twice per task and spends after that: until the
+claim says whether a host runs such packages, a package with the exception
+needs a host that grants it among those that claim its tasks. A rootless host cannot grant it: its bridges reach the LAN through
+the engine's user-mode network stack, while its tasks, behind their egress
+sidecars, never do.
 
 **A host runs as many tasks at once as its units hold (#337).** The pool
 hands it one task per claim and its dispatcher claims again at once while
@@ -243,6 +265,27 @@ Rosetta's in its VM, below). An emulated build is
 slower and shares the host's units; on a 16K-page kernel the lane stays on,
 and a build whose toolchain cannot start under qemu goes back to the queue
 for a native host without spending its attempt.
+
+**Contributors' builds run in a sandbox when your engine has one (#330).**
+Install gVisor (`runsc install` registers it with docker) or Kata Containers
+and count the host again: the agent finds it after a smoke run that must
+show a kernel other than your machine's, and from then on the dispatcher
+starts everything a contributor wrote on your native lane in it — their
+builds, the project's review rebuilds of them, trials and audits — so an
+escape from a recipe lands in the sandbox's kernel rather than on your
+machine. The project's own recipes, the sidecars and the check containers
+of the pool's jobs (#340) run on the engine as before. A sandbox does not cover an emulated lane (its kernel has no binfmt
+handler), so the pool then hands your emulated lanes the project's own
+recipes only. `sandbox = "off"` in your envelope turns it off,
+`sandbox = "kata"` picks one — at the host: a widening signed from the
+host page (#328) never sets it, nor does a package's signed network
+exception (#373) take its task out of it; the host page says which your dispatcher
+applies, or why none does (podman's docker API, for one, cannot pass the
+runtime on), and why its claims hold if the runtime refuses a start — for 30
+minutes, doubled with each further refusal in a row, a day at most: fix the
+runtime, then **Restart** on the dispatcher's worker page claims again at
+once. The runbook's *A sandboxed runtime for community tasks* has the
+steps.
 
 **Where the project's copies and their audits go (#339).** The project's
 copy of a package you asked for — its review rebuild, the one that is
@@ -334,12 +377,15 @@ every value above it. The agent takes a setting at its next poll, and the
 dispatcher claims by it from its next claim; a task already running above
 the new count finishes, nothing is stopped for it. Whatever the pool asks,
 the agent itself refuses a value above the envelope, and the page shows the
-refusal; only the owner widens the envelope, by editing `[envelope]` in
-`agent.toml` at the host and restarting the agent (`systemctl --user restart
-omarchy-agent`). The page's **Host orders** card gives the rest, its
+refusal; only the owner widens the envelope — at the host, by editing
+`[envelope]` in `agent.toml` and restarting the agent (`systemctl --user
+restart omarchy-agent`), or from the page with the passkey pinned at the
+host ([Owner control without a visit](#owner-control-without-a-visit)). A
+narrowing needs no signature. The page's **Host orders** card gives the rest, its
 owner's or any maintainer's: **Retry release** lifts the quarantine of a
 release its guard reverted and tries it again; **Rotate token** gives the
-dispatcher a new worker token (the old one works ten more minutes);
+dispatcher a new worker token, in its file (#327; the old one works ten more
+minutes);
 **Diagnostics** brings the dispatcher's last 500 log lines, scrubbed of the
 host's secrets, read on the page — only when the envelope says
 `diagnostics = true`. Every order and its agent's answer are on the page's
@@ -381,12 +427,166 @@ The agent changes nothing for it — it follows only the pool and what is
 signed ([Runbook](/docs/runbook#a-new-maintainer-host), *Freeze detection*).
 
 **The runtime is the owner's, at the host** (#325): `omarchy-agent runtime
-switch compose/podman` (or `compose/docker`) moves the dispatcher to the
-other engine with the same guard as a release, and back if it fails there;
-the pool cannot choose it. Drain the host's registration and let its tasks
-finish first: task containers and caches do not move between engines
-([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*). A Mac's
-bundle stays in its VM's engine: the switch is refused there.
+switch compose/podman` (or `compose/docker`, or `quadlet`: below) moves the
+dispatcher to the other engine with the same guard as a release, and back if
+it fails there; the pool cannot choose it. Drain the host's registration and
+let its tasks finish first: task containers and caches do not move between
+engines ([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*). A
+Mac's bundle stays in its VM's engine: the switch is refused there.
+
+## A host on Quadlet
+
+A Linux host with rootless podman and no compose can run its dispatcher as
+a unit of your own systemd (#330, design v2 §15): the **Quadlet driver**
+(an agent from 0.5.0).
+The bundle is the same as every other host's — the release's signed
+`compose.yml`, the agent's labels and your `compose.override.yml` — and the
+agent renders it, as compose would load it, into
+`~/.config/containers/systemd/omarchy-host-dispatcher.container`. podman's
+generator turns that file into `omarchy-host-dispatcher.service` at
+`systemctl --user daemon-reload`, and the agent applies a release with
+`daemon-reload` and `restart`, behind the same guard, revert and quarantine
+as compose's rounds. The unit restarts the dispatcher the way the
+template's `restart: unless-stopped` does (every exit, a second later, for
+as long as it takes: the guard, not systemd's start limit, judges a release
+that keeps restarting), stops it with the template's `stop_grace_period`,
+and starts it at boot (linger, which install enables). podman's
+`AutoUpdate=` is never written: only the agent moves the host to a release,
+and only to one release.yml signed. Task containers stay the dispatcher's,
+on podman's API socket, which the dispatcher mounts as on any rootless
+podman host. The unit holds `agent.toml`'s paths and variables and names
+files by path, never a secret: the worker token's own file,
+`run/host/dispatcher/token`, is a read-only mount the dispatcher reads
+through `OMARCHY_WORKER_TOKEN_FILE`, as on compose (#327), and
+`etc/dispatcher.env` its env file. podman never makes a mount's missing
+source, so without the token file the unit does not start (the agent holds
+the dispatcher until it wrote the file); a rotation (`omarchy-agent token`)
+restarts the dispatcher's unit alone, its tasks running on.
+
+- **Choose it at install**: `install.sh … | OMARCHY_ENROLL=… sh -s --
+  --driver quadlet` (or `omarchy-agent install --driver quadlet`). It needs
+  podman 4.6 or later (its Quadlet generator reads every key the agent
+  writes, `Pull=` and `PodmanArgs=` among them: 4.4 and 4.5 ship a
+  generator that would make no service of the unit, and preflight refuses
+  them), its rootless API socket
+  (`systemctl --user enable --now podman.socket`; install asks
+  `$XDG_RUNTIME_DIR/podman/podman.sock` unless you give `--socket`) and
+  your systemd user manager with linger; preflight says what is missing.
+  `agent.toml` then says `driver = "quadlet"` under `[set]`, and its
+  envelope's `drivers` name `quadlet`. Running install again keeps the
+  driver; to change a running host's, switch it.
+- **Or switch to it later**, at the host: name `quadlet` in the envelope's
+  `drivers`, drain the host's registration, then `omarchy-agent runtime
+  switch quadlet` (refused, with nothing changed, below podman 4.6). Run
+  it in your own login session: like install, it asks
+  `$XDG_RUNTIME_DIR/podman/podman.sock` unless you give `--socket`, and a
+  shell without `XDG_RUNTIME_DIR` (`su`, `sudo -u`) is refused. The agent
+  stops the dispatcher where it runs, brings the
+  same release up as the unit through a whole round, and writes the driver
+  into `agent.toml` only once that round is `ok`; it goes back otherwise.
+  From compose on the same rootless podman this keeps the engine (and its
+  images); `omarchy-agent runtime switch compose/podman` goes back to
+  compose.
+- **On the host**: `omarchy-agent status` says `driver: quadlet` and where
+  its units are; `systemctl --user status omarchy-host-dispatcher` and
+  `journalctl --user -u omarchy-host-dispatcher` show the unit. Change the
+  dispatcher through `compose.override.yml`, never the unit file: the next
+  round writes it again. An override the driver cannot render as compose
+  would run it — a service network, `depends_on`, `profiles`, a string
+  command with quotes, a variable `agent.toml` does not set, a bind with
+  `create_host_path: true` — is refused at
+  the round's lint (`quadlet: …`) and the host keeps running what it ran. A
+  unit you stop by hand is started again within 15 minutes, as a stopped
+  compose container is. Uninstall stops the unit and removes its file.
+- **Your own lines in `etc/dispatcher.env`** reach the dispatcher as
+  podman's `--env-file` reads them, not as compose does: `$` is not
+  expanded, a ` #` after the value is part of it, and podman 4 keeps
+  quotes (`FOO="a b"` gives `"a b"`), where compose's reader expands
+  `$VAR`, drops the comment and strips the quotes. Write a line
+  unquoted, with no `$` and no comment after its value (`FOO=a b`), and
+  it means the same on both drivers; the lines the agent writes are
+  already so.
+
+The host's report says `quadlet` as its driver, and the host's page shows
+it beside its isolation level.
+
+## Owner control without a visit
+
+Its owner widens a host's envelope and sets its agent keys from the host's
+page (#328, design v2 §14, D6 b) — with no visit to the machine, and only
+with the one passkey they pinned at the host. The pool relays; the host
+checks. An agent 0.4.0 or later takes these; the page's **Owner control**
+card shows what its agent reports (the pinned passkey, the seal key, the
+envelope a widening starts from, the agent keys' names) and greys each
+button with why.
+
+1. **Pin a passkey, once, at the host.** **Make a pin** asks one of your
+   passkeys (registered on your page) to sign a pin document for this
+   host, and prints `omarchy-agent envelope pin-passkey <pin>`, good for
+   ten minutes. Paste it at the host as the agent's user. The agent checks
+   the signature itself, with the public key the pin carries, and that the
+   pin names this host and its pool's relying party (`omarchy-pool.org` on
+   `https://omarchy-pool.org`; `localhost` only for a pool on the same
+   machine), then keeps that key in
+   `state/owner.json` (0600); its next report shows it pinned. A new pin
+   replaces the old one (what the old one signed is refused from then on);
+   `omarchy-agent envelope unpin-passkey` removes it, and the site widens
+   nothing until one is pinned again. `omarchy-agent status` prints what is
+   pinned, and the seal key.
+2. **Confirm the seal key, once.** The agent has an X25519 **seal key** of
+   its own (a 0600 file, `state/seal.x25519`, on Linux; the login keychain
+   on a Mac) and reports its public half. Compare the fingerprint on the
+   page with the `seal key:` line of `omarchy-agent status`, then
+   **Confirm the seal key** with your passkey. A seal key made again shows
+   as changed and is confirmed again before anything is sealed to it; so
+   does one other than the key you confirmed in this browser. A browser
+   that never confirmed it (another device, a new profile) shows you the
+   fingerprint to compare once more before its first seal: the pool's
+   record of your confirmation never decides on its own.
+3. **Widen the envelope.** `max_units`, `max_cpus`, `max_mem_gb`,
+   `emulate`, `agent_slots`, `agent_budget`, `diagnostics` and `paths`:
+   **Review and sign** sends what you changed to the pool, which writes the
+   document (this host, a version above the last, an hour to live); your
+   pinned passkey signs it, and the pool relays it as a `widen-envelope`
+   order. The agent refuses it unless the pinned passkey signed exactly that
+   document for this host, on its pool's origin, with you present and
+   verified, within its hour, under a version above the last it took — so
+   a document replayed, or an older one, is refused too. It then sets those
+   keys in `[envelope]` of `agent.toml` (its other lines and its mode kept),
+   takes the new envelope at once and counts `run/capacity.json` again —
+   never more units than the applied release's signed constants and the
+   detected hardware give. The dispatcher is recreated with the new file
+   and claims by it; a running task is never stopped. A Mac's VM is
+   restarted with a new `max_cpus`/`max_mem_gb` as for any change of its
+   size — once no task runs, within the brake — and an emulated lane its
+   detection never checked comes on at its next count: on Linux, which the
+   loop never runs on its own, `omarchy-agent capacity --write` at the
+   host; on a Mac, the next start of its VM. Before your passkey is asked,
+   the page checks that the pool's document is the one it showed you (this
+   host, the envelope you changed, its challenge the document's SHA-256).
+4. **Set agent keys.** `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+   `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY` and `GITHUB_TOKEN`
+   (the keys a task's agent sidecar reads): **Seal and sign** seals the
+   value in your browser to the confirmed seal key — X25519, HKDF-SHA256
+   and AES-256-GCM, bound to this host and the key's name — so the pool
+   stores and relays ciphertext only, inside a document your pinned
+   passkey signed. The agent opens it and writes it to
+   `OMARCHY_SECRETS_DIR/agent.env` (0600), keeping the lines you wrote
+   there; a `GITHUB_TOKEN` with any scope is refused. Only agent sidecars
+   mount that directory, read-only; the dispatcher never does, and the
+   journal, the report and the diagnostics scrub every value. A key is
+   taken out the same way. A task already running keeps what it started
+   with.
+
+Each order and the agent's answer — `done` with what changed, or `refused`
+with why (nothing pinned, another passkey, a replay, an expired document,
+another host or origin) — are on the page's journal of orders. Whatever
+can refuse a widening is checked before anything changes; once `agent.toml`
+or `agent.env` holds it, the answer is `done`, with anything that failed
+after it said. A setting
+that narrows (above) needs no signature
+([Security model](/docs/security-model#maintainer-hosts), *Owner control without a visit*;
+[Runbook](/docs/runbook#a-new-maintainer-host), *Owner control*).
 
 ## Stopping a host
 
@@ -427,9 +627,10 @@ macOS agent whose Arch Linux containers run in a Linux VM, the agent's own
   agent starts, stops and sizes the profile itself, at most once every ten
   minutes and six times a day, and never restarts it for a new size while a
   task runs; after a resize it reports the VM's new size to the pool.
-- **Tasks reach only the internet.** The agent puts the same task firewall
-  in the VM as on a Linux host: a task reaches no address of your LAN, your
-  router or the Mac itself, which preflight's egress probe checks.
+- **Tasks reach only the internet.** A task leaves only through its egress
+  sidecar, and the agent puts the same task firewall in the VM as on a Linux
+  host: a task reaches no address of your LAN, your router or the Mac
+  itself, which preflight's egress probe checks the way a task runs (#373).
 - **An x86_64 lane through Rosetta.** With Rosetta 2 installed the VM runs
   with `--vz-rosetta` (4K pages): x86_64 builds run on a lane that reports
   `via: rosetta`, faster than qemu.

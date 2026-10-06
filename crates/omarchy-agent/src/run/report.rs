@@ -10,7 +10,9 @@
 //! sleeps (`asleep`, #329; `false` on every other host), which the pool counts as zero free
 //! units. #326 adds to `release` the owner's soak — `soak_minutes`, and `soaking_until`, which
 //! the pool's claim grace follows — and freeze detection's `github_latest` and
-//! `pool_behind_github`. Bundle and task fields stay with the issues that read them.
+//! `pool_behind_github`. #328 adds `owner`: the passkey pinned at the host and the last
+//! signed version taken, the seal key, the envelope's keys a signed widening may set, and
+//! the names of the agent keys. Bundle and task fields stay with the issues that read them.
 //!
 //! A Mac about to sleep reports at once ([`Agent::report_now`]), whatever the spacing or a
 //! retry's wait: the sleep waits for it.
@@ -75,6 +77,9 @@ impl Agent {
             &self.cfg.policy,
         );
         body["brake"] = self.state.brake.view(now);
+        // The owner's control without a visit (#328): the pinned passkey, the seal key, the
+        // envelope a widening starts from and the names of the agent keys — never a value.
+        body["owner"] = self.owner_view(now);
         // Only a whole one: a pool refuses the report (and the answers it carries) whose
         // capacity it cannot read, `null` too before #325.
         if let Some(c) = self.capacity_view() {
@@ -84,9 +89,9 @@ impl Agent {
         let short = |t: &str| -> String { t.chars().take(RUNTIME_WORDS_MAX).collect() };
         body["runtime"] = serde_json::json!({
             // `null` until the engine said which it is (agent.toml without `set.runtime`).
-            "driver": self.cfg.runtime.map(super::config::Runtime::driver),
+            "driver": self.cfg.driver_name(),
             "switch": self.state.switch.as_ref().map(|w| serde_json::json!({
-                "to": format!("compose/{}", w.to.runtime), "since": iso(w.started), "step": w.step,
+                "to": w.to.name(), "since": iso(w.started), "step": w.step,
                 "why": w.why.as_deref().map(short),
             })),
             "switch_last": self.state.switch_last.as_ref().map(|e| serde_json::json!({

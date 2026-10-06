@@ -38,9 +38,16 @@
 //! read: [`probe::in_mac_vm`] puts the `x86_64` lane through Rosetta into the same lanes
 //! after the same smoke run, and says why it is off in install's notes and the run loop's
 //! journal rather than in `held_lanes`.
+//!
+//! [`sandbox`] (#330, design v2 §10.4; D43) finds the sandboxed runtime — gVisor's `runsc`
+//! or Kata Containers — the dispatcher runs what a contributor wrote on the native lane in, within
+//! the envelope's `sandbox`, after its smoke run shows a kernel that is not the engine's
+//! (`sandbox` in the file, `null` when the host has none; `sandbox_held` with why one is not
+//! used).
 
 pub mod emulation;
 pub mod probe;
+pub mod sandbox;
 
 use std::fmt;
 use std::io::Write as _;
@@ -118,6 +125,9 @@ pub struct Caps {
     /// The foreign architectures that may run emulated (`emulate`): `None` when the
     /// envelope does not say (every one detection turns on), `Some([])` keeps them off.
     pub emulate: Option<Vec<String>>,
+    /// The sandboxed runtime community tasks may run in (`sandbox`, #330): the first that
+    /// passes its smoke run, none, or the one it names.
+    pub sandbox: sandbox::Setting,
 }
 
 impl Default for Caps {
@@ -129,6 +139,7 @@ impl Default for Caps {
             agent_slots: 2,
             dedicated: false,
             emulate: None,
+            sandbox: sandbox::Setting::Auto,
         }
     }
 }
@@ -177,6 +188,7 @@ impl AgentToml {
             #[serde(default)]
             dedicated: bool,
             emulate: Option<Vec<String>>,
+            sandbox: Option<String>,
         }
         let raw: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
         if let Some(env) = raw.get("envelope").and_then(toml::Value::as_table) {
@@ -205,6 +217,7 @@ impl AgentToml {
                 emulation::ARCHES.join(", ")
             ));
         }
+        let sandbox = sandbox::Setting::parse(e.sandbox.as_deref())?;
         Ok(AgentToml {
             caps: Caps {
                 max_units: e.max_units,
@@ -213,6 +226,7 @@ impl AgentToml {
                 agent_slots: e.agent_slots.unwrap_or(2),
                 dedicated: e.dedicated,
                 emulate: e.emulate,
+                sandbox,
             },
             work_root: f.set.work_root,
             socket_cli: f.set.socket_cli,
@@ -221,7 +235,9 @@ impl AgentToml {
     }
 }
 
-/// Every key of `agent.toml`'s `[envelope]` (design v2 §12).
+/// Every key of `agent.toml`'s `[envelope]` (design v2 §12), `direct_network`, the grant
+/// of a signed exception's bridge network (#373), and `sandbox`, the sandboxed runtime what
+/// a contributor wrote runs in (#330). A signed widening sets neither (`owner::WIDENABLE`).
 const ENVELOPE_KEYS: &[&str] = &[
     "max_units",
     "max_cpus",
@@ -234,11 +250,13 @@ const ENVELOPE_KEYS: &[&str] = &[
     "allow_socket",
     "rootful_ack",
     "dedicated",
+    "direct_network",
     "userns_remap",
     "drivers",
     "paths",
     "diagnostics",
     "soak_minutes",
+    "sandbox",
 ];
 
 /// One way the host is below the signed minimum, with the numbers.
@@ -265,6 +283,9 @@ impl fmt::Display for Shortfall {
 pub struct Capacity {
     cpus: u32,
     mem_gb: u32,
+    /// The totals detection found before the owner's `max_cpus` and `max_mem_gb` (#328): a
+    /// signed widening of those counts the units again from them, never above them.
+    hardware: (u32, u32),
     mem_available_gb: Option<u32>,
     page_kb: u32,
     disk_free_gb: DiskFree,
@@ -278,6 +299,8 @@ pub struct Capacity {
     dedicated: bool,
     limits: Limits,
     shortfalls: Vec<Shortfall>,
+    sandbox: Option<sandbox::Sandbox>,
+    sandbox_held: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -291,6 +314,7 @@ impl Capacity {
     pub fn new(facts: &Facts, caps: &Caps, constants: &manifest::Capacity) -> Self {
         let c = constants.constants();
         let (cpus, mem_gb) = facts.totals();
+        let hardware = (cpus, mem_gb);
         let cpus = caps.max_cpus.map_or(cpus, |m| cpus.min(m));
         let mem_gb = caps.max_mem_gb.map_or(mem_gb, |m| mem_gb.min(m));
         let disk = facts.disk_free_gb();
@@ -319,16 +343,11 @@ impl Capacity {
             }
         }
 
-        let usable_cpus = cpus.saturating_sub(c.reserve.cpus);
-        let usable_mem = mem_gb.saturating_sub(c.reserve.mem_gb);
-        // The constants are verified non-zero (manifest::Capacity::validate).
-        let mut units = (usable_cpus / c.unit.cpus).min(usable_mem / c.unit.mem_gb);
-        if let Some(m) = caps.max_units {
-            units = units.min(m);
-        }
-        if !shortfalls.is_empty() {
-            units = 0;
-        }
+        let units = if shortfalls.is_empty() {
+            units_of(cpus, mem_gb, caps.max_units, c)
+        } else {
+            0
+        };
         // The emulated lanes detection turned on, within the owner's envelope: one it leaves
         // out is held, whatever the probe that found it was told (design v2 §7.5, §12).
         let (mut emulated, mut held) = facts
@@ -342,9 +361,28 @@ impl Capacity {
             }
             ok
         });
+        // The sandbox detection found, within the envelope's `sandbox` whatever the probe that
+        // found it was told: `off` keeps none, a runtime's name that one only (#330).
+        let (mut sandbox, mut sandbox_held) = facts
+            .sandbox()
+            .map(|f| (f.on.clone(), f.held.clone()))
+            .unwrap_or_default();
+        match &caps.sandbox {
+            sandbox::Setting::Off => (sandbox, sandbox_held) = (None, None),
+            sandbox::Setting::Named(n) => {
+                if let Some(s) = sandbox.take_if(|s| &s.runtime != n) {
+                    sandbox_held = Some(format!(
+                        "{}: not the runtime the envelope's sandbox names ({n})",
+                        s.runtime
+                    ));
+                }
+            }
+            sandbox::Setting::Auto => {}
+        }
         Capacity {
             cpus,
             mem_gb,
+            hardware,
             mem_available_gb: facts.mem_available_gb(),
             page_kb: facts.page_kb(),
             disk_free_gb: disk,
@@ -358,6 +396,8 @@ impl Capacity {
             dedicated: caps.dedicated,
             limits: facts.limits(),
             shortfalls,
+            sandbox,
+            sandbox_held,
         }
     }
 
@@ -406,6 +446,14 @@ impl Capacity {
     pub fn held_lanes(&self) -> &[emulation::Held] {
         &self.held
     }
+    /// The sandboxed runtime a contributor's tasks on the native lane run in (#330), if any.
+    pub fn sandbox(&self) -> Option<&sandbox::Sandbox> {
+        self.sandbox.as_ref()
+    }
+    /// Why a sandboxed runtime the engine has, or the envelope names, is not used.
+    pub fn sandbox_held(&self) -> Option<&str> {
+        self.sandbox_held.as_deref()
+    }
     /// Below the signed minimum (D44): the host keeps its bundle, claims nothing.
     pub fn below_minimum(&self) -> bool {
         !self.shortfalls.is_empty()
@@ -427,6 +475,10 @@ impl Capacity {
             at: at.to_owned(),
             cpus: self.cpus,
             mem_gb: self.mem_gb,
+            hardware: (self.hardware != (self.cpus, self.mem_gb)).then_some(Totals {
+                cpus: self.hardware.0,
+                mem_gb: self.hardware.1,
+            }),
             page_kb: self.page_kb,
             disk_free_gb: DiskFree {
                 work: self.disk_free_gb.work / DISK_STEP_GB * DISK_STEP_GB,
@@ -441,6 +493,8 @@ impl Capacity {
             dedicated: self.dedicated,
             limits: self.limits,
             below_minimum: self.below_minimum(),
+            sandbox: self.sandbox.clone(),
+            sandbox_held: self.sandbox_held.clone(),
         }
     }
 }
@@ -466,6 +520,9 @@ pub struct CapacityFile {
     pub at: String,
     pub cpus: u32,
     pub mem_gb: u32,
+    /// The detected totals, when the owner's caps lowered `cpus` or `mem_gb` (#328).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<Totals>,
     pub page_kb: u32,
     pub disk_free_gb: DiskFree,
     pub units: u32,
@@ -478,6 +535,39 @@ pub struct CapacityFile {
     pub dedicated: bool,
     pub limits: Limits,
     pub below_minimum: bool,
+    /// The sandboxed runtime the dispatcher runs a contributor's tasks on the native lane in
+    /// (#330, D43): `{runtime, kind}`, `null` when the host has none — which an agent
+    /// before #330 does not say at all.
+    pub sandbox: Option<sandbox::Sandbox>,
+    /// Why a sandboxed runtime the engine has, or the envelope names, is not used: for the
+    /// host page, never read by the dispatcher.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_held: Option<String>,
+}
+
+/// A host's CPUs and memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Totals {
+    pub cpus: u32,
+    pub mem_gb: u32,
+}
+
+/// The units `cpus` and `mem_gb` give under the signed constants (design v2 §7.3): what is
+/// left after the reserve, in whole units of CPU and memory, the smaller of the two, and
+/// at most the owner's `max_units`. Detection counts them so, and so does a signed widening
+/// of the envelope (#328, `run::settings::recount`), which therefore never gives more than
+/// the constants and the detected hardware allow.
+pub(crate) fn units_of(
+    cpus: u32,
+    mem_gb: u32,
+    max_units: Option<u32>,
+    c: &manifest::CapacityConstants,
+) -> u32 {
+    let usable_cpus = cpus.saturating_sub(c.reserve.cpus);
+    let usable_mem = mem_gb.saturating_sub(c.reserve.mem_gb);
+    // The constants are verified non-zero (manifest::Capacity::validate).
+    let units = (usable_cpus / c.unit.cpus.max(1)).min(usable_mem / c.unit.mem_gb.max(1));
+    max_units.map_or(units, |m| units.min(m))
 }
 
 /// What stops an install (design v2 §13.3, the capacity part): below the minimum, with

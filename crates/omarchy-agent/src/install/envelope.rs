@@ -14,8 +14,11 @@ use toml::{Table, Value};
 
 /// What install decides; `None` keeps an existing file's value (or leaves the key out).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // the envelope's own switches, one for one
 pub(crate) struct Values {
     pub pool: String,
+    /// The driver that runs the set (#330): the flag's, or agent.toml's.
+    pub driver: crate::run::config::DriverKind,
     pub set_dir: PathBuf,
     pub work_root: PathBuf,
     pub secrets_dir: PathBuf,
@@ -31,6 +34,9 @@ pub(crate) struct Values {
     /// Rootful with `userns-remap`: the dispatcher alone runs with `userns_mode: host`.
     pub userns_remap: bool,
     pub dedicated: bool,
+    /// The owner grants a signed exception's bridge network (#373): the dispatcher runs a
+    /// package with `network = "direct"` in `factory/sizing` only where this is true.
+    pub direct_network: bool,
     pub max_units: Option<u32>,
     pub max_cpus: Option<u32>,
     pub max_mem_gb: Option<u32>,
@@ -98,7 +104,7 @@ pub(crate) fn render(
     set.insert("secrets_dir".into(), path(&v.secrets_dir));
     set.entry("project")
         .or_insert_with(|| Value::String(PROJECT.into()));
-    set.insert("driver".into(), Value::String("compose".into()));
+    set.insert("driver".into(), Value::String(v.driver.word().into()));
     set.insert("socket_cli".into(), path(&v.socket));
     set.insert("socket_mount".into(), path(&v.socket_mount));
     set.insert(
@@ -111,8 +117,23 @@ pub(crate) fn render(
     env.insert("rootful_ack".into(), Value::Boolean(v.rootful));
     env.insert("userns_remap".into(), Value::Boolean(v.userns_remap));
     env.insert("dedicated".into(), Value::Boolean(v.dedicated));
-    env.entry("drivers")
-        .or_insert_with(|| Value::Array(vec![Value::String("compose".into())]));
+    env.insert("direct_network".into(), Value::Boolean(v.direct_network));
+    // The drivers a runtime switch may move to: the one install runs with at least, which
+    // the owner chose here (#330); the rest is theirs.
+    let chosen = Value::String(v.driver.word().into());
+    let drivers = env
+        .entry("drivers")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(list) = drivers.as_array_mut() {
+        let named = list.iter().any(|d| {
+            d == &chosen
+                || (v.driver == crate::run::config::DriverKind::Compose
+                    && d.as_str().is_some_and(|d| d.starts_with("compose/")))
+        });
+        if !named {
+            list.push(chosen);
+        }
+    }
     for (k, cap) in [
         ("max_units", v.max_units),
         ("max_cpus", v.max_cpus),

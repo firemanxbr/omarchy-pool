@@ -43,6 +43,8 @@ please do not file a public issue for it.
 | Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered with the browser's session, on their own page or, the first one, in the dialog of the act that needs it (#287); the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
 | Host enrollment token `ome_…` | the maintainer who pressed *Add a host*, for the one command they paste on the machine (in the environment of `sh`, never an argument) | enroll one host, once, within 15 minutes, as that maintainer — while they are still in `factory/MAINTAINERS.toml` and still the same GitHub user id | claim, confirm the host, or enroll a second one | live (#321); stored as its SHA-256; burnt by the enrollment in the same D1 batch that creates the host |
 | Host key (Ed25519) | one maintainer host's agent: `host.ed25519`, mode 0600, made at install, never in a container | sign the host's calls (`Omarchy-Host`: method, path, body hash, time, nonce): read its state, fetch or rotate its worker token, report, post the diagnostics its own order asked for (#325) | claim, change the maintainer list, widen the owner's envelope; be replayed (a nonce table), act from a clock 120 s off; act before its owner confirmed its fingerprint on the site | live (#321); a suspended or retired host's key is refused |
+| Owner's pinned passkey (at the host) | one maintainer host's agent, for its owner: the COSE public key, credential id, algorithm and relying party of one of the owner's passkeys, pinned with `omarchy-agent envelope pin-passkey` and kept in `state/owner.json` (0600) | let the host take a `widen-envelope` or `set-agent-keys` document the pool relays (#328, D6 b): only one this passkey signed, for this host, on its pool's origin, user present and verified, within its hour and under a version above the last it took | be used by the pool or another passkey; widen above the release's signed constants or the detected hardware; set any key but the six agent keys; be replayed | live (#328); unpinned at the host, the site widens nothing |
+| Seal key (X25519) | one maintainer host's agent: `state/seal.x25519` (0600) on Linux, the login keychain on a Mac; its public half reported, its fingerprint confirmed once by the owner on the host's page | open the agent keys the owner's browser sealed to it (HKDF-SHA256, AES-256-GCM, bound to the host and the key's name) into `OMARCHY_SECRETS_DIR/agent.env` | sign anything; take a sealed key that the pinned passkey did not sign; be read by the pool, the dispatcher or a container | live (#328); a key made again is confirmed again before anything is sealed to it |
 | Session cookie `oms_…` | one person's browser, after Sign in with GitHub | what that person's contributor token can, from the dashboard's pages | — | live; separate from the CLI token, so signing in never invalidates a worker; *sign out* (in the header of every page) invalidates it on the server, not only in that browser |
 | Signing key (OpenPGP) | the pool's Worker only (`SIGNING_KEY` secret, `worker/src/signing.ts`) | sign the databases it stores and the packages the factory builds (`POST /pool/:sha256/sign`) | — | live; no worker, runner or repository holds it |
 | `CLOUDFLARE_API_TOKEN` | the release workflow on GitHub | deploy the Worker, apply migrations, record the deploy | — | live; all GitHub holds (no hosted worker: Actions runs CI and the release only) |
@@ -106,7 +108,8 @@ secret). Everything travels in the `Authorization` header over TLS only.
   same package, on the same side, wrote.
 - **On a maintainer host, one container per task, born with nothing
   (#335).** The host's one service, the dispatcher (`pkg-repo dispatch`),
-  holds the host's worker token and each lease's job token, and starts every
+  holds the host's worker token (a read-only file, never its environment,
+  #327) and each lease's job token, and starts every
   task — a build, an audit, a trial's helper — in a container made by one
   function: no socket, no token of any kind, no agent key, not the work root
   nor another task's directory, `--cap-drop ALL` with the few capabilities
@@ -128,14 +131,58 @@ secret). Everything travels in the `Authorization` header over TLS only.
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
   runs the dispatcher on a real engine (`tests/dispatch-engine.sh`).
+- **What a contributor wrote, in a sandbox, where the host has one (#330, D43).**
+  A contributor's recipe is the code most likely to try an escape, and on a
+  host it runs beside the dispatcher's tokens — as root on a rootful engine
+  without remapping (design v2 §10.4, §19.3). When the host's engine has
+  gVisor's `runsc` or Kata Containers, the agent finds it: a smoke run of the
+  release's build image under it must print a kernel that is not the
+  engine's own, so a runtime on the host's kernel — docker's CLI on podman,
+  whose API does not pass `--runtime` on — is never taken for one. The
+  dispatcher then starts, with `--runtime <it>`, every task that runs what a
+  contributor wrote — decided by what runs, not by the trust label: a
+  contributor's build; the project's review rebuild, whose recipe the
+  project's drafter wrote from the contributor's evidence before anyone
+  approved it (§9.5 says it can be subverted); the trial that installs what
+  that rebuild built, install scriptlets and all; the audit that reads it;
+  and any kind or trust the dispatcher does not know. An escape from them
+  lands in gVisor's user-space kernel or in Kata's VM, not on the host. Only
+  the project's own recipe — on main, or a maintainer's dry run — runs on the
+  engine's own runtime. A sandbox covers the native lane only: an emulated
+  lane runs its architecture through the host kernel's binfmt handler, which
+  a sandbox's kernel does not have, so the pool hands a host whose
+  dispatcher applies a sandbox none of that work for its emulated lanes —
+  only the project's own recipes — and the dispatcher hands back one that
+  reaches them anyway, before anything runs. The dispatcher never runs such a
+  task outside a sandbox the host says it has: a runtime the engine refuses
+  fails the start (`lost`) and holds its claims (30 minutes, doubled after
+  each further refusal in a row, a day at most; a restart of the dispatcher
+  ends it), and a capacity file whose sandbox it cannot read claims
+  nothing. Each claim says the sandbox the dispatcher applies; the pool
+  selects on that and the host page (*Sandbox*) shows it — not merely what
+  the agent found, which a dispatcher from before #330 ignores — with why
+  one the engine has is not used and why the claims hold. The envelope's `sandbox` (`"off"`, or one
+  runtime's name) is the owner's, set at the host: a signed widening from
+  the browser (#328) never sets it. A host without one runs these tasks as
+  before, at its isolation level. A package with a signed network exception
+  (`direct_network`, #373) changes its network, never its runtime: on a
+  granted host its task runs on its bridge in the sandbox all the same. Stated plainly: a sandbox's kernel is a
+  smaller surface, not none — a bug in gVisor's, or in the gofer that serves
+  the task's mounts, is still an escape — and the task's own mounts (its
+  directories, the release's checkout read-only) are the host's files
+  either way. Its sidecars run the signed worker image on the engine's own
+  runtime, and the sandboxed recipe reaches them over its internal network
+  (design v2 §10.1): a recipe that first compromises its egress or agent
+  sidecar runs code outside the sandbox, and can try an escape from there
+  at the host's isolation level.
 - **Pool jobs stay in the dispatcher; their check containers go through the
   spec (#340, D34).** A host's pool jobs — sync, render, promote, rollback,
   security, gc, verify, relayout, enqueue, publish, health — are the
   release's own signed code, trusted like the dispatcher: each runs in a
   child process of it (`pkg-repo pool-job`) with its lease's job token, as a
   legacy pool worker runs them, under a 2 GB memory limit and a time limit,
-  killed whole when it overruns; it never holds the host's worker token, and
-  it reaches no task network. The containers its scripts start run package
+  killed whole when it overruns; it never holds the host's worker token nor
+  the name of its file (#327), and it reaches no task network. The containers its scripts start run package
   code (a health check's pacman, an ABI gate's install of a ring, the
   enqueue's reader, which sources the recipes on `main`), so they go
   through the one spec: the job's only engine is `omarchy-task-run`
@@ -143,9 +190,18 @@ secret). Everything travels in the `Authorization` header over TLS only.
   one shape the scripts use — `run --rm --platform … [-e KEYRING=…] -v
   <the job's scratch dir>:/repo[:ro] <an image the release pins> bash
   /repo/<script>.sh` — and runs it on the job's own internal network behind
-  its egress sidecar, with the job's unit, the task container's
+  its egress sidecar, made as a task's are (never a signed exception's
+  bridge, whatever the owner's envelope grants: `direct_network` is a
+  package build's, #373), with the job's unit, the task container's
   capabilities, that one directory and no token; any other shape, verb or
-  flag is refused before the engine is asked. The spec's CI test renders
+  flag is refused before the engine is asked. They run on the engine's own
+  runtime on a host with a sandboxed runtime too (#330): what they run is the
+  project's own — the release's scripts in its pinned images, over what a
+  ring serves (signed, after the maintainers' approval) and the recipes on
+  `main` — as the project's own recipe does, and on any lane of their
+  architecture, an emulated one included, which a sandbox's kernel cannot
+  run. A sandbox hold holds a host's pool jobs with its tasks: they share
+  its claim. The spec's CI test renders
   every helper the scripts start, and the shim's tests every shape refused.
   Hosts take pool jobs only once the maintainers' `host-pool-jobs` setting
   names them.
@@ -175,7 +231,11 @@ secret). Everything travels in the `Authorization` header over TLS only.
   that one refused, while a task already running keeps the list its egress was
   started with. A raw socket fails with "Network is
   unreachable"; a package that needs one gets a reviewed exception in
-  `factory/sizing` (a bridge network of its own). A task that needs a model
+  `factory/sizing` (a bridge network of its own), which a host runs only
+  where its owner's envelope grants it (`direct_network`, #373): elsewhere the
+  dispatcher hands the task back before anything starts, as a lost lease (the
+  attempt given back twice per task, spent after: a package that only
+  non-granting hosts claim fails rather than run on an unprobed bridge). A task that needs a model
   gets an agent sidecar of its own, on its network only, with the keys file
   read-only and its caps (calls, tokens, wall time); the dispatcher refuses to
   start with an agent key or a GitHub token in its own environment and keeps the
@@ -201,30 +261,43 @@ secret). Everything travels in the `Authorization` header over TLS only.
   network without DNS, which has no gateway — by podman's own CLI, or behind
   docker's CLI (whose podman API forces DNS on and drops docker's option)
   through libpod's own API on the socket that CLI talks to, which must answer
-  as podman (#372). Stated plainly: a signed exception's bridge always has
-  its gateway, the host itself on a rootful engine, where the `DOCKER-USER` rules (in
-  `FORWARD`) never see traffic to the host (CVE-2024-29018). The agent's
-  preflight checks it rather than trusting it (#367): on a rootful Linux
-  engine it refuses a host whose prep-root.sh firewall script (world-readable) does
-  not drop every task subnet in INPUT, or whose boot unit for it is not
-  there or not enabled (a reboot would take the drop away, and nothing
-  probes again after install), and a probe task on a bridge and one
-  on a network made as a task's try their gateway on 22, 53 and the pool's
-  ports, and the bridge's the host's LAN address: a connection made or
-  refused there fails the install, with the command that puts the INPUT drop
-  in place or back. On a rootless engine the gateway is the engine's own
-  namespace, and what could reach the host is the user-mode stack's host
-  loopback (RootlessKit's, slirp4netns's or pasta's), off by default: preflight
-  reads the stack's command line in `/proc` while its probe tasks run and
-  refuses one that maps it, with the setting that turns it off (the runbook's
-  *Rootless engines*). It reads rather than listening for a connection: the
-  agent listens on nothing (design v2 §11.2). pasta can also forward an
-  address to the host's own (`--map-guest-addr`, `169.254.1.2` by rootless
-  podman's default from 5.3 on), which a bridge reaches: on rootless podman
-  behind pasta the probe task on a bridge tries it (a task's own network,
-  internal, has no route to it), and an answer there, or an address pasta
-  maps that the probe did not try, refuses the install with containers.conf's
-  `--map-guest-addr none` (#372).
+  as podman (#372). The agent's preflight checks this rather than trusting it,
+  and it probes the way a task runs (#373): a probe task on a network made as a
+  task's, behind an egress sidecar from the release's worker image with the
+  dispatcher's deny list (the task subnets and `OMARCHY_HOST_ADDRESSES`), tries
+  the cloud metadata address, the default gateway, the host's LAN address, the
+  host's own addresses and its network's gateway on 22, 53 and the pool's
+  ports, straight and through the sidecar, and must reach GitHub through the
+  sidecar: a connection made or refused there fails the install (the sidecar's
+  own refusal, a 403, is what it must answer). Stated plainly: a signed
+  exception's bridge always has its gateway, the host itself on a rootful
+  engine, where the `DOCKER-USER` rules (in `FORWARD`) never see traffic to the
+  host (CVE-2024-29018), and on a rootless engine the engine's namespace, with
+  the LAN behind the user-mode network stack; so that bridge runs only where the
+  envelope grants it, and there a probe task on it must fail to reach the
+  metadata address, the default gateway, the LAN address and its gateway. On a
+  rootful Linux engine preflight refuses a host whose prep-root.sh firewall
+  script (world-readable) does not drop every task subnet in INPUT, or whose
+  boot unit for it is not there or not enabled (a reboot would take the drop
+  away, and nothing probes again after install), whatever the probe says: the
+  second layer under every task network, with the command that puts the INPUT
+  drop in place. Whether the rule is in effect, rather than installed, only a
+  granted bridge's probe shows (its gateway and the LAN address are the host
+  itself; a rule flushed since the unit ran gets the command that puts it
+  back): without the grant nothing a probe task tries crosses INPUT, since a
+  task's own network has no address of the host's and no route off its subnet,
+  and its sidecar refuses the LAN (#373). On a rootless engine what could reach the host is the
+  user-mode stack's host loopback (RootlessKit's, slirp4netns's or pasta's),
+  off by default: preflight reads the stack's command line in `/proc` while its
+  probe tasks run and refuses one that maps it, with the setting that turns it
+  off (the runbook's *Rootless engines*). It reads rather than listening for a
+  connection: the agent listens on nothing (design v2 §11.2). pasta can also
+  forward an address to the host's own (`--map-guest-addr`, `169.254.1.2` by
+  rootless podman's default from 5.3 on): on rootless podman behind pasta the
+  probe tries it (a task's own network has no route to it, and its sidecar
+  refuses link-local addresses; a granted bridge has one), and an answer
+  there, or an address pasta maps that the probe did not try, refuses the
+  install with containers.conf's `--map-guest-addr none` (#372).
   A signed `factory/sizing` exception is per package:
   it also covers a contributor's recipe of that package, so its reviewer
   approves exactly that.
@@ -491,19 +564,37 @@ it is:
 6. **Depth bound (D25):** the signed `created` of `to`'s manifest is at most
    14 days before the statement's Rekor integrated time — both signed
    times, never the host's clock and never a count of releases. A deeper
-   rollback is a forward-fix release built from the old code (or, from P5, a
-   maintainer co-signature).
-7. `to`'s own host bundle verifies (`verify --bundle`).
+   statement is taken only with the maintainers' co-signature over its
+   bytes (#330, *The maintainers' co-signature* below): at least one pinned
+   maintainer's, or as many as the agent's threshold when that is higher.
+   Without it, the way back further is a forward-fix release built from the
+   old code.
+7. `to`'s own host bundle verifies (`verify --bundle`), and carries the
+   maintainers' co-signature the agent requires — or the statement does,
+   which then vouches for its target (a release published before the
+   threshold rose has none, and an immutable release takes none later).
 
 It then sets `floor = to`, preempts an in-flight rollout and skips soak and
 the brake. Going forward again needs nothing special.
+
+**Co-signatures travel with it.** A maintainer co-signs a statement once
+`rollback.yml` stored it (`factory/bin/co-sign rollback vX.Y.Z`: the
+statement fetched from the relay, its keyless signature checked, signed
+offline with their security key in the namespace `rollback@omarchy-pool.org`)
+and hands the signature to the pool with their token, at
+`PUT /api/v1/factory/rollback/:to/cosignature`. The pool keeps it in R2 under
+the statement's SHA-256 and the maintainer's login, journals it, and relays
+every one beside the statement as `cosignatures`; a statement signed again
+travels with none of the older ones. The pool checks their shape only: each
+host verifies them against the keys its own agent pins, so a pool can
+withhold a co-signature (the host then stays where it is) and never make one.
 
 **What bounds it.** A statement is only as strong as the run that signed
 it: the `pool` environment admits `main` only and waits for a maintainer's
 approval (#308), and the daily token probe checks that no token the pool
 holds can dispatch `rollback.yml`. One wrongly approved dispatch can send
 hosts back at most 14 days, to a release that is neither revoked nor below
-`min_release`. A pool that withholds a statement keeps hosts where they are;
+`min_release`; further only with a maintainer's security key, offline. A pool that withholds a statement keeps hosts where they are;
 one that serves an older one gains nothing a genuine statement did not
 already allow (its `retracts_through` was at most the highest release then,
 below a host's floor since), and a host that took a newer one refuses it
@@ -519,7 +610,10 @@ approved that dispatch and every rule above still applies to it.
 **Revoked releases, and a host on its last-good** (#342, design v2 §8.6,
 §9.1; D55). `revoked` and `min_release` reach the pool the way they reach
 the hosts: the Worker reads `factory/bundle/manifest.toml` of the release it
-was deployed from, the file `release.yml` signs into that release's bundle.
+was deployed from, the file `release.yml` signs into that release's bundle,
+and it is deployed only once `publish-release` has published that release,
+with its maintainers' co-signatures where `factory/MAINTAINERS.toml` asks
+for them (#330, below).
 A lease records the release it was claimed on (`build_tasks.release`, the
 claim's `version`); once the pool's release revokes it, nothing of that
 lease is taken — heartbeat, staging upload, pool or ring write, completion —
@@ -546,6 +640,79 @@ the host's page say so. A host that lies about a revert (a stolen host key,
 a modified agent) gains claims on an older release that is neither revoked
 nor below the floor — work any release in that range could do anyway, on a
 registration whose worker token that key fetches anyway — and in public.
+
+## The maintainers' co-signature
+
+From #330 (design v2 D1 b, P6), what a maintainer's host takes can be held
+to two signatures: `release.yml`'s keyless one, and an offline signature by
+maintainers' FIDO security keys. A compromised GitHub admin, a malicious
+change merged into `release.yml`, or a stolen signing environment can then
+publish a bundle that verifies, and no host takes it.
+
+- **Why SSH-FIDO, not minisign** (D1 b left the two open): the private key
+  stays on a hardware token and every signature needs a touch, where a
+  minisign key is a file; `ssh-keygen` is already on every maintainer's
+  machine; and the agent verifies the format with the crypto it already
+  carries (aws-lc-rs, sha2), so the co-signature adds no dependency to it.
+- **The keys and the threshold** are `factory/MAINTAINERS.toml`'s
+  `[cosignature]` table: a key per maintainer under their login, or a list
+  of them (a backup security key beside their own; either is that
+  maintainer's one co-signature, never two) — an
+  `sk-ssh-ed25519@openssh.com` key (`ssh-keygen -t ed25519-sk`) or an
+  `sk-ecdsa-sha2-nistp256@openssh.com` one, whose private half never leaves
+  the security key — and `threshold`, counted in maintainers: 0 asks
+  nothing, 1 is 1-of-N, 2 is 2-of-N. A key in a file (`ssh-ed25519`) is
+  refused: it is not offline. Changing the table is a governance pull
+  request another maintainer approves, like any change to the file.
+- **A lost key never strands the hosts.** Each agent requires its own pinned
+  policy of the next release, so the release that drops a key is co-signed
+  under the policy that still lists it. With as many maintainers required as
+  hold a key and one of them holding a single key, losing it would leave
+  that requirement out of reach for good: every host would refuse every later
+  release until it is reinstalled. `factory/bin/check-governance` refuses
+  such a table (keep the threshold below the number of maintainers with a
+  key, or give each a backup key), and a key changes in two releases, one
+  change each (the runbook, *Co-signing a release*).
+- **Where the requirement lives.** `factory/bin/check-governance --write`
+  pins the table into the host agent
+  (`crates/omarchy-agent/src/verify/maintainers.toml`), and CI fails when the
+  two differ. An agent requires what the release it shipped in pinned:
+  nothing the pool says and nothing a manifest says lowers it, and the pool
+  cannot turn it off. An agent moves only to an agent its own requirement
+  accepted — self-update is upward only and needs the co-signed bundle; a
+  rollback's `agent_to` needs a co-signed target or a co-signed statement —
+  so a new key, a removed one or a lower threshold is a new agent, taken
+  under the old one's requirement. A bundle the agent refuses for want of
+  its co-signature does not raise `min_release` or add to `revoked` either,
+  so a release signed by `release.yml` alone cannot shut every host out.
+- **What is signed.** The host bundle's bytes — the archive `release.yml`
+  signs — in the namespace `host-bundle@omarchy-pool.org`, as a release
+  asset `omarchy-host-vX.Y.Z.tar.gz.<login>.sshsig` uploaded to the draft
+  (`factory/bin/co-sign release vX.Y.Z`); a rollback statement's bytes in
+  `rollback@omarchy-pool.org` (above), which the pool keeps beside that
+  statement only (`co-sign` names it by SHA-256; another is 409), and which
+  vouch for the target's bundle when it was published before the threshold
+  rose — on the round that accepts the statement and on its retries, while
+  the floor stands at that target. A signature counts only with the
+  security key's user-presence flag (a touch): software on the maintainer's
+  computer cannot sign without their hand on the key.
+- **Checked twice.** `factory/bin/publish-release` publishes a release only
+  once its co-signatures meet the threshold of this release's
+  `MAINTAINERS.toml`, of the latest published release's however old, and of
+  every release of the last 30 days (their agents verify the new bundle
+  before they update themselves), with `ssh-keygen -Y verify` and the touch
+  flag (which `ssh-keygen` itself does not check); the release stays a draft
+  until then. Each
+  host's agent verifies them again, in Rust, before it applies a bundle or
+  takes its agent, and during install.
+- **What it does not cover, stated plainly.** A host installed from nothing
+  trusts the agent `install.sh` fetched, which `release.yml`'s signature
+  vouches for (the runbook's verifying install); the requirement holds from
+  that agent on. A maintainer who co-signs a bundle they did not read
+  vouches for it: `co-sign release` shows the manifest and checks the keyless
+  signature before it asks for the touch. With a threshold of 1, one
+  maintainer's key and `release.yml` together are enough; 2 asks a second
+  person.
 
 ## Maintainer hosts
 
@@ -633,19 +800,22 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   record of a host's settings, which only an agent that lost its own takes,
   is narrowed by the envelope the same way, and what of it is above the
   envelope is reported, never applied. No
-  order widens the envelope, selects a driver or names a path, an image or a
-  command: the closed set is `retire-legacy`, `reconcile-now`, `set-units`,
+  order the pool can make widens the envelope, selects a driver or names a
+  path, an image or a command (a widening is the owner's passkey's, signed,
+  below): the closed set is `retire-legacy`, `reconcile-now`, `set-units`,
   `set-emulate`, `rotate-token` (a new worker token from the same signed
   `POST /hosts/self/token`, written only in the pool's shapes, for the
   registration the host already has), `retry-release` (lifts a quarantine;
   the release is still checked as any target) and `diagnostics` (design v2
   M10: the dispatcher's last 500 log lines, only when the envelope says
-  `diagnostics = true`, scrubbed on the host of every value in the set's
-  `etc/*.env` and the secrets directory's env files and of anything shaped
+  `diagnostics = true`, scrubbed on the host of the worker token's file
+  (#327), every value in the set's `etc/*.env` and the secrets directory's
+  env files and of anything shaped
   like a pool token (its job tokens `omj.` and agent tokens `oma_` too),
   GitHub or model provider token, then checked again by the
   pool's leak scan, which drops a line that still looks like one; kept a
-  week, for its owner and the maintainers only). Because the pool may be
+  week, for its owner and the maintainers only), with `widen-envelope` and
+  `set-agent-keys` (#328, below). Because the pool may be
   compromised, **the host brakes it**, in its own code and with counters it
   keeps in `state.json` (a restart loop resets nothing): orders at least 2 s
   apart and at most 20 an hour; at most 6 dispatcher restarts an hour that
@@ -665,21 +835,126 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   scrubbed logs where the owner allowed them, and make it restart its
   dispatcher at most six times an hour — a slowdown, never a widening,
   a foreign command or a secret. Changing the runtime is the owner's alone:
-  `omarchy-agent runtime switch` at the host, which the pool cannot ask for.
-- **The host worker token** (`omw_…`) is the dispatcher's only, written
-  0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
-  id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
-  digits and dashes), so a pool cannot add a variable to the dispatcher's
-  environment (#371: the secrets directory's path and the agent budget come
-  from `agent.toml`, the host's addresses from its interfaces and from the
-  address the pool's edge saw the probe task or the agent come from, which is
-  read as one IP address, so a pool can at most add one address to the deny
-  list, never a variable); strings the pool sends reach the terminal without control
-  characters. It is a new one at every fetch; the agent
-  rotates it every 30 days. The one it replaces works ten more minutes (kept
+  `omarchy-agent runtime switch` at the host, which the pool cannot ask for —
+  the Quadlet driver (#330) among them, which runs the dispatcher as a unit
+  of the owner's own systemd on rootless podman: the unit is rendered from
+  the same signed set and `agent.toml`'s variables, mounts the worker token's
+  own file read-only and names its env file by path, never holding the token
+  (#327), and never uses podman's `AutoUpdate=`, which would let podman move
+  the host to an image no release signed.
+- **Owner control without a visit** (#328, design v2 §14, D6 b). Two more
+  orders — `widen-envelope` and `set-agent-keys`, its owner's only, an agent
+  from 0.4.0 — carry a document the owner's passkey signed, and the agent
+  takes one only when **the passkey its owner pinned at the host** signed it:
+  the pool's database and its relay can relay them, never make one (what a
+  pool whose code is compromised can do is said at the end of this item). The pin is made on the host's
+  page (the owner's passkey signs a ten-minute pin document for that host)
+  and pasted at the host (`omarchy-agent envelope pin-passkey`), where the
+  agent checks the signature with the public key the pin carries and that
+  the relying party is its own pool's before it keeps that key (`localhost`
+  only for a pool on the same machine, as wrangler dev's). From then on
+  it checks each document itself: the pinned credential and its signature
+  (ES256, EdDSA or RS256) over the authenticator data and the client data,
+  the client data's type, challenge (the document's SHA-256) and origin, the
+  authenticator data's RP id hash, user present and user verified flags and
+  counter, the document's host, act, time (issued within five minutes of
+  its clock, at most two hours to live) and a version above the last it took
+  — recorded before anything changes, so a document is good once and an
+  older one never comes back. A forged document (no assertion, another
+  passkey, another host or origin, a replay, a lower version, user presence
+  or verification missing) is refused on the host with nothing changed and
+  answered so. A widening sets only `max_units`, `max_cpus`, `max_mem_gb`,
+  `emulate`, `agent_slots`, `agent_budget`, `diagnostics` and `paths` in
+  `[envelope]` (agent.toml's other lines kept), each checked by agent.toml's
+  own parser and the lint, and the units are counted again under the applied
+  release's signed constants and the detected hardware: a widening never
+  gives more than the machine has; nor does it ever set the grant of a
+  signed exception's bridge (`direct_network`, #373) or the sandboxed
+  runtime what a contributor wrote runs in (`sandbox`, #330), which stay
+  the host's. Narrowing (`set-units`, `set-emulate`) needs no signature, as
+  before. Agent keys are sealed in the owner's
+  browser to the host's X25519 seal key, which its owner confirmed once by
+  its fingerprint (`omarchy-agent status` prints it at the host): the pool
+  stores and relays only `{name, epk, nonce, ct}`, and its tests read every
+  table of D1 after a key went through and find no trace of the value. A
+  sealed key is taken only inside a document the pinned passkey signed —
+  sealing is not signing, anyone may seal to a public key — and only under
+  the six names of the agent keys (`ANTHROPIC_API_KEY`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+  `XAI_API_KEY`, `GITHUB_TOKEN`), so not even a signed document sets, say,
+  a model provider's base URL; a `GITHUB_TOKEN` with any scope is refused.
+  The agent writes them to `OMARCHY_SECRETS_DIR/agent.env` (0600, the
+  owner's own lines kept), which only agent sidecars mount, read-only: the
+  dispatcher never does (the lint), never has them in its environment, and
+  the journal, the report and the diagnostics scrub every value the file
+  holds. The owner's browser checks what the pool answers before it asks
+  the passkey: the challenge is the SHA-256 of the document, and the
+  document names this host, the act, the envelope or the keys the page
+  showed and sealed, the seal key they were sealed to and a version above
+  the last the host took — so the pool's database or its API answering
+  another document gets nothing signed. The browser also remembers the seal
+  key its owner confirmed in it, and asks for the confirmation again before
+  it seals to another; a browser that never confirmed one (a new device or
+  profile) has its owner compare the fingerprint with `omarchy-agent
+  status` before its first seal, whatever the pool's record says.
+
+  What it does not cover, stated plainly (as design v2 §10.4 does for the
+  invariants): **every ceremony trusts the page and the code the pool
+  serves at that moment.** The guarantee is against a pool whose data or
+  relay is compromised — its D1 rows, the orders it relays, the documents
+  its API answers —, not against compromised Worker code serving the host
+  page when the owner uses the passkey or types a key. The authenticator
+  shows its owner nothing of the challenge it signs, so such code can show
+  one envelope and have the pinned passkey sign another widening of its
+  choosing — at any later ceremony on the pool's origin, not only on the
+  host page (approve, block, retire-legacy, a seal-key confirmation) — and
+  it reads an agent key as it is typed, before it is sealed. A widening it
+  made that way is still held to the host's own bounds: the eight widenable
+  keys, the signed capacity constants and the detected hardware, the six
+  agent keys' names. The seal key's confirmation (`hosts.seal_confirmed`)
+  is the pool's own record, which no browser seals on alone: one that has
+  not compared the key itself asks its owner to before the first seal.
+  That is why the agent prints what it
+  pinned and `omarchy-agent status` the seal key's fingerprint, to compare,
+  and why the journal shows every widening and key set with who signed it.
+  On a Mac the Keychain holds the seal key only (the host key stays a 0600
+  file there; hardware-bound host keys are P6), and agent.env stays a 0600
+  file, which agent sidecars in the VM mount.
+- **The host worker token** (`omw_…`) is the dispatcher's only, and reaches
+  it as a read-only file, never as a value in its environment (#327, design
+  v2 §14, D15): container environment is readable through `docker inspect` by
+  anyone who can talk to the engine's socket. The agent writes it to
+  `run/host/dispatcher/token` in the set directory (0400, owned by the agent's
+  user, in 0700 directories); the host set mounts that file read-only into the
+  dispatcher and names it in `OMARCHY_WORKER_TOKEN_FILE`, which the image's
+  entrypoint and `pkg-repo` read before `OMARCHY_WORKER_TOKEN` (a file named
+  but unreadable stops the container; it never falls back). `lint-set`
+  refuses a service mounting anything under the secrets directory, another
+  service's secret file (`run/host/<service>/token`), its own writable, or a
+  directory that holds them. The agent writes the token, and the
+  registration's id (`# worker:` in `etc/dispatcher.env`, 0600), only in the
+  shapes the pool mints (`omw_` and 48 hex digits; letters, digits and
+  dashes), so a pool cannot add a variable to the dispatcher's environment
+  (#371: the secrets directory's path and the agent budget come from
+  `agent.toml`, the host's addresses from its interfaces and from the address
+  the pool's edge saw the probe task or the agent come from, which is read as
+  one IP address, so a pool can at most add one address to the deny list,
+  never a variable); strings the pool sends reach the terminal without control
+  characters. It is a new one at every fetch; the agent rotates it every 30
+  days by rewriting the file. The one it replaces works ten more minutes (kept
   on the host's row, never on the registration that older Workers list), so
-  only the dispatcher is recreated, and a running task — whose job token does
-  not depend on it — never notices.
+  only the dispatcher is recreated — the file is an input of the set — and a
+  running task, whose job token does not depend on it, never notices. Stated
+  plainly: while a release from before #327 runs or is being rolled out on a
+  host, its dispatcher reads only `OMARCHY_WORKER_TOKEN`, so the agent keeps
+  the token in `etc/dispatcher.env` too (and the dispatcher's environment
+  shows it) until no such release is left; a new token also passes through
+  that file for the moment between two of its writes when the file names no
+  registration yet, another one, or still holds an older token's line, so a
+  writer stopped half-way never leaves an older token that looks newer; and on
+  a rootful engine the socket makes the dispatcher root-equivalent anyway —
+  the file protects against leaks through `inspect`, logs, crash dumps and
+  bugs, not against a compromised dispatcher.
 - **The host report** is at most 16 KiB (its `runtime` at most 2 KiB) and
   refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
@@ -705,9 +980,12 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   compromised pool skip the soak; the agent's own update waits with it
   unless the signed manifest sets `agent.urgent` (only a security release
   does). Nothing the pool sends skips it (`reconcile-now`, an Update); a
-  rollback statement does, since only `rollback.yml` signs one, and the
-  soaking host still learns each verified release's `revoked` and
-  `min_release` while it waits. The pool keeps a soaking host's
+  rollback statement does, since only `rollback.yml` signs one — under the
+  rollback rules above as ever, so one deeper than 14 days still needs the
+  maintainers' co-signature (#330) — and the soaking host still learns each
+  verified release's `revoked` and `min_release` while it waits. The soak
+  only delays: a release without the co-signature the agent requires is
+  refused, soaking or not, and moves neither. The pool keeps a soaking host's
   registration out of the 426 gate until the soak its agent reports ends,
   15 minutes more for the round, never more than two hours after the
   deploy and not at all while the host holds the pool's release in
@@ -746,7 +1024,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   it again after every start, hourly and after a wake. A task reaches
   neither your LAN nor the Mac through Colima's NAT, nor the VM itself at a
   bridge's gateway (the firewall's INPUT drop, #367), and the egress probe
-  checks it before install goes on; every task's egress sidecar also refuses
+  checks it before install goes on (behind a task's egress sidecar, and on a
+  signed exception's bridge where the envelope grants one, #373); every task's
+  egress sidecar also refuses
   the Mac's own addresses (`/sbin/ifconfig -a`'s, a Mac having no `/proc`,
   and the public one it leaves from, #371). Docker Desktop's or OrbStack's VM
   (`vm-shared`) is used only if it is already there, with nothing of the
@@ -779,6 +1059,25 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   whose agent says it sleeps (#329) has no lane for it until it wakes, so
   the rebuild may be offered for release meanwhile; the release still takes
   another maintainer's passkey, and a sleeping host is never where it runs.
+
+### Where secrets live on a maintainer host
+
+| Secret | Where it comes from | At rest | Which container gets it |
+|---|---|---|---|
+| Host key | generated at install | 0600 `state/host.ed25519` in the agent's data directory | none, ever |
+| Seal key (X25519, #328) | generated by the agent; its owner confirms its fingerprint once on the host's page | 0600 `state/seal.x25519` beside the host key (on a Mac, the Keychain) | none, ever |
+| Host worker token `omw_` | minted by the pool for the confirmed host, fetched with a host-key-signed request, rotated every 30 days | 0400 `run/host/dispatcher/token` in the set directory (and in 0600 `etc/dispatcher.env` only while a release from before #327 is applied or staged, from just before a rollback statement's `agent_to` moves the agent down to run a rollback to one, or for the moment between two writes when the env file names no registration yet, another one, or still holds an older token's line) | the dispatcher only, as a read-only file mount (`OMARCHY_WORKER_TOKEN_FILE`; on the Quadlet driver, #330, the unit's read-only `Volume=`, which podman never creates when the file is missing), never in its environment except while that `etc/dispatcher.env` line is there (the file is the dispatcher's `env_file`; a release from before #327 reads `OMARCHY_WORKER_TOKEN` from it) |
+| Job tokens `omj.` | the claim answer, per lease, carrying the lease generation | the dispatcher's memory and `work/state/leases/` (0600) | the dispatcher and its pool-job children only; never a task |
+| Agent keys, `GITHUB_TOKEN` (public read only), `CLAUDE_CODE_OAUTH_TOKEN` | typed at install on `/dev/tty`, copied from an existing file with confirmation, or set from the host's page: sealed in the owner's browser to the host's seal key, in a document the passkey pinned at the host signed (#328) | 0600 `OMARCHY_SECRETS_DIR/agent.env`, outside the work root and the set directory | a task's agent sidecar only, as a read-only file mount (`OMARCHY_AGENT_ENV`), never in its environment |
+
+So, whenever `etc/dispatcher.env` holds no token line (no release from
+before #327 applied, staged or about to be rolled back to, no token write
+half-way), `docker inspect` of the dispatcher, of every sidecar and of every task
+container shows no token or key in its environment: the egress sidecar and the
+task container hold none at all. `tests/agent-run-loop.sh` checks the
+dispatcher's and a task's on a real engine (`tests/agent-quadlet.sh` on the
+Quadlet driver, where the unit file holds no token either),
+`tests/task-networks.sh` every sidecar's and task's the real dispatcher makes.
 
 ## Stopping a host
 
@@ -959,6 +1258,8 @@ instead of stopping them.
 | a maintainer's signed-in browser, driven by an agent | what the session decides alone: request changes, reject, withdraw, a lift, a claim, a pool job by hand other than a forced promotion, a dry run by hand, and orders to any worker (20 an hour). Approve, block and a forced promotion need the person's passkey (#257, #271, #284), and so do adding a second passkey and removing one; only a login that holds none yet registers its first with the session | sign out (the session ends on the server); a first passkey registered meanwhile is on the public journal (`passkey`), and another maintainer resets it |
 | a maintainer's authenticator, lost or stolen | nothing without its user verification (a PIN or a biometric on the device); with it, what the person decides — approve, block and a forced promotion | another maintainer resets the login's passkeys with a reason (#271), after confirming the request out of band: every one removed, the login signed out, its `omc_` token and its agents' live grants revoked (#284), the journal — a line each — and a signed record say who and why; the person ends the device's GitHub sessions and revokes the GitHub tokens it held (the GitHub CLI's authorization, personal access tokens) — until they make a new token on their page, `POST /factory/register` mints the login none (`token_reset`) —, signs in again, registers a new one, makes a new token and grants their agents again (RUNBOOK, *A lost passkey*) |
 | the signing key | signatures on bad content — only through the Worker's own routes, since the key is a secret of the service | rotate: `wrangler secret put SIGNING_KEY`, re-render every ring, users import the new public key (RUNBOOK) |
+| `release.yml`'s or `rollback.yml`'s signing identity (a GitHub admin, a malicious merged change, a stolen environment) | before a co-signature threshold: a host bundle or a rollback statement every host takes; from one (#330): a bundle or a statement no host takes without the maintainers' security keys, and a statement at most 14 days deep | `revoked` and `min_release` in a later release, a rollback statement; the co-signature threshold in `factory/MAINTAINERS.toml` (*The maintainers' co-signature*) |
+| a maintainer's security key (co-signature), stolen or lost | stolen, with a threshold of 1 and `release.yml`'s identity together, a bundle hosts take; alone, nothing (a bundle also needs `release.yml`'s signature). Lost, nothing: `check-governance` refuses a threshold one lost key would leave out of reach | a governance pull request removes the key: a new agent, under the old requirement, so it is co-signed by another key the agents pin — the maintainer's backup key, or another maintainer's under 1-of-N; a replacement key is added in one release and the old one dropped in the next (the runbook, *Co-signing a release*); 2-of-N needs a second person |
 
 ## Roadmap
 

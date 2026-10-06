@@ -5,7 +5,7 @@ use std::fs;
 
 use crate::dispatcher_env::{Budget, Sources};
 use crate::run::agent::HostEnv;
-use crate::run::fake::{publish, relay_statement, rendered_compose, World, T0, TOKEN};
+use crate::run::fake::{publish, relay_statement, rendered_compose, World, T0, TOKEN, WORKER};
 use crate::run::pool::{HostState, Net};
 use crate::run::state::{Files, Phase, Step};
 use crate::version::Release;
@@ -478,30 +478,221 @@ fn storms_of_401_and_5xx_leave_everything_running_and_the_agent_recovers_by_itse
 }
 
 #[test]
-fn with_the_dispatcher_env_missing_the_dispatcher_is_held_and_the_reason_reported() {
+fn with_the_dispatcher_env_or_its_token_file_missing_the_dispatcher_is_held_and_the_reason_reported(
+) {
     let mut w = World::new();
-    fs::remove_file(w.set_dir().join("etc/dispatcher.env")).unwrap();
+    let env = w.set_dir().join("etc/dispatcher.env");
+    fs::remove_file(&env).unwrap();
+    fs::remove_file(w.token_file()).unwrap();
     w.release("v1.0.0");
     w.target("v1.0.0", None);
     w.round();
     let (outcome, detail) = w.outcome();
     assert_eq!(outcome, "held");
     assert!(
-        detail.contains("awaiting the owner's Confirm: etc/dispatcher.env is missing"),
+        detail.contains("awaiting the owner's Confirm: etc/dispatcher.env is missing")
+            && detail
+                .contains("awaiting the owner's Confirm: run/host/dispatcher/token is missing"),
         "{detail}"
     );
     assert!(w.changes().is_empty(), "{:?}", w.changes());
     assert_eq!(w.applied(), None);
+    // The env file alone (its token not written yet): still held, for the token file —
+    // compose would make a directory where it belongs.
+    fs::write(&env, format!("# worker: {WORKER}\n")).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&env, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    w.round();
+    let (outcome, detail) = w.outcome();
+    assert_eq!(outcome, "held");
+    assert!(
+        detail.contains("run/host/dispatcher/token is missing")
+            && !detail.contains("etc/dispatcher.env"),
+        "{detail}"
+    );
+    assert!(w.changes().is_empty(), "{:?}", w.changes());
 
-    // The owner confirms; the token arrives; the next poll starts the dispatcher.
-    fs::write(
-        w.set_dir().join("etc/dispatcher.env"),
-        format!("OMARCHY_WORKER_TOKEN={TOKEN}\n"),
-    )
-    .unwrap();
+    // The owner confirms; the token arrives as the enrollment writes it; the next poll
+    // starts the dispatcher.
+    let r = crate::dispatcher_env::Rendered {
+        addresses: Vec::new(),
+        envelope: None,
+        plain: false,
+    };
+    crate::dispatcher_env::write_token(&env, WORKER, TOKEN, &r).unwrap();
     w.round();
     assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
     assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
+}
+
+#[test]
+fn a_rotation_writes_the_token_file_and_recreates_only_the_dispatcher_while_the_task_runs_on() {
+    let mut w = World::running_v1();
+    let (task, started) = {
+        let e = w.engine.borrow();
+        (e.tasks()[0].id.clone(), e.tasks()[0].started_at)
+    };
+    let first = w.engine.borrow().dispatcher().unwrap().id.clone();
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let before = fs::read_to_string(&env).unwrap();
+    let changes = w.changes().len();
+    // `omarchy-agent token` (or #325's rotate-token order) writes the pool's answer through
+    // the one place that knows where the token lives.
+    let new = format!("omw_{}", "5e".repeat(24));
+    let r = crate::dispatcher_env::Rendered::now(
+        &Sources {
+            proc_net: w.dir.join("no-proc-net"),
+            ifconfig: None,
+        },
+        &w.agent.paths.data,
+        None,
+    );
+    assert!(!r.plain, "every release here reads the token file");
+    let worker = crate::enroll::write_worker_token(
+        &env,
+        &serde_json::json!({"worker": WORKER, "token": new, "rotate_after": "later"}),
+        &r,
+    )
+    .unwrap();
+    assert_eq!(worker, WORKER);
+    assert_eq!(
+        crate::dispatcher_env::read_token(&w.token_file()).unwrap(),
+        Some((new.clone(), 0o400))
+    );
+    assert_eq!(
+        fs::read_to_string(&env).unwrap(),
+        before,
+        "the env file holds no token"
+    );
+    // The next tick sees the changed input and recreates the dispatcher, and only it.
+    w.tick(3);
+    assert!(
+        w.agent.state.rollout.why.contains("an input changed"),
+        "{:?}",
+        w.agent.state.rollout
+    );
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    let second = w.engine.borrow().dispatcher().unwrap().id.clone();
+    assert_ne!(
+        first, second,
+        "the dispatcher was recreated with the new token"
+    );
+    let e = w.engine.borrow();
+    assert_eq!(e.tasks().len(), 1);
+    assert_eq!(
+        (e.tasks()[0].id.as_str(), e.tasks()[0].started_at),
+        (task.as_str(), started),
+        "the task runs on, never restarted"
+    );
+    assert!(
+        e.containers
+            .iter()
+            .all(|c| c.project.is_empty() || c.service == "dispatcher"),
+        "only the dispatcher is the agent's to replace"
+    );
+    let since: Vec<&String> = e.changes[changes..].iter().collect();
+    assert!(
+        !since.is_empty() && since.iter().all(|c| !c.contains(&task)),
+        "{since:?}"
+    );
+    drop(e);
+    // The round read the token file again: the journal scrubs the new token as it did the
+    // old.
+    crate::run::rollout::report(
+        &mut w.agent.state,
+        &w.agent.journal,
+        w.now,
+        crate::run::rollout::Outcome::EngineUnreachable,
+        None,
+        &format!("compose: echoed {new}"),
+    );
+    assert!(!w.agent.state.round.detail.contains(&new));
+    assert!(!w.journal().contains(&new));
+}
+
+#[test]
+fn an_upgraded_host_moves_its_token_to_the_file_and_keeps_it_in_the_env_file_only_for_an_older_release(
+) {
+    // A host of #371's time: the token in etc/dispatcher.env, no token file, and a release
+    // from before #327 to run, whose dispatcher reads the token there.
+    let mut w = World::new();
+    let env = w.set_dir().join("etc/dispatcher.env");
+    fs::remove_file(w.token_file()).unwrap();
+    fs::write(
+        &env,
+        format!("# worker: {WORKER}\nOMARCHY_WORKER_TOKEN={TOKEN}\nTZ=UTC\n"),
+    )
+    .unwrap();
+    w.agent.host_env = Some(HostEnv::new(Sources {
+        proc_net: w.dir.join("no-proc-net"),
+        ifconfig: None,
+    }));
+    w.release_before_token_file("v1.0.0");
+    w.target("v1.0.0", None);
+    w.round();
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    let has_plain = |w: &World| {
+        fs::read_to_string(w.set_dir().join("etc/dispatcher.env"))
+            .unwrap()
+            .contains(&format!("\nOMARCHY_WORKER_TOKEN={TOKEN}\n"))
+    };
+    // The token moved to its file, and stays in the env file too: v1.0.0 reads it there.
+    assert_eq!(
+        crate::dispatcher_env::read_token(&w.token_file()).unwrap(),
+        Some((TOKEN.to_owned(), 0o400))
+    );
+    assert!(has_plain(&w));
+    assert!(w
+        .journal()
+        .contains("moved from etc/dispatcher.env to run/host/dispatcher/token"));
+    w.engine.borrow_mut().start_task();
+    let task = w.engine.borrow().tasks()[0].id.clone();
+
+    // A release that reads the token file: while it rolls out, the older one could be
+    // reverted to, so the token stays in the env file.
+    w.release("v1.1.0");
+    w.target("v1.1.0", None);
+    w.round();
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
+    let v11 = w.engine.borrow().dispatcher().unwrap().id.clone();
+    // Committed: no release here reads it from the env file any more. The next refresh takes
+    // it out, and that change recreates the dispatcher, which reads its file.
+    w.tick(61);
+    assert!(!has_plain(&w));
+    assert!(
+        !fs::read_to_string(&env).unwrap().contains(TOKEN),
+        "{}",
+        fs::read_to_string(&env).unwrap()
+    );
+    assert!(fs::read_to_string(&env).unwrap().ends_with("\nTZ=UTC\n"));
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    assert_ne!(w.engine.borrow().dispatcher().unwrap().id, v11);
+    assert_eq!(
+        crate::dispatcher_env::read_token(&w.token_file()).unwrap(),
+        Some((TOKEN.to_owned(), 0o400))
+    );
+    // A rollback statement to v1.0.0: its round puts the token back where that release's
+    // dispatcher reads it, before it creates it.
+    relay_statement(&w.remote, 1, "v1.0.0", "v1.1.0", b"signed");
+    w.target("v1.0.0", None);
+    w.round();
+    assert_eq!(w.outcome().0, "ok", "{:?}", w.outcome());
+    assert_eq!(w.applied().as_deref(), Some("v1.0.0"));
+    assert!(has_plain(&w));
+    assert_eq!(
+        w.engine.borrow().tasks()[0].id,
+        task,
+        "the task ran through it all"
+    );
 }
 
 #[test]
@@ -528,16 +719,22 @@ fn the_host_s_addresses_reach_dispatcher_env_and_a_change_recreates_the_dispatch
     let env = w.set_dir().join("etc/dispatcher.env");
     let first = w.engine.borrow().dispatcher().unwrap().id.clone();
 
-    // At its start: rendered with the token kept, 0600, and a round recreates the dispatcher.
+    // At its start: rendered with the registration kept, 0600, the token left in its file,
+    // and a round recreates the dispatcher.
     w.tick(3);
     let text = fs::read_to_string(&env).unwrap();
     for want in [
-        format!("\nOMARCHY_WORKER_TOKEN={TOKEN}\n"),
+        format!("\n# worker: {WORKER}\n"),
         "\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n".into(),
         format!("\nOMARCHY_SECRETS_DIR={}\nOMARCHY_AGENT_CALLS_PER_DAY=900\n", w.dir.join("secrets").display()),
     ] {
         assert!(text.contains(&want), "{want:?} in:\n{text}");
     }
+    assert!(!text.contains(TOKEN), "{text}");
+    assert_eq!(
+        crate::dispatcher_env::read_token(&w.token_file()).unwrap(),
+        Some((TOKEN.to_owned(), 0o400))
+    );
     assert_eq!(
         fs::metadata(&env).unwrap().permissions().mode() & 0o777,
         0o600
@@ -785,6 +982,47 @@ fn agent_toml_is_read_again_so_the_loop_never_puts_back_what_a_rotation_or_dispa
 }
 
 #[test]
+fn the_grant_of_a_signed_exception_s_bridge_reaches_the_dispatcher_and_goes_with_its_key() {
+    let mut w = with_host_env();
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let toml = w.agent.paths.data.join("agent.toml");
+    let secrets = w.dir.join("secrets");
+    let with = |line: &str| {
+        format!(
+            "[set]\nsecrets_dir = \"{}\"\n[envelope]\n{line}\n",
+            secrets.display()
+        )
+    };
+    let granted = |w: &World| {
+        fs::read_to_string(w.set_dir().join("etc/dispatcher.env"))
+            .unwrap()
+            .lines()
+            .any(|l| l == "OMARCHY_DIRECT_NETWORK=1")
+    };
+    // The owner's envelope grants it (install's --direct-network, #373): the loop renders it.
+    fs::write(&toml, with("direct_network = true")).unwrap();
+    w.tick(3);
+    settle(&mut w);
+    assert!(granted(&w), "{}", fs::read_to_string(&env).unwrap());
+    // Taken back (--no-direct-network writes false): the line goes, the dispatcher hands such a
+    // package back again.
+    fs::write(&toml, with("direct_network = false")).unwrap();
+    w.tick(61);
+    assert!(!granted(&w), "{}", fs::read_to_string(&env).unwrap());
+    fs::write(&toml, with("direct_network = true")).unwrap();
+    w.tick(61);
+    assert!(granted(&w));
+    fs::write(&toml, with("")).unwrap();
+    w.tick(61);
+    assert!(!granted(&w), "no key is no grant");
+    // A value that is neither true nor false is no grant either: what the loop started with,
+    // which has none.
+    fs::write(&toml, with("direct_network = \"yes\"")).unwrap();
+    w.tick(61);
+    assert!(!granted(&w));
+}
+
+#[test]
 fn interpolated_output_and_the_token_never_reach_the_disk_or_a_report() {
     let mut w = World::running_v1();
     w.release("v1.1.0");
@@ -798,12 +1036,17 @@ fn interpolated_output_and_the_token_never_reach_the_disk_or_a_report() {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if !p.ends_with("etc/dispatcher.env") {
+            } else if p != w.token_file() {
                 files.push(p);
             }
         }
     }
     assert!(files.len() > 8, "{files:?}");
+    // The token is in its own file, 0400 (#327), and in no other: not the env file either.
+    assert_eq!(
+        crate::dispatcher_env::read_token(&w.token_file()).unwrap(),
+        Some((TOKEN.to_owned(), 0o400))
+    );
     for f in &files {
         let text = String::from_utf8_lossy(&fs::read(f).unwrap()).into_owned();
         assert!(!text.contains(TOKEN), "{} holds the token", f.display());

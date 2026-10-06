@@ -14,9 +14,11 @@
 //!    of that architecture — and only reported: a held lane never stops an install;
 //! 3. prints the envelope (agent.toml) for the person to confirm on `/dev/tty` (`--yes`
 //!    skips) and writes `run/capacity.json`;
-//! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into
-//!    `etc/dispatcher.env` with the host's own addresses (#371: its interfaces' and the
-//!    public one the egress probe saw tasks leave from, kept in `egress.json`);
+//! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into its
+//!    file `run/host/dispatcher/token` (0400, #327), which the dispatcher mounts read-only,
+//!    and its registration into `etc/dispatcher.env` with the host's own addresses (#371: its
+//!    interfaces' and the public one the egress probe saw tasks leave from, kept in
+//!    `egress.json`);
 //! 5. only then writes agent.toml, with the `host_id` and `worker_id` enrollment gave:
 //!    before it there is no run loop, no dispatcher, and nothing claims; then
 //!    `etc/dispatcher.env` gets the secrets directory and the agent budget from it (#371);
@@ -36,9 +38,15 @@
 //! Docker Desktop's or `OrbStack`'s VM when one is here and its home mount is removed; the
 //! envelope records the VM (`[vm]`) and the two sockets; the plist replaces the unit.
 //!
-//! Seams left for later issues, by name: the egress probe behind the egress sidecar on a
-//! task's internal network (#373), until which a rootless host fails the probe on a signed
-//! exception's bridge ([`egress`]); the `subuid` level for rootless podman, once the
+//! Preflight's egress probe runs the way a task runs, behind an egress sidecar from the
+//! release's worker image on a network made like a task's, and probes a signed exception's
+//! bridge only where the envelope grants one (`--direct-network`, #373; [`egress`]).
+//!
+//! Seams left for later issues, by name: the claim saying whether a host runs a signed
+//! exception's bridge (until then the pool may offer such a package to a host that hands it
+//! back, #373, as a lost lease: the pool gives the attempt back for a task's first two losses
+//! and spends one for each after, so such a package fails where only hosts without the grant
+//! claim it); the `subuid` level for rootless podman, once the
 //! dispatcher (#335) starts task containers with `--userns=auto` (until then rootless podman
 //! reads as `user`); task containers and sidecars carry `org.omarchy-pool.agent.host=<host>`
 //! (design v2 §9.3), which uninstall removes by.
@@ -61,6 +69,7 @@ pub(crate) mod unit;
 
 pub use sys::Machine;
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -70,8 +79,9 @@ use crate::dispatcher_env::{self, addresses, Envelope, Refresh, Rendered, Source
 use crate::enroll;
 use crate::host::{HostKey, Identity, KEY_FILE};
 use crate::manifest::Manifest;
+use crate::run::config::DriverKind;
 use crate::run::{tools, Verifier};
-use crate::verify::BundleOutcome;
+use crate::verify::{cosignature, BundleOutcome};
 use crate::version::Release;
 
 pub use checks::Report;
@@ -126,6 +136,9 @@ pub struct Places {
     pub docker_daemon: PathBuf,
     /// Where processes are read (`/proc`): a rootless engine's network stack (#367).
     pub proc: PathBuf,
+    /// podman's Quadlet generator, where systemd finds a user generator (#330): what the
+    /// Quadlet driver needs.
+    pub quadlet_generator: Option<PathBuf>,
 }
 
 impl Places {
@@ -169,6 +182,7 @@ impl Places {
             systemd_system: PathBuf::from("/etc/systemd/system"),
             docker_daemon: PathBuf::from("/etc/docker/daemon.json"),
             proc: PathBuf::from("/proc"),
+            quadlet_generator: crate::run::quadlet::generator(),
         })
     }
 
@@ -193,6 +207,11 @@ impl Places {
     }
     pub fn unit_dir(&self) -> PathBuf {
         self.config_home.join("systemd").join("user")
+    }
+    /// Where the Quadlet driver's units go (#330): podman's generator reads the user's
+    /// `containers/systemd/`.
+    pub fn quadlet_dir(&self) -> PathBuf {
+        self.config_home.join("containers").join("systemd")
     }
     /// The agent's own `DOCKER_CONFIG`, the run loop's: a Mac's Colima writes its Docker
     /// context there, never into the person's `~/.docker` (#320).
@@ -259,7 +278,16 @@ pub struct Options {
     pub task_subnets: Option<String>,
     /// The person says this is a machine or VM used only as a pool host (design v2 §19.1).
     pub dedicated: bool,
+    /// The person grants a signed exception's bridge network (`--direct-network`, the
+    /// envelope's `direct_network`, #373): its probe runs, and the dispatcher runs a package
+    /// with that exception instead of handing it back. `--no-direct-network` takes a recorded
+    /// grant back; neither keeps what agent.toml says.
+    pub direct_network: Option<bool>,
     pub legacy: Option<String>,
+    /// The driver that runs the set (`--driver`, #330): compose, or Quadlet on rootless
+    /// podman under this user's systemd. `None` keeps what agent.toml says (compose at
+    /// first).
+    pub driver: Option<DriverKind>,
     pub agent_env_from: Option<PathBuf>,
     pub max_units: Option<u32>,
     pub max_cpus: Option<u32>,
@@ -294,6 +322,9 @@ pub trait Sys {
     fn github_scopes(&mut self, token: &str) -> Result<Option<String>, String>;
     /// A release asset or a pinned tool, over HTTPS.
     fn download(&mut self, url: &str) -> Result<Vec<u8>, String>;
+    /// The same for an asset the release may not carry (a maintainer's co-signature,
+    /// #330): `Ok(None)` when the server answers 404, an error when it does not answer.
+    fn download_if_any(&mut self, url: &str) -> Result<Option<Vec<u8>>, String>;
 }
 
 #[derive(Debug)]
@@ -341,11 +372,27 @@ fn say(out: &mut dyn Write, line: &str) {
     let _ = writeln!(out, "omarchy-agent: {line}");
 }
 
-/// The verified release: its manifest.
+/// The verified release: its manifest, once it carries the maintainers' co-signatures
+/// this agent requires (#330, D1 b): the release's `<bundle>.<login>.sshsig` assets, or the
+/// files of those names beside `--bundle`.
 fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Manifest, Failure> {
+    let policy = verifier.cosignature();
+    let mut cosignatures = BTreeMap::new();
     let (archive, sig) = match &o.source {
         Some(Source::Files(b, s)) => {
             let read = |p: &Path| std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
+            if policy.threshold() > 0 {
+                let name = b.file_name().map(|n| n.to_string_lossy().into_owned());
+                for login in policy.logins() {
+                    let beside = b.with_file_name(cosignature::file_name(
+                        name.as_deref().unwrap_or_default(),
+                        login,
+                    ));
+                    if let Ok(found) = std::fs::read(beside) {
+                        cosignatures.insert(login.to_owned(), found);
+                    }
+                }
+            }
             (
                 read(b).map_err(Failure::Refused)?,
                 read(s).map_err(Failure::Refused)?,
@@ -354,6 +401,24 @@ fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Ma
         Some(Source::Release(r)) => {
             let (name, sig) = crate::run::bundle_names(*r);
             let url = |n: &str| format!("{}/{r}/{n}", crate::run::RELEASES);
+            if policy.threshold() > 0 {
+                // One a maintainer did not make answers 404, which counts as none; GitHub not
+                // answering is said as that, never as a release without its co-signature.
+                for login in policy.logins() {
+                    let asset = url(&cosignature::file_name(&name, login));
+                    match sys.download_if_any(&asset) {
+                        Ok(Some(found)) => {
+                            cosignatures.insert(login.to_owned(), found);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            return Err(Failure::Refused(format!(
+                                "GitHub did not answer for the maintainers' co-signature {asset}: {e}; run it again"
+                            )))
+                        }
+                    }
+                }
+            }
             (
                 sys.download(&url(&name)).map_err(Failure::Refused)?,
                 sys.download(&url(&sig)).map_err(Failure::Refused)?,
@@ -365,8 +430,19 @@ fn release(o: &Options, sys: &mut dyn Sys, verifier: &dyn Verifier) -> Result<Ma
             ))
         }
     };
+    let cosigned = || {
+        policy
+            .check(cosignature::BUNDLE_NAMESPACE, &archive, &cosignatures)
+            .require(policy.threshold(), "the release bundle")
+            .map_err(|e| {
+                Failure::Refused(format!("the release bundle is refused (cosignature): {e}"))
+            })
+    };
     match verifier.bundle(&archive, &sig) {
-        Ok(BundleOutcome::Current(b)) => Ok(b.manifest().clone()),
+        Ok(BundleOutcome::Current(b)) => {
+            cosigned()?;
+            Ok(b.manifest().clone())
+        }
         Ok(BundleOutcome::NeedsNewerAgent { why, .. }) => Err(Failure::NeedsNewerAgent(format!(
             "needs a newer agent: {why}"
         ))),
@@ -509,6 +585,33 @@ pub(crate) fn measure_as(
     }
     let existing = std::fs::read_to_string(p.agent_toml()).ok();
     let ex = existing.as_deref();
+    // The driver (#330): the flag, else agent.toml's, else compose. Another than the one an
+    // installed host runs is the runtime switch's, which stops the dispatcher first: a
+    // second install would leave the first one running beside the new one.
+    let had = envelope::set_str(ex, "driver").and_then(|d| DriverKind::parse(&d));
+    let driver = o.driver.or(had).unwrap_or_default();
+    if let Some(had) = had.filter(|h| *h != driver) {
+        let installed = ex
+            .and_then(|t| toml::from_str::<toml::Table>(t).ok())
+            .is_some_and(|t| t.contains_key("host_id"));
+        if installed {
+            r.blockers.push(format!(
+                "this host runs the {} driver: `omarchy-agent runtime switch {}` moves it, stopping the dispatcher where it runs and guarding it where it goes",
+                had.word(),
+                match driver {
+                    DriverKind::Quadlet => "quadlet",
+                    DriverKind::Compose => "compose/podman",
+                }
+            ));
+        }
+    }
+    if driver == DriverKind::Quadlet {
+        if mac {
+            r.blockers.push("--driver quadlet runs the set under a Linux user's systemd; a Mac's bundle runs in its VM".into());
+        } else if p.quadlet_generator.is_none() {
+            r.blockers.push("--driver quadlet: podman's Quadlet generator is not installed (the driver needs podman 4.6 or later)".into());
+        }
+    }
     let enrolled = Identity::read(&p.data.join("state")).ok().flatten();
     if enrolled.is_none() && o.token.is_none() {
         r.blockers.push(
@@ -639,6 +742,11 @@ pub(crate) fn measure_as(
     };
     let mut dedicated = o.dedicated
         || envelope::envelope_value(ex, "dedicated").and_then(|v| v.as_bool()) == Some(true);
+    // A grant an earlier install recorded, or the owner wrote, stays unless taken back with
+    // `--no-direct-network` (#373).
+    let direct_network = o.direct_network.unwrap_or_else(|| {
+        envelope::envelope_value(ex, "direct_network").and_then(|v| v.as_bool()) == Some(true)
+    });
     let project = envelope::set_str(ex, "project").unwrap_or_else(|| envelope::PROJECT.to_owned());
     // The legacy project: `--legacy`, or the one an earlier install recorded, so running
     // install again repairs it without the flag (legacy.json's owner is checked below).
@@ -690,6 +798,7 @@ pub(crate) fn measure_as(
         set_dir.join("compose.override.yml"),
         set_dir.join(".env"),
         enroll_paths.dispatcher_env(),
+        enroll_paths.token(),
         secrets_dir.join("agent.env"),
         p.data.join(legacy::FILE),
     ] {
@@ -764,10 +873,14 @@ pub(crate) fn measure_as(
         (None, None) => None,
     };
     // The engine: on a Mac in its VM, started and sized here when it is the omarchy one.
-    let given = o
-        .socket
-        .clone()
-        .or_else(|| envelope::set_path(ex, "socket_cli"));
+    // Quadlet runs this user's own podman: its rootless API socket unless one is given.
+    let given = o.socket.clone().or_else(|| match driver {
+        DriverKind::Quadlet if had != Some(DriverKind::Quadlet) => p
+            .xdg_runtime_dir
+            .as_ref()
+            .map(|x| x.join("podman/podman.sock")),
+        _ => envelope::set_path(ex, "socket_cli"),
+    });
     let caps = (
         o.max_cpus.or_else(|| envelope_u32(ex, "max_cpus")),
         o.max_mem_gb.or_else(|| envelope_u32(ex, "max_mem_gb")),
@@ -829,6 +942,20 @@ pub(crate) fn measure_as(
             .filter_map(|a| a.as_str().map(str::to_owned))
             .collect()
     });
+    // The sandboxed runtime for community tasks (#330), within the envelope's `sandbox` an
+    // earlier install's owner may have set: absent tries what the engine has.
+    let sandbox = match envelope::envelope_value(ex, "sandbox") {
+        None => Ok(capacity::sandbox::Setting::Auto),
+        Some(toml::Value::String(s)) => capacity::sandbox::Setting::parse(Some(&s)),
+        Some(v) => Err(format!(
+            "agent.toml: [envelope] sandbox = {v} is not \"auto\", \"off\" or a runtime's name"
+        )),
+    }
+    .map_err(|e| format!("{e}; nothing was changed"));
+    let sandbox = sandbox.unwrap_or_else(|e| {
+        r.blockers.push(e);
+        capacity::sandbox::Setting::Off
+    });
     let facts = docker.as_ref().and_then(|d| {
         let host = d.host();
         let how = probe::Probe {
@@ -841,6 +968,11 @@ pub(crate) fn measure_as(
                 binfmt: &p.binfmt,
                 images: &images,
                 emulate: emulate.as_deref(),
+            }),
+            // A Mac's VM holds the engine's files: the smoke run alone decides there.
+            sandbox: Some(capacity::sandbox::Probe {
+                setting: &sandbox,
+                local: !mac,
             }),
         };
         match probe::detect(&how) {
@@ -879,6 +1011,7 @@ pub(crate) fn measure_as(
         max_mem_gb: o.max_mem_gb,
         dedicated,
         emulate,
+        sandbox,
         ..Caps::default()
     };
     let capacity = facts.as_ref().zip(manifest.as_ref()).map(|(f, m)| {
@@ -900,6 +1033,7 @@ pub(crate) fn measure_as(
             emulated.concat()
         ));
         checks::emulation(&c, &mut r);
+        checks::sandbox(&c, &mut r);
         c
     });
     if let Some(f) = &facts {
@@ -910,6 +1044,31 @@ pub(crate) fn measure_as(
             rootful_exception,
             &mut r,
         );
+    }
+    if driver == DriverKind::Quadlet && !mac {
+        // podman's own version: the units the driver writes need its Quadlet to read every
+        // key of them (`crate::quadlet::PODMAN_MIN`).
+        let podman = docker.as_ref().and_then(|d| d.podman().ok().flatten());
+        match (&docker, &facts, podman) {
+            (Some(d), Some(f), Some(v)) if f.rootless() => {
+                if let Some(e) = crate::quadlet::podman_refused(&v) {
+                    r.blockers.push(format!(
+                        "--driver quadlet: {e}; upgrade podman, or install without --driver quadlet"
+                    ));
+                } else {
+                    r.notes.push(format!(
+                        "driver: quadlet on {}, its units in {} (the user's systemd runs the dispatcher)",
+                        d.socket.display(),
+                        p.quadlet_dir().display()
+                    ));
+                }
+            }
+            (Some(d), Some(_), _) => r.blockers.push(format!(
+                "--driver quadlet runs rootless podman under this user's systemd: {} is not rootless podman's API socket (`systemctl --user enable --now podman.socket`, or give --socket)",
+                d.socket.display()
+            )),
+            _ => {}
+        }
     }
     let creds = checks::credentials(&p.home);
     if found.as_ref().and_then(|f| f.kind).is_some() {
@@ -958,8 +1117,11 @@ pub(crate) fn measure_as(
                 Err(e) => r.blockers.push(format!("legacy: {e}")),
             }
         }
-        match (task.first().and_then(|t| t.last_28()), &image) {
-            (Some(subnet), Some(img)) => {
+        let worker = manifest
+            .as_ref()
+            .map(|m| m.worker_image().index().to_string());
+        match (task.first().and_then(|t| t.last_28()), &image, worker) {
+            (Some(subnet), Some(img), Some(worker)) => {
                 let rootful = facts.as_ref().is_none_or(|f| !f.rootless());
                 let server = d.server();
                 let vm = found.as_ref().and_then(|f| f.kind);
@@ -1000,6 +1162,12 @@ pub(crate) fn measure_as(
                     router: gateway,
                     lan: net::lan_address(),
                     pool: pool.as_deref(),
+                    worker: &worker,
+                    task: &task,
+                    // What the agent renders for the dispatcher's sidecars now (#371): the
+                    // interfaces' addresses and the public one an earlier probe or run loop saw.
+                    own: addresses::detect(&p.sources(), &p.data, &task),
+                    direct: direct_network,
                     advice: egress::Advice {
                         rootful,
                         podman,
@@ -1064,6 +1232,7 @@ pub(crate) fn measure_as(
                 });
             let values = envelope::Values {
                 pool: pool.clone(),
+                driver,
                 set_dir,
                 work_root,
                 secrets_dir,
@@ -1079,6 +1248,7 @@ pub(crate) fn measure_as(
                     && facts.inner_isolation() == capacity::Isolation::Subuid
                     && facts.vm().is_none(),
                 dedicated,
+                direct_network,
                 max_units: o.max_units,
                 // The omarchy VM's size is the envelope's: written so the owner sees it.
                 max_cpus: vm
@@ -1170,6 +1340,7 @@ fn mac_facts(
             work_root: &o.places.home,
             image: None,
             emulation: None,
+            sandbox: None,
         };
         probe::rosetta_lane(&how, img)
     });
@@ -1334,12 +1505,13 @@ pub(crate) fn apply(
                 env_file.display()
             )))
         }
-        Refresh::Written | Refresh::Unchanged => say(
+        Refresh::Written | Refresh::Unchanged | Refresh::TokenMoved => say(
             out,
             &format!(
-                "{} (0600): the worker token, {}",
+                "{} (0600): the registration, {}; the worker token in {} (0400)",
                 env_file.display(),
-                rendered.lines().map_err(Failure::Refused)?.join(", ")
+                rendered.lines().map_err(Failure::Refused)?.join(", "),
+                eo.paths.token().display()
             ),
         ),
     }
@@ -1555,6 +1727,28 @@ pub fn uninstall(
         .as_deref()
         .and_then(|t| toml::from_str::<toml::Table>(t).ok())
         .and_then(|t| t.get("host_id").and_then(|h| h.as_str().map(str::to_owned)));
+    // The Quadlet driver's units (#330), before the containers: stopped, their files gone and
+    // systemd told, or their restart policy would bring the dispatcher back. On a host that
+    // runs Quadlet, and on one a runtime switch to Quadlet is still moving: agent.toml names
+    // compose until the switch's round is `ok`, while the unit's file is already there.
+    let (unit_dir, units) = quadlet_units(places, cfg.as_deref(), &project);
+    let quadlet = envelope::set_str(cfg.as_deref(), "driver").as_deref() == Some("quadlet");
+    if quadlet
+        || units
+            .iter()
+            .any(|n| unit_dir.join(format!("{n}.container")).exists())
+    {
+        match remove_quadlet_units(&unit_dir, &units, sys) {
+            Ok(()) => say(
+                out,
+                &format!("stopped and removed the Quadlet unit(s) {}", units.join(", ")),
+            ),
+            Err(e) => left.push(format!(
+                "needs a person: the Quadlet units were not all removed ({e}); `systemctl --user stop` them and remove their files from {}",
+                unit_dir.display()
+            )),
+        }
+    }
     // Containers that could not be removed keep their set (its dispatcher.env) until a
     // later uninstall removes them.
     let mut keep_set = false;
@@ -1722,6 +1916,61 @@ fn labelled(
         })
         .filter(|(id, _)| !id.is_empty())
         .collect())
+}
+
+/// The set's Quadlet units (#330): their directory, and their names, one per service of the
+/// bundle that ran (the dispatcher when that is gone).
+fn quadlet_units(places: &Places, cfg: Option<&str>, project: &str) -> (PathBuf, Vec<String>) {
+    let dir = envelope::set_path(cfg, "unit_dir").unwrap_or_else(|| places.quadlet_dir());
+    let services = std::fs::read_to_string(places.data.join("last-good/host/compose.yml"))
+        .ok()
+        .and_then(|t| crate::lint::service_names(&t))
+        .unwrap_or_else(|| vec!["dispatcher".to_owned()]);
+    let names = services
+        .iter()
+        .map(|s| crate::quadlet::unit_name(project, s))
+        .collect();
+    (dir, names)
+}
+
+/// The units `names` in `dir` stopped, their files removed and systemd told, whatever one of
+/// them said: a unit systemd never loaded — no round created it yet (the dispatcher waits
+/// for the owner's Confirm), or its generator did not take the file — has nothing to stop
+/// (`systemctl stop` would exit 5, "not loaded"), and its file goes all the same. One still
+/// running from a file already gone is stopped.
+fn remove_quadlet_units(dir: &Path, names: &[String], sys: &mut dyn Sys) -> Result<(), String> {
+    let mut failed = Vec::new();
+    for name in names {
+        let service = format!("{name}.service");
+        let shown = sys.run(
+            "systemctl",
+            &[
+                "--user",
+                "show",
+                "--property=LoadState",
+                "--property=ActiveState",
+                &service,
+            ],
+        );
+        let unloaded = shown.is_ok_and(|s| {
+            s.lines().any(|l| l.trim() == "LoadState=not-found")
+                && s.lines().any(|l| l.trim() == "ActiveState=inactive")
+        });
+        if !unloaded {
+            if let Err(e) = sys.run("systemctl", &["--user", "stop", &service]) {
+                failed.push(format!("{service}: {e}"));
+            }
+        }
+        if let Err(e) = files::remove(dir, &format!("{name}.container")) {
+            failed.push(e);
+        }
+    }
+    unit::reload(sys);
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
 }
 
 fn remove_containers(

@@ -189,6 +189,12 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
         image: image.as_deref(),
         // The VM's lane is Rosetta's ([`probe::in_mac_vm`]), not the binfmt table's.
         emulation: None,
+        // A sandboxed runtime in the VM's engine (#330): the VM's files are not this
+        // machine's, so its smoke run alone decides.
+        sandbox: Some(crate::capacity::sandbox::Probe {
+            setting: &toml.caps.sandbox,
+            local: false,
+        }),
     };
     // The loop pulls nothing: a pull of a multi-GB build image would hold the tick far past
     // one engine call (and the watchdog's patience). A native build image the VM's store
@@ -350,6 +356,16 @@ impl Keeper {
     pub fn use_docker(&mut self, cli: &Path) {
         self.colima.use_docker(cli);
         self.docker = true;
+    }
+
+    /// A new size from agent.toml, as a signed widening of `max_cpus` or `max_mem_gb` wrote
+    /// it (#328): held to the same bounds as at start, and the VM restarted with it as any
+    /// size change is — at once only when no task runs, within the rate limit.
+    pub fn resize(&mut self, size: vm::Size) {
+        if self.want.size != size {
+            self.want.size = size;
+            self.next_look = 0;
+        }
     }
 
     /// The applied release's signed minimum (CPUs, GB): a size below it is refused.

@@ -373,8 +373,11 @@ the release, its registration's open Updates and its host orders — #344;
 from agent 0.4.0 its settings and the rest of the host orders, behind the
 host's own brake, #325, and the owner's soak, which the claim's 426 gate
 follows for at most two hours after a deploy, and a warning when GitHub has
-shown a newer release than the pool names for over a day, #326;
-the runbook's *The run loop*, *Soak* and *Freeze detection* — except from a Worker from before #344, whose
+shown a newer release than the pool names for over a day, #326, and the
+owner's widening of its envelope and its agent keys, each a document the
+passkey pinned at the host signed and the keys sealed in the browser to the
+host's seal key, #328;
+the runbook's *The run loop*, *Owner control*, *Soak* and *Freeze detection* — except from a Worker from before #344, whose
 state names no release: only a rollback below it deploys one, and the agent
 then reads its `follow` as the agents before it did.) It names
 its workers by id from inside the set: a project worker's entrypoint writes

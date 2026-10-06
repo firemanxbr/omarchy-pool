@@ -122,6 +122,14 @@ export interface Lane { arch: Arch; mode: "native" | "emulated"; via?: string; p
 export interface HeldLane { arch: Arch; reason: string }
 /** A held lane's reason is shown as the agent wrote it, cut at this length. */
 export const HELD_REASON_MAX = 300;
+/** The sandboxed runtimes a host's agent finds (#330, design v2 §10.4; D43): gVisor's `runsc`, Kata Containers. */
+export const SANDBOX_KINDS = ["gvisor", "kata"] as const;
+/**
+ * The sandboxed runtime a host's tasks of a contributor's run in on its native lane (#330): the engine's name for it, as `--runtime`
+ * takes it, and which sandbox it is. A container escape of a contributor's recipe then lands in its kernel, not on the host.
+ */
+export interface Sandbox { runtime: string; kind: (typeof SANDBOX_KINDS)[number] }
+const RUNTIME_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** A capacity report (design v2 §7.3, `run/capacity.json`), as the pool keeps it: the totals it can check, nothing it takes on trust. */
 export interface Capacity {
   cpus: number;
@@ -133,6 +141,39 @@ export interface Capacity {
   agent_slots: number | null;
   /** What the host said it runs; the pool's own count is unitsOf(). */
   units: number | null;
+  /**
+   * Its sandboxed runtime for a contributor's tasks (#330): `null` when it has none; absent from an agent, or a dispatcher, before
+   * #330. An agent's report says what it found, for the host page; a claim says what its dispatcher applies, which selection reads
+   * (a sandboxed host's emulated lanes take the project's own recipes only) and hosts.sandbox_applied keeps (sandboxApplied).
+   */
+  sandbox?: Sandbox | null;
+  /**
+   * Why a sandboxed runtime its engine has, or its envelope names, is not used (an agent's report), or why a dispatcher's claims hold
+   * for it (a claim: its runtime refused a start) (#330), cut at HELD_REASON_MAX.
+   */
+  sandbox_held?: string;
+}
+
+/** What a host's dispatcher says, with its claims, of the sandbox it applies (#330, hosts.sandbox_applied): the runtime or none, and why its claims hold for it. */
+export interface SandboxApplied { sandbox: Sandbox | null; held?: string }
+
+/** The claim's word on the sandbox, as hosts.sandbox_applied keeps it: null when its capacity does not say (a dispatcher before #330). */
+export function sandboxApplied(c: Capacity | null): string | null {
+  if (!c || c.sandbox === undefined) return null;
+  return JSON.stringify({ sandbox: c.sandbox, ...(c.sandbox_held ? { held: c.sandbox_held } : {}) });
+}
+
+/** hosts.sandbox_applied read back: null when its dispatcher's claims do not say, or it does not read. */
+export function sandboxAppliedOf(v: string | null | undefined): SandboxApplied | null {
+  if (!v) return null;
+  try {
+    const j = JSON.parse(v) as { sandbox?: unknown; held?: unknown };
+    const c = parseCapacity({ cpus: 1, mem_gb: 0, disk_free_gb: { work: 0, engine: 0 }, lanes: [{ arch: "x86_64", mode: "native" }], sandbox: j.sandbox, sandbox_held: j.held });
+    if (typeof c === "string" || c.sandbox === undefined) return null;
+    return { sandbox: c.sandbox, ...(c.sandbox_held ? { held: c.sandbox_held } : {}) };
+  } catch {
+    return null;
+  }
 }
 
 const num = (v: unknown, min: number, max: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
@@ -166,6 +207,15 @@ export function parseCapacity(v: unknown): Capacity | string {
       held.push({ arch: x.arch as Arch, reason: x.reason.trim().slice(0, HELD_REASON_MAX) });
     }
   }
+  // Its sandbox (#330) — what an agent found, or what a dispatcher applies — one that does not read is left out (as an agent or a
+  // dispatcher before #330 says nothing: no sandbox to select on) rather than refuse the report or the claim it rides on.
+  const sb = c.sandbox as Record<string, unknown> | null | undefined;
+  const sandbox: Sandbox | null | undefined =
+    sb === null ? null
+    : sb && typeof sb === "object" && typeof sb.runtime === "string" && RUNTIME_NAME.test(sb.runtime) && SANDBOX_KINDS.includes(sb.kind as Sandbox["kind"])
+      ? { runtime: sb.runtime, kind: sb.kind as Sandbox["kind"] }
+      : undefined;
+  const sandboxHeld = typeof c.sandbox_held === "string" && c.sandbox_held.trim() ? c.sandbox_held.trim().slice(0, HELD_REASON_MAX) : undefined;
   return {
     cpus: c.cpus,
     mem_gb: c.mem_gb,
@@ -174,6 +224,8 @@ export function parseCapacity(v: unknown): Capacity | string {
     held_lanes: held,
     agent_slots: int(c.agent_slots, 0, 64) ? c.agent_slots : null,
     units: int(c.units, 0, 4096) ? c.units : null,
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(sandboxHeld === undefined ? {} : { sandbox_held: sandboxHeld }),
   };
 }
 
@@ -354,11 +406,17 @@ export interface SoakColumns { soaking_until: unknown; quarantine: unknown }
 
 /**
  * A host as every claim of its registration reads it: one row by the primary key, the owner joined with the maintainer list, its soak
- * (#326), the release it reverted (#342), and whether the maintainers let it take pool jobs yet (#340, by the settings' primary key).
+ * (#326), the release it reverted (#342), the sandbox it applies (#330), and whether the maintainers let it take pool jobs yet (#340, by
+ * the settings' primary key).
  */
-export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed, ${SOAK_COLUMNS("hosts")}, ${REVERTED_COLUMNS("hosts")},
+export const HOST_CLAIM_SQL = `SELECT name, status, status_by, status_at, status_reason, owner_login, owner_removed_at, ${OWNER_LISTED_SQL("hosts.owner_github_id")} AS listed, ${SOAK_COLUMNS("hosts")}, ${REVERTED_COLUMNS("hosts")}, sandbox_applied,
     (SELECT value FROM settings WHERE key = '${POOL_JOBS_KEY}') AS pool_jobs FROM hosts WHERE id = ?`;
-export interface HostClaimRow extends SoakColumns, RevertedColumns { name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number; pool_jobs: string | null }
+export interface HostClaimRow extends SoakColumns, RevertedColumns {
+  name: string; status: string; status_by: string | null; status_at: string | null; status_reason: string | null; owner_login: string; owner_removed_at: string | null; listed: number;
+  /** #330: what its dispatcher's last claim said of the sandbox it applies (sandboxApplied), written again only when a claim says something new. */
+  sandbox_applied: string | null;
+  pool_jobs: string | null;
+}
 
 const TAG = /^v\d+\.\d+\.\d+$/;
 const isoOrNull = (v: unknown) => (typeof v === "string" && v.length <= 40 && Number.isFinite(Date.parse(v)) ? v : null);
@@ -481,9 +539,13 @@ export function hostReason(v: unknown): string | null {
  * agent paces and brakes them (two seconds apart, twenty an hour, and its
  * limits on restarts, release changes and narrowings).
  */
-export const HOST_ORDER_KINDS = ["retire-legacy", "reconcile-now", "set-units", "set-emulate", "rotate-token", "retry-release", "diagnostics"] as const;
+export const HOST_ORDER_KINDS = ["retire-legacy", "reconcile-now", "set-units", "set-emulate", "rotate-token", "retry-release", "diagnostics", "widen-envelope", "set-agent-keys"] as const;
 export type HostOrderKind = (typeof HOST_ORDER_KINDS)[number];
 export const isHostOrderKind = (k: unknown): k is HostOrderKind => typeof k === "string" && (HOST_ORDER_KINDS as readonly string[]).includes(k);
+/** P5's kinds (#328): a document the owner's passkey signed, which an agent from HOST_OWNER_AGENT takes when the passkey pinned at the host made it. */
+export const OWNER_ORDER_KINDS: readonly HostOrderKind[] = ["widen-envelope", "set-agent-keys"];
+/** The first agent that takes them (#328): an older one refuses them as unknown. */
+export const HOST_OWNER_AGENT = "0.4.0";
 /** P4's kinds (#325): an agent from HOST_SETTINGS_AGENT takes them. */
 export const SETTINGS_ORDER_KINDS: readonly HostOrderKind[] = ["set-units", "set-emulate", "rotate-token", "retry-release", "diagnostics"];
 /** The first agent that takes P4's settings and orders (#325): an older one refuses them as unknown. */
@@ -516,6 +578,10 @@ export function agentTakesOrders(v: string | null | undefined): boolean {
 /** Whether an agent of version `v` takes P4's settings and orders (at or above HOST_SETTINGS_AGENT, #325). */
 export function agentTakesSettings(v: string | null | undefined): boolean {
   return atLeast(v, HOST_SETTINGS_AGENT);
+}
+/** Whether an agent of version `v` takes P5's signed widening and sealed keys (at or above HOST_OWNER_AGENT, #328). */
+export function agentTakesOwner(v: string | null | undefined): boolean {
+  return atLeast(v, HOST_OWNER_AGENT);
 }
 
 // ---------- the host's settings (#325, design v2 §12, §17.1) ----------
@@ -672,4 +738,195 @@ export function orderAnswers(v: unknown): OrderAnswer[] {
     out.push({ id: x.id, outcome: x.outcome, detail });
   }
   return out;
+}
+
+// ---------- the owner's control without a visit (#328, design v2 §12, §14, D6 b) ----------
+
+/**
+ * What the owner signs with the passkey pinned at the host, written by the
+ * pool and checked by the agent (crates/omarchy-agent/src/owner/mod.rs, which
+ * reads it strictly): the schema, the act, the host, the version above the
+ * last the host took (none for a pin), when it was issued and until when it
+ * holds, the owner's login, then the act's own fields — the relying party
+ * for a pin, the envelope's keys for a widening, the seal key and the sealed
+ * keys for agent keys. The challenge the passkey signs is the SHA-256 of
+ * exactly these bytes, which the agent recomputes: the pool relays the
+ * document, it cannot change it. Key order is fixed (the agent's fixtures,
+ * tests/owner-fixtures.mjs, are written the same way).
+ */
+export const OWNER_DOC_SCHEMA = "omarchy-agent/owner/1";
+export type OwnerAct = "pin-passkey" | "widen-envelope" | "set-agent-keys";
+/** A widening or keys document holds as long as an order waits for its agent; a pin, the minutes it takes to paste it at the host. */
+export const OWNER_DOC_TTL_MIN = 60;
+export const PIN_DOC_TTL_MIN = 10;
+/** The agent reads a document up to this size. */
+export const OWNER_DOC_MAX = 32 * 1024;
+/** The `[envelope]` keys a signed widening may set: the agent's own list (owner::WIDENABLE). */
+export const WIDENABLE = ["max_units", "max_cpus", "max_mem_gb", "emulate", "agent_slots", "agent_budget", "diagnostics", "paths"] as const;
+/** The agent keys a sealed document may set: the ones agent sidecars read and the dispatcher refuses to hold (owner::AGENT_KEYS). */
+export const AGENT_KEY_NAMES = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "GITHUB_TOKEN"] as const;
+const BUDGET_KEYS = ["calls_per_task", "tokens_per_task", "minutes_per_task", "calls_per_day"];
+/** Each budget key's top as the agent takes it: the calls a u32 (dispatcher_env `Budget::from_envelope`), the tokens and minutes 1e12 here, below owner::Widening's 2^40. */
+const BUDGET_MAX: Record<string, number> = { calls_per_task: 4294967295, tokens_per_task: 1e12, minutes_per_task: 1e12, calls_per_day: 4294967295 };
+const B64U = /^[A-Za-z0-9_-]+$/;
+
+export interface SealedKeyArg { name: string; epk?: string; nonce?: string; ct?: string; remove?: true }
+export interface OwnerDocInput {
+  act: OwnerAct; host: string; version?: number; issued_at: string; not_after: string; by: string;
+  rp_id?: string; origin?: string; envelope?: Record<string, unknown>; seal_key?: string; keys?: SealedKeyArg[];
+}
+
+/** The document's bytes, as the passkey signs them and the agent reads them. */
+export function ownerDoc(d: OwnerDocInput): string {
+  const o: Record<string, unknown> = { schema: OWNER_DOC_SCHEMA, act: d.act, host: d.host };
+  if (d.act !== "pin-passkey") o.version = d.version;
+  o.issued_at = d.issued_at;
+  o.not_after = d.not_after;
+  o.by = d.by;
+  if (d.act === "pin-passkey") Object.assign(o, { rp_id: d.rp_id, origin: d.origin });
+  if (d.act === "widen-envelope") o.envelope = d.envelope;
+  if (d.act === "set-agent-keys") Object.assign(o, { seal_key: d.seal_key, keys: d.keys });
+  return JSON.stringify(o);
+}
+
+/** A document the pool wrote, read back from what a page posts: its fields, or null when it is none of the pool's shapes. */
+export function readOwnerDoc(text: unknown): OwnerDocInput | null {
+  if (typeof text !== "string" || text.length > OWNER_DOC_MAX) return null;
+  let d: Record<string, unknown>;
+  try {
+    d = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!d || typeof d !== "object" || d.schema !== OWNER_DOC_SCHEMA) return null;
+  const act = d.act;
+  if (act !== "pin-passkey" && act !== "widen-envelope" && act !== "set-agent-keys") return null;
+  if (typeof d.host !== "string" || typeof d.issued_at !== "string" || typeof d.not_after !== "string" || typeof d.by !== "string") return null;
+  const doc = d as unknown as OwnerDocInput;
+  // Byte for byte what the pool writes: a document that reads but was not written so is refused.
+  return ownerDoc(doc) === text ? doc : null;
+}
+
+const whole = (v: unknown, min: number, max: number) => Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
+
+/**
+ * A proposed envelope from the owner's form: each key one of WIDENABLE with
+ * a value of its type and range — the agent's own rules, so a value the host
+ * would refuse is said here first —, or why not. The host checks it again,
+ * and its own envelope file, whatever this said.
+ */
+export function widening(v: unknown): Record<string, unknown> | string {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return "envelope: an object of the keys to set";
+  const out: Record<string, unknown> = {};
+  const entries = Object.entries(v as Record<string, unknown>);
+  if (!entries.length) return "envelope: name at least one key to set";
+  for (const [k, x] of entries) {
+    if (!(WIDENABLE as readonly string[]).includes(k)) return `envelope: ${k} is no key a signed widening sets (it sets ${WIDENABLE.join(", ")}); the rest of the envelope is its owner's, at the host`;
+    const nullable = ["max_units", "max_cpus", "max_mem_gb", "emulate", "agent_budget"].includes(k);
+    if (x === null) {
+      if (!nullable) return `envelope.${k}: null is not a value of it`;
+      out[k] = null;
+      continue;
+    }
+    if (k === "max_units" || k === "max_cpus") {
+      if (!whole(x, 1, 4096)) return `envelope.${k}: a whole number from 1 to 4096, or null for none`;
+    } else if (k === "max_mem_gb") {
+      if (!whole(x, 1, 65536)) return "envelope.max_mem_gb: a whole number of GB from 1 to 65536, or null for none";
+    } else if (k === "agent_slots") {
+      if (!whole(x, 0, 64)) return "envelope.agent_slots: a whole number from 0 to 64";
+    } else if (k === "diagnostics") {
+      if (typeof x !== "boolean") return "envelope.diagnostics: true or false";
+    } else if (k === "emulate") {
+      if (!Array.isArray(x) || x.some((a) => !ARCHES.includes(a as Arch)) || new Set(x).size !== x.length) return "envelope.emulate: a list of distinct architectures (x86_64, aarch64), [] for none, or null for detection's";
+    } else if (k === "agent_budget") {
+      if (!x || typeof x !== "object" || Array.isArray(x)) return "envelope.agent_budget: a table of calls_per_task, tokens_per_task, minutes_per_task, calls_per_day";
+      for (const [bk, bv] of Object.entries(x as Record<string, unknown>)) {
+        if (!BUDGET_KEYS.includes(bk)) return `envelope.agent_budget.${bk}: one of ${BUDGET_KEYS.join(", ")}`;
+        if (!whole(bv, 1, BUDGET_MAX[bk])) return `envelope.agent_budget.${bk}: a whole number from 1 to ${BUDGET_MAX[bk]}`;
+      }
+    } else {
+      if (!Array.isArray(x) || x.length > 16 || new Set(x).size !== x.length || x.some((p) => typeof p !== "string" || p.length > 4096 || p === "/" || !p.startsWith("/") || p.split("/").slice(1).some((c) => c === "" || c === "." || c === ".."))) return "envelope.paths: at most 16 plain absolute paths below /, each once";
+    }
+    out[k] = x;
+  }
+  return out;
+}
+
+/** The sealed keys a page posts: each one of AGENT_KEY_NAMES, once, sealed (epk, nonce, ct, base64url) or taken out; one to six. */
+export function sealedKeys(v: unknown): SealedKeyArg[] | string {
+  if (!Array.isArray(v) || v.length === 0 || v.length > AGENT_KEY_NAMES.length) return `keys: one to ${AGENT_KEY_NAMES.length} sealed keys`;
+  const out: SealedKeyArg[] = [];
+  for (const k of v as Record<string, unknown>[]) {
+    if (!k || typeof k !== "object" || !(AGENT_KEY_NAMES as readonly string[]).includes(k.name as string)) return `keys: each names one of ${AGENT_KEY_NAMES.join(", ")}`;
+    if (out.some((o) => o.name === k.name)) return `keys: ${k.name as string} is named twice`;
+    if (k.remove === true) {
+      if (Object.keys(k).some((x) => x !== "name" && x !== "remove")) return `keys: ${k.name as string} is taken out and sealed at once`;
+      out.push({ name: k.name as string, remove: true });
+      continue;
+    }
+    const field = (f: unknown, len: [number, number]) => typeof f === "string" && B64U.test(f) && f.length >= len[0] && f.length <= len[1];
+    if (Object.keys(k).some((x) => !["name", "epk", "nonce", "ct"].includes(x)) || !field(k.epk, [43, 43]) || !field(k.nonce, [16, 16]) || !field(k.ct, [23, 1400])) return `keys: ${k.name as string} is not sealed as the page seals (epk, nonce, ct)`;
+    out.push({ name: k.name as string, epk: k.epk as string, nonce: k.nonce as string, ct: k.ct as string });
+  }
+  return out;
+}
+
+/** A host's X25519 seal key as its report says it (`owner.seal.key`): 32 bytes, base64url; null otherwise. */
+export function sealKeyOf(v: unknown): string | null {
+  if (typeof v !== "string" || v.length !== 43 || !B64U.test(v)) return null;
+  try {
+    return fromB64url(v, "the seal key").length === 32 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The owner's part of a host's last report (#328): the passkey pinned at the
+ * host (never its key), the last signed version it took, its seal key, the
+ * envelope's keys a widening may set as its agent.toml says them, and the
+ * names of the agent keys its agent.env holds — never a value.
+ */
+export interface ReportedOwner {
+  passkey: { credential: string; alg: string; rp_id: string; origin: string; by: string; pinned_at: string } | null;
+  version: number | null;
+  seal: { key: string; fingerprint: string } | null;
+  envelope: Record<string, unknown> | null;
+  agent_keys: string[];
+}
+export function reportedOwnerOf(report: string | null): ReportedOwner | null {
+  if (!report) return null;
+  let r: { owner?: unknown };
+  try {
+    r = JSON.parse(report);
+  } catch {
+    return null;
+  }
+  const o = r?.owner as Record<string, any> | null | undefined;
+  if (!o || typeof o !== "object") return null;
+  const text = (v: unknown, max: number) => (typeof v === "string" && v.length <= max && !/[\x00-\x1f\x7f]/.test(v) ? v : null);
+  const p = o.passkey && typeof o.passkey === "object" ? o.passkey : null;
+  const credential = p ? text(p.credential, 1400) : null;
+  const passkey = p && credential && B64U.test(credential)
+    ? { credential, alg: text(p.alg, 8) ?? "?", rp_id: text(p.rp_id, 253) ?? "?", origin: text(p.origin, 300) ?? "?", by: text(p.by, 39) ?? "?", pinned_at: text(p.pinned_at, 40) ?? "?" }
+    : null;
+  const key = sealKeyOf(o.seal?.key);
+  const fp = text(o.seal?.fingerprint, 60);
+  const env = o.envelope && typeof o.envelope === "object" && !Array.isArray(o.envelope) ? o.envelope : null;
+  let envelope: Record<string, unknown> | null = null;
+  if (env) {
+    envelope = {};
+    for (const k of WIDENABLE) envelope[k] = k in env ? env[k] : null;
+    // Only what reads as the envelope's own: a value of another shape is shown as none, never as the agent's word.
+    for (const [k, v] of Object.entries(envelope)) {
+      if (v !== null && typeof widening({ [k]: v }) === "string") envelope[k] = null;
+    }
+  }
+  return {
+    passkey,
+    version: Number.isSafeInteger(o.version) && o.version >= 0 ? o.version : null,
+    seal: key && fp ? { key, fingerprint: fp } : null,
+    envelope,
+    agent_keys: Array.isArray(o.agent_keys) ? o.agent_keys.filter((k: unknown): k is string => typeof k === "string" && /^[A-Z_][A-Z0-9_]{0,63}$/.test(k)).slice(0, 32) : [],
+  };
 }

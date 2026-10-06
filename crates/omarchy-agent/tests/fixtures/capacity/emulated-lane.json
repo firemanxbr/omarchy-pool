@@ -16,5 +16,6 @@
   "isolation": "root",
   "dedicated": true,
   "limits": { "cpus_hard": true, "memory_hard": true, "pids": true },
-  "below_minimum": false
+  "below_minimum": false,
+  "sandbox": null
 }

@@ -13,7 +13,7 @@ import { isRevoked, lastGoodMessage, updateMessage, updateState, type HostSoak, 
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, requeueRevoked, revokedRefusal, stopError } from "../lease";
-import { asleepNow, freshSince, parseCapacity, poolJobsOn, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, HOST_REPORT_FRESH_MIN, hostClaimRefusal, MAX_SIZE, MIN_HOST, poolBehindOf, REVERTED_COLUMNS, revertedOf, SOAK_COLUMNS, soakOf, TASK_UNITS, type Capacity, type HostClaimRow, type PoolBehind, type RevertedColumns } from "../hosts";
+import { asleepNow, freshSince, parseCapacity, poolJobsOn, sandboxApplied, sandboxAppliedOf, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, HOST_REPORT_FRESH_MIN, hostClaimRefusal, MAX_SIZE, MIN_HOST, poolBehindOf, REVERTED_COLUMNS, revertedOf, SOAK_COLUMNS, soakOf, TASK_UNITS, type Capacity, type HostClaimRow, type PoolBehind, type RevertedColumns } from "../hosts";
 import { largestSize, ownerCap, ownersLeased, placementOf, reserve, roomOf, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules, type Scope } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
@@ -828,7 +828,7 @@ export const SAME_MODEL_HEAD_SQL = (filters: string) => `SELECT ${candidateCols(
 export const FLEET_SQL = `SELECT w.id, w.kind, w.arch, w.labels, w.kinds, w.agent, w.agent_status, w.drained_at, w.trust, w.owner, w.version, w.last_seen, w.current_task,
     w.owner IN (SELECT login FROM factory_maintainers) AS owner_listed,
     h.id AS host_id, h.status AS host_status, h.owner_removed_at, h.units, h.lanes, h.agent_slots, h.disk_free, h.capacity, h.pool_cap_units, h.reserving_task, h.reserving_since,
-    h.asleep_at, h.reported_at, ${SOAK_COLUMNS("h")}, ${REVERTED_COLUMNS("h")}
+    h.asleep_at, h.reported_at, ${SOAK_COLUMNS("h")}, ${REVERTED_COLUMNS("h")}, h.sandbox_applied
   FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.last_seen > ? AND w.revoked_at IS NULL`;
 /** #342: its host's revert, which keeps it out of the update gate on its last-good as the claim's own (REVERTED_COLUMNS). */
 interface FleetRow extends RevertedColumns {
@@ -837,6 +837,8 @@ interface FleetRow extends RevertedColumns {
   owner_listed: number | null;
   host_id: string | null; host_status: string | null; owner_removed_at: string | null; units: number | null; lanes: string | null; agent_slots: number | null; disk_free: string | null; capacity: string | null; pool_cap_units: number | null; reserving_task: number | null; reserving_since: string | null;
   asleep_at: string | null; reported_at: string | null;
+  /** #330: the sandbox its dispatcher's last claim said it applies (hosts.sandbox_applied). */
+  sandbox_applied?: string | null;
   /** #326: its host's soak, which keeps it out of the update gate as the claim's own (SOAK_COLUMNS). */
   soaking_until: unknown; quarantine: unknown;
 }
@@ -913,6 +915,8 @@ function memberOf(r: FleetRow, pool: RunningVersion, nowMs = Date.now()): Member
     busy: !host && r.current_task !== null, owner: r.owner, model: r.agent, host_id: host ? r.host_id : null,
     // A host whose agent says it sleeps has zero free units (#329).
     asleep: host && asleepNow(r, nowMs),
+    // Its dispatcher applies a sandbox, as its last claim said (#330): its emulated lanes take the project's own recipes only.
+    sandbox: host && !!sandboxAppliedOf(r.sandbox_applied)?.sandbox,
   };
 }
 
@@ -1088,6 +1092,8 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     scope: scopeOfRow(host, k.legacy?.trust ?? "host"),
     offer: host && k.hc!.offer !== null ? k.hc!.offer : undefined, owner: k.owner, model: k.model, host_id: host ? k.hostId : null,
     asleep: host && !!hostRow && asleepNow(hostRow, nowMs),
+    // The sandbox its dispatcher applies, as this claim says it (#330): its emulated lanes take the project's own recipes only.
+    sandbox: !!cap?.sandbox,
   };
   // A host below the signed minimum keeps its bundle running and claims nothing (D44); one whose agent says it sleeps has zero free
   // units (#329) — a Mac about to sleep, whose dispatcher claims once more before the VM stops — until its agent says it woke.
@@ -1168,6 +1174,10 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   const archs = host ? [...new Set(lanes.map((l) => l.arch))] : [k.arch];
   const native = lanes.find((l) => l.mode === "native")?.arch ?? k.arch;
   const emulatedOnly = (a: string) => !lanes.some((l) => l.arch === a && l.mode === "native");
+  // A sandboxed host's emulated lane (#330, D43): of the builds and trials, the project's own recipes only (selection.ts laneFor) — a
+  // head of what a contributor wrote, which its sandbox cannot run there, never hides one.
+  const projectsOwn = (t: string) => ` AND (${t}.kind NOT IN (${LANE_KINDS.map((x) => `'${x}'`).join(", ")}) OR (${t}.kind = 'build' AND ${t}.trust = 'project' AND json_extract(${t}.params, '$.review') IS NULL))`;
+  const outsideSandbox = (a: string) => host && me.sandbox === true && emulatedOnly(a);
   // The second opinion's model rule (D36, #339) in the reads: the audits of the project's copy this claimer's model cannot count as
   // another are read apart from the head that holds the audits — selection holds them all from it while another model was alive in the
   // last 24 hours, so a head of them (more than HEAD_LIMIT while that host is away) never hides an audit it can take.
@@ -1178,13 +1188,14 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     if (host) {
       // Each lane's own head (§7.4): a build or a trial of that arch (a job with helpers too); one an emulated lane could not start
       // (needs_native) waits for a native host and is no candidate here.
-      reads.push(env.DB.prepare(LANE_HEAD_SQL(`${scope.sql}${fits.sql}${emulatedOnly(a) ? notNeedsNative("c") : ""}`)).bind(a, ...scope.binds, ...fits.binds));
+      reads.push(env.DB.prepare(LANE_HEAD_SQL(`${scope.sql}${fits.sql}${emulatedOnly(a) ? notNeedsNative("c") : ""}${outsideSandbox(a) ? projectsOwn("c") : ""}`)).bind(a, ...scope.binds, ...fits.binds));
     } else {
       // A legacy registration's one lane: its arch, or a kind any arch runs.
       reads.push(env.DB.prepare(`SELECT ${cols} FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope.sql}${fits.sql}${otherAudits.sql} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`)
         .bind(a, ...scope.binds, ...fits.binds, ...otherAudits.binds));
     }
-    if (k.kinds.includes("build") && k.legacy?.trust !== "project") {
+    // Contributors' builds: none for a sandboxed host's emulated lane (#330).
+    if (k.kinds.includes("build") && k.legacy?.trust !== "project" && !outsideSandbox(a)) {
       reads.push(env.DB.prepare(OWNER_HEADS_SQL(`${scope2.sql}${fits2.sql}${host && emulatedOnly(a) ? notNeedsNative("c2") : ""}`)).bind(OWNERS_LIMIT, a, ...scope2.binds, ...fits2.binds, capped));
     }
   }
@@ -1365,6 +1376,12 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     if (no) return json(no, 403);
     soak = soakOf(h);
     reverted = revertedOf(h);
+    // The sandbox its dispatcher applies (#330), as this claim says it: kept for the fleet's selection and the host page, written only
+    // when it says something new. A claim without a capacity says nothing of it.
+    const said = hc?.capacity ? sandboxApplied(hc.capacity) : undefined;
+    if (said !== undefined && said !== (h!.sandbox_applied ?? null)) {
+      await env.DB.prepare("UPDATE hosts SET sandbox_applied = ? WHERE id = ?").bind(said, actor.w.host_id).run();
+    }
     poolJobs = poolJobsOn(h!.pool_jobs, { worker: workerId, name: h!.name });
   }
   // A legacy community registration (#343, design v2 §8.2, D56): with the community tier gone it takes any contributor's build, as a

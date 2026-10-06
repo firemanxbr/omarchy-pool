@@ -4,11 +4,12 @@
 //! `worker_id` the enrollment gave, #321), by a person at the host and by the person's
 //! `omarchy-agent runtime switch` there (#325), never by the pool. It is refused when
 //! group- or world-writable or owned by another user. Unknown keys are left alone
-//! (capacity caps are #333's), but `[envelope].agent_budget`, which reaches the
-//! dispatcher (#371), is read strictly. What the pool may narrow inside it — units,
-//! emulated lanes — and what it allows the pool to ask — diagnostics — is [`Policy`]
-//! (#325, design v2 §12), with the owner's soak (`soak_minutes`, #326). Any problem here is
-//! a local configuration error: the loop exits 78 and says why.
+//! (capacity caps are #333's), but `[envelope].agent_budget` and
+//! `[envelope].direct_network`, which reach the dispatcher (#371, #373), are read strictly.
+//! What the pool may narrow inside it — units, emulated lanes — and what it allows the pool
+//! to ask — diagnostics — is [`Policy`] (#325, design v2 §12), with the owner's soak
+//! (`soak_minutes`, #326). Any problem here is a local configuration error: the loop exits
+//! 78 and says why.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -120,6 +121,9 @@ pub struct Config {
     pub task_subnets: Option<String>,
     /// `[envelope].agent_budget` (#371): what `etc/dispatcher.env` gives the dispatcher.
     pub agent_budget: Budget,
+    /// `[envelope].direct_network` (#373): the owner grants a signed exception's bridge
+    /// network, which `etc/dispatcher.env` tells the dispatcher.
+    pub direct_network: bool,
     pub envelope: Envelope,
     /// What install detected behind the socket (`set.engine`, #317): the lint holds a
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
@@ -127,8 +131,15 @@ pub struct Config {
     /// The engine the compose driver talks to (`set.runtime`, `docker` or `podman`): what
     /// `runtime switch` moved the bundle to (#325). Absent — install writes none: it finds
     /// a socket, and podman's speaks docker's API — the run loop asks the engine behind
-    /// the socket which it is ([`super::agent::Agent::identify_runtime`]).
+    /// the socket which it is ([`super::agent::Agent::identify_runtime`]). Podman's on a
+    /// Quadlet host.
     pub runtime: Option<Runtime>,
+    /// The driver that runs the set (`set.driver`): compose, or Quadlet (#330), chosen at
+    /// install or by the owner's runtime switch at the host, never by the pool.
+    pub driver: DriverKind,
+    /// Where the Quadlet driver writes its units (`set.unit_dir`): podman's generator reads
+    /// the user's `$XDG_CONFIG_HOME/containers/systemd/` (`~/.config/...`) when absent.
+    pub unit_dir: Option<PathBuf>,
     /// The envelope's bounds on what the pool may narrow and ask (#325).
     pub policy: Policy,
     /// A Mac's `omarchy` Colima VM (#320, `[vm] runtime = "colima"`), which the loop keeps
@@ -182,6 +193,34 @@ impl Runtime {
     }
 }
 
+/// The drivers this binary carries (design v2 §15): compose — against docker's socket or
+/// podman's API socket, [`Runtime`] — and Quadlet (#330): the set as systemd user units
+/// podman's generator makes, on a rootless podman host with no compose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DriverKind {
+    #[default]
+    Compose,
+    Quadlet,
+}
+
+impl DriverKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "compose" => Some(DriverKind::Compose),
+            "quadlet" => Some(DriverKind::Quadlet),
+            _ => None,
+        }
+    }
+
+    /// `set.driver`'s word.
+    pub fn word(self) -> &'static str {
+        match self {
+            DriverKind::Compose => "compose",
+            DriverKind::Quadlet => "quadlet",
+        }
+    }
+}
+
 /// What the envelope says the pool may narrow and ask (design v2 §12, #325): the owner's
 /// own words at the host. The pool's settings only ever narrow inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -194,7 +233,8 @@ pub struct Policy {
     /// `diagnostics`: whether the pool may ask for the dispatcher's last log lines (M10).
     pub diagnostics: bool,
     /// `drivers`: the drivers `runtime switch` may move the bundle to (`compose` names
-    /// both of this binary's).
+    /// both compose ones, `compose/docker` and `compose/podman`; `quadlet` the Quadlet
+    /// driver, #330).
     pub drivers: Vec<String>,
     /// `soak_minutes` (#326, design v2 D16): how long a new release waits before this host
     /// takes it, from when the pool first names it; 0 (the default) takes it at once. A
@@ -203,11 +243,17 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// Whether the envelope lets the bundle run on `r`'s driver.
+    /// Whether the envelope lets the bundle run on `r`'s compose driver.
     pub fn allows_driver(&self, r: Runtime) -> bool {
+        self.allows(&r.driver())
+    }
+
+    /// Whether the envelope lets the bundle run on `driver` (`compose/docker`,
+    /// `compose/podman` or `quadlet`).
+    pub fn allows(&self, driver: &str) -> bool {
         self.drivers
             .iter()
-            .any(|d| d == "compose" || *d == r.driver())
+            .any(|d| d == driver || (d == "compose" && driver.starts_with("compose/")))
     }
 
     /// Whether the envelope lets an emulated lane of `arch` run.
@@ -248,6 +294,7 @@ struct SetPart {
     socket_mount: Option<PathBuf>,
     engine: Option<String>,
     runtime: Option<String>,
+    unit_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Default)]
@@ -256,6 +303,7 @@ struct EnvelopePart {
     max_cpus: Option<u32>,
     max_mem_gb: Option<u32>,
     agent_budget: Option<toml::Value>,
+    direct_network: Option<bool>,
     max_units: Option<u32>,
     emulate: Option<Vec<String>>,
     #[serde(default)]
@@ -391,31 +439,22 @@ impl Config {
                 return Err(format!("agent.toml: {k} {v:?} is not an id"));
             }
         }
+        let (driver, engine, runtime) = Self::driver_of(&f.set, f.vm.is_some())?;
         let set_name = f.set.name.unwrap_or_else(|| "host".into());
         if set_name != "host" {
             return Err(format!(
                 "agent.toml: set.name {set_name:?}: this agent runs the host set only"
             ));
         }
-        if let Some(d) = f.set.driver.filter(|d| d != "compose") {
-            return Err(format!(
-                "agent.toml: set.driver {d:?}: this agent has the compose driver only"
-            ));
-        }
-        let engine = match f.set.engine.as_deref() {
-            None | Some("rootful") => Engine::Rootful,
-            Some("rootless") => Engine::Rootless,
-            Some(other) => {
+        let unit_dir = match f.set.unit_dir {
+            None => None,
+            Some(d) if is_plain_absolute(&d) => Some(d),
+            Some(d) => {
                 return Err(format!(
-                    "agent.toml: set.engine {other:?} is neither \"rootful\" nor \"rootless\""
+                    "agent.toml: set.unit_dir {} is not a plain absolute path",
+                    d.display()
                 ))
             }
-        };
-        let runtime = match f.set.runtime.as_deref() {
-            None => None,
-            Some(r) => Some(Runtime::parse(r).ok_or_else(|| {
-                format!("agent.toml: set.runtime {r:?} is neither \"docker\" nor \"podman\"")
-            })?),
         };
         let policy = Policy::of(&f.envelope)?;
         let socket_cli = need_path(f.set.socket_cli, "set.socket_cli")?;
@@ -441,13 +480,83 @@ impl Config {
             socket_mount,
             task_subnets: f.envelope.task_subnets,
             agent_budget: Budget::from_envelope(f.envelope.agent_budget.as_ref())?,
+            direct_network: f.envelope.direct_network.unwrap_or(false),
             envelope,
             engine,
             runtime,
+            driver,
+            unit_dir,
             policy,
             vm,
             mac,
         })
+    }
+
+    /// `[set]`'s driver, engine and runtime, held together: a Quadlet host (#330) runs
+    /// rootless podman under a Linux user's systemd.
+    fn driver_of(set: &SetPart, vm: bool) -> Result<(DriverKind, Engine, Option<Runtime>), String> {
+        let driver = match set.driver.as_deref() {
+            None => DriverKind::Compose,
+            Some(d) => DriverKind::parse(d).ok_or_else(|| {
+                format!("agent.toml: set.driver {d:?}: this agent carries the compose and quadlet drivers")
+            })?,
+        };
+        let engine = match set.engine.as_deref() {
+            // A Quadlet host's podman runs as the user, under the user's systemd.
+            None if driver == DriverKind::Quadlet => Engine::Rootless,
+            None | Some("rootful") => Engine::Rootful,
+            Some("rootless") => Engine::Rootless,
+            Some(other) => {
+                return Err(format!(
+                    "agent.toml: set.engine {other:?} is neither \"rootful\" nor \"rootless\""
+                ))
+            }
+        };
+        let runtime = match set.runtime.as_deref() {
+            None => None,
+            Some(r) => Some(Runtime::parse(r).ok_or_else(|| {
+                format!("agent.toml: set.runtime {r:?} is neither \"docker\" nor \"podman\"")
+            })?),
+        };
+        if driver == DriverKind::Compose {
+            return Ok((driver, engine, runtime));
+        }
+        if vm {
+            return Err("agent.toml: set.driver \"quadlet\" runs under a Linux user's systemd; a Mac's bundle runs in its VM (#320)".into());
+        }
+        if engine != Engine::Rootless || runtime == Some(Runtime::Docker) {
+            return Err("agent.toml: set.driver \"quadlet\" is rootless podman's: set.engine \"rootless\", set.runtime \"podman\" or none".into());
+        }
+        Ok((driver, engine, Some(Runtime::Podman)))
+    }
+
+    /// The driver as the report and `runtime switch` say it: `quadlet`, or
+    /// `compose/<runtime>` once the engine said which it is.
+    pub fn driver_name(&self) -> Option<String> {
+        match self.driver {
+            DriverKind::Quadlet => Some(DriverKind::Quadlet.word().to_owned()),
+            DriverKind::Compose => self.runtime.map(Runtime::driver),
+        }
+    }
+
+    /// Where the Quadlet driver's units go: `set.unit_dir`, else where podman's generator
+    /// reads a user's (`$XDG_CONFIG_HOME/containers/systemd`, `~/.config/...`).
+    pub fn quadlet_dir(&self) -> Result<PathBuf, String> {
+        if let Some(d) = &self.unit_dir {
+            return Ok(d.clone());
+        }
+        let var = |k: &str| {
+            std::env::var_os(k)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
+        var("XDG_CONFIG_HOME")
+            .or_else(|| var("HOME").map(|h| h.join(".config")))
+            .map(|c| c.join("containers/systemd"))
+            .ok_or_else(|| {
+                "neither set.unit_dir, XDG_CONFIG_HOME nor HOME says where the Quadlet units go"
+                    .into()
+            })
     }
 
     /// Reads agent.toml, refusing one another user owns or others may write. `uid` is
@@ -493,6 +602,74 @@ impl Config {
         }
         env
     }
+}
+
+/// `text` with `[<table>]`'s `keys` set line by line — each `key = <TOML value>`, or taken
+/// out when its value is `None` —: a key's line replaced (or dropped) where it is, a
+/// missing one added after the section's last key, a missing section added at the end;
+/// every other line as it was. agent.toml is the owner's policy document (design v2 §12),
+/// so the runtime switch (#325, `[set]`) and a signed widening (#328, `[envelope]`) change
+/// only their keys' lines, and the owner's comments and layout stay. A caller reads the
+/// result back: a layout the line edit cannot name a value in (a dotted key, a sub-table, a
+/// value over several lines) is written again from its table instead.
+pub(crate) fn table_lines(text: &str, table: &str, keys: &[(&str, Option<String>)]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    // A key to take out needs no line added when the file lacks it.
+    let mut done: Vec<bool> = keys.iter().map(|(_, v)| v.is_none()).collect();
+    // While in the table: the index of its last line that is a key or its header.
+    let mut last: Option<usize> = None;
+    let mut seen = false;
+    let add = |out: &mut Vec<String>, done: &mut [bool], at: usize| {
+        let missing: Vec<String> = keys
+            .iter()
+            .zip(done.iter())
+            .filter(|(_, d)| !**d)
+            .filter_map(|((k, v), _)| v.as_ref().map(|v| format!("{k} = {v}")))
+            .collect();
+        out.splice(at..at, missing);
+        done.fill(true);
+    };
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with('[') {
+            if let Some(i) = last.take() {
+                add(&mut out, &mut done, i + 1);
+            }
+            let name = t.trim_start_matches('[').split(']').next().unwrap_or("");
+            if !t.starts_with("[[") && name.trim() == table {
+                seen = true;
+                last = Some(out.len());
+            }
+            out.push(line.to_owned());
+            continue;
+        }
+        if let Some(i) = last.as_mut() {
+            if !t.is_empty() && !t.starts_with('#') {
+                let key = t.split_once('=').map(|(k, _)| k.trim().trim_matches('"'));
+                if let Some(k) = key.and_then(|k| keys.iter().position(|(n, _)| *n == k)) {
+                    done[k] = true;
+                    if let Some(v) = &keys[k].1 {
+                        *i = out.len();
+                        let indent = &line[..line.len() - t.len()];
+                        out.push(format!("{indent}{} = {v}", keys[k].0));
+                    }
+                    continue;
+                }
+                *i = out.len();
+            }
+        }
+        out.push(line.to_owned());
+    }
+    if let Some(i) = last {
+        add(&mut out, &mut done, i + 1);
+    }
+    if !seen && done.iter().any(|d| !d) {
+        out.push(String::new());
+        out.push(format!("[{table}]"));
+        let at = out.len();
+        add(&mut out, &mut done, at);
+    }
+    out.join("\n") + "\n"
 }
 
 #[cfg(test)]
@@ -549,8 +726,8 @@ max_units = 3
             ),
             (
                 "driver       = \"compose\"",
-                "driver = \"quadlet\"",
-                "compose driver only",
+                "driver = \"kube\"",
+                "carries the compose and quadlet drivers",
             ),
             (
                 "/var/run/docker.sock\"\nsocket_mount",
@@ -566,6 +743,47 @@ max_units = 3
             let text = format!("worker_id = \"w_1\"\n{}", studio.replacen(from, to, 1));
             let e = Config::parse(&text).unwrap_err();
             assert!(e.contains(why), "{why}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_grant_of_a_signed_exception_s_bridge_is_read_strictly_and_reaches_the_dispatcher() {
+        let studio = include_str!("../../tests/fixtures/lint/envelope/studio.toml");
+        let with = |line: &str| {
+            format!(
+                "worker_id = \"w_1\"\n{}",
+                studio.replacen("[envelope]\n", &format!("[envelope]\n{line}\n"), 1)
+            )
+        };
+        let rendered = |c: &Config| {
+            crate::dispatcher_env::Rendered {
+                addresses: Vec::new(),
+                envelope: Some(crate::dispatcher_env::Envelope::of_config(c)),
+                plain: false,
+            }
+            .lines()
+            .unwrap()
+        };
+        // No key: no grant, and no line for the dispatcher, which hands such a package back.
+        let c = Config::parse(&with("")).unwrap();
+        assert!(!c.direct_network);
+        assert!(!rendered(&c)
+            .iter()
+            .any(|l| l.starts_with("OMARCHY_DIRECT_NETWORK")));
+        // The grant (#373): the run loop writes it into etc/dispatcher.env.
+        let c = Config::parse(&with("direct_network = true")).unwrap();
+        assert!(c.direct_network);
+        assert!(rendered(&c).contains(&"OMARCHY_DIRECT_NETWORK=1".to_owned()));
+        let c = Config::parse(&with("direct_network = false")).unwrap();
+        assert!(!c.direct_network);
+        assert!(!rendered(&c)
+            .iter()
+            .any(|l| l.starts_with("OMARCHY_DIRECT_NETWORK")));
+        // Anything but true or false is a configuration error (the loop exits 78), never read
+        // as a grant or as none.
+        for bad in ["direct_network = \"yes\"", "direct_network = 1"] {
+            let e = Config::parse(&with(bad)).unwrap_err();
+            assert!(e.contains("direct_network"), "{bad}: {e}");
         }
     }
 

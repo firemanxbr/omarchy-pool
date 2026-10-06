@@ -48,6 +48,9 @@
  *   no emulated lane wait and leaves the guaranteed share to one that runs
  *   its arch emulated, keeps no reservation mark and counts in no size or
  *   cap; awake again, it takes what waited at once;
+ * - a host whose dispatcher applies a sandbox (#330, D43): its emulated
+ *   lane takes the project's own recipe only, never what a contributor
+ *   wrote — that runs on a native lane, or on a host without a sandbox;
  * - a legacy registration as a host with one lane and one build;
  * - placement (#339, D35, D36), on fleets of maintainers' hosts with the
  *   models their claims say: the project's copy of a maintainer's package
@@ -69,7 +72,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  alive, apart, auditElsewhere, buildsOf, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, otherModels, ownerCap, ownersLeased, placementOf, requesterHost, reserve, roomOf, select, sizeOf, takes, thresholdMs, unitsOf,
+  alive, apart, auditElsewhere, buildsOf, contributorsCode, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, otherModels, ownerCap, ownersLeased, placementOf, requesterHost, reserve, roomOf, select, sizeOf, takes, thresholdMs, unitsOf,
   ALIVE_MS, ELSEWHERE_MS, HELPER_KINDS, LANE_KINDS, MIN, MODEL_WINDOW_MS, RING_ARCHES, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
   type Candidate, type Fleet, type Held, type Independence, type Machine, type Member, type Mode,
 } from "../src/selection";
@@ -173,13 +176,16 @@ class Sim {
     // The audits of the project's copy the claimer's model cannot count as another (sameModelAuditOf): read apart, their own head (D36).
     const sameModel = (c: Candidate) => m.kinds.includes("audit") && c.kind === "audit" && !!c.publish_bound && !(m.model && c.built_with && c.built_with !== m.model);
     const emulatedOnly = (a: string) => !m.lanes.some((l) => l.arch === a && l.mode === "native");
+    // A sandboxed host's emulated lane (#330): of the builds and trials, the project's own recipes only.
+    const outsideSandbox = (a: string) => !m.legacy && !!m.sandbox && emulatedOnly(a);
+    const projectsOwn = (c: Candidate) => !LANE_KINDS.includes(c.kind) || !contributorsCode(c);
     const out = new Map<number, Candidate>();
     const put = (cs: Candidate[]) => cs.forEach((c) => out.set(c.id, c));
     const owners = [...new Set(queue.filter((c) => c.trust === "community" && c.owner).map((c) => c.owner!))].sort().slice(0, OWNERS_LIMIT);
     for (const a of [...new Set(m.lanes.map((l) => l.arch))]) {
       if (m.legacy) put(queue.filter((c) => (c.arch === a || r.legacy_any_arch.includes(c.kind)) && scope(c) && fits(c) && !sameModel(c)).sort(byOrder).slice(0, HEAD_LIMIT));
-      else put(queue.filter((c) => c.arch === a && !neutral(c.kind) && scope(c) && fits(c) && !(emulatedOnly(a) && c.needs_native)).sort(byOrder).slice(0, HEAD_LIMIT));
-      if (m.kinds.includes("build") && m.scope.trust !== "project") {
+      else put(queue.filter((c) => c.arch === a && !neutral(c.kind) && scope(c) && fits(c) && !(emulatedOnly(a) && c.needs_native) && (!outsideSandbox(a) || projectsOwn(c))).sort(byOrder).slice(0, HEAD_LIMIT));
+      if (m.kinds.includes("build") && m.scope.trust !== "project" && !outsideSandbox(a)) {
         for (const o of owners) {
           if (capped.has(o)) continue;
           put(queue.filter((c) => c.trust === "community" && c.owner === o && c.arch === a && c.kind === "build" && scope(c) && fits(c) && !(!m.legacy && emulatedOnly(a) && c.needs_native)).sort(byOrder).slice(0, 1));
@@ -508,6 +514,38 @@ describe("emulated lanes per lane (#338, design v2 §7.4, §8.6)", () => {
     expect(select(studio, { members: [studio], leases: [] }, [plain], T0, R).map((c) => c.lane)).toEqual(["emulated"]);
   });
 
+  it("a host whose dispatcher applies a sandbox (#330, D43): its emulated lane takes the project's own recipe only — what a contributor wrote goes to its native lane, or to a host without one", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"], sandbox: true });
+    const plain = host("plain", "aarch64", 11, { emulated: ["x86_64"] });
+    const old = T0 - 120 * MIN;
+    // A contributor's build, the project's review rebuild of one (its copy), its trial, and the project's own recipe, all x86_64; a
+    // contributor's aarch64 build.
+    const theirs = task({ arch: "x86_64", trust: "community", owner: "alice", queued_at: old });
+    const copy = task({ arch: "x86_64", publish_bound: true, requesters: ["bob"], queued_at: old });
+    const trial = task({ arch: "x86_64", kind: "trial", queued_at: old });
+    const own = task({ arch: "x86_64", queued_at: old });
+    const native = task({ arch: "aarch64", trust: "community", owner: "carol", queued_at: old });
+    const all = [theirs, copy, trial, own, native];
+    expect([theirs, copy, trial, native].every(contributorsCode)).toBe(true);
+    expect(contributorsCode(own)).toBe(false);
+    expect(contributorsCode(task({ arch: "x86_64", kind: "audit" }))).toBe(true);
+    const lanes = (m: Member) => new Map(select(m, { members: [m], leases: [] }, all, T0, R).map((c) => [c.id, c.lane]));
+    expect(lanes(studio)).toEqual(new Map([[own.id, "emulated"], [native.id, "native"]]));
+    expect(lanes(plain)).toEqual(new Map(all.map((c) => [c.id, c === native ? "native" : "emulated"])));
+    // Placement counts no such lane as one allowed for the copy (D35): the sandboxed host could never run it there.
+    expect(mayRun(studio, copy, T0, R, 4)).toBe(false);
+    expect(mayRun(plain, copy, T0, R, 4)).toBe(true);
+    // Side by side, minute by minute: every contributor's x86_64 task runs on the host without a sandbox, the project's own on either.
+    const s = new Sim([host("studio", "aarch64", 11, { emulated: ["x86_64"], sandbox: true }), host("plain", "aarch64", 11, { emulated: ["x86_64"] })]);
+    const contributed = [...s.add({ arch: "x86_64", trust: "community", owner: "alice" }, 3), ...s.add({ arch: "x86_64", kind: "trial" }, 2)];
+    s.add({ arch: "x86_64" }, 6);
+    s.run(200);
+    expect(s.queue).toEqual([]);
+    for (const t of contributed) expect(s.startOf(t), `${t.id}`).toMatchObject({ by: "plain", lane: "emulated" });
+    expect(s.ran.filter((r) => r.by === "studio").length).toBeGreaterThan(0);
+    expect(s.ran.filter((r) => r.by === "studio").every((r) => !contributorsCode(r.task))).toBe(true);
+  });
+
   it("a health check of the x86_64 ring runs on an aarch64 host's emulated lane at once: no wait, no preference for a native host", () => {
     const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"], kinds: JOBS });
     // A native x86_64 host alive, idle and eligible makes no job with helpers wait.
@@ -523,6 +561,15 @@ describe("emulated lanes per lane (#338, design v2 §7.4, §8.6)", () => {
     const plain = host("plain", "aarch64", 7, { kinds: JOBS });
     expect(select(plain, { members: [plain], leases: [] }, [health], T0, R)).toEqual([]);
     expect(HELPER_KINDS).toEqual(["health"]);
+  });
+
+  it("a sandboxed host's emulated lane takes the pool's jobs with helpers as any host's does: they run the project's own scripts on the engine's own runtime (#330, #340)", () => {
+    const studio = host("studio", "aarch64", 11, { emulated: ["x86_64"], sandbox: true, kinds: JOBS });
+    const fleet: Fleet = { members: [studio], leases: [] };
+    const health = task({ arch: "x86_64", kind: "health", queued_at: T0 });
+    const promote = task({ arch: "x86_64", kind: "promote" });
+    const theirs = task({ arch: "x86_64", trust: "community", owner: "alice", queued_at: T0 - 120 * MIN });
+    expect(select(studio, fleet, [health, promote, theirs], T0, R).map((c) => [c.id, c.lane])).toEqual([[health.id, "emulated"], [promote.id, null]]);
   });
 
   it("a promotion's ABI gates and health checks need a lane of every architecture it promotes, a security job's fast-track both; the job itself has no lane", () => {

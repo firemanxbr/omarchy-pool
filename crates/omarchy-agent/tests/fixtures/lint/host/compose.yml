@@ -12,10 +12,16 @@ services:
       OMARCHY_BUILD_IMAGE_X86_64: "@BUILD_X86_64@"
       OMARCHY_WORKER_IMAGE: "@RELEASE_IMAGE@"
       OMARCHY_TASK_SUBNETS: ${OMARCHY_TASK_SUBNETS:-10.231.0.0/16}
+      OMARCHY_WORKER_TOKEN_FILE: /run/omarchy/worker-token
     env_file: [etc/dispatcher.env]
     volumes:
       - ${OMARCHY_SOCKET}:/var/run/docker.sock
       - ${OMARCHY_WORK_ROOT}:${OMARCHY_WORK_ROOT}
       - ./run/capacity.json:/run/omarchy/capacity.json:ro
+      - type: bind
+        source: ./run/host/dispatcher/token
+        target: /run/omarchy/worker-token
+        read_only: true
+        bind: { create_host_path: false }
     restart: unless-stopped
     stop_grace_period: 60s

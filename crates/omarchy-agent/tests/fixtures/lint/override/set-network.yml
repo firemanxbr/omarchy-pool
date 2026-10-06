@@ -1,0 +1,5 @@
+# An override compose runs but one rootless Quadlet service cannot mean the same way
+# (#330): a set network. Clean for a compose host, a `quadlet` violation for a Quadlet one.
+services:
+  dispatcher:
+    networks: [default]
