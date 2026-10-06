@@ -18,7 +18,9 @@ RING="${2:-stable}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/tests/images.env"
 CACHE="${OMARCHY_WORK_DIR:-/var/tmp/omarchy-pool-worker}/omarchy-rootfs/$ARCH"
-RUNTIME="$(command -v docker || command -v podman)"
+# The engine: RUNTIME when set — a dispatcher's pool job sets it to omarchy-task-run (#340), which runs this
+# script's check container through the task spec — or the docker (or podman) on PATH.
+RUNTIME="${RUNTIME:-$(command -v docker || command -v podman)}"
 POOL="${OMARCHY_POOL:?}"
 API="${OMARCHY_API:?}"
 LIST_URL="https://raw.githubusercontent.com/omacom/omarchy/quattro/install/omarchy-base.packages"

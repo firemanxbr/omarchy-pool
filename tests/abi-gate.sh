@@ -24,7 +24,9 @@ esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PKG_REPO="${PKG_REPO:-$ROOT/target/release/pkg-repo}"
 CLI="${OMARCHY_CLI:-$ROOT/target/release/omarchy-cli}"
-RUNTIME="$(command -v docker || command -v podman)"
+# The engine: RUNTIME when set — a dispatcher's pool job sets it to omarchy-task-run (#340), which runs this
+# script's check container through the task spec — or the docker (or podman) on PATH.
+RUNTIME="${RUNTIME:-$(command -v docker || command -v podman)}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 ms() { python3 -c "import time; print(int(time.time()*1000))"; }
@@ -87,17 +89,22 @@ json.dump(details, open(sys.argv[1] + "/details.json", "w"))
 print(b, w)
 PY
 
-# Reference 1: the distribution's base image.
-# Created, never started, then removed below: a kill in between would leave it behind, which `ps` without -a does not list and `kill`
-# cannot end. Run by a worker for a task (OMARCHY_TASK_ID, #277), it carries the task's name and label, and a stop removes it by that label.
-cid="$("$RUNTIME" create ${OMARCHY_TASK_ID:+--name "omarchy-task-$OMARCHY_TASK_ID-ref-$$" --label "com.omarchy.task=$OMARCHY_TASK_ID"} --platform "$PLATFORM" "$IMAGE" true)"
+# Reference 1: the distribution's base image. Its pacman database and libraries, written by tar inside a
+# container of it into a scratch directory of its own (mktemp -d, as every helper's: a dispatcher's pool job
+# runs it through omarchy-task-run and the task spec, #340, which takes `run` only — never `create` or
+# `export`), then unpacked here. Run by a worker for a task (OMARCHY_TASK_ID, #277), it carries the task's name
+# and label, and a stop removes it by that label.
+REF="$(mktemp -d)"
+trap 'rm -rf "$WORK" "$REF"' EXIT
+cat > "$REF/export.sh" <<'EXPORT'
+set -euo pipefail
+cd /
+tar -cf /repo/rootfs.tar var/lib/pacman/local usr/lib/lib*.so* 2>/dev/null || [[ -s /repo/rootfs.tar ]]
+EXPORT
+"$RUNTIME" run --rm ${OMARCHY_TASK_ID:+--name "omarchy-task-$OMARCHY_TASK_ID-ref-$$" --label "com.omarchy.task=$OMARCHY_TASK_ID"} --platform "$PLATFORM" -v "$REF:/repo" "$IMAGE" bash /repo/export.sh >/dev/null 2>&1 || true
 mkdir -p "$WORK/rootfs"
-if tar --version 2>/dev/null | grep -q GNU; then
-  "$RUNTIME" export "$cid" | tar -x -C "$WORK/rootfs" --wildcards 'var/lib/pacman/local/*' 'usr/lib/lib*.so*' 2>/dev/null || true
-else
-  "$RUNTIME" export "$cid" | tar -x -C "$WORK/rootfs" --include 'var/lib/pacman/local/*' --include 'usr/lib/lib*.so*' 2>/dev/null || true
-fi
-"$RUNTIME" rm "$cid" >/dev/null
+tar -x -C "$WORK/rootfs" -f "$REF/rootfs.tar" 2>/dev/null || true
+rm -rf "$REF"
 if [[ "$(ls "$WORK/rootfs/var/lib/pacman/local" 2>/dev/null | wc -l | tr -d ' ')" == "0" ]]; then
   post error "$RING $ARCH: could not export the reference system from $IMAGE" '{}'
   echo "no pacman database exported from $IMAGE"; rm -rf "$WORK"; exit 1

@@ -1954,6 +1954,60 @@ so a size-4 build waits for memory rather than run smaller.
   sets it on the host's page, with a reason — the Studio canary runs at 3
   units, one build (§21.1). Lowered below what the host runs, nothing ends;
   it claims nothing until its leases fit. Lifted, the host's count decides.
+- **Pool jobs on hosts (#340, D34).** Sync, render, promote, rollback,
+  security, gc, verify, relayout, enqueue, publish and the health checks
+  reach a host once the maintainers let them: the `host-pool-jobs` setting
+  names its host (or its registration's id), or says `*` for every host;
+  absent, no host takes one and the legacy pool workers run them all. The
+  rollout: the P1 host first, the Studio canary a week later, every host at
+  the P3 switch:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "INSERT INTO settings (key, value) VALUES ('host-pool-jobs', '<p1 host name>') ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+  npx wrangler d1 execute omarchy-repo --remote --command "UPDATE settings SET value = '<p1 host name>,<studio canary name>', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE key = 'host-pool-jobs'"   # a week on
+  npx wrangler d1 execute omarchy-repo --remote --command "DELETE FROM settings WHERE key = 'host-pool-jobs'"   # back to none
+  ```
+
+  The next claim of each host reads it. Its dispatcher runs one pool job at
+  a time, in the unit kept for them — so a sync starts while every other
+  unit holds builds and model work, and a build starts beside a running
+  sync: the job holds the kept unit, never a task's (the minimum host's 3
+  units run one build and one job, whichever came first) —, each in a
+  process of its own
+  (`pkg-repo pool-job`, its directory `<work root>/tasks/<id>-<gen>/` with
+  `job.json`, its `token` renewed at every heartbeat, `result.json`) with a
+  2 GB memory limit and a time limit of its kind: 30 min a render, a
+  rollback or an enqueue, 45 a health check, 60 a gc or a publish, 150 a
+  sync or a security run, 180 a promotion, 240 a verify or a relayout. Past
+  it the job's process group and its helper containers are killed and it
+  fails, not final (`… ran past its timeout of 45 min: killed, with its
+  helper containers`); a crash fails with its signal (`… ended on signal 6
+  (SIGABRT: a crash, or an allocation past its 2 GB memory limit) before it
+  reported`). A job does not outlive its dispatcher: one running when it is
+  replaced (a release, a `restart`) fails `lost` with its attempt given back.
+  Arch-neutral jobs run in the dispatcher's own native process whatever
+  their row's arch; a health check, a promotion's ABI gates and health
+  checks and a fast-track's need a lane of each ring arch they check,
+  native or emulated, and their check containers — and the enqueue's
+  reader of the recipes on `main`, on the host's native arch — start through
+  `omarchy-task-run` — the job's own internal network and egress sidecar,
+  its unit, the job's scratch directory at `/repo` and nothing else, no
+  token. The shim takes only `run --rm --platform … [-e KEYRING=…] -v
+  <scratch dir>:/repo[:ro] <image pinned in tests/images.env> bash
+  /repo/<script>.sh`; anything else a job's script asks of the engine it
+  refuses with 125 (`omarchy-task-run: refused — …` in the dispatcher's
+  log). The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
+  ABI gate's cached Omarchy reference), as a legacy pool worker's work
+  directory. On the host, while one runs:
+
+  ```bash
+  docker ps --filter label=org.omarchy-pool.task.role=helper --format '{{.Names}} {{.Status}}'
+  curl -s 127.0.0.1:8791/leases | jq '.[] | select(.kind != "build" and .kind != "trial" and .kind != "audit")'
+  ```
+
+  An agent fault on a host row leads the pool's rules to `recheck-agent`
+  only (a fresh probe sidecar), never `restart`: its page says so, and the
+  site's pacing and election are a legacy set's.
 - **A sleeping host has zero free units** (#329). A Mac's agent reports
   `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
   meanwhile its claims are handed nothing, it makes no emulated lane wait,

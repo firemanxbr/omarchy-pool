@@ -393,6 +393,9 @@ enum Command {
         /// The disk floor in GB, instead of the signed one.
         #[arg(long, hide = true)]
         disk_floor_gb: Option<u64>,
+        /// Every pool job's timeout in seconds, instead of its kind's (#340).
+        #[arg(long, hide = true)]
+        job_timeout_s: Option<u64>,
         /// The worker image by digest: every task's egress and agent sidecars run it.
         #[arg(long, env = "OMARCHY_WORKER_IMAGE", default_value = "")]
         worker_image: String,
@@ -442,6 +445,22 @@ enum Command {
         /// A range refused besides the built-in ones (the task subnets, the host's addresses).
         #[arg(long)]
         deny: Vec<String>,
+    },
+    /// A dispatcher's pool job (#340, design v2 §9.2): the job in `<dir>/job.json`, run as
+    /// `pkg-repo work` runs it, under a 2 GB memory limit, its result in `<dir>/result.json`.
+    /// The dispatcher starts it; never by hand.
+    #[command(hide = true)]
+    PoolJob {
+        #[arg(long)]
+        dir: PathBuf,
+    },
+    /// `omarchy-task-run` (#340): a pool job's only container engine. It takes the one shape its
+    /// scripts use for their helper containers and runs it through the task spec; anything else
+    /// is refused (exit 125).
+    #[command(hide = true, disable_help_flag = true)]
+    TaskRun {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
     },
     /// Deletes pool objects no recent release references (retention).
     Gc {
@@ -739,6 +758,7 @@ fn main() -> Result<()> {
                 idle_exit,
                 work_dir,
                 repo_dir,
+                scratch: None,
             })
         }
         Command::Dispatch {
@@ -755,6 +775,7 @@ fn main() -> Result<()> {
             stall_s,
             idle_claim_s,
             disk_floor_gb,
+            job_timeout_s,
             worker_image,
             task_subnets,
             host_addresses,
@@ -786,6 +807,7 @@ fn main() -> Result<()> {
                     idle_claim: Duration::from_secs(idle_claim_s.max(1)),
                 },
                 disk_floor_gb,
+                job_timeout: job_timeout_s.map(|s| Duration::from_secs(s.max(1))),
                 net: dispatch::Net {
                     worker_image: worker_image.trim().to_owned(),
                     subnets,
@@ -808,6 +830,8 @@ fn main() -> Result<()> {
             })
         }
         Command::Egress { listen, deny } => pkg_repo::egress::run(&listen, &deny),
+        Command::PoolJob { dir } => dispatch::jobs::child_main(&dir),
+        Command::TaskRun { args } => std::process::exit(dispatch::shim::main(&args)),
         Command::Event {
             remote,
             kind,

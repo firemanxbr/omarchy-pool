@@ -163,6 +163,9 @@ pub struct WorkOptions {
     pub work_dir: PathBuf,
     /// A checkout of the repository (its tests/ scripts); cloned when absent.
     pub repo_dir: Option<PathBuf>,
+    /// Where the scripts make their scratch directories (`TMPDIR`): a dispatcher's pool job's own
+    /// (#340), which its helper containers mount; `<work dir>/tmp` when none.
+    pub scratch: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -1506,7 +1509,7 @@ fn restart_agent(hands: &dyn Hands, me: &mut Process, check: &mut AgentCheck, o:
 /// worker's (`NeedsNative`): not final, and `needs_native` sends it back to
 /// the queue for a native worker of its architecture, the attempt given
 /// back — the pool hands it to no emulated worker again.
-fn fail_body(e: &anyhow::Error, took: u64) -> serde_json::Value {
+pub(crate) fn fail_body(e: &anyhow::Error, took: u64) -> serde_json::Value {
     let msg = format!("{e:#}");
     let native = e.downcast_ref::<NeedsNative>().is_some();
     let last = !native && msg.contains("— the gate");
@@ -1754,7 +1757,13 @@ fn task_api(opts: &WorkOptions, token: &str) -> Result<Api> {
     })
 }
 
-fn execute(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Result<Outcome> {
+/// A task's work, as this worker runs it — and as a dispatcher's pool job does, in a child
+/// process of its own (#340, `dispatch::jobs`).
+pub(crate) fn execute(
+    opts: &WorkOptions,
+    task: &Task,
+    token: &Arc<Mutex<String>>,
+) -> Result<Outcome> {
     let job = task_api(opts, &token.lock().unwrap().clone())?;
     match task.kind.as_str() {
         "sync" => sync_job(opts, &job, task),
@@ -1771,7 +1780,7 @@ fn execute(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Resul
         "security" => security_job(opts, &job, token),
         "rollback" => rollback_job(opts, &job, task),
         "enqueue" => {
-            let r = crate::reconcile::run(&job, &opts.work_dir, &opts.arch)?;
+            let r = crate::reconcile::run(&job, &opts.work_dir, &opts.arch, &scratch_of(opts))?;
             Ok(Outcome {
                 summary: format!(
                     "main@{}: {} queued, {} skipped, {} up to date{}",
@@ -2420,6 +2429,14 @@ fn sync_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
     })
 }
 
+/// Where a job's scripts make their scratch directories: under the work directory — the same
+/// path on the host when this worker is itself a container — or a dispatcher's pool job's own (#340).
+fn scratch_of(opts: &WorkOptions) -> PathBuf {
+    opts.scratch
+        .clone()
+        .unwrap_or_else(|| opts.work_dir.join("tmp"))
+}
+
 /// Runs one of the pipeline's scripts with the job's credential; true when it exited 0.
 fn script(
     opts: &WorkOptions,
@@ -2434,7 +2451,7 @@ fn script(
     // (`mktemp -d`): under the work directory, which is the same path on
     // the host when this worker is itself a container (docs: /docs/workers),
     // rather than a /tmp the runtime on the host cannot see.
-    let tmp = opts.work_dir.join("tmp");
+    let tmp = scratch_of(opts);
     std::fs::create_dir_all(&tmp)?;
     let mut cmd = Command::new("bash");
     cmd.arg(repo.join(rel))
@@ -3664,6 +3681,7 @@ mod tests {
             idle_exit: 0,
             work_dir: dir.path().into(),
             repo_dir: Some(dir.path().into()),
+            scratch: None,
         };
         Some((dir, opts))
     }
@@ -4881,6 +4899,7 @@ mod orders_tests {
             idle_exit: 30,
             work_dir: work.path().into(),
             repo_dir: Some(work.path().into()),
+            scratch: None,
         };
         run(&opts).unwrap();
         let seen = pool.seen.lock().unwrap();
@@ -4943,6 +4962,7 @@ mod stop_tests {
             idle_exit: 0,
             work_dir: dir.path().into(),
             repo_dir: Some(dir.path().into()),
+            scratch: None,
         };
         (dir, opts)
     }

@@ -130,6 +130,29 @@ secret). Everything travels in the `Authorization` header over TLS only.
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
   runs the dispatcher on a real engine (`tests/dispatch-engine.sh`).
+- **Pool jobs stay in the dispatcher; their check containers go through the
+  spec (#340, D34).** A host's pool jobs — sync, render, promote, rollback,
+  security, gc, verify, relayout, enqueue, publish, health — are the
+  release's own signed code, trusted like the dispatcher: each runs in a
+  child process of it (`pkg-repo pool-job`) with its lease's job token, as a
+  legacy pool worker runs them, under a 2 GB memory limit and a time limit,
+  killed whole when it overruns; it never holds the host's worker token, and
+  it reaches no task network. The containers its scripts start run package
+  code (a health check's pacman, an ABI gate's install of a ring, the
+  enqueue's reader, which sources the recipes on `main`), so they go
+  through the one spec: the job's only engine is `omarchy-task-run`
+  (`RUNTIME`, and `docker` and `podman` first on its `PATH`), which takes the
+  one shape the scripts use — `run --rm --platform … [-e KEYRING=…] -v
+  <the job's scratch dir>:/repo[:ro] <an image the release pins> bash
+  /repo/<script>.sh` — and runs it on the job's own internal network behind
+  its egress sidecar, made as a task's are (never a signed exception's
+  bridge, whatever the owner's envelope grants: `direct_network` is a
+  package build's, #373), with the job's unit, the task container's
+  capabilities, that one directory and no token; any other shape, verb or
+  flag is refused before the engine is asked. The spec's CI test renders
+  every helper the scripts start, and the shim's tests every shape refused.
+  Hosts take pool jobs only once the maintainers' `host-pool-jobs` setting
+  names them.
 - **Each task on its own network, its own egress, its own agent (#336).**
   A task container is on an internal network of its own (a /28 of
   `OMARCHY_TASK_SUBNETS`) that no other task, the host's LAN, the dispatcher
