@@ -38,9 +38,16 @@
 //! read: [`probe::in_mac_vm`] puts the `x86_64` lane through Rosetta into the same lanes
 //! after the same smoke run, and says why it is off in install's notes and the run loop's
 //! journal rather than in `held_lanes`.
+//!
+//! [`sandbox`] (#330, design v2 §10.4; D43) finds the sandboxed runtime — gVisor's `runsc`
+//! or Kata Containers — the dispatcher runs community tasks on the native lane in, within
+//! the envelope's `sandbox`, after its smoke run shows a kernel that is not the engine's
+//! (`sandbox` in the file, `null` when the host has none; `sandbox_held` with why one is not
+//! used).
 
 pub mod emulation;
 pub mod probe;
+pub mod sandbox;
 
 use std::fmt;
 use std::io::Write as _;
@@ -118,6 +125,9 @@ pub struct Caps {
     /// The foreign architectures that may run emulated (`emulate`): `None` when the
     /// envelope does not say (every one detection turns on), `Some([])` keeps them off.
     pub emulate: Option<Vec<String>>,
+    /// The sandboxed runtime community tasks may run in (`sandbox`, #330): the first that
+    /// passes its smoke run, none, or the one it names.
+    pub sandbox: sandbox::Setting,
 }
 
 impl Default for Caps {
@@ -129,6 +139,7 @@ impl Default for Caps {
             agent_slots: 2,
             dedicated: false,
             emulate: None,
+            sandbox: sandbox::Setting::Auto,
         }
     }
 }
@@ -177,6 +188,7 @@ impl AgentToml {
             #[serde(default)]
             dedicated: bool,
             emulate: Option<Vec<String>>,
+            sandbox: Option<String>,
         }
         let raw: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
         if let Some(env) = raw.get("envelope").and_then(toml::Value::as_table) {
@@ -205,6 +217,7 @@ impl AgentToml {
                 emulation::ARCHES.join(", ")
             ));
         }
+        let sandbox = sandbox::Setting::parse(e.sandbox.as_deref())?;
         Ok(AgentToml {
             caps: Caps {
                 max_units: e.max_units,
@@ -213,6 +226,7 @@ impl AgentToml {
                 agent_slots: e.agent_slots.unwrap_or(2),
                 dedicated: e.dedicated,
                 emulate: e.emulate,
+                sandbox,
             },
             work_root: f.set.work_root,
             socket_cli: f.set.socket_cli,
@@ -239,6 +253,7 @@ const ENVELOPE_KEYS: &[&str] = &[
     "paths",
     "diagnostics",
     "soak_minutes",
+    "sandbox",
 ];
 
 /// One way the host is below the signed minimum, with the numbers.
@@ -278,6 +293,8 @@ pub struct Capacity {
     dedicated: bool,
     limits: Limits,
     shortfalls: Vec<Shortfall>,
+    sandbox: Option<sandbox::Sandbox>,
+    sandbox_held: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -342,6 +359,24 @@ impl Capacity {
             }
             ok
         });
+        // The sandbox detection found, within the envelope's `sandbox` whatever the probe that
+        // found it was told: `off` keeps none, a runtime's name that one only (#330).
+        let (mut sandbox, mut sandbox_held) = facts
+            .sandbox()
+            .map(|f| (f.on.clone(), f.held.clone()))
+            .unwrap_or_default();
+        match &caps.sandbox {
+            sandbox::Setting::Off => (sandbox, sandbox_held) = (None, None),
+            sandbox::Setting::Named(n) => {
+                if let Some(s) = sandbox.take_if(|s| &s.runtime != n) {
+                    sandbox_held = Some(format!(
+                        "{}: not the runtime the envelope's sandbox names ({n})",
+                        s.runtime
+                    ));
+                }
+            }
+            sandbox::Setting::Auto => {}
+        }
         Capacity {
             cpus,
             mem_gb,
@@ -358,6 +393,8 @@ impl Capacity {
             dedicated: caps.dedicated,
             limits: facts.limits(),
             shortfalls,
+            sandbox,
+            sandbox_held,
         }
     }
 
@@ -406,6 +443,14 @@ impl Capacity {
     pub fn held_lanes(&self) -> &[emulation::Held] {
         &self.held
     }
+    /// The sandboxed runtime community tasks on the native lane run in (#330), if any.
+    pub fn sandbox(&self) -> Option<&sandbox::Sandbox> {
+        self.sandbox.as_ref()
+    }
+    /// Why a sandboxed runtime the engine has, or the envelope names, is not used.
+    pub fn sandbox_held(&self) -> Option<&str> {
+        self.sandbox_held.as_deref()
+    }
     /// Below the signed minimum (D44): the host keeps its bundle, claims nothing.
     pub fn below_minimum(&self) -> bool {
         !self.shortfalls.is_empty()
@@ -441,6 +486,8 @@ impl Capacity {
             dedicated: self.dedicated,
             limits: self.limits,
             below_minimum: self.below_minimum(),
+            sandbox: self.sandbox.clone(),
+            sandbox_held: self.sandbox_held.clone(),
         }
     }
 }
@@ -478,6 +525,14 @@ pub struct CapacityFile {
     pub dedicated: bool,
     pub limits: Limits,
     pub below_minimum: bool,
+    /// The sandboxed runtime the dispatcher runs community tasks on the native lane in
+    /// (#330, D43): `{runtime, kind}`, `null` when the host has none — which an agent
+    /// before #330 does not say at all.
+    pub sandbox: Option<sandbox::Sandbox>,
+    /// Why a sandboxed runtime the engine has, or the envelope names, is not used: for the
+    /// host page, never read by the dispatcher.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_held: Option<String>,
 }
 
 /// What stops an install (design v2 §13.3, the capacity part): below the minimum, with
