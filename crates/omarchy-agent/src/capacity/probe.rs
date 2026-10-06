@@ -582,12 +582,10 @@ pub(super) fn df_free(out: &str) -> Option<u64> {
 /// Runs a command with a deadline, killing it when the deadline passes; its stdout.
 /// Install's engine calls (#317) go through it too.
 pub(crate) fn run(mut c: Command, timeout: Duration) -> Result<String, String> {
-    let mut child = c
-        .stdin(Stdio::null())
+    c.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .stderr(Stdio::piped());
+    let mut child = crate::run::exec::retry_busy(|| c.spawn()).map_err(|e| e.to_string())?;
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let out = std::thread::spawn(move || {

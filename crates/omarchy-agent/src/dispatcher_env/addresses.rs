@@ -69,7 +69,11 @@ impl Sources {
     fn listing(&self) -> String {
         self.ifconfig
             .as_ref()
-            .and_then(|p| std::process::Command::new(p).arg("-a").output().ok())
+            .and_then(|p| {
+                let mut c = std::process::Command::new(p);
+                c.arg("-a");
+                crate::run::exec::retry_busy(|| c.output()).ok()
+            })
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default()

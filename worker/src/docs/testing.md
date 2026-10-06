@@ -884,6 +884,16 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   of ending a loop whose first tick after the wake is a slow one; under
   launchd (`XPC_SERVICE_NAME`) a refused agent.toml is waited on until it
   changes, not said every 10 s.
+- `run/exec.rs` — a start that meets `ETXTBSY` ("Text file busy": a binary
+  just written — a self-update's new agent, a pinned tool, a test's stub —
+  still open in a child that another thread forked and that has not exec'd
+  yet) tried again for about 2 s, 2 ms apart and doubling, and any other
+  error returned at once; on Linux, a script still open for writing starts
+  once it is closed. Its callers: `exec::run` and `Background`,
+  `capacity::probe::run`, install's commands and `ifconfig`; the stubs a shell
+  starts (the task firewall's iptables and systemctl, the guards' docker,
+  curl and jq) are written from a child process (`exec::write_stub`), where
+  no fork of the multithreaded test process can hold them.
 - `bash tests/prep-mac.sh` (CI) — `factory/host/prep-mac.sh` against stubs
   (uname, id, sw_vers, brew, stat), under dash: Colima and Lima only, the
   three directories 0700, nothing changed on a second run, `--dry-run`, and

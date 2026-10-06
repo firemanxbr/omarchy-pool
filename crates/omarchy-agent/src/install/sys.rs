@@ -54,12 +54,11 @@ impl Sys for Machine {
         args: &[&str],
         env: &[(&'static str, String)],
     ) -> Result<String, String> {
-        let o = Command::new(prog)
-            .args(args)
+        let mut c = Command::new(prog);
+        c.args(args)
             .envs(env.iter().map(|(k, v)| (*k, v)))
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("{prog}: {e}"))?;
+            .stdin(Stdio::null());
+        let o = crate::run::exec::retry_busy(|| c.output()).map_err(|e| format!("{prog}: {e}"))?;
         if o.status.success() {
             Ok(String::from_utf8_lossy(&o.stdout).into_owned())
         } else {

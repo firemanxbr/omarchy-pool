@@ -521,9 +521,8 @@ fn the_task_firewall_is_kept_in_the_vm_and_applied_at_its_every_boot_after_docke
             ),
         ),
     ] {
-        let p = bin.join(tool);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Started by the script's shell: written where no fork of this process can hold it.
+        crate::run::exec::write_stub(&bin.join(tool), &format!("#!/bin/sh\n{body}\n"));
     }
     let subnets = crate::install::net::parse_list("10.231.0.0/16").unwrap();
     let script = firewall(&subnets)
