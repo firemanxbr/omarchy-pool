@@ -354,7 +354,10 @@ button with why.
    page with the `seal key:` line of `omarchy-agent status`, then
    **Confirm the seal key** with your passkey. A seal key made again shows
    as changed and is confirmed again before anything is sealed to it; so
-   does one other than the key you confirmed in this browser.
+   does one other than the key you confirmed in this browser. A browser
+   that never confirmed it (another device, a new profile) shows you the
+   fingerprint to compare once more before its first seal: the pool's
+   record of your confirmation never decides on its own.
 3. **Widen the envelope.** `max_units`, `max_cpus`, `max_mem_gb`,
    `emulate`, `agent_slots`, `agent_budget`, `diagnostics` and `paths`:
    **Review and sign** sends what you changed to the pool, which writes the

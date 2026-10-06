@@ -353,9 +353,22 @@ const SCRIPT = String.raw`
   // its agent reports them; Make a pin, Confirm the seal key, Widen the envelope and Set agent keys — its owner's, greyed with the door's reason.
   function envText(v) { return v === null || v === undefined ? "—" : typeof v === "object" && !Array.isArray(v) ? Object.keys(v).map(function (k) { return k + "=" + v[k]; }).join(" ") : Array.isArray(v) ? (v.length ? v.join(", ") : "none") : String(v); }
   // The seal key its owner confirmed in this browser, kept here (#328): the pool's record of the confirmation is the pool's, so a key the
-  // pool's database says is confirmed but this browser confirmed another is confirmed again before anything is sealed to it.
+  // pool's database says is confirmed but this browser confirmed another is confirmed again before anything is sealed to it, and one
+  // this browser never confirmed is compared with omarchy-agent status before the first seal to it (sealCompared): the pool's record
+  // never decides on its own which key a value is sealed to.
   function sealHere(id) { try { return localStorage.getItem("op-seal:" + id) || ""; } catch (e) { return ""; } }
   function keepSeal(id, key) { try { localStorage.setItem("op-seal:" + id, key); } catch (e) {} }
+  // Whether a value may be sealed to the key its agent reports (true), its owner having compared it in this browser — now, or before.
+  function sealCompared(key, fp) {
+    var here = sealHere(ID);
+    if (here === key) return Promise.resolve(true);
+    if (here) { toast("Its seal key is not the one you confirmed in this browser: compare it with <code>omarchy-agent status</code> at the host and confirm it again. Nothing was sealed.", "error"); return Promise.resolve(false); }
+    return ask({ title: "Compare the seal key of " + H.name, text: "This browser has not confirmed it yet. At the host, <code>omarchy-agent status</code> prints its seal key: it must be <code>" + esc(fp || "?") + "</code>. Your agent keys are sealed to this key in your browser, and only the host opens them.", confirm: "It is the same: seal to it", nothing: "Nothing was sealed." }).then(function (go) {
+      if (go === null) return false;
+      keepSeal(ID, key);
+      return true;
+    });
+  }
   function drawOwner(h, can) {
     $("#hp-owner").hidden = h.fingerprint === undefined;
     if (h.fingerprint === undefined) return;
@@ -365,7 +378,7 @@ const SCRIPT = String.raw`
     var sealed = !!(s && s.key && s.confirmed && s.confirmed.current) && !other;
     $("#hp-owner-kv").innerHTML = !o ? kv("Owner control", '<span class="muted">its agent reports none yet: agent ' + esc(OWNER_AGENT) + ' or later does</span>') : [
       kv("Passkey at the host", pk ? esc(pk.by) + "'s " + esc(pk.alg) + ' passkey <span class="mono">' + esc(pk.credential.slice(0, 12)) + "…</span> for " + esc(pk.rp_id) + ", pinned " + when(pk.pinned_at) + (o.version ? "; it took signed version " + num(o.version) + " last" : "") : '<span class="muted">none pinned yet: Make a pin, then paste it at the host</span>'),
-      kv("Seal key", s && s.fingerprint ? '<span class="mono">' + esc(s.fingerprint) + "</span> " + (sealed ? pillHtml("ok", "confirmed", "by " + s.confirmed.by + ", " + s.confirmed.at) : other ? pillHtml("warn", "not the key you confirmed in this browser", "compare it with omarchy-agent status at the host and confirm it again") : s.confirmed ? pillHtml("warn", "changed since it was confirmed", "a key made again: compare and confirm it again") : pillHtml("warn", "not confirmed yet", "compare it with omarchy-agent status at the host")) : '<span class="muted">its agent reports none yet</span>'),
+      kv("Seal key", s && s.fingerprint ? '<span class="mono">' + esc(s.fingerprint) + "</span> " + (sealed ? pillHtml("ok", "confirmed", "by " + s.confirmed.by + ", " + s.confirmed.at + (here ? "" : "; this browser has you compare it with omarchy-agent status before it seals anything to it")) : other ? pillHtml("warn", "not the key you confirmed in this browser", "compare it with omarchy-agent status at the host and confirm it again") : s.confirmed ? pillHtml("warn", "changed since it was confirmed", "a key made again: compare and confirm it again") : pillHtml("warn", "not confirmed yet", "compare it with omarchy-agent status at the host")) : '<span class="muted">its agent reports none yet</span>'),
       kv("Envelope", WIDENABLE.map(function (k) { return '<span class="mono">' + esc(k) + " " + esc(envText(env[k])) + "</span>"; }).join(", ")),
       kv("Agent keys", o.agent_keys.length ? o.agent_keys.map(esc).join(", ") : '<span class="muted">none</span>'),
     ].join("");
@@ -431,17 +444,21 @@ const SCRIPT = String.raw`
       + '<label class="wide">paths, one a line<textarea rows="2" data-env="paths">' + esc((env.paths || []).join("\n")) + "</textarea></label>"
       + '<div class="hp-ops wide"><button type="button" class="op-btn" data-host-act="widen-send">' + ICON.widen + "Review and sign</button></div>";
   }
+  // The value a key of the envelope takes where agent.toml does not set it, which its agent reports as null: agent_slots 2 and
+  // diagnostics false (install writes neither), so a form left as it was asks for neither.
+  var ENV_DEFAULT = { agent_slots: 2, diagnostics: false };
+  function envWas(env, k) { return env[k] === null || env[k] === undefined ? (k in ENV_DEFAULT ? ENV_DEFAULT[k] : null) : env[k]; }
   // What the form asks for that the envelope does not say: {key: value}, each as a widening sets it.
   function widenAsked() {
     var env = ((H.owner_control || {}).envelope) || {}, out = {};
     document.querySelectorAll("#hp-owner-form [data-env]").forEach(function (el) {
-      var k = el.getAttribute("data-env"), v;
+      var k = el.getAttribute("data-env"), v, was = envWas(env, k);
       if (k === "emulate") v = el.value === "" ? null : el.value === "none" ? [] : el.value.split(",");
       else if (k === "diagnostics") v = el.value === "true";
       else if (k === "paths") v = el.value.split("\n").map(function (x) { return x.trim(); }).filter(Boolean);
-      else v = el.value === "" ? (k === "agent_slots" ? 2 : null) : Number(el.value);
-      if (k === "paths" && !v.length && (env.paths === null || env.paths === undefined)) return;
-      if (JSON.stringify(v) !== JSON.stringify(env[k] === undefined ? null : env[k])) out[k] = v;
+      else v = el.value === "" ? (k in ENV_DEFAULT ? ENV_DEFAULT[k] : null) : Number(el.value);
+      if (k === "paths" && !v.length && was === null) return;
+      if (JSON.stringify(v) !== JSON.stringify(was)) out[k] = v;
     });
     var budget = {}, any = false;
     document.querySelectorAll("#hp-owner-form [data-budget]").forEach(function (el) { if (el.value !== "") { budget[el.getAttribute("data-budget")] = Number(el.value); any = true; } });
@@ -573,7 +590,7 @@ const SCRIPT = String.raw`
     } else if (act === "widen-send") {
       var asked = widenAsked(), env0 = ((H.owner_control || {}).envelope) || {}, keys0 = Object.keys(asked);
       if (!keys0.length) { toast("Nothing to change: the form says what its envelope says."); return; }
-      ask({ title: "Widen the envelope of " + H.name, text: "Its agent sets, in agent.toml at the host: " + keys0.map(function (k) { return "<code>" + esc(k) + "</code> " + esc(envText(env0[k])) + " → " + esc(envText(asked[k])); }).join(", ") + ". Units never rise above what the release's signed constants and its detected hardware give." + ("emulate" in asked ? " An emulated lane its detection never smoke-tested comes on at its next count, which the loop does not run on its own on Linux: there it takes <code>omarchy-agent capacity --write</code> at the host (on a Mac, the next start of its VM counts it)." : ""), held: "The passkey pinned at the host signs it.", confirm: "Sign with your passkey" }).then(function (go) {
+      ask({ title: "Widen the envelope of " + H.name, text: "Its agent sets, in agent.toml at the host: " + keys0.map(function (k) { return "<code>" + esc(k) + "</code> " + esc(envText(envWas(env0, k))) + " → " + esc(envText(asked[k])); }).join(", ") + ". Units never rise above what the release's signed constants and its detected hardware give." + ("emulate" in asked ? " An emulated lane its detection never smoke-tested comes on at its next count, which the loop does not run on its own on Linux: there it takes <code>omarchy-agent capacity --write</code> at the host (on a Mac, the next start of its VM counts it)." : ""), held: "The passkey pinned at the host signs it.", confirm: "Sign with your passkey" }).then(function (go) {
         if (go === null) return;
         signDoc({ act: "widen-envelope", envelope: asked }, function (doc, a) { return api("POST", BASE + "/orders", { kind: "widen-envelope", doc: doc, assertion: a }); }).then(function (d) { if (!d.error) $("#hp-owner-form").innerHTML = ""; done(d); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
@@ -581,16 +598,18 @@ const SCRIPT = String.raw`
       keysForm();
     } else if (act === "keys-send") {
       var name = $("#hp-owner-form [data-key-name]").value, input = $("#hp-owner-form [data-key-value]"), remove = $("#hp-owner-form [data-key-remove]").value === "remove";
-      var to = (H.seal || {}).key, here = sealHere(ID);
-      // Sealed only to the key this browser confirmed; one it never confirmed is the pool's record's, and kept from then on.
-      if (here && here !== to) { toast("Its seal key is not the one you confirmed in this browser: compare it with <code>omarchy-agent status</code> at the host and confirm it again. Nothing was sealed.", "error"); return; }
-      var sealing = remove ? Promise.resolve({ name: name, remove: true }) : sealAgentKey(to, ID, name, input.value);
-      sealing.then(function (k) {
+      var to = (H.seal || {}).key, fp = (H.seal || {}).fingerprint;
+      // Sealed only to the key this browser confirmed, or its owner compares it here first: never to the pool's record's alone.
+      sealCompared(to, fp).then(function (same) {
+        if (!same) return null;
+        return remove ? { name: name, remove: true } : sealAgentKey(to, ID, name, input.value);
+      }).then(function (k) {
+        if (!k) return;
         // The value is gone from the page once it is sealed: only its ciphertext is left to send.
         input.value = "";
         return ask({ title: (remove ? "Take " : "Set ") + name + (remove ? " out of " : " on ") + H.name, text: remove ? "Its agent takes it out of agent.env at the host." : "Sealed in this browser to its seal key " + esc((H.seal || {}).fingerprint || "") + ": the pool relays only ciphertext, and its agent writes it to agent.env alone, which only agent sidecars read.", held: "The passkey pinned at the host signs it.", confirm: "Sign with your passkey" }).then(function (go) {
           if (go === null) return;
-          return signDoc({ act: "set-agent-keys", keys: [k] }, function (doc, a) { return api("POST", BASE + "/orders", { kind: "set-agent-keys", doc: doc, assertion: a }); }).then(function (d) { if (!d.error) { $("#hp-owner-form").innerHTML = ""; if (!here) keepSeal(ID, to); } done(d); });
+          return signDoc({ act: "set-agent-keys", keys: [k] }, function (doc, a) { return api("POST", BASE + "/orders", { kind: "set-agent-keys", doc: doc, assertion: a }); }).then(function (d) { if (!d.error) $("#hp-owner-form").innerHTML = ""; done(d); });
         });
       }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     } else if (act === "retire-legacy") {
@@ -704,7 +723,7 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.owner",
     page: `/hosts/${F.host}`,
     anchor: ['id="hp-owner"', 'id="hp-owner-kv"', 'id="hp-owner-ops"', 'id="hp-owner-form"', 'id="hp-pin"', 'href="/docs/worker-host#owner-control-without-a-visit"'],
-    script: ["function drawOwner(h, can)", "can.owner === true", "function signDoc(body, post)", "function docSaysWhy(body, o)", "its challenge is not the document's SHA-256", 'keepSeal(ID, sk.key)', 'BASE + "/owner/challenge"', 'BASE + "/owner/pin"', 'BASE + "/seal-key"', 'kind: "widen-envelope"', 'kind: "set-agent-keys"', 'passkeyed("host:seal-key:" + ID', "async function sealAgentKey(", '"Passkey at the host"', '"Seal key"', '"Agent keys"', "OWNER_AGENT", "WIDENABLE", "AGENT_KEYS"],
+    script: ["function drawOwner(h, can)", "can.owner === true", "function signDoc(body, post)", "function docSaysWhy(body, o)", "its challenge is not the document's SHA-256", 'keepSeal(ID, sk.key)', "function sealCompared(key, fp)", "function widenAsked()", 'BASE + "/owner/challenge"', 'BASE + "/owner/pin"', 'BASE + "/seal-key"', 'kind: "widen-envelope"', 'kind: "set-agent-keys"', 'passkeyed("host:seal-key:" + ID', "async function sealAgentKey(", '"Passkey at the host"', '"Seal key"', '"Agent keys"', "OWNER_AGENT", "WIDENABLE", "AGENT_KEYS"],
     reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.owner", "host.owner_control", "host.seal", "can.owner", "can.why"] }],
     acts: [
       { method: "POST", path: `/api/v1/hosts/${F.host}/owner/challenge`, body: { act: "pin-passkey" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },

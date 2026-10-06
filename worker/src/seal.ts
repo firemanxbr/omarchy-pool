@@ -9,10 +9,13 @@
  *   ct     = AES-256-GCM(key, nonce = 12 random bytes, the value, additionalData = info)
  *
  * and {name, epk, nonce, ct}, each base64url without padding. The host's seal key is the
- * one its agent reports and its owner confirmed on the host page; `info` binds the
- * ciphertext to that host and that key's name, so the pool's database and relay can
- * neither read it nor present it as another key or to another host (the page that runs
- * this is the pool's own: docs/security-model.md says what that leaves). Sealing is not
+ * one its agent reports and its owner compared with `omarchy-agent status` in the browser
+ * that seals (the host page keeps it there, and asks for the comparison before the first
+ * seal in a browser that never made it: the pool's record of a confirmation never decides
+ * alone); `info` binds the ciphertext to that host and that key's name, so the pool's
+ * database and relay can neither read it nor present it as another key or to another host
+ * (the page that runs this is the pool's own: docs/security-model.md says what that
+ * leaves). Sealing is not
  * signing — anyone may seal to a public key — so a sealed key reaches the host only
  * inside a document the owner's passkey signed, which the host checks against the passkey
  * pinned there.

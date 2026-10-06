@@ -134,7 +134,8 @@ const ownerPart = (credential: string | null, seal: string, version = 0) => ({
   owner: {
     passkey: credential ? { credential, alg: "ES256", rp_id: "localhost", origin: ORIGIN, by: "m1", pinned_at: "2027-01-15T08:00:00Z" } : null,
     version, seal: { key: seal, fingerprint: "SHA256:x" },
-    envelope: { max_units: 3, max_cpus: null, max_mem_gb: null, emulate: ["x86_64"], agent_slots: 2, agent_budget: null, diagnostics: false, paths: null },
+    // As a stock host reports it: install writes max_units (and emulate), never agent_slots or diagnostics, so the agent reports them null.
+    envelope: { max_units: 3, max_cpus: null, max_mem_gb: null, emulate: ["x86_64"], agent_slots: null, agent_budget: null, diagnostics: null, paths: null },
     agent_keys: ["GEMINI_API_KEY"],
   },
 });
@@ -193,6 +194,78 @@ describe("the documents, the widening and the sealed keys (pure)", () => {
     }
     expect(widening({ agent_budget: { calls_per_day: 4294967295, calls_per_task: 1, tokens_per_task: 1e12, minutes_per_task: 1e12 } })).toEqual({ agent_budget: { calls_per_day: 4294967295, calls_per_task: 1, tokens_per_task: 1e12, minutes_per_task: 1e12 } });
     expect(WIDENABLE).toEqual(["max_units", "max_cpus", "max_mem_gb", "emulate", "agent_slots", "agent_budget", "diagnostics", "paths"]);
+  });
+
+  it("the page's widening form left as it was asks for nothing on a stock host, and asks for each key changed, against the default an unset key takes", () => {
+    // The form's fields read back from the HTML widenForm wrote, as a browser's document holds them: an input's value, a select's
+    // selected option (else its first), a textarea's text; a field the test changes keeps its value until the form is drawn again.
+    let fields: { attr: string; name: string; value: string; getAttribute: (a: string) => string | null }[] = [];
+    const unesc = (t: string) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+    const read = (html: string) => [...html.matchAll(/<(input|select|textarea)\b([^>]*?)\bdata-(env|budget)="([^"]*)"([^>]*)>/g)].map((m) => {
+      const rest = html.slice(m.index! + m[0].length), attrs = m[2] + m[5];
+      const value = m[1] === "input" ? unesc(/\bvalue="([^"]*)"/.exec(attrs)?.[1] ?? "")
+        : m[1] === "textarea" ? unesc(rest.slice(0, rest.indexOf("</textarea>")))
+        : ((o) => (o.find((x) => x[2]) ?? o[0])[1])([...rest.slice(0, rest.indexOf("</select>")).matchAll(/<option value="([^"]*)"( selected)?/g)]);
+      const attr = `data-${m[3]}`, name = m[4];
+      return { attr, name, value, getAttribute: (a: string) => (a === attr ? name : null) };
+    });
+    const ran = runScript(scriptOf(hostHtml("h_0123456789", "http://pool.test", { version: "test", deployed_at: null } as never)), {
+      pathname: "/hosts/h_0123456789", functions: ["widenForm", "widenAsked"], variables: ["H"],
+      querySelectorAll: (sel) => fields.filter((f) => sel === `#hp-owner-form [${f.attr}]`),
+    });
+    const draw = (envelope: Record<string, unknown>) => {
+      ran.setH({ id: "h_0123456789", name: "box", owner_control: { envelope } });
+      ran.widenForm();
+      fields = read(ran.nodes["#hp-owner-form"].innerHTML);
+    };
+    const set = (name: string, value: string) => { fields.find((f) => f.name === name)!.value = value; };
+    const stock = ownerPart(null, "k").owner.envelope;
+    draw(stock);
+    expect(fields.map((f) => f.name).sort()).toEqual([...WIDENABLE.filter((k) => k !== "agent_budget"), "calls_per_task", "tokens_per_task", "minutes_per_task", "calls_per_day"].sort());
+    expect(ran.widenAsked()).toEqual({});
+    // The default an unset key takes, asked for explicitly, is no change either.
+    set("agent_slots", "2"); set("diagnostics", "false");
+    expect(ran.widenAsked()).toEqual({});
+    // Each key changed is asked for, and only those.
+    set("agent_slots", "4"); set("diagnostics", "true"); set("max_units", "8"); set("calls_per_day", "9000");
+    expect(ran.widenAsked()).toEqual({ agent_slots: 4, diagnostics: true, max_units: 8, agent_budget: { calls_per_day: 9000 } });
+    // A host whose agent.toml sets them: left as it was, nothing; agent_slots emptied is its default, 2, and diagnostics false is asked.
+    draw({ ...stock, agent_slots: 3, diagnostics: true, paths: ["/srv/a"] });
+    expect(ran.widenAsked()).toEqual({});
+    set("agent_slots", ""); set("diagnostics", "false"); set("emulate", "none");
+    expect(ran.widenAsked()).toEqual({ agent_slots: 2, diagnostics: false, emulate: [] });
+  });
+
+  it("the page seals only to a seal key its owner compared in this browser: the pool's record of a confirmation never decides alone", async () => {
+    const storage = new Map<string, string>();
+    (globalThis as any).__ownerPageStorage = { getItem: (k: string) => storage.get(k) ?? null, setItem: (k: string, v: string) => void storage.set(k, v) };
+    const browser = "var localStorage = globalThis.__ownerPageStorage;";
+    const html = hostHtml("h_0123456789", "http://pool.test", { version: "test", deployed_at: null } as never);
+    const ran = runScript(scriptOf(html).trim().replace(/^\(function \(\) \{/, `(function () {${browser}`), { pathname: "/hosts/h_0123456789", functions: ["sealCompared"], variables: ["H", "ask", "toast"] });
+    const asked: { title: string; text: string }[] = [], toasted: string[] = [];
+    let answer: unknown = null;
+    ran.setH({ id: "h_0123456789", name: "box", seal: { key: "KEY-A", fingerprint: "SHA256:aaaa", confirmed: { by: "m1", at: "2027-01-15T08:00:00Z", current: true } } });
+    ran.setask((o: { title: string; text: string }) => { asked.push(o); return Promise.resolve(answer); });
+    ran.settoast((t: string) => void toasted.push(t));
+    // A browser that never confirmed it, with the pool's record saying confirmed: its owner compares the fingerprint first. Cancelled,
+    // nothing is sealed and nothing kept.
+    expect(await ran.sealCompared("KEY-A", "SHA256:aaaa")).toBe(false);
+    expect(asked).toHaveLength(1);
+    expect(asked[0].text).toContain("omarchy-agent status");
+    expect(asked[0].text).toContain("SHA256:aaaa");
+    expect(storage.size).toBe(0);
+    // "It is the same": sealed to it, and this browser keeps it.
+    answer = true;
+    expect(await ran.sealCompared("KEY-A", "SHA256:aaaa")).toBe(true);
+    expect(storage.get("op-seal:h_0123456789")).toBe("KEY-A");
+    // From then on, that key without asking; another key the pool's record calls confirmed, never — until confirmed here again.
+    expect(await ran.sealCompared("KEY-A", "SHA256:aaaa")).toBe(true);
+    expect(asked).toHaveLength(2);
+    expect(await ran.sealCompared("KEY-B", "SHA256:bbbb")).toBe(false);
+    expect(asked).toHaveLength(2);
+    expect(toasted.join(" ")).toContain("not the one you confirmed in this browser");
+    expect(storage.get("op-seal:h_0123456789")).toBe("KEY-A");
+    delete (globalThis as any).__ownerPageStorage;
   });
 
   it("takes sealed keys of the six agent keys only, each once, sealed or taken out", async () => {

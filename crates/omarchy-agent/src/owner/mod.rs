@@ -1,7 +1,9 @@
 //! The owner's control without a visit (#328, design v2 §12, §14, decision D6 b): a
 //! widening of the envelope and the agent keys, given from the site and taken on the host
 //! only when the owner's own passkey signed them. The pool relays both; its database and
-//! its relay can forge neither, nor read a key. (The page the owner signs on is the pool's:
+//! its relay can forge neither, nor read a key: the browser seals a key only to a seal key
+//! its owner compared there with `omarchy-agent status`, never to the one the pool's record
+//! calls confirmed alone. (The page the owner signs on is the pool's:
 //! worker/src/docs/security-model.md says what compromised code serving it could do.)
 //!
 //! - **The pin.** Once, at the host, `omarchy-agent envelope pin-passkey <pin>` takes the

@@ -661,7 +661,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   the last the host took — so the pool's database or its API answering
   another document gets nothing signed. The browser also remembers the seal
   key its owner confirmed in it, and asks for the confirmation again before
-  it seals to another.
+  it seals to another; a browser that never confirmed one (a new device or
+  profile) has its owner compare the fingerprint with `omarchy-agent
+  status` before its first seal, whatever the pool's record says.
 
   What it does not cover, stated plainly (as design v2 §10.4 does for the
   invariants): **every ceremony trusts the page and the code the pool
@@ -677,8 +679,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   made that way is still held to the host's own bounds: the eight widenable
   keys, the signed capacity constants and the detected hardware, the six
   agent keys' names. The seal key's confirmation (`hosts.seal_confirmed`)
-  is the pool's own record, which the browser trusts only where it has not
-  confirmed another key itself. That is why the agent prints what it
+  is the pool's own record, which no browser seals on alone: one that has
+  not compared the key itself asks its owner to before the first seal.
+  That is why the agent prints what it
   pinned and `omarchy-agent status` the seal key's fingerprint, to compare,
   and why the journal shows every widening and key set with who signed it.
   On a Mac the Keychain holds the seal key only (the host key stays a 0600
