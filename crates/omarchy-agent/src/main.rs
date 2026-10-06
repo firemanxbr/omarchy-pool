@@ -43,6 +43,9 @@
 //! omarchy-agent logs [--data-dir <dir>] [-n <lines>]
 //! omarchy-agent self-test --release <vX.Y.Z> [--data-dir <dir>]
 //!     (what a self-update asks of the new agent before it hands over: prints `ok`)
+//! omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
+//!     (#325: the owner moves the bundle to another driver this binary carries, with the
+//!     same guard and revert; never the pool's to choose)
 //!
 //! Every command's data directory is `--data-dir`, `$OMARCHY_AGENT_DATA`,
 //! `$XDG_DATA_HOME/omarchy-agent` or `~/.local/share/omarchy-agent` (install.sh's).
@@ -90,6 +93,7 @@ const USAGE: &str = "usage:
   omarchy-agent round [--data-dir <dir>]
   omarchy-agent logs [--data-dir <dir>] [-n <lines>]
   omarchy-agent self-test --release <vX.Y.Z> [--data-dir <dir>]
+  omarchy-agent runtime switch <compose/docker|compose/podman> [--socket <path>] [--data-dir <dir>]
   omarchy-agent --version
 The enrollment token is read from OMARCHY_ENROLL, never from an argument.";
 
@@ -109,6 +113,7 @@ fn main() -> ExitCode {
         Some("uninstall") => uninstall_cmd(&args[1..]),
         Some("enroll") => enroll_cmd(&args[1..]),
         Some("token") => token_cmd(&args[1..]),
+        Some("runtime") => runtime_cmd(&args[1..]),
         Some("dispatcher-env") => dispatcher_env_cmd(&args[1..]),
         Some("--version" | "version") => {
             println!("omarchy-agent {}", omarchy_agent::AGENT_VERSION);
@@ -277,6 +282,21 @@ fn run_cmd(cmd: &str, args: &[String]) -> Result<u8, String> {
             run::logs(data, n)
         }
     })
+}
+
+/// `runtime switch <driver> [--socket <path>] [--data-dir <dir>]` (#325).
+fn runtime_cmd(args: &[String]) -> Result<u8, String> {
+    let mut rest = Vec::new();
+    let f = flags(args, &["--data-dir", "--socket"], &mut rest)?;
+    let ["switch", driver] = rest.as_slice() else {
+        return Err(USAGE.to_owned());
+    };
+    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    Ok(run::runtime_switch(
+        get("--data-dir"),
+        driver,
+        get("--socket"),
+    ))
 }
 
 fn refused(r: &verify::Rejection) -> u8 {

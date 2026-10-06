@@ -29,6 +29,7 @@ use sha2::{Digest as _, Sha256};
 use crate::lint::{self, SetToml};
 use crate::version::Release;
 
+use super::brake::Ask;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver, Exit, Project, PullState, Unit};
 use super::journal::Journal;
@@ -196,6 +197,7 @@ pub(crate) fn start(
         why: why.to_owned(),
         services: Vec::new(),
         reverting: None,
+        braked: false,
     };
     j.write(
         now,
@@ -779,7 +781,15 @@ fn replace(state: &mut State, ctx: &mut Ctx, files: Files, phase: &Phase) -> Res
         },
     };
     match then {
-        Then::Go(step) => go(state, ctx, step),
+        Then::Go(step) => {
+            // The old dispatcher was sent its stop: one recreation of it, once per replace
+            // (the step is saved past it). A round the pool's target started toward another
+            // release counts it on the brake, and its revert's too (#325).
+            if *phase == Phase::Stop && state.rollout.braked {
+                state.brake.record(now, &[Ask::Restart]);
+            }
+            go(state, ctx, step);
+        }
         Then::Stay => {}
         Then::Wait(e) => engine_wait(state, ctx, "replace", &e),
         Then::Fail(why) => fail_replace(state, ctx, files, &why)?,

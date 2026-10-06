@@ -81,8 +81,10 @@ fn a_bundle_without_the_maintainers_co_signature_is_refused_once_the_agent_requi
     assert!(detail.contains("alice: signed by another key"), "{detail}");
     assert_eq!(w.changes().len(), changes, "a refusal changed the engine");
 
-    // Alice co-signs: v1.2.0 goes, and her signature is kept beside the bundle.
+    // Alice co-signs: v1.2.0 goes (past the brake's ten minutes, #325), and her signature
+    // is kept beside the bundle.
     cosign(&w.remote, "v1.2.0", &alice);
+    w.tick(601);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.2.0"), "{:?}", w.outcome());
     assert_eq!(w.agent.state.min_release, r("v1.1.0"));
@@ -103,6 +105,7 @@ fn a_bundle_without_the_maintainers_co_signature_is_refused_once_the_agent_requi
         "{detail}"
     );
     cosign(&w.remote, "v1.3.0", &bob);
+    w.tick(601);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.3.0"), "{:?}", w.outcome());
 
@@ -111,6 +114,7 @@ fn a_bundle_without_the_maintainers_co_signature_is_refused_once_the_agent_requi
     cosign(&w.remote, "v1.4.0", &alice);
     cosign(&w.remote, "v1.4.0", &bob);
     w.target("v1.4.0", None);
+    w.tick(601);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.4.0"), "{:?}", w.outcome());
     assert!(!kept.exists(), "v1.2.0's co-signature outlived its bundle");

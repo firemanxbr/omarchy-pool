@@ -4,8 +4,9 @@
 //! owner's Confirm, and the host worker token written for the dispatcher.
 //!
 //! What comes before it at install — the verified bundle, preflight, the runtime and
-//! the capacity detection that writes `run/capacity.json` — is #317's and #333's; the
-//! rotation every 30 days is called from the run loop (#315) through [`fetch_token`].
+//! the capacity detection that writes `run/capacity.json` — is #317's and #333's; a
+//! rotation is `omarchy-agent token` or the pool's `rotate-token` host order (#325), both
+//! through [`write_worker_token`].
 //! Re-running it keeps the identity: a machine that enrolled goes straight to the wait
 //! or the token — and keeps the worker token it holds, since every fetch rotates it
 //! (the one it replaces works ten more minutes only, so two fetches in a row would cut
@@ -473,23 +474,9 @@ pub fn fetch_token(
             a.why()
         )));
     }
-    // Both go into the dispatcher's env_file: anything but the pool's own shapes — a
-    // newline above all, which would add a variable of the pool's choosing to a
-    // container that holds the engine's socket — is refused, and nothing is written.
-    let worker = a.json["worker"]
-        .as_str()
-        .filter(|w| valid_worker_id(w))
-        .ok_or("the answer names no registration (letters, digits and dashes)")?;
-    let token = a.json["token"]
-        .as_str()
-        .filter(|t| valid_worker_token(t))
-        .ok_or("the answer carries no worker token (omw_ and 48 hex digits)")?;
     let env = o.paths.dispatcher_env();
-    host::private_dir(env.parent().ok_or("no etc directory")?)?;
-    // The rest of the file is rendered again (#371): a rotation keeps the host's addresses,
-    // the secrets directory, the agent budget and the owner's own lines.
     let r = rendered(o, out);
-    dispatcher_env::write_token(&env, worker, token, &r)?;
+    let worker = write_worker_token(&env, &a.json, &r)?;
     say(
         out,
         &format!(
@@ -501,6 +488,35 @@ pub fn fetch_token(
     );
     said_rendered(out, &env, &r);
     Ok(())
+}
+
+/// Writes the host worker token of the pool's answer to `POST /hosts/self/token` for the
+/// dispatcher, and nowhere else: `env` (the set's `etc/dispatcher.env`, mode 0600, in a
+/// directory only the agent writes), the rest of the file rendered again by `r` (#371): a
+/// rotation keeps the host's addresses, the secrets directory, the agent budget and the
+/// owner's own lines. The registration it names is returned. Enrollment's first fetch and
+/// every rotation — `omarchy-agent token` and the run loop's `rotate-token` host order
+/// (#325) — write through here alone: the seam where the token's file moves (#327's token
+/// file for a `*_FILE` mount).
+pub fn write_worker_token(
+    env: &Path,
+    answer: &serde_json::Value,
+    r: &Rendered,
+) -> Result<String, String> {
+    // Both go into the dispatcher's env_file: anything but the pool's own shapes — a
+    // newline above all, which would add a variable of the pool's choosing to a
+    // container that holds the engine's socket — is refused, and nothing is written.
+    let worker = answer["worker"]
+        .as_str()
+        .filter(|w| valid_worker_id(w))
+        .ok_or("the answer names no registration (letters, digits and dashes)")?;
+    let token = answer["token"]
+        .as_str()
+        .filter(|t| valid_worker_token(t))
+        .ok_or("the answer carries no worker token (omw_ and 48 hex digits)")?;
+    host::private_dir(env.parent().ok_or("no etc directory")?)?;
+    dispatcher_env::write_token(env, worker, token, r)?;
+    Ok(worker.to_owned())
 }
 
 /// The machine's name as the pool takes it: a DNS label's characters, at most 63.

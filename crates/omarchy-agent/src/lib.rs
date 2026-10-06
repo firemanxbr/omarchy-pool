@@ -52,12 +52,20 @@ pub mod fuzz {
         let _ = crate::statement::parse(data);
     }
 
-    /// `state.json` as the run loop reads it, the pool's host state (#344) and the `follow`
-    /// answer of a pool from before it.
+    /// `state.json` as the run loop reads it, the pool's host state (#344, with P4's settings
+    /// and orders, #325), the `follow` answer of a pool from before it, and
+    /// `run/capacity.json` narrowed to settings (#325).
     pub fn state(data: &[u8]) {
         let _ = crate::run::state::parse(data);
         let _ = crate::run::pool::parse_state(data);
         let _ = crate::run::pool::parse_follow(data, "w_fuzz");
+        if let Ok(b) = crate::run::settings::Base::parse(data) {
+            let s = crate::run::settings::Settings {
+                units: Some(3),
+                emulate: Some(Vec::new()),
+            };
+            let _ = b.narrowed(&s, &crate::run::config::Policy::default());
+        }
     }
 
     /// The bundle archive, then its manifest, as `verify --bundle` reads them once signed.

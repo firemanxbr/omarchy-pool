@@ -1,9 +1,13 @@
 //! What the agent asks over the network (design v2 §16.1, §16.4, §17.1): the pool's host
 //! state (`GET /api/v1/hosts/self/state`, signed with the host key, #344) — the release
-//! target, the open Update orders of the host's registration and the host orders — and
-//! its rollback relay (with the maintainers' co-signatures of a statement, #330), the host
-//! report (`POST /api/v1/hosts/self/report`, signed), and the release assets on GitHub (a
-//! bundle's co-signatures among them, each of which may not exist). Answers are read leniently and sorted three ways; none
+//! target, the open Update orders of the host's registration, the host orders and (#325)
+//! the settings the pool keeps for it — and its rollback relay (with the maintainers'
+//! co-signatures of a statement, #330), the host report
+//! (`POST /api/v1/hosts/self/report`, signed), a new host worker token
+//! (`POST /api/v1/hosts/self/token`, signed, for `rotate-token`), the dispatcher's
+//! scrubbed log lines (`POST /api/v1/hosts/self/diagnostics`, signed, for `diagnostics`),
+//! and the release assets on GitHub (a bundle's co-signatures among them, each of which
+//! may not exist). Answers are read leniently and sorted three ways; none
 //! of them ever stops the agent: no answer, a 5xx or a malformed body changes nothing; a
 //! 401/403 changes nothing and slows the polls to hourly. The host state's answer, whatever
 //! its status, also gives the pool's clock (its `Date`), which a Mac's VM is held to (#320).
@@ -38,8 +42,8 @@ pub(crate) enum Net<T> {
     Unauthorized(u16),
 }
 
-/// What `GET /api/v1/hosts/self/state` says, as far as this agent reads it (P3's minimal
-/// host state, design v2 §17.1; settings and the other orders are P4's).
+/// What `GET /api/v1/hosts/self/state` says, as far as this agent reads it (design v2
+/// §17.1: P3's release target and orders, #344; P4's settings and other orders, #325).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct HostState {
     /// The release the pool names for this host; `None` when it runs none (a build with
@@ -56,6 +60,9 @@ pub(crate) struct HostState {
     /// open Update are its `follow`'s. A pool from #344 on always sends one, `{"target":
     /// null}` when it runs no release.
     pub older_pool: bool,
+    /// The settings the pool keeps for this host (#325): the last ones its agent took. Read
+    /// only by an agent that has none of its own (a `state.json` lost), always narrowed.
+    pub settings: Option<super::settings::Settings>,
 }
 
 /// What `GET /api/v1/factory/follow?ids=<worker>` says, as far as the agent reads it: read
@@ -80,6 +87,15 @@ pub(crate) struct Order {
     pub not_after: Option<i64>,
 }
 
+/// The argument of a settings order: a value, the envelope's own (`null`), or one this
+/// agent cannot read (refused).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Arg<T> {
+    Set(T),
+    Envelope,
+    Malformed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OrderKind {
     /// Stop and then remove the legacy compose project `legacy.json` records, and write the
@@ -87,18 +103,61 @@ pub(crate) enum OrderKind {
     RetireLegacy,
     /// A round now; it never skips the owner's soak (P4).
     ReconcileNow,
+    /// At most this many units, inside the envelope (#325).
+    SetUnits(Arg<u32>),
+    /// Only these emulated lanes, inside the envelope (#325).
+    SetEmulate(Arg<Vec<String>>),
+    /// A new host worker token for the dispatcher (#325, design v2 §6.1).
+    RotateToken,
+    /// Lift every quarantine and try the release again (#325).
+    RetryRelease,
+    /// The dispatcher's last log lines, scrubbed, if the envelope allows it (#325, M10).
+    Diagnostics,
     /// Any other word, kept to say what was refused.
     Unknown(String),
 }
+
+/// At most this many architectures in a `set-emulate`.
+const MAX_ARCHES: usize = 4;
 
 impl OrderKind {
     pub fn parse(s: &str) -> Self {
         match s {
             "retire-legacy" => OrderKind::RetireLegacy,
             "reconcile-now" => OrderKind::ReconcileNow,
+            "set-units" => OrderKind::SetUnits(Arg::Malformed),
+            "set-emulate" => OrderKind::SetEmulate(Arg::Malformed),
+            "rotate-token" => OrderKind::RotateToken,
+            "retry-release" => OrderKind::RetryRelease,
+            "diagnostics" => OrderKind::Diagnostics,
             other => {
                 OrderKind::Unknown(other.chars().filter(|c| !c.is_control()).take(64).collect())
             }
+        }
+    }
+
+    /// The kind with its argument read from the order's object: `units` for `set-units`,
+    /// `emulate` for `set-emulate`.
+    fn read(s: &str, o: &serde_json::Value) -> Self {
+        match Self::parse(s) {
+            OrderKind::SetUnits(_) => OrderKind::SetUnits(match o.get("units") {
+                Some(serde_json::Value::Null) => Arg::Envelope,
+                Some(v) => v
+                    .as_u64()
+                    .and_then(|u| u32::try_from(u).ok())
+                    .map_or(Arg::Malformed, Arg::Set),
+                None => Arg::Malformed,
+            }),
+            OrderKind::SetEmulate(_) => OrderKind::SetEmulate(match o.get("emulate") {
+                Some(serde_json::Value::Null) => Arg::Envelope,
+                Some(serde_json::Value::Array(a)) if a.len() <= MAX_ARCHES => a
+                    .iter()
+                    .map(|x| x.as_str().filter(|x| x.len() <= 16).map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+                    .map_or(Arg::Malformed, Arg::Set),
+                _ => Arg::Malformed,
+            }),
+            k => k,
         }
     }
 
@@ -106,6 +165,11 @@ impl OrderKind {
         match self {
             OrderKind::RetireLegacy => "retire-legacy",
             OrderKind::ReconcileNow => "reconcile-now",
+            OrderKind::SetUnits(_) => "set-units",
+            OrderKind::SetEmulate(_) => "set-emulate",
+            OrderKind::RotateToken => "rotate-token",
+            OrderKind::RetryRelease => "retry-release",
+            OrderKind::Diagnostics => "diagnostics",
             OrderKind::Unknown(k) => k,
         }
     }
@@ -143,6 +207,10 @@ pub(crate) trait Pool {
     fn release_asset_if_any(&mut self, r: Release, name: &str) -> Net<Option<Vec<u8>>>;
     /// A pinned tool (checked by SHA-256 by the caller).
     fn download(&mut self, url: &str) -> Net<Vec<u8>>;
+    /// A new host worker token (signed, #325's `rotate-token`): the pool's answer.
+    fn token(&mut self) -> Net<serde_json::Value>;
+    /// Posts the dispatcher's scrubbed log lines (signed, #325's `diagnostics`).
+    fn diagnostics(&mut self, body: &[u8]) -> Net<()>;
     /// The public address the pool's edge sees this host come from over IPv4 (#371): the
     /// one its tasks leave from too, through the same NAT.
     fn public_address(&mut self) -> Net<IpAddr>;
@@ -152,6 +220,8 @@ const STATE_MAX: u64 = 64 << 10;
 const FOLLOW_MAX: u64 = 64 << 10;
 const STATE_PATH: &str = "/api/v1/hosts/self/state";
 const REPORT_PATH: &str = "/api/v1/hosts/self/report";
+const TOKEN_PATH: &str = "/api/v1/hosts/self/token";
+const DIAGNOSTICS_PATH: &str = "/api/v1/hosts/self/diagnostics";
 /// `/cdn-cgi/trace` is a dozen short lines.
 const TRACE_MAX: u64 = 4 << 10;
 const STATEMENT_MAX: u64 = 1 << 20;
@@ -199,10 +269,11 @@ pub(crate) fn parse_state(body: &[u8]) -> Result<HostState, String> {
         .iter()
         .filter_map(|o| {
             let id = o.get("id")?.as_str().filter(|i| is_order_id(i))?.to_owned();
-            let kind = OrderKind::parse(
+            let kind = OrderKind::read(
                 o.get("kind")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(""),
+                o,
             );
             let not_after = match o.get("not_after") {
                 Some(serde_json::Value::String(t)) => super::trust::unix_time(t),
@@ -216,12 +287,34 @@ pub(crate) fn parse_state(body: &[u8]) -> Result<HostState, String> {
             })
         })
         .collect();
+    // The settings the pool keeps: a units count and a list of architectures, each read
+    // alone; anything else is none.
+    let settings = raw
+        .get("settings")
+        .and_then(serde_json::Value::as_object)
+        .map(|s| super::settings::Settings {
+            units: s
+                .get("units")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|u| u32::try_from(u).ok()),
+            emulate: s
+                .get("emulate")
+                .and_then(serde_json::Value::as_array)
+                .filter(|a| a.len() <= MAX_ARCHES)
+                .and_then(|a| {
+                    a.iter()
+                        .map(|x| x.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                }),
+        })
+        .filter(|s| !s.is_empty());
     Ok(HostState {
         target,
         updates,
         orders,
         poll_s: raw.get("poll_s").and_then(serde_json::Value::as_i64),
         older_pool: !raw.contains_key("release"),
+        settings,
     })
 }
 
@@ -561,6 +654,25 @@ impl Pool for Https {
         self.get_ok(&self.downloads, url, super::tools::MAX_TOOL)
     }
 
+    fn token(&mut self) -> Net<serde_json::Value> {
+        match self.signed_call("POST", TOKEN_PATH, Some(b"")) {
+            Net::Ok(body) => match serde_json::from_slice(&body) {
+                Ok(v) => Net::Ok(v),
+                Err(e) => Net::NoAnswer(format!("token: {e}")),
+            },
+            Net::NoAnswer(e) => Net::NoAnswer(e),
+            Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
+    }
+
+    fn diagnostics(&mut self, body: &[u8]) -> Net<()> {
+        match self.signed_call("POST", DIAGNOSTICS_PATH, Some(body)) {
+            Net::Ok(_) => Net::Ok(()),
+            Net::NoAnswer(e) => Net::NoAnswer(e),
+            Net::Unauthorized(s) => Net::Unauthorized(s),
+        }
+    }
+
     fn public_address(&mut self) -> Net<IpAddr> {
         let url = format!("{}/cdn-cgi/trace", self.origin);
         match self.get_ok(&self.direct_v4, &url, TRACE_MAX) {
@@ -599,7 +711,7 @@ mod tests {
             "orders":[
               {"id":"ho_a","kind":"retire-legacy","not_after":"2027-01-15T09:00:00.000Z","by":"m1"},
               {"id":"ho_b","kind":"reconcile-now","not_after":1800003600},
-              {"id":"ho_c","kind":"rotate-token","not_after":"2027-01-15T09:00:00Z"},
+              {"id":"ho_c","kind":"shell","not_after":"2027-01-15T09:00:00Z"},
               {"id":"ho_d","kind":"reconcile-now","not_after":"soon"},
               {"id":"ho_e","not_after":"2027-01-15T09:00:00Z"},
               {"id":"bad id","kind":"reconcile-now","not_after":1},
@@ -620,7 +732,7 @@ mod tests {
             [
                 ("ho_a", "retire-legacy", Some(1_800_003_600)),
                 ("ho_b", "reconcile-now", Some(1_800_003_600)),
-                ("ho_c", "rotate-token", Some(1_800_003_600)),
+                ("ho_c", "shell", Some(1_800_003_600)),
                 ("ho_d", "reconcile-now", None),
                 ("ho_e", "", Some(1_800_003_600)),
             ]
@@ -660,6 +772,71 @@ mod tests {
         assert!(!k.name().contains('\u{1b}'));
     }
 
+    #[test]
+    fn p4s_orders_and_settings_are_read_with_their_arguments() {
+        let body = br#"{"release":{"target":"v1.21.0"},
+            "settings":{"units":4,"emulate":["x86_64"],"new":1},
+            "orders":[
+              {"id":"ho_1","kind":"set-units","not_after":1800003600,"units":4},
+              {"id":"ho_2","kind":"set-units","not_after":1800003600,"units":null},
+              {"id":"ho_3","kind":"set-units","not_after":1800003600,"units":-1},
+              {"id":"ho_4","kind":"set-units","not_after":1800003600},
+              {"id":"ho_5","kind":"set-emulate","not_after":1800003600,"emulate":[]},
+              {"id":"ho_6","kind":"set-emulate","not_after":1800003600,"emulate":["x86_64",1]},
+              {"id":"ho_7","kind":"set-emulate","not_after":1800003600,"emulate":null},
+              {"id":"ho_8","kind":"rotate-token","not_after":1800003600},
+              {"id":"ho_9","kind":"retry-release","not_after":1800003600},
+              {"id":"ho_a","kind":"diagnostics","not_after":1800003600}
+            ]}"#;
+        let s = parse_state(body).unwrap();
+        let kinds: Vec<&OrderKind> = s.orders.iter().map(|o| &o.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                &OrderKind::SetUnits(Arg::Set(4)),
+                &OrderKind::SetUnits(Arg::Envelope),
+                &OrderKind::SetUnits(Arg::Malformed),
+                &OrderKind::SetUnits(Arg::Malformed),
+                &OrderKind::SetEmulate(Arg::Set(Vec::new())),
+                &OrderKind::SetEmulate(Arg::Malformed),
+                &OrderKind::SetEmulate(Arg::Envelope),
+                &OrderKind::RotateToken,
+                &OrderKind::RetryRelease,
+                &OrderKind::Diagnostics,
+            ]
+        );
+        assert_eq!(
+            s.orders.iter().map(|o| o.kind.name()).collect::<Vec<_>>(),
+            [
+                "set-units",
+                "set-units",
+                "set-units",
+                "set-units",
+                "set-emulate",
+                "set-emulate",
+                "set-emulate",
+                "rotate-token",
+                "retry-release",
+                "diagnostics"
+            ]
+        );
+        assert_eq!(
+            s.settings,
+            Some(crate::run::settings::Settings {
+                units: Some(4),
+                emulate: Some(vec!["x86_64".into()]),
+            })
+        );
+        // Settings that say nothing are none.
+        for none in [
+            &br#"{"release":{"target":null},"settings":null}"#[..],
+            br#"{"release":{"target":null},"settings":{}}"#,
+            br#"{"release":{"target":null},"settings":{"units":"4","emulate":"x86_64"}}"#,
+        ] {
+            assert_eq!(parse_state(none).unwrap().settings, None);
+        }
+    }
+
     /// The host state as the Worker answers it (`tests/fixtures/host-api/state.json`), whose
     /// keys and value types worker/test/host-orders.test.ts holds handleHostState's answer
     /// to: the contract both sides read, written once.
@@ -688,7 +865,24 @@ mod tests {
                     &OrderKind::ReconcileNow,
                     Some(1_800_003_900)
                 ),
+                (
+                    "ho_33333333333333333333333333333333",
+                    &OrderKind::SetUnits(Arg::Set(4)),
+                    Some(1_800_003_960)
+                ),
+                (
+                    "ho_44444444444444444444444444444444",
+                    &OrderKind::SetEmulate(Arg::Set(Vec::new())),
+                    Some(1_800_004_020)
+                ),
             ]
+        );
+        assert_eq!(
+            s.settings,
+            Some(crate::run::settings::Settings {
+                units: Some(6),
+                emulate: Some(vec!["x86_64".into()]),
+            })
         );
     }
 
