@@ -52,13 +52,23 @@
 //! A probe sidecar ([`probe`]) says who this host's agent is with every
 //! claim (`agent`) and answers `recheck-agent` and `restart-agent`.
 //!
-//! **The sandbox** (#330, design v2 §10.4; D43): a community task on its
-//! native lane starts in the sandboxed runtime `run/capacity.json` names —
-//! gVisor's `runsc` or Kata Containers, which the agent found after a smoke
-//! run on a kernel that is not the engine's — read again before each start;
-//! its sidecars, the project's tasks and an emulated lane's run on the
-//! engine's own runtime. A runtime the engine no longer has fails the start,
-//! `lost`: nothing runs outside the sandbox the file says the host has.
+//! **The sandbox** (#330, design v2 §10.4; D43): a task that runs what a
+//! contributor wrote — everything but the project's own recipe
+//! ([`spec::sandboxed`]) — starts in the sandboxed runtime
+//! `run/capacity.json` names — gVisor's `runsc` or Kata Containers, which
+//! the agent found after a smoke run on a kernel that is not the engine's —
+//! read again before each start; its sidecars and the project's own recipes
+//! run on the engine's own runtime. The claim's `capacity.sandbox` says the
+//! runtime it applies, so the pool hands a sandboxed host's emulated lanes —
+//! which a sandbox's kernel cannot run, their binfmt handler being the
+//! host's — the project's own recipes only; one that reaches them anyway is
+//! handed back `lost` before anything runs. A start the runtime refuses fails
+//! `lost` — nothing runs outside the sandbox the file says the host has —
+//! and holds the claims (`want: 0`, the reason in the claim's
+//! `capacity.sandbox_held`) for [`SANDBOX_HOLD`], and after a second refusal
+//! in a row until the agent counts the host again (a new `at` in the file):
+//! a runtime gone or broken since the count loses one or two tasks, not
+//! every one the pool hands the host.
 //!
 //! **Lanes** (#338, design v2 §7.4, §7.5): a build or a trial runs on the
 //! lane the pool leased it on — its architecture's `--platform`, natively
@@ -152,6 +162,9 @@ const CLAIM_RETRY: u64 = 60;
 pub const DISK_HOLD: u64 = 30 * 60;
 /// What a host claims while a disk hold keeps builds out.
 const KINDS_HELD: [&str; 2] = ["trial", "audit"];
+/// After a first start its sandbox's runtime refused, no claim for this long (#330); a
+/// second refusal in a row holds the claims until the agent counts the host again.
+pub const SANDBOX_HOLD: u64 = 30 * 60;
 /// How long after its container starts a lease's memory share still counts as promised before a
 /// claim (#337, design v2 §7.6): a container just started has not grown to its share, so
 /// `MemAvailable` does not show it yet, and claims that follow each other at once would each offer
@@ -396,6 +409,10 @@ pub struct Dispatcher {
     /// disks, or until `hold_until` (trials and audits are claimed meanwhile).
     disk_hold: u64,
     hold_until: u64,
+    /// The sandbox's runtime refused a task container's start (#330): no claim while it holds.
+    sandbox_hold: Option<SandboxHold>,
+    /// The sandboxed starts refused in a row: a second holds until the next count.
+    sandbox_refusals: u32,
     /// The capacity file's `at` when the watcher last killed on the engine's value: once per probe.
     engine_kill_at: Option<String>,
     /// What the memory available let the last claim offer, when it was below its free units (said once per change).
@@ -413,6 +430,15 @@ pub struct Dispatcher {
     pub net: Net,
     ledger: budget::Ledger,
     probe: Prober,
+}
+
+/// A hold on the claims after the sandbox's runtime refused a start (#330): the count it was
+/// refused under (the capacity file's `at`), until when (`None`: until the next count) and why.
+#[derive(Debug, Clone)]
+struct SandboxHold {
+    at: Option<String>,
+    until: Option<u64>,
+    why: String,
 }
 
 /// The probe sidecar's standing: its last answer, the probe running now, when the next one is due, the orders waiting for it.
@@ -460,6 +486,8 @@ impl Dispatcher {
             disk_low: false,
             disk_hold: 0,
             hold_until: 0,
+            sandbox_hold: None,
+            sandbox_refusals: 0,
             engine_kill_at: None,
             mem_held: None,
             pool_until: Instant::now(),
@@ -1035,16 +1063,28 @@ impl Dispatcher {
                 return live;
             }
         };
-        // A community task on its native lane runs in the host's sandboxed runtime when the
-        // agent found one (#330, D43), read now as the lane is. A file that does not read now
-        // hands the lease back: a community task never runs outside a sandbox the host may have.
-        let runtime = if spec::sandboxed(&live.lease.task.trust, live.lease.emulated()) {
-            if let Some(c) = capacity::read(&self.capacity_file) {
-                c.sandbox.map(|s| s.runtime)
-            } else {
-                let why = "run/capacity.json does not read now: a community task waits for the sandbox this host may have".to_owned();
-                lost(self, &mut live, why);
-                return live;
+        // What a contributor wrote runs in the host's sandboxed runtime when the agent found one
+        // (#330, D43), read now as the lane is. A file that does not read now, or a lease on an
+        // emulated lane of a host that has one (the pool hands them none: a lease leased before
+        // the count found it), is handed back: it never runs outside a sandbox the host may have.
+        let t = &live.lease.task;
+        let review = t.params.get("review").is_some() || t.pkgbuild_ref.starts_with("review:");
+        let runtime = if spec::sandboxed(&t.trust, &t.kind, review) {
+            match capacity::read(&self.capacity_file).map(|c| c.sandbox) {
+                None => {
+                    let why = "run/capacity.json does not read now: a task of a contributor's waits for the sandbox this host may have".to_owned();
+                    lost(self, &mut live, why);
+                    return live;
+                }
+                Some(Some(_)) if live.lease.emulated() => {
+                    let why = format!(
+                        "this host's sandbox does not cover its emulated {} lane, which runs the project's own recipes only: handed back",
+                        live.lease.arch()
+                    );
+                    lost(self, &mut live, why);
+                    return live;
+                }
+                Some(s) => s.map(|s| s.runtime),
             }
         } else {
             None
@@ -1140,6 +1180,10 @@ impl Dispatcher {
             if agent_start.is_none_or(|a| i <= a) {
                 live.lease.agent_calls = None;
             }
+            // The task container's own start, in the sandbox's runtime: the claims hold (#330).
+            if let Some(r) = runtime.as_deref().filter(|_| plan[i][0] == "run") {
+                self.hold_sandbox(now, r, live.lease.task.id, &why);
+            }
             // A `run` that did not answer may still have made the container: the ending removes it, its sidecars and network.
             self.begin_ending(&mut live, Ending::Lost(why));
             return live;
@@ -1158,9 +1202,62 @@ impl Dispatcher {
             agent_calls.map_or(String::new(), |c| format!(
                 ", an agent sidecar of {c} calls"
             )),
-            runtime.map_or(String::new(), |r| format!(", in the sandbox {r}"))
+            runtime
+                .as_deref()
+                .map_or(String::new(), |r| format!(", in the sandbox {r}"))
         ));
+        if runtime.is_some() {
+            self.sandbox_refusals = 0;
+        }
         live
+    }
+
+    /// The sandbox's runtime refused a task container (#330): no claim for [`SANDBOX_HOLD`],
+    /// or after a second refusal in a row until the agent counts the host again — the pool
+    /// would hand it task after task, each lost, each loss of the same task past the second
+    /// spending its attempt (worker/src/routes/factory.ts `HOST_LOSSES_MAX`).
+    fn hold_sandbox(&mut self, now: u64, runtime: &str, task: u64, why: &str) {
+        self.sandbox_refusals += 1;
+        let until = (self.sandbox_refusals < 2).then_some(now + SANDBOX_HOLD);
+        let why = format!(
+            "{runtime} refused task {task}'s start ({}): no claim {}",
+            why.chars().take(160).collect::<String>(),
+            if until.is_some() {
+                format!("for {} minutes", SANDBOX_HOLD / 60)
+            } else {
+                "until the agent counts the host again (`omarchy-agent capacity --write`)".into()
+            }
+        );
+        say(format!("the sandbox: {why}"));
+        self.sandbox_hold = Some(SandboxHold {
+            at: capacity::read(&self.capacity_file).map(|c| c.at),
+            until,
+            why,
+        });
+    }
+
+    /// Whether the claims hold for the sandbox now: until its time, or until the capacity
+    /// file says another count than the one it was refused under.
+    fn sandbox_held(&mut self, now: u64, at: Option<&str>) -> Option<String> {
+        let h = self.sandbox_hold.as_ref()?;
+        // A file that does not read now is no new count: the claims wait for it anyway.
+        let counted = at.is_some() && h.at.as_deref() != at;
+        if !counted && h.until.is_none_or(|u| now < u) {
+            return Some(h.why.clone());
+        }
+        say(format!(
+            "the sandbox: claiming again ({})",
+            if counted {
+                "the agent counted the host again"
+            } else {
+                "its hold is over"
+            }
+        ));
+        if counted {
+            self.sandbox_refusals = 0;
+        }
+        self.sandbox_hold = None;
+        None
     }
 
     /// The lowest /28 no lease and no probe holds, once what no lease or probe owns is swept.
@@ -1319,12 +1416,14 @@ impl Dispatcher {
         } else {
             self.mem_held = None;
         }
+        let sandbox_held = self.sandbox_held(now, cap.as_ref().map(|c| c.at.as_str()));
         let want = cap.as_ref().is_some_and(|c| {
             !c.below_minimum
                 && offer > 0
                 && c.engine_free_gb >= self.floor_gb
                 && spec::digest_ok(self.images.of(&c.arch))
-        }) && !self.disk_low;
+        }) && !self.disk_low
+            && sandbox_held.is_none();
         // What a task may take: the units this claim offered, none when it said `want: 0`.
         let room = if want { offer } else { 0 };
         let claim_id = self
@@ -1371,6 +1470,10 @@ impl Dispatcher {
             // The day's agent budget spent: no model work until tomorrow (the pool counts agent slots like units).
             if !self.agent_day_left(now) {
                 body["capacity"]["agent_slots"] = json!(0);
+            }
+            // Why the claims hold for the sandbox (#330), for the host page.
+            if let Some(why) = &sandbox_held {
+                body["capacity"]["sandbox_held"] = json!(why);
             }
         }
         if let Some(agent) = self.agent_field() {

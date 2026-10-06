@@ -5,9 +5,10 @@
 //!
 //! Its `sandbox` (#330, D43) is the sandboxed runtime the agent found — gVisor's `runsc` or
 //! Kata Containers, after a smoke run on a kernel that is not the engine's — which the
-//! dispatcher starts community tasks on the native lane in. One it cannot read makes the
-//! whole file unread (no claim): a community task never runs outside a sandbox the host
-//! may have.
+//! dispatcher starts what a contributor wrote in on the native lane, and which the claim's
+//! `capacity.sandbox` says it applies (`null`: none), for the pool's selection and the host
+//! page. One it cannot read makes the whole file unread (no claim): a contributor's task
+//! never runs outside a sandbox the host may have.
 //!
 //! Seams: the agent's run loop (#315) refreshes the file; its free engine
 //! disk is the agent's last probe, in 10 GB steps, so the disk watcher's
@@ -115,10 +116,12 @@ pub struct File {
     /// each on after binfmt and a smoke run, within the owner's envelope.
     pub emulated: Vec<String>,
     pub engine_free_gb: u64,
-    /// The sandboxed runtime community tasks on the native lane run in (#330); `None` when the
-    /// host has none (`null`, or a file from an agent before #330).
+    /// The sandboxed runtime a contributor's tasks on the native lane run in (#330); `None` when
+    /// the host has none (`null`, or a file from an agent before #330).
     pub sandbox: Option<Sandbox>,
-    /// The claim's `capacity`, as the pool reads it (worker/src/hosts.ts parseCapacity).
+    /// The claim's `capacity`, as the pool reads it (worker/src/hosts.ts parseCapacity), with
+    /// the `sandbox` this dispatcher applies: the pool keeps a sandboxed host's emulated lanes
+    /// to the project's own recipes, and the host page says what is applied, not only found.
     pub claim: Value,
 }
 
@@ -184,6 +187,7 @@ pub fn read(path: &Path) -> Option<File> {
         "agent_slots": v.get("agent_slots").cloned().unwrap_or(Value::from(0)),
         "lanes": lanes,
         "held_lanes": v.get("held_lanes").cloned().unwrap_or(Value::Array(Vec::new())),
+        "sandbox": sandbox.as_ref().map(|s| serde_json::json!({ "runtime": s.runtime, "kind": s.kind })),
     });
     Some(File {
         at: v
@@ -340,6 +344,11 @@ mod tests {
             .unwrap()
             .starts_with("needs a person: prep-root.sh installs qemu-user-static-binfmt"));
         assert_eq!(f.sandbox, None, "`sandbox: null`: none");
+        assert_eq!(
+            f.claim["sandbox"],
+            Value::Null,
+            "the claim says it applies none"
+        );
         // The Studio with gVisor (#330): the runtime its community tasks start in.
         agent("sandboxed.json");
         let f = read(&p).unwrap();
@@ -350,9 +359,10 @@ mod tests {
                 kind: "gvisor".into()
             })
         );
-        assert!(
-            f.claim.get("sandbox").is_none(),
-            "the pool reads it from the agent's report, not the claim"
+        assert_eq!(
+            f.claim["sandbox"],
+            serde_json::json!({ "runtime": "runsc", "kind": "gvisor" }),
+            "the claim says the runtime this dispatcher applies"
         );
     }
 
@@ -365,7 +375,13 @@ mod tests {
             std::fs::write(&p, format!(r#"{{"schema":2,"at":"t","cpus":12,"mem_gb":32,"disk_free_gb":{{"work":200,"engine":150}},"units":11,"lanes":[{{"arch":"aarch64","mode":"native"}}],"below_minimum":false{sandbox}}}"#)).unwrap();
             read(&p)
         };
-        assert_eq!(with("").unwrap().sandbox, None, "an agent before #330");
+        let older = with("").unwrap();
+        assert_eq!(older.sandbox, None, "an agent before #330");
+        assert_eq!(
+            older.claim["sandbox"],
+            Value::Null,
+            "none applied, and said"
+        );
         assert_eq!(with(r#","sandbox":null"#).unwrap().sandbox, None);
         assert_eq!(
             with(r#","sandbox":{"runtime":"kata-qemu","kind":"kata"}"#)

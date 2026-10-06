@@ -40,7 +40,7 @@
 //! journal rather than in `held_lanes`.
 //!
 //! [`sandbox`] (#330, design v2 §10.4; D43) finds the sandboxed runtime — gVisor's `runsc`
-//! or Kata Containers — the dispatcher runs community tasks on the native lane in, within
+//! or Kata Containers — the dispatcher runs what a contributor wrote on the native lane in, within
 //! the envelope's `sandbox`, after its smoke run shows a kernel that is not the engine's
 //! (`sandbox` in the file, `null` when the host has none; `sandbox_held` with why one is not
 //! used).
@@ -443,7 +443,7 @@ impl Capacity {
     pub fn held_lanes(&self) -> &[emulation::Held] {
         &self.held
     }
-    /// The sandboxed runtime community tasks on the native lane run in (#330), if any.
+    /// The sandboxed runtime a contributor's tasks on the native lane run in (#330), if any.
     pub fn sandbox(&self) -> Option<&sandbox::Sandbox> {
         self.sandbox.as_ref()
     }
@@ -525,7 +525,7 @@ pub struct CapacityFile {
     pub dedicated: bool,
     pub limits: Limits,
     pub below_minimum: bool,
-    /// The sandboxed runtime the dispatcher runs community tasks on the native lane in
+    /// The sandboxed runtime the dispatcher runs a contributor's tasks on the native lane in
     /// (#330, D43): `{runtime, kind}`, `null` when the host has none — which an agent
     /// before #330 does not say at all.
     pub sandbox: Option<sandbox::Sandbox>,

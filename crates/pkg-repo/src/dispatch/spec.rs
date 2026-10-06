@@ -39,13 +39,17 @@
 //! script probe the toolchains a recipe installs and fail at once with
 //! `needs_native` when one cannot start (a 16K-page host's qemu, D33).
 //!
-//! **Its runtime** (#330, design v2 §10.4; D43): a community task — a
-//! contributor's recipe — on its native lane runs in the host's sandboxed
+//! **Its runtime** (#330, design v2 §10.4; D43): a task that runs what a
+//! contributor wrote — their recipe, the project's review rebuild drafted
+//! from it, a trial of what that built, an audit of it: everything but the
+//! project's own recipe ([`sandboxed`]) — runs in the host's sandboxed
 //! runtime when the agent found one (`run/capacity.json`'s `sandbox`: gVisor's
 //! `runsc` or Kata Containers), `--runtime <name>` on its task container, so
-//! an escape lands in the sandbox's own kernel, not on the host. Never on an
-//! emulated lane, whose binfmt handler is the host kernel's, and never on a
-//! sidecar, which runs the signed worker image and no recipe ([`sandboxed`]).
+//! an escape lands in the sandbox's own kernel, not on the host. Only on its
+//! native lane: an emulated lane's binfmt handler is the host kernel's, so a
+//! sandboxed host's emulated lanes take the project's own recipes only (the
+//! pool's selection; the dispatcher hands back one that reaches them). Never
+//! on a sidecar, which runs the signed worker image and no recipe.
 //!
 //! Seams left for later issues, by name: P2's task caches child issue
 //! mounts the read-only shared pacman cache and the per-package build
@@ -166,12 +170,16 @@ pub fn runtime_ok(s: &str) -> bool {
     name_ok(s) && !s.contains('+')
 }
 
-/// Whether a lease's task container runs in the host's sandboxed runtime (#330, D43): a
-/// community task — a contributor's recipe, or what it built — on its native lane. An
-/// emulated lane runs its architecture through the host kernel's binfmt handler, which a
-/// sandbox's own kernel does not have; the project's tasks run the project's own recipes.
-pub fn sandboxed(trust: &str, emulated: bool) -> bool {
-    trust == "community" && !emulated
+/// Whether a task's container runs in the host's sandboxed runtime, when it has one (#330,
+/// D43), by what runs in it rather than by its trust alone: everything but the project's own
+/// recipe — a build of trust `project` that is no review rebuild (a recipe on main, a
+/// maintainer's dry run). A contributor's build; the project's review rebuild (`review`: a
+/// recipe the project's drafter wrote from a contributor's evidence before any approval,
+/// design v2 §9.2, §9.5); a trial, whose helper installs what such a rebuild built, its
+/// install scriptlets with it; an audit; and any trust or kind this dispatcher does not know.
+/// Its lane is the caller's: a sandbox covers the native lane only.
+pub fn sandboxed(trust: &str, kind: &str, review: bool) -> bool {
+    !(trust == "project" && kind == "build" && !review)
 }
 
 /// A lease generation, as the pool draws it: `g_` and 16 hex digits (#334).
@@ -1859,8 +1867,8 @@ mod tests {
         }
     }
 
-    /// The sandboxed runtime (#330, D43): a community task on its native lane runs in it, its
-    /// sidecars on the engine's own runtime; anything else is outside the spec.
+    /// The sandboxed runtime (#330, D43): a task of a contributor's on its native lane runs in it,
+    /// its sidecars on the engine's own runtime; anything else is outside the spec.
     #[test]
     fn a_sandboxed_task_runs_in_its_runtime_and_its_sidecars_on_the_engines_own() {
         let (tdir, rel, work) = dirs();
@@ -1909,14 +1917,32 @@ mod tests {
     }
 
     #[test]
-    fn only_a_community_task_on_its_native_lane_is_sandboxed() {
-        assert!(sandboxed("community", false));
+    fn everything_but_the_projects_own_recipe_is_sandboxed() {
         assert!(
-            !sandboxed("community", true),
-            "an emulated lane runs on the host's binfmt"
+            sandboxed("community", "build", false),
+            "a contributor's recipe"
         );
-        assert!(!sandboxed("project", false), "the project's own recipes");
-        assert!(!sandboxed("project", true));
+        assert!(
+            sandboxed("project", "build", true),
+            "the project's review rebuild, drafted from a contributor's evidence"
+        );
+        assert!(
+            sandboxed("project", "trial", false),
+            "a trial installs what a review rebuild built"
+        );
+        assert!(sandboxed("project", "audit", false));
+        assert!(
+            sandboxed("host", "build", false) && sandboxed("", "build", false),
+            "a trust it does not know"
+        );
+        assert!(
+            sandboxed("project", "health", false),
+            "a kind it does not know"
+        );
+        assert!(
+            !sandboxed("project", "build", false),
+            "the project's own recipe: on main, or a maintainer's dry run"
+        );
         assert!(
             runtime_ok("runsc") && runtime_ok("io.containerd.runsc.v1") && runtime_ok("kata-qemu")
         );

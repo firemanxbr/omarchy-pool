@@ -12,9 +12,10 @@
 #      build runs in runsc — the engine's HostConfig.Runtime, the kernel its stub reads inside
 #      gVisor's, its egress sidecar reached over its internal network — and completes; the
 #      project's build beside it, and every sidecar, run on the engine's own runtime, on the
-#      host's kernel;
+#      host's kernel; its claims say the sandbox it applies (`capacity.sandbox`);
 #   3. a file naming a runtime the engine does not have: the community task fails `lost` before
-#      anything of it runs, never on the engine's own runtime.
+#      anything of it runs, never on the engine's own runtime, and the claims hold (`want: 0`,
+#      `capacity.sandbox_held` saying why).
 #
 # Every container it starts is labelled with this run's own host id and removed at the end.
 #
@@ -210,6 +211,9 @@ for side in "$(name 1)-egress" "$(name 2)-egress"; do
   [[ "$(runtime_of "$side")" != runsc ]] || fail "$side runs in runsc"
 done
 echo "ok: the project's task and every sidecar run on the engine's own runtime ($(runtime_of "$(name 2)"))"
+last_claim() { jq -c -s '[.[] | select(.path == "/api/v1/factory/claim") | .body] | last' "$tmp/requests.jsonl"; }
+check "$(last_claim)" "j['capacity']['sandbox'] == {'runtime': 'runsc', 'kind': 'gvisor'}" "the claim says the sandbox it applies"
+echo "ok: its claims say the sandbox it applies (capacity.sandbox)"
 touch "$tmp/work/tasks/1-$(gen 1)/in/finish" "$tmp/work/tasks/2-$(gen 2)/in/finish"
 until_ 120 "both tasks completed" both_done
 until_ 30 "the community task's container removed" gone 1
@@ -222,6 +226,8 @@ until_ 60 "task 3 failed" reported 3 fail
 jq -e '.lost == true and .final == false' <<<"$(report 3 fail)" >/dev/null || fail "task 3: $(report 3 fail)"
 gone 3 || fail "task 3's container is there"
 grep -q "task 3: build sbx started" "$tmp/dispatcher.log" && fail "task 3 was started: $(grep 'task 3' "$tmp/dispatcher.log")"
-echo "ok: a runtime the engine does not have fails the community task lost before it runs, never on the engine's own runtime"
+held() { jq -e '.want == 0 and (.capacity.sandbox_held // "" | startswith("runsc-not-here refused task 3"))' <<<"$(last_claim)" >/dev/null; }
+until_ 30 "a claim held for the sandbox" held
+echo "ok: a runtime the engine does not have fails the community task lost before it runs, never on the engine's own runtime, and holds the claims: $(last_claim | jq -r .capacity.sandbox_held)"
 kill "$disp" 2>/dev/null; wait "$disp" 2>/dev/null || true; disp=""
 echo "ok: a sandboxed runtime on a real engine (docker $("$RT" version --format '{{.Server.Version}}'), runsc at $("$RT" info --format '{{json .Runtimes.runsc}}' | jq -r '.path // .runtimeType'))"

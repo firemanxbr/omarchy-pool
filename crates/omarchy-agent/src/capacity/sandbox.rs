@@ -1,9 +1,11 @@
 //! A sandboxed runtime for community tasks (design v2 §10.4, §19.3; D43; #330): gVisor
-//! (`runsc`) or Kata Containers, on a host whose engine has one. The dispatcher runs a
-//! community task on its native lane under it (`--runtime <name>`), so a container escape
-//! of a contributor's recipe lands in the sandbox's own kernel — gVisor's, or Kata's VM —
-//! and not on the host, whatever the isolation level (§19.3) says an escape from the
-//! engine's own runtime lands as. Detected, not configured, as an emulated lane is:
+//! (`runsc`) or Kata Containers, on a host whose engine has one. The dispatcher runs what a
+//! contributor wrote — their build, the project's review rebuild of one, its trial and
+//! audit: everything but the project's own recipe (pkg-repo's `dispatch::spec::sandboxed`)
+//! — on its native lane under it (`--runtime <name>`), so a container escape of a
+//! contributor's recipe lands in the sandbox's own kernel — gVisor's, or Kata's VM — and
+//! not on the host, whatever the isolation level (§19.3) says an escape from the engine's
+//! own runtime lands as. Detected, not configured, as an emulated lane is:
 //!
 //! 1. the envelope's `sandbox` (design v2 §12): absent or `"auto"` tries what the engine
 //!    lists, `"off"` uses none and runs nothing for it, a runtime's name only that one;
@@ -19,16 +21,17 @@
 //!    instead), shows exactly that — then answers `pacman --version`.
 //!
 //! The first that passes is the host's sandbox (`run/capacity.json`'s `sandbox`, which the
-//! host report carries to the host page). One the envelope names that is not there or
-//! fails, and one installed here that fails its smoke run, are said with why
-//! (`sandbox_held`); a host with none says `sandbox: null`, and its community tasks run on
-//! the engine's own runtime as before (D43: on hosts that have it).
+//! host report carries to the host page beside what the dispatcher's claims say it
+//! applies). One the envelope names that is not there or fails, and one installed here
+//! that fails its smoke run, are said with why (`sandbox_held`); a host with none says
+//! `sandbox: null`, and its community tasks run on the engine's own runtime as before
+//! (D43: on hosts that have it).
 //!
 //! **The native lane only.** An emulated lane runs its architecture through the host
-//! kernel's binfmt handler (§7.5), which a sandbox's own kernel does not have: a community
-//! task on an emulated lane runs on the engine's own runtime, and the host page says so.
-//! Its sidecars run the signed worker image on the engine's own runtime too: no recipe code
-//! runs in them.
+//! kernel's binfmt handler (§7.5), which a sandbox's own kernel does not have: the pool
+//! hands a sandboxed host's emulated lanes the project's own recipes only. Its sidecars run
+//! the signed worker image on the engine's own runtime; the recipe reaches them, which the
+//! security model states as the path a sandbox does not close.
 
 use std::path::Path;
 

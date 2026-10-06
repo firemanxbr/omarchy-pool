@@ -18,7 +18,7 @@ use super::kinds::Ctx;
 use super::lease::{Lease, Phase, Store};
 use super::pool::Pool;
 use super::spec::{self, HOST_LABEL};
-use super::{Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS, MEM_RAMP};
+use super::{Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS, MEM_RAMP, SANDBOX_HOLD};
 use crate::stop::Beat;
 use crate::RepoError;
 
@@ -60,6 +60,9 @@ struct FakeEngine {
     stuck: AtomicBool,
     /// The engine refuses to start the container whose name ends with this.
     refuse: Mutex<Option<String>>,
+    /// The runtimes the engine has besides its own: a container that names another
+    /// (`--runtime`) is refused, as docker refuses it. `None`: whatever it names.
+    runtimes: Mutex<Option<Vec<String>>>,
     /// Each network's `--subnet`: a second network on a /28 still in use is refused, as the engines do.
     subnets: Mutex<BTreeMap<String, String>>,
     /// A lease's teardown leaves its network behind (a `network rm` past its deadline).
@@ -142,6 +145,19 @@ impl FakeEngine {
             .is_some_and(|r| name.ends_with(r.as_str()))
         {
             return Err(format!("the engine refused {name}"));
+        }
+        if let Some(r) = value_of(args, "--runtime") {
+            if self
+                .runtimes
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|has| !has.iter().any(|x| x == r))
+            {
+                return Err(format!(
+                    "docker: Error response from daemon: unknown or invalid runtime name: {r}"
+                ));
+            }
         }
         let host = label_of(args, HOST_LABEL).unwrap_or_default().to_owned();
         let mut c = self.containers.lock().unwrap();
@@ -1548,72 +1564,180 @@ fn sandboxed_file(h: &H) {
     std::fs::copy(fixture, &h.capacity).unwrap();
 }
 
+/// Every `run` this engine was asked for the task container of `id`: what each named as its runtime.
+fn runtimes_of(h: &H, id: u64, gen: &str) -> Vec<Option<String>> {
+    let name = spec::container_name(id, gen);
+    h.engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c[0] == "run" && value_of(c, "--name") == Some(name.as_str()))
+        .map(|c| value_of(c, "--runtime").map(str::to_owned))
+        .collect()
+}
+
+/// The release checkout's trial scripts, as a trial's trusted steps run them: the packages it is
+/// to install, its check, the keyrings.
+fn trial_scripts(h: &H) {
+    std::fs::create_dir_all(h.checkout.join("tests")).unwrap();
+    std::fs::write(
+        h.checkout.join("tests/trial.sh"),
+        "#!/bin/bash\nset -e\nprintf '%s\\n' \"${@:3}\" > \"$TRIAL_STAGE/packages.txt\"\necho check > \"$TRIAL_STAGE/check.sh\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        h.checkout.join("tests/fetch-keyrings.sh"),
+        "#!/bin/bash\ntouch \"$1/archlinux.gpg\"\n",
+    )
+    .unwrap();
+}
+
 #[test]
-fn a_community_task_on_its_native_lane_starts_in_the_sandbox_and_nothing_else_does() {
+fn what_a_contributor_wrote_starts_in_the_sandbox_and_the_projects_own_recipe_does_not() {
     let h = H::new();
     sandboxed_file(&h);
+    trial_scripts(&h);
+    for (name, b) in [
+        ("felix-1.0-1-aarch64.pkg.tar.zst", package("felix")),
+        ("PKGBUILD", b"x".to_vec()),
+        ("build.log", b"x".to_vec()),
+    ] {
+        h.pool.artifacts.lock().unwrap().insert((5, name.into()), b);
+    }
     let mut d = h.dispatcher();
-    let gen3 = "g_00000000000000c3";
-    // A contributor's build on the native lane, one on the emulated lane, and the project's
-    // recipe on main.
-    h.give(on_lane(community(7, GEN), "aarch64", Some("native")));
-    h.give(on_lane(community(8, GEN2), "x86_64", Some("emulated")));
+    let gens = [
+        GEN,
+        GEN2,
+        "g_00000000000000c3",
+        "g_00000000000000c4",
+        "g_00000000000000c5",
+    ];
+    // A contributor's build; the project's review rebuild of one (a recipe its drafter wrote from
+    // the contributor's evidence, before any approval); the trial that installs what that built;
+    // the audit that reads it; and the project's own recipe on main.
+    h.give(on_lane(community(7, gens[0]), "aarch64", Some("native")));
+    h.give(task(
+        8,
+        "build",
+        "felix",
+        "review:7",
+        "project",
+        json!({ "review": 7 }),
+        gens[1],
+    ));
     h.give(task(
         9,
+        "trial",
+        "felix",
+        "staging:8",
+        "project",
+        json!({ "task": 5, "files": ["felix-1.0-1-aarch64.pkg.tar.zst"] }),
+        gens[2],
+    ));
+    h.give(on_lane(
+        task(
+            10,
+            "audit",
+            "felix",
+            "staging:5",
+            "project",
+            json!({ "task": 5 }),
+            gens[3],
+        ),
+        "aarch64",
+        None,
+    ));
+    h.give(task(
+        11,
         "build",
         "felix",
         "0123abcd",
         "project",
         json!({}),
-        gen3,
+        gens[4],
     ));
-    h.ticks(&mut d, 6);
-    assert_eq!(value_of(&h.engine.args(7, GEN), "--runtime"), Some("runsc"));
+    h.ticks(&mut d, 12);
+    for (id, gen) in (7..=10).zip(gens) {
+        assert_eq!(
+            runtimes_of(&h, id, gen),
+            [Some("runsc".to_owned())],
+            "task {id}: {:?}",
+            h.pool.fails_of(id)
+        );
+    }
     assert_eq!(
-        value_of(&h.engine.args(8, GEN2), "--runtime"),
-        None,
-        "an emulated lane runs through the host kernel's binfmt handler"
+        runtimes_of(&h, 11, gens[4]),
+        [None],
+        "the project's own recipe, on the engine's own runtime"
     );
-    assert_eq!(
-        value_of(&h.engine.args(9, gen3), "--runtime"),
-        None,
-        "the project's own recipe"
-    );
-    // Its sidecars, and every other call, on the engine's own runtime.
+    // Their sidecars, and every other call, on the engine's own runtime.
     let calls = h.engine.calls.lock().unwrap().clone();
     let with: Vec<&Vec<String>> = calls
         .iter()
         .filter(|c| c.iter().any(|x| x == "--runtime"))
         .collect();
-    assert_eq!(with.len(), 1, "{with:?}");
+    assert_eq!(with.len(), 4, "{with:?}");
+    assert!(with.iter().all(|c| c[0] == "run"), "{with:?}");
+    // The claim says the runtime this dispatcher applies, for the pool's lanes and the host page.
     assert_eq!(
-        value_of(with[0], "--name"),
-        Some(spec::container_name(7, GEN).as_str())
+        h.pool.last_claim()["capacity"]["sandbox"],
+        json!({ "runtime": "runsc", "kind": "gvisor" })
     );
-    // The file says none now (the owner's `sandbox = "off"`, a runtime that failed its
-    // smoke run): the next community task runs on the engine's own runtime, as on any host
-    // without one.
-    h.units(11);
+    // The file says none now (the owner's `sandbox = "off"`, a runtime that failed its smoke
+    // run): the next contributor's task runs on the engine's own runtime, as on any host
+    // without one, and the claim says none (units beside the five running).
+    h.units(20);
     h.give(on_lane(
-        community(10, "g_00000000000000d4"),
+        community(12, "g_00000000000000d4"),
         "aarch64",
         Some("native"),
     ));
     h.advance(30); // the claim after one that brought nothing
     h.ticks(&mut d, 3);
-    assert!(h.engine.has(10, "g_00000000000000d4"));
+    assert_eq!(runtimes_of(&h, 12, "g_00000000000000d4"), [None]);
+    assert_eq!(h.pool.last_claim()["capacity"]["sandbox"], Value::Null);
+}
+
+#[test]
+fn a_contributors_task_on_an_emulated_lane_of_a_sandboxed_host_is_handed_back_before_it_runs() {
+    let h = H::new();
+    sandboxed_file(&h);
+    let mut d = h.dispatcher();
+    // The pool hands a sandboxed host's emulated lanes the project's own recipes only: a lease
+    // leased before the agent's count found the sandbox is the one that reaches it.
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
+    h.give(on_lane(
+        task(8, "build", "felix", "0123abcd", "project", json!({}), GEN2),
+        "x86_64",
+        Some("emulated"),
+    ));
+    h.ticks(&mut d, 6);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(f["lost"], json!(true), "{f}");
+    assert!(
+        f["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not cover its emulated x86_64 lane"),
+        "{f}"
+    );
+    assert!(runtimes_of(&h, 7, GEN).is_empty(), "nothing started");
+    // The project's own recipe runs there, on the engine's own runtime through binfmt.
+    assert_eq!(runtimes_of(&h, 8, GEN2), [None]);
     assert_eq!(
-        value_of(&h.engine.args(10, "g_00000000000000d4"), "--runtime"),
-        None
+        value_of(&h.engine.args(8, GEN2), "--platform"),
+        Some("linux/amd64")
     );
 }
 
 #[test]
-fn a_runtime_the_engine_refuses_fails_the_start_and_nothing_runs_outside_it() {
+fn a_runtime_the_engine_refuses_fails_the_start_and_holds_the_claims_nothing_runs_outside_it() {
     let h = H::new();
     sandboxed_file(&h);
-    // The engine no longer has the runtime the file names: `docker run --runtime` refuses.
-    *h.engine.refuse.lock().unwrap() = Some(format!("7-{GEN}"));
+    // The engine no longer has the runtime the file names (runsc removed, daemon.json reset):
+    // `docker run --runtime runsc` is refused, whatever the container.
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
     let mut d = h.dispatcher();
     h.give(community(7, GEN));
     h.ticks(&mut d, 4);
@@ -1623,8 +1747,69 @@ fn a_runtime_the_engine_refuses_fails_the_start_and_nothing_runs_outside_it() {
         (json!(true), json!(false)),
         "{f}"
     );
+    assert!(
+        f["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown or invalid runtime name: runsc"),
+        "{f}"
+    );
+    // Its one start named the sandbox, and none was tried without it.
+    assert_eq!(runtimes_of(&h, 7, GEN), [Some("runsc".to_owned())]);
     assert!(h.engine.runs.lock().unwrap().is_empty(), "nothing started");
     assert!(!h.engine.has(7, GEN));
+    // The claims hold, and say why: the pool would hand it task after task, each lost.
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], json!(0), "{c}");
+    assert!(
+        c["capacity"]["sandbox_held"]
+            .as_str()
+            .unwrap()
+            .starts_with("runsc refused task 7's start"),
+        "{c}"
+    );
+    h.advance(SANDBOX_HOLD - 60);
+    h.ticks(&mut d, 1);
+    assert_eq!(h.pool.last_claim()["want"], json!(0));
+    // Its hold over, it claims again; refused a second time in a row, it holds until the
+    // agent counts the host again.
+    h.advance(60);
+    h.give(community(8, GEN2));
+    h.ticks(&mut d, 4);
+    assert_eq!(h.pool.fails_of(8)[0]["lost"], json!(true));
+    assert_eq!(runtimes_of(&h, 8, GEN2), [Some("runsc".to_owned())]);
+    h.advance(4 * SANDBOX_HOLD);
+    h.ticks(&mut d, 2);
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], json!(0), "{c}");
+    assert!(
+        c["capacity"]["sandbox_held"]
+            .as_str()
+            .unwrap()
+            .contains("until the agent counts the host again"),
+        "{c}"
+    );
+    // Two tasks lost, not every one the pool had for it.
+    assert_eq!(h.pool.fails.lock().unwrap().len(), 2);
+    // The owner fixed the runtime and counted the host again: a new count, claims again.
+    *h.engine.runtimes.lock().unwrap() = Some(vec!["runsc".to_owned()]);
+    let text = std::fs::read_to_string(&h.capacity).unwrap();
+    std::fs::write(
+        &h.capacity,
+        text.replace("2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z"),
+    )
+    .unwrap();
+    h.give(community(9, "g_00000000000000c3"));
+    h.advance(30);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(9, "g_00000000000000c3"));
+    assert_eq!(
+        runtimes_of(&h, 9, "g_00000000000000c3"),
+        [Some("runsc".to_owned())]
+    );
+    assert!(h.pool.last_claim()["capacity"]
+        .get("sandbox_held")
+        .is_none());
 }
 
 #[test]
