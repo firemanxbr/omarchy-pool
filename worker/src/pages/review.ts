@@ -79,7 +79,7 @@ const BODY = String.raw`
       <div class="rv-lede">
         <p class="op-eyebrow">For maintainers</p>
         <h1 class="op-hero">Review what others asked for</h1>
-        <p class="rv-facts"><a href="/docs/governance">${lucide("lock", 15)}Never your own requests</a><a href="/docs/governance">${lucide("refresh-cw", 15)}Rebuild from scratch</a><a href="/docs/factory">${lucide("package-check", 15)}Your build is the one that ships</a></p>
+        <p class="rv-facts"><a href="/docs/governance" id="rv-own">${lucide("lock", 15)}<span id="rv-own-t">Never your own requests</span></a><a href="/docs/governance">${lucide("refresh-cw", 15)}Rebuild from scratch</a><a href="/docs/factory">${lucide("package-check", 15)}Your build is the one that ships</a></p>
         <p class="rv-solo" id="rv-solo" hidden></p>
       </div>
       <div class="op-stats rv-stats" id="rv-tiles">${TILES.map(tile).join("")}</div>
@@ -300,7 +300,9 @@ const SCRIPT = String.raw`
   function selfPill(mark) { return mark ? ' ' + pillHtml("warn", "self-reviewed", "taken by its requester, " + mark.maintainer + ", under the solo-maintainer exception (since " + mark.since + ")") : ""; }
   // Above the queue, while the exception is in force: who, since when, why, and where every decision taken under it is listed.
   function renderSolo() {
-    var el = $("#rv-solo"), s = REVIEW && REVIEW.solo; if (!el) return;
+    var el = $("#rv-solo"), s = REVIEW && REVIEW.solo, own = $("#rv-own"), ownT = $("#rv-own-t"); if (!el) return;
+    // The hero's rule, as true as the line under it: while the exception is in force the rule has one, and the chip says so and links to it.
+    if (own && ownT) { own.href = s ? "/docs/governance#solo" : "/docs/governance"; ownT.textContent = s ? "Never your own requests — one exception, on the record" : "Never your own requests"; }
     el.hidden = !s;
     el.innerHTML = s ? '<b>Solo-maintainer exception</b> since ' + esc(s.since) + ': ' + at(s.maintainer) + ' builds, reviews and approves their own packages, each decision marked self-reviewed — ' + esc(s.reason) + '. <a href="/docs/governance#solo">The rule and every self-reviewed decision</a>' : "";
   }
@@ -1007,7 +1009,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "review.hero",
     page: "/review",
-    anchor: ['<p class="op-eyebrow">For maintainers</p>', '<h1 class="op-hero">Review what others asked for</h1>', "Never your own requests", "Rebuild from scratch", "Your build is the one that ships", 'href="/docs/governance"'],
+    anchor: ['<p class="op-eyebrow">For maintainers</p>', '<h1 class="op-hero">Review what others asked for</h1>', 'id="rv-own"', '<span id="rv-own-t">Never your own requests</span>', "Rebuild from scratch", "Your build is the one that ships", 'href="/docs/governance"'],
     visible: EVERYONE,
   },
   {
@@ -1018,7 +1020,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.solo",
     page: "/review",
     anchor: ['<p class="rv-solo" id="rv-solo" hidden></p>'],
-    script: ["function renderSolo()", "REVIEW.solo", "<b>Solo-maintainer exception</b> since ", "function selfReview(owner)", "function selfPill(mark)", '"self-reviewed"', "selfPill(cl.solo_exception)", "selfPill(a.solo_exception)", '"Claim · self-review"', '"Adopt · self-review"', "self-reviewed under the solo-maintainer exception", "Self-reviewed: you brought it", "pl.solo.hosts", "no release needed", 'href="/docs/governance#solo"'],
+    script: ["function renderSolo()", "REVIEW.solo", '$("#rv-own-t")', '"Never your own requests — one exception, on the record"', "<b>Solo-maintainer exception</b> since ", "function selfReview(owner)", "function selfPill(mark)", '"self-reviewed"', "selfPill(cl.solo_exception)", "selfPill(a.solo_exception)", '"Claim · self-review"', '"Adopt · self-review"', "self-reviewed under the solo-maintainer exception", "Self-reviewed: you brought it", "pl.solo.hosts", "no release needed", 'href="/docs/governance#solo"'],
     reads: [
       { path: "/api/v1/factory/review", fields: ["solo", "packages.0.claim"] },
       { path: "/api/v1/factory/approvals", fields: ["approvals.0.solo_exception"] },

@@ -28,8 +28,8 @@
  *   the release to any host is refused as nothing to release; a claim may pin
  *   it to m1's worker; m2's copy is still kept off m2's host; without the
  *   table it is held again;
- * - the pages: Review's line above the queue, the self-reviewed marks and the
- *   placement's words; Status's line; the build page's and the package
+ * - the pages: Review's line above the queue, the hero's rule saying its one
+ *   exception, the self-reviewed marks and the placement's words; Status's line; the build page's and the package
  *   page's marks, drawn by their own scripts; the package page's You for the
  *   maintainer the exception names; the governance chapter's list.
  *
@@ -549,12 +549,15 @@ describe("the pages: Review's line and marks, Status's line, the build page's an
   const tick = () => new Promise((r) => setTimeout(r, 10));
   const PL = { held: false, others: [], mine: ["m1-studio"], requesters: ["m1"], released: null, solo: { maintainer: "m1", hosts: ["m1-studio"], since: "2026-10-06" }, any_host: { ok: false, why: "nothing to release" } };
 
-  it("Review: the exception above the queue, a self-reviewed claim marked, m1's own row offering the claim as the server allows, and why m1's host builds the copy", async () => {
+  it("Review: the exception above the queue and in the hero's rule, a self-reviewed claim marked, m1's own row offering the claim as the server allows, and why m1's host builds the copy", async () => {
     const d = runScript(scriptOf(await html("/review")), { pathname: "/review", functions: ["renderSolo", "selfPill", "readyRow", "reviewRow", "renderRebuild", "confirmText"], variables: ["REVIEW", "WHO", "STORY", "OPEN"] }) as Ran & Record<string, any>;
     d.setREVIEW({ staged: [], packages: [], solo: SOLO });
     d.setWHO({ me: { login: "m1", role: "maintainer" }, login: "m1", role: "maintainer" });
     d.renderSolo();
     expect(d.nodes["#rv-solo"].hidden).toBe(false);
+    // The hero's rule says it has one exception while it is in force, and links to it.
+    expect(d.nodes["#rv-own-t"].textContent).toBe("Never your own requests — one exception, on the record");
+    expect(d.nodes["#rv-own"].href).toBe("/docs/governance#solo");
     expect(d.nodes["#rv-solo"].innerHTML).toContain("<b>Solo-maintainer exception</b> since 2026-10-06: ");
     expect(d.nodes["#rv-solo"].innerHTML).toContain(">@m1</a> builds, reviews and approves their own packages, each decision marked self-reviewed — " + SOLO.reason);
     expect(d.selfPill(MARK)).toBe(' <span class="pill warn" title="taken by its requester, m1, under the solo-maintainer exception (since 2026-10-06)">self-reviewed</span>');
@@ -577,6 +580,8 @@ describe("the pages: Review's line and marks, Status's line, the build page's an
     d.setREVIEW({ staged: [], packages: [], solo: null });
     d.renderSolo();
     expect(d.nodes["#rv-solo"].hidden).toBe(true);
+    expect(d.nodes["#rv-own-t"].textContent).toBe("Never your own requests");
+    expect(d.nodes["#rv-own"].href).toBe("/docs/governance");
     expect(d.readyRow({ name: "mine", owner: "m1", version: "1.0-1", targets: {}, lead: { ...lead, can: { build: false, why: { build: OWNER("mine") } } }, rows: [lead] })).toContain(">yours · locked</button>");
   });
 

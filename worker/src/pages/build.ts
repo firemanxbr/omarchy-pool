@@ -22,8 +22,8 @@ const BODY = String.raw`
   <div id="acts" class="acts"></div>
 
   <section id="who-section" hidden>
-    <div class="h2row"><h2>Who does what</h2><span class="hint">two people behind every package the factory ships</span></div>
-    <p class="sub">The contributor brings the request and a build that passes the gate; only then is a maintainer's time well spent. The maintainer has the project build it again, reads the evidence, tries it and decides — never on their own package. Each half is fifty points; the class is the score today, the projection is with the maintainer's half green. <a href="/docs/what-we-test#the-score">The rules →</a></p>
+    <div class="h2row"><h2>Who does what</h2><span class="hint">two people behind every package the factory ships — the solo-maintainer exception aside, marked</span></div>
+    <p class="sub">The contributor brings the request and a build that passes the gate; only then is a maintainer's time well spent. The maintainer has the project build it again, reads the evidence, tries it and decides — never on their own package, but for the one maintainer the solo-maintainer exception names, each such decision marked self-reviewed (<a href="/docs/governance#solo">#394</a>). Each half is fifty points; the class is the score today, the projection is with the maintainer's half green. <a href="/docs/what-we-test#the-score">The rules →</a></p>
     <div id="ckreq"></div>
     <div class="cklist" id="cklist"></div>
   </section>
@@ -403,7 +403,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "build.who-section",
       page,
-      anchor: ['id="who-section"', "two people behind every package the factory ships", 'href="/docs/what-we-test#the-score"'],
+      anchor: ['id="who-section"', "two people behind every package the factory ships — the solo-maintainer exception aside, marked", 'href="/docs/what-we-test#the-score"'],
       script: ['$("#who-section")', "if (!sc) { el.hidden = true; return; }"],
       reads: [{ path: task, fields: ["score"] }],
       visible: EVERYONE,

@@ -2743,7 +2743,7 @@ a ring, and the one thing that must hold for it to open:
 
 | Door | What it ships | What guards it |
 |---|---|---|
-| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package |
+| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
 | **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
 | **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
 | **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |
