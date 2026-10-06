@@ -715,6 +715,12 @@ pub(crate) fn measure_as(
     {
         r.blockers.push(e);
     }
+    // So do the task caches' caps (#341).
+    if let Err(e) = dispatcher_env::CacheCaps::from_envelope(
+        envelope::envelope_value(ex, "cache_caps").as_ref(),
+    ) {
+        r.blockers.push(e);
+    }
     if let Err(e) = secrets::outside(&secrets_dir, &work_root, &set_dir) {
         r.blockers.push(e);
     }

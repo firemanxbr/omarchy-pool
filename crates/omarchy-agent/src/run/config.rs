@@ -4,8 +4,9 @@
 //! `worker_id` the enrollment gave, #321), by a person at the host and by the person's
 //! `omarchy-agent runtime switch` there (#325), never by the pool. It is refused when
 //! group- or world-writable or owned by another user. Unknown keys are left alone
-//! (capacity caps are #333's), but `[envelope].agent_budget` and
-//! `[envelope].direct_network`, which reach the dispatcher (#371, #373), are read strictly.
+//! (capacity caps are #333's), but `[envelope].agent_budget`, `[envelope].direct_network`
+//! and `[envelope].cache_caps`, which reach the dispatcher (#371, #373, #341), are read
+//! strictly.
 //! What the pool may narrow inside it — units, emulated lanes — and what it allows the pool
 //! to ask — diagnostics — is [`Policy`] (#325, design v2 §12), with the owner's soak
 //! (`soak_minutes`, #326). Any problem here is a local configuration error: the loop exits
@@ -17,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::dispatcher_env::Budget;
+use crate::dispatcher_env::{Budget, CacheCaps};
 use crate::lint::{Engine, Envelope};
 
 /// Where the agent keeps everything (design v2 §13.1), for every command: `--data-dir`,
@@ -124,6 +125,8 @@ pub struct Config {
     /// `[envelope].direct_network` (#373): the owner grants a signed exception's bridge
     /// network, which `etc/dispatcher.env` tells the dispatcher.
     pub direct_network: bool,
+    /// `[envelope].cache_caps` (#341): the task caches' caps `etc/dispatcher.env` gives the dispatcher.
+    pub cache_caps: CacheCaps,
     pub envelope: Envelope,
     /// What install detected behind the socket (`set.engine`, #317): the lint holds a
     /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
@@ -304,6 +307,7 @@ struct EnvelopePart {
     max_mem_gb: Option<u32>,
     agent_budget: Option<toml::Value>,
     direct_network: Option<bool>,
+    cache_caps: Option<toml::Value>,
     max_units: Option<u32>,
     emulate: Option<Vec<String>>,
     #[serde(default)]
@@ -481,6 +485,7 @@ impl Config {
             task_subnets: f.envelope.task_subnets,
             agent_budget: Budget::from_envelope(f.envelope.agent_budget.as_ref())?,
             direct_network: f.envelope.direct_network.unwrap_or(false),
+            cache_caps: CacheCaps::from_envelope(f.envelope.cache_caps.as_ref())?,
             envelope,
             engine,
             runtime,
@@ -718,6 +723,14 @@ max_units = 3
                 ..Budget::default()
             }
         );
+        // And its cache caps (#341), for the dispatcher's task caches.
+        assert_eq!(
+            c.cache_caps,
+            CacheCaps {
+                pacman_gb: Some(40),
+                build_gb: Some(120)
+            }
+        );
         for (from, to, why) in [
             (
                 "https://omarchy-pool.example.org",
@@ -738,6 +751,11 @@ max_units = 3
                 "calls_per_day = 5000",
                 "calls_per_day = 0",
                 "agent_budget.calls_per_day must be a whole number from 1",
+            ),
+            (
+                "pacman_gb = 40",
+                "pacman_gb = 0",
+                "cache_caps.pacman_gb must be a whole number of GB from 1",
             ),
         ] {
             let text = format!("worker_id = \"w_1\"\n{}", studio.replacen(from, to, 1));
