@@ -25,6 +25,9 @@ pub struct Constants {
     pub unit_mem_gb: u32,
     /// Free disk below this, on the work root or the engine's data root, stops claims and starts the disk watcher.
     pub floor_gb: u64,
+    /// The units of the largest task the pool may hand: a build of the signed maximum size (#337). Memory is checked against it
+    /// before a claim.
+    pub largest_task_units: u32,
 }
 
 #[derive(Deserialize)]
@@ -33,8 +36,14 @@ struct Manifest {
 }
 #[derive(Deserialize)]
 struct Cap {
+    max_size: u32,
     unit: Unit,
+    units: Units,
     disk: Disk,
+}
+#[derive(Deserialize)]
+struct Units {
+    build_per_size: u32,
 }
 #[derive(Deserialize)]
 struct Unit {
@@ -58,7 +67,25 @@ impl Constants {
             unit_cpus: m.capacity.unit.cpus,
             unit_mem_gb: m.capacity.unit.mem_gb,
             floor_gb: m.capacity.disk.floor_gb,
+            largest_task_units: m.capacity.units.build_per_size * m.capacity.max_size.max(1),
         }
+    }
+
+    /// The units a claim may offer now (design v2 §7.6): what its units leave beside its leases and the
+    /// job unit, and — when `MemAvailable` is below the largest task it could receive — only what the
+    /// memory available still holds, so a host another workload is using claims what still fits, or
+    /// nothing. `None` (no `/proc/meminfo`) leaves the units alone.
+    pub fn offer(&self, room: u32, mem_available_gb: Option<u64>) -> u32 {
+        let Some(mem) = mem_available_gb else {
+            return room;
+        };
+        let largest = room.min(self.largest_task_units);
+        if mem >= u64::from(largest) * u64::from(self.unit_mem_gb) {
+            return room;
+        }
+        u32::try_from(mem / u64::from(self.unit_mem_gb.max(1)))
+            .unwrap_or(u32::MAX)
+            .min(room)
     }
 
     /// A lease's share: its units' CPUs and memory.
@@ -78,6 +105,9 @@ pub struct File {
     pub below_minimum: bool,
     /// The native lane's architecture.
     pub arch: String,
+    /// The architectures this host runs emulated (#338, design v2 §7.5): the agent turned
+    /// each on after binfmt and a smoke run, within the owner's envelope.
+    pub emulated: Vec<String>,
     pub engine_free_gb: u64,
     /// The claim's `capacity`, as the pool reads it (worker/src/hosts.ts parseCapacity).
     pub claim: Value,
@@ -93,12 +123,20 @@ pub fn read(path: &Path) -> Option<File> {
     let units = u32::try_from(n("units")?).ok()?;
     let job_reserved = u32::try_from(n("job_reserved").unwrap_or(0)).ok()?;
     let lanes = v.get("lanes")?.as_array()?;
+    let mode = |l: &Value, m: &str| l.get("mode").and_then(Value::as_str) == Some(m);
     let arch = lanes
         .iter()
-        .find(|l| l.get("mode").and_then(Value::as_str) == Some("native"))?
+        .find(|l| mode(l, "native"))?
         .get("arch")?
         .as_str()?
         .to_owned();
+    let emulated = lanes
+        .iter()
+        .filter(|l| mode(l, "emulated"))
+        .filter_map(|l| l.get("arch")?.as_str())
+        .filter(|a| *a != arch)
+        .map(str::to_owned)
+        .collect();
     let disk = v.get("disk_free_gb")?;
     let claim = serde_json::json!({
         "cpus": v.get("cpus")?, "mem_gb": v.get("mem_gb")?,
@@ -106,6 +144,7 @@ pub fn read(path: &Path) -> Option<File> {
         "units": units, "job_reserved": job_reserved,
         "agent_slots": v.get("agent_slots").cloned().unwrap_or(Value::from(0)),
         "lanes": lanes,
+        "held_lanes": v.get("held_lanes").cloned().unwrap_or(Value::Array(Vec::new())),
     });
     Some(File {
         at: v
@@ -120,6 +159,7 @@ pub fn read(path: &Path) -> Option<File> {
             .and_then(Value::as_bool)
             .unwrap_or(true),
         arch,
+        emulated,
         engine_free_gb: disk.get("engine")?.as_u64()?,
         claim,
     })
@@ -157,11 +197,28 @@ mod tests {
             Constants {
                 unit_cpus: 1,
                 unit_mem_gb: 2,
-                floor_gb: 10
+                floor_gb: 10,
+                largest_task_units: 8
             }
         );
         assert_eq!(c.share(4), (4, 8));
         assert_eq!(c.share(0), (1, 2));
+    }
+
+    #[test]
+    fn a_claim_offers_what_the_memory_available_still_holds() {
+        let c = Constants::signed();
+        // Memory for the largest task it could receive (a size-4 build, 8 units, 16 GB): every free unit.
+        assert_eq!(c.offer(10, Some(16)), 10);
+        assert_eq!(c.offer(10, Some(64)), 10);
+        // Three free units: the largest it could receive is 3 units, 6 GB.
+        assert_eq!(c.offer(3, Some(6)), 3);
+        // Another workload holds the machine: only what fits, or nothing.
+        assert_eq!(c.offer(10, Some(9)), 4);
+        assert_eq!(c.offer(10, Some(1)), 0);
+        assert_eq!(c.offer(0, Some(64)), 0);
+        // No /proc/meminfo (a VM's view comes later): the units decide.
+        assert_eq!(c.offer(10, None), 10);
     }
 
     #[test]
@@ -183,7 +240,64 @@ mod tests {
         );
         assert_eq!(f.claim["disk_free_gb"]["work"], 200);
         assert_eq!(f.claim["lanes"][0]["mode"], "native");
+        assert!(f.emulated.is_empty());
+        // An emulated lane (#338) goes with the claim as the agent wrote it, and so does a held one.
+        std::fs::write(&p, r#"{"schema":2,"at":"2026-10-01T00:00:00Z","cpus":12,"mem_gb":32,"page_kb":16,"disk_free_gb":{"work":200,"engine":150},"units":11,"job_reserved":1,"agent_slots":1,"lanes":[{"arch":"aarch64","mode":"native"},{"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true}],"held_lanes":[],"below_minimum":false}"#).unwrap();
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (f.arch.as_str(), f.emulated.as_slice()),
+            ("aarch64", &["x86_64".to_owned()][..])
+        );
+        assert_eq!(
+            f.claim["lanes"][1],
+            serde_json::json!({"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true})
+        );
+        std::fs::write(&p, r#"{"schema":2,"cpus":12,"mem_gb":32,"disk_free_gb":{"work":200,"engine":150},"units":11,"lanes":[{"arch":"x86_64","mode":"native"}],"held_lanes":[{"arch":"aarch64","reason":"needs a person: prep-root.sh installs qemu-user-static-binfmt"}]}"#).unwrap();
+        let f = read(&p).unwrap();
+        assert!(f.emulated.is_empty());
+        assert_eq!(f.claim["held_lanes"][0]["arch"], "aarch64");
         std::fs::write(&p, r#"{"schema":1,"units":3}"#).unwrap();
         assert!(read(&p).is_none(), "another schema: nothing is guessed");
+    }
+
+    /// The agent's own files (#338): its capacity tests write exactly these, so a field
+    /// renamed on either side fails one of the two crates.
+    #[test]
+    fn the_files_the_agent_writes_with_its_lanes_read_whole() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("capacity.json");
+        let agent = |name: &str| -> Value {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../omarchy-agent/tests/fixtures/capacity")
+                .join(name);
+            let text = std::fs::read_to_string(path).unwrap();
+            std::fs::write(&p, &text).unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        let wrote = agent("emulated-lane.json");
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (
+                f.arch.as_str(),
+                f.emulated.as_slice(),
+                f.units,
+                f.below_minimum
+            ),
+            ("aarch64", &["x86_64".to_owned()][..], 11, false)
+        );
+        assert_eq!(f.claim["lanes"], wrote["lanes"]);
+        assert_eq!(f.claim["held_lanes"], serde_json::json!([]));
+        let wrote = agent("held-lane.json");
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (f.arch.as_str(), f.emulated.len(), f.units),
+            ("x86_64", 0, 7)
+        );
+        assert_eq!(f.claim["lanes"], wrote["lanes"]);
+        assert_eq!(f.claim["held_lanes"], wrote["held_lanes"]);
+        assert!(f.claim["held_lanes"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("needs a person: prep-root.sh installs qemu-user-static-binfmt"));
     }
 }

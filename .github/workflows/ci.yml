@@ -59,7 +59,9 @@ jobs:
     # ship it for (#311): two builds of this commit give one binary, and its
     # Sigstore check holds against the conformance suite at a pinned commit (not
     # copied here: that repository carries no license file). Its unit tests run
-    # in the rust job.
+    # in the rust job on Linux, and here on macOS (#320): a Mac runs the same
+    # agent, so its tests — the LaunchAgent's plist through plutil among them —
+    # run on the platform it ships for.
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -95,6 +97,9 @@ jobs:
         run: cargo test --locked -p omarchy-agent --lib -- --ignored conformance
         env:
           OMARCHY_SIGSTORE_CONFORMANCE: ${{ github.workspace }}/sigstore-conformance
+      - name: The agent's tests on macOS — the plist plutil reads, the omarchy VM's size, mounts, clock and rate limit, install and uninstall on a played Mac
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p omarchy-agent
 
   agent-run-loop:
     name: Host agent run loop on a real engine (${{ matrix.engine }})
@@ -117,6 +122,28 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: The run loop on ${{ matrix.engine }}, with only the pinned tools and a task that survives every rollout
         run: bash tests/agent-run-loop.sh ${{ matrix.engine }}
+
+  agent-host-orders:
+    name: Host agent host orders on a real engine (${{ matrix.engine }})
+    # #344: reconcile-now starts a round; retire-legacy writes the marker into a
+    # stand-in legacy compose project's directory, then stops and removes that
+    # project — and nothing else: a project nobody recorded, the task container
+    # and the dispatcher run on — on rootful docker and rootless podman's API
+    # socket, with the pinned docker CLI and compose plugin.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [docker, podman]
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: The host orders on ${{ matrix.engine }}, beside a stand-in legacy compose project
+        run: bash tests/agent-host-orders.sh ${{ matrix.engine }}
 
   agent-install:
     name: Host agent install on a real engine (${{ matrix.engine }})
@@ -147,6 +174,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: The egress probe (a task network's gateway, made as the dispatcher makes it, and the host's loopback too) and a legacy project on ${{ matrix.engine }}
         run: bash tests/agent-install.sh ${{ matrix.engine }}
+
+  emulated-lane:
+    name: Emulated lane on a real engine (${{ matrix.os }})
+    # #338 (design v2 §7.5; D33): each runner emulates the other architecture
+    # through qemu-user-static's binfmt handler (the F flag), as
+    # factory/host/prep-root.sh installs it on a host — the agent's smoke run
+    # turns the lane on, the envelope's `emulate = []` and a disabled handler
+    # hold it off with the native lane kept, and one build of the other
+    # architecture runs emulated through the dispatcher, built, uploaded and
+    # completed.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: qemu-user-static's binfmt handlers, with the F flag containers need
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-user-static
+          head -n 3 /proc/sys/fs/binfmt_misc/qemu-x86_64 /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || true
+      - name: The other architecture's lane — the agent's smoke run, the envelope, a disabled handler — and one emulated build through the dispatcher
+        run: bash tests/emulated-lane.sh
 
   agent-self-update:
     name: Host agent self-update under systemd --user
@@ -297,6 +352,12 @@ jobs:
       - name: shellcheck of prep-root.sh
         working-directory: .
         run: shellcheck factory/host/prep-root.sh
+      - name: A Mac's one-time steps — prep-mac.sh installs Colima and Lima only and makes the omarchy VM's three directories outside the home directory, no sudo — against stubs, under dash
+        working-directory: .
+        run: bash tests/prep-mac.sh
+      - name: shellcheck of prep-mac.sh
+        working-directory: .
+        run: shellcheck factory/host/prep-mac.sh
       - name: The rollback — images and Worker back to a tag — against stubbed buildx and wrangler
         working-directory: .
         run: bash tests/rollback-workflow.sh

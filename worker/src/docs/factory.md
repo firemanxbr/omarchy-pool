@@ -382,7 +382,13 @@ attempt with exit 96, before any drafter turn. `pkg-repo work` and the
 community worker report it with `needs_native`, and the build goes back to
 the queue for a native worker of its architecture, the attempt given back.
 No emulated worker takes it again. Every page that follows the build says
-what it waits for.
+what it waits for. On a maintainer host the word is its lease's lane
+(#338): the dispatcher tells only a container on an emulated lane
+`WORKER_LABELS={"emulated":true}`, and the pool takes `needs_native` from a
+lease whose `lane` is `emulated` — the attempt given back, no emulated lane
+again — and refuses it from a native lane (a failure like any other),
+whatever the registration's labels say. A legacy worker's lease carries the
+lane its claim wrote from its labels.
 
 `--idle-exit 300` makes a worker exit after five minutes without work;
 `--once` makes it one-shot; SIGTERM (`docker stop`) drains it — the task in
@@ -480,6 +486,8 @@ POST /factory/claim   {arch, version, hostname, kinds, agent: {provider, model, 
                        claim_id,            c_…, new per attempt: a retry after a lost answer reuses it and gets the same lease, a fresh token
                        want,                1 to take a task, 0 to reconcile and take orders only (every 30 s while it is full)
                        capacity,            {cpus, mem_gb, disk_free_gb: {work, engine}, units, job_reserved, agent_slots, lanes} (required with want 1)
+                       offer?,              the units this claim offers when MemAvailable holds fewer than its free units (#337): no task
+                                            above it this round; the host is still counted by its capacity (its builds, the largest size)
                        leases}              [{task, gen}]: every lease the dispatcher holds
   400 a field missing or malformed: nothing is guessed
 ```
@@ -495,8 +503,9 @@ its own: an unfenced lease two consecutive claims did not list goes back to the 
 when a claim no longer lists it, or at the lease's end. It leases only what fits, from its own
 leases: their units plus the task's within min(declared units, units recomputed from the totals
 with the signed constants, the pool's cap), one unit kept for pool jobs, model work within
-`agent_slots`, and in P1 one build (or trial) and one audit. A host takes builds of every trust,
-trials and audits. A Stop is per lease (`task` names it; several open at once, 30 an hour per
+`agent_slots`, a build's disk budget within both free-disk values less the floor and the budgets
+of the builds it holds — as many leases at once as that allows (#337). A host takes builds of
+every trust, trials and audits; which one comes next is the selection's (below). A Stop is per lease (`task` names it; several open at once, 30 an hour per
 login), and `fail` takes `lost: true` (a host event: the attempt given back, twice per task at
 most) and `oom: true` (the engine's kill: the attempt spent, the reason kept).
 
@@ -511,7 +520,11 @@ loop       per lease: heartbeat (409 stop: kill, fail as stopped), its own watch
            + 35 min: kill, report nothing), its container's state; the disk watcher (work root below the
            floor: the youngest build killed `lost`, want 0 until the space is back; a build refused at start
            for its budget: builds left out of the claims, trials and audits not, until it fits, 30 min at most);
-           then the claim
+           then the claim: want 1 while units are free beside its leases and the job unit, offering only what
+           MemAvailable still holds below the largest task it could receive (#337; the shares of the leases it
+           started in the last 5 minutes subtracted: their containers have not grown yet) — again at the next tick
+           after a task, every 30 s otherwise; want 0 every 30 s when full or when fewer units than leases
+           remain (nothing running is killed); each lease starts at once in its own container, no host queue
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
 out        /task/out: the kind's closed list under its caps (a build: packages, PKGBUILD, vet.json, tests.log,
            resources.json, verdict.json), uploaded by the dispatcher with the job token; /task/log/task.log, ≤ 64 MiB
@@ -533,8 +546,39 @@ agent      the claim's agent: {provider, model, probe, error, checked_at} from a
            calls (OMARCHY_AGENT_CALLS_PER_DAY) spent: agent_slots 0 in the claim and no model task starts
 ```
 
-A claim is one `UPDATE … WHERE id = (SELECT … LIMIT 1) RETURNING *`; D1
-serialises writes, so two workers never receive the same task. Only the lease
+A claim (#337, design v2 §8.3; `worker/src/selection.ts`) with nothing
+queued of its kinds reads nothing more (one probe of the kind index).
+Otherwise it reads the registrations alive and every lease the pool holds
+first, so it knows the
+claimer's room — its free units (and its `offer`), a free agent slot, its
+disk, the largest size alive, the contributors at their cap. Then bounded
+heads of the queue (`ORDER BY priority, id LIMIT 50`), each filtered in SQL
+by that room so a head of tasks it cannot take never hides one it can: one
+per arch of its lanes (a long backlog of one arch never hides another's, so
+the guaranteed share and native work arriving are always seen), one of the
+arch-neutral kinds, each contributor's first community build of each arch
+(a walk over the owners through a partial index, so one contributor's
+backlog never hides another's package, and a capped contributor's flood
+hides no one's), the first native task whatever its size (it holds the
+emulated lanes to their share), the task the host reserves for, and the
+oldest builds the reservation weighs; then the sizes set for the
+candidates' packages and their last native build; selection orders the
+candidates — priority, then community builds round-robin by owner (within a
+per-owner cap, the `owner-cap-divisor` setting), then effective age (the
+wait less the lane's penalty: 0 native, T emulated), then id, the
+guaranteed emulated share first — and the first is leased with one
+`UPDATE … WHERE id = ? AND status = 'queued' RETURNING *` (the next, when
+another claim took it first); D1
+serialises writes, so two workers never receive the same task. A host's
+lease records its `lane`, `size`, `units` and `disk_gb`, and the statement
+itself checks the host's units again. A host's lanes are its agent's (`run/capacity.json`, #338): the native one
+and each emulated one it detected. Builds and trials run on a lane of their
+arch; a job with helper containers needs a lane of each ring architecture
+they check (`health` its own, `promote` each it promotes, `security` both),
+native or emulated, with no wait; every other kind is arch-neutral. A legacy registration is selected as a
+host with one lane (its arch, emulated when its labels say so) and one
+build, its own scope (project or community, shared or its owner's) kept
+until #343. The runbook's *How the pool hands a host work* has the rules. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron
 requeues leases past `lease_expires_at` — the way out for a worker that
 vanished, not the way a worker reports: the community worker's shell has
@@ -562,9 +606,10 @@ factory/
   bin/omarchy-rollout             the updater: the compose set follows the pool's latest image, what changed replaced together, itself last
   bin/pkgbuild-meta               PKGBUILD → arches and version, without executing it as you
   sizing/<name>/                  recipes kept for dry runs only (never queued) — the only recipes in the repository
-  sizing/tasks.toml               maintainer-set task sizes, disk budgets and network exceptions per package (empty until P2 of #307)
+  sizing/tasks.toml               maintainer-set task sizes, disk budgets (the pool's claims read them, #337) and network exceptions per package
   sets/host/                      the host agent's set (#307): compose.yml with the one dispatcher service, set.toml, files/
   host/prep-root.sh               the root-only steps a new maintainer host needs once (never run by the agent)
+  host/prep-mac.sh                a Mac's once, without sudo: Colima and Lima from Homebrew, the omarchy VM's three directories (#320)
   bin/agent.py                    the owner's agent, whichever provider: Anthropic, OpenAI, Gemini, xAI (by the key set)
   bin/draft-pkgbuild              project URL → PKGBUILD (the agent, or a template), checksums left to updpkgsums
   prompts/pkgbuild.md             the packaging rules the drafter follows

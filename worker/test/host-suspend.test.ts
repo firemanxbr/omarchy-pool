@@ -234,11 +234,11 @@ describe("Suspend and Resume", () => {
     expect(await call("POST", `/hosts/${host}/suspend`, { session: "m2", body: reason })).toMatchObject({ status: 409, json: { error: "who is suspended already — its owner's Resume ends it" } });
     const asOwner = (await call("GET", `/hosts/${host}`, { session: "m1" })).json;
     expect(asOwner.can).toMatchObject({ suspend: false, resume: true, retire: true });
-    expect(asOwner.passkey).toEqual({ retire: false });
+    expect(asOwner.passkey).toEqual({ retire: false, retire_legacy: true });
     expect(asOwner.host).toMatchObject({ status: "suspended", status_by: "m1", status_reason: "a reason enough" });
     const asOther = (await call("GET", `/hosts/${host}`, { session: "m2" })).json;
     expect(asOther.can).toMatchObject({ resume: false, retire: true, why: { resume: "only m1 resumes who, with their passkey" } });
-    expect(asOther.passkey).toEqual({ retire: true });
+    expect(asOther.passkey).toEqual({ retire: true, retire_legacy: true });
     expect((await call("GET", `/hosts/${host}`)).json.can).toMatchObject({ suspend: false, resume: false, retire: false, why: { suspend: "sign in with GitHub" } });
   });
 });

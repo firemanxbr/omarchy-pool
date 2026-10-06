@@ -33,9 +33,15 @@
 //! removed with it; their CPUs and memory (0.1 CPU / 64 MB, 0.25 CPU /
 //! 256 MB) come out of the task container's share.
 //!
+//! **Its lane** (#338, design v2 §7.4, §7.5): `--platform linux/<arch>` is
+//! the lane's architecture, and a container on an emulated lane — and only
+//! there — carries `WORKER_LABELS={"emulated":true}`, which makes the build
+//! script probe the toolchains a recipe installs and fail at once with
+//! `needs_native` when one cannot start (a 16K-page host's qemu, D33).
+//!
 //! Seams left for later issues, by name: P2's task caches child issue
 //! mounts the read-only shared pacman cache and the per-package build
-//! caches; emulated lanes (#338) add the emulated lane's `WORKER_LABELS`.
+//! caches.
 
 use std::path::{Path, PathBuf};
 
@@ -103,8 +109,9 @@ pub const AGENT_MEM_MB: u32 = 256;
 
 /// The variables a task container may be given, and nothing else (§9.3).
 /// Both spellings of the proxy variables: curl, pacman and git read only
-/// the lowercase `http_proxy`, others the uppercase ones.
-pub const ENV_ALLOWLIST: [&str; 13] = [
+/// the lowercase `http_proxy`, others the uppercase ones. `WORKER_LABELS`
+/// is `{"emulated":true}` on an emulated lane, and absent elsewhere.
+pub const ENV_ALLOWLIST: [&str; 14] = [
     "HTTP_PROXY",
     "http_proxy",
     "HTTPS_PROXY",
@@ -118,7 +125,12 @@ pub const ENV_ALLOWLIST: [&str; 13] = [
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
     "GITHUB_API",
+    "WORKER_LABELS",
 ];
+
+/// What a container on an emulated lane is told, as the build script reads it
+/// (`emulated_worker`) and as `pkg-repo work`'s emulated workers have always said it.
+pub const EMULATED_LABELS: &str = r#"{"emulated":true}"#;
 
 /// A name that reaches `docker` argv — a package, a release, a host: `[a-z0-9][a-z0-9._+-]{0,63}`.
 pub fn name_ok(s: &str) -> bool {
@@ -305,7 +317,10 @@ pub struct Spec<'a> {
     pub gen: &'a str,
     pub host: &'a str,
     pub release: &'a str,
+    /// The lane's architecture: the container's `--platform`.
     pub arch: &'a str,
+    /// The lane is emulated on this host (#338): the container is told so.
+    pub emulated: bool,
     pub name: &'a str,
     pub kind: Kind,
     /// The CPUs and the memory of its units (the signed constants); the sidecars' come out of them.
@@ -812,6 +827,9 @@ fn env_of(s: &Spec<'_>, side: &Side<'_>) -> Vec<(&'static str, String)> {
         "localhost,127.0.0.1".to_owned()
     };
     env.extend(side.proxy_env(&no_proxy));
+    if s.emulated {
+        env.push(("WORKER_LABELS", EMULATED_LABELS.to_owned()));
+    }
     if s.kind.model() {
         env.push(("FACTORY_PROVIDER", "anthropic".to_owned()));
         env.push(("ANTHROPIC_BASE_URL", agent.clone()));
@@ -866,6 +884,7 @@ mod tests {
             host: "h_studio-1",
             release: "v1.2.3",
             arch: "aarch64",
+            emulated: false,
             name: "felix",
             kind,
             cpus: 4,
@@ -1114,6 +1133,7 @@ mod tests {
                 "ANTHROPIC_BASE_URL" => v == agent,
                 "GITHUB_API" => v == format!("{agent}/github"),
                 "ANTHROPIC_API_KEY" => v == AGENT_KEY_PLACEHOLDER,
+                "WORKER_LABELS" => v == EMULATED_LABELS,
                 k if k.to_ascii_lowercase().contains("proxy") => proxy_ok(k, v, slot),
                 _ => true,
             };
@@ -1409,6 +1429,61 @@ mod tests {
             assert_eq!(p[0][..2], ["network", "create"]);
             assert_eq!(p.last().unwrap()[0], "run");
         }
+    }
+
+    #[test]
+    fn only_a_container_on_an_emulated_lane_is_told_so_and_its_platform_is_the_lanes() {
+        let (tdir, rel, work) = dirs();
+        let after = |a: &[String], f: &str| {
+            a.iter()
+                .position(|x| x == f)
+                .map(|i| a[i + 1].clone())
+                .unwrap()
+        };
+        for kind in [Kind::Build, Kind::ModelBuild, Kind::Trial, Kind::Audit] {
+            // The native lane: no WORKER_LABELS at all.
+            let p = plan(&spec(kind, &tdir, &rel)).unwrap();
+            let a = task_of(&p);
+            assert!(
+                !a.iter().any(|x| x.starts_with("WORKER_LABELS=")),
+                "{kind:?}: a native lane's container is not told anything of emulation"
+            );
+            assert_eq!(after(&a, "--platform"), "linux/arm64");
+            // An x86_64 lane emulated on this aarch64 host (#338).
+            let mut s = spec(kind, &tdir, &rel);
+            s.arch = "x86_64";
+            s.emulated = true;
+            let p = plan(&s).unwrap();
+            check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
+            let a = task_of(&p);
+            assert_eq!(after(&a, "--platform"), "linux/amd64");
+            assert_eq!(
+                a.iter()
+                    .filter(|x| x.starts_with("WORKER_LABELS="))
+                    .collect::<Vec<_>>(),
+                [r#"WORKER_LABELS={"emulated":true}"#]
+            );
+            // Its sidecars run the worker image natively, and are told nothing.
+            for c in p.iter().filter(|c| c[0] == "create") {
+                assert!(
+                    !c.iter().any(|x| x.starts_with("WORKER_LABELS=")),
+                    "{kind:?}: {c:?}"
+                );
+            }
+        }
+        // Any other value of it is outside the spec.
+        let mut bad = task_of(&plan(&spec(Kind::Build, &tdir, &rel)).unwrap());
+        let image = bad.iter().position(|x| x == DIGEST).unwrap();
+        bad.splice(
+            image..image,
+            [
+                "-e".to_owned(),
+                r#"WORKER_LABELS={"emulated":false,"x":1}"#.to_owned(),
+            ],
+        );
+        let mut p = plan(&spec(Kind::Build, &tdir, &rel)).unwrap();
+        *p.last_mut().unwrap() = bad;
+        assert!(check_plan(&p, &work, false).is_err());
     }
 
     #[test]

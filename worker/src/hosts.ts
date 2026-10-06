@@ -27,7 +27,7 @@ import { fromB64url } from "./webauthn";
 interface Resources { cpus: number; mem_gb: number }
 export interface MinHost extends Resources { work_disk_gb: number; engine_disk_gb: number }
 interface TaskUnits { build_per_size: number; trial: number; audit: number; job: number; job_reserved: number }
-interface SignedCapacity { max_size: number; community_max_size: number; min: MinHost; reserve: Resources; unit: Resources; units: TaskUnits; disk: { build_gb_per_size: number } }
+interface SignedCapacity { max_size: number; community_max_size: number; min: MinHost; reserve: Resources; unit: Resources; units: TaskUnits; disk: { build_gb_per_size: number; floor_gb: number }; emulated: { share_when_native_waits: number } }
 
 const SIGNED = (parse(manifestToml) as unknown as { capacity: SignedCapacity }).capacity;
 /** The minimum a host must have to join (D30), as the release signs it. */
@@ -40,6 +40,10 @@ export const TASK_UNITS: Readonly<TaskUnits> = Object.freeze({ ...SIGNED.units }
 export const MAX_SIZE = SIGNED.max_size;
 export const COMMUNITY_MAX_SIZE = SIGNED.community_max_size;
 export const BUILD_GB_PER_SIZE = SIGNED.disk.build_gb_per_size;
+/** Free disk a host keeps below every build's budget, on the work root and on the engine's data root (D53). */
+export const DISK_FLOOR_GB = SIGNED.disk.floor_gb;
+/** The share of a host's builds its emulated lanes may hold while native work for it is queued (D50: the work-conserving cap). */
+export const EMULATED_SHARE = SIGNED.emulated.share_when_native_waits;
 
 /** An enrollment token lives this long, and is spent once. */
 export const ENROLL_TTL_MIN = 15;
@@ -59,16 +63,23 @@ export const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 export const HOST_ID = /^h_[0-9a-z]{10}$/;
 const ARCHES = ["x86_64", "aarch64"] as const;
 export type Arch = (typeof ARCHES)[number];
-export const ISOLATIONS = ["root", "user", "subuid"] as const;
+/** Where a task-container escape lands (design v2 §19.3): on Linux the engine's level; on a Mac (#320) its dedicated omarchy VM (`vm`) or Docker Desktop's / OrbStack's shared VM (`vm-shared`). */
+export const ISOLATIONS = ["root", "user", "subuid", "vm", "vm-shared"] as const;
 export type Isolation = (typeof ISOLATIONS)[number];
 
 export interface Lane { arch: Arch; mode: "native" | "emulated"; via?: string; page16k?: boolean }
+/** A foreign architecture the host does not run, and why (#338, design v2 §7.5): binfmt missing ("needs a person: …"), the envelope, a smoke run that failed. */
+export interface HeldLane { arch: Arch; reason: string }
+/** A held lane's reason is shown as the agent wrote it, cut at this length. */
+export const HELD_REASON_MAX = 300;
 /** A capacity report (design v2 §7.3, `run/capacity.json`), as the pool keeps it: the totals it can check, nothing it takes on trust. */
 export interface Capacity {
   cpus: number;
   mem_gb: number;
   disk_free_gb: { work: number; engine: number };
   lanes: Lane[];
+  /** The lanes the agent holds off, with their reasons, for the host page (#324): kept, never selected on. */
+  held_lanes?: HeldLane[];
   agent_slots: number | null;
   /** What the host said it runs; the pool's own count is unitsOf(). */
   units: number | null;
@@ -96,11 +107,21 @@ export function parseCapacity(v: unknown): Capacity | string {
     lanes.push(lane);
   }
   if (lanes.filter((l) => l.mode === "native").length !== 1) return "capacity.lanes must have exactly one native lane";
+  // What it holds off and why (#338): shown on the host page, never selected on — so an entry that does not read is left out
+  // rather than refuse the claim it rides on.
+  const held: HeldLane[] = [];
+  for (const h of Array.isArray(c.held_lanes) ? (c.held_lanes as unknown[]).slice(0, 4) : []) {
+    const x = h as Record<string, unknown> | null;
+    if (x && typeof x === "object" && ARCHES.includes(x.arch as Arch) && typeof x.reason === "string" && x.reason.trim()) {
+      held.push({ arch: x.arch as Arch, reason: x.reason.trim().slice(0, HELD_REASON_MAX) });
+    }
+  }
   return {
     cpus: c.cpus,
     mem_gb: c.mem_gb,
     disk_free_gb: { work: d.work as number, engine: d.engine as number },
     lanes,
+    held_lanes: held,
     agent_slots: int(c.agent_slots, 0, 64) ? c.agent_slots : null,
     units: int(c.units, 0, 4096) ? c.units : null,
   };
@@ -285,4 +306,95 @@ export function hostReason(v: unknown): string | null {
   const s = v.replace(/\s+/g, " ").trim();
   if (s.length < HOST_REASON.min || s.length > HOST_REASON.max || /[\p{Cc}\p{Cf}\p{Co}\p{Cs}]/u.test(s)) return null;
   return s;
+}
+
+// ---------- host orders (#344, design v2 §11.1 M4, M5, §17.1, §21.1 step 6) ----------
+
+/**
+ * The host orders P3 gives, sent in the signed host state: a closed set,
+ * each with an id and a not_after; the agent refuses any other kind, an order
+ * past its not_after and an id it took already. retire-legacy stops and
+ * removes the legacy compose project the host recorded (install --legacy)
+ * and writes the .omarchy-agent marker into its directory; reconcile-now is a
+ * round now, which never skips the owner's soak (P4). P4 (#325) adds the
+ * settings and the other kinds.
+ */
+export const HOST_ORDER_KINDS = ["retire-legacy", "reconcile-now"] as const;
+export type HostOrderKind = (typeof HOST_ORDER_KINDS)[number];
+export const isHostOrderKind = (k: unknown): k is HostOrderKind => typeof k === "string" && (HOST_ORDER_KINDS as readonly string[]).includes(k);
+/** How long an order waits for its agent's poll (60-120 s, hourly while the pool answers 401): past it, it expires. */
+export const HOST_ORDER_TTL_MIN = 60;
+/** The first agent that reads the host state's target and orders (and never follow.latest): an older one would let an order expire unheard. */
+export const HOST_ORDERS_AGENT = "0.3.0";
+/** An order's id: `ho_` and 32 hex digits. */
+export const HOST_ORDER_ID = /^ho_[0-9a-f]{32}$/;
+/** An agent's answer's words are kept to this many characters. */
+export const ORDER_DETAIL_MAX = 500;
+
+const semver = (v: string | null | undefined): number[] | null => {
+  const m = /^(\d{1,4})\.(\d{1,4})\.(\d{1,6})$/.exec(v ?? "");
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+};
+
+/** Whether an agent of version `v` takes host orders (at or above HOST_ORDERS_AGENT). */
+export function agentTakesOrders(v: string | null | undefined): boolean {
+  const have = semver(v), want = semver(HOST_ORDERS_AGENT)!;
+  if (!have) return false;
+  for (let i = 0; i < 3; i++) if (have[i] !== want[i]) return have[i] > want[i];
+  return true;
+}
+
+/** The legacy set as the host's last report says it (design v2 §17.2 `legacy`), each field checked; null when it reports none. */
+export interface LegacySet {
+  project: string;
+  /** running | stopped | gone | retiring | retired | unknown */
+  state: string;
+  since: string | null;
+  containers: number | null;
+  running: number | null;
+  dir: string | null;
+  /** Why a retire-legacy would be refused now (the agent's words), or null. */
+  blocked: string | null;
+  /** The order that is retiring it, or retired it. */
+  order: string | null;
+}
+const LEGACY_STATES = ["running", "stopped", "gone", "retiring", "retired", "unknown"];
+export function legacyOf(report: string | null): LegacySet | null {
+  if (!report) return null;
+  let r: { legacy?: unknown };
+  try {
+    r = JSON.parse(report);
+  } catch {
+    return null;
+  }
+  const l = r?.legacy as Record<string, unknown> | null | undefined;
+  if (!l || typeof l !== "object" || typeof l.project !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(l.project)) return null;
+  const text = (v: unknown, max: number) => (typeof v === "string" && v.length <= max && !/[\x00-\x1f\x7f]/.test(v) ? v : null);
+  const count = (v: unknown) => (Number.isInteger(v) && (v as number) >= 0 && (v as number) < 10000 ? (v as number) : null);
+  return {
+    project: l.project,
+    state: typeof l.state === "string" && LEGACY_STATES.includes(l.state) ? l.state : "unknown",
+    since: text(l.since, 40),
+    containers: count(l.containers),
+    running: count(l.running),
+    dir: text(l.dir, 4096),
+    blocked: text(l.blocked, ORDER_DETAIL_MAX),
+    order: typeof l.order === "string" && HOST_ORDER_ID.test(l.order) ? l.order : null,
+  };
+}
+
+/** An agent's answer to a host order, as its report carries them (`orders`). */
+export interface OrderAnswer { id: string; outcome: "done" | "refused" | "failed"; detail: string }
+/** The answers in a report, each checked; at most 16, the rest and anything malformed left out. */
+export function orderAnswers(v: unknown): OrderAnswer[] {
+  if (!Array.isArray(v)) return [];
+  const out: OrderAnswer[] = [];
+  for (const a of v.slice(0, 16)) {
+    const x = a as Record<string, unknown>;
+    if (!x || typeof x !== "object" || typeof x.id !== "string" || !HOST_ORDER_ID.test(x.id)) continue;
+    if (x.outcome !== "done" && x.outcome !== "refused" && x.outcome !== "failed") continue;
+    const detail = typeof x.detail === "string" ? x.detail.replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, ORDER_DETAIL_MAX) : "";
+    out.push({ id: x.id, outcome: x.outcome, detail });
+  }
+  return out;
 }

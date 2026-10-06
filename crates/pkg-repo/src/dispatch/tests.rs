@@ -18,7 +18,7 @@ use super::kinds::Ctx;
 use super::lease::{Lease, Phase, Store};
 use super::pool::Pool;
 use super::spec::{self, HOST_LABEL};
-use super::{Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS};
+use super::{Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS, MEM_RAMP};
 use crate::stop::Beat;
 use crate::RepoError;
 
@@ -538,6 +538,7 @@ impl Pool for FakePool {
 struct FakeProbes {
     now: Arc<AtomicU64>,
     work: Arc<Mutex<Option<u64>>>,
+    mem: Arc<Mutex<Option<u64>>>,
 }
 
 impl Probes for FakeProbes {
@@ -548,7 +549,7 @@ impl Probes for FakeProbes {
         *self.work.lock().unwrap()
     }
     fn mem_available_gb(&self) -> Option<u64> {
-        None
+        *self.mem.lock().unwrap()
     }
 }
 
@@ -563,6 +564,8 @@ struct H {
     pool: Arc<FakePool>,
     now: Arc<AtomicU64>,
     free: Arc<Mutex<Option<u64>>>,
+    /// `MemAvailable`, in GB: none (no `/proc/meminfo`) unless a test sets it.
+    mem: Arc<Mutex<Option<u64>>>,
 }
 
 impl H {
@@ -586,6 +589,7 @@ impl H {
             pool: Arc::new(FakePool::default()),
             now: Arc::new(AtomicU64::new(1_000_000)),
             free: Arc::new(Mutex::new(Some(500))),
+            mem: Arc::new(Mutex::new(None)),
         };
         h.units(11);
         h
@@ -626,6 +630,7 @@ impl H {
             Box::new(FakeProbes {
                 now: Arc::clone(&self.now),
                 work: Arc::clone(&self.free),
+                mem: Arc::clone(&self.mem),
             }),
             timing,
             HOST.into(),
@@ -656,6 +661,7 @@ impl H {
             Box::new(FakeProbes {
                 now: Arc::clone(&self.now),
                 work: Arc::clone(&self.free),
+                mem: Arc::clone(&self.mem),
             }),
             Timing::default(),
             HOST.into(),
@@ -883,6 +889,189 @@ fn the_claim_lists_the_leases_with_the_capacity_and_reuses_its_claim_id_after_a_
     d.tick();
     assert_eq!(h.pool.last_claim()["want"], 0);
     assert!(h.pool.last_claim().get("capacity").is_none());
+}
+
+/// A lease generation for the n-th of several tasks.
+fn gen_of(n: u64) -> String {
+    format!("g_{:016x}", 0xc000 + n)
+}
+
+#[test]
+fn a_host_takes_as_many_tasks_as_its_units_hold_one_container_each_then_claims_want_0() {
+    // The pool hands one task per claim (D29); the dispatcher claims again at the next tick while units
+    // are free, starts each lease in its own container at once (no queue on the host), and once its 11
+    // units hold five builds and the pool jobs' unit is all that is left, claims with want 0 every 30 s.
+    let h = H::new();
+    let mut d = h.dispatcher();
+    for n in 0..6 {
+        h.give(community(100 + n, &gen_of(n)));
+    }
+    h.ticks(&mut d, 12);
+    let bodies = h.pool.claim_bodies.lock().unwrap().clone();
+    let wants: Vec<u64> = bodies.iter().map(|b| b["want"].as_u64().unwrap()).collect();
+    assert_eq!(&wants[..6], &[1, 1, 1, 1, 1, 0], "{wants:?}");
+    assert_eq!(h.leases().len(), 5);
+    for n in 0..5 {
+        assert!(
+            h.engine.has(100 + n, &gen_of(n)),
+            "task {} runs in its own container",
+            100 + n
+        );
+    }
+    assert_eq!(h.engine.runs.lock().unwrap().len(), 5);
+    // The sixth was handed to a claim that offered nothing: given back, never started.
+    assert_eq!(h.pool.fails_of(105)[0]["lost"], true);
+    // Full: one claim in 30 s, with want 0, listing all five.
+    let n = h.pool.claim_bodies.lock().unwrap().len();
+    h.ticks(&mut d, 10);
+    assert_eq!(h.pool.claim_bodies.lock().unwrap().len(), n + 1);
+    assert_eq!(h.pool.last_claim()["want"], 0);
+    assert_eq!(h.pool.last_claim()["leases"].as_array().unwrap().len(), 5);
+    // One ends: a build's units are free again, and the next claim wants a task.
+    h.leave(100, &gen_of(0), &built_ok(), "==> Finished making: felix\n");
+    h.engine.exit(100, &gen_of(0), 0, false);
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert_eq!(h.leases().len(), 4);
+    assert_eq!(h.pool.last_claim()["want"], 1);
+}
+
+#[test]
+fn a_memory_check_that_refuses_claims_only_what_still_fits_or_nothing() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    // Another workload holds the machine: less than a unit's 2 GB available — nothing this round.
+    *h.mem.lock().unwrap() = Some(1);
+    d.tick();
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], 0);
+    assert_eq!(
+        c["capacity"]["units"], 11,
+        "want 0 changes nothing of the capacity"
+    );
+    assert!(c.get("offer").is_none());
+    // 9 GB: four units of the ten free — the claim offers those only (`offer`), and its capacity still
+    // says the host's 11 units: the pool counts the host by them, and hands nothing above the offer.
+    *h.mem.lock().unwrap() = Some(9);
+    h.advance(31);
+    let mut big = community(7, GEN);
+    big["task"]["units"] = json!(6);
+    h.give(big);
+    d.tick();
+    let c = h.pool.last_claim();
+    assert_eq!(
+        (
+            c["want"].clone(),
+            c["offer"].clone(),
+            c["capacity"]["units"].clone()
+        ),
+        (json!(1), json!(4), json!(11))
+    );
+    // A task above what it offered (the pool's mistake) is given back, never started.
+    h.ticks(&mut d, 2);
+    assert!(h.engine.runs.lock().unwrap().is_empty());
+    assert_eq!(h.pool.fails_of(7)[0]["lost"], true);
+    // A task that fits what it offered runs.
+    h.advance(31);
+    h.give(community(8, GEN2));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(8, GEN2));
+    // The memory back: the largest task it could receive fits (16 GB, beside the 4 GB the build just
+    // started still owes), every free unit is offered again — no `offer` at all.
+    *h.mem.lock().unwrap() = Some(64);
+    h.advance(31);
+    h.ticks(&mut d, 1);
+    let c = h.pool.last_claim();
+    assert_eq!(
+        (c["want"].clone(), c["capacity"]["units"].clone()),
+        (json!(1), json!(11))
+    );
+    assert!(c.get("offer").is_none());
+}
+
+#[test]
+fn claims_that_follow_each_other_at_once_never_offer_the_same_memory_twice() {
+    // MemAvailable holds at 9 GB: the containers just started have not grown yet. Each lease's share
+    // (2 GB a unit) counts as promised from its claim until MEM_RAMP after its start, so the burst of
+    // claims after each task takes 4 units (8 GB) in all, never the host's ten free units.
+    let h = H::new();
+    let mut d = h.dispatcher();
+    *h.mem.lock().unwrap() = Some(9);
+    for n in 0..4 {
+        h.give(community(300 + n, &gen_of(n)));
+    }
+    h.ticks(&mut d, 8);
+    let offers: Vec<Value> = h
+        .pool
+        .claim_bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| json!([b["want"], b["offer"]]))
+        .collect();
+    assert_eq!(
+        &offers[..3],
+        &[json!([1, 4]), json!([1, 2]), json!([0, null])],
+        "{offers:?}"
+    );
+    let held: u32 = h.leases().iter().map(|l| l.units).sum();
+    assert_eq!(held, 4, "8 GB of memory limits against 9 GB available");
+    // The third was handed to a claim that offered nothing: given back, never started.
+    assert_eq!(h.pool.fails_of(302)[0]["lost"], true);
+    assert_eq!(h.engine.runs.lock().unwrap().len(), 2);
+    // Past the ramp, MemAvailable holds what the containers use (4 GB of their 8): what is left is offered.
+    h.advance(MEM_RAMP + 31);
+    *h.mem.lock().unwrap() = Some(5);
+    h.ticks(&mut d, 1);
+    let c = h.pool.last_claim();
+    assert_eq!(
+        (c["want"].clone(), c["offer"].clone()),
+        (json!(1), json!(2))
+    );
+}
+
+#[test]
+fn the_claim_says_the_work_root_as_measured_now_when_it_holds_less_than_the_agents_probe() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    // The agent's file says 200 GB on the work root; the dispatcher measures 150 now (builds write there).
+    *h.free.lock().unwrap() = Some(150);
+    d.tick();
+    let c = h.pool.last_claim();
+    assert_eq!(c["capacity"]["disk_free_gb"]["work"], 150);
+    assert_eq!(
+        c["capacity"]["disk_free_gb"]["engine"], 150,
+        "the engine's is the agent's"
+    );
+    // More now than the probe said: the probe's value stands, never a higher one.
+    *h.free.lock().unwrap() = Some(500);
+    h.advance(31);
+    d.tick();
+    assert_eq!(h.pool.last_claim()["capacity"]["disk_free_gb"]["work"], 200);
+}
+
+#[test]
+fn fewer_units_than_leases_claims_nothing_until_they_fit_and_kills_nothing() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    for n in 0..3 {
+        h.give(community(200 + n, &gen_of(n)));
+    }
+    h.ticks(&mut d, 8);
+    assert_eq!(h.leases().len(), 3);
+    // The cap lowered below what it holds (the owner's envelope, or a VM shrunk): want 0, and all three run on.
+    h.units(3);
+    h.advance(31);
+    h.ticks(&mut d, 12);
+    assert_eq!(h.pool.last_claim()["want"], 0);
+    assert_eq!(h.leases().len(), 3);
+    for n in 0..3 {
+        assert!(
+            h.engine.has(200 + n, &gen_of(n)),
+            "nothing running is killed for a lower cap"
+        );
+    }
+    assert!(h.pool.fails_of(200).is_empty());
 }
 
 #[test]
@@ -1152,6 +1341,203 @@ fn a_failed_build_reports_its_verdict_with_its_evidence() {
     assert_eq!(f["final"], true);
     assert_eq!(f["error"], "the gate: namcap: fail");
     assert!(f["log_tail"].as_str().unwrap().contains("The gate: FAIL"));
+}
+
+/// The Studio's file (#338): `aarch64` native, `x86_64` emulated through qemu on 16K pages.
+fn emulated_lanes(h: &H) {
+    std::fs::write(&h.capacity, json!({"schema":2,"at":"2026-10-01T00:00:00Z","cpus":12,"mem_gb":32,"page_kb":16,"disk_free_gb":{"work":200,"engine":150},"units":11,"job_reserved":1,"agent_slots":1,"lanes":[{"arch":"aarch64","mode":"native"},{"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true}],"held_lanes":[],"isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}).to_string()).unwrap();
+}
+
+/// A task of `arch` leased on `lane` (as the pool's claim answer carries `build_tasks.lane`).
+fn on_lane(mut t: Value, arch: &str, lane: Option<&str>) -> Value {
+    t["task"]["arch"] = json!(arch);
+    t["task"]["lane"] = json!(lane);
+    t
+}
+
+#[test]
+fn only_a_task_on_an_emulated_lane_is_told_so_and_each_runs_its_lanes_platform() {
+    let h = H::new();
+    emulated_lanes(&h);
+    let mut d = h.dispatcher();
+    let gen3 = "g_00000000000000c3";
+    // An x86_64 build on the emulated lane, an aarch64 one on the native lane, and an audit of
+    // an x86_64 build (no lane: it reads its build as data, natively).
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
+    h.give(on_lane(community(8, GEN2), "aarch64", Some("native")));
+    for name in ["PKGBUILD", "build.log"] {
+        h.pool
+            .artifacts
+            .lock()
+            .unwrap()
+            .insert((5, name.into()), b"x".to_vec());
+    }
+    h.give(on_lane(
+        task(
+            9,
+            "audit",
+            "felix",
+            "",
+            "community",
+            json!({"task": 5}),
+            gen3,
+        ),
+        "x86_64",
+        None,
+    ));
+    h.ticks(&mut d, 6);
+    let labels = |a: &[String]| -> Vec<String> {
+        a.windows(2)
+            .filter(|w| w[0] == "-e" && w[1].starts_with("WORKER_LABELS="))
+            .map(|w| w[1].clone())
+            .collect()
+    };
+    let a = h.engine.args(7, GEN);
+    assert_eq!(value_of(&a, "--platform"), Some("linux/amd64"));
+    assert_eq!(labels(&a), [r#"WORKER_LABELS={"emulated":true}"#]);
+    let a = h.engine.args(8, GEN2);
+    assert_eq!(value_of(&a, "--platform"), Some("linux/arm64"));
+    assert!(
+        labels(&a).is_empty(),
+        "a native lane's container is told nothing: {a:?}"
+    );
+    let a = h.engine.args(9, gen3);
+    assert_eq!(value_of(&a, "--platform"), Some("linux/arm64"));
+    assert!(labels(&a).is_empty(), "an audit runs natively: {a:?}");
+    // The lease files keep each lane, so a restarted dispatcher starts the same container.
+    let lanes: BTreeMap<u64, (String, bool)> = h
+        .leases()
+        .iter()
+        .map(|l| (l.task.id, (l.arch().to_owned(), l.emulated())))
+        .collect();
+    assert_eq!(lanes[&7], ("x86_64".to_owned(), true));
+    assert_eq!(lanes[&8], ("aarch64".to_owned(), false));
+    assert_eq!(lanes[&9], ("aarch64".to_owned(), false));
+    // A toolchain that could not start under qemu: the script's verdict goes to the pool as it said.
+    h.leave(
+        7,
+        GEN,
+        &[(
+            "verdict.json",
+            br#"{"status":96,"final":false,"needs_native":true,"error":"rustc cannot start on this worker"}"#.to_vec(),
+        )],
+        "==> rustc cannot start on this worker: emulated x86_64 under qemu\n",
+    );
+    h.engine.exit(7, GEN, 96, false);
+    h.ticks(&mut d, 2);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(
+        (f["needs_native"].clone(), f["final"].clone()),
+        (json!(true), json!(false))
+    );
+}
+
+#[test]
+fn a_lease_on_a_lane_this_host_does_not_run_is_given_back_its_attempt_with_it() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    // The agent turned the x86_64 lane off (or never had it): the pool's emulated lease is handed back.
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
+    // A native lease of an architecture that is not this host's.
+    h.give(on_lane(community(8, GEN2), "x86_64", Some("native")));
+    // A lane word this dispatcher does not know.
+    h.give(on_lane(
+        community(9, "g_00000000000000c3"),
+        "aarch64",
+        Some("sideways"),
+    ));
+    h.ticks(&mut d, 5);
+    for id in [7, 8, 9] {
+        let f = &h.pool.fails_of(id)[0];
+        assert_eq!(
+            (f["lost"].clone(), f["final"].clone()),
+            (json!(true), json!(false)),
+            "{id}: {f}"
+        );
+        assert!(
+            f["error"].as_str().unwrap().contains("this host runs no"),
+            "{f}"
+        );
+    }
+    assert!(
+        h.engine.runs.lock().unwrap().is_empty(),
+        "nothing was started"
+    );
+    assert!(h.leases().is_empty());
+    // Its emulated lane on, but no x86_64 build image by digest: not offered, and not started.
+    emulated_lanes(&h);
+    let mut d = h.dispatcher_with(
+        Timing::default(),
+        Images {
+            aarch64: IMAGE.into(),
+            x86_64: "archlinux:latest".into(),
+        },
+    );
+    h.advance(120);
+    h.ticks(&mut d, 2);
+    let lanes = h.pool.last_claim()["capacity"]["lanes"].clone();
+    assert_eq!(
+        lanes,
+        json!([{"arch":"aarch64","mode":"native"}]),
+        "{lanes}"
+    );
+    h.give(on_lane(community(10, GEN), "x86_64", Some("emulated")));
+    h.advance(120);
+    h.ticks(&mut d, 2);
+    assert_eq!(h.pool.fails_of(10)[0]["lost"], true);
+    // With the image: offered, as the agent wrote it.
+    let mut d = h.dispatcher();
+    h.advance(120);
+    h.ticks(&mut d, 2);
+    assert_eq!(
+        h.pool.last_claim()["capacity"]["lanes"][1],
+        json!({"arch":"x86_64","mode":"emulated","via":"qemu","page16k":true})
+    );
+}
+
+#[test]
+fn a_lease_prepared_again_after_a_restart_is_given_back_when_its_emulated_lane_went_off() {
+    let h = H::new();
+    emulated_lanes(&h);
+    let mut d = h.dispatcher();
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
+    d.tick(); // claimed on the emulated lane, Preparing
+    drop(d);
+    // The owner's `emulate = []` (or binfmt gone): the agent rewrote the file without the lane,
+    // and the run loop started a new dispatcher, which prepares the lease again.
+    h.capacity_file(11, 150, "2026-10-01T01:00:00Z");
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 3);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(
+        (f["lost"].clone(), f["final"].clone()),
+        (json!(true), json!(false)),
+        "{f}"
+    );
+    assert!(
+        f["error"]
+            .as_str()
+            .unwrap()
+            .contains("no emulated lane of x86_64 now"),
+        "{f}"
+    );
+    assert!(
+        h.engine.runs.lock().unwrap().is_empty(),
+        "nothing was started"
+    );
+    assert!(h.leases().is_empty());
+    // With the lane still on, the same restart starts it on that lane.
+    emulated_lanes(&h);
+    let mut d = h.dispatcher();
+    h.give(on_lane(community(8, GEN2), "x86_64", Some("emulated")));
+    d.tick();
+    drop(d);
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 3);
+    assert_eq!(
+        value_of(&h.engine.args(8, GEN2), "--platform"),
+        Some("linux/amd64")
+    );
 }
 
 #[test]
@@ -1596,6 +1982,7 @@ fn a_value_outside_the_grammar_fails_the_task_before_docker() {
 #[test]
 fn a_build_image_that_is_not_a_digest_fails_the_task_before_docker() {
     let h = H::new();
+    emulated_lanes(&h);
     let mut d = h.dispatcher_with(
         Timing::default(),
         Images {
@@ -1603,9 +1990,7 @@ fn a_build_image_that_is_not_a_digest_fails_the_task_before_docker() {
             x86_64: "docker.io/library/archlinux:base-devel".into(),
         },
     );
-    let mut emulated = community(7, GEN);
-    emulated["task"]["arch"] = json!("x86_64");
-    h.give(emulated);
+    h.give(on_lane(community(7, GEN), "x86_64", Some("emulated")));
     h.ticks(&mut d, 3);
     assert!(h.engine.runs.lock().unwrap().is_empty());
     let f = &h.pool.fails_of(7)[0];

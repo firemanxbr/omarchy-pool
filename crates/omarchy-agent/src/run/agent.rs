@@ -1,9 +1,12 @@
-//! One tick of the run loop (design v2 §16.1): ask the pool when a poll is due, check the
-//! target against the trust rules, start or preempt a round, and take one step of it.
-//! Network answers never stop the agent (§16.4): no answer, a 5xx or a malformed body
-//! changes nothing and backs off to 10 minutes; a 401/403 changes nothing and polls
-//! hourly; both recover by themselves at the next answer.
+//! One tick of the run loop (design v2 §16.1): ask the pool for the host state when a poll
+//! is due (#344: the release target, the open Updates and the host orders), check the
+//! target against the trust rules, start or preempt a round, and take one step of it; one
+//! step of a `retire-legacy` in flight; the host report when it is due. Network answers
+//! never stop the agent (§16.4): no answer, a 5xx or a malformed body changes nothing and
+//! backs off to 10 minutes; a 401/403 changes nothing and polls hourly; both recover by
+//! themselves at the next answer.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -19,7 +22,8 @@ use super::compose::Compose;
 use super::config::{Config, Paths};
 use super::driver::{Answer, Driver};
 use super::journal::{env_secrets, Journal};
-use super::pool::{Follow, Net, Pool};
+use super::pool::{HostState, Net, Pool};
+use super::report::Reported;
 use super::rollout::{self, Ctx, Outcome};
 use super::selfupdate::Pending;
 use super::state::{self, Files, Phase, State, Step};
@@ -30,9 +34,11 @@ use super::trust::{self, Refusal};
 /// The poll interval when the pool names none (its `FOLLOW_POLL_S`), and the bounds.
 const POLL_S: i64 = 120;
 const MAX_BACKOFF_S: i64 = 600;
-const UNAUTHORIZED_S: i64 = 3600;
+pub(super) const UNAUTHORIZED_S: i64 = 3600;
 /// The safety timer: the running set is checked against `last-good/` at least this often.
 const DRIFT_S: i64 = 900;
+/// A count of a Mac's capacity that did not happen after a start of the VM, tried again.
+const RECOUNT_AGAIN_S: i64 = 3600;
 /// How often the host's own addresses are read again for `etc/dispatcher.env` (#371).
 pub(crate) const ADDRESSES_S: i64 = 60;
 /// How often the pool's edge is asked which public address the host leaves from (#371).
@@ -103,6 +109,30 @@ pub(crate) struct Agent {
     pub(super) retry: Option<(Version, i64)>,
     /// The applied release whose agent was checked and needs no update (once per start).
     pub(super) upward_checked: Option<Release>,
+    /// A Mac's `omarchy` VM (#320), kept running, sized, walled and on time.
+    pub vm: Option<super::vm::Keeper>,
+    /// The `Date` of the host state's last answer, whatever its status, and when it came
+    /// (the Mac's clock): the VM's is held to it.
+    pool_date: Option<(i64, i64)>,
+    /// The applied release whose signed minimum the keeper holds the VM's size to.
+    vm_release: Option<Release>,
+    /// A start of the VM ended: the host's capacity is counted again from then, once the
+    /// gate is open; a count that did not happen (an image the VM lacks, which the loop does
+    /// not pull) is tried again an hour later.
+    vm_recount_at: Option<i64>,
+    /// The pinned docker CLI the driver runs, for that count.
+    docker_cli: Option<PathBuf>,
+    /// How the host's capacity is counted (a test plays it).
+    pub count: Box<Count>,
+    /// Order ids refused as seen already, said once per process (#344).
+    pub(super) repeated: BTreeSet<String>,
+    /// The legacy set as last looked at, for the report, and when.
+    pub(super) legacy_seen: Option<(i64, serde_json::Value)>,
+    /// The host report last sent (#344).
+    pub(super) reported: Reported,
+    /// Said once per process: the pool predates the host state's release (#344), so its
+    /// `follow` names the target.
+    older_pool_said: bool,
     /// `etc/dispatcher.env` rendered again from the host and agent.toml (#371); `None`
     /// leaves the file alone (the tests that play other parts).
     pub host_env: Option<HostEnv>,
@@ -135,6 +165,9 @@ impl HostEnv {
         }
     }
 }
+
+/// [`super::vm::count`], or a test's stand-in.
+pub(crate) type Count = dyn FnMut(&super::vm::Counting<'_>) -> Result<String, String>;
 
 enum Fetched {
     Bundle(Box<VerifiedBundle>),
@@ -183,6 +216,16 @@ impl Agent {
             gate_next: 0,
             retry: None,
             upward_checked: None,
+            vm: None,
+            pool_date: None,
+            vm_release: None,
+            vm_recount_at: None,
+            docker_cli: None,
+            count: Box::new(super::vm::count),
+            repeated: BTreeSet::new(),
+            legacy_seen: None,
+            reported: Reported::default(),
+            older_pool_said: false,
             host_env: None,
         }
     }
@@ -236,6 +279,11 @@ impl Agent {
 
     fn use_tools(&mut self, t: tools::Tools) {
         self.state.tools = Some(t.pins.clone());
+        // Colima wants a docker client on the Mac to start the VM: the release's (#320).
+        if let Some(k) = self.vm.as_mut() {
+            k.use_docker(&t.docker);
+        }
+        self.docker_cli = Some(t.docker.clone());
         self.driver = Some(Box::new(Compose::new(
             t,
             &self.cfg.socket_cli,
@@ -290,18 +338,39 @@ impl Agent {
         // A new agent touches nothing until its health gate passed; once a self-update
         // swapped `current`, the state is saved and the agent exits before anything
         // else (#316).
+        let asks = self
+            .vm
+            .as_mut()
+            .map(|k| k.before_poll(now, &self.journal))
+            .unwrap_or_default();
+        if asks.poll_now {
+            // A Mac that woke may be on another network: its addresses, and the public one
+            // its tasks leave from, are read again at once, not at the hour (#371).
+            if let Some(h) = self.host_env.as_mut() {
+                h.next_at = now;
+                h.public_at = now;
+            }
+        }
         if self.gate.is_some() {
+            self.keep_vm(now, true);
             self.gate_step(now);
         } else if self.exit.is_none() {
             self.dispatcher_env(now);
-            if round_now || now >= self.state.poll.next_at {
+            if round_now || asks.poll_now || now >= self.state.poll.next_at {
                 self.poll(now, round_now);
             }
+            self.keep_vm(now, false);
             if self.state.rollout.step == Step::Idle && self.exit.is_none() {
                 self.drift(now);
             }
             if self.exit.is_none() {
-                self.step(now)?;
+                // A step that cannot write (a set directory, a full disk) is retried every
+                // tick; a retire-legacy in flight goes on meanwhile, and the report still
+                // says what the host knows, its answers above all.
+                let stepped = self.step(now);
+                self.retire_step(now);
+                self.report(now);
+                stepped?;
             }
         }
         if self.saved.as_ref() != Some(&self.state) {
@@ -309,6 +378,84 @@ impl Agent {
             self.saved = Some(self.state.clone());
         }
         Ok(())
+    }
+
+    /// A Mac's VM, one step: started when it is not running, restarted when it differs
+    /// from agent.toml (a size or mount change only while no task runs, never below the
+    /// applied release's signed minimum), walled, its clock held to the pool's; once a
+    /// start ended, the host's capacity counted again (#320).
+    fn keep_vm(&mut self, now: i64, gate: bool) {
+        if self.vm.is_none() {
+            return;
+        }
+        // The applied release's signed minimum, read once per release.
+        if let Some(r) = self.state.applied.filter(|r| self.vm_release != Some(*r)) {
+            self.vm_release = Some(r);
+            if let Some(b) = self.cached(r) {
+                let c = b.manifest().capacity().constants();
+                let min = (c.min.cpus, c.min.mem_gb);
+                if let Some(k) = self.vm.as_mut() {
+                    k.minimum(min);
+                }
+            }
+        }
+        let Some(k) = self.vm.as_mut() else {
+            return;
+        };
+        let driver = &mut self.driver;
+        let mut tasks = || match driver.as_deref_mut().map(Driver::tasks_running) {
+            Some(Answer::Yes(b)) => Some(b),
+            _ => None,
+        };
+        if k.step(now, self.pool_date, &mut tasks, gate, &self.journal) {
+            self.vm_recount_at = Some(now);
+        }
+        // A new agent's health gate touches nothing but the VM's start.
+        if !gate && self.vm_recount_at.is_some_and(|t| now >= t) {
+            self.vm_recount_at = (!self.recount(now)).then_some(now + RECOUNT_AGAIN_S);
+        }
+    }
+
+    /// The host's capacity counted again after a start of the VM, as `omarchy-agent
+    /// capacity --write` counts it ([`super::vm::count`]): a new size or Rosetta lane
+    /// reaches `run/capacity.json`, whose change reloads the dispatcher (an input of the
+    /// set) and reaches the pool with its next report. Whether it was counted.
+    fn recount(&mut self, now: i64) -> bool {
+        // The probe container may take a while (the engine just up; it pulls nothing): the
+        // watchdog counts from here.
+        if let Some(p) = &self.progress {
+            p.store(super::now(), Ordering::Relaxed);
+        }
+        let said = match (self.docker_cli.clone(), self.state.applied) {
+            (Some(docker), Some(r)) => match self.cached(r) {
+                Some(b) => {
+                    let toml = fs::read_to_string(self.paths.agent_toml()).unwrap_or_default();
+                    let meminfo = self.vm.as_mut().and_then(super::vm::Keeper::meminfo);
+                    let c = super::vm::Counting {
+                        docker: &docker,
+                        socket: &self.cfg.socket_cli,
+                        work_root: &self.cfg.work_root,
+                        set_dir: &self.cfg.set_dir,
+                        manifest: b.manifest(),
+                        agent_toml: &toml,
+                        meminfo: meminfo.as_deref(),
+                    };
+                    (self.count)(&c)
+                }
+                None => Err(format!("release {r}'s bundle is not in the cache")),
+            },
+            _ => Err("no release applied yet, or no pinned docker CLI".into()),
+        };
+        let counted = said.is_ok();
+        let detail = match said {
+            Ok(s) => s,
+            Err(e) => format!(
+                "the host's capacity was not counted again after the VM started ({e}); the loop tries again in an hour, `omarchy-agent capacity --write` counts it now"
+            ),
+        };
+        self.journal
+            .write(now, "capacity", serde_json::json!({ "detail": detail }));
+        counted
     }
 
     fn step(&mut self, now: i64) -> Result<(), String> {
@@ -380,16 +527,31 @@ impl Agent {
     }
 
     fn poll(&mut self, now: i64, round_now: bool) {
-        let answer = self.pool.follow(&self.cfg.worker_id);
+        let answer = self.pool.state();
+        // The pool's clock, from any answer it gave: a 401 for a Mac whose clock is too far
+        // off to sign is the answer the VM's clock rule needs most (#320).
+        if let Some(d) = self.pool.date() {
+            self.pool_date = Some((d, super::now()));
+        }
+        let answer = match answer {
+            Net::Ok(s) if s.older_pool => self.target_by_follow(s, now),
+            other => other,
+        };
         let p = &mut self.state.poll;
         p.last_at = now;
+        let refused = p.last == "unauthorized";
         match answer {
             Net::Ok(f) => {
                 p.last = "ok".into();
                 p.backoff_s = 0;
                 let every = f.poll_s.unwrap_or(POLL_S).clamp(60, MAX_BACKOFF_S);
                 p.next_at = now + jitter(every, now);
-                self.on_follow(f, now, round_now);
+                // The pool takes the host's calls again: the report waiting for its hourly
+                // retry goes now.
+                if refused {
+                    self.reported.next_at = self.reported.next_at.min(now);
+                }
+                self.on_state(f, now, round_now);
             }
             Net::NoAnswer(e) => {
                 p.last = "no-answer".into();
@@ -417,16 +579,58 @@ impl Agent {
         }
     }
 
-    fn on_follow(&mut self, f: Follow, now: i64, round_now: bool) {
+    /// A host state with no `release` member, a pool from before #344: only a rollback below
+    /// the release that brought agent 0.3.0 deploys one again (rollback.yml deploys the
+    /// Worker of the tag it goes back to). Its target and the open Update of the host's
+    /// registration are then its `follow`'s, as agents before 0.3.0 read them, so the host
+    /// follows the rollback (its statement) down; a pool from #344 on is never asked.
+    fn target_by_follow(&mut self, mut s: HostState, now: i64) -> Net<HostState> {
+        let f = match self.pool.follow(&self.cfg.worker_id) {
+            Net::Ok(f) => f,
+            Net::NoAnswer(e) => {
+                return Net::NoAnswer(format!(
+                    "its host state names no release (a pool from before #344) and its follow did not answer: {e}"
+                ))
+            }
+            Net::Unauthorized(c) => return Net::Unauthorized(c),
+        };
+        if !self.older_pool_said {
+            self.older_pool_said = true;
+            self.journal.write(
+                now,
+                "poll",
+                serde_json::json!({"detail": format!(
+                    "the pool's host state names no release: a pool from before #344 (a rollback below it); its follow names the target ({})",
+                    f.latest.map_or_else(|| "none".to_owned(), |r| r.to_string())
+                )}),
+            );
+        }
+        s.target = f.latest;
+        if s.updates.is_empty() {
+            s.updates.extend(f.update);
+        }
+        s.poll_s = s.poll_s.or(f.poll_s);
+        Net::Ok(s)
+    }
+
+    /// The host state (#344): its Update orders, its host orders, then its target.
+    fn on_state(&mut self, s: HostState, now: i64, round_now: bool) {
         let mut force: Option<String> =
             round_now.then(|| "a round was asked for (SIGUSR1)".to_owned());
         // An Update order waits while commit or a revert finishes (a revert quarantines
         // again): the next poll sees it unconsumed.
         let busy = self.state.rollout.step != Step::Idle
             && !rollout::preemptible(&self.state.rollout.step);
-        if let Some(id) = f
-            .update
-            .filter(|id| !busy && self.state.update_seen.as_ref() != Some(id))
+        // The last Update an agent before 0.3.0 took (`update_seen`) counts as seen.
+        if let Some(id) = s
+            .updates
+            .iter()
+            .find(|id| {
+                !busy
+                    && !self.state.orders.seen(id)
+                    && self.state.update_seen.as_deref() != Some(id.as_str())
+            })
+            .cloned()
         {
             if !self.state.quarantine.is_empty() {
                 self.journal.write(
@@ -437,9 +641,43 @@ impl Agent {
             }
             self.state.quarantine.clear();
             force = Some(format!("Update order {id}"));
+            self.state.orders.remember(&id);
             self.state.update_seen = Some(id);
         }
-        let Some(target) = f.latest else {
+        let taken = self.take_orders(s.orders, now, busy);
+        if let (None, Some(id)) = (&force, taken.reconcile.first()) {
+            force = Some(format!("host order {id} (reconcile-now)"));
+        }
+        let named = s.target.is_some();
+        self.follow_target(s.target, force, now);
+        for id in taken.reconcile {
+            let detail = if self.state.rollout.step != Step::Idle {
+                format!(
+                    "a round now: {} ({})",
+                    self.state.rollout.why,
+                    self.state.rollout.step.name()
+                )
+            } else if !named {
+                "the pool names no release for this host: no round".to_owned()
+            } else if self.state.round.detail.is_empty() {
+                format!(
+                    "no round started; the last round says {}",
+                    self.state.round.outcome
+                )
+            } else {
+                format!(
+                    "no round started; the last round says {}: {}",
+                    self.state.round.outcome, self.state.round.detail
+                )
+            };
+            self.answer(&id, "reconcile-now", "done", &detail, now);
+        }
+    }
+
+    /// The release the pool names: a round to it, preempting one in flight when it may,
+    /// or a round to the release that runs when `force` says why.
+    fn follow_target(&mut self, target: Option<Release>, force: Option<String>, now: i64) {
+        let Some(target) = target else {
             return;
         };
         self.state.target = Some(target);
