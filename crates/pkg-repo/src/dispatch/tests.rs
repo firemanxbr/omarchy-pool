@@ -380,6 +380,9 @@ struct FakePool {
     refuse_uploads: Mutex<Option<u16>>,
     /// Each heartbeat takes this long (a pool that holds the connection open).
     slow_beat: Mutex<Duration>,
+    /// Fetches fail as a pool that does not answer them, while claims go on: a preparation
+    /// that fetches tries again later.
+    deaf_fetch: AtomicBool,
 }
 
 fn down() -> RepoError {
@@ -501,7 +504,7 @@ impl Pool for FakePool {
         Ok(())
     }
     fn fetch(&self, _token: &str, of: u64, name: &str, dest: &Path) -> Result<bool, RepoError> {
-        if self.down.load(Ordering::SeqCst) {
+        if self.down.load(Ordering::SeqCst) || self.deaf_fetch.load(Ordering::SeqCst) {
             return Err(down());
         }
         match self.artifacts.lock().unwrap().get(&(of, name.to_owned())) {
@@ -1835,6 +1838,72 @@ fn a_runtime_the_engine_refuses_fails_the_start_and_holds_the_claims_nothing_run
         .get("sandbox_held")
         .is_none());
     assert_eq!(h.pool.fails.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn leases_refused_while_a_sandbox_hold_is_in_effect_are_one_outage_and_do_not_double_it() {
+    let h = H::new();
+    sandboxed_file(&h);
+    *h.engine.runtimes.lock().unwrap() = Some(Vec::new());
+    // Three contributors' builds claimed one after the other while none could start yet (in
+    // production each prepares in a thread of its own; here a lesson the pool does not hand
+    // over keeps each preparing), then the three started in one round once the pool answers.
+    h.pool.deaf_fetch.store(true, Ordering::SeqCst);
+    let gens = [GEN, GEN2, "g_00000000000000c3"];
+    let mut d = h.dispatcher();
+    for (id, gen) in (7..).zip(gens) {
+        h.give(task(
+            id,
+            "build",
+            "felix",
+            "https://github.com/felix/felix@v1.0:PKGBUILD",
+            "community",
+            json!({ "lesson": 3 }),
+            gen,
+        ));
+    }
+    h.ticks(&mut d, 4);
+    let leases = h.leases();
+    assert_eq!(leases.len(), 3);
+    assert!(leases.iter().all(|l| l.phase == Phase::Preparing));
+    assert!((7..)
+        .zip(gens)
+        .all(|(id, gen)| runtimes_of(&h, id, gen).is_empty()));
+    h.pool.deaf_fetch.store(false, Ordering::SeqCst);
+    h.advance(super::RETRY_AFTER);
+    h.ticks(&mut d, 3);
+    // Each was refused in the sandbox and lost, none tried without it …
+    for (id, gen) in (7..).zip(gens) {
+        assert_eq!(runtimes_of(&h, id, gen), [Some("runsc".to_owned())]);
+        assert_eq!(h.pool.fails_of(id)[0]["lost"], json!(true));
+    }
+    assert!(h.engine.runs.lock().unwrap().is_empty(), "nothing started");
+    // … and the three are one refusal: the first's 30 minutes, not two hours.
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], json!(0), "{c}");
+    let why = c["capacity"]["sandbox_held"].as_str().unwrap();
+    assert!(why.starts_with("runsc refused task 7's start"), "{why}");
+    assert!(
+        why.ends_with("no claim for 30 minutes; the dispatcher's Restart ends it sooner"),
+        "{why}"
+    );
+    h.advance(SANDBOX_HOLD);
+    h.ticks(&mut d, 1);
+    let c = h.pool.last_claim();
+    assert_eq!(c["want"], json!(1), "{c}");
+    assert!(c["capacity"].get("sandbox_held").is_none(), "{c}");
+    // A refusal after the hold is the second in a row.
+    h.give(community(10, "g_00000000000000c4"));
+    h.advance(30);
+    h.ticks(&mut d, 3);
+    let c = h.pool.last_claim();
+    assert!(
+        c["capacity"]["sandbox_held"]
+            .as_str()
+            .is_some_and(|w| w.starts_with("runsc refused task 10's start")
+                && w.contains("no claim for 1 hour (2 refusals in a row)")),
+        "{c}"
+    );
 }
 
 #[test]

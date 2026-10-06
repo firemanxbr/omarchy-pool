@@ -1036,7 +1036,9 @@ a runtime's name only that one (`sandbox = "kata"`). Where it does not apply:
   pool spends one from a task's third loss on a host (`HOST_LOSSES_MAX`), so
   the dispatcher holds its claims (`want: 0`) for 30 minutes after a first
   refusal, twice as long after each further one in a row (1, 2, 4 … hours,
-  a day at most), and claims again when the hold is over; the host page
+  a day at most), and claims again when the hold is over — the leases it
+  claimed before a hold and refused while it holds are lost with it, and
+  count as that one refusal; the host page
   says why under *Sandbox* ("its claims hold: runsc refused task … 's start
   …: no claim for 1 hour (2 refusals in a row) …") and the dispatcher's log
   says it once. Only the runtime's own error holds the claims (docker's

@@ -1283,8 +1283,17 @@ impl Dispatcher {
     /// pool would hand it task after task, each lost, each loss of the same task past the
     /// second spending its attempt (worker/src/routes/factory.ts `HOST_LOSSES_MAX`). Bounded in
     /// time, so that a runtime fixed since claims again without a recount, which writes nothing
-    /// when it finds the host as it was.
+    /// when it finds the host as it was. A refusal while a hold is in effect is the same outage
+    /// — a lease claimed before it, still preparing in its thread when the runtime broke — and
+    /// neither counts nor lengthens it: only a refusal after a hold doubles the next.
     fn hold_sandbox(&mut self, now: u64, runtime: &str, task: u64, why: &str) {
+        if self.sandbox_hold.as_ref().is_some_and(|h| now < h.until) {
+            say(format!(
+                "the sandbox: {runtime} refused task {task}'s start too ({}), a lease claimed before the hold: the hold stands as it was",
+                why.chars().take(160).collect::<String>()
+            ));
+            return;
+        }
         self.sandbox_refusals = self.sandbox_refusals.saturating_add(1);
         let hold = sandbox_hold_for(self.sandbox_refusals);
         let why = format!(
