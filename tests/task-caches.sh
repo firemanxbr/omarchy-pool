@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# The task caches' pacman side (#341, design v2 §9.3, D52): what the build
+# script's pacman makes of the two pacman caches a task container mounts — the
+# host's, read-only, as its first CacheDir, and its own, writable, the second.
+# (The dispatcher's side — the mounts it makes, the merge-back against the
+# pool's signed databases, the caps — is crates/pkg-repo/src/dispatch/cache.rs's
+# tests and tests/dispatch-engine.sh's section 7.)
+#
+#   1. pacman_ready (factory/worker/omarchy-build-worker.sh) names the shared
+#      cache first and the task's own second, once, and only where the shared
+#      cache is mounted
+#   2. on a real engine with a real pacman (the pinned Arch base image of this
+#      machine's architecture), two containers mounted as the spec mounts a
+#      task's caches, with its capabilities, download the same packages from a
+#      local repository at once: each into its own cache, whole, the bytes the
+#      repository lists; the shared cache is read-only in both and stays empty
+#   3. once those bytes are in the shared cache (as the merge-back puts them), a
+#      third container finds them there and downloads nothing; a file there
+#      whose bytes are not the database's fails the transaction, since pacman
+#      cannot delete it from a read-only cache — what the merge-back's check
+#      keeps out
+#
+# Requires: bash, sed, grep, sha256sum; docker or podman for 2 and 3 (CI runs it
+# on x86_64; on a shared machine under `flock /tmp/omarchy-engine.lock`). The
+# base image comes from tests/images.env, pulled when absent; nothing is
+# fetched from the network but that image.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RT="${RUNTIME:-$(command -v docker >/dev/null 2>&1 && echo docker || echo podman)}"
+tmp="$(cd "$(mktemp -d)" && pwd -P)"
+image=""
+cleanup() {
+  local c
+  for c in a b c d; do "$RT" rm -f "omarchy-cachetest-$c-$$" >/dev/null 2>&1 || true; done
+  # What the containers wrote as root goes through one more container of the same image, on this run's directory only.
+  rm -rf "$tmp" 2>/dev/null || { [[ -z "$image" ]] || "$RT" run --rm -v "$tmp:$tmp" "$image" rm -rf "$tmp" >/dev/null 2>&1; rm -rf "$tmp" 2>/dev/null; } || true
+}
+trap cleanup EXIT
+fail() { echo "task-caches: FAIL — $*" >&2; exit 1; }
+
+# ---------- 1. pacman_ready's CacheDir lines ----------
+sed -n '/^pacman_ready() {/,/^}/p' "$root/factory/worker/omarchy-build-worker.sh" | sed "s|/etc/pacman.conf|$tmp/pacman.conf|g" > "$tmp/fn.sh"
+grep -q 'CacheDir' "$tmp/fn.sh" || fail "pacman_ready names no CacheDir"
+# shellcheck source=/dev/null
+source "$tmp/fn.sh"
+pacman-key() { :; }
+printf '[options]\nArchitecture = auto\n#CacheDir    = /var/cache/pacman/pkg/\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' > "$tmp/pacman.conf"
+PACMAN_SHARED_CACHE="$tmp/nowhere" pacman_ready
+grep -q '^CacheDir' "$tmp/pacman.conf" && fail "a CacheDir without the shared cache mounted: $(cat "$tmp/pacman.conf")"
+mkdir -p "$tmp/shared-here"
+PACMAN_SHARED_CACHE="$tmp/shared-here" pacman_ready
+PACMAN_SHARED_CACHE="$tmp/shared-here" pacman_ready
+[[ "$(grep '^CacheDir' "$tmp/pacman.conf" | tr -s ' ')" == "$(printf 'CacheDir = %s/\nCacheDir = /var/cache/pacman/pkg/' "$tmp/shared-here")" ]] \
+  || fail "the CacheDir lines: $(cat "$tmp/pacman.conf")"
+[[ "$(sed -n '2p' "$tmp/pacman.conf")" == "CacheDir = $tmp/shared-here/" ]] || fail "the shared cache is not first in [options]: $(cat "$tmp/pacman.conf")"
+echo "ok: pacman_ready names the shared cache first and the task's own second, once, and only where it is mounted"
+
+# ---------- 2. two containers at once, a real pacman ----------
+command -v "$RT" >/dev/null 2>&1 || fail "no container engine ($RT)"
+# shellcheck source=/dev/null
+source "$root/tests/images.env"
+arch="$(uname -m)"; [[ "$arch" == arm64 ]] && arch=aarch64
+case "$arch" in
+  x86_64) image="$ARCHLINUX_BASE" ;;
+  aarch64) image="$ARCHLINUXARM_BASE" ;;
+  *) fail "no pinned Arch base image for $arch" ;;
+esac
+"$RT" image inspect "$image" >/dev/null 2>&1 || "$RT" pull -q "$image" >/dev/null
+# The capabilities a task container keeps (crates/pkg-repo/src/dispatch/spec.rs, CAPS).
+caps=()
+while read -r c; do caps+=(--cap-add "$c"); done < <(sed -n '/^pub const CAPS/,/^];/s/^ *"\([A-Z_]*\)",$/\1/p' "$root/crates/pkg-repo/src/dispatch/spec.rs")
+(( ${#caps[@]} > 0 )) || fail "no CAPS in crates/pkg-repo/src/dispatch/spec.rs"
+mkdir -p "$tmp/repo" "$tmp/shared" "$tmp/own-a" "$tmp/own-b" "$tmp/own-c" "$tmp/own-d" "$tmp/sync"
+# A local repository of three packages, the dependency both builds need 48 MiB, made with pacman's own tools in the image.
+"$RT" run --rm -v "$tmp/repo:/repo" "$image" bash -c '
+  set -e; cd /tmp; a="$(uname -m)"
+  for p in cachefix-dep:50331648 cachefix-a:4096 cachefix-b:4096; do
+    n="${p%%:*}"; size="${p#*:}"
+    rm -rf pkg && mkdir -p "pkg/usr/share/$n"
+    head -c "$size" /dev/urandom > "pkg/usr/share/$n/data"
+    printf "pkgname = %s\npkgbase = %s\npkgver = 1.0-1\npkgdesc = a fixture\nurl = https://example.invalid\nbuilddate = 1700000000\npackager = omarchy-pool test\nsize = %s\narch = %s\nlicense = MIT\n" "$n" "$n" "$size" "$a" > pkg/.PKGINFO
+    (cd pkg && bsdtar --zstd -cf "/repo/$n-1.0-1-$a.pkg.tar.zst" .PKGINFO usr)
+  done
+  repo-add -q /repo/cachefix.db.tar.gz /repo/*.pkg.tar.zst
+  chown -R "$0" /repo' "$(id -u):$(id -g)"
+ls "$tmp"/repo/*.pkg.tar.zst >/dev/null || fail "the local repository was not made"
+
+# One task's pacman: the build script's pacman_ready, the shared cache read-only and its own cache mounted as the spec mounts them,
+# the spec's capabilities; the image's repositories left out (no network here), the local one in. $3: wait for the other at the
+# barrier first, so both download at once.
+dl() { # name own [barrier-peer]
+  "$RT" run --rm --name "omarchy-cachetest-$1-$$" --cap-drop ALL "${caps[@]}" --security-opt no-new-privileges \
+    -v "$root:/pool:ro" -v "$tmp/repo:/repo:ro" -v "$tmp/sync:/sync" \
+    -v "$tmp/shared:/var/cache/pacman/shared:ro" -v "$tmp/$2:/var/cache/pacman/pkg" \
+    "$image" bash -c '
+      set -uo pipefail
+      source <(sed -n "/^pacman_ready() {/,/^}/p" /pool/factory/worker/omarchy-build-worker.sh)
+      pacman_ready
+      echo "== cachedirs: $(pacman-conf CacheDir | tr "\n" " ")"
+      awk "/^\\[/ { keep = (\$0 == \"[options]\") } keep" /etc/pacman.conf > /tmp/pacman.conf
+      printf "\n[cachefix]\nSigLevel = Never\nServer = file:///repo\n" >> /tmp/pacman.conf
+      echo "== shared write: $(touch /var/cache/pacman/shared/planted 2>&1 || true)"
+      pacman --config /tmp/pacman.conf -Sy --noconfirm >/dev/null || exit 3
+      if [[ -n "$1" ]]; then touch "/sync/$0"; for _ in $(seq 120); do [[ -e "/sync/$1" ]] && break; sleep 0.25; done; fi
+      pacman --config /tmp/pacman.conf -Sw --noconfirm cachefix-dep cachefix-a cachefix-b 2>&1
+      echo "== exit: $?"' "$1" "${3:-}"
+}
+dl a own-a b > "$tmp/a.log" 2>&1 & pa=$!
+dl b own-b a > "$tmp/b.log" 2>&1 & pb=$!
+wait "$pa" || true; wait "$pb" || true
+for t in a b; do
+  grep -qx '== exit: 0' "$tmp/$t.log" || fail "task $t's pacman: $(cat "$tmp/$t.log")"
+  grep -q "^== cachedirs: /var/cache/pacman/shared/ /var/cache/pacman/pkg/ $" "$tmp/$t.log" || fail "task $t's CacheDirs: $(grep '== cachedirs' "$tmp/$t.log")"
+  grep -q '^== shared write: .*Read-only' "$tmp/$t.log" || fail "task $t could write the shared cache: $(grep '== shared write' "$tmp/$t.log")"
+  for f in "$tmp"/repo/*.pkg.tar.zst; do
+    cmp -s "$f" "$tmp/own-$t/$(basename "$f")" || fail "task $t's own cache does not hold $(basename "$f") whole: $(ls -la "$tmp/own-$t")"
+  done
+done
+[[ -z "$(ls -A "$tmp/shared")" ]] || fail "a task wrote into the shared cache: $(ls -A "$tmp/shared")"
+echo "ok: two tasks at once download the same packages, each into its own cache, whole; the shared cache is read-only to both and stays as it was"
+
+# ---------- 3. the shared cache, once merged ----------
+# What the merge-back puts there: the bytes the database lists (here every one, from task a's cache, as the dispatcher copies them).
+cp "$tmp"/own-a/*.pkg.tar.zst "$tmp/shared/"
+dl c own-c > "$tmp/c.log" 2>&1 || true
+grep -qx '== exit: 0' "$tmp/c.log" || fail "task c's pacman: $(cat "$tmp/c.log")"
+[[ -z "$(find "$tmp/own-c" -name '*.pkg.tar*' -print -quit)" ]] || fail "task c downloaded what the shared cache holds: $(ls -A "$tmp/own-c")"
+echo "ok: a task finds what the shared cache holds, checks it and downloads nothing"
+# Bytes the database does not list under that name, in the read-only cache: pacman cannot delete them, and the transaction fails.
+dep="$(basename "$(ls "$tmp"/repo/cachefix-dep-*.pkg.tar.zst)")"
+cp "$tmp/own-a/$(basename "$(ls "$tmp"/repo/cachefix-a-*.pkg.tar.zst)")" "$tmp/shared/$dep"
+dl d own-d > "$tmp/d.log" 2>&1 || true
+grep -qx '== exit: 0' "$tmp/d.log" && fail "a corrupt file in the read-only cache went unnoticed: $(cat "$tmp/d.log")"
+echo "ok: bytes the database does not list, in the read-only cache, fail the task — what the merge-back's check keeps out"
+echo "ok: the task caches' pacman side ($RT, $image)"
