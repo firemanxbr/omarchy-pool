@@ -340,10 +340,12 @@ impl Driver for Quadlet {
 
     /// The unit's stop, queued: systemd stops the container with the template's
     /// `stop_grace_period` (`--stop-timeout`, then a kill), and a unit stopped by hand is not
-    /// restarted. `_grace_s` is that same grace, rendered into the unit.
-    fn begin_drain(&mut self, u: &Unit, _grace_s: u64) -> Answer<()> {
+    /// restarted; `grace_s` is that same grace, rendered into the unit. A container of
+    /// another compose project, by its id — the legacy set `retire-legacy` stops (#344) —
+    /// is the engine's to stop, as on compose.
+    fn begin_drain(&mut self, u: &Unit, grace_s: u64) -> Answer<()> {
         if !is_unit(&u.id) {
-            return Answer::NoAnswer(format!("{:?} is not a unit name", u.id));
+            return self.api.begin_drain(u, grace_s);
         }
         let service = format!("{}.service", u.id);
         self.systemctl(&["stop", "--no-block", &service]).map_none()
@@ -351,7 +353,7 @@ impl Driver for Quadlet {
 
     fn drained(&mut self, u: &Unit) -> Answer<bool> {
         if !is_unit(&u.id) {
-            return Answer::NoAnswer(format!("{:?} is not a unit name", u.id));
+            return self.api.drained(u);
         }
         match self.show(&u.id) {
             Answer::Yes(s) => Answer::Yes(
@@ -363,10 +365,11 @@ impl Driver for Quadlet {
     }
 
     /// The unit's file gone and systemd told, so nothing starts it again (at boot, say);
-    /// `force`: what is left of it killed first, the container removed by force.
+    /// `force`: what is left of it killed first, the container removed by force. Another
+    /// project's container (`retire-legacy`) is the engine's to remove.
     fn remove(&mut self, u: &Unit, force: bool) -> Answer<()> {
         if !is_unit(&u.id) {
-            return Answer::NoAnswer(format!("{:?} is not a unit name", u.id));
+            return self.api.remove(u, force);
         }
         let service = format!("{}.service", u.id);
         if force {

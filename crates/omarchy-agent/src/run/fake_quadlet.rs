@@ -330,7 +330,7 @@ impl Systemd for FakeSystemd {
 }
 
 /// The pinned docker CLI on podman's API socket, on the fake: only what the Quadlet driver
-/// asks of the engine.
+/// asks of the engine (compose's own calls panic).
 pub(crate) struct FakeApi(pub QHost);
 
 fn not_asked<T>(what: &str) -> Answer<T> {
@@ -350,11 +350,27 @@ impl Driver for FakeApi {
     fn start_pull(&mut self, _: &Project, _: &[String]) -> Answer<()> {
         not_asked("start_pull")
     }
-    fn begin_drain(&mut self, _: &Unit, _: u64) -> Answer<()> {
-        not_asked("begin_drain")
+    /// Another project's container (`retire-legacy`'s): the engine stops it.
+    fn begin_drain(&mut self, u: &Unit, _: u64) -> Answer<()> {
+        let mut q = self.0.borrow_mut();
+        q.changes.push(format!("stop {}", u.id));
+        match q.containers.iter_mut().find(|c| c.id == u.id) {
+            Some(c) => {
+                assert!(!c.task, "a task container was stopped");
+                c.status = "exited".into();
+                Answer::Yes(())
+            }
+            None => Answer::NotFound,
+        }
     }
-    fn drained(&mut self, _: &Unit) -> Answer<bool> {
-        not_asked("drained")
+    fn drained(&mut self, u: &Unit) -> Answer<bool> {
+        let q = self.0.borrow();
+        Answer::Yes(
+            q.containers
+                .iter()
+                .find(|c| c.id == u.id)
+                .is_none_or(|c| c.status == "exited"),
+        )
     }
     fn create(&mut self, _: &Project, _: &[String]) -> Answer<()> {
         not_asked("create")

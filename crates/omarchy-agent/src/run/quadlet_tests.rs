@@ -190,7 +190,31 @@ fn drains_by_the_unit_and_removes_its_file_so_nothing_starts_it_again() {
             &format!("systemctl --user reset-failed {NAME}.service"),
         ]
     );
-    // Names that are not the driver's own never reach a command line.
+    // A container of another compose project, by its id — the legacy set `retire-legacy`
+    // stops and removes (#344) — is the engine's, as on compose.
+    fs::write(&log, "").unwrap();
+    let legacy = Unit {
+        id: "b".repeat(64),
+        ..u.clone()
+    };
+    assert_eq!(q.begin_drain(&legacy, 60), Answer::Yes(()));
+    // The stop is a child the engine carries: logged whole before the next call.
+    for _ in 0..500 {
+        let text = fs::read_to_string(&log).unwrap();
+        if text.lines().count() == 2 && text.ends_with('\n') {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(q.remove(&legacy, true), Answer::Yes(()));
+    let (argv, _) = calls(&log);
+    assert!(
+        argv.contains(&format!("docker stop --time 60 {}", legacy.id))
+            && argv.contains(&format!("docker rm --force {}", legacy.id))
+            && !argv.iter().any(|a| a.starts_with("systemctl")),
+        "{argv:?}"
+    );
+    // Names that are neither its own nor a container's never reach a command line.
     let bad = Unit {
         id: "--all".into(),
         ..u.clone()
