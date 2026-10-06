@@ -496,6 +496,46 @@ fn a_task_that_reaches_its_networks_gateway_on_any_port_fails_the_probe_with_wha
     assert!(b.iter().all(|x| x.contains("no answer")), "{b:?}");
 }
 
+#[test]
+fn on_a_mac_a_bridges_gateway_is_the_vm_and_the_macs_lan_address_is_past_its_nat() {
+    // A Mac's engine is rootful in its VM (#320): a bridge's gateway is the VM itself,
+    // which the omarchy VM's own task firewall closes, and nothing of prep-root.sh's is
+    // there; the Mac's LAN address is reached through the VM's NAT, as its router is.
+    let net = Cidr::parse(PROBE_NET).unwrap();
+    let t = egress::Targets::of_host(None, Some("192.168.1.20".parse().unwrap()), net);
+    let ok = format!("{}egress public open\n", all_blocked(&t));
+    let out = ok
+        .replace("gateway-22 blocked", "gateway-22 open")
+        .replace("lan blocked", "lan refused");
+    let mac = |vm| egress::Advice {
+        firewall: String::new(),
+        vm: Some(vm),
+        ..advice(true, false)
+    };
+    let b = egress::verdict(&out, &t, &mac(VmKind::Dedicated));
+    assert_eq!(b.len(), 2, "{b:?}");
+    assert!(
+        b[0].contains("a task reaches the host's LAN address 192.168.1.20 (port 22: refused); only public addresses may be reachable"),
+        "{b:?}"
+    );
+    assert!(
+        b[1].contains(
+            "reaches its gateway 10.231.255.241 (port 22: open); that is the omarchy VM itself"
+        ) && b[1].contains("colima ssh --profile omarchy"),
+        "{b:?}"
+    );
+    assert!(
+        b.iter().all(|x| !x.contains("prep-root.sh --user")),
+        "{b:?}"
+    );
+    let b = egress::verdict(&out, &t, &mac(VmKind::Shared));
+    assert!(
+        b[1].contains("that is Docker Desktop's or OrbStack's VM itself")
+            && b[1].contains("factory/host/prep-mac.sh"),
+        "{b:?}"
+    );
+}
+
 /// prep-root.sh's firewall script for the default task subnets, as it writes it (step 9).
 const FIREWALL: &str = "#!/bin/sh\nset -e\niptables -N OMARCHY-TASKS-HOST 2>/dev/null || true\niptables -F OMARCHY-TASKS-HOST\niptables -A OMARCHY-TASKS-HOST -s 10.231.0.0/16 -j DROP\niptables -C INPUT -j OMARCHY-TASKS-HOST 2>/dev/null || iptables -I INPUT -j OMARCHY-TASKS-HOST\n";
 
@@ -2563,6 +2603,8 @@ fn a_rerun_after_retire_legacy_keeps_the_rootful_exception_and_looks_at_nothing_
         r#""SecurityOptions":[]"#,
     );
     let h = host(&rootful, EGRESS_OK);
+    // prep-root.sh's INPUT drop, which a rootful host needs (#367).
+    prepare(&h.root);
     let record = legacy::Legacy {
         project: "omarchy-pool".into(),
         recorded_at: "2027-01-14T08:00:00Z".into(),
@@ -2657,7 +2699,7 @@ fn mac_host(min_cpus: u32) -> Host {
     fs::write(
         &h.docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\"source=$(cat {r}/home-path),\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"source=$(cat {r}/home-path)/\"*) case \" $* \" in *\"source=$(cat {r}/part-visible 2>/dev/null),\"*) exit 0 ;; esac; echo 'path is not shared' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; echo 'Pacman v7.0.0 - libalpm v15.0.0' ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" ps -q --filter label=com.omarchy.task \"*) cat {r}/tasks 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) if [ -e {r}/walled ]; then cat {r}/egress; else cat {r}/egress-nat; fi ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\"source=$(cat {r}/home-path),\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"source=$(cat {r}/home-path)/\"*) case \" $* \" in *\"source=$(cat {r}/part-visible 2>/dev/null),\"*) exit 0 ;; esac; echo 'path is not shared' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; echo 'Pacman v7.0.0 - libalpm v15.0.0' ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" ps -q --filter label=com.omarchy.task \"*) cat {r}/tasks 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*-task*) cat {r}/task-egress ;;\n  *omarchy-egress-probe-*) if [ -e {r}/walled ]; then cat {r}/egress; else cat {r}/egress-nat; fi ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = r.display()
         ),
     )
@@ -3030,9 +3072,17 @@ fn the_task_firewall_goes_into_the_vm_before_the_egress_probe_and_without_it_a_t
         "the omarchy VM's task firewall did not apply (sudo: a password is required)",
         "egress: a task reaches the default gateway 192.168.1.1 (port 53: open)",
         "egress: a task reaches the Mac as its VM reaches it 192.168.5.2 (port 22: refused)",
+        // The bridge's gateway is the VM itself, which only the firewall's INPUT drop closes
+        // (#367); nothing of prep-root.sh's is asked of a Mac.
+        "reaches its gateway 10.231.255.241 (port 22: open,",
+        "that is the omarchy VM itself",
     ] {
         assert!(screen.contains(want), "{want}:\n{screen}");
     }
+    assert!(
+        !screen.contains("prep-root.sh --user") && !screen.contains("TASKS-HOST) is not installed"),
+        "{screen}"
+    );
     // The script is prep-root.sh's step 9 for the task subnets.
     let script = crate::vm::firewall(&net::parse_list(TASK_SUBNETS).unwrap());
     assert!(script.contains("iptables -A OMARCHY-TASKS -s 10.231.0.0/16 -d 192.168.0.0/16 -j DROP"));
@@ -3309,7 +3359,8 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
     // The agent puts no firewall in a VM it does not own: its NAT carries a task to the
     // LAN, and the egress probe says so as on any host.
     assert!(
-        screen.contains("egress: a task reaches the default gateway 192.168.1.1 (port 53: open)"),
+        screen.contains("egress: a task reaches the default gateway 192.168.1.1 (port 53: open)")
+            && screen.contains("that is Docker Desktop's or OrbStack's VM itself"),
         "{screen}"
     );
     assert!(!sys.calls.iter().any(|c| c.ends_with("<firewall>")));
