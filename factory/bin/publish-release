@@ -23,11 +23,14 @@
 # (`factory/bin/co-sign release vX.Y.Z`, the runbook's *Co-signing a
 # release*). The release is published only once the co-signatures meet the
 # threshold factory/MAINTAINERS.toml sets here (the one this release's agent
-# pins) and the one it set at every release of the last 30 days (those
-# releases' agents verify the new bundle before they update themselves, as
-# verify-with-agents runs them): `factory/bin/co-sign check`, with
-# ssh-keygen. Until then it stays a draft; once they are on it, re-running
-# the failed job publishes it. With no threshold anywhere, nothing is asked.
+# pins), the one it set at the latest published release, however old (the
+# agent most hosts run, which takes the new bundle first: a pause in releases
+# never lets a rotated key past it), and the one it set at every release of
+# the last 30 days (those releases' agents verify the new bundle before they
+# update themselves, as verify-with-agents runs them): `factory/bin/co-sign
+# check`, with ssh-keygen. Until then it stays a draft; once they are on it,
+# re-running the failed job publishes it. With no threshold anywhere, nothing
+# is asked.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 v="${1:?usage: publish-release vX.Y.Z <sums>}"
@@ -65,7 +68,8 @@ if (( ${#changed[@]} )); then
   exit 1
 fi
 # The maintainers' co-signature: every one on the draft, then the policy of this
-# release and of every release of the last 30 days.
+# release, of the latest published one whatever its age, and of every release of
+# the last 30 days.
 bundle="omarchy-host-$v.tar.gz"
 cosigned=(); while IFS= read -r a; do [[ "$a" == "$bundle".*.sshsig ]] && cosigned+=("$a"); done <<<"$have"
 mkdir -p "$work/cosignatures"
@@ -75,8 +79,9 @@ if (( ${#cosigned[@]} )); then
 fi
 policies=(--policy "$v=$root/factory/MAINTAINERS.toml")
 cutoff="$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=30)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
-tags="$(gh release list --exclude-drafts --limit 200 --json tagName,publishedAt --jq ".[] | select(.publishedAt >= \"$cutoff\") | .tagName")" \
-  || { echo "publish-release: cannot list the releases of the last 30 days, whose agents must take $v; it stays as it is" >&2; exit 1; }
+tags="$(gh release list --exclude-drafts --limit 200 --json tagName,publishedAt \
+  --jq "sort_by(.publishedAt) | reverse | (.[0:1] + map(select(.publishedAt >= \"$cutoff\"))) | unique_by(.tagName) | .[].tagName")" \
+  || { echo "publish-release: cannot list the latest release and those of the last 30 days, whose agents must take $v; it stays as it is" >&2; exit 1; }
 for tag in $tags; do
   [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
   if gh api "repos/{owner}/{repo}/contents/factory/MAINTAINERS.toml?ref=$tag" -H "Accept: application/vnd.github.raw" > "$work/maintainers-$tag.toml" 2>"$work/err"; then

@@ -12,13 +12,14 @@
  * maintainer's token hands one in (PUT .../cosignature, what
  * factory/bin/co-sign rollback sends), kept under the statement's SHA-256
  * and the maintainer's login, so a statement signed again never travels
- * with co-signatures over other bytes; the agent verifies each.
+ * with co-signatures over other bytes, and refused (409) when it names
+ * another statement than the one stored; the agent verifies each.
  */
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
-import { cosignaturePrefix, MAX_COSIGNATURE, rollbackKeys } from "../src/routes/rollback";
+import { cosignaturePrefix, MAX_COSIGNATURE, rollbackKeys, STATEMENT_SHA256_HEADER } from "../src/routes/rollback";
 import coSign from "../../factory/bin/co-sign?raw";
 // The agent's fixture: Alice's security-key signature over a statement (crates/omarchy-agent/tests/fixtures/cosignature/).
 import aliceStatementSignature from "../../crates/omarchy-agent/tests/fixtures/cosignature/statement.json.alice.sshsig?raw";
@@ -103,8 +104,17 @@ describe("PUT /factory/rollback/:to/cosignature (#330)", () => {
         .bind(await sha256Hex("omc_alice"), await sha256Hex("oms_alice"), await sha256Hex("omc_bob"), await sha256Hex("oms_bob"), await sha256Hex("omc_carol"), await sha256Hex("oms_carol")),
     ]);
   });
-  const put = (to: string, token: string | null, body: string) =>
-    get(`/factory/rollback/${to}/cosignature`, { method: "PUT", body, headers: { "content-type": "text/plain", ...(token ? { authorization: `Bearer ${token}` } : {}) } });
+  // What co-sign sends: the signature, and the SHA-256 of the statement it signed (STATEMENT by default).
+  let signed = "";
+  beforeAll(async () => {
+    signed = await sha256Hex(STATEMENT);
+  });
+  const put = (to: string, token: string | null, body: string, sha: string | null = signed) =>
+    get(`/factory/rollback/${to}/cosignature`, {
+      method: "PUT",
+      body,
+      headers: { "content-type": "text/plain", ...(token ? { authorization: `Bearer ${token}` } : {}), ...(sha === null ? {} : { [STATEMENT_SHA256_HEADER]: sha }) },
+    });
   const SIG = aliceStatementSignature;
 
   it("takes a maintainer's co-signature of the stored statement and relays it beside it, under their login", async () => {
@@ -136,9 +146,18 @@ describe("PUT /factory/rollback/:to/cosignature (#330)", () => {
     await env.PACKAGES.put(keys.bundle, BUNDLE);
     expect((await put("v1.20.2", "omc_alice", SIG)).status).toBe(200);
     // rollback.yml runs again: a new seq, new bytes.
-    await env.PACKAGES.put(keys.statement, STATEMENT.replace('"seq":4', '"seq":5'));
+    const again = STATEMENT.replace('"seq":4', '"seq":5');
+    await env.PACKAGES.put(keys.statement, again);
     const relayed = (await (await get("/factory/rollback/v1.20.2")).json()) as { cosignatures: Record<string, string> };
     expect(relayed.cosignatures).toEqual({});
+    // Bob co-signed the statement he fetched before that re-run: refused, never kept beside the new one.
+    const late = await put("v1.20.2", "omc_bob", SIG);
+    expect(late.status).toBe(409);
+    const why = (await late.json()) as { error: string; statement_sha256: string };
+    expect(why.statement_sha256).toBe(await sha256Hex(again));
+    expect(why.error).toContain("was signed again since you fetched it");
+    expect(await env.PACKAGES.get(`${cosignaturePrefix("v1.20.2", await sha256Hex(again))}bob.sshsig`)).toBeNull();
+    expect(((await (await get("/factory/rollback/v1.20.2")).json()) as { cosignatures: Record<string, string> }).cosignatures).toEqual({});
   });
 
   it("refuses what is no armored SSH signature, an oversized one, a name that is no release, and a statement that is not there", async () => {
@@ -151,13 +170,17 @@ describe("PUT /factory/rollback/:to/cosignature (#330)", () => {
     }
     expect((await put("latest", "omc_alice", SIG)).status).toBe(400);
     expect((await put("v9.9.8", "omc_alice", SIG)).status).toBe(404);
+    // The statement it is over must be named, as a SHA-256.
+    expect((await put("v1.20.3", "omc_alice", SIG, null)).status).toBe(400);
+    expect((await put("v1.20.3", "omc_alice", SIG, "not-a-digest")).status).toBe(400);
     expect((await (await get("/factory/rollback/v1.20.3")).json()) as unknown).toMatchObject({ cosignatures: {} });
   });
 
-  it("is what factory/bin/co-sign rollback sends: the route, the token, the armored text", () => {
+  it("is what factory/bin/co-sign rollback sends: the route, the token, the armored text, the statement's SHA-256", () => {
     expect(coSign).toContain('f"{api}/api/v1/factory/rollback/{v}/cosignature"');
     expect(coSign).toContain('method="PUT"');
     expect(coSign).toContain('"authorization": f"Bearer {token}"');
+    expect(coSign).toContain(`"${STATEMENT_SHA256_HEADER}": digest`);
     expect(coSign).toContain('ROLLBACK_NAMESPACE = "rollback@omarchy-pool.org"');
   });
 });

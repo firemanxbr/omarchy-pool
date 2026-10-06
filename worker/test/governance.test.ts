@@ -28,6 +28,9 @@ describe("governance file", () => {
     expect(repositoryFile).toMatch(/^\[cosignature\]\nthreshold = \d+$/m);
     const withKeys = `maintainers = ["maralcbr", "firemanxbr"]\n\n[cosignature]\nthreshold = 1\n\n[cosignature.keys]\nfiremanxbr = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29cAAAABHNzaDo= firemanxbr@security-key"\n`;
     expect(parseGovernance(withKeys)).toEqual(["firemanxbr", "maralcbr"]);
+    // A maintainer's backup key beside their own: a list (#330).
+    const key = withKeys.split('"')[5];
+    expect(parseGovernance(`${withKeys}maralcbr = ["${key.replace("AAAAII", "AAAAIJ")}", "${key}"]\n`)).toEqual(["firemanxbr", "maralcbr"]);
   });
 });
 

@@ -13,13 +13,17 @@ disagree; a maintainer runs it with --write in the pull request that
 changes the file.
 
 The same file's `[cosignature]` table (#330, design v2 D1 b) is the maintainers'
-co-signature the host agent requires: `threshold` of the FIDO keys under
-`[cosignature.keys]` (one per maintainer, under their login) over every host
-bundle, and at least one over a rollback statement deeper than 14 days. The
-agent pins it as crates/omarchy-agent/src/verify/maintainers.toml, which this
-writes too and CI holds to the file the same way: a key that is not a FIDO
-key, a login that is not a maintainer, one key under two logins, or a
-threshold the keys cannot meet is refused (factory/bin/co-sign reads it).
+co-signature the host agent requires: `threshold` maintainers' FIDO keys under
+`[cosignature.keys]` (a key per maintainer under their login, or a list: a
+backup key beside their own) over every host bundle, and at least one over a
+rollback statement deeper than 14 days. The agent pins it as
+crates/omarchy-agent/src/verify/maintainers.toml, which this writes too and CI
+holds to the file the same way: a key that is not a FIDO key, a login that is
+not a maintainer, one key listed twice, or a threshold the keys cannot meet is
+refused (factory/bin/co-sign reads it) — and so is a threshold one lost key
+would leave out of reach (as many maintainers required as hold a key, one of
+them with a single key): no release could be co-signed under the old pin
+again, and every host would need a reinstall.
 """
 import importlib.machinery
 import importlib.util
@@ -58,6 +62,9 @@ def load():
         threshold, keys = cs.policy(doc)
     except ValueError as e:
         sys.exit(f"{GOV.name}: {e}")
+    why = cs.stranded(threshold, keys)
+    if why:
+        sys.exit(f"{GOV.name}: {why}")
     return sorted(dict.fromkeys(ms), key=str.lower), cs.pinned_toml(threshold, keys), threshold, keys
 
 
@@ -96,13 +103,14 @@ def main():
         PINNED.write_text(pinned)
         print(f"{CODEOWNERS.relative_to(ROOT)} written for {len(maintainers)} maintainer(s)")
         changed = "; the agent changed: raise its version (crates/omarchy-agent/Cargo.toml)" if have_pinned != pinned else ", unchanged"
-        print(f"{PINNED.relative_to(ROOT)} written: {threshold} of {len(keys)} key(s){changed}")
+        print(f"{PINNED.relative_to(ROOT)} written: {threshold} of {len(keys)} maintainer(s) with a key{changed}")
         return
     if have != want:
         sys.exit(f"{CODEOWNERS.relative_to(ROOT)} does not match {GOV.relative_to(ROOT)}; run factory/bin/check-governance --write")
     if have_pinned != pinned:
         sys.exit(f"{PINNED.relative_to(ROOT)} does not match {GOV.relative_to(ROOT)}'s [cosignature]; run factory/bin/check-governance --write (and raise the agent's version)")
-    print(f"governance ok: {len(maintainers)} maintainer(s): {', '.join(maintainers)}; co-signature: {threshold} of {len(keys)} key(s) ({', '.join(keys) or 'none yet'})")
+    held = ", ".join(f"{login}: {len(theirs)} keys" if len(theirs) > 1 else login for login, theirs in keys.items())
+    print(f"governance ok: {len(maintainers)} maintainer(s): {', '.join(maintainers)}; co-signature: {threshold} of {len(keys)} maintainer(s) with a key ({held or 'none yet'})")
 
 
 if __name__ == "__main__":

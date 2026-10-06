@@ -277,7 +277,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz@0.13.2
-      - name: The manifest, statement, bundle, set and state parsers, 60 seconds each
+      - name: The manifest, statement, bundle, set, state and co-signature parsers, 60 seconds each
         run: bash tests/agent-fuzz.sh 60
 
   supply-chain:

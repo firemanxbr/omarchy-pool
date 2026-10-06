@@ -23,7 +23,10 @@
  * makes offline once rollback.yml stored the statement, and hands here with
  * the maintainer's token. The pool keeps it under the statement's own
  * SHA-256, so a statement signed again (a re-run) never travels with
- * co-signatures over other bytes, and relays every one as `cosignatures`
+ * co-signatures over other bytes — and co-sign names the statement it signed
+ * (`x-omarchy-statement-sha256`), so one that rollback.yml signed again
+ * between the maintainer's fetch and the PUT is refused (409) rather than
+ * kept beside bytes it is not over —, and relays every one as `cosignatures`
  * (login → the armored text). It verifies nothing: the agent checks each
  * against the keys its own build pins from factory/MAINTAINERS.toml, so a
  * pool can withhold a co-signature and never make one.
@@ -74,14 +77,24 @@ export async function handleRollbackStatement(to: string, env: Env): Promise<Res
   return json({ to, statement: text, bundle: await bundle.text(), cosignatures }, 200, CACHE);
 }
 
+/** The header naming the statement a co-signature is over: its SHA-256, lowercase hex. */
+export const STATEMENT_SHA256_HEADER = "x-omarchy-statement-sha256";
+
 /**
  * A maintainer's co-signature of the statement stored for `to` (#330): the body is the
  * armored text `ssh-keygen -Y sign -n rollback@omarchy-pool.org` wrote, kept under the
- * caller's login (a second one replaces the first) and journaled. A maintainer's token or
- * session only; the signature is checked by the hosts, not here.
+ * caller's login (a second one replaces the first) and journaled. The statement it is over
+ * is named by its SHA-256 (STATEMENT_SHA256_HEADER): another than the one stored now (a
+ * re-run of rollback.yml since the maintainer fetched it) is 409, so a co-signature is never
+ * relayed beside bytes it does not sign. A maintainer's token or session only; the
+ * signature is checked by the hosts, not here.
  */
 export async function handleRollbackCosignature(c: Contributor, to: string, request: Request, env: Env): Promise<Response> {
   if (!RELEASE_RE.test(to)) return json({ error: "a release name like v1.2.3 is required" }, 400);
+  const named = request.headers.get(STATEMENT_SHA256_HEADER) ?? "";
+  if (!/^[0-9a-f]{64}$/.test(named)) {
+    return json({ error: `${STATEMENT_SHA256_HEADER}: the SHA-256 (hex) of the statement you co-signed is required (factory/bin/co-sign rollback sends it)` }, 400);
+  }
   const statement = await env.PACKAGES.get(rollbackKeys(to).statement);
   if (!statement) return json({ error: `no rollback statement to ${to} to co-sign` }, 404);
   const body = await request.text();
@@ -89,6 +102,9 @@ export async function handleRollbackCosignature(c: Contributor, to: string, requ
     return json({ error: "the body is one armored SSH signature (ssh-keygen -Y sign's output), at most 8 KiB" }, 400);
   }
   const sha = await sha256Hex(await statement.text());
+  if (sha !== named) {
+    return json({ error: `the rollback statement to ${to} was signed again since you fetched it (sha256 ${sha}, not ${named}): run factory/bin/co-sign rollback ${to} again`, statement_sha256: sha }, 409);
+  }
   await env.PACKAGES.put(`${cosignaturePrefix(to, sha)}${c.login}.sshsig`, body, { httpMetadata: { contentType: "text/plain" } });
   const summary = `the rollback statement to ${to} is co-signed by ${c.login}: relayed beside it, each host's agent checks it against the keys it pins (#330)`;
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('host', NULL, 'factory', 'ok', ?, ?)")

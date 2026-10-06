@@ -59,6 +59,9 @@ for sig in "$c"/bundle.*.sshsig; do
     >"$corpus/cosignature/$(basename "$sig")"
 done
 { printf '\0'; cat "$c/statement.json.alice.sshsig"; printf '\0'; cat "$c/statement.json"; } >"$corpus/cosignature/statement"
+# A maintainer's backup key beside their own: a list (Carol's standing in for it).
+{ printf 'threshold = 1\n[keys]\nalice = ["%s", "%s"]\n' "$(cut -d' ' -f1,2 "$c/alice.pub")" "$(cut -d' ' -f1,2 "$c/carol.pub")"; printf '\0'; cat "$c/bundle.carol.sshsig"; printf '\0'; cat "$c/bundle"; } \
+  >"$corpus/cosignature/backup-key"
 
 cd "$crate"
 # cargo fuzz has no --locked: fail here if fuzz/Cargo.lock would have to change.

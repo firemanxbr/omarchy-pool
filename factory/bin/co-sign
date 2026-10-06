@@ -7,7 +7,9 @@ statement that goes back more than 14 days carries at least one over the
 statement's bytes. Each is an OpenSSH signature (`ssh-keygen -Y sign`, made
 offline with a touch of the key), named for its signer:
 `<file>.<login>.sshsig`. The keys and the threshold are factory/MAINTAINERS.toml's
-`[cosignature]` table, which factory/bin/check-governance pins into the host
+`[cosignature]` table (a key per maintainer, or a list: a backup security key
+beside their own, either of which is their one co-signature), which
+factory/bin/check-governance pins into the host
 agent (crates/omarchy-agent/src/verify/maintainers.toml): the agent requires
 what the release it shipped in said, and verifies in Rust what this script
 checks here with ssh-keygen (tests/cosignature.sh holds the two to the same
@@ -29,7 +31,8 @@ fixtures).
       back to vX.Y.Z (needed when it goes back more than 14 days, or when its
       target was published without the co-signature the agents now require),
       and hands it to the pool with their token (OMARCHY_TOKEN), which relays
-      it beside the statement.
+      it beside the statement, once it is still the statement signed (the
+      pool answers 409 when rollback.yml signed another since).
 
 Exit status: 0 met or done, 1 not met or refused, 2 usage.
 """
@@ -102,7 +105,7 @@ def parse_key(line):
 
 
 def policy(doc):
-    """A parsed MAINTAINERS.toml's `[cosignature]`: (threshold, {login: "<type> <base64>"}).
+    """A parsed MAINTAINERS.toml's `[cosignature]`: (threshold, {login: ["<type> <base64>", ...]}).
     No table asks nothing. Raises ValueError for a table the agent would refuse."""
     maintainers = doc.get("maintainers")
     if not isinstance(maintainers, list):
@@ -118,26 +121,58 @@ def policy(doc):
         raise ValueError("[cosignature] threshold must be a whole number, 0 or more")
     raw = table.get("keys", {})
     if not isinstance(raw, dict):
-        raise ValueError("[cosignature.keys] must be a table of login = key")
+        raise ValueError("[cosignature.keys] must be a table of login = key, or login = [key, key]")
     keys, seen = {}, {}
-    for login, line in sorted(raw.items(), key=lambda kv: kv[0].lower()):
+    for login, lines in sorted(raw.items(), key=lambda kv: kv[0].lower()):
         if not LOGIN.match(login):
             raise ValueError(f"[cosignature.keys]: {login!r} is not a login")
         if login not in maintainers:
             raise ValueError(f"[cosignature.keys]: {login} is not in `maintainers`: only a maintainer co-signs")
-        if not isinstance(line, str):
-            raise ValueError(f"[cosignature.keys]: {login}'s key must be a string")
-        try:
-            kind, b64 = parse_key(line)
-        except ValueError as e:
-            raise ValueError(f"[cosignature.keys]: {login}'s key: {e}") from None
-        if b64 in seen:
-            raise ValueError(f"[cosignature.keys]: {login} and {seen[b64]} have the same key: one person, one co-signature")
-        seen[b64] = login
-        keys[login] = f"{kind} {b64}"
+        if isinstance(lines, str):
+            lines = [lines]
+        if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+            raise ValueError(f"[cosignature.keys]: {login}'s key must be a string, or a list of them")
+        if not lines:
+            raise ValueError(f"[cosignature.keys]: {login} lists no key")
+        theirs = []
+        for line in lines:
+            try:
+                kind, b64 = parse_key(line)
+            except ValueError as e:
+                raise ValueError(f"[cosignature.keys]: {login}'s key: {e}") from None
+            if seen.get(b64) == login:
+                raise ValueError(f"[cosignature.keys]: {login} lists the same key twice")
+            if b64 in seen:
+                raise ValueError(f"[cosignature.keys]: {login} and {seen[b64]} have the same key: one person, one co-signature")
+            seen[b64] = login
+            theirs.append(f"{kind} {b64}")
+        keys[login] = theirs
     if threshold > len(keys):
-        raise ValueError(f"[cosignature]: a threshold of {threshold} with {len(keys)} key(s) is never met")
+        raise ValueError(f"[cosignature]: a threshold of {threshold} with {len(keys)} maintainer(s) holding a key is never met")
     return threshold, keys
+
+
+def stranded(threshold, keys):
+    """Why one lost security key would leave `threshold` out of reach, or None.
+
+    An agent requires its own pinned policy of the next release, so the release that drops a
+    lost key must still be co-signed under the old one: with as many maintainers required as
+    hold a key, a maintainer whose only key is lost can never co-sign again, and every host
+    stays on its agent until it is reinstalled. A backup key beside their own (a list) or a
+    threshold below the number of maintainers with a key keeps a way back
+    (factory/bin/check-governance refuses the rest)."""
+    if threshold == 0 or threshold < len(keys):
+        return None
+    single = [login for login, theirs in keys.items() if len(theirs) < 2]
+    if not single:
+        return None
+    return (
+        f"[cosignature]: a threshold of {threshold} with {len(keys)} maintainer(s) holding a key is "
+        f"stranded by one lost security key ({', '.join(single)} hold(s) one key only): every host "
+        "would refuse every release until it is reinstalled. Lower the threshold below the "
+        "number of maintainers with a key, or give each of them a backup key "
+        '(login = ["<key>", "<backup key>"]); the runbook, *Co-signing a release*'
+    )
 
 
 def load_policy(path):
@@ -159,14 +194,18 @@ def pinned_toml(threshold, keys):
         "",
         "[keys]",
     ]
-    lines += [f'{login} = "{key}"' for login, key in keys.items()]
+    for login, theirs in keys.items():
+        if len(theirs) == 1:
+            lines.append(f'{login} = "{theirs[0]}"')
+        else:
+            lines.append(f"{login} = [" + ", ".join(f'"{key}"' for key in theirs) + "]")
     return "\n".join(lines) + "\n"
 
 
 def signers(keys, namespace=None):
-    """An ssh-keygen allowed_signers file for `keys`."""
+    """An ssh-keygen allowed_signers file for `keys`: a line per key."""
     ns = namespace or f"{BUNDLE_NAMESPACE},{ROLLBACK_NAMESPACE}"
-    return "".join(f'{login} namespaces="{ns}" {key}\n' for login, key in keys.items())
+    return "".join(f'{login} namespaces="{ns}" {key}\n' for login, theirs in keys.items() for key in theirs)
 
 
 def touched(armored):
@@ -194,12 +233,13 @@ def touched(armored):
     return len(tail) == 5 and bool(tail[0] & 0x01)
 
 
-def verify_one(file, namespace, login, key, sig_path):
-    """None when `sig_path` is `login`'s (key `key`) touch signature over `file`; else why."""
+def verify_one(file, namespace, login, theirs, sig_path):
+    """None when `sig_path` is a touch signature over `file` by one of `login`'s keys
+    (`theirs`); else why."""
     armored = Path(sig_path).read_bytes()
     with tempfile.TemporaryDirectory() as d:
         allowed = Path(d) / "allowed_signers"
-        allowed.write_text(signers({login: key}, namespace))
+        allowed.write_text(signers({login: theirs}, namespace))
         with open(file, "rb") as message:
             r = subprocess.run(
                 ["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", login, "-n", namespace, "-s", str(sig_path)],
@@ -220,11 +260,11 @@ def check(file, namespace, sigdir, policies):
     name = Path(file).name
     for label, (threshold, keys) in policies:
         by, why = [], []
-        for login, key in keys.items():
+        for login, theirs in keys.items():
             sig = Path(sigdir) / f"{name}.{login}.sshsig"
             if not sig.exists():
                 continue
-            refused = verify_one(file, namespace, login, key, sig)
+            refused = verify_one(file, namespace, login, theirs, sig)
             if refused is None:
                 by.append(login)
             else:
@@ -284,7 +324,7 @@ def whoami(a):
 
 
 def my_key(a, login):
-    """The private key to sign with, once its public half is the one MAINTAINERS.toml pins
+    """The private key to sign with, once its public half is one MAINTAINERS.toml pins
     for `login`."""
     _, keys = load_policy(ROOT / "factory" / "MAINTAINERS.toml")
     if login not in keys:
@@ -294,9 +334,9 @@ def my_key(a, login):
         pub = Path(f"{k}.pub")
         if k.exists() and pub.exists():
             kind, b64 = parse_key(pub.read_text())
-            if f"{kind} {b64}" == keys[login]:
-                return k, keys[login]
-    raise Refused(f"no key at {', '.join(map(str, candidates))} is the one MAINTAINERS.toml pins for {login}: --key <your security key's private key file>")
+            if f"{kind} {b64}" in keys[login]:
+                return k, f"{kind} {b64}"
+    raise Refused(f"no key at {', '.join(map(str, candidates))} is one MAINTAINERS.toml pins for {login}: --key <your security key's private key file>")
 
 
 def keyless(kind, file, sigstore):
@@ -363,7 +403,7 @@ def cmd_release(a):
             f"  co-signed by {login} with {pinned.split()[0]}",
         ]))
         sig = sign(key, BUNDLE_NAMESPACE, bundle, login)
-        for _, ok, line in check(bundle, BUNDLE_NAMESPACE, d, [("your key", (1, {login: pinned}))]):
+        for _, ok, line in check(bundle, BUNDLE_NAMESPACE, d, [("your key", (1, {login: [pinned]}))]):
             if not ok:
                 raise Refused(line)
         r = run(["gh", "release", "upload", v, str(sig), "--repo", REPO, "--clobber"])
@@ -386,9 +426,11 @@ def cmd_rollback(a):
             relayed = json.load(res)
     except (urllib.error.URLError, ValueError) as e:
         raise Refused(f"the pool relays no rollback statement to {v}: {e}") from None
+    signed = relayed["statement"].encode()
+    digest = hashlib.sha256(signed).hexdigest()
     with tempfile.TemporaryDirectory() as d:
         st = Path(d) / "statement.json"
-        st.write_text(relayed["statement"])
+        st.write_bytes(signed)
         Path(f"{st}.sigstore.json").write_text(relayed["bundle"])
         said = keyless("rollback", st, f"{st}.sigstore.json")
         s = json.loads(relayed["statement"])
@@ -399,14 +441,16 @@ def cmd_rollback(a):
             f"  co-signed by {login} with {pinned.split()[0]}",
         ]))
         sig = sign(key, ROLLBACK_NAMESPACE, st, login)
-        for _, ok, line in check(st, ROLLBACK_NAMESPACE, d, [("your key", (1, {login: pinned}))]):
+        for _, ok, line in check(st, ROLLBACK_NAMESPACE, d, [("your key", (1, {login: [pinned]}))]):
             if not ok:
                 raise Refused(line)
         req = urllib.request.Request(
             f"{api}/api/v1/factory/rollback/{v}/cosignature",
             data=sig.read_bytes(),
             method="PUT",
-            headers={"authorization": f"Bearer {token}", "content-type": "text/plain"},
+            # The statement this signature is over: the pool keeps it beside that one only,
+            # and answers 409 when rollback.yml signed another since it was fetched.
+            headers={"authorization": f"Bearer {token}", "content-type": "text/plain", "x-omarchy-statement-sha256": digest},
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as res:
@@ -415,7 +459,13 @@ def cmd_rollback(a):
             raise Refused(f"the pool refused it (HTTP {e.code}): {e.read().decode(errors='replace')}") from None
         except urllib.error.URLError as e:
             raise Refused(f"the pool did not answer: {e}") from None
-    print(f"co-sign: the pool relays your co-signature beside the statement to {v}: {answer}")
+    try:
+        kept = json.loads(answer).get("statement_sha256")
+    except (ValueError, AttributeError):
+        kept = None
+    if kept != digest:
+        raise Refused(f"the pool kept the co-signature beside another statement (sha256 {kept}, not {digest}): run co-sign rollback {v} again")
+    print(f"co-sign: the pool relays your co-signature beside the statement to {v} (sha256 {digest}): {answer}")
     return 0
 
 

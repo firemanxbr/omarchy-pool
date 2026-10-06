@@ -500,14 +500,30 @@ maintainers' FIDO security keys. A compromised GitHub admin, a malicious
 change merged into `release.yml`, or a stolen signing environment can then
 publish a bundle that verifies, and no host takes it.
 
+- **Why SSH-FIDO, not minisign** (D1 b left the two open): the private key
+  stays on a hardware token and every signature needs a touch, where a
+  minisign key is a file; `ssh-keygen` is already on every maintainer's
+  machine; and the agent verifies the format with the crypto it already
+  carries (aws-lc-rs, sha2), so the co-signature adds no dependency to it.
 - **The keys and the threshold** are `factory/MAINTAINERS.toml`'s
-  `[cosignature]` table: one key per maintainer under their login — an
+  `[cosignature]` table: a key per maintainer under their login, or a list
+  of them (a backup security key beside their own; either is that
+  maintainer's one co-signature, never two) — an
   `sk-ssh-ed25519@openssh.com` key (`ssh-keygen -t ed25519-sk`) or an
   `sk-ecdsa-sha2-nistp256@openssh.com` one, whose private half never leaves
-  the security key — and `threshold`: 0 asks nothing, 1 is 1-of-N, 2 is
-  2-of-N. A key in a file (`ssh-ed25519`) is refused: it is not offline.
-  Changing the table is a governance pull request another maintainer
-  approves, like any change to the file.
+  the security key — and `threshold`, counted in maintainers: 0 asks
+  nothing, 1 is 1-of-N, 2 is 2-of-N. A key in a file (`ssh-ed25519`) is
+  refused: it is not offline. Changing the table is a governance pull
+  request another maintainer approves, like any change to the file.
+- **A lost key never strands the hosts.** Each agent requires its own pinned
+  policy of the next release, so the release that drops a key is co-signed
+  under the policy that still lists it. With as many maintainers required as
+  hold a key and one of them holding a single key, losing it would leave
+  that requirement out of reach for good: every host would refuse every later
+  release until it is reinstalled. `factory/bin/check-governance` refuses
+  such a table (keep the threshold below the number of maintainers with a
+  key, or give each a backup key), and a key changes in two releases, one
+  change each (the runbook, *Co-signing a release*).
 - **Where the requirement lives.** `factory/bin/check-governance --write`
   pins the table into the host agent
   (`crates/omarchy-agent/src/verify/maintainers.toml`), and CI fails when the
@@ -524,14 +540,20 @@ publish a bundle that verifies, and no host takes it.
   signs — in the namespace `host-bundle@omarchy-pool.org`, as a release
   asset `omarchy-host-vX.Y.Z.tar.gz.<login>.sshsig` uploaded to the draft
   (`factory/bin/co-sign release vX.Y.Z`); a rollback statement's bytes in
-  `rollback@omarchy-pool.org` (above). A signature counts only with the
+  `rollback@omarchy-pool.org` (above), which the pool keeps beside that
+  statement only (`co-sign` names it by SHA-256; another is 409), and which
+  vouch for the target's bundle when it was published before the threshold
+  rose — on the round that accepts the statement and on its retries, while
+  the floor stands at that target. A signature counts only with the
   security key's user-presence flag (a touch): software on the maintainer's
   computer cannot sign without their hand on the key.
 - **Checked twice.** `factory/bin/publish-release` publishes a release only
   once its co-signatures meet the threshold of this release's
-  `MAINTAINERS.toml` and of every release of the last 30 days (their agents
-  verify the new bundle before they update themselves), with `ssh-keygen -Y
-  verify` and the touch flag; the release stays a draft until then. Each
+  `MAINTAINERS.toml`, of the latest published release's however old, and of
+  every release of the last 30 days (their agents verify the new bundle
+  before they update themselves), with `ssh-keygen -Y verify` and the touch
+  flag (which `ssh-keygen` itself does not check); the release stays a draft
+  until then. Each
   host's agent verifies them again, in Rust, before it applies a bundle or
   takes its agent, and during install.
 - **What it does not cover, stated plainly.** A host installed from nothing
@@ -896,7 +918,7 @@ instead of stopping them.
 | a maintainer's authenticator, lost or stolen | nothing without its user verification (a PIN or a biometric on the device); with it, what the person decides — approve, block and a forced promotion | another maintainer resets the login's passkeys with a reason (#271), after confirming the request out of band: every one removed, the login signed out, its `omc_` token and its agents' live grants revoked (#284), the journal — a line each — and a signed record say who and why; the person ends the device's GitHub sessions and revokes the GitHub tokens it held (the GitHub CLI's authorization, personal access tokens) — until they make a new token on their page, `POST /factory/register` mints the login none (`token_reset`) —, signs in again, registers a new one, makes a new token and grants their agents again (RUNBOOK, *A lost passkey*) |
 | the signing key | signatures on bad content — only through the Worker's own routes, since the key is a secret of the service | rotate: `wrangler secret put SIGNING_KEY`, re-render every ring, users import the new public key (RUNBOOK) |
 | `release.yml`'s or `rollback.yml`'s signing identity (a GitHub admin, a malicious merged change, a stolen environment) | before a co-signature threshold: a host bundle or a rollback statement every host takes; from one (#330): a bundle or a statement no host takes without the maintainers' security keys, and a statement at most 14 days deep | `revoked` and `min_release` in a later release, a rollback statement; the co-signature threshold in `factory/MAINTAINERS.toml` (*The maintainers' co-signature*) |
-| a maintainer's security key (co-signature) | with a threshold of 1 and `release.yml`'s identity together, a bundle hosts take; alone, nothing (a bundle also needs `release.yml`'s signature) | a governance pull request removes the key (a new agent, under the old requirement: another maintainer co-signs it); 2-of-N needs a second key |
+| a maintainer's security key (co-signature), stolen or lost | stolen, with a threshold of 1 and `release.yml`'s identity together, a bundle hosts take; alone, nothing (a bundle also needs `release.yml`'s signature). Lost, nothing: `check-governance` refuses a threshold one lost key would leave out of reach | a governance pull request removes the key: a new agent, under the old requirement, so it is co-signed by another key the agents pin — the maintainer's backup key, or another maintainer's under 1-of-N; a replacement key is added in one release and the old one dropped in the next (the runbook, *Co-signing a release*); 2-of-N needs a second person |
 
 ## Roadmap
 

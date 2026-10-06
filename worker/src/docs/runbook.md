@@ -653,14 +653,45 @@ pin) and the agent's version raised (`crates/omarchy-agent/Cargo.toml`; CI's
 0: bundles are not asked for anything yet, and a deep rollback can already
 be co-signed.
 
+**A backup key.** A second security key, made the same way (`-f
+~/.ssh/id_ed25519_sk_backup`) and kept apart from the first, goes beside it
+as a list: `<login> = ["<first line>", "<backup line>"]`. A signature by
+either is that maintainer's one co-signature (it never counts twice). Keep
+the backup in a safe place; it is what lets you replace a lost or broken key
+without a visit to every host.
+
 **Switching it on** is a pull request that sets `threshold = 1` (1-of-N) or
 `2` (2-of-N), the same `--write` and version raise, approved by another
 maintainer. The release that carries it is the first one asked for
 co-signatures: its new agent requires them, and so does
-`publish-release`. Lowering it, or rotating a key, works the same way, and
-the release that does it is still co-signed under the old requirement
-(`publish-release` checks this release's policy and that of every release
-of the last 30 days, whose agents verify the bundle before they update).
+`publish-release`. Every agent requires its own pinned policy of the next
+release, so a release that changes the policy is always co-signed under the
+old one (`publish-release` checks this release's policy, the latest
+published release's whatever its age, and that of every release of the last
+30 days, whose agents verify the bundle before they update).
+
+That is why **a lost key must never strand the threshold**. With as many
+maintainers required as hold a key (2-of-2 with the project's two
+maintainers, or 1-of-1), a maintainer whose only key is lost can never
+co-sign under the old pin again: every host would refuse every later release
+(`refused (cosignature)`) until it is reinstalled. `check-governance` refuses
+such a table: keep the threshold below the number of maintainers with a key
+(1-of-2), or give every one of them a backup key (2-of-2 with two keys
+each).
+
+**Rotating a key, or replacing a lost one,** takes two releases, one change
+each, so each is co-signed under the pin before it:
+
+1. A release that adds the new key beside the old (`<login> = ["<old>",
+   "<new>"]`), co-signed with a key the agents already pin: the old one, the
+   backup, or the other maintainers' under 1-of-N. A lost key stays listed
+   here; nobody can sign with it.
+2. Once that release is out, one that drops the old key, co-signed with the
+   new.
+
+Never change two keys a co-signature needs in one release. Lowering the
+threshold is one release too (co-signed under the old threshold); raising
+it, likewise.
 
 **Each release.** The release run stops at *Publish the release* with
 `vX.Y.Z lacks the maintainers' co-signature its agents require; it stays a
@@ -701,11 +732,22 @@ which relays it beside the statement: hosts take it at their next poll. A
 re-run of `rollback.yml` signs a new statement, and it needs co-signing
 again.
 
+The pool keeps a co-signature beside the statement it signed only:
+`co-sign` names it by SHA-256, and when `rollback.yml` signed another since
+you fetched yours the pool answers 409 (*signed again since you fetched it*):
+run `co-sign rollback` again, on the new statement.
+
 **On a host**, a bundle refused for want of co-signatures says `refused
 (cosignature)` with the count and each signature that did not verify; the
 co-signatures are asked of GitHub (`<bundle>.<login>.sshsig`, for every
 maintainer the agent pins) and kept beside the cached bundle. GitHub not
-answering is `pool-unreachable`, never a refusal.
+answering is `pool-unreachable`, never a refusal (install says *GitHub did
+not answer*, and is run again). A rollback target published before the
+threshold rose is refused with *or the rollback statement to it does
+(factory/bin/co-sign rollback vX.Y.Z)*: it is the statement that takes more
+co-signatures, never the published release. Once a host accepted a
+co-signed statement, a round to its target that did not finish (a pull, the
+tools, a quarantine) is tried again under the same co-signatures.
 
 ### Installing a host
 
