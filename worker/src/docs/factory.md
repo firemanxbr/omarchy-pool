@@ -35,8 +35,8 @@ verify and attest the package faster and approve it with more confidence.
    `factory/<name>/<id>/request.json` in the pool bucket with the pool's
    detached signature, public and immutable (`worker/src/record.ts`).
    Nothing about a request lives on GitHub. The build starts by itself,
-   in the shared queue: the best idle worker of the architecture, on the
-   pool's hosts, with its agent. The four things, as the form asks them:
+   in the queue: the next host of the architecture with room takes it, on
+   the pool's hosts, with its agent. The four things, as the form asks them:
 <!-- checklist -->
 2. **Does someone ship it already?** The pool is asked first. If Arch, Arch
    Linux ARM or the OPR ship the name for an architecture it enters the pool's
@@ -139,8 +139,8 @@ verify and attest the package faster and approve it with more confidence.
 8. **After that: bumps are evidence too.** Once a day the brain asks GitHub
    for each approved package's latest release and queues a community build
    from the contributor's staged PKGBUILD with `pkgver` moved to the tag
-   (`bump:<task>@<tag>`) — for the owner's worker first, for any `--shared`
-   worker after 14 days — and a maintainer reviews it like the first time.
+   (`bump:<task>@<tag>`) — into the queue at once, as a request's build
+   (#343) — and a maintainer reviews it like the first time.
    30 days without a build and the package is *unmaintained* until someone
    takes it (docs/GOVERNANCE.md) — a maintainer, from Review's *No
    maintainer* tab or the package's page: *Adopt*, one door for both, makes
@@ -252,9 +252,9 @@ curl -s -X POST $API/factory/packages -H "authorization: Bearer $OMC" -H 'conten
        "checklist":{"official":true,"license":true,"unshipped":true,"evidence":true}}'
 #    optional: "name", "arches"; for a project not on GitHub: "source" (the release tarball) and "version"
 #    → {"package":…,"request":{"id":12,"record":"https://pool.omarchy-pool.org/factory/<name>/12/request.json",…},
-#       "build":{"tasks":[57],"queue":{"aarch64":{"position":2,"total":3}},…}}   — queued at once, in the shared queue
+#       "build":{"tasks":[57],"queue":{"aarch64":{"position":2,"total":3}},…}}   — queued at once, in the queue
 
-# 3. Build it again, after a failure or a fix (the request above is already in the shared queue).
+# 3. Build it again, after a failure or a fix (the request above is already in the queue).
 curl -s -X POST $API/factory/packages/project/build -H "authorization: Bearer $OMC"
 
 # 4. Follow it.
@@ -344,8 +344,11 @@ anyone else (403, *your packages build on the pool's hosts*), and the
 worker form is on a maintainer's page only. What follows is for a
 maintainer's host.
 
-Anything with `podman` or `docker` and `curl` is a project worker: a
-laptop, a VM, a Droplet. **Every task builds in a fresh Arch container**
+A new machine joins as a host ([a maintainer's host](/docs/worker-host#maintainer-hosts));
+what follows is also how a legacy project registration — one that already
+holds project trust, given before #343 on two maintainers' word — keeps
+running until P3 retires it, on a laptop, a VM or a Droplet with `podman`
+or `docker` and `curl`. **Every task builds in a fresh Arch container**
 (`archlinux:base-devel` for x86_64, `menci/archlinuxarm:base-devel` for
 aarch64; on a host the agent runs, by the digest the release pinned: see
 [the security model](/docs/security-model)) that sees the PKGBUILD and the network and nothing else; the worker
@@ -355,8 +358,8 @@ architecture natively and the other one emulated (`--arch`).
 
 The easiest way is the same container image every worker runs,
 `ghcr.io/firemanxbr/omarchy-worker` (both architectures, signed, tagged with
-the pool's release; `factory/image/Containerfile`): given a token whose
-registration a maintainer trusted, it runs `pkg-repo work` and starts each
+the pool's release; `factory/image/Containerfile`): given the token of a
+registration that holds project trust, it runs `pkg-repo work` and starts each
 build as a sibling container through the runtime's socket — the dashboard's
 *Run a worker* page has the exact commands for Docker Desktop and Podman.
 Without a container, the release binaries do the same:
@@ -365,8 +368,8 @@ Without a container, the release binaries do the same:
 # once: the pool's publisher (from the releases, or cargo build --release -p pkg-repo)
 export OMARCHY_API=https://pkgs.omarchy-pool.org OMARCHY_POOL=https://pool.omarchy-pool.org
 
-# register (POST /factory/workers with your maintainer token) and have a
-# second maintainer trust it; then, native architecture:
+# a registration that already holds project trust (none is given one at a
+# time since #343: a new machine joins as a host); then, native architecture:
 pkg-repo work --worker-token omw_… --labels '{"where":"laptop"}'
 # the other one, emulated (Apple silicon builds x86_64 through podman machine)
 pkg-repo work --worker-token omw_… --arch x86_64 --labels '{"where":"laptop","emulated":true}'
@@ -414,22 +417,29 @@ promote, rollback, health, security, enqueue, gc, verify); **review** — a
 project-trusted registration that takes only the maintainers' work — the
 project's own build of a reviewed package, the build of the recipes on
 `main` and the audit of staged builds — reaching the agent through
-`agent-proxy`; **community** — a community registration, shared, that builds
-anyone's registered packages and drafts PKGBUILDs for package requests, as a
-**broker** (the token, the agent key, `GITHUB_TOKEN`; runs no build) beside
-a **builder** born with nothing; **broker** itself is a role
-(`OMARCHY_WORKER_ROLE=broker`, `agent` without a worker token). A role
-narrows what the trust allows and the container refuses a registration that
-does not match; project trust takes two maintainers' word. Two of each,
-one per architecture, plus the brokers, run on the project's own host
-(`factory/host/`, RUNBOOK *The Studio host*).
+`agent-proxy`; **community** — a community registration that builds any
+contributor's registered packages, as a host does (#343), and drafts
+PKGBUILDs for package requests, as a **broker** (the token, the agent key,
+`GITHUB_TOKEN`; runs no build) beside a **builder** born with nothing;
+**broker** itself is a role (`OMARCHY_WORKER_ROLE=broker`, `agent` without
+a worker token). A role narrows what the trust allows and the container
+refuses a registration that does not match; the project trust the pool and
+review registrations hold was given on two maintainers' word, before a
+host's trust came from the maintainer list (#343: no worker is trusted one
+by one any more). Two of each, one per architecture, plus the brokers, run
+on the project's own host (`factory/host/`, RUNBOOK *The Studio host*),
+beside its host until P3 retires them.
 
 **Whose compute.** The project's compute is its maintainers' hosts.
 Contributors do not run workers: they submit packages, and every build —
 a contributor's evidence and the project's own build written from it —
-runs on a host a maintainer provides. The community workers registered
-before #331 are expected to be the maintainers' own (checked on #331) and
-retire with the move to the host agent (#307). No GitHub runner ever builds a package: the project's compute is
+runs on a host a maintainer provides, and every host builds every
+contributor's packages, in turn by owner. The community worker tier, its
+shared and own-packages modes and the command that ran a contributor's
+worker are gone (#343); the community registrations left are the
+maintainers' own legacy sets, selected as hosts with one lane and one build
+until they retire with the move to the host agent (P3); one whose owner is
+no maintainer claims nothing (`403`, with why and the pointer). No GitHub runner ever builds a package: the project's compute is
 not for building everyone's software, and GitHub Actions runs CI and the
 release only — no worker, not even for the pool's own jobs: when the
 project's host is down they wait, and the Workers page says so.
@@ -457,10 +467,9 @@ pointing the repository name in the worker script, `reconcile.rs`,
 ### Worker protocol
 
 ```
-POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, shared?, log?}   Authorization: Bearer omw_… (the registration)
-                                    shared: the first word only — once the mode was set from the brain the registration's mode counts:
-                                    POST /factory/workers/self/mode {mode} with this token, or POST /factory/workers/:id/mode with a
-                                    contributor token (the owner; a maintainer may set dedicated, never shared — sharing is the owner's word);
+POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, log?}   Authorization: Bearer omw_… (the registration)
+                                    (a legacy image's `shared` is read no more, #343: a community registration takes any contributor's
+                                    build, and POST /factory/workers/self/mode and /factory/workers/:id/mode answer 410);
                                     log: the worker's own lines since its last claim (4 KB a chunk, the last 8 KB kept), for its owner and
                                     the maintainers: GET /factory/workers/:id/log with a contributor token or the dashboard's session
   200 {task:{id,name,arch,version,pkgbuild_ref,reason,attempts,…}, token: "omj.…", token_expires_at, lease_minutes, repo, pkgbuild_path, upload}
@@ -609,8 +618,9 @@ arch; a job with helper containers needs a lane of each ring architecture
 they check (`health` its own, `promote` each it promotes, `security` both),
 native or emulated, with no wait; every other kind is arch-neutral. A legacy registration is selected as a
 host with one lane (its arch, emulated when its labels say so) and one
-build, its own scope (project or community, shared or its owner's) kept
-until #343. Placement (#339, design v2 §8.4; D35, D36): the project's copy
+build, its trust its only scope (#343): a project registration takes no
+contributor's build, a community one community builds only — anyone's, as
+a host does. Placement (#339, design v2 §8.4; D35, D36): the project's copy
 of a package — its review rebuild — is never handed to a host its requester
 owns (the rebuild's owner, and the owner of the contributor's build it
 answers) while another maintainer's host has a lane allowed for it, native or
@@ -669,7 +679,9 @@ factory/
   bin/check-governance            validates it and generates .github/CODEOWNERS from it
   image/Containerfile             the one worker image (Arch, both architectures, signed, built by the release workflow); image/entrypoint.sh
                                   reads the registration and runs the contributor's or the project's half, or the updater; image/compose.yml
-                                  runs the set — broker, builder, updater (or a project worker) — as `omarchy-worker start` writes it
+                                  runs the set — broker, builder, updater (or a project worker) — as `omarchy-worker start` wrote it
+  host/omarchy-worker             a maintainer's legacy set's command, until P3: runs the set in its directory (the pool no longer
+                                  serves it nor its compose file, #343; a new machine joins as a host)
   bin/omarchy-rollout             the updater: the compose set follows the pool's latest image, what changed replaced together, itself last
   bin/pkgbuild-meta               PKGBUILD → arches and version, without executing it as you
   sizing/<name>/                  recipes kept for dry runs only (never queued) — the only recipes in the repository

@@ -294,7 +294,7 @@ if (( migrating )); then
   # worker without one exits at start and restarts, and the updater never adopts a set where one does. The values are not printed.
   missing="$(jq -r '[.services | to_entries[] | select((.value.environment // {}) | has("OMARCHY_WORKER_TOKEN")) | select((.value.environment.OMARCHY_WORKER_TOKEN // "") | startswith("omw_") | not) | .key] | sort | map(. + " ") | add // ""' <<<"$config")" \
     || refuse "compose printed no project jq reads"
-  [[ -z "$missing" ]] || refuse "no worker token for ${missing}— run register.sh (a maintainer's token) or leave those services out of COMPOSE_PROFILES in $root/.env"
+  [[ -z "$missing" ]] || refuse "no worker token for ${missing}— run register.sh (a maintainer's token) for the community pair, or leave those services out of COMPOSE_PROFILES in $root/.env; a project service (pool, review, review2) is registered no more since #343, its work is a maintainer host's: https://omarchy-pool.org/docs/worker-host#maintainer-hosts"
   # A rollout.sh started by hand (not the timer's, which is waited for below) would drain beside the updater's first round.
   hand="$(pgrep -f 'rollout\.sh' | tr '\n' ' ' || true)"
   [[ -z "$hand" ]] || rolling || refuse "a rollout.sh runs outside the timer (pids ${hand}— pgrep -af rollout.sh): let it end, or stop it, then run setup.sh again"
@@ -439,7 +439,7 @@ cat <<NEXT
 
 Done. Next, as $user (log in again so the docker group applies):
   1. put your agent key in $root/etc/agent.env
-  2. register the workers and trust the project's:
+  2. register the community pair (since #343 the project's services are a maintainer host's work, not registered here):
        OMARCHY_CONTRIBUTOR_TOKEN=omc_… $root/register.sh        (a maintainer's token; from the profile page, shown once)
   3. cd $root && docker compose pull && docker compose up -d        (the only bare up -d: after it, ./rollout.sh)
   4. the Workers page lists them within a minute; the updater keeps them on the pool's release from then on

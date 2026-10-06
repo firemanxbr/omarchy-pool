@@ -89,7 +89,7 @@ function host(id: string, arch: string, units: number, o: Partial<Member> & { em
   return {
     id, legacy: false, lanes: [{ arch, mode: "native" }, ...emulated.map((a) => ({ arch: a, mode: "emulated" as Mode }))], units, agent_slots: 2,
     disk: { work: 400, engine: 200 }, kinds: ["build", "trial", "audit", "sync", "health"], probe_ok: true, drained: false, below_minimum: false, may_claim: true, behind: false,
-    seen_at: T0, reserving: null, scope: { trust: "host", owner: null, shared: false }, host_id: `h_${id}`, ...rest,
+    seen_at: T0, reserving: null, scope: { trust: "host" }, host_id: `h_${id}`, ...rest,
   };
 }
 
@@ -101,7 +101,7 @@ function legacy(id: string, arch: string, o: Partial<Member> & { emulated?: bool
   const { emulated = false, trust = "project", ...rest } = o;
   return {
     id, legacy: true, lanes: [{ arch, mode: emulated ? "emulated" : "native" }], units: 0, agent_slots: 0, disk: null, kinds: ["build", "trial", "audit"], probe_ok: true,
-    drained: false, below_minimum: false, may_claim: true, behind: false, seen_at: T0, reserving: null, scope: { trust, owner: null, shared: true }, ...rest,
+    drained: false, below_minimum: false, may_claim: true, behind: false, seen_at: T0, reserving: null, scope: { trust }, ...rest,
   };
 }
 
@@ -1026,11 +1026,14 @@ describe("legacy registrations", () => {
     const big = host("big", "aarch64", 11);
     expect(select(native, { members: [native, big], leases: [] }, [task({ arch: "aarch64", size: 2, trust: "community", owner: "alice" })], T0, R)).toEqual([]);
     expect(select(native, { members: [native], leases: [] }, [task({ arch: "aarch64", size: 2, trust: "community", owner: "alice" })], T0, R)[0]).toMatchObject({ size: 1, asked: 2 });
-    // Its scope until #343: a project one takes no contributor's build, a dedicated community one only its owner's.
+    // Its trust is all its scope (#343): a project one takes no contributor's build; a community one any contributor's, as a host
+    // does — its owner's no sooner than anyone's, whatever its row once said of a mode — and never the project's.
     const project = legacy("pool-aarch64", "aarch64", { trust: "project" });
     expect(select(project, { members: [project], leases: [] }, [task({ arch: "aarch64", trust: "community", owner: "alice" })], T0, R)).toEqual([]);
-    const mine = legacy("dave-aarch64", "aarch64", { trust: "community", scope: { trust: "community", owner: "dave", shared: false } });
-    expect(select(mine, { members: [mine], leases: [] }, [task({ arch: "aarch64", trust: "community", owner: "erin" }), task({ arch: "aarch64", trust: "community", owner: "dave" })], T0, R).map((c) => c.id)).toEqual([ids]);
+    const theirs = legacy("dave-aarch64", "aarch64", { trust: "community", owner: "dave" });
+    const erin = task({ arch: "aarch64", trust: "community", owner: "erin" }), dave = task({ arch: "aarch64", trust: "community", owner: "dave" });
+    expect(select(theirs, { members: [theirs], leases: [] }, [erin, dave], T0, R).map((c) => c.id)).toEqual([erin.id, dave.id]);
+    expect(select(theirs, { members: [theirs], leases: [] }, [task({ arch: "aarch64", trust: "project" })], T0, R)).toEqual([]);
   });
 });
 
@@ -1307,8 +1310,8 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
   });
 
   it("independence is of the machine, not the registration: the legacy role containers of one maintainer, and a host beside its own legacy set, are one machine — none; another owner's, or another host of the same owner's, is another", () => {
-    // The Studio's legacy compose set until #343: community-aarch64 builds a contributor's package, review-aarch64 audits it — one machine, m1's.
-    const community = legacy("community-aarch64", "aarch64", { trust: "community", owner: "m1", scope: { trust: "community", owner: "m1", shared: true }, kinds: ["build"], model: "anthropic/claude-a" });
+    // The Studio's legacy compose set until P3: community-aarch64 builds a contributor's package, review-aarch64 audits it — one machine, m1's.
+    const community = legacy("community-aarch64", "aarch64", { trust: "community", owner: "m1", kinds: ["build"], model: "anthropic/claude-a" });
     const review = legacy("review-aarch64", "aarch64", { trust: "project", owner: "m1", kinds: ["audit"], model: "anthropic/claude-a" });
     const audit = auditOf(community, "anthropic/claude-a", false);
     expect(apart(machineOf(review), machineOf(community))).toBe(false);

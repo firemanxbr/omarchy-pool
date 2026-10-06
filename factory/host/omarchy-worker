@@ -1,24 +1,36 @@
 #!/usr/bin/env bash
-# omarchy-worker — run a worker for the omarchy pool with one command.
+# omarchy-worker — a maintainer's legacy worker set, until P3 retires it.
 #
-#   curl -fsSLo omarchy-worker __API__/omarchy-worker && chmod +x omarchy-worker
-#   ./omarchy-worker start --token omw_…            # your packages, on this machine
-#   ./omarchy-worker start --token omw_… --shared   # and everyone's queue (the pool keeps the mode; share on|off and the page's Share flip it)
+# Contributors do not run workers (#331, #343): their packages build on the
+# pool's hosts, and a maintainer's new machine joins the pool as a host
+# (https://omarchy-pool.org/docs/worker-host#maintainer-hosts: install.sh with an enrollment
+# token). The pool no longer serves this command nor its compose file; it
+# stays in the repository (factory/host/omarchy-worker) for the sets a
+# maintainer already runs with it, until they switch to a host and retire
+# (design v2 §21.2, P3). Such a set builds any contributor's package, as a
+# host does: there is no mode to set.
 #
-# It finds the container runtime you have (docker or podman, with compose),
-# writes the compose file and a .env beside itself (~/.config/omarchy-worker
-# by default, --dir elsewhere), pulls the signed image and starts the set:
-# the broker that holds your token and keys, the builder born with nothing,
-# and the updater that keeps both on the pool's latest image — every worker
-# follows it, the pool hands nothing to one that is behind. A maintainer's
-# project worker: --project (with --role pool|review), the same way; back
-# to a contributor's set with --community. Options are remembered.
+#   ./omarchy-worker status         # what runs here, and what the pool thinks of it
+#   ./omarchy-worker start          # start the set in this directory again (or apply changed options)
 #
-#   start     write the files, pull, start (or apply changed options)
+# It finds the container runtime you have (docker or podman, with compose)
+# and runs the set in its directory (~/.config/omarchy-worker by default,
+# --dir elsewhere) from the compose file and the .env an earlier start wrote
+# there: the broker that holds the token and keys, the builder born with
+# nothing, and the updater that keeps both on the pool's latest image —
+# every worker follows it, the pool hands nothing to one that is behind. A
+# directory without that compose file is refused: a new machine is a host.
+# Neither start nor update fetches that file any more, and the updater pulls
+# images only: a release that changes factory/image/compose.yml reaches the
+# set once you take that release's file into its directory and start again
+# (https://omarchy-pool.org/docs/workers#contributor, A changed compose file).
+# A project set: --project (with --role pool|review); back to a community
+# set with --community. Options are remembered.
+#
+#   start     pull and start the set here (or apply changed options)
 #   status    what runs here, and what the pool thinks of it
 #   logs      follow the builder's log (logs broker|updater|project for another)
 #   update    wake the updater: it pulls now and replaces what changed (one round here when no updater runs)
-#   share     on|off — build everyone's queue, or yours only (the pool keeps it; the page has the same switch)
 #   stop      drain and stop (a build in hand finishes first, up to three hours)
 #   remove    stop and delete the files here (the registration stays; revoke it on your page)
 #
@@ -28,7 +40,7 @@
 #
 # Nothing here needs root; the runtime's socket is the one your user reaches.
 set -euo pipefail
-API="__API__"
+API="${OMARCHY_API:-https://pkgs.omarchy-pool.org}"
 IMAGE="ghcr.io/firemanxbr/omarchy-worker:latest"
 DIR="${OMARCHY_WORKER_DIR:-$HOME/.config/omarchy-worker}"
 say() { printf '%s\n' "$*"; }
@@ -83,20 +95,18 @@ env_set() { # key value — replace or append, the file stays 600
   fi
 }
 
-fetch_compose() {
-  mkdir -p "$DIR"
-  curl -fsSL --max-time 60 "$API/omarchy-worker/compose.yml" -o "$DIR/compose.yml.new" || die "could not fetch the compose file from $API/omarchy-worker/compose.yml"
-  mv "$DIR/compose.yml.new" "$DIR/compose.yml"
+# The set's own compose file, as an earlier start wrote it: the pool serves none any more (#343), and a directory without one is
+# no set — a new machine joins the pool as a host.
+need_compose() {
+  [[ -f "$DIR/compose.yml" ]] || die "no worker set here ($DIR/compose.yml): the pool no longer starts new worker sets (#343) — contributors run no worker, and a maintainer's machine joins the pool as a host: https://omarchy-pool.org/docs/worker-host#maintainer-hosts"
 }
 
 # ------------------------------------------------------------------- start --
 cmd_start() {
-  local token="" shared="" where="" gh="" anthropic="" openai="" gemini="" xai="" claude="" model="" provider="" project=0 community=0 role="" workdir=""
+  local token="" where="" gh="" anthropic="" openai="" gemini="" xai="" claude="" model="" provider="" project=0 community=0 role="" workdir=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --token) token="$2"; shift 2 ;;
-      --shared) shared=1; shift ;;
-      --own|--not-shared) shared=0; shift ;;
       --where) where="$2"; shift 2 ;;
       --github-token) gh="$2"; shift 2 ;;
       --anthropic-key) anthropic="$2"; shift 2 ;;
@@ -114,8 +124,8 @@ cmd_start() {
       *) die "unknown option $1 (see --help)" ;;
     esac
   done
+  need_compose
   find_runtime
-  fetch_compose
   local had; had="$(env_get OMARCHY_WORKER_TOKEN)"
   [[ -n "$token" || -n "$had" ]] || die "--token omw_… is required the first time: register a worker on your page (maintainers only), the token is shown once"
   [[ -n "$token" ]] && env_set OMARCHY_WORKER_TOKEN "$token"
@@ -141,9 +151,6 @@ cmd_start() {
     local wd; wd="$(env_get OMARCHY_WORK_DIR)"; [[ -n "$wd" ]] || wd="$DIR/work"
     mkdir -p "$wd"
   fi
-  [[ -n "$shared" ]] && env_set WORKER_SHARED "$shared"
-  # --shared / --own: the pool keeps the mode from here on (the page's Share / Own only is the same switch); the .env flag alone is only the first word.
-  [[ -n "$shared" ]] && tell_mode "$( [[ "$shared" == 1 ]] && echo shared || echo dedicated )" || true
   [[ -n "$where" ]] && env_set WHERE "$where"
   [[ -n "$gh" ]] && env_set GITHUB_TOKEN "$gh"
   [[ -n "$anthropic" ]] && env_set ANTHROPIC_API_KEY "$anthropic"
@@ -180,7 +187,7 @@ cmd_status() {
   compose ps --format 'table {{.Service}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true
   local self; self="$(curl -fsS --max-time 30 "$API/api/v1/factory/workers/self" -H "authorization: Bearer $(env_get OMARCHY_WORKER_TOKEN)" 2>/dev/null || true)"
   if [[ -n "$self" ]]; then
-    jq -r '"the pool: \(.id) · \(.trust) · \(.arch)" + (if .trust == "community" and .mode then " · " + (if .mode == "shared" then "shared (everyone\u0027s queue)" else "own packages only" end) + (if .mode_by then " — set from the brain" else "" end) elif .trust == "project" then " · the project\u0027s work" else "" end)' <<<"$self" 2>/dev/null || say "the pool: $self"
+    jq -r '"the pool: \(.id) · \(.trust) · \(.arch)" + (if .trust == "community" then " · contributors\u0027 builds" elif .trust == "project" then " · the project\u0027s work" else "" end)' <<<"$self" 2>/dev/null || say "the pool: $self"
   else
     say "the pool did not answer for this token"
   fi
@@ -196,7 +203,7 @@ cmd_logs() { find_runtime; local svc="${1:-}"; if [[ -z "$svc" ]]; then svc=work
 # The updater that runs here does the round (#277): it follows the pool by itself, and a kick (SIGUSR1) makes it start one now, with its
 # own lock and its guard. Only when none runs does this run one round of its own, the same way.
 cmd_update() {
-  find_runtime; fetch_compose
+  need_compose; find_runtime
   local cid; cid="$(compose ps -q --status running updater 2>/dev/null | head -1 || true)"
   if [[ -n "$cid" ]] && compose kill -s USR1 updater >/dev/null 2>&1; then
     say "woke the updater: it pulls and replaces what changed now (a build in hand finishes first) — 'omarchy-worker logs updater' follows it"
@@ -204,24 +211,6 @@ cmd_update() {
     say "no updater runs here: pulling and replacing what changed once (a build in hand finishes first); 'omarchy-worker start' starts the updater again"
     compose run --rm --no-deps updater --once
   fi
-}
-# The mode is the brain's: set through the worker's token, it holds from the
-# next claim (within the minute), nothing restarts — the page shows the same
-# switch. The .env keeps it too, for a set started again from scratch.
-# The mode, told to the pool through the worker's token: it holds from the next claim, and the pool says what it did (or why not).
-tell_mode() { # shared|dedicated
-  local mode="$1" out code body
-  out="$(curl -sS --max-time 30 -w '\n%{http_code}' -X POST "$API/api/v1/factory/workers/self/mode" -H "authorization: Bearer $(env_get OMARCHY_WORKER_TOKEN)" -H "content-type: application/json" -d "{\"mode\":\"$mode\"}" 2>&1)" || { say "the pool did not answer about the mode: ${out:0:200}"; return 1; }
-  code="${out##*$'\n'}"; body="${out%$'\n'*}"
-  if [[ "$code" == 200 ]]; then say "$(jq -r '.note // ("mode: " + .mode)' <<<"$body" 2>/dev/null || echo "mode: $mode")"; return 0; fi
-  say "the pool did not take the mode ($code): $(jq -r '.error // empty' <<<"$body" 2>/dev/null || echo "${body:0:200}")"; return 1
-}
-cmd_share() {
-  local mode
-  case "${1:-}" in on) mode=shared ;; off) mode=dedicated ;; *) die "share on|off" ;; esac
-  [[ -f "$DIR/.env" ]] || die "nothing here ($DIR): omarchy-worker start --token omw_… first"
-  tell_mode "$mode" || exit 1
-  env_set WORKER_SHARED "$( [[ "$mode" == shared ]] && echo 1 || echo 0 )"
 }
 # down with every profile: what a switch may have left behind goes too.
 cmd_stop() { find_runtime; say "draining: a build in hand finishes first (up to three hours)"; compose --profile '*' down; }
@@ -243,7 +232,6 @@ case "$cmd" in
   status) none "$@"; cmd_status ;;
   logs) cmd_logs "$@" ;;
   update) none "$@"; retired; cmd_update ;;
-  share) cmd_share "$@" ;;
   stop) none "$@"; cmd_stop ;;
   remove) none "$@"; retired; cmd_remove ;;
   ""|-h|--help|help) usage ;;

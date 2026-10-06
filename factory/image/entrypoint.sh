@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# omarchy-worker — one image, one command, for contributors and maintainers.
+# omarchy-worker — one image, one command, for a maintainer's legacy sets
+# until P3 (contributors run no worker since #343; a new machine is a host).
 #
 # The registration behind OMARCHY_WORKER_TOKEN decides what this container
-# does; nothing else differs between a contributor's machine and a
-# maintainer's:
+# does:
 #
-#   community trust  → the contributor's worker: one task per container,
-#                      built right here, the result into the contributor's
-#                      staging workspace (WORKER_SHARED=1 builds anyone's,
-#                      an agent key — ANTHROPIC_API_KEY, OPENAI_API_KEY,
-#                      GEMINI_API_KEY or XAI_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN for
-#                      a Claude subscription — brings the owner's agent).
+#   community trust  → a community worker: one task per container, built
+#                      right here, any contributor's package (#343: the
+#                      pool ignores WORKER_SHARED), the result into that
+#                      contributor's staging workspace; an agent key —
+#                      ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY or
+#                      XAI_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN for a Claude
+#                      subscription — brings the owner's agent.
 #   project trust    → the project's worker: the pool's jobs and the rebuild
 #                      of approved packages, each in a fresh sibling
 #                      container through the runtime's socket mounted at
@@ -28,9 +29,9 @@
 #   review     a project worker for the maintainers' work only — the rebuild
 #              of approved packages and the audit of staged builds (the
 #              second agent, so it wants an agent key); never a pool job.
-#   community  a shared community worker: builds anyone's community
-#              packages, drafts PKGBUILDs for package requests with its
-#              owner's agent key (WORKER_SHARED=1 is implied).
+#   community  a community worker: builds any contributor's package,
+#              drafts PKGBUILDs for package requests with its owner's
+#              agent key (WORKER_SHARED=1 is set, and ignored since #343).
 #   broker     no build here: the one process on this host that holds the
 #              credentials (factory/bin/broker, :8790) — the worker's token,
 #              the agent's key, GITHUB_TOKEN — and only receives, processes
@@ -214,7 +215,7 @@ mode="${OMARCHY_WORKER_MODE:-$([[ "$trust" == project ]] && echo project || echo
 # trust must allow it, or the container says so and stops rather than
 # quietly doing something else.
 case "$role" in
-  pool|review) [[ "$trust" == project ]] || { echo "omarchy-worker: $id is a $trust registration; the $role role needs a project-trusted one (a maintainer trusts it on Review)" >&2; exit 2; }; mode=project ;;
+  pool|review) [[ "$trust" == project ]] || { echo "omarchy-worker: $id is a $trust registration; the $role role needs a project-trusted one, given before #343 (per-worker trust is gone: a host takes this work, /docs/worker-host#maintainer-hosts)" >&2; exit 2; }; mode=project ;;
   community) [[ "$trust" == community ]] || { echo "omarchy-worker: $id is project-trusted; the community role wants a community registration (never mix the project's work with contributors' builds)" >&2; exit 2; }; mode=community; export WORKER_SHARED=1 ;;
 esac
 # A community worker builds inside this container, so it must be the

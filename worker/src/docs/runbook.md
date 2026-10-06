@@ -503,9 +503,11 @@ pulls and runs them:
 pkg-repo work --worker-token omw_… --labels '{"where":"droplet-1"}'
 ```
 
-The worker is registered like any other (`POST /factory/workers`) and a
-maintainer promotes it: `POST /factory/workers/<id>/trust {"trust":"project"}`
-with a maintainer's contributor token; maintainers are named by
+The worker is registered like any other (`POST /factory/workers`, a
+maintainer's); project trust is no longer given one worker at a time
+(#343: `POST /factory/workers/<id>/trust` answers 410), so only a
+registration that already holds it takes the pool's jobs this way — a new
+machine joins as a host (*A new maintainer host*, below); maintainers are named by
 `factory/MAINTAINERS.toml` (docs/GOVERNANCE.md), nowhere else. Every task
 runs with a per-job token the pool issues at claim time (SECURITY.md);
 the worker's own token only claims. No pipeline step runs on GitHub any
@@ -2013,8 +2015,9 @@ anything else, and treat it as an incident (the security model's
 ### How the pool hands a host work
 
 Every claim of a host — and of a legacy registration, selected as a host
-with one lane and one build until it retires — goes through the pool's
-selection (#337, design v2 §8.3; `worker/src/selection.ts`). A host is
+with one lane and one build until it retires; a community one only while
+its owner is a maintainer, else `403 owner_not_maintainer` (#343) — goes
+through the pool's selection (#337, design v2 §8.3; `worker/src/selection.ts`). A host is
 handed as many tasks as its units hold: a build 2 units per size, a trial 2,
 an audit 1, one unit kept for pool jobs, model work within its agent slots,
 each lease its own container; what does not fit waits in the pool's queue
@@ -2121,7 +2124,7 @@ so a size-4 build waits for memory rather than run smaller.
   machines apart by owner and host: two registrations are on different
   machines only when their owners differ or they are two hosts'
   registrations of different hosts. A maintainer's legacy role containers
-  (the Studio's `community-*` and `review-*`, until #343), and a host's
+  (the Studio's `community-*` and `review-*`, until P3), and a host's
   registration beside its own legacy set during the canary, are one
   machine, so an audit one takes of another's build says `none`, never
   `host`. An audit of the project's
@@ -2246,7 +2249,11 @@ so a size-4 build waits for memory rather than run smaller.
 
   An agent fault on a host row leads the pool's rules to `recheck-agent`
   only (a fresh probe sidecar), never `restart`: its page says so, and the
-  site's pacing and election are a legacy set's.
+  site's pacing and election are a legacy set's. They stay for the legacy
+  sets alone until P3, with the community share of the pool's order budget
+  (#343 keeps them: the Studio's pairs and maralcbr's set still share an
+  agent service — the broker, `agent-proxy` — whose restart its siblings
+  pace), and leave with those sets (#346).
 - **A sleeping host has zero free units** (#329). A Mac's agent reports
   `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
   meanwhile its claims are handed nothing, it makes no emulated lane wait,
@@ -2257,6 +2264,38 @@ so a size-4 build waits for memory rather than run smaller.
   its own until they expire. The pool holds it only while that report is
   fresh (15 minutes): a dispatcher that claims after that is on a Mac that
   woke. The host's page says *asleep*.
+
+**Once, before the deploy that carries #343.** The owner test is exact:
+a community legacy registration with no owner (one registered before the
+pool kept owners, migration 0010), or whose owner is spelled otherwise than
+in `factory/MAINTAINERS.toml`, claims nothing from that deploy on. List the
+live ones it would turn away; none of the Studio's community pair or
+maralcbr's workers may be among them:
+
+```bash
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, owner, last_seen FROM build_workers WHERE kind = 'legacy' AND trust != 'project' AND revoked_at IS NULL AND (owner IS NULL OR owner NOT IN (SELECT login FROM factory_maintainers)) AND last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')"
+```
+
+A maintainer's worker that is listed gets its owner as the file spells it
+(`UPDATE build_workers SET owner = '<login>' WHERE id = '<id>'`, the same
+command), then the query again comes back without it. Any other row is a
+contributor's, which builds nothing from then on: revoke it on its page.
+
+The same deploy widens what a maintainer's set takes: a community legacy
+registration that was dedicated (its owner's builds only, and the ones
+pinned to it) takes any contributor's build from then on, as a host does
+(design v2 D56, §8.2), with the agent key and the `GITHUB_TOKEN` its broker
+holds. Nothing asks its owner, so list those sets (`mode` is the last one
+a claim reported, kept as history and written no more; a row that never
+claimed says `project`):
+
+```bash
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, owner, mode, last_seen FROM build_workers WHERE kind = 'legacy' AND trust != 'project' AND revoked_at IS NULL AND owner IN (SELECT login FROM factory_maintainers) AND mode IS NOT 'shared' AND last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')"
+```
+
+and tell each owner before the deploy (maralcbr's sets among them, design
+§21.2): a set that should not build strangers' recipes is drained
+(`./omarchy-worker stop`) or revoked on its page first.
 
 ### A host reverted a release
 
@@ -2338,7 +2377,7 @@ worker containers of the image: two pool, four review (two pairs, since
 pool's jobs), two community, one per architecture each (four of them run
 by default: the x86_64 review and community services are behind the
 `emulated` profile, and the second review pair behind its own `review2`
-profile, off until `register.sh` has registered it)
+profile, off unless it was registered and trusted before #343)
 ([factory/host/](../factory/host/README.md); the roles:
 [factory/README.md](../factory/README.md) *Three roles*):
 
@@ -2346,7 +2385,7 @@ profile, off until `register.sh` has registered it)
 |---|---|---|
 | `pool-x86_64`, `pool-aarch64` | project trust | the pool's jobs: sync, render, promote, rollback, health, security, enqueue, gc, verify, relayout, trial |
 | `review-x86_64`, `review-aarch64`, `review2-x86_64`, `review2-aarch64` | project trust, an agent key | the project's builds from staged evidence, the audit of staged builds — two pairs, so an audit does not wait for a build |
-| `community-x86_64`, `community-aarch64` | community, shared, an agent key | contributors' requested packages, with the project's agent |
+| `community-x86_64`, `community-aarch64` | community, an agent key | contributors' requested packages, anyone's, as a host takes them (#343), with the project's agent |
 | `broker-community-{x86_64,aarch64}` | `etc/agent.env` + the builder's token | the broker (`factory/bin/broker`): the worker token, the agent key and `GITHUB_TOKEN` for the builder beside it, which holds nothing; the pool's calls for the one task it claimed, the agent, GitHub read-only |
 | `agent-proxy` | `etc/agent.env` — no worker token | the agent and GitHub, natively, over HTTP for the review workers' audits and their build containers (the `review` network): Claude Code's binary dies under qemu, so the emulated worker asks this one (`FACTORY_PROVIDER=anthropic`, `ANTHROPIC_BASE_URL=http://agent-proxy:8790`; `factory/bin/agent-proxy`) |
 
@@ -2361,11 +2400,14 @@ machine with docker becomes one in minutes (factory/host/README.md,
 `COMPOSE_PROFILES=emulated` in `.env` turns them on here anyway
 (`community-x86_64`, `review-x86_64`, labeled `"emulated":true`), for
 C-only packages. The second review pair has a profile of its own,
-`review2` (#295): until it is registered, a worker with no token would
-exit at start and restart, and the updater holds back a set where one
-restarts. To turn it on, run `./register.sh` (it registers only the
-services whose env file has no token yet), then set
-`COMPOSE_PROFILES=emulated,review2` in `.env`, then run `./rollout.sh`.
+`review2` (#295): a worker with no token, or whose registration holds no
+project trust, exits at start and restarts, and the updater holds back a
+set where one restarts. A pair registered and trusted before #343 is
+turned on by setting `COMPOSE_PROFILES=emulated,review2` in `.env`, then
+running `./rollout.sh`. One that is not registered yet can no longer be
+added: per-worker trust is gone (#343, its door answers 410), so
+`register.sh` registers no project service any more, and the maintainer's
+host takes that work ([Maintainer hosts](/docs/worker-host#maintainer-hosts)).
 `review2-x86_64` is labeled `"emulated":true` too. A build that dies of emulation
 there goes back to the queue for a native x86_64 worker, not retried and
 not failed: a toolchain that cannot start, or a library qemu cannot map.
@@ -2419,9 +2461,40 @@ before this release, paste the block in *Once: the updater* again: it takes
 the release's `setup.sh`, which on a host whose updater already runs only
 installs the new host files (keeping the ones it replaces) and wakes the
 updater. `grep -q omarchy-agent /srv/omarchy-pool/rollout.sh` then says the
-copy has the guard. Fetch an `omarchy-worker` downloaded before this release
-again (the `curl` line at its top). An old `rollout.sh` that is missed
-brings back only the updater, which stands down.
+copy has the guard. An old `rollout.sh` that is missed brings back only the
+updater, which stands down.
+
+**Every CLI set replaces its `omarchy-worker`, once, at the deploy that
+carries #343** (the copy reaches `main` with it), whenever its copy was
+downloaded: one from before #313 has no guard, and every copy the pool
+served (one from after #313 too) fetches the compose file at `start` and
+`update` (a `curl -f` of the one the pool served beside it), which answers
+410 from that deploy on, so its `start` (a changed option, a new agent key)
+and `update` die with *could not fetch the compose file*, the 410's pointer
+unseen; the running containers keep going, as the updater pulls images only.
+The pool no longer serves the command (#343): take the repository's,
+`factory/host/omarchy-worker` (it reads the pool's address from
+`OMARCHY_API`, `https://pkgs.omarchy-pool.org` by default, and fetches no
+compose file), into the set's directory, maralcbr's sets included:
+
+```bash
+cd ~/.config/omarchy-worker     # the set's directory
+curl -fsSo omarchy-worker https://raw.githubusercontent.com/firemanxbr/omarchy-pool/main/factory/host/omarchy-worker && chmod +x omarchy-worker
+grep -q 'fetch_compose' omarchy-worker || echo replaced   # the repository's copy has no fetch_compose
+```
+
+With that copy, a CLI set's compose file is the one its last `start` before
+#343 wrote: neither `omarchy-worker` (`start`, `update`) nor the updater
+fetches it any more, so a release that changes `factory/image/compose.yml`
+before P3 (the broker's, say) reaches a CLI set only by hand. After such a
+release, in the set's directory ([Workers](/docs/workers#contributor), *A
+changed compose file*):
+
+```bash
+tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
+curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/image/compose.yml" | diff -u compose.yml -
+curl -fsSo compose.yml "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/image/compose.yml" && ./omarchy-worker start
+```
 
 **Rehearse `retire-legacy` before the Studio's** (#344), on the P1 host,
 with a stand-in legacy set the agent's user owns:
@@ -2539,8 +2612,8 @@ registration claims on through its owner's soak, at most two hours after
 the deploy (#326, *Soak*). Every set carries an
 **updater** container of the same image (`OMARCHY_WORKER_ROLE=updater`,
 `factory/bin/omarchy-rollout`: the same rolling replacement, itself
-last) — contributors' sets since `omarchy-worker start` writes one, this
-host since its one-time step below. It asks the pool every two minutes
+last) — a maintainer's `omarchy-worker` set since its start wrote one,
+this host since its one-time step below. It asks the pool every two minutes
 (`GET /api/v1/factory/follow`) and follows its release, and an Update
 pressed on any of its workers' pages; it replaces itself last, and only
 with an image under which what it replaced stays up. A set without one
@@ -2566,7 +2639,7 @@ cd /srv/omarchy-pool
 docker ps -a --filter label=com.docker.compose.project=omarchy-pool   # what runs now: a container that restarts is fixed or removed first
 pgrep -af rollout.sh                              # nothing, or the timer's own rollout (setup.sh waits for that one); setup.sh refuses while one started by hand runs
 ls -l etc/                                        # the env files there; review2-*.env may be missing (setup.sh writes them)
-grep COMPOSE_PROFILES .env                        # emulated on the Studio; review2 stays off until it is registered
+grep COMPOSE_PROFILES .env                        # emulated on the Studio; review2 stays off unless registered and trusted before #343
 grep -l '^OMARCHY_WORKER_TOKEN=omw_' etc/review2-*.env   # a review2 registered already: add review2 to COMPOSE_PROFILES first
 tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
 curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/compose.yml" | diff -u compose.yml -
@@ -2619,9 +2692,15 @@ What `setup.sh` does, in order, and what a failure leaves:
    before anything else, when the new files are in already (a killed step:
    see below). Any of these fails with exit 4
    and changes none of the host's files, units or containers (only the
-   updater image may have been pulled): the timer runs on. Fix what it names (for a
-   missing token: `register.sh`, or leave that service's profile out of
-   `COMPOSE_PROFILES`), then paste again. It also warns about a container
+   updater image may have been pulled): the timer runs on. Fix what it names, then
+   paste again. A community service's missing token: `register.sh`, or
+   leave its profile out of `COMPOSE_PROFILES` where it has one. A project service (pool,
+   review, review2) can no longer be registered (#343: per-worker trust is
+   gone, so `register.sh` skips it): leave its profile out where it has one
+   (`emulated` holds review-x86_64, `review2` the second pair). pool-* and
+   review-aarch64 have none, so keep the env files that hold their tokens;
+   a lost one is the maintainer host's work from then on
+   ([Maintainer hosts](/docs/worker-host#maintainer-hosts)). It also warns about a container
    of this project whose service the new `compose.yml` does not run under
    this host's profiles (a registered review2, now behind a profile of its
    own): no rollout reaches it until its profile is in `COMPOSE_PROFILES`.
@@ -2780,9 +2859,12 @@ the review2 pair with no profile, which would start it unregistered.
 ### After a release
 
 Nothing to do on any host, and on a host the agent manages, nothing needs
-to be run either. The pool is deployed once the images exist. Within two
+to be run either; one exception until P3: a release that changes
+`factory/image/compose.yml` reaches a maintainer's CLI set only once its
+owner takes the file in (*The Studio host* above: a CLI set's compose
+file). The pool is deployed once the images exist. Within two
 minutes, every updater sees the pool's new release and rolls its set out:
-every contributor's set, and the Studio's since its one-time step above.
+every maintainer's legacy set, and the Studio's since its one-time step above.
 `agent-proxy` and the brokers go first, each answering before the workers
 that call them (#278), then the workers, each stop a drain.
 
@@ -2809,7 +2891,7 @@ the pool itself*).
 ## Maintainers: reviewing contributed builds
 
 The **Review** page lists staged builds (a contributor's package built on
-their worker or a shared one, with PKGBUILD, log, the gate's verdict and
+a maintainer's host, with PKGBUILD, log, the gate's verdict and
 the audit — and the worker and host behind it). A maintainer — a login
 listed in `factory/MAINTAINERS.toml`, signed in with GitHub — never
 decides on their own package, and never on a contributor's bytes:
@@ -3077,20 +3159,20 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
 
 - **Add a package**: sign in and request it on `/factory` (the project's
   URL, a description, the licence, the checklist — written once to the
-  public record); the build starts by itself in the shared queue — the
-  best idle shared worker of the architecture, or a worker of your own at
-  once — and a maintainer reviews the staged build (docs/GOVERNANCE.md).
+  public record); the build starts by itself in the queue — the next host
+  of the architecture with room, contributors' builds in turn by owner —
+  and a maintainer reviews the staged build (docs/GOVERNANCE.md).
   The person's page says where the build stands.
-- **Rebuild**: press *Build* on the person's page (the queue, or a worker
-  of yours), or `POST $API/factory/packages/<name>/build`; a maintainer's
+- **Rebuild**: press *Build* on the person's page (the queue, or a legacy
+  community set of yours), or `POST $API/factory/packages/<name>/build`; a maintainer's
   `POST $API/factory/enqueue` (`{"name","pkgbuild_ref":"<commit>","version","arches","publish":false}`)
   queues a sizing recipe as a dry run: by hand a build never publishes
   (#284, `dry_run_only`).
 - **A failed task**: the person's page says what stopped it and how to fix
   it (the build's page has the whole log); *Build* again starts from that
   build's PKGBUILD and log.
-- **Workers**: contributors' builds run on their own and on the shared
-  workers; project builds (the rebuild of what a maintainer reviews) on
+- **Workers**: contributors' builds run on the maintainers' hosts and their
+  legacy community sets, anyone's (#343); project builds (the rebuild of what a maintainer reviews) on
   project-trusted workers — today the
   Mac (`pkg-repo work`, one process per architecture). No GitHub runner
   builds packages; a queued build waits for a project worker. Workers
@@ -3138,11 +3220,11 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   - a package a contributor registered: once a day (05:45 UTC) the brain
     asks GitHub for each approved package's latest release and queues a
     community build from the approved PKGBUILD with `pkgver` moved to the
-    tag (`bump:<task>@<tag>`, `updpkgsums` in the worker). The owner's
-    worker has **14 days**; then any shared worker (`WORKER_SHARED=1`,
-    anyone's) may build it. (A contributor's request is different: it lands in the
-    shared queue at once — any shared worker, the best idle one first for
-    three minutes, the owner's own native worker at any time — and a build asked for one
+    tag (`bump:<task>@<tag>`, `updpkgsums` in the worker), into the queue
+    at once, as a request's build (#343: the fourteen days a bump waited for
+    its owner's own worker are gone). (A contributor's request lands in the
+    queue the same way — the next host of the architecture with room takes
+    it, contributors' builds in turn by owner — and a build asked for one
     worker — `worker` in `POST /factory/packages/<name>/build`, `pinned_to`
     on the task — waits for that worker only; revoking the worker frees it;
     the owner takes a queued build out with
@@ -3184,12 +3266,19 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   owner or as a maintainer (the Revoke button on the owner's page is the same
   door).
 - **Tokens**: there is no shared worker secret. Every worker — each of the
-  Studio's six, a droplet's, a contributor's — is a registration with its
-  own `omw_` token; project trust is a maintainer's decision on that
-  registration. The Studio's tokens live in `/srv/omarchy-pool/etc/*.env`
-  on the host (`factory/host/register.sh` writes them); to rotate one,
-  revoke the worker, blank its env file, run `register.sh` again,
-  `docker compose up -d`.
+  Studio's eight, a host's, a maintainer's legacy set — is a registration
+  with its own `omw_` token; the project trust a legacy registration holds
+  was given on two maintainers' word, and is given that way no more (#343:
+  a host's trust is the maintainer list). The Studio's tokens live in `/srv/omarchy-pool/etc/*.env`
+  on the host (`factory/host/register.sh` writes them). Only the community
+  pair's rotate: revoke the worker, blank its env file, run `register.sh`
+  again, `docker compose up -d`. A project service's token (pool, review,
+  review2) cannot be rotated since #343: no new registration can be given
+  project trust (the trust door answers 410), so `register.sh` skips that
+  service and revoking its token ends it for good (blank its env file and
+  its role container exits at start, holding the updater back). Revoke one
+  only when it leaks, and move its work to the maintainer's host first
+  ([Maintainer hosts](/docs/worker-host#maintainer-hosts)).
 
 ## Costs
 
@@ -3254,8 +3343,8 @@ What keeps the bill down:
   advisory)` matches it posts), not by `updated_at` — a run that changed
   nothing writes nothing, where it wrote 290 k rows a day (2026-09-19). A
   prune without the keys (an older `pkg-repo`) is refused with a `security`
-  warn line and deletes nothing: a contributor's worker on an old image
-  leaves a stale match in place until a current worker runs the job.
+  warn line and deletes nothing: a worker on an old image leaves a stale
+  match in place until a current worker runs the job.
 
 **Watching it.** The brain estimates the month's bill <!-- estimate-cadence -->
 from Cloudflare's own analytics — what was used so far, priced, plus the

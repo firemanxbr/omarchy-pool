@@ -1,7 +1,10 @@
-# A contributor's worker: three containers, `COMPOSE_PROFILES=community
-# docker compose up -d` (or podman compose) — or one command,
-# `omarchy-worker start --token omw_…`, which writes this file and its .env
-# for you (/docs/workers). The broker
+# A maintainer's legacy community set, until P3 retires it: three
+# containers, `COMPOSE_PROFILES=community docker compose up -d` (or podman
+# compose), or `omarchy-worker start` (factory/host/omarchy-worker) in the
+# directory holding this file and its .env (/docs/workers#contributor).
+# Contributors run no worker (#343): the pool no longer serves this file
+# nor the command, which fetch it no more — a changed one is taken in by
+# hand, and a new machine joins as a host. The broker
 # holds everything that is yours — the worker token, your agent's key, a
 # GitHub token — and only receives, processes and answers; the builder beside
 # it is born with nothing, builds one task in a fresh container and exits
@@ -62,8 +65,8 @@ services:
     environment:
       OMARCHY_BROKER: http://broker:8790
       WORKER_LABELS: '{"where":"${WHERE:-my-machine}"}'
-      # 1 = also build whatever is queued, anyone's packages; default: yours only. Workers are maintainers only (#331).
-      # On, this machine runs strangers' recipes: give the broker no key you would mind losing.
+      # Ignored by the pool since #343: a community registration builds any contributor's package, as a host does.
+      # This machine runs strangers' recipes: give the broker no key you would mind losing. Workers are maintainers only (#331).
       WORKER_SHARED: ${WORKER_SHARED:-0}
     networks: [worker]
 

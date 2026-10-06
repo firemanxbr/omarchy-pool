@@ -3,8 +3,8 @@
  * (the pool's own jobs: sync, render, promote, health, security, gc), the
  * review ones (the maintainers' side: trusted by a maintainer, they build
  * again what a maintainer asked for, publish what is approved and write
- * the audit) and the contributors' (their own packages, or whatever is
- * queued when shared). Each table says, per worker: the id whole (two
+ * the audit) and the legacy community sets (any contributor's packages,
+ * as a host builds them, #343). Each table says, per worker: the id whole (two
  * workers of one host share a name, never an id), its state in one word,
  * the release it runs, who keeps it, what its machine uses and what it
  * last did; above them, how many builds wait for a native worker (an
@@ -21,7 +21,7 @@ const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">Workers</p>
     <h1>Three kinds of worker, and whose they are</h1>
-    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's alone — build again what a maintainer asked for, and write the audit. The community ones, legacy sets until they retire, build their owner's packages, or whatever is queued when shared. All run on the maintainers' hosts — contributors run none. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one (maintainers only) →</a></p>
+    <p class="lede">The project's take the pool's jobs. The review ones — the project's trust, given on two maintainers' word before a host's trust came from the maintainer list — build again what a maintainer asked for, and write the audit. The community ones, legacy sets until they retire, build any contributor's packages, as a host does. All run on the maintainers' hosts — contributors run none. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one (maintainers only) →</a></p>
   </div>
 
   <div class="tiles four" id="tiles"></div>
@@ -39,11 +39,11 @@ const BODY = String.raw`
     ${workerPanels([
       { kind: "project", blurb: "the pool's own jobs — sync, render, promote, health, security, gc — on the host a maintainer keeps" },
       { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits — the agent through a proxy that holds the key" },
-      { kind: "community", blurb: "legacy community sets, until they retire: their owner's packages, or whatever is queued when shared" },
+      { kind: "community", blurb: "legacy community sets, until they retire: any contributor's packages, as a host builds them" },
     ])}
   </section>
 
-  <div class="gate"><div><h3>Your packages build on the pool's hosts</h3><p>Contributors do not run workers: the project provides them for everyone, and its maintainers are their only providers. Request a package and it builds here. A maintainer adds a host with the signed image (<a href="/docs/workers">Run a worker</a>, maintainers only).</p></div><a class="btn ghost" href="/docs/factory#contribute-a-package">How packaging works →</a></div>
+  <div class="gate"><div><h3>Your packages build on the pool's hosts</h3><p>Contributors do not run workers: the project provides them for everyone, and its maintainers are their only providers. Request a package and it builds here. A maintainer adds a host with the signed host bundle (<a href="/docs/workers">Run a worker</a>, maintainers only).</p></div><a class="btn ghost" href="/docs/factory#contribute-a-package">How packaging works →</a></div>
 `;
 
 const SCRIPT = String.raw`
@@ -107,13 +107,13 @@ __CHARTS__
     };
     $("#kinds").innerHTML =
       card("project", "Project", kinds.project, "The pool's own jobs, on the host a maintainer keeps.") +
-      card("review", "Review", kinds.review, "Rebuilds, publishes and audits, on two maintainers' word.") +
-      card("community", "Community", kinds.community, "Legacy community sets, until they retire: their owner's packages, or whatever is queued when shared.");
+      card("review", "Review", kinds.review, "Rebuilds, publishes and audits, on the project's trust.") +
+      card("community", "Community", kinds.community, "Legacy community sets, until they retire: any contributor's packages, as a host builds them.");
     // The load per worker, the busiest first: the name with the kind and the architecture, the bar in the kind's colour, and what it did in the tooltip.
     var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
     $("#c-perworker").innerHTML = ranked.length ? hrows(ranked.map(function (w) {
       var k = wtKind(w), l = LOAD[w.id] || { ms: 0, done: 0 };
-      return [workerName(w), (k === "community" ? (w.mode === "shared" ? "shared" : "own") : k) + " · " + esc(w.arch), busyOf(w), COLOR[k], null,
+      return [workerName(w), k + " · " + esc(w.arch), busyOf(w), COLOR[k], null,
         w.id + ": " + busyOf(w) + "% of the last day with a lease · " + num(l.done) + " task(s) finished, " + Math.round(l.ms / 60000) + " min" + (w.current_task ? " · building #" + w.current_task + " now" : "") + " · " + num(w.builds_done) + " done / " + num(w.builds_failed) + " failed all time"];
     }), { w: 150, html: true }) + '<div class="legend"><span><i style="background:' + COLOR.project + '"></i>project</span><span><i style="background:' + COLOR.review + '"></i>review</span><span><i style="background:' + COLOR.community + '"></i>community</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';
     // The three tables.
@@ -225,7 +225,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     script: ['"#c-perworker"', "workers_daily", "running_ms", "hrows(ranked", "builds_failed"],
     reads: [
       { path: "/api/v1/stats", fields: ["series.workers_daily.0.worker", "series.workers_daily.0.ms", "series.workers_daily.0.running_ms", "series.workers_daily.0.done"] },
-      { path: "/api/v1/factory?live=1&limit=200", fields: ["workers.0.id", "workers.0.arch", "workers.0.mode", "workers.0.alive", "workers.0.current_task", "workers.0.builds_done", "workers.0.builds_failed"] },
+      { path: "/api/v1/factory?live=1&limit=200", fields: ["workers.0.id", "workers.0.arch", "workers.0.alive", "workers.0.current_task", "workers.0.builds_done", "workers.0.builds_failed"] },
     ],
     visible: EVERYONE,
   },
@@ -249,7 +249,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
         fields: [
           "workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.trust", "workers.0.labels", "workers.0.hostname", "workers.0.kinds", "workers.0.trusted_by", "workers.0.trust_proposed_by",
           "workers.0.alive", "workers.0.last_seen", "workers.0.current_task", "workers.0.ready", "workers.0.update.required", "workers.0.update.latest",
-          "workers.0.arch", "workers.0.version", "workers.0.mode", "workers.0.packages",
+          "workers.0.arch", "workers.0.version", "workers.0.packages",
           "workers.0.agent", "workers.0.agent_status", "workers.0.agent_checked_at", "workers.0.agent_error",
           "workers.0.usage", "workers.0.usage_at", "workers.0.builds_done", "workers.0.builds_failed",
           "workers.0.last_task", "workers.0.last_task.id", "workers.0.last_task.kind", "workers.0.last_task.name", "workers.0.last_task.status", "workers.0.last_task.at",
@@ -268,7 +268,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/factory/workers/${F.worker}/log`, status: 401 },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "contributor", status: 403 },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "owner", status: 403 },
-      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.ownerWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
       { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
     ],

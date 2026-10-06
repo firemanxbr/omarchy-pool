@@ -476,7 +476,7 @@ describe("Adopt: a package the pool serves gets its maintainer in the pool", () 
       p.fn.act("adopt", "");
       await until(() => p.nodes["#you"].innerHTML.includes("You adopted this package"));
       expect(p.asked).toContain(`POST /api/v1/factory/packages/${F.publishedPkg}/adopt`);
-      expect(p.nodes["#you"].innerHTML).toContain("You adopted this package: its registration is yours, and its bumps come to your workers.");
+      expect(p.nodes["#you"].innerHTML).toContain("You adopted this package: its registration is yours, and its bumps build in your name on the pool's hosts.");
       expect(p.nodes["#you-who"].textContent).toBe("@m1 · maintainer");
       // Its maintainer, adopted — and nobody named as having requested it who did not.
       expect(p.nodes["#who"].innerHTML).toContain("@m1</a>");

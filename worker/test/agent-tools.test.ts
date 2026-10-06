@@ -121,7 +121,7 @@ const stage = async (c: { task: { id: number; name: string; arch?: string }; tok
   const done = await call("POST", `/factory/tasks/${c.task.id}/complete`, { sha256: (who === "the project" ? "d" : "c").repeat(64), filename: file, version: "1.0-1" }, c.token);
   expect(done.json, JSON.stringify(done.json)).toMatchObject({ status: "staged" });
 };
-/** alice's request, built and staged by her worker: ready for a claim. */
+/** alice's request, built and staged by m1's community registration: ready for a claim. */
 const ready = async (name: string) => {
   expect((await call("POST", "/factory/packages", { name, url: `https://${name}.example`, source: `https://${name}.example/${name}-1.0.tar.gz`, version: "1.0", description: `${name}, a tool for the agents' tests`, license: "MIT", arches: ["x86_64"], checklist }, "omc_alice")).status).toBe(201);
   const c = await claimAs("omw_cx", name);
@@ -210,9 +210,9 @@ beforeAll(async () => {
     env.DB.prepare("INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m4')"),
     ...(await Promise.all(people.map(async (l) => env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role) VALUES (?, ?, ?, ?)").bind(l, await h(`omc_${l}`), await h(`oms_${l}`), role(l))))),
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES
-      ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
+      ('cx', 'x86_64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
       ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]'),
-      ('cxa', 'aarch64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
+      ('cxa', 'aarch64', 'm1', ?, 'shared', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
       ('pxa', 'aarch64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`).bind(await h("omw_cx"), await h("omw_px"), AGENT, await h("omw_cxa"), await h("omw_pxa"), AGENT),
   ]);
 });

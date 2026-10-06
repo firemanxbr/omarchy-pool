@@ -153,8 +153,8 @@ const SCRIPT = String.raw`
     if (isBuild && T.package && T.package.request_id) add("ok", "Requested", personLink(T.package.owner) + ' asked for <b>' + esc(t.name) + '</b> — request #' + T.package.request_id + (T.package.project ? ' from <a href="' + esc(T.package.project) + '">' + esc(T.package.project.replace(/^https?:\/\/(www\.)?/, "")) + '</a>' : ''), T.package.created_at);
     if (T.from && p.review !== undefined) add("ok", "Evidence", personLink(T.from.owner) + '\'s build <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> was staged; a maintainer asked the project to build it again', T.from.finished_at);
     if (T.from && p.task !== undefined) add("ok", "Of build", 'this ' + esc(t.kind) + ' is of build <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + esc(T.from.name || t.name) + ' ' + esc(T.from.version || '') + ')', T.from.finished_at);
-    // Asked for a worker that was drained (#277): the sweep sent it to the shared queue, and the step says so.
-    var unpinned = p.unpinned && p.unpinned.from ? ' · asked for ' + wtId(p.unpinned.from) + ', which was drained: in the shared queue since ' + esc(clockOf(p.unpinned.at)) : '';
+    // Asked for a worker that was drained (#277): the sweep sent it to the queue, and the step says so.
+    var unpinned = p.unpinned && p.unpinned.from ? ' · asked for ' + wtId(p.unpinned.from) + ', which was drained: in the queue since ' + esc(clockOf(p.unpinned.at)) : '';
     add("ok", "Queued", esc(t.reason || "") + (isBuild ? ' · recipe <span class="mono">' + esc(String(t.pkgbuild_ref || "")) + '</span>' : '') + unpinned, t.created_at);
     // The worker as every page names it (the shell's wtId, a link to its page, #277); while it runs, the way out of a task that hangs is on
     // that page — Stop its task —, and while a stop fences the lease the step says when its worker was told and the latest it goes back.
@@ -432,7 +432,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       script: [
         '"#timeline"', "T.package.request_id", "p.review !== undefined", "p.task !== undefined", "t.pkgbuild_ref",
         // #277: the worker a link to its page, Stop its task there while the task runs, and when a stop fences it.
-        "wtId(T.worker || t.lease_owner)", "workerHref(t.lease_owner)", "Stop its task on its worker", "T.stopping.since", "T.stopping.until", "p.unpinned.from", "which was drained: in the shared queue since",
+        "wtId(T.worker || t.lease_owner)", "workerHref(t.lease_owner)", "Stop its task on its worker", "T.stopping.since", "T.stopping.until", "p.unpinned.from", "which was drained: in the queue since",
         "T.audit.slice().reverse()", "T.trial.slice().reverse()", "T.project_builds.slice().reverse()", "T.publish.slice().reverse()",
         "a.rebuild_task", "a.withdrawn_reason", "vet.warned", "vet.failed", "pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch)",
       ],

@@ -54,7 +54,8 @@
 #    right after: until it serves, the Worker from #277 writes them back at
 #    every claim, and the older one never writes them. Kept: drained_at,
 #    drained_by and drain_reason, a person's standing drain, which the Worker
-#    from #277 serves as `drained` and needs back after a roll-forward.
+#    from #277 serves as `drained` and needs back after a roll-forward; and
+#    mode, history the Worker from #343 withholds, which an older one reads.
 #    instance_churn goes to its default 0 (NOT NULL: a NULL would fail the
 #    whole UPDATE). A task's stop_order goes too: the older Worker never
 #    clears it, and a stale fence would refuse a later lease after the
@@ -187,7 +188,7 @@ undo() { # why — the images back, and the rollback ends: nothing else moved
 move_images || undo "the images did not all move to $to"
 
 # 2. The Worker of that release, from its tag; #277's columns cleared around the deploy when it is from before #277.
-# Every column workerView withholds from #277 on, but drained_* (worker/test/rollback-clear.test.ts keeps the two in step).
+# Every column workerView withholds from #277 on, but drained_* and mode (worker/test/rollback-clear.test.ts keeps the two in step).
 CLEAR_277_SQL="UPDATE build_workers SET instance = NULL, instance_prev = NULL, instance_since = NULL, instance_conflict_at = NULL, instance_other_at = NULL, instance_churn = 0, instance_finished = NULL, site = NULL, auto_orders = NULL, agent_error_since = NULL, agent_error_class = NULL, agent_probed_at = NULL, rollout = NULL, order_kinds = NULL, watchdog_exits = NULL WHERE instance IS NOT NULL OR instance_prev IS NOT NULL OR instance_since IS NOT NULL OR instance_conflict_at IS NOT NULL OR instance_other_at IS NOT NULL OR instance_churn != 0 OR instance_finished IS NOT NULL OR site IS NOT NULL OR auto_orders IS NOT NULL OR agent_error_since IS NOT NULL OR agent_error_class IS NOT NULL OR agent_probed_at IS NOT NULL OR rollout IS NOT NULL OR order_kinds IS NOT NULL OR watchdog_exits IS NOT NULL; UPDATE build_tasks SET stop_order = NULL WHERE stop_order IS NOT NULL;"
 clear_277() {
   npx wrangler d1 execute omarchy-repo --remote --command "$CLEAR_277_SQL" >/dev/null

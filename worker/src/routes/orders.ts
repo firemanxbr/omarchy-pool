@@ -26,12 +26,11 @@ import {
   answerCode, breakerKey, breakerOf, breakerScope, capRefusal, cleanText, codeSentence, drainWords, isOrderKind, loginCapWords, issueOrder, openOrdersOf, orderFacts, orderVerdicts, providerOf, readSite, refreshOpen, rulesScale, siteWords, stopWay,
   ORDER_KINDS, ORDER_RIGHTS, OUTCOMES, RIGHT_OF, SITE_WORKERS_SQL, FOLLOW_MAX_IDS, FOLLOW_POLL_S, TTL_UPDATE_MIN,
   ANSWER_WITHIN_MIN, GIVE_UP_AFTER_MIN, MAX_ORDERS_PER_LOGIN_HOUR, MAX_POOL_ORDERS_PER_DAY, MAX_POOL_RECHECKS_PER_DAY, MAX_POOL_RESTARTS_PER_DAY, MAX_POOL_RESTARTS_PER_SPELL, MAX_RECHECKS_PER_HOUR,
-  MAX_RESTARTS_PER_HOUR, MIN_UPTIME_S, RECHECK_AFTER_MIN, RESTART_AFTER_MIN, RESTART_SPACING_MIN, TTL_PERSON_MIN,
+  MAX_RESTARTS_PER_HOUR, MIN_UPTIME_S, RECHECK_AFTER_MIN, RESTART_AFTER_MIN, RESTART_SPACING_MIN, TTL_PERSON_MIN, UNPIN_AFTER_DRAIN_MINUTES,
   type HeldTask, type OrderKind, type OrderWorker, type Outcome,
 } from "../orders";
 import { WORKER_ALIVE_MINUTES } from "../meta";
 import { updateState } from "../update";
-import { FIRST_PICK_MINUTES } from "../queue";
 import { LEASE_MINUTES } from "../lease";
 import { REVERTED_COLUMNS, SOAK_COLUMNS } from "../hosts";
 
@@ -216,7 +215,7 @@ export async function handleIssueOrder(c: Contributor, id: string, request: Requ
     return json({ error: await capRefusal(env, { worker: w.id, kind, by: c.login, now, host }) }, 409);
   }
   const note = stop ? `${w.id} hears it at its next heartbeat: ${stopNote(stop)}. Nothing is cancelled.`
-    : kind === "drain" ? `the pool hands it nothing from its next claim${w.current_task ? `; task #${w.current_task} runs to its end` : ""}. Builds asked for it by name go to the shared queue after ${FIRST_PICK_MINUTES} min. Resume ends it.`
+    : kind === "drain" ? `the pool hands it nothing from its next claim${w.current_task ? `; task #${w.current_task} runs to its end` : ""}. Builds asked for it by name go to the queue after ${UNPIN_AFTER_DRAIN_MINUTES} min. Resume ends it.`
       : kind === "resume" ? "it is handed work again from its next claim"
         : kind === "update" ? updateNote(w)
           : deliveryNote(w);
@@ -309,7 +308,7 @@ const RULES = {
   recheck_after_min: RECHECK_AFTER_MIN, restart_after_min: RESTART_AFTER_MIN, restart_spacing_min: RESTART_SPACING_MIN, give_up_after_min: GIVE_UP_AFTER_MIN, min_uptime_s: MIN_UPTIME_S,
   max_pool_restarts_per_spell: MAX_POOL_RESTARTS_PER_SPELL, max_pool_restarts_per_day: MAX_POOL_RESTARTS_PER_DAY, max_pool_rechecks_per_day: MAX_POOL_RECHECKS_PER_DAY,
   max_restarts_per_hour: MAX_RESTARTS_PER_HOUR, max_rechecks_per_hour: MAX_RECHECKS_PER_HOUR, max_orders_per_login_hour: MAX_ORDERS_PER_LOGIN_HOUR, max_pool_orders_per_day: MAX_POOL_ORDERS_PER_DAY,
-  answer_within_min: ANSWER_WITHIN_MIN, ttl_person_min: TTL_PERSON_MIN, lease_minutes: LEASE_MINUTES, first_pick_minutes: FIRST_PICK_MINUTES,
+  answer_within_min: ANSWER_WITHIN_MIN, ttl_person_min: TTL_PERSON_MIN, lease_minutes: LEASE_MINUTES, unpin_after_drain_min: UNPIN_AFTER_DRAIN_MINUTES,
 };
 
 /** A worker's last orders, newest first, through idx_worker_orders_worker (worker_id, issued_at). */
