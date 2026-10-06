@@ -12,6 +12,7 @@ import { packageRows, parseTargets, settleTargets, targetsOf, type PackageRows, 
 import { throughWords, type Through } from "../agents";
 import { decidedWith, justNowWords, type PasskeyGate } from "./passkeys";
 import { placements, type PlacementView } from "./factory";
+import { SELF_REVIEWED, soloMark, soloOf, type Solo, type SoloMark } from "../governance";
 
 /**
  * Review: what maintainers do with staged builds (docs/GOVERNANCE.md). A
@@ -80,6 +81,14 @@ import { placements, type PlacementView } from "./factory";
  * never rewritten: what takes an approval back is a block, or the withdrawal
  * a maintainer writes a reason for (#178), each a decision of its own on the
  * record.
+ *
+ * "Never the owner" has one exception, written in the governance file and
+ * nowhere else (#394): while factory/MAINTAINERS.toml's [solo] table names a
+ * maintainer, that maintainer's claim, approval (their passkey still asked),
+ * changes, rejection and release on a package they brought are taken
+ * (selfReview), each self-reviewed in public — `solo_exception` in its record,
+ * its journal line's words, its review row (reviews.solo_since) or its
+ * rebuild's params — and their hosts build its project's copy (soloHostOf).
  */
 
 interface Staged {
@@ -100,7 +109,7 @@ interface Staged {
 }
 
 export async function handleReviewList(env: Env, request: Request): Promise<Response> {
-  const c = await contributorOf(request, env);
+  const [c, solo] = await Promise.all([contributorOf(request, env), soloOf(env)]);
   const staged = await env.DB.prepare(
     `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.created_at, t.finished_at, t.pkgbuild_ref, t.result, t.attempts,
             t.lease_owner, w.owner AS worker_owner, w.labels AS worker_labels, w.hostname AS worker_hostname, w.trusted_by AS worker_trusted_by, w.agent AS worker_agent,
@@ -124,7 +133,7 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
       ORDER BY t.id DESC LIMIT 100`,
   ).all();
   // A contributor's build that the project is building again, or built: the review row says so — and who claimed it, with the agent they chose (the claim's params: `by`, `agent`), since when.
-  const projectOf = new Map<number, { id: number; status: string; error: string | null; worker: string | null; attempts: number; result: string | null; trial_status: string | null; trial_result: string | null; by: string | null; agent: string | null; at: string | null }>();
+  const projectOf = new Map<number, { id: number; status: string; error: string | null; worker: string | null; attempts: number; result: string | null; trial_status: string | null; trial_result: string | null; by: string | null; agent: string | null; at: string | null; solo_exception: SoloMark | null }>();
   const builds = await env.DB.prepare(
     `SELECT id, name, arch, status, error, params, lease_owner, pinned_to, attempts, result, created_at,
             (SELECT u.status FROM build_tasks u WHERE u.kind = 'trial' AND u.name = b.name AND json_extract(u.params, '$.task') = b.id ORDER BY u.id DESC LIMIT 1) AS trial_status,
@@ -132,9 +141,9 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
        FROM build_tasks b WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') IS NOT NULL AND status IN ('queued', 'leased', 'staged', 'failed', 'done') ORDER BY id`,
   ).all<{ id: number; name: string; arch: string; status: string; error: string | null; params: string; lease_owner: string | null; pinned_to: string | null; attempts: number; result: string | null; created_at: string | null; trial_status: string | null; trial_result: string | null }>();
   for (const b of builds.results) {
-    const p = JSON.parse(b.params) as { review?: number; by?: string; agent?: string | null };
+    const p = JSON.parse(b.params) as { review?: number; by?: string; agent?: string | null; solo_exception?: unknown };
     const from = Number(p.review);
-    if (from) projectOf.set(from, { id: b.id, status: b.status, error: b.error, worker: b.lease_owner ?? b.pinned_to, attempts: b.attempts, result: b.result, trial_status: b.trial_status, trial_result: b.trial_result, by: p.by ?? null, agent: p.agent ?? null, at: b.created_at });
+    if (from) projectOf.set(from, { id: b.id, status: b.status, error: b.error, worker: b.lease_owner ?? b.pinned_to, attempts: b.attempts, result: b.result, trial_status: b.trial_status, trial_result: b.trial_result, by: p.by ?? null, agent: p.agent ?? null, at: b.created_at, solo_exception: soloMarkOf(p.solo_exception) });
   }
   // The project's copy of a package while it is queued (#339, D35): where it may run — kept off its requester's hosts, held when only
   // theirs can build it — and whether the caller may release it to any host (anyHostVerdict). The fleet is read only when one is queued.
@@ -219,13 +228,14 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     return { worker: r.lease_owner as string, owner: (r.worker_owner as string | null) ?? null, where, trusted_by: (r.worker_trusted_by as string | null) ?? null };
   };
   // Whose claim a row is under: the project's rebuild of a contributor's build while it is in flight or staged, or the project's row itself (its own params say who asked and with which agent; the worker that built it, when none was chosen).
+  // A claim its requester made under the solo-maintainer exception (#394) says so: `solo_exception`, as its rebuild's params carry it.
   const claimRow = (r: Record<string, unknown>) => {
     if (r.trust === "project") {
-      const p = r.params ? (JSON.parse(r.params as string) as { by?: string; agent?: string | null }) : {};
-      return { task: r.id as number, status: r.status as string, by: p.by ?? null, agent: p.agent ?? (r.worker_agent as string | null) ?? null, at: (r.created_at as string | null) ?? null };
+      const p = r.params ? (JSON.parse(r.params as string) as { by?: string; agent?: string | null; solo_exception?: unknown }) : {};
+      return { task: r.id as number, status: r.status as string, by: p.by ?? null, agent: p.agent ?? (r.worker_agent as string | null) ?? null, at: (r.created_at as string | null) ?? null, solo_exception: soloMarkOf(p.solo_exception) };
     }
     const pb = projectOf.get(r.id as number);
-    return pb && ["queued", "leased", "staged"].includes(pb.status) ? { task: pb.id, status: pb.status, by: pb.by, agent: pb.agent, at: pb.at } : null;
+    return pb && ["queued", "leased", "staged"].includes(pb.status) ? { task: pb.id, status: pb.status, by: pb.by, agent: pb.agent, at: pb.at, solo_exception: pb.solo_exception } : null;
   };
   // The project's builds that still have a package in staging: the sweep
   // (staging.ts, STAGING_DAYS) drops the objects of an old build while the
@@ -258,6 +268,7 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
       standing: prior.some((x) => halves.includes(x.task_id) || (x.rebuild_task !== null && halves.includes(x.rebuild_task))),
       packaged: r.trust !== "project" || packaged.has(id),
       claim: claimOf(buildsOf(r.name as string)),
+      solo,
       ...packageFacts({ id, arch: r.arch as string, trust: r.trust as string, version: (r.version as string | null) ?? null }, buildsOf(r.name as string), parseTargets(r.targets)),
     };
   };
@@ -344,8 +355,9 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     if (!p.claim && t.claim) p.claim = t.claim;
   }
   for (const p of packages) p.state = queue.get(p.name)?.state ?? null;
+  // The solo-maintainer exception in force (#394), the same for every reader: who it names, since when, why — the page says so above the queue.
   return json(
-    { staged: rows, waiting: waiting.length, oldest_ms: ages.length ? Math.max(...ages) : null, ready: packages.filter((p) => p.state === "ready").length, in_review: packages.filter((p) => p.state === "in_review").length, packages },
+    { staged: rows, waiting: waiting.length, oldest_ms: ages.length ? Math.max(...ages) : null, ready: packages.filter((p) => p.state === "ready").length, in_review: packages.filter((p) => p.state === "in_review").length, packages, solo },
     200,
     { "cache-control": "no-store" },
   );
@@ -598,10 +610,10 @@ export function buildsOfPackage(rows: { builds: Omit<PackageRows["builds"][numbe
  * asked for the build (`requesters`), a standing approval on the task, the
  * project's build in flight, a standing approval anywhere on the chain, a
  * package still in staging (a project's build the sweep emptied has nothing
- * to publish), the claim — what a release lets go — and what the package
- * says (packageFacts).
+ * to publish), the claim — what a release lets go — what the package says
+ * (packageFacts), and the solo-maintainer exception in force (#394), if any.
  */
-interface Facts extends PackageFacts { owner: string | null; requesters: string[]; already: boolean; inFlight: { id: number; status: string } | null; standing: boolean; packaged: boolean; claim: number[] }
+interface Facts extends PackageFacts { owner: string | null; requesters: string[]; already: boolean; inFlight: { id: number; status: string } | null; standing: boolean; packaged: boolean; claim: number[]; solo?: Solo | null }
 
 /**
  * The claim on a package, as a release lets it go: the project's rebuilds a
@@ -621,6 +633,12 @@ export function claimOf(p: Pick<PackageBuilds, "project" | "staged">): number[] 
   return p.project.filter((b) => live(b) || (b.status === "staged" && undecided.has(b.review))).map((b) => b.id);
 }
 
+/** A task's or a payload's `solo_exception`, as written by a door (soloMark), or null for anything else. */
+export function soloMarkOf(v: unknown): SoloMark | null {
+  const m = v as Partial<SoloMark> | null | undefined;
+  return m && typeof m === "object" && typeof m.maintainer === "string" && typeof m.since === "string" ? { maintainer: m.maintainer, since: m.since } : null;
+}
+
 /** The contributor's build a project's rebuild answers (its params' `review`), or null for any other task. */
 function reviewOf(params: string | null | undefined): number | null {
   if (!params) return null;
@@ -630,6 +648,31 @@ function reviewOf(params: string | null | undefined): number | null {
 /** Who asked for a build, as the conflict of interest reads it: the registration's owner today, the build's own owner, and — for the project's rebuild — the owner of the contributor's build it answers. An adoption moves the registration, never who asked for a build in review. */
 function requestersOf(...logins: (string | null | undefined)[]): string[] {
   return [...new Set(logins.filter((l): l is string => typeof l === "string" && l !== ""))];
+}
+
+/**
+ * The solo-maintainer exception at work on one package (#394): the maintainer
+ * factory/MAINTAINERS.toml's [solo] table names, on a package they brought —
+ * its registration's owner, or among who asked for a build in review — while
+ * the table is in force. The exception, or null. For anyone else, and for that
+ * maintainer on anybody else's package, nothing changes: the two-person rule
+ * decides, word for word. A decision the exception let through is marked
+ * self-reviewed, in public: its record and journal line carry
+ * `solo_exception`, and the pages and Status show it.
+ */
+export function selfReview(c: Contributor | null, f: Pick<Facts, "owner" | "requesters" | "solo">): Solo | null {
+  const s = f.solo ?? null;
+  return c && s && isMaintainer(c) && c.login === s.maintainer && (f.owner === c.login || f.requesters.includes(c.login)) ? s : null;
+}
+
+/**
+ * The maintainer the exception lifts the requester-host rule for (#394, D35)
+ * on this package — the one [solo] names, when they are among its requesters:
+ * their hosts may build its project's copy, so nothing waits for a release.
+ * Any other requester's hosts are still kept off it. Null without the table.
+ */
+export function soloHostOf(f: Pick<Facts, "requesters" | "solo">): string | null {
+  return f.solo && f.requesters.includes(f.solo.maintainer) ? f.solo.maintainer : null;
 }
 
 export function decisions(c: Contributor | null, t: Decidable, f: Facts): Record<Decision, Verdict> {
@@ -643,7 +686,9 @@ export function decisions(c: Contributor | null, t: Decidable, f: Facts): Record
   // on it too (the claim is the project's rebuild), and so is letting a claim on it go. Their own is the
   // registration's today and every build they asked for: a package adopted from them is still not theirs to
   // review while a build they asked for is in review (an adoption once made the requester a stranger to it).
-  const owner = c && (f.owner === c.login || f.requesters.includes(c.login)) ? no(403, `you brought ${t.name} — another maintainer decides; with one maintainer, that maintainer's own packages wait`, "conflict_of_interest") : null;
+  // The one exception is written in the governance file, for one named maintainer (#394, selfReview): while
+  // [solo] names them, they decide on their own packages — every such decision marked self-reviewed.
+  const owner = c && (f.owner === c.login || f.requesters.includes(c.login)) && !selfReview(c, f) ? no(403, `you brought ${t.name} — another maintainer decides; with one maintainer, that maintainer's own packages wait`, "conflict_of_interest") : null;
   // One review covers every architecture: it starts once each is built or not supported, and decides once the project built each again.
   const building = f.building ? no(409, `${f.building.arch} is still building (task ${f.building.id}): one review covers every architecture — it starts once each is built or not supported`) : null;
   // A build its architecture no longer stands on is history: the review decides where each architecture stands now.
@@ -733,6 +778,24 @@ export async function decisionRecord(env: Env, name: string, word: string, id: s
   }
 }
 
+/**
+ * A decision taken under the solo-maintainer exception (#394), on the record:
+ * its signed document carries `solo_exception` — who the governance file
+ * names, since when, and why — and its journal line the mark and its words.
+ * Nothing for a decision taken under the two-person rule.
+ */
+function soloRecord(self: Solo | null): { solo_exception?: Solo } {
+  return self ? { solo_exception: { maintainer: self.maintainer, since: self.since, reason: self.reason } } : {};
+}
+/** The journal payload's and the answer's share of it: who and since when. */
+function soloPayload(self: Solo | null): { solo_exception?: SoloMark } {
+  return self ? { solo_exception: soloMark(self) } : {};
+}
+/** The journal line's words: " — self-reviewed (solo-maintainer exception)". */
+function selfWords(self: Solo | null): string {
+  return self ? ` — ${SELF_REVIEWED}` : "";
+}
+
 /** The approval that stands on this task's chain — asked by the contributor's build or the project's, it is the same one. */
 async function standingApproval(env: Env, name: string, id: number): Promise<Approval | null> {
   const story = await storyRows(env, name);
@@ -748,23 +811,25 @@ async function standingApproval(env: Env, name: string, id: number): Promise<App
  * architectures stands. A decision never reads the stored column: it is a
  * view the next transition settles, not what a decision is taken on.
  */
-async function factsOf(env: Env, t: Decidable & { owner: string | null; version?: string | null; params?: string | null }): Promise<Facts & { approval: Approval | null; builds: PackageBuilds; targets: Targets }> {
+async function factsOf(env: Env, t: Decidable & { owner: string | null; version?: string | null; params?: string | null }): Promise<Facts & { approval: Approval | null; builds: PackageBuilds; targets: Targets; solo: Solo | null }> {
   // The project's rebuild answers a contributor's build: whoever asked for that one asked for this one too (requestersOf), by the primary key.
   const from = t.trust === "project" ? reviewOf(t.params) : null;
-  const [owner, already, approval, packaged, rows, asked] = await Promise.all([
+  const [owner, already, approval, packaged, rows, asked, solo] = await Promise.all([
     ownerOf(env, t.name, t.owner),
     env.DB.prepare(`SELECT id FROM approvals WHERE task_id = ? AND ${standsSql()}`).bind(t.id).first(),
     standingApproval(env, t.name, t.id),
     t.trust === "project" ? env.DB.prepare("SELECT 1 AS one FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst' LIMIT 1").bind(t.id).first() : Promise.resolve(true),
     packageRows(env, t.name, { unregistered: true }),
     from !== null ? env.DB.prepare("SELECT owner FROM build_tasks WHERE id = ?").bind(from).first<{ owner: string | null }>() : Promise.resolve(null),
+    // The solo-maintainer exception in force (#394): the governance file's [solo], as the last sync wrote it.
+    soloOf(env),
   ]);
   const builds = rows ? buildsOfPackage(rows) : { building: [], staged: [], project: [] };
   const targets = rows ? targetsOf(rows.arches, rows.builds, rows.decisions, rows.closedThrough) : {};
   // The project's build of this one, queued, running or staged: the newest, from the same rows.
   const pb = builds.project.find((b) => b.review === t.id && ["queued", "leased", "staged"].includes(b.status));
   const inFlight = pb ? { id: pb.id, status: pb.status } : null;
-  return { owner, requesters: requestersOf(owner, t.owner, asked?.owner), already: !!already, inFlight, standing: !!approval, packaged: !!packaged, claim: claimOf(builds), approval, builds, targets, ...packageFacts({ ...t, version: t.version ?? null }, builds, targets) };
+  return { owner, requesters: requestersOf(owner, t.owner, asked?.owner), already: !!already, inFlight, standing: !!approval, packaged: !!packaged, claim: claimOf(builds), approval, builds, targets, solo, ...packageFacts({ ...t, version: t.version ?? null }, builds, targets) };
 }
 
 /** GET /factory/tasks/:id/can — what the caller may do on this task, and why not: no-store, it is the caller's. */
@@ -837,13 +902,19 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   const no = refused(decisions(c, t, f).build);
   if (no) return no;
   const owner = f.owner;
+  // A claim its requester makes under the solo-maintainer exception (#394): marked self-reviewed on the rebuilds, the record and the line.
+  const self = selfReview(c, f);
+  // The requester-host rule (D35) as it holds for this package: the maintainer [solo] names may have their own host build it (#394).
+  const soloHost = soloHostOf(f);
+  const keptOff = f.requesters.filter((r) => r !== soloHost);
   // Where it runs: one of the project's workers that builds this architecture, when the maintainer says which (the native one, not the emulated one).
   let pinned: string | null = null, agent: string | null = null;
   if (typeof b.worker === "string" && b.worker.trim()) {
     const w = await env.DB.prepare("SELECT id, arch, owner, kinds, agent, agent_status, drained_at, drained_by, drain_reason FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string; owner: string | null; kinds: string | null; agent: string | null; agent_status: string | null; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
     if (!w || w.arch !== t.arch) return json({ error: `${b.worker} is not a project worker for ${t.arch}` }, 400);
-    // The project's copy of a package is not built on its requester's host (#339, D35): pinned to one, it would wait for a release.
-    if (w.owner && f.requesters.includes(w.owner)) return json({ error: `${w.id} is ${w.owner}'s, who brought ${t.name}: the project's copy of a package is not built on its requester's host — choose another maintainer's`, code: "requester_host" }, 409);
+    // The project's copy of a package is not built on its requester's host (#339, D35): pinned to one, it would wait for a release —
+    // the solo-maintainer exception's own hosts aside, on their own package (#394).
+    if (w.owner && keptOff.includes(w.owner)) return json({ error: `${w.id} is ${w.owner}'s, who brought ${t.name}: the project's copy of a package is not built on its requester's host — choose another maintainer's`, code: "requester_host" }, 409);
     // A drained worker is handed nothing until it is resumed (#277): pinned to it, the rebuild would wait for it.
     if (w.drained_at) return json({ error: drainedRefusal(w) }, 409);
     // The claim gives a review build only to a worker that declares builds and whose agent answered; pinned to another, it would wait forever.
@@ -865,14 +936,14 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   // would wait for a release. The statement leaves them out, so another maintainer's live worker with the same agent is found whichever
   // claimed last; with none, the rebuild of that architecture goes unpinned, to any other maintainer's host that runs it.
   const sameAgent = async (arch: string): Promise<string | null> =>
-    agent ? ((await env.DB.prepare(SAME_AGENT_SQL).bind(arch, agent, alive, JSON.stringify(f.requesters)).first<{ id: string }>())?.id ?? null) : null;
+    agent ? ((await env.DB.prepare(SAME_AGENT_SQL).bind(arch, agent, alive, JSON.stringify(keptOff)).first<{ id: string }>())?.id ?? null) : null;
   const queued: { task: number; arch: string; from: number; pinned_to: string | null; agent: string | null }[] = [];
   for (const s of from) {
     const pin = s.id === id ? pinned : await sameAgent(s.arch);
     // The maintainer's note is on the record and is the hint the project's agent drafts with (the worker reads params.hint) — the web's, never an agent's (#252):
     // text that passed through an agent, which may have read the requester's instructions, is not the maintainer's word, so a claim made with an agent token keeps its note for people and leaves the hint null.
     // What the rebuild starts from is the request's facts, the maintainer's word and the contributor's text evidence as the lesson (read through the public evidence routes): never a staged object of the contributor's — no package, no staging prefix, no checksum — and its job's token reads no staging but its own (jobtoken.ts), so the factory's packages are never downloaded, let alone reused (#247; test/review.test.ts holds it).
-    const params = { review: s.id, request: pkg?.request_id ?? null, project: pkg?.project ?? null, source: pkg?.source ?? null, version: pkg?.release ?? s.version, description: pkg?.description ?? null, license: pkg?.license ?? null, owner, by: c.login, ...(through ? { through } : {}), agent: pin ? agent : null, note, hint: note && !through ? note.slice(0, 600) : null };
+    const params = { review: s.id, request: pkg?.request_id ?? null, project: pkg?.project ?? null, source: pkg?.source ?? null, version: pkg?.release ?? s.version, description: pkg?.description ?? null, license: pkg?.license ?? null, owner, by: c.login, ...(through ? { through } : {}), agent: pin ? agent : null, note, hint: note && !through ? note.slice(0, 600) : null, ...(self ? { solo_exception: soloMark(self) } : {}) };
     // Queued only while no rebuild of the round is queued, running or staged: two claims sent at once are one claim (the name's index, then each row's params).
     const row = await env.DB.prepare(CLAIM_SQL)
       .bind(t.name, s.arch, s.version, `review:${s.id}`, `project build asked by ${c.login}`, owner, JSON.stringify(params), pin, t.name, s.id === id ? round : JSON.stringify([s.id]))
@@ -887,15 +958,15 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   const arches = queued.map((q) => q.arch).join(" · ");
   const lead = queued.find((q) => q.from === id)!;
   await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
-    .bind(`${t.version ?? ""} for ${arches}: the project is building it (task${queued.length > 1 ? "s" : ""} ${queued.map((q) => q.task).join(", ")}), asked by ${c.login}`, t.name)
+    .bind(`${t.version ?? ""} for ${arches}: the project is building it (task${queued.length > 1 ? "s" : ""} ${queued.map((q) => q.task).join(", ")}), asked by ${c.login}${self ? ` — ${SELF_REVIEWED}` : ""}`, t.name)
     .run();
   const via = viaOf(request), at = new Date().toISOString();
-  const record = await decisionRecord(env, t.name, "claim", lead.task, { version: t.version, arches: queued.map((q) => q.arch), owner, from: id, tasks: queued, by: c.login, via, ...(through ? { through } : {}), agent, pinned_to: pinned, at, note });
+  const record = await decisionRecord(env, t.name, "claim", lead.task, { version: t.version, arches: queued.map((q) => q.arch), owner, from: id, tasks: queued, by: c.login, via, ...(through ? { through } : {}), agent, pinned_to: pinned, at, note, ...soloRecord(self) });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('review', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches}): ${c.login} asked the project to build it${throughWords(through)} — ${queued.map((q) => `task ${q.task} from ${owner ?? "?"}'s build ${q.from}`).join(", ")}${agent ? ` — claimed with ${agent}` : ""}`, JSON.stringify({ task: lead.task, tasks: queued, from: id, name: t.name, arch: t.arch, arches: queued.map((q) => q.arch), by: c.login, via, ...(through ? { through } : {}), agent, pinned_to: pinned, owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches}): ${c.login} asked the project to build it${throughWords(through)} — ${queued.map((q) => `task ${q.task} from ${owner ?? "?"}'s build ${q.from}`).join(", ")}${agent ? ` — claimed with ${agent}` : ""}${selfWords(self)}`, JSON.stringify({ task: lead.task, tasks: queued, from: id, name: t.name, arch: t.arch, arches: queued.map((q) => q.arch), by: c.login, via, ...(through ? { through } : {}), agent, pinned_to: pinned, owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}), ...soloPayload(self) }))
     .run();
   await settleTargets(env, t.name);
-  return json({ task: lead.task, tasks: queued.map((q) => q.task), arches: queued.map((q) => q.arch), from: id, by: c.login, pinned_to: pinned, agent, ...(through ? { through, hint: null } : {}), record: record.url });
+  return json({ task: lead.task, tasks: queued.map((q) => q.task), arches: queued.map((q) => q.arch), from: id, by: c.login, pinned_to: pinned, agent, ...(through ? { through, hint: null } : {}), record: record.url, ...soloPayload(self) });
 }
 
 /**
@@ -927,6 +998,8 @@ export function anyHostVerdict(c: Contributor | null, t: { id: number; name: str
   if (!isMaintainer(c)) return no(403, MAINTAINER_DECIDES, "maintainer_only");
   if (t.kind !== "build" || t.trust !== "project" || reviewOf(t.params) === null) return no(409, `task ${t.id} is not the project's copy of a package: only a review rebuild is kept off its requester's hosts`);
   if (t.status !== "queued" || !p) return no(409, `task ${t.id} is ${t.status === "leased" ? "building" : t.status}: only a rebuild still queued waits for a host`);
+  // The solo-maintainer exception (#394): its maintainer's own hosts may build the copy of their own package — nothing waits for a release.
+  if (p.solo && p.solo.hosts.length && !p.released) return no(409, `the solo-maintainer exception (since ${p.solo.since}) lets ${p.solo.maintainer}'s own hosts build the project's copy of their packages: ${p.solo.hosts.join(", ")} can build it — nothing to release`);
   if (p.requesters.includes(c.login)) return no(403, `you brought ${t.name} — another maintainer releases its rebuild to any host, as another decides on it`, "conflict_of_interest");
   if (p.released) return no(409, `released to any host by ${p.released.by} already`);
   if (p.others.length) return no(409, `${p.others.join(", ")} — another maintainer's — can build it: the project's copy waits for that host, not for a release`);
@@ -994,6 +1067,8 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   const confirmed = await decidedWith(through, gate, b.assertion);
   if (confirmed instanceof Response) return confirmed;
   const passkey = confirmed.passkey, owner = f.owner;
+  // Its requester approving under the solo-maintainer exception (#394): with their passkey all the same, and marked self-reviewed.
+  const self = selfReview(c, f);
   // The targets: this build for its architecture, and the project's staged build of each other architecture the review covers (othersOf).
   const others = othersOf(t, f.builds, f.targets).map((s) => f.builds.project.find((p) => p.review === s.id)).filter((p): p is PackageBuilds["project"][number] => !!p);
   const staged = others.filter((p) => p.status === "staged");
@@ -1017,7 +1092,7 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   }
   const arches = targets.map((x) => x.t.arch);
   // The review and its rows, taken at once: a second approval — or a rejection — of these builds sent at the same moment writes nothing.
-  const review = await takeRound(env, { name: t.name, version: t.version, decision: "approved", by: c.login, note, arches, notSupported, through, rows: targets.map((x) => ({ task: x.t.id, arch: x.t.arch, version: x.t.version, rebuild: x.t.id })) });
+  const review = await takeRound(env, { name: t.name, version: t.version, decision: "approved", by: c.login, note, arches, notSupported, through, solo: self, rows: targets.map((x) => ({ task: x.t.id, arch: x.t.arch, version: x.t.version, rebuild: x.t.id })) });
   if (review === null) return decidedAlready(env, t.name, targets.map((x) => x.t.id));
   const publishes: Record<string, number> = {};
   for (const x of targets) {
@@ -1031,18 +1106,18 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   }
   const ns = Object.keys(notSupported);
   await env.DB.prepare("UPDATE factory_packages SET status = 'approved', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
-    .bind(`${t.version ?? ""} for ${arches.join(" · ")} approved by ${c.login}${ns.length ? ` (${ns.join(" · ")} not supported)` : ""}; publishing the project's build${arches.length > 1 ? "s" : ""} (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, t.name)
+    .bind(`${t.version ?? ""} for ${arches.join(" · ")} approved by ${c.login}${self ? `, ${SELF_REVIEWED}` : ""}${ns.length ? ` (${ns.join(" · ")} not supported)` : ""}; publishing the project's build${arches.length > 1 ? "s" : ""} (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, t.name)
     .run();
   for (const x of targets) await cancelPendingAudit(env, x.t.id);
   // Signed and journaled: who, through which door, and the agent that rebuilt what ships — per architecture, what its review worker ran (rebuiltWith); `agent` is this build's.
   const via = viaOf(request), agent = targets.find((x) => x.t.id === id)?.agent ?? null, at = new Date().toISOString();
-  const record = await decisionRecord(env, t.name, "approve", `r${review}`, { version: t.version, arches, not_supported: notSupported, owner, review, targets: targets.map((x) => ({ arch: x.t.arch, task: x.t.id, files: x.files, trial: x.trial, publish: publishes[x.t.arch] ?? null, agent: x.agent })), by: c.login, via, ...(through ? { through } : { passkey }), agent, at, note });
+  const record = await decisionRecord(env, t.name, "approve", `r${review}`, { version: t.version, arches, not_supported: notSupported, owner, review, targets: targets.map((x) => ({ arch: x.t.arch, task: x.t.id, files: x.files, trial: x.trial, publish: publishes[x.t.arch] ?? null, agent: x.agent })), by: c.login, via, ...(through ? { through } : { passkey }), agent, at, note, ...soloRecord(self) });
   // A first use of a passkey registered just now — in the Approve dialog itself, #287 — says so on the line.
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('approve', 'edge', 'factory', 'ok', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${justNowWords(confirmed)}${throughWords(through)}${withAgents(targets.map((x) => ({ arch: x.t.arch, agent: x.agent })))}${note ? " — " + note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, JSON.stringify({ review, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, by: c.login, via, ...(through ? { through } : { passkey }), ...(confirmed.justNow ? { registered_just_now: true } : {}), agent, agents: Object.fromEntries(targets.map((x) => [x.t.arch, x.agent])), owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${justNowWords(confirmed)}${throughWords(through)}${withAgents(targets.map((x) => ({ arch: x.t.arch, agent: x.agent })))}${selfWords(self)}${note ? " — " + note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, JSON.stringify({ review, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, by: c.login, via, ...(through ? { through } : { passkey }), ...(confirmed.justNow ? { registered_just_now: true } : {}), agent, agents: Object.fromEntries(targets.map((x) => [x.t.arch, x.agent])), owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}), ...soloPayload(self) }))
     .run();
   await settleTargets(env, t.name);
-  return json({ task: id, decision: "approved", by: c.login, publish: publishes[t.arch], publishes, review, arches, not_supported: notSupported, via, ...(through ? { through } : { passkey }), agent, record: record.url });
+  return json({ task: id, decision: "approved", by: c.login, publish: publishes[t.arch], publishes, review, arches, not_supported: notSupported, via, ...(through ? { through } : { passkey }), agent, record: record.url, ...soloPayload(self) });
 }
 
 /**
@@ -1086,6 +1161,15 @@ export const ROWS_SQL = `INSERT INTO approvals (task_id, name, arch, version, de
     FROM json_each(?) j WHERE ${UNDECIDED}`;
 
 /**
+ * A decision its requester took under the solo-maintainer exception (#394):
+ * the review the batch's two statements just wrote marked with the
+ * exception's `since` — the name's newest review (its (name, id) index), and
+ * only when the rows were written (changes(): nothing when the decision was
+ * taken a moment before by someone else, and the batch wrote no review).
+ */
+export const SOLO_REVIEW_SQL = "UPDATE reviews SET solo_since = ?1 WHERE id = (SELECT MAX(id) FROM reviews WHERE name = ?2) AND changes() > 0";
+
+/**
  * A decision taken: its review and one approvals row per build it decided,
  * in one batch — a transaction, nothing runs between its two statements —
  * each written only while no live decision is on any of those builds. Two
@@ -1093,11 +1177,13 @@ export const ROWS_SQL = `INSERT INTO approvals (task_id, name, arch, version, de
  * rejection) are one decision: the facts both read said "undecided", and the
  * second batch writes nothing. The review's id, or null: decided already.
  */
-async function takeRound(env: Env, r: { name: string; version: string | null; decision: "approved" | "rejected"; by: string; note: string | null; arches: string[]; notSupported?: Record<string, number | null>; released?: boolean; changes?: boolean; through?: Through; rows: { task: number; arch: string; version: string | null; rebuild: number | null }[] }): Promise<number | null> {
+async function takeRound(env: Env, r: { name: string; version: string | null; decision: "approved" | "rejected"; by: string; note: string | null; arches: string[]; notSupported?: Record<string, number | null>; released?: boolean; changes?: boolean; through?: Through; solo?: Solo | null; rows: { task: number; arch: string; version: string | null; rebuild: number | null }[] }): Promise<number | null> {
   const decided = JSON.stringify(r.rows.map((x) => x.task));
   const [review] = await env.DB.batch([
     env.DB.prepare(REVIEW_SQL).bind(r.name, r.version, r.decision, r.by, r.note, JSON.stringify(r.arches), JSON.stringify(r.notSupported ?? {}), r.released ? 1 : 0, r.changes ? 1 : 0, decided),
     env.DB.prepare(ROWS_SQL).bind(r.name, r.decision, r.by, r.note, r.name, JSON.stringify(r.rows.map((x) => (r.through ? { ...x, through: r.through } : x))), decided),
+    // Self-reviewed under the solo-maintainer exception (#394): on the review the two statements above wrote, in the same transaction.
+    ...(r.solo ? [env.DB.prepare(SOLO_REVIEW_SQL).bind(r.solo.since, r.name)] : []),
   ]);
   return (review.results[0] as { id?: number } | undefined)?.id ?? null;
 }
@@ -1187,8 +1273,11 @@ async function closeRound(c: Contributor, id: number, request: Request, env: Env
   const b = (await request.json().catch(() => ({}))) as { note?: unknown };
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string }>();
   if (!t) return json({ error: "no such task" }, 404);
-  const no = refused(decisions(c, t, await factsOf(env, t))[word]);
+  const f = await factsOf(env, t);
+  const no = refused(decisions(c, t, f)[word]);
   if (no) return no;
+  // Its requester closing the round under the solo-maintainer exception (#394): marked self-reviewed.
+  const self = selfReview(c, f);
   // The input after the predicate, and before any write: a note that is not text is none (a number once wrote the review, then failed on it).
   const note = typeof b.note === "string" ? b.note.trim() : "";
   if (!note) return json({ error: word === "changes" ? "a note saying what to change is required — the requester reads it" : "a note saying why is required" }, 400);
@@ -1209,9 +1298,9 @@ async function closeRound(c: Contributor, id: number, request: Request, env: Env
   // Only a rejection frees a name, and only a request's; changes asked for close the round and keep it the requester's.
   const released = word === "reject" && !inPool;
   const closes = !inPool;
-  const done = word === "changes" ? `changes requested by ${c.login}` : `rejected by ${c.login}`;
+  const done = (word === "changes" ? `changes requested by ${c.login}` : `rejected by ${c.login}`) + (self ? `, ${SELF_REVIEWED}` : "");
   // The review and its rows, taken at once: changes and a rejection — or two of either — sent at the same moment are one decision.
-  const review = await takeRound(env, { name: t.name, version: t.version, decision: "rejected", by: c.login, note, arches: decided.map((x) => x.arch), released, changes: word === "changes", through, rows: decided.map((x) => ({ task: x.id, arch: x.arch, version: x.version, rebuild: null })) });
+  const review = await takeRound(env, { name: t.name, version: t.version, decision: "rejected", by: c.login, note, arches: decided.map((x) => x.arch), released, changes: word === "changes", through, solo: self, rows: decided.map((x) => ({ task: x.id, arch: x.arch, version: x.version, rebuild: null })) });
   if (review === null) return decidedAlready(env, t.name, decided.map((x) => x.id));
   // The round's last build, by the name's (name, arch, id) index: `+kind` keeps the planner off the index of every build's kind.
   const lastBuild = await env.DB.prepare("SELECT MAX(id) AS id FROM build_tasks WHERE name = ? AND +kind = 'build'").bind(t.name).first<{ id: number | null }>();
@@ -1231,12 +1320,12 @@ async function closeRound(c: Contributor, id: number, request: Request, env: Env
   const rebuilt = await Promise.all(decided.filter((x) => x.trust === "project" && x.status === "staged").map(async (x) => ({ arch: x.arch, agent: await rebuiltWith(env, x) })));
   const via = viaOf(request), agent = rebuilt.find((x) => x.agent)?.agent ?? null, at = new Date().toISOString();
   const arches = decided.map((x) => x.arch);
-  const record = await decisionRecord(env, t.name, word, `r${review}`, { version: t.version, arches, owner: t.owner, review, tasks: ids, released, by: c.login, via, ...(through ? { through } : {}), agent, agents: Object.fromEntries(rebuilt.map((x) => [x.arch, x.agent])), at, note });
+  const record = await decisionRecord(env, t.name, word, `r${review}`, { version: t.version, arches, owner: t.owner, review, tasks: ids, released, by: c.login, via, ...(through ? { through } : {}), agent, agents: Object.fromEntries(rebuilt.map((x) => [x.arch, x.agent])), at, note, ...soloRecord(self) });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('approve', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}) ${done}${throughWords(through)}: ${note.slice(0, 140)}${released ? " — the name is free again" : word === "changes" ? " — back to the factory, the name stays the requester's" : ""}`, JSON.stringify({ review, task: id, tasks: ids, name: t.name, arch: t.arch, arches, decision: word === "changes" ? "changes_requested" : "rejected", by: c.login, via, ...(through ? { through } : {}), agent, owner: t.owner, note, released, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}) ${done}${throughWords(through)}: ${note.slice(0, 140)}${released ? " — the name is free again" : word === "changes" ? " — back to the factory, the name stays the requester's" : ""}`, JSON.stringify({ review, task: id, tasks: ids, name: t.name, arch: t.arch, arches, decision: word === "changes" ? "changes_requested" : "rejected", by: c.login, via, ...(through ? { through } : {}), agent, owner: t.owner, note, released, record: record.url, ...(record.error ? { record_error: record.error } : {}), ...soloPayload(self) }))
     .run();
   await settleTargets(env, t.name);
-  return json({ task: id, decision: word === "changes" ? "changes_requested" : "rejected", by: c.login, review, released, cancelled: ids, via, ...(through ? { through } : {}), agent, record: record.url });
+  return json({ task: id, decision: word === "changes" ? "changes_requested" : "rejected", by: c.login, review, released, cancelled: ids, via, ...(through ? { through } : {}), agent, record: record.url, ...soloPayload(self) });
 }
 
 /**
@@ -1263,12 +1352,14 @@ export async function handleRelease(c: Contributor, id: number, request: Request
   const f = await factsOf(env, t);
   const no = refused(decisions(c, t, f).release);
   if (no) return no;
+  // Its requester letting the claim go under the solo-maintainer exception (#394): marked self-reviewed.
+  const self = selfReview(c, f);
   // The input after the predicate, as in the other handlers: a caller who may not is told so, whatever they sent.
   const reason = typeof b.reason === "string" ? b.reason.trim() : "";
   if (reason.length < 4) return json({ error: "a reason is required; it is on the record" }, 400);
   // The claim's own rows, by their primary keys: who made it and with which agent (its params), where it runs.
   const rows = (await env.DB.prepare(CLAIM_ROWS_SQL).bind(JSON.stringify(f.claim)).all<{ id: number; arch: string; status: string; lease_owner: string | null; pinned_to: string | null; by: string | null; agent: string | null }>()).results;
-  const res = await env.DB.prepare(RELEASE_SQL).bind(`claim released by ${c.login}${throughWords(through)}: ${reason.slice(0, 300)}`, JSON.stringify(f.claim), JSON.stringify(f.claim)).all<{ id: number; arch: string }>();
+  const res = await env.DB.prepare(RELEASE_SQL).bind(`claim released by ${c.login}${throughWords(through)}${self ? `, ${SELF_REVIEWED}` : ""}: ${reason.slice(0, 300)}`, JSON.stringify(f.claim), JSON.stringify(f.claim)).all<{ id: number; arch: string }>();
   const gone = res.results.map((r) => r.id);
   if (!gone.length) return json({ error: `nothing to release: no rebuild of ${t.name} is queued or running — released already, or staged and decided, not released` }, 409);
   // What the claim had staged, or a leased worker had put there: the lease is void, its next PUT is refused, the packages go — of the rebuilds cancelled here, never another's.
@@ -1284,12 +1375,12 @@ export async function handleRelease(c: Contributor, id: number, request: Request
   await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
     .bind(`${whose}: ${reason.slice(0, 200)} — waiting for a maintainer's claim again`, t.name)
     .run();
-  const record = await decisionRecord(env, t.name, "release", gone[0], { version: t.version, arches, staged, owner: f.owner, tasks: gone, claimed_by: claimedBy, by: c.login, via, ...(through ? { through } : {}), agent, at, reason });
+  const record = await decisionRecord(env, t.name, "release", gone[0], { version: t.version, arches, staged, owner: f.owner, tasks: gone, claimed_by: claimedBy, by: c.login, via, ...(through ? { through } : {}), agent, at, reason, ...soloRecord(self) });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('review', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}): ${whose}${agent ? ` (the rebuild with ${agent} stopped)` : ""}${staged.length ? `, the rebuild staged for ${staged.join(", ")} with it` : ""} — ${reason.slice(0, 120)}`, JSON.stringify({ name: t.name, arches, staged, tasks: gone, claimed_by: claimedBy, by: c.login, via, ...(through ? { through } : {}), agent, reason, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}): ${whose}${agent ? ` (the rebuild with ${agent} stopped)` : ""}${staged.length ? `, the rebuild staged for ${staged.join(", ")} with it` : ""}${selfWords(self)} — ${reason.slice(0, 120)}`, JSON.stringify({ name: t.name, arches, staged, tasks: gone, claimed_by: claimedBy, by: c.login, via, ...(through ? { through } : {}), agent, reason, record: record.url, ...(record.error ? { record_error: record.error } : {}), ...soloPayload(self) }))
     .run();
   await settleTargets(env, t.name);
-  return json({ released: t.name, tasks: gone, arches, staged, claimed_by: claimedBy, by: c.login, via, ...(through ? { through } : {}), agent, record: record.url });
+  return json({ released: t.name, tasks: gone, arches, staged, claimed_by: claimedBy, by: c.login, via, ...(through ? { through } : {}), agent, record: record.url, ...soloPayload(self) });
 }
 
 /**
@@ -1343,6 +1434,8 @@ interface DecisionRow {
   withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null;
   rebuild_status?: string | null; rebuild_result?: string | null; blocked_at?: string | null; publish_status?: string | null;
   review_arches?: string | null; review_not_supported?: string | null; review_released?: number | null; review_changes?: number | null;
+  /** reviews.solo_since (#394): a decision its requester took under the solo-maintainer exception — served as `solo_exception`. */
+  review_solo_since?: string | null;
   /** approvals.agent (#252): the agent a decision was drafted through, as JSON — served parsed, as `through`, never under `agent`, which is the rebuild's agent (#247). */
   agent?: string | null;
 }
@@ -1387,7 +1480,7 @@ export function asReviews<R extends DecisionRow>(rows: R[], ringsOf: (name: stri
     return {
       ...first,
       review: first.review_id,
-      review_arches: undefined, review_not_supported: undefined, review_released: undefined, review_changes: undefined,
+      review_arches: undefined, review_not_supported: undefined, review_released: undefined, review_changes: undefined, review_solo_since: undefined,
       // Who a decision an agent drafted came through (#252) — the agent, its client, the grant, the draft — parsed; `agent` stays #247's word for the rebuild's agent, and is not the column's.
       agent: undefined,
       through: throughOf(first.agent),
@@ -1398,6 +1491,8 @@ export function asReviews<R extends DecisionRow>(rows: R[], ringsOf: (name: stri
       released: first.review_released === 1,
       // A rejection that asked for changes (#247): the round went back to the factory, the name stayed the requester's.
       changes: first.review_changes === 1,
+      // Self-reviewed (#394): its requester took it under the solo-maintainer exception — who, and the exception's `since`; null under the two-person rule.
+      solo_exception: first.review_solo_since ? { maintainer: first.by, since: first.review_solo_since } : null,
       targets,
       rings: sortRings([...new Set(targets.flatMap((x) => x.rings))]),
       publish_status: targets.map((x) => x.publish_status).filter((s): s is string => !!s).sort((x, y) => worst.indexOf(x) - worst.indexOf(y))[0] ?? null,
@@ -1458,7 +1553,7 @@ export const APPROVALS_PAGE = 100;
  */
 export async function handleApprovals(env: Env): Promise<Response> {
   const select = `SELECT a.*, r.status AS rebuild_status, r.result_filename AS rebuild_result, fp.blocked_at,
-              v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released, v.changes AS review_changes,
+              v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released, v.changes AS review_changes, v.solo_since AS review_solo_since,
               (SELECT p.status FROM build_tasks p WHERE p.name = a.name AND p.arch = a.arch AND p.id > a.task_id AND p.kind = 'publish' AND json_extract(p.params, '$.task') = a.task_id ORDER BY p.id DESC LIMIT 1) AS publish_status
          FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task LEFT JOIN factory_packages fp ON fp.name = a.name LEFT JOIN reviews v ON v.id = a.review_id`;
   const [page, served] = await Promise.all([

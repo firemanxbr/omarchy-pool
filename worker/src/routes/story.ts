@@ -49,7 +49,7 @@ export interface TaskBrief {
 }
 
 /** An approvals row — one architecture of a review (#242): `review_id` is the review, null for a row a Worker older than reviews wrote. */
-export interface Approval { id: number; task_id: number; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; version: string | null; arch: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; standing: boolean; /** A rejection that asked for changes (#247): the round went back to the factory, the name stayed the requester's. */ changes: boolean }
+export interface Approval { id: number; task_id: number; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; version: string | null; arch: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; standing: boolean; /** A rejection that asked for changes (#247): the round went back to the factory, the name stayed the requester's. */ changes: boolean; /** Self-reviewed (#394): its requester took it under the solo-maintainer exception — who and since when; null under the two-person rule. */ solo_exception?: { maintainer: string; since: string } | null }
 
 /** An approval that stands: signed as approved and not taken back — the rule every page reads, never `decision` alone. Every approval the server hands out carries it as `standing`. */
 export function stands(a: { decision: string; withdrawn_at: string | null }): boolean {
@@ -89,15 +89,15 @@ function brief(r: Record<string, unknown>): TaskBrief {
 export async function storyRows(env: Env, name: string) {
   const [tasks, approvals, pkg] = await Promise.all([
     env.DB.prepare(`SELECT ${TASK_COLS} FROM build_tasks WHERE name = ? AND kind IN ('build', 'audit', 'trial', 'publish') ORDER BY id DESC LIMIT 120`).bind(name).all<Record<string, unknown>>(),
-    // Each row's review by its primary key, for the one word the row does not carry: whether the rejection asked for changes.
-    env.DB.prepare("SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.version, a.arch, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, a.review_id, COALESCE(v.changes, 0) AS changes FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id WHERE a.name = ? ORDER BY a.id DESC LIMIT 40").bind(name).all<Omit<Approval, "standing" | "changes"> & { changes: number }>(),
+    // Each row's review by its primary key, for the two words the row does not carry: whether the rejection asked for changes, and whether its requester took it under the solo-maintainer exception (#394).
+    env.DB.prepare("SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.version, a.arch, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, a.review_id, COALESCE(v.changes, 0) AS changes, v.solo_since FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id WHERE a.name = ? ORDER BY a.id DESC LIMIT 40").bind(name).all<Omit<Approval, "standing" | "changes" | "solo_exception"> & { changes: number; solo_since: string | null }>(),
     env.DB.prepare("SELECT name, owner, url, status, detail, category, request_id, description, license, source, project, arches, targets, detected, created_at, updated_at, blocked_at, blocked_by, blocked_reason, size, disk_gb FROM factory_packages WHERE name = ?").bind(name).first<Record<string, unknown>>(),
   ]);
   // The request the registration points at: what the contributor confirmed, the version, the record — the checks read it (request.ts).
   const request = pkg?.request_id
     ? await env.DB.prepare("SELECT id, version, checklist, migrated, record, sha256, arches, created_at FROM package_requests WHERE id = ?").bind(pkg.request_id).first<RequestRow>()
     : null;
-  return { tasks: tasks.results.map(brief), approvals: approvals.results.map((a) => ({ ...a, standing: stands(a), changes: a.changes === 1 })), pkg, request: request ?? null };
+  return { tasks: tasks.results.map(brief), approvals: approvals.results.map(({ solo_since, ...a }) => ({ ...a, standing: stands(a), changes: a.changes === 1, solo_exception: solo_since ? { maintainer: a.by, since: solo_since } : null })), pkg, request: request ?? null };
 }
 
 /** The request as a page shows it: the record's URL, the version, the checks, whether the form would take it today. */

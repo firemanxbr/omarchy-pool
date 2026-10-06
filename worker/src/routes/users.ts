@@ -73,9 +73,9 @@ export async function recordOf(env: Env, login: string): Promise<TrackRecord> {
 
 /** A person's decisions as the record keeps them: each row with its review's own word on it — the architectures it decided, those not supported, whether it freed the name, whether it asked for changes. */
 const DECISIONS = `SELECT a.id, a.task_id, a.name, a.arch, a.version, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, a.review_id, a.agent,
-                          v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released, v.changes AS review_changes
+                          v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released, v.changes AS review_changes, v.solo_since AS review_solo_since
                      FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id`;
-type DecisionOf = { id: number; task_id: number; name: string; arch: string; version: string | null; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; agent: string | null; review_arches: string | null; review_not_supported: string | null; review_released: number | null; review_changes: number | null };
+type DecisionOf = { id: number; task_id: number; name: string; arch: string; version: string | null; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; agent: string | null; review_arches: string | null; review_not_supported: string | null; review_released: number | null; review_changes: number | null; review_solo_since: string | null };
 
 export async function handleUser(login: string, env: Env): Promise<Response> {
   const person = await env.DB.prepare("SELECT login, name, avatar_url, role, created_at, last_seen, blocked_at, blocked_by, blocked_reason FROM contributors WHERE login = ?")
