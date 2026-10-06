@@ -759,8 +759,10 @@ const EGRESS_LETS: &str = "every task's sidecar refuses private, link-local and 
 pub(crate) const GUEST_SETTING: &str = "rootless podman's setting: in containers.conf (~/.config/containers/containers.conf, /etc/containers/containers.conf, or a file in their containers.conf.d) add \"--map-guest-addr\", \"none\" to pasta_options under [network] (pasta_options = [\"--map-guest-addr\", \"none\"]), then stop every container of this user so its network namespace starts again without the mapping";
 
 /// What takes a signed exception's bridge off a host that cannot keep it to public addresses
-/// (#373): the envelope's grant, which the dispatcher's `OMARCHY_DIRECT_NETWORK` follows.
-pub(crate) const DIRECT_OFF: &str = "set direct_network = false under [envelope] in agent.toml (or install again without --direct-network), and this host hands a package with that exception back to the pool";
+/// (#373): the envelope's grant, which the dispatcher's `OMARCHY_DIRECT_NETWORK` follows. A
+/// re-run without either switch keeps a grant agent.toml records, so the advice names the one
+/// that takes it back.
+pub(crate) const DIRECT_OFF: &str = "install again with --no-direct-network, which records direct_network = false under [envelope] in agent.toml (a re-run without it keeps the grant agent.toml holds), and this host hands a package with that exception back to the pool";
 
 /// What a blocker tells the person to change, for this host's engine (#367).
 #[derive(Debug, Clone, PartialEq, Eq)]

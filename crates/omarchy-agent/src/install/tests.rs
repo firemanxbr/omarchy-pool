@@ -1799,7 +1799,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
         rosetta: None,
         task_subnets: None,
         dedicated: true,
-        direct_network: false,
+        direct_network: None,
         legacy: None,
         agent_env_from: None,
         max_units: None,
@@ -2122,7 +2122,7 @@ fn preflight_probes_behind_a_sidecar_started_as_the_dispatcher_starts_one_and_a_
     // With the envelope's grant, a signed exception's bridge is probed too, and a task there
     // that reaches the LAN fails the install.
     let mut h = host(INFO, &EGRESS_OK.replace("lan blocked", "lan refused"));
-    h.options.direct_network = true;
+    h.options.direct_network = Some(true);
     let (r, ready) = measure_on(&h, &mut Fake::default());
     assert!(ready.is_none());
     if net::lan_address().is_some() {
@@ -2162,7 +2162,7 @@ const TASK_PASSED: &str = "egress: a task on its own network reaches public addr
 
 /// `h` with the envelope's grant of a signed exception's bridge (#373): its probe runs too.
 fn granted(mut h: Host) -> Host {
-    h.options.direct_network = true;
+    h.options.direct_network = Some(true);
     h
 }
 
@@ -2506,6 +2506,57 @@ fn a_rootless_host_whose_stack_maps_its_loopback_or_whose_tasks_reach_their_gate
     );
     assert_eq!(r.blockers.len(), 2, "{s}");
     assert!(!s.contains("prep-root.sh --user"), "{s}");
+}
+
+#[test]
+fn a_grant_agent_toml_holds_is_kept_by_a_re_run_and_taken_back_with_no_direct_network() {
+    // agent.toml grants a signed exception's bridge (an earlier install's --direct-network, or
+    // the owner's edit) on what is now a rootless engine, whose bridge reaches its gateway, the
+    // engine's own namespace. A re-run without a switch keeps the grant and probes the bridge
+    // again (#373), so the advice names the switch that takes it back, not a re-run without
+    // --direct-network, which would refuse the same way.
+    let mut h = host(
+        INFO,
+        &EGRESS_OK.replace("gateway-22 blocked", "gateway-22 refused"),
+    );
+    fs::create_dir_all(h.root.join("data")).unwrap();
+    let existing = "[envelope]\ndirect_network = true\n";
+    fs::write(h.root.join("data/agent.toml"), existing).unwrap();
+    fs::set_permissions(
+        h.root.join("data/agent.toml"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    let s = r.screen();
+    assert!(
+        s.contains("egress: a task on a signed exception's bridge network reaches its gateway 10.231.255.241 (port 22: refused); that is the rootless engine's own namespace")
+            && s.contains("so this host cannot grant one (the runbook's Rootless engines); install again with --no-direct-network, which records direct_network = false under [envelope] in agent.toml (a re-run without it keeps the grant agent.toml holds)"),
+        "{s}"
+    );
+    assert!(!s.contains("without --direct-network"), "{s}");
+    assert!(!r
+        .notes
+        .iter()
+        .any(|n| n.contains("no signed exception's bridge probed")));
+
+    // --no-direct-network takes it back: no bridge is probed, the probe the way a task runs
+    // passes, and the envelope records the grant withdrawn, which the dispatcher then follows.
+    h.options.direct_network = Some(false);
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok(), "{}", r.screen());
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.contains("no signed exception's bridge probed")),
+        "{:?}",
+        r.notes
+    );
+    let ready = ready.unwrap();
+    assert!(!ready.values.direct_network);
+    let text = envelope::render(Some(existing), &ready.values, None).unwrap();
+    assert!(text.contains("direct_network = false\n"), "{text}");
 }
 
 /// What libpod's /info says of rootless podman 5 behind pasta.
@@ -4117,7 +4168,7 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
     let dd = home.join(".docker/run");
     fs::create_dir_all(&dd).unwrap();
     let _l = std::os::unix::net::UnixListener::bind(dd.join("docker.sock")).unwrap();
-    h.options.direct_network = true;
+    h.options.direct_network = Some(true);
     let mut sys = Fake {
         colima: false,
         ..mac_sys(&h)
@@ -4143,7 +4194,7 @@ fn docker_desktop_is_used_if_present_shows_vm_shared_and_qualifies_only_with_ded
     assert!(!sys.calls.iter().any(|c| c.ends_with("<firewall>")));
     // Without the grant, a task behind its egress sidecar reaches nothing there, and such a
     // VM qualifies with --dedicated (#373).
-    h.options.direct_network = false;
+    h.options.direct_network = None;
     h.options.dedicated = true;
     let (r, ready) = measure_on(
         &h,

@@ -265,8 +265,9 @@ pub struct Options {
     pub dedicated: bool,
     /// The person grants a signed exception's bridge network (`--direct-network`, the
     /// envelope's `direct_network`, #373): its probe runs, and the dispatcher runs a package
-    /// with that exception instead of handing it back.
-    pub direct_network: bool,
+    /// with that exception instead of handing it back. `--no-direct-network` takes a recorded
+    /// grant back; neither keeps what agent.toml says.
+    pub direct_network: Option<bool>,
     pub legacy: Option<String>,
     pub agent_env_from: Option<PathBuf>,
     pub max_units: Option<u32>,
@@ -647,9 +648,11 @@ pub(crate) fn measure_as(
     };
     let mut dedicated = o.dedicated
         || envelope::envelope_value(ex, "dedicated").and_then(|v| v.as_bool()) == Some(true);
-    // A grant an earlier install recorded, or the owner wrote, stays (#373).
-    let direct_network = o.direct_network
-        || envelope::envelope_value(ex, "direct_network").and_then(|v| v.as_bool()) == Some(true);
+    // A grant an earlier install recorded, or the owner wrote, stays unless taken back with
+    // `--no-direct-network` (#373).
+    let direct_network = o.direct_network.unwrap_or_else(|| {
+        envelope::envelope_value(ex, "direct_network").and_then(|v| v.as_bool()) == Some(true)
+    });
     let project = envelope::set_str(ex, "project").unwrap_or_else(|| envelope::PROJECT.to_owned());
     // The legacy project: `--legacy`, or the one an earlier install recorded, so running
     // install again repairs it without the flag (legacy.json's owner is checked below).

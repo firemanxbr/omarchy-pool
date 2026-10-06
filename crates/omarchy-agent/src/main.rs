@@ -16,9 +16,9 @@
 //! omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
 //!     [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
 //!     [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
-//!     [--direct-network] [--legacy <project>] [--agent-env-from <file>] [--max-units <n>]
-//!     [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>]
-//!     [--yes]
+//!     [--direct-network | --no-direct-network] [--legacy <project>] [--agent-env-from <file>]
+//!     [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta]
+//!     [--wait-minutes <n>] [--yes]
 //!     (#317, what install.sh runs once the binary is in place: preflight, the envelope,
 //!     the enrollment below, agent.toml, the agent keys, the unit and linger, the service;
 //!     on a Mac, #320, the omarchy Colima VM and the LaunchAgent)
@@ -76,9 +76,9 @@ const USAGE: &str = "usage:
   omarchy-agent install (--release <vX.Y.Z> | --bundle <tar.gz> --sig <sigstore.json>)
       [--pool <origin>] [--data-dir <dir>] [--work-root <dir>] [--secrets-dir <dir>]
       [--set-dir <dir>] [--socket <path>] [--task-subnets <cidr>[,<cidr>]] [--dedicated]
-      [--direct-network] [--legacy <project>] [--agent-env-from <file>] [--max-units <n>]
-      [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta] [--wait-minutes <n>]
-      [--yes]
+      [--direct-network | --no-direct-network] [--legacy <project>] [--agent-env-from <file>]
+      [--max-units <n>] [--max-cpus <n>] [--max-mem-gb <n>] [--rosetta | --no-rosetta]
+      [--wait-minutes <n>] [--yes]
   omarchy-agent preflight <install's options>
   omarchy-agent uninstall [--data-dir <dir>]
   omarchy-agent enroll [--pool <origin>] [--data-dir <dir>] [--wait-minutes <n>]
@@ -347,6 +347,17 @@ fn switches(args: &[String], known: &[&'static str]) -> (Vec<String>, Vec<&'stat
     (rest, on)
 }
 
+/// A switch and its opposite among `on`: `Some(true)`, `Some(false)`, or `None` for neither,
+/// which keeps what agent.toml says; both is a usage error.
+fn either(on: &[&str], yes: &str, no: &str) -> Result<Option<bool>, String> {
+    match (on.contains(&yes), on.contains(&no)) {
+        (true, true) => Err(format!("{yes} or {no}, not both\n{USAGE}")),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    }
+}
+
 fn install_options(args: &[String]) -> Result<install::Options, String> {
     let (args, on) = switches(
         args,
@@ -354,16 +365,13 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
             "--yes",
             "--dedicated",
             "--direct-network",
+            "--no-direct-network",
             "--rosetta",
             "--no-rosetta",
         ],
     );
-    let rosetta = match (on.contains(&"--rosetta"), on.contains(&"--no-rosetta")) {
-        (true, true) => return Err(format!("--rosetta or --no-rosetta, not both\n{USAGE}")),
-        (true, false) => Some(true),
-        (false, true) => Some(false),
-        (false, false) => None,
-    };
+    let direct_network = either(&on, "--direct-network", "--no-direct-network")?;
+    let rosetta = either(&on, "--rosetta", "--no-rosetta")?;
     let mut rest = Vec::new();
     let f = flags(
         &args,
@@ -423,7 +431,7 @@ fn install_options(args: &[String]) -> Result<install::Options, String> {
         rosetta,
         task_subnets: get("--task-subnets").map(str::to_owned),
         dedicated: on.contains(&"--dedicated"),
-        direct_network: on.contains(&"--direct-network"),
+        direct_network,
         legacy: get("--legacy").map(str::to_owned),
         agent_env_from: path("--agent-env-from"),
         max_units: num("--max-units")?,

@@ -191,9 +191,12 @@ read-only"). A package that truly needs direct network access (raw sockets,
 its own name resolution) gets `network = "direct"` with a `reason` in
 `factory/sizing/tasks.toml`, in a pull request another maintainer approves.
 A host runs such a package's tasks only where its owner granted that bridge
-(`--direct-network` at install, `direct_network = true` in `agent.toml`),
-which preflight's egress probe then checks too; any other host hands them
-back (#373). A rootless host cannot grant it: its bridges reach the LAN through
+(`--direct-network` at install, `direct_network = true` in `agent.toml`;
+`--no-direct-network` takes it back), which preflight's egress probe then
+checks too; any other host hands them back (#373) as a lost lease, whose
+attempt the pool gives back twice per task and spends after that: until the
+claim says whether a host runs such packages, a package with the exception
+needs a host that grants it among those that claim its tasks. A rootless host cannot grant it: its bridges reach the LAN through
 the engine's user-mode network stack, while its tasks, behind their egress
 sidecars, never do.
 
