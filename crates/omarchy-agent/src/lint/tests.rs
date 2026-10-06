@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 
 use super::{
-    lint_compose, lint_set_toml, parse_set_toml, reads_token_file, references, secret_files,
-    token_file_of, Engine, Envelope, Needs, Ready, Reference, SetToml, Violation,
+    lint_compose, lint_quadlet, lint_set_toml, parse_set_toml, reads_token_file,
+    reference_variables, references, secret_files, token_file_of, Engine, Envelope, Needs, Ready,
+    Reference, SetToml, Violation,
 };
 
 fn fixtures() -> PathBuf {
@@ -708,4 +709,90 @@ fn a_set_toml_that_breaks_schema_3_or_disagrees_with_the_template_is_refused() {
         &template,
     )
     .unwrap();
+}
+
+#[test]
+fn the_same_set_renders_for_the_quadlet_driver() {
+    // #330: one bundle for both drivers. The real template and the fixture render as they
+    // are written, placeholders and all.
+    let vars = reference_variables();
+    lint_quadlet(&real_set("compose.yml"), None, &vars).unwrap();
+    lint_quadlet(HOST, None, &vars).unwrap();
+    // What compose accepts but one rootless Quadlet service cannot mean the same way is a
+    // `quadlet` violation, in the template or an owner's override; compose's lint says
+    // nothing of it.
+    let over = "services:\n  dispatcher:\n    networks: [default]\n";
+    lint_compose(HOST, Some(over), &Envelope::reference(), Engine::Rootful).unwrap();
+    refused_for(
+        lint_quadlet(HOST, Some(over), &vars),
+        "quadlet",
+        "a set network",
+    );
+    let e = lint_quadlet(HOST, Some(over), &vars).unwrap_err();
+    assert!(
+        e[0].message
+            .contains("networks is not rendered for Quadlet"),
+        "{e:?}"
+    );
+    let profiled = mutate(
+        HOST,
+        "    restart: unless-stopped\n",
+        "    restart: unless-stopped\n    profiles: [x]\n",
+    );
+    refused_for(lint_quadlet(&profiled, None, &vars), "quadlet", "a profile");
+    // A variable agent.toml does not set, with no default.
+    let unset = "services:\n  dispatcher:\n    user: ${OMARCHY_UID}\n";
+    refused_for(
+        lint_quadlet(HOST, Some(unset), &vars),
+        "quadlet",
+        "an unset variable",
+    );
+    // A file that is not YAML is compose's lint's to say, once.
+    assert_eq!(lint_quadlet(HOST, Some("a: ["), &vars), Ok(()));
+}
+
+#[test]
+fn the_token_file_s_bind_renders_for_quadlet_and_a_quadlet_host_keeps_the_secret_file_rule() {
+    // #327's bind, long syntax with read_only and `create_host_path: false`, is what the
+    // template and the fixture use: rendered, read-only, by both drivers' lints.
+    let vars = reference_variables();
+    for t in [real_set("compose.yml"), HOST.to_owned()] {
+        assert!(t.contains("bind: { create_host_path: false }"), "{t}");
+        lint_quadlet(&t, None, &vars).unwrap();
+        assert_eq!(secret_files(&t), [token_file_of("dispatcher")]);
+    }
+    // A directory made where the file belongs is what a unit cannot do (podman never makes a
+    // bind's source): compose's lint takes it, Quadlet's refuses it, in an override too.
+    let creates = mutate(
+        HOST,
+        "bind: { create_host_path: false }",
+        "bind: { create_host_path: true }",
+    );
+    lint_compose(&creates, None, &Envelope::reference(), Engine::Rootful).unwrap();
+    refused_for(
+        lint_quadlet(&creates, None, &vars),
+        "quadlet",
+        "create_host_path: true",
+    );
+    let over = "services:\n  dispatcher:\n    volumes:\n      - {type: bind, source: ./run/host/dispatcher/token, target: /run/omarchy/worker-token, read_only: true, bind: {create_host_path: true}}\n";
+    refused_for(
+        lint_quadlet(HOST, Some(over), &vars),
+        "quadlet",
+        "create_host_path: true in an override",
+    );
+    // Another service's secret file, or its own mounted writable, renders as any bind
+    // would; the round lint of a Quadlet host runs compose's lint as well, whose
+    // `secret_file` rule refuses both (`run::quadlet::tests` has the round).
+    for over in [
+        read("override/other-secret-file.yml"),
+        "services:\n  dispatcher:\n    volumes:\n      - ./run/host/dispatcher/token:/run/omarchy/worker-token\n"
+            .to_owned(),
+    ] {
+        lint_quadlet(HOST, Some(&over), &vars).unwrap();
+        refused_for(
+            lint_compose(HOST, Some(&over), &Envelope::reference(), Engine::Rootless),
+            "secret_file",
+            &over,
+        );
+    }
 }

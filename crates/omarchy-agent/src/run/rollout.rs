@@ -543,6 +543,14 @@ fn violations(cfg: &Config, pins: &Pins, compose: &str, set: &str) -> Result<Vec
         .err()
         .unwrap_or_default();
     v.extend(lint::lint_set_toml(set, &compose).err().unwrap_or_default());
+    // A Quadlet host (#330) runs what its driver renders: the owner's override with it.
+    if cfg.driver == super::config::DriverKind::Quadlet {
+        v.extend(
+            lint::lint_quadlet(&compose, over.as_deref(), &cfg.interpolation())
+                .err()
+                .unwrap_or_default(),
+        );
+    }
     Ok(v.iter().map(ToString::to_string).collect())
 }
 
@@ -563,7 +571,8 @@ pub(crate) fn dry_run(cfg: &Config, t: &Target) -> Result<(), String> {
 /// What the dispatcher may not start without: its env files and the secret files its
 /// template mounts (the registration and the host worker token are written once the owner
 /// confirmed the host, #321, #327) and the capacity file (#333). A secret file compose did
-/// not find would be a directory it made in its place.
+/// not find would be a directory it made in its place; on the Quadlet driver (#330) the
+/// unit would not start, podman refusing a missing source.
 fn missing_inputs(cfg: &Config, set: &SetToml, template: &str) -> Vec<String> {
     let secrets = lint::secret_files(template);
     let mut wanted: Vec<&str> = set
