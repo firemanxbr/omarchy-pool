@@ -51,7 +51,9 @@
  *   allowed for it (an emulated one counts, at once; `needs_native` applied),
  *   held from the first minute when one maintainer's hosts are all there is,
  *   or when no other maintainer's host could ever hold it (its size, its pool
- *   cap, its disk), and taken at the next claim once released; pins to a host
+ *   cap, its disk), while one only busy is waited for (its disk filled by its
+ *   builds, below the minimum for that alone, its builds held back for disk),
+ *   and taken at the next claim once released; pins to a host
  *   registration; with one provider an audit leaves the builder's machine to
  *   another that can take it now, with two a publish-bound audit takes the
  *   other model however long that host is busy, and a host with another
@@ -1038,6 +1040,31 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
     // What a host holds now is not asked: full, it still runs the copy once its units free up.
     const full: Held[] = [0, 1].map((i) => ({ task: 9100 + i, by: "m2-vps", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: "project", owner: null, disk_gb: 20 }));
     expect(placementOf({ members: [studio, vps], leases: full }, small, T0, R)).toEqual({ others: ["m2-vps"], mine: ["m1-studio"], held: false });
+  });
+
+  it("another maintainer's host that is only busy is waited for, whatever its last claim and report caught: its disk filled by the builds it runs — below the minimum for that alone —, its builds held back for disk, its memory's offer", () => {
+    const studio = owned("m1-studio", "m1", "aarch64", 11);
+    // m2's host: a 60 GB work root, two size-1 builds running (20 GB budgets) that filled 36 GB of it — its report below the signed
+    // minimum (60 GB) for its disk alone —, its dispatcher claiming trials and audits only while a disk hold lasts, no memory offered.
+    const report: Partial<Member> = { disk: { work: 24, engine: 160 }, below_minimum: true, below_disk: { work: 60, engine: 40 }, kinds: ["trial", "audit"], offer: 0 };
+    const box = owned("m2-box", "m2", "aarch64", 7, report);
+    const running: Held[] = [0, 1].map((i) => ({ task: 9200 + i, by: "m2-box", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: "project", owner: null, disk_gb: 20 }));
+    const fleet: Fleet = { members: [studio, box], leases: running };
+    const copy = task(copyOf(["m1"]));
+    expect(mayRun(box, copy, T0, R, largestSize(fleet, T0, R), running)).toBe(true);
+    expect(placementOf(fleet, copy, T0, R)).toEqual({ others: ["m2-box"], mine: ["m1-studio"], held: false });
+    // Not held: no release is offered, and the requester's host does not take it meanwhile.
+    expect(select(studio, fleet, [copy], T0, R)).toEqual([]);
+    // Its builds end and its report says the disk they held is free: it takes the copy.
+    const idle = owned("m2-box", "m2", "aarch64", 7, { disk: { work: 60, engine: 200 } });
+    expect(placementOf({ members: [studio, idle], leases: [] }, copy, T0, R)).toEqual({ others: ["m2-box"], mine: ["m1-studio"], held: false });
+    expect(select(idle, { members: [studio, idle], leases: [] }, [copy], T0, R)).toMatchObject([{ id: copy.id, lane: "native" }]);
+    // What lasts still decides: the same report with nothing running (its disk is short idle), or below the minimum for its CPUs or memory
+    // too (no below_disk) — none to wait for, held.
+    for (const [o, leases] of [[report, []], [{ ...report, below_disk: null }, running]] as [Partial<Member>, Held[]][]) {
+      const other = owned("m2-box", "m2", "aarch64", 7, o);
+      expect(placementOf({ members: [studio, other], leases }, copy, T0, R), JSON.stringify(o)).toEqual({ others: [], mine: ["m1-studio"], held: true });
+    }
   });
 
   it("is the project's copy's only: a contributor's build of the package, its trial and its audit go to the requester's host as to any other", () => {

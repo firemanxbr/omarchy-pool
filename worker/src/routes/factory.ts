@@ -13,7 +13,7 @@ import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
-import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
+import { parseCapacity, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, hostClaimRefusal, MAX_SIZE, MIN_HOST, TASK_UNITS, type Capacity, type HostClaimRow } from "../hosts";
 import { largestSize, ownerCap, ownersLeased, placementOf, reserve, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules } from "../selection";
 import { shippedSizing, sizingView, type Sizing } from "../sizing";
 import {
@@ -817,6 +817,11 @@ interface FleetRow {
 /** Every lease the pool holds, by the lease index: what each registration holds, each owner's builds, the units and slots in use. */
 export const LEASES_HELD_SQL = `SELECT id, lease_owner, kind, arch, lane, units, size, disk_gb, trust, owner, ${AGENT_SCOPE} AS model FROM build_tasks WHERE status = 'leased'`;
 interface LeaseRow { id: number; lease_owner: string; kind: string; arch: string; lane: string | null; units: number | null; size: number | null; disk_gb: number | null; trust: string; owner: string | null; model: number }
+/** A lease the pool holds, as selection counts it: a row leased before units were written counts its kind's units. */
+const heldOf = (l: LeaseRow, rules: Rules): Held => ({
+  task: l.id, by: l.lease_owner, kind: l.kind, arch: l.arch, lane: l.lane === "native" || l.lane === "emulated" ? l.lane : null,
+  units: l.units ?? unitsOfKind(l.kind, l.size, rules), model: l.model === 1, trust: l.trust, owner: l.owner, disk_gb: l.disk_gb ?? 0,
+});
 /**
  * The oldest queued builds a host may reserve for, by the kind index (`filters` on alias w): within the window of the oldest builds some
  * host alive could run — of an arch a host runs, a `needs_native` one only where a host runs its arch natively, not a contributor's at
@@ -855,6 +860,15 @@ function legacyLanes(arch: string, labels: string | null): Lane[] {
 
 /** Below the signed minimum, as the agent's last capacity report left it on the host's row (routes/hosts.ts; D44). */
 const reportedBelow = (capacity: string | null): boolean => !!jsonOr<{ below_minimum?: unknown } | null>(capacity, null)?.below_minimum;
+/**
+ * The free disk the signed minimum asks, when a host's last report is below it for its disk alone — its CPUs and memory meet it, so the
+ * builds it runs may be what holds it there (selection.ts mayRun: placement judges it by its disk once idle, #339). Null otherwise.
+ */
+function belowOnDisk(capacity: string | null): { work: number; engine: number } | null {
+  const c = jsonOr<{ cpus?: unknown; mem_gb?: unknown; below_minimum?: unknown } | null>(capacity, null);
+  if (!c?.below_minimum || typeof c.cpus !== "number" || typeof c.mem_gb !== "number" || c.cpus < MIN_HOST.cpus || c.mem_gb < MIN_HOST.mem_gb) return null;
+  return { work: MIN_HOST.work_disk_gb, engine: MIN_HOST.engine_disk_gb };
+}
 
 /** A registration of the fleet, from its row (another than the claimer: what it last said). */
 function memberOf(r: FleetRow, pool: RunningVersion): Member {
@@ -864,7 +878,7 @@ function memberOf(r: FleetRow, pool: RunningVersion): Member {
   return {
     id: r.id, legacy: !host, lanes, units: Math.min(r.units ?? 0, r.pool_cap_units ?? Number.MAX_SAFE_INTEGER), agent_slots: r.agent_slots ?? 0,
     disk: jsonOr<{ work: number; engine: number } | null>(r.disk_free, null), kinds, probe_ok: r.agent_status === "ok", drained: r.drained_at !== null,
-    below_minimum: reportedBelow(r.capacity), may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool).required,
+    below_minimum: reportedBelow(r.capacity), below_disk: host ? belowOnDisk(r.capacity) : null, may_claim: !host || (r.host_status === "active" && r.owner_removed_at === null), behind: updateState(r.version ?? undefined, pool).required,
     seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
     scope: host ? { trust: "host", owner: null, shared: false } : r.trust === "project" ? { trust: "project", owner: null, shared: false } : { trust: "community", owner: r.owner, shared: r.mode === "shared" },
     busy: !host && r.current_task !== null, owner: r.owner, model: r.agent, host_id: host ? r.host_id : null,
@@ -938,21 +952,24 @@ export interface PlacementView extends Placement { requesters: string[]; release
  * Where each queued project's copy among `ids` may run (D35): the fleet
  * alive read once — its registrations' lanes, owners, kinds, probes and
  * capacity (one that could not hold the copy idle — its pool cap, its units,
- * its disk — is none to wait for), never their leases (a busy host still
- * runs it once its units free up) — and each task as the claim reads it
+ * its disk — is none to wait for), with the leases the pool holds, read
+ * only for the disk budgets of the builds each host runs, which come back to
+ * it when they end (a busy host still runs it once its units free up:
+ * selection.ts mayRun) — and each task as the claim reads it
  * (candidateCols). Review reads it for the rebuilds it lists, and the
  * release to any host decides on it.
  */
 export async function placements(env: Env, ids: number[], at = Date.now()): Promise<Map<number, PlacementView>> {
   const out = new Map<number, PlacementView>();
   if (!ids.length) return out;
-  const [rows, fleetRows] = await env.DB.batch<unknown>([
+  const [rows, fleetRows, leaseRows] = await env.DB.batch<unknown>([
     env.DB.prepare(PLACEMENTS_SQL).bind(JSON.stringify(ids)),
     env.DB.prepare(FLEET_SQL).bind(new Date(at - Math.max(ALIVE_MS, LEGACY_ALIVE_MS)).toISOString()),
+    env.DB.prepare(LEASES_HELD_SQL),
   ]);
   const pool = running(env);
-  const fleet: Fleet = { members: (fleetRows.results as FleetRow[]).map((r) => memberOf(r, pool)), leases: [] };
   const rules = selectionRules();
+  const fleet: Fleet = { members: (fleetRows.results as FleetRow[]).map((r) => memberOf(r, pool)), leases: (leaseRows.results as LeaseRow[]).map((l) => heldOf(l, rules)) };
   const placed = rows.results as (CandidateRow & { any_host_at: string | null; page_size: number | null; page_disk_gb: number | null })[];
   // The size and budget its package's page sets, as the claim reads them (PACKAGE_SIZES_SQL): a host too small for them is none to wait for.
   const sizes = new Map(placed.filter((r) => r.page_size !== null || r.page_disk_gb !== null).map((r) => [r.name, { size: r.page_size, disk_gb: r.page_disk_gb }]));
@@ -1037,10 +1054,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   // A host below the signed minimum keeps its bundle running and claims nothing (D44).
   if (me.below_minimum) return null;
   members.push(me);
-  const leases: Held[] = (leaseRows.results as LeaseRow[]).map((l) => ({
-    task: l.id, by: l.lease_owner, kind: l.kind, arch: l.arch, lane: l.lane === "native" || l.lane === "emulated" ? l.lane : null,
-    units: l.units ?? unitsOfKind(l.kind, l.size, rules), model: l.model === 1, trust: l.trust, owner: l.owner, disk_gb: l.disk_gb ?? 0,
-  }));
+  const leases: Held[] = (leaseRows.results as LeaseRow[]).map((l) => heldOf(l, rules));
   const fleet: Fleet = { members, leases };
 
   // The claimer's room now, as selection.ts counts it (noRoom), for the statements: a legacy registration is one build.

@@ -109,6 +109,11 @@ export interface Member {
   probe_ok: boolean;
   drained: boolean;
   below_minimum: boolean;
+  /**
+   * Below the minimum (D44) for its free disk alone, its CPUs and memory meeting it: the free disk the minimum asks of its work root and
+   * its engine's data root. Placement judges such a host by its disk once idle (`mayRun`): the builds it runs fill it for a while.
+   */
+  below_disk?: { work: number; engine: number } | null;
   /** A host active with its owner listed; a legacy registration not revoked. */
   may_claim: boolean;
   /** Behind the pool's release past the grace: handed nothing (426). */
@@ -439,14 +444,30 @@ export function requesterHost(m: Pick<Member, "owner">, c: Pick<Candidate, "kind
  * task gets in the fleet alive (`largest`, D31), the maintainer's size kept.
  * A host whose cap is 0 or below the task, or too small for it, never takes
  * it: as a drained one, it is none to wait for. What it holds now is not
- * asked: a busy host runs it once its units free up.
+ * asked: a busy host runs it once its units free up. Nor is the moment its
+ * last claim and report caught: what its memory offered that round; its
+ * free disk, which the builds it runs (`held`, its leases) are filling (the
+ * budgets they hold come back when they end), and the minimum that disk
+ * alone keeps it below (`below_disk`); and the builds its dispatcher leaves
+ * out of its claims while a disk hold lasts (crates/pkg-repo dispatch
+ * KINDS_HELD, DISK_HOLD at most) — every host takes builds (routes/factory.ts
+ * HOST_KINDS). An estimate that runs high only makes the copy wait for that
+ * host until it is idle, when its own report decides.
  */
-export function mayRun(m: Member, c: Candidate, now: number, r: Rules, largest: number): boolean {
-  if (!counts(m, now) || m.drained || m.behind || !takes(m, c)) return false;
+export function mayRun(m: Member, c: Candidate, now: number, r: Rules, largest: number, held: readonly Held[] = []): boolean {
+  const idle = m.legacy ? m : { ...m, offer: undefined, kinds: m.kinds.includes("build") ? m.kinds : [...m.kinds, "build"], disk: m.disk && idleDisk(m.disk, held) };
+  const below = m.below_minimum && !(m.below_disk && idle.disk && idle.disk.work >= m.below_disk.work && idle.disk.engine >= m.below_disk.engine);
+  if (!alive(m, now) || !m.may_claim || below || m.drained || m.behind || !takes(idle, c)) return false;
   const lane = laneFor(m, c, r);
   if (!lane || (lane.byLane && lane.mode === "emulated" && c.needs_native)) return false;
   const size = sizeOf(c, largest, r)?.size ?? null;
-  return !noRoom({ ...m, offer: undefined }, [], c, unitsOf(c.kind, size, r), diskOf(c, size, r), r);
+  return !noRoom(idle, [], c, unitsOf(c.kind, size, r), diskOf(c, size, r), r);
+}
+
+/** A host's free disk once the builds it holds end: what it reported, and the budgets they hold back. */
+function idleDisk(d: { work: number; engine: number }, held: readonly Held[]): { work: number; engine: number } {
+  const budgets = held.reduce((n, l) => n + (l.kind === "build" ? l.disk_gb : 0), 0);
+  return { work: d.work + budgets, engine: d.engine + budgets };
 }
 
 /** Where the project's copy of a package may run (D35): who may run it, and whether it waits for another maintainer's release. */
@@ -473,7 +494,7 @@ export function placementOf(fleet: Fleet, c: Candidate, now: number, r: Rules): 
   if (projectCopy(c)) {
     const largest = largestSize(fleet, now, r);
     for (const m of fleet.members) {
-      if (m.owner == null || !mayRun(m, c, now, r, largest)) continue;
+      if (m.owner == null || !mayRun(m, c, now, r, largest, heldBy(fleet, m))) continue;
       ((c.requesters ?? []).includes(m.owner) ? mine : others).push(m.id);
     }
   }

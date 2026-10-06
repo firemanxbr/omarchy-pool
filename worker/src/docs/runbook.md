@@ -1249,7 +1249,12 @@ so a size-4 build waits for memory rather than run smaller.
   could hold it idle: its units within the pool cap for the rebuild's size
   (the size its page, the sizing file or a Retry asks, clamped only to the
   largest host alive), an agent slot, its disk budget; it waits for that
-  host however busy it is, and their other work goes on. When only the
+  host however busy it is, and their other work goes on. Busy is judged as
+  idle: the disk its running builds fill (their budgets count as free again,
+  a report below the minimum for its disk alone included) and the builds its
+  dispatcher leaves out of its claims during a disk hold do not make it
+  none to wait for; a host short of disk with nothing running, or below the
+  minimum for its CPUs or memory, is. When only the
   requester's hosts have one (a single maintainer's hosts, a `needs_native`
   rebuild with the other host's lane emulated, or a size only the
   requester's host holds — the rebuild is never run smaller there), Review's

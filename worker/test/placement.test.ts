@@ -6,15 +6,16 @@
  *
  * - the requester-host rule: a review rebuild of m1's package is handed to no
  *   host of m1's while m2's host has a lane allowed for it — m2's, however
- *   busy, an emulated lane included; when only m1's hosts have one (a single
- *   maintainer's hosts, `needs_native` with m2's lane emulated, m2's host too
- *   small for the size its page asks or capped at 0) it is held,
- *   Review says so at once with Release to any host for another maintainer
- *   (the server's reason for anyone else), and after m2 releases it with
- *   their passkey — on the task, the journal and the record — m1's host takes
- *   it at its next claim; a claim never pins a rebuild to its requester's
- *   host, and another architecture's same-agent pick is another
- *   maintainer's worker whichever claimed last;
+ *   busy (its disk filled by its builds, below the minimum for that alone,
+ *   its builds held back for disk), an emulated lane included; when only
+ *   m1's hosts have one (a single maintainer's hosts, `needs_native` with
+ *   m2's lane emulated, m2's host too small for the size its page asks or
+ *   capped at 0) it is held, Review says so at once with Release to any
+ *   host for another maintainer (the server's reason for anyone else), and
+ *   after m2 releases it with their passkey — on the task, the journal and
+ *   the record — m1's host takes it at its next claim; a claim never pins a
+ *   rebuild to its requester's host, and another architecture's same-agent
+ *   pick is another maintainer's worker whichever claimed last;
  * - the second opinion: with one provider an audit goes to a host other than
  *   its builder's and a publish-bound one records `independent: none`, a
  *   contributor build's `host`; the Studio's legacy role containers are one
@@ -208,7 +209,17 @@ describe("the requester-host rule (D35): the project's copy is not built on its 
     expect(row.project_build).toMatchObject({ id: copy, status: "queued" });
     expect(row.project_build.placement).toMatchObject({ held: false, others: ["m2-arm"], mine: ["m1-studio"], requesters: ["m1"], released: null, any_host: { ok: false } });
     expect(row.project_build.placement.any_host.why).toMatch(/^m2-arm — another maintainer's — can build it/);
-    // m2's builds end: its host takes the copy.
+    // Its builds fill its disk — its report below the signed minimum for that alone — and its dispatcher, holding builds back for disk,
+    // claims trials and audits only: busy, not gone. Review still waits for that host, and offers no release.
+    const report = (free: { work: number; engine: number }, below: string | null) => env.DB.batch([
+      env.DB.prepare("UPDATE hosts SET disk_free = ?, capacity = json_set(capacity, '$.disk_free_gb', json(?), '$.below_minimum', ?) WHERE worker_id = 'm2-arm'").bind(JSON.stringify(free), JSON.stringify(free), below),
+      env.DB.prepare("UPDATE build_workers SET kinds = ? WHERE id = 'm2-arm'").bind(JSON.stringify(below ? ["trial", "audit"] : ["build", "trial", "audit"])),
+    ]);
+    await report({ work: 24, engine: 160 }, "below the minimum to join: 24 GB free on the work root (60 needed)");
+    expect((await reviewRow(contributor, "m2")).project_build.placement).toMatchObject({ held: false, others: ["m2-arm"], mine: ["m1-studio"], any_host: { ok: false } });
+    expect((await claim("m1-studio")).status).toBe(204);
+    // m2's builds end, and its report says the disk they held is free: its host takes the copy.
+    await report({ work: 410, engine: 220 }, null);
     await env.DB.prepare("UPDATE build_tasks SET status = 'done' WHERE id IN (SELECT value FROM json_each(?))").bind(JSON.stringify(fill)).run();
     const c = await claim("m2-arm");
     expect(c.json.task).toMatchObject({ id: copy, lease_owner: "m2-arm", lane: "native", independent: null });

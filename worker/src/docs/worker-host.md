@@ -224,7 +224,8 @@ maintainer's host has a lane for it and room to hold it at its size: it
 waits for that host, however busy. When only your hosts can build it, it
 waits, and Review offers another maintainer **Release to any host**, which
 they confirm with their passkey; then your host may take it. A host whose
-pool cap is 0, or too small for the copy's size, is none to wait for.
+pool cap is 0, or too small for the copy's size, is none to wait for; one
+whose disk its running builds fill is busy, and waited for.
 Every audit prefers a machine other than the one that built what it
 audits, and an audit of the project's copy takes a model other than the
 one that built it whenever a host with another one answered in the last

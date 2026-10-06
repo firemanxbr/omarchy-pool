@@ -583,7 +583,10 @@ of a package — its review rebuild — is never handed to a host its requester
 owns (the rebuild's owner, and the owner of the contributor's build it
 answers) while another maintainer's host has a lane allowed for it, native or
 emulated with `needs_native` applied, and could hold it idle at its size
-(its units within the pool cap, an agent slot, its disk budget); when only
+(its units within the pool cap, an agent slot, its disk budget against its
+free disk plus the budgets of the builds it runs — a report below the
+minimum for that disk alone, or a claim holding builds back for disk, is
+busy, not gone); when only
 the requester's hosts have one, it waits, and Review offers another maintainer *Release to any host* at
 once, with their passkey (`POST /factory/tasks/:id/any-host`,
 `any-host:<task>`), on the task (`params.any_host`), the journal and the
