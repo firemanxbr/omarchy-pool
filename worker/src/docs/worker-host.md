@@ -146,7 +146,11 @@ to copy.
 4. The agent fetches the host worker token with a request signed by the host
    key and writes it to `etc/dispatcher.env` (0600) for the dispatcher. It
    rotates the token every 30 days; the one it replaces works ten more
-   minutes, so only the dispatcher is recreated and its tasks run on.
+   minutes, so only the dispatcher is recreated and its tasks run on. Beside
+   the token the agent writes the host's own addresses for every task's
+   egress to refuse (`OMARCHY_HOST_ADDRESSES`), and once `agent.toml` is
+   there, the secrets directory and the envelope's agent budget (#371); a
+   rotation keeps them, and the lines you add to the file yourself stay.
 5. Only then does it write `agent.toml` with the host and its registration,
    take the agent keys, write the systemd --user unit, enable linger and start
    the agent, whose first round starts the dispatcher.
@@ -154,7 +158,11 @@ to copy.
 **Every task on a host is fenced in (#336).** Each task runs on its own
 internal network: it reaches public addresses only, through its own egress
 sidecar (cloud metadata, the host's LAN and every other private range are
-refused, judged by the address a name resolves to), never another task. A
+refused, judged by the address a name resolves to, and so are the host's own
+addresses: every address of its interfaces and the public one its tasks leave
+from, which the agent writes into `etc/dispatcher.env` and keeps current — it
+reads the interfaces every minute and asks the pool's edge for the public
+address every hour, and within minutes when it did not answer), never another task. A
 task that needs a model — a draft, a review rebuild, an audit — gets its own
 agent sidecar, which mounts `OMARCHY_SECRETS_DIR/agent.env` read-only; no two
 tasks share one, and the dispatcher itself never holds the key. Per task a
@@ -163,7 +171,12 @@ sidecar makes at most `OMARCHY_AGENT_CALLS_PER_TASK` calls (200),
 `OMARCHY_AGENT_MINUTES_PER_TASK` (120); the host makes at most
 `OMARCHY_AGENT_CALLS_PER_DAY` calls a day (5000, UTC, the probe's one call
 each run included), after which it takes no model work until the next
-day. The sidecars run as root with no capabilities (no `CAP_DAC_OVERRIDE`),
+day. To set them, give `agent.toml`'s envelope an `agent_budget` (any of
+`calls_per_task`, `tokens_per_task`, `minutes_per_task`, `calls_per_day`,
+each a whole number from 1): within a minute the agent writes them into
+`etc/dispatcher.env` (`omarchy-agent dispatcher-env --write` does it at once)
+and the dispatcher is recreated with them; a key you leave out keeps its
+default. The sidecars run as root with no capabilities (no `CAP_DAC_OVERRIDE`),
 so `agent.env` must be owned by the uid their root maps to (root on a rootful
 engine, the maintainer on a rootless one) at 0600, or be 0644 inside the 0700
 `etc/`; otherwise the probe fails and the host takes no model work (#317's
@@ -207,7 +220,24 @@ isolation level, the release it applied, the pool cap, the large task it
 reserves for when it does, and its leases with their lane and units. Every later call of
 the host to the pool is signed with its key (`Omarchy-Host`); the pool
 refuses a replay, a changed body and a clock more than 120 s off
-([Security model](/docs/security-model#maintainer-hosts)).
+([Security model](/docs/security-model#maintainer-hosts)). The agent asks
+for the host's state every two minutes or so — the release to run, and the
+host orders (#344) — and reports what it did.
+
+**Host orders** (#344) are given on the host's page. **Reconcile now** (its
+owner or any maintainer) makes its agent run a round at its next poll.
+**Retire legacy set** is for a host installed beside an older set with
+`--legacy` (the Studio's role containers, or an `omarchy-worker` set): once
+that set has been drained as the way back for 14 days, its owner retires it,
+with a passkey. The agent writes the `.omarchy-agent` marker into the set's
+directory, then stops and removes that compose project's containers and
+networks — nothing else — so `rollout.sh`, `setup.sh`, `omarchy-worker` and
+the updater refuse there from then on. The page shows the set, its state and
+its directory before you press it (and why it would be refused, such as a
+directory the agent's user does not own: the button stays greyed until the
+agent's next report says it is fixed), and each order with its agent's
+answer after
+([Runbook](/docs/runbook#a-new-maintainer-host), *The run loop*).
 
 To stop a host, use its page, `/hosts/<id>` (#322). **Suspend** (its
 owner or any maintainer, with a reason) stops its claims at once and

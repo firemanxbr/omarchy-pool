@@ -14,9 +14,12 @@
 //!    of that architecture — and only reported: a held lane never stops an install;
 //! 3. prints the envelope (agent.toml) for the person to confirm on `/dev/tty` (`--yes`
 //!    skips) and writes `run/capacity.json`;
-//! 4. enrolls (#321): the owner's Confirm, then the host worker token;
+//! 4. enrolls (#321): the owner's Confirm, then the host worker token, written into
+//!    `etc/dispatcher.env` with the host's own addresses (#371: its interfaces' and the
+//!    public one the egress probe saw tasks leave from, kept in `egress.json`);
 //! 5. only then writes agent.toml, with the `host_id` and `worker_id` enrollment gave:
-//!    before it there is no run loop, no dispatcher, and nothing claims;
+//!    before it there is no run loop, no dispatcher, and nothing claims; then
+//!    `etc/dispatcher.env` gets the secrets directory and the agent budget from it (#371);
 //! 6. the agent keys into `OMARCHY_SECRETS_DIR/agent.env`, outside the work root;
 //! 7. with `--legacy <project>`, `legacy.json`, changing nothing in that project;
 //! 8. the systemd --user unit, linger, and the service started: the run loop's first
@@ -53,6 +56,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::capacity::{self, probe, Capacity, Caps, Facts};
+use crate::dispatcher_env::{self, addresses, Envelope, Refresh, Rendered, Sources};
 use crate::enroll;
 use crate::host::{HostKey, Identity, KEY_FILE};
 use crate::manifest::Manifest;
@@ -83,6 +87,8 @@ pub struct Places {
     pub linger_dir: PathBuf,
     pub routes: PathBuf,
     pub binfmt: PathBuf,
+    /// Where the host's own addresses are read (`/proc/net`, #371).
+    pub proc_net: PathBuf,
 }
 
 impl Places {
@@ -108,6 +114,7 @@ impl Places {
             linger_dir: PathBuf::from("/var/lib/systemd/linger"),
             routes: PathBuf::from("/proc/net/route"),
             binfmt: PathBuf::from("/proc/sys/fs/binfmt_misc"),
+            proc_net: Sources::system().proc_net,
         })
     }
 
@@ -122,6 +129,11 @@ impl Places {
     }
     fn enroll_paths(&self) -> enroll::Paths {
         enroll::Paths::under(&self.data)
+    }
+    fn sources(&self) -> Sources {
+        Sources {
+            proc_net: self.proc_net.clone(),
+        }
     }
 }
 
@@ -203,6 +215,8 @@ pub(crate) struct Ready {
     pub values: envelope::Values,
     pub legacy: Option<legacy::Seen>,
     pub existing: Option<String>,
+    /// The public address the egress probe saw tasks leave from (#371).
+    pub public: Option<std::net::IpAddr>,
 }
 
 fn say(out: &mut dyn Write, line: &str) {
@@ -445,6 +459,23 @@ pub(crate) fn measure(
             ));
         }
     }
+    // It reaches the dispatcher through etc/dispatcher.env (#371), which names its
+    // agent.env in an agent sidecar's mount and refuses any other path.
+    if crate::lint::is_plain_absolute(&secrets_dir)
+        && !dispatcher_env::dispatcher_path(&secrets_dir)
+    {
+        r.blockers.push(format!(
+            "the secrets directory {} has a character the dispatcher refuses: letters, digits and / . _ - + only",
+            secrets_dir.display()
+        ));
+    }
+    // The agent budget a re-run keeps reaches it too, and agent.toml is refused with a bad
+    // one: said here, before the owner's Confirm, not after the token is written.
+    if let Err(e) =
+        dispatcher_env::Budget::from_envelope(envelope::envelope_value(ex, "agent_budget").as_ref())
+    {
+        r.blockers.push(e);
+    }
     if let Err(e) = secrets::outside(&secrets_dir, &work_root, &set_dir) {
         r.blockers.push(e);
     }
@@ -470,12 +501,34 @@ pub(crate) fn measure(
     let project = envelope::set_str(ex, "project").unwrap_or_else(|| envelope::PROJECT.to_owned());
     // The legacy project: `--legacy`, or the one an earlier install recorded, so running
     // install again repairs it without the flag (legacy.json's owner is checked below).
+    // A project retire-legacy removed (#344) is no legacy set any more: nothing of it is
+    // looked at again. The rootful exception it was recorded with stays until P6 (design v2
+    // §19.3, §21.1): the Studio stays rootful after step 6, and install again repairs it.
+    let recorded = std::fs::read(p.data.join(legacy::FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok());
+    let retired = recorded.as_ref().filter(|l| l.retired_at.is_some());
     let legacy_project = o.legacy.clone().or_else(|| {
-        std::fs::read(p.data.join(legacy::FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok())
-            .map(|l| l.project)
+        recorded
+            .as_ref()
+            .filter(|l| l.retired_at.is_none())
+            .map(|l| l.project.clone())
     });
+    let rootful_exception =
+        legacy_project.is_some() || retired.is_some_and(|l| l.rootful_exception);
+    if let (None, Some(l)) = (&legacy_project, retired) {
+        r.notes.push(format!(
+            "legacy: {} was retired at {} ({}); {}",
+            l.project,
+            l.retired_at.as_deref().unwrap_or_default(),
+            l.retired_by.as_deref().unwrap_or("retire-legacy"),
+            if l.rootful_exception {
+                "its rootful exception stays until P6"
+            } else {
+                "nothing of it is looked at again"
+            }
+        ));
+    }
     if let Some(l) = &legacy_project {
         if !legacy::valid_project(l) {
             r.blockers
@@ -638,7 +691,7 @@ pub(crate) fn measure(
             f.isolation(),
             !f.rootless(),
             dedicated,
-            legacy_project.is_some(),
+            rootful_exception,
             &mut r,
         );
     }
@@ -652,6 +705,7 @@ pub(crate) fn measure(
         .map(|t| net::parse_routes(&t))
         .unwrap_or_default();
     let mut legacy_seen = None;
+    let mut public = None;
     if let Some(d) = &docker {
         match other_networks(d, &project, legacy_project.as_deref()) {
             Ok(n) => checks::subnets(&task, &routes, &n, &mut r),
@@ -676,7 +730,8 @@ pub(crate) fn measure(
         }
         match (task.first().and_then(|t| t.last_28()), &image) {
             (Some(subnet), Some(img)) => {
-                let t = egress::Targets::of_host(net::default_gateway(&routes), net::lan_address());
+                let t = egress::Targets::of_host(net::default_gateway(&routes), net::lan_address())
+                    .asking(pool.as_deref());
                 match egress::probe(d, img, subnet, &t) {
                     Ok(out) => {
                         let b = egress::verdict(&out, &t);
@@ -685,6 +740,12 @@ pub(crate) fn measure(
                                 .push("egress: a task reaches public addresses only".into());
                         }
                         r.blockers.extend(b);
+                        public = egress::seen(&out);
+                        r.notes.push(match (public, &t.seen) {
+                            (Some(ip), _) => format!("egress: tasks leave from {ip}, which every task's egress refuses with the host's own addresses"),
+                            (None, Some(url)) => format!("egress: the address tasks leave from was not seen ({url} gave none); every task's egress refuses the interfaces' addresses"),
+                            (None, None) => "egress: the address tasks leave from was not asked (the pool is not HTTPS)".into(),
+                        });
                     }
                     Err(e) => r.blockers.push(format!("egress: {e}")),
                 }
@@ -751,6 +812,7 @@ pub(crate) fn measure(
                 values,
                 legacy: legacy_seen,
                 existing,
+                public,
             })
         }
         _ => None,
@@ -844,6 +906,11 @@ pub(crate) fn apply(
     let at = capacity::now();
     capacity::write_if_changed(&v.set_dir, &ready.capacity, &at)
         .map_err(|e| Failure::Refused(format!("{}/run/capacity.json: {e}", v.set_dir.display())))?;
+    // The public address tasks leave from, before the token is written beside the host's
+    // addresses (#371). Not seen this time: an earlier install's stays.
+    if let Some(ip) = ready.public {
+        addresses::keep_seen(&p.data, ip, &at).map_err(Failure::Refused)?;
+    }
 
     // Enrollment: the owner's Confirm, then the host worker token.
     let eo = enroll::Options {
@@ -852,6 +919,7 @@ pub(crate) fn apply(
         token: o.token.clone(),
         wait: o.wait,
         poll: o.poll,
+        sources: p.sources(),
     };
     // Its lines (the fingerprint, where to confirm) are shown as they come: the person
     // compares them while it waits.
@@ -884,6 +952,30 @@ pub(crate) fn apply(
             id.host
         ),
     );
+    // The dispatcher's environment beside its token (#371): the secrets directory install
+    // chose and the agent budget, now that agent.toml says them, and the host's addresses.
+    let env_file = eo.paths.dispatcher_env();
+    let rendered = Rendered::now(
+        &p.sources(),
+        &p.data,
+        Some(Envelope::from_agent_toml(&text).map_err(Failure::Refused)?),
+    );
+    match dispatcher_env::refresh(&env_file, &rendered).map_err(Failure::Refused)? {
+        Refresh::NoFile => {
+            return Err(Failure::Refused(format!(
+                "{} is gone since the enrollment wrote it",
+                env_file.display()
+            )))
+        }
+        Refresh::Written | Refresh::Unchanged => say(
+            out,
+            &format!(
+                "{} (0600): the worker token, {}",
+                env_file.display(),
+                rendered.lines().map_err(Failure::Refused)?.join(", ")
+            ),
+        ),
+    }
 
     agent_keys(o, v, sys, out)?;
 
@@ -894,10 +986,12 @@ pub(crate) fn apply(
             containers: seen.containers.clone(),
             networks: seen.networks.clone(),
             rootful_exception: ready.facts.isolation() == capacity::Isolation::Root,
+            // Where retire-legacy will write its marker (#344): compose's working directory.
+            dir: seen.dir(),
+            retired_at: None,
+            retired_by: None,
         };
-        let body =
-            serde_json::to_vec_pretty(&record).map_err(|e| Failure::Refused(e.to_string()))?;
-        files::write(&p.data, legacy::FILE, &body, 0o600).map_err(Failure::Refused)?;
+        legacy::record(&p.data, &record).map_err(Failure::Refused)?;
         say(
             out,
             &format!(
@@ -1029,10 +1123,10 @@ pub fn uninstall(
     say(out, &format!("stopped and removed {}", unit::NAME));
 
     let cfg = std::fs::read_to_string(places.agent_toml()).ok();
-    let legacy_project = std::fs::read(places.data.join(legacy::FILE))
+    let legacy_record = std::fs::read(places.data.join(legacy::FILE))
         .ok()
-        .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok())
-        .map(|l| l.project);
+        .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok());
+    let legacy_project = legacy_record.as_ref().map(|l| l.project.clone());
     let socket = envelope::set_path(cfg.as_deref(), "socket_cli");
     let project = envelope::set_str(cfg.as_deref(), "project")
         .unwrap_or_else(|| envelope::PROJECT.to_owned());
@@ -1088,8 +1182,23 @@ pub fn uninstall(
             places.data.display()
         ),
     );
-    if let Some(l) = legacy_project {
-        say(out, &format!("the legacy project {l} was not touched"));
+    match legacy_record {
+        Some(l) if l.retired_at.is_some() => say(
+            out,
+            &format!(
+                "the legacy project {} was retired already ({}); its marker stays in {}",
+                l.project,
+                l.retired_at.as_deref().unwrap_or_default(),
+                l.dir
+                    .as_ref()
+                    .map_or_else(|| "its directory".to_owned(), |d| d.display().to_string())
+            ),
+        ),
+        Some(l) => say(
+            out,
+            &format!("the legacy project {} was not touched", l.project),
+        ),
+        None => {}
     }
     Ok(left)
 }

@@ -12,7 +12,10 @@
  *                                owner compares, the capacity), and for a maintainer the other maintainers' new ones
  *   GET  /hosts/:id              one host, and its leases (the host page)
  *   POST /hosts/:id/confirm      its owner, once: the host's one worker registration (kind host, project trust)
- *   GET  /hosts/self/state       signed by the host key: what the pool says of the host
+ *   POST /hosts/:id/orders       a host order (#344): reconcile-now — its owner or any maintainer —, retire-legacy — its owner,
+ *                                with a passkey; one open per kind, each with a not_after
+ *   GET  /hosts/self/state       signed by the host key: what the pool says of the host — its release target, its
+ *                                registration's open Updates and its open host orders (#344)
  *   POST /hosts/self/token       signed: mint the host worker token (first fetch and every rotation alike); the one it
  *                                replaces stays valid ten minutes, so only the dispatcher is recreated
  *   POST /hosts/self/report      signed: the host report (design v2 §17.2), at most 16 KiB
@@ -20,7 +23,8 @@
  * A signed request (hosts.ts) can read the host's state, fetch or rotate its
  * worker token and report — nothing else: it cannot claim (a claim needs the
  * worker token, which only the dispatcher holds), change the maintainer list,
- * or widen anything.
+ * or widen anything. Its report answers the host orders it took, and that
+ * closes them; it can close none of another host's.
  */
 import { json, readJson, type Env } from "../index";
 import { roleFor } from "../governance";
@@ -31,13 +35,15 @@ import { writeGate } from "./orders";
 import { sha256Hex, viaOf, workspace, SIGN_IN, type Contributor } from "./contributors";
 import { dashboardOrigin } from "./agents";
 import { justNowWords, webGate, SELF_CAUSE } from "./passkeys";
-import { cancelOrdersOf } from "../orders";
+import { cancelOrdersOf, openOrdersOf, FOLLOW_POLL_S } from "../orders";
 import {
   belowMinimum, enrollMessage, fingerprint, hostLine, installCommand, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf, shortId, signedMessage,
   unitsOf, verifySignature, ENROLL_TTL_MIN, MIN_HOST, HOST_NAME, HOST_REPORT_FRESH_MIN, ISOLATIONS, NONCE_KEEP_MIN, OLD_TOKEN_GRACE_MIN, REPORT_MAX_BYTES, SIGNED_SKEW_S, TOKEN_ROTATE_DAYS,
   hostReason, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
-  type Capacity, type Isolation,
+  agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT,
+  type Capacity, type HostOrderKind, type Isolation,
 } from "../hosts";
+import { parseTag } from "../update";
 
 const NO_STORE = { "cache-control": "no-store" };
 const MIN = 60000;
@@ -149,6 +155,8 @@ async function hostView(h: HostRow, detailed: boolean, now: number) {
     runtime: h.runtime ? JSON.parse(h.runtime) : null, provider: h.provider, model: h.model,
     agent_version: h.agent_version, release_target: h.release_target, rolled_back_from: h.rolled_back_from,
     round: h.report ? ((JSON.parse(h.report) as { round?: unknown }).round ?? null) : null,
+    // The legacy set its agent reports (#344): the project, its state and directory, what a retire-legacy would be refused for.
+    legacy: legacyOf(h.report),
     reported_at: h.reported_at, last_seen: h.last_seen, token_issued_at: h.token_issued_at,
     summary: capacity ? hostLine(capacity, h.isolation, h.dedicated === null ? null : !!h.dedicated) : null,
   };
@@ -184,7 +192,10 @@ function newHostLine(h: HostRow): string {
   return `new host of ${h.owner_login}: ${c ? hostLine(c, h.isolation, h.dedicated === null ? null : !!h.dedicated) : h.name}`;
 }
 
-/** GET /hosts/:id — one host and the leases its registration holds (the minimal host page, design v2 §18.1). */
+/** A host's last host orders, newest first, through (host_id, issued_at): what its page lists with each answer (#344). */
+export const HOST_ORDERS_SQL = "SELECT id, kind, issued_by, issued_at, not_after, state, answered_at, detail FROM host_orders WHERE host_id = ? ORDER BY issued_at DESC LIMIT 10";
+
+/** GET /hosts/:id — one host and the leases its registration holds (the minimal host page, design v2 §18.1); for its owner and the maintainers its last host orders too (#344). */
 export async function handleHostGet(c: Contributor | null, id: string, env: Env): Promise<Response> {
   const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
   if (!h) return json({ error: "no such host" }, 404, NO_STORE);
@@ -192,7 +203,13 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
     ? (await env.DB.prepare("SELECT id, kind, name, arch, lane, units, size, started_at, lease_expires_at, stop_order IS NOT NULL AS fenced FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id").bind(h.worker_id).all()).results
     : [];
   const viewer = c ? await viewerOf(env, c) : null;
-  return json({ host: await hostView(h, mayDetail(c, h), Date.now()), leases, pool: { version: version(env).version }, can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h) } }, 200, NO_STORE);
+  const detailed = mayDetail(c, h);
+  const orders = detailed ? (await env.DB.prepare(HOST_ORDERS_SQL).bind(h.id).all()).results : undefined;
+  return json(
+    { host: await hostView(h, detailed, Date.now()), leases, orders, pool: { version: version(env).version }, can: canOf(hostVerdicts(viewer, h)), passkey: { retire: !!viewer && !isOwner(viewer, h), retire_legacy: true } },
+    200,
+    NO_STORE,
+  );
 }
 
 /**
@@ -250,12 +267,13 @@ async function viewerOf(env: Env, c: Contributor): Promise<HostViewer> {
 /** The owner is a GitHub user id, not a login: a renamed owner is still the owner, and a login someone else took is not. */
 const isOwner = (v: HostViewer, h: Pick<HostRow, "owner_github_id">) => v.github_id !== null && v.github_id === h.owner_github_id;
 
-export type HostRight = "suspend" | "resume" | "retire" | "cap";
+export type HostRight = "suspend" | "resume" | "retire" | "cap" | "reconcile" | "retire_legacy";
 type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
 
 /**
- * Who may suspend, resume and retire a host, decided in one place — the
- * doors refuse with it and GET /hosts/:id carries it for the page's buttons:
+ * Who may suspend, resume and retire a host, and give it a host order,
+ * decided in one place — the doors refuse with it and GET /hosts/:id carries
+ * it for the page's buttons:
  * - Suspend: its owner or any maintainer, on an active host;
  * - Resume: its owner only, with their passkey — so they are a maintainer;
  * - Retire: its owner, or any maintainer with their passkey; a host retired
@@ -263,13 +281,34 @@ type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; wh
  * - Cap: its owner or any maintainer sets or lifts the pool's cap on its
  *   units (#337, design v2 §7.2), on a host not retired.
  * Every one takes a reason, journaled with who.
+ * - Reconcile now (#344): its owner or any maintainer, on an active host
+ *   whose agent takes host orders (HOST_ORDERS_AGENT on);
+ * - Retire legacy set (#344): its owner only, while a maintainer, with their
+ *   passkey, on an active host whose agent takes host orders and reports a
+ *   legacy set that is not retired or being retired, and that it would not
+ *   refuse (its report's `blocked`: no directory it may write its marker
+ *   into) — the button is greyed with the agent's words, at most one report
+ *   (five minutes) after the owner fixed it.
  */
-export function hostVerdicts(v: HostViewer | null, h: Pick<HostRow, "name" | "status" | "owner_login" | "owner_github_id">): Record<HostRight, HostVerdict> {
+export function hostVerdicts(
+  v: HostViewer | null,
+  h: Pick<HostRow, "name" | "status" | "owner_login" | "owner_github_id"> & Partial<Pick<HostRow, "agent_version" | "report">>,
+): Record<HostRight, HostVerdict> {
   const no = (status: 401 | 403 | 404 | 409, why: string): HostVerdict => ({ ok: false, status, why });
-  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), cap: no(401, SIGN_IN) };
+  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), cap: no(401, SIGN_IN), reconcile: no(401, SIGN_IN), retire_legacy: no(401, SIGN_IN) };
   const owner = isOwner(v, h);
   const theirs = !owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer stops ${h.name}`) : null;
   const gone = h.status === "retired" ? no(409, `${h.name} is retired: a new install enrolls a new host`) : null;
+  // A host order needs an active host and an agent that reads them: an older one would let it expire unheard.
+  const takes = h.status !== "active" ? no(409, h.status === "pending-owner" ? `${h.name} waits for its owner's Confirm: it runs nothing yet` : `${h.name} is ${h.status}: its agent takes no order`)
+    : !agentTakesOrders(h.agent_version) ? no(409, `its agent (${h.agent_version ?? "unknown"}) takes no host order: agent ${HOST_ORDERS_AGENT} or later does, and a release brings it by itself; Update on its registration's page reconciles it meanwhile`)
+    : null;
+  const legacy = legacyOf(h.report ?? null);
+  const legacyWhy = !legacy ? no(409, `${h.name} reports no legacy set: an install with --legacy records one`)
+    : legacy.state === "retired" ? no(409, `${h.name}'s legacy set ${legacy.project} was retired already${legacy.since ? ` (${legacy.since})` : ""}`)
+    : legacy.state === "retiring" ? no(409, `${h.name}'s legacy set ${legacy.project} is being retired (${legacy.order ?? "an order"})`)
+    : legacy.blocked ? no(409, `${h.name}'s agent would refuse it: ${legacy.blocked}`)
+    : null;
   return {
     suspend: theirs ?? gone ?? (h.status === "suspended" ? no(409, `${h.name} is suspended already — its owner's Resume ends it`) : h.status !== "active" ? no(409, `${h.name} waits for its owner's Confirm: it claims nothing yet`) : { ok: true }),
     resume: gone ?? (h.status !== "suspended" ? no(409, `${h.name} is not suspended: there is nothing to resume`)
@@ -277,6 +316,10 @@ export function hostVerdicts(v: HostViewer | null, h: Pick<HostRow, "name" | "st
       : !v.maintainer ? no(403, `${OWNER_NOT_MAINTAINER}: ${h.name} stays suspended`) : { ok: true }),
     retire: theirs ?? gone ?? { ok: true },
     cap: (!owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer caps ${h.name}`) : null) ?? gone ?? { ok: true },
+    reconcile: (!owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer orders ${h.name} a round`) : null) ?? takes ?? { ok: true },
+    retire_legacy: (!owner ? no(403, `only ${h.owner_login} retires the legacy set of ${h.name}, with their passkey`) : null)
+      ?? (!v.maintainer ? no(403, `${OWNER_NOT_MAINTAINER}: ${h.name}'s legacy set stays`) : null)
+      ?? takes ?? legacyWhy ?? { ok: true },
   };
 }
 const canOf = (v: Record<HostRight, HostVerdict>) => {
@@ -321,6 +364,9 @@ function suspendStatements(env: Env, scope: "id" | "owner_github_id" | "owner_lo
     ...cancelOrdersOf(env, { sql: which, binds: [key, at] }, by, at, `its host was suspended by ${by}`),
     env.DB.prepare(FENCE_ORDERS_SQL(where)).bind(reason, by, at, detail, key),
     env.DB.prepare(BULK_FENCE_SQL(where)).bind(null, null, at, null, key),
+    // Its open host orders (#344): its agent's key is refused from now on, so none would be taken.
+    env.DB.prepare(`UPDATE host_orders SET state = 'cancelled', answered_at = ?, detail = ? WHERE state = 'open' AND host_id IN (SELECT id FROM hosts WHERE ${scope} = ? AND status = 'suspended' AND status_at = ?)`)
+      .bind(at, `its host was suspended by ${by}`, key, at),
   ];
 }
 
@@ -332,8 +378,8 @@ function reasonOf(v: unknown): string | Response {
 }
 
 /** The doors' common head: the browser's session, from the pool's own page, a JSON body. */
-async function personAct(c: Contributor, request: Request, env: Env, url: URL): Promise<{ v: HostViewer; b: Record<string, unknown> } | Response> {
-  if (viaOf(request) !== "web") return json({ error: "a host is suspended, resumed and retired on the site, signed in in the browser: a token does not", code: "web_only" }, 403, NO_STORE);
+async function personAct(c: Contributor, request: Request, env: Env, url: URL, what = "suspended, resumed and retired"): Promise<{ v: HostViewer; b: Record<string, unknown> } | Response> {
+  if (viaOf(request) !== "web") return json({ error: `a host is ${what} on the site, signed in in the browser: a token does not`, code: "web_only" }, 403, NO_STORE);
   const gate = writeGate(request, url, true);
   if (gate) return gate;
   const b = await readJson<Record<string, unknown>>(request);
@@ -460,6 +506,8 @@ export async function handleRetireHost(c: Contributor, id: string, request: Requ
     env.DB.prepare("UPDATE build_workers SET revoked_at = ? WHERE id = ? AND host_id = ? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)").bind(at, worker, id, id, at),
     ...cancelOrdersOf(env, { sql: "SELECT id FROM build_workers WHERE id = ? AND revoked_at = ?", binds: [worker, at] }, c.login, at, `its host was retired by ${c.login}`),
     env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL WHERE pinned_to = ? AND status = 'queued' AND EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)").bind(worker, id, at),
+    env.DB.prepare("UPDATE host_orders SET state = 'cancelled', answered_at = ?, detail = ? WHERE host_id = ? AND state = 'open' AND EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)")
+      .bind(at, `its host was retired by ${c.login}`, id, id, at),
     env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'warn', ?, ? WHERE EXISTS (SELECT 1 FROM hosts WHERE id = ? AND status_at = ?)")
       .bind(line, JSON.stringify({ host: id, worker: h.worker_id, owner: h.owner_login, by: c.login, via: "web", action: "retire", reason, ...(ok ? { confirmed_with: ok.passkey } : {}) }), id, at),
   ]);
@@ -532,6 +580,88 @@ export async function handleResumeOwner(c: Contributor, login: string, request: 
   ]);
   if (!res.meta.changes) return json({ error: "your hosts were not resumed: they changed a moment ago", code: "host_right" }, 409, NO_STORE);
   return json({ owner: login, hosts: stopped.map((h) => h.id), at, confirmed_with: ok.passkey, line }, 200, NO_STORE);
+}
+
+// ---------- host orders (#344, design v2 §11.1 M4, M5, §17.1, §21.1 step 6) ----------
+
+/** A new host order's id: `ho_` and 32 hex digits. */
+function newOrderId(): string {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return `ho_${[...b].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** What an order not taken before its not_after says: the agent refuses one past it too. */
+export const ORDER_EXPIRED = "not taken by its agent before its not_after";
+/** A host's open orders past their not_after, expired: the door's first statement, by the open-kind index. */
+export const EXPIRE_HOST_ORDERS_SQL = `UPDATE host_orders SET state = 'expired', answered_at = ?1, detail = '${ORDER_EXPIRED}' WHERE host_id = ?2 AND state = 'open' AND not_after <= ?1`;
+/** Every host's (the cron's), by the open orders' not_after. */
+export const EXPIRE_ALL_HOST_ORDERS_SQL = `UPDATE host_orders SET state = 'expired', answered_at = ?1, detail = '${ORDER_EXPIRED}' WHERE state = 'open' AND not_after <= ?1`;
+/**
+ * An agent's answer closing its host's order: an open one, or one the pool expired meanwhile — the agent takes an order
+ * before its not_after but answers a retire-legacy only at its end (up to 30 minutes on), so its answer, not "not taken",
+ * is what happened. Once answered, a later report carrying the same answer closes nothing more.
+ */
+export const ANSWER_HOST_ORDER_SQL = "UPDATE host_orders SET state = ?, answered_at = ?, detail = ? WHERE id = ? AND host_id = ? AND state IN ('open', 'expired')";
+/** A host's open orders, oldest first: what its state hands its agent, by the open-kind index. */
+export const HOST_OPEN_ORDERS_SQL = "SELECT id, kind, not_after FROM host_orders WHERE host_id = ? AND state = 'open' AND not_after > ? ORDER BY issued_at LIMIT 16";
+
+/**
+ * POST /hosts/:id/orders — {kind, assertion?}: a host order, from the
+ * browser's session on the pool's own page (design v2 §17.1):
+ * - `reconcile-now`, its owner or any maintainer: a round now, which never
+ *   skips the owner's soak (P4) — what the host page's Reconcile now gives;
+ * - `retire-legacy`, its owner only, with their passkey
+ *   (`host:retire-legacy:<id>`): the agent stops and then removes the
+ *   legacy compose project its legacy.json records, and nothing else, and
+ *   writes the .omarchy-agent marker into its directory, so rollout.sh,
+ *   setup.sh, omarchy-worker and the updater refuse there.
+ * Both need an active host whose agent takes host orders; one open per kind,
+ * each with a not_after HOST_ORDER_TTL_MIN on, after which it expires. The
+ * agent answers in its report, which closes the order; issue and answer are
+ * on the journal.
+ */
+export async function handleHostOrder(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url, "given orders");
+  if (p instanceof Response) return p;
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  if (!isHostOrderKind(p.b.kind)) return json({ error: `kind is one of ${HOST_ORDER_KINDS.join(", ")}`, code: "kind" }, 400, NO_STORE);
+  const kind: HostOrderKind = p.b.kind;
+  const no = refusedBy(hostVerdicts(p.v, h)[kind === "retire-legacy" ? "retire_legacy" : "reconcile"]);
+  if (no) return no;
+  const ok = kind === "retire-legacy" ? await webGate(request, url, env, c.login, `host:retire-legacy:${id}`)(p.b.assertion) : null;
+  if (ok instanceof Response) return ok;
+  const now = Date.now();
+  const at = iso(now);
+  const notAfter = iso(now + HOST_ORDER_TTL_MIN * MIN);
+  const oid = newOrderId();
+  const legacy = legacyOf(h.report);
+  const line = kind === "retire-legacy"
+    ? `${hostLine_(h)}: ${c.login}${ok ? justNowWords(ok) : ""} ordered its legacy set ${legacy?.project ?? "?"} retired — its agent stops and removes it and leaves its marker`
+    : `${hostLine_(h)}: ${c.login} ordered a round now`;
+  try {
+    await env.DB.batch([
+      env.DB.prepare(EXPIRE_HOST_ORDERS_SQL).bind(at, id),
+      env.DB.prepare("INSERT INTO host_orders (id, host_id, kind, issued_by, via, confirmed_with, issued_at, not_after) SELECT ?, id, ?, ?, 'web', ?, ?, ? FROM hosts WHERE id = ? AND status = 'active'")
+        .bind(oid, kind, c.login, ok ? ok.passkey : null, at, notAfter, id),
+      env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', ?, ?, ? WHERE EXISTS (SELECT 1 FROM host_orders WHERE id = ?)")
+        .bind(kind === "retire-legacy" ? "warn" : "ok", line, JSON.stringify({ host: id, owner: h.owner_login, by: c.login, via: "web", action: "order", order: oid, kind, not_after: notAfter, ...(ok ? { confirmed_with: ok.passkey } : {}) }), oid),
+    ]);
+  } catch (e) {
+    if (/UNIQUE/i.test(String(e))) return json({ error: `${kind} is waiting for ${h.name}'s agent already: one at a time, until it answers or the order expires`, code: "order_open" }, 409, NO_STORE);
+    throw e;
+  }
+  if (!(await env.DB.prepare("SELECT 1 FROM host_orders WHERE id = ?").bind(oid).first())) return json({ error: `${h.name} was not ordered: it changed a moment ago`, code: "host_right" }, 409, NO_STORE);
+  return json(
+    {
+      order: { id: oid, kind, state: "open", not_after: notAfter, ...(ok ? { confirmed_with: ok.passkey } : {}) },
+      host: id, by: c.login, line,
+      note: `its agent takes it at its next poll (within ${FOLLOW_POLL_S / 60} min) and answers in its next report; not taken by ${notAfter}, it expires`,
+    },
+    201,
+    NO_STORE,
+  );
 }
 
 // ---------- the host's side ----------
@@ -640,16 +770,36 @@ export async function signedHost(request: Request, env: Env, url: URL): Promise<
   return { host: h, body };
 }
 
-/** GET /hosts/self/state — what the pool says of the host. Host orders join it in P3 (#344). */
+/**
+ * GET /hosts/self/state — what the pool says of the host: its status, its
+ * registration and its token's dates, and — P3's minimal host state (#344,
+ * design v2 §17.1) — the release target (the pool's own release, which from
+ * agent 0.3.0 on replaces follow.latest), its registration's open Update
+ * orders, and its open host orders, each with its id and not_after (an
+ * order past it is never sent). P4 (#325) adds the settings and the other
+ * kinds. Every answer is the host's alone: no-store.
+ */
 export async function handleHostState(s: SignedHost, env: Env): Promise<Response> {
   const h = s.host;
-  const at = iso(Date.now());
-  await env.DB.prepare("UPDATE hosts SET last_seen = ? WHERE id = ?").bind(at, h.id).run();
+  const now = Date.now();
+  const at = iso(now);
+  const [, orders, worker] = await env.DB.batch([
+    env.DB.prepare("UPDATE hosts SET last_seen = ? WHERE id = ?").bind(at, h.id),
+    env.DB.prepare(HOST_OPEN_ORDERS_SQL).bind(h.id, at),
+    env.DB.prepare("SELECT open_orders FROM build_workers WHERE id = ? AND host_id = ? AND revoked_at IS NULL").bind(h.worker_id ?? "", h.id),
+  ]);
   const raw = publicKeyBytes(h.pubkey)!;
+  const pool = version(env);
+  const open = (worker.results[0] as { open_orders: string | null } | undefined)?.open_orders ?? null;
   return json({
     host: h.id, status: h.status, name: h.name, owner: h.owner_login, worker: h.worker_id, fingerprint: await fingerprint(raw),
     token: h.token_issued_at ? { issued_at: h.token_issued_at, rotate_after: iso(Date.parse(h.token_issued_at) + TOKEN_ROTATE_DAYS * 24 * 60 * MIN) } : null,
     report_every_s: 300,
+    poll_s: FOLLOW_POLL_S,
+    // A Worker that runs no release (a development one) names none: the agent then changes nothing.
+    release: { target: parseTag(pool.version) ? pool.version : null, deployed_at: pool.deployed_at },
+    updates: openOrdersOf(open).filter((o) => o.kind === "update").map((o) => o.id),
+    orders: (orders.results as { id: string; kind: string; not_after: string }[]).map((o) => ({ id: o.id, kind: o.kind, not_after: o.not_after })),
   }, 200, NO_STORE);
 }
 
@@ -721,14 +871,30 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
       h.id,
     )
     .run();
-  return json({ ok: true, at, units: cap ? unitsOf(cap) : h.units, below_minimum: cap ? belowMinimum(cap) : null }, 200, NO_STORE);
+  // The host orders it answers (#344): each closes an open order of this host only, once; its line is the pool's words, the
+  // agent's own stay on the host's page.
+  const answers = orderAnswers(r.orders);
+  let closed = 0;
+  if (answers.length) {
+    const results = await env.DB.batch(answers.flatMap((a) => [
+      env.DB.prepare(ANSWER_HOST_ORDER_SQL).bind(a.outcome, at, a.detail, a.id, h.id),
+      env.DB.prepare(
+        `INSERT INTO events (kind, ring, source, status, summary, payload)
+         SELECT 'host', NULL, 'factory', ?, ? || kind || ' ' || state || ' (' || id || ')', json_object('host', host_id, 'owner', ?, 'action', 'order-answer', 'order', id, 'kind', kind, 'outcome', state, 'by', issued_by)
+           FROM host_orders WHERE id = ? AND host_id = ? AND state = ? AND answered_at = ?`,
+      ).bind(a.outcome === "done" ? "ok" : "warn", `${hostLine_(h)}: its agent answered the host order `, h.owner_login, a.id, h.id, a.outcome, at),
+    ]));
+    closed = results.filter((x, i) => i % 2 === 0 && x.meta.changes).length;
+  }
+  return json({ ok: true, at, units: cap ? unitsOf(cap) : h.units, below_minimum: cap ? belowMinimum(cap) : null, orders_closed: closed }, 200, NO_STORE);
 }
 
-/** The cron's share (scheduler.ts): nonces past the window, and enrollment tokens nobody used a day after they expired. */
+/** The cron's share (scheduler.ts): nonces past the window, enrollment tokens nobody used a day after they expired, and host orders past their not_after (#344). */
 export async function pruneHosts(env: Env, now = Date.now()): Promise<number> {
-  const [a, b] = await env.DB.batch([
+  const [a, b, c] = await env.DB.batch([
     env.DB.prepare("DELETE FROM host_nonces WHERE at < ?").bind(iso(now - NONCE_KEEP_MIN * MIN)),
     env.DB.prepare("DELETE FROM host_enrollments WHERE used_at IS NULL AND expires_at < ?").bind(iso(now - 24 * 60 * MIN)),
+    env.DB.prepare(EXPIRE_ALL_HOST_ORDERS_SQL).bind(iso(now)),
   ]);
-  return (a.meta.changes ?? 0) + (b.meta.changes ?? 0);
+  return (a.meta.changes ?? 0) + (b.meta.changes ?? 0) + (c.meta.changes ?? 0);
 }

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use super::{count_start, Pending, Start, DEADLINE_S, MAX_TRIES};
 use crate::run::fake::{publish_agent, relay_statement_agent, Ships, World};
-use crate::run::pool::{Follow, Net};
+use crate::run::pool::{HostState, Net};
 use crate::run::state::State;
 use crate::version::{self, Release, Version};
 
@@ -55,7 +55,7 @@ fn host_with(ships: Version, min_agent: &str, bin: &[u8]) -> World {
             binary: bin,
         },
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w
 }
 
@@ -167,12 +167,12 @@ fn a_release_with_a_higher_agent_updates_the_agent_first_and_the_same_one_does_n
     assert_eq!(count_start(&data, new, w.now), Start::Run);
     w.restart_as(new);
     assert!(w.agent.gate.is_some());
-    let follows = w.remote.borrow().follows;
+    let polls = w.remote.borrow().polls;
     w.tick(1);
     assert!(w.agent.gate.is_none(), "{}", w.journal());
     assert!(!data.join("pending").exists());
     assert!(w.journal().contains("\"event\":\"agent-updated\""));
-    assert_eq!(w.remote.borrow().follows, follows + 1, "the gate's report");
+    assert_eq!(w.remote.borrow().polls, polls + 1, "the gate's report");
     assert_eq!(w.changes().len(), changes, "the gate touched nothing");
 
     // Then the round: v1.1.0 ships this agent's version, so nothing restarts it.
@@ -196,7 +196,7 @@ fn a_release_with_a_higher_agent_updates_the_agent_first_and_the_same_one_does_n
             binary: &binary(true),
         },
     );
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
     assert_eq!(w.agent.exit, None);
@@ -272,7 +272,7 @@ fn a_wrong_hash_or_a_failing_self_test_changes_nothing_and_this_agent_applies_th
             binary: &binary(true),
         };
         publish_agent(&w.remote, "v1.2.0", &ships);
-        w.follow("v1.2.0", None);
+        w.target("v1.2.0", None);
         w.round();
         assert_eq!(
             w.journal().matches("not updated").count(),
@@ -284,7 +284,7 @@ fn a_wrong_hash_or_a_failing_self_test_changes_nothing_and_this_agent_applies_th
             (Some("v1.2.0"), None)
         );
         publish_agent(&w.remote, "v1.3.0", &ships);
-        w.follow("v1.3.0", None);
+        w.target("v1.3.0", None);
         w.tick(3600);
         assert_eq!(w.agent.exit, Some(0), "{what}: {}", w.journal());
     }
@@ -422,7 +422,7 @@ fn a_new_agent_that_fails_its_gate_is_rolled_back_skipped_and_reported() {
             binary: &binary(true),
         },
     );
-    w.follow("v1.2.0", None);
+    w.target("v1.2.0", None);
     w.tick(200);
     assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
     assert_eq!(link(&data.join("current")), format!("versions/{higher}"));
@@ -474,13 +474,13 @@ fn a_rollback_keeps_the_running_agent_and_only_agent_to_moves_it_down() {
             binary: &binary(true),
         },
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
 
     // A rollback statement without agent_to: the release goes down, the agent stays.
     relay_statement_agent(&w.remote, 1, "v1.0.0", "v1.1.0", b"signed", None);
-    w.follow("v1.0.0", None);
+    w.target("v1.0.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.0.0"), "{:?}", w.outcome());
     assert_eq!(w.agent.exit, None);
@@ -488,7 +488,7 @@ fn a_rollback_keeps_the_running_agent_and_only_agent_to_moves_it_down() {
 
     // Forward again, then a statement with agent_to: the agent moves down to the agent
     // the release ships, through the same steps, and the statement is accepted with it.
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     assert_eq!(w.applied().as_deref(), Some("v1.1.0"));
     let old = Version(0, 1, 0);
@@ -503,7 +503,7 @@ fn a_rollback_keeps_the_running_agent_and_only_agent_to_moves_it_down() {
         },
     );
     relay_statement_agent(&w.remote, 2, "v1.0.1", "v1.1.0", b"signed", Some("0.1.0"));
-    w.follow("v1.0.1", None);
+    w.target("v1.0.1", None);
     let changes = w.changes().len();
     w.round_now();
     assert_eq!(w.agent.exit, Some(0), "{}", w.journal());
@@ -529,11 +529,11 @@ fn an_agent_to_the_release_does_not_ship_waits_and_changes_nothing() {
             binary: &binary(true),
         },
     );
-    w.follow("v1.1.0", None);
+    w.target("v1.1.0", None);
     w.round();
     // v1.0.0 ships agent 0.1.0; the statement says 0.0.9.
     relay_statement_agent(&w.remote, 1, "v1.0.0", "v1.1.0", b"signed", Some("0.0.9"));
-    w.follow("v1.0.0", None);
+    w.target("v1.0.0", None);
     w.round_now();
     assert_eq!(w.agent.exit, None);
     assert_eq!(w.agent.state.statement_seq, None, "not accepted");
@@ -606,7 +606,7 @@ fn the_pool_not_answering_does_not_keep_the_gate_shut() {
     w.pool_answers(Net::NoAnswer("connection refused".into()));
     w.tick(1);
     assert!(w.agent.gate.is_none(), "{}", w.journal());
-    w.pool_answers(Net::Ok(Follow::default()));
+    w.pool_answers(Net::Ok(HostState::default()));
 }
 
 #[test]

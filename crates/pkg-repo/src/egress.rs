@@ -9,18 +9,23 @@
 //! name resolves to, never by the name: RFC 1918, CGNAT, link-local (cloud
 //! metadata), loopback, multicast, the reserved and documentation ranges,
 //! every IPv6 address outside global unicast, and whatever `--deny` adds (the
-//! task subnets, the host's own addresses) are refused. A name is resolved
+//! task subnets, the host's own addresses) are refused, an IPv4 address in
+//! every IPv6 form that reaches it too (v4-mapped, NAT64, 6to4). A name is resolved
 //! once; the proxy connects to the very addresses it checked, so a name that
 //! answers a public address to the check and a private one to the connection
 //! (DNS rebinding) has no second answer to give. A name with any refused
 //! address is refused whole.
 //!
-//! Seams: the host's own public addresses reach `--deny` from the
-//! dispatcher's `OMARCHY_HOST_ADDRESSES`, which the install child issue
-//! (#317) writes; until it does, a task can CONNECT to them through this
-//! proxy, and prep-root.sh's INPUT drop does not stop that (it matches the
+//! The host's own addresses reach `--deny` from the dispatcher's
+//! `OMARCHY_HOST_ADDRESSES`, which the agent writes into
+//! `etc/dispatcher.env` (#371): every address of the host's interfaces (an
+//! IPv6 one as its /64), read again by the run loop every minute, and the
+//! public address the host's tasks leave from, which install's egress probe
+//! saw and the run loop asks the pool's edge for again every hour; a change
+//! recreates the dispatcher, so tasks started after it get the new list. This
+//! list is what keeps a task off them: prep-root.sh's INPUT drop matches the
 //! task subnets, and this proxy's traffic comes from the `omarchy-egress`
-//! bridge). `DOCKER-USER` rules are prep-root.sh's (the P0 sets issue).
+//! bridge. `DOCKER-USER` rules are prep-root.sh's (the P0 sets issue).
 
 use std::fmt::Write as _;
 use std::io::{self, Read as _, Write as _};
@@ -50,7 +55,9 @@ fn thread(f: impl FnOnce() + Send + 'static) -> io::Result<std::thread::JoinHand
     std::thread::Builder::new().stack_size(STACK).spawn(f)
 }
 
-/// An address range: `10.0.0.0/8`, `fe80::/10`, or one address.
+/// An address range: `10.0.0.0/8`, `fe80::/10`, or one address. An IPv4 range in its
+/// v4-mapped form (`::ffff:a.b.c.d`, a prefix of 96 or more) is read as the IPv4 range it
+/// is, since a destination is judged as IPv4 in every form that reaches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cidr {
     net: IpAddr,
@@ -74,6 +81,14 @@ impl FromStr for Cidr {
                 .filter(|p| *p <= max)
                 .ok_or_else(|| format!("{s:?}: the prefix is not 0..{max}"))?
         };
+        if let IpAddr::V6(v6) = net {
+            if let (Some(v4), Some(p)) = (v6.to_ipv4_mapped(), prefix.checked_sub(96)) {
+                return Ok(Self {
+                    net: IpAddr::V4(v4),
+                    prefix: p,
+                });
+            }
+        }
         Ok(Self { net, prefix })
     }
 }
@@ -125,24 +140,34 @@ fn refused_v4(ip: Ipv4Addr) -> Option<&'static str> {
     })
 }
 
-fn refused_v6(ip: Ipv6Addr) -> Option<&'static str> {
-    let in_ = |range: &str| {
-        Cidr::from_str(range)
-            .expect("a built-in range")
-            .contains(IpAddr::V6(ip))
-    };
-    let embedded = |from: usize| {
+fn in_v6(ip: Ipv6Addr, range: &str) -> bool {
+    Cidr::from_str(range)
+        .expect("a built-in range")
+        .contains(IpAddr::V6(ip))
+}
+
+/// The IPv4 address an IPv6 one reaches: v4-mapped (`::ffff:a.b.c.d`, which an IPv6
+/// socket connects to over IPv4), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`).
+fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let at = |from: usize| {
         let o = ip.octets();
         Ipv4Addr::new(o[from], o[from + 1], o[from + 2], o[from + 3])
     };
     if let Some(v4) = ip.to_ipv4_mapped() {
+        Some(v4)
+    } else if in_v6(ip, "64:ff9b::/96") {
+        Some(at(12))
+    } else if in_v6(ip, "2002::/16") {
+        Some(at(2))
+    } else {
+        None
+    }
+}
+
+fn refused_v6(ip: Ipv6Addr) -> Option<&'static str> {
+    let in_ = |range: &str| in_v6(ip, range);
+    if let Some(v4) = embedded_v4(ip) {
         return refused_v4(v4);
-    }
-    if in_("64:ff9b::/96") {
-        return refused_v4(embedded(12));
-    }
-    if in_("2002::/16") {
-        return refused_v4(embedded(2));
     }
     if ip.is_loopback() {
         return Some("loopback");
@@ -169,16 +194,22 @@ fn refused_v6(ip: Ipv6Addr) -> Option<&'static str> {
 }
 
 /// Why `ip` is refused, or `None` when it is a public address outside `deny`.
+///
+/// `deny` is judged like the built-in ranges: an IPv4 address in it is refused in every
+/// IPv6 form that reaches it too (v4-mapped, NAT64, 6to4), or `[::ffff:<the host's
+/// public IPv4>]` would reach the host (#371).
 pub fn refused(ip: IpAddr, deny: &[Cidr]) -> Option<String> {
-    let builtin = match ip {
-        IpAddr::V4(v4) => refused_v4(v4),
-        IpAddr::V6(v6) => refused_v6(v6),
+    let ip = ip.to_canonical();
+    let (builtin, v4) = match ip {
+        IpAddr::V4(v4) => (refused_v4(v4), None),
+        IpAddr::V6(v6) => (refused_v6(v6), embedded_v4(v6)),
     };
     if let Some(why) = builtin {
         return Some(why.to_owned());
     }
-    deny.iter()
-        .any(|c| c.contains(ip))
+    std::iter::once(ip)
+        .chain(v4.map(IpAddr::V4))
+        .any(|a| deny.iter().any(|c| c.contains(a)))
         .then(|| "an address of this host or of its task networks".to_owned())
 }
 
@@ -222,12 +253,16 @@ impl Policy {
         if port == 0 {
             return Err((400, "port 0".into()));
         }
-        // An address needs no resolver; a name is resolved once, here.
-        let addrs = match host.parse::<IpAddr>() {
+        // An address needs no resolver; a name is resolved once, here. A v4-mapped
+        // address is its IPv4 one, judged and connected to as such.
+        let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
             Ok(ip) => vec![SocketAddr::new(ip, port)],
             Err(_) => (self.resolve)(host, port)
                 .map_err(|e| (502, format!("{host} does not resolve: {e}")))?,
-        };
+        }
+        .into_iter()
+        .map(|a| SocketAddr::new(a.ip().to_canonical(), a.port()))
+        .collect();
         if addrs.is_empty() {
             return Err((502, format!("{host} does not resolve")));
         }
@@ -558,6 +593,78 @@ mod tests {
         assert!("0.0.0.0/0".parse::<Cidr>().unwrap().contains(ip("8.8.8.8")));
     }
 
+    #[test]
+    fn the_agents_host_addresses_are_a_deny_list_as_written() {
+        // `OMARCHY_HOST_ADDRESSES` as the agent renders it (#371): plain addresses, an IPv6
+        // address as its /64 (a temporary address in it is the host's too), link-local.
+        let deny: Vec<Cidr> = "203.0.114.10,2a01:4f8:1:2::/64,fe80::/64"
+            .split(',')
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let host = Some("an address of this host or of its task networks".to_owned());
+        assert_eq!(refused(ip("203.0.114.10"), &deny), host);
+        assert_eq!(refused(ip("2a01:4f8:1:2:9c1e:44ff:fe00:7"), &deny), host);
+        assert_eq!(refused(ip("2a01:4f8:1:3::1"), &deny), None);
+        assert_eq!(refused(ip("203.0.114.11"), &deny), None);
+        // The host's public IPv4 in an IPv6 form that reaches it: v4-mapped (an IPv6 socket
+        // connects to it over IPv4), NAT64 and 6to4.
+        for a in [
+            "::ffff:203.0.114.10",
+            "64:ff9b::cb00:720a",
+            "2002:cb00:720a::1",
+        ] {
+            assert_eq!(refused(ip(a), &deny), host, "{a}");
+        }
+        assert_eq!(refused(ip("::ffff:203.0.114.11"), &deny), None);
+        assert_eq!(refused(ip("64:ff9b::cb00:720b"), &deny), None);
+    }
+
+    #[test]
+    fn a_denied_ipv4_address_written_v4_mapped_is_refused_in_every_form() {
+        // `--deny ::ffff:203.0.114.10` is the IPv4 address: refused as IPv4, v4-mapped,
+        // NAT64 and 6to4, as `--deny 203.0.114.10` is; a range keeps its width.
+        let host = Some("an address of this host or of its task networks".to_owned());
+        for entry in [
+            "::ffff:203.0.114.10",
+            "::ffff:cb00:720a",
+            "::ffff:203.0.114.0/120",
+        ] {
+            let deny = [entry.parse::<Cidr>().unwrap()];
+            for a in [
+                "203.0.114.10",
+                "::ffff:203.0.114.10",
+                "64:ff9b::cb00:720a",
+                "2002:cb00:720a::1",
+            ] {
+                assert_eq!(refused(ip(a), &deny), host, "--deny {entry}: {a}");
+            }
+            assert_eq!(refused(ip("203.0.115.10"), &deny), None, "--deny {entry}");
+        }
+        assert_eq!(
+            "::ffff:203.0.114.10".parse::<Cidr>().unwrap(),
+            "203.0.114.10".parse::<Cidr>().unwrap()
+        );
+        assert_eq!(
+            "::ffff:203.0.114.0/120".parse::<Cidr>().unwrap(),
+            "203.0.114.0/24".parse::<Cidr>().unwrap()
+        );
+        assert_eq!(
+            refused(
+                ip("203.0.114.11"),
+                &["::ffff:203.0.114.10".parse().unwrap()]
+            ),
+            None
+        );
+        // Wider than the v4-mapped range: an IPv6 range, as written.
+        assert!(matches!(
+            "::ffff:0:0/80".parse::<Cidr>().unwrap(),
+            Cidr {
+                net: IpAddr::V6(_),
+                prefix: 80
+            }
+        ));
+    }
+
     fn rebinding(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
         let a = |s: &str| SocketAddr::new(s.parse().unwrap(), port);
         Ok(match host {
@@ -593,6 +700,19 @@ mod tests {
             assert!(why.contains("resolves to"), "{why}");
         }
         assert_eq!(p.destination("169.254.169.254", 80).unwrap_err().0, 403);
+        // A v4-mapped address is judged and connected to as its IPv4 one.
+        assert_eq!(
+            p.destination("[::ffff:93.184.215.14]", 443).unwrap(),
+            vec![SocketAddr::new(ip("93.184.215.14"), 443)]
+        );
+        let host = Policy {
+            deny: vec!["203.0.114.10".parse().unwrap()],
+            resolve: rebinding,
+            judge: refused,
+        };
+        let (status, why) = host.destination("[::ffff:203.0.114.10]", 22).unwrap_err();
+        assert_eq!(status, 403);
+        assert!(why.contains("an address of this host"), "{why}");
         assert_eq!(p.destination("[::1]", 80).unwrap_err().0, 403);
         assert_eq!(p.destination("nowhere.example", 80).unwrap_err().0, 502);
         assert_eq!(p.destination("a b", 80).unwrap_err().0, 400);
