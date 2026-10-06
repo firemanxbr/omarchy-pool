@@ -538,13 +538,15 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
 | Secret | Where it comes from | At rest | Which container gets it |
 |---|---|---|---|
 | Host key | generated at install | 0600 `state/host.ed25519` in the agent's data directory | none, ever |
-| Host worker token `omw_` | minted by the pool for the confirmed host, fetched with a host-key-signed request, rotated every 30 days | 0400 `run/host/dispatcher/token` in the set directory (and in 0600 `etc/dispatcher.env` only while a release from before #327 is applied or staged, from just before a rollback statement's `agent_to` moves the agent down to run a rollback to one, or for the moment between two writes of a first enrollment) | the dispatcher only, as a read-only file mount (`OMARCHY_WORKER_TOKEN_FILE`), never in its environment |
+| Host worker token `omw_` | minted by the pool for the confirmed host, fetched with a host-key-signed request, rotated every 30 days | 0400 `run/host/dispatcher/token` in the set directory (and in 0600 `etc/dispatcher.env` only while a release from before #327 is applied or staged, from just before a rollback statement's `agent_to` moves the agent down to run a rollback to one, or for the moment between two writes when the env file names no registration yet, another one, or still holds an older token's line) | the dispatcher only, as a read-only file mount (`OMARCHY_WORKER_TOKEN_FILE`), never in its environment except while that `etc/dispatcher.env` line is there (the file is the dispatcher's `env_file`; a release from before #327 reads `OMARCHY_WORKER_TOKEN` from it) |
 | Job tokens `omj.` | the claim answer, per lease, carrying the lease generation | the dispatcher's memory and `work/state/leases/` (0600) | the dispatcher and its pool-job children only; never a task |
 | Agent keys, `GITHUB_TOKEN` (public read only), `CLAUDE_CODE_OAUTH_TOKEN` | typed at install on `/dev/tty`, or copied from an existing file with confirmation | 0600 `OMARCHY_SECRETS_DIR/agent.env`, outside the work root and the set directory | a task's agent sidecar only, as a read-only file mount (`OMARCHY_AGENT_ENV`), never in its environment |
 
-So `docker inspect` of the dispatcher, of every sidecar and of every task
-container shows no token or key in its environment: the egress sidecar and
-the task container hold none at all. `tests/agent-run-loop.sh` checks the
+So, whenever `etc/dispatcher.env` holds no token line (no release from
+before #327 applied, staged or about to be rolled back to, no token write
+half-way), `docker inspect` of the dispatcher, of every sidecar and of every task
+container shows no token or key in its environment: the egress sidecar and the
+task container hold none at all. `tests/agent-run-loop.sh` checks the
 dispatcher's and a task's on a real engine, `tests/task-networks.sh` every
 sidecar's and task's the real dispatcher makes.
 
