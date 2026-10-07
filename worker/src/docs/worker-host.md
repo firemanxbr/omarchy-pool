@@ -201,8 +201,10 @@ install writes it so). Recommended: a **separate, spend-capped key for
 contributor drafts** (the provider's own spending limit), since a
 recipe that compromises its draft's sidecar can use that key until the caps
 stop it; and a `GITHUB_TOKEN` in `agent.env` with no write scope and no
-private-repository read (a fine-grained token, "public repositories,
-read-only"). A package that truly needs direct network access (raw sockets,
+private-repository read: a classic token with no scope at all, which
+reads public repositories only — install and *Set agent keys* refuse a
+token with a scope, and a fine-grained or app token, for which GitHub
+names no scopes, since whether it may write cannot be told. A package that truly needs direct network access (raw sockets,
 its own name resolution) gets `network = "direct"` with a `reason` in
 `factory/sizing/tasks.toml`, in a pull request another maintainer approves.
 A host runs such a package's tasks only where its owner granted that bridge
