@@ -72,7 +72,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  alive, apart, auditElsewhere, buildsOf, contributorsCode, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, otherModels, ownerCap, ownersLeased, placementOf, requesterHost, reserve, roomOf, select, sizeOf, takes, thresholdMs, unitsOf,
+  alive, apart, auditElsewhere, buildsOf, contributorsCode, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, notClaiming, otherModels, ownerCap, ownersLeased, placementOf, repinRefusal, requesterHost, reserve, roomOf, select, sizeOf, takes, thresholdMs, unitsOf,
   ALIVE_MS, ELSEWHERE_MS, HELPER_KINDS, LANE_KINDS, MIN, MODEL_WINDOW_MS, RING_ARCHES, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
   type Candidate, type Fleet, type Held, type Independence, type Machine, type Member, type Mode,
 } from "../src/selection";
@@ -1379,6 +1379,54 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     s.run(45);
     expect(s.startOf(back)).toMatchObject({ by: "m1-studio" });
     expect(s.ran.find((r) => r.task.name === `audit-${back.name}`)).toMatchObject({ by: "m2-vps", independent: "model" });
+  });
+});
+
+describe("the switch's pins (#345, design v2 §21.1 step 4): a task pinned to a legacy registration moves onto its owner's host only where the host could run it once idle", () => {
+  const studio = (o: Partial<Member> = {}) => host("m1-studio", "aarch64", 11, { owner: "m1", emulated: ["x86_64"], ...o });
+  const pinned = (o: Partial<Candidate> & { arch?: string } = {}) => task({ arch: "aarch64", pinned_to: "m1-pool-aarch64", ...o });
+
+  it("moves a native build, an emulated one, an audit and model work whose probe passes — the pin to the legacy registration no bar", () => {
+    for (const c of [pinned(), pinned({ arch: "x86_64" }), pinned({ kind: "audit", model: true }), pinned({ model: true })]) {
+      expect(repinRefusal(studio(), c, T0, R, 4), `${c.kind} ${c.arch}`).toBeNull();
+    }
+    // Busy is no bar: what it holds ends, and the task waits for it as it waited for the legacy registration.
+    const held: Held[] = Array.from({ length: 5 }, (_, i) => ({ task: 900 + i, by: "m1-studio", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: "project", owner: null, disk_gb: 20 }));
+    expect(repinRefusal(studio(), pinned(), T0, R, 4, held)).toBeNull();
+  });
+
+  it("leaves, with why, needs_native on its emulated lane, the project's copy of its owner's own package, a lane it lacks, a size its pool cap leaves no room for, model work while its probe fails, and an agent its pin chose that the host does not run", () => {
+    expect(repinRefusal(studio(), pinned({ arch: "x86_64", needs_native: true }), T0, R, 4)).toBe("it needs a native x86_64 lane, and this host runs x86_64 emulated");
+    expect(repinRefusal(studio(), pinned({ name: "mine", ...copyOf(["m1"]) }), T0, R, 4)).toBe("the project's copy of mine is not built on its requester's host (D35)");
+    // Released to any host by another maintainer, it moves.
+    expect(repinRefusal(studio(), pinned({ ...copyOf(["m1"]), any_host: "m2" }), T0, R, 4)).toBeNull();
+    // While the solo-maintainer exception names m1 (#394), m1's own copy is m1's hosts' to build: it moves; one naming m2 lifts nothing for m1.
+    expect(repinRefusal(studio(), pinned({ name: "mine", ...copyOf(["m1"], { solo: "m1" }) }), T0, R, 4)).toBeNull();
+    expect(repinRefusal(studio(), pinned({ name: "mine", ...copyOf(["m1"], { solo: "m2" }) }), T0, R, 4)).toBe("the project's copy of mine is not built on its requester's host (D35)");
+    expect(repinRefusal(host("m1-arm", "aarch64", 7, { owner: "m1" }), pinned({ arch: "x86_64" }), T0, R, 4)).toBe("it has no lane for x86_64");
+    // A sandbox keeps a contributor's build off its emulated lane (#330).
+    expect(repinRefusal(studio({ sandbox: true }), pinned({ arch: "x86_64", trust: "community" }), T0, R, 4)).toContain("emulated beside a sandbox");
+    // Under a pool cap of 5 (four units for tasks), a size-3 build in a fleet whose largest size alive is 3 never fits.
+    expect(repinRefusal(studio({ units: 5 }), pinned({ size: 3 }), T0, R, 3)).toContain("could not hold it once idle at its size");
+    expect(repinRefusal(studio({ units: 5 }), pinned({ size: 2 }), T0, R, 3)).toBeNull();
+    expect(repinRefusal(studio({ probe_ok: false }), pinned({ kind: "audit", model: true }), T0, R, 4)).toBe("its agent's probe fails: model work would wait for it");
+    // The agent a review rebuild's pin chose (params.agent) is the maintainer's choice: it moves only onto a host that runs it.
+    expect(repinRefusal(studio({ model: "anthropic/claude-a" }), pinned({ model: true }), T0, R, 4, [], "openai/gpt-5")).toBe("its pin chose the agent openai/gpt-5, and this host's is anthropic/claude-a");
+    expect(repinRefusal(studio({ model: null }), pinned({ model: true }), T0, R, 4, [], "openai/gpt-5")).toBe("its pin chose the agent openai/gpt-5, and this host's is not reported");
+    expect(repinRefusal(studio({ model: "openai/gpt-5" }), pinned({ model: true }), T0, R, 4, [], "openai/gpt-5")).toBeNull();
+  });
+
+  it("moves nothing onto a host that does not claim now: drained, behind, asleep, below the minimum, not alive, not active", () => {
+    const why = (o: Partial<Member>, now = T0) => repinRefusal(studio(o), pinned(), now, R, 4);
+    expect(why({ drained: true })).toBe("its registration is drained");
+    expect(why({ behind: true })).toContain("behind the pool's release");
+    expect(why({ asleep: true })).toBe("its agent says it sleeps");
+    expect(why({ below_minimum: true })).toBe("it is below the signed minimum to join");
+    expect(why({ may_claim: false })).toContain("it is handed nothing");
+    expect(why({}, T0 + ALIVE_MS + 1)).toBe("it has not claimed in the last 2 minutes");
+    expect(notClaiming(studio(), T0 + ALIVE_MS - 1)).toBeNull();
+    // Below the minimum for its disk alone: the builds it runs may hold it there, so each task is judged by its disk once idle (mayRun).
+    expect(notClaiming(studio({ below_minimum: true, below_disk: { work: 100, engine: 50 } }), T0)).toBeNull();
   });
 });
 
