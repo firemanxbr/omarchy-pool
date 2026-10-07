@@ -206,10 +206,13 @@ agent keys* write it, and the sidecars have no capability (no
 `CAP_DAC_OVERRIDE`), so they run as the file's owner as the engine shows it
 to a container (#399): the agent writes that into `etc/dispatcher.env`
 (`OMARCHY_AGENT_USER`) — its own uid on a rootful daemon and in a Mac's VM,
-`0:0` on a rootless engine, whose root is the agent's user, and on a daemon
-with userns-remap its uid in the host's user namespace
-(`OMARCHY_AGENT_USERNS=host`), never root — and you do nothing (the runbook's
-*How an agent sidecar reads the keys*). Recommended: a **separate, spend-capped key for
+`0:0` on a rootless engine, whose root is the agent's user — and you do
+nothing (the runbook's *How an agent sidecar reads the keys*). A daemon with
+userns-remap shows the file's owner to no container user, and its sidecars
+stay remapped (design v2 §19.1), so there the agent holds the host's model
+kinds (`OMARCHY_AGENT_HELD=userns-remap`): the host builds, and its page says
+why it takes no model work until a maintainer decides how such a host reads
+its keys. Recommended: a **separate, spend-capped key for
 contributor drafts** (the provider's own spending limit), since a
 recipe that compromises its draft's sidecar can use that key until the caps
 stop it; and a `GITHUB_TOKEN` in `agent.env` with no write scope and no

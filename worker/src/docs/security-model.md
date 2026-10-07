@@ -262,14 +262,14 @@ secret). Everything travels in the `Authorization` header over TLS only.
   the agent user's, and the sidecar keeps every capability dropped and no new
   privileges, so it runs as that owner as the engine shows it (#399): the
   agent's uid on a rootful engine, root on a rootless one (whose root is the
-  agent's user). On a daemon with userns-remap no remapped uid is the owner,
-  so the agent sidecar and the probe alone run in the host's user namespace,
-  as the agent's uid, never root: an escape from one of them lands as the
-  agent's user (with the file's group alone, no supplementary group such as
-  docker's) rather than a subuid — the user whose keys it already holds and
-  who owns the agent's own files — while every task container, which runs
-  the recipe, stays remapped; the sidecar runs no recipe and is reachable
-  from its own task only. The dispatcher refuses to
+  agent's user), and never outside the engine's user namespace: an escape
+  from a sidecar lands no higher than one from its task, at the host's
+  isolation level. On a daemon with userns-remap no remapped uid is the
+  owner, and its sidecars stay remapped as its task containers do (design v2
+  §19.1), so no sidecar can read the file there: the agent holds the host's
+  model kinds instead (`OMARCHY_AGENT_HELD=userns-remap`), the dispatcher
+  starts no probe and no agent sidecar, and the host's page says why. How a
+  remapped host reads its keys is a maintainer's decision still open. The dispatcher refuses to
   start with an agent key or a GitHub token in its own environment and keeps the
   host's per-day budget from the usage each sidecar writes where its task
   cannot. So a recipe that subverts its sidecar reaches that task's answers

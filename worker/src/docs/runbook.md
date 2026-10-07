@@ -986,8 +986,8 @@ envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
 dispatcher's defaults), `OMARCHY_DIRECT_NETWORK=1` when the envelope grants
 a signed exception's bridge (#373), when the envelope has a `cache_caps`,
 `OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB` (#341), and who the
-agent sidecars run as, `OMARCHY_AGENT_USER` (with `OMARCHY_AGENT_USERNS=host`
-on a remapped daemon, #399; below). Those envelope
+agent sidecars run as, `OMARCHY_AGENT_USER` (or, on a remapped daemon, why
+none runs, `OMARCHY_AGENT_HELD=userns-remap`, #399; below). Those envelope
 lines come from `agent.toml` alone: once it is there, a line of yours for one of
 their keys is replaced (set it in the envelope instead). Every other line of that file is yours and kept. It writes the
 agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
@@ -1017,24 +1017,30 @@ into `etc/dispatcher.env`:
 
 | Engine | `OMARCHY_AGENT_USER` | Why |
 |---|---|---|
-| rootful docker without remapping (the Studio) | the agent's `uid:gid` | uids are the host's |
+| rootful docker without remapping (the Studio) | the agent's `uid:gid` (a file of group `root`: gid 65534) | uids are the host's; a sidecar that is not root takes no root group |
 | rootless podman or docker (and Quadlet) | `0:0` | the engine's root is the agent's user; its own uid would map to a subordinate one |
-| rootful docker with userns-remap | the agent's `uid:gid`, and `OMARCHY_AGENT_USERNS=host` | no remapped uid is the owner, so the agent sidecar and the probe alone run in the host's user namespace, as that unprivileged user, never as root; task containers and egress sidecars stay remapped |
+| rootful docker with userns-remap | none: `OMARCHY_AGENT_HELD=userns-remap` | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so none can read the file: no probe and no agent sidecar runs, the host takes no model kinds (its builds run), and its page says why |
 | a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM, whose shared directory (Colima's virtiofs) shows the Mac's uid |
 
-The dispatcher gives that user the sidecar's usage directory and says at
-start whom it runs them as; the sidecar, a uid with no home in the image,
-makes one under `/tmp`. You do nothing: an agent that comes with a release
-writes the line within a minute and the run loop recreates the dispatcher with
-it. Without the line (an agent from before #399, or one that found no
-container user who is the owner: a rootless engine and a file another user
-owns, a remapped daemon and a file of root's) the sidecars run as the image's
-root, and the probe's error on the host's page says why: `no agent keys at
-/run/omarchy/agent.env …: it is <uid>:<gid>, mode 600, and this sidecar runs
-as 0:0`. The first heals itself with the next release; for the others,
-make `agent.env` the agent user's again (`chown`, as the user who owns it
-now), and `omarchy-agent dispatcher-env` prints the line the agent renders
-then.
+No sidecar ever leaves the engine's user namespace (`--userns` is refused
+on every container the dispatcher starts), so an escape from one lands no
+higher than one from its task, at the host's isolation level. The dispatcher gives
+that user the sidecar's usage directory and says at start whom it runs them
+as, or why it runs none; the sidecar, a uid with no home in the image, makes
+one under `/tmp`. You do nothing: an agent that comes with a release writes
+the line within a minute and the run loop recreates the dispatcher with it.
+Without a line (an agent from before #399, or a rootless engine and a file
+another user owns) the sidecars run as the image's root, and the probe's
+error on the host's page says why: `no agent keys at /run/omarchy/agent.env
+…: it is <uid>:<gid>, mode 600, and this sidecar runs as 0:0`. The first
+heals itself with the next release; for the other, make `agent.env` the
+agent user's again (as root, `chown <agent user>: agent.env`), and
+`omarchy-agent dispatcher-env` prints the line the agent renders then. On a
+remapped daemon the host page's agent error reads `model kinds held: this
+daemon remaps users (userns-remap), …`: how such a host reads its keys
+without leaving the remapping (an ACL for one remapped uid, say) is a
+maintainer's decision still open, and until it is taken the host builds
+only.
 
 `omarchy-agent uninstall` stops the agent, removes the unit, the bundle's
 containers and networks, task containers and sidecars (labelled
