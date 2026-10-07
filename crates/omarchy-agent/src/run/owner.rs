@@ -274,20 +274,15 @@ impl Agent {
         }
         let dir = self.cfg.secrets_dir.clone();
         let path = dir.join("agent.env");
-        let (text, mode) = match fs::symlink_metadata(&path) {
+        let text = match fs::symlink_metadata(&path) {
             Ok(m) if m.file_type().is_symlink() => {
                 return Err(format!(
                     "{}: a symbolic link; refused, not followed",
                     path.display()
                 ))
             }
-            Ok(m) => (
-                fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?,
-                // The owner's mode stays (0644 inside a 0700 directory for a rootful
-                // engine's sidecars), never wider.
-                m.permissions().mode() & 0o644,
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), 0o600),
+            Ok(_) => fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
         let new = owner::merge_agent_env(&text, &keys)?;
@@ -299,7 +294,10 @@ impl Agent {
         }
         rec.save(&state)?;
         crate::install::files::make_dir(&dir)?;
-        crate::install::files::write(&dir, "agent.env", new.as_bytes(), mode.max(0o600))?;
+        // Owner-only, as install writes it: the agent sidecars read it as its owner (#399), so a
+        // wider mode an owner once gave it for them (0644, which worker-host.md said before) is
+        // narrowed back.
+        crate::install::files::write(&dir, "agent.env", new.as_bytes(), 0o600)?;
         rec.took(order, s.doc.as_bytes());
         let recorded = rec.save(&state);
         // From now on the journal, the report and the diagnostics scrub these values too.
