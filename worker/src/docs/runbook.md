@@ -1020,7 +1020,7 @@ into `etc/dispatcher.env`:
 | rootful docker without remapping (the Studio) | the agent's `uid:gid` (a file of group `root`: gid 65534) | uids are the host's; a sidecar that is not root takes no root group |
 | rootless podman or docker (and Quadlet) | `0:0` | the engine's root is the agent's user; its own uid would map to a subordinate one |
 | rootful docker with userns-remap | none: `OMARCHY_AGENT_HELD=userns-remap` | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so none can read the file: no probe and no agent sidecar runs, the host takes no model kinds (its builds run), and its page says why |
-| a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM, whose shared directory (Colima's virtiofs) shows the Mac's uid |
+| a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM; the `omarchy` profile's virtiofs mount shows the Mac's uid and checks access against it, as on the Studio. Docker Desktop and OrbStack show shared files their own way, and the Mac's uid reads the file there too |
 
 No sidecar ever leaves the engine's user namespace (`--userns` is refused
 on every container the dispatcher starts), so an escape from one lands no
