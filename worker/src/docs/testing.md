@@ -1180,8 +1180,10 @@ runner, where the agent's tests run whole (the `agent` job's macOS entry:
   three directories 0700, nothing changed on a second run, `--dry-run`, and
   refusals (root, Linux, Intel, macOS 12, no Homebrew, a root under or
   holding `~`, relative, with `:`, another user's, a link); shellcheck.
-- `python3 tests/host-bundle.py` — the release pins the Darwin docker CLI and
-  compose plugin at the worker image's versions; `worker/test/host-enroll.test.ts`
+- `python3 tests/host-bundle.py` — the release pins the Darwin docker CLI at
+  the worker image's version and the compose plugin at the manifest's one
+  version for every platform (the image carries none since its updater left,
+  #346); `worker/test/host-enroll.test.ts`
   — a Mac enrolls at `vm` with its Rosetta lane, which the host's page shows,
   and reports `vm-shared`.
 

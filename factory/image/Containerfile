@@ -47,13 +47,6 @@ RUN set -eu; if pacman -S --noconfirm --needed shellcheck >/dev/null 2>&1; then 
 RUN set -eu; case "$ARCH" in x86_64) sum=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640 ;; aarch64) sum=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817 ;; esac; \
     curl -fsSL -o /tmp/docker.tgz "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_CLI}.tgz"; \
     echo "$sum  /tmp/docker.tgz" | sha256sum -c -; tar -xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker; rm -f /tmp/docker.tgz
-# The compose plugin, pinned by checksum: the version and sums the host bundle pins for the agent's own compose
-# (factory/bundle/manifest.toml; tests/host-bundle.py holds the two equal), so one compose is in use wherever the
-# release runs one. A new COMPOSE needs both sums again, here and in the manifest.
-ARG COMPOSE=v5.5.1
-RUN set -eu; case "$ARCH" in x86_64) sum=db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576 ;; aarch64) sum=732e3a84c1a0f67256ce80bc2598a24546b10ca05f9faa97efceb1171ece2ef7 ;; esac; \
-    curl -fsSL -o /tmp/docker-compose "https://github.com/docker/compose/releases/download/${COMPOSE}/docker-compose-linux-${ARCH}"; \
-    echo "$sum  /tmp/docker-compose" | sha256sum -c -; install -Dm755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose; rm -f /tmp/docker-compose
 # The pool's tools, from the release this image is tagged with: pkg-repo is the dispatcher and the egress sidecar.
 RUN set -eu; name="omarchy-pool-${POOL_RELEASE}-${ARCH}-linux"; \
     curl -fsSL -o /tmp/tools.tgz "${TOOLS_URL}/${name}.tar.gz"; \
