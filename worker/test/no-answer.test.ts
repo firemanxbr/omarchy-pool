@@ -273,13 +273,13 @@ describe("a list that did not answer is said, not drawn", () => {
     expect(html(d, "#journal-list")).not.toContain("nothing on the record");
   });
 
-  it("/workers: the note by Every worker, the four tiles read —, no table says 'no worker alive'", async () => {
+  it("/workers: the note by Load, the four tiles read —, the load chart never says 'no host alive'", async () => {
     const d = await run("/workers", { down: true });
     await settled();
     const reason = `the worker listing did not answer: ${INTERNAL}`;
     expect(d.nodes["#lists-note"].textContent).toBe(reason);
     expectDashes(d, 4, reason, "#tiles", 1);
-    for (const t of ["#w-project tbody", "#w-review tbody", "#w-community tbody"]) expect(html(d, t)).not.toMatch(/no (project|review|contributor's) worker/);
+    expect(html(d, "#c-perworker")).not.toMatch(/no host alive/);
   });
 
   it("/workers, the listing failing and the stats poll answering: the minutes tile keeps its number", async () => {

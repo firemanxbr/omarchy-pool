@@ -568,10 +568,10 @@ describe("dashboard pages", () => {
     expect(script).not.toContain("gate(");
   });
 
-  // A worker's row is the shell's wherever it is drawn. The manifests say which pages draw the worker tables (`shared: "worker-table"`, the legend `"worker-legend"`) — the Workers page and a person's; the People page links the Workers page since #251 and draws none — and each is proved the same way: the panels served by workerPanels(), the head and the skeleton by wtTables(), every row by workerRow() over wtKind(), the filter by wtText, and no hand-written head, cell or filter left; a page that serves a worker table without claiming the shared name fails here by its address.
+  // A worker's row is the shell's wherever it is drawn. The manifests say which pages draw the worker tables (`shared: "worker-table"`, the legend `"worker-legend"`) — a person's, for the legacy registrations under their name until they are retired; the Workers page lists hosts only since #346, and the People page links the Workers page since #251 and draws none — and each is proved the same way: the panels served by workerPanels(), the head and the skeleton by wtTables(), every row by workerRow() over wtKind(), the filter by wtText, and no hand-written head, cell or filter left; a page that serves a worker table without claiming the shared name fails here by its address.
   it("draws every worker table the manifests claim with the shell's panels, head and row, and no other page draws one", async () => {
     const claims = allComponents(F).filter((c) => c.shared === "worker-table");
-    expect(claims.map((c) => c.page).sort()).toEqual([`/user/${F.owner}`, "/workers"].sort());
+    expect(claims.map((c) => c.page).sort()).toEqual([`/user/${F.owner}`]);
     for (const c of claims) {
       const html = await (await get(c.page)).text(), script = ownScript(html);
       // The served frame: one panel per kind with the shell's table, the legend after them.

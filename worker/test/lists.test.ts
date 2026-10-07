@@ -14,7 +14,8 @@
  * and the docs index's short API table against both;
  * the rings, the architectures, the severities and the alive threshold
  * (meta.ts) spliced into the shell and read by every page script, none
- * typing a list of its own; the Workers page's pool kinds (JOB_KINDS).
+ * typing a list of its own; and the Workers page, which splits nothing by a
+ * legacy kind since #346.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -236,13 +237,11 @@ describe("lists come from the code that owns them", () => {
     expect(ownScriptOf(await text("/status"))).toContain("h.source || NULL_SOURCE_ARCH");
   });
 
-  it("the Workers page's pool kinds are JOB_KINDS, spliced in — a kind added to jobs.ts lands on the project's card", async () => {
+  it("the Workers page splits nothing by a legacy kind any more (#346): no pool kinds, no project, review or community card", async () => {
     const script = ownScriptOf(await text("/workers"))!;
-    expect(script).toContain(`var POOL_KINDS = ${JSON.stringify(JOB_KINDS)};`);
-    expect(script).toContain('POOL_KINDS.indexOf(r.kind) >= 0 ? "project" : "review"');
-    expect(script).not.toMatch(/POOL_KINDS = \{/);
-    const c = allComponents(F).find((x) => x.id === "workers.kind-cards");
-    expect(c?.script, "the manifest pins the splice").toEqual(expect.arrayContaining([`POOL_KINDS = ${JSON.stringify(JOB_KINDS)}`, "POOL_KINDS.indexOf(r.kind)"]));
+    expect(script).not.toContain("POOL_KINDS");
+    expect(script).not.toMatch(/"(project|review|community)"\s*:/);
+    expect(allComponents(F).find((x) => x.id === "workers.kind-cards")).toBeUndefined();
   });
 
   it("a worker is alive by one number, WORKER_ALIVE_MINUTES: the listing, a person's page, the snapshot and the scheduler read meta.ts's, the shell's titles say it", async () => {

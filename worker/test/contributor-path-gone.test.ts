@@ -253,12 +253,9 @@ describe("a contributor's registration from before #331 claims nothing: it does 
     expect([theirs.status, theirs.json.pinned_to]).toEqual([201, "maralcbr-box"]);
   });
 
-  it("a legacy registration made now and a confirmed host's write no mode, and the listing serves none: the column is history", async () => {
+  it("no legacy registration is made any more (#346), and the listing serves no mode: the column is history", async () => {
     const r = await api("POST", "/factory/workers", { session: "m1", body: { name: "studio-community", arch: "aarch64" } });
-    expect(r.status, JSON.stringify(r.json)).toBe(201);
-    const row = (await env.DB.prepare("SELECT mode, mode_by FROM build_workers WHERE id = ?").bind(r.json.worker).first<{ mode: string; mode_by: string | null }>())!;
-    expect(["shared", "dedicated"]).not.toContain(row.mode);
-    expect(row.mode_by).toBeNull();
+    expect([r.status, r.json.code], JSON.stringify(r.json)).toEqual([410, "gone"]);
     const listed = (await api("GET", `/factory?limit=50&fresh=${Date.now()}`)).json.workers as Record<string, unknown>[];
     expect(listed.length).toBeGreaterThan(0);
     for (const w of listed) expect(w, String(w.id)).not.toHaveProperty("mode");

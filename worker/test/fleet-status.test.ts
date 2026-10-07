@@ -377,13 +377,13 @@ describe("Status draws the fleet's lines (#324)", () => {
 });
 
 describe("the Workers page by host (#324, design v2 §18.2)", () => {
-  it("lists the hosts with their units and lanes; the legacy registrations as such, a host's own registration never among them", async () => {
+  it("lists the hosts with their units and lanes, and only them (#346): no legacy registration is listed, and the load chart names hosts", async () => {
     const html = await page("/workers");
     expect(html).toContain("<h2>Hosts</h2>");
-    expect(html).toContain("<h2>Legacy registrations</h2>");
+    expect(html).not.toContain("Legacy registrations");
+    for (const gone of ['id="w-project"', 'id="w-review"', 'id="w-community"', 'id="kinds"', 'id="all-workers"']) expect(html, gone).not.toContain(gone);
     const d = await drawn("/workers");
     for (let i = 0; i < 100 && !/hosts\/h_/.test(d.nodes["#hosts-table tbody"]?.innerHTML ?? ""); i++) await new Promise((r) => setTimeout(r, 30));
-    for (let i = 0; i < 100 && !(d.nodes["#w-review tbody"]?.innerHTML ?? "").includes(legacyReg); i++) await new Promise((r) => setTimeout(r, 30));
     const hosts = d.nodes["#hosts-table tbody"].innerHTML as string;
     expect(hosts).toContain('<a href="/hosts/h_studio0001">studio</a> <span class="pill blue">full</span>');
     expect(hosts).toContain('aarch64 <span class="muted">native</span><br>x86_64 <span class="muted">emulated (qemu, 16K pages)</span>');
@@ -391,10 +391,11 @@ describe("the Workers page by host (#324, design v2 §18.2)", () => {
     expect(hosts).toContain('<a href="/hosts/h_vpsx860001">vps-x86</a> <span class="pill warn">silent</span>');
     expect(hosts).toContain('<td><span class="muted" title="silent: nothing of it reached the pool in the last 10 minutes">no</span></td>');
     expect(d.nodes["#hosts-note"].textContent).toBe("2 hosts · 1 alive · 10 of 18 units busy · 5 tasks");
-    // The legacy tables: the role container, not the hosts' own registrations.
-    const legacy = ["#w-project tbody", "#w-review tbody", "#w-community tbody"].map((t) => d.nodes[t]?.innerHTML ?? "").join("");
-    expect(legacy).toContain(legacyReg);
-    expect(legacy).not.toContain(studioReg);
+    // The load per host: a host's registration under its host's name, never a legacy registration's row.
+    for (let i = 0; i < 100 && !(d.nodes["#c-perworker"]?.innerHTML ?? "").includes("/hosts/h_studio0001"); i++) await new Promise((r) => setTimeout(r, 30));
+    const load = d.nodes["#c-perworker"].innerHTML as string;
+    expect(load).toContain('<a href="/hosts/h_studio0001">studio</a>');
+    expect(load).not.toContain(legacyReg);
   });
 });
 
