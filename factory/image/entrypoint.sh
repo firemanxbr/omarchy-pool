@@ -46,7 +46,10 @@
 #              keys come from the read-only file OMARCHY_AGENT_ENV names
 #              (OMARCHY_SECRETS_DIR/agent.env), never from the environment
 #              the engine shows; `agent --probe` answers the probe sidecar's
-#              one question and exits.
+#              one question and exits. The file is 0600 and the sidecar has
+#              no capability, so the dispatcher starts it as the file's owner
+#              (#399: `--user`, a uid this image has no home for — it gets one
+#              under /tmp).
 #   egress     a task's egress sidecar on a maintainer host (#336, design v2
 #              §9.4): `pkg-repo egress`, a forward proxy that allows CONNECT,
 #              GET and HEAD to public addresses only. No token, no key, no
@@ -119,7 +122,9 @@ token_from_file() {
 # token or anything else in it is ignored, and named. A value may be quoted; nothing in the file is run.
 load_agent_env() {
   local file="$1" line k v
-  [[ -r "$file" && -f "$file" ]] || { echo "omarchy-worker: no agent keys at $file (OMARCHY_SECRETS_DIR/agent.env)" >&2; return 1; }
+  [[ -f "$file" ]] || { echo "omarchy-worker: no agent keys at $file (OMARCHY_SECRETS_DIR/agent.env)" >&2; return 1; }
+  # A file this user cannot open (#399): whose it is and who asked, as the probe's error says it on the host's page.
+  [[ -r "$file" ]] || { echo "omarchy-worker: no agent keys at $file (OMARCHY_SECRETS_DIR/agent.env): it is $(stat -c '%u:%g, mode %a' "$file" 2>/dev/null || echo 'of another user'), and this sidecar runs as $(id -u):$(id -g) — the dispatcher starts it as the file's owner when the host's agent names one (OMARCHY_AGENT_USER, #399)" >&2; return 1; }
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%$'\r'}"
     [[ -z "${line//[[:space:]]/}" || "$line" == \#* ]] && continue
@@ -160,6 +165,12 @@ if [[ "$role" == agent && -n "${OMARCHY_AGENT_ENV:-}" ]]; then
   # A task's agent sidecar, or the probe's: never the pool's path, whatever the environment says.
   unset OMARCHY_WORKER_TOKEN OMARCHY_WORKER_TOKEN_FILE FACTORY_TOKEN
   load_agent_env "$OMARCHY_AGENT_ENV" || exit 2
+fi
+# An agent sidecar runs as the keys file's owner (#399), a uid with no home in this image (the
+# engine gives it /): Claude Code installs, and keeps its settings, under a home of its own.
+if [[ "$role" == agent ]] && ! { mkdir -p "${HOME:-/}" 2>/dev/null && [[ -w "${HOME:-/}" ]]; }; then
+  HOME="$(mktemp -d "${TMPDIR:-/tmp}/omarchy-home.XXXXXX")" || { echo "omarchy-worker: no home for uid $(id -u) and none could be made" >&2; exit 2; }
+  export HOME
 fi
 if [[ "$role" == agent && "${1:-}" == --probe ]]; then
   ensure_claude || echo "omarchy-worker: Claude Code did not install" >&2

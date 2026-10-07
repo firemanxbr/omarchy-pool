@@ -13,7 +13,10 @@
 # arguments; an agent sidecar reads its keys from the read-only file
 # OMARCHY_AGENT_ENV names — the agent's settings only, a worker token in the
 # file or the environment dropped, nothing in it run — and `--probe` runs
-# agent.py's probe instead of the broker.
+# agent.py's probe instead of the broker. And (#399): a keys file the
+# sidecar's user cannot open is refused with whose it is and who asked, and a
+# sidecar the dispatcher starts as the file's owner — a uid with no home in
+# the image — installs Claude Code under a home of its own.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -116,4 +119,24 @@ if env -i PATH="$tmp/bin:/usr/bin:/bin" HOME="$tmp/side" STUB_LOG="$STUB_LOG" OM
   echo "a missing keys file must stop the sidecar"; exit 1
 fi
 grep -q "no agent keys at $tmp/missing.env" "$tmp/stderr" && [[ ! -s "$STUB_LOG" ]] || { echo "and say so: $(cat "$tmp/stderr" "$STUB_LOG")"; exit 1; }
+# 9. A keys file this user cannot open (#399: the owner's 0600 file, a sidecar run as another uid): refused, saying whose it is
+# and who asked — the probe's error on the host's page. Root reads any file, so as root the sidecar runs as nobody here.
+cp "$tmp/agent.env" "$tmp/locked.env"; chmod 000 "$tmp/locked.env"
+as_other=(); [[ $EUID -eq 0 ]] && { as_other=(setpriv --reuid 65534 --regid 65534 --clear-groups); chmod 755 "$tmp" "$tmp/bin"; }
+: > "$STUB_LOG"; chmod 666 "$STUB_LOG"
+if env -i PATH="$tmp/bin:/usr/bin:/bin" HOME="$tmp/side" STUB_LOG="$STUB_LOG" OMARCHY_WORKER_ROLE=agent OMARCHY_AGENT_ENV="$tmp/locked.env" "${as_other[@]}" bash "$root/factory/image/entrypoint.sh" --probe 2> "$tmp/stderr"; then
+  echo "a keys file the sidecar cannot open must stop it"; exit 1
+fi
+said="$(tail -n1 "$tmp/stderr")"
+[[ "$said" == *"no agent keys at $tmp/locked.env"*"it is $(stat -c %u:%g "$tmp/locked.env"), mode 0, and this sidecar runs as "*"OMARCHY_AGENT_USER"* && ${#said} -le 300 && ! -s "$STUB_LOG" ]] \
+  || { echo "an unreadable keys file says whose it is, in the probe's 300 characters: $said $(cat "$STUB_LOG")"; exit 1; }
+# 10. The sidecar as the keys' owner, a uid the image has no home for (the engine gives it /, which it cannot write; a home
+# that cannot be made, here): a home of its own under TMPDIR, where Claude Code installs, and the keys from the file.
+mkdir -p "$tmp/tmpdir"
+: > "$STUB_LOG"
+env -i PATH="$tmp/bin:/usr/bin:/bin" HOME=/dev/null/no-home TMPDIR="$tmp/tmpdir" STUB_LOG="$STUB_LOG" OMARCHY_WORKER_ROLE=agent OMARCHY_AGENT_ENV="$tmp/agent.env" CLAUDE_CODE_OAUTH_TOKEN=stub-token bash "$root/factory/image/entrypoint.sh" 2> "$tmp/stderr"
+home="$(find "$tmp/tmpdir" -maxdepth 1 -name 'omarchy-home.*' -type d)"
+[[ -n "$home" && -x "$home/.local/bin/claude" ]] && grep -q '^installed$' "$STUB_LOG" && grep -q 'key=sk-ant-from-the-file' "$STUB_LOG" \
+  || { echo "a sidecar with no home gets one, and Claude Code installs there: $home $(cat "$STUB_LOG" "$tmp/stderr")"; exit 1; }
+[[ -c /dev/null ]] || { echo "the home it was given is left alone"; exit 1; }
 echo "entrypoint agent: ok"
