@@ -16,8 +16,8 @@
  *   Request changes, Reject — each confirmed before it is posted.
  *
  * A claim is "Build by the project" (routes/review.ts): the project's
- * rebuild of the package on a review worker, the maintainer's choice of
- * agent pinning the worker that drafts it (an idle one first). What is
+ * rebuild of the package on a maintainer's host, the maintainer's choice of
+ * agent pinning the registration that drafts it (an idle one first). What is
  * decided is the server's rule, read, never the page's: the list files
  * each package (`state`) and counts them (`ready`, `in_review`), every row
  * carries what the viewer may do on it (`can`, with the reason), and a
@@ -474,7 +474,7 @@ const SCRIPT = String.raw`
   }
   function choose(a) { try { localStorage.setItem(AGENT_KEY, a); } catch (e) { /* a browser that keeps nothing: the choice lasts the page */ } }
 
-  // ---- a claim: the project's rebuild, pinned to a review worker with the chosen agent — an idle one first — for the lead's architecture (the server gives the others a worker with the same agent where one is live); a hint for the agent from the workspace.
+  // ---- a claim: the project's rebuild, pinned to a maintainer's host with the chosen agent — an idle one first — for the lead's architecture (the server gives the others a worker with the same agent where one is live); a hint for the agent from the workspace.
   function claim(id, name, arch, hint) {
     return needWorkers().then(function () {
       var a = chosenAgent(arch), ws = agentWorkers(arch).filter(function (x) { return x.agent === a; }), w = ws.filter(function (x) { return !x.current_task; })[0] || ws[0];
@@ -656,7 +656,7 @@ const SCRIPT = String.raw`
       var d = t[0] !== null && t[1] !== null ? diff(t[0].replace(/\n$/, "").split("\n"), t[1].replace(/\n$/, "").split("\n")) : null;
       $("#rv-f-pkgbuild").innerHTML = t[0] !== null ? recipe(t[0], d ? d.left : {}, f.factory.id) : f ? elsewhere(f.factory.id, "Its PKGBUILD is") : empty("nothing built yet");
       $("#rv-y-pkgbuild").innerHTML = t[1] !== null ? recipe(t[1], d ? d.right : {}, y.rebuild.id) : y ? elsewhere(y.rebuild.id, "Its PKGBUILD is") : empty("Written from the request's facts by the claim's agent; the factory's recipe is only read.");
-      var note = $("#rv-diffnote"); if (note) { note.textContent = d ? (d.differ ? diffCount(d.differ) + " from the factory's" : "the same as the factory's") : R.some(function (r) { return r.rebuild && r.rebuild.status === "leased"; }) ? "being written…" : R.some(function (r) { return r.rebuild && r.rebuild.status === "queued"; }) ? R.map(function (r) { return waitsForNative(r.rebuild); }).filter(Boolean)[0] || "waiting for a review worker" : ""; note.className = "rv-diffnote" + (d && d.differ ? " warn" : ""); }
+      var note = $("#rv-diffnote"); if (note) { note.textContent = d ? (d.differ ? diffCount(d.differ) + " from the factory's" : "the same as the factory's") : R.some(function (r) { return r.rebuild && r.rebuild.status === "leased"; }) ? "being written…" : R.some(function (r) { return r.rebuild && r.rebuild.status === "queued"; }) ? R.map(function (r) { return waitsForNative(r.rebuild); }).filter(Boolean)[0] || "waiting for a host" : ""; note.className = "rv-diffnote" + (d && d.differ ? " warn" : ""); }
       DIFFED = d;
       renderSteps(R);
     });
@@ -716,7 +716,7 @@ const SCRIPT = String.raw`
     if (!b) log.innerHTML = empty(cl ? "queued for a host" : "Nothing yet: a maintainer's claim starts the rebuild.");
     else if (built(b) || b.status === "failed") textOf(b.id, "log").then(function (t) { if (current(gen)) tail(log, t !== null ? numbered(t, null, 40) : elsewhere(b.id, b.error ? b.error + " — the log is" : "Its log is")); });
     else if (b.status === "leased" && WLOG && WLOG.id === b.id) tail(log, WLOG.log ? numbered(WLOG.log, null, 40) : empty("building on " + WLOG.worker + "; nothing logged yet"));
-    // Sent back by an emulated worker (#281): no review worker of that kind takes it again, so the words are the shell's.
+    // Sent back by an emulated worker (#281): no host that emulates it takes it again, so the words are the shell's.
     else log.innerHTML = empty(b.status === "leased" ? "building on " + (b.lease_owner || "a maintainer's host") + (isMaintainer() ? "" : " — its log is here once it built") : waitsForNative(b) ? waitsForNative(b) + ": it could not run emulated" : heldOf(b) ? "waiting for a host: " + HELD_WORDS : "queued for a host");
     var yev = b ? evidenceOf(b.id) || {} : {};
     // Out of memory (#337): the engine's words — queued again, at the size it waits at — and a maintainer's Retry at size.

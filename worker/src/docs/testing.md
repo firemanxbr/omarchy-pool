@@ -656,10 +656,11 @@ entrypoint starts no updater nor a builder behind a broker, writes no
 worker id for one and refuses both roles with the pointer; the broker has
 its agent path and no pool path; the build script has no broker mode; and
 the docs (`worker/src/docs`, the READMEs, and the pages the Worker writes in
-code: How it works, the docs index, the diagrams and the API page) no longer
-name the legacy roles' containers — the pool, review and project workers
-among them —, the updater, the broker's relay or a contributor-run worker,
-but in a line that says they retired. `worker/test/legacy-path-gone.test.ts`
+code: How it works, the docs index, the diagrams and the API page), and
+Review's page, whose rebuild pane says where a claim's rebuild waits, no
+longer name the legacy roles' containers — the pool, review and project
+workers among them —, the updater, the broker's relay or a contributor-run
+worker, but in a line that says they retired. `worker/test/legacy-path-gone.test.ts`
 checks the same on the pages the Worker serves, and on every diagram the
 docs draw.
 `bash tests/rollback-workflow.sh` (CI) runs `factory/bin/release-rollback`,

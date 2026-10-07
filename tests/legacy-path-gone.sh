@@ -17,6 +17,7 @@
 #   no pool path; the build script has no broker mode;
 # - the docs (worker/src/docs, the READMEs, and the docs pages the Worker
 #   writes in code: How it works, the docs index, the diagrams, the API page)
+#   and Review's page, whose rebuild pane says where a claim's rebuild waits,
 #   no longer describe role containers — the pool, review and project workers
 #   among them —, the updater, the broker's relay or a contributor-run worker.
 #
@@ -69,7 +70,7 @@ grep -q 'OMARCHY_BROKER' factory/worker/omarchy-build-worker.sh && say "the buil
 # set_rollout, `pkg-repo work`), which leave with that code; the paths above hold it to the files.
 docs=()
 for f in worker/src/docs/*.md README.md CONTRIBUTING.md SECURITY.md factory/sets/host/README.md \
-  worker/src/pages/{how-it-works,docs,doc-diagrams,api-docs}.ts; do [[ "$f" == worker/src/docs/testing.md ]] || docs+=("$f"); done
+  worker/src/pages/{how-it-works,docs,doc-diagrams,api-docs,review}.ts; do [[ "$f" == worker/src/docs/testing.md ]] || docs+=("$f"); done
 WORDS=(
   "role container" "role-container" "omarchy-rollout" "rollout.sh" "register.sh" "agent-proxy" "updater"
   "behind a broker" "builder relay" "community worker" "community set" "contributor-run" "a contributor's worker" "shared mode"

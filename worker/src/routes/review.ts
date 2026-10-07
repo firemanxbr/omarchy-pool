@@ -905,7 +905,7 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   let pinned: string | null = null, agent: string | null = null;
   if (typeof b.worker === "string" && b.worker.trim()) {
     const w = await env.DB.prepare("SELECT id, arch, owner, kinds, agent, agent_status, drained_at, drained_by, drain_reason FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string; owner: string | null; kinds: string | null; agent: string | null; agent_status: string | null; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
-    if (!w || w.arch !== t.arch) return json({ error: `${b.worker} is not a project worker for ${t.arch}` }, 400);
+    if (!w || w.arch !== t.arch) return json({ error: `${b.worker} is not a maintainer host's registration for ${t.arch}` }, 400);
     // The project's copy of a package is not built on its requester's host (#339, D35): pinned to one, it would wait for a release —
     // the solo-maintainer exception's own hosts aside, on their own package (#394).
     if (w.owner && keptOff.includes(w.owner)) return json({ error: `${w.id} is ${w.owner}'s, who brought ${t.name}: the project's copy of a package is not built on its requester's host — choose another maintainer's`, code: "requester_host" }, 409);
