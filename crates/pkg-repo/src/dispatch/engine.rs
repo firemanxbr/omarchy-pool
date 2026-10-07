@@ -527,6 +527,123 @@ mod tests {
         );
     }
 
+    /// #399, on a real engine (tests/agent-install.sh runs it beside the test above, on rootful
+    /// docker and rootless podman): the probe's one-shot agent, started as the dispatcher starts
+    /// it — every capability dropped, no new privileges, the keys a read-only file mount — reads
+    /// an owner-only (0600) keys file of a non-root user's as that owner as the engine shows it
+    /// to a container, which is what the agent writes into `OMARCHY_AGENT_USER`: `--user 0:0` on a
+    /// rootless engine (whose root is the runner, the file's owner), the file's own `uid:gid` on a
+    /// rootful one (as root here, the file is made another uid's first). On a rootful engine the
+    /// image's root, with no capability, cannot read it — the bug the Studio's canary found. The
+    /// image is the stand-in's (busybox), which `cat`s the file where the worker image's
+    /// `agent --probe` would read it.
+    #[test]
+    #[ignore = "needs a real engine: tests/agent-install.sh"]
+    fn real_engine_the_probe_reads_owner_only_keys_as_their_owner() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let image = std::env::var("OMARCHY_STANDIN_IMAGE")
+            .expect("OMARCHY_STANDIN_IMAGE (tests/agent-install.sh sets it)");
+        let mut cli = Cli {
+            runtime: std::env::var("OMARCHY_DISPATCH_CLI").unwrap_or_else(|_| "docker".into()),
+            libpod: None,
+        };
+        let gateway = cli.gateway().unwrap();
+        let security = stdout(&cli, &["info", "--format", "{{json .SecurityOptions}}"]);
+        if security.contains("name=userns") {
+            println!("a remapped daemon: its agent holds the host's model kinds (#399), nothing reads the keys");
+            return;
+        }
+        let rootless = security.contains("name=rootless");
+        // The keys as install writes them: 0600, a non-root user's.
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("agent.env");
+        std::fs::write(&keys, "ANTHROPIC_API_KEY=sk-ant-not-a-real-key\n").unwrap();
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if !rootless && std::fs::metadata(&keys).unwrap().uid() == 0 {
+            std::os::unix::fs::chown(&keys, Some(4242), Some(4242)).unwrap();
+        }
+        let m = std::fs::metadata(&keys).unwrap();
+        assert_ne!(m.uid(), 0, "the keys file must be a non-root user's");
+        let user = if rootless {
+            spec::AgentUser { uid: 0, gid: 0 }
+        } else {
+            spec::AgentUser {
+                uid: m.uid(),
+                gid: m.gid(),
+            }
+        };
+        // A generation of its own: the test above runs beside it, under the same pid.
+        let pid = u64::from(std::process::id());
+        let (gen, host) = (
+            format!("g_{:016x}", pid | 1 << 60),
+            format!("h_keys-test-{pid}"),
+        );
+        let probe = |user| {
+            spec::probe_plan(&spec::Probe {
+                gen: &gen,
+                host: &host,
+                worker_image: "docker.io/library/busybox@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                subnets: spec::Subnets::parse("10.197.11.0/24").unwrap(),
+                slot: 15,
+                gateway,
+                deny: &[],
+                env_file: &keys,
+                user,
+            })
+            .unwrap()
+        };
+        let (setup, run) = probe(Some(user));
+        let net = spec::container_name(0, &gen);
+        cli.remove_network(&net);
+        cli.run(&setup[0]).unwrap();
+        let _gone = Gone(&cli, &net);
+        // The probe's own argv up to its image, then the stand-in reading the keys.
+        let read = |run: &[String]| {
+            let (args, tail) = run.split_at(run.len() - 2);
+            assert_eq!(tail[1], "--probe");
+            let mut a: Vec<&str> = args.iter().map(String::as_str).collect();
+            a.extend([image.as_str(), "cat", spec::AGENT_ENV_IN]);
+            cli.call(&a).unwrap()
+        };
+        for (k, v) in [
+            ("--cap-drop", "ALL"),
+            ("--security-opt", "no-new-privileges"),
+        ] {
+            assert!(run.windows(2).any(|w| w[0] == k && w[1] == v), "{run:?}");
+        }
+        assert!(
+            !run.iter()
+                .any(|x| x == "--cap-add" || x.starts_with("--userns")),
+            "{run:?}"
+        );
+        let out = read(&run);
+        let said = String::from_utf8_lossy(&out.stdout);
+        println!(
+            "{}: the probe as {}:{} read agent.env ({}:{}, 0600): {}",
+            if rootless { "rootless" } else { "rootful" },
+            user.uid,
+            user.gid,
+            m.uid(),
+            m.gid(),
+            out.status
+        );
+        assert!(
+            out.status.success() && said.contains("ANTHROPIC_API_KEY="),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Before #399, on a rootful engine: the image's root, with no capability, cannot.
+        if !rootless {
+            let (_, before) = probe(None);
+            let out = read(&before);
+            assert!(
+                !out.status.success() && out.stdout.is_empty(),
+                "root with no capability read another user's 0600 keys: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+    }
+
     #[test]
     fn podmans_cli_takes_the_sandboxs_runtime_before_the_verb() {
         let call: Vec<String> = [

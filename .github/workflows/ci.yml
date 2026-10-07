@@ -200,6 +200,10 @@ jobs:
     # base; the worker-image job runs it again with the worker image) — and
     # passes on both engines, while a network made without --internal, or a
     # sidecar not given a public address of the host's, fails it.
+    # #399: the probe's own argv reads a 0600 keys file of the runner's as its
+    # owner as the engine shows it (--user 0:0 on rootless podman, the runner's
+    # uid:gid on rootful docker, where the image's root with no capability
+    # cannot).
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -212,7 +216,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The egress probe the way a task runs, behind its egress sidecar (a task network's gateway, made as the dispatcher makes it, and the host's loopback too) and a legacy project on ${{ matrix.engine }}
+      - name: The egress probe the way a task runs, behind its egress sidecar (a task network's gateway, made as the dispatcher makes it, and the host's loopback too), the probe reading owner-only keys as their owner (#399), and a legacy project on ${{ matrix.engine }}
         run: bash tests/agent-install.sh ${{ matrix.engine }}
 
   emulated-lane:
