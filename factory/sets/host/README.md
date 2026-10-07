@@ -58,6 +58,9 @@ to use the socket and the work root. The template leaves it out (design v2
 agent's overlay (`agent.yml`, beside its labels, #315) adds it for such a
 host.
 
-The legacy files (`factory/host/{compose.yml,setup.sh,rollout.sh,register.sh}`,
-`factory/image/compose.yml`) stay unchanged until the switches of design v2
-§21; this set is a new template, not a copy of them.
+This set is the only one a host runs (design v2 §4.1, S3: one bundle, one
+service). The legacy compose files from before hosts, with their role
+containers and the updater that rolled them out, left the repository once
+every host had switched (#346, design v2 §21.4); `factory/host/` keeps the
+root-only `prep-root.sh` a new Linux host runs once, and a Mac's
+`prep-mac.sh`.

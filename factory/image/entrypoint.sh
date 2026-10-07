@@ -1,56 +1,10 @@
 #!/usr/bin/env bash
-# omarchy-worker — one image, one command, for a maintainer's legacy sets
-# until P3 (contributors run no worker since #343; a new machine is a host).
+# omarchy-worker — one image, one command: what a maintainer host's dispatcher
+# starts (design v2 §9, #335, #336), and, until the last of them is retired
+# (#346), what a legacy registration from before hosts still runs.
 #
-# The registration behind OMARCHY_WORKER_TOKEN decides what this container
-# does:
+# OMARCHY_WORKER_ROLE names what this container is:
 #
-#   community trust  → a community worker: one task per container, built
-#                      right here, any contributor's package (#343: the
-#                      pool ignores WORKER_SHARED), the result into that
-#                      contributor's staging workspace; an agent key —
-#                      ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY or
-#                      XAI_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN for a Claude
-#                      subscription — brings the owner's agent.
-#   project trust    → the project's worker: the pool's jobs and the rebuild
-#                      of approved packages, each in a fresh sibling
-#                      container through the runtime's socket mounted at
-#                      /var/run/docker.sock (docs: /docs/workers); with an
-#                      agent key it also audits staged builds for the
-#                      maintainers (the second agent).
-#
-# OMARCHY_WORKER_ROLE names one of the three containers the project runs
-# (docs: /docs/workers — *The three roles*), and is optional: without it the
-# trust decides everything, as above. With it:
-#
-#   pool       a project worker for the pool's own jobs only — sync, render,
-#              promote, rollback, health, security, enqueue, gc, verify;
-#              never a build, never an audit. No agent key needed.
-#   review     a project worker for the maintainers' work only — the rebuild
-#              of approved packages and the audit of staged builds (the
-#              second agent, so it wants an agent key); never a pool job.
-#   community  a community worker: builds any contributor's package,
-#              drafts PKGBUILDs for package requests with its owner's
-#              agent key (WORKER_SHARED=1 is set, and ignored since #343).
-#   broker     no build here: the one process on this host that holds the
-#              credentials (factory/bin/broker, :8790) — the worker's token,
-#              the agent's key, GITHUB_TOKEN — and only receives, processes
-#              and answers: the pool's calls for the one task it claimed,
-#              the agent, GitHub read-only. A community builder runs beside
-#              it with OMARCHY_BROKER=http://broker:8790 and nothing else.
-#              `agent` is the same role without a worker token: the agent
-#              and GitHub served to build containers that cannot run the
-#              agent themselves (the project's review builds; the emulated
-#              x86_64 worker, where Claude Code's binary dies under qemu).
-#              On a maintainer host it is a task's agent sidecar (#336): its
-#              keys come from the read-only file OMARCHY_AGENT_ENV names
-#              (OMARCHY_SECRETS_DIR/agent.env), never from the environment
-#              the engine shows; `agent --probe` answers the probe sidecar's
-#              one question and exits.
-#   egress     a task's egress sidecar on a maintainer host (#336, design v2
-#              §9.4): `pkg-repo egress`, a forward proxy that allows CONNECT,
-#              GET and HEAD to public addresses only. No token, no key, no
-#              mount; the dispatcher starts one per task.
 #   dispatcher a maintainer host's one service (the host set, factory/sets/host;
 #              design v2 §9, #335): `pkg-repo dispatch` — it claims as many
 #              tasks as the host's capacity allows and runs each in one
@@ -60,20 +14,37 @@
 #              agent's run/host/dispatcher/token, #327), never a value in
 #              its environment; it holds no agent key and refuses a package
 #              signing key.
+#   egress     a task's egress sidecar (#336, design v2 §9.4): `pkg-repo
+#              egress`, a forward proxy that allows CONNECT, GET and HEAD to
+#              public addresses only. No token, no key, no mount; the
+#              dispatcher starts one per task.
+#   agent      a task's agent sidecar (#336, design v2 §9.5): factory/bin/broker
+#              serving the agent in the Anthropic Messages shape and GitHub
+#              read-only, to its own task only, within the caps the
+#              dispatcher set. Its keys come from the read-only file
+#              OMARCHY_AGENT_ENV names (OMARCHY_SECRETS_DIR/agent.env), never
+#              from the environment the engine shows; a worker token is never
+#              its. `agent --probe` answers the probe sidecar's one question
+#              and exits.
+#
+# A legacy registration's token, with no role or with pool, review or
+# community, still starts what it started before hosts — `pkg-repo work` for a
+# project-trusted one, the build script's container mode for a community one —
+# for whatever is left of those sets until its registration is retired (design
+# v2 §21.4: `:latest` stays published and signed for anything left). Nothing
+# new starts them: no legacy registration is made any more (POST
+# /factory/workers answers 410), the sets' compose files, their updater
+# (omarchy-rollout) and the broker that relayed a builder's pool calls are gone
+# (#346), and a maintainer's machine joins as a host (/docs/worker-host).
 #
 # OMARCHY_WORKER_TOKEN_FILE names a file holding the worker token, and wins
 # over OMARCHY_WORKER_TOKEN, whose value anyone who can talk to the runtime's
 # socket reads with `docker inspect` (design v2 §14, D15). The plain variable
 # keeps working: a container started from an older release carries it there.
 #
-# OMARCHY_BROKER makes this container a builder: it holds no token and no
-# key, asks the broker who it is, builds one task and exits (/docs/security-model,
-# *Isolation*; /docs/workers#secrets).
-#
-# A role reports itself in the worker's labels ("role"), so the Workers page
-# shows what each container is for. Extra arguments go to `pkg-repo work`
-# in project mode (--idle-exit, --once; --kind and --labels are the role's
-# when a role is set); in community mode they are ignored.
+# A role reports itself in the worker's labels ("role"). Extra arguments go to
+# `pkg-repo dispatch` and `pkg-repo egress`, and to `pkg-repo work` for a
+# legacy project registration.
 set -euo pipefail
 : "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
 # Claude Code, for a Claude subscription as the agent (CLAUDE_CODE_OAUTH_TOKEN):
@@ -101,7 +72,12 @@ ensure_claude() { # returns non-zero when Claude Code is not there after it
 }
 
 role="${OMARCHY_WORKER_ROLE:-}"
-case "$role" in ""|pool|review|community|agent|broker|updater|dispatcher|egress) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker, agent, updater, dispatcher or egress (or unset)" >&2; exit 2 ;; esac
+case "$role" in
+  ""|pool|review|community|agent|dispatcher|egress) ;;
+  # The legacy sets' updater and broker are gone (#346): a container that still asks for one says what replaced it.
+  updater|broker) echo "omarchy-worker: the $role role is gone (#346): legacy sets retired with the move to the host agent, and a maintainer's machine joins as a host (https://omarchy-pool.org/docs/worker-host)" >&2; exit 2 ;;
+  *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be dispatcher, egress or agent (or, for a legacy registration not yet retired, pool, review, community or unset)" >&2; exit 2 ;;
+esac
 if [[ "$role" == egress ]]; then
   exec pkg-repo egress "$@"
 fi
@@ -133,17 +109,6 @@ load_agent_env() {
     esac
   done < "$file"
 }
-# The updater: the compose project (COMPOSE_DIR, mounted at the same path)
-# follows the pool's release through the runtime's socket
-# (factory/bin/omarchy-rollout) — as a service it asks the pool every two
-# minutes and rolls the set out when the release changes or an Update is
-# open for one of its workers (#277), once with --once when no updater runs
-# (omarchy-worker update), what changed replaced together, itself last. No
-# token, no key.
-if [[ "$role" == updater ]]; then
-  [[ -S /var/run/docker.sock ]] || { echo "omarchy-worker: the updater needs the runtime's socket at /var/run/docker.sock" >&2; exit 2; }
-  exec /usr/local/lib/omarchy-factory/bin/omarchy-rollout "${@:---loop}"
-fi
 if [[ "$role" == dispatcher ]]; then
   sock="${DOCKER_HOST:-unix:///var/run/docker.sock}"; sock="${sock#unix://}"
   [[ "$sock" == *://* || -S "$sock" ]] || { echo "omarchy-worker: the dispatcher starts task containers through the runtime's socket; mount it at $sock" >&2; exit 2; }
@@ -156,55 +121,25 @@ if [[ "$role" == dispatcher ]]; then
   fi
   exec pkg-repo dispatch "$@"
 fi
-if [[ "$role" == agent && -n "${OMARCHY_AGENT_ENV:-}" ]]; then
-  # A task's agent sidecar, or the probe's: never the pool's path, whatever the environment says.
+if [[ "$role" == agent ]]; then
+  # A task's agent sidecar, or the probe's: no worker token, whatever the environment says; its keys from the read-only file
+  # OMARCHY_AGENT_ENV names. Claude Code is installed at first start when the subscription token is the agent.
   unset OMARCHY_WORKER_TOKEN OMARCHY_WORKER_TOKEN_FILE FACTORY_TOKEN
-  load_agent_env "$OMARCHY_AGENT_ENV" || exit 2
-fi
-if [[ "$role" == agent && "${1:-}" == --probe ]]; then
-  ensure_claude || echo "omarchy-worker: Claude Code did not install" >&2
+  if [[ -n "${OMARCHY_AGENT_ENV:-}" ]]; then load_agent_env "$OMARCHY_AGENT_ENV" || exit 2; fi
+  ensure_claude || echo "omarchy-worker: Claude Code did not install; the agent answers 502 until it does" >&2
   export PATH="$HOME/.local/bin:$PATH"
-  exec python3 /usr/local/lib/omarchy-factory/bin/agent.py --probe
+  if [[ "${1:-}" == --probe ]]; then exec python3 /usr/local/lib/omarchy-factory/bin/agent.py --probe; fi
+  exec python3 /usr/local/lib/omarchy-factory/bin/broker
 fi
-# The roles that hold the worker token read it from the environment — the broker, the
-# pool's answer below, pkg-repo work, the build worker: the file's value goes there, into
-# this container's processes only, never into its configuration. A builder behind a broker
-# holds none (below), and neither does the agent role.
-if [[ -n "${OMARCHY_WORKER_TOKEN_FILE:-}" && -z "${OMARCHY_BROKER:-}" && "$role" != agent ]]; then
+# A legacy registration's token, read from the environment by the pool's answer below,
+# pkg-repo work and the build worker: the file's value goes there, into this container's
+# processes only, never into its configuration.
+if [[ -n "${OMARCHY_WORKER_TOKEN_FILE:-}" ]]; then
   OMARCHY_WORKER_TOKEN="$(token_from_file)" || exit 2
   export OMARCHY_WORKER_TOKEN
   unset OMARCHY_WORKER_TOKEN_FILE
 fi
-if [[ "$role" == broker || "$role" == agent ]]; then
-  # The broker: the credentials stay here. Claude Code is installed the
-  # same way a worker installs it when the subscription token is the agent.
-  ensure_claude || echo "omarchy-worker: Claude Code did not install; the broker will answer 502 to the agent's calls until it does" >&2
-  export PATH="$HOME/.local/bin:$PATH"
-  exec python3 /usr/local/lib/omarchy-factory/bin/broker
-fi
-if [[ -n "${OMARCHY_BROKER:-}" ]]; then
-  # A builder behind a broker: no token, no key — ask the broker who this
-  # worker is. The broker may still be starting (installing the agent).
-  OMARCHY_BROKER="${OMARCHY_BROKER%/}"
-  for k in OMARCHY_WORKER_TOKEN OMARCHY_WORKER_TOKEN_FILE FACTORY_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY XAI_API_KEY GITHUB_TOKEN; do
-    [[ -n "${!k:-}" ]] && echo "omarchy-worker: $k is set on a builder behind a broker; it belongs on the broker — ignoring it" >&2 && unset "$k"
-  done
-  self=""; for _ in $(seq 1 40); do
-    self="$(curl -sS --fail-with-body --max-time 30 "$OMARCHY_BROKER/pool/factory/workers/self" 2>&1)" && break
-    echo "omarchy-worker: waiting for the broker at $OMARCHY_BROKER: $self" >&2; self=""; sleep 15
-  done
-  [[ -n "$self" ]] || { echo "omarchy-worker: no broker answered at $OMARCHY_BROKER in ten minutes" >&2; exit 2; }
-  id="$(jq -r .id <<<"$self")"; trust="$(jq -r .trust <<<"$self")"; arch="$(jq -r .arch <<<"$self")"; owner="$(jq -r '.owner // ""' <<<"$self")"
-  host_arch="$(uname -m)"; [[ "$host_arch" == arm64 ]] && host_arch=aarch64
-  [[ "$trust" == community ]] || { echo "omarchy-worker: $id is project-trusted; a project worker runs pkg-repo work with the runtime's socket, not behind a broker (docs: /docs/workers#project)" >&2; exit 2; }
-  [[ "$arch" == "$host_arch" ]] || { echo "omarchy-worker: $id is registered for $arch but this machine is $host_arch" >&2; exit 2; }
-  [[ "$role" == community ]] && export WORKER_SHARED=1
-  labels="$(jq -cn --argjson l "${WORKER_LABELS:-"{}"}" --arg r "$role" 'if $r == "" then $l else $l + {role: $r} end')"
-  export WORKER_LABELS="$labels" WORKER_ID="$id"
-  echo "omarchy-worker: $id — ${owner:-?}'s builder ($arch) behind the broker at $OMARCHY_BROKER; one task per container${WORKER_SHARED:+, shared}" >&2
-  exec omarchy-build-worker --container
-fi
-: "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_TOKEN is required: register a worker on your page, /user/<login> (maintainers only) (or OMARCHY_BROKER, the broker that holds it)}"
+: "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_ROLE is required: dispatcher, egress or agent, as a maintainer host starts them (or OMARCHY_WORKER_TOKEN, for a legacy registration not yet retired)}"
 
 self="$(curl -sS --fail-with-body --max-time 30 "$OMARCHY_API/api/v1/factory/workers/self" -H "authorization: Bearer $OMARCHY_WORKER_TOKEN" 2>&1)" \
   || { echo "omarchy-worker: the pool did not accept this token: $self" >&2; exit 2; }
@@ -243,11 +178,6 @@ export WORKER_LABELS="$labels"
 
 case "$mode" in
   project)
-    # Its id, where its set's updater reads it through the engine (#277): the updater names this worker to the pool's follow with it, and
-    # never sees the token. Root-owned, readable, beside the instance pkg-repo work writes (its own container's proof, §1.14).
-    run_dir="${OMARCHY_RUN_DIR:-/run/omarchy}"
-    if mkdir -p "$run_dir" 2>/dev/null && printf '%s\n' "$id" > "$run_dir/worker-id" 2>/dev/null; then chmod 0644 "$run_dir/worker-id" 2>/dev/null || true
-    else echo "omarchy-worker: could not write $run_dir/worker-id; its set's updater cannot name $id to the pool, and follows the pool's release alone" >&2; fi
     # The runtime's socket (DOCKER_HOST, unix:///var/run/docker.sock in the image).
     sock="${DOCKER_HOST:-unix:///var/run/docker.sock}"; sock="${sock#unix://}"
     if [[ "$sock" != *://* && ! -S "$sock" ]]; then

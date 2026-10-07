@@ -15,9 +15,9 @@ name: Rollback
 # `:<arch>-vX.Y.Z` images, and `:latest` at its `:vX.Y.Z`, each signed; the
 # Worker deployed from the tag with POOL_VERSION set to it (no migration:
 # they are forward-only) — a deploy that fails puts the tags back where they
-# were; a `deploy` event; the running version checked. Then every updater
-# sees the pool's release change within two minutes and follows it down, as
-# it follows a release up. The same permissions and environment as
+# were; a `deploy` event; the running version checked. Then every host's
+# agent goes down to that release on the signed statement (§5.3), as it
+# follows a release up. The same permissions and environment as
 # release.yml's image and deploy jobs, and its concurrency group: a rollback
 # and a release never run at once. Its one job both signs and deploys, so it
 # runs in the pool environment, which admits main only and waits for a

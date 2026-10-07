@@ -7,8 +7,7 @@
 # - worker-image (a matrix leg per architecture) pushes the version's own
 #   `:<arch>-vX.Y.Z` only, then runs tests/image-smoke.sh on it; it moves,
 #   tags or signs nothing else. One leg's smoke start that fails moves no
-#   tag at all — not even the other architecture's, which the Studio's
-#   builders, brokers and agent proxy follow.
+#   tag at all — not even the other architecture's.
 # - worker-image-manifest needs both legs, and moves the version's
 #   multi-arch `:vX.Y.Z` only (the mark that both smoke starts passed, which
 #   rollback.yml requires, and the index host-bundle signs), signed.

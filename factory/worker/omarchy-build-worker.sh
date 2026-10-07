@@ -3,15 +3,12 @@
 #
 # Two modes, both inside a container, never on a host by hand:
 #
-#   --container  the Omarchy Packaging image (a contributor's worker): claims
-#                one community task, builds it right here, uploads the result
-#                to the contributor's staging workspace and exits; a wrapper
-#                (compose restart) starts the next container. No key, no
+#   --container  the Omarchy Packaging image under a legacy community
+#                registration not yet retired (#346): claims one community
+#                task, builds it right here, uploads the result to the
+#                contributor's staging workspace and exits; a wrapper (its
+#                restart policy) starts the next container. No key, no
 #                publish credential: community results never touch the pool.
-#                With OMARCHY_BROKER it holds no token either: the broker
-#                beside it (factory/bin/broker) holds the worker's token, the
-#                agent's key and GitHub's, and passes the pool's calls for
-#                the one task it claimed — this container is born with nothing.
 #   --inside     called by `pkg-repo work` (a project worker) in a FRESH Arch
 #                container per task (x86_64: archlinux:base-devel, aarch64:
 #                menci/archlinuxarm:base-devel): fetch the PKGBUILD at the
@@ -29,9 +26,8 @@
 # never reach the build: hold_secrets, below):
 #   OMARCHY_API            https://pkgs.omarchy-pool.org
 #   OMARCHY_POOL           https://pool.omarchy-pool.org (builds can depend on earlier factory builds)
-#   OMARCHY_BROKER         http://broker:8790 — the broker that holds the credentials; then none of the next three is needed here
 #   OMARCHY_WORKER_TOKEN   this worker's token (POST /factory/workers, shown once); FACTORY_TOKEN is an accepted alias
-#   WORKER_ID              the registered worker id (shown with the token; the image reads it from the broker)
+#   WORKER_ID              the registered worker id (shown with the token; the image reads it from the pool)
 #   WORKER_LABELS          JSON shown on the Workers page (the id's tooltip), e.g. {"where":"laptop"}
 #   WORKER_SHARED          ignored by the pool since #343: a community registration builds any contributor's package
 #   ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN
@@ -76,13 +72,11 @@ with_secrets() { # command... — run with the agent's keys in its environment
 # The agent this worker runs, as "<provider>/<model>" (the same choice
 # factory/bin/agent.py makes), or "" without a key — reported at claim time
 # so the Workers page can show it; the key itself never leaves this machine.
-BROKER_AGENT=""  # what the broker's /health says its agent is (provider/model), in broker mode
 # The release this image was built from (the Containerfile sets OMARCHY_IMAGE
 # from the tag; pkg-repo in the image says the same), so the Workers page
 # shows a version, not the word "container". Outside the image: unknown.
 image_version() { echo "${OMARCHY_IMAGE:-$(pkg-repo --version 2>/dev/null | awk '{ print $2 }')}" | grep . || echo container; }
 agent_label() {
-  if [[ -n "${OMARCHY_BROKER:-}" ]]; then echo "$BROKER_AGENT"; return; fi
   local p k m
   for p in anthropic:ANTHROPIC_API_KEY:claude-sonnet-5 claude-code:CLAUDE_CODE_OAUTH_TOKEN:claude-sonnet-5 openai:OPENAI_API_KEY:gpt-5 gemini:GEMINI_API_KEY:gemini-3.6-flash xai:XAI_API_KEY:grok-4; do
     k="${p#*:}"; k="${k%%:*}"; m="${p##*:}"
@@ -99,7 +93,7 @@ agent_label() {
 # — only to a worker whose agent is ok (docs/GOVERNANCE.md, *Workers*).
 #
 # A probe that did not answer is not a verdict for half an hour: the agent
-# behind it may only be starting — a broker installing Claude Code, the
+# behind it may only be starting — Claude Code being installed, the
 # agent proxy replaced in the same rollout (both review workers on the
 # Studio refused at their only check and not ready for 35 minutes after
 # v1.0.0, and again after v1.0.1, until someone restarted them: #273). So
@@ -115,36 +109,13 @@ agent_label() {
 AGENT_STATUS=""; AGENT_ERROR=""; AGENT_CHECKED=0; AGENT_RETRY=0; AGENT_FAILS=0
 agent_probe() {
   local out who status="" error="" ms="?"
-  if [[ -n "${OMARCHY_BROKER:-}" ]]; then
-    # The broker probes its own agent and says who it is; a broker without
-    # an agent is a worker without one. It may still be starting (installing
-    # the agent): a while, not a verdict — twenty tries at start; a re-check
-    # later is one try, and the backoff below spaces them.
-    local tries=0 most=1
-    (( AGENT_CHECKED == 0 )) && most=20
-    while :; do
-      out="$(curl -sS --max-time 180 "$OMARCHY_BROKER/health" 2>/dev/null || true)"
-      [[ -n "$out" ]] && break
-      tries=$((tries + 1)); (( tries < most )) || break
-      sleep 15
-    done
-    if [[ -z "$out" ]]; then
-      who="${BROKER_AGENT:-(not known yet)}, through the broker"; status=error; error="the broker at $OMARCHY_BROKER did not answer"
-    else
-      BROKER_AGENT="$(jq -r '.agent // ""' <<<"$out" 2>/dev/null || true)"; who="$BROKER_AGENT, through the broker"
-      if [[ -z "$BROKER_AGENT" ]]; then status=""
-      elif [[ "$(jq -r '.ok' <<<"$out" 2>/dev/null)" == true ]]; then status=ok; ms="$(jq -r '.ms // "?"' <<<"$out")"
-      else status=error; error="$(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "no answer")"; fi
-    fi
+  [[ -n "$(agent_label)" ]] || { AGENT_STATUS=""; AGENT_ERROR=""; return; }
+  factory_lib
+  who="$(agent_label)"
+  if out="$(with_secrets timeout 120 python3 "$FACTORY_LIB"/bin/agent.py --probe 2>/dev/null)"; then
+    status=ok; ms="$(jq -r '.ms' <<<"$out" 2>/dev/null || echo ?)"
   else
-    [[ -n "$(agent_label)" ]] || { AGENT_STATUS=""; AGENT_ERROR=""; return; }
-    factory_lib
-    who="$(agent_label)"
-    if out="$(with_secrets timeout 120 python3 "$FACTORY_LIB"/bin/agent.py --probe 2>/dev/null)"; then
-      status=ok; ms="$(jq -r '.ms' <<<"$out" 2>/dev/null || echo ?)"
-    else
-      status=error; error="$(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "no answer")"
-    fi
+    status=error; error="$(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "no answer")"
   fi
   [[ "$status" != error || -n "$error" ]] || error="no answer"
   agent_checked "$who" "$status" "$error" "$ms"
@@ -1052,7 +1023,7 @@ failure_facts() { # status log
 # where its agent is, and — once, with the first claim — why the process
 # before it ended on purpose (its note in STATE_DIR, the container's own
 # writable layer: a restart keeps it, a new container starts without). The
-# answer goes through the worker's token (the broker's, behind one), with
+# answer goes through the worker's token, with
 # this process's instance: only its answer counts. Nothing the pool answers
 # ends this script: an answer it cannot read is logged and slept on.
 INSTANCE="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
@@ -1076,10 +1047,10 @@ exit_note_heard() { # the pool answered a claim (a task, orders, nothing, a 426)
 }
 # A line a person or the pool wrote, as this worker prints it: escape sequences and control characters out, one line, 300 characters.
 clean_line() { printf '%s' "$1" | sed $'s/\x1b\\[[0-9;?]*[ -\/]*[@-~]//g; s/\x1b\\][^\x07]*\x07//g' | tr '\n\r\t' '   ' | tr -d '\000-\010\013-\037\177' | cut -c1-300; }
-agent_via() { if [[ -n "${OMARCHY_BROKER:-}" ]]; then echo broker; elif [[ -n "$(agent_label)" ]]; then echo direct; else echo none; fi; }
+agent_via() { if [[ -n "$(agent_label)" ]]; then echo direct; else echo none; fi; }
 # What this process takes: the kinds it executes, drain (it understands the notice), and stop-task (#277, part 2) — it stops its build on
-# the heartbeat's 409 with stop (heartbeat_loop, stop_build), the one word the pool and a broker read as a builder that stops.
-order_kinds() { if [[ -n "${OMARCHY_BROKER:-}" || -n "$(agent_label)" ]]; then echo '["drain","recheck-agent","restart","stop-task"]'; else echo '["drain","restart","stop-task"]'; fi; }
+# the heartbeat's 409 with stop (heartbeat_loop, stop_build), the one word the pool reads as a builder that stops.
+order_kinds() { if [[ -n "$(agent_label)" ]]; then echo '["drain","recheck-agent","restart","stop-task"]'; else echo '["drain","restart","stop-task"]'; fi; }
 answer_order() { # id outcome code detail [agent-json]
   api POST "/factory/workers/self/orders/$1" "$(jq -cn --arg i "$INSTANCE" --arg o "$2" --arg c "$3" --arg d "$4" --argjson a "${5:-null}" '{instance:$i,outcome:$o,code:$c,detail:$d} + (if $a == null then {} else {agent:$a} end)')" >/dev/null 2>&1 \
     || log "order $1: the answer did not reach the pool; it closes the order by what it sees"
@@ -1146,10 +1117,8 @@ claim_body() {
 # key, no publish token: community results never touch the pool directly.
 # shellcheck disable=SC2034  # REPORTED is read by the EXIT trap
 container_worker() {
-  if [[ -z "${OMARCHY_BROKER:-}" ]]; then
-    OMARCHY_WORKER_TOKEN="${OMARCHY_WORKER_TOKEN:-${FACTORY_TOKEN:-}}"
-    : "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_TOKEN (a worker token from POST /factory/workers) is required, or OMARCHY_BROKER (the broker that holds it)}"
-  fi
+  OMARCHY_WORKER_TOKEN="${OMARCHY_WORKER_TOKEN:-${FACTORY_TOKEN:-}}"
+  : "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_TOKEN, the worker token of a legacy registration not yet retired, is required}"
   : "${WORKER_ID:?WORKER_ID (from POST /factory/workers) is required}"
   ARCH="$(uname -m)"; [[ "$ARCH" == arm64 ]] && ARCH=aarch64
   log "container worker $WORKER_ID ($ARCH) preparing"
@@ -1375,11 +1344,11 @@ upload_staging() { # task-id file name
 : "${OMARCHY_POOL:=https://pool.omarchy-pool.org}"
 : "${IDLE_EXIT:=0}"
 : "${MAX_TASKS:=0}"
-# The pool's calls go to the broker when there is one (it adds the worker's
-# token and passes only what a build needs), straight to the pool with the
-# token otherwise. pool_auth fills the caller's `auth` array.
-pool_url() { if [[ -n "${OMARCHY_BROKER:-}" ]]; then echo "${OMARCHY_BROKER%/}/pool$1"; else echo "$OMARCHY_API/api/v1$1"; fi; }
-pool_auth() { auth=(); [[ -n "${OMARCHY_BROKER:-}" ]] || auth=(-H "authorization: Bearer $OMARCHY_WORKER_TOKEN"); }
+# The pool's calls, straight to the pool with the worker's token (the broker that relayed them
+# for a builder born with nothing left with the legacy sets, #346). pool_auth fills the caller's
+# `auth` array.
+pool_url() { echo "$OMARCHY_API/api/v1$1"; }
+pool_auth() { auth=(-H "authorization: Bearer $OMARCHY_WORKER_TOKEN"); }
 api() { # method path [json]
   local method="$1" path="$2" body="${3:-}"
   local -a auth; pool_auth
@@ -1387,17 +1356,12 @@ api() { # method path [json]
     "${auth[@]}" -H "content-type: application/json" \
     ${body:+--data "$body"} -w '\n%{http_code}'
 }
-# With a broker, the agent is spoken to in the Anthropic shape at the
-# broker's address (any key; it never reads it) and GitHub through it.
-if [[ -n "${OMARCHY_BROKER:-}" ]]; then
-  export FACTORY_PROVIDER=anthropic ANTHROPIC_BASE_URL="${OMARCHY_BROKER%/}" ANTHROPIC_API_KEY=via-broker GITHUB_API="${OMARCHY_BROKER%/}/github"
-fi
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
 # The smoke start of this image's builder (#277): the release starts every role of the image before any tag moves
 # (tests/image-smoke.sh), and this is the builder's. It reads the claim answers a pool may send as the loop reads them — an order
 # and no task, a task, a task whose rest it cannot read, an answer it cannot read at all — builds the claim it would send, and exits
-# 0. Nothing reaches a pool or a broker; nothing is installed.
+# 0. Nothing reaches a pool; nothing is installed.
 self_test() {
   local id orders task bad body
   id="wo_$(printf '%032d' 0)"

@@ -1,52 +1,42 @@
 #!/usr/bin/env python3
-"""The broker: the one process on a worker host that holds credentials.
-
-It only receives, processes and answers. Beside it, on a private network,
-a builder is born with nothing — no token, no key — builds one task and
-dies; whatever the recipe or the upstream's build does with `env` or
-`curl`, there is nothing to take (/docs/security-model, *Isolation*; /docs/workers
-#secrets). Three things pass through, each on its own path:
-
-    the pool     ANY  /pool/<path>      → $OMARCHY_API/api/v1/<path> with the worker's token
-                                          (OMARCHY_WORKER_TOKEN), for the calls a build needs:
-                                          workers/self, claim, then heartbeat, artifacts, complete
-                                          and fail for the ONE task this broker claimed — one
-                                          task at a time, another task's id is a 403. The job
-                                          token the pool hands out at claim and heartbeat is
-                                          stripped from the answer: the builder holds nothing
-    the agent    POST /v1/messages      → agent.complete() over whichever provider the environment
-                                          names (factory/bin/agent.py) — the Anthropic Messages shape
-                                          in and out, so the builder speaks to it as FACTORY_PROVIDER=
-                                          anthropic, ANTHROPIC_BASE_URL=http://broker:8790 and any key
-                 GET  /health           → the probe, plus who the agent really is ("agent": provider/model);
-                                          on an agent sidecar, liveness only (no completion)
-    GitHub       GET  /github/<path>    → https://api.github.com/<path> with GITHUB_TOKEN (read-only)
-
-Without OMARCHY_WORKER_TOKEN the pool path is off and this is the agent
-proxy the project's review builds use (the aarch64 host serves the agent
-to build containers that cannot run it — Claude Code's binary dies under
-qemu). Without an agent key the agent path answers 503. The compose network
-is the only caller; nothing here is reachable from outside the host.
-
-One completion at a time, in order — the agent is one subscription; at most
-BROKER_AGENT_CALLS (60) per task, so a runaway recipe cannot spend it.
+"""The broker: a task's agent sidecar, the one process beside it that holds the agent's keys.
 
 On a maintainer host each task that needs a model gets its own copy of this
-process, its **agent sidecar** (#336, design v2 §9.5): no worker token, on
-the task's own network, its keys from a read-only file. BROKER_USAGE_FILE
-names where it writes what it spent ({"calls", "tokens"}, after every
-completion), a directory the task container does not mount, from which the
-dispatcher keeps the host's per-day budget. A sidecar serves one task for
-its whole life, so its caps are the process's: BROKER_AGENT_CALLS
-completions, BROKER_AGENT_TOKENS tokens (as the provider counts them, or
-about four characters each when it says nothing) and
-BROKER_AGENT_WALL_SECONDS from its start; past any of them every completion
-is a 429.
+process (#336, design v2 §9.5): no worker token, on the task's own internal
+network, its keys from a read-only file the task container does not mount
+(OMARCHY_SECRETS_DIR/agent.env, loaded by the image's entrypoint). It only
+receives, processes and answers — whatever the recipe or the upstream's build
+does with `env` or `curl`, the task container holds nothing to take
+(/docs/security-model, *Isolation*). Two things pass through, each on its own
+path:
+
+    the agent    POST /v1/messages      → agent.complete() over whichever provider the keys
+                                          name (factory/bin/agent.py) — the Anthropic Messages
+                                          shape in and out, so the task speaks to it as
+                                          FACTORY_PROVIDER=anthropic, ANTHROPIC_BASE_URL=
+                                          http://<sidecar>:8790 and a placeholder key
+                 GET  /health           → liveness and who the agent is ("agent": provider/model);
+                                          on an agent sidecar no completion (the probe sidecar's
+                                          own `agent.py --probe` is the host's model check)
+    GitHub       GET  /github/<path>    → https://api.github.com/<path> with GITHUB_TOKEN (read-only)
+
+It never relays a call to the pool: the dispatcher makes every pool call of its
+task, before the task container starts and after it exits (design v2 §9.6,
+§10.2). The builder relay of the legacy sets — the pool's calls for one task
+with the worker's token added here — left with them (#346). Without an agent
+key the agent path answers 503.
+
+One completion at a time, in order. A sidecar serves one task for its whole
+life, so its caps are the process's: BROKER_AGENT_CALLS completions (60 by
+default), BROKER_AGENT_TOKENS tokens (as the provider counts them, or about
+four characters each when it says nothing) and BROKER_AGENT_WALL_SECONDS from
+its start; past any of them every completion is a 429. BROKER_USAGE_FILE names
+where it writes what it spent ({"calls", "tokens"}, after every completion), a
+directory the task container does not mount, from which the dispatcher keeps
+the host's per-day budget.
 """
-import calendar
 import json
 import os
-import re
 import sys
 import threading
 import time
@@ -60,16 +50,12 @@ import agent  # noqa: E402
 
 LOCK = threading.Lock()
 PORT = int(os.environ.get("AGENT_PROXY_PORT", os.environ.get("BROKER_PORT", "8790")))
-POOL = os.environ.get("OMARCHY_API", "https://pkgs.omarchy-pool.org").rstrip("/") + "/api/v1"
 GITHUB = "https://api.github.com"
-LEASE_SECONDS = 30 * 60
-# Cloudflare fronts the pool and answers a request without a browser-like
-# or named user agent with 403 "error code: 1010" — urllib's default
-# (Python-urllib/3.x) is one (2026-09-16, the first broker on the Studio).
-# Every request from here says who it is.
+# GitHub, like the Cloudflare edge that answered the first broker on the
+# Studio with 403 "error code: 1010" (2026-09-16), wants a request to say who
+# it is, and urllib's default (Python-urllib/3.x) says nothing useful.
 USER_AGENT = "omarchy-broker/1 (+https://github.com/firemanxbr/omarchy-pool)"
 AGENT_CALLS = int(os.environ.get("BROKER_AGENT_CALLS", "60"))
-UPSTREAM_TIMEOUT = int(os.environ.get("BROKER_UPSTREAM_TIMEOUT", "900"))
 
 
 class Spent:
@@ -77,8 +63,9 @@ class Spent:
     life — its caps are BROKER_AGENT_CALLS, BROKER_AGENT_TOKENS and
     BROKER_AGENT_WALL_SECONDS, and what it spent is written to
     BROKER_USAGE_FILE after every completion (and at start, so a sidecar that
-    made no call says 0). Off without BROKER_USAGE_FILE: the shared agent
-    proxy and the broker keep their per-task count (Held)."""
+    made no call says 0). Off without BROKER_USAGE_FILE: a broker started
+    without one (an older release's agent proxy, for whatever of a legacy set
+    is left) counts nothing, as it never did, and its /health probes the agent."""
 
     def __init__(self):
         self.file = os.environ.get("BROKER_USAGE_FILE", "")
@@ -136,244 +123,6 @@ class Spent:
 SPENT = Spent()
 
 
-def worker_token():
-    return os.environ.get("OMARCHY_WORKER_TOKEN") or os.environ.get("FACTORY_TOKEN") or ""
-
-
-class Held:
-    """The one task this broker's worker holds: its id and how long the
-    lease runs (the claim says; every heartbeat extends it). A builder that
-    died mid-task leaves the lease to expire, as the pool does. And whether
-    the claim that took it declared `stop-task` (#277, part 2): a builder
-    that stops on the pool's word — read from the builder's claim, made
-    before any recipe of the task ran, so no recipe can set it. Declaring
-    `orders` alone is not that: #277's first part takes orders and builds a
-    stopped task on to its end."""
-
-    def __init__(self):
-        self.task = None
-        self.until = 0.0
-        self.agent_calls = 0
-        self.stops = False
-
-    def current(self):
-        if self.task is not None and time.time() >= self.until:
-            sys.stderr.write(f"broker: task {self.task}'s lease expired here; forgetting it\n")
-            self.task, self.until, self.agent_calls, self.stops = None, 0.0, 0, False
-        return self.task
-
-    def take(self, task, lease_expires_at, stops=False):
-        self.task, self.agent_calls, self.stops = task, 0, stops
-        self.extend(lease_expires_at)
-
-    def extend(self, lease_expires_at=None):
-        until = time.time() + LEASE_SECONDS
-        if lease_expires_at:
-            try:
-                until = calendar.timegm(time.strptime(lease_expires_at[:19], "%Y-%m-%dT%H:%M:%S"))
-            except ValueError:
-                pass
-        self.until = until
-
-    def release(self):
-        self.task, self.until, self.agent_calls, self.stops = None, 0.0, 0, False
-
-
-HELD = Held()
-SELF = {"id": None}
-
-# How long after a stopped task is let go — and after the last of its calls still in flight here has returned — the broker passes no
-# claim and no order's answer (#277): the builder kills its build and exits within about 11 s of the stop, or of the upload its shell
-# was in (bash runs the stop's trap once a foreground command returns), and with it every process of its container — a recipe still
-# alive cannot claim, or answer, in between.
-STOP_FENCE_SECONDS = 30
-
-
-class InFlight:
-    """The held task's calls this broker is forwarding now, per task (#277,
-    part 2). A stopped builder may be inside an upload when the stop comes:
-    its shell runs the stop's trap only once that `curl` returns, which a
-    large upload through here makes up to UPSTREAM_TIMEOUT later. So the
-    stop's fence stands while any call of the stopped task is still in
-    flight, and its STOP_FENCE_SECONDS start when the last one returns — a
-    fence on a timer alone would open the claim door while that builder,
-    and whatever a recipe left running in its container, is still alive."""
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.n = {}
-
-    def enter(self, task):
-        with self.lock:
-            self.n[task] = self.n.get(task, 0) + 1
-
-    def leave(self, task):
-        with self.lock:
-            left = self.n.get(task, 1) - 1
-            if left > 0:
-                self.n[task] = left
-            else:
-                self.n.pop(task, None)
-        if left <= 0:
-            STOPPED.returned(task)
-
-    def of(self, task):
-        with self.lock:
-            return self.n.get(task, 0)
-
-
-INFLIGHT = InFlight()
-
-
-class Stopped:
-    """The tasks this broker let go on a stop (#277, part 2). The pool fences
-    a stopped task's lease: it stays leased to this worker until the worker
-    claims again or the lease ends. So until that lease's end — the released
-    hold's, since nothing renews it after the stop — every pinned call for
-    it is refused here, without asking the pool, and it is never adopted
-    again: a recipe's heartbeat, upload or fail in the seconds before its
-    container dies would otherwise take it up, and hold the next builder's
-    claim off for half an hour. An entry ends at its time, or when a claim
-    hands that task out again (a task pinned here comes back, under a new
-    lease). And while a call of the stopped task is still in flight here,
-    then for STOP_FENCE_SECONDS after the stop or after that call returned,
-    whichever is later, no claim and no order's answer passes."""
-
-    def __init__(self):
-        self.until = {}
-        self.fence = 0.0
-        self.task = None
-
-    def add(self, task, until):
-        self.until[task] = until
-        self.task, self.fence = task, time.time() + STOP_FENCE_SECONDS
-
-    def returned(self, task):
-        """The last call of `task` in flight here returned: when it is the stopped one, its builder exits within seconds — the fence runs on from now."""
-        if task is not None and task == self.task and task in self.until:
-            self.fence = max(self.fence, time.time() + STOP_FENCE_SECONDS)
-
-    def in_flight(self):
-        return self.task is not None and INFLIGHT.of(self.task) > 0
-
-    def holds(self, task):
-        until = self.until.get(task)
-        if until is not None and time.time() >= until:
-            self.until.pop(task, None)
-            return False
-        return until is not None
-
-    def clear(self, task):
-        self.until.pop(task, None)
-
-    def fenced(self):
-        return self.fence if (time.time() < self.fence or self.in_flight()) else None
-
-    def fence_words(self):
-        if self.in_flight():
-            return f"a call of it is still in flight here; the next builder claims {STOP_FENCE_SECONDS} s after it returns"
-        return f"the next builder claims from {time.strftime('%H:%M:%S', time.gmtime(self.fence))} UTC"
-
-
-STOPPED = Stopped()
-
-
-class Delivered:
-    """The orders the pool handed this broker's builder (#277): an answer to
-    an order passes only for an id seen in a claim answer that went through
-    here, only while no task is held — a recipe runs only inside a held task,
-    and between tasks the container that ran it is gone — and only once. The
-    oldest are forgotten past 32. A notice (drain) is never answered."""
-
-    MOST = 32
-
-    def __init__(self):
-        self.kinds = {}
-        self.answered = []
-
-    def note(self, answer):
-        for o in (answer or {}).get("orders") or []:
-            if isinstance(o, dict) and not o.get("notice") and isinstance(o.get("id"), str) and re.fullmatch(r"wo_[0-9a-f]{32}", o["id"]):
-                self.kinds[o["id"]] = str(o.get("kind") or "")
-                while len(self.kinds) > self.MOST:
-                    self.kinds.pop(next(iter(self.kinds)))
-
-    def take(self, oid):
-        """(kind, None) when the answer may pass — the id is spent — or (None, (status, error)) when not."""
-        if oid in self.answered:
-            return None, (409, "answered already through this broker")
-        if oid not in self.kinds:
-            return None, (403, "the broker passes an answer only to an order it saw delivered to its builder")
-        self.answered = (self.answered + [oid])[-self.MOST:]
-        return self.kinds.pop(oid), None
-
-
-DELIVERED = Delivered()
-
-
-def pair_restart():
-    """The broker exits with its builder on a restart (#277): the agent is
-    the broker's, so a builder whose agent does not answer is restarted with
-    it, and the restart policy starts both again. The answer's reply goes
-    out first."""
-    sys.stderr.write("broker: the builder accepted a restart; exiting with it (75) so the restart policy starts both again\n")
-    sys.stderr.flush()
-    os._exit(75)
-
-
-def worker_id():
-    """This worker's id, from the pool (once)."""
-    if SELF["id"] is None and worker_token():
-        try:
-            req = urllib.request.Request(POOL + "/factory/workers/self", headers={"authorization": "Bearer " + worker_token(), "user-agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                SELF["id"] = json.load(r).get("id")
-        except (urllib.error.URLError, OSError, ValueError):
-            return None
-    return SELF["id"]
-
-
-def adopt(task):
-    """A broker that restarted mid-build holds nothing, and the builder's next
-    call names a task: the pool says whose lease it is. Ours — leased to this
-    worker, not yet over — is taken up again; anyone else's is not, and
-    neither is one the pool is stopping (#277): its view carries
-    `stop_order` while the fence holds — read past the view's 30 s edge
-    cache (a query of its own), since a copy from before the stop would show
-    none. A broker that restarted between a stop and the requeue has
-    forgotten STOPPED; this covers it. A pool from before #277 has no such
-    field, and fences nothing."""
-    me = worker_id()
-    if not me:
-        return False
-    try:
-        with urllib.request.urlopen(urllib.request.Request(POOL + f"/factory/tasks/{task}?fresh={time.time_ns()}", headers={"user-agent": USER_AGENT}), timeout=30) as r:
-            row = json.load(r).get("task") or {}
-    except (urllib.error.URLError, OSError, ValueError):
-        return False
-    if row.get("stop_order"):
-        sys.stderr.write(f"broker: task {task} is being stopped by the pool; not taken up again\n")
-        return False
-    if row.get("status") == "leased" and row.get("lease_owner") == me:
-        HELD.take(task, row.get("lease_expires_at"))
-        sys.stderr.write(f"broker: adopted task {task} (leased to {me} by the pool)\n")
-        return True
-    return False
-
-# The pool's routes a build needs, and nothing else: (method, regex, pin) — "task" means group 1 must be the held task's id,
-# "order" that group 1 is an order this broker saw delivered to its builder, answered while no task is held, once (#277).
-POOL_ROUTES = [
-    ("GET", re.compile(r"^factory/workers/self$"), None),
-    ("POST", re.compile(r"^factory/claim$"), None),
-    ("POST", re.compile(r"^factory/tasks/(\d+)/heartbeat$"), "task"),
-    ("POST", re.compile(r"^factory/tasks/(\d+)/complete$"), "task"),
-    ("POST", re.compile(r"^factory/tasks/(\d+)/fail$"), "task"),
-    ("PUT", re.compile(r"^factory/tasks/(\d+)/artifacts/[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$"), "task"),
-    ("POST", re.compile(r"^factory/tasks/(\d+)/artifacts/[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}/multipart$"), "task"),
-    ("POST", re.compile(r"^factory/workers/self/orders/(wo_[0-9a-f]{32})$"), "order"),
-]
-
-
 class Handler(BaseHTTPRequestHandler):
     server_version = "omarchy-broker/1"
     protocol_version = "HTTP/1.1"
@@ -402,32 +151,27 @@ class Handler(BaseHTTPRequestHandler):
             return self.health()
         if path.startswith("/github/"):
             return self.github()
-        if path.startswith("/pool/"):
-            return self.pool("GET")
-        return self._json(404, {"error": "GET /health, GET /github/<path>, or /pool/<path>"})
+        # No pool path (#346): the dispatcher makes its task's pool calls, never a sidecar.
+        return self._json(404, {"error": "GET /health or GET /github/<path>"})
 
     def do_POST(self):  # noqa: N802
         path = urllib.parse.urlsplit(self.path).path
         if path == "/v1/messages":
             return self.messages()
-        if path.startswith("/pool/"):
-            return self.pool("POST")
         self._body()
-        return self._json(404, {"error": "POST /v1/messages or /pool/<path>"})
+        return self._json(404, {"error": "POST /v1/messages"})
 
     def do_PUT(self):  # noqa: N802
-        if urllib.parse.urlsplit(self.path).path.startswith("/pool/"):
-            return self.pool("PUT")
         self._body()
-        return self._json(404, {"error": "PUT /pool/<path>"})
+        return self._json(404, {"error": "nothing here takes a PUT"})
 
     # ------------------------------------------------------------- agent --
     def health(self):
         found = agent.provider() if agent.available() else None
-        body = {"ok": False, "agent": "", "task": HELD.current(), "pool": bool(worker_token())}
+        body = {"ok": False, "agent": ""}
         if not found:
             body["error"] = "no agent key on the broker"
-            return self._json(200 if worker_token() else 503, body)
+            return self._json(503, body)
         name, p = found
         if SPENT.on():
             # An agent sidecar's /health is liveness only: its task container reaches it, and a probe
@@ -462,10 +206,6 @@ class Handler(BaseHTTPRequestHandler):
             if refused:
                 return self._json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": refused}})
             max_tokens = SPENT.left(max_tokens)
-        elif HELD.current() is not None:
-            if HELD.agent_calls >= AGENT_CALLS:
-                return self._json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": f"the broker answers at most {AGENT_CALLS} completions per task"}})
-            HELD.agent_calls += 1
         with LOCK:
             agent.USAGE["tokens"] = 0
             try:
@@ -490,126 +230,6 @@ class Handler(BaseHTTPRequestHandler):
             headers["authorization"] = "Bearer " + token
         return self.forward(urllib.request.Request(url, headers=headers, method="GET"), timeout=60)
 
-    # -------------------------------------------------------------- pool --
-    def pool(self, method):
-        split = urllib.parse.urlsplit(self.path)
-        rel = split.path[len("/pool/"):]
-        body = self._body()
-        if not worker_token():
-            return self._json(503, {"error": "this broker holds no worker token; it serves the agent and GitHub only"})
-        for m, rx, pin in POOL_ROUTES:
-            match = rx.match(rel)
-            if m != method or not match:
-                continue
-            pinned = pin == "task"
-            kind = None
-            stops = False
-            if pinned:
-                # A task this broker let go on a stop is never taken up again: refused here, the pool not asked (#277).
-                if STOPPED.holds(int(match.group(1))):
-                    return self._json(403, {"error": f"task {int(match.group(1))} was stopped by the pool; this broker does not take it up again"})
-                held = HELD.current()
-                if held is None and adopt(int(match.group(1))):
-                    held = HELD.current()
-                if held is None or int(match.group(1)) != held:
-                    return self._json(403, {"error": f"the broker passes only the pool's calls for the task it claimed" + (f" ({held})" if held is not None else " (none held)")})
-            elif pin == "order":
-                # A recipe runs only inside a held task: while one is held, no answer passes — nor in the seconds after a stop, while the
-                # stopped builder's container may still run one (#277).
-                held = HELD.current()
-                if held is not None:
-                    return self._json(403, {"error": f"the broker passes an order's answer only between tasks; it holds task {held}"})
-                if STOPPED.fenced():
-                    return self._json(403, {"error": f"task {STOPPED.task} was stopped; no order's answer passes yet — {STOPPED.fence_words()}"})
-                kind, refused = DELIVERED.take(match.group(1))
-                if refused:
-                    return self._json(refused[0], {"error": refused[1]})
-            elif rel == "factory/claim":
-                held = HELD.current()
-                if held is not None:
-                    return self._json(409, {"error": f"the broker holds task {held} until its lease ends; one task at a time"})
-                if STOPPED.fenced():
-                    return self._json(409, {"error": f"task {STOPPED.task} was stopped; {STOPPED.fence_words()}"})
-                # Whether this builder stops on the pool's word: its claim declares stop-task among the orders it takes (#277, part 2) —
-                # orders alone are #277's first part, whose builder builds a stopped task on.
-                try:
-                    kinds = json.loads(body or b"{}").get("orders")
-                    stops = isinstance(kinds, list) and "stop-task" in kinds
-                except (ValueError, AttributeError):
-                    stops = False
-            headers = {"authorization": "Bearer " + worker_token(), "content-type": self.headers.get("content-type", "application/json"), "user-agent": USER_AGENT}
-            if rel == "factory/claim":
-                # This broker exits with its builder on a restart (pair restart, #277): the pool may restart a builder whose agent — this
-                # broker's — does not answer. The header is the broker's own, never one the builder sent.
-                headers["x-omarchy-broker-takes"] = "pair-restart"
-            url = POOL + "/" + rel + (("?" + split.query) if split.query else "")
-            req = urllib.request.Request(url, data=body if body else None, headers=headers, method=method)
-            # A call of the held task, while it is forwarded: a stop that comes meanwhile keeps its fence until it returns (#277).
-            flight = int(match.group(1)) if pinned else None
-            if flight is not None:
-                INFLIGHT.enter(flight)
-            try:
-                status, ctype, out = self.upstream(req, UPSTREAM_TIMEOUT)
-            finally:
-                if flight is not None:
-                    INFLIGHT.leave(flight)
-            # What the pool said back changes what this broker holds — and
-            # the job token it hands out at claim and heartbeat stays here.
-            if rel == "factory/claim" and status in (200, 426):
-                try:
-                    DELIVERED.note(json.loads(out))
-                except (ValueError, AttributeError):
-                    pass
-            if pin == "order" and status == 200 and kind == "restart":
-                try:
-                    accepted = json.loads(body or b"{}").get("outcome") == "accepted"
-                except (ValueError, AttributeError):
-                    accepted = False
-                if accepted:
-                    threading.Timer(3.0, pair_restart).start()
-            if status == 200 and rel == "factory/claim":
-                try:
-                    answer = json.loads(out)
-                    HELD.take(int(answer["task"]["id"]), answer.get("lease_expires_at"), stops)
-                    # Handed out again (requeued, a new lease): no longer the one this broker let go.
-                    STOPPED.clear(HELD.task)
-                    out = self.without_token(answer)
-                    sys.stderr.write(f"broker: holding task {HELD.task}\n")
-                except (ValueError, KeyError, TypeError):
-                    pass
-            elif status == 200 and pinned and rel.endswith("/heartbeat"):
-                try:
-                    answer = json.loads(out)
-                    HELD.extend(answer.get("lease_expires_at"))
-                    out = self.without_token(answer)
-                except (ValueError, AttributeError):
-                    HELD.extend()
-            elif status == 409 and pinned and rel.endswith("/heartbeat"):
-                # The pool took the task back (#277): its heartbeat's 409 says stop — an answer to this broker's own request, with the
-                # worker's token, which neither the builder nor a recipe can fake. A builder that declared stop-task stops on it, so the
-                # hold goes, and the fence starts — standing while any other call of the task is still in flight here; one that did not
-                # (before #277, or its first part) builds on, so its hold stays until its own report or the lease's end — its recipe
-                # cannot claim in between. The 409 goes to the builder unchanged.
-                try:
-                    said = json.loads(out)
-                except ValueError:
-                    said = {}
-                if isinstance(said, dict) and said.get("stop") is True and HELD.task == int(match.group(1)) and HELD.stops:
-                    sys.stderr.write(f"broker: task {HELD.task} was stopped by the pool ({str(said.get('state') or 'stopping')[:16]}); released\n")
-                    STOPPED.add(HELD.task, HELD.until)
-                    HELD.release()
-            elif pinned and (rel.endswith("/complete") or rel.endswith("/fail")) and status < 500:
-                sys.stderr.write(f"broker: task {HELD.task} {'done' if rel.endswith('/complete') else 'failed'} ({status}); released\n")
-                HELD.release()
-            return self._send(status, out, ctype)
-        return self._json(403, {"error": "the broker passes only the pool's calls a build needs: workers/self, claim, and the held task's heartbeat, artifacts, complete and fail"})
-
-    @staticmethod
-    def without_token(answer):
-        for k in ("token", "token_expires_at"):
-            answer.pop(k, None)
-        return json.dumps(answer).encode()
-
     # ---------------------------------------------------------- upstream --
     def upstream(self, req, timeout):
         """(status, content-type, body) — an HTTP error is an answer too."""
@@ -629,16 +249,14 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     have_agent = agent.provider() if agent.available() else None
     serves = []
-    if worker_token():
-        serves.append("the pool for one task at a time (/pool)")
     if have_agent and SPENT.on():
         serves.append(f"the agent {have_agent[0]}/{agent.model_for(*have_agent)} for one task (/v1/messages, at most {AGENT_CALLS} completions, "
                       f"{SPENT.tokens_cap or 'any number of'} tokens, {SPENT.wall or 'no limit of'} s)")
     elif have_agent:
-        serves.append(f"the agent {have_agent[0]}/{agent.model_for(*have_agent)} (/v1/messages, at most {AGENT_CALLS} per task)")
+        serves.append(f"the agent {have_agent[0]}/{agent.model_for(*have_agent)} (/v1/messages)")
     serves.append("GitHub read-only (/github" + (", with a token)" if os.environ.get("GITHUB_TOKEN") else ", 60 requests an hour)"))
-    if not worker_token() and not have_agent:
-        print("broker: neither OMARCHY_WORKER_TOKEN nor an agent key in the environment; serving GitHub only", file=sys.stderr)
+    if not have_agent:
+        print("broker: no agent key in the environment; serving GitHub only", file=sys.stderr)
     SPENT.write()
     print(f"broker: serving {'; '.join(serves)} on :{PORT}", file=sys.stderr)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

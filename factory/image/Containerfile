@@ -1,16 +1,14 @@
-# omarchy-worker — the one image every worker runs, contributor or maintainer.
+# omarchy-worker — the one image a maintainer host runs, in every container it starts.
 #
-# What it does is decided by the registration behind the token it is given
-# (entrypoint.sh): a contributor's worker builds their packages right here,
-# one task per container, into their staging workspace; a project worker —
-# a registration a maintainer trusted — runs `pkg-repo work`: the pool's
-# jobs and the rebuild of approved packages, each in a fresh sibling
-# container through the runtime's socket the operator mounts.
+# What a container of it does is its role (entrypoint.sh): on a maintainer host the
+# `dispatcher` (the host set's one service, `pkg-repo dispatch`), a task's `egress` sidecar
+# and its `agent` sidecar (factory/bin/broker, the agent and GitHub read-only for one task);
+# the task containers themselves start from the build image by digest, never from this one.
 #
-# The image carries no key and no pool credential: the pool signs, and a
-# worker's token only claims; each task runs with the per-job token the
-# claim issues. Whoever runs it brings the token and, for an agent that
-# drafts and corrects PKGBUILDs, their own agent key (Anthropic, OpenAI, Gemini or xAI).
+# The image carries no key and no pool credential: the pool signs, the host's worker token
+# only claims and lives in a read-only file the host set mounts into the dispatcher, and
+# each task runs with the per-job token its claim issues. The host's owner brings the agent
+# keys, in a file only the agent sidecars mount.
 #
 # Arch Linux, both architectures, built by the release workflow from the
 # binaries it just published (the tag is the pool's release) and signed
@@ -33,12 +31,9 @@ ARG TOOLS_URL=https://github.com/firemanxbr/omarchy-pool/releases/download/${POO
 # inspect`: ParseAddr("<nil>")), and the dispatcher lists its networks with it. A bump needs a podman that omits that
 # gateway, or the dispatcher listing networks another way; tests/host-bundle.py holds the pin below 29 until then.
 ARG DOCKER_CLI=27.5.1
-# com.omarchy.updater.follows: this image's updater follows the pool (#277) — it asks GET /factory/follow every two minutes and
-# takes Update. A project worker reports it with its set's rollout, so the pool knows what rolls the set out.
 LABEL org.opencontainers.image.source="https://github.com/firemanxbr/omarchy-pool" \
-      org.opencontainers.image.description="Omarchy Worker: builds for the Omarchy pool — a contributor's packages, or the project's jobs and approved rebuilds" \
-      org.opencontainers.image.licenses="MIT" \
-      com.omarchy.updater.follows="1"
+      org.opencontainers.image.description="Omarchy Worker: a maintainer host's dispatcher and its tasks' sidecars, for the Omarchy pool" \
+      org.opencontainers.image.licenses="MIT"
 # pacman's download sandbox needs privileges a container build does not have.
 RUN sed -i '0,/^\[options\]/s//[options]\nDisableSandboxSyscalls\nDisableSandboxFilesystem/' /etc/pacman.conf \
  && pacman -Syu --noconfirm --needed git curl jq python libarchive gnupg bash ca-certificates sudo namcap pacman-contrib && pacman -Scc --noconfirm
@@ -47,28 +42,28 @@ RUN set -eu; if pacman -S --noconfirm --needed shellcheck >/dev/null 2>&1; then 
       v=v0.11.0; case "${ARCH}" in x86_64) sum=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 ;; aarch64) sum=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588 ;; esac; \
       curl -fsSL -o /tmp/sc.tar.xz "https://github.com/koalaman/shellcheck/releases/download/$v/shellcheck-$v.linux.${ARCH}.tar.xz"; \
       echo "$sum  /tmp/sc.tar.xz" | sha256sum -c -; tar -xJf /tmp/sc.tar.xz -C /tmp; install -m755 "/tmp/shellcheck-$v/shellcheck" /usr/local/bin/shellcheck; rm -rf /tmp/sc.tar.xz "/tmp/shellcheck-$v"; fi
-# The docker CLI, static, pinned by checksum (#308): it talks to whatever Docker-compatible socket is mounted at
-# /var/run/docker.sock (project mode). A new DOCKER_CLI needs both sums again.
+# The docker CLI, static, pinned by checksum (#308): the dispatcher starts every task container and sidecar through
+# whatever Docker-compatible socket the host set mounts at /var/run/docker.sock. A new DOCKER_CLI needs both sums again.
 RUN set -eu; case "$ARCH" in x86_64) sum=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640 ;; aarch64) sum=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817 ;; esac; \
     curl -fsSL -o /tmp/docker.tgz "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_CLI}.tgz"; \
     echo "$sum  /tmp/docker.tgz" | sha256sum -c -; tar -xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker; rm -f /tmp/docker.tgz
-# The compose plugin, pinned by checksum: the updater role (factory/bin/omarchy-rollout) recreates a compose
-# project's services from the new image through the same socket — every worker follows the latest image.
+# The compose plugin, pinned by checksum: the version and sums the host bundle pins for the agent's own compose
+# (factory/bundle/manifest.toml; tests/host-bundle.py holds the two equal), so one compose is in use wherever the
+# release runs one. A new COMPOSE needs both sums again, here and in the manifest.
 ARG COMPOSE=v5.5.1
 RUN set -eu; case "$ARCH" in x86_64) sum=db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576 ;; aarch64) sum=732e3a84c1a0f67256ce80bc2598a24546b10ca05f9faa97efceb1171ece2ef7 ;; esac; \
     curl -fsSL -o /tmp/docker-compose "https://github.com/docker/compose/releases/download/${COMPOSE}/docker-compose-linux-${ARCH}"; \
     echo "$sum  /tmp/docker-compose" | sha256sum -c -; install -Dm755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose; rm -f /tmp/docker-compose
-# The pool's tools, from the release this image is tagged with (project mode).
+# The pool's tools, from the release this image is tagged with: pkg-repo is the dispatcher and the egress sidecar.
 RUN set -eu; name="omarchy-pool-${POOL_RELEASE}-${ARCH}-linux"; \
     curl -fsSL -o /tmp/tools.tgz "${TOOLS_URL}/${name}.tar.gz"; \
     curl -fsSL -o /tmp/tools.tgz.sha256 "${TOOLS_URL}/${name}.tar.gz.sha256"; \
     cd /tmp && echo "$(cut -d' ' -f1 tools.tgz.sha256)  tools.tgz" | sha256sum -c -; \
     tar -xzf /tmp/tools.tgz -C /tmp && install -m 755 "/tmp/${name}"/pkg-repo "/tmp/${name}"/omarchy-cli "/tmp/${name}"/pkg-extract /usr/local/bin/ && rm -rf /tmp/tools.tgz* "/tmp/${name}"
-# The build half and the drafter (community mode), the auditor (project mode
-# with an agent key); pacman runs at first start of a build.
+# The build half and the drafter, the auditor (with an agent key); pacman runs at first start of a build.
 COPY factory/worker/omarchy-build-worker.sh /usr/local/bin/omarchy-build-worker
 COPY factory/image/entrypoint.sh /usr/local/bin/omarchy-worker
-COPY factory/bin/draft-pkgbuild factory/bin/pkgbuild-meta factory/bin/audit-pkgbuild factory/bin/agent.py factory/bin/broker factory/bin/omarchy-rollout /usr/local/lib/omarchy-factory/bin/
+COPY factory/bin/draft-pkgbuild factory/bin/pkgbuild-meta factory/bin/audit-pkgbuild factory/bin/agent.py factory/bin/broker /usr/local/lib/omarchy-factory/bin/
 COPY factory/prompts/pkgbuild.md factory/prompts/audit.md /usr/local/lib/omarchy-factory/prompts/
 COPY factory/skills /usr/local/lib/omarchy-factory/skills/
 # The pool's public key: a build verifies the pool's databases against it without cloning anything.
