@@ -307,6 +307,8 @@ describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)"
     expect(text).toContain("`host-pool-jobs` set to `*`");
     // Move pins here names the Studio's set, never another machine's of the same owner.
     expect(text).toContain("the press names those registrations alone, so another machine's pins never move with them");
+    // The requester-host rule as main holds it: lifted for the maintainer [solo] names (#394).
+    expect(text).toContain("never the project's copy onto its requester's host (D35) — but for the maintainer `[solo]` names, whose own copies their hosts take");
   });
 
   it("the dress rehearsal's VM has qemu's binfmt before stand-in, and says how a long build lands on it", () => {

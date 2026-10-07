@@ -1268,7 +1268,8 @@ refused), is refused server-side to anyone without the right, and writes a
   — the owner's own legacy registrations of the set the host replaces, as
   its page groups them by machine; any other id is refused — move onto the
   host's registration, and only those the host could run once idle — never
-  the project's copy of a package onto its requester's host (D35), never a
+  the project's copy of a package onto its requester's host (D35) but for
+  the maintainer `[solo]` names (#394), never a
   `needs_native` task onto an emulated lane, never a contributor's recipe
   onto an emulated lane beside a sandbox (#330), never one whose pin chose
   an agent the host does not run, never a size its pool cap leaves no room

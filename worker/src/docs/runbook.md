@@ -3092,7 +3092,9 @@ no TPM: …*, isolation `root (dedicated)` with the box's
 set* card (`omarchy-pool` running, `/srv/omarchy-pool`, nothing under
 *Retiring now*), *Pool cap: 3 units*, the release it applied and its last
 round, and its leases, each with a Stop. The canary takes community and
-project builds on both lanes and audits from the start; **pool jobs from
+project builds on both lanes and audits from the start — the project's
+copies of its owner's own packages too while `[solo]` names them (*The
+solo-maintainer exception*, below); **pool jobs from
 mid-P2**, once the P1 host has run them for a week: add its name to
 `host-pool-jobs` (*Pool jobs on hosts*, above). The dispatcher's memory
 check before every claim keeps it off the legacy set's memory: *Diagnostics*
@@ -3242,7 +3244,9 @@ npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, arch, trust,
    another machine's pins never move with them. Each moves onto the
    host's registration where the host could run it once idle — a lane for
    it, `needs_native` kept, never the project's copy onto its requester's
-   host (D35), the agent its pin chose, its size under the pool's cap —
+   host (D35) — but for the maintainer `[solo]` names, whose own copies
+   their hosts take (*The solo-maintainer exception*, below) —, the agent
+   its pin chose, its size under the pool's cap —
    and says so on its page; the rest stay, each said with why, and go to
    the queue three minutes into their registration's drain. A task pinned
    to a drained registration otherwise waits for it until that sweep, and

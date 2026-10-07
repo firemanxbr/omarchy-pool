@@ -1400,6 +1400,9 @@ describe("the switch's pins (#345, design v2 §21.1 step 4): a task pinned to a 
     expect(repinRefusal(studio(), pinned({ name: "mine", ...copyOf(["m1"]) }), T0, R, 4)).toBe("the project's copy of mine is not built on its requester's host (D35)");
     // Released to any host by another maintainer, it moves.
     expect(repinRefusal(studio(), pinned({ ...copyOf(["m1"]), any_host: "m2" }), T0, R, 4)).toBeNull();
+    // While the solo-maintainer exception names m1 (#394), m1's own copy is m1's hosts' to build: it moves; one naming m2 lifts nothing for m1.
+    expect(repinRefusal(studio(), pinned({ name: "mine", ...copyOf(["m1"], { solo: "m1" }) }), T0, R, 4)).toBeNull();
+    expect(repinRefusal(studio(), pinned({ name: "mine", ...copyOf(["m1"], { solo: "m2" }) }), T0, R, 4)).toBe("the project's copy of mine is not built on its requester's host (D35)");
     expect(repinRefusal(host("m1-arm", "aarch64", 7, { owner: "m1" }), pinned({ arch: "x86_64" }), T0, R, 4)).toBe("it has no lane for x86_64");
     // A sandbox keeps a contributor's build off its emulated lane (#330).
     expect(repinRefusal(studio({ sandbox: true }), pinned({ arch: "x86_64", trust: "community" }), T0, R, 4)).toContain("emulated beside a sandbox");

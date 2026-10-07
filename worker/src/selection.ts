@@ -555,10 +555,11 @@ export function notClaiming(m: Member, now: number): string | null {
  * Why a queued task pinned to one of a maintainer's legacy registrations does not move onto their host's registration `m` (#345, design
  * v2 §21.1 step 4: the switch moves the pins of the legacy set it drains), or null when it moves: only where the host could run it once
  * idle — a lane allowed for it, `needs_native` kept, the project's copy never onto its requester's host (D35, unless released to any
- * host), the agent its pin chose (`agent`: a review rebuild's `params.agent`, the claimed worker's — the maintainer's choice, which a
- * move keeps or does not make), and room for it at its size under the pool's cap, an agent slot for model work, its disk (`mayRun`).
- * A task the host could never take would wait on it as it waits on the drained registration; one left where it is goes to the queue
- * once that registration's drain has held UNPIN_AFTER_DRAIN_MINUTES (orders.ts), so none is stranded either way.
+ * host, or the requester is the maintainer the solo-maintainer exception names, #394: `requesterHost`), the agent its pin chose
+ * (`agent`: a review rebuild's `params.agent`, the claimed worker's — the maintainer's choice, which a move keeps or does not make), and
+ * room for it at its size under the pool's cap, an agent slot for model work, its disk (`mayRun`). A task the host could never take
+ * would wait on it as it waits on the drained registration; one left where it is goes to the queue once that registration's drain has
+ * held UNPIN_AFTER_DRAIN_MINUTES (orders.ts), so none is stranded either way.
  */
 export function repinRefusal(m: Member, c: Candidate, now: number, r: Rules, largest: number, held: readonly Held[] = [], agent: string | null = null): string | null {
   const claiming = notClaiming(m, now);
