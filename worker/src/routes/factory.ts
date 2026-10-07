@@ -14,7 +14,7 @@ import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALI
 import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, requeueRevoked, revokedRefusal, stopError } from "../lease";
 import { asleepNow, freshSince, parseCapacity, poolJobsOn, sandboxApplied, sandboxAppliedOf, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, HOST_REPORT_FRESH_MIN, hostClaimRefusal, MAX_SIZE, MIN_HOST, poolBehindOf, REVERTED_COLUMNS, revertedOf, SOAK_COLUMNS, soakOf, TASK_UNITS, type Capacity, type HostClaimRow, type PoolBehind, type RevertedColumns } from "../hosts";
-import { largestSize, ownerCap, ownersLeased, placementOf, reserve, roomOf, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules, type Scope } from "../selection";
+import { largestSize, notClaiming, ownerCap, ownersLeased, placementOf, repinRefusal, reserve, roomOf, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules, type Scope } from "../selection";
 import { afterBuild, afterOom, learnedOf, peakBelowMb, shippedSizing, sizingView, DECAY_AFTER, type Learned, type Sizing } from "../sizing";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
@@ -1030,6 +1030,72 @@ export async function placements(env: Env, ids: number[], at = Date.now()): Prom
 /** The queued tasks Review asks the placement of, by their primary keys, as the claim reads them — with their package page's size and budget, and its learned size. */
 export const PLACEMENTS_SQL = `SELECT ${candidateCols("c")}, json_extract(c.params, '$.any_host.at') AS any_host_at, p.size AS page_size, p.disk_gb AS page_disk_gb, p.learned_size
   FROM build_tasks c LEFT JOIN factory_packages p ON p.name = c.name WHERE c.id IN (SELECT value FROM json_each(?)) AND +c.status = 'queued'`;
+
+/** One owner's legacy registrations that may still hold a pin: not revoked (a revoke unpins at once, contributors.ts handleRevokeWorker). One binding: the owner. */
+const LEGACY_OF_OWNER = "SELECT id FROM build_workers WHERE owner = ? AND kind = 'legacy' AND revoked_at IS NULL";
+/** How many pinned tasks one press weighs: the oldest; a second press takes the rest. */
+export const LEGACY_PINS_LIMIT = 200;
+/**
+ * The queued tasks pinned to one maintainer's legacy registrations (#345, design v2 §21.1 step 4), as the claim reads them, with their
+ * package page's size and budget and its learned size: the queue through its own index (status first — the queue's rows, bounded, as
+ * orders.ts DRAINED_PINS_SQL walks it), each pin against that owner's legacy registrations, a few rows. One binding: the owner.
+ */
+export const LEGACY_PINS_SQL = `SELECT ${candidateCols("c")}, p.size AS page_size, p.disk_gb AS page_disk_gb, p.learned_size
+  FROM build_tasks c LEFT JOIN factory_packages p ON p.name = c.name
+ WHERE c.status = 'queued' AND c.pinned_to IN (${LEGACY_OF_OWNER}) ORDER BY c.id LIMIT ${LEGACY_PINS_LIMIT}`;
+/** How many queued tasks each of one maintainer's legacy registrations holds pinned (the host page's Legacy set card): the same walk. One binding: the owner. */
+export const LEGACY_PIN_COUNTS_SQL = `SELECT pinned_to AS worker, COUNT(*) AS n FROM build_tasks WHERE status = 'queued' AND pinned_to IN (${LEGACY_OF_OWNER}) GROUP BY pinned_to ORDER BY pinned_to`;
+/**
+ * The move (#345): each task the read found movable, while it is still queued and pinned to one of that owner's legacy registrations —
+ * a claim that took it meanwhile, or another press that moved it first, leaves it — onto the host's registration, with a word on the
+ * task for its page: the registration it was asked for (the row's value before this statement, as SQLite evaluates every SET
+ * expression), the one it moved to, by whom and when. Bindings: the host's registration, the person, the time, the tasks (JSON), the owner.
+ */
+export const REPIN_SQL = `UPDATE build_tasks SET pinned_to = ?1, params = json_set(COALESCE(params, '{}'), '$.repinned', json_object('from', pinned_to, 'to', ?1, 'by', ?2, 'at', ?3))
+ WHERE id IN (SELECT value FROM json_each(?4)) AND +status = 'queued' AND pinned_to IN (SELECT id FROM build_workers WHERE owner = ?5 AND kind = 'legacy' AND revoked_at IS NULL)`;
+/** The tasks one move took, as they stand after it (its line's payload): by their primary keys, the ones carrying this press's word. Bindings: the tasks (JSON), the host's registration, the time. */
+export const REPINNED_SQL = "SELECT json_group_array(id) AS moved FROM build_tasks WHERE id IN (SELECT value FROM json_each(?1)) AND pinned_to = ?2 AND json_extract(params, '$.repinned.at') = ?3";
+/** A move's journal line (#345), only if the move took a task: its payload's `moved` what REPINNED_SQL reads after it. Bindings: the summary, the payload, the tasks, the host's registration, the time. */
+export const REPIN_LINE_SQL = "INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'ok', ?1, json_set(?2, '$.moved', json((" + REPINNED_SQL.replace("?3", "?5").replace("?2", "?4").replace("?1", "?3") + "))) WHERE changes() > 0";
+
+/** What a move of pins weighs (#345): whether the host claims, and each pinned task — moving, or staying with why. */
+export interface LegacyPins {
+  /** Why the host does not claim now (selection.ts notClaiming), or null: then each task is weighed. */
+  claiming: string | null;
+  move: { task: number; from: string }[];
+  stay: { task: number; from: string; why: string }[];
+}
+
+/**
+ * The tasks pinned to a maintainer's legacy registrations, weighed against their host's registration (#345, design v2 §21.1 step 4):
+ * the fleet alive read once, as placements() reads it — the host's lanes, units under the pool's cap, kinds, probe and disk, and the
+ * leases it holds for the disk their budgets take — and each task as the claim reads it (candidateCols), moving only where
+ * selection.ts repinRefusal finds the host could run it once idle. A host that does not claim now moves nothing.
+ */
+export async function legacyPins(env: Env, h: { worker_id: string | null; owner_login: string }, at = Date.now()): Promise<LegacyPins> {
+  const [rows, fleetRows, leaseRows] = await env.DB.batch<unknown>([
+    env.DB.prepare(LEGACY_PINS_SQL).bind(h.owner_login),
+    env.DB.prepare(FLEET_SQL).bind(new Date(at - Math.max(ALIVE_MS, LEGACY_ALIVE_MS)).toISOString()),
+    env.DB.prepare(LEASES_HELD_SQL),
+  ]);
+  const pool = running(env);
+  const rules = selectionRules();
+  const fleet: Fleet = { members: (fleetRows.results as FleetRow[]).map((r) => memberOf(r, pool, at)), leases: (leaseRows.results as LeaseRow[]).map((l) => heldOf(l, rules)) };
+  const pinned = rows.results as (CandidateRow & { page_size: number | null; page_disk_gb: number | null; learned_size: number | null })[];
+  const m = fleet.members.find((x) => x.id === h.worker_id && !x.legacy);
+  const claiming = !h.worker_id ? "it has no registration yet: its owner's Confirm makes it" : !m ? `it has not claimed in the last ${Math.max(ALIVE_MS, LEGACY_ALIVE_MS) / 60000} minutes` : notClaiming(m, at);
+  if (claiming || !m) return { claiming, move: [], stay: pinned.map((r) => ({ task: r.id, from: r.pinned_to ?? "", why: claiming ?? "" })) };
+  const sizes = new Map(pinned.filter((r) => r.page_size !== null || r.page_disk_gb !== null || r.learned_size !== null).map((r) => [r.name, { size: r.page_size, disk_gb: r.page_disk_gb, learned: r.learned_size }]));
+  const largest = largestSize(fleet, at, rules);
+  const held = fleet.leases.filter((l) => l.by === m.id);
+  const out: LegacyPins = { claiming: null, move: [], stay: [] };
+  for (const r of pinned) {
+    const why = repinRefusal(m, candidateOf(r, sizes, new Map()), at, rules, largest, held);
+    if (why) out.stay.push({ task: r.id, from: r.pinned_to ?? "", why });
+    else out.move.push({ task: r.id, from: r.pinned_to ?? "" });
+  }
+  return out;
+}
 
 /** What the claim knows of the claimer for selection: a host's capacity and lanes, or a legacy registration's one lane and its trust. */
 interface Claimer {

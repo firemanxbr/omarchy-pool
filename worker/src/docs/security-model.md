@@ -1148,6 +1148,19 @@ refused), is refused server-side to anyone without the right, and writes a
   the tasks finish). A drain by the owner is resumed by the owner only (they
   may need the machine); a drain by another maintainer by either of the two
   (D57).
+- **Move pins here** — its owner or any maintainer, with a reason (#345,
+  design v2 §21.1 step 4), on an active host whose registration is not
+  drained and whose pool cap is not 0: the queued tasks pinned to the
+  owner's own legacy registrations move onto the host's registration, and
+  only those the host could run once idle — never the project's copy of a
+  package onto its requester's host (D35), never a `needs_native` task onto
+  an emulated lane, never a contributor's recipe onto an emulated lane beside
+  a sandbox (#330), never a size its pool cap leaves no room for. It moves no
+  other owner's pin and no task already leased, and widens no trust: the host
+  is its owner's machine, as the legacy registrations were. Its worst is a
+  delay — a task that waits for this host rather than going to the queue at
+  its registration's drain — never a publish; each task says so on its page,
+  and the `host` line says who, why, what moved and what stayed.
 - **Removal from the list** (D39). Hosts are owned by GitHub user ids, and
   the file lists logins: the pool resolves each listed login to its id
   through the contributors' sign-in records, so a login renamed in the file

@@ -525,6 +525,44 @@ export function mayRun(m: Member, c: Candidate, now: number, r: Rules, largest: 
   return !noRoom(idle, [], c, unitsOf(c.kind, size, r), diskOf(c, size, r), r);
 }
 
+/**
+ * Why a registration does not claim now, in the words a person reads at the door that moves pins onto it (#345), or null: active with
+ * its owner listed, not drained, not behind the pool's release past the grace, not asleep, not below the signed minimum (for its disk
+ * alone, the builds it runs may hold it there: `mayRun` judges that per task), and alive — what `mayRun` asks before any task.
+ */
+export function notClaiming(m: Member, now: number): string | null {
+  if (!m.may_claim) return "it is handed nothing: it is not active, or its owner is no longer a maintainer";
+  if (m.drained) return "its registration is drained";
+  if (m.behind) return "it is behind the pool's release past the grace (426)";
+  if (m.asleep) return "its agent says it sleeps";
+  if (m.below_minimum && !m.below_disk) return "it is below the signed minimum to join";
+  if (!alive(m, now)) return `it has not claimed in the last ${Math.round((m.alive_ms ?? ALIVE_MS) / MIN)} minutes`;
+  return null;
+}
+
+/**
+ * Why a queued task pinned to one of a maintainer's legacy registrations does not move onto their host's registration `m` (#345, design
+ * v2 §21.1 step 4: the switch moves the pins of the legacy set it drains), or null when it moves: only where the host could run it once
+ * idle — a lane allowed for it, `needs_native` kept, the project's copy never onto its requester's host (D35, unless released to any
+ * host), and room for it at its size under the pool's cap, an agent slot for model work, its disk (`mayRun`). A task the host could
+ * never take would wait on it as it waits on the drained registration; one left where it is goes to the queue once that registration's
+ * drain has held UNPIN_AFTER_DRAIN_MINUTES (orders.ts), so none is stranded either way.
+ */
+export function repinRefusal(m: Member, c: Candidate, now: number, r: Rules, largest: number, held: readonly Held[] = []): string | null {
+  const claiming = notClaiming(m, now);
+  if (claiming) return claiming;
+  if (requesterHost(m, c)) return `the project's copy of ${c.name} is not built on its requester's host (D35)`;
+  const lane = laneFor(m, c, r);
+  if (!lane) {
+    return m.lanes.some((l) => l.arch === c.arch) ? `its ${c.arch} lane is emulated beside a sandbox, which takes the project's own recipes only (#330)` : `it has no lane for ${c.arch}`;
+  }
+  if (lane.byLane && lane.mode === "emulated" && c.needs_native) return `it needs a native ${c.arch} lane, and this host runs ${c.arch} emulated`;
+  // A host whose dispatcher holds builds back for disk leaves them out of its claim's kinds: once idle it takes them (mayRun).
+  if (!m.kinds.includes(c.kind) && c.kind !== "build") return `it takes no ${c.kind}`;
+  if (c.model && !m.probe_ok) return "its agent's probe fails: model work would wait for it";
+  return mayRun(m, { ...c, pinned_to: m.id }, now, r, largest, held) ? null : "it could not hold it once idle at its size: its units under the pool's cap, an agent slot or its disk";
+}
+
 /** A host's free disk once the builds it holds end: what it reported, and the budgets they hold back. */
 function idleDisk(d: { work: number; engine: number }, held: readonly Held[]): { work: number; engine: number } {
   const budgets = held.reduce((n, l) => n + (l.kind === "build" ? l.disk_gb : 0), 0);

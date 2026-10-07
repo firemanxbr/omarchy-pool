@@ -47,6 +47,7 @@
  *                                                  a document the owner's passkey signed (#328)
  *   POST /api/v1/hosts/self/diagnostics · GET /hosts/:id/diagnostics/:order   a diagnostics order's scrubbed log lines (#325)
  *   POST /api/v1/hosts/:id/cap                    {units | null, reason}: the pool's cap on a host's units, its owner or any maintainer (#337)
+ *   POST /api/v1/hosts/:id/pins                   {reason}: the queued tasks pinned to its owner's legacy registrations, onto its registration where it could run them (#345)
  *   POST /api/v1/hosts/:id/owner/challenge · /owner/pin · /seal-key   the owner's control without a visit (#328): the document their
  *                                                  passkey signs for a host, the pin pasted at the host, the seal key confirmed
  *   GET  /api/v1/hosts/fleet                      every host's public row and Status's host and capacity lines (#324)
@@ -91,7 +92,7 @@ import {
 import { handleSourceRead } from "./routes/sources";
 import { handleAnswerOrder, handleCancelOrder, handleFollow, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
 import { handleRollbackCosignature, handleRollbackStatement } from "./routes/rollback";
-import { handleCapHost, handleConfirmHost, handleEnroll, handleFleet, handleHostDiagnostics, handleHostDiagnosticsGet, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleOwnerChallenge, handleOwnerPin, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSealKeyConfirm, handleSuspendHost, signedHost } from "./routes/hosts";
+import { handleCapHost, handleConfirmHost, handleMovePins, handleEnroll, handleFleet, handleHostDiagnostics, handleHostDiagnosticsGet, handleHostGet, handleHostOrder, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, handleOwnerChallenge, handleOwnerPin, handleRemoveForCause, handleResumeHost, handleResumeOwner, handleRetireHost, handleSealKeyConfirm, handleSuspendHost, signedHost } from "./routes/hosts";
 import { DIAGNOSTICS_MAX_BYTES } from "./hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
@@ -770,6 +771,12 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/cap$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     return c ? handleCapHost(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
+  }
+  // The switch (#345, routes/hosts.ts): the queued tasks pinned to its owner's legacy registrations, onto its registration; its owner or any
+  // maintainer, the browser's session only.
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/pins$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleMovePins(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
   }
   if ((m = path.match(/^\/hosts\/owners\/([A-Za-z0-9-]{1,39})\/(cause|resume)$/)) && method === "POST") {
     const c = await contributorOf(request, env);

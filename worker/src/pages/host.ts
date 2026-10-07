@@ -46,6 +46,10 @@
  *   reports them, and Retire legacy set — its owner's, with a passkey: the
  *   agent stops and removes that project and leaves the .omarchy-agent
  *   marker in its directory.
+ *   Beside it, the queued tasks pinned to its owner's legacy registrations
+ *   and Move pins here (#345, design v2 §21.1 step 4) — its owner's or any
+ *   maintainer's, with a reason: what the host could run moves onto its
+ *   registration before the switch drains them, the rest is said with why.
  * - Its settings (#325, design v2 §12, §17.1, §18.1): the units it gives and
  *   its emulated lanes, narrowed from the site inside the envelope its owner
  *   wrote at the host — the envelope shown, every value above it greyed (the
@@ -222,11 +226,12 @@ const BODY = String.raw`
       <dl class="hp-kv" id="hp-legacy-kv"></dl>
       <div class="op-card-b">
         <div class="hp-ops" id="hp-legacy-ops">
+          <button type="button" class="op-btn" data-host-act="move-pins" disabled>${lucide("git-compare", 14)}Move pins here</button>
           <button type="button" class="op-btn danger" data-host-act="retire-legacy" disabled>${lucide("file-archive", 14)}Retire legacy set</button>
         </div>
-        <p class="hp-note">Retire legacy set: its agent writes the <code>.omarchy-agent</code> marker into the legacy set's directory, then stops and removes that compose project — its containers and networks, nothing else — so <code>rollout.sh</code>, <code>setup.sh</code>, <code>omarchy-worker</code> and the updater refuse there from then on. Its owner's, with a passkey, once the set has been drained as the way back for 14 days.</p>
+        <p class="hp-note">Move pins here: the queued tasks pinned to its owner's legacy registrations move onto this host's registration where it could run them — before the switch drains those registrations, so the pin's choice stays; the rest go to the queue once their registration's drain has held. Retire legacy set: its agent writes the <code>.omarchy-agent</code> marker into the legacy set's directory, then stops and removes that compose project — its containers and networks, nothing else — so <code>rollout.sh</code>, <code>setup.sh</code>, <code>omarchy-worker</code> and the updater refuse there from then on. Its owner's, with a passkey, once the set has been drained as the way back for 14 days.</p>
       </div>
-      <div class="op-card-f"><a href="/docs/runbook#the-studio-host">The legacy set and its marker →</a></div>
+      <div class="op-card-f"><a href="/docs/runbook#the-studio-host">The Studio host: the switch, the way back and the marker →</a></div>
     </section>
 
     <section class="op-card" id="hp-leases" aria-labelledby="hp-leases-h">
@@ -248,7 +253,7 @@ const SCRIPT = String.raw`
   // Silent as Status says it (fleet.ts silentOf): nothing of it — no report, no poll — for these minutes.
   var SILENT_MIN = ${SILENT_MIN};
   var PILL = { active: ["ok", "active"], "pending-owner": ["warn", "waits for its owner's Confirm"], suspended: ["fail", "suspended"], retired: ["na", "retired"] };
-  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14), reconcile: lucide("refresh-cw", 14), legacy: lucide("file-archive", 14), units: lucide("hard-drive", 14), lanes: lucide("git-fork", 14), retry: lucide("package-check", 14), token: lucide("key-round", 14), diag: lucide("scroll-text", 14), stop: lucide("ban", 14), pin: lucide("shield-check", 14), seal: lucide("lock", 14), widen: lucide("arrow-up-right", 14) })};
+  var ICON = ${JSON.stringify({ suspend: lucide("ban", 14), resume: lucide("circle-check", 14), retire: lucide("octagon-x", 14), drain: lucide("circle-slash", 14), cap: lucide("cpu", 14), reconcile: lucide("refresh-cw", 14), legacy: lucide("file-archive", 14), units: lucide("hard-drive", 14), lanes: lucide("git-fork", 14), retry: lucide("package-check", 14), token: lucide("key-round", 14), diag: lucide("scroll-text", 14), stop: lucide("ban", 14), pin: lucide("shield-check", 14), seal: lucide("lock", 14), widen: lucide("arrow-up-right", 14), pins: lucide("git-compare", 14) })};
   // What the "needs a person" box names (#324, fleet.ts needsPersonOf), one word each.
   var NEED_WORD = { "pending-owner": "Confirm", suspended: "suspended", stopped: "claims stopped", "below-minimum": "below the minimum", "disk-low": "disk low", binfmt: "binfmt", cgroups: "cgroup delegation", hosting: "hosting", "docker-group": "docker group", linger: "linger", credentials: "credentials", round: "its last round" };
   var SETTINGS_AGENT = ${JSON.stringify(HOST_SETTINGS_AGENT)};
@@ -625,19 +630,22 @@ const SCRIPT = String.raw`
       return '<tr><td><span class="mono">' + esc(o.kind) + esc(argText(o)) + "</span></td><td>" + personLink(o.issued_by) + "</td><td>" + when(o.issued_at) + "</td><td>" + pillHtml(p[0], p[1], o.state === "open" ? "until " + o.not_after : o.answered_at || "") + "</td><td>" + (o.detail ? esc(o.detail) : '<span class="muted">—</span>') + lines + "</td></tr>";
     }).join("") || '<tr><td colspan="5" class="muted">no host order yet</td></tr>';
   }
-  // The legacy set (#344): what its agent reports of it, and Retire legacy set — the owner's, with a passkey.
+  // The legacy set (#344): what its agent reports of it, and Retire legacy set — the owner's, with a passkey. Beside it (#345), the queued
+  // tasks pinned to its owner's legacy registrations and Move pins here — drawn too for a host with no legacy set of its own while some are.
   function drawLegacy(h, can) {
-    var why = can.why || {}, l = h.legacy;
-    $("#hp-legacy").hidden = h.fingerprint === undefined || !l;
-    if (!l) return;
-    var p = LEGACY_PILL[l.state] || ["na", l.state];
-    $("#hp-legacy-kv").innerHTML = [
+    var why = can.why || {}, l = h.legacy, lp = h.legacy_pins || { tasks: 0, workers: [] };
+    $("#hp-legacy").hidden = h.fingerprint === undefined || (!l && !lp.tasks);
+    if (!l && !lp.tasks) return;
+    var p = l ? LEGACY_PILL[l.state] || ["na", l.state] : null;
+    var pins = kv("Pinned", lp.tasks ? num(lp.tasks) + " queued task" + (lp.tasks === 1 ? "" : "s") + " — " + lp.workers.map(function (w) { return '<a class="mono" href="/worker/' + encodeURIComponent(w.id) + '">' + esc(w.id) + "</a> " + num(w.tasks); }).join(", ") : '<span class="muted">none on ' + esc(h.owner) + "'s legacy registrations</span>");
+    $("#hp-legacy-kv").innerHTML = (l ? [
       kv("Project", '<span class="mono">' + esc(l.project) + '</span> ' + pillHtml(p[0], p[1])),
       kv("Containers", l.containers === null || l.containers === undefined ? "—" : num(l.containers) + (l.running === null || l.running === undefined ? "" : ", " + num(l.running) + " running")),
       kv("Directory", l.dir ? '<span class="mono">' + esc(l.dir) + '</span>' : "—"),
       kv(l.state === "retired" ? "Retired" : "Recorded", when(l.since) + (l.order ? ' <span class="mono">' + esc(l.order) + '</span>' : "")),
-    ].concat(l.blocked ? [kv("Retiring now", '<span class="hp-blocked">' + esc(l.blocked) + '</span>')] : []).join("");
-    $("#hp-legacy-ops").innerHTML = gate('<button type="button" class="op-btn danger" data-host-act="retire-legacy">' + ICON.legacy + 'Retire legacy set</button>', can.retire_legacy === true, why.retire_legacy || "");
+    ].concat(l.blocked ? [kv("Retiring now", '<span class="hp-blocked">' + esc(l.blocked) + '</span>')] : []) : []).concat([pins]).join("");
+    $("#hp-legacy-ops").innerHTML = gate('<button type="button" class="op-btn" data-host-act="move-pins">' + ICON.pins + "Move pins here</button>", can.pins === true && lp.tasks > 0, why.pins || "no queued task is pinned to " + h.owner + "'s legacy registrations")
+      + (l ? gate('<button type="button" class="op-btn danger" data-host-act="retire-legacy">' + ICON.legacy + 'Retire legacy set</button>', can.retire_legacy === true, why.retire_legacy || "") : "");
   }
   function done(d) {
     if (d.error) { toast(esc(d.error), "error"); return; }
@@ -761,6 +769,16 @@ const SCRIPT = String.raw`
           return signDoc({ act: "set-agent-keys", keys: [k] }, function (doc, a) { return api("POST", BASE + "/orders", { kind: "set-agent-keys", doc: doc, assertion: a }); }).then(function (d) { if (!d.error) $("#hp-owner-form").innerHTML = ""; done(d); });
         });
       }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    } else if (act === "move-pins") {
+      // #345: before the switch drains them, what the host could run moves onto its registration; the rest stays, said with why.
+      var lp = H.legacy_pins || { tasks: 0 };
+      ask({ title: "Move pins onto " + H.name, text: "The " + num(lp.tasks) + " queued task" + (lp.tasks === 1 ? "" : "s") + " pinned to " + esc(H.owner) + "'s legacy registrations move onto this host's registration where it could run them once idle — a lane for each, never the project's copy onto its requester's host, its units under the pool's cap. The rest stay, said with why, and go to the queue once their registration's drain has held.", input: "required", confirm: "Move pins here" }).then(function (r) {
+        if (r === null) return;
+        api("POST", BASE + "/pins", { reason: r }).then(function (d) {
+          if (d.error) { toast(esc(d.error), "error"); load(); return; }
+          toast(esc(d.line || "moved")); load();
+        }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
     } else if (act === "retire-legacy") {
       var l = H.legacy || {};
       ask({ title: "Retire the legacy set of " + H.name, text: "Its agent writes the .omarchy-agent marker into " + esc(l.dir || "the legacy set's directory") + ", then stops and removes the compose project " + esc(l.project || "") + " — its containers and networks, nothing else. From then on rollout.sh, setup.sh, omarchy-worker and the updater refuse there: the way back through the legacy set is over.", held: "Your passkey confirms it.", confirm: "Retire legacy set", first: "Register a passkey and retire the legacy set", nothing: "Nothing was retired.", danger: true }).then(function (go) {
@@ -903,11 +921,14 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     // The legacy set (#344): what the agent reports of it, and Retire legacy set — its owner's, with a passkey.
     id: "host.legacy",
     page: `/hosts/${F.host}`,
-    anchor: ['id="hp-legacy"', 'id="hp-legacy-kv"', 'id="hp-legacy-ops"', 'data-host-act="retire-legacy"', 'href="/docs/runbook#the-studio-host"'],
-    script: ["function drawLegacy(h, can)", "can.retire_legacy === true", 'kind: "retire-legacy"', 'passkeyed("host:retire-legacy:" + ID', "LEGACY_PILL", "l.blocked", "l.dir"],
-    reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.legacy", "can.retire_legacy", "passkey.retire_legacy"] }],
+    anchor: ['id="hp-legacy"', 'id="hp-legacy-kv"', 'id="hp-legacy-ops"', 'data-host-act="retire-legacy"', 'data-host-act="move-pins"', 'href="/docs/runbook#the-studio-host"'],
+    script: ["function drawLegacy(h, can)", "can.retire_legacy === true", 'kind: "retire-legacy"', 'passkeyed("host:retire-legacy:" + ID', "LEGACY_PILL", "l.blocked", "l.dir",
+      // #345: the tasks pinned to its owner's legacy registrations and Move pins here, the door's verdict in the read.
+      "h.legacy_pins", '"Pinned"', "can.pins === true", 'BASE + "/pins"', 'data-host-act="move-pins"'],
+    reads: [{ path: `/api/v1/hosts/${F.host}`, as: "maintainer", fields: ["host.legacy", "host.legacy_pins", "host.legacy_pins.tasks", "can.retire_legacy", "can.pins", "passkey.retire_legacy"] }],
     acts: [
       { method: "POST", path: `/api/v1/hosts/${F.host}/orders`, body: { kind: "retire-legacy" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: `/api/v1/hosts/${F.host}/pins`, body: { reason: "a reason enough" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
     ],
     visible: ["maintainer"],
   },

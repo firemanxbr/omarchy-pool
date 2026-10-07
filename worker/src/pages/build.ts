@@ -155,7 +155,9 @@ const SCRIPT = String.raw`
     if (T.from && p.task !== undefined) add("ok", "Of build", 'this ' + esc(t.kind) + ' is of build <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + esc(T.from.name || t.name) + ' ' + esc(T.from.version || '') + ')', T.from.finished_at);
     // Asked for a worker that was drained (#277): the sweep sent it to the queue, and the step says so.
     var unpinned = p.unpinned && p.unpinned.from ? ' · asked for ' + wtId(p.unpinned.from) + ', which was drained: in the queue since ' + esc(clockOf(p.unpinned.at)) : '';
-    add("ok", "Queued", esc(t.reason || "") + (isBuild ? ' · recipe <span class="mono">' + esc(String(t.pkgbuild_ref || "")) + '</span>' : '') + unpinned, t.created_at);
+    // Asked for a legacy registration, then moved onto its owner's host before the switch drained it (#345).
+    var repinned = p.repinned && p.repinned.from ? ' · asked for ' + wtId(p.repinned.from) + ', moved onto ' + wtId(p.repinned.to) + ' by ' + personLink(p.repinned.by) + ' at ' + esc(clockOf(p.repinned.at)) : '';
+    add("ok", "Queued", esc(t.reason || "") + (isBuild ? ' · recipe <span class="mono">' + esc(String(t.pkgbuild_ref || "")) + '</span>' : '') + repinned + unpinned, t.created_at);
     // The worker as every page names it (the shell's wtId, a link to its page, #277); while it runs, the way out of a task that hangs is on
     // that page — Stop its task —, and while a stop fences the lease the step says when its worker was told and the latest it goes back.
     var leased = t.status === "leased", stopping = leased && T.stopping;
@@ -432,7 +434,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       script: [
         '"#timeline"', "T.package.request_id", "p.review !== undefined", "p.task !== undefined", "t.pkgbuild_ref",
         // #277: the worker a link to its page, Stop its task there while the task runs, and when a stop fences it.
-        "wtId(T.worker || t.lease_owner)", "workerHref(t.lease_owner)", "Stop its task on its worker", "T.stopping.since", "T.stopping.until", "p.unpinned.from", "which was drained: in the queue since",
+        "wtId(T.worker || t.lease_owner)", "workerHref(t.lease_owner)", "Stop its task on its worker", "T.stopping.since", "T.stopping.until", "p.unpinned.from", "which was drained: in the queue since", "p.repinned.from", "moved onto ",
         "T.audit.slice().reverse()", "T.trial.slice().reverse()", "T.project_builds.slice().reverse()", "T.publish.slice().reverse()",
         "a.rebuild_task", "a.withdrawn_reason", "vet.warned", "vet.failed", "pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch)",
       ],

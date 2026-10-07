@@ -35,7 +35,7 @@ import { findLeak } from "../leak";
 import { machineOrigin, version, API_HOST, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { putRecord } from "../record";
 import { writeGate, WORKER_ROW_SQL } from "./orders";
-import { selectionRules } from "./factory";
+import { legacyPins, selectionRules, LEGACY_PIN_COUNTS_SQL, REPIN_LINE_SQL, REPIN_SQL, REPINNED_SQL } from "./factory";
 import { sha256Hex, viaOf, workspace, SIGN_IN, type Contributor } from "./contributors";
 import { dashboardOrigin } from "./agents";
 import { docChallenge, issueChallenge, PASSKEYS_SQL, justNowWords, relyingParty, webGate, CEREMONY_MS, SELF_CAUSE, TOO_MANY_CHALLENGES, CHALLENGE_MINUTES } from "./passkeys";
@@ -438,7 +438,8 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
     {
       // Where its registration stands at the 426 gate (#326) tells its soak and the releases it holds in quarantine: its owner's and the
       // maintainers', as host.soak and host.quarantine are.
-      host: await hostView(h, detailed, now, pool, leases),
+      // The tasks pinned to its owner's legacy registrations (#345): what Move pins here would weigh — its owner's and the maintainers'.
+      host: detailed ? { ...(await hostView(h, detailed, now, pool, leases)), legacy_pins: await legacyPinsOf(env, h) } : await hostView(h, detailed, now, pool, leases),
       // Its leases are its details (§18.1): a visitor gets their count on the Workers page, not what runs.
       leases: detailed ? held.map((l) => ({
         id: l.id, kind: l.kind, name: l.name, arch: l.arch, lane: l.lane, units: l.units, size: l.size, started_at: l.started_at, lease_expires_at: l.lease_expires_at, fenced: !!l.stop_order,
@@ -549,7 +550,7 @@ async function viewerOf(env: Env, c: Contributor): Promise<HostViewer> {
 /** The owner is a GitHub user id, not a login: a renamed owner is still the owner, and a login someone else took is not. */
 const isOwner = (v: HostViewer, h: Pick<HostRow, "owner_github_id">) => v.github_id !== null && v.github_id === h.owner_github_id;
 
-export type HostRight = "suspend" | "resume" | "retire" | "cap" | "reconcile" | "retire_legacy" | "settings" | "rotate_token" | "retry_release" | "diagnostics" | "owner";
+export type HostRight = "suspend" | "resume" | "retire" | "cap" | "reconcile" | "retire_legacy" | "settings" | "rotate_token" | "retry_release" | "diagnostics" | "owner" | "pins";
 type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
 
 /**
@@ -582,13 +583,18 @@ type HostVerdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; wh
  *   passkey, on an active host whose agent takes them (HOST_OWNER_AGENT on).
  *   Whatever the door says, the host takes a widening or a key only when the
  *   passkey pinned there signed it.
+ * - Move pins here (#345, design v2 §21.1 step 4): its owner or any
+ *   maintainer, with a reason, on an active host whose registration is not
+ *   drained and whose pool cap is not 0 — a task moved onto a host that takes
+ *   nothing would wait there. Which tasks move is the host's own claim's
+ *   word (routes/factory.ts legacyPins), weighed at the press.
  */
 export function hostVerdicts(
   v: HostViewer | null,
-  h: Pick<HostRow, "name" | "status" | "owner_login" | "owner_github_id"> & Partial<Pick<HostRow, "agent_version" | "report">>,
+  h: Pick<HostRow, "name" | "status" | "owner_login" | "owner_github_id"> & Partial<Pick<HostRow, "agent_version" | "report" | "pool_cap_units" | "drained_at">>,
 ): Record<HostRight, HostVerdict> {
   const no = (status: 401 | 403 | 404 | 409, why: string): HostVerdict => ({ ok: false, status, why });
-  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), cap: no(401, SIGN_IN), reconcile: no(401, SIGN_IN), retire_legacy: no(401, SIGN_IN), settings: no(401, SIGN_IN), rotate_token: no(401, SIGN_IN), retry_release: no(401, SIGN_IN), diagnostics: no(401, SIGN_IN), owner: no(401, SIGN_IN) };
+  if (!v) return { suspend: no(401, SIGN_IN), resume: no(401, SIGN_IN), retire: no(401, SIGN_IN), cap: no(401, SIGN_IN), reconcile: no(401, SIGN_IN), retire_legacy: no(401, SIGN_IN), settings: no(401, SIGN_IN), rotate_token: no(401, SIGN_IN), retry_release: no(401, SIGN_IN), diagnostics: no(401, SIGN_IN), owner: no(401, SIGN_IN), pins: no(401, SIGN_IN) };
   const owner = isOwner(v, h);
   const theirs = !owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer stops ${h.name}`) : null;
   const gone = h.status === "retired" ? no(409, `${h.name} is retired: a new install enrolls a new host`) : null;
@@ -624,6 +630,12 @@ export function hostVerdicts(
       ?? (!v.maintainer ? no(403, `${OWNER_NOT_MAINTAINER}: ${h.name}'s envelope and keys stay as they are`) : null)
       ?? takes
       ?? (!agentTakesOwner(h.agent_version) ? no(409, `its agent (${h.agent_version ?? "unknown"}) takes no signed widening or sealed key: agent ${HOST_OWNER_AGENT} or later does, and a release brings it by itself`) : null)
+      ?? { ok: true },
+    // #345: the tasks pinned to its owner's legacy registrations, onto its registration — only while it takes work.
+    pins: (!owner && !v.maintainer ? no(403, `only ${h.owner_login} or a maintainer moves pinned tasks onto ${h.name}`) : null)
+      ?? (h.status !== "active" ? no(409, h.status === "pending-owner" ? `${h.name} waits for its owner's Confirm: it has no registration to take them yet` : `${h.name} is ${h.status}: it claims nothing`) : null)
+      ?? (h.pool_cap_units === 0 ? no(409, `${h.name}'s pool cap is 0: raise it first, or the tasks moved here would wait for it`) : null)
+      ?? (h.drained_at ? no(409, `${h.name}'s registration is drained: resume it first, or the tasks moved here would go to the queue at the drain's sweep`) : null)
       ?? { ok: true },
   };
 }
@@ -759,6 +771,67 @@ export async function handleCapHost(c: Contributor, id: string, request: Request
   ]);
   if (!res.meta.changes) return json({ error: `${h.name}'s cap was not set: it ${h.pool_cap_units === units ? "is that already" : "changed a moment ago"}`, code: "host_right" }, 409, NO_STORE);
   return json({ host: id, pool_cap_units: units, was: h.pool_cap_units, by: c.login, at, reason, line }, 200, NO_STORE);
+}
+
+/** How many moved and stayed tasks a move's journal line names; its payload holds them all. */
+const PINS_NAMED = 10;
+const named = <T>(xs: T[], word: (x: T) => string) => xs.slice(0, PINS_NAMED).map(word).join(", ") + (xs.length > PINS_NAMED ? ` and ${xs.length - PINS_NAMED} more` : "");
+const tasksWord = (n: number) => `${n} queued task${n === 1 ? "" : "s"}`;
+
+/**
+ * POST /hosts/:id/pins — {reason}: its owner or any maintainer (#345, design
+ * v2 §21.1 step 4). The switch drains its owner's legacy registrations, and a
+ * task pinned to a drained registration waits for it until the drain's sweep
+ * sends it to the queue (orders.ts UNPIN_AFTER_DRAIN_MINUTES), where the
+ * choice the pin made — that machine, its agent — is lost. Pressed before the
+ * drain, each queued task pinned to one of the owner's legacy registrations
+ * moves onto this host's registration where the host could run it once idle
+ * (routes/factory.ts legacyPins: a lane for it, `needs_native`, D35, its units
+ * under the pool's cap, the probe for model work); the others stay where they
+ * are, each said with why, and go to the queue at that sweep — none is
+ * stranded. Each moved task says so on its page (`params.repinned`); one
+ * journal line with who, why, what moved and what stayed. A host that does
+ * not claim now moves nothing.
+ */
+export async function handleMovePins(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  const p = await personAct(c, request, env, url, "handed its owner's pinned tasks");
+  if (p instanceof Response) return p;
+  const h = await env.DB.prepare(`SELECT ${HOST_VIEW_COLS} FROM ${HOST_VIEW_FROM} WHERE hosts.id = ?`).bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  const no = refusedBy(hostVerdicts(p.v, h).pins);
+  if (no) return no;
+  const reason = reasonOf(p.b.reason);
+  if (reason instanceof Response) return reason;
+  const now = Date.now();
+  const at = iso(now);
+  const w = await legacyPins(env, h, now);
+  const legacy = `${h.owner_login}'s legacy registrations`;
+  if (w.claiming) return json({ error: `${h.name} takes nothing now — ${w.claiming}: nothing was moved, so no task waits on it`, code: "not_claiming", stay: w.stay }, 409, NO_STORE);
+  if (!w.move.length) {
+    return json({
+      error: w.stay.length ? `none of the ${tasksWord(w.stay.length)} pinned to ${legacy} can move onto ${h.name} (${named(w.stay, (s) => `#${s.task}: ${s.why}`)}); each goes to the queue once its registration's drain has held` : `no queued task is pinned to ${legacy}: there is nothing to move`,
+      code: "nothing_to_move", stay: w.stay,
+    }, 409, NO_STORE);
+  }
+  const worker = h.worker_id!;
+  const tasks = JSON.stringify(w.move.map((m) => m.task));
+  const stays = w.stay.length ? ` — ${tasksWord(w.stay.length)} stay pinned, for their registration's drain to send to the queue (${named(w.stay, (s) => `#${s.task}: ${s.why}`)})` : "";
+  const line = `${hostLine_(h)}: ${c.login} moved ${tasksWord(w.move.length)} pinned to ${legacy} onto its registration ${worker} (${named(w.move, (m) => `#${m.task} from ${m.from}`)})${stays}: ${reason}`;
+  const [res] = await env.DB.batch([
+    env.DB.prepare(REPIN_SQL).bind(worker, c.login, at, tasks, h.owner_login),
+    // The line only if the move took one; its payload's `moved` the tasks that carry this press's word, as they stand after it.
+    env.DB.prepare(REPIN_LINE_SQL)
+      .bind(line, JSON.stringify({ host: id, worker, owner: h.owner_login, by: c.login, via: "web", action: "pins", reason, stay: w.stay }), tasks, worker, at),
+  ]);
+  if (!res.meta.changes) return json({ error: `nothing was moved: the tasks pinned to ${legacy} changed a moment ago (a claim took them, or another press moved them)`, code: "host_right" }, 409, NO_STORE);
+  const moved = await env.DB.prepare(REPINNED_SQL).bind(tasks, worker, at).first<{ moved: string }>();
+  return json({ host: id, worker, moved: JSON.parse(moved?.moved ?? "[]") as number[], stay: w.stay, by: c.login, at, reason, line }, 200, NO_STORE);
+}
+
+/** The queued tasks pinned to its owner's legacy registrations (#345): how many, on which — what Move pins here weighs. Its owner's and the maintainers'. */
+async function legacyPinsOf(env: Env, h: Pick<HostRow, "owner_login">): Promise<{ tasks: number; workers: { id: string; tasks: number }[] }> {
+  const rows = (await env.DB.prepare(LEGACY_PIN_COUNTS_SQL).bind(h.owner_login).all<{ worker: string; n: number }>()).results;
+  return { tasks: rows.reduce((n, r) => n + r.n, 0), workers: rows.map((r) => ({ id: r.worker, tasks: r.n })) };
 }
 
 /**
