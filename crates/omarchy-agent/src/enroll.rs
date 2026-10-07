@@ -1,7 +1,9 @@
 //! Enrollment, the agent's half (#321, design v2 §6.1 steps 1-5, §13.2 step 6): the
-//! host key, `POST /api/v1/hosts/enroll` with the one-time token from the environment
-//! (never argv), the fingerprint printed for the owner to compare, the wait for the
-//! owner's Confirm, and the host worker token written for the dispatcher.
+//! host key — made in the machine's TPM where its user may open one, else a file, as the
+//! owner's `OMARCHY_HOST_KEY` asks (#330, [`crate::host`]) —, `POST /api/v1/hosts/enroll`
+//! with the one-time token from the environment (never argv) and where the key lives, the
+//! fingerprint printed for the owner to compare, the wait for the owner's Confirm, and the
+//! host worker token written for the dispatcher.
 //!
 //! What comes before it at install — the verified bundle, preflight, the runtime and
 //! the capacity detection that writes `run/capacity.json` — is #317's and #333's; a
@@ -11,7 +13,9 @@
 //! or the token — and keeps the worker token it holds, since every fetch rotates it
 //! (the one it replaces works ten more minutes only, so two fetches in a row would cut
 //! off a running dispatcher). Rotation is `omarchy-agent token`, and the run loop's
-//! (#315).
+//! (#315). A host whose key in the TPM does not sign is told so before anything is sent;
+//! one whose TPM was cleared enrolls as a new host with a new command, its old identity
+//! kept beside (`host.json.lost-<host>`), as a retired host's is (#322, #330).
 //!
 //! The token goes into its own file, `run/host/dispatcher/token` (0400, #327), which the
 //! host set mounts read-only into the dispatcher, and its registration into
@@ -27,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use crate::dispatcher_env::{self, Envelope, Refresh, Rendered, Sources};
 use crate::host::{self, HostKey, Identity};
-use crate::pool::{shown, Answer, Pool};
+use crate::pool::{shown, Answer, CallError, Pool};
 
 /// Where the agent keeps its files, under its data directory (install.sh's
 /// `${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-agent`).
@@ -88,6 +92,9 @@ pub struct Options {
     pub poll: Duration,
     /// Where the host's own addresses are read (`/proc/net`).
     pub sources: Sources,
+    /// Where a new host key is made: in the TPM where the machine has one (#330), as the
+    /// owner's `OMARCHY_HOST_KEY` and `OMARCHY_TPM_TCTI` ask.
+    pub key: host::KeyChoice,
 }
 
 #[derive(Debug)]
@@ -115,6 +122,12 @@ impl From<String> for Failure {
 impl From<&str> for Failure {
     fn from(s: &str) -> Self {
         Failure::Refused(s.to_owned())
+    }
+}
+
+impl From<CallError> for Failure {
+    fn from(e: CallError) -> Self {
+        Failure::Refused(e.to_string())
     }
 }
 
@@ -151,9 +164,15 @@ pub fn valid_worker_id(w: &str) -> bool {
     all_of(w, 1, 120, |b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// The host key the agent opens with, and — a new file key's — why it is not in the TPM.
+struct Keyed {
+    key: HostKey,
+    held: Option<String>,
+}
+
 /// What the agent opens with: its key, which pool and which host — the identity this
 /// machine has, if it has one.
-fn open(o: &Options) -> Result<(HostKey, Option<Identity>, Pool), Failure> {
+fn open(o: &Options) -> Result<(Keyed, Option<Identity>, Pool), Failure> {
     host::private_dir(&o.paths.state)?;
     let identity = Identity::read(&o.paths.state)?;
     let origin = match (&identity, &o.pool) {
@@ -168,25 +187,70 @@ fn open(o: &Options) -> Result<(HostKey, Option<Identity>, Pool), Failure> {
         (None, None) => crate::pool::DEFAULT_POOL.to_owned(),
     };
     let pool = Pool::new(&origin)?;
-    let key_path = o.paths.state.join(host::KEY_FILE);
-    // No identity yet: this enrollment's own key. One kept from an enrollment whose
-    // answer never arrived may be a host's already (the pool's key_taken).
-    let key = if identity.is_some() {
-        HostKey::load_or_create(&key_path)?
+    // No identity yet: this enrollment's own key, in the TPM where it can be (#330). One
+    // kept from an enrollment whose answer never arrived may be a host's already (the
+    // pool's key_taken).
+    let keyed = if identity.is_some() {
+        Keyed {
+            key: HostKey::open_in(&o.paths.state, std::sync::Arc::clone(&o.key.tools))?,
+            held: None,
+        }
     } else {
-        HostKey::create_fresh(&key_path)?
+        new_key(o)?
     };
-    Ok((key, identity, pool))
+    Ok((keyed, identity, pool))
+}
+
+/// A new host key for this enrollment, as the owner asked (`OMARCHY_HOST_KEY`).
+fn new_key(o: &Options) -> Result<Keyed, Failure> {
+    let (key, held) = HostKey::create_in(&o.paths.state, &o.key)?;
+    Ok(Keyed { key, held })
 }
 
 /// The whole enrollment: enroll (once), wait for the owner's Confirm, write the token.
 pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
-    let (mut key, mut identity, pool) = open(o)?;
+    let (mut keyed, mut identity, pool) = open(o)?;
+    // A machine that enrolled signs with the key it enrolled with, which in a TPM may no
+    // longer sign (#330): asked before anything is sent, so nothing below waits on a key
+    // that cannot sign, nor takes it for a pool that does not answer.
+    if let Some(host_id) = identity.as_ref().map(|id| id.host.clone()) {
+        if let Err(why) = keyed.key.check() {
+            match (keyed.key.lost(), &o.token) {
+                // Gone for good — the TPM was cleared — and the owner pasted a new command:
+                // the machine enrolls as a new host, with a new key, as a retired host's
+                // does; the old identity is kept beside, renamed.
+                (Some(lost), Some(_)) => {
+                    say(
+                        out,
+                        &format!(
+                            "host {host_id}'s key is gone from the TPM, which was cleared or is another machine's ({lost}): this install enrolls the machine as a new host; Retire {host_id} on its page"
+                        ),
+                    );
+                    set_aside(&o.paths.state, &host_id, "lost")?;
+                    keyed = new_key(o)?;
+                    identity = None;
+                }
+                (Some(lost), None) => {
+                    return Err(Failure::Refused(format!(
+                        "host {host_id}'s key is gone from the TPM, which was cleared or is another machine's ({lost}); nothing was sent: Retire {host_id} on its page, add the host again and paste the command it prints (the machine enrolls as a new host, with a new key)"
+                    )))
+                }
+                // The TPM could not be asked (a device this user may not open, tpm2-abrmd
+                // not running), or did not say the key is gone (a load that timed out, a TPM
+                // out of memory or busy): the key may well be there, so the identity is kept.
+                (None, _) => {
+                    return Err(Failure::Refused(format!(
+                        "{why}; nothing was sent, and this machine stays host {host_id}: run it again once the TPM answers"
+                    )))
+                }
+            }
+        }
+    }
     // A new install on the machine of a retired host (#322): the pool refuses that key for
     // good, so the new token enrolls the machine as a new host, with a new key. The old
     // identity is kept beside, renamed; nothing else is asked of the owner.
     if let (Some(id), Some(_)) = (&identity, &o.token) {
-        if retired(&key, &pool, id) {
+        if retired(&keyed.key, &pool, id) {
             say(
                 out,
                 &format!(
@@ -194,8 +258,8 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
                     id.host
                 ),
             );
-            retire_identity(&o.paths.state, &id.host)?;
-            key = HostKey::create_fresh(&o.paths.state.join(host::KEY_FILE))?;
+            set_aside(&o.paths.state, &id.host, "retired")?;
+            keyed = new_key(o)?;
             identity = None;
         }
     }
@@ -206,12 +270,24 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
         );
         id
     } else {
-        let id = enroll(o, &key, &pool, out)?;
+        let id = enroll(o, &keyed, &pool, out)?;
         id.write(&o.paths.state)?;
         id
     };
+    let key = &keyed.key;
     say(out, &format!("host key fingerprint: {}", key.fingerprint()));
-    let state = wait_for_confirm(o, &key, &pool, &id, out)?;
+    say(
+        out,
+        &format!(
+            "host key: {}{}",
+            key.describe(),
+            keyed
+                .held
+                .as_deref()
+                .map_or_else(String::new, |why| format!("; not in the TPM: {why}"))
+        ),
+    );
+    let state = wait_for_confirm(o, key, &pool, &id, out)?;
     let env = o.paths.dispatcher_env();
     // A token is kept only with its registration (the env file's `# worker:` line), which
     // install names in agent.toml: a token file without it — an env file lost, or a write
@@ -234,11 +310,11 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
             Refresh::Written => said_rendered(out, &env, &r),
             Refresh::Unchanged => {}
             // The env file went in the meantime: as above, a new token.
-            Refresh::NoFile => return fetch_token(o, &key, &pool, &id, out),
+            Refresh::NoFile => return fetch_token(o, key, &pool, &id, out),
         }
         return Ok(());
     }
-    fetch_token(o, &key, &pool, &id, out)
+    fetch_token(o, key, &pool, &id, out)
 }
 
 /// What the dispatcher's env file gets beside the token: the host's addresses now and,
@@ -297,13 +373,14 @@ fn retired(key: &HostKey, pool: &Pool, id: &Identity) -> bool {
     )
 }
 
-/// The retired host's identity, renamed beside: `host.json.retired-<host>`.
-fn retire_identity(state: &Path, host_id: &str) -> Result<(), Failure> {
+/// The identity of a host this machine no longer is, renamed beside: `host.json.<why>-<host>`
+/// (`retired`, or `lost` for a key gone from the TPM).
+fn set_aside(state: &Path, host_id: &str, why: &str) -> Result<(), Failure> {
     if !valid_host(host_id) {
         return Err(Failure::Refused(format!("{host_id}: not a host id")));
     }
     let from = state.join(host::IDENTITY_FILE);
-    let to = state.join(format!("{}.retired-{host_id}", host::IDENTITY_FILE));
+    let to = state.join(format!("{}.{why}-{host_id}", host::IDENTITY_FILE));
     std::fs::rename(&from, &to).map_err(|e| Failure::Refused(format!("{}: {e}", from.display())))
 }
 
@@ -324,11 +401,18 @@ pub fn worker_of(env: &Path) -> Option<String> {
 
 /// The host worker token, fetched again (a rotation): only for a machine that enrolled.
 pub fn rotate(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
-    let (key, identity, pool) = open(o)?;
+    // Asked before any key is opened: a machine that never enrolled gets none made here.
+    host::private_dir(&o.paths.state)?;
+    if Identity::read(&o.paths.state)?.is_none() {
+        return Err(Failure::Refused(
+            "this machine has not enrolled: run the command the site printed".into(),
+        ));
+    }
+    let (keyed, identity, pool) = open(o)?;
     let id = identity.ok_or_else(|| {
         Failure::Refused("this machine has not enrolled: run the command the site printed".into())
     })?;
-    fetch_token(o, &key, &pool, &id, out)
+    fetch_token(o, &keyed.key, &pool, &id, out)
 }
 
 fn say(out: &mut impl Write, line: &str) {
@@ -337,10 +421,11 @@ fn say(out: &mut impl Write, line: &str) {
 
 fn enroll(
     o: &Options,
-    key: &HostKey,
+    keyed: &Keyed,
     pool: &Pool,
     out: &mut impl Write,
 ) -> Result<Identity, Failure> {
+    let key = &keyed.key;
     let token = o.token.as_deref().ok_or_else(|| {
         Failure::Refused(
             "this machine has not enrolled yet, and OMARCHY_ENROLL is not set: add the host on your page and paste the command it prints"
@@ -372,7 +457,11 @@ fn enroll(
     let body = serde_json::json!({
         "token": token,
         "pubkey": pubkey,
-        "sig": key.sign(&host::enroll_message(token, &pubkey)),
+        "sig": key.sign(&host::enroll_message(token, &pubkey))?,
+        // Where the key lives (#330): the pool keeps it, and the host's page shows it, with
+        // why a file key is not in the TPM.
+        "key_store": key.store().name(),
+        "key_held": keyed.held,
         "hostname": hostname(),
         "os": if cfg!(target_os = "macos") { "macos" } else { "linux" },
         "arch": std::env::consts::ARCH,
@@ -461,8 +550,10 @@ fn wait_for_confirm(
             // The clock is the machine's to fix; nothing a retry changes.
             Ok(a) if a.json["code"] == "clock" => return Err(Failure::Refused(a.why())),
             Ok(a) if a.status == 401 || a.status == 403 => return Err(Failure::Refused(a.why())),
+            // Nothing was sent: the key did not sign (#330), and no wait changes that.
+            Err(CallError::NotSent(why)) => return Err(Failure::Refused(why)),
             // A 5xx, or no answer: the pool comes back; the wait goes on.
-            Ok(_) | Err(_) => {}
+            Ok(_) | Err(CallError::NoAnswer(_)) => {}
         }
         if Instant::now() >= until {
             return Err(Failure::TimedOut(format!(
@@ -753,6 +844,7 @@ mod tests {
             wait: Duration::from_secs(5),
             poll: Duration::from_millis(10),
             sources: fixture(),
+            key: host::KeyChoice::file(),
         };
         // The machine was host h_0000000001 on this pool, with its key and a capacity report.
         host::private_dir(&o.paths.state).unwrap();
@@ -790,8 +882,8 @@ mod tests {
             .state
             .join("host.json.retired-h_0000000001")
             .exists());
-        let (key, _, _) = open(&o).unwrap();
-        assert_ne!(key.public_b64u(), old_key);
+        let (keyed, _, _) = open(&o).unwrap();
+        assert_ne!(keyed.key.public_b64u(), old_key);
         assert!(dispatcher_env::holds_token(&o.paths.dispatcher_env()));
         assert!(valid_worker_token(&token_in_its_file_only(&o)));
         // Beside the registration, the host's own addresses (#371); no agent.toml yet, so no
@@ -851,6 +943,7 @@ mod tests {
             wait: Duration::from_secs(5),
             poll: Duration::from_millis(10),
             sources: fixture(),
+            key: host::KeyChoice::file(),
         };
         host::private_dir(&o.paths.state).unwrap();
         HostKey::load_or_create(&o.paths.state.join(host::KEY_FILE)).unwrap();
@@ -964,6 +1057,7 @@ mod tests {
             wait: Duration::from_secs(5),
             poll: Duration::from_millis(10),
             sources: fixture(),
+            key: host::KeyChoice::file(),
         };
         host::private_dir(&o.paths.state).unwrap();
         HostKey::load_or_create(&o.paths.state.join(host::KEY_FILE)).unwrap();
@@ -1013,6 +1107,7 @@ mod tests {
             wait: Duration::from_secs(5),
             poll: Duration::from_millis(10),
             sources: fixture(),
+            key: host::KeyChoice::file(),
         };
         host::private_dir(&o.paths.state).unwrap();
         let key = HostKey::load_or_create(&o.paths.state.join(host::KEY_FILE))
@@ -1031,7 +1126,7 @@ mod tests {
             Identity::read(&o.paths.state).unwrap().unwrap().host,
             "h_0000000001"
         );
-        assert_eq!(open(&o).unwrap().0.public_b64u(), key);
+        assert_eq!(open(&o).unwrap().0.key.public_b64u(), key);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1061,6 +1156,7 @@ mod tests {
                 wait: Duration::from_secs(0),
                 poll: Duration::from_millis(10),
                 sources: fixture(),
+                key: host::KeyChoice::file(),
             };
             host::private_dir(&o.paths.state).unwrap();
             let key = HostKey::create_fresh(&o.paths.state.join(host::KEY_FILE)).unwrap();
@@ -1078,6 +1174,301 @@ mod tests {
         }
     }
 
+    /// An enrollment on a machine with a TPM (#330, played by `host::tpm::fake`): the key
+    /// is made there, the proof and every call are its ECDSA P-256 signatures, and the pool
+    /// is told where the key lives; without one, a file key and why.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::too_many_lines)] // one pool, two machines: one with a TPM, one without
+    fn a_machine_with_a_tpm_enrolls_with_its_key_in_it_and_one_without_says_why_not() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        use std::sync::{Arc, Mutex};
+        let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+        let pool = pool_scripted({
+            let bodies = Arc::clone(&bodies);
+            move |method, path, _, body| {
+                match (method, path) {
+                ("POST", "/api/v1/hosts/enroll") => {
+                    let b: serde_json::Value = serde_json::from_slice(body).unwrap();
+                    let token = b["token"].as_str().unwrap();
+                    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(b["pubkey"].as_str().unwrap())
+                        .unwrap();
+                    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(b["sig"].as_str().unwrap())
+                        .unwrap();
+                    let alg: &dyn aws_lc_rs::signature::VerificationAlgorithm = if raw.len() == 65 {
+                        &aws_lc_rs::signature::ECDSA_P256_SHA256_FIXED
+                    } else {
+                        &aws_lc_rs::signature::ED25519
+                    };
+                    // The proof of possession, as the pool checks it.
+                    aws_lc_rs::signature::UnparsedPublicKey::new(alg, &raw)
+                        .verify(
+                            host::enroll_message(token, b["pubkey"].as_str().unwrap()).as_bytes(),
+                            &sig,
+                        )
+                        .unwrap();
+                    let fp = format!(
+                        "SHA256:{}",
+                        base64::engine::general_purpose::STANDARD_NO_PAD
+                            .encode(sha2::Sha256::digest(&raw))
+                    );
+                    bodies.lock().unwrap().push(b);
+                    (
+                        201,
+                        serde_json::json!({"host": "h_0000000003", "name": "box", "owner": "m1", "units": 3, "fingerprint": fp}).to_string(),
+                    )
+                }
+                ("GET", "/api/v1/hosts/self/state") => (
+                    200,
+                    r#"{"status":"active","owner":"m1","token":null}"#.into(),
+                ),
+                ("POST", "/api/v1/hosts/self/token") => (
+                    200,
+                    serde_json::json!({"worker": "m1-box-0a9z", "token": format!("omw_{}", "5e".repeat(24)), "rotate_after": "later"})
+                        .to_string(),
+                ),
+                _ => (404, "{}".into()),
+            }
+            }
+        });
+        let machine = |name: &str, tpm: &Arc<host::tpm::fake::Tpm>| {
+            let d = crate::run::state::tempdir().join(name);
+            let o = Options {
+                pool: Some(pool.clone()),
+                paths: Paths::under(&d),
+                token: Some(format!("ome_{}", "0".repeat(48))),
+                wait: Duration::from_secs(5),
+                poll: Duration::from_millis(10),
+                sources: fixture(),
+                key: host::KeyChoice {
+                    want: host::Want::Auto,
+                    tcti: host::tpm::DEFAULT_TCTI.into(),
+                    tools: Arc::clone(tpm) as Arc<dyn host::tpm::Tools>,
+                },
+            };
+            std::fs::create_dir_all(o.paths.capacity().parent().unwrap()).unwrap();
+            std::fs::write(
+                o.paths.capacity(),
+                r#"{"page_kb":4,"isolation":"root","cpus":4,"mem_gb":8,"disk_free_gb":{"work":60,"engine":40},"lanes":[{"arch":"x86_64","mode":"native"}]}"#,
+            )
+            .unwrap();
+            o
+        };
+
+        let tpm = host::tpm::fake::Tpm::new();
+        let o = machine("tpm", &tpm);
+        let mut out = Vec::new();
+        run(&o, &mut out).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out)));
+        let said = String::from_utf8_lossy(&out);
+        assert!(
+            said.contains("host key: in the TPM (device:/dev/tpmrm0; ECDSA P-256): made inside it, and it never leaves it\n"),
+            "{said}"
+        );
+        let b = bodies.lock().unwrap().pop().unwrap();
+        assert_eq!(b["key_store"], "tpm");
+        assert!(b["key_held"].is_null());
+        assert_eq!(b["pubkey"].as_str().unwrap().len(), 87);
+        assert!(host::tpm::present(&o.paths.state));
+        assert!(!o.paths.state.join(host::KEY_FILE).exists());
+        // The confirm's wait and the token's fetch were the TPM's signatures too: one making
+        // with its probe, then the proof, the state and the token.
+        assert_eq!(tpm.calls("sign"), 4);
+        assert!(valid_worker_token(&token_in_its_file_only(&o)));
+
+        let none = host::tpm::fake::Tpm::new();
+        *none.unreachable.lock().unwrap() = Some("no TPM: /dev/tpmrm0 is not there".into());
+        let o = machine("file", &none);
+        let mut out = Vec::new();
+        run(&o, &mut out).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out)));
+        assert!(String::from_utf8_lossy(&out).contains(
+            "host key: a file (Ed25519, host.ed25519, mode 0600); not in the TPM: no TPM: /dev/tpmrm0 is not there\n"
+        ));
+        let b = bodies.lock().unwrap().pop().unwrap();
+        assert_eq!(
+            (b["key_store"].as_str(), b["key_held"].as_str()),
+            (Some("file"), Some("no TPM: /dev/tpmrm0 is not there"))
+        );
+        assert_eq!(none.calls("sign"), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::too_many_lines)] // one pool, one machine through a cleared TPM
+    fn a_host_whose_tpm_key_does_not_sign_says_so_at_once_and_a_new_command_after_a_clear_enrolls_a_new_host(
+    ) {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        use std::sync::{Arc, Mutex};
+        let tpm = host::tpm::fake::Tpm::new();
+        // What the pool was asked (method, path, signer), and the TPM that stops signing as
+        // soon as the pool has its enrollment, when one is set.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let breaks: Arc<Mutex<Option<Arc<host::tpm::fake::Tpm>>>> = Arc::default();
+        let pool = pool_scripted({
+            let (asked, breaks) = (Arc::clone(&asked), Arc::clone(&breaks));
+            move |method, path, signer, body| {
+                let n = {
+                    let mut a = asked.lock().unwrap();
+                    a.push(format!("{method} {path} {signer}"));
+                    a.iter().filter(|x| x.contains("/hosts/enroll")).count()
+                };
+                match (method, path) {
+                    ("POST", "/api/v1/hosts/enroll") => {
+                        if let Some(t) = breaks.lock().unwrap().take() {
+                            *t.fails.lock().unwrap() =
+                                Some(("sign".into(), "Esys_Sign: the TPM is gone".into()));
+                        }
+                        let b: serde_json::Value = serde_json::from_slice(body).unwrap();
+                        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .decode(b["pubkey"].as_str().unwrap())
+                            .unwrap();
+                        let fp = format!(
+                            "SHA256:{}",
+                            base64::engine::general_purpose::STANDARD_NO_PAD
+                                .encode(sha2::Sha256::digest(&raw))
+                        );
+                        (
+                            201,
+                            serde_json::json!({"host": format!("h_000000000{n}"), "name": "box", "owner": "m1", "units": 3, "fingerprint": fp}).to_string(),
+                        )
+                    }
+                    ("GET", "/api/v1/hosts/self/state") => (
+                        200,
+                        r#"{"status":"active","owner":"m1","token":null}"#.into(),
+                    ),
+                    ("POST", "/api/v1/hosts/self/token") => (
+                        200,
+                        serde_json::json!({"worker": "m1-box-0a9z", "token": format!("omw_{}", "5e".repeat(24)), "rotate_after": "later"})
+                            .to_string(),
+                    ),
+                    _ => (404, "{}".into()),
+                }
+            }
+        });
+        let machine = |name: &str, tpm: &Arc<host::tpm::fake::Tpm>, token: bool| {
+            let d = crate::run::state::tempdir().join(name);
+            let o = Options {
+                pool: Some(pool.clone()),
+                paths: Paths::under(&d),
+                token: token.then(|| format!("ome_{}", "0".repeat(48))),
+                // Long: what is refused here is refused at once, never after the wait.
+                wait: Duration::from_secs(30),
+                poll: Duration::from_millis(10),
+                sources: fixture(),
+                key: host::KeyChoice {
+                    want: host::Want::Auto,
+                    tcti: host::tpm::DEFAULT_TCTI.into(),
+                    tools: Arc::clone(tpm) as Arc<dyn host::tpm::Tools>,
+                },
+            };
+            std::fs::create_dir_all(o.paths.capacity().parent().unwrap()).unwrap();
+            std::fs::write(
+                o.paths.capacity(),
+                r#"{"page_kb":4,"isolation":"root","cpus":4,"mem_gb":8,"disk_free_gb":{"work":60,"engine":40},"lanes":[{"arch":"x86_64","mode":"native"}]}"#,
+            )
+            .unwrap();
+            o
+        };
+        let quick = |o: &Options| {
+            let (started, mut out) = (Instant::now(), Vec::new());
+            let r = run(o, &mut out);
+            assert!(started.elapsed() < Duration::from_secs(10), "it waited");
+            (r, String::from_utf8_lossy(&out).into_owned())
+        };
+        let asked_now = || asked.lock().unwrap().len();
+
+        // The TPM stops signing once the pool has the enrollment: the wait for the Confirm
+        // ends at once, the identity kept, and nothing is sent unsigned.
+        let broken = host::tpm::fake::Tpm::new();
+        *breaks.lock().unwrap() = Some(Arc::clone(&broken));
+        let o = machine("broken", &broken, true);
+        let (r, said) = quick(&o);
+        let e = r.unwrap_err().to_string();
+        assert!(
+            e.contains("the host key in the TPM did not sign"),
+            "{e} {said}"
+        );
+        assert_eq!(
+            Identity::read(&o.paths.state).unwrap().unwrap().host,
+            "h_0000000001"
+        );
+        assert!(!asked.lock().unwrap().iter().any(|a| a.contains("/self/")));
+
+        // A host enrolled with its key in the TPM.
+        let o = machine("cleared", &tpm, true);
+        let (r, said) = quick(&o);
+        r.unwrap_or_else(|e| panic!("{e}: {said}"));
+        assert_eq!(
+            Identity::read(&o.paths.state).unwrap().unwrap().host,
+            "h_0000000002"
+        );
+        let old_key = open(&o).unwrap().0.key.public_b64u();
+
+        // The TPM cannot be asked (this user may not open it): said at once, nothing sent,
+        // the identity and the key's files kept, a new command or not.
+        *tpm.fails.lock().unwrap() = Some((
+            "createprimary".into(),
+            "/dev/tpmrm0: Permission denied".into(),
+        ));
+        let before = asked_now();
+        let (r, said) = quick(&o);
+        let e = r.unwrap_err().to_string();
+        assert!(
+            e.contains("Permission denied") && e.contains("this machine stays host h_0000000002"),
+            "{e} {said}"
+        );
+        assert_eq!(asked_now(), before);
+        assert_eq!(
+            Identity::read(&o.paths.state).unwrap().unwrap().host,
+            "h_0000000002"
+        );
+        assert!(host::tpm::present(&o.paths.state));
+        *tpm.fails.lock().unwrap() = None;
+
+        // The TPM cleared, and no new command: what to do, at once, nothing sent.
+        tpm.clear();
+        let o = Options { token: None, ..o };
+        let (r, said) = quick(&o);
+        let e = r.unwrap_err().to_string();
+        assert!(
+            e.contains("host h_0000000002's key is gone from the TPM")
+                && e.contains("integrity check failed")
+                && e.contains("Retire h_0000000002 on its page, add the host again"),
+            "{e} {said}"
+        );
+        assert_eq!(asked_now(), before);
+        assert_eq!(
+            Identity::read(&o.paths.state).unwrap().unwrap().host,
+            "h_0000000002"
+        );
+
+        // A new command: the machine enrolls as a new host, with a new key in the TPM, and
+        // the old identity is kept beside.
+        let o = Options {
+            token: Some(format!("ome_{}", "0".repeat(48))),
+            ..o
+        };
+        let (r, said) = quick(&o);
+        r.unwrap_or_else(|e| panic!("{e}: {said}"));
+        assert!(
+            said.contains("host h_0000000002's key is gone from the TPM, which was cleared or is another machine's (")
+                && said.contains("this install enrolls the machine as a new host; Retire h_0000000002 on its page"),
+            "{said}"
+        );
+        assert_eq!(
+            Identity::read(&o.paths.state).unwrap().unwrap().host,
+            "h_0000000003"
+        );
+        assert!(o.paths.state.join("host.json.lost-h_0000000002").exists());
+        let (keyed, _, _) = open(&o).unwrap();
+        assert_eq!(keyed.key.store(), host::Store::Tpm);
+        assert_ne!(keyed.key.public_b64u(), old_key);
+        assert!(valid_worker_token(&token_in_its_file_only(&o)));
+    }
+
     #[test]
     fn a_machine_with_no_identity_enrolls_with_a_new_key() {
         let d = std::env::temp_dir().join(format!("omarchy-agent-fresh-{}", std::process::id()));
@@ -1089,17 +1480,18 @@ mod tests {
             wait: Duration::from_secs(0),
             poll: Duration::from_millis(10),
             sources: fixture(),
+            key: host::KeyChoice::file(),
         };
-        let first = open(&o).unwrap().0.public_b64u();
-        assert_ne!(open(&o).unwrap().0.public_b64u(), first);
+        let first = open(&o).unwrap().0.key.public_b64u();
+        assert_ne!(open(&o).unwrap().0.key.public_b64u(), first);
         Identity {
             pool: "http://127.0.0.1:9".into(),
             host: "h_0123456789".into(),
         }
         .write(&o.paths.state)
         .unwrap();
-        let kept = open(&o).unwrap().0.public_b64u();
-        assert_eq!(open(&o).unwrap().0.public_b64u(), kept);
+        let kept = open(&o).unwrap().0.key.public_b64u();
+        assert_eq!(open(&o).unwrap().0.key.public_b64u(), kept);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1155,6 +1547,7 @@ mod tests {
             wait: Duration::from_secs(0),
             poll: Duration::from_millis(10),
             sources: fixture(),
+            key: host::KeyChoice::file(),
         };
         let mut out = Vec::new();
         let e = run(&o, &mut out).unwrap_err().to_string();

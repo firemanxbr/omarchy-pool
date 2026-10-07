@@ -19,8 +19,10 @@
  *   build, an emulated one — each saying so on its page (`params.repinned`),
  *   one journal line with who, why, what moved and what stayed; what it could
  *   not stays, said with why — a `needs_native` task on its emulated lane,
- *   the project's copy of its owner's own package (D35), a size its pool cap
- *   leaves no room for, an agent its pin chose that the host does not run —;
+ *   the project's copy of its owner's own package (D35) — which moves while
+ *   the solo-maintainer exception names its owner (#394) —, a size its pool
+ *   cap leaves no room for, an agent its pin chose that the host does not
+ *   run —;
  *   the owner's other machine's pins, another maintainer's, a leased task and
  *   a revoked registration's are never touched;
  * - the switch drains the legacy registrations and the drain's sweep sends
@@ -437,6 +439,33 @@ describe("Move pins here: what moves, what stays, and the switch's drain (#345, 
     expect(r.json.line).toContain("205 queued tasks stay pinned");
     expect(r.json.line).toContain(" and 195 more)");
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE pinned_to IN ('m1-laptop-aarch64', 'm1-studio') AND status = 'queued' AND id NOT IN (?, ?)").bind(T.native, T.emulated).run();
+  });
+
+  it("the solo-maintainer exception (#394): while [solo] names m1, the project's copy of m1's own package moves onto m1's host; without it, it stays (D35)", async () => {
+    await env.DB.prepare("UPDATE build_workers SET last_seen = ? WHERE id = 'm1-studio'").bind(iso(Date.now())).run();
+    // The project's copy of m1's own package, pinned to the other machine's set (named below): m1 is its requester.
+    const theirs = await seedTask({ arch: "aarch64", pinned_to: null, trust: "community", owner: "m1", status: "staged" });
+    const name = (await taskOf(theirs)).name;
+    const copy = (await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, params, pinned_to)
+        VALUES (?, 'aarch64', '1.0-1', ?, 'project build asked by m2', 30, 'queued', 0, 'project', 'm1', 'build', ?, 'm1-laptop-aarch64') RETURNING id`)
+      .bind(name, `review:${theirs}`, JSON.stringify({ review: theirs, by: "m2", agent: CLAUDE })).first<{ id: number }>())!.id;
+    const laptop = ["m1-laptop-aarch64"];
+    try {
+      const held = await press(studio, "m1's own copy, under the two-person rule", page("m1"), laptop);
+      expect(held.status, JSON.stringify(held.json)).toBe(409);
+      expect(held.json.code).toBe("nothing_to_move");
+      expect(held.json.stay).toEqual([{ task: copy, from: "m1-laptop-aarch64", why: `the project's copy of ${name} is not built on its requester's host (D35)` }]);
+      // The sync applies [solo] naming m1: the claim's read carries it, and m1's host may build m1's own copy — so it moves.
+      await applyGovernance(env, ["m1", "m2"], "sha-solo", { maintainer: "m1", since: "2026-10-06", reason: "one active maintainer and one host" });
+      const r = await press(studio, "m1's own copy, under the solo-maintainer exception", page("m1"), laptop);
+      expect(r.status, JSON.stringify(r.json)).toBe(200);
+      expect(r.json.moved).toEqual([copy]);
+      expect(r.json.stay).toEqual([]);
+      expect(await taskOf(copy)).toMatchObject({ status: "queued", pinned_to: "m1-studio" });
+    } finally {
+      await applyGovernance(env, ["m1", "m2"], "sha-start");
+      await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id IN (?, ?)").bind(copy, theirs).run();
+    }
   });
 
   it("the way back: the host's registration drained, what was moved onto it goes to the queue, and a resumed legacy registration claims on the pool's release", async () => {

@@ -17,7 +17,7 @@
  *   contributor's or the copy's kill below what the recipe on main learned,
  *   a kill at a clamped size, the edge of "lower";
  * - through the Worker (routes/factory.ts handleFail, handleComplete,
- *   selectAndLease; migration 0050), inside workerd with a real D1: a
+ *   selectAndLease; migration 0052), inside workerd with a real D1: a
  *   contributor's build that ran out of memory at size 1 queued again and
  *   leased at 2, its journal line, its story, and no further than 2; the
  *   project's copy whose size a maintainer set on the page keeps asking that
@@ -218,7 +218,7 @@ afterEach(async () => {
   await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE status IN ('queued', 'leased')").run();
 });
 
-describe("the migration (0050)", () => {
+describe("the migration (0052)", () => {
   it("adds the remembered size, the lower peaks counted and the report that last changed it to a package", async () => {
     const cols = (await env.DB.prepare("SELECT name FROM pragma_table_info('factory_packages')").all<{ name: string }>()).results.map((r) => r.name);
     expect(cols).toEqual(expect.arrayContaining(["learned_size", "learned_lower", "learned_task", "learned_why", "learned_at"]));

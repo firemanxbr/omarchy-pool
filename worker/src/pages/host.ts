@@ -78,18 +78,23 @@
  *   (sealAgentKey, whose own source is inlined here), so the pool relays
  *   only ciphertext. Its owner's; the host checks every signature again.
  *
+ * - Its host key (#330, design v2 §14): the fingerprint its owner compared
+ *   before Confirm, and where the key lives — in its TPM (ECDSA P-256, made
+ *   there and never out of it) or a file (Ed25519), with why not the TPM — as
+ *   its agent said at enrollment.
+ *
  * Anyone sees the name, the architectures, the release and whether its agent
  * reports (with whose it is and who stopped it, as the journal says); the
- * rest — the capacity, the leases, the box, the hostname and the host key's
- * fingerprint — is its owner's and the maintainers' (GET /api/v1/hosts/:id
- * says which; the Workers page's fleet row says the units and lanes to
- * anyone). A static shell, the same for every id; the script reads the host
- * from the address.
+ * rest — the capacity, the leases, the box, the hostname, the host key's
+ * fingerprint and where the key lives — is its owner's and the maintainers'
+ * (GET /api/v1/hosts/:id says which; the Workers page's fleet row says the
+ * units and lanes to anyone). A static shell, the same for every id; the
+ * script reads the host from the address.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
-import { AGENT_KEY_NAMES, HOST_ORDER_TTL_MIN, HOST_OWNER_AGENT, HOST_REPORT_FRESH_MIN, HOST_SETTINGS_AGENT, OWNER_NOT_MAINTAINER, WIDENABLE } from "../hosts";
+import { AGENT_KEY_NAMES, HOST_KEY_ALG_NAMES, HOST_ORDER_TTL_MIN, HOST_OWNER_AGENT, HOST_REPORT_FRESH_MIN, HOST_SETTINGS_AGENT, OWNER_NOT_MAINTAINER, WIDENABLE } from "../hosts";
 import { SILENT_MIN } from "../fleet";
 import { sealAgentKey } from "../seal";
 import { lucide } from "./kit";
@@ -269,6 +274,7 @@ const SCRIPT = String.raw`
   var LEGACY_PILL = { running: ["warn", "running"], stopped: ["na", "stopped"], gone: ["na", "no container left"], retiring: ["warn", "being retired"], retired: ["ok", "retired"], unknown: ["na", "not seen"] };
   var NOT_LISTED = ${JSON.stringify(OWNER_NOT_MAINTAINER)};
   var SANDBOX_KINDS = { gvisor: "gVisor", kata: "Kata Containers" };
+  var KEY_ALGS = ${JSON.stringify(HOST_KEY_ALG_NAMES)};
   // A sleeping host (#329): what its sleep means for the pool, in the head's words.
   var SLEEPS = "the pool hands it nothing until it wakes, and a task the sleep caught goes back to the queue when its lease expires.";
   var H = null, PK = {}, TIMER = 0, REG = null, VIA = null;
@@ -340,7 +346,7 @@ const SCRIPT = String.raw`
       ? kv("Status", esc(p[1])) + kv("Release", esc(h.release_applied || "—")) + kv("Alive", h.alive ? "its agent reports" : '<span class="muted">' + esc(quietWords(h)) + "</span>") + kv("Details", '<span class="muted">its owner\'s and the maintainers\'</span>')
       : [
         kv("Status", esc(p[1]) + (h.status_at && (h.status === "suspended" || h.status === "retired") ? " since " + when(h.status_at) : h.confirmed_at ? " since " + when(h.confirmed_at) : " — enrolled " + when(h.enrolled_at))),
-        kv("Host key", '<span class="mono">' + esc(h.fingerprint) + '</span>'),
+        kv("Host key", '<span class="mono">' + esc(h.fingerprint) + '</span><br>' + keyWords(h)),
         kv("Machine", esc((h.hostname || "?") + " · " + (h.os || "?") + " " + (h.arch || "?") + (h.page_kb ? ", " + h.page_kb + "K pages" : ""))),
         kv("Isolation", esc(h.isolation || "?") + (h.dedicated ? " (dedicated)" : h.dedicated === false ? " (a dedicated user on a shared machine)" : "")),
         kv("Runtime", runtimeWords(h)),
@@ -411,6 +417,14 @@ const SCRIPT = String.raw`
     var emulated = lanes.filter(function (l) { return l.mode === "emulated"; }).map(function (l) { return l.arch; });
     return named(a.sandbox) + " — what its contributors wrote (their builds, the project's review rebuilds, trials, audits) runs in it on the " + esc(native.join(", ") || "native") + " lane: a container escape lands in its kernel, not on the host"
       + (emulated.length ? "; its emulated " + esc(emulated.join(", ")) + " lane takes the project's own recipes only" : "") + stop + held;
+  }
+  // Where its key lives (#330): in its TPM — made there, and the TPM never lets it out, so a copy of its agent's files signs nothing
+  // on another machine — or a file in its agent's state directory, with why not the TPM. What its agent said at enrollment: the pool
+  // holds the key's kind to it (a TPM makes ECDSA P-256 keys, a file is Ed25519) and attests nothing more.
+  function keyWords(h) {
+    var k = h.host_key || {}, alg = esc(KEY_ALGS[k.alg] || k.alg || "?");
+    if (k.store === "tpm") return "in its TPM (" + alg + "): made there, and never out of it — a copy of its agent's files signs nothing on another machine";
+    return "a file (" + alg + "), 0600 in its agent's state directory" + (k.held ? '<br><span class="muted">not in its TPM: ' + esc(k.held) + "</span>" : "");
   }
   // The pool's cap (#337): what the pool hands it at most, whatever its envelope says; none lets its count decide.
   // The cap dialog's choices: none, or 0 up to the units the pool counts on it — the door refuses a cap above them (#324) —, or
@@ -792,7 +806,7 @@ const SCRIPT = String.raw`
         return { value: g.workers.map(function (w) { return w.id; }).join(","), text: (g.where || "no machine named") + " — " + g.workers.length + " registration" + (g.workers.length === 1 ? "" : "s") + ", " + num(g.tasks) + " queued task" + (g.tasks === 1 ? "" : "s"), selected: g === here };
       });
       if (!here && groups.length > 1) sets.unshift({ value: "", text: "Choose the legacy set this host replaces", disabled: true, selected: true });
-      ask({ title: "Move pins onto " + H.name, text: "The queued tasks pinned to the legacy set chosen — " + esc(H.owner) + "'s registrations at that machine — move onto this host's registration where it could run them once idle: a lane for each, never the project's copy onto its requester's host, the agent its pin chose, its units under the pool's cap. The rest stay, said with why, and go to the queue once their registration's drain has held. Another machine's set is never touched unless chosen.", select: { label: "Legacy set", options: sets }, input: "required", confirm: "Move pins here" }).then(function (r) {
+      ask({ title: "Move pins onto " + H.name, text: "The queued tasks pinned to the legacy set chosen — " + esc(H.owner) + "'s registrations at that machine — move onto this host's registration where it could run them once idle: a lane for each, never the project's copy onto its requester's host but for the maintainer [solo] names, the agent its pin chose, its units under the pool's cap. The rest stay, said with why, and go to the queue once their registration's drain has held. Another machine's set is never touched unless chosen.", select: { label: "Legacy set", options: sets }, input: "required", confirm: "Move pins here" }).then(function (r) {
         if (r === null) return;
         if (!r.pick) { toast("Choose the legacy set this host replaces: nothing was moved.", "error"); return; }
         api("POST", BASE + "/pins", { reason: r.note, workers: r.pick.split(",") }).then(function (d) {
@@ -815,7 +829,7 @@ export function hostHtml(id: string, poolUrl: string, version: RunningVersion): 
   return page({
     path: `/hosts/${id}`,
     title: "Host · omarchy-pool",
-    description: "One maintainer host of the pool: its status and whether it sleeps, its capacity and units, its lanes, isolation level and sandbox, the release it applied, its settings inside its envelope, its host orders, its legacy set and its leases.",
+    description: "One maintainer host of the pool: its status and whether it sleeps, its host key and where it lives, its capacity and units, its lanes, isolation level and sandbox, the release it applied, its settings inside its envelope, its host orders, its legacy set and its leases.",
     active: "factory",
     body: BODY,
     script: SCRIPT,
@@ -832,14 +846,14 @@ export const HOST_COMPONENTS = (F: Fixture): Component[] => [
     id: "host.head-facts",
     page: `/hosts/${F.host}`,
     anchor: ['<p class="op-eyebrow">Host</p>', 'id="hp-name"', 'id="hp-status"', 'id="hp-lede"', 'id="hp-stats"', 'id="hp-kv"'],
-    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', '"Isolation"', '"Sandbox"', "function sandboxWords(h)", "c.sandbox_held", "h.sandbox_applied", '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS", '"Alive"', "function quietWords(h)", "h.silent",
+    script: ['var BASE = "/api/v1/hosts/" + encodeURIComponent(ID)', 'api("GET", BASE)', "h.fingerprint === undefined", '"Host key"', "function keyWords(h)", "h.host_key", '"Isolation"', '"Sandbox"', "function sandboxWords(h)", "c.sandbox_held", "h.sandbox_applied", '"Lanes"', '"Last round"', "h.below_minimum", '"Units"', "personLink(h.owner)", "h.asleep", "h.asleep_since", "SLEEPS", '"Alive"', "function quietWords(h)", "h.silent",
       // #324: the runtime and its versions, the units busy and free, the held lanes, the owner's caps, the limits, the floor and the rollout.
       '"Runtime"', "function runtimeWords(h)", '"Versions"', "tools.compose", "tools.docker", "function unitWords(h)", "h.units_busy", "h.units_free", "h.job_reserved", "h.held_lanes", '"Owner\'s caps"', '"Limits"', "h.release_floor", '"Rollout"', "h.rollout.state"],
     reads: [
       { path: `/api/v1/hosts/${F.host}`, fields: ["host.id", "host.name", "host.owner", "host.status", "host.arches", "host.release_applied", "host.alive", "host.silent", "host.asleep", "host.asleep_since", "pool.version"] },
       {
         path: `/api/v1/hosts/${F.host}`, as: "maintainer",
-        fields: ["host.fingerprint", "host.capacity", "host.capacity.sandbox", "host.sandbox_applied", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version",
+        fields: ["host.fingerprint", "host.host_key", "host.host_key.store", "host.host_key.alg", "host.capacity", "host.capacity.sandbox", "host.sandbox_applied", "host.units", "host.lanes", "host.isolation", "host.dedicated", "host.hostname", "host.round", "host.below_minimum", "host.agent_version",
           "host.units_busy", "host.units_free", "host.units_effective", "host.job_reserved", "host.tasks", "host.state", "host.held_lanes", "host.limits", "host.owner_caps", "host.runtime", "host.tools.compose", "host.tools.docker", "host.release_floor", "host.rollout", "leases"],
       },
       { path: "/api/v1/hosts/h_nobody0000", status: 404 },

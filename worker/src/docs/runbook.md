@@ -539,7 +539,12 @@ sudo factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-pool/host
 
 It installs the runtime, qemu's binfmt handlers (with the `F` flag, for the
 emulated lane), btrfs-progs and jq; puts the user in the docker group
-(rootful); sets docker's default address pools and, on a daemon with no
+(rootful); where the machine has a TPM (`/dev/tpmrm0`), installs tpm2-tools
+and puts the user in the tss group, for the host key (#330, *Where the host
+key lives*, below) — before linger starts the user's manager, which keeps the
+groups it started with, and saying under *needs a person* when that manager
+already runs without the group (restart it, or reboot), on every run until
+its main process has it; sets docker's default address pools and, on a daemon with no
 container or image yet, `userns-remap`; makes the work root (a btrfs
 subvolume where it can); turns on linger; delegates cgroup v2 controllers to
 the user's systemd (rootless); and installs `DOCKER-USER` drop rules from
@@ -548,9 +553,9 @@ CGNAT, link-local and the host (IPv4; task networks stay IPv4 only), kept across
 `omarchy-task-firewall.service` (rootful). A second run changes nothing,
 but enables and restarts that unit when it was disabled or stopped since;
 exit 1 lists what needs a person. The task subnets and the work root must be
-the ones the agent's install is given. The Studio, set up before the script,
-has the same pieces from its own setup, without `userns-remap` — its recorded
-exception until P6 (*The Studio host*, below). A Mac runs
+the ones the agent's install is given. The Studio ran it once, at its
+canary visit, and leaves `userns-remap` off there — its recorded exception
+until P6 (D13; *The Studio host*, below). A Mac runs
 [`factory/host/prep-mac.sh`](../factory/host/prep-mac.sh) instead, with no
 sudo (*Installing a Mac*, below).
 
@@ -786,6 +791,73 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
 | `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory (it must be the one install.sh put the agent in, `omarchy-agent` under `XDG_DATA_HOME` or `~/.local/share`: the unit starts `<data>/current/omarchy-agent`); how long to wait for your Confirm |
 
+**Where the host key lives** (#330, design v2 §14). On a machine with a TPM
+2.0, the enrollment makes the host key inside it (ECDSA P-256, made by the
+TPM and never let out of it) when the agent's user may open the kernel's
+resource manager, `/dev/tpmrm0`, and the distribution's tpm2-tools are in
+`/usr/bin`; otherwise the key is `host.ed25519` as before, and preflight and
+the enrollment say why. prep-root.sh does both on a machine with a TPM; by
+hand, before the install, as root:
+
+```bash
+pacman -S tpm2-tools            # Arch; apt-get install tpm2-tools on Ubuntu
+usermod -aG tss omarchy         # the agent's user
+systemctl restart user@$(id -u omarchy).service   # or reboot: its user manager, which runs the agent's service, keeps the groups it started with
+ls -l /dev/tpmrm0               # crw-rw---- tss tss: the group may open it
+```
+
+then log in as it again (the install's shell needs the group too). Linger
+starts the user's manager at once and keeps it running, so a `usermod` alone
+reaches a new login but never the agent's service: preflight checks the
+running manager's groups too, and a manager without the group is a TPM out
+of the agent's reach (the key is then a file, and preflight says to restart
+the manager). The tss group opens the whole TPM, not the agent's key alone:
+the agent's user, and anything running as it (a task that escaped its
+container where it lands as that user, the `user` isolation level, among
+them), may send it any command the
+TPM's authorizations allow. With the lockout authorization empty, as on most
+machines, that includes `tpm2_clear`, which ends every key the TPM holds
+(systemd-cryptenroll's or clevis's LUKS bindings among them). On a machine
+whose TPM seals other secrets, set the lockout authorization first
+(`tpm2_changeauth -c lockout`, which takes `TPM2_Clear` through lockout away
+from that user; the owner hierarchy's must stay empty for the agent), or keep
+the user out of tss and the key a file (`OMARCHY_HOST_KEY=file`).
+
+Preflight's screen says where the key will live: a note for the TPM, a note
+for a machine with none (a VPS often has none; a VM's TPM is its
+hypervisor's), a warning when one is there but out of the agent's reach (no
+tpm2-tools, the user or its running manager not in tss).
+Two variables, in install.sh's environment beside `OMARCHY_ENROLL`, change
+it: `OMARCHY_HOST_KEY=tpm` makes a TPM out of reach a blocker (nothing is
+enrolled without it), `OMARCHY_HOST_KEY=file` keeps the file whatever the
+machine has; `OMARCHY_TPM_TCTI` names another resource manager
+(`tabrmd` for tpm2-abrmd; never the raw `/dev/tpm0`). The owner hierarchy's
+password must be empty, as it is unless someone took ownership of the TPM;
+with one, the key is a file and the enrollment says so. The host's page shows
+where its key lives beside its fingerprint, and `omarchy-agent status` says
+it at the host. A host keeps the key it enrolled with: to move a host whose
+key is a file into its TPM, Retire it on its page and install again (it
+enrolls as a new host, with a new key). Clearing the TPM — `tpm2_clear`, the
+firmware's *Clear TPM*, some firmware updates — ends a key made in it: the
+agent's signed calls then go unsent, its rounds say `pool-unreachable` with
+*the host key in the TPM did not sign: … the TPM does not load the host key:
+was it cleared* (`omarchy-agent status` and `logs`; `omarchy-agent token`
+says the same), its set keeps running, and the pool hears nothing from it.
+Retire the host on its page, add it again and paste the command it prints:
+the agent sees the TPM refuse the old key before it sends anything, keeps the
+old identity beside (`state/host.json.lost-<host>`) and enrolls the machine
+as a new host with a new key in the TPM (`enroll` without a new command says
+these steps and stops at once). Only the TPM's own refusal of the key's blob
+counts — its integrity check,
+`Esys_Load(0x1DF) - tpm:parameter(1):integrity check failed`, which is what a
+cleared TPM, or another machine's, answers. A
+TPM it cannot ask at all — the device out of the user's reach, tpm2-abrmd
+stopped — or one whose load fails any other way (a run that does not answer,
+a TPM out of memory or busy, a full disk) is no verdict: the identity and the
+key are kept, and the install stops at once saying why; run it again once
+the TPM answers. A Mac's key stays a file until the agent is signed with
+a Developer ID and notarised for the Secure Enclave (still open in #330).
+
 It verifies the release bundle and that it is the agent that release ships,
 fetches the release's pinned docker CLI and compose plugin into `tools/`,
 then runs **preflight** — `omarchy-agent preflight` with the same options
@@ -912,8 +984,11 @@ the run loop asks again every hour, and within minutes after no answer), `OMARCH
 (the path chosen here, never mounted into the dispatcher) and, when the
 envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
 `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK` and `…_CALLS_PER_DAY` (without one, the
-dispatcher's defaults), and `OMARCHY_DIRECT_NETWORK=1` when the envelope grants
-a signed exception's bridge (#373). Every other line of that file is yours and kept. It writes the
+dispatcher's defaults), `OMARCHY_DIRECT_NETWORK=1` when the envelope grants
+a signed exception's bridge (#373), and, when the envelope has a `cache_caps`,
+`OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB` (#341). Those envelope
+lines come from `agent.toml` alone: once it is there, a line of yours for one of
+their keys is replaced (set it in the envelope instead). Every other line of that file is yours and kept. It writes the
 agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
 `--legacy`, and the unit `~/.config/systemd/user/omarchy-agent.service`
 (`Type=notify`, `Restart=always`, `WatchdogSec=300`,
@@ -2046,7 +2121,13 @@ so a size-4 build waits for memory rather than run smaller.
   without a release. A claim never pins a rebuild to the requester's host:
   naming one is refused (`requester_host`), and another architecture's
   same-agent pick goes to another maintainer's worker with that agent, or
-  unpinned when there is none.
+  unpinned when there is none. While the solo-maintainer exception names a
+  maintainer (#394, *The solo-maintainer exception*), none of this holds for
+  that maintainer's own packages: their own hosts take the copy at their next
+  claim, Review's pane says *@m1's own hosts may build it … no release
+  needed*, a claim may pin it to their worker, and *Release to any host* is
+  refused as nothing to release. Another requester's hosts are still kept off
+  it.
 - **The second opinion (#339, D36).** An audit runs in a fresh container
   with its own agent sidecar. It leaves the machine that built what it
   audits to another that can take it now, for 3 minutes. The pool tells
@@ -2227,6 +2308,106 @@ so a size-4 build waits for memory rather than run smaller.
   its own until they expire. The pool holds it only while that report is
   fresh (15 minutes): a dispatcher that claims after that is on a Mac that
   woke. The host's page says *asleep*.
+
+### A host's task caches
+
+A host's dispatcher keeps its tasks' caches under `<work root>/cache/`
+(#341, design v2 §9.3, D52), 0700, never mounted whole into a task:
+
+- `build/<community|project>/<arch>/<package>/` — one package's cargo, Go
+  and ccache caches on one side: a build mounts its own at `/build/cache`
+  and nothing else of the tree (an audit and a trial none);
+- `pacman/<arch>/` — the shared pacman cache, read-only in every task; a
+  build's and an audit's pacman reads it first (its first `CacheDir`) and
+  downloads into its own `tasks/<id>-<gen>/pkgcache/`. A trial's check reads
+  none and downloads everything itself, as in its own container: it installs
+  the lab's sections above edge's, and this cache holds the bytes edge's
+  databases list, which the lab's need not;
+- `merged/<arch>/` — one record per file merged, a package's signature
+  included: its SHA-256 and size;
+- `incoming/<arch>/<id>-<gen>/` — a lease's downloads set aside when it
+  ends, until the next pass of the upkeep merges or discards them;
+- `syncdb/<arch>/` — the pool's signed `edge` databases of every source,
+  fetched again when an hour old, each read only once its `.sig` verifies
+  with the pool's key built into the dispatcher (`pool-key.asc` beside them);
+- `used/` — when a lease last mounted each build cache: the order the build
+  caches are pruned in; `trash/` — a build cache being deleted.
+
+A download enters `pacman/<arch>/` only when its SHA-256 and size are what
+those databases list for its file name; a file they do not list (a recipe's,
+a `.part`), one with other bytes and one two databases list with different
+bytes are discarded. A package enters with the signature the pool keeps
+beside it (`<source>/<arch>/<file>.sig`, fetched from the pool as the
+databases are: its upstream's, or for the pool's own builds the pool key's,
+which `pkg-repo publish` makes), or not at all: a build's pacman downloads a
+package's `.sig` with it from the image's own Arch and Arch Linux ARM
+sections, whose `SigLevel` checks packages, and checks the package by the
+`.sig` beside the file it found, so a package there without its `.sig`, or
+beside another one, fails every build that installs it. When its build
+downloaded a `.sig`, that `.sig` must be the pool's copy; a `.sig` of a
+build's own never enters. A package the pool keeps no signature of (an
+upstream that ships none, or a build published before the pool had its key)
+enters alone; the pool's own builds enter with the pool's `.sig`, which their
+`PackageNever` sections never read. Each pass — after a lease ends, and
+every 15 minutes — prunes first, before it asks the pool anything: the
+pacman cache to the two newest versions of each package, then within `OMARCHY_CACHE_PACMAN_GB` (older
+versions first, then the oldest merged); the build caches least recently
+used first within `OMARCHY_CACHE_BUILD_GB`, never one a lease of the host
+mounts. Then it checks the shared cache again against the databases of the
+day: a file whose name they now list with other bytes than its record's (a
+source published the same file name since), or list twice at odds, or that
+is not whole (a crash while it was written) is removed, and its signature
+after it. Both caps
+are the envelope's `cache_caps` (`agent.toml`: `cache_caps = { pacman_gb =
+40, build_gb = 120 }` on the Studio; 10 and 20 GB when it sets none), which
+the agent writes into `etc/dispatcher.env`. The dispatcher's log says what a
+pass did:
+
+```
+caches: the downloads of 2 lease(s): 14 merged into the shared pacman cache (310 MB) and 12 signature(s) of the pool's beside their package, 15 there already, 2 discarded (…); 6 file(s) of the pacman cache pruned (…)
+```
+
+- **Nothing is ever merged** (`no signed database of <arch> could be read`):
+  the pool's databases did not come (the pool or the network: the last copies
+  verified are used meanwhile; a pass stops asking at the first that does not
+  come, and the next pass asks again) or do not verify with the dispatcher's
+  key (a release whose key is not the pool's). Builds go on, each downloading
+  what it needs.
+- **`… for a signature the pool does not keep as the one downloaded`**, or
+  `the pool's copies of the packages' signatures (<arch>): …` (the pool did
+  not answer): those packages are not merged, and each build downloads them
+  itself until a later lease's merge-back has the pool's copy. Many of them
+  from one repository mean the pool keeps no signatures of it, or other ones
+  (an upstream that signs its packages again): `pkg-repo sync` keeps the
+  upstream `.sig` beside each package it takes.
+- **`<package>: missing required signature`** in a build's log, for a file
+  of `/var/cache/pacman/shared`: that package is there without its `.sig`,
+  which the merge-back never leaves (one the pool keeps no signature of,
+  taken from a build whose repository checks none, then needed by one whose
+  repository does). The pass after that build ends takes the package out (`N
+  package(s) taken out of the shared pacman cache`); to clear it at once,
+  remove that file from `cache/pacman/<arch>/`.
+- **`File /var/cache/pacman/shared/<file> is corrupted`** in a build's log:
+  the shared cache holds bytes under that name which the repository the
+  build resolved it from lists otherwise; pacman cannot delete them from a
+  read-only cache, so every build that needs the file fails. The next pass
+  removes it once the pool's databases (fetched hourly) list the other bytes;
+  a repository outside the pool's (the image's own mirrors) can be ahead of
+  them. To clear it at once, remove that file from `cache/pacman/<arch>/`.
+- **`<package>: could not find package in cache`** (or `could not open
+  file` on a file of `/var/cache/pacman/shared`), rarely: a pass pruned it
+  while that build's pacman, which had found it there, was about to open it. The build fails and
+  the pool runs it again; often, the cap is too small for what the host's
+  builds need at once: raise `pacman_gb`.
+- **`its downloads could not be set aside for the shared pacman cache`**:
+  `cache/` is not on the file system of `tasks/` (a link of yours to another
+  disk); keep it on the work root.
+- **A cache to clear**: stop nothing; remove the package's directory under
+  `cache/build/…` (or a file of `cache/pacman/<arch>/`) between its builds;
+  the next build starts it again. A build cache a running lease mounts is
+  never pruned, and should not be removed by hand while it runs.
+- **Disk**: the caches count against the work root's free space like
+  everything else under it; lower `cache_caps` rather than the disk floor.
 
 ### A host reverted a release
 
@@ -2579,7 +2760,10 @@ decides on their own package, and never on a contributor's bytes:
   request changes, a rejection and a release with `code:
   "conflict_of_interest"` when they are a maintainer (`maintainer_only`, as
   anyone who is not, otherwise); an adoption of your own package is refused
-  the same way (`conflict_of_interest`).
+  the same way (`conflict_of_interest`) — except for the one maintainer
+  `factory/MAINTAINERS.toml`'s `[solo]` table names while it is there, whose
+  decisions on their own packages are taken and marked self-reviewed (*The
+  solo-maintainer exception* below, #394).
 - **Withdraw a record** (`POST /api/v1/factory/record/withdraw {key,
   reason}`) when a log or a report must leave the public bucket: a signed
   tombstone takes its place, the staging copy goes with it.
@@ -2602,7 +2786,7 @@ a ring, and the one thing that must hold for it to open:
 
 | Door | What it ships | What guards it |
 |---|---|---|
-| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package |
+| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
 | **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
 | **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
 | **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |
@@ -2679,6 +2863,75 @@ agree). See [Governance](GOVERNANCE.md). `GET /api/v1/factory/maintainers`
 and `/factory/approvals` are the public record. What a package is about is
 its *category*, proposed by the project's agent at audit and settled by a
 maintainer (`POST /factory/packages/<name>/category`).
+
+### The solo-maintainer exception
+
+A maintainer decision of 2026-10-06 (#394): while one maintainer is active
+and the Studio is the only host, that maintainer builds, reviews and approves
+their own packages, in the open. The switch is one table in
+`factory/MAINTAINERS.toml`, nothing else — no setting, no route, no database
+write by hand:
+
+```toml
+[solo]
+maintainer = "firemanxbr"
+since = "2026-10-06"
+reason = "maralcbr has no time or machines for the pool (#332): one active maintainer and one host until more maintainers join"
+```
+
+**Turning it on** is a governance pull request adding the table, like any
+change to the file: `factory/bin/check-governance` (CI) refuses a table that
+is not exactly one maintainer of `maintainers` (never a list), a `since`
+written `"YYYY-MM-DD"`, and a `reason` on one line of 300 characters at most
+(no tab, control or format character; counted as the brain counts them, so a
+table CI takes is one the brain applies), and nothing else in it; it changes
+neither `.github/CODEOWNERS` nor the host agent's pin (`check-governance
+--write` says so). Within ten minutes of the
+merge the brain applies it (`worker/src/governance.ts`, the table
+`governance_solo` is its copy) and writes one `role` line, *… under the
+solo-maintainer exception since …*; `GET /api/v1/factory/maintainers` says
+`solo`, and Status and Review say it is in force.
+
+**While it is on**, for the named maintainer, and only on their own packages:
+
+- Review's doors let them through — **Claim** (labelled *Claim ·
+  self-review* on their row), **Approve** with their passkey as always,
+  **Request changes**, **Reject**, **Release claim**; the cancel door sends
+  them to the release, as it sends anyone; the *No maintainer* tab's
+  **Adopt** on a package of their own, and the package page's (*Adopt ·
+  self-review*, where its You card says they decide on their own package
+  instead of the lock). An agent's draft of their own verdict
+  is taken too, and confirmed in the browser as any draft.
+- Their own host builds the project's copy (D35 above): nothing waits for
+  *Release to any host*.
+- Each such decision says *self-reviewed (solo-maintainer exception)* on its
+  journal line, carries `solo_exception` (who, since, why) in its signed
+  record and its answer, and is marked *self-reviewed* on Review (the claim,
+  the workspace, the decision), the build's page and the package's page —
+  an adoption on its maintainer row, with its requester still named, for as
+  long as it stands.
+  Status's line counts them and links the list on `/docs/governance#solo`
+  (`GET /api/v1/factory/self-reviewed`).
+- Everyone else is under the rule as before: another maintainer is refused
+  their own package (`conflict_of_interest`) and their hosts are kept off its
+  copy; a contributor's package is decided as it always was.
+- The second opinion is unchanged: with one host and one model each audit of
+  the project's copy records `independent: none`, and Status's line counts
+  them beside the exception.
+
+A sync that reads a `[solo]` the brain refuses (it cannot get past CI, but a
+hand edit on `main` could) applies the list and no exception, and its log line
+says `[solo] not applied: …`; the rules then hold for everyone.
+
+**Turning it off** — once a second maintainer is active, with a host — is a
+pull request deleting the table, reviewed by that maintainer. Within ten
+minutes the brain clears it, writes the `role` line *… ended …*, and every
+door and placement is the two-person rule again, unchanged: a claim of their
+own package answers `conflict_of_interest`, its copy waits for another
+maintainer's host or release. Nothing decided meanwhile is undone, and its
+marks stay on the record and in the list; a self-reviewed approval another
+maintainer does not stand behind is withdrawn like any other (*Withdraw*
+above), with a reason.
 
 ## Adding a repository
 

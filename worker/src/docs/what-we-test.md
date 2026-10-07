@@ -59,7 +59,10 @@ pacman install it from the lab (the trial), and decide — approve with a
 note, or reject with the reason, which sends it back to the contributor.
 A maintainer who brought the package is its contributor: **nobody decides
 on their own package**, whatever their role, so two people are always
-between a recipe and the rings.
+between a recipe and the rings — but for the one maintainer the
+solo-maintainer exception names while it is in force, whose decisions on
+their own packages are marked self-reviewed, in public (#394,
+[/docs/governance#solo](/docs/governance#solo)).
 
 Until the maintainer decides, the project's build sits in the lab: pinned,
 tried, visible on the package's page under *How it got here*, never

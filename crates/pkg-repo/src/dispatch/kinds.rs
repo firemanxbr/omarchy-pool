@@ -61,6 +61,9 @@ pub struct Ctx {
     /// A release checkout to mount instead of `work/releases/<release>` (tests, and a host that keeps its own).
     pub checkout: Option<PathBuf>,
     pub constants: Constants,
+    /// The key the pool's databases are verified with before a download is merged into the shared
+    /// pacman cache (#341): `None`, the one built into this binary (the engine tests give their own).
+    pub pool_key: Option<PathBuf>,
 }
 
 impl Ctx {
@@ -172,7 +175,16 @@ pub fn prepare(ctx: &Ctx, l: &Lease, stop: &AtomicBool) -> Result<Value, Prep> {
     let subs: &[&str] = if super::jobs::is_job(&l.task.kind) {
         &["tmp"]
     } else {
-        &["in", "out", "log", "build", "pkgcache", "agent"]
+        // `build/cache`: where a build's own package cache is mounted (#341), made here, not by the engine.
+        &[
+            "in",
+            "out",
+            "log",
+            "build",
+            "build/cache",
+            "pkgcache",
+            "agent",
+        ]
     };
     for sub in subs {
         std::fs::create_dir_all(dir.join(sub)).map_err(retry_of)?;

@@ -86,6 +86,13 @@
 //! changed) — and the claim offers no emulated lane without its build image
 //! by digest.
 //!
+//! **Caches** (#341, design v2 §9.3; D52, [`cache`]): a build mounts its own
+//! package's build cache on its own side and nothing else of the cache tree,
+//! every task its lane's pacman cache read-only beside a writable one of its
+//! own; what a lease downloaded is merged into the shared cache, in a thread of
+//! the dispatcher's, only when the pool's signed databases list its bytes, and
+//! both caches are pruned to the envelope's `cache_caps`.
+//!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
 //! restart makes the dispatcher exit 75 (tasks survive), recheck-agent and
@@ -130,11 +137,14 @@
 //! when agent.toml sets it, so the defaults below hold otherwise, and
 //! `OMARCHY_DIRECT_NETWORK=1` when the envelope grants a signed exception's
 //! bridge network (#373), which install's egress probe then checked: without
-//! it a package with `network = "direct"` is handed back. A changed
+//! it a package with `network = "direct"` is handed back; and the envelope's
+//! `cache_caps` (`OMARCHY_CACHE_PACMAN_GB`, `OMARCHY_CACHE_BUILD_GB`, #341),
+//! each only when agent.toml sets it. A changed
 //! file recreates the dispatcher, which re-adopts its tasks. The dispatcher
 //! keeps the registration's id it learned in `state/host`.
 
 pub mod budget;
+pub mod cache;
 pub mod capacity;
 pub mod engine;
 pub mod jobs;
@@ -298,6 +308,10 @@ pub struct Options {
     pub net: Net,
     /// Every pool job's timeout instead of its kind's (the engine tests' hidden flag, #340).
     pub job_timeout: Option<Duration>,
+    /// The task caches' caps (#341): `OMARCHY_CACHE_PACMAN_GB`, `OMARCHY_CACHE_BUILD_GB`.
+    pub cache_caps: cache::Caps,
+    /// The key the pool's databases are verified with instead of the one built in (the engine tests' hidden flag).
+    pub pool_key: Option<PathBuf>,
 }
 
 /// What the dispatcher needs for its tasks' networks and sidecars (#336).
@@ -508,6 +522,18 @@ pub struct Dispatcher {
     revoked: BTreeSet<String>,
     /// Pool jobs (#340).
     pub jobs: JobConf,
+    /// The task caches' caps (#341): the envelope's `cache_caps`, or the defaults.
+    pub cache_caps: cache::Caps,
+    caches: Caches,
+}
+
+/// The task caches' upkeep (#341, [`cache`]): its pass running now, when the next one is due,
+/// whether a lease left downloads since the last.
+#[derive(Default)]
+struct Caches {
+    job: Option<Job<cache::Report>>,
+    next_at: u64,
+    dirty: bool,
 }
 
 /// A hold on the claims after the sandbox's runtime refused a start (#330): the count it was
@@ -587,6 +613,8 @@ impl Dispatcher {
                 engine: PathBuf::from("docker"),
                 timeout: None,
             },
+            cache_caps: cache::Caps::default(),
+            caches: Caches::default(),
         })
     }
 
@@ -775,9 +803,54 @@ impl Dispatcher {
         }
         self.watch_disk(now);
         if !self.terminating.load(Ordering::SeqCst) {
+            self.step_caches(now);
             self.step_probe(now);
             self.claim(now);
         }
+    }
+
+    // ---------- the task caches (#341) ----------
+
+    /// Starts the caches' upkeep when a lease left downloads or its pass is due, in a thread of
+    /// its own (it fetches the pool's databases and hashes what it merges), and says what a
+    /// finished pass did.
+    fn step_caches(&mut self, now: u64) {
+        if self.caches.job.is_none() && (self.caches.dirty || now >= self.caches.next_at) {
+            self.caches.dirty = false;
+            self.caches.next_at = now + cache::EVERY;
+            let u = cache::Upkeep {
+                pool: Arc::clone(&self.ctx.pool),
+                pool_url: self.ctx.pool_url.clone(),
+                work_root: self.ctx.work_root.clone(),
+                key: self.ctx.pool_key.clone(),
+                caps: self.cache_caps,
+                in_use: self.caches_in_use(),
+            };
+            let work = move || cache::upkeep(&u);
+            self.caches.job = Some(if self.inline {
+                Job::Done(work())
+            } else {
+                Job::Running(std::thread::spawn(work))
+            });
+        }
+        if let Some(r) = poll(&mut self.caches.job) {
+            if let Some(line) = r.said() {
+                say(line);
+            }
+        }
+    }
+
+    /// The build caches this host's leases mount, or are about to: never pruned.
+    fn caches_in_use(&self) -> BTreeSet<PathBuf> {
+        self.leases
+            .values()
+            .filter_map(|v| {
+                let l = &v.lease;
+                let builds = kinds::kind_of(l).is_some_and(spec::Kind::builds);
+                let trust = spec::Trust::of(&l.task.trust)?;
+                builds.then(|| cache::build_dir(&self.ctx.work_root, trust, l.arch(), &l.task.name))
+            })
+            .collect()
     }
 
     // ---------- the probe sidecar (§9.5) ----------
@@ -930,6 +1003,22 @@ impl Dispatcher {
         if let Some(cap) = l.agent_calls {
             self.ledger
                 .add(self.probes.now(), budget::used(&self.ctx.task_dir(l), cap));
+        }
+        // What its pacman downloaded goes aside for the verified merge-back (#341), whatever
+        // ended it: only what the pool's signed databases list is ever merged.
+        match cache::collect(
+            &self.ctx.task_dir(l),
+            &self.ctx.work_root,
+            l.arch(),
+            l.task.id,
+            &l.gen,
+        ) {
+            Ok(true) => self.caches.dirty = true,
+            Ok(false) => {}
+            Err(e) => say(format!(
+                "task {}: its downloads could not be set aside for the shared pacman cache ({e}); they go with its directory",
+                l.task.id
+            )),
         }
         let _ = std::fs::remove_dir_all(self.ctx.task_dir(l));
         self.store.remove(l.task.id, &l.gen);
@@ -1395,6 +1484,26 @@ impl Dispatcher {
         } else {
             None
         };
+        // Its caches (#341): its lane's shared pacman cache and, for a build, its own package's
+        // build cache on its own side, made and stamped as used before anything mounts them.
+        let Some(trust) = spec::Trust::of(&live.lease.task.trust) else {
+            let why = format!(
+                "trust {:?} is neither community nor project",
+                live.lease.task.trust
+            );
+            lost(self, &mut live, why);
+            return live;
+        };
+        if let Err(e) = cache::ready(
+            &self.ctx.work_root,
+            trust,
+            live.lease.arch(),
+            &live.lease.task.name,
+            kind.builds(),
+        ) {
+            lost(self, &mut live, format!("its caches: {e}"));
+            return live;
+        }
         let env_file = self.net.env_file();
         let plan = spec::plan(&spec::Spec {
             task: live.lease.task.id,
@@ -1405,9 +1514,11 @@ impl Dispatcher {
             emulated: live.lease.emulated(),
             name: &live.lease.task.name,
             kind,
+            trust,
             cpus,
             mem_gb,
             image: &image,
+            work_root: &self.ctx.work_root,
             task_dir: &tdir,
             release_dir: &rdir,
             worker_image: &self.net.worker_image,
@@ -2086,6 +2197,14 @@ impl Dispatcher {
                 true,
             );
         }
+        // A task container's build cache is its side's (#341): a trust that is neither is no task to start.
+        if !job && spec::Trust::of(&task.trust).is_none() {
+            return refuse(
+                self,
+                &format!("trust {:?} is neither community nor project", task.trust),
+                true,
+            );
+        }
         if !KINDS.contains(&task.kind.as_str()) && !job {
             return refuse(
                 self,
@@ -2577,6 +2696,7 @@ pub fn run(opts: &Options) -> Result<()> {
         pool_url: opts.pool.clone(),
         checkout: opts.checkout.clone(),
         constants: Constants::signed(),
+        pool_key: opts.pool_key.clone(),
     };
     let mut d = Dispatcher::new(
         ctx,
@@ -2594,6 +2714,7 @@ pub fn run(opts: &Options) -> Result<()> {
     d.terminating = Arc::clone(&terminating);
     d.net = opts.net.clone();
     d.net.gateway = gateway;
+    d.cache_caps = opts.cache_caps;
     // Pool jobs (#340): the shim first on their PATH, as the only engine their scripts reach; the real one by its path.
     let exe = std::env::current_exe().context("this binary's path, for the pool jobs' shim")?;
     jobs::install_shim(&d.jobs.bin, &exe).context("the pool jobs' shim (state/bin)")?;

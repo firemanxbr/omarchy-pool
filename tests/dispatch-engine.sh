@@ -37,6 +37,17 @@
 #      of the job is refused; a job that hangs is killed at its timeout and
 #      failed, with what it started, while a build's lease beats on and
 #      completes
+#   7. the task caches (#341): two community builds of packages that need the
+#      same dependency, at once — each mounts its own package's build cache
+#      (a project cache of the same name and the other package's out of its
+#      reach) and the shared pacman cache read-only, and downloads into a
+#      cache of its own; after them (in one pass of the merge-back or in two,
+#      as they end), only the bytes the pool's signed
+#      databases list (the fixture databases, served by the stub pool, signed
+#      by their own key) are merged into the shared cache, with the pool's copy
+#      of the dependency's signature beside it — a planted file, an unlisted
+#      one, one two databases list otherwise and a forged signature are not;
+#      the next build finds it there, read-only
 #
 # Every task runs on its own internal network with its egress sidecar (#336);
 # here the worker image the sidecars run is a stand-in that only sleeps (the
@@ -96,11 +107,13 @@ awk 'index($0, "ram_anon() {") == 1 { on = 1 } on { print } on && /^}/ { exit }'
 grep -q '^ram_anon() {' "$tmp/checkout/factory/worker/ram-anon.sh" || fail "no ram_anon in the worker script"
 python3 - "$tmp/checkout/fixtures" "$arch" <<'PY'
 import io, sys, tarfile
-for name in ("ok", "slow", "fill"):
+for name in ("ok", "slow", "fill", "cache-a", "cache-b", "cache-c"):
     info = f"pkgname = {name}\npkgver = 1.0-1\narch = {sys.argv[2]}\nsize = 1\n".encode()
     with tarfile.open(f"{sys.argv[1]}/{name}-1.0-1-{sys.argv[2]}.pkg.tar.zst", "w", format=tarfile.GNU_FORMAT) as t:
         ti = tarfile.TarInfo(".PKGINFO"); ti.size = len(info); t.addfile(ti, io.BytesIO(info))
 PY
+# Where the work root is on this host, for a stub recipe that tries the host's own paths to the caches (#341).
+printf '%s\n' "$tmp/work" > "$tmp/checkout/fixtures/work-root"
 cat > "$tmp/checkout/factory/worker/omarchy-build-worker.sh" <<'STUB'
 #!/usr/bin/env bash
 # The stub task: what the real script's --task mode leaves (outputs, verdict.json, the log), by the task's name.
@@ -125,6 +138,43 @@ case "$name" in
   slow) while [[ ! -e /task/in/finish ]]; do sleep 1; done; ok ;;
   quiet) exit 0 ;;   # what podman shows of a task a reboot killed: exited, its stale exit code 0, no verdict
   fill) head -c 50000000 /dev/zero > /build/fill; while :; do sleep 1; done ;;
+  cache-*)
+    # What it sees of the caches (#341): its own package's build cache, the shared pacman cache read-only.
+    echo "== build cache: $(ls -A /build/cache | tr '\n' ' ')"
+    echo "== shared: $(ls -A /var/cache/pacman/shared | tr '\n' ' ')"
+    echo "== shared write: $(touch /var/cache/pacman/shared/planted 2>&1 || true)"
+    for f in /var/cache/pacman/shared/*.pkg.tar.zst; do [[ -f "$f" ]] && echo "== shared sha: $(sha256sum "$f" | cut -c1-64) $(basename "$f")"; done
+    echo "$name" > "/build/cache/own-$name"
+    # A recipe that writes outside its cache: the cache tree is not mounted, and /build/cache/.. is its own /build.
+    echo "== outside: $(ls -A /build/cache/.. | tr '\n' ' ')"
+    if [[ "$name" == cache-a ]]; then
+      # Every road it has to a project cache of its own name and to the other package's (AC1): up from its cache,
+      # and the host's own paths of them (the test wrote its work root here). Each lands in the container, if anywhere.
+      w="$(cat /pool/fixtures/work-root)"
+      for d in "/build/cache/../../cache/build/project/$arch/cache-a" "/build/cache/../cache-b" "/build/cache/../../../cache-b" \
+               "$w/cache/build/project/$arch/cache-a" "$w/cache/build/community/$arch/cache-b" "$w/cache"; do
+        mkdir -p "$d" 2>/dev/null; echo "planted by cache-a's recipe" > "$d/planted" 2>/dev/null
+      done
+      echo "== escapes tried"
+    fi
+    [[ "$name" == cache-c ]] && ok
+    # pacman's downloads go to its own cache, the dependency both builds need first as a .part, held until both are in flight.
+    lib="libfixture-1.0-1-$arch.pkg.tar.zst"
+    printf 'omarchy-pool fixture package %s (%s) for %s\n' libfixture libfixture "$arch" > "/var/cache/pacman/pkg/$lib.part"
+    echo "== downloading"
+    while [[ ! -e /task/in/finish ]]; do sleep 1; done
+    mv "/var/cache/pacman/pkg/$lib.part" "/var/cache/pacman/pkg/$lib"
+    if [[ "$name" == cache-a ]]; then
+      echo "planted by cache-a's recipe" > "/var/cache/pacman/pkg/evil-1.0-1-$arch.pkg.tar.zst"
+      echo x > "/var/cache/pacman/pkg/stranger-1.0-1-$arch.pkg.tar.zst"
+      # A signature its recipe forged for the dependency another build installs.
+      echo "forged by cache-a's recipe" > "/var/cache/pacman/pkg/$lib.sig"
+    else
+      # The dependency's upstream signature, as its pacman downloads it beside the package (a repository whose SigLevel checks them).
+      printf 'omarchy-pool fixture signature of %s for %s\n' libfixture "$arch" > "/var/cache/pacman/pkg/$lib.sig"
+      printf 'omarchy-pool fixture package %s (%s) for %s\n' twin core "$arch" > "/var/cache/pacman/pkg/twin-1.0-1-$arch.pkg.tar.zst"
+    fi
+    ok ;;
   *) echo "unknown stub task $name"; exit 2 ;;
 esac
 STUB
@@ -168,7 +218,7 @@ mkdir -p "$tmp/beats"; : > "$tmp/tasks.jsonl"; : > "$tmp/requests.jsonl"
 cat > "$tmp/pool.py" <<'P'
 import json, os, re, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-d, host = sys.argv[1], sys.argv[2]
+d, host, dbs = sys.argv[1], sys.argv[2], sys.argv[3]
 served = 0
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -185,6 +235,16 @@ class H(BaseHTTPRequestHandler):
         self.record()
         # Who the host is answers only to its worker token, as the pool does (a dispatcher that asked without it never got ready).
         if self.path == "/api/v1/factory/workers/self": return self.send(200, {"id": host}) if self.headers.get("authorization") == "Bearer omw_it" else self.send(401, {"error": "unauthorized"})
+        # The pool's package repositories (#341): the fixture databases and their signatures, for either architecture.
+        m = re.match(r"/(core|packages)/(x86_64|aarch64)/(omarchy-(core|packages)-edge\.db(\.sig)?)$", self.path)
+        if m and m.group(1) == m.group(4) and os.path.exists(f"{dbs}/{m.group(3)}"):
+            data = open(f"{dbs}/{m.group(3)}", "rb").read()
+            self.send_response(200); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+        # Its copy of the shared dependency's upstream signature, beside the package in core's directory, where core's database lists it.
+        m = re.match(r"/core/(x86_64|aarch64)/libfixture-1\.0-1-(x86_64|aarch64)\.pkg\.tar\.zst\.sig$", self.path)
+        if m and m.group(1) == m.group(2):
+            data = f"omarchy-pool fixture signature of libfixture for {m.group(1)}\n".encode()
+            self.send_response(200); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data); return
         return self.send(404, {"error": "none"})
     def do_PUT(self):
         self.record(); return self.send(200, {})
@@ -209,7 +269,7 @@ srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
 open(f"{d}/port", "w").write(str(srv.server_address[1]))
 srv.serve_forever()
 P
-python3 "$tmp/pool.py" "$tmp" "$host" & stub=$!
+python3 "$tmp/pool.py" "$tmp" "$host" "$root/crates/pkg-repo/tests/fixtures/pool-dbs" & stub=$!
 for _ in $(seq 50); do [[ -s "$tmp/port" ]] && break; sleep 0.1; done
 port="$(cat "$tmp/port")"; ready_port=$((18000 + RANDOM % 2000))
 
@@ -232,7 +292,7 @@ start() { # [extra flags…]: a dispatcher, in the background
     OMARCHY_WORKER_IMAGE="$worker_id" OMARCHY_TASK_SUBNETS="$subnets" \
     "$PKG_REPO" dispatch --api "http://127.0.0.1:$port" --pool "http://127.0.0.1:$port" --worker-token omw_it \
       --work-root "$tmp/work" --capacity-file "$tmp/capacity.json" --checkout "$tmp/checkout" --ready "127.0.0.1:$ready_port" \
-      --tick-s 1 --heartbeat-s 2 --idle-claim-s 1 "$@" >> "$tmp/dispatcher.log" 2>&1 & disp=$!
+      --tick-s 1 --heartbeat-s 2 --idle-claim-s 1 --pool-key "$root/crates/pkg-repo/tests/fixtures/pool-dbs/pool.pub.asc" "$@" >> "$tmp/dispatcher.log" 2>&1 & disp=$!
   for _ in $(seq 60); do curl -sf "http://127.0.0.1:$ready_port/ready" >/dev/null 2>&1 && return 0; sleep 0.5; done
   fail "the dispatcher never answered /ready"
 }
@@ -265,7 +325,13 @@ for v in $env_names; do
 done
 "$RT" inspect --format '{{json .Config.Env}}' "$c" | grep -qiE 'omj\.|omw_|token|_key|secret' && fail "a credential in the task container's environment"
 mounts="$("$RT" inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' "$c" | tr ' ' '\n' | grep . | sort | tr '\n' ' ')"
-[[ "$mounts" == "/build /pool /task/in /task/log /task/out /var/cache/pacman/pkg " ]] || fail "the task container's mounts: $mounts"
+[[ "$mounts" == "/build /build/cache /pool /task/in /task/log /task/out /var/cache/pacman/pkg /var/cache/pacman/shared " ]] || fail "the task container's mounts: $mounts"
+# Its caches (#341): its own package's build cache on its side, the shared pacman cache read-only, a pacman cache of its own.
+"$RT" inspect "$c" | jq -e --arg w "$tmp/work" --arg a "$arch" --arg t "$tmp/work/tasks/1-$(gen 1)" '.[0].Mounts as $m
+  | ($m[] | select(.Destination == "/build/cache") | .Source == "\($w)/cache/build/community/\($a)/slow" and .RW == true)
+  and ($m[] | select(.Destination == "/var/cache/pacman/shared") | .Source == "\($w)/cache/pacman/\($a)" and .RW == false)
+  and ($m[] | select(.Destination == "/var/cache/pacman/pkg") | .Source == "\($t)/pkgcache" and .RW == true)' >/dev/null \
+  || fail "the task container's caches: $("$RT" inspect "$c" | jq -c '[.[0].Mounts[] | {Source, Destination, RW}]')"
 # Its flags: not privileged, not on the host's network, never removed by the engine, its pid limit, no engine-side log,
 # and only the spec's capabilities (docker keeps CapDrop ["ALL"]; podman says what is left, EffectiveCaps).
 "$RT" inspect "$c" | jq -e '.[0] as $c | ["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_SETUID","CAP_SETGID","CAP_KILL"] as $ok
@@ -437,5 +503,72 @@ running 21 || fail "task 21 was touched by task 22's kill"
 finish 21
 until_ 30 "task 21 completed" reported 21 complete
 echo "ok: a pool job that hangs is killed at its timeout and failed, with its script; a build's lease beats on and completes"
+
+# ---------- 7. the task caches (#341) ----------
+# A project cache of the same name as a community package's: a community build never reaches it.
+mkdir -p "$tmp/work/cache/build/project/$arch/cache-a"; echo project > "$tmp/work/cache/build/project/$arch/cache-a/marker-project"
+log_at="$(wc -l < "$tmp/dispatcher.log")"
+give 30 cache-a 2; give 31 cache-b 2
+until_ 60 "tasks 30 and 31 run" all_running 30 31
+log_of() { echo "$tmp/work/tasks/$1-$(gen "$1")/log/task.log"; }
+downloading() { local i; for i; do grep -q '^== downloading' "$(log_of "$i")" 2>/dev/null || return 1; done; }
+until_ 30 "both builds download the dependency they share, at once" downloading 30 31
+all_running 30 31 || fail "tasks 30 and 31 do not run at once"
+for i in 30 31; do
+  n="cache-$([[ $i == 30 ]] && echo a || echo b)"
+  "$RT" inspect "$(name "$i")" | jq -e --arg w "$tmp/work" --arg a "$arch" --arg n "$n" '.[0].Mounts as $m
+    | ($m[] | select(.Destination == "/build/cache") | .Source == "\($w)/cache/build/community/\($a)/\($n)" and .RW == true)
+    and ($m[] | select(.Destination == "/var/cache/pacman/shared") | .RW == false)
+    and ([$m[] | select(.Source | startswith("\($w)/cache"))] | length) == 2' >/dev/null \
+    || fail "task $i's caches: $("$RT" inspect "$(name "$i")" | jq -c '[.[0].Mounts[] | {Source, Destination, RW}]')"
+  grep -q '^== shared write: .*Read-only' "$(log_of "$i")" || fail "task $i could write the shared pacman cache: $(grep '== shared write' "$(log_of "$i")")"
+  grep -qx '== build cache: ' "$(log_of "$i")" || fail "task $i saw another cache: $(grep '== build cache' "$(log_of "$i")")"
+  grep -q '^== outside: .*cache' "$(log_of "$i")" || fail "task $i's /build: $(grep '== outside' "$(log_of "$i")")"
+  grep -q 'marker-project\|own-cache-[ab]' <(grep '== outside' "$(log_of "$i")") && fail "task $i reached past its cache: $(grep '== outside' "$(log_of "$i")")"
+done
+grep -q '^== escapes tried' "$(log_of 30)" || fail "cache-a's recipe did not try its escapes: $(cat "$(log_of 30)")"
+# Both downloaded into their own caches meanwhile, never into the shared one.
+[[ -z "$(ls -A "$tmp/work/cache/pacman/$arch")" ]] || fail "a build wrote into the shared pacman cache: $(ls -A "$tmp/work/cache/pacman/$arch")"
+finish 30; finish 31
+all_completed() { local i; for i; do reported "$i" complete || return 1; done; }
+until_ 60 "tasks 30 and 31 completed" all_completed 30 31
+# A pass of the merge-back takes the downloads set aside when it begins, one pass at a time, and says how many leases' it
+# took. Two builds that end a tick or two apart go in two passes, the second begun once the loop has taken the first — a
+# few ticks, never a fixed time — so this waits until the passes have said both leases. However they are split, the
+# dependency is merged once, with the pool's signature (cache-a's forged one keeps it out when cache-a's pass comes first,
+# and finds the pool's there when it comes second); cache-b's twin (two databases at odds), cache-a's evil (other bytes)
+# and its stranger (no database) are discarded.
+said() { # leases merged signed mismatched unknown ambiguous: what the passes said since this section began, summed
+  tail -n +"$((log_at + 1))" "$tmp/dispatcher.log" \
+    | sed -nE 's/^caches: the downloads of ([0-9]+) lease\(s\): ([0-9]+) merged .* and ([0-9]+) signature\(s\) .*\(([0-9]+) not the bytes .*, ([0-9]+) listed by none, ([0-9]+) listed twice .*/\1 \2 \3 \4 \5 \6/p' \
+    | awk '{ for (i = 1; i <= 6; i++) s[i] += $i } END { printf "%d %d %d %d %d %d\n", s[1], s[2], s[3], s[4], s[5], s[6] }'
+}
+both_said() { local n; read -r n _ <<<"$(said)"; (( n >= 2 )); }
+until_ 60 "the passes of the merge-back said both leases' downloads" both_said
+[[ "$(said)" == "2 1 1 1 1 1" ]] || fail "what the merge-back said of the two leases' downloads (leases, merged, signatures, other bytes, listed by none, listed twice): $(said) — $(grep '^caches: the downloads of' "$tmp/dispatcher.log")"
+lib="libfixture-1.0-1-$arch.pkg.tar.zst"
+[[ -f "$tmp/work/cache/pacman/$arch/$lib" ]] || fail "the dependency was not merged into the shared pacman cache"
+want_sha="$(printf 'omarchy-pool fixture package %s (%s) for %s\n' libfixture libfixture "$arch" | sha256sum | cut -c1-64)"
+[[ "$(sha256sum "$tmp/work/cache/pacman/$arch/$lib" | cut -c1-64)" == "$want_sha" ]] || fail "the merged dependency is not the bytes the signed database lists"
+[[ "$(ls -A "$tmp/work/cache/pacman/$arch")" == "$(printf '%s\n%s' "$lib" "$lib.sig")" ]] || fail "the shared pacman cache holds more than the signed bytes and the pool's signature of them: $(ls -A "$tmp/work/cache/pacman/$arch")"
+[[ "$(cat "$tmp/work/cache/pacman/$arch/$lib.sig")" == "omarchy-pool fixture signature of libfixture for $arch" ]] || fail "the dependency's signature is not the pool's copy: $(cat "$tmp/work/cache/pacman/$arch/$lib.sig")"
+jq -r '.path' "$tmp/requests.jsonl" | grep -qx "/core/$arch/$lib.sig" || fail "the dependency's signature was not asked of the pool"
+[[ -z "$(ls -A "$tmp/work/cache/incoming/$arch" 2>/dev/null)" ]] || fail "downloads left aside: $(ls -A "$tmp/work/cache/incoming/$arch")"
+jq -r 'select(.path | test("^/(core|packages)/")) | .path' "$tmp/requests.jsonl" | grep -qx "/core/$arch/omarchy-core-edge.db.sig" || fail "the databases' signatures were not asked of the pool"
+# Each build's cache holds what it wrote, and only that; the project cache of the same name is untouched.
+[[ "$(ls -A "$tmp/work/cache/build/community/$arch/cache-a")" == own-cache-a ]] || fail "cache-a's build cache: $(ls -A "$tmp/work/cache/build/community/$arch/cache-a")"
+[[ "$(ls -A "$tmp/work/cache/build/community/$arch/cache-b")" == own-cache-b ]] || fail "cache-b's build cache: $(ls -A "$tmp/work/cache/build/community/$arch/cache-b")"
+[[ "$(ls -A "$tmp/work/cache/build/project/$arch/cache-a")" == marker-project ]] || fail "the project cache was touched: $(ls -A "$tmp/work/cache/build/project/$arch/cache-a")"
+# cache-a's recipe tried to write past its cache, by every road it had: nothing it planted is anywhere in the host's cache tree.
+planted="$(find "$tmp/work/cache" -name planted -print 2>/dev/null)"
+[[ -z "$planted" ]] || fail "a recipe wrote past its own cache: $planted"
+echo "ok: two builds at once each mount their own package's build cache and the shared pacman cache read-only; only the signed bytes are merged back"
+# The next build finds the dependency there, read-only, as merged.
+give 32 cache-c 1
+until_ 60 "task 32 completed" reported 32 complete
+tail32="$(report 32 complete | jq -r '.log_tail')"
+grep -qx "== shared sha: $want_sha $lib" <<<"$tail32" || fail "task 32 did not find the merged dependency: $tail32"
+grep -q '^== shared write: .*Read-only' <<<"$tail32" || fail "task 32 could write the shared pacman cache: $tail32"
+echo "ok: the next build finds the merged dependency in the shared pacman cache, read-only"
 stop 15
 echo "ok: the dispatcher on a real engine ($RT, $STUB_IMAGE)"

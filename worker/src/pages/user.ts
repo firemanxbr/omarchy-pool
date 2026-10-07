@@ -54,7 +54,8 @@ const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Main
  * Add a host (#321, design v2 §6.1): a maintainer's, on their own page — a
  * name and where it runs; the answer is one command to paste on the machine,
  * with a one-time token in the environment of `sh`. The machine enrolls and
- * the host waits here, with its fingerprint, for its owner's Confirm.
+ * the host waits here, with its fingerprint and where its key lives (in its
+ * TPM, or a file, #330), for its owner's Confirm.
  */
 const HOST_TOGGLE = `<button type="button" class="more-link" id="h-toggle" title="a name, where it runs, then one command to paste on the machine">+ add a host</button>`;
 const HOST_FORM = `<label>Name <input type="text" id="h-name" placeholder="vps-1" pattern="[a-z0-9](?:[a-z0-9\\-]{0,30}[a-z0-9])?" title="lowercase letters, digits and dashes, 1 to 32, not ending in a dash" required></label> <label>Where <input type="text" id="h-where" maxlength="80" placeholder="a VPS in Falkenstein" autocomplete="off"></label> <button type="submit" id="h-btn">Add a host</button>`;
@@ -239,6 +240,8 @@ const SCRIPT = String.raw`
   function loadHosts() {
     return api("GET", "/api/v1/hosts?owner=" + encodeURIComponent(login)).then(function (d) { if (d.__status === 200) { HOSTS = d; renderHosts(); } }).catch(function () {});
   }
+  // Where its key lives (#330): in its TPM, made there and never out of it, or a file — what its agent said at enrollment.
+  function keyWhere(h) { var k = h.host_key; return !k ? "" : k.store === "tpm" ? " · its key is in its TPM, never out of it" : " · its key is a file" + (k.held ? " (not in its TPM: " + esc(k.held) + ")" : ""); }
   function hostCaps(h) { return h.capacity ? num(h.capacity.cpus) + " CPUs, " + num(h.capacity.mem_gb) + " GB, " + h.lanes.map(function (l) { return l.arch + " " + l.mode; }).join(", ") + ", isolation " + (h.isolation || "?") + (h.dedicated ? " (dedicated)" : "") : ""; }
   function renderHosts() {
     if (!HOSTS) return;
@@ -249,7 +252,7 @@ const SCRIPT = String.raw`
       var p = h.status === "active" ? ["ok", "active"] : h.status === "pending-owner" ? ["warn", "waits for Confirm"] : h.status === "suspended" ? ["error", "suspended"] : ["na", h.status];
       if (h.status === "pending-owner") pending = true;
       var confirm = h.status === "pending-owner" ? gate('<button type="button" class="small-btn" data-host-confirm="' + esc(h.id) + '" data-name="' + esc(h.name) + '" title="the fingerprint matches what the machine printed: make it a pool host">Confirm</button>', isOwner(h.owner), "only " + h.owner + " confirms their host") : "";
-      var detail = h.fingerprint ? '<div class="muted h-detail" style="font-size:12px">' + esc((h.hostname || "") + (h.where ? " · " + h.where : "")) + (h.capacity ? " · " + esc(hostCaps(h)) : "") + '<br><span class="mono">' + esc(h.fingerprint) + '</span>' + (h.below_minimum ? '<br>' + esc(h.below_minimum) : '') + '</div>' : '';
+      var detail = h.fingerprint ? '<div class="muted h-detail" style="font-size:12px">' + esc((h.hostname || "") + (h.where ? " · " + h.where : "")) + (h.capacity ? " · " + esc(hostCaps(h)) : "") + '<br><span class="mono">' + esc(h.fingerprint) + '</span>' + keyWhere(h) + (h.below_minimum ? '<br>' + esc(h.below_minimum) : '') + '</div>' : '';
       // Who stopped it and why, readable on a phone too (the pill's title is a hover).
       if ((h.status === "suspended" || h.status === "retired") && h.status_by) detail += '<div class="muted" style="font-size:12px">' + esc(h.status + " by " + h.status_by + (h.status_reason ? ": " + h.status_reason : "")) + '</div>';
       return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1], h.status_reason ? h.status + " by " + (h.status_by || "?") + ": " + h.status_reason : "") + (h.claims_stopped_at && h.status !== "retired" ? " " + pillHtml("error", "claims stopped", NOT_LISTED) : "") + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.fleet && h.fleet.units !== null && h.fleet.units !== undefined ? num(h.fleet.units) + ' <span class="muted" title="the units its leases hold, and the ones free for a task now">' + num(h.fleet.units_busy) + ' busy · ' + num(h.fleet.units_free) + ' free</span>' : h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + confirm + '</td></tr>';
@@ -310,7 +313,7 @@ const SCRIPT = String.raw`
     var b = ev.target.closest ? ev.target.closest("button[data-host-confirm]") : null;
     if (!b || b.disabled) return;
     var id = b.getAttribute("data-host-confirm"), h = (HOSTS && HOSTS.hosts || []).filter(function (x) { return x.id === id; })[0];
-    ask({ title: "Confirm " + b.getAttribute("data-name"), text: "Compare the fingerprint with the one the machine printed. They must be the same: then this host gets its worker registration and claims from its next round." + (h && h.fingerprint ? '<br><code>' + esc(h.fingerprint) + '</code>' : ''), confirm: "Confirm" }).then(function (go) {
+    ask({ title: "Confirm " + b.getAttribute("data-name"), text: "Compare the fingerprint with the one the machine printed. They must be the same: then this host gets its worker registration and claims from its next round." + (h && h.fingerprint ? '<br><code>' + esc(h.fingerprint) + '</code>' + keyWhere(h) : ''), confirm: "Confirm" }).then(function (go) {
       if (go === null) return;
       api("POST", "/api/v1/hosts/" + encodeURIComponent(id) + "/confirm", {}).then(function (d) {
         if (d.error) { toast(esc(d.error), "error"); return; }
@@ -1051,14 +1054,14 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The hosts under this name for everyone, each with its units busy and free (#324, its fleet row); the fingerprint and the capacity for their owner and the maintainers; Confirm on one that waits, its owner's; a maintainer's notices of the others' new hosts.
+      // The hosts under this name for everyone, each with its units busy and free (#324, its fleet row); the fingerprint, where its key lives (#330) and the capacity for their owner and the maintainers; Confirm on one that waits, its owner's; a maintainer's notices of the others' new hosts.
       id: "user.hosts-table",
       page: `/user/${F.m1}`,
       anchor: ['id="hosts-table"', 'id="h-none"'],
-      script: ['"/api/v1/hosts?owner=" + encodeURIComponent(login)', "function renderHosts()", "h.fingerprint", "hostCaps(h)", "data-host-confirm", '"only " + h.owner + " confirms their host"', '"/api/v1/hosts/" + encodeURIComponent(id) + "/confirm"', "HOSTS.notices", "n.line", 'href="/hosts/', "h.fleet.units_busy", "h.fleet.units_free"],
+      script: ['"/api/v1/hosts?owner=" + encodeURIComponent(login)', "function renderHosts()", "h.fingerprint", "function keyWhere(h)", "hostCaps(h)", "data-host-confirm", '"only " + h.owner + " confirms their host"', '"/api/v1/hosts/" + encodeURIComponent(id) + "/confirm"', "HOSTS.notices", "n.line", 'href="/hosts/', "h.fleet.units_busy", "h.fleet.units_free"],
       reads: [
         { path: `/api/v1/hosts?owner=${F.m1}`, fields: ["hosts", "hosts.0.id", "hosts.0.name", "hosts.0.owner", "hosts.0.status", "hosts.0.arches", "hosts.0.release_applied", "hosts.0.alive", "hosts.0.fleet.units", "hosts.0.fleet.units_busy", "hosts.0.fleet.units_free", "notices", "minimum"] },
-        { path: `/api/v1/hosts?owner=${F.m1}`, as: "maintainer", fields: ["hosts.0.fingerprint", "hosts.0.capacity", "hosts.0.units", "hosts.0.lanes", "hosts.0.isolation", "hosts.0.hostname" ] },
+        { path: `/api/v1/hosts?owner=${F.m1}`, as: "maintainer", fields: ["hosts.0.fingerprint", "hosts.0.host_key", "hosts.0.capacity", "hosts.0.units", "hosts.0.lanes", "hosts.0.isolation", "hosts.0.hostname" ] },
       ],
       acts: [{ method: "POST", path: `/api/v1/hosts/${F.host}/confirm`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: EVERYONE,

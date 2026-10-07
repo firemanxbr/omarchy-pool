@@ -79,7 +79,8 @@ const BODY = String.raw`
       <div class="rv-lede">
         <p class="op-eyebrow">For maintainers</p>
         <h1 class="op-hero">Review what others asked for</h1>
-        <p class="rv-facts"><a href="/docs/governance">${lucide("lock", 15)}Never your own requests</a><a href="/docs/governance">${lucide("refresh-cw", 15)}Rebuild from scratch</a><a href="/docs/factory">${lucide("package-check", 15)}Your build is the one that ships</a></p>
+        <p class="rv-facts"><a href="/docs/governance" id="rv-own">${lucide("lock", 15)}<span id="rv-own-t">Never your own requests</span></a><a href="/docs/governance">${lucide("refresh-cw", 15)}Rebuild from scratch</a><a href="/docs/factory">${lucide("package-check", 15)}Your build is the one that ships</a></p>
+        <p class="rv-solo" id="rv-solo" hidden></p>
       </div>
       <div class="op-stats rv-stats" id="rv-tiles">${TILES.map(tile).join("")}</div>
     </section>
@@ -198,6 +199,8 @@ const CSS = String.raw`
   .rv .op-btn[disabled] { opacity: 1; background: transparent; border-color: var(--line); color: var(--dim); }
   .rv-empty { margin: 0; padding: 16px; font-size: 13px; color: var(--dim); }
   .rv-note { margin: 0; padding: 10px 16px; font-size: 12.5px; color: var(--amber); } .rv-note:empty { display: none; }
+  /* The solo-maintainer exception (#394): said above the queue while it is in force, for everyone; a self-reviewed claim or decision says so on its row. */
+  .rv-solo { margin: 10px 0 0; padding: 8px 12px; border-left: 3px solid var(--amber); background: var(--bg-deep); font-size: 12.5px; color: var(--muted); } .rv-solo[hidden] { display: none; } .rv-solo a { color: inherit; text-decoration: underline; }
   .rv-brake { display: none; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 16px; border-top: 1px solid var(--line); } .rv-list[data-tab="blocked"] .rv-brake { display: flex; }
   .rv-brake-f { flex: 1 1 420px; display: flex; flex-wrap: wrap; gap: 8px; }
   .rv-brake input, .rv-claimbar input { flex: 1 1 180px; min-width: 0; padding: 5px 10px; border: 1px solid var(--line); border-radius: 0; background: var(--bg-deep); color: var(--text); font: 13px var(--font-mono); }
@@ -290,9 +293,22 @@ const SCRIPT = String.raw`
   // How long ago, the way the queue says it: "now" under five seconds, then "10s", "3m", "2h", "5d".
   function since(iso) { if (!iso) return ""; var s = (Date.now() - Date.parse(iso)) / 1000; return s < 5 ? "now" : ago(iso).replace(" ago", ""); }
   function at(login) { return login ? '<a href="' + userHref(login) + '"' + whoAttr(login) + '>@' + esc(login) + '</a>' : '<span class="muted">—</span>'; }
+  // The solo-maintainer exception (#394), as the review list says it (REVIEW.solo, the same for everyone): whether the viewer is the one it
+  // names, deciding on a package of their own (owner) — the page's words and labels only; what may be pressed is the server's can.
+  function selfReview(owner) { var s = REVIEW && REVIEW.solo; return !!(s && isMaintainer() && isOwner(s.maintainer) && isOwner(owner)); }
+  // A claim or a decision its requester took under the exception: marked, for every reader.
+  function selfPill(mark) { return mark ? ' ' + pillHtml("warn", "self-reviewed", "taken by its requester, " + mark.maintainer + ", under the solo-maintainer exception (since " + mark.since + ")") : ""; }
+  // Above the queue, while the exception is in force: who, since when, why, and where every decision taken under it is listed.
+  function renderSolo() {
+    var el = $("#rv-solo"), s = REVIEW && REVIEW.solo, own = $("#rv-own"), ownT = $("#rv-own-t"); if (!el) return;
+    // The hero's rule, as true as the line under it: while the exception is in force the rule has one, and the chip says so and links to it.
+    if (own && ownT) { own.href = s ? "/docs/governance#solo" : "/docs/governance"; ownT.textContent = s ? "Never your own requests — one exception, on the record" : "Never your own requests"; }
+    el.hidden = !s;
+    el.innerHTML = s ? '<b>Solo-maintainer exception</b> since ' + esc(s.since) + ': ' + at(s.maintainer) + ' builds, reviews and approves their own packages, each decision marked self-reviewed — ' + esc(s.reason) + '. <a href="/docs/governance#solo">The rule and every self-reviewed decision</a>' : "";
+  }
   function av(login, cls) { return '<span class="rv-av' + (cls ? " " + cls : "") + '" aria-hidden="true">' + esc(String(login || "?").slice(0, 1)) + '</span>'; }
   function mark(m, cls, title) { return '<i class="op-mark ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + m + '</i>'; }
-  var MARK = { ok: "✓", run: "⟳", fail: "✗", wait: "○", na: "—" };
+  var MARK = { ok: "✓", run: "⟳", fail: "✗", wait: "○", na: "—", warn: "!" };
   // A rebuild that built: staged for the review, or done — published under the approval that decided it.
   function built(b) { return !!b && (b.status === "staged" || b.status === "done"); }
 
@@ -330,14 +346,15 @@ const SCRIPT = String.raw`
     var sub = av(p.owner) + '<span class="t">' + at(p.owner) + (ns.length ? ' · ' + esc(ns.join(" · ")) + ' not supported' : '') + (pb && pb.status === "failed" ? ' · the rebuild failed' : '') + (t.already ? ' · a version already approved' : '') + '</span>';
     var act;
     if (t.already) act = '<span class="decide" data-task="' + t.id + '" data-label="' + esc(p.name + " " + (t.version || "") + " (build #" + t.id + ")") + '" data-arch="' + esc(t.arch) + '">' + gate('<button type="button" class="op-btn sm" data-reject="' + t.id + '" data-note="a build of a version already approved (#' + t.already.task + ')" aria-label="Drop ' + esc(p.name) + ' ' + esc(t.version || "") + '">Drop</button>', !!c.reject, c.why.reject || "not now") + '</span>';
-    else if (own) act = btn("yours · locked", "", false, c.why.build || ("you brought " + p.name + " — another maintainer reviews it"));
-    else if (isMaintainer()) act = btn("Claim", ' data-claim="' + t.id + '" data-name="' + esc(p.name) + '" data-arch="' + esc(t.arch) + '"', !!c.build, c.why.build, "primary", "Claim " + p.name);
+    // Your own: locked — but under the solo-maintainer exception (#394), which the server's can says, the one it names claims it, self-reviewed.
+    else if (own && !(c.build && selfReview(p.owner))) act = btn("yours · locked", "", false, c.why.build || ("you brought " + p.name + " — another maintainer reviews it"));
+    else if (isMaintainer()) act = btn(own ? "Claim · self-review" : "Claim", ' data-claim="' + t.id + '" data-name="' + esc(p.name) + '" data-arch="' + esc(t.arch) + '"', !!c.build, c.why.build, "primary", "Claim " + p.name + (own ? " (self-review, the solo-maintainer exception)" : ""));
     else act = btn("maintainers claim", "", false, orSignIn("a maintainer claims it"));
     return row(p.name, pkgHref(p.name, "lab", t.arch), p.version, sub, archSquares(p.targets), since(t.finished_at), act, fresh);
   }
   function reviewRow(p, fresh) {
     var cl = p.claim || {}, t = p.lead || {}, mine = isMaintainer() && isOwner(cl.by);
-    var sub = av(cl.by) + '<span class="t">claimed by ' + at(cl.by) + ' · asked by ' + at(p.owner) + '</span>';
+    var sub = av(cl.by) + '<span class="t">claimed by ' + at(cl.by) + ' · asked by ' + at(p.owner) + '</span>' + selfPill(cl.solo_exception);
     var act = isMaintainer() ? '<a class="op-btn sm' + (mine ? " primary" : "") + '" href="' + esc(workHref(p.name)) + '" aria-label="Open ' + esc(p.name) + '">Open</a>' : btn("in progress", "", false, orSignIn("a maintainer is rebuilding it"));
     return row(p.name, pkgHref(p.name, "lab", t.arch), p.version, sub, archSquares(p.targets), since(cl.at), act, fresh);
   }
@@ -358,8 +375,10 @@ const SCRIPT = String.raw`
   function unmaintainedRows() {
     var list = unmaintained(); if (!list) return null;
     return list.map(function (p) {
-      var label = !isMaintainer() ? "maintainers adopt" : isOwner(p.owner) ? "yours · build it" : "Adopt";
-      return row(p.name, pkgHref(p.name, null, null), p.release, av(p.owner) + '<span class="t">left by ' + at(p.owner) + (p.detail ? ' · ' + esc(p.detail) : '') + '</span>', archSquares(p.targets), since(p.updated_at), btn(label, ' data-adopt="' + esc(p.name) + '"', isMaintainer() && !isOwner(p.owner), isMaintainer() ? "it is yours: build it to take it up again" : orSignIn("a maintainer adopts it"), "primary", "Adopt " + p.name));
+      // Your own, under the solo-maintainer exception (#394): the one it names adopts it, self-reviewed — the server says the same.
+      var mine = isOwner(p.owner), self = mine && selfReview(p.owner);
+      var label = !isMaintainer() ? "maintainers adopt" : self ? "Adopt · self-review" : mine ? "yours · build it" : "Adopt";
+      return row(p.name, pkgHref(p.name, null, null), p.release, av(p.owner) + '<span class="t">left by ' + at(p.owner) + (p.detail ? ' · ' + esc(p.detail) : '') + '</span>', archSquares(p.targets), since(p.updated_at), btn(label, ' data-adopt="' + esc(p.name) + '"', isMaintainer() && (!mine || self), isMaintainer() ? "it is yours: build it to take it up again" : orSignIn("a maintainer adopts it"), "primary", "Adopt " + p.name));
     });
   }
 
@@ -590,14 +609,14 @@ const SCRIPT = String.raw`
     }
     // The claim, and what the viewer may do with it: Release while there is one, grey with the server's reason where the viewer may not.
     var mine = !!cl && isOwner(cl.by), running = cl && (cl.status === "queued" || cl.status === "leased");
-    $("#rv-w-claim").innerHTML = cl ? '<span class="rv-claimed' + (mine ? "" : " other") + '">' + (running ? '<span class="op-live-dot"></span>' : '') + 'claimed by ' + (mine ? "you" : at(cl.by)) + ' · <span id="rv-w-since">' + esc(since(cl.at) === "now" ? "just now" : since(cl.at)) + '</span></span>' : '<span class="rv-claimed none">' + (p && p.state === "ready" ? "not claimed yet" : "not in review") + '</span>';
+    $("#rv-w-claim").innerHTML = cl ? '<span class="rv-claimed' + (mine ? "" : " other") + '">' + (running ? '<span class="op-live-dot"></span>' : '') + 'claimed by ' + (mine ? "you" : at(cl.by)) + ' · <span id="rv-w-since">' + esc(since(cl.at) === "now" ? "just now" : since(cl.at)) + '</span></span>' + selfPill(cl.solo_exception) : '<span class="rv-claimed none">' + (p && p.state === "ready" ? "not claimed yet" : "not in review") + '</span>';
     var c = (lead && lead.can) || { why: {} };
     $("#rv-w-release").innerHTML = cl ? gate('<button type="button" class="op-btn sm" id="rv-release"' + (lead ? ' data-task="' + lead.id + '"' : '') + '>Release claim</button>', !!c.release, c.why.release || "not now") : "";
     // The state: in review (claimed), ready, or — decided — where the approval that stands is today (the shell's approvalWhere), else the registry's word.
     var a = (APPROVALS || []).filter(function (x) { return x.name === name && x.standing; })[0], state, tone;
     if (p && p.state === "in_review") { state = '<span class="op-pill warn">in review</span>'; tone = "warn"; }
     else if (p && p.state === "ready") { state = '<span class="op-pill ok">ready for review</span>'; tone = "ok"; }
-    else if (a) { var w = approvalWhere(a); tone = { ok: "ok", error: "fail", blue: "run" }[w.cls] || "wait"; state = '<span class="op-pill ' + tone + '" title="' + esc(w.title || "") + '">' + esc(w.word) + '</span>'; }
+    else if (a) { var w = approvalWhere(a); tone = { ok: "ok", error: "fail", blue: "run" }[w.cls] || "wait"; state = '<span class="op-pill ' + tone + '" title="' + esc(w.title || "") + '">' + esc(w.word) + '</span>' + selfPill(a.solo_exception); }
     else { state = '<span class="op-pill wait">' + esc(reg ? String(reg.status || "").replace("_", " ") : "not a factory package") + '</span>'; tone = "wait"; }
     $("#rv-w-state").innerHTML = state;
     var box = $("#rv-w-box"); if (box) box.className = "op-box lg " + tone;
@@ -710,6 +729,8 @@ const SCRIPT = String.raw`
     $("#rv-place").innerHTML = R.map(function (r) {
       var pl = r.rebuild ? placeOf(r.rebuild) : null; if (!pl) return "";
       if (pl.released) return '<p class="rv-placed">' + esc(r.arch) + ': released to any host by ' + at(pl.released.by) + '</p>';
+      // The solo-maintainer exception (#394): the requester-host rule does not hold for the maintainer it names — their own hosts build it, no release.
+      if (pl.solo && pl.solo.hosts && pl.solo.hosts.length) return '<p class="rv-placed">' + esc(r.arch) + ": " + at(pl.solo.maintainer) + "'s own hosts may build it (" + esc(pl.solo.hosts.join(", ")) + ") — the requester-host rule does not hold for " + at(pl.solo.maintainer) + "'s packages while the solo-maintainer exception is in force (since " + esc(pl.solo.since) + '): no release needed. <a href="/docs/governance#solo">Why</a></p>';
       if (!pl.held) return "";
       var whose = (pl.requesters || []).map(at).join(", ") || "its requester";
       return '<p class="rv-placed warn">' + esc(r.arch) + ': waits for a host — only ' + whose + "'s can build it, and the project's copy is not built on its requester's host while another maintainer's can. " + gate('<button type="button" class="op-btn sm" data-anyhost="' + r.rebuild.id + '">Release to any host</button>', !!(pl.any_host && pl.any_host.ok), (pl.any_host && pl.any_host.why) || "not now") + '</p>';
@@ -741,7 +762,8 @@ const SCRIPT = String.raw`
     var C = function (t, m) { return '<div class="rv-cl' + (m === "wait" ? " dim" : "") + '">' + mark(MARK[m], m) + '<span>' + t + '</span></div>'; };
     var who = WHO.me ? at(WHO.login) : "The reviewer";
     $("#rv-checklist").innerHTML = [
-      C(who + " did not request it", !WHO.me ? "wait" : reg && isOwner(reg.owner) ? "fail" : "ok"),
+      // The reviewer's own package under the solo-maintainer exception (#394): said as it is — self-reviewed, on the record.
+      reg && isOwner(reg.owner) && selfReview(reg.owner) ? C(who + " requested it: self-reviewed under the solo-maintainer exception", "warn") : C(who + " did not request it", !WHO.me ? "wait" : reg && isOwner(reg.owner) ? "fail" : "ok"),
       C("Request re-checked from scratch", req ? (req.complete ? "ok" : "fail") : "wait"),
       C("Rebuilt by the project, not the factory's package", done.length ? "ok" : rb.some(function (r) { return r.rebuild.status === "leased"; }) ? "run" : "wait"),
       C("The project's gate passed", done.length ? (done.every(function (r) { return vetOk(r.rebuild) !== false; }) ? "ok" : "fail") : "wait"),
@@ -792,6 +814,9 @@ const SCRIPT = String.raw`
   function unconfirm() { var what = CONFIRM && CONFIRM.what; CONFIRM = null; PK_SAID = ""; renderDecide(round(), workPkg()); var b = what ? $('#rv-btns [data-decide="' + what + '"]') : null; if (b && b.focus) b.focus(); }
   // What the confirmation says the decision does: approve publishes the rebuild on every architecture it covers; reject frees a request's name (a package already in the pool keeps it); changes go back to the factory with the name kept.
   function confirmText(what, R, p) {
+    return decisionText(what, R, p) + (p && isOwner(p.owner) && selfReview(p.owner) ? " Self-reviewed: you brought it, and the solo-maintainer exception lets you decide — the record, the journal and every page say so." : "");
+  }
+  function decisionText(what, R, p) {
     var name = OPEN, ver = (p && p.version) || "", arches = R.filter(function (r) { return r.rebuild && r.rebuild.status === "staged"; }).map(function (r) { return r.arch; }), ns = notSupported(p ? p.targets : {}), owner = (STORY && STORY.package && STORY.package.owner) || (p && p.owner);
     var inPool = (APPROVALS || []).some(function (a) { return a.name === name && a.standing; }), mine = p && p.claim && isOwner(p.claim.by);
     if (what === "approve") return "Approve " + name + " " + ver + " for " + (arches.join(" + ") || "every architecture rebuilt") + (ns.length ? " (" + ns.join(" · ") + " not supported)" : "") + "? " + (mine ? "Your build enters edge." : "The project's build enters edge.") + (needsPasskey() ? " You hold no passkey yet: your device makes one now, then confirms the approval with it." : PK_SAID ? "" : " Your passkey confirms it.");
@@ -926,7 +951,7 @@ const SCRIPT = String.raw`
     Promise.all([api("GET", API + "/review"), api("GET", API + "/approvals")]).then(function (rs) {
       REVIEW = rs[0]; APPROVALS = rs[1].approvals || []; DRAWN = true; DOWN = null;
       var note = $("#rv-note"); if (note) note.textContent = "";
-      renderQueue(); if (OPEN) renderWork();
+      renderSolo(); renderQueue(); if (OPEN) renderWork();
     }).catch(function (e) { DOWN = noAnswer("review list", e, "#rv-note"); renderQueue(); });
     api("GET", API + "/blocks").then(function (d) { if (!d.error) { BLOCKS = d; BLOCKS_DOWN = null; renderQueue(); } }).catch(function (e) { BLOCKS_DOWN = noAnswer("brake's record", e); renderQueue(); });
     api("GET", API + "/packages").then(function (d) {
@@ -984,7 +1009,22 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "review.hero",
     page: "/review",
-    anchor: ['<p class="op-eyebrow">For maintainers</p>', '<h1 class="op-hero">Review what others asked for</h1>', "Never your own requests", "Rebuild from scratch", "Your build is the one that ships", 'href="/docs/governance"'],
+    anchor: ['<p class="op-eyebrow">For maintainers</p>', '<h1 class="op-hero">Review what others asked for</h1>', 'id="rv-own"', '<span id="rv-own-t">Never your own requests</span>', "Rebuild from scratch", "Your build is the one that ships", 'href="/docs/governance"'],
+    visible: EVERYONE,
+  },
+  {
+    // The solo-maintainer exception (#394), while factory/MAINTAINERS.toml's [solo] is in force: said above the queue for everyone — who, since
+    // when, why, the list of what was decided under it; a claim or a standing approval its requester took under it marked self-reviewed on its
+    // row and in the workspace; the named maintainer's own rows offer Claim and Adopt as the server's can says (labelled self-review), the
+    // checklist and the confirmation say it is self-reviewed, and a queued rebuild their own host may build says why no release is needed.
+    id: "review.solo",
+    page: "/review",
+    anchor: ['<p class="rv-solo" id="rv-solo" hidden></p>'],
+    script: ["function renderSolo()", "REVIEW.solo", '$("#rv-own-t")', '"Never your own requests — one exception, on the record"', "<b>Solo-maintainer exception</b> since ", "function selfReview(owner)", "function selfPill(mark)", '"self-reviewed"', "selfPill(cl.solo_exception)", "selfPill(a.solo_exception)", '"Claim · self-review"', '"Adopt · self-review"', "self-reviewed under the solo-maintainer exception", "Self-reviewed: you brought it", "pl.solo.hosts", "no release needed", 'href="/docs/governance#solo"'],
+    reads: [
+      { path: "/api/v1/factory/review", fields: ["solo", "packages.0.claim"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals.0.solo_exception"] },
+    ],
     visible: EVERYONE,
   },
   {
