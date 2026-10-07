@@ -982,8 +982,10 @@ the run loop asks again every hour, and within minutes after no answer), `OMARCH
 envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
 `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK` and `…_CALLS_PER_DAY` (without one, the
 dispatcher's defaults), `OMARCHY_DIRECT_NETWORK=1` when the envelope grants
-a signed exception's bridge (#373), and, when the envelope has a `cache_caps`,
-`OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB` (#341). Those envelope
+a signed exception's bridge (#373), when the envelope has a `cache_caps`,
+`OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB` (#341), and who the
+agent sidecars run as, `OMARCHY_AGENT_USER` (with `OMARCHY_AGENT_USERNS=host`
+on a remapped daemon, #399; below). Those envelope
 lines come from `agent.toml` alone: once it is there, a line of yours for one of
 their keys is replaced (set it in the envelope instead). Every other line of that file is yours and kept. It writes the
 agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
@@ -997,6 +999,40 @@ Every owner file is written through `openat` with `O_NOFOLLOW` in a
 directory the agent owns; a symbolic link, another user's file or one others
 may write is refused. Running it again repairs the install and keeps the
 identity, the agent keys and your edits to `agent.toml`.
+
+**How an agent sidecar reads the keys (#399).** `agent.env` stays 0600 and
+the agent user's, as install and the host page's *Set agent keys* write it,
+and nothing else on the host reads it: not the dispatcher, whose environment
+holds no key and which mounts nothing of the secrets directory, and not a
+task container. For each task that needs a model, and for the probe, the
+dispatcher starts the worker image's `agent` role with `--cap-drop ALL` and
+`no-new-privileges`, the file mounted read-only at `/run/omarchy/agent.env`
+(`OMARCHY_AGENT_ENV`, never a value in its environment), and — since root
+with no capability opens no file another uid owns — as the file's owner as
+the engine shows it to a container, which the agent works out from the file
+(its directory before there is one) and `agent.toml`'s engine and writes
+into `etc/dispatcher.env`:
+
+| Engine | `OMARCHY_AGENT_USER` | Why |
+|---|---|---|
+| rootful docker without remapping (the Studio) | the agent's `uid:gid` | uids are the host's |
+| rootless podman or docker (and Quadlet) | `0:0` | the engine's root is the agent's user; its own uid would map to a subordinate one |
+| rootful docker with userns-remap | the agent's `uid:gid`, and `OMARCHY_AGENT_USERNS=host` | no remapped uid is the owner, so the agent sidecar and the probe alone run in the host's user namespace, as that unprivileged user, never as root; task containers and egress sidecars stay remapped |
+| a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM, whose shared directory (Colima's virtiofs) shows the Mac's uid |
+
+The dispatcher gives that user the sidecar's usage directory and says at
+start whom it runs them as; the sidecar, a uid with no home in the image,
+makes one under `/tmp`. You do nothing: an agent that comes with a release
+writes the line within a minute and the run loop recreates the dispatcher with
+it. Without the line (an agent from before #399, or one that found no
+container user who is the owner: a rootless engine and a file another user
+owns, a remapped daemon and a file of root's) the sidecars run as the image's
+root, and the probe's error on the host's page says why: `no agent keys at
+/run/omarchy/agent.env …: it is <uid>:<gid>, mode 600, and this sidecar runs
+as 0:0`. The first heals itself with the next release; for the others,
+make `agent.env` the agent user's again (`chown`, as the user who owns it
+now), and `omarchy-agent dispatcher-env` prints the line the agent renders
+then.
 
 `omarchy-agent uninstall` stops the agent, removes the unit, the bundle's
 containers and networks, task containers and sidecars (labelled
@@ -1905,7 +1941,8 @@ Then, on the page: **Widen the envelope** (the agent answers `done` with
 what changed in `agent.toml` and in `run/capacity.json`, and recreates the
 dispatcher with the new count) and **Set agent keys** (written to
 `OMARCHY_SECRETS_DIR/agent.env`, 0600; your own lines there are kept, and
-the next agent sidecar reads it). Each is one order on the page's journal of
+the next agent sidecar reads it, as the file's owner: *How an agent sidecar
+reads the keys*, above). Each is one order on the page's journal of
 orders; the agent's answer says why when it refuses:
 
 | The answer says | What it means |

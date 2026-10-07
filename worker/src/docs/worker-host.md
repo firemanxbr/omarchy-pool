@@ -201,11 +201,15 @@ day. To set them, give `agent.toml`'s envelope an `agent_budget` (any of
 each a whole number from 1): within a minute the agent writes them into
 `etc/dispatcher.env` (`omarchy-agent dispatcher-env --write` does it at once)
 and the dispatcher is recreated with them; a key you leave out keeps its
-default. The sidecars run as root with no capabilities (no `CAP_DAC_OVERRIDE`),
-so `agent.env` must be owned by the uid their root maps to (root on a rootful
-engine, the maintainer on a rootless one) at 0600, or be 0644 inside the 0700
-`etc/`; otherwise the probe fails and the host takes no model work (#317's
-install writes it so). Recommended: a **separate, spend-capped key for
+default. `agent.env` stays 0600 and the agent user's, as install and *Set
+agent keys* write it, and the sidecars have no capability (no
+`CAP_DAC_OVERRIDE`), so they run as the file's owner as the engine shows it
+to a container (#399): the agent writes that into `etc/dispatcher.env`
+(`OMARCHY_AGENT_USER`) — its own uid on a rootful daemon and in a Mac's VM,
+`0:0` on a rootless engine, whose root is the agent's user, and on a daemon
+with userns-remap its uid in the host's user namespace
+(`OMARCHY_AGENT_USERNS=host`), never root — and you do nothing (the runbook's
+*How an agent sidecar reads the keys*). Recommended: a **separate, spend-capped key for
 contributor drafts** (the provider's own spending limit), since a
 recipe that compromises its draft's sidecar can use that key until the caps
 stop it; and a `GITHUB_TOKEN` in `agent.env` with no write scope and no
