@@ -566,7 +566,7 @@ jobs:
       # On docker only: the script's podman run (RUNTIME=podman, the dispatcher's docker CLI on
       # podman's socket) is by hand; in CI a task network the dispatcher makes on podman is covered
       # by agent-install's pkg-repo test on rootless podman (#372).
-      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env and its read-only token file, no token or key in any container's environment; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own
+      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env and its read-only token file, no token or key in any container's environment; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the agent sidecar and the probe reading the 0600 keys of a non-root user as their owner, every capability dropped (#399); the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own
         run: bash tests/task-networks.sh
         env:
           WORKER_IMAGE: omarchy-worker:ci
