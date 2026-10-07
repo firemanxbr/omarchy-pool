@@ -271,7 +271,7 @@ addresses=",$(key OMARCHY_HOST_ADDRESSES),"
 [[ "$(key OMARCHY_SECRETS_DIR)" == "$tmp/secrets" ]] || fail "OMARCHY_SECRETS_DIR: $(key OMARCHY_SECRETS_DIR)"
 [[ "$(key OMARCHY_AGENT_CALLS_PER_TASK) $(key OMARCHY_AGENT_TOKENS_PER_TASK) $(key OMARCHY_AGENT_MINUTES_PER_TASK) $(key OMARCHY_AGENT_CALLS_PER_DAY)" == "37 123456 7 4000" ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$envfile")"
 [[ "$(key OMARCHY_DIRECT_NETWORK)" == 1 ]] || fail "the envelope's grant of a signed exception's bridge: $(grep OMARCHY_DIRECT_NETWORK "$envfile" || echo none)"
-[[ "$(key OMARCHY_AGENT_USER)" == "$keys_user" && -z "$(key OMARCHY_AGENT_USERNS)" ]] || fail "who the agent sidecars run as ($engine_kind, agent.env $keys_owner 0600): $(grep OMARCHY_AGENT_USER "$envfile" || echo none)"
+[[ "$(key OMARCHY_AGENT_USER)" == "$keys_user" && -z "$(key OMARCHY_AGENT_HELD)" ]] || fail "who the agent sidecars run as ($engine_kind, agent.env $keys_owner 0600): $(grep OMARCHY_AGENT_USER "$envfile" || echo none)"
 # The dispatcher's environment is that file, as compose's env_file gives it.
 from_agent=()
 while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || from_agent+=("$line"); done < "$envfile"
