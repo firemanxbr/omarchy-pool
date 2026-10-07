@@ -746,6 +746,29 @@ absolute or `../` path are refused with 4 before the timer is touched.
 The runbook's kill paragraph checks `grep -c '^  updater:' compose.yml`
 and, when it prints 1, sends the operator to the way back and never to
 the timer.
+`bash tests/studio-rehearsal.sh` (CI's Worker job, on its docker; by hand
+under the engine lock) runs `factory/host/studio-rehearsal.sh`, the
+Studio's dress rehearsal tool (#319, #345), on a real engine: `stand-in`
+lays out a copy of the legacy compose project from `factory/host/compose.yml`
+in a directory of its own and starts the ten services of
+`COMPOSE_PROFILES=emulated`, every one a busybox sleeper and none the worker
+image, a placeholder in every env file the compose file names (`agent.env`
+without `GITHUB_TOKEN`; the review2 pair's named and not started), the
+directory itself and the engine's socket bind-mounted as on the Studio, the
+mounts' sources made as the login rather than root — and refuses a directory
+holding a compose file it did not lay out, and a project that runs from
+elsewhere; `ids` and `compare` say the same ids after a restart and name the
+gone and the new one after a recreation; `check`, with a host root of its
+own (`OMARCHY_REHEARSAL_FS`) and a stand-in GitHub, refuses a work root and a
+secrets directory under the directory the legacy project mounts (the
+design's `/srv/omarchy-pool/host`) and task subnets on a legacy network
+(exit 2), says linger, binfmt with the F flag, the task firewall's drop of
+each task subnet and its enabled unit, and a legacy directory its group may
+write (retire-legacy's marker) a person's step (exit 1) until each is there,
+and takes a `GITHUB_TOKEN` as install does — a classic one with no scope,
+never one with a scope, one GitHub names no scopes for or one it refuses —
+never printing it nor putting it in a process's arguments; `remove` takes the
+stand-in away and leaves another project running; shellcheck of both.
 `bash tests/rollback-workflow.sh` (CI) runs `factory/bin/release-rollback`,
 what `rollback.yml` runs, against stubbed buildx, cosign and wrangler in a
 repository with release tags: the release's `:vX.Y.Z` asked for and its

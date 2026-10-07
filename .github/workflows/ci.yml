@@ -468,6 +468,12 @@ jobs:
       - name: shellcheck of prep-mac.sh
         working-directory: .
         run: shellcheck factory/host/prep-mac.sh
+      - name: The Studio's dress rehearsal tool on a real engine — a stand-in of its legacy set from its compose file, sleepers and placeholders only; its ids the same after a restart and not after a recreation; the visit's checks, a work root under the directory the legacy set mounts refused, a GITHUB_TOKEN as install takes it (#319, #345)
+        working-directory: .
+        run: bash tests/studio-rehearsal.sh
+      - name: shellcheck of studio-rehearsal.sh
+        working-directory: .
+        run: shellcheck factory/host/studio-rehearsal.sh tests/studio-rehearsal.sh
       - name: The rollback — images and Worker back to a tag — against stubbed buildx and wrangler
         working-directory: .
         run: bash tests/rollback-workflow.sh
