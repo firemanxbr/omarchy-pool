@@ -156,6 +156,10 @@ import rehearsal from "../../factory/host/studio-rehearsal.sh?raw";
 import studioCompose from "../../factory/host/compose.yml?raw";
 import rolloutSource from "../../crates/omarchy-agent/src/run/rollout.rs?raw";
 import hostRollout from "../../factory/host/rollout.sh?raw";
+import hostKeySource from "../../crates/omarchy-agent/src/host.rs?raw";
+import tpmSource from "../../crates/omarchy-agent/src/host/tpm.rs?raw";
+import enrollSource from "../../crates/omarchy-agent/src/enroll.rs?raw";
+import dispatcherEnvSource from "../../crates/omarchy-agent/src/dispatcher_env/mod.rs?raw";
 
 describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)", () => {
   const canary = cut(runbook, "the-studio-canary");
@@ -229,6 +233,25 @@ describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)"
     expect(installSource).toContain('"legacy: {l}, {} container(s), recorded only and left running"');
     expect(text).toContain("*enrollment: … OMARCHY_ENROLL is not set*");
     expect(installSource).toContain("enrollment: this machine has not enrolled yet, and OMARCHY_ENROLL is not set");
+  });
+
+  it("says where the Studio's host key and worker token live, in the agent's own words and paths: a file key with no TPM (#330), the token's own file (#327)", () => {
+    const text = flat(canary);
+    // Preflight's note and the enrollment's line on a Linux machine with no TPM device (the default, OMARCHY_HOST_KEY unset).
+    expect(text).toContain("`host key: a file (no TPM: /dev/tpmrm0 is not there)`");
+    expect(checksSource).toContain('r.notes.push(format!("host key: a file ({why})"))');
+    expect(tpmSource).toContain('return Err(format!("no TPM: {dev} is not there"));');
+    expect(text).toContain("`host key: a file (Ed25519, host.ed25519, mode 0600); not in the TPM: no TPM: /dev/tpmrm0 is not there`");
+    expect(enrollSource).toContain('"host key: {}{}"');
+    expect(enrollSource).toContain('format!("; not in the TPM: {why}")');
+    expect(hostKeySource).toContain('Inner::File(_) => format!("a file (Ed25519, {KEY_FILE}, mode 0600)")');
+    expect(hostKeySource).toContain('pub const KEY_FILE: &str = "host.ed25519";');
+    // The host worker token: its own file in the set directory, which install puts under the data directory on Linux.
+    expect(text).toContain("~/.local/share/omarchy-agent/sets/host/run/host/dispatcher/token");
+    expect(dispatcherEnvSource).toContain('pub const TOKEN_FILE: &str = "run/host/dispatcher/token";');
+    expect(installSource).toContain('self.data.join("sets").join("host")');
+    // The compose driver on the Studio's rootful docker: Quadlet is rootless podman's.
+    expect(text).toContain("on the compose driver (Quadlet is rootless podman's, #330)");
   });
 
   it("sets the pool cap before Confirm, pins the owner's passkey at the visit, and checks a reboot with nobody logged in", () => {

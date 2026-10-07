@@ -551,8 +551,10 @@ CGNAT, link-local and the host (IPv4; task networks stay IPv4 only), kept across
 `omarchy-task-firewall.service` (rootful). A second run changes nothing,
 but enables and restarts that unit when it was disabled or stopped since;
 exit 1 lists what needs a person. The task subnets and the work root must be
-the ones the agent's install is given. The Studio does not run it: it keeps
-its legacy set (below) until the switch of design v2 §21. A Mac runs
+the ones the agent's install is given. The Studio runs it once, at its
+canary visit, beside the legacy set it keeps until the switch of design v2
+§21: there it leaves userns-remap off, the recorded exception (D13; *The
+Studio canary*, below). A Mac runs
 [`factory/host/prep-mac.sh`](../factory/host/prep-mac.sh) instead, with no
 sudo (*Installing a Mac*, below).
 
@@ -2891,8 +2893,8 @@ and the retirement are site actions (*The Studio switch*, below).
 | What | Where | What it holds |
 |---|---|---|
 | The legacy set, compose project `omarchy-pool` | `/srv/omarchy-pool`, as above | its eight registrations' tokens and `agent.env` in `etc/`; its updater follows releases |
-| The host agent | the login's `systemd --user` unit, with linger | the host key, `~/.local/share/omarchy-agent` (`agent.toml`, `legacy.json`, the bundles), the secrets directory `~/.local/share/omarchy-agent/secrets` (`agent.env`, 0600) |
-| The dispatcher and its task containers | the same rootful daemon, the `host` set's project | the host worker token (a file mounted read-only); each task on its own internal network in `10.232.0.0/16` behind its egress sidecar |
+| The host agent | the login's `systemd --user` unit, with linger | `~/.local/share/omarchy-agent` (`agent.toml`, `legacy.json`, the bundles), the host key in its `state/` — `host.ed25519`, a file: the Studio has no TPM (#330, *Where the host key lives*, above) —, the secrets directory `~/.local/share/omarchy-agent/secrets` (`agent.env`, 0600) |
+| The dispatcher and its task containers | the same rootful daemon, the `host` set's project, on the compose driver (Quadlet is rootless podman's, #330) | the host worker token, `run/host/dispatcher/token` in the set directory `~/.local/share/omarchy-agent/sets/host` (0400), mounted read-only (#327); each task on its own internal network in `10.232.0.0/16` behind its egress sidecar |
 | The work root | `/srv/omarchy-host`, a btrfs subvolume of its own | the tasks' directories, the pool jobs' `jobs/`, the caches |
 
 **The work root is not `/srv/omarchy-pool/host`**, the path design v2
@@ -3026,6 +3028,8 @@ thing that fails; nothing before step 6 changes the legacy set but step
    - `emulation x86_64: on, through qemu, on pages larger than the guest's: …` — the emulated lane on 16K pages (`page16k`, D33);
    - `! hosting: a rootful daemon without userns-remap, beside the legacy set: recorded as an exception until P6` and `isolation: root (a dedicated machine or VM)` — D13's recorded exception;
    - `legacy: omarchy-pool, N container(s), recorded only and left running`;
+   - `host key: a file (no TPM: /dev/tpmrm0 is not there)`, a note: the
+     Studio has no TPM, so the enrollment makes `host.ed25519` (#330);
    - the egress probe passed, and credentials within the login's reach as
      warnings only (a dedicated machine).
 
@@ -3043,13 +3047,16 @@ thing that fails; nothing before step 6 changes the legacy set but step
 
    It shows the envelope — the whole machine: no `--max-units`, so nothing
    later needs a visit to widen it — and the agent keys it copies, by name,
-   for you to confirm; enrolls; prints the host key's fingerprint; and
-   waits, up to 30 minutes, for your Confirm.
+   for you to confirm; enrolls; prints the host key's fingerprint and where
+   it lives (`host key: a file (Ed25519, host.ed25519, mode 0600); not in
+   the TPM: no TPM: /dev/tpmrm0 is not there`); and waits, up to 30
+   minutes, for your Confirm.
 7. On the site, **the pool cap first, then Confirm**: the host's page
    (`/hosts/<id>`, linked from your page's hosts) takes a cap while it
    waits — *Set the pool cap*, **3 units** (one build plus the job unit),
    reason *the Studio canary (#319)*. Then *Confirm* on your page, the
-   fingerprint compared with the one install printed. Confirmed first,
+   fingerprint compared with the one install printed, and the key a file
+   for the same reason. Confirmed first,
    its first claims would take up to its 11 units beside the legacy set.
 8. Install ends: the unit runs, the first round renders, pulls and starts
    the dispatcher. Then:
@@ -3058,6 +3065,7 @@ thing that fails; nothing before step 6 changes the legacy set but step
    systemctl --user status omarchy-agent       # active (running)
    loginctl show-user "$USER" -p Linger        # Linger=yes
    ~/.local/share/omarchy-agent/current/omarchy-agent status
+   stat -c '%a %U' ~/.local/share/omarchy-agent/sets/host/run/host/dispatcher/token   # 400 and the login: the host worker token's file (#327)
    "$src/factory/host/studio-rehearsal.sh" compare ~/legacy-ids-before --project omarchy-pool   # the same: install replaced no legacy container
    ```
 
@@ -3078,7 +3086,8 @@ thing that fails; nothing before step 6 changes the legacy set but step
 **From the site, after the visit**: the host's page says 11 units (*Units*:
 the pool counts 11, busy, free and the one kept for pool jobs; the
 *Stats* row's busy over 11), the lanes *aarch64 native* and *x86_64
-emulated (qemu, 16K pages)*, isolation `root (dedicated)` with the box's
+emulated (qemu, 16K pages)*, *Host key* a file (Ed25519) *not in its TPM:
+no TPM: …*, isolation `root (dedicated)` with the box's
 *hosting* item — the Studio's recorded exception until P6 —, the *Legacy
 set* card (`omarchy-pool` running, `/srv/omarchy-pool`, nothing under
 *Retiring now*), *Pool cap: 3 units*, the release it applied and its last
@@ -3149,7 +3158,9 @@ src="$(mktemp -d)" && git clone --quiet --depth 1 --branch "$tag" https://github
 Then the visit's steps 1 to 9 as written, with the host named
 `studio-rehearsal` and `--agent-env-from` given a file with an agent key
 of its own (a separate, spend-capped one) or none — the stand-in's
-placeholders make the host's probe fail, so it takes no model work. Then,
+placeholders make the host's probe fail, so it takes no model work. Give
+the VM no virtual TPM, as the Studio has none, so that preflight and the
+enrollment say its host key's file as steps 4 and 6 quote them. Then,
 on the same VM:
 
 - **a release while a task runs**: keep it claiming at its cap of 3
