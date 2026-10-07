@@ -95,8 +95,9 @@ verify and attest the package faster and approve it with more confidence.
    factory and the name stays the requester's; *Reject* frees a request's
    name. One review covers the package: it starts once every architecture
    requested is built or *not supported*, and the project builds each built
-   one again. A host of each architecture takes its task (`review:<task>`), in a fresh
-   task container with its own agent sidecar: the project's agent gets the request and the contributor's PKGBUILD, log, gate and
+   one again. A host of each architecture takes its task (`review:<task>`),
+   in a fresh task container with its own agent sidecar: the project's
+   agent gets the request and the contributor's PKGBUILD, log, gate and
    audit as the lesson — `draft-pkgbuild --evidence` — and writes the
    project's own recipe from the project's sources; the same gate runs;
    the packages, the recipe, the log, the gate go to the project's staging
@@ -105,8 +106,9 @@ verify and attest the package faster and approve it with more confidence.
    architecture takes it; its dispatcher puts the package into the pool
    under the factory's directory and pins it into the **lab** (the fourth
    ring: nothing there is promised or promoted), renders the lab, and a real
-   pacman in the task's clean container installs it from the lab above `edge` (`tests/trial.sh`): dependencies
-   from `edge`, hooks run, files verified. The transcript goes beside the
+   pacman in the task's clean container installs it from the lab above
+   `edge` (`tests/trial.sh`): dependencies from `edge`, hooks run, files
+   verified. The transcript goes beside the
    evidence (`trial.log`); the Review page shows *installs* or what stopped
    it. Nothing is published yet.
 7. **A maintainer approves the project's build.** With the project's
@@ -115,8 +117,8 @@ verify and attest the package faster and approve it with more confidence.
    confirmation, with their passkey in the browser (#271: no token approves
    or blocks). Every decision is a record the pool signs and a journal line
    with who, the door (`via`: the web or a token) and the agent that rebuilt
-   each architecture (what the host that rebuilt it ran when it staged it). Review's
-   decisions — a claim, approve, request changes, reject, a release, an
+   each architecture (what the host that rebuilt it ran when it staged it).
+   Review's decisions — a claim, approve, request changes, reject, a release, an
    adoption that takes a registration — are beside the request, at
    `factory/<name>/<request>/decision-<time>-<word>-<id>.json`; a block of a
    package and its lift at `factory/<name>/<request>/decision-<time>.json`;

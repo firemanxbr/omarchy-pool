@@ -512,8 +512,9 @@ did are gone, and a run by hand is a job. GitHub Actions runs CI and the
 release only — there is no hosted worker: when no host is named in
 `host-pool-jobs`, or none it names is alive, the pool's jobs wait — the
 rings stop moving —, the scheduler log says so and Status counts them
-waiting, and the hosts' pages (*The Studio host*, below) are where to look. Worker secret:
-`JOB_TOKEN_SECRET` (any random string) signs the job tokens.
+waiting, and the hosts' pages (*The Studio host*, below) are where to
+look. Worker secret: `JOB_TOKEN_SECRET` (any random string) signs the job
+tokens.
 
 ## A new maintainer host
 
