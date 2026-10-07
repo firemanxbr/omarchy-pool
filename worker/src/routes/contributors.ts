@@ -233,7 +233,7 @@ const revokedAlready = (w: WorkerRow): Verdict | null => (w.revoked_at ? { ok: f
  * back per id in `workers`, the state's word before the role's, as the row
  * greys it; the door behind Revoke refuses with the same verdict.
  */
-export function workspace(c: Contributor | null, login: string, registrations: Registration[] = [], workers: WorkerRow[] = []): Record<Right, Verdict> & { packages: Record<string, Verdict>; workers: Record<string, Record<WorkerRight, Verdict>> } {
+export function workspace(c: Contributor | null, login: string, registrations: Registration[] = [], workers: WorkerRow[] = []): Record<Right, Verdict> & { packages: Record<string, Verdict>; workers: Record<string, Record<WorkerRight, Verdict>>; host: Verdict } {
   const allow: Verdict = { ok: true };
   const no = (status: 401 | 403 | 404 | 409 | 410, why: string): Verdict => ({ ok: false, status, why });
   const person = !c ? no(401, SIGN_IN) : null;
@@ -258,6 +258,10 @@ export function workspace(c: Contributor | null, login: string, registrations: R
         ?? allow;
   }
   const revoke = ownerOrMaintainer("revokes a worker here", 404) ?? allow;
+  // Who provides a machine to the pool (#331): a maintainer, on their own page, not blocked — the role from the synced
+  // MAINTAINERS.toml, before a block, so every contributor reads the same sentence. A machine joins as a host (POST
+  // /hosts/enrollments asks this); a legacy registration is gone (#346), whoever asks.
+  const provide = onlyOwner("registers a worker here") ?? (maintainer ? null : no(403, POOL_HOSTS)) ?? blocked ?? allow;
   const byWorker: Record<string, Record<WorkerRight, Verdict>> = {};
   for (const w of workers) {
     // The row's own state first — the same grey for every role — then whose it is.
@@ -266,8 +270,8 @@ export function workspace(c: Contributor | null, login: string, registrations: R
   return {
     request: onlyOwner("requests here") ?? blocked ?? allow,
     // No legacy registration is made any more (#346): a contributor reads that their packages build on the pool's hosts (#331), a
-    // maintainer that the door is gone — their new machine is a host. Never allowed.
-    register: onlyOwner("registers a worker here") ?? (maintainer ? no(410, GONE.register) : no(403, POOL_HOSTS)),
+    // blocked maintainer the block, a maintainer that the door is gone — their new machine is a host. Never allowed.
+    register: provide.ok ? no(410, GONE.register) : provide,
     token: onlyOwner("mints their token") ?? allow,
     // A registration is built by the one who brought it: for anyone else the name is not theirs to build (404, as a name not registered).
     build: onlyOwner("builds here", 404) ?? blocked ?? allow,
@@ -277,6 +281,7 @@ export function workspace(c: Contributor | null, login: string, registrations: R
     withdraw: person ?? (maintainer ? null : no(403, MAINTAINER_DECIDES)) ?? allow,
     packages,
     workers: byWorker,
+    host: provide,
   };
 }
 

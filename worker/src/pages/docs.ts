@@ -310,14 +310,14 @@ const CHAPTER_ANCHORS: Partial<Record<DocKey, string[]>> = {
   "what-we-test": ['id="the-score"', 'id="who-does-what"', "<th>The contributor's half</th><th>points</th><th>The maintainer's half</th><th>points</th>"],
   architecture: ['href="/docs/proof-of-concept#results"', 'href="/docs/omarchy-cli-mcp"', `href="${REPO_URL}/blob/main/docs/omarchy-cli.config.toml"`, "<th>Route</th><th>Purpose</th>", '<figure class="diagram">'],
   // Releasing the pool itself: Contributing and Testing link here.
-  runbook: ['id="releasing-the-pool-itself"', 'href="/docs/architecture"', 'href="/docs/worker-host"', "<th>Service</th><th>Registration</th><th>Takes</th>", '<pre><code class="lang-bash">', "<th>Door</th><th>What it ships</th><th>What guards it</th>"],
+  runbook: ['id="releasing-the-pool-itself"', 'href="/docs/architecture"', 'href="/docs/worker-host"', "<th>What</th><th>Where</th>", '<pre><code class="lang-bash">', "<th>Door</th><th>What it ships</th><th>What guards it</th>"],
   testing: ['href="/docs/runbook#releasing-the-pool-itself"', 'href="/docs/proof-of-concept#results"', "<th>File</th><th>What is covered</th>", '<pre><code class="lang-bash">'],
   migration: ['href="/docs/factory"', "<th>Placeholder</th><th>Meaning</th><th>Today</th>", '<pre><code class="lang-bash">'],
   // The Review link is written as a path climbed out of factory/: the dashboard's own page.
   factory: ['href="/review"', 'href="/docs/migration"', "<th>Check</th><th>What it asks</th><th>fail when</th>", '<pre><code class="lang-bash">', '<figure class="diagram">'],
-  "worker-host": ['href="/docs/factory"', 'href="/docs/runbook"', "<th>File</th><th>What</th>", '<pre><code class="lang-bash">'],
-  // The doors that ship and what guards each (#284): open-work links here.
-  "security-model": ["<th>Credential</th><th>Held by</th><th>Can do</th><th>Cannot do</th><th>Status</th>", "<th>Who</th><th>Gets</th><th>How</th>", 'id="the-doors-that-ship"', "<th>Door</th><th>What it ships</th><th>What guards it</th>"],
+  "worker-host": ['href="/docs/factory"', 'href="/docs/runbook"', "<th>What</th><th>Where</th>", '<pre><code class="lang-bash">'],
+  // The isolation model (#346): the pieces of a host and the levels, which Run a host and the worker host chapter link here.
+  "security-model": ["<th>Credential</th><th>Held by</th><th>Can do</th><th>Cannot do</th><th>Status</th>", "<th>Who</th><th>Gets</th><th>How</th>", 'id="the-doors-that-ship"', "<th>Door</th><th>What it ships</th><th>What guards it</th>", 'id="isolation"', "<th>Piece</th><th>Holds</th><th>Reaches</th><th>Runtime socket</th><th>Runs untrusted code</th><th>Reachable from a task</th>", "<th>Host</th><th>The agent process</th><th>A task-container escape lands as</th><th>Level</th><th>Allowed</th>"],
   contributing: ['href="/docs/runbook#releasing-the-pool-itself"', 'href="/docs/governance"', 'href="/docs/testing"', "<th>Change</th><th>Label on the pull request</th><th>Example</th>", '<pre><code class="lang-bash">'],
   // Results: poc/RESULTS.md became this section (doc.ts FILES); the crates are the code on GitHub.
   "proof-of-concept": ['id="results"', 'href="/docs/proof-of-concept#results"', `href="${REPO_URL}/tree/main/poc/crates/pkg-store"`, 'href="/docs/testing"', "<th>Command</th><th>Result</th>", '<figure class="diagram">'],

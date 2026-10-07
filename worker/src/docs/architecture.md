@@ -99,7 +99,7 @@ Migrations live in `worker/migrations/`.
 | `GET /api/v1/search?q=` · `/package/:name[/files]` | search within a ring; a package's versions per ring, manifest, forward edges (declared dependencies and loaded sonames resolved to providers) and reverse edges (declared, or by loading one of its libraries) — the package page and, later, CVE propagation. A loaded soname resolves to one package built for the page's architecture (see Architectures) |
 | `GET /api/v1/packages?q=&ring=&arch=&origin=&sort=` | the packages list (`routes/browse.ts`): one row per name over the rings picked, filtered and paged by the server — a page found by walking the name index (or the table in id order, for recency) from a cursor, a search by one read of the table — and the counts behind every filter kept in `settings` under the ring heads they were counted at; `/packages` draws its first page into the HTML from the same address, through the edge's copy |
 | `GET /api/v1/pool/unreferenced` · `POST /api/v1/pool/gc` | retention: what the last N releases do not reference |
-| `GET /api/v1/factory` · `POST /factory/{requests,enqueue,claim,jobs}` · `/factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,retry,any-host}` · `/factory/tasks/:id/artifacts/<file>` · `/factory/{register,packages,workers,workers/self,maintainers,review,approvals,trust,me}` · `/factory/workers/:id/{orders,can}` · `/factory/workers/self/orders/:id` · `GET /factory/follow` · `GET /api/v1/users/:login` · `GET /api/v1/cost` | the factory's brain: package requests, build tasks with leases, the workers pulling them, contributors and their packages, maintainers' approvals, jobs queued by hand, orders to a worker, what each set's updater follows, the daily cost estimate ([factory/README.md](../factory/README.md), [GOVERNANCE.md](GOVERNANCE.md)) |
+| `GET /api/v1/factory` · `POST /factory/{requests,enqueue,claim,jobs}` · `/factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,retry,any-host}` · `/factory/tasks/:id/artifacts/<file>` · `/factory/{register,packages,workers,workers/self,maintainers,review,approvals,trust,me}` · `/factory/workers/:id/{orders,can}` · `/factory/workers/self/orders/:id` · `GET /factory/follow` · `GET /api/v1/users/:login` · `GET /api/v1/cost` | the factory's brain: package requests, build tasks with leases, the workers pulling them, contributors and their packages, maintainers' approvals, jobs queued by hand, orders to a worker, the release `follow` names, the daily cost estimate ([factory/README.md](../factory/README.md), [GOVERNANCE.md](GOVERNANCE.md)) |
 | `GET /api/v1/hosts[/:id]` · `GET /api/v1/hosts/fleet` | the maintainers' hosts (#321, #324): a host's page — its public fields for anyone, everything its agent reports for its owner and the maintainers, the leases with a Stop each, the "needs a person" box —, and the fleet (`src/fleet.ts`): each host's public row (lanes, units busy and free, tasks, release, isolation, alive) and Status's lines — a host silent, behind, rolled back, a lost task, the disk low, a lane held, a clamp, a long reservation, a verify failure as an error; the capacity per architecture with the native waits and the week's busy ratio; the second opinion. A host's own row is written on a change or once five minutes old |
 | `POST /api/v1/events` · `GET /api/v1/events` · `GET /api/v1/stats` | activity log and the dashboard's data |
 | `GET /` | the dashboard — three doors in the header, one per job: `/` the Pool (use it: a search, the pool's four numbers, the chain from the sources to your machine, the command that points pacman at a ring, Live and what is new in the rings; no account), `/factory` the Factory (contribute: the request with its live checks, the workers and what each is doing, the line from request to the pool), `/review` Review (maintain: the staged builds and the decisions). The footer links `/packages`, `/status`, `/agents`, `/docs` and `/people`; `/package/:name`, `/workers`, `/user/:login`, `/build/:id` and the API reference `/api` are one link from those. `/pipeline`, `/journal` and `/security` redirect to the sections of `/status` they became, `/docs/api` to the docs' API section and `/request` to the Factory's request card (`MOVED` in `index.ts`). Every page is a string with a `<script>` that reads the API; the diagrams are inline SVG drawn in `worker/src/pages/diagrams.ts`, the charts in `charts.ts`. Every colour is a named token (`layout.ts`): dark by default for everyone, its light twin only for a reader who chose it (the header's switch or the ⌘K menu), the choice kept in the browser. The v1 kit (`kit.ts`) holds the pieces the v1.0 pages are drawn with: a page drawn with it links one stylesheet, `/assets/kit.<hash>.css` (its primitives and its icons, immutable under its hash), and a page that is not pays nothing for it until the ⌘K menu opens. The menu (`GO_MENU` in `layout.ts`) is on every page: ⌘K or Ctrl+K open it (on a Mac, Ctrl+K in a text field stays the field's), and so does `/` on every page but Home, where it focuses the search. It goes to the pages and to packages through the same `/api/v1/search` address Home's box asks, the term in lower case (so the two share the edge's copy); a name that search does not find is looked up in the factory's names and at `/api/v1/package/:name` on each architecture before the menu offers to request it, on `/factory?name=`; and it links the kit's sheet for its icons the first time it opens |
@@ -110,20 +110,18 @@ serves data. Decisions are made by the publisher (`pkg-repo`) and the client.
 ### Staging pipeline (pulled jobs)
 
 Every row below is a **pulled job**: the Worker's cron queues it in
-`build_tasks` on this schedule (`JOB_KINDS`), a project worker runs it with a
-per-job token, and a maintainer queues the same by hand (`pkg-repo job`).
-Nothing of the pipeline runs on GitHub Actions. The project's workers are
-three roles of one image ([factory/README.md](../factory/README.md) *Three
-roles*): *pool* workers take the rows below, *review* workers the project's
-`build` and the `audit`, *community* workers the contributors' builds,
-anyone's, as a host takes them (#343) — two of each, one per architecture,
-on the project's host (RUNBOOK, *The Studio host*), beside its host until
-P3 retires them. A community worker is a pair: a **broker** that holds the
-worker's token, the agent key and a GitHub token and only receives,
-processes and answers, and a **builder** born with nothing that builds one
-task and dies (`factory/bin/broker`; SECURITY.md, *Isolation*). A project
-worker is its own broker: the build containers it starts hold nothing and
-reach the agent through `agent-proxy`.
+`build_tasks` on this schedule (`JOB_KINDS`), a maintainer's host runs it
+with a per-job token, and a maintainer queues the same by hand (`pkg-repo
+job`). Nothing of the pipeline runs on GitHub Actions. The project's
+compute is its maintainers' hosts ([factory/README.md](../factory/README.md)
+*The project's hosts*): each runs one bundle, whose one service, the
+dispatcher, claims every kind by its capacity — the pool's own jobs in
+child processes of its own on the unit it keeps for them (#340), every
+build, trial and audit in its own container born with nothing, on an
+internal network of its own behind an egress sidecar, with an agent sidecar
+of its own for a model kind (#335, #336; SECURITY.md, *Isolation*). No
+container is fixed to a role: the legacy sets of fixed containers per role
+retired with P3 (#346).
 
 | Job | Schedule | What it does |
 |---|---|---|
@@ -135,13 +133,13 @@ reach the agent through `agent-proxy`.
 | `enqueue` | by hand only (`pkg-repo job enqueue`) | the sizing recipes on `main` reconciled with what the factory built — the repository holds no package recipes since 2026-09-17, so the scheduler no longer runs it |
 | `rollback` | by hand only | a ring pointed at an earlier release, both architectures re-rendered |
 | `verify` | weekly (Saturday 03:00 UTC), or by hand | does what the pool serves verify? Every OPR object of every ring and architecture downloaded and checked: the bytes are the ones the index names, the `.sig` beside them is Omarchy's signature of those bytes. What is wrong is repaired — the right signature from the upstream channel that still serves the bytes, the ring re-pinned to the object the pool actually holds (indexed from the bytes if the index never saw them), rendered — and what no channel serves any more is reported for a replacement (`verify` event, `pkg-repo verify --repair`) |
-| `trial` | when the project's review build is staged, or by hand (`pkg-repo job trial --param task=<build>`) | the build into the lab and a real pacman on it: the staged packages go into the pool under the factory's directory, pinned into the `lab` ring (never a promised one), the lab rendered; then `tests/trial.sh` runs a clean container of that architecture with the include of `--ring lab` — the lab's sections above `edge`'s — and installs the packages for real (dependencies from `edge`, hooks run, `pacman -Qkk` on the files), checking each came from the lab. The transcript is attached to the evidence (`trial.log`), a `trial` event records it, the Review page shows *installs* or what stopped it. Evidence for the maintainer, never a decision. A pool worker's job |
-| `audit` | when a build is staged: a contributor's, and the project's review rebuild — the publish-bound one, whose audit is the second opinion | the second agent ([Governance](GOVERNANCE.md#learn)): a project worker whose owner set an agent key (Anthropic, OpenAI, Gemini or xAI) reads the staged PKGBUILD, log and `.PKGINFO`, asks its model for a structured review (`factory/bin/audit-pkgbuild`, `factory/prompts/audit.md`) and attaches `audit.json` / `audit.md` to the evidence; the Review page shows the verdict. A review worker's job. Placed as the second opinion (#339, design v2 §8.4, D36): it prefers a machine other than the one that built what it audits, and an audit of the review rebuild takes another model (the claim's `agent`) whenever a registration with one answered in the last 24 hours; its lease records `build_tasks.independent` (`model`, `host` or `none`), shown beside the verdict. Evidence for the maintainer, never an automatic gate |
-| `build` | on a request (at once, in the queue), on a new upstream release, and when a maintainer presses *Build by the project* | a package built in a fresh container through the gate (checksums, shellcheck, namcap ×2, files, metadata, `check()`, smoke): a contributor's build on a maintainer's host (or a legacy community set, until P3) into the owner's staging workspace as evidence; project trust (`review:<task>`) on a worker two maintainers vouched for, the project's agent writing its own recipe from that evidence, into `staging/@project/` for the audit, the trial and the approval |
+| `trial` | when the project's review build is staged, or by hand (`pkg-repo job trial --param task=<build>`) | the build into the lab and a real pacman on it: the staged packages go into the pool under the factory's directory, pinned into the `lab` ring (never a promised one), the lab rendered; then `tests/trial.sh` runs a clean container of that architecture with the include of `--ring lab` — the lab's sections above `edge`'s — and installs the packages for real (dependencies from `edge`, hooks run, `pacman -Qkk` on the files), checking each came from the lab. The transcript is attached to the evidence (`trial.log`), a `trial` event records it, the Review page shows *installs* or what stopped it. Evidence for the maintainer, never a decision. A pool job, in a host's dispatcher |
+| `audit` | when a build is staged: a contributor's, and the project's review rebuild — the publish-bound one, whose audit is the second opinion | the second agent ([Governance](GOVERNANCE.md#learn)): a host's audit task, with its own agent sidecar holding the host owner's key (Anthropic, OpenAI, Gemini or xAI), reads the staged PKGBUILD, log and `.PKGINFO`, asks its model for a structured review (`factory/bin/audit-pkgbuild`, `factory/prompts/audit.md`) and attaches `audit.json` / `audit.md` to the evidence; the Review page shows the verdict. Placed as the second opinion (#339, design v2 §8.4, D36): it prefers a machine other than the one that built what it audits, and an audit of the review rebuild takes another model (the claim's `agent`) whenever a registration with one answered in the last 24 hours; its lease records `build_tasks.independent` (`model`, `host` or `none`), shown beside the verdict. Evidence for the maintainer, never an automatic gate |
+| `build` | on a request (at once, in the queue), on a new upstream release, and when a maintainer presses *Build by the project* | a package built in a fresh container through the gate (checksums, shellcheck, namcap ×2, files, metadata, `check()`, smoke): a contributor's build on a maintainer's host into the owner's staging workspace as evidence; the project's (`review:<task>`) on a maintainer's host — never its requester's own while another can take it (#339) —, the project's agent writing its own recipe from that evidence, into `staging/@project/` for the audit, the trial and the approval |
 | `publish` | on approval | carries the project's approved build into `edge` as source `factory`, signed by the pool; when the trial passed, into rc and stable too (the fast lane) |
 | audience (`src/audience.ts`) | once a day, 00:30 UTC | taken by the Worker itself from the account's request analytics, both pool hosts in one query: distinct addresses that fetched a ring database the day before, per ring and per architecture, as an `audience` event, which `/api/v1/stats` carries (the last 30 days; no page draws it since the Pool's redesign, #243); nothing per request is kept |
 | metrics snapshot (`src/metrics.ts`) | every 30 minutes | taken by the Worker itself, no job: the pool's jobs of the last 7 days (runs, failures, worker minutes, per kind), builds, workers alive, pool totals and ring sizes, as a `metrics` event — the pool's history, in `/api/v1/stats` (the pool's totals, the Pool's package count among them); the jobs of the week the Status page's tiles, table and charts say are one reduce over the live series (`jobs_daily`, the shell's `jobsSummary`; a job's bucket is `jobBucket`, the rule the Workers page's cards apply too), never the snapshot's, which is up to half an hour older and counts a cancelled job as a success; a job still queued or leased rides the series on today whatever its age, so the tile that says what waits counts every job in flight, as the snapshot did. Between two changes of the pool a snapshot carries the previous one's pool block and counts its jobs afresh |
-| worker cron trigger | every 10 minutes | the pool's own scheduler: queues the jobs above when due, requeues expired leases, applies `factory/MAINTAINERS.toml`, reads the OPR's recipe repository for provenance (05:15, `src/provenance.ts`: per package, Omarchy's own or AUR-synced, the upstream AUR commit, the last commit), checks upstreams for bumps (05:45), estimates the bill (06:30), probes its own GitHub tokens for a write scope once a day (`src/tokenprobe.ts`, #308), logs pool jobs waiting for a project worker; see RUNBOOK |
+| worker cron trigger | every 10 minutes | the pool's own scheduler: queues the jobs above when due, requeues expired leases, applies `factory/MAINTAINERS.toml`, reads the OPR's recipe repository for provenance (05:15, `src/provenance.ts`: per package, Omarchy's own or AUR-synced, the upstream AUR commit, the last commit), checks upstreams for bumps (05:45), estimates the bill (06:30), probes its own GitHub tokens for a write scope once a day (`src/tokenprobe.ts`, #308), logs pool jobs waiting for a host; see RUNBOOK |
 | `ci.yml`, `e2e.yml` | every pull request | fmt, clippy, tests and the worker typecheck on x86_64 and aarch64; real pacman end to end through a local worker |
 | `release.yml` | when a maintainer decides (`gh workflow run release.yml`, or the Actions page) — main takes merges as they are ready, one release carries them all | CI + E2E again on main's head, next version from the last tag (`v0.0.1`, `v0.0.2`, …), binaries for both architectures, GitHub release with notes from every pull request since the last tag, the worker image, `wrangler deploy` carrying `POOL_VERSION` — the dashboard shows what is running |
 
@@ -257,10 +255,10 @@ per ring, the package page shows the chain, and the graph marks the nodes.
 
 #### Workers follow the brain (#277)
 
-The pool sees every worker's claims, so it knows first when one has stopped
-working: after the v1.0.0 and v1.0.1 releases two review workers sat not ready
-until a maintainer reached the Studio host by hand (#273). Now the pool tells
-them. An **order** rides the answer to the worker's own claim, `{"task": null,
+The pool sees every registration's claims, so it knows first when one has
+stopped working: after the v1.0.0 and v1.0.1 releases two of the Studio's
+workers sat not ready until a maintainer reached the machine by hand (#273).
+Now the pool tells them. An **order** rides the answer to the worker's own claim, `{"task": null,
 "orders": [...]}` (and the `426` of an outdated worker), and nothing else: no
 new connection to a host, no listener on the worker, only that worker's own
 token. A claim says which orders its process carries out (`orders`, canonical
@@ -268,8 +266,8 @@ and sorted), so an older worker is never handed one; the worker checks each
 order again before it acts, answers `POST /factory/workers/self/orders/:id`,
 and an order it never answers is closed by what its next claims show, or
 expires. Every claim also carries the process's `instance` (random at start),
-when it started, how its previous process ended, where its agent is (`direct`,
-`sibling`, `broker`) and its `site` (the engine it runs on, kept under the
+when it started, how its previous process ended, where its agent is
+(`direct`, `sibling`, or a host's probe sidecar) and its `site` (the engine it runs on, kept under the
 name of who runs the worker — the project's, or the contributor's login — so
 only one person's workers ever share a site): the pool learns a restart
 happened when the instance changes, and tells two processes on one token, and
@@ -282,10 +280,11 @@ has claimed alone for ten. Orders live in `worker_orders`
 `done`, `refused`, `failed`, `expired`, `cancelled`), who gave it, why and the
 answer; at most one open per kind per worker, and per site and agent service.
 
-Three kinds ship first: **Re-check agent** (probe now), **Restart** (exit 75,
-and the restart policy starts it again; a builder exits 0 and its broker
-restarts beside it) and **Restart agent service** (a review worker restarts the
-project host's `agent-proxy` on its own engine). Its owner or any maintainer
+Three kinds ship first: **Re-check agent** (probe now — on a host, a fresh
+probe sidecar), **Restart** (exit 75, and the restart policy starts it
+again) and **Restart agent service** (a process whose agent is a service
+beside it restarts that service; a host's agent is its own task's sidecar,
+so the pool never sends a host either restart, only the re-check). Its owner or any maintainer
 gives them from the worker's page, `/worker/:id`, or the API; the pool gives
 them itself (`orders.ts`, run at the claim, swept by the cron): after 5 minutes
 not ready it re-checks a worker whose own re-check stalled, after 10 it
@@ -296,21 +295,16 @@ says so. An error a restart cannot help (auth, credit, rate, the provider's
 own) gets no order. A **breaker** holds every automatic restart of a provider
 while three sites have an open spell on it, and releases when fewer than two
 have had one for 15 minutes: an outage of a provider is not the workers' to
-fix. A worker's error is its own word, so the breaker has two scopes: the
-project's workers are held only by the project's own spells
-(`worker-breaker:<provider>:project`), community registrations — the
-maintainers' legacy sets since #343 — by everyone's
-(`worker-breaker:<provider>`). A legacy set's shared agent service is restarted
-once, through its elected worker; the others wait, give up with it, or —
-when the service answers another of them — are restarted themselves (this
-site pacing, and the community share below, stay for the legacy sets alone
-until P3: a host's agent is a probe sidecar of its own). Every
-cap sits inside the `INSERT` that issues the order — six restarts and six
-re-checks an hour per worker, twenty orders an hour per login, ten automatic
-restarts an hour and sixty automatic orders a day for the pool, of which
-community registrations take six and forty — so two claims at once cannot pass
-one together. The pool signs its own orders `pool:project` or
-`pool:community`, which no GitHub login can be. The journal has exactly one
+fix. A registration's error is its own word, so the breaker has two scopes:
+the project's registrations — every host's — are held only by the
+project's own spells (`worker-breaker:<provider>:project`), and the
+community scope (`worker-breaker:<provider>`) and the site pacing of a
+shared agent service had only the legacy sets to hold, which retired with
+P3 (#346). Every cap sits inside the `INSERT` that issues the order — six
+restarts and six re-checks an hour per registration, twenty orders an hour
+per login, ten automatic restarts an hour and sixty automatic orders a day
+for the pool — so two claims at once cannot pass one together. The pool
+signs its own orders `pool:project`, which no GitHub login can be. The journal has exactly one
 line when an order is issued and one when it ends, whichever path closed it:
 each close is conditional on the order's state, and writes its line only
 when it changed it. `WORKER_RULES = "off"` stops the
@@ -322,30 +316,25 @@ nothing (`204`) until a **Resume** — its first claim that understands
 notices hears it once —, the Build door and the project-build door refuse to
 pin it, the cron's sweep sends the builds already pinned to it to the
 queue once it has been drained three minutes (`UNPIN_AFTER_DRAIN_MINUTES`), and
-Status raises an error when every live pool or review worker of an
-architecture is drained. Who resumes: any maintainer a project worker (its
-owner, when not a maintainer, only a drain of their own); a community
-registration its owner, and a maintainer only when a maintainer drained it. A
-drain counts toward six an hour per worker, a resume toward nothing, so a
-drain can always be undone. **Stop its task** is the way out of a task that hangs, which
+Status raises an error when every live host of an architecture is
+drained. Who resumes: whoever's drain it is (D57) — a host's owner lifts a
+drain of their own, a maintainer's drain any maintainer. A drain counts
+toward six an hour per registration, a resume toward nothing, so a drain can
+always be undone. **Stop its task** is the way out of a task that hangs, which
 every other order waits for: it **fences** the lease (`build_tasks.stop_order`)
 instead of giving it back — still the worker's, so nobody else takes it and
 the ring lock holds, but every heartbeat, report and staging upload of it is
 refused with `409 {"stop": true, "state": "stopping"}` and nothing renews it.
 The heartbeat's `409` with `stop` (a `404` too) is how every worker hears
-that a task is no longer its own, whatever took it back: the Rust worker
-kills the task's process groups and removes the containers labelled with
-the task (`com.omarchy.task`, a created one included), and its calls to the
-pool stop at the next one (every `Api` of a task checks its stop before each
-attempt); a builder runs its build as a job of its own process group, which
-the heartbeat's signal kills, and exits. A process says it stops on that
-word by declaring `stop-task` with its claim — every image from #277's
-second part on; one that does not (from before it, or from its first part,
-which takes orders but runs a stopped task on) is given back at its lease's
-end, and its broker keeps its hold. The worker's next claim proves its
-processes are gone and gives the task back to the queue (`lease.ts`,
+that a task is no longer its own, whatever took it back: the dispatcher
+kills the task's containers (labelled with the task, `com.omarchy.task`, a
+created one included) and fails it as stopped, and its calls to the pool for
+it stop at the next one. A process says it stops on that word by declaring
+`stop-task` with its claim, as every dispatcher does; one that does not is
+given back at its lease's end. A host's next claim that no longer lists the
+lease proves it is gone and gives the task back to the queue (`lease.ts`,
 `requeueLease`, the same statements as an expired lease); so does the lease's
-end, when the worker does not claim first — the cron's requeue only while
+end, when the host does not claim first — the cron's requeue only while
 that lease has still expired, so a heartbeat that renewed it just before
 keeps it. Every write that renews or ends a lease (a heartbeat, `complete`,
 `fail`) is conditional on the lease the handler read — still the caller's,
@@ -357,68 +346,43 @@ minutes, then 40, 80, … at most a day (35 at least in a task), counted in its
 container's layer, so at most six in any day, each told to the pool by the
 next process.
 
-**Versions follow the brain too: the set's updater.** Every set runs an
-`updater` service of the same image (`factory/bin/omarchy-rollout`): every
-contributor's set, and the Studio since its one-time step (the runbook's *The
-Studio host*). Every two minutes it asks `GET /api/v1/factory/follow?ids=…`,
-with no token — the pool's release, and for each worker of its set its
-release and the id of an open **Update**; the edge keeps an answer thirty
-seconds per release of the pool, so a deploy is never answered from before
-it — and runs a round when the release changes (a release, or a rollback),
-when an Update it has not acted on appears, and every fifteen minutes when
-the pool does not answer. A Worker from before #277 knows no follow: the
-updater reads its release from `/api/v1/version` instead. (A maintainer
-host's agent, from 0.3.0, reads none of this: its signed host state names
-the release, its registration's open Updates and its host orders — #344;
-from agent 0.4.0 its settings and the rest of the host orders, behind the
-host's own brake, #325, and the owner's soak, which the claim's 426 gate
-follows for at most two hours after a deploy, and a warning when GitHub has
-shown a newer release than the pool names for over a day, #326, and the
-owner's widening of its envelope and its agent keys, each a document the
-passkey pinned at the host signed and the keys sealed in the browser to the
-host's seal key, #328;
-the runbook's *The run loop*, *Owner control*, *Soak* and *Freeze detection* — except from a Worker from before #344, whose
-state names no release: only a rollback below it deploys one, and the agent
-then reads its `follow` as the agents before it did.) It names
-its workers by id from inside the set: a project worker's entrypoint writes
-its own to `/run/omarchy/worker-id`, and a builder's is asked of its broker,
-which holds the token; nothing is read of a builder's container. A round is
-#278's (brokers first, each answering, then the workers in one `up`, each stop
-a drain), inside a lock — a container created by name, labelled with its
-holder's container and start, broken at once (by the id it was judged by)
-when that holder is gone or restarted, released at every round's end — and
-followed by a guard: for 90 s
-every container of the set on the new image but the builders (which exit
-after every task) is sampled, and the updater replaces itself, and removes
-the old images, only when none restarts at two samples in a row, none
-restarts twice, none that ran stays down, every service was replaced, and the
-new image's own updater passes `--self-test` (one from before #277 has none,
-and is adopted on the rest: a rollback past #277). An Update is therefore never
-delivered to the worker: the updater executes it, and the pool closes it when
-the worker claims on the pool's release (or expires it after six hours). The
-door refuses it for a worker on the latest release, and for a project worker
-whose set nothing that follows the pool rolls out: each claim reports what
-does (`rollout`: its project's updater — its image, and whether that image
-carries `com.omarchy.updater.follows=1` — and the host's `rollout.sh` by its
-marker line), and the pool says it in one word, `set_rollout` (`follows`,
-`old-updater`, `both`, `timer`, `stopped`, `none`, `unknown`), on the worker's
-page and in Status's lines.
+**Versions follow the brain too: the host agent.** A maintainer host's agent
+reads the release to run from its signed host state (`GET
+/api/v1/hosts/self/state`, #344), with its registration's open Updates and
+its host orders — from agent 0.4.0 its settings and the rest of the host
+orders, behind the host's own brake (#325), and the owner's soak, which the
+claim's 426 gate follows for at most two hours after a deploy, and a warning
+when GitHub has shown a newer release than the pool names for over a day
+(#326), and the owner's widening of its envelope and its agent keys, each a
+document the passkey pinned at the host signed and the keys sealed in the
+browser to the host's seal key (#328); the runbook's *The run loop*, *Owner
+control*, *Soak* and *Freeze detection*. It verifies the release's bundle
+against `release.yml`'s signature, the floor and `min_release`, rolls it out
+with its guard — a task runs across it, re-adopted by the new dispatcher —
+and commits or reverts, and replaces itself the same way, upward only. A
+Worker from before #344 names no release in its state: only a rollback below
+it deploys one, and the agent then reads its public `follow`
+(`GET /api/v1/factory/follow`, no token), as the agents before 0.3.0 did and
+as the legacy sets' rollout did until they retired (#346). An Update of a
+host's registration is a round of its agent, which the pool closes when the
+registration claims on the pool's release (or expires after six hours).
 
 **A release whose image does not start.** Prevented: the release pushes each
 architecture's image as `:<arch>-vX.Y.Z` only, starts every role from it on
-the runner (`tests/image-smoke.sh`, the project worker up to its first
-claim), and only once both architectures have started moves `:vX.Y.Z`; the
-tags a host follows, `:<arch>` then `:latest`, move only once the release is
-published (#359). Contained: an updater never
-adopts an image under which what it replaced keeps restarting, and keeps the
-old images. Detected: a process that lives minutes and finishes nothing is
+the runner (`tests/image-smoke.sh`: the dispatcher, the egress and agent
+sidecars, the build script), and only once both architectures have started
+moves `:vX.Y.Z`, the index the host bundle names by digest; the floating
+tags, `:<arch>` then `:latest`, move only once the release is published
+(#359). Contained: a host's guard never commits a release under which its
+dispatcher does not come up, and reverts to its last-good, quarantining
+the release. Detected: a process that lives minutes and finishes nothing is
 counted as churn; workers alive before the latest deploy, last heard during
 its rollout and silent for 15 minutes since are an error on Status.
 Remedied from anywhere: `gh workflow run rollback.yml -f to=vX.Y.Z` re-points
 the images and deploys that release's Worker — only to a release whose
 images passed both smoke starts, with its Worker built before any tag moves
-and the tags put back if its deploy fails — and every updater follows the
-pool's release down.
+and the tags put back if its deploy fails — and signs a rollback statement
+on which every host's agent goes below its floor to it.
 
 ### Architectures
 

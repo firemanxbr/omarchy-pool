@@ -93,9 +93,9 @@ can be ready while the other failed). The tools, in the order to try them:
    record is written — every host the maintainers provide takes from it,
    the contributors' builds in turn by owner, a native lane first and an
    emulated one after its wait (#337, #343); the page says where a build
-   stands ("3 of 7"). The Build dialog offers the queue, or a legacy
-   community set registered under the asker's name, which then waits for
-   that set alone;
+   stands ("3 of 7"). The Build dialog offers the queue — no legacy set
+   is left to pin a build to since the legacy registrations retired
+   (#346);
    a queued build can be taken out and put back from the same dialog —
    nothing puts it back by itself. A build that ran *emulated* (x86_64
    under qemu on an aarch64 host) may need nothing but a native worker: a
@@ -226,7 +226,7 @@ maintainer merges it like any other change to the process.
   failure on one architecture leaves the package `staged` while a build of
   the other waits for a maintainer, with the failure in its detail.
 - **2026-09-17 — a worker that died without a word.** omarchy-cli's
-  aarch64 build was claimed five times by the Studio's community worker
+  aarch64 build was claimed five times by one of the Studio's legacy workers
   and reported nothing five times: each lease expired half an hour later,
   the pool queued the build again, the same worker took it and died the
   same way — a day lost to a package that built fine on the first native
@@ -289,19 +289,19 @@ maintainer merges it like any other change to the process.
   idle: the queue's first pick never applied to a worker's own builds, so
   the emulated one took its owner's Rust build at once, installed the
   toolchain and reported the failure as the recipe's — final, on the first
-  of three attempts. Two rules followed: an emulated shared worker has no
+  of three attempts. Two rules followed: an emulated worker has no
   first pick of its own — its owner's builds wait the three minutes like
   anyone's while a native worker is idle (a build pinned to it is still its
   at once) — and a build a toolchain cannot start on the worker is the
   worker's failure, not the recipe's: it goes back to the queue marked for
   a native worker, the attempt given back, and waits there until one is
-  alive — the page says so. (The first pick, and the shared workers it
-  ranked, went with the community worker tier in #343; the native lane's
+  alive — the page says so. (The first pick, and the workers it ranked,
+  went with the community tier in #343; the native lane's
   preference is selection's since #337.)
 - **2026-09-29 — the project's own emulated worker.** The x86_64 capacity
   evaluation found omarchy-cli's own x86_64 review build failed for good
   on the Studio's review-x86_64: rustc under qemu again, three attempts,
-  then final. The pool and the community worker already sent a build back
+  then final. The pool and the community build script already sent a build back
   for a native worker when a toolchain could not start (exit 96); the
   review and pool workers run `pkg-repo work`, which never said so, and a
   library qemu could not map (sudo through libldap, a libedit user) was

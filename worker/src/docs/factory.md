@@ -51,8 +51,8 @@ verify and attest the package faster and approve it with more confidence.
    (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`;
    `FACTORY_MODEL` picks the model) — or runs Claude Code in print mode on
    a Claude subscription (`CLAUDE_CODE_OAUTH_TOKEN`, from `claude
-   setup-token`; the dashboard's *Run a worker* page has the steps) — the
-   worker owner's key, never the pool's; without one a template covers Rust,
+   setup-token`; the dashboard's *Run a host* page has the steps) — the
+   host owner's key, in the task's own agent sidecar, never the pool's; without one a template covers Rust,
    Go, CMake, Meson, autotools and prebuilt release binaries. `updpkgsums`
    fills the checksums and `namcap` lints, in the container.
 4. **It is built before anyone reviews it — and it passes the gate.** The
@@ -67,7 +67,7 @@ verify and attest the package faster and approve it with more confidence.
    — is copied to the record, `factory/<name>/<request>/build-<task>/`,
    signed; nothing is published.
 5. **The second agent reads it.** Staging the build queues an `audit`: a
-   project worker whose owner set an agent key reads the PKGBUILD, the log
+   host whose agent answers reads the PKGBUILD, the log
    and the `.PKGINFO`, asks the model for a structured review
    (`factory/bin/audit-pkgbuild`, `factory/prompts/audit.md`) and attaches
    `audit.json` / `audit.md` to the evidence. The Review page shows the
@@ -124,7 +124,7 @@ verify and attest the package faster and approve it with more confidence.
    withdrawal a maintainer writes a reason for. The approval is one decision on
    the record for the package — a review covering every architecture the
    project built again, one that never built named *not supported* — and a
-   `publish` job per architecture: a project worker fetches the staged
+   `publish` job per architecture: a host's dispatcher fetches the staged
    packages with the job's token, publishes them into `edge` as source
    `factory` (the pool signs), renders, and the brain marks the
    registration `published`, links the approval to the build and writes
@@ -334,115 +334,97 @@ the enqueue job still queues the build that publishes a recipe on `main`. `facto
 only for this (chromium, from Arch Linux ARM): the only recipes left in
 the repository, and the `enqueue` job never queues them.
 
-## Run a worker
+## The project's hosts
 
 **Maintainers only.** Contributors do not run workers: the project provides
 the workers for everyone, and its maintainers are their only providers — a
 maintainer is vetted by a pull request to `factory/MAINTAINERS.toml`, and
-their host is trusted by that same act. `POST /factory/workers` refuses
-anyone else (403, *your packages build on the pool's hosts*), and the
-worker form is on a maintainer's page only. What follows is for a
-maintainer's host.
-
-A new machine joins as a host ([a maintainer's host](/docs/worker-host#maintainer-hosts));
-what follows is also how a legacy project registration — one that already
-holds project trust, given before #343 on two maintainers' word — keeps
-running until P3 retires it, on a laptop, a VM or a Droplet with `podman`
-or `docker` and `curl`. **Every task builds in a fresh Arch container**
-(`archlinux:base-devel` for x86_64, `menci/archlinuxarm:base-devel` for
-aarch64; on a host the agent runs, by the digest the release pinned: see
-[the security model](/docs/security-model)) that sees the PKGBUILD and the network and nothing else; the worker
-process on the host holds only its own token, publishes the result and the
-pool signs it — no key ever sits on a worker. A host builds its own
-architecture natively and the other one emulated (`--arch`).
-
-The easiest way is the same container image every worker runs,
-`ghcr.io/firemanxbr/omarchy-worker` (both architectures, signed, tagged with
-the pool's release; `factory/image/Containerfile`): given the token of a
-registration that holds project trust, it runs `pkg-repo work` and starts each
-build as a sibling container through the runtime's socket — the dashboard's
-*Run a worker* page has the exact commands for Docker Desktop and Podman.
-Without a container, the release binaries do the same:
-
-```bash
-# once: the pool's publisher (from the releases, or cargo build --release -p pkg-repo)
-export OMARCHY_API=https://pkgs.omarchy-pool.org OMARCHY_POOL=https://pool.omarchy-pool.org
-
-# a registration that already holds project trust (none is given one at a
-# time since #343: a new machine joins as a host); then, native architecture:
-pkg-repo work --worker-token omw_… --labels '{"where":"laptop"}'
-# the other one, emulated (Apple silicon builds x86_64 through podman machine)
-pkg-repo work --worker-token omw_… --arch x86_64 --labels '{"where":"laptop","emulated":true}'
-```
-
-An emulated worker says so in its labels (`"emulated":true`; `--labels`,
-or `WORKER_LABELS` when the flag is not given). Its build containers get
-the same labels. A build that dies of emulation there is the worker's
-failure, not the recipe's: a toolchain that cannot start, or a library
-qemu cannot map (*failed to map segment from shared object*: rustc, sudo,
-anything linking libedit or libldap). The build script stops at the first
-attempt with exit 96, before any drafter turn. `pkg-repo work` and the
-community worker report it with `needs_native`, and the build goes back to
-the queue for a native worker of its architecture, the attempt given back.
-No emulated worker takes it again. Every page that follows the build says
-what it waits for. On a maintainer host the word is its lease's lane
-(#338): the dispatcher tells only a container on an emulated lane
-`WORKER_LABELS={"emulated":true}`, and the pool takes `needs_native` from a
-lease whose `lane` is `emulated` — the attempt given back, no emulated lane
-again — and refuses it from a native lane (a failure like any other),
-whatever the registration's labels say. A legacy worker's lease carries the
-lane its claim wrote from its labels.
-
-`--idle-exit 300` makes a worker exit after five minutes without work;
-`--once` makes it one-shot; SIGTERM (`docker stop`) drains it — the task in
-hand runs to its end and is reported, nothing new is claimed, exit 0 — so
-a container can be replaced without losing work. A build container gets `[omarchy-packages-edge]`
-and `[omarchy-factory-edge]` in its `pacman.conf` — each one when the pool
-serves that database for the architecture — so a package can depend on the
-OPR or on an earlier factory build. `OMARCHY_PKG_CACHE=/path` on the host shares one
-pacman package cache (a directory per architecture) with every build
-container it starts, so a dependency downloads once; `OMARCHY_BUILD_CACHE`
-likewise mounts a build cache at `/build/cache` — cargo's registry, Go's
-module and build caches, ccache's objects — so a Rust or Go package
-rebuilds in minutes. A build container runs make, ninja and cargo with
-the job count its dispatcher set to match the task's CPUs (`MAKEFLAGS`,
-`NINJAFLAGS`, `CARGO_BUILD_JOBS`), or with every core it sees when none was
-set, with ccache on.
-
-**Three roles.** The project runs its workers as three kinds of container
-of that same image, `OMARCHY_WORKER_ROLE` set (`factory/image/entrypoint.sh`;
-the dashboard's *Run a worker* page, *The three roles*): **pool** — a
-project-trusted registration that takes only the pool's jobs (sync, render,
-promote, rollback, health, security, enqueue, gc, verify); **review** — a
-project-trusted registration that takes only the maintainers' work — the
-project's own build of a reviewed package, the build of the recipes on
-`main` and the audit of staged builds — reaching the agent through
-`agent-proxy`; **community** — a community registration that builds any
-contributor's registered packages, as a host does (#343), and drafts
-PKGBUILDs for package requests, as a **broker** (the token, the agent key,
-`GITHUB_TOKEN`; runs no build) beside a **builder** born with nothing;
-**broker** itself is a role (`OMARCHY_WORKER_ROLE=broker`, `agent` without
-a worker token). A role narrows what the trust allows and the container
-refuses a registration that does not match; the project trust the pool and
-review registrations hold was given on two maintainers' word, before a
-host's trust came from the maintainer list (#343: no worker is trusted one
-by one any more). Two of each, one per architecture, plus the brokers, run
-on the project's own host (`factory/host/`, RUNBOOK *The Studio host*),
-beside its host until P3 retires them.
+their host is trusted by that same act. `POST /factory/workers` refuses a
+contributor (403, *your packages build on the pool's hosts*) and, since the
+legacy registrations from before hosts retired (#346), answers a maintainer
+410 with the pointer to the maintainer-host docs: a machine joins the pool
+as a host, enrolled from its owner's page ([a maintainer's host](/docs/worker-host#maintainer-hosts);
+the dashboard's *Run a host* page).
 
 **Whose compute.** The project's compute is its maintainers' hosts.
-Contributors do not run workers: they submit packages, and every build —
-a contributor's evidence and the project's own build written from it —
-runs on a host a maintainer provides, and every host builds every
-contributor's packages, in turn by owner. The community worker tier, its
-shared and own-packages modes and the command that ran a contributor's
-worker are gone (#343); the community registrations left are the
-maintainers' own legacy sets, selected as hosts with one lane and one build
-until they retire with the move to the host agent (P3); one whose owner is
-no maintainer claims nothing (`403`, with why and the pointer). No GitHub runner ever builds a package: the project's compute is
-not for building everyone's software, and GitHub Actions runs CI and the
-release only — no worker, not even for the pool's own jobs: when the
-project's host is down they wait, and the Workers page says so.
+Contributors do not run workers: they submit packages, and every build — a
+contributor's evidence and the project's own build written from it — runs
+on a host a maintainer provides, and every host builds every contributor's
+packages, in turn by owner. The community tier ended with its modes, the
+command that ran one and per-worker trust (#343), and the maintainers'
+legacy sets from before hosts retired (#346). No GitHub runner
+ever builds a package: the project's compute is not for building everyone's
+software, and GitHub Actions runs CI and the release only — not even the
+pool's own jobs: when no host takes them they wait, and Status says so.
+
+**Three roles, no fixed container.** A host runs one bundle — the host
+agent and one service, the **dispatcher** (`pkg-repo dispatch`, the host set
+`factory/sets/host/`) — and no container per kind of work: the pool's jobs,
+contributors' builds, the project's rebuilds, trials and audits are all
+tasks a host claims by its capacity. The one image
+(`ghcr.io/firemanxbr/omarchy-worker`, both architectures, signed, tagged with
+the pool's release; `factory/image/Containerfile`) has three roles, set with
+`OMARCHY_WORKER_ROLE` by the bundle and the dispatcher
+(`factory/image/entrypoint.sh`): **dispatcher** — the host's one service,
+which holds the host's worker token in a read-only file and each lease's job
+token, claims, stages a task's inputs, starts it, uploads what its kind may
+upload after it exits, and runs the pool's jobs in child processes of its
+own; **egress** — one per task, the task's only way out, to public
+addresses; **agent** — one per task that needs a model, its agent sidecar
+(`factory/bin/broker`), which holds the host owner's agent keys read-only
+and serves that one task within its caps. The task itself runs in a
+container started from the build image by digest (`archlinux:base-devel`
+for x86_64, `menci/archlinuxarm:base-devel` for aarch64), born with nothing:
+no token, no key, no socket, on an internal network of its own, the build
+script (`factory/worker/omarchy-build-worker.sh --task`) reading what was
+staged in `/task/in` and writing to `/task/out`. Nothing in it calls the
+pool, and the pool signs what is published (design v2 §9;
+[the security model](/docs/security-model#isolation)).
+
+**Capacity and lanes.** The agent detects what the machine has and counts
+it in units (design v2 §7.3): a build takes 2 per size (`factory/sizing/tasks.toml`
+sets a package's size, and the pool learns it from its builds, #330), a trial
+2, an audit 1, and one unit stays for the pool's jobs; the owner's envelope
+(`agent.toml`, at the host) caps what the machine gives and the pool cap
+lowers what the pool hands it. The pool gives a host as many leases as its
+free units hold, one per claim; whatever does not fit waits in the pool's
+queue, never on a host. A host's **lanes** are its agent's
+(`run/capacity.json`, #338): its own architecture natively, and the other one
+**emulated** when the kernel has qemu's binfmt handler with the `F` flag
+(`factory/host/prep-root.sh` installs it) and the release's build image of
+that architecture starts there; a Mac's x86_64 lane is Rosetta's in its VM.
+Selection is native first (#337, design v2 §8.3): a build of an architecture
+a host runs emulated waits a little for a native host (twice that
+package's last native build, 3 to 60 minutes) unless none could take it
+now, and emulated lanes are always given a share — while no host runs an
+architecture natively, each host that can keeps one of its builds moving —
+so slower is accepted and nothing is left out.
+
+**Emulation is part of scaling.** Adding hosts is how the pool grows, and
+every host adds to both architectures: natively to its own, emulated to the
+other. An emulated build is slower and shares the host's units; a build
+that dies of emulation (a toolchain that cannot start, or a library qemu
+cannot map — *failed to map segment from shared object*: rustc, sudo,
+anything linking libedit or libldap — on a 16K-page kernel) is the lane's
+failure, not the recipe's: the build script stops at the first attempt with
+exit 96, before any drafter turn, and reports `needs_native`, which the pool
+takes only from a lease it put on an emulated lane — the attempt given back,
+no emulated lane again, the build back in the queue for a native host — and
+refuses from a native lane (a failure like any other). Every page that
+follows the build says what it waits for, and the Workers page and Status
+say which architecture needs a native host next.
+
+**Inside a task.** A build container gets `[omarchy-packages-edge]` and
+`[omarchy-factory-edge]` in its `pacman.conf` — each one when the pool
+serves that database for the architecture — so a package can depend on the
+OPR or on an earlier factory build. The host shares one pacman package
+cache per architecture with every task, read-only, and keeps a build cache
+per package (#341) — cargo's registry, Go's module and build caches,
+ccache's objects at `/build/cache` — so a Rust or Go package rebuilds in
+minutes, and a build reads only what an earlier build of the same package,
+on the same side, wrote. A build container runs make, ninja and cargo with
+the job count the dispatcher set to match the task's CPUs (`MAKEFLAGS`,
+`NINJAFLAGS`, `CARGO_BUILD_JOBS`), with ccache on.
 
 ## The contract
 
@@ -468,8 +450,6 @@ pointing the repository name in the worker script, `reconcile.rs`,
 
 ```
 POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, log?}   Authorization: Bearer omw_… (the registration)
-                                    (a legacy image's `shared` is read no more, #343: a community registration takes any contributor's
-                                    build, and POST /factory/workers/self/mode and /factory/workers/:id/mode answer 410);
                                     log: the worker's own lines since its last claim (4 KB a chunk, the last 8 KB kept), for its owner and
                                     the maintainers: GET /factory/workers/:id/log with a contributor token or the dashboard's session
   200 {task:{id,name,arch,version,pkgbuild_ref,reason,attempts,…}, token: "omj.…", token_expires_at, lease_minutes, repo, pkgbuild_path, upload}
@@ -626,11 +606,7 @@ itself checks the host's units again. A host's lanes are its agent's (`run/capac
 and each emulated one it detected. Builds and trials run on a lane of their
 arch; a job with helper containers needs a lane of each ring architecture
 they check (`health` its own, `promote` each it promotes, `security` both),
-native or emulated, with no wait; every other kind is arch-neutral. A legacy registration is selected as a
-host with one lane (its arch, emulated when its labels say so) and one
-build, its trust its only scope (#343): a project registration takes no
-contributor's build, a community one community builds only — anyone's, as
-a host does. Placement (#339, design v2 §8.4; D35, D36): the project's copy
+native or emulated, with no wait; every other kind is arch-neutral. Placement (#339, design v2 §8.4; D35, D36): the project's copy
 of a package — its review rebuild — is never handed to a host its requester
 owns (the rebuild's owner, and the owner of the contributor's build it
 answers) while another maintainer's host has a lane allowed for it, native or
@@ -667,11 +643,13 @@ is left to, holds no reservation mark and counts in no size alive until a
 report says it woke. The runbook's *How the pool hands a host work* has the
 rules. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron
-requeues leases past `lease_expires_at` — the way out for a worker that
-vanished, not the way a worker reports: the community worker's shell has
-last words, and whatever ends it while it holds a task (a command that fails
-outside the build's subshell, under `set -e`) is posted to `/fail` at once
-with the command and its status, the build's log with it. One job at a
+requeues leases past `lease_expires_at` — the way out for a host that
+vanished, not the way a host reports: the dispatcher reports every task
+whose container ended, with its exit code, the engine's out-of-memory word
+and its log, and a lease it lost (`lost`, the attempt given back at most
+twice, D54); the build script's own last words — a command that fails
+outside the build's subshell, under `set -e` — are in `verdict.json`, which
+is always JSON. One job at a
 time on a ring: a promotion into it, a rollback, a render and the security
 fast-track (any ring) are not handed out while another of them holds a
 lease on the same ring — a promotion into rc and a fast-track into rc ran
@@ -683,16 +661,15 @@ in the same minute and the fast-track's late rollback undid the promotion
 ```
 factory/
   README.md                       this file
-  worker/omarchy-build-worker.sh  the build half: `--inside` (called by pkg-repo work in a fresh container),
-                                  `--container` (the contributor's one-task-per-container mode)
+  worker/omarchy-build-worker.sh  the build half: `--task` (in a task container the dispatcher starts, born with nothing: what was
+                                  staged in /task/in, what it makes to /task/out); `--inside` and `--container`, the modes of the legacy
+                                  registrations' `pkg-repo work` and community container, kept for whatever of them is not retired yet
   MAINTAINERS.toml                the governance file: the maintainers, one list (docs/GOVERNANCE.md)
   bin/check-governance            validates it and generates .github/CODEOWNERS from it
   image/Containerfile             the one worker image (Arch, both architectures, signed, built by the release workflow); image/entrypoint.sh
-                                  reads the registration and runs the contributor's or the project's half, or the updater; image/compose.yml
-                                  runs the set — broker, builder, updater (or a project worker) — as `omarchy-worker start` wrote it
-  host/omarchy-worker             a maintainer's legacy set's command, until P3: runs the set in its directory (the pool no longer
-                                  serves it nor its compose file, #343; a new machine joins as a host)
-  bin/omarchy-rollout             the updater: the compose set follows the pool's latest image, what changed replaced together, itself last
+                                  starts its role: the dispatcher, a task's egress sidecar, a task's agent sidecar
+  bin/broker                      a task's agent sidecar: the agent in the Anthropic Messages shape and GitHub read-only, for one task,
+                                  within its caps (no pool path since #346)
   bin/pkgbuild-meta               PKGBUILD → arches and version, without executing it as you
   sizing/<name>/                  recipes kept for dry runs only (never queued) — the only recipes in the repository
   sizing/tasks.toml               maintainer-set task sizes, disk budgets (the pool's claims read them, #337, above the sizes it learns, #330) and network exceptions per package

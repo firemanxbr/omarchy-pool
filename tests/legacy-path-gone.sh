@@ -62,8 +62,11 @@ grep -qE 'POOL_ROUTES|/pool/|OMARCHY_WORKER_TOKEN|def pool\(' factory/bin/broker
 grep -q '"/v1/messages"' factory/bin/broker || say "the broker lost its agent path"
 grep -q 'OMARCHY_BROKER' factory/worker/omarchy-build-worker.sh && say "the build script still has a broker mode"
 
-# The docs describe hosts: no role container, updater, broker relay or contributor-run worker.
-docs=(worker/src/docs/*.md README.md CONTRIBUTING.md SECURITY.md factory/sets/host/README.md)
+# The docs describe hosts: no role container, updater, broker relay or contributor-run worker. testing.md is the exception: it
+# describes the tests of what the Worker and pkg-repo still keep for a legacy registration not yet retired (its Update order and
+# set_rollout, `pkg-repo work`), which leave with that code; the paths above hold it to the files.
+docs=()
+for f in worker/src/docs/*.md README.md CONTRIBUTING.md SECURITY.md factory/sets/host/README.md; do [[ "$f" == worker/src/docs/testing.md ]] || docs+=("$f"); done
 WORDS=(
   "role container" "role-container" "omarchy-rollout" "rollout.sh" "register.sh" "agent-proxy" "updater"
   "behind a broker" "builder relay" "community worker" "community set" "contributor-run" "a contributor's worker" "shared mode"

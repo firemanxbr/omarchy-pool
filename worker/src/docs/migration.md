@@ -287,10 +287,9 @@ Until then, moving the pool moves them too:
 - Workers: the pool's compute is its maintainers' hosts — each enrolled
   from its owner's page (*Add a host*, /docs/worker-host), trusted by the
   maintainer list; no registration is trusted one at a time any more (#343:
-  `POST /factory/workers/:id/trust` answers 410). A legacy registration
-  (`POST /factory/workers` with a maintainer's token, #331) that already
-  holds project trust keeps its token as the GitHub secrets
-  `POOL_WORKER_TOKEN_X86_64` / `POOL_WORKER_TOKEN_AARCH64` until P3; `JOB_TOKEN_SECRET` (any random
+  `POST /factory/workers/:id/trust` answers 410), and no legacy
+  registration is made any more (#346: `POST /factory/workers` answers
+  410); `JOB_TOKEN_SECRET` (any random
   string, `npx wrangler secret put JOB_TOKEN_SECRET`) signs the per-job
   tokens.
 - `REPO_URL` in `factory/worker/omarchy-build-worker.sh` and `repo` in
