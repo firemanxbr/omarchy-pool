@@ -312,7 +312,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   const stage = async (task: number, token: string, whose: string, name: string, version: string) => {
     for (const f of ["PKGBUILD", "build.log", "PKGINFO", "tests.log", `${name}-${version}-${arch}.pkg.tar.zst`]) must(await call(env, "PUT", `/factory/tasks/${task}/artifacts/${f}`, undefined, token, `${whose} ${f}`), 201, `stage ${f} of ${task}`);
     must(await call(env, "PUT", `/factory/tasks/${task}/artifacts/vet.json`, undefined, token, JSON.stringify({ schema: "omarchy-pool/vet/1", verdict: "pass", checks: [{ name: "checksums", status: "pass", detail: "" }, { name: "check", status: "warn", detail: "no check()" }] })), 201, `vet.json of ${task}`);
-    must(await call(env, "PUT", `/factory/tasks/${task}/artifacts/resources.json`, undefined, token, JSON.stringify({ schema: "omarchy-pool/resources/1", wall_s: 42, cpu_s: 80, ram_peak_mb: 512, disk_mb: 300, cores: 4 })), 201, `resources.json of ${task}`);
+    must(await call(env, "PUT", `/factory/tasks/${task}/artifacts/resources.json`, undefined, token, JSON.stringify({ schema: "omarchy-pool/resources/1", wall_s: 42, cpu_s: 80, ram_peak_mb: 512, ram_anon_peak_mb: 300, disk_mb: 300, cores: 4 })), 201, `resources.json of ${task}`);
   };
   // The project's worker, with its own agent, takes the pool's jobs one kind at a time.
   const project = { arch, agent: "claude-code/claude-sonnet-5", agent_status: "ok" };

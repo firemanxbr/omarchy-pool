@@ -24,12 +24,19 @@ export const RETRY_AT_SIZE = String.raw`
   // size — the build queued again at the size they choose, one more try (POST /api/v1/factory/tasks/:id/retry), up to the signed
   // maximum (a contributor's lower; SIZES, the signed constants) and the largest size a host alive runs (the story's largest_size, read
   // when one of its builds ran out of memory: sizesAlive) — the pool refuses a size no host alive runs.
-  var SIZES = ${JSON.stringify(SIZES_SPLICE)}, LARGEST = 0;
-  function sizesAlive(d) { LARGEST = d && d.largest_size > 0 ? d.largest_size : 0; }
+  var SIZES = ${JSON.stringify(SIZES_SPLICE)}, LARGEST = 0, ASKS = 0;
+  // ASKS: the size the package's builds ask now (the story's package.sizing: a maintainer's, else the one learned from its builds, #330).
+  function sizesAlive(d) { LARGEST = d && d.largest_size > 0 ? d.largest_size : 0; ASKS = d && d.package && d.package.sizing && d.package.sizing.size > 0 ? d.package.sizing.size : 0; }
   function oomSize(b) { var m = b && (b.kind || "build") === "build" && typeof b.error === "string" ? /^out of memory at \d+ GB(?: \(size (\d+)\))?/.exec(b.error) : null; return m ? Number(m[1] || 1) : 0; }
-  // The size a build waits at once a maintainer retried it at one (its params.size, handleRetryAtSize): the error keeps the size it ran
-  // out of memory at until its next lease, so a queued one says the size it was queued again at, and offers nothing it already asks.
-  function queuedSize(b) { var z = b && b.status === "queued" && b.params ? Number(b.params.size) : 0; return Math.max(oomSize(b), Number.isInteger(z) ? z : 0); }
+  // The size a build waits at: its own once a maintainer retried it at one (its params.size, handleRetryAtSize), else what its package
+  // asks now — raised by the out-of-memory kill itself when the pool learned a size from it (#330) — clamped as the claim clamps it (a
+  // contributor's at 2 at most, any at the largest size a host alive runs). The error keeps the size it ran out of memory at until its
+  // next lease, so a queued one says the size it was queued again at, and offers nothing it already asks.
+  function queuedSize(b) {
+    if (!b || b.status !== "queued") return oomSize(b);
+    var z = b.params ? Number(b.params.size) : 0, own = Number.isInteger(z) && z >= 1;
+    return Math.max(oomSize(b), own ? z : Math.min(ASKS, b.trust === "community" ? SIZES.community_max : SIZES.max, LARGEST || SIZES.max));
+  }
   function requeuedAt(b) { var s = oomSize(b), z = queuedSize(b); return z > s ? "queued again at size " + z : "queued again at the same size"; }
   function retryAtSize(b) {
     var s = oomSize(b), cur = queuedSize(b), max = Math.min(b && b.trust === "community" ? SIZES.community_max : SIZES.max, LARGEST || SIZES.max);

@@ -2198,6 +2198,43 @@ so a size-4 build waits for memory rather than run smaller.
   it waits at — and on Review, where a maintainer's **Retry at size N**
   queues it again at the size chosen (up to the largest a host alive
   runs), for one more try.
+- **Sizes the pool learns (#330, D31).** Below a maintainer's size, the
+  pool remembers one per package from its own builds on hosts
+  (`factory_packages.learned_*`). When the engine kills a build at its
+  memory limit (`oom`), the size goes one step above the size it ran at —
+  never above 2 for a build whose recipe or source is a requester's (a
+  contributor's build, and the project's copy of it, the review rebuild),
+  nor above 4 for the project's recipe on main — and that build's next
+  attempt, queued again at once, already asks it; a `build` warn line says
+  *learned size 2 (was 1) — task N … ran out of memory at size 1*. A
+  requester's package that needs more than 2 gets it from a maintainer: a
+  size on its page or in `factory/sizing`, or **Retry at size N**. Each
+  build that completes says what its container held that reclaim cannot
+  free (`ram_anon_peak_mb`, from its `resources.json`: anonymous and shared
+  memory, sampled every second from its cgroup's `memory.stat` — never the
+  page cache its files filled, which keeps the cgroup's high-water mark,
+  `ram_peak_mb`, at the container's limit for any build that reads or
+  writes more files than its memory; the build page shows both); five in a
+  row below what the size under the remembered one gives (its units'
+  memory less both sidecars: 3776 MB under size 2) lower it one step, and
+  a build that held at or above that, or ran out of memory, starts the
+  count over (a build that says nothing held counts nothing: a container
+  with no `memory.stat` of its own — a host's cgroup namespace —, or a
+  dispatcher of a release before this one). A maintainer's dry run teaches
+  nothing. The package page's *size* fact says the learned size, the
+  build that last moved it and the count; a size set on the page or in
+  `factory/sizing` wins over it, and clearing that size lets the learned
+  one stand again. A learned size of 2 or more is reserved for like one
+  set on the page (a host holds back for it, two hours at most), and
+  Review's placement reads it. The peak is the build's own word: a recipe
+  can only lower or keep its own package's remembered size with it, never
+  raise it. A best-effort write: a database error while learning is a
+  `build` warn line (*size not learned from task N*), never a lost report.
+  To forget what the pool learned for a package:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "UPDATE factory_packages SET learned_size = NULL, learned_lower = 0 WHERE name = '<package>'"
+  ```
 - **The pool's cap** (`hosts.pool_cap_units`): its owner or any maintainer
   sets it on the host's page, with a reason — the Studio canary runs at 3
   units, one build (§21.1). Lowered below what the host runs, nothing ends;

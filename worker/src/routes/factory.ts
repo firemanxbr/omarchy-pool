@@ -15,7 +15,7 @@ import { parseTargets, settleTargets } from "../targets";
 import { afterRequeue, LEASE_MINUTES, packageAfterFailure, requeueLease, requeueRevoked, revokedRefusal, stopError } from "../lease";
 import { asleepNow, freshSince, parseCapacity, poolJobsOn, sandboxApplied, sandboxAppliedOf, unitsOf, BUILD_GB_PER_SIZE, UNIT, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, HOST_AWAKE_SQL, HOST_CLAIM_SQL, HOST_MAY_LEASE_SQL, HOST_REPORT_FRESH_MIN, hostClaimRefusal, MAX_SIZE, MIN_HOST, poolBehindOf, REVERTED_COLUMNS, revertedOf, SOAK_COLUMNS, soakOf, TASK_UNITS, type Capacity, type HostClaimRow, type PoolBehind, type RevertedColumns } from "../hosts";
 import { largestSize, ownerCap, ownersLeased, placementOf, reserve, roomOf, select, sizeOf, ALIVE_MS, HELPER_KINDS, LANE_KINDS, MODEL_WINDOW_MS, RING_JOBS, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, TASK_KINDS, type Candidate, type Fleet, type Held, type Lane, type Member, type Placement, type Rules, type Scope } from "../selection";
-import { shippedSizing, sizingView, type Sizing } from "../sizing";
+import { afterBuild, afterOom, learnedOf, peakBelowMb, shippedSizing, sizingView, DECAY_AFTER, type Learned, type Sizing } from "../sizing";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
   capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
@@ -797,10 +797,12 @@ interface CandidateRow { id: number; name: string; arch: string; kind: string; t
 
 /**
  * A build's size before any clamp, in SQL (`t` the alias; one binding: factory/sizing's sizes, `{name: [size, disk_gb]}`), as
- * candidateOf reads it: its own when whole and from 1, else its package page's, else factory/sizing's, else 1.
+ * candidateOf reads it: its own when whole and from 1, else its package page's, else factory/sizing's, else the size learned from its
+ * builds (#330), else 1.
  */
 const askedSql = (t: string) => `COALESCE(CASE WHEN ${ownSize(t)} >= 1 AND ${ownSize(t)} = CAST(${ownSize(t)} AS INTEGER) THEN CAST(${ownSize(t)} AS INTEGER) END,
-    (SELECT p.size FROM factory_packages p WHERE p.name = ${t}.name), (SELECT json_extract(f.value, '$[0]') FROM json_each(?) f WHERE f.key = ${t}.name), 1)`;
+    (SELECT p.size FROM factory_packages p WHERE p.name = ${t}.name), (SELECT json_extract(f.value, '$[0]') FROM json_each(?) f WHERE f.key = ${t}.name),
+    (SELECT p.learned_size FROM factory_packages p WHERE p.name = ${t}.name), 1)`;
 /** factory/sizing's sizes and budgets, as the statements bind them. */
 const fileSizes = (): string => JSON.stringify(Object.fromEntries([...shippedSizing()].map(([name, z]) => [name, [z.size, z.disk_gb]])));
 /** A number written into a statement: one computed here, never a caller's text. */
@@ -869,8 +871,8 @@ export const OLDEST_BUILDS_SQL = (filters: string) => `SELECT ${candidateCols("c
 export const ANY_QUEUED_SQL = "SELECT id FROM build_tasks WHERE kind IN (SELECT value FROM json_each(?)) AND status = 'queued' LIMIT 1";
 /** The tasks hosts reserve for that still wait, by their primary keys. */
 export const MARKED_WAITING_SQL = "SELECT id FROM build_tasks WHERE id IN (SELECT value FROM json_each(?)) AND +status = 'queued'";
-/** The sizes and budgets set on the candidates' packages' pages. */
-export const PACKAGE_SIZES_SQL = "SELECT name, size, disk_gb FROM factory_packages WHERE name IN (SELECT value FROM json_each(?)) AND (size IS NOT NULL OR disk_gb IS NOT NULL)";
+/** The sizes and budgets set on the candidates' packages' pages, and the sizes learned from their builds (#330). */
+export const PACKAGE_SIZES_SQL = "SELECT name, size, disk_gb, learned_size FROM factory_packages WHERE name IN (SELECT value FROM json_each(?)) AND (size IS NOT NULL OR disk_gb IS NOT NULL OR learned_size IS NOT NULL)";
 /** The last native build of each (package, arch), by the name index: T for an emulated candidate (D50). */
 export const NATIVE_MS_SQL = `SELECT j.value AS k, (SELECT d.duration_ms FROM build_tasks d WHERE d.name = json_extract(j.value, '$[0]') AND d.arch = json_extract(j.value, '$[1]')
     AND d.kind = 'build' AND d.lane = 'native' AND d.status IN ('done', 'staged') AND d.duration_ms IS NOT NULL ORDER BY d.id DESC LIMIT 1) AS ms FROM json_each(?) j`;
@@ -963,13 +965,16 @@ async function modelsAlive(env: Env, nowMs: number, me: { id: string; model: str
   return out;
 }
 
-/** A candidate for selection: a build's size is its own (a Retry at size), else its package page's, else factory/sizing's; its budget the page's, else the file's. */
-function candidateOf(r: CandidateRow, sizes: Map<string, Sizing>, nativeMs: Map<string, number>): Candidate {
+/**
+ * A candidate for selection: a build's size is its own (a Retry at size), else its package page's, else factory/sizing's, else the size
+ * learned from its builds (#330, below a maintainer's word); its budget the page's, else the file's.
+ */
+function candidateOf(r: CandidateRow, sizes: Map<string, Sizing & { learned?: number | null }>, nativeMs: Map<string, number>): Candidate {
   const page = sizes.get(r.name), file = shippedSizing().get(r.name), build = r.kind === "build";
   return {
     id: r.id, name: r.name, kind: r.kind, arch: r.arch, trust: r.trust, owner: r.owner, priority: r.priority, queued_at: Date.parse(r.created_at), pinned_to: r.pinned_to,
     needs_native: r.needs_native === 1, model: r.model === 1,
-    size: build ? (Number.isInteger(r.asked) && (r.asked as number) >= 1 ? (r.asked as number) : page?.size ?? file?.size ?? null) : null,
+    size: build ? (Number.isInteger(r.asked) && (r.asked as number) >= 1 ? (r.asked as number) : page?.size ?? file?.size ?? page?.learned ?? null) : null,
     disk_gb: build ? page?.disk_gb ?? file?.disk_gb ?? null : null, native_ms: nativeMs.get(`${r.name}\0${r.arch}`) ?? null,
     reserved_at: r.reserved_at ? Date.parse(r.reserved_at) : null, job_arch: r.job_arch,
     ...placementOfRow(r),
@@ -1017,9 +1022,10 @@ export async function placements(env: Env, ids: number[], at = Date.now()): Prom
   const pool = running(env);
   const rules = selectionRules();
   const fleet: Fleet = { members: (fleetRows.results as FleetRow[]).map((r) => memberOf(r, pool, at)), leases: (leaseRows.results as LeaseRow[]).map((l) => heldOf(l, rules)) };
-  const placed = rows.results as (CandidateRow & { any_host_at: string | null; solo_since: string | null; page_size: number | null; page_disk_gb: number | null })[];
-  // The size and budget its package's page sets, as the claim reads them (PACKAGE_SIZES_SQL): a host too small for them is none to wait for.
-  const sizes = new Map(placed.filter((r) => r.page_size !== null || r.page_disk_gb !== null).map((r) => [r.name, { size: r.page_size, disk_gb: r.page_disk_gb }]));
+  const placed = rows.results as (CandidateRow & { any_host_at: string | null; solo_since: string | null; page_size: number | null; page_disk_gb: number | null; learned_size: number | null })[];
+  // The size and budget its package's page sets, and the size learned from its builds, as the claim reads them (PACKAGE_SIZES_SQL): a
+  // host too small for them is none to wait for.
+  const sizes = new Map(placed.filter((r) => r.page_size !== null || r.page_disk_gb !== null || r.learned_size !== null).map((r) => [r.name, { size: r.page_size, disk_gb: r.page_disk_gb, learned: r.learned_size }]));
   for (const r of placed) {
     const c = candidateOf(r, sizes, new Map());
     if (c.kind !== "build" || !c.publish_bound) continue;
@@ -1030,8 +1036,8 @@ export async function placements(env: Env, ids: number[], at = Date.now()): Prom
   }
   return out;
 }
-/** The queued tasks Review asks the placement of, by their primary keys, as the claim reads them — with their package page's size and budget. */
-export const PLACEMENTS_SQL = `SELECT ${candidateCols("c")}, json_extract(c.params, '$.any_host.at') AS any_host_at, (SELECT gs.since FROM governance_solo gs WHERE gs.id = 1) AS solo_since, p.size AS page_size, p.disk_gb AS page_disk_gb
+/** The queued tasks Review asks the placement of, by their primary keys, as the claim reads them — with their package page's size and budget, and its learned size. */
+export const PLACEMENTS_SQL = `SELECT ${candidateCols("c")}, json_extract(c.params, '$.any_host.at') AS any_host_at, (SELECT gs.since FROM governance_solo gs WHERE gs.id = 1) AS solo_since, p.size AS page_size, p.disk_gb AS page_disk_gb, p.learned_size
   FROM build_tasks c LEFT JOIN factory_packages p ON p.name = c.name WHERE c.id IN (SELECT value FROM json_each(?)) AND +c.status = 'queued'`;
 
 /** What the claim knows of the claimer for selection: a host's capacity and lanes, or a legacy registration's one lane and its trust. */
@@ -1251,7 +1257,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     env.DB.prepare(PACKAGE_SIZES_SQL).bind(JSON.stringify([...new Set(cands.filter((c) => c.kind === "build").map((c) => c.name))])),
     env.DB.prepare(NATIVE_MS_SQL).bind(JSON.stringify(cands.filter((c) => LANE_KINDS.includes(c.kind) && emulatedArches.has(c.arch)).map((c) => [c.name, c.arch]))),
   ]);
-  const sizes = new Map((sizeRows.results as { name: string; size: number | null; disk_gb: number | null }[]).map((r) => [r.name, { size: r.size, disk_gb: r.disk_gb }]));
+  const sizes = new Map((sizeRows.results as { name: string; size: number | null; disk_gb: number | null; learned_size: number | null }[]).map((r) => [r.name, { size: r.size, disk_gb: r.disk_gb, learned: r.learned_size }]));
   const nativeMs = new Map<string, number>();
   for (const r of msRows.results as { k: string; ms: number | null }[]) {
     const [name, arch] = jsonOr<[string, string]>(r.k, ["", ""]);
@@ -1632,7 +1638,7 @@ async function withheld(env: Env, id: number, field: string, text: string | unde
 }
 
 export async function handleComplete(id: number, request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = await readJson<{ sha256?: string; filename?: string; version?: string; duration_ms?: number; log_tail?: string; result?: unknown; summary?: string }>(request);
+  const b = await readJson<{ sha256?: string; filename?: string; version?: string; duration_ms?: number; log_tail?: string; result?: unknown; summary?: string; ram_anon_peak_mb?: unknown }>(request);
   if (b instanceof Response) return b;
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
@@ -1735,6 +1741,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     // The evidence outlives staging: on the record, signed.
     await recordEvidence(env, task.name, await requestOf(env, task.name), id, prefix);
     await workerFinished(env, who, task, "staged", b.version);
+    await learnFromPeak(env, task, who, b.ram_anon_peak_mb);
     // A newer build of the same package and architecture supersedes the
     // staged ones before it: one row per package in the review queue, the
     // audits of the old ones cancelled with them. Their text evidence stays;
@@ -1798,6 +1805,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     .run();
   if (!done.meta.changes) return leaseMoved(env, id, actor);
   await workerFinished(env, who, task, "done", b.version);
+  await learnFromPeak(env, task, who, b.ram_anon_peak_mb);
   if (task.publish !== 0) {
     // What users get. A contributor's registration of this name is now
     // published, and the approval that led here keeps the task — the seal
@@ -1888,6 +1896,11 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
     .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id, who, task.lease_gen)
     .run();
   if (!failed.meta.changes) return leaseMoved(env, id, actor);
+  // The engine's out-of-memory kill of a build raises the size its package remembers, one step (#330, D31): its next attempt — queued
+  // again just above — and every build of it after asks that size, unless a maintainer's size says otherwise; a contributor's build and
+  // the project's copy of it no further than 2 (learnCap). Written before anything else, so a claim between the two statements is the
+  // only one that can still take that attempt at the size that ran out.
+  if (oom && learnsSize(task)) await learnSize(env, task, who, (cur) => afterOom(cur, { ran: task.size ?? 1, trust: task.trust, review: review !== undefined, task: id, at: now() }));
   // What the worker uploaded before giving up — the log, the PKGBUILD, the
   // gate's verdict — is evidence too: a failed attempt is on the record (a
   // report the pool took: not one of a lease stopped meanwhile).
@@ -1917,6 +1930,75 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   return json({ task: id, status: exhausted ? "failed" : "queued", attempts });
 }
 
+/**
+ * Whether a build's reports teach its package's size (#330, D31): a host's lease (the engine decides out of memory there, #334; a
+ * legacy lease reports neither an `oom` nor a peak) of a package's build — a contributor's, or the project's copy of it, or a build of
+ * a recipe on main — never a maintainer's dry run (#284), whose recipe may be any one they measure.
+ */
+const learnsSize = (task: TaskRow): boolean =>
+  task.kind === "build" && task.lease_gen !== null && !(task.trust === "project" && task.publish === 0 && jsonOr<{ review?: unknown }>(task.params, {}).review === undefined);
+
+/**
+ * A memory peak a dispatcher reports with a build's completion (`ram_anon_peak_mb`: what its container held that reclaim cannot free,
+ * never the page cache — omarchy-build-worker.sh resources_end): whole MB from 1, else none (0 is a cgroup that measured none).
+ */
+function peakOf(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 1 << 30 ? v : null;
+}
+
+/** A completed build's memory peak, counted toward its package's remembered size decaying (#330, D31). */
+async function learnFromPeak(env: Env, task: TaskRow, who: string, said: unknown): Promise<void> {
+  const peak = peakOf(said);
+  if (peak === null || !learnsSize(task)) return;
+  await learnSize(env, task, who, (cur) => afterBuild(cur, { peak_mb: peak, task: task.id, at: now() }), peak);
+}
+
+/** The package row size learning reads and writes (#330): the maintainer's sizes, for the words, and the remembered size. */
+const LEARNED_SQL = "SELECT name, size, disk_gb, learned_size, learned_lower, learned_task, learned_why, learned_at FROM factory_packages WHERE name = ?";
+
+/**
+ * Moves a package's remembered size by one report (#330, design v2 §7.4; D31; the rules are sizing.ts `afterOom` and `afterBuild`):
+ * compare-and-set on what it read, read again when another report of the package moved it first — so two builds ending at once never
+ * count one peak twice nor lose a raise. A package with no registration remembers nothing. A size that changed is journaled with what
+ * its builds ask from now on (a maintainer's size, on the page or in factory/sizing, still wins); a lower peak counted is not.
+ */
+async function learnSize(env: Env, task: TaskRow, who: string, step: (cur: Learned) => Learned | null, peak: number | null = null): Promise<void> {
+  // Best effort, like the seal: what a package's builds ask is an optimisation, never part of the report it rides on — a D1 error here
+  // is a warn line, and the completion or failure goes on whole (its staging, audit and trial, its package's status, its targets).
+  try {
+    await moveLearned(env, task, who, step, peak);
+  } catch (e) {
+    await event(env, "build", "warn", `${task.name}: size not learned from task ${task.id} — ${String(e)}`, { name: task.name, task: task.id, arch: task.arch, worker: who })
+      .catch((e2: unknown) => console.error(`size learning of ${task.name} (task ${task.id}): ${String(e)}; its warn line: ${String(e2)}`));
+  }
+}
+
+/** learnSize's read, compare-and-set and journal line. */
+async function moveLearned(env: Env, task: TaskRow, who: string, step: (cur: Learned) => Learned | null, peak: number | null): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    const row = await env.DB.prepare(LEARNED_SQL).bind(task.name).first<{ name: string; size: number | null; disk_gb: number | null; learned_size: number | null; learned_lower: number; learned_task: number | null; learned_why: string | null; learned_at: string | null }>();
+    if (!row) return;
+    const cur = learnedOf(row);
+    const next = step(cur);
+    if (!next) return;
+    const moved = await env.DB.prepare(
+      `UPDATE factory_packages SET learned_size = ?, learned_lower = ?, learned_task = ?, learned_why = ?, learned_at = ?
+        WHERE name = ? AND learned_size IS ? AND learned_lower = ? AND learned_task IS ? AND learned_at IS ?`,
+    ).bind(next.size, next.lower, next.task, next.why, next.at, task.name, row.learned_size, row.learned_lower, row.learned_task, row.learned_at).run();
+    if (!moved.meta.changes) continue;
+    if (next.size === cur.size) return;
+    const view = sizingView({ ...row, learned_size: next.size, learned_lower: next.lower, learned_task: next.task, learned_why: next.why, learned_at: next.at });
+    const was = cur.size ?? 1, size = next.size ?? 1;
+    const asks = view.from === "page" || view.from === "file" ? `its builds still ask size ${view.size}, ${view.from === "page" ? "set on its page" : "factory/sizing's"}` : `its builds ask size ${view.size} from now on`;
+    const why = next.why === "oom"
+      ? `task ${task.id} for ${task.arch} ran out of memory at size ${task.size ?? 1} on ${who}`
+      : `${DECAY_AFTER} builds in a row peaked below the ${peakBelowMb(was)} MB size ${was - 1} gives, the last task ${task.id} for ${task.arch} at ${peak ?? "?"} MB on ${who}`;
+    await event(env, "build", next.why === "oom" ? "warn" : "ok", `${task.name}: learned size ${size} (was ${was}) — ${why}; ${asks}`,
+      { name: task.name, task: task.id, arch: task.arch, worker: who, learned: { size: next.size, was: cur.size, why: next.why }, ...(peak !== null ? { peak_mb: peak } : {}), sizing: view });
+    return;
+  }
+}
+
 /** A disk budget a maintainer may set on a package's page, in GB. */
 export const DISK_GB_MAX = 4096;
 
@@ -1937,11 +2019,12 @@ export async function handleSetSize(c: Contributor, name: string, request: Reque
   if (b.size === undefined && b.disk_gb === undefined) return json({ error: "size and/or disk_gb: a whole number, or null to clear it" }, 400);
   if (b.size !== undefined && !whole(b.size, MAX_SIZE)) return json({ error: `size: a whole number from 1 to ${MAX_SIZE}, or null for factory/sizing's (or 1)` }, 400);
   if (b.disk_gb !== undefined && !whole(b.disk_gb, DISK_GB_MAX)) return json({ error: `disk_gb: a whole number of GB from 1 to ${DISK_GB_MAX}, or null for factory/sizing's (or ${BUILD_GB_PER_SIZE} per size)` }, 400);
-  const pkg = await env.DB.prepare("SELECT name, size, disk_gb FROM factory_packages WHERE name = ?").bind(name).first<{ name: string; size: number | null; disk_gb: number | null }>();
+  const pkg = await env.DB.prepare(LEARNED_SQL).bind(name).first<{ name: string; size: number | null; disk_gb: number | null }>();
   if (!pkg) return json({ error: "not registered" }, 404);
   const size = b.size === undefined ? pkg.size : (b.size as number | null);
   const disk = b.disk_gb === undefined ? pkg.disk_gb : (b.disk_gb as number | null);
-  const view = sizingView({ name, size, disk_gb: disk });
+  // The size learned from its builds (#330) stays as it is, below the size set here: cleared, it stands again.
+  const view = sizingView({ ...pkg, size, disk_gb: disk });
   if (size === pkg.size && disk === pkg.disk_gb) return json({ package: name, sizing: view, by: c.login, unchanged: true });
   const words = (z: number | null, d: number | null) => `size ${z ?? "unset"}, disk ${d === null ? "unset" : `${d} GB`}`;
   await env.DB.batch([

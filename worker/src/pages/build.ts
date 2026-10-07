@@ -198,7 +198,7 @@ const SCRIPT = String.raw`
   function renderResources(r) {
     if (!r) return;
     $("#res-panel").hidden = false;
-    $("#res").innerHTML = '<div><b>' + dur((r.wall_s || 0) * 1000) + '</b>wall</div><div><b>' + num(r.cpu_s || 0) + ' s</b>cpu' + (r.cores ? ' · ' + num(r.cores) + ' cores' : '') + '</div><div><b>' + num(r.ram_peak_mb || 0) + ' MB</b>ram peak</div><div><b>' + num(r.disk_mb || 0) + ' MB</b>disk</div>';
+    $("#res").innerHTML = '<div><b>' + dur((r.wall_s || 0) * 1000) + '</b>wall</div><div><b>' + num(r.cpu_s || 0) + ' s</b>cpu' + (r.cores ? ' · ' + num(r.cores) + ' cores' : '') + '</div><div><b>' + num(r.ram_peak_mb || 0) + ' MB</b>ram peak' + (r.ram_anon_peak_mb ? ' · ' + num(r.ram_anon_peak_mb) + ' MB held' : '') + '</div><div><b>' + num(r.disk_mb || 0) + ' MB</b>disk</div>';
   }
 
   // ---- the evidence, read in place
@@ -486,7 +486,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       id: "build.resources",
       page,
       anchor: ['id="res-panel"', 'id="res"', 'class="mini four"'],
-      script: ['"#res-panel"', '"#res"', '"resources.json"', "r.wall_s", "r.cpu_s", "r.ram_peak_mb", "r.disk_mb"],
+      script: ['"#res-panel"', '"#res"', '"resources.json"', "r.wall_s", "r.cpu_s", "r.ram_peak_mb", "r.ram_anon_peak_mb", "r.disk_mb"],
       reads: [{ path: `${task}/artifacts/resources.json`, json: false }],
       visible: EVERYONE,
     },
