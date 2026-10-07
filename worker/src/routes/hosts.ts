@@ -6,8 +6,9 @@
  *
  *   POST /hosts/enrollments      a maintainer, from their page: {name, where?} → a one-time ome_ token, 15 minutes,
  *                                bound to their login and GitHub user id, and the one command to paste on the machine
- *   POST /hosts/enroll           the machine's agent, with the token, its new Ed25519 key, what it is and its capacity,
- *                                and a proof it holds the key: the host waits in pending-owner
+ *   POST /hosts/enroll           the machine's agent, with the token, its new key (Ed25519 in a file, or ECDSA P-256
+ *                                made in its TPM, #330), what it is and its capacity, and a proof it holds the key:
+ *                                the host waits in pending-owner
  *   GET  /hosts[?owner=]         the hosts — for the owner and the maintainers with the details (the fingerprint the
  *                                owner compares, the capacity), and for a maintainer the other maintainers' new ones
  *   GET  /hosts/:id              one host, and its leases (the host page)
@@ -47,8 +48,8 @@ import {
   type AuditRow, type BusyRow, type FleetHostRow, type FleetLease, type MixRow, type QueueRow,
 } from "../fleet";
 import {
-  belowMinimum, enrollMessage, fingerprint, hostLine, installCommand, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf, shortId, signedMessage,
-  unitsOf, verifySignature, ENROLL_TTL_MIN, MIN_HOST, HOST_NAME, HOST_REPORT_FRESH_MIN, ISOLATIONS, NONCE_KEEP_MIN, OLD_TOKEN_GRACE_MIN, REPORT_MAX_BYTES, SIGNED_SKEW_S, TOKEN_ROTATE_DAYS,
+  belowMinimum, enrollMessage, fingerprint, hostLine, hostPublicKey, installCommand, keyStoreFits, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf,
+  shortId, signedMessage, unitsOf, verifyHostSignature, KEY_HELD_MAX, KEY_STORES, type KeyStore, ENROLL_TTL_MIN, MIN_HOST, HOST_NAME, HOST_REPORT_FRESH_MIN, ISOLATIONS, NONCE_KEEP_MIN, OLD_TOKEN_GRACE_MIN, REPORT_MAX_BYTES, SIGNED_SKEW_S, TOKEN_ROTATE_DAYS,
   hostReason, revertedOf, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
   agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT, asleepNow,
   agentTakesSettings, hostSettingsOf, orderArg, reportedBrakeOf, reportedSettingsOf, DIAGNOSTIC_LINE_MAX, DIAGNOSTIC_LINES, DIAGNOSTICS_MAX_BYTES, HOST_ORDER_ID, HOST_SETTINGS_AGENT, SETTINGS_ORDER_KINDS,
@@ -91,6 +92,8 @@ export interface HostRow {
   seal_key: string | null; seal_confirmed: string | null;
   /** #330: the sandbox its dispatcher's last claim said it applies (migration 0049, hosts.ts sandboxApplied); NULL while its claims do not say. */
   sandbox_applied: string | null;
+  /** #330: where its key lives as its enrollment said — `file` or `tpm` — and why a file key is not in its TPM (migration 0051); NULL for a host enrolled before, whose Ed25519 key is a file. */
+  key_store: string | null; key_held: string | null;
 }
 
 function newToken(prefix: string): string {
@@ -199,7 +202,7 @@ async function hostView(h: HostRow, detailed: boolean, now: number, pool: Runnin
     status_by: h.status_by, status_at: h.status_at, status_reason: h.status_reason, claims_stopped_at: h.owner_removed_at,
   };
   if (!detailed) return out;
-  const raw = publicKeyBytes(h.pubkey)!;
+  const key = hostPublicKey(h.pubkey)!;
   const report = reportOf(h.report);
   const fleet = fleetHostOf(fleetRowOf(h), leases, now, selectionRules());
   const settings = reportedSettingsOf(h.report);
@@ -215,7 +218,10 @@ async function hostView(h: HostRow, detailed: boolean, now: number, pool: Runnin
   return {
     ...out,
     where: h.where, hostname: h.hostname, os: h.os, arch: h.arch, page_kb: h.page_kb, isolation: h.isolation, dedicated: h.dedicated === null ? null : !!h.dedicated,
-    fingerprint: await fingerprint(raw),
+    fingerprint: await fingerprint(key.raw),
+    // Where its key lives (#330): in its TPM, made there and never out of it, or a file — with why not the TPM, as its agent said at
+    // enrollment. A host enrolled before says nothing: its Ed25519 key is a file.
+    host_key: { store: (h.key_store ?? "file") as KeyStore, alg: key.alg, held: h.key_held },
     capacity, lanes, units: h.units, agent_slots: h.agent_slots, disk_free: h.disk_free ? JSON.parse(h.disk_free) : null, pool_cap_units: h.pool_cap_units,
     // The sandbox its dispatcher applies, as its last claim said (#330) — beside what its agent found (capacity.sandbox): null while
     // its claims do not say (a dispatcher before #330), whatever its agent found.
@@ -535,7 +541,7 @@ export async function handleConfirmHost(c: Contributor, id: string, request: Req
   ]);
   if (!res.meta.changes) return json({ error: `${h.name} was not confirmed: it is no longer waiting, or ${h.owner_login} is no longer a maintainer`, code: "not_pending" }, 409, NO_STORE);
   await putRecord(env, `workers/${worker}/trust-${at}.json`, {
-    schema: "omarchy-pool/worker-trust/1", worker, owner: h.owner_login, trust: "project", host: id, fingerprint: await fingerprint(publicKeyBytes(h.pubkey)!), confirmed_by: c.login, basis: "factory/MAINTAINERS.toml", at,
+    schema: "omarchy-pool/worker-trust/1", worker, owner: h.owner_login, trust: "project", host: id, fingerprint: await fingerprint(hostPublicKey(h.pubkey)!.raw), confirmed_by: c.login, basis: "factory/MAINTAINERS.toml", at,
   }).catch(() => null);
   return json({ host: id, status: "active", worker, line, note: "The agent fetches the host's worker token with its next signed request, writes it for the dispatcher, and the host claims from then on." }, 200, NO_STORE);
 }
@@ -1342,6 +1348,14 @@ export const HOST_DIAGNOSTICS_SQL = "SELECT order_id, at, lines, dropped FROM ho
 
 const ENROLL_FIELDS = "the token, pubkey, sig, hostname, os, arch, page_kb, isolation, agent_version and capacity";
 
+/** Why a host's key is a file, as its enrollment says (#330): one line, cut at KEY_HELD_MAX; undefined for anything but a string or nothing. */
+function keyHeldOf(v: unknown): string | null | undefined {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "string") return undefined;
+  const s = v.replace(/[\x00-\x1f\x7f]+/g, " ").trim();
+  return s ? s.slice(0, KEY_HELD_MAX) : null;
+}
+
 /**
  * POST /hosts/enroll — the machine's agent (design v2 §6.1 steps 2-3): the
  * token, its public key and a signature of enrollMessage() with it, what the
@@ -1362,10 +1376,17 @@ export async function handleEnroll(request: Request, env: Env, url: URL): Promis
   if (!b || typeof b !== "object") return json({ error: `${ENROLL_FIELDS} are required` }, 400);
   const token = typeof b.token === "string" && /^ome_[0-9a-f]{48}$/.test(b.token) ? b.token : null;
   if (!token) return json({ error: "token: the ome_ token the site printed", code: "token_unknown" }, 401);
-  const raw = publicKeyBytes(b.pubkey);
-  if (!raw) return json({ error: "pubkey: the host's Ed25519 public key, 32 bytes, base64url" }, 400);
+  const key = hostPublicKey(b.pubkey);
+  if (!key) return json({ error: "pubkey: the host's public key, base64url: Ed25519 (32 bytes) or, made in its TPM, an uncompressed ECDSA P-256 point (65 bytes)" }, 400);
   const pubkey = b.pubkey as string;
-  if (typeof b.sig !== "string" || !(await verifySignature(raw, b.sig, enrollMessage(token, pubkey)))) return json({ error: "sig: no proof the host holds that key (the key's signature of the enrollment)", code: "proof" }, 401);
+  if (typeof b.sig !== "string" || !(await verifyHostSignature(key, b.sig, enrollMessage(token, pubkey)))) return json({ error: "sig: no proof the host holds that key (the key's signature of the enrollment)", code: "proof" }, 401);
+  // Where the key lives (#330): an agent before it says nothing, and its key is an Ed25519 file. A TPM makes P-256 keys only, and
+  // the agent no P-256 key but in a TPM.
+  const store = b.key_store === undefined || b.key_store === null ? "file" : KEY_STORES.includes(b.key_store as KeyStore) ? (b.key_store as KeyStore) : null;
+  if (!store) return json({ error: `key_store: ${KEY_STORES.join(" or ")}` }, 400);
+  if (!keyStoreFits(store, key.alg)) return json({ error: `key_store: a key in ${store === "tpm" ? "the TPM is ECDSA P-256" : "a file is Ed25519"}, and this one is ${key.alg === "p256" ? "ECDSA P-256" : "Ed25519"}`, code: "key_store" }, 400);
+  const held = keyHeldOf(b.key_held);
+  if (held === undefined) return json({ error: "key_held: why the key is not in the TPM, one line" }, 400);
   const cap = parseCapacity(b.capacity);
   if (typeof cap === "string") return json({ error: cap }, 400);
   const hostname = typeof b.hostname === "string" && /^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$/.test(b.hostname) ? b.hostname : null;
@@ -1405,14 +1426,14 @@ export async function handleEnroll(request: Request, env: Env, url: URL): Promis
          AND login IN (SELECT login FROM factory_maintainers) AND github_id = (SELECT github_id FROM contributors WHERE login = host_enrollments.login)`,
     ).bind(at, id, hash, at),
     env.DB.prepare(
-      `INSERT INTO hosts (id, owner_login, owner_github_id, name, "where", pubkey, status, hostname, os, arch, page_kb, runtime, isolation, dedicated, capacity, lanes, units, agent_slots, disk_free, agent_version, enrolled_at, last_seen)
-       SELECT ?, login, github_id, name, "where", ?, 'pending-owner', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM host_enrollments WHERE token_hash = ? AND host_id = ?`,
-    ).bind(id, pubkey, hostname, os, arch, pageKb, runtime, isolation, b.dedicated === true ? 1 : b.dedicated === false ? 0 : null, capacity, JSON.stringify(cap.lanes), units, cap.agent_slots, JSON.stringify(cap.disk_free_gb), agent, at, at, hash, id),
+      `INSERT INTO hosts (id, owner_login, owner_github_id, name, "where", pubkey, key_store, key_held, status, hostname, os, arch, page_kb, runtime, isolation, dedicated, capacity, lanes, units, agent_slots, disk_free, agent_version, enrolled_at, last_seen)
+       SELECT ?, login, github_id, name, "where", ?, ?, ?, 'pending-owner', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM host_enrollments WHERE token_hash = ? AND host_id = ?`,
+    ).bind(id, pubkey, store, store === "file" ? held : null, hostname, os, arch, pageKb, runtime, isolation, b.dedicated === true ? 1 : b.dedicated === false ? 0 : null, capacity, JSON.stringify(cap.lanes), units, cap.agent_slots, JSON.stringify(cap.disk_free_gb), agent, at, at, hash, id),
   ]);
   if (!burn.meta.changes) return json({ error: "this token was used already, or expired, a moment ago", code: "token_used" }, 401);
-  const fp = await fingerprint(raw);
+  const fp = await fingerprint(key.raw);
   return json(
-    { host: id, status: "pending-owner", owner: e.login, name: e.name, fingerprint: fp, units, confirm: `${dashboardOrigin(url)}/user/${e.login}#hosts`, note: `waiting for ${e.login} to confirm ${fp} on the site; nothing claims before that` },
+    { host: id, status: "pending-owner", owner: e.login, name: e.name, fingerprint: fp, key_store: store, units, confirm: `${dashboardOrigin(url)}/user/${e.login}#hosts`, note: `waiting for ${e.login} to confirm ${fp} on the site; nothing claims before that` },
     201,
     NO_STORE,
   );
@@ -1434,10 +1455,10 @@ export async function signedHost(request: Request, env: Env, url: URL, max = REP
   const now = Date.now();
   if (Math.abs(hdr.ts - Math.floor(now / 1000)) > SIGNED_SKEW_S) return json({ error: `the request's time is more than ${SIGNED_SKEW_S} s from the pool's (${iso(now)}): set the host's clock`, code: "clock", now: iso(now) }, 401, NO_STORE);
   const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(hdr.host).first<HostRow>();
-  const raw = h ? publicKeyBytes(h.pubkey) : null;
-  if (!h || !raw) return json({ error: "no such host", code: "host_signature" }, 401, NO_STORE);
+  const key = h ? hostPublicKey(h.pubkey) : null;
+  if (!h || !key) return json({ error: "no such host", code: "host_signature" }, 401, NO_STORE);
   const message = signedMessage(h.id, request.method, url.pathname, await sha256HexOf(body), hdr.ts, hdr.nonce);
-  if (!(await verifySignature(raw, hdr.sig, message))) return json({ error: "the signature is not this host's over this request", code: "host_signature" }, 401, NO_STORE);
+  if (!(await verifyHostSignature(key, hdr.sig, message))) return json({ error: "the signature is not this host's over this request", code: "host_signature" }, 401, NO_STORE);
   // Its status rides the refusal (#322): an agent re-installed on a retired host's machine enrolls a new host, and one on a suspended host waits.
   if (h.status === "suspended" || h.status === "retired") return json({ error: `${h.name} is ${h.status}${h.status_by ? ` (by ${h.status_by}${h.status_reason ? `: ${h.status_reason}` : ""})` : ""}`, code: "host_status", status: h.status }, 403, NO_STORE);
   const fresh = await env.DB.prepare("INSERT INTO host_nonces (host_id, nonce, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING").bind(h.id, hdr.nonce, iso(now)).run();
@@ -1466,11 +1487,11 @@ export async function handleHostState(s: SignedHost, env: Env): Promise<Response
     env.DB.prepare(HOST_OPEN_ORDERS_SQL).bind(h.id, at),
     env.DB.prepare("SELECT open_orders FROM build_workers WHERE id = ? AND host_id = ? AND revoked_at IS NULL").bind(h.worker_id ?? "", h.id),
   ]);
-  const raw = publicKeyBytes(h.pubkey)!;
+  const key = hostPublicKey(h.pubkey)!;
   const pool = version(env);
   const open = (worker.results[0] as { open_orders: string | null } | undefined)?.open_orders ?? null;
   return json({
-    host: h.id, status: h.status, name: h.name, owner: h.owner_login, worker: h.worker_id, fingerprint: await fingerprint(raw),
+    host: h.id, status: h.status, name: h.name, owner: h.owner_login, worker: h.worker_id, fingerprint: await fingerprint(key.raw),
     token: h.token_issued_at ? { issued_at: h.token_issued_at, rotate_after: iso(Date.parse(h.token_issued_at) + TOKEN_ROTATE_DAYS * 24 * 60 * MIN) } : null,
     report_every_s: 300,
     poll_s: FOLLOW_POLL_S,

@@ -368,6 +368,60 @@ fn the_task_subnets_must_not_collide_with_routes_or_other_projects_networks() {
     assert!(net::parse_list("10.0.0.0/33").is_err());
 }
 
+/// Where the enrollment will make the host key (#330), said before anything is made: the
+/// TPM, a file on a machine with none (a note) or with one out of reach (a warning), and a
+/// blocker when the owner asked for the TPM and it is out of reach.
+#[test]
+fn preflight_says_where_the_host_key_will_live() {
+    use crate::host::{tpm, KeyChoice, Want};
+    use std::sync::Arc;
+    let choice = |want, why: Option<&str>| {
+        let t = tpm::fake::Tpm::new();
+        *t.unreachable.lock().unwrap() = why.map(str::to_owned);
+        KeyChoice {
+            want,
+            tcti: tpm::DEFAULT_TCTI.into(),
+            tools: t as Arc<dyn tpm::Tools>,
+        }
+    };
+    let run = |c: &KeyChoice, linux| {
+        let mut r = Report::default();
+        checks::host_key(c, linux, &mut r);
+        r
+    };
+    let r = run(&choice(Want::Auto, None), true);
+    assert!(
+        r.ok() && r.notes[0].contains("made in the TPM (device:/dev/tpmrm0)"),
+        "{r:?}"
+    );
+    let r = run(
+        &choice(Want::Auto, Some("no TPM: /dev/tpmrm0 is not there")),
+        true,
+    );
+    assert!(
+        r.ok() && r.warnings.is_empty() && r.notes[0].contains("a file (no TPM"),
+        "{r:?}"
+    );
+    let denied =
+        "/dev/tpmrm0 is there, but this user (uid 1000) may not open it: the tss group gives it";
+    let r = run(&choice(Want::Auto, Some(denied)), true);
+    assert!(
+        r.ok() && r.warnings[0].contains("the tss group gives it"),
+        "{r:?}"
+    );
+    let r = run(&choice(Want::Tpm, Some(denied)), true);
+    assert!(r.blockers[0].contains("OMARCHY_HOST_KEY=tpm, but"), "{r:?}");
+    let r = run(&choice(Want::File, None), true);
+    assert!(
+        r.ok() && r.notes[0].contains("OMARCHY_HOST_KEY=file"),
+        "{r:?}"
+    );
+    // A Mac: a file until the agent is signed for the Secure Enclave; asked for the TPM, no.
+    let r = run(&choice(Want::Auto, None), false);
+    assert!(r.ok() && r.notes[0].contains("Secure Enclave"), "{r:?}");
+    assert!(!run(&choice(Want::Tpm, None), false).ok());
+}
+
 #[test]
 fn linger_and_the_user_manager_are_reported() {
     let d = tempdir();
@@ -1960,6 +2014,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
         max_mem_gb: None,
         yes: true,
         token: Some(format!("ome_{}", "0a".repeat(24))),
+        key: crate::host::KeyChoice::file(),
         wait: Duration::ZERO,
         poll: Duration::from_millis(10),
         exe: Some(agent),
@@ -3222,7 +3277,7 @@ fn ready_to_enroll(h: &Host, state: &str) -> Ready {
     );
     ready.pool = pool(state.to_owned(), token);
     crate::host::private_dir(&state_dir).unwrap();
-    HostKey::load_or_create(&state_dir.join(KEY_FILE)).unwrap();
+    HostKey::load_or_create(&state_dir.join(crate::host::KEY_FILE)).unwrap();
     Identity {
         pool: ready.pool.clone(),
         host: "h_0123456789".into(),
@@ -3329,7 +3384,9 @@ fn nothing_can_claim_before_the_owner_confirms_and_the_ids_land_in_agent_toml_af
     assert!(
         said.contains("host h_0123456789 on")
             && said.contains("isolation user")
-            && said.contains("host key SHA256:"),
+            && said.contains("host key SHA256:")
+            // Where it lives (#330): the test asks for a file key.
+            && said.contains(", a file (Ed25519, host.ed25519, mode 0600)"),
         "{said}"
     );
 
@@ -3425,6 +3482,7 @@ fn a_public_address_the_sidecar_was_not_given_is_probed_again_by_one_given_it() 
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // the file through an enrollment and a re-run, then each envelope key preflight refuses
 fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_beside_the_token() {
     // The probe task saw the pool see it come from 198.51.100.20 (#371), through its egress
     // sidecar as a task asks anything (#373).
@@ -3521,6 +3579,23 @@ fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_
     assert!(
         r.screen()
             .contains("envelope.agent_budget.calls_per_tusk is none of calls_per_task"),
+        "{}",
+        r.screen()
+    );
+    // So is a cache cap it would refuse (#341).
+    let caps = fs::read_to_string(p.data.join("agent.toml"))
+        .unwrap()
+        .replace("calls_per_tusk = 50", "calls_per_task = 50")
+        .replace(
+            "[envelope]\n",
+            "[envelope]\ncache_caps = { pacman_gb = 0 }\n",
+        );
+    fs::write(p.data.join("agent.toml"), caps).unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    assert!(
+        r.screen()
+            .contains("envelope.cache_caps.pacman_gb must be a whole number of GB from 1"),
         "{}",
         r.screen()
     );

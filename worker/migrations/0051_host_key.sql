@@ -1,0 +1,23 @@
+-- Where a host's key lives (#330, epic #307, design v2 §14; P6: hardware-bound
+-- host keys, the Linux half): the agent makes the host key in the machine's
+-- TPM where one is there and its user may open it — an ECDSA P-256 key, since
+-- TPM 2.0 has no Ed25519, made inside the TPM and never out of it — and
+-- otherwise keeps the Ed25519 file it always had.
+--
+-- - hosts.key_store: 'file' or 'tpm', as the enrollment said; the pool takes
+--   an Ed25519 key only as a file and a P-256 key only from a TPM (hosts.ts
+--   keyStoreFits). NULL for a host enrolled before: its key is an Ed25519 file.
+-- - hosts.key_held: why a file key is not in the TPM (no TPM, one the agent's
+--   user may not open, no tpm2-tools, a Mac, the owner's choice), as the agent
+--   said at enrollment, one line; NULL for a key in the TPM and for a host
+--   enrolled before.
+--
+-- Both are written once, by the enrollment (POST /hosts/enroll), and read by
+-- the host page: a key does not move between stores without a new enrollment.
+-- hosts.pubkey keeps either key, base64url; the signed requests are verified
+-- by its length (verifyHostSignature).
+--
+-- Additive only: the Worker that runs during the deploy minute reads and
+-- writes none of it.
+ALTER TABLE hosts ADD COLUMN key_store TEXT;
+ALTER TABLE hosts ADD COLUMN key_held TEXT;

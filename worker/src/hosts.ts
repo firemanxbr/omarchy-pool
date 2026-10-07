@@ -14,9 +14,10 @@
  *
  *   Omarchy-Host: <host_id>; ts=<unix seconds>; nonce=<32 hex>; sig=<base64url>
  *
- * where `sig` is the host key's Ed25519 signature over the lines of
- * `signedMessage`: a fixed tag, the host, the method, the path, the SHA-256
- * of the body, the time and the nonce. The pool checks the key of that host,
+ * where `sig` is the host key's signature over the lines of `signedMessage`:
+ * a fixed tag, the host, the method, the path, the SHA-256 of the body, the
+ * time and the nonce — Ed25519, or ECDSA P-256 for a key in the host's TPM
+ * (#330, verifyHostSignature). The pool checks the key of that host,
  * that the time is within 120 seconds of its own, and that the nonce is new
  * (host_nonces), so a request can be neither changed nor replayed.
  */
@@ -265,7 +266,7 @@ export function hostLine(c: Pick<Capacity, "cpus" | "mem_gb" | "lanes">, isolati
 
 // ---------- the host key ----------
 
-/** A raw Ed25519 public key from its base64url, or null. */
+/** A raw 32-byte public key (Ed25519, or a seal key's X25519) from its base64url, or null. */
 export function publicKeyBytes(b64u: unknown): Uint8Array | null {
   if (typeof b64u !== "string" || b64u.length !== 43) return null;
   try {
@@ -276,6 +277,40 @@ export function publicKeyBytes(b64u: unknown): Uint8Array | null {
   }
 }
 
+/**
+ * A host key's algorithm (#330, design v2 §14, P6): Ed25519 in a file, or ECDSA P-256 with SHA-256, made in the host's TPM —
+ * TPM 2.0 has no Ed25519. Both sign the same words (signedMessage, enrollMessage) and both signatures are 64 bytes: Ed25519's,
+ * or P-256's r and s (IEEE P1363, what WebCrypto verifies).
+ */
+export type HostKeyAlg = "ed25519" | "p256";
+export interface HostKey { alg: HostKeyAlg; raw: Uint8Array }
+/** Where a host's key lives, as its enrollment says (#330): `file` (host.ed25519, 0600 in its agent's state directory), or `tpm`, made in the machine's TPM and never out of it. */
+export const KEY_STORES = ["file", "tpm"] as const;
+export type KeyStore = (typeof KEY_STORES)[number];
+/** Why a host's key is a file and not in its TPM, as its agent said at enrollment, is kept cut at this length. */
+export const KEY_HELD_MAX = 300;
+
+/** A host's public key from its base64url: Ed25519's 32 bytes (43 characters), or an uncompressed P-256 point (65 bytes from 0x04, 87 characters); null for anything else. Whether the point is on the curve is WebCrypto's to say, when it is imported to verify. */
+export function hostPublicKey(b64u: unknown): HostKey | null {
+  const ed = publicKeyBytes(b64u);
+  if (ed) return { alg: "ed25519", raw: ed };
+  if (typeof b64u !== "string" || b64u.length !== 87) return null;
+  try {
+    const raw = fromB64url(b64u, "the public key");
+    return raw.length === 65 && raw[0] === 0x04 ? { alg: "p256", raw } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a key may live where its enrollment says (#330): an Ed25519 key in a file, a P-256 key in the TPM — the agent makes no other, and a TPM no Ed25519 one. */
+export function keyStoreFits(store: KeyStore, alg: HostKeyAlg): boolean {
+  return (store === "file" && alg === "ed25519") || (store === "tpm" && alg === "p256");
+}
+
+/** The key's algorithm in the owner's words, as the host's page and `omarchy-agent status` name it. */
+export const HOST_KEY_ALG_NAMES: Readonly<Record<HostKeyAlg, string>> = Object.freeze({ ed25519: "Ed25519", p256: "ECDSA P-256" });
+
 /** The key's fingerprint as OpenSSH writes it — `SHA256:` and the unpadded base64 of its SHA-256 — which the agent prints at the host and the owner compares on the page. */
 export async function fingerprint(raw: Uint8Array): Promise<string> {
   const d = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));
@@ -284,8 +319,8 @@ export async function fingerprint(raw: Uint8Array): Promise<string> {
   return `SHA256:${btoa(s).replace(/=+$/, "")}`;
 }
 
-/** Whether `sig` (base64url) is the key's Ed25519 signature of `message`. Anything malformed is false, never a throw. */
-export async function verifySignature(raw: Uint8Array, sig: string, message: string): Promise<boolean> {
+/** Whether `sig` (base64url, 64 bytes) is the host key's signature of `message`: Ed25519, or ECDSA P-256 with SHA-256 (#330). Anything malformed — a point off the curve, a DER signature — is false, never a throw. */
+export async function verifyHostSignature(key: HostKey, sig: string, message: string): Promise<boolean> {
   let bytes: Uint8Array;
   try {
     bytes = fromB64url(sig, "the signature");
@@ -293,9 +328,14 @@ export async function verifySignature(raw: Uint8Array, sig: string, message: str
     return false;
   }
   if (bytes.length !== 64) return false;
+  const data = new TextEncoder().encode(message);
   try {
-    const key = await crypto.subtle.importKey("raw", raw, { name: "Ed25519" }, false, ["verify"]);
-    return await crypto.subtle.verify({ name: "Ed25519" }, key, bytes, new TextEncoder().encode(message));
+    if (key.alg === "ed25519") {
+      const k = await crypto.subtle.importKey("raw", key.raw, { name: "Ed25519" }, false, ["verify"]);
+      return await crypto.subtle.verify({ name: "Ed25519" }, k, bytes, data);
+    }
+    const k = await crypto.subtle.importKey("raw", key.raw, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    return await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, k, bytes, data);
   } catch {
     return false;
   }

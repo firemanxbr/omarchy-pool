@@ -42,7 +42,7 @@ please do not file a public issue for it.
 | Agent token `oma_…` | one agent on one person's machine, granted by that person in their signed-in browser (`omarchy-cli login`: a loopback address and PKCE), kept in `~/.config/omarchy-cli/credentials.toml` (0600) and bound to the origin that granted it | the tools of `omarchy-cli mcp` its scopes hold, as that person: request and follow packages (`contribute`); claim, release, read evidence and draft a verdict (`review`) or a block (`block`) — the two a maintainer's only, read again on every call; twenty calls a minute, five requests, ten claims and thirty drafts a day | decide anything — approve, request changes, reject and block are drafts the person confirms in the browser, approve and block with the person's passkey; every other route (403); give the project's agent a hint; outlive seven days with `review` or `block`, ninety with `contribute` | live; revoked by `omarchy-cli logout`, the person's page, a block of the person, or a reset of their passkeys (#284) |
 | Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered with the browser's session, on their own page or, the first one, in the dialog of the act that needs it (#287); the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
 | Host enrollment token `ome_…` | the maintainer who pressed *Add a host*, for the one command they paste on the machine (in the environment of `sh`, never an argument) | enroll one host, once, within 15 minutes, as that maintainer — while they are still in `factory/MAINTAINERS.toml` and still the same GitHub user id | claim, confirm the host, or enroll a second one | live (#321); stored as its SHA-256; burnt by the enrollment in the same D1 batch that creates the host |
-| Host key (Ed25519) | one maintainer host's agent: `host.ed25519`, mode 0600, made at install, never in a container | sign the host's calls (`Omarchy-Host`: method, path, body hash, time, nonce): read its state, fetch or rotate its worker token, report, post the diagnostics its own order asked for (#325) | claim, change the maintainer list, widen the owner's envelope; be replayed (a nonce table), act from a clock 120 s off; act before its owner confirmed its fingerprint on the site | live (#321); a suspended or retired host's key is refused |
+| Host key (Ed25519, or ECDSA P-256 in the host's TPM) | one maintainer host's agent, made at install, never in a container: made in the machine's TPM where its user may open one (#330: `fixedtpm` and `fixedparent`, so the TPM never lets it out; the agent keeps `host.tpm.pub` and `host.tpm.priv`, a blob only that TPM loads, 0600), else `host.ed25519`, mode 0600 | sign the host's calls (`Omarchy-Host`: method, path, body hash, time, nonce): read its state, fetch or rotate its worker token, report, post the diagnostics its own order asked for (#325) | claim, change the maintainer list, widen the owner's envelope; be replayed (a nonce table), act from a clock 120 s off; act before its owner confirmed its fingerprint on the site | live (#321); a suspended or retired host's key is refused; in a Linux host's TPM where it has one (#330), the store on the host's page; a Mac's Secure Enclave still open (it needs the agent signed and notarised) |
 | Owner's pinned passkey (at the host) | one maintainer host's agent, for its owner: the COSE public key, credential id, algorithm and relying party of one of the owner's passkeys, pinned with `omarchy-agent envelope pin-passkey` and kept in `state/owner.json` (0600) | let the host take a `widen-envelope` or `set-agent-keys` document the pool relays (#328, D6 b): only one this passkey signed, for this host, on its pool's origin, user present and verified, within its hour and under a version above the last it took | be used by the pool or another passkey; widen above the release's signed constants or the detected hardware; set any key but the six agent keys; be replayed | live (#328); unpinned at the host, the site widens nothing |
 | Seal key (X25519) | one maintainer host's agent: `state/seal.x25519` (0600) on Linux, the login keychain on a Mac; its public half reported, its fingerprint confirmed once by the owner on the host's page | open the agent keys the owner's browser sealed to it (HKDF-SHA256, AES-256-GCM, bound to the host and the key's name) into `OMARCHY_SECRETS_DIR/agent.env` | sign anything; take a sealed key that the pinned passkey did not sign; be read by the pool, the dispatcher or a container | live (#328); a key made again is confirmed again before anything is sealed to it |
 | Session cookie `oms_…` | one person's browser, after Sign in with GitHub | what that person's contributor token can, from the dashboard's pages | — | live; separate from the CLI token, so signing in never invalidates a worker; *sign out* (in the header of every page) invalidates it on the server, not only in that browser |
@@ -83,7 +83,7 @@ secret). Everything travels in the `Authorization` header over TLS only.
 | Host | the workers: every one is provided by a maintainer — the project's compute is its maintainers' hosts. A maintainer's host is trusted by the same act that makes them a maintainer | enrolled by a maintainer listed in `factory/MAINTAINERS.toml` at the last sync (*Maintainer hosts* below, #321), owned by their GitHub user id, confirmed by fingerprint; a legacy registration (`POST /factory/workers`) keeps claiming until a maintainer revokes it — a community one only while its owner is listed (#343). A removal from the list stops its claims and lets its running tasks finish (*Stopping a host* below, #322) |
 | Community worker | none: the tier ended (#307, #343) — contributors run no worker, the command that ran one and a worker's mode are gone (`GET /omarchy-worker`, `POST /factory/workers/self/mode` and `/factory/workers/:id/mode` answer 410 with the pointer to the maintainer-host docs). The community registrations left — the maintainers' own legacy sets, checked on #331 — build any contributor's packages, as a host does, selected as hosts with one lane and one build, until they retire (P3); one whose owner is not a maintainer (a contributor's from before #331, or an owner the list dropped) is refused at the claim (`403`, `owner_not_maintainer`), counts as nobody's capacity and is never pinned, so it never builds a stranger's package on a non-maintainer's machine; a maintainer's set that was dedicated (its owner's builds only) takes anyone's from #343 on, its owner told before that deploy (RUNBOOK, *Once, before the deploy that carries #343*) | no new one |
 | Project worker | pool jobs (sync, render, promote, health, security, gc) and the rebuild of approved packages — never a build without evidence and review | the legacy registrations that hold it were given it on two maintainers' word, each step a signed record under `workers/<id>/` that stays as history; no worker is trusted one by one any more (#343: `POST /factory/workers/:id/trust` answers 410) — a host's trust is the pull request that names its owner in `factory/MAINTAINERS.toml` (S2). The Review page names the worker and host behind every build |
-| Maintainer | provide the project's hosts, approve the project's staged builds — never their own package — settle categories, block with a reason, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
+| Maintainer | provide the project's hosts, approve the project's staged builds — never their own package, but the one maintainer the file's `[solo]` table names while it is there (#394, *The solo-maintainer exception* below) — settle categories, block with a reason, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
 | Agent key | drafts and corrects PKGBUILDs on a community worker; audits staged builds on a project worker | the worker owner's own key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` or `XAI_API_KEY` — set in the container's environment; the pool and GitHub hold none. The worker reports only the provider and model name (`anthropic/claude-sonnet-5`) for the Workers page. An audit's report is evidence a maintainer reads, never something the pool acts on |
 
 ## Isolation
@@ -127,6 +127,27 @@ secret). Everything travels in the `Authorization` header over TLS only.
   emulated lane, so a recipe on a native lane cannot buy its attempts back
   with it, and one that says it on an emulated lane never runs emulated
   again.
+  Its caches are the host's to fence, not the script's (#341, D52; design
+  v2 §10.2 invariant 9): a build mounts only its own package's build cache
+  on its own side (`cache/build/<trust>/<arch>/<package>` at `/build/cache`,
+  cut by the dispatcher from the lease), never the tree, another package's
+  or, from a community task, a project cache; an audit and a trial mount
+  none. Every task mounts the host's pacman cache of its lane read-only (a
+  build's and an audit's pacman's first `CacheDir`; a trial's check, which
+  installs the lab above edge, reads none) and downloads into a writable
+  cache of its own, so no recipe plants a package another build installs and
+  two builds never write one file. What a task downloaded enters the shared
+  cache only when its SHA-256 is the one the pool's signed databases list for
+  that file name (each database's `.sig` verified with the pool's key the
+  dispatcher carries; a name two databases list with different bytes is never
+  merged), and with the pool's own copy of its upstream signature beside it
+  (the very `.sig` the task downloaded, when it downloaded one) or not at
+  all: a task's own `.sig` never enters, since a wrong one — or none — beside
+  a package of a repository whose `SigLevel` checks packages fails every
+  build that installs it, and pacman cannot delete it from a read-only
+  cache. Everything else is discarded, and a file whose name the databases
+  later list with other bytes leaves the shared cache at the next pass, its
+  signature after it. The caches stay within the envelope's `cache_caps`.
   The dispatcher refuses to start with a package signing key in its
   environment: the pool signs what is published. CI renders every kind's
   container and fails on anything outside that spec (`dispatch/spec.rs`), and
@@ -757,6 +778,45 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   state, fetches or rotates its worker token, reports, and posts the
   dispatcher's log lines a `diagnostics` order of that host asked for (#325);
   it cannot claim, change the maintainer list or widen anything.
+- **Where the host key lives** (#330, design v2 §14, P6; the Linux half of
+  hardware-bound host keys). Where the machine has a TPM 2.0 the agent's
+  user may open (`/dev/tpmrm0`, the tss group), the enrollment makes the key
+  inside it with the distribution's tpm2-tools — no TPM library is linked
+  into the agent — as an ECDSA P-256 key (TPM 2.0 has no Ed25519) with
+  `fixedtpm`, `fixedparent` and `sensitivedataorigin`: the TPM made it and
+  never lets it out, so the two files the agent keeps (its public area, and
+  its private part sealed by the TPM to its own storage key) sign nothing on
+  any other machine, and nothing here once the TPM is cleared. Elsewhere —
+  no TPM, one out of the user's reach, no tpm2-tools, a Mac, or the owner's
+  `OMARCHY_HOST_KEY=file` — the key is the Ed25519 file it always was, and
+  the enrollment says why not the TPM; `OMARCHY_HOST_KEY=tpm` makes a TPM out
+  of reach stop the enrollment instead. The pool verifies either key the
+  same way (64-byte signatures over the same words), records where it lives
+  (`key_store`, held to the key's kind: a TPM's key is P-256, a file's
+  Ed25519) and shows it on the host's page beside the fingerprint. What it
+  does not do, stated plainly: the store is the agent's word at enrollment —
+  the pool asks the TPM for no attestation (no endorsement-key certificate is
+  checked), so a modified agent could call a file key `tpm` (but never a
+  P-256 key `file`, nor an Ed25519 key `tpm`); on a VM the TPM is the
+  hypervisor's virtual one; and the key's own authorization is empty, so a
+  process running as the agent's user, or root, on the machine signs with it
+  while it is there. The tss group that opens `/dev/tpmrm0` opens the whole
+  TPM, not the agent's key alone: the agent's user, and anything running as
+  it — a task that escaped its container where it lands as that user (the
+  `user` isolation level, design v2 §10.4, §19.3) among them — may send the TPM any command its authorizations allow.
+  The owner hierarchy's must stay empty for the agent, so it may define and
+  write NV indices and evict persistent objects; with the lockout
+  authorization empty too, as on most machines, it may `tpm2_clear` the TPM,
+  ending every key it holds (systemd-cryptenroll's or clevis's LUKS bindings
+  among them). Only the lockout authorization can be set without stopping the
+  agent, and setting it takes `TPM2_Clear` through lockout away from that
+  user: the runbook advises it, or a file key, on a machine whose TPM seals
+  other secrets. A key in the TPM bounds what a stolen copy of the
+  agent's files is worth — nothing elsewhere — not what a compromise of the
+  machine itself is. The agent reaches the TPM only through a resource
+  manager (the kernel's `/dev/tpmrm0`, or tpm2-abrmd), never the raw device.
+  A Mac's Secure Enclave needs the agent signed with a Developer ID and
+  notarised, and stays open in #330.
 - **The host state and its orders** (#344, design v2 §11, §17.1). From agent
   0.3.0 the release a host rolls out is the one its signed state names —
   still checked against `release.yml`'s signature, the floor, `min_release`,
@@ -918,7 +978,9 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   pinned and `omarchy-agent status` the seal key's fingerprint, to compare,
   and why the journal shows every widening and key set with who signed it.
   On a Mac the Keychain holds the seal key only (the host key stays a 0600
-  file there; hardware-bound host keys are P6), and agent.env stays a 0600
+  file there until the agent is signed with a Developer ID and notarised for
+  the Secure Enclave, the half of #330 still open; a Linux host's is in its
+  TPM where it has one), and agent.env stays a 0600
   file, which agent sidecars in the VM mount.
 - **The host worker token** (`omw_…`) is the dispatcher's only, and reaches
   it as a read-only file, never as a value in its environment (#327, design
@@ -1083,12 +1145,63 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   whose agent says it sleeps (#329) has no lane for it until it wakes, so
   the rebuild may be offered for release meanwhile; the release still takes
   another maintainer's passkey, and a sleeping host is never where it runs.
+  The solo-maintainer exception lifts this for the maintainer it names,
+  only on their own packages (#394, below): their own host builds the copy,
+  with no release.
+
+### The solo-maintainer exception (#394)
+
+The two-person rule — nobody decides on a package they brought, and the
+project's copy of it is not built on their host (D35) — **does not hold for
+one named maintainer while `factory/MAINTAINERS.toml` carries a `[solo]`
+table naming them** (a maintainer decision of 2026-10-06: one active
+maintainer and one host, the Studio, until more maintainers are active).
+What that changes, and what it does not:
+
+- **For the named maintainer, on a package they brought**: the review's
+  doors (claim, approve, request changes, reject, release, cancel) and the
+  adoption of their own package let them through where they answer
+  `conflict_of_interest` for anyone else, and their own hosts build the
+  project's copy with no release to any host. Users then get a package one
+  person stood behind — the maintainer who brought it and approved it — built
+  by the project's agent on the project's host, through the gate and the
+  trial as every package. That is the risk the exception accepts in the open.
+- **What still holds**: approve, block and a forced promotion take that
+  maintainer's passkey in the browser (#271), never a token or an agent
+  alone; no contributor's bytes ship (the project's rebuild is what is
+  approved); the second opinion still runs and records its independence
+  (D36) — with one host and one model, `independent: none`, which Status
+  counts; nobody else decides on anybody's package differently: another
+  maintainer's own packages, and their hosts, are under the rule as before,
+  and a contributor's package is decided as it always was.
+- **On the record, every time**: each decision taken under the exception
+  carries `solo_exception` (who, since when, why) in the record the pool
+  signs, its journal line says *self-reviewed (solo-maintainer exception)*,
+  and Review, the build's page, the package's page and Status mark it;
+  `GET /api/v1/factory/self-reviewed` lists them all, and the list outlives
+  the exception. An adoption stays marked on the package page and in
+  `maintenance.maintainer.solo_exception` for as long as it stands. The
+  list and Status's count read journal lines of the kinds only the pool's
+  own doors write — `review`, `approve`, `adopt`, `role` — and
+  `POST /api/v1/events` refuses those kinds to every job token
+  (`reserved_kind`), so no job can add a decision nobody took; a record is
+  passed on, and the governance chapter links it, only as the pool's own
+  address.
+- **The switch is the governance file only**: the brain reads `[solo]` on
+  `main` with the list, every ten minutes; no route, setting or database row
+  turns it on (the table it writes, `governance_solo`, is the sync's copy of
+  the file, as `factory_maintainers` is). `check-governance` refuses a table
+  that is not exactly one maintainer of the list, a date and a reason on one
+  line, and the brain applies nothing it refuses — a table that does not
+  parse is no exception. Turning it on or off is a governance pull request,
+  CODEOWNERS-reviewed like any change to the file; deleting the table brings
+  the previous rules back unchanged at the next sync.
 
 ### Where secrets live on a maintainer host
 
 | Secret | Where it comes from | At rest | Which container gets it |
 |---|---|---|---|
-| Host key | generated at install | 0600 `state/host.ed25519` in the agent's data directory | none, ever |
+| Host key | generated at install | in the machine's TPM where the agent's user may open one (#330: ECDSA P-256, made inside it and never out of it; `state/host.tpm.pub` and `state/host.tpm.priv`, 0600, a blob only that TPM loads), else 0600 `state/host.ed25519` in the agent's data directory | none, ever |
 | Seal key (X25519, #328) | generated by the agent; its owner confirms its fingerprint once on the host's page | 0600 `state/seal.x25519` beside the host key (on a Mac, the Keychain) | none, ever |
 | Host worker token `omw_` | minted by the pool for the confirmed host, fetched with a host-key-signed request, rotated every 30 days | 0400 `run/host/dispatcher/token` in the set directory (and in 0600 `etc/dispatcher.env` only while a release from before #327 is applied or staged, from just before a rollback statement's `agent_to` moves the agent down to run a rollback to one, or for the moment between two writes when the env file names no registration yet, another one, or still holds an older token's line) | the dispatcher only, as a read-only file mount (`OMARCHY_WORKER_TOKEN_FILE`; on the Quadlet driver, #330, the unit's read-only `Volume=`, which podman never creates when the file is missing), never in its environment except while that `etc/dispatcher.env` line is there (the file is the dispatcher's `env_file`; a release from before #327 reads `OMARCHY_WORKER_TOKEN` from it) |
 | Job tokens `omj.` | the claim answer, per lease, carrying the lease generation | the dispatcher's memory and `work/state/leases/` (0600) | the dispatcher and its pool-job children only; never a task |
@@ -1218,7 +1331,7 @@ passed without the maintainer's passkey.
 
 | Door | What it ships | What guards it |
 |---|---|---|
-| Approve — Review, a build's page, an agent's draft confirmed | the project's build, into edge (rc and stable too when its trial passed) | the maintainer's passkey, in the browser (#257, #271); never their own package, never a contributor's bytes |
+| Approve — Review, a build's page, an agent's draft confirmed | the project's build, into edge (rc and stable too when its trial passed) | the maintainer's passkey, in the browser (#257, #271); never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) —, never a contributor's bytes |
 | The enqueue job — `POST /factory/enqueue` with its job token | a recipe on `main`, built by a project worker and published into edge | a job token, issued only to a project worker at claim (`factory:write`); the recipe is a reviewed commit on `main` |
 | A build queued by hand — `POST /factory/enqueue`, a maintainer's session or `omc_` token | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`, #284); the dry run's job token has no pool and no ring scope, whatever recipe it names |
 | A sync — the scheduler's, or a job by hand | upstream's packages, into edge (the OPR's channels into their rings) | every package verified against its upstream's keyring |
@@ -1297,7 +1410,7 @@ instead of stopping them.
 | a community registration's token (a maintainer's legacy set, until P3) | claims of any contributor's community build — never a project build or a pool job — and uploads to those tasks' staging; nothing once its owner is no maintainer (#343) | its owner or a maintainer revokes the worker |
 | a job token | that task's writes, until its lease ends | expires by itself; the task can be cancelled, or stopped from its worker's page (its lease is fenced — nothing it sends is taken, nothing renews it — until the worker has stopped, #277) |
 | a project worker's token | claims of pool jobs — each still executed with a scoped job token — until revoked | a maintainer revokes the worker |
-| a maintainer's token | rejections and requests for changes (never on their own package), withdrawals, lifts, a pool job by hand — a rollback inside its ring, a promotion the gate still decides —, a dry run by hand and a note on the journal (#284: a build queued by hand never publishes, and the gate's evidence is the jobs' alone), and orders to any worker, 20 an hour (#277: a restart, a drain or a stopped task at worst — a delay, and a drain of everything is an error on Status —, never a publish or a cancel), a package's size and disk budget (`POST /factory/packages/:name/size`, #337: up to size 4 — the units and memory a build of it takes, and a large one makes a host reserve for it two hours at most —, said on the package's story and the journal; it wins over the size the pool learns from the package's builds, #330) and a Retry at size of a build that ran out of memory (`POST /factory/tasks/:id/retry`, #337: queued again at a larger size, up to the largest host alive, with one attempt given back — one more build of the same recipe, never a publish) — not an approval, a block nor a forced promotion: those take the browser's session and the maintainer's passkey (#271, #284) | the person replaces the token (their page's *Token*: the old one stops working), and a reset of their passkeys revokes it (#284); a governance pull request removes the login; decisions and builds are journaled and reversible (rollback); a host's trust takes a reviewed pull request to `factory/MAINTAINERS.toml` (no token trusts a worker since #343) |
+| a maintainer's token | rejections and requests for changes (never on their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed, #394), withdrawals, lifts, a pool job by hand — a rollback inside its ring, a promotion the gate still decides —, a dry run by hand and a note on the journal (#284: a build queued by hand never publishes, and the gate's evidence is the jobs' alone), and orders to any worker, 20 an hour (#277: a restart, a drain or a stopped task at worst — a delay, and a drain of everything is an error on Status —, never a publish or a cancel), a package's size and disk budget (`POST /factory/packages/:name/size`, #337: up to size 4 — the units and memory a build of it takes, and a large one makes a host reserve for it two hours at most —, said on the package's story and the journal; it wins over the size the pool learns from the package's builds, #330) and a Retry at size of a build that ran out of memory (`POST /factory/tasks/:id/retry`, #337: queued again at a larger size, up to the largest host alive, with one attempt given back — one more build of the same recipe, never a publish) — not an approval, a block nor a forced promotion: those take the browser's session and the maintainer's passkey (#271, #284) | the person replaces the token (their page's *Token*: the old one stops working), and a reset of their passkeys revokes it (#284); a governance pull request removes the login; decisions and builds are journaled and reversible (rollback); a host's trust takes a reviewed pull request to `factory/MAINTAINERS.toml` (no token trusts a worker since #343) |
 | a maintainer's agent token (`oma_`) | drafts; request changes and reject once the person confirms them in the browser — approve and block drafted by the agent also need the maintainer's passkey, which the token cannot answer (user verification) | revoke the grant on the person's page or `omarchy-cli logout` |
 | a maintainer's signed-in browser, driven by an agent | what the session decides alone: request changes, reject, withdraw, a lift, a claim, a pool job by hand other than a forced promotion, a dry run by hand, and orders to any worker (20 an hour). Approve, block and a forced promotion need the person's passkey (#257, #271, #284), and so do adding a second passkey and removing one; only a login that holds none yet registers its first with the session | sign out (the session ends on the server); a first passkey registered meanwhile is on the public journal (`passkey`), and another maintainer resets it |
 | a maintainer's authenticator, lost or stolen | nothing without its user verification (a PIN or a biometric on the device); with it, what the person decides — approve, block and a forced promotion | another maintainer resets the login's passkeys with a reason (#271), after confirming the request out of band: every one removed, the login signed out, its `omc_` token and its agents' live grants revoked (#284), the journal — a line each — and a signed record say who and why; the person ends the device's GitHub sessions and revokes the GitHub tokens it held (the GitHub CLI's authorization, personal access tokens) — until they make a new token on their page, `POST /factory/register` mints the login none (`token_reset`) —, signs in again, registers a new one, makes a new token and grants their agents again (RUNBOOK, *A lost passkey*) |

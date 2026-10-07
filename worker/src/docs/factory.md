@@ -72,7 +72,10 @@ verify and attest the package faster and approve it with more confidence.
    (`factory/bin/audit-pkgbuild`, `factory/prompts/audit.md`) and attaches
    `audit.json` / `audit.md` to the evidence. The Review page shows the
    verdict (`ok`, `warn`, `block`); nothing acts on it, the maintainer does.
-6. **A maintainer claims it — never their own package.** On the Review
+6. **A maintainer claims it — never their own package** (but the one
+   maintainer the governance file's solo-maintainer exception names while it
+   is in force, on their own packages, each decision marked self-reviewed:
+   #394, [/docs/governance#solo](/docs/governance#solo)). On the Review
    page, a maintainer (`factory/MAINTAINERS.toml`) claims a package that is
    ready (*Build by the project* on a build's page is the same door): the
    project builds it again on a review worker, with the agent the maintainer
@@ -404,7 +407,8 @@ pacman package cache (a directory per architecture) with every build
 container it starts, so a dependency downloads once; `OMARCHY_BUILD_CACHE`
 likewise mounts a build cache at `/build/cache` — cargo's registry, Go's
 module and build caches, ccache's objects — so a Rust or Go package
-rebuilds in minutes. A build container runs make, ninja and cargo with
+rebuilds in minutes. A maintainer host's dispatcher keeps those caches
+itself, per package and read-only where shared (#341, below). A build container runs make, ninja and cargo with
 the job count its dispatcher set to match the task's CPUs (`MAKEFLAGS`,
 `NINJAFLAGS`, `CARGO_BUILD_JOBS`), or with every core it sees when none was
 set, with ccache on.
@@ -451,7 +455,7 @@ The factory touches the pool through four things, all versioned in the API:
 | The factory uses | Meaning |
 |---|---|
 | `GET /api/v1/package/:name` | who ships a name already (the guard) |
-| `POST /api/v1/factory/{requests,enqueue}` · `/requests/:id/{approve,reject}` · `/tasks/:id/cancel` (a maintainer's token — by hand, a dry run only (#284) — or the enqueue job's) · `/tasks/:id/{build,approve,reject}` (a maintainer, never the owner) · `POST /factory/workers` (a maintainer's token; 403 for anyone else, #331) · `/{contributors,packages}/:x/{block,unblock}` (a maintainer — a block, like an approval, in the browser with their passkey; lifting by another) · `POST /factory/jobs` (a maintainer queues a pool job; one that forces a promotion past its evidence in the browser with their passkey, #284) · `GET /factory/built`, `/factory/maintainers`, `/factory/review`, `/factory/blocks` | maintainers and the enqueue job |
+| `POST /api/v1/factory/{requests,enqueue}` · `/requests/:id/{approve,reject}` · `/tasks/:id/cancel` (a maintainer's token — by hand, a dry run only (#284) — or the enqueue job's) · `/tasks/:id/{build,approve,reject}` (a maintainer, never the owner — but the one maintainer the solo-maintainer exception names, on their own package, self-reviewed, #394) · `POST /factory/workers` (a maintainer's token; 403 for anyone else, #331) · `/{contributors,packages}/:x/{block,unblock}` (a maintainer — a block, like an approval, in the browser with their passkey; lifting by another) · `POST /factory/jobs` (a maintainer queues a pool job; one that forces a promotion past its evidence in the browser with their passkey, #284) · `GET /factory/built`, `/factory/maintainers`, `/factory/review`, `/factory/blocks` | maintainers and the enqueue job |
 | `POST /api/v1/factory/claim` (a registered worker's token) · `/tasks/:id/{heartbeat,complete,fail}` (the claim's job token) | the worker protocol |
 | `POST /api/v1/factory/register` · `/factory/packages[/:name/build]` · `PUT /factory/tasks/:id/artifacts/:file` (worker token) · `GET /factory/packages`, `/factory/me` | contributors: registry, staging uploads |
 | `pkg-repo publish --source factory --ring edge --arch …` · `pkg-repo render` | how a result enters the pool: as a source like any other |
@@ -591,6 +595,20 @@ network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a 
            host whose envelope grants it (OMARCHY_DIRECT_NETWORK, #373); elsewhere handed back lost (the attempt
            given back for a task's first HOST_LOSSES_MAX losses, spent after: the claim does not say yet whether
            a host runs such packages)
+caches     per lease (#341, D52): <work>/cache/pacman/<arch> read-only at /var/cache/pacman/shared (a build's and an
+           audit's pacman's first CacheDir; a trial's check reads none), and <task dir>/pkgcache writable at
+           /var/cache/pacman/pkg, where it downloads; a build also its own package's
+           <work>/cache/build/<trust>/<arch>/<package> at /build/cache — never the tree, another package's or the other
+           side's; after the lease its downloads go into the shared cache only when each file's SHA-256 is the one the
+           pool's signed edge databases of that arch list (every source's, fetched hourly, each .sig verified with the
+           pool's key built into the dispatcher; a name two databases list with different bytes is never merged), each
+           package with the pool's own copy of its upstream .sig beside it (<source>/<arch>/<file>.sig: a build's
+           pacman checks the image's Arch sections' packages by the .sig beside the file it found, and fails on one
+           without it), which must be the .sig the build downloaded when it downloaded one, or not at all; the rest
+           discarded, and each pass removes a file whose name the databases of the day list with other bytes than
+           its record's, its .sig after it; the pacman cache keeps two versions per package within OMARCHY_CACHE_PACMAN_GB, the build
+           caches go least recently used first within OMARCHY_CACHE_BUILD_GB (the envelope's cache_caps; 10 and 20 GB
+           by default), never one a lease mounts
 agent      the claim's agent: {provider, model, probe, error, checked_at} from a probe sidecar on a network of its own
            (at start, every 30 min, sooner after a failure, and for recheck-agent / restart-agent); the day's agent
            calls (OMARCHY_AGENT_CALLS_PER_DAY) spent: agent_slots 0 in the claim and no model task starts
@@ -642,7 +660,9 @@ busy, not gone); when only
 the requester's hosts have one, it waits, and Review offers another maintainer *Release to any host* at
 once, with their passkey (`POST /factory/tasks/:id/any-host`,
 `any-host:<task>`), on the task (`params.any_host`), the journal and the
-record. An audit — in a fresh container with its own agent sidecar, by
+record — except for the packages of the maintainer the solo-maintainer
+exception names (#394): their own hosts take that copy, with no release, and
+Review says why. An audit — in a fresh container with its own agent sidecar, by
 construction — leaves the machine that built what it audits (its
 registration, or one of the same owner's the pool cannot tell apart from it:
 two registrations are apart only with different owners, or as two hosts'

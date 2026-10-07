@@ -28,7 +28,10 @@
 //!   so an envelope without one leaves the dispatcher's defaults;
 //! - `OMARCHY_DIRECT_NETWORK=1`, only when the envelope grants a signed exception's bridge
 //!   network (`direct_network`, #373), which install's egress probe then checked: without
-//!   it the dispatcher hands a package with `network = "direct"` in `factory/sizing` back.
+//!   it the dispatcher hands a package with `network = "direct"` in `factory/sizing` back;
+//! - `OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB`: the envelope's `cache_caps`
+//!   (#341, design v2 §12, D52), each only when agent.toml sets it, so the dispatcher's
+//!   defaults hold otherwise — the task caches it prunes to them.
 //!
 //! It is written on install, on enrollment, on every rotation, and by the run loop when the
 //! host's addresses or agent.toml changed (it reads both every minute, agent.toml only when
@@ -85,11 +88,19 @@ pub const BUDGET: [(&str, &str); 4] = [
     ("calls_per_day", "OMARCHY_AGENT_CALLS_PER_DAY"),
 ];
 
+/// `[envelope].cache_caps`' keys, and the variables the dispatcher reads them from (#341, D52).
+pub const CACHE_CAPS: [(&str, &str); 2] = [
+    ("pacman_gb", "OMARCHY_CACHE_PACMAN_GB"),
+    ("build_gb", "OMARCHY_CACHE_BUILD_GB"),
+];
+/// No cache cap is larger: a value past it is a typo, not a disk.
+const MAX_CACHE_GB: u64 = 1 << 20;
+
 /// The registration the token belongs to: what install puts in agent.toml's `worker_id`.
 pub const WORKER: &str = "# worker: ";
-const HEADER: &str = "# The dispatcher's environment (omarchy-agent, #321, #371, #327): the registration of its host worker token, the host's own addresses, the secrets directory and the agent budget; the token itself is run/host/dispatcher/token, a read-only file (here too only while an older release needs it). The agent renders its own lines and keeps every other one.";
-/// Every heading the agent wrote: this one, #371's (which said the token was here), and
-/// the first one #321's wrote, before there was more than the token.
+const HEADER: &str = "# The dispatcher's environment (omarchy-agent, #321, #371, #327, #341): the registration of its host worker token, the host's own addresses, and from agent.toml alone the secrets directory, the agent budget, the grant of a signed exception's bridge and the cache caps (a line of yours for one of those is replaced); the token itself is run/host/dispatcher/token, a read-only file (here too only while an older release needs it). The agent renders its own lines and keeps every other one.";
+/// Every heading the agent wrote: this one, #371's and #327's (which said less), and the
+/// first one #321's wrote, before there was more than the token.
 const OLD_HEADERS: [&str; 2] = [
     "# The dispatcher's environment (omarchy-agent",
     "# The host worker token (omarchy-agent",
@@ -103,7 +114,10 @@ pub(crate) fn not_secret(key: &str) -> bool {
 }
 
 fn owned_by_envelope(key: &str) -> bool {
-    key == SECRETS_DIR || key == DIRECT_NETWORK || BUDGET.iter().any(|(_, k)| *k == key)
+    key == SECRETS_DIR
+        || key == DIRECT_NETWORK
+        || BUDGET.iter().any(|(_, k)| *k == key)
+        || CACHE_CAPS.iter().any(|(_, k)| *k == key)
 }
 
 /// The envelope's agent budget (design v2 §12, D45); `None` leaves the dispatcher's default.
@@ -171,15 +185,69 @@ impl Budget {
     }
 }
 
-/// What agent.toml gives the file: the secrets directory, the agent budget and the grant of
-/// a signed exception's bridge, and the task subnets, whose container bridges' addresses are
-/// not the host's own to refuse.
+/// The envelope's caps of the dispatcher's task caches in GB (#341, design v2 §12, D52);
+/// `None` leaves the dispatcher's default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheCaps {
+    pub pacman_gb: Option<u64>,
+    pub build_gb: Option<u64>,
+}
+
+impl CacheCaps {
+    /// `[envelope].cache_caps`: a table of `pacman_gb` and `build_gb`, each a whole number of
+    /// GB from 1; no table leaves both defaults. A key it does not know is refused: a typo
+    /// would leave a default the owner did not mean.
+    pub fn from_envelope(caps: Option<&toml::Value>) -> Result<Self, String> {
+        let Some(v) = caps else {
+            return Ok(Self::default());
+        };
+        let t = v
+            .as_table()
+            .ok_or("agent.toml: envelope.cache_caps is not a table")?;
+        if let Some(k) = t.keys().find(|k| !CACHE_CAPS.iter().any(|(n, _)| n == k)) {
+            return Err(format!(
+                "agent.toml: envelope.cache_caps.{k} is none of {}",
+                CACHE_CAPS.map(|(n, _)| n).join(", ")
+            ));
+        }
+        let get = |k: &str| -> Result<Option<u64>, String> {
+            t.get(k)
+                .map(|v| {
+                    v.as_integer()
+                        .and_then(|i| u64::try_from(i).ok())
+                        .filter(|n| (1..=MAX_CACHE_GB).contains(n))
+                        .ok_or_else(|| {
+                            format!("agent.toml: envelope.cache_caps.{k} must be a whole number of GB from 1 to {MAX_CACHE_GB}")
+                        })
+                })
+                .transpose()
+        };
+        Ok(Self {
+            pacman_gb: get("pacman_gb")?,
+            build_gb: get("build_gb")?,
+        })
+    }
+
+    fn lines(&self) -> Vec<String> {
+        CACHE_CAPS
+            .iter()
+            .zip([self.pacman_gb, self.build_gb])
+            .filter_map(|((_, var), v)| v.map(|v| format!("{var}={v}")))
+            .collect()
+    }
+}
+
+/// What agent.toml gives the file: the secrets directory, the agent budget, the grant of a
+/// signed exception's bridge and the task caches' caps, and the task subnets, whose container
+/// bridges' addresses are not the host's own to refuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
     pub secrets_dir: PathBuf,
     pub budget: Budget,
     /// `[envelope].direct_network` (#373): absent is no grant.
     pub direct_network: bool,
+    /// `[envelope].cache_caps` (#341).
+    pub cache_caps: CacheCaps,
     pub(crate) task_subnets: Vec<Cidr>,
 }
 
@@ -203,8 +271,9 @@ fn task_subnets(value: Option<&str>) -> Vec<Cidr> {
 
 impl Envelope {
     /// From agent.toml's text: `set.secrets_dir`, `envelope.agent_budget`,
-    /// `envelope.direct_network` and `envelope.task_subnets`, nothing else (the enrollment
-    /// reads it where the run loop's stricter configuration does not apply).
+    /// `envelope.direct_network`, `envelope.cache_caps` and `envelope.task_subnets`, nothing
+    /// else (the enrollment reads it where the run loop's stricter configuration does not
+    /// apply).
     pub fn from_agent_toml(text: &str) -> Result<Self, String> {
         let t: toml::Table = toml::from_str(text).map_err(|e| format!("agent.toml: {e}"))?;
         let secrets_dir = t
@@ -219,6 +288,7 @@ impl Envelope {
             secrets_dir,
             budget,
             direct_network: direct_network(envelope)?,
+            cache_caps: CacheCaps::from_envelope(envelope.and_then(|e| e.get("cache_caps")))?,
             task_subnets: task_subnets(
                 envelope
                     .and_then(|e| e.get("task_subnets"))
@@ -233,6 +303,7 @@ impl Envelope {
             secrets_dir: cfg.secrets_dir.clone(),
             budget: cfg.agent_budget,
             direct_network: cfg.direct_network,
+            cache_caps: cfg.cache_caps,
             task_subnets: task_subnets(cfg.task_subnets.as_deref()),
         }
     }
@@ -310,6 +381,7 @@ impl Rendered {
             if e.direct_network {
                 out.push(format!("{DIRECT_NETWORK}=1"));
             }
+            out.extend(e.cache_caps.lines());
         }
         Ok(out)
     }

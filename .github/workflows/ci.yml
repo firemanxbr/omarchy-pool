@@ -41,7 +41,7 @@ jobs:
         run: bash tests/worker-needs-native.sh
         env:
           PKG_REPO: target/release/pkg-repo
-      - name: The dispatcher on a real engine — a task container born with nothing on its own internal network with its egress sidecar, staged in and out, completed with the memory peak it measured; a failure, the memory limit's kill and an output outside its list; restarts that re-adopt and sweep orphans; a lease the pool stops hearing; a stop; the disk watcher; pool jobs — a health check's helper through omarchy-task-run on its own network under the job's 2 GB limit, other engine calls refused, a hung job killed at its timeout while a build beats on
+      - name: The dispatcher on a real engine — a task container born with nothing on its own internal network with its egress sidecar, staged in and out, completed with the memory peak it measured; a failure, the memory limit's kill and an output outside its list; restarts that re-adopt and sweep orphans; a lease the pool stops hearing; a stop; the disk watcher; pool jobs — a health check's helper through omarchy-task-run on its own network under the job's 2 GB limit, other engine calls refused, a hung job killed at its timeout while a build beats on; the task caches — two builds at once in their own package caches, a recipe's writes past its own cache reaching nothing, the shared pacman cache read-only and only the signed bytes merged back
         run: bash tests/dispatch-engine.sh
         env:
           PKG_REPO: target/release/pkg-repo
@@ -276,6 +276,36 @@ jobs:
       - name: The sandboxed runtime — the agent finds runsc after its smoke run, a community build runs in it, the project's build and every sidecar on runc, a runtime the engine lacks never falls back
         run: bash tests/sandboxed-runtime.sh
 
+  host-key-tpm:
+    name: Host key in a TPM (swtpm behind tpm2-abrmd, against a local pool)
+    # #330, the Linux half of hardware-bound host keys (design v2 §14): the real agent makes
+    # its key in a TPM 2.0 (swtpm, reached through tpm2-abrmd as /dev/tpmrm0 would be, with the
+    # distribution's tpm2-tools) — ECDSA P-256, fixedtpm and fixedparent, no host.ed25519 —
+    # and enrolls with the TPM's signature against a local pool (wrangler dev), whose page
+    # shows the key in the TPM; the token comes with TPM-signed requests and rotates with
+    # the TPM its file names; the key's files load in no other TPM, and a cleared TPM signs
+    # nothing more; with no TPM in reach the key is a file and the page says why, and
+    # OMARCHY_HOST_KEY=tpm with none enrolls nothing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+        working-directory: worker
+      - name: swtpm, tpm2-tools, and tpm2-abrmd with its TCTI and a D-Bus to run it on
+        run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends swtpm swtpm-tools tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 dbus
+      - name: The host key made in a TPM, used there and never out of it; a file key, and why, where there is none
+        run: bash tests/host-key-tpm.sh
+
   agent-self-update:
     name: Host agent self-update under systemd --user
     # #316: deliberately broken builds of a higher agent — a panic while it
@@ -400,6 +430,9 @@ jobs:
       - name: Governance file and CODEOWNERS agree
         working-directory: .
         run: factory/bin/check-governance
+      - name: The solo-maintainer exception's switch — check-governance takes a [solo] table that is exactly it and refuses any other
+        working-directory: .
+        run: bash tests/governance-solo.sh
       - name: The tree carries no ignored, one-machine or secret file
         working-directory: .
         run: bash tests/tracked-tree.sh
@@ -430,6 +463,9 @@ jobs:
       - name: The build script's task mode — no pool call, the log cut at its cap, verdict.json always JSON — in a container with the task's mounts
         working-directory: .
         run: bash tests/worker-task-mode.sh
+      - name: A task's two pacman caches with a real pacman — the host's read-only first, its own writable second; two tasks at once download into their own; what the shared cache holds with each package's .sig is used, and a package without its .sig, beside a wrong one or with bytes it should not hold fails the task
+        working-directory: .
+        run: bash tests/task-caches.sh
       - name: The worker checks its agent again until it answers, against a stub agent that comes up late
         working-directory: .
         run: bash tests/worker-agent-recheck.sh

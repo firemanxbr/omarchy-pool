@@ -1426,3 +1426,106 @@ describe("the switch's pins (#345, design v2 §21.1 step 4): a task pinned to a 
     expect(notClaiming(studio({ below_minimum: true, below_disk: { work: 100, engine: 50 } }), T0)).toBeNull();
   });
 });
+
+// The solo-maintainer exception (#394): while factory/MAINTAINERS.toml's [solo] names m1, the claim's reads say so on the project's copy of a
+// package (routes/factory.ts placementCols: `solo`), and the requester-host rule (D35) does not hold for m1's own packages — m1's hosts take
+// their copies, nothing waits for a release. Nobody else gains anything: another requester's hosts are still kept off a copy, and a
+// contributor's package is placed as it always was.
+describe("the solo-maintainer exception (#394): the requester-host rule lifted for the maintainer [solo] names, and for nobody else", () => {
+  const SOLO = "m1";
+  const soloCopy = (requesters: string[], o: Partial<Candidate> & { arch?: string } = {}) => copyOf(requesters, { solo: SOLO, ...o });
+
+  it("one maintainer, one host — the Studio: m1's own copy is built there at the first claim, no release, and Review is told why", () => {
+    const studio = owned("m1-studio", "m1", "aarch64", 11);
+    const s = new Sim([studio], () => 30);
+    const [own] = s.add(soloCopy(["m1"]));
+    const [theirs] = s.add(soloCopy(["m2"]));
+    // Not held: the exception's own host may take it, and placement says whose and which.
+    expect(placementOf(s.fleet(), own, T0, R)).toEqual({ others: [], mine: ["m1-studio"], held: false, solo: { maintainer: "m1", hosts: ["m1-studio"] } });
+    expect(requesterHost(studio, own)).toBe(false);
+    s.run(1);
+    expect(s.startOf(own)).toMatchObject({ by: "m1-studio", at: T0, lane: "native" });
+    // Another maintainer's package is the Studio's as it always was, and its placement says nothing of the exception.
+    expect(s.startOf(theirs)).toMatchObject({ by: "m1-studio", at: T0 });
+    expect(placementOf(s.fleet(), theirs, T0, R)).toEqual({ others: ["m1-studio"], mine: [], held: false });
+    // An emulated lane of m1's counts too, and needs_native leaves m1's native host: the exception's, so no hold either.
+    const vps = owned("m1-vps86", "m1", "x86_64", 7);
+    const both: Fleet = { members: [studio, vps], leases: [] };
+    const native = task(soloCopy(["m1"], { arch: "x86_64", needs_native: true }));
+    expect(placementOf(both, native, T0, R)).toEqual({ others: [], mine: ["m1-vps86"], held: false, solo: { maintainer: "m1", hosts: ["m1-vps86"] } });
+    expect(select(vps, both, [native], T0, R)).toMatchObject([{ id: native.id, lane: "native" }]);
+  });
+
+  it("without the table the same fleet holds m1's copy for a release, as today; and the copy carries no exception unless the claim's read says so", () => {
+    const studio = owned("m1-studio", "m1", "aarch64", 11);
+    const s = new Sim([studio]);
+    const [own] = s.add(copyOf(["m1"]));
+    expect(placementOf(s.fleet(), own, T0, R)).toEqual({ others: [], mine: ["m1-studio"], held: true });
+    s.run(120);
+    expect(s.startOf(own)).toBeUndefined();
+    // A [solo] naming m1 that the read did not carry (solo: null) is no exception either.
+    expect(requesterHost(studio, { ...own, solo: null })).toBe(true);
+  });
+
+  it("another maintainer gains nothing: [solo] naming m1 keeps m2's copy off m2's hosts, and with only m2's hosts it is held for a release", () => {
+    const m1 = owned("m1-studio", "m1", "aarch64", 11);
+    const m2 = owned("m2-vps", "m2", "aarch64", 7);
+    const fleet: Fleet = { members: [m1, m2], leases: [] };
+    const theirs = task(soloCopy(["m2"]));
+    expect(requesterHost(m2, theirs)).toBe(true);
+    expect(select(m2, fleet, [theirs], T0, R)).toEqual([]);
+    expect(placementOf(fleet, theirs, T0, R)).toEqual({ others: ["m1-studio"], mine: ["m2-vps"], held: false });
+    expect(placementOf({ members: [m2], leases: [] }, theirs, T0, R)).toEqual({ others: [], mine: ["m2-vps"], held: true });
+    // A package both asked for: m1's host may build it (m1's own), m2's still may not.
+    const shared = task(soloCopy(["m2", "m1"]));
+    expect(requesterHost(m1, shared)).toBe(false);
+    expect(requesterHost(m2, shared)).toBe(true);
+    expect(placementOf(fleet, shared, T0, R)).toEqual({ others: [], mine: ["m1-studio", "m2-vps"], held: false, solo: { maintainer: "m1", hosts: ["m1-studio"] } });
+    // Only m2's host alive for it: held, as today — the exception's maintainer has no host that can run it.
+    expect(placementOf({ members: [m2], leases: [] }, shared, T0, R)).toEqual({ others: [], mine: ["m2-vps"], held: true, solo: { maintainer: "m1", hosts: [] } });
+  });
+
+  it("a legacy project registration — a host with one lane and one build since #343 — is m1's host to the exception as any of m1's: it takes m1's copy, and m2's is still kept off m2's", () => {
+    const pool = legacy("m1-pool-aarch64", "aarch64", { trust: "project", owner: "m1", model: "anthropic/claude-a" });
+    const theirs = legacy("m2-pool-aarch64", "aarch64", { trust: "project", owner: "m2", model: "anthropic/claude-a" });
+    const own = task(soloCopy(["m1"]));
+    expect(requesterHost(pool, own)).toBe(false);
+    expect(placementOf({ members: [pool], leases: [] }, own, T0, R)).toEqual({ others: [], mine: ["m1-pool-aarch64"], held: false, solo: { maintainer: "m1", hosts: ["m1-pool-aarch64"] } });
+    expect(select(pool, { members: [pool], leases: [] }, [own], T0, R)).toMatchObject([{ id: own.id, lane: "native" }]);
+    // Without the table it is the requester's registration again: held for a release.
+    const before = task(copyOf(["m1"]));
+    expect(placementOf({ members: [pool], leases: [] }, before, T0, R)).toEqual({ others: [], mine: ["m1-pool-aarch64"], held: true });
+    expect(select(pool, { members: [pool], leases: [] }, [before], T0, R)).toEqual([]);
+    // Another maintainer's legacy registration gains nothing: m2's copy goes to m1's, never to m2's.
+    const m2s = task(soloCopy(["m2"]));
+    expect(select(theirs, { members: [pool, theirs], leases: [] }, [m2s], T0, R)).toEqual([]);
+    expect(select(pool, { members: [pool, theirs], leases: [] }, [m2s], T0, R)).toMatchObject([{ id: m2s.id }]);
+  });
+
+  it("a contributor's package is placed as it always was: its copy anyone's, the exception's host among them, no word of it", () => {
+    const m1 = owned("m1-studio", "m1", "aarch64", 11);
+    const s = new Sim([m1]);
+    const [alices] = s.add(soloCopy(["alice"]));
+    expect(placementOf(s.fleet(), alices, T0, R)).toEqual({ others: ["m1-studio"], mine: [], held: false });
+    s.run(1);
+    expect(s.startOf(alices)).toMatchObject({ by: "m1-studio", at: T0 });
+  });
+
+  it("over a simulated day on the Studio alone: every copy of m1's packages built as it arrives, none waiting for a release; another maintainer's built there as before", () => {
+    const studio = owned("m1-studio", "m1", "aarch64", 11);
+    // Twenty-minute rebuilds: the Studio's two agent slots hold every one of them as it comes (each copy is model work).
+    const s = new Sim([studio], () => 20);
+    const mine: Candidate[] = [], theirs: Candidate[] = [];
+    // A copy of m1's every half hour, and one of m2's every two hours: the Studio is another maintainer's host to m2's, as without the table.
+    s.run(24 * 60, (sim) => {
+      if ((sim.now - T0) % (30 * MIN) === 0) mine.push(...sim.add(soloCopy(["m1"])));
+      if ((sim.now - T0) % (120 * MIN) === 0) theirs.push(...sim.add(soloCopy(["m2"])));
+    });
+    const waited = (cs: Candidate[]) => cs.filter((c) => c.queued_at < s.now - MIN).map((c) => (s.startOf(c)?.at ?? Number.POSITIVE_INFINITY) - c.queued_at);
+    // Every copy queued before the day's last minute started within a few minutes of arriving — no hold, no release asked of anyone.
+    expect(waited(mine).length).toBeGreaterThan(40);
+    expect(Math.max(...waited(mine))).toBeLessThanOrEqual(5 * MIN);
+    expect(Math.max(...waited(theirs))).toBeLessThanOrEqual(5 * MIN);
+    expect(s.ran.filter((r) => mine.includes(r.task)).every((r) => r.by === "m1-studio")).toBe(true);
+  });
+});
