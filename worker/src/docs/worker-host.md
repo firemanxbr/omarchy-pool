@@ -213,8 +213,10 @@ with userns-remap its uid in the host's user namespace
 contributor drafts** (the provider's own spending limit), since a
 recipe that compromises its draft's sidecar can use that key until the caps
 stop it; and a `GITHUB_TOKEN` in `agent.env` with no write scope and no
-private-repository read (a fine-grained token, "public repositories,
-read-only"). A package that truly needs direct network access (raw sockets,
+private-repository read: a classic token with no scope at all, which
+reads public repositories only — install and *Set agent keys* refuse a
+token with a scope, and a fine-grained or app token, for which GitHub
+names no scopes, since whether it may write cannot be told. A package that truly needs direct network access (raw sockets,
 its own name resolution) gets `network = "direct"` with a `reason` in
 `factory/sizing/tasks.toml`, in a pull request another maintainer approves.
 A host runs such a package's tasks only where its owner granted that bridge
@@ -368,7 +370,17 @@ before 0.5.0 says neither, and so does a Mac's, whose engine runs in the VM
 that mounts nothing of your home directory).
 Its buttons are there too: Reconcile now (an Update of its registration
 while its agent takes no host order), **Drain** and **Resume claims** —
-your drain is lifted by you only —, Suspend and Retire. Anyone else sees
+your drain is lifted by you only —, Suspend and Retire. Beside the legacy
+set it was installed with (`--legacy`), its page counts the queued tasks
+pinned to your legacy registrations, by the machine their labels say, and
+**Move pins here** (#345) moves those of the set you choose — this
+machine's, by default; another machine's set, still claiming, only if you
+choose it — onto the host's registration where the host could run them,
+the agent a pin chose included — before you drain those registrations at
+the switch, so a build pinned to one keeps that choice of machine and
+agent; the rest go to the queue once their registration's drain has held
+three minutes
+([Runbook](/docs/runbook#the-studio-host), *The Studio switch*). Anyone else sees
 its name, architectures, release and whether its agent reports; the
 [Workers page](/workers) lists every host with its owner, lanes, units busy
 and free, tasks, release and isolation level for anyone, and Status says
