@@ -536,7 +536,7 @@ enum Command {
         payload: Option<String>,
     },
     /// Queues a pool job by hand, as a maintainer: sync, promote, render,
-    /// health, security, enqueue or gc. A project worker runs it with a
+    /// health, security, enqueue or gc. A maintainer's host runs it with a
     /// per-job token; the maintainer's token only queues.
     Job {
         #[command(flatten)]
@@ -892,7 +892,7 @@ fn main() -> Result<()> {
             });
             let queued = api(&remote)?.post_json("/factory/jobs", &body)?;
             println!(
-                "queued as task {} ({} — a project worker runs it; the Pipeline follows it)",
+                "queued as task {} ({} — a maintainer's host runs it; the Pipeline follows it)",
                 queued["task"],
                 queued["job"]["kind"].as_str().unwrap_or(&kind)
             );

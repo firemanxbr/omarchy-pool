@@ -202,13 +202,13 @@ describe("a list that did not answer is said, not drawn", () => {
     expect(rvTiles(d)).toEqual(before);
   });
 
-  it("/status: the Workers card, the rollbacks tile, the advisories and the journal each say which read did not answer — no 'no project worker', no 0, no 'nothing on the record'", async () => {
+  it("/status: the Workers card, the rollbacks tile, the advisories and the journal each say which read did not answer — no 'no host enrolled', no 0, no 'nothing on the record'", async () => {
     const d = await run("/status", { down: true });
     await settled();
     // The worker listing: the card's foot says so, the busy count is a dash, no empty state stands in for the list.
     expect(d.nodes["#workers-note"].textContent).toBe(`the worker listing did not answer: ${INTERNAL}`);
     expect(d.nodes["#workers-busy"].textContent).toBe("—");
-    expect(html(d, "#workers-list")).not.toContain("no project worker");
+    expect(html(d, "#workers-list")).not.toContain("no host enrolled");
     // The rollbacks tile: a dash and the reason on hover, not "0 this month".
     expect(d.nodes["#t-rollbacks-n"].textContent).toBe("—");
     expect(html(d, "#t-rollbacks-s")).toBe(`<span title="the journal did not answer: ${INTERNAL}">did not answer</span>`);

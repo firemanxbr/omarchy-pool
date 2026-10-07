@@ -462,7 +462,7 @@ __CHARTS__
       return passkeyed("promote:force:" + from + ":" + to + (arch ? ":" + arch : ""), function (assertion) { return api("POST", "/api/v1/factory/jobs", { kind: "promote", params: params, assertion: assertion }); }).then(function (j) {
         if (j.error) b.disabled = false;
         el.hidden = false;
-        el.innerHTML = j.error ? pillHtml("error", "refused") + " " + refusalHtml(j) : pillHtml("ok", "queued") + " forced promotion of <b>" + esc(from) + "</b> into <b>" + esc(to) + "</b>" + (arch ? " (" + esc(arch) + " only)" : "") + " is task #" + esc(j.task || "?") + " — a project worker runs it, the journal records it with your passkey";
+        el.innerHTML = j.error ? pillHtml("error", "refused") + " " + refusalHtml(j) : pillHtml("ok", "queued") + " forced promotion of <b>" + esc(from) + "</b> into <b>" + esc(to) + "</b>" + (arch ? " (" + esc(arch) + " only)" : "") + " is task #" + esc(j.task || "?") + " — a maintainer's host runs it, the journal records it with your passkey";
       });
     }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
   });
@@ -618,7 +618,7 @@ __CHARTS__
     var looks = ws.filter(function (w) { return w.alive && !w.revoked_at && (w.crash_loop_since || (w.watchdog && w.watchdog.n >= 2)); });
     var notes = fleetLines(FACTORY.workers, FACTORY.pool, Date.now()).concat(behindLines(FACTORY.pool_behind_github), looks.map(function (w) { return ["warn", workerName(w) + (w.crash_loop_since ? ": a new process every few minutes since " + esc(ago(w.crash_loop_since)) + " — it may be crash-looping; its log has why" : ": restarted by its watchdog " + w.watchdog.n + " times since " + esc(ago(w.watchdog.since)) + " — it wedges the same way; its log has why")]; }));
     if (notes.length && !WC_DOWN) $("#workers-note").innerHTML = notes.map(function (n) { return '<span class="st-dot ' + (n[0] === "info" ? "run" : n[0]) + '" aria-hidden="true"></span>' + n[1]; }).join("<br>");
-    $("#workers-list").innerHTML = ws.map(function (w) { return workerLine(w, tasks[w.current_task]); }).join("") || '<p class="st-empty">no project worker registered</p>';
+    $("#workers-list").innerHTML = ws.map(function (w) { return workerLine(w, tasks[w.current_task]); }).join("") || '<p class="st-empty">no host enrolled</p>';
   }
   // ---- hosts and capacity (#324, design v2 §18.3): the fleet's lines — each host's errors, warnings and info, the capacity per architecture (the
   // scaling signal: how many wait, the oldest, the free units native and emulated, and the week's busy ratio per lane) and the second opinion —
@@ -945,7 +945,7 @@ __CHARTS__
     pager("#workflows", kinds, function (w) {
       var l = w.last, st = l ? l.status : "—", cls = st === "ok" ? "ok" : st === "error" ? "error" : st === "warn" ? "warn" : "";
       return '<tr><td>' + esc(w.kind) + '</td><td><span class="dot ' + cls + '"></span>' + esc(st) + (l ? ' <span class="when">' + ago(l.created_at) + '</span>' : '') + '</td><td class="num">' + num(w.runs) + '</td><td class="num">' + (w.failed ? '<span style="color:var(--red)">' + num(w.failed) + '</span>' : '0') + '</td><td class="num">' + (w.waiting ? '<span style="color:var(--blue)">' + num(w.waiting) + '</span>' : '0') + '</td><td class="num">' + num(w.minutes) + '</td></tr>';
-    }, { empty: 'no jobs yet — the pool queues them on schedule and project workers pull them', n: 25 });
+    }, { empty: 'no jobs yet — the pool queues them on schedule and the maintainers\' hosts pull them', n: 25 });
   }
 
   // The bill, estimated __CADENCE__ from Cloudflare's analytics (cost.ts); the guard pauses writing jobs over budget. Asked once per stats poll, as the page always did, and kept (BILL) for the tiles drawn again between polls when the listing answers. The colour and the figure are the shell's (costColor, usd).

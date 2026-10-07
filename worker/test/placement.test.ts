@@ -538,7 +538,7 @@ describe("Review's view (the page's own script)", () => {
     d.setREVIEW(listWith(placementFor({ ok: false, why: "m2-arm — another maintainer's — can build it" }, { held: false, others: ["m2-arm"] })));
     d.renderRebuild(R, null);
     expect(d.nodes["#rv-place"].innerHTML).toBe("");
-    expect(d.nodes["#rv-y-log"].innerHTML).toContain("queued for a review worker");
+    expect(d.nodes["#rv-y-log"].innerHTML).toContain("queued for a host");
   });
 
   it("the audit's independence beside its verdict: the rebuild's audit on the right, as the shell words it for each value", async () => {
