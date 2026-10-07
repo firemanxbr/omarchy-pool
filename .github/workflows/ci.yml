@@ -406,7 +406,7 @@ jobs:
       - name: The agent's claude-code provider, against a fake claude
         working-directory: .
         run: python3 tests/agent-claude-code.py
-      - name: The broker, against a fake agent and a fake pool
+      - name: The broker — a task's agent sidecar, within its caps — against a fake agent and a fake GitHub, with no pool path (#346)
         working-directory: .
         run: python3 tests/broker.py
       - name: The setup script, against an Asahi-like pacman.conf

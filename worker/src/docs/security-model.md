@@ -92,7 +92,7 @@ secret). Everything travels in the `Authorization` header over TLS only.
 Every task runs on a maintainer's host, and the host is built so that the
 code a task runs — a contributor's recipe, the upstream's build system, a
 package's install scriptlets — holds nothing worth taking and reaches
-nothing worth reaching (design v2 §9, §10). Four kinds of process share the
+nothing worth reaching (design v2 §9, §10). Five kinds of piece share the
 host, and only one of them runs untrusted code:
 
 | Piece | Holds | Reaches | Runtime socket | Runs untrusted code | Reachable from a task |

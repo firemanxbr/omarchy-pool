@@ -42,7 +42,8 @@ for gone in updater broker; do
   if out="$("$RT" run --rm -e OMARCHY_WORKER_ROLE="$gone" -e OMARCHY_WORKER_TOKEN=omw_smoke "$image" 2>&1)"; then fail "the $gone role started: $out"; fi
   grep -q "the $gone role is gone (#346)" <<<"$out" || fail "the $gone role's refusal: $out"
 done
-[[ -z "$("$RT" image inspect -f '{{index .Config.Labels "com.omarchy.updater.follows"}}' "$image" | grep -v '<no value>')" ]] || fail "the image still says an updater follows the pool"
+label="$("$RT" image inspect -f '{{index .Config.Labels "com.omarchy.updater.follows"}}' "$image")"
+[[ -z "$label" || "$label" == "<no value>" ]] || fail "the image still says an updater follows the pool: $label"
 echo "ok: no updater and no broker role"
 
 # A stub pool on the runner: who a worker token is (a project registration of this architecture), and no work for its claim (204,
