@@ -519,14 +519,19 @@ a fake `claude`.
 
 `bash tests/worker-resources.sh` (CI, a real engine) runs the build
 script's own `ram_anon`, `resources_begin` and `resources_end` (#330, D31)
-in a container at a 384 MB memory limit around a build that writes and
-reads 1 GB of files and holds 64 MB of shared memory (a tmpfs file) and
-50 MB of its own for three seconds, all given back before the end:
+in a container at a 384 MB memory limit around a build that reads 1 GB
+of files and holds 64 MB of shared memory (a tmpfs file) and 50 MB of its
+own for three seconds, all given back before the end:
 `resources.json` reads, its `ram_anon_peak_mb` — the size learning's —
 says what was held (from 100 to 260 MB: the sampler saw it, and the page
 cache is not counted), and its `ram_peak_mb` — the build page's
 high-water mark — the page cache up to the limit wherever the kernel keeps
-one.
+one. The files are a sparse file, read, so their page cache is clean: 1 GB
+written through the container is dirty until the disk takes it, and only
+cgroup v1's reclaim waits for writeback, so on cgroup v2 the container was
+OOM-killed before anything was measured. A container that dies says the
+step it died in and whether its memory limit killed it. TMPDIR must be on
+a disk: tmpfs keeps no page cache of a sparse file.
 
 `bash tests/worker-agent-recheck.sh` (CI) drives the claim loop of
 `omarchy-build-worker.sh --container` on a fake clock — the script sourced
