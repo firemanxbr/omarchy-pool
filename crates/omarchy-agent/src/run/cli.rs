@@ -279,7 +279,7 @@ fn setup(
     // Without it they answer "no answer" (the agent keeps running and says why); a missing
     // key is no reason to stop.
     let mut https = Https::new(&cfg.pool).with_progress(Arc::clone(progress));
-    let key_error = match crate::host::HostKey::load(&paths.host_key()) {
+    let key_error = match crate::host::HostKey::load_in(&paths.host_key_dir()) {
         Ok(k) => {
             https = https.with_host(k, &cfg.host_id);
             None
@@ -479,6 +479,7 @@ pub fn status(data: Option<&str>) -> u8 {
                 paths.state().display()
             );
             print_pending(&paths);
+            print!("{}", host_key_line(&paths.host_key_dir()));
             return 0;
         }
         Err(e) => {
@@ -503,8 +504,24 @@ pub fn status(data: Option<&str>) -> u8 {
     if let Some(c) = &cfg {
         println!("driver:    {}", driver_line(c));
     }
+    print!("{}", host_key_line(&paths.host_key_dir()));
     print!("{}", owner_lines(&paths.data.join("state")));
     0
+}
+
+/// `status`'s line for the host key: its fingerprint, the one the host's page shows, and
+/// where it lives — in the TPM, or a file (#330). The TPM is not asked: its files say.
+fn host_key_line(state: &Path) -> String {
+    match crate::host::HostKey::load_in(state) {
+        Ok(k) => format!("{:<10} {} {}\n", "host key:", k.fingerprint(), k.describe()),
+        Err(_) if !state.join(crate::host::IDENTITY_FILE).exists() => {
+            format!(
+                "{:<10} none yet: this machine has not enrolled\n",
+                "host key:"
+            )
+        }
+        Err(e) => format!("{:<10} {e}\n", "host key:"),
+    }
 }
 
 /// The driver agent.toml names and where it runs the set (#330: the Quadlet driver's units).

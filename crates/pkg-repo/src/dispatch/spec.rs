@@ -7,8 +7,9 @@
 //! no agent key, not the work root, not another task's directory, not the
 //! dispatcher's state, never `--privileged`, a device or host networking. It
 //! mounts its own staged inputs read-only, its outputs, its log, its build
-//! directory on the work root, the release's checkout read-only and a
-//! pacman cache of its own; its environment is an allowlist; it is never
+//! directory on the work root, the release's checkout read-only, the host's
+//! pacman cache read-only and one of its own, and a build its package's build
+//! cache; its environment is an allowlist; it is never
 //! started with `--rm`, so its exit code and `OOMKilled` outlive a
 //! dispatcher restart (§9.8).
 //!
@@ -64,12 +65,18 @@
 //! and nothing else: no token, no socket, no other mount. It runs on the
 //! engine's own runtime, a sandboxed host's included (#330, [`helper_plan`]).
 //!
-//! Seams left for later issues, by name: P2's task caches child issue
-//! mounts the read-only shared pacman cache and the per-package build
-//! caches.
+//! **Its caches** (#341, D52; [`super::cache`]) are cut from the lease
+//! itself: the host's pacman cache of its lane, read-only (a build's and an
+//! audit's pacman's first `CacheDir`), beside its own writable one, and, for a build, the build
+//! cache of its own package on its own side of the pool
+//! (`<work>/cache/build/<trust>/<arch>/<package>` at `/build/cache`) — never
+//! the cache tree, a project cache for a community task, or another
+//! package's (invariant 9). An audit and a trial compile nothing and mount no
+//! build cache.
 
 use std::path::{Path, PathBuf};
 
+use super::cache;
 use crate::stop::TASK_LABEL;
 
 /// The lease generation label (D46): a container of an older lease of the same task is never taken for this one.
@@ -278,7 +285,8 @@ pub fn path_ok(p: &Path) -> bool {
 }
 
 /// What a task container runs (design v2 §9.2): the kind decides its
-/// environment and its sidecars, never its mounts.
+/// environment and its sidecars, and whether it mounts a build cache (a
+/// build only); never any other mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// A build that needs no model: a contributor's recipe, a bump, the project's recipe on main.
@@ -294,6 +302,36 @@ pub enum Kind {
 impl Kind {
     pub fn model(self) -> bool {
         matches!(self, Kind::ModelBuild | Kind::Audit)
+    }
+
+    /// It compiles: its package's build cache is mounted at `/build/cache` (#341).
+    pub fn builds(self) -> bool {
+        matches!(self, Kind::Build | Kind::ModelBuild)
+    }
+}
+
+/// The side of the pool a task builds for (`build_tasks.trust`): its build cache is that
+/// side's, so a community recipe never writes what a project build reads (D52).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Trust {
+    Community,
+    Project,
+}
+
+impl Trust {
+    pub fn of(s: &str) -> Option<Self> {
+        match s {
+            "community" => Some(Self::Community),
+            "project" => Some(Self::Project),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Community => "community",
+            Self::Project => "project",
+        }
     }
 }
 
@@ -393,10 +431,14 @@ pub struct Spec<'a> {
     pub emulated: bool,
     pub name: &'a str,
     pub kind: Kind,
+    /// The side its build is for: its build cache is that side's (#341).
+    pub trust: Trust,
     /// The CPUs and the memory of its units (the signed constants); the sidecars' come out of them.
     pub cpus: u32,
     pub mem_gb: u32,
     pub image: &'a str,
+    /// The work root: its caches are cut from it by the lease's own trust, lane and package (#341).
+    pub work_root: &'a Path,
     /// `<work root>/tasks/<id>-<gen>`.
     pub task_dir: &'a Path,
     /// `<work root>/releases/<release>`: the release's checkout.
@@ -970,18 +1012,18 @@ pub fn task_container(s: &Spec<'_>) -> Result<Vec<String>, String> {
             s.cpus, s.mem_gb
         ));
     }
-    for p in [s.task_dir, s.release_dir] {
+    for p in [s.work_root, s.task_dir, s.release_dir] {
         if !path_ok(p) {
             return Err(format!("host path {} is outside the grammar", p.display()));
         }
     }
-    let dir_name = s.task_dir.file_name().map(|n| n.to_string_lossy());
-    if dir_name.as_deref() != Some(&format!("{}-{}", s.task, s.gen)) {
+    if s.task_dir != task_dir(s.work_root, s.task, s.gen) {
         return Err(format!(
-            "task directory {} is not this lease's ({}-{})",
+            "task directory {} is not this lease's ({}-{} under {})",
             s.task_dir.display(),
             s.task,
-            s.gen
+            s.gen,
+            s.work_root.display()
         ));
     }
     let side = side_of(s)?;
@@ -1041,14 +1083,31 @@ pub fn task_container(s: &Spec<'_>) -> Result<Vec<String>, String> {
     a.push("--security-opt".into());
     a.push("no-new-privileges".into());
     let d = |sub: &str| s.task_dir.join(sub).display().to_string();
-    for mount in [
+    let mut mounts = vec![
         format!("{}:/task/in:ro", d("in")),
         format!("{}:/task/out", d("out")),
         format!("{}:/task/log", d("log")),
         format!("{}:/build", d("build")),
         format!("{}:/pool:ro", s.release_dir.display()),
-        format!("{}:/var/cache/pacman/pkg", d("pkgcache")),
-    ] {
+        // The host's pacman cache of its lane, read-only: a build's and an audit's pacman's first
+        // CacheDir; its own, where it downloads, the second (#341, D52).
+        format!(
+            "{}:{}:ro",
+            cache::pacman_dir(s.work_root, s.arch).display(),
+            cache::PACMAN_SHARED_IN
+        ),
+        format!("{}:{}", d("pkgcache"), cache::PACMAN_OWN_IN),
+    ];
+    // Its own package's build cache on its own side, cut from the lease's values here: never
+    // the tree, another package's, or the other side's.
+    if s.kind.builds() {
+        mounts.push(format!(
+            "{}:{}",
+            cache::build_dir(s.work_root, s.trust, s.arch, s.name).display(),
+            cache::BUILD_CACHE_IN
+        ));
+    }
+    for mount in mounts {
         a.push("-v".into());
         a.push(mount);
     }
@@ -1137,9 +1196,11 @@ mod tests {
             emulated: false,
             name: "felix",
             kind,
+            trust: Trust::Community,
             cpus: 4,
             mem_gb: 8,
             image: DIGEST,
+            work_root: Path::new("/srv/omarchy/work"),
             task_dir: dir,
             release_dir: rel,
             worker_image: WORKER,
@@ -1316,14 +1377,45 @@ mod tests {
         }
     }
 
+    /// Whose plan the reader reads: the network it may have, the task container's caches,
+    /// which are its package's on its side only (#341, invariant 9), and the sandboxed
+    /// runtime it was to run in, or none (#330).
+    #[derive(Debug, Clone, Copy)]
+    struct Want<'a> {
+        direct: bool,
+        trust: Trust,
+        name: &'a str,
+        builds: bool,
+        runtime: Option<&'a str>,
+    }
+
+    /// What a spec's plan must be.
+    fn want<'a>(s: &Spec<'a>) -> Want<'a> {
+        Want {
+            direct: s.direct,
+            trust: s.trust,
+            name: s.name,
+            builds: s.kind.builds(),
+            runtime: s.runtime,
+        }
+    }
+
+    /// A plan without a task container (a probe's, a helper's): only its network is anyone's.
+    fn no_task(direct: bool) -> Want<'static> {
+        Want {
+            direct,
+            trust: Trust::Community,
+            name: "felix",
+            builds: false,
+            runtime: None,
+        }
+    }
+
     /// The task container: the spec's flags, mounts, environment and command, and the
     /// sandboxed runtime it was to run in, or none.
-    fn check_task(
-        r: &Read<'_>,
-        work: &Path,
-        slot: Slot,
-        runtime: Option<&str>,
-    ) -> Result<(), String> {
+    #[allow(clippy::too_many_lines)] // every flag, label, mount and variable of the task container, in the spec's order
+    fn check_task(r: &Read<'_>, work: &Path, slot: Slot, w: Want<'_>) -> Result<(), String> {
+        let runtime = w.runtime;
         if flag(r, "--runtime") != runtime || runtime.is_some_and(|x| !runtime_ok(x)) {
             return Err(format!(
                 "the task container's runtime: {:?}, not {runtime:?}",
@@ -1366,6 +1458,13 @@ mod tests {
             }
         }
         let tdir = task_dir(work, id, &gen);
+        // Its lane's pacman cache and its own package's build cache: the architecture its
+        // platform says, the side and the package it builds (#341).
+        let arch = match flag(r, "--platform") {
+            Some("linux/amd64") => "x86_64",
+            Some("linux/arm64") => "aarch64",
+            p => return Err(format!("platform {p:?}")),
+        };
         let mut dests = Vec::new();
         for m in &r.mounts {
             let parts: Vec<&str> = m.split(':').collect();
@@ -1381,6 +1480,20 @@ mod tests {
                 "/task/log" => !ro && from == tdir.join("log"),
                 "/build" => !ro && from == tdir.join("build"),
                 "/var/cache/pacman/pkg" => !ro && from == tdir.join("pkgcache"),
+                "/var/cache/pacman/shared" => {
+                    ro && from == work.join("cache").join("pacman").join(arch)
+                }
+                "/build/cache" => {
+                    w.builds
+                        && !ro
+                        && from
+                            == work
+                                .join("cache")
+                                .join("build")
+                                .join(w.trust.as_str())
+                                .join(arch)
+                                .join(w.name)
+                }
                 "/pool" => {
                     ro && from.starts_with(work.join("releases")) && from != work.join("releases")
                 }
@@ -1393,7 +1506,7 @@ mod tests {
         }
         dests.sort_unstable();
         dests.dedup();
-        if dests.len() != r.mounts.len() || r.mounts.len() != 6 {
+        if dests.len() != r.mounts.len() || r.mounts.len() != 7 + usize::from(w.builds) {
             return Err(format!("mounts: {:?}", r.mounts));
         }
         let agent = format!("http://{}:{AGENT_PORT}", slot.agent_ip());
@@ -1629,20 +1742,11 @@ mod tests {
         Ok(())
     }
 
-    /// Reads a whole plan back whose task container runs on the engine's own runtime.
-    fn check_plan(calls: &[Vec<String>], work: &Path, direct: bool) -> Result<(), String> {
-        check_plan_in(calls, work, direct, None)
-    }
-
     /// Reads a whole plan back: its network, every container attached to it, every connect and
-    /// start, and the runtime its task container was to run in (#330).
+    /// start, and what its task container must be (`w`: its caches, #341; its runtime, #330).
     #[allow(clippy::too_many_lines)] // one reading of every call a plan may hold
-    fn check_plan_in(
-        calls: &[Vec<String>],
-        work: &Path,
-        direct: bool,
-        runtime: Option<&str>,
-    ) -> Result<(), String> {
+    fn check_plan(calls: &[Vec<String>], work: &Path, w: Want<'_>) -> Result<(), String> {
+        let direct = w.direct;
         let range = subnets();
         let mut net: Option<(String, Slot)> = None;
         let mut made: Vec<String> = Vec::new();
@@ -1740,7 +1844,7 @@ mod tests {
                         check_helper(&r, work, *slot)?;
                     } else {
                         tasks += 1;
-                        check_task(&r, work, *slot, runtime)?;
+                        check_task(&r, work, *slot, w)?;
                     }
                     made.push(r.name.to_owned());
                 }
@@ -1779,8 +1883,9 @@ mod tests {
     fn every_kind_renders_inside_the_spec() {
         let (tdir, rel, work) = dirs();
         for kind in [Kind::Build, Kind::ModelBuild, Kind::Audit, Kind::Trial] {
-            let p = plan(&spec(kind, &tdir, &rel)).unwrap();
-            check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
+            let s = spec(kind, &tdir, &rel);
+            let p = plan(&s).unwrap();
+            check_plan(&p, &work, want(&s)).unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
             let a = task_of(&p);
             let has = |s: &str| a.iter().any(|x| x == s);
             assert!(!has("--rm"), "never --rm");
@@ -1825,7 +1930,7 @@ mod tests {
             s.arch = "x86_64";
             s.emulated = true;
             let p = plan(&s).unwrap();
-            check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
+            check_plan(&p, &work, want(&s)).unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
             let a = task_of(&p);
             assert_eq!(after(&a, "--platform"), "linux/amd64");
             assert_eq!(
@@ -1854,7 +1959,7 @@ mod tests {
         );
         let mut p = plan(&spec(Kind::Build, &tdir, &rel)).unwrap();
         *p.last_mut().unwrap() = bad;
-        assert!(check_plan(&p, &work, false).is_err());
+        assert!(check_plan(&p, &work, want(&spec(Kind::Build, &tdir, &rel))).is_err());
     }
 
     #[test]
@@ -1983,21 +2088,38 @@ mod tests {
             let mut s = spec(kind, &tdir, &rel);
             s.direct = true;
             let p = plan(&s).unwrap();
-            check_plan(&p, &work, true).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
+            check_plan(&p, &work, want(&s)).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
             assert!(!p[0].iter().any(|x| x == "--internal"));
             assert!(!p.iter().any(|c| c
                 .iter()
                 .any(|x| x.contains("proxy=") || x.contains("PROXY="))));
             assert!(
-                check_plan(&p, &work, false).is_err(),
+                check_plan(
+                    &p,
+                    &work,
+                    Want {
+                        direct: false,
+                        ..want(&s)
+                    }
+                )
+                .is_err(),
                 "a bridge network without its exception is refused"
             );
             let a = task_of(&p);
             let cpus = a[a.iter().position(|x| x == "--cpus").unwrap() + 1].clone();
             assert_eq!(cpus, if kind.model() { "3.750" } else { "4.000" });
         }
-        let internal = plan(&spec(Kind::Build, &tdir, &rel)).unwrap();
-        assert!(check_plan(&internal, &work, true).is_err());
+        let s = spec(Kind::Build, &tdir, &rel);
+        let internal = plan(&s).unwrap();
+        assert!(check_plan(
+            &internal,
+            &work,
+            Want {
+                direct: true,
+                ..want(&s)
+            }
+        )
+        .is_err());
     }
 
     #[test]
@@ -2015,8 +2137,8 @@ mod tests {
         b.gen = "g_fedcba9876543210";
         b.slot = 1;
         let (pa, pb) = (plan(&a).unwrap(), plan(&b).unwrap());
-        check_plan(&pa, &work, false).unwrap();
-        check_plan(&pb, &work, false).unwrap();
+        check_plan(&pa, &work, want(&a)).unwrap();
+        check_plan(&pb, &work, want(&b)).unwrap();
         let names = |p: &[Vec<String>]| -> Vec<String> {
             p.iter()
                 .flat_map(|c| c.iter())
@@ -2040,6 +2162,150 @@ mod tests {
             p[0][p[0].iter().position(|x| x == "--subnet").unwrap() + 1].clone()
         };
         assert_ne!(subnet(&pa), subnet(&pb));
+    }
+
+    /// The caches (#341, invariant 9): every task mounts its lane's shared pacman cache read-only
+    /// and its own writable one; a build its own package's build cache on its own side, and
+    /// nothing else of the cache tree; an audit and a trial no build cache at all.
+    #[test]
+    #[allow(clippy::too_many_lines)] // every kind and side, then each thing the reader refuses
+    fn a_task_mounts_only_its_own_packages_build_cache_and_the_pacman_cache_read_only() {
+        let (tdir, rel, work) = dirs();
+        let mounts = |a: &[String]| -> Vec<String> {
+            a.windows(2)
+                .filter(|w| w[0] == "-v")
+                .map(|w| w[1].clone())
+                .collect()
+        };
+        let shared = "/srv/omarchy/work/cache/pacman/aarch64:/var/cache/pacman/shared:ro";
+        let own = format!("{}/pkgcache:/var/cache/pacman/pkg", tdir.display());
+        let community = "/srv/omarchy/work/cache/build/community/aarch64/felix:/build/cache";
+        let project = "/srv/omarchy/work/cache/build/project/aarch64/felix:/build/cache";
+        for (kind, trust, cache) in [
+            (Kind::Build, Trust::Community, Some(community)),
+            (Kind::ModelBuild, Trust::Community, Some(community)),
+            (Kind::Build, Trust::Project, Some(project)),
+            (Kind::ModelBuild, Trust::Project, Some(project)),
+            (Kind::Audit, Trust::Project, None),
+            (Kind::Audit, Trust::Community, None),
+            (Kind::Trial, Trust::Project, None),
+        ] {
+            let mut s = spec(kind, &tdir, &rel);
+            s.trust = trust;
+            let p = plan(&s).unwrap();
+            check_plan(&p, &work, want(&s)).unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
+            let m = mounts(&task_of(&p));
+            assert!(m.iter().any(|x| x == shared), "{kind:?}: {m:?}");
+            assert!(m.contains(&own), "{kind:?}: {m:?}");
+            assert_eq!(
+                m.iter()
+                    .filter(|x| x.contains("/cache/build"))
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                cache.into_iter().collect::<Vec<_>>(),
+                "{kind:?} {trust:?}"
+            );
+            // The same plan, read as another package's, the other side's or a kind that does not
+            // build, is refused: its cache is this lease's own.
+            if kind.builds() {
+                let other_side = if trust == Trust::Community {
+                    Trust::Project
+                } else {
+                    Trust::Community
+                };
+                for other in [
+                    Want {
+                        name: "other",
+                        ..want(&s)
+                    },
+                    Want {
+                        trust: other_side,
+                        ..want(&s)
+                    },
+                    Want {
+                        builds: false,
+                        ..want(&s)
+                    },
+                ] {
+                    assert!(check_plan(&p, &work, other).is_err(), "{other:?}");
+                }
+            }
+        }
+        // An emulated lane: that architecture's caches.
+        let mut s = spec(Kind::Build, &tdir, &rel);
+        s.arch = "x86_64";
+        s.emulated = true;
+        let m = mounts(&task_of(&plan(&s).unwrap()));
+        assert!(m
+            .iter()
+            .any(|x| x == "/srv/omarchy/work/cache/pacman/x86_64:/var/cache/pacman/shared:ro"));
+        assert!(m
+            .iter()
+            .any(|x| x == "/srv/omarchy/work/cache/build/community/x86_64/felix:/build/cache"));
+        // What the reader refuses of a community build's caches.
+        let s = spec(Kind::Build, &tdir, &rel);
+        let good = plan(&s).unwrap();
+        let swap = |from: &str, to: &str| {
+            let mut p = good.clone();
+            let last = p.len() - 1;
+            let i = p[last].iter().position(|x| x == from).unwrap();
+            p[last][i] = to.into();
+            p
+        };
+        for bad in [
+            swap(community, project),
+            swap(
+                community,
+                "/srv/omarchy/work/cache/build/community/aarch64/other:/build/cache",
+            ),
+            swap(
+                community,
+                "/srv/omarchy/work/cache/build/community/aarch64:/build/cache",
+            ),
+            swap(community, "/srv/omarchy/work/cache/build:/build/cache"),
+            swap(
+                community,
+                "/srv/omarchy/work/cache/build/community/x86_64/felix:/build/cache",
+            ),
+            swap(
+                community,
+                "/srv/omarchy/work/cache/build/community/aarch64/felix:/build/cache:ro",
+            ),
+            swap(
+                shared,
+                "/srv/omarchy/work/cache/pacman/aarch64:/var/cache/pacman/shared",
+            ),
+            swap(
+                shared,
+                "/srv/omarchy/work/cache/pacman/x86_64:/var/cache/pacman/shared:ro",
+            ),
+            swap(
+                shared,
+                "/srv/omarchy/work/cache/pacman/aarch64:/var/cache/pacman/pkg",
+            ),
+            swap(
+                &own,
+                "/srv/omarchy/work/cache/pacman/aarch64:/var/cache/pacman/pkg",
+            ),
+        ] {
+            assert!(
+                check_plan(&bad, &work, want(&s)).is_err(),
+                "must be refused: {:?}",
+                bad.last()
+            );
+        }
+        // A build without its cache; an audit with one.
+        let mut without = good.clone();
+        let last = without.len() - 1;
+        let i = without[last].iter().position(|x| x == community).unwrap();
+        without[last].drain(i - 1..=i);
+        assert!(check_plan(&without, &work, want(&s)).is_err());
+        let a = spec(Kind::Audit, &tdir, &rel);
+        let mut audit = plan(&a).unwrap();
+        let last = audit.len() - 1;
+        let image = audit[last].iter().position(|x| x == DIGEST).unwrap();
+        audit[last].splice(image..image, ["-v".to_owned(), community.to_owned()]);
+        assert!(check_plan(&audit, &work, want(&a)).is_err());
     }
 
     #[test]
@@ -2111,6 +2377,14 @@ mod tests {
             ),
             ("worker image empty", Box::new(|s| s.worker_image = "")),
             ("slot outside the range", Box::new(|s| s.slot = 4096)),
+            (
+                "a work root with a colon",
+                Box::new(|s| s.work_root = Path::new("/srv/omarchy/work:/x")),
+            ),
+            (
+                "a task directory under another root",
+                Box::new(|s| s.work_root = Path::new("/srv/other")),
+            ),
         ];
         for (what, change) in cases {
             let mut s = spec(Kind::Build, &tdir, &rel);
@@ -2213,8 +2487,7 @@ mod tests {
             let mut s = spec(kind, &tdir, &rel);
             s.runtime = Some("runsc");
             let p = plan(&s).unwrap();
-            check_plan_in(&p, &work, false, Some("runsc"))
-                .unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
+            check_plan(&p, &work, want(&s)).unwrap_or_else(|e| panic!("{kind:?}: {e}\n{p:#?}"));
             let a = task_of(&p);
             let at = a.iter().position(|x| x == "--runtime").unwrap();
             assert_eq!(a[at + 1], "runsc");
@@ -2222,12 +2495,21 @@ mod tests {
                 assert!(!c.iter().any(|x| x == "--runtime"), "{kind:?}: {c:?}");
             }
             // Read as a plan on the engine's own runtime, or another sandbox's: refused.
-            assert!(check_plan(&p, &work, false).is_err());
-            assert!(check_plan_in(&p, &work, false, Some("kata")).is_err());
+            for runtime in [None, Some("kata")] {
+                assert!(check_plan(
+                    &p,
+                    &work,
+                    Want {
+                        runtime,
+                        ..want(&s)
+                    }
+                )
+                .is_err());
+            }
             // And a plan without it, read as one that was to have it: refused too.
             let plain = plan(&spec(kind, &tdir, &rel)).unwrap();
             assert!(!task_of(&plain).iter().any(|x| x == "--runtime"));
-            assert!(check_plan_in(&plain, &work, false, Some("runsc")).is_err());
+            assert!(check_plan(&plain, &work, want(&s)).is_err());
         }
         // A package's signed network exception (#373) changes its network, never its runtime:
         // on its bridge, with no egress sidecar, its task container still runs in the sandbox.
@@ -2235,8 +2517,16 @@ mod tests {
         s.direct = true;
         s.runtime = Some("runsc");
         let p = plan(&s).unwrap();
-        check_plan_in(&p, &work, true, Some("runsc")).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
-        assert!(check_plan(&p, &work, true).is_err());
+        check_plan(&p, &work, want(&s)).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
+        assert!(check_plan(
+            &p,
+            &work,
+            Want {
+                runtime: None,
+                ..want(&s)
+            }
+        )
+        .is_err());
         assert!(p.iter().all(|c| !c.iter().any(|x| x.ends_with("-egress"))));
         // A sandboxed task's egress sidecar is started exactly as an unsandboxed one's, which
         // install's egress probe shares (#373, tests/fixtures/egress-sidecar.txt): on runc.
@@ -2255,10 +2545,7 @@ mod tests {
                 .position(|c| c[0] == "create" && c[2].ends_with(suffix))
                 .unwrap();
             p[i].splice(3..3, ["--runtime".to_owned(), "runsc".to_owned()]);
-            assert!(
-                check_plan_in(&p, &work, false, Some("runsc")).is_err(),
-                "{suffix}"
-            );
+            assert!(check_plan(&p, &work, want(&s)).is_err(), "{suffix}");
         }
         // A runtime outside the grammar fails the task before the engine runs.
         for bad in ["--privileged", "Runsc", "runsc --privileged", "", "gtk+3"] {
@@ -2318,7 +2605,7 @@ mod tests {
         let (setup, run) = probe_plan(&p).unwrap();
         let mut all = setup.clone();
         all.push(run.clone());
-        check_plan(&all, Path::new("/srv/omarchy/work"), false)
+        check_plan(&all, Path::new("/srv/omarchy/work"), no_task(false))
             .unwrap_or_else(|e| panic!("{e}\n{all:#?}"));
         assert_eq!(run[..3], ["run", "--rm", "--name"]);
         assert_eq!(run.last().unwrap(), "--probe");
@@ -2360,8 +2647,9 @@ mod tests {
     #[allow(clippy::too_many_lines)] // one case per thing the spec forbids
     fn the_check_refuses_what_the_spec_forbids() {
         let (tdir, rel, work) = dirs();
+        let ws = want(&spec(Kind::ModelBuild, &tdir, &rel));
         let good = plan(&spec(Kind::ModelBuild, &tdir, &rel)).unwrap();
-        check_plan(&good, &work, false).unwrap();
+        check_plan(&good, &work, ws).unwrap();
         let at = |p: &[Vec<String>], suffix: &str| {
             p.iter()
                 .position(|c| {
@@ -2422,6 +2710,10 @@ mod tests {
             with("-agent", &["-e", "FACTORY_TOKEN=omw_x"]),
             with("-agent", &["-v", "/srv/omarchy/work/state:/state"]),
             with("-agent", &["--privileged"]),
+            // The cache tree, or the shared pacman cache a second time, writable (#341).
+            with("", &["-v", "/srv/omarchy/work/cache:/cache"]),
+            with("", &["-v", "/srv/omarchy/work/cache/pacman/aarch64:/var/cache/pacman/rw"]),
+            with("-agent", &["-v", "/srv/omarchy/work/cache/pacman/aarch64:/var/cache/pacman/shared:ro"]),
         ];
         // A task container on another network, or attached to the shared bridge.
         let mut other_net = good.clone();
@@ -2474,7 +2766,7 @@ mod tests {
         forbidden.push(second);
         for p in forbidden {
             assert!(
-                check_plan(&p, &work, false).is_err(),
+                check_plan(&p, &work, ws).is_err(),
                 "must be refused: {p:#?}"
             );
         }
@@ -2485,12 +2777,12 @@ mod tests {
             .position(|x| x == "--cap-drop")
             .unwrap();
         no_drop[last].drain(i..i + 2);
-        assert!(check_plan(&no_drop, &work, false).is_err());
+        assert!(check_plan(&no_drop, &work, ws).is_err());
         let mut tag = good.clone();
         let last = tag.len() - 1;
         let i = tag[last].iter().position(|x| x == DIGEST).unwrap();
         tag[last][i] = "archlinux:base-devel".into();
-        assert!(check_plan(&tag, &work, false).is_err());
+        assert!(check_plan(&tag, &work, ws).is_err());
         let mut agent_url = good.clone();
         let last = agent_url.len() - 1;
         let j = agent_url[last]
@@ -2498,7 +2790,7 @@ mod tests {
             .position(|x| x.starts_with("ANTHROPIC_BASE_URL="))
             .unwrap();
         agent_url[last][j] = "ANTHROPIC_BASE_URL=https://api.anthropic.com".into();
-        assert!(check_plan(&agent_url, &work, false).is_err());
+        assert!(check_plan(&agent_url, &work, ws).is_err());
     }
 
     // ---------- a pool job's helpers (#340) ----------
@@ -2551,7 +2843,8 @@ mod tests {
                 keyring,
                 ..helper(&dir, &scratch, script, ro)
             });
-            check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{script}: {e}\n{p:#?}"));
+            check_plan(&p, &work, no_task(false))
+                .unwrap_or_else(|e| panic!("{script}: {e}\n{p:#?}"));
             let run = p.last().unwrap();
             let has = |s: &str| run.iter().any(|x| x == s);
             assert!(
@@ -2595,7 +2888,7 @@ mod tests {
         let scratch = tdir.join("tmp");
         let dir = scratch.join("tmp.Ab3dE5gH9k");
         let p = helper_calls(&helper(&dir, &scratch, "check.sh", true));
-        check_plan(&p, &work, false).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
+        check_plan(&p, &work, no_task(false)).unwrap_or_else(|e| panic!("{e}\n{p:#?}"));
         assert!(
             p.iter().all(|c| !c.iter().any(|x| x == "--runtime")),
             "{p:#?}"
@@ -2603,8 +2896,16 @@ mod tests {
         let mut under = p.clone();
         let last = under.len() - 1;
         under[last].splice(1..1, ["--runtime".to_owned(), "runsc".to_owned()]);
-        assert!(check_plan(&under, &work, false).is_err());
-        assert!(check_plan_in(&under, &work, false, Some("runsc")).is_err());
+        assert!(check_plan(&under, &work, no_task(false)).is_err());
+        assert!(check_plan(
+            &under,
+            &work,
+            Want {
+                runtime: Some("runsc"),
+                ..no_task(false)
+            }
+        )
+        .is_err());
     }
 
     fn value<'a>(a: &'a [String], f: &str) -> Option<&'a str> {
@@ -2632,7 +2933,7 @@ mod tests {
             deny: &own,
             ..helper(&dir, &scratch, "check.sh", true)
         });
-        check_plan(&helper, &work, false).unwrap_or_else(|e| panic!("{e}\n{helper:#?}"));
+        check_plan(&helper, &work, no_task(false)).unwrap_or_else(|e| panic!("{e}\n{helper:#?}"));
         assert_eq!(helper[..4], task[..4], "the network and the egress sidecar");
         let want = egress_fixture(&[
             ("{name}", "omarchy-task-812-g_0123456789abcdef-egress"),
@@ -2647,7 +2948,10 @@ mod tests {
             ("{deny}", "--deny 10.231.0.0/16 --deny 203.0.113.10"),
         ]);
         assert_eq!(helper[1..4], want[..]);
-        assert!(check_plan(&helper, &work, true).is_err(), "never a bridge");
+        assert!(
+            check_plan(&helper, &work, no_task(true)).is_err(),
+            "never a bridge"
+        );
     }
 
     #[test]
@@ -2787,7 +3091,7 @@ mod tests {
         let scratch = tdir.join("tmp");
         let dir = scratch.join("tmp.Ab3dE5gH9k");
         let good = helper_calls(&helper(&dir, &scratch, "check.sh", true));
-        check_plan(&good, &work, false).unwrap();
+        check_plan(&good, &work, no_task(false)).unwrap();
         let with = |extra: &[&str]| {
             let mut p = good.clone();
             let last = p.len() - 1;
@@ -2838,9 +3142,11 @@ mod tests {
         let mut beside = plan(&spec(Kind::Build, &task_dir, &rel)).unwrap();
         beside.push(good[good.len() - 1].clone());
         forbidden.push(beside);
+        // The build's own identity: refused for the helper beside it, not for its caches.
+        let ws = want(&spec(Kind::Build, &task_dir, &rel));
         for p in forbidden {
             assert!(
-                check_plan(&p, &work, false).is_err(),
+                check_plan(&p, &work, ws).is_err(),
                 "must be refused: {p:#?}"
             );
         }

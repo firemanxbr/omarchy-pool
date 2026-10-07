@@ -175,7 +175,7 @@ export function sourcesDiagram(): string {
   s += darrow(280, 500, 320, 500);
   s += dbox({ x: 320, y: 470, w: 270, h: 60, title: "The lab", tcls: "amber", cls: "amber", lines: ["a real pacman installs it — the trial", "nothing promised, nothing promoted"] });
   s += darrow(590, 500, 630, 500);
-  s += dbox({ x: 630, y: 470, w: 250, h: 60, title: "A maintainer approves", tcls: "amber", cls: "amber", lines: ["never their own package", "what installed, not what compiled"] });
+  s += dbox({ x: 630, y: 470, w: 250, h: 60, title: "A maintainer approves", tcls: "amber", cls: "amber", lines: ["never their own but under [solo]", "what installed, not what compiled"] });
   s += darrow(785, 470, 785, 240) + dlab(775, 366, ["approved", "→ edge"], "end");
   s += dpath("M880 510 L1290 510 L1290 240", "hi dash", true) + dlab(1085, 502, ["the fast lane: the trial installed it → stable with edge"], "middle", "hi");
   // The marks ride under the boxes: visible on the arrows, covered inside a box, never across its text.

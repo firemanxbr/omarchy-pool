@@ -1,0 +1,19 @@
+{
+  "pubkey": "BG-8g2s49gVWwmWPGIasN7sXLaRyUfbeFo2y5J29PY_asawWXn48XgNWJCGDHAK3ARRzBamPquGWJKJF8ab1yr4",
+  "fingerprint": "SHA256:rstwPRmi0VaKQfKEPKpRfuoLnE6AFSkA9q4nKt0Wjo8",
+  "enroll": {
+    "token": "ome_abababababababababababababababababababababababab",
+    "message": "omarchy-host-enroll-v1\nome_abababababababababababababababababababababababab\nBG-8g2s49gVWwmWPGIasN7sXLaRyUfbeFo2y5J29PY_asawWXn48XgNWJCGDHAK3ARRzBamPquGWJKJF8ab1yr4",
+    "sig": "YuVVWwFgJiMEgzwrWkUleAW_no02kOfRWU45FtOYNv8qgNeggeffvErcuf3qMc8ktrUJI93eBt7Xmk0dvu35eg"
+  },
+  "request": {
+    "host": "h_0123456789",
+    "method": "POST",
+    "path": "/api/v1/hosts/self/report",
+    "body": "{\"agent\":{\"version\":\"0.4.0\"}}",
+    "ts": 1800000000,
+    "nonce": "00112233445566778899aabbccddeeff",
+    "message": "omarchy-host-v1\nh_0123456789\nPOST\n/api/v1/hosts/self/report\n45a198ea16ddbc358960e0a3b4206907283cbd7d5b020c0db4a6f97c2b6d869b\n1800000000\n00112233445566778899aabbccddeeff",
+    "sig": "dC_I-Un5bRRMQFEOqyGJlxikLaJujwLzFLRIznRRXXt-Yux7KJlnBBWV-BLTtIui0ec2lUE6_G48RIFfotTofQ"
+  }
+}

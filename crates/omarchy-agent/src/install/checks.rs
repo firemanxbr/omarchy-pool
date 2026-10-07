@@ -330,3 +330,36 @@ pub(crate) fn github_token(scopes: Result<Option<String>, String>) -> Result<(),
         }
     }
 }
+
+/// Where the enrollment will make the host key (#330, design v2 §14), said before anything
+/// is made, since a host keeps the key it enrolled with: in the TPM where this user may open
+/// one; else a file — a note on a machine with no TPM (or a Mac), a warning where one is
+/// there but out of the agent's reach (tpm2-tools, the tss group, or a running user manager
+/// that started without it and so would run the agent's service without it), which the
+/// owner may fix first. `OMARCHY_HOST_KEY=tpm` makes a TPM out of reach a blocker.
+pub(crate) fn host_key(choice: &crate::host::KeyChoice, linux: bool, r: &mut Report) {
+    use crate::host::Want;
+    let tpm = if linux {
+        choice.tools.reachable(&choice.tcti)
+    } else {
+        Err(crate::host::MAC_FILE_KEY.to_owned())
+    };
+    match (choice.want, tpm) {
+        (Want::File, _) => r
+            .notes
+            .push("host key: a file, as OMARCHY_HOST_KEY=file asks".into()),
+        (_, Ok(())) => r.notes.push(format!(
+            "host key: made in the TPM ({}) at the enrollment, ECDSA P-256, and it never leaves it",
+            choice.tcti
+        )),
+        (Want::Tpm, Err(why)) => r
+            .blockers
+            .push(format!("host key: OMARCHY_HOST_KEY=tpm, but {why}")),
+        (Want::Auto, Err(why)) if !linux || why.starts_with("no TPM") => {
+            r.notes.push(format!("host key: a file ({why})"));
+        }
+        (Want::Auto, Err(why)) => r.warnings.push(format!(
+            "host key: a file, not in the TPM: {why}; a host keeps the key it enrolled with (OMARCHY_HOST_KEY=file says a file is meant)"
+        )),
+    }
+}

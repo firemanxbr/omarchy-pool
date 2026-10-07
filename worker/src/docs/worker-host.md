@@ -136,12 +136,17 @@ to copy.
 2. On the machine, as the user the agent runs as: `install.sh` installs the
    agent, which runs its preflight first (one screen of everything to fix,
    nothing written until it passes; the runbook's *Installing a host* has the
-   options, `--dedicated` and `--work-root` above all), then makes the host key (`host.ed25519`, mode 0600, never in a
-   container), checks the machine against the release's signed minimum (4
+   options, `--dedicated` and `--work-root` above all), then makes the host key (never in a
+   container): in the machine's TPM where its user may open one (#330 — an
+   ECDSA P-256 key made inside the TPM with tpm2-tools, which never lets it
+   out), else `host.ed25519` (Ed25519, mode 0600); preflight says which, and
+   why not the TPM. It checks the machine against the release's signed minimum (4
    CPUs, 8 GB, 60 GB free on the work root, 40 GB on the engine's data
    root) and enrolls with the token, its public key, a proof it holds the
-   key and its capacity report. It prints the key's fingerprint and waits.
-3. Your page shows the host with the same fingerprint and **Confirm**.
+   key, where the key lives and its capacity report. It prints the key's
+   fingerprint and where it lives, and waits.
+3. Your page shows the host with the same fingerprint, where its key lives
+   (in its TPM, or a file and why), and **Confirm**.
    Compare the two, then confirm: the host gets its one worker registration
    (`<login>-<name>-<4 base36>`, project trust from the maintainer list), the
    journal and Status get an info line, and the other maintainers see a
@@ -158,13 +163,16 @@ to copy.
    and it re-adopts them. `etc/dispatcher.env` (0600) names the token's
    registration (`# worker:`), the host's own addresses for every task's
    egress to refuse (`OMARCHY_HOST_ADDRESSES`), and once `agent.toml` is
-   there, the secrets directory, the envelope's agent budget (#371) and its
-   grant of a signed exception's bridge (`OMARCHY_DIRECT_NETWORK`, #373); a
-   rotation keeps them, and the lines you add to the file yourself stay. A
-   host that ran the agent before #327 had the token in that file: the agent
-   moves it to its own file at its first start, losing nothing, and keeps it
-   in `etc/dispatcher.env` too only while a release from before #327 is
-   running or being rolled out (its dispatcher reads it there), so a
+   there, the secrets directory, the envelope's agent budget (#371), its
+   grant of a signed exception's bridge (`OMARCHY_DIRECT_NETWORK`, #373) and
+   its cache caps (`OMARCHY_CACHE_PACMAN_GB`, `OMARCHY_CACHE_BUILD_GB`, when
+   it has a `cache_caps`, #341). Those come from `agent.toml` alone: a line
+   of yours for one of their keys is replaced, so set them in the envelope. A
+   rotation keeps them, and every other line you add to the file yourself
+   stays. A host that ran the agent before #327 had the token in that file:
+   the agent moves it to its own file at its first start, losing nothing,
+   and keeps it in `etc/dispatcher.env` too only while a release from before
+   #327 is running or being rolled out (its dispatcher reads it there), so a
    rollback to one still works; once none is left it takes it out, which
    recreates the dispatcher once.
 5. Only then does it write `agent.toml` with the host and its registration,
@@ -214,6 +222,30 @@ claim says whether a host runs such packages, a package with the exception
 needs a host that grants it among those that claim its tasks. A rootless host cannot grant it: its bridges reach the LAN through
 the engine's user-mode network stack, while its tasks, behind their egress
 sidecars, never do.
+
+**Its caches are fenced in too (#341).** A build mounts its own package's
+build cache only — cargo's registry, Go's caches and ccache's objects under
+`<work root>/cache/build/<community|project>/<arch>/<package>` — so a
+contributor's recipe never reaches a project cache or another package's.
+A build and an audit read the host's pacman cache of their architecture
+(`<work root>/cache/pacman/<arch>`) read-only, and download into one of
+their own (a trial downloads everything itself: it installs the lab above
+edge, whose bytes the shared cache holds); after the task, the dispatcher
+copies a download into the shared cache only when its SHA-256 is the one the
+pool's signed `edge` databases list for it (fetched hourly into
+`cache/syncdb/`, each verified with the pool's key), with the pool's own copy
+of the package's upstream `.sig` beside it — which a build's pacman checks
+the image's Arch packages by, and fails without — or not at all; it
+discards everything else, and on every pass removes a file whose name those
+databases have come to list with other bytes. The pacman cache keeps the two newest versions
+of each package within `OMARCHY_CACHE_PACMAN_GB` (10 GB), and the build
+caches go least recently used first, a package at a time, within
+`OMARCHY_CACHE_BUILD_GB` (20 GB), never one a running build mounts. To set
+them, give `agent.toml`'s envelope a `cache_caps` (`pacman_gb`, `build_gb`,
+each a whole number of GB from 1; the Studio's `{ pacman_gb = 40, build_gb =
+120 }`): the agent writes them into `etc/dispatcher.env` within a minute and
+the dispatcher is recreated with them. The dispatcher's log says what each
+pass merged, discarded and pruned (`caches: …`).
 
 **A host runs as many tasks at once as its units hold (#337).** The pool
 hands it one task per claim and its dispatcher claims again at once while

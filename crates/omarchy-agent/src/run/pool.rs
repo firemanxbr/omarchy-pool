@@ -586,11 +586,20 @@ impl Https {
 
     /// The URL of a call signed with the host key and its `Omarchy-Host` header (design v2
     /// D7): the signature covers the path as the pool reads it (`/api/v1/...`) and the body.
-    fn signed_request(&self, method: &str, path: &str, body: &[u8]) -> Option<(String, String)> {
-        let (key, host) = self.host.as_ref()?;
-        Some((
+    /// Why not, when there is no key or it did not sign (a TPM that does not answer, #330).
+    fn signed_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<(String, String), String> {
+        let (key, host) = self
+            .host
+            .as_ref()
+            .ok_or("no host key on this machine to sign with")?;
+        Ok((
             format!("{}{path}", self.origin),
-            key.header(host, method, path, body),
+            key.header(host, method, path, body)?,
         ))
     }
 
@@ -606,12 +615,9 @@ impl Https {
         path: &str,
         body: Option<&[u8]>,
     ) -> (Net<Vec<u8>>, Option<i64>) {
-        let Some((url, header)) = self.signed_request(method, path, body.unwrap_or_default())
-        else {
-            return (
-                Net::NoAnswer("no host key on this machine to sign with".into()),
-                None,
-            );
+        let (url, header) = match self.signed_request(method, path, body.unwrap_or_default()) {
+            Ok(r) => r,
+            Err(e) => return (Net::NoAnswer(e), None),
         };
         let res = match body {
             None => self
@@ -1060,8 +1066,33 @@ mod tests {
         assert_eq!(crate::host::HEADER, "omarchy-host");
         assert!(Https::new("https://pool.example")
             .signed_request("GET", STATE_PATH, b"")
-            .is_none());
+            .unwrap_err()
+            .contains("no host key"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A key in a TPM that no longer signs (cleared, #330): the call is no answer, with why,
+    /// and nothing is sent — the loop keeps the set running and tries at its next poll.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tpm_that_does_not_sign_is_no_answer_and_says_why() {
+        use std::sync::Arc;
+        let dir = crate::run::state::tempdir();
+        let tpm = crate::host::tpm::fake::Tpm::new();
+        let choice = crate::host::KeyChoice {
+            want: crate::host::Want::Tpm,
+            tcti: crate::host::tpm::DEFAULT_TCTI.into(),
+            tools: Arc::clone(&tpm) as Arc<dyn crate::host::tpm::Tools>,
+        };
+        let (key, _) = HostKey::create_in(&dir, &choice).unwrap();
+        // An origin nobody answers: a request that left would be refused, not this.
+        let https = Https::new("https://127.0.0.1:9").with_host(key, "h_0123456789");
+        assert!(https.signed_request("GET", STATE_PATH, b"").is_ok());
+        tpm.clear();
+        match https.signed_call("GET", STATE_PATH, None) {
+            Net::NoAnswer(e) => assert!(e.contains("the host key in the TPM did not sign"), "{e}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

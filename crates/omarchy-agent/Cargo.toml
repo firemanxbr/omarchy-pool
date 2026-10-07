@@ -35,7 +35,8 @@ sigstore-verify = { version = "=0.14.0", default-features = false }
 x509-cert = "0.2"
 # The host's identity and its calls to the pool (#321), and the run loop's HTTPS to the
 # pool and GitHub (#315): the host key is Ed25519 through aws-lc-rs (already the
-# verifier's crypto, through rustls-webpki); HTTPS is ureq on rustls with that same
+# verifier's crypto, through rustls-webpki), or ECDSA P-256 made in the machine's TPM
+# through tpm2-tools, which aws-lc-rs checks (#330); HTTPS is ureq on rustls with that same
 # provider and the webpki roots — blocking, no async runtime, no OpenSSL, no ring
 # (tests/agent-deps.sh).
 aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }

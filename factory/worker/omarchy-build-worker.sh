@@ -233,6 +233,19 @@ pacman_ready() {
   for opt in DisableSandboxSyscalls DisableSandboxFilesystem; do
     grep -q "^$opt" /etc/pacman.conf || sed -i "0,/^\[options\]/s//[options]\n$opt/" /etc/pacman.conf
   done
+  # A task container on a maintainer host (#341, design v2 §9.3) mounts the host's pacman
+  # cache read-only here: the first CacheDir, so what an earlier task downloaded (and the
+  # dispatcher merged back once its bytes matched the pool's signed databases) is used from
+  # there; pacman downloads into the first writable one, the task's own /var/cache/pacman/pkg,
+  # so two builds at once never write one file. A package of a repository whose SigLevel
+  # checks packages (the image's own sections) is checked by the .sig beside the file pacman
+  # found, and is downloaded again, then refused, when that is missing: the dispatcher puts
+  # the pool's copy of its upstream .sig beside each package it merges, or leaves the package
+  # out. Elsewhere there is no such directory.
+  local shared="${PACMAN_SHARED_CACHE:-/var/cache/pacman/shared}"   # the tests' own; a task container is never given it (the env allowlist)
+  if [[ -d "$shared" ]] && ! grep -q "^CacheDir *= *$shared/\?$" /etc/pacman.conf; then
+    sed -i "0,/^\[options\]/s##[options]\nCacheDir = $shared/\nCacheDir = /var/cache/pacman/pkg/#" /etc/pacman.conf
+  fi
   pacman-key --init >/dev/null 2>&1 || true
 }
 
@@ -263,7 +276,9 @@ prepare_container() {
   # (one directory per trust and architecture on the host; a fresh directory
   # otherwise). Inside it, one directory per package (run_makepkg): what a
   # build writes to cargo's registry, Go's module and build caches or
-  # ccache's objects is read by a later build of the same package only.
+  # ccache's objects is read by a later build of the same package only. On a
+  # maintainer host the dispatcher mounts this package's own cache alone
+  # (#341): the boundary is the host's, not this script's.
   install -d -o builder -g builder /build/cache
   factory_lib
 }
