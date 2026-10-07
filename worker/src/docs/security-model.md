@@ -12,8 +12,8 @@ please do not file a public issue for it.
 
 1. **Users trust the pool, nothing else.** A machine installs from the
    pool's signed databases; every package it serves was either verified
-   against its upstream project's key at import or built by a worker the
-   maintainer's host and signed by the pool. No contributor's bytes reach a
+   against its upstream project's key at import or built on a maintainer's
+   host and signed by the pool. No contributor's bytes reach a
    user, ever: a maintainer approves the *recipe* on the evidence of the
    contributor's build, and the project rebuilds it. Zero trust between
    people, shared knowledge between them — we do not use what a contributor
@@ -1435,10 +1435,10 @@ instead of stopping them.
 
 ## Roadmap
 
-1. ~~Per-job scoped tokens; project workers registered and trusted by a maintainer; pool jobs pulled by workers~~ — live (v0.0.40).
+1. ~~Per-job scoped tokens; the project's workers registered and trusted by a maintainer; pool jobs pulled by workers~~ — live (v0.0.40); those registrations retired with #346, and a host's trust is its owner's place in `factory/MAINTAINERS.toml`.
 2. ~~Signing inside the pool's Worker: the key becomes a Worker secret; `publish` and `render` stop signing on workers; the GitHub secret is deleted~~ — live (v0.0.49). A client's `.sig` for a database is superseded; a package signature must match the stored bytes.
 3. ~~Retire `FACTORY_TOKEN`~~ — gone (v0.0.50). ~~The pipeline's last workflows become jobs~~ — done (v0.0.51). ~~Retire the publish token~~ — gone (v0.0.56): writes need a per-job token; maintainers act by queueing jobs (`POST /factory/jobs`) and on the factory's own routes with their contributor token; the PKGBUILD reconcile (`enqueue`) and package requests (issues, read by the brain) left GitHub with it. GitHub keeps only the release (`CLOUDFLARE_API_TOKEN`); the Worker's `GITHUB_TOKEN` has been read-only since 2026-09-18 (nothing is dispatched), and the one thing the brain writes on GitHub — the daily comment on the *Cost report* issue — has its own token, `GITHUB_REPORT_TOKEN`, Issues: Read and write and nothing else (the table above).
-4. ~~Phase 2: maintainers by area, approval as a recorded action, rebuild at approval on project workers~~ — live (v0.0.42). A promotion gate for the `factory` source is unnecessary: nothing unapproved enters `edge`.
+4. ~~Phase 2: maintainers by area, approval as a recorded action, rebuild at approval on the project's own workers~~ — live (v0.0.42); the maintainers' hosts since (#346). A promotion gate for the `factory` source is unnecessary: nothing unapproved enters `edge`.
 5. ~~**The broker.** One process per host holds the credentials and runs no
    build; what builds is born with nothing.~~ — live, then replaced by the
    host agent's model (#335, #336): the dispatcher holds the host's token

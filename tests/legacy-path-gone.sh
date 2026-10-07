@@ -15,8 +15,10 @@
 #   left with those tools), says no updater follows the pool, and copies no
 #   omarchy-rollout; the broker keeps its agent role, the agent sidecar, and has
 #   no pool path; the build script has no broker mode;
-# - the docs (worker/src/docs, the READMEs) no longer describe role containers,
-#   the updater, the broker's relay or a contributor-run worker.
+# - the docs (worker/src/docs, the READMEs, and the docs pages the Worker
+#   writes in code: How it works, the docs index, the diagrams, the API page)
+#   no longer describe role containers — the pool, review and project workers
+#   among them —, the updater, the broker's relay or a contributor-run worker.
 #
 # The Worker's own test (worker/test/legacy-path-gone.test.ts) checks the pages
 # it serves. Run: bash tests/legacy-path-gone.sh
@@ -66,11 +68,14 @@ grep -q 'OMARCHY_BROKER' factory/worker/omarchy-build-worker.sh && say "the buil
 # describes the tests of what the Worker and pkg-repo still keep for a legacy registration not yet retired (its Update order and
 # set_rollout, `pkg-repo work`), which leave with that code; the paths above hold it to the files.
 docs=()
-for f in worker/src/docs/*.md README.md CONTRIBUTING.md SECURITY.md factory/sets/host/README.md; do [[ "$f" == worker/src/docs/testing.md ]] || docs+=("$f"); done
+for f in worker/src/docs/*.md README.md CONTRIBUTING.md SECURITY.md factory/sets/host/README.md \
+  worker/src/pages/{how-it-works,docs,doc-diagrams,api-docs}.ts; do [[ "$f" == worker/src/docs/testing.md ]] || docs+=("$f"); done
 WORDS=(
   "role container" "role-container" "omarchy-rollout" "rollout.sh" "register.sh" "agent-proxy" "updater"
   "behind a broker" "builder relay" "community worker" "community set" "contributor-run" "a contributor's worker" "shared mode"
   "WORKER_SHARED" "OMARCHY_BROKER"
+  # The legacy sets' role containers by the names the docs gave them (`review worker` matches `review workers` too).
+  "review worker" "pool worker" "project worker"
 )
 for w in "${WORDS[@]}"; do
   if hits="$(grep -n -i -F -- "$w" "${docs[@]}" | grep -v -i -E 'left with (the|them)|left the repository|retired|#346' || true)"; [[ -n "$hits" ]]; then

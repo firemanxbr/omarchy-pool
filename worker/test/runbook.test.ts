@@ -65,8 +65,13 @@ describe("the runbook's The Studio host (#346, design v2 §21.1)", () => {
     expect(studio).toContain("11 units");
     expect(studio).toContain("aarch64 native, and x86_64 emulated under\nqemu (`page16k`)");
     expect(studio).toContain("**Isolation `root`, a recorded exception until P6**");
-    expect(studio).toContain("`/srv/omarchy-pool/host`");
+    expect(studio).toContain("`/srv/omarchy-host`, a btrfs subvolume of its own");
     expect(studio).toContain("`10.232.0.0/16`");
+    // Where its key and its token live, as the canary set them up: a file key, the Studio having no TPM (#330); the token's own
+    // file in the set directory (#327), on the compose driver.
+    expect(studio).toContain("`host.ed25519` in the agent's `state/`, a file: the Studio has no TPM");
+    expect(studio).toContain("`~/.local/share/omarchy-agent/secrets` (`agent.env`, 0600)");
+    expect(studio).toContain("`run/host/dispatcher/token` (0400), mounted read-only into the dispatcher (#327)");
     // A build that dies of emulation goes back for a native host, its attempt given back.
     expect(studio).toContain("`needs_native`, #338");
   });
@@ -77,8 +82,12 @@ describe("the runbook's The Studio host (#346, design v2 §21.1)", () => {
     expect(retired).toContain("`POST /factory/workers` answers 410");
     expect(retired).toContain("WHERE kind = 'legacy' AND revoked_at IS NULL");
     expect(retired).toContain("SELECT value FROM settings WHERE key = 'host-pool-jobs'");
-    // The marker stays: an old copy of the set's tools refuses where it is.
-    expect(retired).toContain("Keep `host/` and `host-secrets/`");
+    // Nothing of the host is in the retired set's directory; the marker stays while its files do: an old copy of the set's tools refuses there.
+    expect(retired).toContain("Nothing of the host is in that directory");
+    expect(retired).toContain("keep the marker, which tells any old copy of the set's tools to\nrefuse there");
+    // The pool refuses no claim of a legacy row left unrevoked: the check is a hard precondition of the deploy.
+    expect(retired).toContain("a hard precondition of that deploy");
+    expect(retired).toContain("So do not deploy while the first two queries list anything.");
   });
 });
 

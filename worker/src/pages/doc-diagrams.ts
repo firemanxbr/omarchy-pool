@@ -312,7 +312,7 @@ export function transactionLifecycleDiagram(): string {
  * with the fast lane a trial earns.
  */
 export function factoryLoopDiagram(): string {
-  let s = svgo(1330, 470, "What starts a build — a request on the record and its owner's Build, a recipe merged, a new upstream release — is queued in the pool's build_tasks; a worker anywhere claims it with a thirty-minute lease, heartbeats, and builds it in a fresh container through the gate, the owner's agent drafting the PKGBUILD when none is given; an expired lease goes back in the queue on the scheduler's next tick. A merged recipe's build goes straight into edge, signed by the pool; a contributor's build is staged as evidence, never published: a second agent audits it, the project builds it again on a review worker, a real pacman installs the project's build in the lab, and a maintainer who does not own it approves — a project worker publishes the project's build into edge, the pool signs it, and rc and stable follow when the trial installed it.");
+  let s = svgo(1330, 470, "What starts a build — a request on the record and its owner's Build, a recipe merged, a new upstream release — is queued in the pool's build_tasks; a maintainer's host claims it with a thirty-minute lease, heartbeats, and builds it in a fresh container through the gate, the owner's agent drafting the PKGBUILD when none is given; an expired lease goes back in the queue on the scheduler's next tick. A merged recipe's build goes straight into edge, signed by the pool; a contributor's build is staged as evidence, never published: a second agent audits it, the project builds it again on a maintainer's host, a real pacman installs the project's build in the lab, and a maintainer who does not own it approves — a host's publish job carries the project's build into edge, the pool signs it, and rc and stable follow when the trial installed it.");
   // The loop, above. Every box is at least as wide as its longest line
   // (dbox widens to the text), so the widths here are the real ones.
   const T = 84, H = 96, Y = T + H / 2;
@@ -325,7 +325,7 @@ export function factoryLoopDiagram(): string {
   s += `<text class="d-s" x="440" y="${T + 56}" text-anchor="middle">${escapeHtml("queues and signs · never builds")}</text>`;
   s += `<rect class="d-queue" x="320" y="${T + 64}" width="240" height="24"/><text class="d-t small" x="440" y="${T + 81}" text-anchor="middle">${escapeHtml("build_tasks in D1 · ≤ 3 attempts")}</text>`;
   s += darrow(570, Y, 670, Y, "", true) + dlab(620, Y - 12, ["claim"]) + dlab(620, Y + 16, ["report"]);
-  s += dbox({ x: 670, y: T, w: 240, h: H, title: "A worker, anywhere", lines: ["registered · ephemeral · pulls", "claims a task · a 30 min lease", "a heartbeat every 5 min"] });
+  s += dbox({ x: 670, y: T, w: 240, h: H, title: "A maintainer's host", lines: ["enrolled · its dispatcher pulls", "claims a task · a 30 min lease", "a heartbeat every 5 min"] });
   // An expired lease: the loop over the top, back into the queue.
   s += dpath(`M730 ${T} C730 ${T - 40}, 500 ${T - 40}, 500 ${T}`, "warn dash", true) + dlab(615, 29, ["an expired lease is requeued", "the scheduler, every 10 min"]);
   s += darrow(910, Y, 950, Y);
@@ -345,7 +345,7 @@ export function factoryLoopDiagram(): string {
   s += dbox({ x: 250, y: R, w: 180, h: RH, title: "The audit", cls: "amber", tcls: "amber", lines: ["a second agent reads it", "ok · warn · block", "the maintainer decides"] });
   s += darrow(430, RY, 470, RY);
   // The pool's own build wears the pool's green: this is what can reach the rings.
-  s += dbox({ x: 470, y: R, w: 200, h: RH, title: "The project builds it", cls: "hi", lines: ["on a review worker", "its own recipe · the gate", "queued like any build"] });
+  s += dbox({ x: 470, y: R, w: 200, h: RH, title: "The project builds it", cls: "hi", lines: ["on a maintainer's host", "its own recipe · the gate", "queued like any build"] });
   s += darrow(670, RY, 710, RY);
   s += dbox({ x: 710, y: R, w: 190, h: RH, title: "The lab · the trial", cls: "amber", tcls: "amber", lines: ["pinned, never promised", "a real pacman installs it", "the transcript: trial.log"] });
   s += darrow(900, RY, 940, RY);

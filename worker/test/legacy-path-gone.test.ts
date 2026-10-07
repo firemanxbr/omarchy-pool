@@ -5,8 +5,9 @@
  * the docs above all — describe the maintainers' hosts: one bundle, one
  * isolated, credential-less container per task, capacity and lanes,
  * emulation, the isolation model with the invariants of design v2 §10.2 and
- * the levels of §19.3; never role containers, the updater, the broker's
- * relay or a contributor-run worker. tests/legacy-path-gone.sh checks the
+ * the levels of §19.3; never role containers (the pool, review and project
+ * workers among them), the updater, the broker's relay or a contributor-run
+ * worker. tests/legacy-path-gone.sh checks the
  * repository's side: the files gone, nothing naming them.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
@@ -14,6 +15,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { GONE, HOST_DOCS } from "../src/routes/contributors";
 import { DOCS_TREE } from "../src/pages/docs-tree";
+import { DOC_DIAGRAMS } from "../src/pages/doc-diagrams";
 import { seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
@@ -45,6 +47,8 @@ describe("the pages describe the maintainers' hosts, never the legacy role conta
     "role container", "omarchy-rollout", "rollout.sh", "register.sh", "factory/host/setup.sh", "factory/image/compose.yml", "factory/host/compose.yml",
     "agent-proxy", "behind a broker", "OMARCHY_BROKER", "OMARCHY_WORKER_ROLE=updater", "omarchy-worker start", "Run a worker", "The three roles",
     "community set", "a community worker", "Legacy registrations", "<h2>Legacy",
+    // The legacy sets' role containers by the names the docs gave them (`review worker` matches `review workers` too).
+    "review worker", "pool worker", "project worker",
   ];
   const PAGES = ["/workers", "/docs", "/docs/glossary", "/api", ...new Set(DOCS_TREE.map((c) => c.href.replace(/#.*$/, "")))];
 
@@ -57,6 +61,13 @@ describe("the pages describe the maintainers' hosts, never the legacy role conta
       // set_rollout): it is held to the files, not to the words (tests/legacy-path-gone.sh).
       const words = path === "/docs/testing" ? GONE_WORDS.filter((w) => /[/.]/.test(w)) : GONE_WORDS;
       for (const w of words) expect(r.text, `${path}: ${w}`).not.toContain(w);
+    }
+    // The pages How it works and the docs index write in code, the API page's and every diagram a chapter draws: each on a page above,
+    // and checked here by name too, so a diagram no chapter draws yet cannot bring one back.
+    expect(PAGES).toEqual(expect.arrayContaining(["/docs", "/docs/how-it-works", "/api"]));
+    for (const [name, draw] of Object.entries(DOC_DIAGRAMS)) {
+      const svg = draw();
+      for (const w of GONE_WORDS) expect(svg, `diagram ${name}: ${w}`).not.toContain(w);
     }
   });
 

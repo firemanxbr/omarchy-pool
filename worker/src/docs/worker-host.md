@@ -230,8 +230,8 @@ its own with a 2 GB memory limit and a time limit of its kind (45 minutes for
 a health check, 2½ hours for a sync, 3 for a promotion): one that crashes or
 hangs is failed and the pool queues it again, and every task beside it goes
 on. They run on any host whatever architecture they are for (a sync of the
-x86_64 sources runs natively on an aarch64 host, as the Studio's
-`pool-x86_64` always did), except the checks that install a ring's packages
+x86_64 sources runs natively on an aarch64 host, as it always did on the
+Studio), except the checks that install a ring's packages
 — a health check, a promotion's ABI gate — which need a lane of that ring's
 architecture, native or emulated. Those check containers, and the enqueue's
 reader of the recipes on `main` (on your host's own architecture), start
@@ -240,7 +240,7 @@ the job's own network behind its egress sidecar, with no token and nothing
 of the host but the job's scratch directory. Nothing to set up on your side:
 the dispatcher claims pool jobs on its own, and the pool hands them to a host
 only once the maintainers' `host-pool-jobs` setting names it — `*`, every
-host, since the legacy pool workers retired (runbook, *Pool jobs on hosts*) —
+host, since the legacy registrations retired (runbook, *Pool jobs on hosts*) —
 so a host that never gets a sync is most likely not named there. A host's agent that stops answering is
 re-checked by the pool, never restarted: the dispatcher's restart would not
 reach it, and would cost the jobs it runs.

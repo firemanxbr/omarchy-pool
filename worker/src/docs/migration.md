@@ -4,7 +4,7 @@ How to move omarchy-pool from one GitHub account and one Cloudflare account to
 others — for instance from `firemanxbr` to the Omarchy foundation — starting
 from a copy of this repository. Every step is a command or a click; nothing
 depends on the old accounts once it is done. Budget an afternoon, plus the
-hours the first full import takes on a project worker.
+hours the first full import takes on a maintainer's host.
 
 Throughout, replace:
 
@@ -224,7 +224,8 @@ The pool is rebuilt from upstream, not copied (every object is verified against
 its project's keyring on the way in). With A–D in place:
 
 ```bash
-# a project worker (RUNBOOK, Pulled jobs) must be running; as a maintainer:
+# a maintainer's host must be enrolled, confirmed and alive, and host-pool-jobs must name it ('*';
+# RUNBOOK, A new maintainer host and its Pool jobs on hosts); then, as a maintainer:
 export OMARCHY_API=https://pkgs.example.org OMARCHY_TOKEN=omc_…
 pkg-repo job sync --param arch=x86_64 && pkg-repo job sync --param arch=aarch64   # hours; idempotent, queue again if it stops
 pkg-repo job promote --param from=edge --param to=rc --param note=seed

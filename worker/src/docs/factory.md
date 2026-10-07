@@ -78,8 +78,9 @@ verify and attest the package faster and approve it with more confidence.
    #394, [/docs/governance#solo](/docs/governance#solo)). On the Review
    page, a maintainer (`factory/MAINTAINERS.toml`) claims a package that is
    ready (*Build by the project* on a build's page is the same door): the
-   project builds it again on a review worker, with the agent the maintainer
-   chose — the worker the claim pins. The workspace puts the factory's build
+   project builds it again on a maintainer's host, with the agent the
+   maintainer chose — the host registration the claim pins, whose agent
+   drafts the rebuild. The workspace puts the factory's build
    beside the rebuild: the request as checked, both PKGBUILDs with the lines
    that differ lit, both logs. A claim can be let go (*Release claim*) by the
    maintainer who made it or another, while a rebuild of it is queued or
@@ -94,17 +95,17 @@ verify and attest the package faster and approve it with more confidence.
    factory and the name stays the requester's; *Reject* frees a request's
    name. One review covers the package: it starts once every architecture
    requested is built or *not supported*, and the project builds each built
-   one again. A review worker of each architecture takes its task (`review:<task>`): the project's
-   agent gets the request and the contributor's PKGBUILD, log, gate and
+   one again. A host of each architecture takes its task (`review:<task>`), in a fresh
+   task container with its own agent sidecar: the project's agent gets the request and the contributor's PKGBUILD, log, gate and
    audit as the lesson — `draft-pkgbuild --evidence` — and writes the
    project's own recipe from the project's sources; the same gate runs;
    the packages, the recipe, the log, the gate go to the project's staging
    space (`staging/@project/…`) and the evidence to the record; its own
-   audit is queued — and its **trial**: a pool worker of that architecture
-   puts the package into the pool under the factory's directory and pins it
-   into the **lab** (the fourth ring: nothing there is promised or
-   promoted), renders the lab, and a real pacman in a clean container
-   installs it from the lab above `edge` (`tests/trial.sh`): dependencies
+   audit is queued — and its **trial**: a host with a lane of that
+   architecture takes it; its dispatcher puts the package into the pool
+   under the factory's directory and pins it into the **lab** (the fourth
+   ring: nothing there is promised or promoted), renders the lab, and a real
+   pacman in the task's clean container installs it from the lab above `edge` (`tests/trial.sh`): dependencies
    from `edge`, hooks run, files verified. The transcript goes beside the
    evidence (`trial.log`); the Review page shows *installs* or what stopped
    it. Nothing is published yet.
@@ -114,7 +115,7 @@ verify and attest the package faster and approve it with more confidence.
    confirmation, with their passkey in the browser (#271: no token approves
    or blocks). Every decision is a record the pool signs and a journal line
    with who, the door (`via`: the web or a token) and the agent that rebuilt
-   each architecture (what its review worker ran when it staged it). Review's
+   each architecture (what the host that rebuilt it ran when it staged it). Review's
    decisions — a claim, approve, request changes, reject, a release, an
    adoption that takes a registration — are beside the request, at
    `factory/<name>/<request>/decision-<time>-<word>-<id>.json`; a block of a
@@ -195,7 +196,7 @@ none builds, the request goes back to its owner. An architecture already
 in the pool stays where it is served when a build of its next version
 fails: that failure is the new version's. One review covers every
 target, as each architecture stands now and at one version: the project
-builds each supported architecture again on its review workers — never an
+builds each supported architecture again on its maintainers' hosts — never an
 older build of an architecture whose newest one failed — and one decision
 — approve, request changes, reject — covers them all, as a withdrawal or a
 block of it does later; what it approved is what

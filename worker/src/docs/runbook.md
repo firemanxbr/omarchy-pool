@@ -3,7 +3,7 @@
 Operating the staging environment. Nothing here is done by hand on the servers:
 every write goes through the Worker with a per-job token a worker got at claim
 time; there is no shared secret. Humans operate the pipeline by queueing jobs
-(`pkg-repo job`, or the API with a maintainer's token) that project workers run.
+(`pkg-repo job`, or the API with a maintainer's token) that the maintainers' hosts run.
 
 | | |
 |---|---|
@@ -11,7 +11,7 @@ time; there is no shared secret. Humans operate the pipeline by queueing jobs
 | Index API | https://pkgs.omarchy-pool.org/api/v1/stats |
 | Pool (static, what pacman reads) | https://pool.omarchy-pool.org/`<source>`/x86_64/ · `/aarch64/` — `core/`, `extra/`, `packages/` (the OPR), `asahi/`, `factory/`, … |
 | Signing key | `docs/omarchy-staging.pub.asc` · https://pool.omarchy-pool.org/omarchy-staging.pub.asc · https://pkgs.omarchy-pool.org/api/v1/signing-key (expires 2027-09-12); the private key is the Worker secret `SIGNING_KEY` — nowhere else |
-| Jobs (pulled by project workers) | Sync (every 3 h, one task per architecture) · Promote (by evidence: edge→rc right after the sync that changed edge, rc→stable on the second green check in a row, attempted every 3 h; auto-rollback) · Fast lane (a factory build the trial installed, and security fixes, straight to stable) · Health (daily, both arches) · Security (every 3 h, with fast-track) · GC (Sundays) · Metrics snapshot (every 30 min, by the brain itself) · Release (GitHub, when a maintainer decides: `gh workflow run release.yml`) |
+| Jobs (pulled by the maintainers' hosts) | Sync (every 3 h, one task per architecture) · Promote (by evidence: edge→rc right after the sync that changed edge, rc→stable on the second green check in a row, attempted every 3 h; auto-rollback) · Fast lane (a factory build the trial installed, and security fixes, straight to stable) · Health (daily, both arches) · Security (every 3 h, with fast-track) · GC (Sundays) · Metrics snapshot (every 30 min, by the brain itself) · Release (GitHub, when a maintainer decides: `gh workflow run release.yml`) |
 | Running version | https://pkgs.omarchy-pool.org/api/v1/version · the chip in the dashboard header |
 
 **The address moved (2026-09-18).** The product has its own domain. Six
@@ -47,13 +47,13 @@ runs `/setup` again; nothing it reads went away. The key's user id,
   selection; history is never rewritten. Every action posts an event.
 * **Nobody holds R2 credentials, and nobody holds a pool credential.** Reads
   are public objects; writes go through the Worker with the per-job token of
-  a task a project worker claimed; the R2 bucket has no API tokens.
+  a task a host claimed; the R2 bucket has no API tokens.
 
 ## Everyday operations
 
 Everything the scheduler does can be queued by hand by a maintainer
 (`OMARCHY_API` and `OMARCHY_TOKEN=omc_…` set — the token from your own
-page); a project worker runs it with a per-job token, and Status counts it
+page); a host runs it with a per-job token, and Status counts it
 with the pool's other jobs (*The numbers*, at the foot of the page):
 
 ```bash
@@ -137,9 +137,10 @@ A release is `main` at the moment a maintainer dispatches one
    started from it on the runner (`tests/image-smoke.sh`: the dispatcher,
    which refuses a signing key and otherwise claims with its token's file;
    the egress sidecar; the agent sidecar answering on `:8790`, with no pool
-   path; the build script's `--self-test`; a legacy registration's project
-   worker to its first claim of a stub pool; and, since #346, the updater
-   and broker roles refused). Only once
+   path; the build script's `--self-test`; a legacy project registration's
+   `pkg-repo work`, kept until the last such registration is retired, to
+   its first claim of a stub pool; and, since #346, the updater and broker
+   roles refused). Only once
    both architectures' images have started does the version's own
    `:vX.Y.Z` move (the index the host bundle signs). An image whose roles do
    not start, on either architecture, stops the release before any tag
@@ -378,7 +379,7 @@ whoever uses it: it refuses an `install.sh` whose provenance is not
 
 ## Security data
 
-The `security` job (every 3 h, pulled by a project worker; `pkg-repo job
+The `security` job (every 3 h, pulled by a host; `pkg-repo job
 security` queues one by hand) fetches the Arch and Debian trackers, KEV and EPSS,
 matches them (`pkg-repo security`) and then fast-tracks fixes into `rc` and
 `stable` (`pkg-repo fast-track`, `--min-severity medium`, exploited-in-the-wild
@@ -496,29 +497,23 @@ Actions (*The GitHub settings the signature relies on*, below).
 The pool's own work — sync, promote, rollback, render, health, security,
 enqueue, gc — runs as tasks in the factory's queue when `JOB_KINDS` (a
 Worker var, comma-separated kinds) lists the kind: the cron creates them
-on schedule, a maintainer queues one by hand, and a **project worker**
-pulls and runs them:
-
-```bash
-# on any machine with podman/docker, python3, curl, git (the health and ABI
-# scripts) — a droplet, a laptop, a Hetzner box
-pkg-repo work --worker-token omw_… --labels '{"where":"droplet-1"}'
-```
-
-The worker is registered like any other (`POST /factory/workers`, a
-maintainer's); project trust is no longer given one worker at a time
-(#343: `POST /factory/workers/<id>/trust` answers 410), so only a
-registration that already holds it takes the pool's jobs this way — a new
-machine joins as a host (*A new maintainer host*, below); maintainers are named by
-`factory/MAINTAINERS.toml` (docs/GOVERNANCE.md), nowhere else. Every task
-runs with a per-job token the pool issues at claim time (SECURITY.md);
-the worker's own token only claims. No pipeline step runs on GitHub any
-more: the workflows that did are gone, and a run by hand is a job. GitHub
-Actions runs CI and the release only — there is no hosted worker: when
-pool jobs wait and no project worker is alive, they wait, the scheduler
-log and the Workers page say so, and *The Studio host* (below) is where
-to look. Worker secret: `JOB_TOKEN_SECRET` (any random string) signs the
-job tokens.
+on schedule, a maintainer queues one by hand, and a **maintainer's host**
+pulls and runs them — its dispatcher, in a child process of its own on the
+unit it keeps for them, once the `host-pool-jobs` setting names it (`*` for
+every host: *A new maintainer host* below, its *Pool jobs on hosts*).
+Nothing else takes them: no machine is registered for them one at a time
+(`POST /factory/workers` answers 410, #346; project trust is given to no
+worker by hand, #343), a new machine joins as a host (*A new maintainer
+host*, below), and maintainers are named by `factory/MAINTAINERS.toml`
+(docs/GOVERNANCE.md), nowhere else. Every task runs with a per-job token
+the pool issues at claim time (SECURITY.md); the host's own worker token
+only claims. No pipeline step runs on GitHub any more: the workflows that
+did are gone, and a run by hand is a job. GitHub Actions runs CI and the
+release only — there is no hosted worker: when no host is named in
+`host-pool-jobs`, or none it names is alive, the pool's jobs wait — the
+rings stop moving —, the scheduler log says so and Status counts them
+waiting, and the hosts' pages (*The Studio host*, below) are where to look. Worker secret:
+`JOB_TOKEN_SECRET` (any random string) signs the job tokens.
 
 ## A new maintainer host
 
@@ -2243,7 +2238,7 @@ so a size-4 build waits for memory rather than run smaller.
   reach a host once the maintainers let them: the `host-pool-jobs` setting
   names its host (or its registration's id), or says `*` for every host;
   absent, no host takes one and the pool's jobs wait — the rings stop
-  moving. With the legacy pool workers retired (#346) the hosts are the only
+  moving. With the legacy registrations retired (#346) the hosts are the only
   ones that take them, so it names every host that should (`*`, as the P3
   switch left it; the rollout was the P1 host first, the Studio canary a
   week later, every host at the switch):
@@ -2599,11 +2594,12 @@ its owner and the maintainers act on its page, `/hosts/<id>`
 
 | What | Where |
 |---|---|
-| the agent | its owner's login on the Studio — in the docker group, linger on — as a `systemd --user` unit (*Installing a host*, above) |
-| the work root | `/srv/omarchy-pool/host`, on the internal disk's btrfs subvolume |
-| the secrets directory | `/srv/omarchy-pool/host-secrets` (`agent.env`, 0600) |
+| the agent | its owner's login on the Studio — in the docker group, linger on — as a `systemd --user` unit (*Installing a host*, above), its data in `~/.local/share/omarchy-agent` (`agent.toml`, the bundles) |
+| the host key | `host.ed25519` in the agent's `state/`, a file: the Studio has no TPM (#330, *Where the host key lives*, above) |
+| the work root | `/srv/omarchy-host`, a btrfs subvolume of its own on the internal disk, beside the directory its legacy set ran from (below) |
+| the secrets directory | `~/.local/share/omarchy-agent/secrets` (`agent.env`, 0600) |
 | the task subnets | `10.232.0.0/16`, dropped to the host by prep-root.sh's task firewall |
-| the bundle | the agent's set directory, `~/.local/share/omarchy-agent/sets/host/` |
+| the bundle | the agent's set directory, `~/.local/share/omarchy-agent/sets/host/`, on the compose driver (Quadlet is rootless podman's); the host worker token in its own file there, `run/host/dispatcher/token` (0400), mounted read-only into the dispatcher (#327) |
 
 **Capacity and lanes.** 11 units — for example five builds and the job unit
 (§21.1 step 7) — on two lanes: aarch64 native, and x86_64 emulated under
@@ -2657,8 +2653,8 @@ switched and retired theirs the same way (#332). The files the legacy sets
 ran from left the repository with #346, and so did the way to register
 another: `POST /factory/workers` answers 410.
 
-What is left of the set on the machine — its files beside the work root,
-its volumes and its images — is for its owner to remove at a visit, once:
+What is left of the set on the machine — its directory, its volumes and
+its images — is for its owner to remove at a visit, once:
 
 ```bash
 cd /srv/omarchy-pool && ls -A                                       # the retired set's tree: etc/, work/, cache/, compose files, the marker
@@ -2666,13 +2662,22 @@ docker volume ls --filter label=com.docker.compose.project=omarchy-pool
 docker image ls ghcr.io/firemanxbr/omarchy-worker                   # images no container uses any more; docker image prune removes the dangling ones
 ```
 
-Keep `host/` and `host-secrets/` (the host's work root and secrets), and the
-marker, which tells any old copy of the set's tools to refuse there.
+Nothing of the host is in that directory: its work root (`/srv/omarchy-host`)
+and its secrets (in the agent's data directory) were put beside it at the
+canary, so removing it takes nothing of the host's. While any of the set's
+files stay, keep the marker, which tells any old copy of the set's tools to
+refuse there.
 
 **No legacy registration is left** — the check before the deploy that
-carries #346, and after it. Every row it lists is to revoke on its page (its
-owner or a maintainer: *Revoke*, or `DELETE /api/v1/factory/workers/<id>`
-with a maintainer's token); a revoked one claims nothing, at once:
+carries #346, and after it; a hard precondition of that deploy. The pool
+makes no new legacy registration from then on (`POST /factory/workers`
+answers 410), but it does not refuse the claims of one that is still
+unrevoked: such a row would go on taking pool jobs, rebuilds or
+contributors' builds on a machine that runs none of the host's isolation.
+So do not deploy while the first two queries list anything. Every row the
+first lists is to revoke on its page (its owner or a maintainer: *Revoke*,
+or `DELETE /api/v1/factory/workers/<id>` with a maintainer's token); a
+revoked one claims nothing, at once:
 
 ```bash
 npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, owner, trust, arch, last_seen FROM build_workers WHERE kind = 'legacy' AND revoked_at IS NULL ORDER BY last_seen DESC"
@@ -2716,8 +2721,9 @@ decides on their own package, and never on a contributor's bytes:
 
 - **Claim** (Review's queue; *Build by the project* on a build's page)
   queues a project build (`pkgbuild_ref = review:<task>`, trust `project`),
-  pinned to the review worker whose agent you chose: a review worker (`pkg-repo work`)
-  starts a fresh container that holds nothing, where the project's agent
+  pinned to the host registration whose agent you chose: that host's
+  dispatcher starts a fresh container that holds nothing, beside its own
+  agent sidecar, where the project's agent
   writes its own recipe with the request's facts and the contributor's
   evidence as the lesson, builds it through the same gate and stages it
   under `staging/@project/`; a second agent audits it, and the trial
@@ -2787,7 +2793,7 @@ a ring, and the one thing that must hold for it to open:
 | Door | What it ships | What guards it |
 |---|---|---|
 | **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
-| **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
+| **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built on a maintainer's host and published into edge | the job's token, issued only to a project-trusted registration — a host's — at claim; the recipe is a reviewed commit on `main` |
 | **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
 | **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |
 | **A promotion** (the scheduler's, or `pkg-repo job promote`) | a ring's head, into the ring above | the gate: fresh health and ABI checks, the soak, no security regression — rows the jobs write: your token writes a `note` to the journal, nothing else (`note_only`) |
@@ -3091,21 +3097,22 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   carry them). Records are cached under the worker's `osv/` directory;
   `pkg-repo security --osv-cache DIR` by hand, omit the flag to skip OSV.
 - **The audit** (the second agent, GOVERNANCE.md): every staged community
-  build queues an `audit` task. A project worker takes it only when it
-  was started with an agent key in its environment — `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `GEMINI_API_KEY` or `XAI_API_KEY`, or a Claude
-  subscription as `CLAUDE_CODE_OAUTH_TOKEN` (Claude Code in print mode, no
-  tools; the worker installs it at start) (`pkg-repo work` adds
-  the `audit` kind by itself then; `FACTORY_PROVIDER` picks among several
-  keys, `FACTORY_MODEL` the model — defaults `claude-sonnet-5`, `gpt-5`,
-  `gemini-3.6-flash`, `grok-4`; `FACTORY_REASONING=low` keeps a reasoning
-  model's answers inside the budget — the Studio sets it, and a reply cut
-  short is retried once with four times the budget). The Workers page
-  shows the agent each worker reported. The report lands next to the evidence
+  build queues an `audit` task. A host takes it only when its agent
+  answers: its owner's agent key in the host's `agent.env` —
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` or `XAI_API_KEY`,
+  or a Claude subscription as `CLAUDE_CODE_OAUTH_TOKEN` (Claude Code in
+  print mode, no tools) —, which the task's own agent sidecar reads and
+  serves to that one task, never its container nor the dispatcher;
+  `FACTORY_PROVIDER` picks among several keys, `FACTORY_MODEL` the model —
+  defaults `claude-sonnet-5`, `gpt-5`, `gemini-3.6-flash`, `grok-4`;
+  `FACTORY_REASONING=low` in the same file keeps a reasoning model's answers
+  inside the budget, and a reply cut short is retried once with four times
+  the budget. The Workers page and each host's page show the agent its
+  host reported. The report lands next to the evidence
   (`/api/v1/factory/tasks/<id>/artifacts/audit.md`) and the Review page
-  shows the verdict; *waiting* in that column means no such worker is
-  running. It is advice for the maintainer; nothing acts on it. A build
-  approved or rejected before the audit ran cancels it.
+  shows the verdict; *waiting* in that column means no host whose agent
+  answers is alive. It is advice for the maintainer; nothing acts on it. A
+  build approved or rejected before the audit ran cancels it.
 - **New upstream versions** — two paths, one rule (evidence before review):
   - a package a contributor registered: once a day (05:45 UTC) the brain
     asks GitHub for each approved package's latest release and queues a

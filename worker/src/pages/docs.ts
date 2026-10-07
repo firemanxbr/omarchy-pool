@@ -120,7 +120,7 @@ export const DOC_SECTIONS: IndexSection[] = [
     id: "review",
     icon: "user-check",
     title: "Review",
-    text: "A maintainer who did not request the package reads what the factory did and has it built again from scratch on a review worker. That build is the one that ships, once a maintainer approves it. Any maintainer can block a package later.",
+    text: "A maintainer who did not request the package reads what the factory did and has it built again from scratch on a maintainer's host. That build is the one that ships, once a maintainer approves it. Any maintainer can block a package later.",
     more: [chapter("governance")],
   },
   {

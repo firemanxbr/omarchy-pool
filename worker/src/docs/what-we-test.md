@@ -306,7 +306,7 @@ maintainer merges it like any other change to the process.
   on the Studio's review-x86_64: rustc under qemu again, three attempts,
   then final. The pool and the community build script already sent a build back
   for a native worker when a toolchain could not start (exit 96); the
-  review and pool workers run `pkg-repo work`, which never said so, and a
+  project's own workers then ran `pkg-repo work`, which never said so, and a
   library qemu could not map (sudo through libldap, a libedit user) was
   nobody's exit 96. Both are now (#281): the build script stops at the
   first attempt with exit 96 when the loader says *failed to map segment*
