@@ -36,6 +36,17 @@
 //! removed with it; their CPUs and memory (0.1 CPU / 64 MB, 0.25 CPU /
 //! 256 MB) come out of the task container's share.
 //!
+//! **Who the agent sidecar is** (#399): the keys file stays owner-only (0600)
+//! on the host, and root with every capability dropped opens no file another
+//! uid owns, so the agent sidecar and the probe run as the file's owner as the
+//! engine shows it to a container ([`AgentUser`], `--user <uid>:<gid>`): the
+//! agent's uid on a rootful engine and in a Mac's VM, root on a rootless one
+//! (whose root is the agent's user). A remapped daemon (`userns-remap`) shows
+//! the owner to no remapped uid, so there they leave the remapping
+//! (`--userns host`) as that owner, never as root. The agent, which writes the
+//! file, says which in `etc/dispatcher.env`; without it (an older agent) they
+//! run as the image's root, as before.
+//!
 //! **Its lane** (#338, design v2 §7.4, §7.5): `--platform linux/<arch>` is
 //! the lane's architecture, and a container on an emulated lane — and only
 //! there — carries `WORKER_LABELS={"emulated":true}`, which makes the build
@@ -408,11 +419,86 @@ pub enum Gateway {
     NoDns,
 }
 
-/// A model kind's agent sidecar: where its keys are, and its per-task caps (D45).
+/// Who an agent sidecar and the probe run as (#399): the keys file's owner as the engine
+/// shows it to a container, which the agent writes into `etc/dispatcher.env`
+/// (`OMARCHY_AGENT_USER`, `OMARCHY_AGENT_USERNS`). The file is 0600 on the host, and the
+/// sidecars keep `--cap-drop ALL` and `no-new-privileges`: they read it as its owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentUser {
+    pub uid: u32,
+    pub gid: u32,
+    /// A remapped daemon (`userns-remap`): no remapped uid is the owner, so the sidecar runs in
+    /// the host's user namespace (`--userns host`), as that owner — never as root.
+    pub host_userns: bool,
+}
+
+impl AgentUser {
+    /// `OMARCHY_AGENT_USER` (`<uid>:<gid>`, decimal) and `OMARCHY_AGENT_USERNS` (`host`, or
+    /// empty); `None` when neither is set (an agent from before #399), which leaves the
+    /// image's own user.
+    pub fn parse(user: &str, userns: &str) -> Result<Option<Self>, String> {
+        let (user, userns) = (user.trim(), userns.trim());
+        if user.is_empty() {
+            return if userns.is_empty() {
+                Ok(None)
+            } else {
+                Err(format!("OMARCHY_AGENT_USERNS={userns} without OMARCHY_AGENT_USER: the agent sidecar leaves a namespace only as the keys' owner"))
+            };
+        }
+        let id = |s: &str| {
+            (!s.is_empty() && s.len() <= 10 && s.bytes().all(|c| c.is_ascii_digit()))
+                .then(|| s.parse::<u32>().ok())
+                .flatten()
+        };
+        let (uid, gid) = user
+            .split_once(':')
+            .and_then(|(u, g)| Some((id(u)?, id(g)?)))
+            .ok_or_else(|| {
+                format!("OMARCHY_AGENT_USER={user} is not <uid>:<gid> (two decimal numbers)")
+            })?;
+        let host_userns = match userns {
+            "" => false,
+            "host" => true,
+            other => {
+                return Err(format!(
+                    "OMARCHY_AGENT_USERNS={other}: `host` (a remapped daemon's agent sidecar runs in the host's user namespace) or nothing"
+                ))
+            }
+        };
+        let u = Self {
+            uid,
+            gid,
+            host_userns,
+        };
+        u.check()?;
+        Ok(Some(u))
+    }
+
+    /// A sidecar in the host's user namespace as root would be the host's root, whatever it drops.
+    fn check(self) -> Result<(), String> {
+        if self.host_userns && self.uid == 0 {
+            return Err("an agent sidecar in the host's user namespace never runs as root (uid 0): the keys file is the agent user's".into());
+        }
+        Ok(())
+    }
+
+    /// Its `--user` (and `--userns`) arguments.
+    fn args(self) -> Vec<String> {
+        let mut a = vec!["--user".to_owned(), format!("{}:{}", self.uid, self.gid)];
+        if self.host_userns {
+            a.extend(["--userns".to_owned(), "host".to_owned()]);
+        }
+        a
+    }
+}
+
+/// A model kind's agent sidecar: where its keys are, who reads them, and its per-task caps (D45).
 #[derive(Debug, Clone, Copy)]
 pub struct Agent<'a> {
     /// `OMARCHY_SECRETS_DIR/agent.env` on the host: mounted read-only into the sidecar, never read by the dispatcher.
     pub env_file: &'a Path,
+    /// The keys file's owner as the engine shows it (#399); `None`: the image's own user.
+    pub user: Option<AgentUser>,
     pub calls: u32,
     pub tokens: u64,
     pub wall_s: u64,
@@ -640,6 +726,10 @@ impl Side<'_> {
             ]
             .map(str::to_owned),
         );
+        // The keys file's owner (#399): root with no capability cannot open the 0600 file.
+        if let Some(u) = agent.user {
+            a.extend(u.args());
+        }
         if !probe {
             a.extend(["--log-driver".into(), "none".into()]);
         }
@@ -713,6 +803,9 @@ fn side_ok(image: &str, deny: &[String], agent: Option<&Agent<'_>>) -> Result<()
         if a.calls == 0 || a.tokens == 0 || a.wall_s == 0 {
             return Err("an agent sidecar with a cap of 0".into());
         }
+        if let Some(u) = a.user {
+            u.check()?;
+        }
     }
     Ok(())
 }
@@ -773,6 +866,8 @@ pub struct Probe<'a> {
     pub gateway: Gateway,
     pub deny: &'a [String],
     pub env_file: &'a Path,
+    /// The keys file's owner, as a task's agent sidecar runs (#399).
+    pub user: Option<AgentUser>,
 }
 
 pub fn probe_plan(p: &Probe<'_>) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
@@ -781,6 +876,7 @@ pub fn probe_plan(p: &Probe<'_>) -> Result<(Vec<Vec<String>>, Vec<String>), Stri
     }
     let agent = Agent {
         env_file: p.env_file,
+        user: p.user,
         calls: 1,
         tokens: 1,
         wall_s: 1,
@@ -1211,6 +1307,7 @@ mod tests {
             deny: &[],
             agent: Some(Agent {
                 env_file: env_file(),
+                user: None,
                 calls: 200,
                 tokens: 2_000_000,
                 wall_s: 7200,
@@ -1219,7 +1316,7 @@ mod tests {
         }
     }
 
-    const FLAGS_WITH_VALUE: [&str; 17] = [
+    const FLAGS_WITH_VALUE: [&str; 19] = [
         "--runtime",
         "--name",
         "--mount",
@@ -1235,6 +1332,8 @@ mod tests {
         "--cap-add",
         "--security-opt",
         "--log-driver",
+        "--user",
+        "--userns",
         "-v",
         "-e",
     ];
@@ -1324,6 +1423,12 @@ mod tests {
         }
         if flag(r, "--mount").is_some() && !r.name.ends_with("-agent") {
             return Err(format!("{}: --mount outside the agent sidecar", r.name));
+        }
+        // Only the agent sidecar runs as another user, the keys' owner (#399).
+        if (flag(r, "--user").is_some() || flag(r, "--userns").is_some())
+            && !r.name.ends_with("-agent")
+        {
+            return Err(format!("{}: --user outside the agent sidecar", r.name));
         }
         if flag(r, "--runtime").is_some()
             && (r.name.ends_with("-egress") || r.name.ends_with("-agent"))
@@ -1688,6 +1793,21 @@ mod tests {
         }
         if r.ip != Some(&slot.agent_ip()) || !r.caps.is_empty() {
             return Err(format!("{}: address {:?}, caps {:?}", r.name, r.ip, r.caps));
+        }
+        // The keys' owner (#399): numeric, and in the host's user namespace never root.
+        let user = flag(r, "--user");
+        let userns = flag(r, "--userns");
+        if let Some(u) = user {
+            let parsed = AgentUser::parse(u, userns.unwrap_or(""))
+                .map_err(|e| format!("{}: --user {u}: {e}", r.name))?;
+            if parsed.is_none() || userns.is_some_and(|n| n != "host") {
+                return Err(format!("{}: --user {u} --userns {userns:?}", r.name));
+            }
+        } else if userns.is_some() {
+            return Err(format!(
+                "{}: --userns {userns:?} without the keys' owner",
+                r.name
+            ));
         }
         let (id, gen) = owner_of_name(r.name).ok_or("name")?;
         let usage = format!(
@@ -2400,6 +2520,7 @@ mod tests {
             let mut s = spec(Kind::Audit, &tdir, &rel);
             s.agent = Some(Agent {
                 env_file: keys,
+                user: None,
                 calls: 1,
                 tokens: 1,
                 wall_s: 1,
@@ -2601,6 +2722,7 @@ mod tests {
             gateway: Gateway::Isolated,
             deny: &[],
             env_file: env_file(),
+            user: None,
         };
         let (setup, run) = probe_plan(&p).unwrap();
         let mut all = setup.clone();
@@ -2612,6 +2734,158 @@ mod tests {
         assert!(setup[0]
             .iter()
             .any(|x| x == "omarchy-task-0-g_0123456789abcdef"));
+    }
+
+    /// #399: the keys file is 0600 and its owner's, and root with every capability dropped
+    /// cannot open it, so a task's agent sidecar and the probe run as that owner as each engine
+    /// shows it to a container — what the agent writes into etc/dispatcher.env — and keep
+    /// `--cap-drop ALL` and `no-new-privileges`, with no capability added.
+    #[test]
+    fn the_agent_sidecar_and_the_probe_run_as_the_keys_owner_on_every_engine() {
+        let (tdir, rel, work) = dirs();
+        let user = |user: &str, userns: &str| AgentUser::parse(user, userns).unwrap();
+        for (engine, u, args) in [
+            // A rootful daemon (the Studio): the agent's own uid, as the host has it.
+            (
+                "rootful docker",
+                user("1000:1000", ""),
+                &["--user", "1000:1000"][..],
+            ),
+            // A Mac's VM: the Mac user's uid, as Colima's shared directory shows it.
+            ("a Mac's VM", user("501:20", ""), &["--user", "501:20"][..]),
+            // A rootless engine: its root is the agent's user.
+            ("rootless podman", user("0:0", ""), &["--user", "0:0"][..]),
+            // A remapped daemon: no remapped uid is the owner; the host's namespace, as it.
+            (
+                "rootful docker with userns-remap",
+                user("1000:1000", "host"),
+                &["--user", "1000:1000", "--userns", "host"][..],
+            ),
+            // An agent from before #399 wrote neither: the image's user, as before.
+            ("an older agent", None, &[][..]),
+        ] {
+            let at = |a: &[String]| {
+                a.iter()
+                    .position(|x| x == "--user" || x == "--userns")
+                    .map_or(&[][..], |i| &a[i..])
+                    .iter()
+                    .take(args.len())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            // A model task's agent sidecar.
+            let mut s = spec(Kind::ModelBuild, &tdir, &rel);
+            s.agent.as_mut().unwrap().user = u;
+            let p = plan(&s).unwrap();
+            check_plan(&p, &work, want(&s)).unwrap_or_else(|e| panic!("{engine}: {e}\n{p:#?}"));
+            let side = p
+                .iter()
+                .find(|c| c[0] == "create" && c.get(2).is_some_and(|n| n.ends_with("-agent")))
+                .unwrap();
+            assert_eq!(at(side), args, "{engine}: {side:?}");
+            for (k, v) in [
+                ("--cap-drop", "ALL"),
+                ("--security-opt", "no-new-privileges"),
+            ] {
+                assert!(
+                    side.windows(2).any(|w| w[0] == k && w[1] == v),
+                    "{engine}: {k} {v}"
+                );
+            }
+            assert!(!side.iter().any(|x| x == "--cap-add"), "{engine}");
+            // Only the agent sidecar: the egress and the task container run as before.
+            for c in p.iter().filter(|c| {
+                c[0] == "run"
+                    || c[0] == "create" && c.get(2).is_some_and(|n| n.ends_with("-egress"))
+            }) {
+                assert!(
+                    !c.iter().any(|x| x == "--user" || x == "--userns"),
+                    "{engine}: {c:?}"
+                );
+            }
+            // The probe's one-shot agent, the same.
+            let probe = Probe {
+                gen: GEN,
+                host: "h_studio-1",
+                worker_image: WORKER,
+                subnets: subnets(),
+                slot: 9,
+                gateway: Gateway::Isolated,
+                deny: &[],
+                env_file: env_file(),
+                user: u,
+            };
+            let (setup, run) = probe_plan(&probe).unwrap();
+            let mut all = setup.clone();
+            all.push(run.clone());
+            check_plan(&all, &work, no_task(false))
+                .unwrap_or_else(|e| panic!("{engine}: {e}\n{all:#?}"));
+            assert_eq!(at(&run), args, "{engine}: the probe {run:?}");
+            assert_eq!(run.last().unwrap(), "--probe");
+        }
+        // In the host's user namespace never as root, whatever it drops: refused before docker.
+        let root_on_host = AgentUser {
+            uid: 0,
+            gid: 0,
+            host_userns: true,
+        };
+        let mut s = spec(Kind::Audit, &tdir, &rel);
+        s.agent.as_mut().unwrap().user = Some(root_on_host);
+        assert!(plan(&s).unwrap_err().contains("never runs as root"));
+        let probe = Probe {
+            gen: GEN,
+            host: "h_studio-1",
+            worker_image: WORKER,
+            subnets: subnets(),
+            slot: 9,
+            gateway: Gateway::Isolated,
+            deny: &[],
+            env_file: env_file(),
+            user: Some(root_on_host),
+        };
+        assert!(probe_plan(&probe).is_err());
+    }
+
+    /// What `OMARCHY_AGENT_USER` and `OMARCHY_AGENT_USERNS` may say (#399).
+    #[test]
+    fn the_agent_user_s_grammar() {
+        assert_eq!(AgentUser::parse("", "").unwrap(), None);
+        assert_eq!(
+            AgentUser::parse(" 1000:984 ", "").unwrap(),
+            Some(AgentUser {
+                uid: 1000,
+                gid: 984,
+                host_userns: false
+            })
+        );
+        assert_eq!(
+            AgentUser::parse("1000:1000", "host").unwrap(),
+            Some(AgentUser {
+                uid: 1000,
+                gid: 1000,
+                host_userns: true
+            })
+        );
+        for (user, userns) in [
+            ("1000", ""),
+            ("root", ""),
+            ("root:root", ""),
+            ("1000:", ""),
+            (":1000", ""),
+            ("-1:0", ""),
+            ("1000:1000:1000", ""),
+            ("4294967296:0", ""),
+            ("1000:1000 --privileged", ""),
+            ("1000:1000", "auto"),
+            ("1000:1000", "keep-id"),
+            ("", "host"),
+            ("0:0", "host"),
+        ] {
+            assert!(
+                AgentUser::parse(user, userns).is_err(),
+                "{user:?} {userns:?} must be refused"
+            );
+        }
     }
 
     /// The internal network's gateway, per engine: docker's isolated mode, podman's without DNS (its
@@ -2714,6 +2988,18 @@ mod tests {
             with("", &["-v", "/srv/omarchy/work/cache:/cache"]),
             with("", &["-v", "/srv/omarchy/work/cache/pacman/aarch64:/var/cache/pacman/rw"]),
             with("-agent", &["-v", "/srv/omarchy/work/cache/pacman/aarch64:/var/cache/pacman/shared:ro"]),
+            // Another user, or the host's user namespace, anywhere but the agent sidecar's keys'
+            // owner (#399): numeric, and in the host's namespace never root.
+            with("", &["--user", "1000:1000"]),
+            with("", &["--userns", "host"]),
+            with("-egress", &["--user", "1000:1000"]),
+            with("-egress", &["--userns", "host"]),
+            with("-agent", &["--userns", "host"]),
+            with("-agent", &["--user", "0:0", "--userns", "host"]),
+            with("-agent", &["--user", "1000:1000", "--userns", "auto"]),
+            with("-agent", &["--user", "root"]),
+            with("-agent", &["--user", "1000"]),
+            with("-agent", &["--user", "1000:1000", "--user", "0:0"]),
         ];
         // A task container on another network, or attached to the shared bridge.
         let mut other_net = good.clone();

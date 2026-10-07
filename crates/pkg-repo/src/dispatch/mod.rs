@@ -139,7 +139,12 @@
 //! bridge network (#373), which install's egress probe then checked: without
 //! it a package with `network = "direct"` is handed back; and the envelope's
 //! `cache_caps` (`OMARCHY_CACHE_PACMAN_GB`, `OMARCHY_CACHE_BUILD_GB`, #341),
-//! each only when agent.toml sets it. A changed
+//! each only when agent.toml sets it; and who the agent sidecars and the
+//! probe run as (#399): `OMARCHY_AGENT_USER=<uid>:<gid>`, the keys file's
+//! owner as the engine shows it to a container, with
+//! `OMARCHY_AGENT_USERNS=host` on a remapped daemon ([`spec::AgentUser`]) —
+//! the file stays 0600 and the sidecars keep every capability dropped, so
+//! they read it as its owner. A changed
 //! file recreates the dispatcher, which re-adopts its tasks. The dispatcher
 //! keeps the registration's id it learned in `state/host`.
 
@@ -325,6 +330,10 @@ pub struct Net {
     pub deny: Vec<String>,
     /// `OMARCHY_SECRETS_DIR` on the host: its `agent.env` is mounted into agent sidecars, never read here.
     pub secrets_dir: Option<PathBuf>,
+    /// Who the agent sidecars and the probe run as (#399): the keys file's owner as the engine
+    /// shows it (`OMARCHY_AGENT_USER`, `OMARCHY_AGENT_USERNS`, which the agent writes); `None`
+    /// from an agent before it, the image's own user.
+    pub agent_user: Option<spec::AgentUser>,
     pub caps: budget::Caps,
     /// How the engine keeps a task network's gateway off the host: asked of the engine at start.
     pub gateway: spec::Gateway,
@@ -341,6 +350,7 @@ impl Default for Net {
             subnets: spec::Subnets::parse("10.231.0.0/16").expect("the default range"),
             deny: Vec::new(),
             secrets_dir: None,
+            agent_user: None,
             caps: budget::Caps::default(),
             gateway: spec::Gateway::Isolated,
             direct: false,
@@ -918,6 +928,7 @@ impl Dispatcher {
                     gateway: net.gateway,
                     deny: &net.deny,
                     env_file: &env_file,
+                    user: net.agent_user,
                 },
                 || iso(epoch_now()),
             )
@@ -1504,6 +1515,17 @@ impl Dispatcher {
             lost(self, &mut live, format!("its caches: {e}"));
             return live;
         }
+        // A model kind's agent sidecar writes its usage as the keys file's owner (#399).
+        if let Some(u) = self.net.agent_user.filter(|_| kind.model()) {
+            if let Err(e) = budget::usage_dir_for(&tdir, u.uid, u.gid) {
+                lost(
+                    self,
+                    &mut live,
+                    format!("its agent sidecar's usage directory: {e}"),
+                );
+                return live;
+            }
+        }
         let env_file = self.net.env_file();
         let plan = spec::plan(&spec::Spec {
             task: live.lease.task.id,
@@ -1529,6 +1551,7 @@ impl Dispatcher {
             deny: &self.net.deny,
             agent: env_file.as_deref().map(|f| spec::Agent {
                 env_file: f,
+                user: self.net.agent_user,
                 calls: agent_calls.unwrap_or(1),
                 tokens: self.net.caps.tokens_per_task,
                 wall_s: self.net.caps.minutes_per_task * 60,
@@ -2666,6 +2689,17 @@ pub fn run(opts: &Options) -> Result<()> {
             l.version,
             l.socket.display()
         ));
+    }
+    if opts.net.secrets_dir.is_some() {
+        say(match opts.net.agent_user {
+            Some(u) => format!(
+                "agent sidecars and the probe run as {}:{}{}, agent.env's owner as the engine shows it (#399)",
+                u.uid,
+                u.gid,
+                if u.host_userns { " in the host's user namespace (a remapped daemon)" } else { "" }
+            ),
+            None => "agent sidecars and the probe run as the worker image's user: etc/dispatcher.env names no OMARCHY_AGENT_USER (an agent from before #399), so a 0600 agent.env of another user's does not read".into(),
+        });
     }
     let terminating = Arc::new(AtomicBool::new(false));
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {

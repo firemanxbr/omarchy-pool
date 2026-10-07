@@ -490,6 +490,7 @@ mod tests {
             gateway,
             deny: &[],
             env_file: std::path::Path::new("/nonexistent/agent.env"),
+            user: None,
         })
         .unwrap();
         let net = spec::container_name(0, &gen);

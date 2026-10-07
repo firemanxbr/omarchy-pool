@@ -415,6 +415,15 @@ enum Command {
         /// The host directory whose agent.env agent sidecars mount read-only (never read by the dispatcher).
         #[arg(long, env = "OMARCHY_SECRETS_DIR")]
         secrets_dir: Option<PathBuf>,
+        /// Who the agent sidecars and the probe run as (#399): agent.env's owner as the engine
+        /// shows it to a container, `<uid>:<gid>`, which the agent writes into
+        /// `etc/dispatcher.env`; empty, the worker image's own user (an agent from before it).
+        #[arg(long, env = "OMARCHY_AGENT_USER", default_value = "")]
+        agent_user: String,
+        /// `host` on a remapped daemon (userns-remap), whose remapped uids are not agent.env's
+        /// owner: the agent sidecars run in the host's user namespace, as that owner.
+        #[arg(long, env = "OMARCHY_AGENT_USERNS", default_value = "")]
+        agent_userns: String,
         /// Per-task caps of an agent sidecar, and the host's calls per day (UTC) (D45): the envelope's
         /// `agent_budget`, which the agent writes into `etc/dispatcher.env` (#371), or these defaults.
         #[arg(long, env = "OMARCHY_AGENT_CALLS_PER_TASK", default_value_t = 200)]
@@ -802,6 +811,8 @@ fn main() -> Result<()> {
             task_subnets,
             host_addresses,
             secrets_dir,
+            agent_user,
+            agent_userns,
             agent_calls_per_task,
             agent_tokens_per_task,
             agent_minutes_per_task,
@@ -847,6 +858,8 @@ fn main() -> Result<()> {
                         .filter(|a| !a.is_empty())
                         .collect(),
                     secrets_dir: secrets_dir.filter(|d| !d.as_os_str().is_empty()),
+                    agent_user: dispatch::spec::AgentUser::parse(&agent_user, &agent_userns)
+                        .map_err(anyhow::Error::msg)?,
                     direct: direct_network,
                     caps: dispatch::budget::Caps {
                         calls_per_task: agent_calls_per_task.max(1),

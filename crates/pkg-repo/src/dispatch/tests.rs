@@ -4355,6 +4355,94 @@ fn the_claim_says_who_the_agent_is_from_the_probe_sidecar() {
         .contains("no agent key"));
 }
 
+/// #399: the keys file is 0600 and its owner's, so on a host whose agent named that owner as the
+/// engine shows it (`OMARCHY_AGENT_USER`, and `OMARCHY_AGENT_USERNS=host` on a remapped daemon)
+/// the probe and a model task's agent sidecar run as it — the sidecar's usage directory made
+/// its — while the task container and the egress sidecar run as before; a host whose agent
+/// named none (one from before #399) starts them as before.
+#[test]
+fn the_probe_and_the_agent_sidecar_run_as_the_keys_owner_the_agent_named() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    for (user, args) in [
+        (
+            spec::AgentUser {
+                uid: 4242,
+                gid: 4343,
+                host_userns: false,
+            },
+            &["--user", "4242:4343"][..],
+        ),
+        (
+            spec::AgentUser {
+                uid: 4242,
+                gid: 4343,
+                host_userns: true,
+            },
+            &["--user", "4242:4343", "--userns", "host"][..],
+        ),
+    ] {
+        let h = H::new();
+        let mut d = h.dispatcher();
+        d.net.agent_user = Some(user);
+        stage_evidence(&h, &[5]);
+        h.give(audit(9, 5, GEN));
+        h.ticks(&mut d, 4);
+        let from = |a: &[String]| {
+            a.iter()
+                .position(|x| x == "--user")
+                .map(|i| a[i..(i + args.len()).min(a.len())].to_vec())
+                .unwrap_or_default()
+        };
+        let probe = h
+            .engine
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|c| c[0] == "run" && c.iter().any(|x| x == "--probe"))
+            .cloned()
+            .expect("the probe ran");
+        assert_eq!(from(&probe), args, "the probe: {probe:?}");
+        assert_eq!(h.pool.last_claim()["agent"]["probe"], "ok");
+        let agent = h.engine.args_of(&sidecar(9, GEN, "agent"));
+        assert_eq!(from(&agent), args, "the agent sidecar: {agent:?}");
+        for other in [
+            h.engine.args(9, GEN),
+            h.engine.args_of(&sidecar(9, GEN, "egress")),
+        ] {
+            assert!(
+                !other.iter().any(|x| x == "--user" || x == "--userns"),
+                "{other:?}"
+            );
+        }
+        // Its usage reads back: the directory is the sidecar's user's — or, where this process
+        // may not give it away (CI runs these tests as a user), open to it in the 0700 task directory.
+        let usage = super::spec::task_dir(&h.work, 9, GEN).join("agent");
+        let m = std::fs::metadata(&usage).unwrap();
+        assert!(
+            (m.uid(), m.gid()) == (4242, 4343) || m.permissions().mode() & 0o777 == 0o777,
+            "{}: uid {} gid {} mode {:o}",
+            usage.display(),
+            m.uid(),
+            m.gid(),
+            m.permissions().mode()
+        );
+    }
+    // An agent from before #399: no user named, the image's own, as before.
+    let h = H::new();
+    let mut d = h.dispatcher();
+    stage_evidence(&h, &[5]);
+    h.give(audit(9, 5, GEN));
+    h.ticks(&mut d, 4);
+    assert!(!h
+        .engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.iter().any(|x| x == "--user" || x == "--userns")));
+}
+
 // ---------- revoked releases (#342) ----------
 
 /// A newer release's manifest, as a stub: it revokes v1.2.3, the release `task()` leases on.
