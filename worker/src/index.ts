@@ -47,7 +47,7 @@
  *                                                  a document the owner's passkey signed (#328)
  *   POST /api/v1/hosts/self/diagnostics · GET /hosts/:id/diagnostics/:order   a diagnostics order's scrubbed log lines (#325)
  *   POST /api/v1/hosts/:id/cap                    {units | null, reason}: the pool's cap on a host's units, its owner or any maintainer (#337)
- *   POST /api/v1/hosts/:id/pins                   {reason}: the queued tasks pinned to its owner's legacy registrations, onto its registration where it could run them (#345)
+ *   POST /api/v1/hosts/:id/pins                   {reason, workers}: the queued tasks pinned to the legacy registrations named (the set it replaces), onto its registration where it could run them (#345)
  *   POST /api/v1/hosts/:id/owner/challenge · /owner/pin · /seal-key   the owner's control without a visit (#328): the document their
  *                                                  passkey signs for a host, the pin pasted at the host, the seal key confirmed
  *   GET  /api/v1/hosts/fleet                      every host's public row and Status's host and capacity lines (#324)

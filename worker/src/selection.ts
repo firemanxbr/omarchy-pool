@@ -544,11 +544,12 @@ export function notClaiming(m: Member, now: number): string | null {
  * Why a queued task pinned to one of a maintainer's legacy registrations does not move onto their host's registration `m` (#345, design
  * v2 §21.1 step 4: the switch moves the pins of the legacy set it drains), or null when it moves: only where the host could run it once
  * idle — a lane allowed for it, `needs_native` kept, the project's copy never onto its requester's host (D35, unless released to any
- * host), and room for it at its size under the pool's cap, an agent slot for model work, its disk (`mayRun`). A task the host could
- * never take would wait on it as it waits on the drained registration; one left where it is goes to the queue once that registration's
- * drain has held UNPIN_AFTER_DRAIN_MINUTES (orders.ts), so none is stranded either way.
+ * host), the agent its pin chose (`agent`: a review rebuild's `params.agent`, the claimed worker's — the maintainer's choice, which a
+ * move keeps or does not make), and room for it at its size under the pool's cap, an agent slot for model work, its disk (`mayRun`).
+ * A task the host could never take would wait on it as it waits on the drained registration; one left where it is goes to the queue
+ * once that registration's drain has held UNPIN_AFTER_DRAIN_MINUTES (orders.ts), so none is stranded either way.
  */
-export function repinRefusal(m: Member, c: Candidate, now: number, r: Rules, largest: number, held: readonly Held[] = []): string | null {
+export function repinRefusal(m: Member, c: Candidate, now: number, r: Rules, largest: number, held: readonly Held[] = [], agent: string | null = null): string | null {
   const claiming = notClaiming(m, now);
   if (claiming) return claiming;
   if (requesterHost(m, c)) return `the project's copy of ${c.name} is not built on its requester's host (D35)`;
@@ -559,6 +560,7 @@ export function repinRefusal(m: Member, c: Candidate, now: number, r: Rules, lar
   if (lane.byLane && lane.mode === "emulated" && c.needs_native) return `it needs a native ${c.arch} lane, and this host runs ${c.arch} emulated`;
   // A host whose dispatcher holds builds back for disk leaves them out of its claim's kinds: once idle it takes them (mayRun).
   if (!m.kinds.includes(c.kind) && c.kind !== "build") return `it takes no ${c.kind}`;
+  if (agent && m.model !== agent) return `its pin chose the agent ${agent}, and this host's is ${m.model ?? "not reported"}`;
   if (c.model && !m.probe_ok) return "its agent's probe fails: model work would wait for it";
   return mayRun(m, { ...c, pinned_to: m.id }, now, r, largest, held) ? null : "it could not hold it once idle at its size: its units under the pool's cap, an agent slot or its disk";
 }

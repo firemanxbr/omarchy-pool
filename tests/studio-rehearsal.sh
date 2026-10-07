@@ -9,8 +9,10 @@
 #     placeholder token never reaches the pool —, every env file the compose
 #     file names a placeholder (agent.env without GITHUB_TOKEN), the review2
 #     pair named and not started, the directory itself and the engine's
-#     socket bind-mounted as on the Studio; it refuses a directory holding a
-#     compose file it did not lay out, and a project that runs from elsewhere;
+#     socket bind-mounted as on the Studio, the release's rollout.sh beside
+#     it; it refuses a directory holding a compose file it did not lay out,
+#     and — in a directory of its own, before it writes anything — a project
+#     that runs from elsewhere;
 #   - ids and compare: the same ids after a restart of a container, and an id
 #     gone and a new one named after a recreation;
 #   - check, with a host root of the test's own (OMARCHY_REHEARSAL_FS) and a
@@ -18,9 +20,11 @@
 #     directory refused, as install's preflight refuses it; task subnets on a
 #     legacy network refused; linger, binfmt and the task firewall each a
 #     person's step until they are there; the legacy directory writable by
-#     its group a person's step (retire-legacy's marker); a GITHUB_TOKEN with a
-#     scope, or one GitHub names no scopes for, refused, one with none taken,
-#     the token in no process's arguments;
+#     its group a person's step (retire-legacy's marker), and so its
+#     rollout.sh without the marker's guard; a GITHUB_TOKEN with a scope, or
+#     one GitHub names no scopes for, refused, one with none taken — curl
+#     given the header from a file, never the token in its arguments (a curl
+#     first on PATH keeps every argument list it is given);
 #   - remove takes the stand-in away and nothing else: another compose
 #     project beside it runs on.
 #
@@ -90,14 +94,19 @@ mounts="$(docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Sou
 [[ " $mounts " == *" $dir "* && " $mounts " == *" /var/run/docker.sock "* ]] || fail "a project worker mounts the directory itself and the engine's socket, as on the Studio: $mounts"
 [[ "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$pool")" == "$dir" ]] || fail "compose's working directory is the stand-in's"
 [[ "$(stat -c %u "$dir/cache/pacman/x86_64")" == "$(id -u)" ]] || fail "the bind mounts' sources made as this login, not the engine's root"
+if ! cmp -s "$dir/rollout.sh" "$here/../factory/host/rollout.sh" || [[ ! -x "$dir/rollout.sh" ]]; then fail "the release's rollout.sh beside it, as setup.sh installs it"; fi
 ok "stand-in runs the Studio's ten services as sleepers, placeholders in every env file, its mounts as on the Studio"
 
 # Another compose project beside it: never one remove or ids touches.
 mkdir -p "$work/other"
 printf 'services:\n  x:\n    image: %s\n    command: ["sleep", "3600"]\n' "$BUSYBOX" >"$work/other/compose.yml"
 (cd "$work/other" && docker compose -p "$other" up -d --quiet-pull >/dev/null 2>&1)
-if out="$("$tool" stand-in --dir "$work/other" --project "$other" 2>&1)"; then fail "stand-in where the project runs from elsewhere: $out"; fi
-ok "stand-in refuses a project that runs from elsewhere"
+# In a directory of its own, empty: the refusal is the running project's, not the compose file's, and comes before anything is written.
+install -d -m 0755 "$work/elsewhere"
+if out="$("$tool" stand-in --dir "$work/elsewhere" --project "$other" 2>&1)"; then fail "stand-in where the project runs from elsewhere: $out"; fi
+[[ "$out" == *"the compose project $other runs already, from elsewhere: give another --project"* ]] || fail "its refusal: $out"
+[[ -z "$(ls -A "$work/elsewhere")" ]] || fail "nothing written before the refusal: $(ls -A "$work/elsewhere")"
+ok "stand-in refuses a project that runs from elsewhere, writing nothing"
 
 # ---------------------------------------------------------- ids and compare
 "$tool" ids --project "$project" >"$work/before"
@@ -114,7 +123,12 @@ ok "ids and compare: the same after a restart, the gone and the new named after 
 fs="$work/fs"
 mkdir -p "$fs/proc/sys/fs/binfmt_misc" "$fs/var/lib/systemd/linger" "$fs/usr/local/libexec" "$fs/etc/systemd/system/multi-user.target.wants"
 foreign=x86_64; [[ "$(uname -m)" == x86_64 ]] && foreign=aarch64
-check() { OMARCHY_REHEARSAL_FS="$fs" OMARCHY_REHEARSAL_GITHUB="http://127.0.0.1:$port" "$tool" check --project "$project" "$@"; }
+# A curl first on PATH that keeps every argument list it is given, then runs the real one: what any process could read of it (ps).
+real_curl="$(command -v curl)"
+mkdir -p "$work/shim"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexec "%s" "$@"\n' "$work/curl-argv" "$real_curl" >"$work/shim/curl"
+chmod 0755 "$work/shim/curl"
+check() { PATH="$work/shim:$PATH" OMARCHY_REHEARSAL_FS="$fs" OMARCHY_REHEARSAL_GITHUB="http://127.0.0.1:$port" "$tool" check --project "$project" "$@"; }
 # A stand-in GitHub: the scopes header as the token file says, and every request's command line kept, to see the token in none.
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
 cat >"$work/github.py" <<'PY'
@@ -173,19 +187,27 @@ set +e; out="$(check --work-root "$work/omarchy-host" --secrets-dir "$work/host-
 chmod 0755 "$dir"
 ok "check: a legacy directory others may write is a person's step, for retire-legacy's marker"
 
+grep -qF "ok       legacy directory $dir: its rollout.sh has the guard for retire-legacy's .omarchy-agent marker" <<<"$out" || fail "the stand-in's rollout.sh has the guard: $out"
+cp "$dir/rollout.sh" "$work/rollout.sh.release"
+printf '#!/usr/bin/env bash\n# a copy from before #313\ndocker compose up -d updater\n' >"$dir/rollout.sh"
+set +e; out="$(check --work-root "$work/omarchy-host" --secrets-dir "$work/host-secrets" --task-subnets 10.232.0.0/16)"; rc=$?; set -e
+[[ $rc -eq 1 && "$out" == *"person   legacy directory $dir: its rollout.sh has no guard for retire-legacy's .omarchy-agent marker — paste the runbook's *Once: the updater* block now"* ]] || fail "a rollout.sh without the marker's guard: $out"
+rm "$dir/rollout.sh"
+out="$(check --work-root "$work/omarchy-host" --secrets-dir "$work/host-secrets" --task-subnets 10.232.0.0/16)" || fail "no rollout.sh is fine: $out"
+grep -qF "ok       legacy directory $dir: no rollout.sh to bring its updater back" <<<"$out" || fail "it says there is none: $out"
+install -m 0755 "$work/rollout.sh.release" "$dir/rollout.sh"
+ok "check: a rollout.sh without the marker's guard is a person's step, before the last visit ends"
+
 env_file="$work/agent.env"
 for case in "tok_none:0:its GITHUB_TOKEN is a classic token with no scope" "tok_repo:2:carries the scopes repo, workflow" "tok_fine:2:GitHub names no scopes for its GITHUB_TOKEN (a fine-grained or app token)" "tok_bad:2:GitHub answers 401"; do
   IFS=: read -r token code words <<<"$case"
   printf 'ANTHROPIC_API_KEY=placeholder\nGITHUB_TOKEN=%s\n' "$token" >"$env_file"
-  # The token in no process's arguments while check asks GitHub: curl reads the header from a file. The watcher's own grep holds
-  # the pattern, never the token: its fifth letter bracketed.
-  pattern="${token:0:4}[${token:4:1}]${token:5}"
-  ( while :; do grep -l -e "$pattern" /proc/[0-9]*/cmdline 2>/dev/null || true; sleep 0.05; done ) >"$work/argv.$token" &
-  watcher=$!
+  # The token in no process's arguments while check asks GitHub: curl reads the header from a file (-H @file), as its arguments say.
+  : >"$work/curl-argv"
   set +e; out="$(check --work-root "$work/omarchy-host" --secrets-dir "$work/host-secrets" --task-subnets 10.232.0.0/16 --agent-env-from "$env_file")"; rc=$?; set -e
-  kill "$watcher" 2>/dev/null || true; wait "$watcher" 2>/dev/null || true
   [[ $rc -eq $code && "$out" == *"$words"* ]] || fail "GITHUB_TOKEN $token: exit $code saying \"$words\": $rc: $out"
-  [[ ! -s "$work/argv.$token" ]] || fail "the token was in a process's arguments: $(cat "$work/argv.$token")"
+  grep -q -- "-H @" "$work/curl-argv" || fail "curl asked GitHub with the header from a file: $(cat "$work/curl-argv")"
+  ! grep -qF -- "$token" "$work/curl-argv" || fail "the token was in curl's arguments: $(cat "$work/curl-argv")"
   [[ "$out" != *"$token"* ]] || fail "the token is never printed: $out"
 done
 printf 'ANTHROPIC_API_KEY=placeholder\n' >"$env_file"

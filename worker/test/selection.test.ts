@@ -1395,7 +1395,7 @@ describe("the switch's pins (#345, design v2 §21.1 step 4): a task pinned to a 
     expect(repinRefusal(studio(), pinned(), T0, R, 4, held)).toBeNull();
   });
 
-  it("leaves, with why, needs_native on its emulated lane, the project's copy of its owner's own package, a lane it lacks, a size its pool cap leaves no room for, and model work while its probe fails", () => {
+  it("leaves, with why, needs_native on its emulated lane, the project's copy of its owner's own package, a lane it lacks, a size its pool cap leaves no room for, model work while its probe fails, and an agent its pin chose that the host does not run", () => {
     expect(repinRefusal(studio(), pinned({ arch: "x86_64", needs_native: true }), T0, R, 4)).toBe("it needs a native x86_64 lane, and this host runs x86_64 emulated");
     expect(repinRefusal(studio(), pinned({ name: "mine", ...copyOf(["m1"]) }), T0, R, 4)).toBe("the project's copy of mine is not built on its requester's host (D35)");
     // Released to any host by another maintainer, it moves.
@@ -1407,6 +1407,10 @@ describe("the switch's pins (#345, design v2 §21.1 step 4): a task pinned to a 
     expect(repinRefusal(studio({ units: 5 }), pinned({ size: 3 }), T0, R, 3)).toContain("could not hold it once idle at its size");
     expect(repinRefusal(studio({ units: 5 }), pinned({ size: 2 }), T0, R, 3)).toBeNull();
     expect(repinRefusal(studio({ probe_ok: false }), pinned({ kind: "audit", model: true }), T0, R, 4)).toBe("its agent's probe fails: model work would wait for it");
+    // The agent a review rebuild's pin chose (params.agent) is the maintainer's choice: it moves only onto a host that runs it.
+    expect(repinRefusal(studio({ model: "anthropic/claude-a" }), pinned({ model: true }), T0, R, 4, [], "openai/gpt-5")).toBe("its pin chose the agent openai/gpt-5, and this host's is anthropic/claude-a");
+    expect(repinRefusal(studio({ model: null }), pinned({ model: true }), T0, R, 4, [], "openai/gpt-5")).toBe("its pin chose the agent openai/gpt-5, and this host's is not reported");
+    expect(repinRefusal(studio({ model: "openai/gpt-5" }), pinned({ model: true }), T0, R, 4, [], "openai/gpt-5")).toBeNull();
   });
 
   it("moves nothing onto a host that does not claim now: drained, behind, asleep, below the minimum, not alive, not active", () => {

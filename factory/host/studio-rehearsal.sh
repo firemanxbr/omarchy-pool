@@ -21,7 +21,10 @@
 #             (no GITHUB_TOKEN: install would ask GitHub its scopes), and a
 #             compose.override.yml that runs every service as a sleeper from
 #             the pinned busybox (tests/images.env), so nothing there calls the
-#             pool. Then starts it, as the Studio runs it (COMPOSE_PROFILES).
+#             pool, and this checkout's rollout.sh beside it, as setup.sh
+#             installs it on the Studio. Then starts it, as the Studio runs it
+#             (COMPOSE_PROFILES). The foreign architecture's services keep
+#             their platform, so qemu's binfmt handler must be there first.
 #             It refuses a directory holding a compose file it did not lay
 #             out: never the Studio's own set.
 #   ids       the project's containers and networks by full id, sorted: before
@@ -41,7 +44,10 @@
 #             - the task subnets outside the legacy project's networks;
 #             - the legacy directory (its compose working directory) owned by
 #               this login and writable by it alone: retire-legacy writes its
-#               .omarchy-agent marker there (#344, #374);
+#               .omarchy-agent marker there (#344, #374); and its rollout.sh,
+#               when it has one, the copy with the marker's guard (the
+#               runbook's *Once: the updater* installs it) — the last visit
+#               is the last chance to replace an older one;
 #             - this login reaches the engine (the docker group);
 #             - qemu's binfmt handler for the other architecture, with the F
 #               flag (the emulated lane), and linger for this login;
@@ -107,8 +113,8 @@ ids() {
 
 # --------------------------------------------------------------- stand-in --
 stand_in() {
-  local src="$ROOT/factory/host/compose.yml" images="$ROOT/tests/images.env" busybox="" f svc p
-  [[ -f "$src" && -f "$images" ]] || die 2 "run it from a checkout: $src and $images"
+  local src="$ROOT/factory/host/compose.yml" images="$ROOT/tests/images.env" rollout="$ROOT/factory/host/rollout.sh" busybox="" f svc p
+  [[ -f "$src" && -f "$images" && -f "$rollout" ]] || die 2 "run it from a checkout: $src, $rollout and $images"
   busybox="$(sed -n 's/^BUSYBOX="\(.*\)"$/\1/p' "$images")"
   [[ -n "$busybox" ]] || die 2 "$images names no BUSYBOX"
   command -v jq >/dev/null || die 2 "jq is needed (prep-root.sh installs it)"
@@ -117,6 +123,8 @@ stand_in() {
   if [[ -n "$(containers)" && ! -e "$dir/$MARK" ]]; then die 2 "the compose project $project runs already, from elsewhere: give another --project"; fi
   printf 'a stand-in of the Studio legacy set, laid out by factory/host/studio-rehearsal.sh (project %s)\n' "$project" >"$dir/$MARK"
   install -m 0644 "$src" "$dir/compose.yml"
+  # The host's copy of rollout.sh, as setup.sh installs it: this release's, with the marker's guard (check looks for it).
+  install -m 0755 "$rollout" "$dir/rollout.sh"
   install -d -m 0700 "$dir/etc"
   # Every env file the compose file names, the review2 pair's too (compose loads them all): placeholders only.
   while read -r f; do
@@ -252,6 +260,15 @@ check() {
     else
       say ok "legacy directory $dirs: $(id -un)'s, mode $mode (retire-legacy can leave its marker)"
     fi
+    # The host's copy of rollout.sh: setup.sh installs it only when it runs, so one from before the marker's guard (#313) stays until a
+    # person replaces it — after retire-legacy it would bring the updater back (which stands down), and the canary's visit is the last.
+    if [[ ! -e "$dirs/rollout.sh" ]]; then
+      say ok "legacy directory $dirs: no rollout.sh to bring its updater back"
+    elif grep -q omarchy-agent "$dirs/rollout.sh"; then
+      say ok "legacy directory $dirs: its rollout.sh has the guard for retire-legacy's .omarchy-agent marker"
+    else
+      say person "legacy directory $dirs: its rollout.sh has no guard for retire-legacy's .omarchy-agent marker — paste the runbook's *Once: the updater* block now (it installs this release's host files and wakes the updater); then grep -q omarchy-agent $dirs/rollout.sh says it has"
+    fi
   fi
   # The emulated lane: qemu's binfmt handler for the other architecture, with the F flag containers need.
   local foreign=x86_64
@@ -315,7 +332,7 @@ remove() {
   for p in work cache; do
     if [[ -d "$dir/$p" ]] && ! rm -rf "${dir:?}/$p" 2>/dev/null; then printf 'left %s: something in it is not %s'"'"'s to remove (sudo rm -r it)\n' "$dir/$p" "$(id -un)"; fi
   done
-  rm -f "$dir/compose.yml" "$dir/compose.override.yml" "$dir/.env" "$dir"/etc/*.env "$dir/$MARK"
+  rm -f "$dir/compose.yml" "$dir/compose.override.yml" "$dir/rollout.sh" "$dir/.env" "$dir"/etc/*.env "$dir/$MARK"
   rmdir "$dir/etc" 2>/dev/null || true
   printf 'the stand-in of %s is gone from %s\n' "$project" "$dir"
 }

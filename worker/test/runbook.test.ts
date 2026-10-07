@@ -154,6 +154,8 @@ import legacySource from "../../crates/omarchy-agent/src/install/legacy.rs?raw";
 import prepRoot from "../../factory/host/prep-root.sh?raw";
 import rehearsal from "../../factory/host/studio-rehearsal.sh?raw";
 import studioCompose from "../../factory/host/compose.yml?raw";
+import rolloutSource from "../../crates/omarchy-agent/src/run/rollout.rs?raw";
+import hostRollout from "../../factory/host/rollout.sh?raw";
 
 describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)", () => {
   const canary = cut(runbook, "the-studio-canary");
@@ -174,13 +176,41 @@ describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)"
 
   it("the visit's exact command keeps every new path out of what the legacy compose project mounts, and the check says why", () => {
     const command = "--legacy omarchy-pool --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --dedicated \\\n     --agent-env-from /srv/omarchy-pool/etc/agent.env";
-    expect(canary).toContain(`| OMARCHY_ENROLL=ome_… sh -s -- \\\n     ${command}`);
+    expect(canary).toContain(`   OMARCHY_ENROLL=ome_… sh ~/install.sh \\\n     ${command}`);
     expect(canary).not.toMatch(/--work-root \/srv\/omarchy-pool|--secrets-dir \/srv\/omarchy-pool/);
     // Why: the Studio's compose file mounts POOL_ROOT whole into its workers, and preflight refuses a work root under it, in its own words.
     expect(studioCompose).toContain("- ${POOL_ROOT:-/srv/omarchy-pool}:${POOL_ROOT:-/srv/omarchy-pool}");
     expect(flat(canary)).toContain("legacy: the work root … overlaps the legacy project's /srv/omarchy-pool; give a new --work-root beside it");
     expect(legacySource).toContain("overlaps the legacy project's {}; give a new --work-root beside it");
     expect(flat(canary)).toContain('studio-rehearsal.sh" check --project omarchy-pool --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --agent-env-from /srv/omarchy-pool/etc/agent.env');
+  });
+
+  it("installs the pool's release, $tag, through the attested install — never GitHub's latest, piped", () => {
+    const text = flat(canary);
+    expect(text).toContain('curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"');
+    expect(text).toContain("gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main");
+    // The same check The host bundle gives for the verifying install.
+    expect(flat(cut(runbook, "the-host-bundle"))).toContain("--signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main");
+    // Steps 4 and 6 run that file, the tag the checkout and preflight's --release name too.
+    expect(canary).toContain("   sh ~/install.sh \\\n     --legacy omarchy-pool");
+    expect(canary).toContain("   OMARCHY_ENROLL=ome_… sh ~/install.sh \\\n     --legacy omarchy-pool");
+    expect(canary).not.toContain("releases/latest/download/install.sh");
+    expect(canary).not.toMatch(/\| (OMARCHY_ENROLL=\S+ )?sh -s --/);
+    expect(text).toContain('git clone --quiet --depth 1 --branch "$tag"');
+    expect(text).toContain('omarchy-agent preflight --release "$tag"');
+  });
+
+  it("refreshes the Studio's rollout.sh before the ids are taken, as the one-time step says, and the check says it too", () => {
+    const text = flat(canary);
+    const grep = text.indexOf("grep -q omarchy-agent /srv/omarchy-pool/rollout.sh");
+    expect(grep).toBeGreaterThan(0);
+    expect(grep).toBeLessThan(text.indexOf('ids --project omarchy-pool > ~/legacy-ids-before'));
+    expect(text).toContain("paste the block in *Once: the updater* (below) now, before the ids are taken");
+    // The guard the grep looks for is the host copy's own (#313), and *On a host the agent manages* asks for it before the first retire-legacy.
+    expect(hostRollout).toMatch(/omarchy-agent/);
+    expect(flat(cut(runbook, "the-studio-host"))).toContain("`grep -q omarchy-agent /srv/omarchy-pool/rollout.sh` then says the copy has the guard");
+    expect(rehearsal).toContain("its rollout.sh has no guard for retire-legacy's .omarchy-agent marker — paste the runbook's *Once: the updater* block now");
+    expect(text).toContain("Its `rollout.sh` line says `ok` after step 1");
   });
 
   it("names what preflight must show in the agent's own words: 11 units, both lanes, the recorded exception, the legacy project", () => {
@@ -231,6 +261,11 @@ describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)"
   it("gives the exit criteria as queries: no readopt-failed, a release across a task, both lanes staged, a ring moved", () => {
     expect(canary).toContain("json_extract(payload, '$.lost') = 1");
     expect(canary).toContain("t.started_at < json_extract(h.report, '$.round.at') AND t.finished_at > json_extract(h.report, '$.round.at')");
+    // Only the round that applied a release: the host's release changed from the one noted before, and the round's detail names it in
+    // the agent's words — a round forced to the release it runs (Reconcile now, a widening) does not count.
+    expect(canary).toContain(`SELECT release_applied FROM hosts WHERE id = '<host>'`);
+    expect(canary).toContain("h.release_applied IS NOT '<before>' AND json_extract(h.report, '$.round.detail') LIKE '% runs ' || h.release_applied");
+    expect(rolloutSource).toContain('format!("{} runs {target}", ctx.cfg.set_name)');
     expect(canary).toContain("GROUP BY arch, lane");
     expect(canary).toContain("kind IN ('sync', 'promote') AND status = 'done'");
   });
@@ -247,5 +282,18 @@ describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)"
     // Retired after the 14 days: Retire legacy set first, then Revoke the eight.
     expect(text.indexOf("*Retire legacy set* on the host's page")).toBeLessThan(text.indexOf("*Revoke* on each one's page"));
     expect(text).toContain("`host-pool-jobs` set to `*`");
+    // Move pins here names the Studio's set, never another machine's of the same owner.
+    expect(text).toContain("the press names those registrations alone, so another machine's pins never move with them");
+  });
+
+  it("the dress rehearsal's VM has qemu's binfmt before stand-in, and says how a long build lands on it", () => {
+    const text = flat(canary);
+    const vm = text.indexOf("qemu-user-static qemu-user-static-binfmt");
+    expect(vm).toBeGreaterThan(0);
+    expect(vm).toBeLessThan(text.indexOf('studio-rehearsal.sh" stand-in --dir /srv/omarchy-pool'));
+    // Why: the stand-in keeps the compose file's platform for the x86_64 community worker.
+    expect(studioCompose).toMatch(/community-x86_64:\n(?:.*\n){0,3}\s+platform: linux\/amd64/);
+    expect(text).toContain("No door aims a dry run at one host (`POST /factory/enqueue` pins none)");
+    expect(text).toContain("until its page's *Leases* shows one of them");
   });
 });

@@ -2747,18 +2747,38 @@ task subnets leave every path and network of the legacy set untouched.
 
 **The visit, the last one**, as the login in the docker group that owns
 `/srv/omarchy-pool` (not root), in `tmux`. Each step stops at the first
-thing that fails; nothing before step 6 changes the legacy set.
+thing that fails; nothing before step 6 changes the legacy set but step
+1's refresh of its host files, when they predate the marker's guard.
 
-1. A checkout of the release the pool runs, and the backup of this
-   host's own files (it holds the eight worker tokens and the agent key:
-   copy it off the host, encrypted, and delete it here):
+1. A checkout of the release the pool runs, the backup of this host's own
+   files (it holds the eight worker tokens and the agent key: copy it off
+   the host, encrypted, and delete it here), that release's `install.sh`
+   checked as *The host bundle* (above) checks it — the pool's release,
+   `$tag`, not GitHub's *latest*, which may be one published and not
+   deployed, or one the pool rolled back from —, and this host's copy of
+   `rollout.sh`:
 
    ```bash
    tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
    src="$(mktemp -d)" && git clone --quiet --depth 1 --branch "$tag" https://github.com/firemanxbr/omarchy-pool.git "$src"
    cd /srv/omarchy-pool && (umask 077 && tar -czf ~/omarchy-pool-before-canary.tgz $(for f in compose.yml compose.override.yml .env etc rollout.sh register.sh; do [ -e "$f" ] && echo "$f"; done))
+   curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"
+   gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool \
+     --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main
+   grep -q omarchy-agent /srv/omarchy-pool/rollout.sh   # fails: its copy predates the marker's guard — paste *Once: the updater* now
    "$src/factory/host/studio-rehearsal.sh" ids --project omarchy-pool > ~/legacy-ids-before
    ```
+
+   `gh` needs a login; without one here, run the `curl` and `gh
+   attestation verify` on your own machine and compare `sha256sum
+   install.sh` there and here. When the `grep` fails, this host's copy of
+   `rollout.sh` has no guard for retire-legacy's marker (*On a host the
+   agent manages, nothing needs to be run*, above): paste the block in
+   *Once: the updater* (below) now, before the ids are taken — it installs
+   the release's host files and wakes the updater — and the `grep` then
+   succeeds. This visit is the last one: missed now, `retire-legacy` in
+   fourteen days leaves a `rollout.sh` there that would bring the updater
+   back (which stands down), and no visit is planned to replace it.
 2. What the visit needs, read-only (`factory/host/studio-rehearsal.sh
    check`: each line `ok`, `person` with the command that fixes it, or
    `refused`):
@@ -2769,7 +2789,9 @@ thing that fails; nothing before step 6 changes the legacy set.
      --agent-env-from /srv/omarchy-pool/etc/agent.env
    ```
 
-   Two of its lines a person fixes here, before anything is installed:
+   Its `rollout.sh` line says `ok` after step 1 (`person` with the same
+   fix if it was missed). Two of its lines a person fixes here, before
+   anything is installed:
    - *legacy directory … retire-legacy writes its .omarchy-agent marker
      there only when … owns it*: the `retire-legacy` order (#344, #374)
      writes its marker into `/srv/omarchy-pool` as the agent's user, and
@@ -2807,12 +2829,13 @@ thing that fails; nothing before step 6 changes the legacy set.
    when none does* — do not restart docker: the default address pools it
    wrote apply at the next boot, to networks made after it only, and the
    legacy set's networks keep theirs. Then `check` again: all ok.
-4. Preflight alone, nothing written: install.sh without a token installs
-   the agent's binary and runs preflight, whose only blocker must be
-   *enrollment: … OMARCHY_ENROLL is not set*:
+4. Preflight alone, nothing written: step 1's `install.sh` (the pool's
+   release, checked) without a token installs the agent's binary and runs
+   preflight, whose only blocker must be *enrollment: … OMARCHY_ENROLL is
+   not set*:
 
    ```bash
-   curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh | sh -s -- \
+   sh ~/install.sh \
      --legacy omarchy-pool --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --dedicated \
      --agent-env-from /srv/omarchy-pool/etc/agent.env
    ```
@@ -2832,7 +2855,7 @@ thing that fails; nothing before step 6 changes the legacy set.
 6. The install — the same command with the token in the environment:
 
    ```bash
-   curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh | OMARCHY_ENROLL=ome_… sh -s -- \
+   OMARCHY_ENROLL=ome_… sh ~/install.sh \
      --legacy omarchy-pool --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --dedicated \
      --agent-env-from /srv/omarchy-pool/etc/agent.env
    ```
@@ -2868,8 +2891,8 @@ thing that fails; nothing before step 6 changes the legacy set.
 9. `sudo reboot`, and do not log in: on the host's page its agent reports
    again within minutes and its dispatcher claims — linger brought the unit
    back. Then log in once more, run the same `compare` (a reboot keeps the
-   ids), `rm -rf "$src" ~/legacy-ids-before`, and leave. Nothing on this
-   machine needs a person again.
+   ids), `rm -rf "$src" ~/legacy-ids-before ~/install.sh`, and leave.
+   Nothing on this machine needs a person again.
 
 **From the site, after the visit**: the host's page says 11 units (*Units*:
 the pool counts 11, busy, free and the one kept for pool jobs; the
@@ -2900,23 +2923,33 @@ cap at 3 (or *Resume*) starts it again.
 ```bash
 # no readopt-failed: no task lost on it (a container gone when its dispatcher came back)
 npx wrangler d1 execute omarchy-repo --remote --command "SELECT created_at, summary FROM events WHERE kind = 'build' AND json_extract(payload, '$.worker') = '<reg>' AND json_extract(payload, '$.lost') = 1 AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')"
-# a release applied while a task ran: a task leased before its last round and finished after it — run it the day a release lands
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT t.id, t.kind, t.started_at, t.finished_at, json_extract(h.report, '$.round.at') AS round_at, json_extract(h.report, '$.round.outcome') AS outcome, h.release_applied FROM hosts h JOIN build_tasks t ON t.lease_owner = h.worker_id WHERE h.id = '<host>' AND t.started_at < json_extract(h.report, '$.round.at') AND t.finished_at > json_extract(h.report, '$.round.at') AND t.status NOT IN ('queued', 'leased', 'failed', 'cancelled')"
+# a release applied while a task ran, the day a release lands. Before it lands, the release the host runs (<before>):
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT release_applied FROM hosts WHERE id = '<host>'"
+# once its page shows the new one: a task leased before its last round and finished after it, that round the one that applied it
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT t.id, t.kind, t.started_at, t.finished_at, json_extract(h.report, '$.round.at') AS round_at, json_extract(h.report, '$.round.outcome') AS outcome, json_extract(h.report, '$.round.detail') AS detail, h.release_applied FROM hosts h JOIN build_tasks t ON t.lease_owner = h.worker_id WHERE h.id = '<host>' AND h.release_applied IS NOT '<before>' AND json_extract(h.report, '$.round.detail') LIKE '% runs ' || h.release_applied AND t.started_at < json_extract(h.report, '$.round.at') AND t.finished_at > json_extract(h.report, '$.round.at') AND t.status NOT IN ('queued', 'leased', 'failed', 'cancelled')"
 # aarch64 native and x86_64 emulated builds staged by it
 npx wrangler d1 execute omarchy-repo --remote --command "SELECT arch, lane, COUNT(*) AS n FROM build_tasks WHERE lease_owner = '<reg>' AND kind = 'build' AND status NOT IN ('queued', 'leased', 'failed', 'cancelled') AND finished_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') GROUP BY arch, lane"
 # a ring moved by it: a sync or a promotion it ran
 npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, kind, params, finished_at FROM build_tasks WHERE lease_owner = '<reg>' AND kind IN ('sync', 'promote') AND status = 'done' AND finished_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')"
 ```
 
-The first comes back empty, the second with a task whose round says `ok`,
-the third with both rows, the fourth with at least one. And a later
+The first comes back empty, the second (run the day a release lands)
+with a task whose round says `ok` — the round that applied the new
+release: its `detail` is the agent's *… runs vX.Y.Z* and its release is
+not the one noted before, so a round the agent ran for another reason
+(*Reconcile now*, a signed widening) does not count —, the third with both
+rows, the fourth with at least one. And a later
 release reaches the bundle with nobody at the host: its page's release is
 the pool's, its last round `ok`.
 
 **The dress rehearsal**, before the visit, on an aarch64 Linux VM built
 like the Studio (Arch Linux ARM, docker, a login in the docker group, git,
-jq; `/srv` on btrfs where it can be): the visit's exact commands, beside a
-copy of the legacy compose project, with placeholder tokens.
+jq, `gh`, and qemu's binfmt handlers — `sudo pacman -S --needed
+qemu-user-static qemu-user-static-binfmt`, as on the Studio: the stand-in's
+`community-x86_64` keeps its `platform: linux/amd64`, so its sleeper runs
+under qemu, and `stand-in` runs before `prep-root.sh`; `/srv` on btrfs
+where it can be): the visit's exact commands, beside a copy of the legacy
+compose project, with placeholder tokens.
 `factory/host/studio-rehearsal.sh stand-in` lays that copy out from the
 release's `factory/host/compose.yml` — the same services, profiles
 (`emulated`, as here), networks, bind mounts and env files, a placeholder
@@ -2939,10 +2972,15 @@ placeholders make the host's probe fail, so it takes no model work. Then,
 on the same VM:
 
 - **a release while a task runs**: keep it claiming at its cap of 3
-  through the next release, with a long build queued for it (a
-  maintainer's dry run of a large package, `POST /factory/enqueue`), and
-  run the exit criteria's second query the day the release lands: a task
-  across the round, the round `ok`;
+  through the next release with a long build running on it. No door aims
+  a dry run at one host (`POST /factory/enqueue` pins none), and every
+  aarch64 worker claims them: queue a few long aarch64 dry runs (a large
+  package, `{"name": …, "arches": ["aarch64"], "publish": false}`), more
+  as they are taken, until its page's *Leases* shows one of them, shortly
+  before the release lands — the other aarch64 workers, the Studio's
+  legacy ones among them, take the rest. Note its release first, and
+  run the exit criteria's second query once the release is applied: a task
+  across the round that applied it, the round `ok`;
 - **the switch**: *Set the pool cap* to none (its count decides), and its
   units fill with builds;
 - **the way back**: *Drain* its registration; nothing new reaches it, and
@@ -2954,6 +2992,10 @@ on the same VM:
   throughout;
 - **retire the rehearsal host** on its page, `omarchy-agent uninstall`,
   and `studio-rehearsal.sh remove --dir /srv/omarchy-pool`.
+
+The stand-in carries the release's `rollout.sh`, which has the marker's
+guard, so step 1's `grep` succeeds there and `check` says `ok` for it;
+the Studio's own copy is the one the visit may have to refresh.
 
 The stand-in has no registrations, so the legacy side of the switch and
 the way back is rehearsed on the Studio itself, with one registration
@@ -2999,16 +3041,20 @@ npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, arch, trust,
 2. **Raise the cap**: the host's page, *Set the pool cap*, *No cap — its
    count decides* (its 11 units), reason *the Studio switch (#345)*.
 3. **Move pins here**, on the host's page (the *Legacy set* card, which
-   counts the queued tasks pinned to its owner's legacy registrations,
-   every one of them — the query above without its `where` lists them;
-   they should be the Studio's eight), with a reason: each moves onto the host's registration where the host
-   could run it once idle — a lane for it, `needs_native` kept, never the
-   project's copy onto its requester's host (D35), its size under the
-   pool's cap — and says so on its page; the rest stay, each said with why,
-   and go to the queue three minutes into their registration's drain. A
-   task pinned to a drained registration otherwise waits for it until that
-   sweep, and goes to any host: the pin's choice — the machine, its agent
-   — is lost.
+   counts the queued tasks pinned to its owner's legacy registrations, by
+   the machine their labels say — the Studio's eight at `omarchy-studio`,
+   the query above; another machine of the owner's, its own set still
+   claiming, on a line of its own), with a reason, and in its dialog the
+   legacy set at `omarchy-studio` — chosen already when the host's *where*
+   is that machine's; the press names those registrations alone, so
+   another machine's pins never move with them. Each moves onto the
+   host's registration where the host could run it once idle — a lane for
+   it, `needs_native` kept, never the project's copy onto its requester's
+   host (D35), the agent its pin chose, its size under the pool's cap —
+   and says so on its page; the rest stay, each said with why, and go to
+   the queue three minutes into their registration's drain. A task pinned
+   to a drained registration otherwise waits for it until that sweep, and
+   goes to any host: the pin's choice — the machine, its agent — is lost.
 4. **Drain the eight legacy registrations** — *Drain* on each one's page
    (`/worker/<id>`), with the reason; or, with your CLI token (`omc_…`, from
    your page), the same orders in a loop:
@@ -3051,10 +3097,10 @@ drained: N builds pinned to it go to the queue*); then *Resume* it —
 within minutes its page shows a new claim and a build, and it is not
 *outdated*. The host's own side the same way: *Drain* its registration for
 a few minutes, then *Resume* it. Neither touches the machine, and the rest
-runs on. *Move pins here* is not part of it — it weighs every legacy
-registration of the host's owner, the Studio's eight, onto a canary capped
-at one build —, and `retire-legacy` is rehearsed on the P1 host (above)
-and in the VM's dress rehearsal.
+runs on. *Move pins here* is not part of it — it would move the pins of
+the Studio's set it names onto a canary capped at one build —, and
+`retire-legacy` is rehearsed on the P1 host (above) and in the VM's dress
+rehearsal.
 
 **After 14 healthy days** — no way back taken, the canary's checks still
 holding:

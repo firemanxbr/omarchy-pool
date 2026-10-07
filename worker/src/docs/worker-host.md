@@ -336,11 +336,14 @@ Its buttons are there too: Reconcile now (an Update of its registration
 while its agent takes no host order), **Drain** and **Resume claims** —
 your drain is lifted by you only —, Suspend and Retire. Beside the legacy
 set it was installed with (`--legacy`), its page counts the queued tasks
-pinned to your legacy registrations, and **Move pins here** (#345) moves
-each onto the host's registration where the host could run it — before
-you drain those registrations at the switch, so a build pinned to one
-keeps that choice of machine and agent; the rest go to the queue once
-their registration's drain has held three minutes
+pinned to your legacy registrations, by the machine their labels say, and
+**Move pins here** (#345) moves those of the set you choose — this
+machine's, by default; another machine's set, still claiming, only if you
+choose it — onto the host's registration where the host could run them,
+the agent a pin chose included — before you drain those registrations at
+the switch, so a build pinned to one keeps that choice of machine and
+agent; the rest go to the queue once their registration's drain has held
+three minutes
 ([Runbook](/docs/runbook#the-studio-host), *The Studio switch*). Anyone else sees
 its name, architectures, release and whether its agent reports; the
 [Workers page](/workers) lists every host with its owner, lanes, units busy

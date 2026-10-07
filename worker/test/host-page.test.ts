@@ -20,6 +20,8 @@
  *   the public fields — the page drawn from the same reads says the same;
  * - the pool's cap lowers what the pool hands out and touches nothing of the
  *   envelope (no host order, no setting), and is refused above its units;
+ *   set while the host waits for its Confirm, it survives the Confirm and
+ *   holds its first claims (the Studio canary's order, #319);
  * - a Stop on one lease fences that task only; Drain and Resume keep the
  *   owner rule; Reconcile now is an Update while its agent takes no host order;
  * - D1 is written only on a change, or when the row is five minutes old;
@@ -412,6 +414,38 @@ describe("the host page's controls (#324)", () => {
     expect(values({ units: 6, pool_cap_units: null })).toEqual(["", "0", "1", "2", "3", "4", "5", "6"]);
     expect(values({ units: null, pool_cap_units: null })).toHaveLength(18);
     expect((capOptions({ units: 6, pool_cap_units: 3 }) as { selected: boolean }[]).filter((o) => o.selected)).toHaveLength(1);
+  });
+
+  it("the Studio canary's order (#319): the pool cap set while the host waits for its Confirm survives the Confirm, and its first claims take one build", async () => {
+    const m = await call("POST", "/hosts/enrollments", { session: "m1", body: { name: "canary" } });
+    const k = await newKey();
+    const e = await call("POST", "/hosts/enroll", { body: { token: m.json.token, pubkey: k.pub, sig: await sign(k, enrollMessage(m.json.token, k.pub)), hostname: "canary-1", os: "linux", arch: "aarch64", page_kb: 16, isolation: "root", dedicated: true, agent_version: "0.4.0", runtime: { driver: "compose/docker", rootless: false }, capacity: STUDIO_REPORT.capacity } });
+    expect(e.status, JSON.stringify(e.json)).toBe(201);
+    expect((await hostRow(e.json.host)).status).toBe("pending-owner");
+    // Its owner caps it from its page while it waits — the visit's step 7, before Confirm.
+    const cap = await call("POST", `/hosts/${e.json.host}/cap`, { session: "m1", body: { units: 3, reason: "the Studio canary (#319)" } });
+    expect(cap.status, JSON.stringify(cap.json)).toBe(200);
+    expect(await hostRow(e.json.host)).toMatchObject({ status: "pending-owner", pool_cap_units: 3 });
+    // Then Confirm: the host is active with its registration, and the cap stays.
+    const c = await call("POST", `/hosts/${e.json.host}/confirm`, { session: "m1", body: {} });
+    expect(c.status, JSON.stringify(c.json)).toBe(200);
+    expect(await hostRow(e.json.host)).toMatchObject({ status: "active", pool_cap_units: 3 });
+    const t = await signed(k, e.json.host, "POST", "/hosts/self/token");
+    expect(t.status, JSON.stringify(t.json)).toBe(200);
+    const canary: Host = { k, host: e.json.host, worker: c.json.worker, token: t.json.token };
+    expect((await report(k, canary.host, STUDIO_REPORT)).json).toMatchObject({ ok: true });
+    // Its first claims, its 11 units offered: one build of two and the job unit, never more beside the legacy set.
+    for (let i = 0; i < 3; i++) await queued("aarch64");
+    const got: { task: number; gen: string }[] = [];
+    for (let i = 0; i < 4; i++) {
+      const r = await claim(canary, "aarch64", STUDIO_REPORT.capacity, got);
+      if (r.status !== 200) break;
+      got.push({ task: r.json.task.id, gen: r.json.task.lease_gen });
+    }
+    expect(got).toHaveLength(1);
+    expect((await call("GET", `/hosts/${canary.host}`, { session: "m1" })).json.host).toMatchObject({ pool_cap_units: 3, units_effective: 3, units_busy: 2, units_free: 0 });
+    // Retired, it leaves the rest of this file's fleet as it was.
+    expect((await call("POST", `/hosts/${canary.host}/retire`, { session: "m1", body: { reason: "the canary test is over" } })).status).toBe(200);
   });
 });
 
