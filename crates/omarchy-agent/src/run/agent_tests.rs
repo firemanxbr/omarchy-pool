@@ -520,6 +520,7 @@ fn with_the_dispatcher_env_or_its_token_file_missing_the_dispatcher_is_held_and_
         addresses: Vec::new(),
         envelope: None,
         plain: false,
+        keys_user: None,
     };
     crate::dispatcher_env::write_token(&env, WORKER, TOKEN, &r).unwrap();
     w.round();

@@ -426,14 +426,15 @@ fn a_widening_never_gives_more_units_than_the_constants_and_the_hardware() {
 fn sealed_agent_keys_land_in_agent_env_alone() {
     let c = cases();
     let mut w = owned(2);
-    // The owner's own line, and a key the document takes out.
+    // The owner's own line, and a key the document takes out; the file 0644, as worker-host.md
+    // told an owner to make it for a rootful engine's sidecars before #399.
     let env = w.dir.join("secrets/agent.env");
     fs::write(
         &env,
         "# mine\nGEMINI_API_KEY=keep-this-one\nOPENAI_API_KEY=sk-old\n",
     )
     .unwrap();
-    fs::set_permissions(&env, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&env, fs::Permissions::from_mode(0o644)).unwrap();
     send(
         &w,
         &[("ho_k1", OrderKind::SetAgentKeys(Some(signed(&c["keys"]))))],
@@ -454,6 +455,7 @@ fn sealed_agent_keys_land_in_agent_env_alone() {
         text,
         format!("# mine\nGEMINI_API_KEY=keep-this-one\nCLAUDE_CODE_OAUTH_TOKEN={canary}\nGITHUB_TOKEN={token}\n")
     );
+    // Owner-only again: the agent sidecars read it as its owner (#399).
     assert_eq!(
         fs::metadata(&env).unwrap().permissions().mode() & 0o777,
         0o600

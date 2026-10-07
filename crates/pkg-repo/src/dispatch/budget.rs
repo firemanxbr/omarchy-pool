@@ -13,7 +13,8 @@
 //!   usage comes back in `<task dir>/agent/usage.json`, which the sidecar
 //!   writes and the task container does not mount; a usage that does not
 //!   read counts as the whole cap it was given. Each probe that ran counts
-//!   one call (its one tiny completion).
+//!   one call (its one tiny completion). The sidecar runs as the keys file's
+//!   owner (#399), so that directory is made that user's ([`usage_dir_for`]).
 //!
 //! The caps come from the envelope's `agent_budget` (agent.toml), which the
 //! agent writes into `etc/dispatcher.env` (#371); a key the envelope does not
@@ -100,6 +101,22 @@ pub fn grant(caps: &Caps, spent_today: u32, reserved: u32) -> u32 {
     )
 }
 
+/// The agent sidecar's usage directory (`<task dir>/agent`, which the dispatcher made) given to
+/// the user the sidecar runs as (#399): the keys file's owner, not this dispatcher's root.
+/// Where the change of owner is refused — a dispatcher without `CAP_CHOWN`, a filesystem that
+/// keeps no owners of its own, as a Mac's VM may share the work root — the directory is opened
+/// to every user instead: it lies in the task's 0700 directory, which only the dispatcher
+/// walks into, and only that sidecar mounts it. Either way the usage reads back here, rather
+/// than every task counting its whole cap.
+pub fn usage_dir_for(task_dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = task_dir.join("agent");
+    if std::os::unix::fs::chown(&dir, Some(uid), Some(gid)).is_ok() {
+        return Ok(());
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+}
+
 /// The calls an ended sidecar made, from the file it wrote; its whole cap when the file does not read.
 /// The sidecar writes that directory, so the file is opened without following a symlink and
 /// without blocking on a FIFO, must be a regular file, and is read up to 4 KiB.
@@ -176,6 +193,40 @@ mod tests {
             used(t.path(), 200),
             200,
             "never more than the cap it was given"
+        );
+    }
+
+    /// #399: the sidecar runs as the keys' owner, so its usage directory is that user's — or,
+    /// where the dispatcher may not give it away (a dispatcher without `CAP_CHOWN`, as these
+    /// tests run in CI), open to every user inside the task's own directory.
+    #[test]
+    fn the_usage_directory_is_the_sidecar_s_user_s() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let t = tempfile::tempdir().unwrap();
+        assert!(
+            usage_dir_for(t.path(), 4242, 4242).is_err(),
+            "no directory, nothing made"
+        );
+        let agent = t.path().join("agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        // Its own user (a rootless engine's root, or a dispatcher that is the keys' owner): kept.
+        let me = std::fs::metadata(&agent).unwrap();
+        usage_dir_for(t.path(), me.uid(), me.gid()).unwrap();
+        let kept = std::fs::metadata(&agent).unwrap();
+        assert_eq!((kept.uid(), kept.gid()), (me.uid(), me.gid()));
+        assert_eq!(
+            kept.permissions().mode() & 0o777,
+            me.permissions().mode() & 0o777
+        );
+        // Another user's: given to it where this process may, else open to it.
+        usage_dir_for(t.path(), 4242, 4242).unwrap();
+        let m = std::fs::metadata(&agent).unwrap();
+        assert!(
+            (m.uid(), m.gid()) == (4242, 4242) || m.permissions().mode() & 0o777 == 0o777,
+            "uid {} gid {} mode {:o}",
+            m.uid(),
+            m.gid(),
+            m.permissions().mode()
         );
     }
 

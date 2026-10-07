@@ -20,16 +20,20 @@
 #               re-adopts nothing, answers /ready on loopback, claims with want 0 (no capacity file) and leaves on SIGTERM —
 #               its worker token from a read-only file, as the host set mounts it (OMARCHY_WORKER_TOKEN_FILE, #327)
 #   egress      `pkg-repo egress` through its entrypoint (#336): it listens, and refuses cloud metadata (403) and a POST (405)
+#   agent       a task's agent sidecar as a host's dispatcher starts it (#336, #399): every capability dropped, no new
+#               privileges, its keys a read-only file, 0600 and a non-root user's — run as that user (as a container sees
+#               it: root on a rootless engine), with no home in the image, it reads them and its broker answers on :8790;
+#               run as the image's root on a rootful engine, it cannot, and says whose the file is
 #
 # usage: tests/image-smoke.sh <image>      (docker; RUNTIME=podman for podman)
 set -euo pipefail
 image="${1:?usage: tests/image-smoke.sh <image>}"
 RT="${RUNTIME:-docker}"
-tmp="$(mktemp -d)"; broker=""; stub=""; egress=""; dispatcher=""
+tmp="$(mktemp -d)"; broker=""; stub=""; egress=""; dispatcher=""; agent=""
 # The dispatcher writes its state under the work root as the container's user, which the
 # runner's user may not remove: what rm cannot, a container of the image removes.
 cleanup() {
-  for c in "$broker" "$egress" "$dispatcher"; do [[ -z "$c" ]] || "$RT" rm -f "$c" >/dev/null 2>&1 || true; done; [[ -z "$stub" ]] || kill "$stub" 2>/dev/null || true
+  for c in "$broker" "$egress" "$dispatcher" "$agent"; do [[ -z "$c" ]] || "$RT" rm -f "$c" >/dev/null 2>&1 || true; done; [[ -z "$stub" ]] || kill "$stub" 2>/dev/null || true
   rm -rf "$tmp" 2>/dev/null || { [[ -z "${image:-}" ]] || "$RT" run --rm --security-opt label=disable -v "$tmp:$tmp" --entrypoint rm "$image" -rf "$tmp/work" >/dev/null 2>&1; rm -rf "$tmp"; }
 }
 trap cleanup EXIT
@@ -143,5 +147,34 @@ code=""; for _ in $(seq 1 30); do code="$(curl -s -o /dev/null -w '%{http_code}'
 [[ "$code" == 403 ]] || fail "the egress let cloud metadata through, or did not answer: $code ($("$RT" logs "$egress" 2>&1 | tail -n3))"
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -x http://127.0.0.1:18792 -X POST http://example.org/)" == 405 ]] || fail "the egress took a POST"
 echo "ok: the egress (refuses cloud metadata and a POST)"
+
+# The agent sidecar's role (#399): its keys owner-only and a non-root user's, as install and the owner's Set agent keys
+# write them (the runner's; as root, another uid's), mounted read-only; started as that user as a container sees it, with
+# every capability dropped and no new privileges, as the dispatcher starts it, its broker answers on :8790 (GET /, a 404:
+# /health would spend a completion).
+mkdir -p "$tmp/keys"; printf 'FACTORY_PROVIDER=anthropic\nANTHROPIC_API_KEY=sk-ant-not-a-real-key\n' > "$tmp/keys/agent.env"; chmod 600 "$tmp/keys/agent.env"
+[[ $EUID -ne 0 ]] || chown 4242:4242 "$tmp/keys/agent.env"
+owner="$(stat -c %u:%g "$tmp/keys/agent.env")"
+if [[ "$(basename "$RT")" == podman && "$("$RT" info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" == true ]] \
+  || "$RT" info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless'; then as=0:0; else as="$owner"; fi
+side=(--cap-drop ALL --security-opt no-new-privileges --security-opt label=disable -e OMARCHY_WORKER_ROLE=agent -e OMARCHY_AGENT_ENV=/run/omarchy/agent.env
+  --mount "type=bind,source=$tmp/keys/agent.env,target=/run/omarchy/agent.env,readonly")
+agent="omarchy-smoke-agent-$$"
+"$RT" run -d --name "$agent" --user "$as" "${side[@]}" "$image" >/dev/null || fail "the agent sidecar did not start"
+code=000
+for _ in $(seq 1 60); do
+  code="$("$RT" exec "$agent" curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8790/ 2>/dev/null || true)"
+  [[ "$code" != 000 && -n "$code" ]] && break
+  [[ "$("$RT" inspect -f '{{.State.Running}}' "$agent" 2>/dev/null)" == true ]] || fail "the agent sidecar as $as exited: $("$RT" logs "$agent" 2>&1 | tail -n 5)"
+  sleep 1
+done
+[[ "$code" == 404 ]] || fail "the agent sidecar as $as does not answer on :8790 (got $code): $("$RT" logs "$agent" 2>&1 | tail -n 5)"
+"$RT" rm -f "$agent" >/dev/null; agent=""
+if [[ "$as" != 0:0 ]]; then
+  out="$("$RT" run --rm "${side[@]}" "$image" 2>&1)" && fail "the agent sidecar read another user's 0600 keys as the image's root, with no capability: $out"
+  grep -q "no agent keys at /run/omarchy/agent.env (OMARCHY_SECRETS_DIR/agent.env): it is $owner, mode 600, and this sidecar runs as 0:0" <<<"$out" \
+    || fail "the agent sidecar as root does not say whose the keys are: $out"
+fi
+echo "ok: the agent sidecar (as $as, agent.env $owner 0600, no capability: its broker answers$([[ "$as" == 0:0 ]] || echo "; as the image's root it cannot read them, and says whose they are"))"
 
 echo "image smoke: every role of $image starts"

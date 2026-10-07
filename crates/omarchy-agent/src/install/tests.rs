@@ -3531,7 +3531,13 @@ fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_
     assert_eq!(mode(&file), 0o400);
     assert_eq!(mode(file.parent().unwrap()), 0o700);
     // No agent_budget in the envelope: the dispatcher's defaults.
-    assert!(!text.contains("OMARCHY_AGENT_"), "{text}");
+    assert!(
+        !text.contains("OMARCHY_AGENT_CALLS") && !text.contains("_PER_TASK="),
+        "{text}"
+    );
+    // Who the agent sidecars run as (#399): this engine is rootless, whose root is the agent's
+    // user, the owner of the secrets directory agent.env will be written to.
+    assert!(text.contains("\nOMARCHY_AGENT_USER=0:0\n"), "{text}");
     assert_eq!(mode(&env), 0o600);
     let said = String::from_utf8_lossy(&out).into_owned();
     assert!(
