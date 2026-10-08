@@ -15,12 +15,16 @@ digest() { # repository tag → repo@sha256:…
 }
 
 x86="$(digest library/archlinux base)"; arm="$(digest menci/archlinuxarm base)"; bb="$(digest library/busybox 1.37.0)"
-[[ -n "$x86" && -n "$arm" && -n "$bb" ]] || { echo "could not resolve a digest" >&2; exit 1; }
+x86dev="$(digest library/archlinux base-devel)"; armdev="$(digest menci/archlinuxarm base-devel)"
+[[ -n "$x86" && -n "$arm" && -n "$bb" && -n "$x86dev" && -n "$armdev" ]] || { echo "could not resolve a digest" >&2; exit 1; }
 {
   echo "# Container images the checks run in, pinned by digest (tests/pin-images.sh, $(date -u +%F))."
   echo "# The tag is kept beside the digest for the reader; the digest is what pulls."
   echo "ARCHLINUX_BASE=\"docker.io/library/archlinux:base@$x86\""
   echo "ARCHLINUXARM_BASE=\"docker.io/menci/archlinuxarm:base@$arm\""
+  echo "# The emulated lane's smoke run (tests/emulated-lane.sh): base-devel, as the release's build images are, whose sudo the x86_64 lane's loader check on 4K pages runs (#413); pinned $(date -u +%F)."
+  echo "ARCHLINUX_BASE_DEVEL=\"docker.io/library/archlinux:base-devel@$x86dev\""
+  echo "ARCHLINUXARM_BASE_DEVEL=\"docker.io/menci/archlinuxarm:base-devel@$armdev\""
   echo "# The host agent's stand-ins (tests/agent-run-loop.sh, tests/agent-install.sh, tests/agent-host-orders.sh, tests/agent-runtime-switch.sh): sh, httpd, wget and nc."
   echo "BUSYBOX=\"docker.io/library/busybox:1.37.0@$bb\""
 } > "$OUT"

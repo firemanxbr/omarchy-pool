@@ -1007,8 +1007,11 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
     if (dup) {
       if (dup.status === "queued") {
         // Asked again while it waits: where it goes, the hint and the lesson are what was asked now — the queue when nothing was named.
-        // A build sent back for a native worker (needs_native) still waits for one there; a worker named is the asker's own choice.
-        if (!pinned && dup.params && (JSON.parse(dup.params) as { needs_native?: number }).needs_native === 1) params.needs_native = 1;
+        // A build sent back for a native worker (needs_native) still waits for one there — or for a 4K-page lane, unless one refused it
+        // too (refused_4k, #413); a worker named is the asker's own choice.
+        const marks = !pinned && dup.params ? (JSON.parse(dup.params) as { needs_native?: number; refused_4k?: number }) : {};
+        if (marks.needs_native === 1) params.needs_native = 1;
+        if (marks.needs_native === 1 && marks.refused_4k === 1) params.refused_4k = 1;
         await env.DB.prepare("UPDATE build_tasks SET pinned_to = ?, params = ? WHERE id = ? AND status = 'queued'")
           .bind(pinned, Object.keys(params).length ? JSON.stringify(params) : null, dup.id).run();
         ids.push(dup.id);

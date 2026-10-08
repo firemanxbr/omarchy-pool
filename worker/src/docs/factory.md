@@ -415,10 +415,19 @@ anything linking libedit or libldap — on a 16K-page kernel) is the lane's
 failure, not the recipe's: the build script stops at the first attempt with
 exit 96, before any drafter turn, and reports `needs_native`, which the pool
 takes only from a lease it put on an emulated lane — the attempt given back,
-no emulated lane again, the build back in the queue for a native host — and
-refuses from a native lane (a failure like any other). Every page that
-follows the build says what it waits for, and the Workers page and Status
-say which architecture needs a native host next.
+the build back in the queue — and refuses from a native lane (a failure like
+any other). That is D33, amended by #413: `needs_native` means *needs 4K
+pages or a native host*. What 16K pages cannot map (the Studio's Asahi
+kernel), qemu maps on a 4K-page kernel, so an emulated lane whose host
+reports `page16k: false` — the Studio's x86_64 VM (the runbook's *The
+Studio's x86_64 VM*), a Mac's Rosetta VM — takes the build too; no other
+emulated lane takes it again. The pool marks it `refused_4k` too when the
+host's lanes say 4K pages or the build already carried `needs_native` (only
+a lane its claim says is on 4K pages is handed such a build, so its second
+time back is always its last): only a native host takes it then, and
+emulation has given its attempt back twice at most. Every page that follows
+the build says what it waits for, and the Workers page and Status say which
+architecture needs a native host next.
 
 **Inside a task.** A build container gets `[omarchy-packages-edge]` and
 `[omarchy-factory-edge]` in its `pacman.conf` — each one when the pool
@@ -632,7 +641,8 @@ native or emulated, with no wait; every other kind is arch-neutral. Placement (#
 of a package — its review rebuild — is never handed to a host its requester
 owns (the rebuild's owner, and the owner of the contributor's build it
 answers) while another maintainer's host has a lane allowed for it, native or
-emulated with `needs_native` applied, and could hold it idle at its size
+emulated with its marks applied (`needs_native`: a lane on 4K pages only;
+`refused_4k`: none), and could hold it idle at its size
 (its units within the pool cap, an agent slot, its disk budget against its
 free disk plus the budgets of the builds it runs — a report below the
 minimum for that disk alone, or a claim holding builds back for disk, is
@@ -645,9 +655,10 @@ exception names (#394): their own hosts take that copy, with no release, and
 Review says why. An audit — in a fresh container with its own agent sidecar, by
 construction — leaves the machine that built what it audits (its
 registration, or one of the same owner's the pool cannot tell apart from it:
-two registrations are apart only with different owners, or as two hosts'
-registrations of different hosts) to another that can take it now (for 3
-minutes, so the builder never idles for it); an
+two registrations are apart only with different owners — a host is what
+enrolled, not a machine, and one owner's two hosts may be one, as the
+Studio and the x86_64 VM it runs are, #413) to another that can take it now
+(for 3 minutes, so the builder never idles for it); an
 audit of the project's copy takes a model (the claim's `agent`: provider and
 model) other than the one that built it whenever a registration taking
 audits with another model, and that is handed work (not drained, below the
@@ -656,7 +667,7 @@ claim while its probe passes, the start of its failing spell while it
 fails), and runs on the same model otherwise; a claim reads those audits
 apart, so a head of them never hides another. Each audit's lease records
 `build_tasks.independent` — `model`, `host` (the same model on another
-machine, for an audit that does not ship) or `none` — cleared when the
+owner's machine, for an audit that does not ship) or `none` — cleared when the
 lease goes back to the queue, and Review shows it beside the verdict. A host
 whose agent reports `asleep` (#329: a Mac about to sleep, or asleep, while
 that report is fresh) has zero free units: its claims are handed nothing

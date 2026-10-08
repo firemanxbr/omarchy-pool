@@ -29,7 +29,7 @@ import {
  *   POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, agent?} → a task with a lease and its job token, or 204
  *   POST /factory/tasks/:id/heartbeat                                  extend the lease (a fresh job token)
  *   POST /factory/tasks/:id/complete    {sha256, filename, version, duration_ms?, log_tail?} · {result, summary} for jobs
- *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?, needs_native?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's; needs_native, from a lease on an emulated lane: back in the queue for a native lane — unpinned, the attempt given back; from a native lane it is refused, a failure like any other)
+ *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?, needs_native?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's; needs_native, from a lease on an emulated lane: back in the queue for a native lane or a 4K-page emulated one — unpinned, the attempt given back; from a 4K-page lane, or a second time, for a native lane only (refused_4k, #413); from a native lane it is refused, a failure like any other)
  * The worker is its registered token (POST /factory/workers); a task's
  * writes use the job token the claim issued.
  *
@@ -768,15 +768,15 @@ const builtWithSql = `COALESCE(json_extract(au.params, '$.built_with'), bw.agent
 /**
  * What placement reads of a candidate (#339, design v2 §8.4; `t` the alias), each by a primary key: the project's copy's requesters —
  * its owner and the owner of the contributor's build of the same package it answers — and who released it to any host (D35); an
- * audit's build — the registration that built it, the model it was built with, that registration's owner and its host when it is a
- * host's (the machine, as far as the pool tells machines apart: selection.ts `apart`), and whether it is the project's copy (D36) — and,
+ * audit's build — the registration that built it, the model it was built with, that registration's owner (the machine, as far as the
+ * pool tells machines apart: selection.ts `apart`, #413), and whether it is the project's copy (D36) — and,
  * for the project's copy, the maintainer the solo-maintainer exception names while it is in force (#394: the governance file's [solo],
  * as the last sync wrote it beside the list — one row by its key).
  */
 const placementCols = (t: string) => `CASE WHEN ${projectCopySql(t)} THEN json_array(${t}.owner, (SELECT rq.owner FROM build_tasks rq WHERE rq.id = json_extract(${t}.params, '$.review') AND rq.name = ${t}.name)) END AS requesters,
     CASE WHEN ${projectCopySql(t)} THEN json_extract(${t}.params, '$.any_host.by') END AS any_host,
     CASE WHEN ${projectCopySql(t)} THEN (${SOLO_LOGIN_SQL}) END AS solo,
-    CASE WHEN ${t}.kind = 'audit' THEN (SELECT json_object('by', au.lease_owner, 'with', ${builtWithSql}, 'owner', bw.owner, 'host', CASE WHEN bw.kind = 'host' THEN bw.host_id END, 'copy', ${projectCopySql("au")})
+    CASE WHEN ${t}.kind = 'audit' THEN (SELECT json_object('by', au.lease_owner, 'with', ${builtWithSql}, 'owner', bw.owner, 'copy', ${projectCopySql("au")})
       FROM build_tasks au LEFT JOIN build_workers bw ON bw.id = au.lease_owner WHERE au.id = json_extract(${t}.params, '$.task')) END AS audited`;
 /**
  * An audit of the project's copy that the claimer's model cannot count as another (`t` the alias; #339, D36): built with that model,
@@ -792,8 +792,8 @@ const sameModelAuditOf = (t: string, model: string | null): { sql: string; binds
 /** The maintainer the solo-maintainer exception names (#394), as a scalar subquery by its one row's key: NULL without the table. */
 const SOLO_LOGIN_SQL = "SELECT gs.maintainer FROM governance_solo gs WHERE gs.id = 1";
 /** A candidate as selection reads it (`t` the alias). */
-const candidateCols = (t: string) => `${t}.id, ${t}.name, ${t}.arch, ${t}.kind, ${t}.trust, ${t}.owner, ${t}.priority, ${t}.created_at, ${t}.pinned_to, ${t}.reserved_at, json_extract(${t}.params, '$.needs_native') AS needs_native, ${ownSize(t)} AS asked, ${agentScope(`${t}.`)} AS model, CASE WHEN ${t}.kind IN (${RING_JOB_KINDS}) THEN json_extract(${t}.params, '$.arch') END AS job_arch, ${placementCols(t)}`;
-interface CandidateRow { id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; priority: number; created_at: string; pinned_to: string | null; reserved_at: string | null; needs_native: number | null; asked: number | null; model: number; job_arch: string | null; requesters: string | null; any_host: string | null; solo: string | null; audited: string | null }
+const candidateCols = (t: string) => `${t}.id, ${t}.name, ${t}.arch, ${t}.kind, ${t}.trust, ${t}.owner, ${t}.priority, ${t}.created_at, ${t}.pinned_to, ${t}.reserved_at, json_extract(${t}.params, '$.needs_native') AS needs_native, json_extract(${t}.params, '$.refused_4k') AS refused_4k, ${ownSize(t)} AS asked, ${agentScope(`${t}.`)} AS model, CASE WHEN ${t}.kind IN (${RING_JOB_KINDS}) THEN json_extract(${t}.params, '$.arch') END AS job_arch, ${placementCols(t)}`;
+interface CandidateRow { id: number; name: string; arch: string; kind: string; trust: string; owner: string | null; priority: number; created_at: string; pinned_to: string | null; reserved_at: string | null; needs_native: number | null; refused_4k: number | null; asked: number | null; model: number; job_arch: string | null; requesters: string | null; any_host: string | null; solo: string | null; audited: string | null }
 
 /**
  * A build's size before any clamp, in SQL (`t` the alias; one binding: factory/sizing's sizes, `{name: [size, disk_gb]}`), as
@@ -859,7 +859,8 @@ const heldOf = (l: LeaseRow, rules: Rules): Held => ({
 });
 /**
  * The oldest queued builds a host may reserve for, by the kind index (`filters` on alias w): within the window of the oldest builds some
- * host alive could run — of an arch a host runs, a `needs_native` one only where a host runs its arch natively, not a contributor's at
+ * host alive could run — of an arch a host runs, a `needs_native` one only where a host runs its arch natively or emulated on 4K pages,
+ * a `refused_4k` one only where a host runs it natively (selection.ts emulationRefuses, #413), not a contributor's at
  * their cap, not pinned to a registration that is not alive, not within 30 minutes of its two hours of reservation spent (selection.ts
  * `cooling`) — those that waited 30 minutes and ask a size above 1. Bindings: the filters', then the time 30 minutes ago, then
  * factory/sizing's sizes.
@@ -919,7 +920,7 @@ function memberOf(r: FleetRow, pool: RunningVersion, nowMs = Date.now()): Member
     below_minimum: reportedBelow(r.capacity), below_disk: host ? belowOnDisk(r.capacity) : null, may_claim: host ? r.host_status === "active" && r.owner_removed_at === null : r.trust === "project" || r.owner_listed === 1, behind: updateState(r.version ?? undefined, pool, nowMs, host ? soakOf(r) : null, host ? revertedOf(r) : null).required,
     seen_at: Date.parse(r.last_seen), alive_ms: host ? undefined : LEGACY_ALIVE_MS, reserving: r.reserving_task !== null && r.reserving_since ? { task: r.reserving_task, since: Date.parse(r.reserving_since) } : null,
     scope: scopeOfRow(host, r.trust),
-    busy: !host && r.current_task !== null, owner: r.owner, model: r.agent, host_id: host ? r.host_id : null,
+    busy: !host && r.current_task !== null, owner: r.owner, model: r.agent,
     // A host whose agent says it sleeps has zero free units (#329).
     asleep: host && asleepNow(r, nowMs),
     // Its dispatcher applies a sandbox, as its last claim said (#330): its emulated lanes take the project's own recipes only.
@@ -973,7 +974,7 @@ function candidateOf(r: CandidateRow, sizes: Map<string, Sizing & { learned?: nu
   const page = sizes.get(r.name), file = shippedSizing().get(r.name), build = r.kind === "build";
   return {
     id: r.id, name: r.name, kind: r.kind, arch: r.arch, trust: r.trust, owner: r.owner, priority: r.priority, queued_at: Date.parse(r.created_at), pinned_to: r.pinned_to,
-    needs_native: r.needs_native === 1, model: r.model === 1,
+    needs_native: r.needs_native === 1, refused_4k: r.refused_4k === 1, model: r.model === 1,
     size: build ? (Number.isInteger(r.asked) && (r.asked as number) >= 1 ? (r.asked as number) : page?.size ?? file?.size ?? page?.learned ?? null) : null,
     disk_gb: build ? page?.disk_gb ?? file?.disk_gb ?? null : null, native_ms: nativeMs.get(`${r.name}\0${r.arch}`) ?? null,
     reserved_at: r.reserved_at ? Date.parse(r.reserved_at) : null, job_arch: r.job_arch,
@@ -983,7 +984,7 @@ function candidateOf(r: CandidateRow, sizes: Map<string, Sizing & { learned?: nu
 
 /** What placement knows of a candidate's row (#339): the project's copy's requesters and its release (D35) — and the solo-maintainer exception (#394) —, an audit's build (D36). */
 function placementOfRow(r: Pick<CandidateRow, "requesters" | "any_host" | "solo" | "audited">): Pick<Candidate, "publish_bound" | "requesters" | "any_host" | "solo" | "built_by" | "built_with" | "built_on"> {
-  const audited = jsonOr<{ by?: unknown; with?: unknown; owner?: unknown; host?: unknown; copy?: unknown } | null>(r.audited, null);
+  const audited = jsonOr<{ by?: unknown; with?: unknown; owner?: unknown; copy?: unknown } | null>(r.audited, null);
   const text = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
   return {
     publish_bound: r.requesters !== null || audited?.copy === 1,
@@ -992,7 +993,7 @@ function placementOfRow(r: Pick<CandidateRow, "requesters" | "any_host" | "solo"
     solo: r.solo ?? null,
     built_by: text(audited?.by),
     built_with: text(audited?.with),
-    built_on: audited ? { owner: text(audited.owner), host_id: text(audited.host) } : null,
+    built_on: audited ? { owner: text(audited.owner) } : null,
   };
 }
 
@@ -1206,7 +1207,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     disk: cap?.disk_free_gb ?? null, kinds: k.kinds, probe_ok: k.probeOk, drained: false, below_minimum: host ? reportedBelow(hostRow?.capacity ?? null) : false, may_claim: true, behind: false, seen_at: nowMs,
     reserving: hostRow?.reserving_task != null && hostRow.reserving_since ? { task: hostRow.reserving_task, since: Date.parse(hostRow.reserving_since) } : null,
     scope: scopeOfRow(host, k.legacy?.trust ?? "host"),
-    offer: host && k.hc!.offer !== null ? k.hc!.offer : undefined, owner: k.owner, model: k.model, host_id: host ? k.hostId : null,
+    offer: host && k.hc!.offer !== null ? k.hc!.offer : undefined, owner: k.owner, model: k.model,
     asleep: host && !!hostRow && asleepNow(hostRow, nowMs),
     // The sandbox its dispatcher applies, as this claim says it (#330): its emulated lanes take the project's own recipes only.
     sandbox: !!cap?.sandbox,
@@ -1241,9 +1242,10 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     if (!k.probeOk) sql += ` AND NOT ${agentScope(`${t}.`)}`;
     if (k.legacy?.emulated) {
       // A build a toolchain could not start emulated (the fail report's needs_native) waits for a native worker of its
-      // architecture, whoever's and whatever the trust: handed to an emulated one again it fails the same way, and its attempt is
-      // never spent (handleFail). Selection keeps it off every emulated lane; this keeps an emulated legacy registration's bounded
-      // read free of them.
+      // architecture, whoever's and whatever the trust, or a host's emulated lane on 4K pages (#413): handed to an emulated one
+      // again it fails the same way, and its attempt is never spent (handleFail). A legacy lane reports no page size, so it counts as
+      // 16K (selection.ts emulationRefuses); this keeps an emulated legacy registration's bounded read free of them — of every
+      // refused_4k one too, which is always marked needs_native as well.
       sql += ` AND json_extract(${t}.params, '$.needs_native') IS NOT 1`;
     }
     sql += ringLock(t);
@@ -1284,7 +1286,10 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     binds.push(capped);
     return { sql, binds };
   };
-  const notNeedsNative = (t: string) => ` AND json_extract(${t}.params, '$.needs_native') IS NOT 1`;
+  // What an emulated lane of arch `a` never takes (selection.ts emulationRefuses; D33 amended, #413): on a lane whose host reports 4K
+  // pages, a task a 4K-page lane refused too (`refused_4k`); on any other, one an emulated lane sent back at all (`needs_native`).
+  const on4k = (a: string) => lanes.some((l) => l.arch === a && l.mode === "emulated" && l.page16k === false);
+  const notRefused = (a: string, t: string) => ` AND json_extract(${t}.params, '$.${on4k(a) ? "refused_4k" : "needs_native"}') IS NOT 1`;
   const cols = candidateCols("c");
   const scope = scopeOf("c"), fits = fitsOf("c");
   const scope2 = scopeOf("c2"), fits2 = fitsOf("c2");
@@ -1304,8 +1309,9 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   for (const a of archs) {
     if (host) {
       // Each lane's own head (§7.4): a build or a trial of that arch (a job with helpers too); one an emulated lane could not start
-      // (needs_native) waits for a native host and is no candidate here.
-      reads.push(env.DB.prepare(LANE_HEAD_SQL(`${scope.sql}${fits.sql}${emulatedOnly(a) ? notNeedsNative("c") : ""}${outsideSandbox(a) ? projectsOwn("c") : ""}`)).bind(a, ...scope.binds, ...fits.binds));
+      // (needs_native) waits for a native host or a 4K-page lane, one a 4K-page lane could not either (refused_4k) for a native host,
+      // and is no candidate on a lane that may not take it.
+      reads.push(env.DB.prepare(LANE_HEAD_SQL(`${scope.sql}${fits.sql}${emulatedOnly(a) ? notRefused(a, "c") : ""}${outsideSandbox(a) ? projectsOwn("c") : ""}`)).bind(a, ...scope.binds, ...fits.binds));
     } else {
       // A legacy registration's one lane: its arch, or a kind any arch runs.
       reads.push(env.DB.prepare(`SELECT ${cols} FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope.sql}${fits.sql}${otherAudits.sql} ORDER BY c.priority, c.id LIMIT ${HEAD_LIMIT}`)
@@ -1313,7 +1319,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     }
     // Contributors' builds: none for a sandboxed host's emulated lane (#330).
     if (k.kinds.includes("build") && k.legacy?.trust !== "project" && !outsideSandbox(a)) {
-      reads.push(env.DB.prepare(OWNER_HEADS_SQL(`${scope2.sql}${fits2.sql}${host && emulatedOnly(a) ? notNeedsNative("c2") : ""}`)).bind(OWNERS_LIMIT, a, ...scope2.binds, ...fits2.binds, capped));
+      reads.push(env.DB.prepare(OWNER_HEADS_SQL(`${scope2.sql}${fits2.sql}${host && emulatedOnly(a) ? notRefused(a, "c2") : ""}`)).bind(OWNERS_LIMIT, a, ...scope2.binds, ...fits2.binds, capped));
     }
   }
   if (host) {
@@ -1337,12 +1343,16 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
   const weighs = host && largest >= 2 && claimers.length > 0;
   if (weighs) {
     const laneArchs = JSON.stringify([...new Set(claimers.flatMap((m) => m.lanes.map((l) => l.arch)))]);
-    const nativeArchs = JSON.stringify([...new Set(claimers.flatMap((m) => m.lanes.filter((l) => l.mode === "native").map((l) => l.arch)))]);
+    const archsOf = (keep: (l: Lane) => boolean) => JSON.stringify([...new Set(claimers.flatMap((m) => m.lanes.filter(keep).map((l) => l.arch)))]);
+    const nativeArchs = archsOf((l) => l.mode === "native");
+    // A needs_native build runs on a native lane or an emulated one on 4K pages; a refused_4k one on a native lane only (#413).
+    const nativeOr4k = archsOf((l) => l.mode === "native" || l.page16k === false);
     const filters = ` AND w.arch IN (SELECT value FROM json_each(?)) AND (json_extract(w.params, '$.needs_native') IS NOT 1 OR w.arch IN (SELECT value FROM json_each(?)))
+        AND (json_extract(w.params, '$.refused_4k') IS NOT 1 OR w.arch IN (SELECT value FROM json_each(?)))
         AND NOT (w.trust = 'community' AND w.owner IN (SELECT value FROM json_each(?))) AND (w.pinned_to IS NULL OR w.pinned_to IN (SELECT value FROM json_each(?)))
         AND (w.reserved_at IS NULL OR w.reserved_at > ? OR w.reserved_at <= ?)`;
     reads.push(env.DB.prepare(OLDEST_BUILDS_SQL(filters)).bind(
-      laneArchs, nativeArchs, capped, JSON.stringify(claimers.map((m) => m.id)), new Date(nowMs - RESERVE_FOR_MS).toISOString(),
+      laneArchs, nativeOr4k, nativeArchs, capped, JSON.stringify(claimers.map((m) => m.id)), new Date(nowMs - RESERVE_FOR_MS).toISOString(),
       new Date(nowMs - RESERVE_FOR_MS - RESERVE_AFTER_MS).toISOString(), new Date(nowMs - RESERVE_AFTER_MS).toISOString(), files,
     ));
   }
@@ -1694,6 +1704,19 @@ async function leaseMoved(env: Env, id: number, actor: Actor): Promise<Response>
 }
 
 /**
+ * Whether a registration's host reports an emulated lane of `arch` on 4K pages (`page16k: false`, hosts.lanes as its agent's last report
+ * wrote it; #413): a needs_native from its lease there was said where qemu maps what 16K pages cannot, so the task waits for a native
+ * lane only (`refused_4k`) from its first refusal. The report is not the claim (selection reads the claim's own lanes): a lane held when
+ * the agent last reported and on at the claim is not here, so this only marks a first refusal early — handleFail's bound is the task's
+ * own `needs_native` (a marked task reaches an emulated lane only through a 4K-page one). A legacy registration has no host, and a lane
+ * that does not say its pages counts as 16K: false.
+ */
+async function emulatedOn4k(env: Env, workerId: string, arch: string): Promise<boolean> {
+  const h = await env.DB.prepare("SELECT h.lanes FROM build_workers w JOIN hosts h ON h.id = w.host_id WHERE w.id = ? AND w.kind = 'host'").bind(workerId).first<{ lanes: string | null }>();
+  return jsonOr<{ arch?: unknown; mode?: unknown; page16k?: unknown }[] | null>(h?.lanes ?? null, null)?.some((l) => l?.arch === arch && l.mode === "emulated" && l.page16k === false) ?? false;
+}
+
+/**
  * What a legacy worker registered about itself: x86_64 under qemu on an aarch64 host, or not. Read only for a legacy lease the claim
  * wrote no lane for (one taken before #337 wrote lanes): every other lease's lane is its own (handleFail, #338).
  */
@@ -1971,8 +1994,16 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // a new build. A toolchain that cannot start on the worker (rustc under
   // qemu on a 16 KB-page host, `needs_native`) is the worker's fault, not
   // the recipe's: the build goes back to the queue for a native lane of
-  // its architecture (selection hands it to no emulated lane again), and
-  // the attempt is given back — a build no worker ran is not an attempt.
+  // its architecture or an emulated one on 4K pages, where qemu maps what
+  // 16K pages cannot (D33 amended, #413), and the attempt is given back —
+  // a build no worker ran is not an attempt. It is marked `refused_4k` too
+  // — no emulated lane takes it again — when it already carried
+  // `needs_native` (selection, the lane heads and a re-pin hand a marked
+  // build to an emulated lane only where the claim says 4K pages, and a
+  // pin drops the marks), or when its host's report says this lane is on
+  // 4K pages (`emulatedOn4k`). The first makes the bound structural,
+  // whatever the claim and the report say: emulation gives an attempt
+  // back twice at most (16K, then 4K), never more.
   // The word counts from a lease on an emulated lane only (#338, design v2
   // §8.6): the lane the claim wrote on this very lease, never the
   // registration's labels — one host runs a native and an emulated lane
@@ -1981,8 +2012,14 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // build back for ever. A legacy lease the claim wrote no lane for (taken
   // before #337 wrote them) is read as its registration said, as before.
   const emulatedLane = task.lane === "emulated" || (task.lane === null && task.lease_gen === null && (await emulated(env, who)));
-  const needsNative = !lost && b.needs_native === true && emulatedLane;
-  const nativeRefused = !lost && b.needs_native === true && !emulatedLane;
+  const marks = jsonOr<{ needs_native?: unknown; refused_4k?: unknown } | null>(task.params, null);
+  // A task already refused on 4K pages gets no attempt back from emulation again, whatever lane leased it (a claim that read it
+  // before the mark landed): its attempt is spent, as a native lane's refusal spends one — the bound holds here too (#413).
+  const spent4k = marks?.refused_4k === 1;
+  const needsNative = !lost && b.needs_native === true && emulatedLane && !spent4k;
+  const nativeRefused = !lost && b.needs_native === true && (!emulatedLane || spent4k);
+  const marked = marks?.needs_native === 1;
+  const refused4k = needsNative && (marked || (hostLease && (await emulatedOn4k(env, who, task.arch))));
   const exhausted = !needsNative && !lost && (b.final === true || task.attempts >= task.max_attempts);
   const review = task.kind === "build" && task.params ? (JSON.parse(task.params) as { review?: number }).review : undefined;
   // A requeued task goes behind its peers (priority + 10) so one broken
@@ -1992,7 +2029,7 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // not the owner's fourteen days of a bump — the one that had it is the one
   // that cannot.
   const failed = await env.DB.prepare(
-    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10${exhausted ? "" : ", independent = NULL"}${needsNative ? ", attempts = attempts - 1, pinned_to = NULL, params = json_set(COALESCE(params, '{}'), '$.needs_native', 1)" : ""}${lost ? ", attempts = attempts - 1, host_losses = host_losses + 1" : ""} WHERE id = ? AND ${LEASE_HELD}`,
+    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10${exhausted ? "" : ", independent = NULL"}${needsNative ? `, attempts = attempts - 1, pinned_to = NULL, params = json_set(COALESCE(params, '{}'), '$.needs_native', 1${refused4k ? ", '$.refused_4k', 1" : ""})` : ""}${lost ? ", attempts = attempts - 1, host_losses = host_losses + 1" : ""} WHERE id = ? AND ${LEASE_HELD}`,
   )
     .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id, who, task.lease_gen)
     .run();
@@ -2026,8 +2063,8 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   if (task.kind === "build") await settleTargets(env, task.name);
   const attempts = needsNative || lost ? task.attempts - 1 : task.attempts;
   const refused = nativeRefused ? ` (its needs_native refused: it ran on ${task.lane === "native" ? "the native lane" : "a native worker"})` : "";
-  const tale = lost ? ` lost on ${who} (a host event, ${task.host_losses + 1} of ${HOST_LOSSES_MAX}) — back in the queue, the attempt given back` : needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${refused}${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
-  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative, ...(nativeRefused ? { needs_native_refused: true, lane: task.lane } : {}), ...(hostLease ? { lost: b.lost === true, oom } : {}) });
+  const tale = lost ? ` lost on ${who} (a host event, ${task.host_losses + 1} of ${HOST_LOSSES_MAX}) — back in the queue, the attempt given back` : needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${refused4k ? " (its lane is on 4K pages: no emulated lane takes it again)" : ""}${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${refused}${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
+  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative, ...(refused4k ? { refused_4k: true } : {}), ...(nativeRefused ? { needs_native_refused: true, lane: task.lane } : {}), ...(hostLease ? { lost: b.lost === true, oom } : {}) });
   return json({ task: id, status: exhausted ? "failed" : "queued", attempts });
 }
 

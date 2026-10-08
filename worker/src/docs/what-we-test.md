@@ -101,17 +101,19 @@ can be ready while the other failed). The tools, in the order to try them:
    (#346);
    a queued build can be taken out and put back from the same dialog —
    nothing puts it back by itself. A build that ran *emulated* (x86_64
-   under qemu on an aarch64 host) may need nothing but a native worker: a
-   toolchain that cannot start there ends the build as soon as it is
-   installed, with the reason — before any correction turn of the drafter —
-   and the build goes back to the queue for a native worker, the attempt
-   uncounted. Revoking a worker frees the builds asked for it.
+   under qemu on an aarch64 host) may need nothing but a native worker, or
+   an emulated one on 4K pages: a toolchain that cannot start there ends the
+   build as soon as it is installed, with the reason — before any correction
+   turn of the drafter — and the build goes back to the queue for a native
+   worker or a lane on 4K pages (#413), the attempt uncounted; sent back by
+   a lane on 4K pages too, it waits for a native worker. Revoking a worker
+   frees the builds asked for it.
 
 A maintainer chooses the same way for the project's build: which of the
 project's workers — one that builds and whose agent answers, native or
 emulated — and the note they write is the hint the project's agent drafts
 with. A project build that dies of emulation goes back for a native worker
-the same way.
+(or a lane on 4K pages) the same way.
 
 An approval can be **withdrawn** by any maintainer, the one who gave it
 included: one that broke the rule (a package approved by the person who
@@ -313,3 +315,18 @@ maintainer merges it like any other change to the process.
   on an emulated worker, `pkg-repo work` reports it `needs_native` with the
   labels it claimed with, and the pages that follow a build say what it
   waits for.
+- **2026-10-08 — 4K pages under KVM, on the same machine.** A build the
+  Studio's x86_64 lane sent back waited for a native x86_64 worker, however
+  long none was online. What 16K pages cannot map, qemu maps on a 4K-page
+  kernel, and the Studio can run one: inside a Debian 13 arm64 VM under KVM
+  there, `linux/amd64` `archlinux:base-devel` ran rustc 1.99 and `sudo -V`,
+  and omarchy-cli's `cargo build --release` took 412 s and made a working
+  x86-64 binary. Three things followed (#413): `needs_native` now means
+  *needs 4K pages or a native host* (D33 amended) — an emulated lane whose
+  host reports `page16k: false` takes it, and one that sends it back too
+  marks it `refused_4k`, for a native host only; an x86_64 lane on 4K pages,
+  qemu's or a Mac's Rosetta one, proves it maps those libraries before it is
+  on (its smoke run also starts `sudo -V`, agent 0.5.1); and the pool counts
+  one owner's hosts as one machine, since
+  the VM enrolls as a host of its own on the Studio and an audit there would
+  have counted as one made elsewhere.

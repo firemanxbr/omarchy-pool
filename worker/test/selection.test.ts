@@ -21,7 +21,13 @@
  * - mixed: an x86_64 task goes to a native x86_64 host when one is
  *   eligible, to an emulated lane after T — twice the last native duration,
  *   3 to 60 minutes — or at once when none is; `needs_native` never runs
- *   emulated;
+ *   emulated on 16K pages (or pages not reported);
+ * - a 4K-page emulated lane (#413, D33 amended) — the Studio's x86_64 VM:
+ *   it takes what an emulated lane on 16K pages sent back, never what a
+ *   4K-page lane sent back too (`refused_4k`), which waits for a native
+ *   host; another maintainer's such lane is one the project's copy waits
+ *   for, and one the reservation weighs; and the VM is one machine with the
+ *   Studio, as every two hosts of one owner are (`apart`);
  * - a continuous aarch64 backlog with x86_64 arrivals on an aarch64-only
  *   fleet: x86_64 tasks still start (the guaranteed emulated share),
  *   however far the backlog runs past the bound a claim reads;
@@ -72,7 +78,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  alive, apart, auditElsewhere, buildsOf, contributorsCode, cooling, diskOf, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, notClaiming, otherModels, ownerCap, ownersLeased, placementOf, repinRefusal, requesterHost, reserve, roomOf, select, sizeOf, takes, thresholdMs, unitsOf,
+  alive, apart, auditElsewhere, buildsOf, contributorsCode, cooling, diskOf, emulationRefuses, helperArches, independenceOf, largestSize, mayRun, nativeCapacity, needsOtherModel, noRoom, notClaiming, otherModels, ownerCap, ownersLeased, placementOf, repinRefusal, requesterHost, reserve, roomOf, select, sizeOf, takes, thresholdMs, unitsOf,
   ALIVE_MS, ELSEWHERE_MS, HELPER_KINDS, LANE_KINDS, MIN, MODEL_WINDOW_MS, RING_ARCHES, OWNER_DIVISOR, RESERVE_AFTER_MS, RESERVE_FOR_MS, T_MAX_MS, T_MIN_MS,
   type Candidate, type Fleet, type Held, type Independence, type Machine, type Member, type Mode,
 } from "../src/selection";
@@ -83,18 +89,21 @@ import { BUILD_GB_PER_SIZE, COMMUNITY_MAX_SIZE, DISK_FLOOR_GB, EMULATED_SHARE, M
 const R = selectionRules();
 const T0 = Date.parse("2026-10-01T00:00:00.000Z");
 
-/** A host registration: its native lane, the lanes it runs emulated, its units as the pool counts them; its host is a machine of its own. */
-function host(id: string, arch: string, units: number, o: Partial<Member> & { emulated?: string[] } = {}): Member {
-  const { emulated = [], ...rest } = o;
+/**
+ * A host registration: its native lane, the lanes it runs emulated — on the pages `page16k` says, as its agent reports them (#413), or
+ * not said, as the lanes of an agent before #338 — and its units as the pool counts them.
+ */
+function host(id: string, arch: string, units: number, o: Partial<Member> & { emulated?: string[]; page16k?: boolean } = {}): Member {
+  const { emulated = [], page16k, ...rest } = o;
   return {
-    id, legacy: false, lanes: [{ arch, mode: "native" }, ...emulated.map((a) => ({ arch: a, mode: "emulated" as Mode }))], units, agent_slots: 2,
+    id, legacy: false, lanes: [{ arch, mode: "native" }, ...emulated.map((a) => ({ arch: a, mode: "emulated" as Mode, ...(page16k === undefined ? {} : { page16k }) }))], units, agent_slots: 2,
     disk: { work: 400, engine: 200 }, kinds: ["build", "trial", "audit", "sync", "health"], probe_ok: true, drained: false, below_minimum: false, may_claim: true, behind: false,
-    seen_at: T0, reserving: null, scope: { trust: "host" }, host_id: `h_${id}`, ...rest,
+    seen_at: T0, reserving: null, scope: { trust: "host" }, ...rest,
   };
 }
 
-/** The machine a registration runs on, as an audit of what it built carries it (routes/factory.ts placementCols). */
-const machineOf = (m: Member): Machine => ({ owner: m.owner ?? null, host_id: m.host_id ?? null });
+/** The machine a registration runs on, as an audit of what it built carries it (routes/factory.ts placementCols): its owner. */
+const machineOf = (m: Member): Machine => ({ owner: m.owner ?? null });
 
 /** A legacy registration: one lane, its arch, emulated when its labels say so. */
 function legacy(id: string, arch: string, o: Partial<Member> & { emulated?: boolean; trust?: "project" | "community" } = {}): Member {
@@ -176,6 +185,8 @@ class Sim {
     // The audits of the project's copy the claimer's model cannot count as another (sameModelAuditOf): read apart, their own head (D36).
     const sameModel = (c: Candidate) => m.kinds.includes("audit") && c.kind === "audit" && !!c.publish_bound && !(m.model && c.built_with && c.built_with !== m.model);
     const emulatedOnly = (a: string) => !m.lanes.some((l) => l.arch === a && l.mode === "native");
+    // What an emulated lane of `a` never reads (notRefused, #413): on 4K pages a task a 4K-page lane refused too, else any one sent back.
+    const refusedOn = (a: string, c: Candidate) => (m.lanes.some((l) => l.arch === a && l.mode === "emulated" && l.page16k === false) ? !!c.refused_4k : c.needs_native);
     // A sandboxed host's emulated lane (#330): of the builds and trials, the project's own recipes only.
     const outsideSandbox = (a: string) => !m.legacy && !!m.sandbox && emulatedOnly(a);
     const projectsOwn = (c: Candidate) => !LANE_KINDS.includes(c.kind) || !contributorsCode(c);
@@ -184,11 +195,11 @@ class Sim {
     const owners = [...new Set(queue.filter((c) => c.trust === "community" && c.owner).map((c) => c.owner!))].sort().slice(0, OWNERS_LIMIT);
     for (const a of [...new Set(m.lanes.map((l) => l.arch))]) {
       if (m.legacy) put(queue.filter((c) => (c.arch === a || r.legacy_any_arch.includes(c.kind)) && scope(c) && fits(c) && !sameModel(c)).sort(byOrder).slice(0, HEAD_LIMIT));
-      else put(queue.filter((c) => c.arch === a && !neutral(c.kind) && scope(c) && fits(c) && !(emulatedOnly(a) && c.needs_native) && (!outsideSandbox(a) || projectsOwn(c))).sort(byOrder).slice(0, HEAD_LIMIT));
+      else put(queue.filter((c) => c.arch === a && !neutral(c.kind) && scope(c) && fits(c) && !(emulatedOnly(a) && refusedOn(a, c)) && (!outsideSandbox(a) || projectsOwn(c))).sort(byOrder).slice(0, HEAD_LIMIT));
       if (m.kinds.includes("build") && m.scope.trust !== "project" && !outsideSandbox(a)) {
         for (const o of owners) {
           if (capped.has(o)) continue;
-          put(queue.filter((c) => c.trust === "community" && c.owner === o && c.arch === a && c.kind === "build" && scope(c) && fits(c) && !(!m.legacy && emulatedOnly(a) && c.needs_native)).sort(byOrder).slice(0, 1));
+          put(queue.filter((c) => c.trust === "community" && c.owner === o && c.arch === a && c.kind === "build" && scope(c) && fits(c) && !(!m.legacy && emulatedOnly(a) && refusedOn(a, c))).sort(byOrder).slice(0, 1));
         }
       }
     }
@@ -200,10 +211,11 @@ class Sim {
       if (m.lanes.some((l) => l.mode === "emulated")) put(queue.filter((c) => c.arch === native && LANE_KINDS.includes(c.kind) && scope(c) && !isCapped(c)).sort(byOrder).slice(0, 1));
       if (m.reserving) put(queue.filter((c) => c.id === m.reserving!.task && scope(c)));
       const hosts = this.members.filter((x) => !x.legacy && alive(x, now) && x.may_claim && !x.below_minimum && !x.drained && !x.behind);
-      const runs = (c: Candidate, native: boolean) => hosts.some((x) => x.lanes.some((l) => l.arch === c.arch && (!native || l.mode === "native")));
+      // A host runs its arch at all; natively or emulated on 4K pages (what a needs_native one asks); natively (a refused_4k one).
+      const runs = (c: Candidate, on: "any" | "4k" | "native") => hosts.some((x) => x.lanes.some((l) => l.arch === c.arch && (on === "any" || l.mode === "native" || (on === "4k" && l.page16k === false))));
       if (largest >= 2 && hosts.length) {
         oldest = queue
-          .filter((c) => c.kind === "build" && runs(c, false) && (!c.needs_native || runs(c, true)) && !isCapped(c) && (c.pinned_to === null || hosts.some((x) => x.id === c.pinned_to)) && (c.reserved_at == null || c.reserved_at > now - RESERVE_FOR_MS || c.reserved_at <= now - RESERVE_FOR_MS - RESERVE_AFTER_MS))
+          .filter((c) => c.kind === "build" && runs(c, "any") && (!c.needs_native || runs(c, "4k")) && (!c.refused_4k || runs(c, "native")) && !isCapped(c) && (c.pinned_to === null || hosts.some((x) => x.id === c.pinned_to)) && (c.reserved_at == null || c.reserved_at > now - RESERVE_FOR_MS || c.reserved_at <= now - RESERVE_FOR_MS - RESERVE_AFTER_MS))
           .sort((a, b) => a.id - b.id).slice(0, RESERVE_WINDOW)
           .filter((c) => c.queued_at <= now - RESERVE_AFTER_MS && (c.size ?? 1) >= 2).slice(0, RESERVE_CANDIDATES);
       }
@@ -1040,7 +1052,7 @@ describe("legacy registrations", () => {
 // ---------- placement (#339, design v2 §8.4; D35, D36) ----------
 
 /** A maintainer's host: its owner, and the model its claims say it runs. */
-const owned = (id: string, owner: string, arch: string, units: number, o: Partial<Member> & { emulated?: string[] } = {}) => host(id, arch, units, { owner, model: "anthropic/claude-a", ...o });
+const owned = (id: string, owner: string, arch: string, units: number, o: Partial<Member> & { emulated?: string[]; page16k?: boolean } = {}) => host(id, arch, units, { owner, model: "anthropic/claude-a", ...o });
 /** The project's copy of a package its requesters asked for: the review rebuild, publish-bound, model work. */
 const copyOf = (requesters: string[], o: Partial<Candidate> & { arch?: string } = {}) => ({ arch: "aarch64", kind: "build", trust: "project", model: true, publish_bound: true, requesters, priority: 30, ...o });
 /** Leases that keep a host's builds busy until `until` minutes. */
@@ -1309,7 +1321,7 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     expect(otherModels(noAudits.fleet(), copy, T0)).toEqual([]);
   });
 
-  it("independence is of the machine, not the registration: the legacy role containers of one maintainer, and a host beside its own legacy set, are one machine — none; another owner's, or another host of the same owner's, is another", () => {
+  it("independence is of the machine, not the registration: the legacy role containers of one maintainer, a host beside its own legacy set, and two hosts of one owner are one machine — none; another owner's is another", () => {
     // The Studio's legacy compose set until P3: community-aarch64 builds a contributor's package, review-aarch64 audits it — one machine, m1's.
     const community = legacy("community-aarch64", "aarch64", { trust: "community", owner: "m1", kinds: ["build"], model: "anthropic/claude-a" });
     const review = legacy("review-aarch64", "aarch64", { trust: "project", owner: "m1", kinds: ["audit"], model: "anthropic/claude-a" });
@@ -1322,10 +1334,12 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     expect(independenceOf(review, auditOf(studio, "anthropic/claude-a", false))).toBe("none");
     // An owner the pool does not know (a project registration of the shared token) could be anyone's: one machine, as far as it can tell.
     expect(independenceOf(legacy("pool-aarch64", "aarch64", { kinds: ["audit"], model: "anthropic/claude-a" }), auditOf(studio, "anthropic/claude-a", false))).toBe("none");
-    // Another maintainer's registration, or another host of m1's own: another machine.
+    // Another maintainer's registration: another machine.
     const vps = owned("m2-vps", "m2", "aarch64", 7);
     expect(independenceOf(vps, audit)).toBe("host");
-    expect(independenceOf(owned("m1-laptop", "m1", "aarch64", 5), auditOf(studio, "anthropic/claude-a", false))).toBe("host");
+    // Another host of m1's own is not (#413): the pool cannot tell it from the Studio — the Studio's x86_64 VM enrolls as a host of its
+    // own, on the Studio — so it is one machine with the Studio, whatever the host ids say.
+    expect(independenceOf(owned("m1-laptop", "m1", "aarch64", 5), auditOf(studio, "anthropic/claude-a", false))).toBe("none");
     // The preference follows the machine: review-aarch64 leaves the audit to m2's host while it can take it, for ELSEWHERE_MS…
     const fleet: Fleet = { members: [community, review, vps], leases: [] };
     const queued = { ...audit, queued_at: T0 };
@@ -1396,7 +1410,9 @@ describe("the switch's pins (#345, design v2 §21.1 step 4): a task pinned to a 
   });
 
   it("leaves, with why, needs_native on its emulated lane, the project's copy of its owner's own package, a lane it lacks, a size its pool cap leaves no room for, model work while its probe fails, and an agent its pin chose that the host does not run", () => {
-    expect(repinRefusal(studio(), pinned({ arch: "x86_64", needs_native: true }), T0, R, 4)).toBe("it needs a native x86_64 lane, and this host runs x86_64 emulated");
+    expect(repinRefusal(studio(), pinned({ arch: "x86_64", needs_native: true }), T0, R, 4)).toBe("it needs a native or 4K-page x86_64 lane, and this host runs x86_64 emulated on pages it does not report");
+    expect(repinRefusal(studio({ lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", page16k: true }] }), pinned({ arch: "x86_64", needs_native: true }), T0, R, 4))
+      .toBe("it needs a native or 4K-page x86_64 lane, and this host runs x86_64 emulated on 16K pages");
     expect(repinRefusal(studio(), pinned({ name: "mine", ...copyOf(["m1"]) }), T0, R, 4)).toBe("the project's copy of mine is not built on its requester's host (D35)");
     // Released to any host by another maintainer, it moves.
     expect(repinRefusal(studio(), pinned({ ...copyOf(["m1"]), any_host: "m2" }), T0, R, 4)).toBeNull();
@@ -1530,5 +1546,111 @@ describe("the solo-maintainer exception (#394): the requester-host rule lifted f
     expect(Math.max(...waited(mine))).toBeLessThanOrEqual(5 * MIN);
     expect(Math.max(...waited(theirs))).toBeLessThanOrEqual(5 * MIN);
     expect(s.ran.filter((r) => mine.includes(r.task)).every((r) => r.by === "m1-studio")).toBe(true);
+  });
+});
+
+// The Studio's x86_64 VM (#413; D33 amended): a KVM guest on the Studio with a 4K-page aarch64 kernel, enrolled as a host of its own — aarch64
+// native, x86_64 emulated through qemu with `page16k: false`. What an emulated lane on the Studio's 16K pages could not start (needs_native)
+// starts there; what it could not start either (refused_4k) waits for a native x86_64 host. And it is the Studio's machine: one owner's.
+describe("a 4K-page emulated lane (#413, D33 amended): needs_native means a native host or 4K pages; refused_4k a native host", () => {
+  const old = T0 - 120 * MIN;
+  const studio = (o: Partial<Member> = {}) => host("m1-studio", "aarch64", 11, { owner: "m1", emulated: ["x86_64"], page16k: true, ...o });
+  const vm = (o: Partial<Member> = {}) => host("m1-vm", "aarch64", 5, { owner: "m1", emulated: ["x86_64"], page16k: false, ...o });
+
+  it("a needs_native task is the 4K-page lane's — never a 16K lane's, one whose pages are not reported, or a legacy emulated registration's", () => {
+    const unknown = host("old-agent", "aarch64", 7, { emulated: ["x86_64"] });
+    const legacyEmu = legacy("review-x86_64", "x86_64", { emulated: true });
+    const fleet: Fleet = { members: [studio(), vm(), unknown, legacyEmu], leases: [] };
+    const sentBack = task({ arch: "x86_64", needs_native: true, queued_at: old });
+    for (const m of [studio(), unknown, legacyEmu]) {
+      expect(emulationRefuses(m, sentBack), m.id).toBe(true);
+      expect(select(m, fleet, [sentBack], T0, R), m.id).toEqual([]);
+    }
+    expect(emulationRefuses(vm(), sentBack)).toBe(false);
+    expect(select(vm(), fleet, [sentBack], T0, R)).toMatchObject([{ id: sentBack.id, lane: "emulated" }]);
+    // A mark is of the task's arch: the VM's lane of the other arch is not asked, and a native lane takes both marks.
+    expect(emulationRefuses(vm(), { ...sentBack, arch: "aarch64" })).toBe(true);
+    expect(select(vm(), fleet, [{ ...sentBack, arch: "aarch64" }], T0, R)).toMatchObject([{ lane: "native" }]);
+    // An unmarked task: every emulated lane, as before.
+    expect(emulationRefuses(studio(), task({ arch: "x86_64" }))).toBe(false);
+  });
+
+  it("refused_4k: a 4K-page lane could not start it either — no emulated lane takes it, a native host does at once", () => {
+    const s = new Sim([studio(), vm()]);
+    const [both] = s.add({ arch: "x86_64", needs_native: true, refused_4k: true, queued_at: old });
+    expect(emulationRefuses(vm(), both)).toBe(true);
+    s.run(180);
+    expect(s.startOf(both)).toBeUndefined();
+    s.members.push(host("box", "x86_64", 7, { seen_at: s.now }));
+    s.run(1);
+    expect(s.startOf(both)).toMatchObject({ by: "box", lane: "native" });
+  });
+
+  it("through the claims: a build the Studio's lane sent back starts on the VM at its next claim, the Studio's next claims hand it nothing", () => {
+    // The Studio claims first every minute, and its emulated lane is idle: still never the marked build.
+    const s = new Sim([studio(), vm()]);
+    const [plain] = s.add({ arch: "x86_64", queued_at: old });
+    const [marked] = s.add({ arch: "x86_64", needs_native: true, queued_at: old });
+    s.run(1);
+    expect(s.startOf(plain)).toMatchObject({ by: "m1-studio", lane: "emulated", at: T0 });
+    expect(s.startOf(marked)).toMatchObject({ by: "m1-vm", lane: "emulated", at: T0 });
+    // The VM busy for an hour (its two builds' units full): the marked build waits for it, however idle the Studio's lane is.
+    const s2 = new Sim([studio(), vm()]);
+    busy(s2, "m1-vm", 2, 60);
+    const [late] = s2.add({ arch: "x86_64", needs_native: true, queued_at: old });
+    s2.run(60);
+    expect(s2.startOf(late)).toBeUndefined();
+    s2.run(1);
+    expect(s2.startOf(late)).toMatchObject({ by: "m1-vm", lane: "emulated", at: T0 + 60 * MIN });
+  });
+
+  it("the project's copy waits for another maintainer's 4K-page lane as for any lane allowed for it — not held; refused_4k, it is held", () => {
+    // As "another maintainer's lane is any lane allowed for the task" above, with m2's VM in place of m2's Studio.
+    const vps = owned("m1-vps86", "m1", "x86_64", 7);
+    const m2vm = owned("m2-vm", "m2", "aarch64", 5, { emulated: ["x86_64"], page16k: false });
+    const fleet: Fleet = { members: [vps, m2vm], leases: [] };
+    const sentBack = task(copyOf(["m1"], { arch: "x86_64", needs_native: true }));
+    expect(mayRun(m2vm, sentBack, T0, R, largestSize(fleet, T0, R))).toBe(true);
+    expect(placementOf(fleet, sentBack, T0, R)).toEqual({ others: ["m2-vm"], mine: ["m1-vps86"], held: false });
+    expect(select(m2vm, fleet, [sentBack], T0, R)).toMatchObject([{ id: sentBack.id, lane: "emulated" }]);
+    const refused = { ...sentBack, refused_4k: true };
+    expect(mayRun(m2vm, refused, T0, R, largestSize(fleet, T0, R))).toBe(false);
+    expect(placementOf(fleet, refused, T0, R)).toEqual({ others: [], mine: ["m1-vps86"], held: true });
+  });
+
+  it("moving pins: a 4K-page lane takes a needs_native task, not a refused_4k one, and says why", () => {
+    const pinned = (o: Partial<Candidate>) => task({ arch: "x86_64", pinned_to: "m1-pool-x86_64", needs_native: true, ...o });
+    expect(repinRefusal(vm(), pinned({}), T0, R, 4)).toBeNull();
+    expect(repinRefusal(vm(), pinned({ refused_4k: true }), T0, R, 4)).toBe("it needs a native x86_64 lane (a 4K-page emulated lane refused it too), and this host runs x86_64 emulated");
+    expect(repinRefusal(studio(), pinned({}), T0, R, 4)).toBe("it needs a native or 4K-page x86_64 lane, and this host runs x86_64 emulated on 16K pages");
+  });
+
+  it("the reservation weighs a needs_native build a 4K-page lane could lease once idle, and no refused_4k one", () => {
+    // As the needs_native case in "an older build that waits for another reason", on a host whose x86_64 lane is on 4K pages.
+    const h9 = host("h9", "aarch64", 9, { emulated: ["x86_64"], page16k: false });
+    const busy9: Held[] = [0, 1].map((i) => ({ task: 750 + i, by: "h9", kind: "build", arch: "aarch64", lane: "native", units: 2, model: false, trust: "project", owner: null, disk_gb: 20 }));
+    const big86 = task({ arch: "x86_64", size: 4, needs_native: true, queued_at: T0 - 40 * MIN });
+    expect(reserve({ members: [h9], leases: busy9 }, [big86], () => true, T0, R).set).toEqual({ host: "h9", task: big86.id });
+    expect(reserve({ members: [h9], leases: busy9 }, [{ ...big86, refused_4k: true }], () => true, T0, R).set).toBeNull();
+    // The Studio's 16K lane could not lease it: no mark there.
+    const st = studio({ id: "st" });
+    expect(reserve({ members: [st], leases: busy9.map((l) => ({ ...l, by: "st" })) }, [big86], () => true, T0, R).set).toBeNull();
+  });
+
+  it("the VM is the Studio's machine: an audit of what one built is not 'elsewhere' on the other, and another owner's host takes it first", () => {
+    const m2 = owned("m2-vps", "m2", "aarch64", 7);
+    const audit = task({ arch: "aarch64", kind: "audit", model: true, trust: "project", priority: 40, publish_bound: false, built_by: "m1-studio", built_with: "anthropic/claude-a", built_on: machineOf(studio()), queued_at: T0 });
+    const v = vm({ model: "anthropic/claude-a" });
+    expect(apart(machineOf(v), machineOf(studio()))).toBe(false);
+    expect(apart(machineOf(v), machineOf(m2))).toBe(true);
+    expect(independenceOf(v, audit)).toBe("none");
+    const fleet: Fleet = { members: [studio({ model: "anthropic/claude-a" }), v, m2], leases: [] };
+    expect(auditElsewhere(fleet, audit, T0, R, "m1-vm")).toBe(true);
+    expect(select(v, fleet, [audit], T0, R)).toEqual([]);
+    expect(select(m2, fleet, [audit], T0, R)).toMatchObject([{ id: audit.id, independent: "host" }]);
+    // With the Studio and its VM alone, the VM takes it at once: neither is elsewhere, so nothing waits — and it says none.
+    const alone: Fleet = { members: [studio({ model: "anthropic/claude-a" }), v], leases: [] };
+    expect(auditElsewhere(alone, audit, T0, R, "m1-vm")).toBe(false);
+    expect(select(v, alone, [audit], T0, R)).toMatchObject([{ id: audit.id, independent: "none" }]);
   });
 });
