@@ -333,8 +333,12 @@ export async function handleHostsList(c: Contributor | null, url: URL, env: Env)
 
 /** The hosts that are not retired, with their registration's liveness and drain: a handful of maintainers' machines, no index needed. */
 const FLEET_HOSTS_SQL = `SELECT ${HOST_VIEW_COLS} FROM ${HOST_VIEW_FROM} WHERE hosts.status != 'retired' ORDER BY hosts.name, hosts.id LIMIT 100`;
-/** Each architecture's queue of the tasks a lane runs (builds, trials), by the queue index: how many, the oldest, those waiting for a native host. */
-export const QUEUE_BY_ARCH_SQL = `SELECT arch, COUNT(*) AS n, MIN(created_at) AS oldest, SUM(json_extract(params, '$.needs_native') IS 1) AS needs_native
+/**
+ * Each architecture's queue of the tasks a lane runs (builds, trials), by the queue index: how many, the oldest, those an emulated lane
+ * sent back, and of those the ones a lane on 4K pages sent back too (#VM4K).
+ */
+export const QUEUE_BY_ARCH_SQL = `SELECT arch, COUNT(*) AS n, MIN(created_at) AS oldest, SUM(json_extract(params, '$.needs_native') IS 1) AS needs_native,
+    SUM(json_extract(params, '$.refused_4k') IS 1) AS refused_4k
   FROM build_tasks WHERE status = 'queued' AND kind IN (${QUEUED_KINDS.map((k) => `'${k}'`).join(", ")}) GROUP BY arch`;
 /**
  * The unit-hours each architecture's lanes spent on hosts' leases over the week (?1 now, ?2 a week ago): every lease of a host

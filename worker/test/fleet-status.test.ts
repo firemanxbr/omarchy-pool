@@ -154,11 +154,35 @@ describe("the scaling signal (fleet.ts capacityOf, capacityLines)", () => {
     // The Studio with room (three builds): the emulated lane's free units say so, and no native host runs x86_64 now the VPS is gone.
     const room = [row()].map((h) => fleetHostOf(h, studioLeases.slice(0, 3), NOW, RULES));
     expect(room[0]).toMatchObject({ state: "claiming", units_busy: 6, units_free: 4 });
-    // Its one queued task an emulated lane sent back: the emulated lane's free build does not take it, the warning stands.
+    // Its one queued task an emulated lane sent back: the emulated lane's free build (16K pages) does not take it, the warning stands —
+    // and says a lane on 4K pages would (#VM4K); one a lane on 4K pages sent back too, a native host only.
     expect(capacityLines(capacityOf([{ arch: "x86_64", n: 1, oldest: ago(90), needs_native: 1 }], room, [row()], [], NOW))).toEqual([
       { level: "warn", kind: "capacity", arch: "x86_64", text: "x86_64: 1 task queued, the oldest waited 1 h 30 min; free native units: 0, free emulated units: 4 — no host runs x86_64 natively" },
-      expect.objectContaining({ text: "tasks waiting for a native x86_64 host: 1 — none runs it natively: only a native host takes them" }),
+      expect.objectContaining({ text: "tasks waiting for a native x86_64 host: 1 — none runs it natively: a native host takes them, and a lane on 4K pages the 1 a lane on 16K pages sent back" }),
     ]);
+    expect(capacityLines(capacityOf([{ arch: "x86_64", n: 1, oldest: ago(90), needs_native: 1, refused_4k: 1 }], room, [row()], [], NOW))[1])
+      .toMatchObject({ text: "tasks waiting for a native x86_64 host: 1 — none runs it natively: only a native host takes them" });
+  });
+
+  it("a lane on 4K pages (#VM4K) takes what a lane on 16K pages sent back: only what it sent back too waits for a native host, and a free build there is room for the rest", () => {
+    // The Studio full (16K pages) and its x86_64 VM beside it, idle: aarch64 native, x86_64 emulated on 4K pages, five units.
+    const vmLanes = [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: false }];
+    const vmRow = row({ id: "h_vm00000001", name: "studio-vm", lanes: JSON.stringify(vmLanes), capacity: capOf({ cpus: 6, mem_gb: 12, units: 5, lanes: vmLanes }), units: 5, worker_id: "m1-studio-vm-ef56" });
+    const rows = [row(), vmRow];
+    const hosts = rows.map((h) => fleetHostOf(h, studioLeases, NOW, RULES));
+    // Three x86_64 builds waited 90 minutes, all sent back by the Studio's lane, one of them by the VM's too.
+    const caps = capacityOf([{ arch: "x86_64", n: 3, oldest: ago(90), needs_native: 3, refused_4k: 1 }], hosts, rows, [], NOW);
+    expect(caps[0]).toMatchObject({ needs_native: 3, refused_4k: 1, hosts_native: 0, hosts_emulated: 2, hosts_4k: 1, build_fits: { native: false, emulated: true, emulated_4k: true } });
+    expect(capacityLines(caps)).toEqual([
+      expect.objectContaining({ level: "info", kind: "capacity" }),
+      { level: "warn", kind: "needs-native", arch: "x86_64", text: "tasks waiting for a native x86_64 host: 1 — none runs it natively: only a native host takes them" },
+    ]);
+    // Every one of them sent back by the VM too: no lane takes them, the prompt to add a native host.
+    const refused = capacityOf([{ arch: "x86_64", n: 3, oldest: ago(90), needs_native: 3, refused_4k: 3 }], hosts, rows, [], NOW);
+    expect(capacityLines(refused).map((l) => [l.level, l.kind])).toEqual([["warn", "capacity"], ["warn", "needs-native"]]);
+    // Without the VM: all three wait for a native host, the line says a lane on 4K pages takes the two the Studio alone sent back.
+    const studioOnly = capacityOf([{ arch: "x86_64", n: 3, oldest: ago(90), needs_native: 3, refused_4k: 1 }], [hosts[0]], [row()], [], NOW);
+    expect(capacityLines(studioOnly).find((l) => l.kind === "needs-native")!.text).toBe("tasks waiting for a native x86_64 host: 3 — none runs it natively: a native host takes them, and a lane on 4K pages the 2 a lane on 16K pages sent back");
   });
 
   it("a backlog that waits beside a free build of its arch is no prompt to add a host: an info line says what holds it", () => {
@@ -166,7 +190,7 @@ describe("the scaling signal (fleet.ts capacityOf, capacityLines)", () => {
     // placement, a pin): a new host would not take it sooner.
     const room = [row()].map((h) => fleetHostOf(h, studioLeases.slice(0, 3), NOW, RULES));
     const emulated = capacityOf([{ arch: "x86_64", n: 1, oldest: ago(90), needs_native: 0 }], room, [row()], [], NOW);
-    expect(emulated[0].build_fits).toEqual({ native: false, emulated: true });
+    expect(emulated[0].build_fits).toEqual({ native: false, emulated: true, emulated_4k: false });
     expect(capacityLines(emulated)).toEqual([{ level: "info", kind: "capacity", arch: "x86_64", text: "x86_64: 1 task queued, the oldest waited 1 h 30 min, while a host that claims has a build's units and disk free for it (free native units: 0, free emulated units: 4) — what holds them is their placement, a pin or their size, not the fleet's room" }]);
     // A native x86_64 host that claims with seven units free: the same, whatever the native waits.
     const vpsRow = vps();

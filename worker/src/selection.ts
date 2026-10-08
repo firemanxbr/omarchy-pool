@@ -16,8 +16,10 @@
  *   — and a build's disk budget fits both free-disk values minus the floor
  *   and the budgets of the builds H already holds;
  * - **lane**: a build or a trial of H's native arch is on the native lane;
- *   one of an arch H runs emulated is on the emulated lane when it is not
- *   marked `needs_native` and it waited its threshold T, or no *eligible*
+ *   one of an arch H runs emulated is on the emulated lane when its marks
+ *   allow that lane (`emulationRefuses`: a `needs_native` one only on a lane
+ *   whose host reports 4K pages, one a 4K-page lane refused too on none; D33
+ *   amended, #VM4K) and it waited its threshold T, or no *eligible*
  *   native capacity exists for it — on a host whose dispatcher applies a
  *   sandboxed runtime (#330, D43), only the project's own recipe: a
  *   sandbox covers the native lane, so what a contributor wrote runs on no
@@ -57,8 +59,9 @@
  *   audits while a registration with another model was alive in the last 24
  *   hours; and an audit leaves the machine that built what it audits — the
  *   registration that built it, or one the pool cannot tell apart from it
- *   (`apart`) — to another that can take it now, for ELSEWHERE_MS. Each
- *   audit's lease records how independent it is (`independenceOf`);
+ *   (`apart`: one owner's registrations are one machine, #VM4K) — to
+ *   another that can take it now, for ELSEWHERE_MS. Each audit's lease
+ *   records how independent it is (`independenceOf`);
  * - **asleep** (#329, design v2 §19.2): a host whose agent reported that it
  *   sleeps (a Mac about to sleep, or asleep) has zero free units: it takes
  *   nothing, is no native capacity an emulated lane waits for, is neither
@@ -88,7 +91,12 @@
  */
 
 export type Mode = "native" | "emulated";
-export interface Lane { arch: string; mode: Mode }
+/**
+ * A lane, as its host's capacity reports it. `page16k` (an emulated lane's): the kernel's pages are larger than the guest's 4K — the
+ * Studio's 16K under qemu (D33) — `false` on a 4K kernel (the Studio's x86_64 VM, #VM4K; a Mac's Rosetta VM). Undefined — a legacy
+ * registration's lane, a report that does not say — counts as 16K: `emulationRefuses` keeps a `needs_native` task off it.
+ */
+export interface Lane { arch: string; mode: Mode; page16k?: boolean }
 
 /** A lease the pool holds, as selection counts it. */
 export interface Held {
@@ -161,8 +169,6 @@ export interface Member {
   owner?: string | null;
   /** The model its claims say it runs, "<provider>/<model>" (the claim's `agent`), for the second opinion (D36). */
   model?: string | null;
-  /** A host's registration: its host (hosts.id), the machine it runs on (D36, `apart`); none for a legacy one. */
-  host_id?: string | null;
 }
 
 export interface Candidate {
@@ -176,7 +182,13 @@ export interface Candidate {
   /** When it was queued, ms. */
   queued_at: number;
   pinned_to: string | null;
+  /**
+   * An emulated lane on 16K pages, or one whose pages are not known (a legacy registration's), could not start it (D33 amended,
+   * #VM4K): it waits for a native lane of its arch or an emulated one whose host reports 4K pages (`emulationRefuses`).
+   */
   needs_native: boolean;
+  /** An emulated lane whose host reports 4K pages could not start it either (#VM4K): a native lane only. Written with `needs_native`. */
+  refused_4k?: boolean;
   model: boolean;
   /** The size asked for — a Retry at size, the package's page, factory/sizing — before any clamp; null: 1. */
   size: number | null;
@@ -205,12 +217,15 @@ export interface Candidate {
   /** An audit's: the registration that built what it audits, and the model that built it (its `built_with`, else that registration's). */
   built_by?: string | null;
   built_with?: string | null;
-  /** An audit's: the machine that built what it audits, as far as the pool tells machines apart — that registration's owner, and its host when it is a host's (`apart`, D36). */
+  /** An audit's: the machine that built what it audits, as far as the pool tells machines apart — that registration's owner (`apart`, D36). */
   built_on?: Machine | null;
 }
 
-/** A registration's machine, as far as the pool tells machines apart (D36): whose registration it is, and its host when it is a host's. */
-export interface Machine { owner?: string | null; host_id?: string | null }
+/**
+ * A registration's machine, as far as the pool tells machines apart (D36): whose registration it is. Not its host: one owner's two
+ * hosts may be one machine — the Studio and the x86_64 VM it runs, each enrolled as a host of its own (#VM4K).
+ */
+export interface Machine { owner?: string | null }
 
 /** The signed constants (hosts.ts, factory/bundle/manifest.toml) and the settings selection runs with. */
 export interface Rules {
@@ -399,6 +414,17 @@ export function laneFor(m: Pick<Member, "lanes" | "legacy" | "sandbox">, c: Pick
   return { mode: null, byLane: false };
 }
 
+/**
+ * Whether a task's marks keep it off a registration's emulated lane of its arch (D33 amended, #VM4K): `refused_4k` — a 4K-page lane
+ * could not start it either — off every emulated lane; `needs_native` — an emulated lane on 16K pages, or one whose pages are not known,
+ * could not start it — off every one but a lane whose host reports 4K pages (`page16k: false`), where qemu maps what 16K pages cannot
+ * (the Studio's VM ran rustc and sudo there). A native lane is never asked: it takes both.
+ */
+export function emulationRefuses(m: Pick<Member, "lanes">, c: Pick<Candidate, "arch" | "needs_native" | "refused_4k">): boolean {
+  if (c.refused_4k) return true;
+  return c.needs_native && !m.lanes.some((l) => l.arch === c.arch && l.mode === "emulated" && l.page16k === false);
+}
+
 /** Whether a registration takes a candidate at all: its kinds, the pin, the probe for model work, and a legacy one's trust. */
 export function takes(m: Member, c: Candidate): boolean {
   if (!m.kinds.includes(c.kind)) return false;
@@ -507,7 +533,8 @@ export function requesterHost(m: Pick<Member, "owner">, c: Pick<Candidate, "kind
  * Whether a registration has a lane allowed for a task (D35's "can run"):
  * alive and claiming (not drained, behind, below the minimum or asleep),
  * taking it — its kinds, the pin, the probe for model work, its scope — on
- * a lane of its arch, native or emulated, with `needs_native` applied, and
+ * a lane of its arch, native or emulated, with its marks applied
+ * (`emulationRefuses`: `needs_native`, `refused_4k`), and
  * able to hold it once it holds nothing: the task's units within its count
  * (its pool cap applied; the reserved job unit kept), an agent slot for
  * model work, and a build's disk budget within its free disk less the floor
@@ -531,7 +558,7 @@ export function mayRun(m: Member, c: Candidate, now: number, r: Rules, largest: 
   const below = m.below_minimum && !(m.below_disk && idle.disk && idle.disk.work >= m.below_disk.work && idle.disk.engine >= m.below_disk.engine);
   if (!alive(m, now) || !m.may_claim || below || m.drained || m.behind || m.asleep || !takes(idle, c)) return false;
   const lane = laneFor(m, c, r);
-  if (!lane || (lane.byLane && lane.mode === "emulated" && c.needs_native)) return false;
+  if (!lane || (lane.byLane && lane.mode === "emulated" && emulationRefuses(m, c))) return false;
   const size = sizeOf(c, largest, r)?.size ?? null;
   return !noRoom(idle, [], c, unitsOf(c.kind, size, r), diskOf(c, size, r), r);
 }
@@ -554,7 +581,7 @@ export function notClaiming(m: Member, now: number): string | null {
 /**
  * Why a queued task pinned to one of a maintainer's legacy registrations does not move onto their host's registration `m` (#345, design
  * v2 §21.1 step 4: the switch moves the pins of the legacy set it drains), or null when it moves: only where the host could run it once
- * idle — a lane allowed for it, `needs_native` kept, the project's copy never onto its requester's host (D35, unless released to any
+ * idle — a lane allowed for it, its marks kept (`emulationRefuses`), the project's copy never onto its requester's host (D35, unless released to any
  * host, or the requester is the maintainer the solo-maintainer exception names, #394: `requesterHost`), the agent its pin chose
  * (`agent`: a review rebuild's `params.agent`, the claimed worker's — the maintainer's choice, which a move keeps or does not make), and
  * room for it at its size under the pool's cap, an agent slot for model work, its disk (`mayRun`). A task the host could never take
@@ -569,7 +596,11 @@ export function repinRefusal(m: Member, c: Candidate, now: number, r: Rules, lar
   if (!lane) {
     return m.lanes.some((l) => l.arch === c.arch) ? `its ${c.arch} lane is emulated beside a sandbox, which takes the project's own recipes only (#330)` : `it has no lane for ${c.arch}`;
   }
-  if (lane.byLane && lane.mode === "emulated" && c.needs_native) return `it needs a native ${c.arch} lane, and this host runs ${c.arch} emulated`;
+  if (lane.byLane && lane.mode === "emulated" && emulationRefuses(m, c)) {
+    if (c.refused_4k) return `it needs a native ${c.arch} lane (a 4K-page emulated lane refused it too), and this host runs ${c.arch} emulated`;
+    const pages = m.lanes.some((l) => l.arch === c.arch && l.mode === "emulated" && l.page16k === true) ? "on 16K pages" : "on pages it does not report";
+    return `it needs a native or 4K-page ${c.arch} lane, and this host runs ${c.arch} emulated ${pages}`;
+  }
   // A host whose dispatcher holds builds back for disk leaves them out of its claim's kinds: once idle it takes them (mayRun).
   if (!m.kinds.includes(c.kind) && c.kind !== "build") return `it takes no ${c.kind}`;
   if (agent && m.model !== agent) return `its pin chose the agent ${agent}, and this host's is ${m.model ?? "not reported"}`;
@@ -647,19 +678,26 @@ const anotherModel = (m: Pick<Member, "model">, c: Pick<Candidate, "built_with">
 
 /**
  * Whether two registrations are certainly on different machines (D36):
- * different owners, or the registrations of two different hosts. Anything
- * else may be one machine: the legacy role containers of one maintainer —
- * the Studio's `community-*` builds a contributor's package and its
- * `review-*` audits it, until P3 — or a host's registration beside its own
- * legacy set during the canary (§21.1), or an owner the pool does not know.
+ * different owners, both known. Anything else may be one machine: the
+ * legacy role containers of one maintainer — the Studio's `community-*`
+ * builds a contributor's package and its `review-*` audits it, until P3 —,
+ * a host's registration beside its own legacy set during the canary
+ * (§21.1), an owner the pool does not know — and two hosts of one owner
+ * (#VM4K): a host is what enrolled, not a machine, and the Studio's x86_64
+ * VM enrolls as a host of its own on the Studio. The pool sees no machines,
+ * so it asks nothing a host could leave out or say wrong: when it cannot
+ * tell, they are one, and an audit is never "elsewhere" on the machine that
+ * built what it audits. What that costs: one owner's machines that are
+ * truly apart are one to it — the preference between them, and the `host`
+ * independence of an audit that does not ship (a publish-bound one counts
+ * its model only).
  */
 export function apart(a: Machine, b: Machine): boolean {
-  if (a.owner != null && b.owner != null && a.owner !== b.owner) return true;
-  return a.host_id != null && b.host_id != null && a.host_id !== b.host_id;
+  return a.owner != null && b.owner != null && a.owner !== b.owner;
 }
 
 /** Whether a registration may be on the machine that built what an audit audits: the registration that built it, or one the pool cannot tell apart from it. */
-const besideBuilder = (m: Pick<Member, "id" | "owner" | "host_id">, c: Pick<Candidate, "built_by" | "built_on">): boolean =>
+const besideBuilder = (m: Pick<Member, "id" | "owner">, c: Pick<Candidate, "built_by" | "built_on">): boolean =>
   c.built_by != null && (m.id === c.built_by || !apart(m, c.built_on ?? {}));
 
 /**
@@ -688,15 +726,15 @@ export function auditElsewhere(fleet: Fleet, c: Candidate, now: number, r: Rules
  * How independent an audit leased to `m` is of what it audits (D36), as
  * its lease records it: `model` — another model judges the build; `host` —
  * the same model (or one not known) on a machine certainly not the one that
- * built it (`apart`: another owner's, or another host's registration — never
- * a legacy role container beside the builder's, which says `none`); `none` —
- * neither. A publish-bound audit is independent by
+ * built it (`apart`: another owner's registration — never a legacy role
+ * container beside the builder's, nor another host of the builder's owner,
+ * which say `none`); `none` — neither. A publish-bound audit is independent by
  * its model or not at all: the project's copy is the recipe a model wrote,
  * and the same model on another host is no second opinion of it — so the
  * share of publish-bound audits that say `none` is what asks one host to
  * run another model (#324). Null for every other kind.
  */
-export function independenceOf(m: Pick<Member, "id" | "model" | "owner" | "host_id">, c: Pick<Candidate, "kind" | "publish_bound" | "built_by" | "built_with" | "built_on">): Independence | null {
+export function independenceOf(m: Pick<Member, "id" | "model" | "owner">, c: Pick<Candidate, "kind" | "publish_bound" | "built_by" | "built_with" | "built_on">): Independence | null {
   if (c.kind !== "audit") return null;
   if (anotherModel(m, c)) return "model";
   if (!c.publish_bound && c.built_by != null && !besideBuilder(m, c)) return "host";
@@ -769,7 +807,9 @@ export function select(H: Member, fleet: Fleet, candidates: Candidate[], now: nu
     if (noRoom(H, held, c, units, disk, r)) continue;
     let penalty = 0;
     if (lane.byLane && lane.mode === "emulated") {
-      if (c.needs_native) continue;
+      // Sent back by an emulated lane (D33 amended, #VM4K): a 4K-page lane takes what a 16K one could not start; nothing emulated takes
+      // what a 4K-page one could not.
+      if (emulationRefuses(H, c)) continue;
       const T = thresholdMs(c.native_ms);
       if (now - c.queued_at < T && nativeCapacity(fleet, c, now, r, H.id)) continue;
       // Never below one: while H's emulated lanes hold nothing, one emulated build of any size (D50), else a size-4 build on a host
@@ -805,8 +845,9 @@ export function select(H: Member, fleet: Fleet, candidates: Candidate[], now: nu
  * nothing needs keeping for it), is not held back by its owner's cap, and
  * some host alive could lease once its units are free (selection on that
  * host as if it held nothing: its lanes, T, the emulated cap,
- * `needs_native`, its disk) — so an older build that waits for another
- * reason (a `needs_native` one on an aarch64-only fleet, a capped
+ * `needs_native` and `refused_4k` (`emulationRefuses`), its disk) — so an
+ * older build that waits for another reason (a `needs_native` one on a
+ * fleet with no native or 4K-page lane of its arch, a capped
  * contributor's) never turns the reservation off. When it fits no
  * registration now, the host with the most free units among those that
  * could is marked reserving for it. `oldest` is the queue's oldest builds,

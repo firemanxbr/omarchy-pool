@@ -10,7 +10,7 @@
  *   aarch64 host's emulated lane after T (3 minutes with no native history,
  *   twice the last native build otherwise), at once when the native host is
  *   full, drained or below the minimum by its last report; `needs_native`
- *   never runs emulated;
+ *   never runs emulated on 16K pages;
  * - with only x86_64 work queued an aarch64 host fills all but one build
  *   with emulated builds, and native work arriving takes the one kept —
  *   behind an x86_64 backlog longer than the bound a claim reads too;
@@ -26,7 +26,9 @@
  * - a size-4 task on a busy host: after 30 minutes the host reserves for
  *   it, takes nothing else, and leases it when its units fit — an older build
  *   that waits for another reason (needs_native) turns nothing off; its two
- *   hours spent, it is not marked again for 30 minutes, then is; a host
+ *   hours spent, it is not marked again for 30 minutes, then is; a 4K-page
+ *   lane (#VM4K) is reserved for a needs_native one, never a refused_4k
+ *   one, which the reads leave out; a host
  *   whose claim cannot take the task it reserves for (its agent's probe
  *   failing, builds held for disk) takes other work; a task larger than
  *   every host alive is clamped, with a Status line;
@@ -71,12 +73,14 @@ async function call(method: string, path: string, o: { token?: string; session?:
   return { status: res.status, json: await res.json().catch(() => null) };
 }
 
-type Lane = { arch: string; mode: "native" | "emulated" };
+type Lane = { arch: string; mode: "native" | "emulated"; via?: string; page16k?: boolean };
 interface Box { cpus: number; mem_gb: number; lanes: Lane[]; agent_slots?: number; disk?: { work: number; engine: number } }
 const capOf = (b: Box) => ({ cpus: b.cpus, mem_gb: b.mem_gb, disk_free_gb: b.disk ?? { work: 410, engine: 220 }, units: unitsOf({ cpus: b.cpus, mem_gb: b.mem_gb, units: null }), job_reserved: 1, agent_slots: b.agent_slots ?? 2, lanes: b.lanes });
 const STUDIO: Box = { cpus: 12, mem_gb: 32, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated" }] }; // 11 units: 5 builds
 const VPS86: Box = { cpus: 8, mem_gb: 16, lanes: [{ arch: "x86_64", mode: "native" }] }; // 7 units: 3 builds
 const P1: Box = { cpus: 8, mem_gb: 16, lanes: [{ arch: "aarch64", mode: "native" }] };
+/** A host whose kernel has 4K pages, x86_64 emulated on them (#VM4K: the Studio's x86_64 VM, here sized for a size-4 build). */
+const VM4K: Box = { cpus: 10, mem_gb: 20, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: false }] }; // 9 units: 4 builds
 
 const boxes = new Map<string, Box>();
 let hostSeq = 0;
@@ -473,6 +477,28 @@ describe("sizes and the reservation for large tasks (D31)", () => {
     expect(await mark()).toEqual({ reserving_task: big, reserving_since: new Date(t0 + 150 * MIN).toISOString() });
     expect((await taskOf(big)).reserved_at).toBe(new Date(t0 + 150 * MIN).toISOString());
     expect((await taskOf(smalls[1])).status).toBe("queued");
+  });
+
+  it("a needs_native build a 4K-page lane could lease once idle is reserved for there (#VM4K); a refused_4k one is not — the reads leave it out", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const host = await seedHost("vm-q", VM4K);
+    for (let i = 0; i < 4; i++) await seedTask({ ago: 40 });
+    const running = await fill("vm-q");
+    expect(running).toHaveLength(4);
+    await env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, size) VALUES ('rust-q', 'm1', 'https://rust-lang.org', '[\"x86_64\"]', 'waiting', 4)").run();
+    // Older than the other: a refused_4k one first in the window would be weighed first, were it read.
+    const refused = await seedTask({ name: "rust-q", arch: "x86_64", params: { needs_native: 1, refused_4k: 1 }, ago: 90 });
+    const big = await seedTask({ name: "rust-q", arch: "x86_64", params: { needs_native: 1 }, ago: 31 });
+    await finish(running[0].task);
+    const held = running.slice(1).map(({ task, gen }) => ({ task, gen }));
+    expect((await claim("vm-q", { leases: held })).status).toBe(204);
+    expect(await env.DB.prepare("SELECT reserving_task FROM hosts WHERE id = ?").bind(host).first()).toEqual({ reserving_task: big });
+    expect((await taskOf(refused)).reserved_at).toBeNull();
+    // Its builds end: the 4K-page lane leases it, at its size.
+    for (const r of running.slice(1)) await finish(r.task);
+    expect((await claim("vm-q")).json.task).toMatchObject({ id: big, lane: "emulated", size: 4 });
+    expect((await claim("vm-q", { leases: [] })).status).toBe(204);
+    expect((await taskOf(refused)).status).toBe("queued");
   });
 
   it("a reserving host whose claim cannot take its task — its agent's probe failing, builds held for disk — takes other work, whatever its free units; once it can read it, the mark holds", async () => {
