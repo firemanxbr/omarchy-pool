@@ -179,14 +179,14 @@ describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)"
   });
 
   it("the visit's exact command keeps every new path out of what the legacy compose project mounts, and the check says why", () => {
-    const command = "--legacy omarchy-pool --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --dedicated \\\n     --agent-env-from /srv/omarchy-pool/etc/agent.env";
+    const command = "--legacy omarchy-pool --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets \\\n     --task-subnets 10.232.0.0/16 --dedicated --agent-env-from <file>";
     expect(canary).toContain(`   OMARCHY_ENROLL=ome_… sh ~/install.sh \\\n     ${command}`);
     expect(canary).not.toMatch(/--work-root \/srv\/omarchy-pool|--secrets-dir \/srv\/omarchy-pool/);
     // Why: the Studio's compose file mounts POOL_ROOT whole into its workers, and preflight refuses a work root under it, in its own words.
     expect(studioCompose).toContain("- ${POOL_ROOT:-/srv/omarchy-pool}:${POOL_ROOT:-/srv/omarchy-pool}");
     expect(flat(canary)).toContain("legacy: the work root … overlaps the legacy project's /srv/omarchy-pool; give a new --work-root beside it");
     expect(legacySource).toContain("overlaps the legacy project's {}; give a new --work-root beside it");
-    expect(flat(canary)).toContain('studio-rehearsal.sh" check --project omarchy-pool --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --agent-env-from /srv/omarchy-pool/etc/agent.env');
+    expect(flat(canary)).toContain('studio-rehearsal.sh" check --project omarchy-pool --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets --task-subnets 10.232.0.0/16 --agent-env-from /srv/omarchy-pool/etc/agent.env');
   });
 
   it("installs the pool's release, $tag, through the attested install — never GitHub's latest, piped", () => {
@@ -293,16 +293,16 @@ describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)"
     expect(canary).toContain("kind IN ('sync', 'promote') AND status = 'done'");
   });
 
-  it("the switch raises the cap, moves pins, drains the eight; the way back drains the host and resumes them; the retirement's order", () => {
+  it("the switch raises the cap, moves pins, drains the six; the way back drains the host and resumes them; the retirement's order", () => {
     const text = flat(sw);
-    const steps = ["**Raise the cap**", "**Move pins here**", "**Drain the eight legacy registrations**"].map((s) => text.indexOf(s));
+    const steps = ["**Raise the cap**", "**Move pins here**", "**Drain the six legacy registrations**"].map((s) => text.indexOf(s));
     expect(steps.every((i) => i > 0)).toBe(true);
     expect([...steps].sort((a, b) => a - b)).toEqual(steps);
     expect(text).toContain('"kind":"drain","reason":"the Studio switch (#345)"');
     expect(text).toContain("*Drain* its registration, reason *the way back*");
     expect(text).toContain("but what was moved onto it would wait for it");
     expect(text).toContain("**Rehearse the way back**");
-    // Retired after the 14 days: Retire legacy set first, then Revoke the eight.
+    // Retired after the 14 days: Retire legacy set first, then Revoke the six.
     expect(text.indexOf("*Retire legacy set* on the host's page")).toBeLessThan(text.indexOf("*Revoke* on each one's page"));
     expect(text).toContain("`host-pool-jobs` set to `*`");
     // Move pins here names the Studio's set, never another machine's of the same owner.

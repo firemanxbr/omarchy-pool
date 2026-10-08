@@ -1,9 +1,10 @@
 # The project's host
 
 What the project runs its workers on: one machine, containers of the one
-worker image — eight worker registrations, of which four run by default
+worker image — eight worker services, of which four run by default
 (the x86_64 build services are behind the `emulated` profile, the second
-review pair behind `review2`), their
+review pair behind `review2`; the Studio runs six, with `emulated`, as six
+registrations), their
 brokers, `agent-proxy`, and the `updater` that rolls them out (the roles:
 [factory/README.md](../README.md) *Three roles*; how the day goes:
 [docs/RUNBOOK.md](../../docs/RUNBOOK.md) *The Studio host*). The project's
@@ -289,8 +290,9 @@ through `omarchy-task-run`, which runs them as it runs a task container: on
 the job's own network behind its egress sidecar, with no token and nothing
 of the host but the job's scratch directory. Nothing to set up on your side:
 the dispatcher claims pool jobs on its own, and the pool hands them to a host
-only once the maintainers' `host-pool-jobs` setting names it — the P1 host
-first, the Studio canary a week later (runbook, *Pool jobs on hosts*) — so a
+only once the maintainers' `host-pool-jobs` setting names it — the Studio
+canary since 2026-10-08, the first and only host, with no P1 host first
+(runbook, *Pool jobs on hosts*) — so a
 host that never gets a sync is most likely not named there yet. A host's agent that stops answering is
 re-checked by the pool, never restarted: the dispatcher's restart would not
 reach it, and would cost the jobs it runs.

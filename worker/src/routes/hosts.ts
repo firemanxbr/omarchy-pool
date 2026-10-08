@@ -785,7 +785,7 @@ export async function handleCapHost(c: Contributor, id: string, request: Request
 /** How many stayed tasks and named registrations a move's journal line names (as many as the moved ones, PINS_NAMED); its payload holds them all. */
 const named = <T>(xs: T[], word: (x: T) => string) => xs.slice(0, PINS_NAMED).map(word).join(", ") + (xs.length > PINS_NAMED ? ` and ${xs.length - PINS_NAMED} more` : "");
 const tasksWord = (n: number) => `${n} queued task${n === 1 ? "" : "s"}`;
-/** The legacy registrations one press names: 1 to 16 ids (the Studio's set is eight), each once. */
+/** The legacy registrations one press names: 1 to 16 ids (the Studio's set is six registrations), each once. */
 const PINS_WORKERS_MAX = 16;
 function pinsWorkersOf(v: unknown): string[] | null {
   if (!Array.isArray(v) || !v.length || v.length > PINS_WORKERS_MAX || !v.every((w) => typeof w === "string" && /^[A-Za-z0-9._-]{1,100}$/.test(w))) return null;
