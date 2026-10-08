@@ -157,6 +157,11 @@ describe("a build waiting for a native worker", () => {
     const rows = (u.nodes["#builds tbody"].innerHTML as string).split("<tr>");
     expect(rows.find((r) => r.includes(`/build/${waiting}"`))).toContain(`<span class="pill none">queued</span> <span class="pill warn" title="it could not run emulated on 16K pages: a toolchain or a library did not start under qemu there. A native worker takes it, or an emulated one on 4K pages.">waiting for a native ${F.arch} worker</span>`);
     expect(rows.filter((r) => r.includes("waiting for a native"))).toHaveLength(1);
+    // Sent back by a lane on 4K pages too (#413, params.refused_4k): the row's pill says no emulated worker takes it.
+    await env.DB.prepare(`UPDATE build_tasks SET params = '{"needs_native":1,"refused_4k":1}' WHERE id = ?`).bind(waiting).run();
+    const r4 = await drawn("/user/alice", (x) => (x.nodes["#builds tbody"]?.innerHTML ?? "").includes(`/build/${waiting}"`));
+    expect((r4.nodes["#builds tbody"].innerHTML as string).split("<tr>").find((r) => r.includes(`/build/${waiting}"`))).toContain(`<span class="pill warn" title="it could not run emulated, on 16K pages nor on 4K pages: a toolchain or a library did not start under qemu. No emulated worker takes it again.">waiting for a native ${F.arch} worker</span>`);
+    await env.DB.prepare(`UPDATE build_tasks SET params = '{"needs_native":1}' WHERE id = ?`).bind(waiting).run();
   });
 
   it("the package page's review cell says it", async () => {

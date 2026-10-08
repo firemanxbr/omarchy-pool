@@ -29,7 +29,7 @@ import {
  *   POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, agent?} → a task with a lease and its job token, or 204
  *   POST /factory/tasks/:id/heartbeat                                  extend the lease (a fresh job token)
  *   POST /factory/tasks/:id/complete    {sha256, filename, version, duration_ms?, log_tail?} · {result, summary} for jobs
- *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?, needs_native?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's; needs_native, from a lease on an emulated lane: back in the queue for a native lane or a 4K-page emulated one — unpinned, the attempt given back; from a 4K-page lane, for a native lane only (refused_4k, #413); from a native lane it is refused, a failure like any other)
+ *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?, needs_native?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's; needs_native, from a lease on an emulated lane: back in the queue for a native lane or a 4K-page emulated one — unpinned, the attempt given back; from a 4K-page lane, or a second time, for a native lane only (refused_4k, #413); from a native lane it is refused, a failure like any other)
  * The worker is its registered token (POST /factory/workers); a task's
  * writes use the job token the claim issued.
  *
@@ -1706,8 +1706,10 @@ async function leaseMoved(env: Env, id: number, actor: Actor): Promise<Response>
 /**
  * Whether a registration's host reports an emulated lane of `arch` on 4K pages (`page16k: false`, hosts.lanes as its agent's last report
  * wrote it; #413): a needs_native from its lease there was said where qemu maps what 16K pages cannot, so the task waits for a native
- * lane only (`refused_4k`). A page size does not change under a running kernel, so the report is the claim's word on it. A legacy
- * registration has no host, and a lane that does not say its pages counts as 16K: false.
+ * lane only (`refused_4k`) from its first refusal. The report is not the claim (selection reads the claim's own lanes): a lane held when
+ * the agent last reported and on at the claim is not here, so this only marks a first refusal early — handleFail's bound is the task's
+ * own `needs_native` (a marked task reaches an emulated lane only through a 4K-page one). A legacy registration has no host, and a lane
+ * that does not say its pages counts as 16K: false.
  */
 async function emulatedOn4k(env: Env, workerId: string, arch: string): Promise<boolean> {
   const h = await env.DB.prepare("SELECT h.lanes FROM build_workers w JOIN hosts h ON h.id = w.host_id WHERE w.id = ? AND w.kind = 'host'").bind(workerId).first<{ lanes: string | null }>();
@@ -1994,9 +1996,14 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // the recipe's: the build goes back to the queue for a native lane of
   // its architecture or an emulated one on 4K pages, where qemu maps what
   // 16K pages cannot (D33 amended, #413), and the attempt is given back —
-  // a build no worker ran is not an attempt. From a host whose lane is on
-  // 4K pages, it is marked `refused_4k` too: no emulated lane takes it
-  // again, so emulation gives an attempt back twice at most (16K, then 4K).
+  // a build no worker ran is not an attempt. It is marked `refused_4k` too
+  // — no emulated lane takes it again — when it already carried
+  // `needs_native` (selection, the lane heads and a re-pin hand a marked
+  // build to an emulated lane only where the claim says 4K pages, and a
+  // pin drops the marks), or when its host's report says this lane is on
+  // 4K pages (`emulatedOn4k`). The first makes the bound structural,
+  // whatever the claim and the report say: emulation gives an attempt
+  // back twice at most (16K, then 4K), never more.
   // The word counts from a lease on an emulated lane only (#338, design v2
   // §8.6): the lane the claim wrote on this very lease, never the
   // registration's labels — one host runs a native and an emulated lane
@@ -2007,7 +2014,8 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   const emulatedLane = task.lane === "emulated" || (task.lane === null && task.lease_gen === null && (await emulated(env, who)));
   const needsNative = !lost && b.needs_native === true && emulatedLane;
   const nativeRefused = !lost && b.needs_native === true && !emulatedLane;
-  const refused4k = needsNative && hostLease && (await emulatedOn4k(env, who, task.arch));
+  const marked = jsonOr<{ needs_native?: unknown } | null>(task.params, null)?.needs_native === 1;
+  const refused4k = needsNative && (marked || (hostLease && (await emulatedOn4k(env, who, task.arch))));
   const exhausted = !needsNative && !lost && (b.final === true || task.attempts >= task.max_attempts);
   const review = task.kind === "build" && task.params ? (JSON.parse(task.params) as { review?: number }).review : undefined;
   // A requeued task goes behind its peers (priority + 10) so one broken

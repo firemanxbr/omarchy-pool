@@ -144,9 +144,12 @@ secret). Everything travels in the `Authorization` header over TLS only.
   with it. One that says it on an emulated lane runs emulated again only on
   a lane whose host reports 4K pages (#413, D33 amended), and one that says
   it there too is marked `refused_4k` and never runs emulated again: a build
-  buys at most two attempts back this way, never more. A host whose lanes
-  claimed 4K pages falsely gains nothing past that: what it sends back waits
-  for a native host.
+  buys at most two attempts back this way, never more. The bound does not
+  rest on what a host says of its pages: a build that already carried
+  `needs_native` is marked `refused_4k` by any emulated lane that sends it
+  back, so a host whose claim says 4K pages while its report does not (or
+  that claims them falsely) gains nothing past that: what it sends back
+  waits for a native host.
   Its caches are the host's to fence, not the script's (#341, D52; design
   v2 §10.2 invariant 9): a build mounts only its own package's build cache
   on its own side (`cache/build/<trust>/<arch>/<package>` at `/build/cache`,

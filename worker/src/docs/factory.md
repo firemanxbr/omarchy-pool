@@ -400,8 +400,11 @@ what it waits for. On a maintainer host the word is its lease's lane
 (#338): the dispatcher tells only a container on an emulated lane
 `WORKER_LABELS={"emulated":true}`, and the pool takes `needs_native` from a
 lease whose `lane` is `emulated` — the attempt given back, `refused_4k` too
-when the host's lanes say 4K pages — and refuses it from a native lane (a
-failure like any other), whatever the registration's labels say. A legacy
+when the host's lanes say 4K pages or the build already carried
+`needs_native` (only a lane its claim says is on 4K pages is handed such a
+build, so its second time back is always its last) — and refuses it from a
+native lane (a failure like any other), whatever the registration's labels
+say. A legacy
 worker's lease carries the lane its claim wrote from its labels.
 
 `--idle-exit 300` makes a worker exit after five minutes without work;
