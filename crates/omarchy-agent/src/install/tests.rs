@@ -1953,7 +1953,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
     fs::write(
         &docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" network connect \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *\" create --name omarchy-egress-probe-\"*|*\" start omarchy-egress-probe-\"*) ;;\n  *omarchy-egress-probe-*-task\" \"*\" public@egress \"*) {r}/probe-answers {r}/task-egress \"$@\" ;;\n  *omarchy-egress-probe-*-task\" \"*) {r}/probe-answers {r}/task-seen \"$@\" ;;\n  *omarchy-egress-probe-*) {r}/probe-answers {r}/egress \"$@\" ;;\n  *\" --entrypoint pacman \"*) cat {r}/pacman 2>/dev/null || exit 125 ;;\n  *\" --entrypoint uname \"*) cat {r}/uname 2>/dev/null || exit 125 ;;\n  *\" --entrypoint /usr/bin/true \"*) test -e {r}/pacman || exit 125 ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" network connect \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *\" create --name omarchy-egress-probe-\"*|*\" start omarchy-egress-probe-\"*) ;;\n  *omarchy-egress-probe-*-task\" \"*\" public@egress \"*) {r}/probe-answers {r}/task-egress \"$@\" ;;\n  *omarchy-egress-probe-*-task\" \"*) {r}/probe-answers {r}/task-seen \"$@\" ;;\n  *omarchy-egress-probe-*) {r}/probe-answers {r}/egress \"$@\" ;;\n  *\" --entrypoint pacman \"*) cat {r}/pacman 2>/dev/null || exit 125 ;;\n  *\" --entrypoint sudo \"*) test -e {r}/pacman && echo 'Sudo version 1.9.17p2' || exit 125 ;;\n  *\" --entrypoint uname \"*) cat {r}/uname 2>/dev/null || exit 125 ;;\n  *\" --entrypoint /usr/bin/true \"*) test -e {r}/pacman || exit 125 ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = root.display()
         ),
     )
@@ -2255,9 +2255,8 @@ fn preflight_reports_the_emulated_lane_and_never_stops_on_a_held_one() {
     let (r, ready) = measure_on(&h, &mut Fake::default());
     assert!(r.ok(), "{}", r.screen());
     assert!(
-        r.notes
-            .iter()
-            .any(|n| n == "emulation x86_64: on, through qemu"),
+        r.notes.iter().any(|n| n
+            == "emulation x86_64: on, through qemu, on 4K pages: it also takes the builds a lane on 16K pages sent back (#VM4K)"),
         "{:?}",
         r.notes
     );
@@ -2291,6 +2290,13 @@ fn preflight_reports_the_emulated_lane_and_never_stops_on_a_held_one() {
     assert!(
         log.contains(&format!(
             "--platform linux/amd64 --entrypoint pacman {x86_image} --version"
+        )),
+        "{log}"
+    );
+    // On the probe's 4K pages, the loader check too (#VM4K).
+    assert!(
+        log.contains(&format!(
+            "--platform linux/amd64 --entrypoint sudo {x86_image} -V"
         )),
         "{log}"
     );

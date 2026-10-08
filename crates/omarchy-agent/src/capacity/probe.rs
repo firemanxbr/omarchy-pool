@@ -429,38 +429,64 @@ impl sandbox::Run for Probe<'_> {
 /// The smoke run of an emulated lane through the engine's CLI (design v2 §15's
 /// `emulation(arch, image)`, which the driver trait wraps with `capacity()` once the run
 /// loop detects, #315): `docker run --rm --network none --platform linux/<arch>
-/// --entrypoint /usr/bin/true <image by digest>`, then `pacman --version` the same way.
-/// The architecture and the image are checked against a closed grammar before they reach
-/// the argv.
+/// --entrypoint /usr/bin/true <image by digest>`, then `pacman --version` the same way,
+/// and on 4K pages `sudo -V` (`loader`, #VM4K). The architecture and the image are
+/// checked against a closed grammar before they reach the argv.
 impl Smoke for Probe<'_> {
     fn emulation(&self, arch: &str, image: &str) -> Result<(), String> {
-        let platform = emulation::platform_of(arch)
-            .ok_or_else(|| format!("{arch:?} is not an architecture the pool builds"))?;
-        if !emulation::image_ok(image) {
-            return Err(format!("{image:?} is not an image by digest"));
+        let platform = smoke_platform(arch, image)?;
+        for step in emulation::STEPS {
+            self.smoke_step(platform, image, step)?;
         }
-        for (entry, args, says) in emulation::STEPS {
-            let mut c = self.docker();
-            c.args([
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--platform",
-                platform,
-                "--entrypoint",
-                entry,
-                image,
-            ])
-            .args(args);
-            let out = run(c, PROBE_TIMEOUT).map_err(|e| format!("{entry}: {e}"))?;
-            if !out.contains(says) {
-                return Err(format!(
-                    "{entry} {}: printed {:?}, not {says:?}",
-                    args.join(" "),
-                    out.trim().chars().take(120).collect::<String>()
-                ));
-            }
+        Ok(())
+    }
+
+    fn loader(&self, arch: &str, image: &str) -> Result<(), String> {
+        let platform = smoke_platform(arch, image)?;
+        self.smoke_step(platform, image, emulation::LOADER)
+    }
+}
+
+/// The engine's platform of a smoke run, once its architecture and image read: an
+/// architecture the pool builds, an image by digest.
+fn smoke_platform(arch: &str, image: &str) -> Result<&'static str, String> {
+    let platform = emulation::platform_of(arch)
+        .ok_or_else(|| format!("{arch:?} is not an architecture the pool builds"))?;
+    if !emulation::image_ok(image) {
+        return Err(format!("{image:?} is not an image by digest"));
+    }
+    Ok(platform)
+}
+
+impl Probe<'_> {
+    /// One container of an emulated lane's smoke run: `docker run --rm --network none
+    /// --platform <platform> --entrypoint <entry> <image> <args…>`, which must print `says`.
+    fn smoke_step(
+        &self,
+        platform: &str,
+        image: &str,
+        (entry, args, says): (&str, &[&str], &str),
+    ) -> Result<(), String> {
+        let mut c = self.docker();
+        c.args([
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--platform",
+            platform,
+            "--entrypoint",
+            entry,
+            image,
+        ])
+        .args(args);
+        let out = run(c, PROBE_TIMEOUT).map_err(|e| format!("{entry}: {e}"))?;
+        if !out.contains(says) {
+            return Err(format!(
+                "{entry} {}: printed {:?}, not {says:?}",
+                args.join(" "),
+                out.trim().chars().take(120).collect::<String>()
+            ));
         }
         Ok(())
     }

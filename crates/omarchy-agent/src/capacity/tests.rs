@@ -715,27 +715,42 @@ fn release() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// A smoke run that passes or fails, and remembers what it was asked.
+/// A smoke run that passes or fails, its loader check too (#VM4K), and remembers what each
+/// was asked.
 struct FakeSmoke {
     fails: Option<&'static str>,
+    loader_fails: Option<&'static str>,
     asked: RefCell<Vec<(String, String)>>,
+    loaded: RefCell<Vec<(String, String)>>,
 }
 
 impl FakeSmoke {
     fn passing() -> Self {
         FakeSmoke {
             fails: None,
+            loader_fails: None,
             asked: RefCell::new(Vec::new()),
+            loaded: RefCell::new(Vec::new()),
         }
     }
     fn failing(why: &'static str) -> Self {
         FakeSmoke {
             fails: Some(why),
-            asked: RefCell::new(Vec::new()),
+            ..FakeSmoke::passing()
+        }
+    }
+    /// `true` and `pacman --version` pass, `sudo -V` does not.
+    fn loader_failing(why: &'static str) -> Self {
+        FakeSmoke {
+            loader_fails: Some(why),
+            ..FakeSmoke::passing()
         }
     }
     fn asked(&self) -> Vec<(String, String)> {
         self.asked.borrow().clone()
+    }
+    fn loaded(&self) -> Vec<(String, String)> {
+        self.loaded.borrow().clone()
     }
 }
 
@@ -743,6 +758,10 @@ impl Smoke for FakeSmoke {
     fn emulation(&self, arch: &str, image: &str) -> Result<(), String> {
         self.asked.borrow_mut().push((arch.into(), image.into()));
         self.fails.map_or(Ok(()), |w| Err(w.into()))
+    }
+    fn loader(&self, arch: &str, image: &str) -> Result<(), String> {
+        self.loaded.borrow_mut().push((arch.into(), image.into()));
+        self.loader_fails.map_or(Ok(()), |w| Err(w.into()))
     }
 }
 
@@ -779,6 +798,11 @@ fn an_aarch64_host_with_binfmt_reports_its_x86_64_lane_after_the_smoke_run() {
         smoke.asked(),
         [("x86_64".to_owned(), X86_IMAGE.to_owned())],
         "the smoke run is the release's x86_64 build image, by digest"
+    );
+    assert_eq!(
+        smoke.loaded(),
+        [("x86_64".to_owned(), X86_IMAGE.to_owned())],
+        "on 4K pages the loader check runs too, in the same image (#VM4K)"
     );
     assert_eq!(
         lanes,
@@ -934,7 +958,11 @@ fn emulate_empty_in_the_envelope_keeps_every_emulated_lane_off() {
 #[test]
 fn on_a_16k_page_host_the_x86_64_lane_is_on_and_says_page16k() {
     let d = binfmt_tree("emu-16k", &[("qemu-x86_64", QEMU_X86_F)]);
-    let lanes = studio(&d, None, 16, &FakeSmoke::passing());
+    // A loader that fails there, as sudo does on 16K pages, is not asked: the lane is on
+    // anyway (D33), and the builds whose libraries do not map come back (#VM4K).
+    let smoke = FakeSmoke::loader_failing("sudo: failed to map segment from shared object");
+    let lanes = studio(&d, None, 16, &smoke);
+    assert!(smoke.loaded().is_empty(), "no loader check on 16K pages");
     assert_eq!(
         lanes.on,
         [Emulated {
@@ -955,6 +983,52 @@ fn on_a_16k_page_host_the_x86_64_lane_is_on_and_says_page16k() {
         v["lanes"][1],
         serde_json::json!({"arch": "x86_64", "mode": "emulated", "via": "qemu", "page16k": true})
     );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn on_4k_pages_a_loader_check_that_fails_holds_the_lane_with_its_reason() {
+    // A 4K-page lane is handed the builds 16K pages sent back (#VM4K): one whose loader does
+    // not start sudo would fail them all, so it is held, not reported on at 4K pages.
+    let d = binfmt_tree("emu-loader", &[("qemu-x86_64", QEMU_X86_F)]);
+    let smoke = FakeSmoke::loader_failing(
+        "sudo -V: printed \"sudo: error while loading shared libraries\", not \"Sudo version\"",
+    );
+    let lanes = studio(&d, None, 4, &smoke);
+    assert_eq!(smoke.asked().len(), 1);
+    assert_eq!(
+        smoke.loaded(),
+        [("x86_64".to_owned(), X86_IMAGE.to_owned())]
+    );
+    assert!(lanes.on.is_empty(), "{lanes:?}");
+    assert_eq!(lanes.held.len(), 1);
+    assert_eq!(lanes.held[0].arch, "x86_64");
+    assert!(
+        lanes.held[0]
+            .reason
+            .starts_with("the smoke run failed: sudo -V: ")
+            && lanes.held[0]
+                .reason
+                .ends_with(" — the loader check of a lane on 4K pages (#VM4K)"),
+        "{}",
+        lanes.held[0].reason
+    );
+    // In capacity.json: only the native lane, the x86_64 one held with that reason.
+    let c = Capacity::new(
+        &facts(ROOTFUL).with_emulation(4, lanes),
+        &Caps::default(),
+        &constants(),
+    );
+    let v = serde_json::to_value(c.file("t")).unwrap();
+    assert_eq!(
+        v["lanes"],
+        serde_json::json!([{"arch": "aarch64", "mode": "native"}])
+    );
+    assert_eq!(v["held_lanes"][0]["arch"], "x86_64");
+    // A smoke run that already failed asks no loader.
+    let smoke = FakeSmoke::failing("exec /usr/bin/true: exec format error");
+    let _ = studio(&d, None, 4, &smoke);
+    assert!(smoke.loaded().is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -1013,7 +1087,7 @@ fn a_smoke_run_that_fails_or_cannot_run_holds_the_lane_with_its_reason() {
 }
 
 /// A docker CLI for the smoke run: each call's arguments to `calls`, `pacman --version`
-/// printing `pacman_says`.
+/// printing `pacman_says`, `sudo -V` printing `Sudo version 1.9.17p2`.
 fn smoke_docker(dir: &Path, pacman_says: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     let d = dir.display();
@@ -1022,7 +1096,7 @@ fn smoke_docker(dir: &Path, pacman_says: &str) -> PathBuf {
         dir,
         "docker",
         &format!(
-            "#!/bin/sh\necho \"$*\" >> '{d}/calls'\ncase \" $* \" in\n  *\" --entrypoint pacman \"*) echo '{pacman_says}' ;;\n  *\" --entrypoint /usr/bin/true \"*) ;;\n  *) exit 2 ;;\nesac\n"
+            "#!/bin/sh\necho \"$*\" >> '{d}/calls'\ncase \" $* \" in\n  *\" --entrypoint pacman \"*) echo '{pacman_says}' ;;\n  *\" --entrypoint sudo \"*) echo 'Sudo version 1.9.17p2' ;;\n  *\" --entrypoint /usr/bin/true \"*) ;;\n  *) exit 2 ;;\nesac\n"
         ),
     );
     std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1080,6 +1154,41 @@ fn the_smoke_run_starts_true_then_pacman_under_the_lane_platform_by_digest() {
     assert!(!dir2.join("calls").exists(), "refused before docker ran");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dir2);
+}
+
+#[test]
+fn the_loader_check_runs_sudo_v_under_the_lane_platform_by_digest() {
+    let dir = tmp("loader-docker");
+    let docker = smoke_docker(&dir, "Pacman v7.0.0 - libalpm v15.0.0");
+    let p = probe::Probe {
+        docker: docker.to_str().unwrap(),
+        host: None,
+        work_root: &dir,
+        image: None,
+        emulation: None,
+        sandbox: None,
+    };
+    p.loader("x86_64", X86_IMAGE).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("calls")).unwrap().trim(),
+        format!("run --rm --network none --platform linux/amd64 --entrypoint sudo {X86_IMAGE} -V")
+    );
+    // Nothing outside the grammar reaches the argv.
+    std::fs::remove_file(dir.join("calls")).unwrap();
+    assert!(p
+        .loader("x86_64", "docker.io/library/archlinux:base-devel")
+        .is_err());
+    assert!(p.loader("riscv64", X86_IMAGE).is_err());
+    assert!(!dir.join("calls").exists(), "refused before docker ran");
+    // A sudo that is not there, or does not load, fails it with what it said.
+    put(
+        &dir,
+        "docker",
+        "#!/bin/sh\necho 'sudo: error while loading shared libraries: failed to map segment from shared object' >&2\nexit 127\n",
+    );
+    let e = p.loader("x86_64", X86_IMAGE).unwrap_err();
+    assert!(e.starts_with("sudo: "), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

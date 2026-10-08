@@ -14,16 +14,24 @@
 //!    started with it). Missing, the lane is held — "needs a person: prep-root.sh installs
 //!    qemu-user-static-binfmt" — and the native lane is unaffected;
 //! 3. the smoke run through the engine ([`Smoke`]): the release's build image of that
-//!    architecture, by digest, runs `/usr/bin/true`, then `pacman --version`. Passing
-//!    turns the lane on, with `via` (`qemu` or `rosetta`) and `page16k`.
+//!    architecture, by digest, runs `/usr/bin/true`, then `pacman --version` — and on a
+//!    kernel with 4K pages, `sudo -V` ([`LOADER`], #VM4K). Passing turns the lane on, with
+//!    `via` (`qemu` or `rosetta`) and `page16k`.
 //!
 //! **On a kernel with pages larger than the guest's 4K the lane stays on** (16K on Asahi;
 //! D33): some `x86_64` toolchains cannot start under qemu there, and the build container
 //! probes the toolchains a recipe installs and fails at once with `needs_native`
 //! (`omarchy-build-worker.sh`, `toolchains_start`, told it is emulated by
 //! `WORKER_LABELS={"emulated":true}`, which the dispatcher sets on this lane only); the
-//! pool sends that task back for a native host without spending its attempt. Most
-//! packages build emulated; the few that cannot wait for a native host.
+//! pool sends that task back without spending its attempt. Most packages build emulated;
+//! the few that cannot wait for a native host — or, since #VM4K (D33 amended), for an
+//! emulated lane on 4K pages, where qemu maps what 16K pages cannot (the Studio's `x86_64`
+//! VM: a 4K-page kernel under KVM on the same machine). That is why a 4K-page lane runs
+//! the loader check too: it is handed exactly the builds whose libraries 16K pages could
+//! not map, so a lane where `sudo` — a setuid binary that loads its plugins through the
+//! dynamic loader, and fails on 16K pages with *failed to map segment from shared object*
+//! — does not start is held, not reported 4K. On 16K pages it is not run: `sudo` fails
+//! there by design (D33), and the lane is on anyway.
 //!
 //! A lane that is not on is reported held with its reason (`held_lanes`), so the host page
 //! says what a person can do about it.
@@ -113,10 +121,12 @@ pub fn binfmt(dir: &Path, arch: &str) -> Binfmt {
 
 /// The smoke run of an emulated lane (design v2 §15's `emulation(arch, image)`): the
 /// build image of `arch`, by digest, starts `/usr/bin/true`, then `pacman --version`,
-/// under `--platform linux/<arch>`. [`super::probe::Probe`] runs it with the engine's
-/// CLI; the tests fake it.
+/// under `--platform linux/<arch>`; on 4K pages, [`LOADER`] too (`loader`, #VM4K).
+/// [`super::probe::Probe`] runs it with the engine's CLI; the tests fake it.
 pub trait Smoke {
     fn emulation(&self, arch: &str, image: &str) -> Result<(), String>;
+    /// [`LOADER`] in the same image, under the same platform.
+    fn loader(&self, arch: &str, image: &str) -> Result<(), String>;
 }
 
 /// The smoke run's two containers, in order: their entrypoint, its arguments, and what it
@@ -126,6 +136,14 @@ pub const STEPS: [(&str, &[&str], &str); 2] = [
     ("/usr/bin/true", &[], ""),
     ("pacman", &["--version"], "Pacman v"),
 ];
+
+/// The loader check of a lane on 4K pages (#VM4K), one more container the same way:
+/// `sudo -V` (`Sudo version 1.9.17p2`, whatever the version) — `sudo` and the plugins it
+/// loads are what 16K pages cannot map (D33), so a 4K-page lane that is handed the builds
+/// 16K pages sent back proves it maps them. The release's build images are Arch's
+/// `base-devel`, which has `sudo` (`factory/bin/build-images`), run as root; an image
+/// given by hand (`--emulate-image`) needs it too.
+pub const LOADER: (&str, &[&str], &str) = ("sudo", &["-V"], "Sudo version");
 
 /// An emulated lane this host runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -240,17 +258,29 @@ pub fn detect(native: &str, page_kb: u32, p: &Probe<'_>, smoke: &dyn Smoke) -> L
         )));
         return out;
     };
-    match smoke.emulation(arch, image) {
-        Ok(()) => out.on.push(Emulated {
-            arch: arch.to_owned(),
-            via,
-            page16k: page_kb >= 16,
-        }),
-        Err(e) => out.held.push(held(format!(
-            "the smoke run failed: {}",
-            e.chars().take(200).collect::<String>()
-        ))),
+    let cut = |e: String| e.chars().take(200).collect::<String>();
+    if let Err(e) = smoke.emulation(arch, image) {
+        out.held
+            .push(held(format!("the smoke run failed: {}", cut(e))));
+        return out;
     }
+    let page16k = page_kb >= 16;
+    // On 4K pages the lane takes what 16K pages sent back (#VM4K): it proves the loader maps
+    // what they could not, or it is held — never on, reported 4K, and failing those builds.
+    if !page16k {
+        if let Err(e) = smoke.loader(arch, image) {
+            out.held.push(held(format!(
+                "the smoke run failed: {} — the loader check of a lane on 4K pages (#VM4K)",
+                cut(e)
+            )));
+            return out;
+        }
+    }
+    out.on.push(Emulated {
+        arch: arch.to_owned(),
+        via,
+        page16k,
+    });
     out
 }
 

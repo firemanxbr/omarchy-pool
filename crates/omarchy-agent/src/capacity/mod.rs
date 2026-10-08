@@ -33,11 +33,12 @@
 //!
 //! [`emulation`] (#338, design v2 §7.5) adds the foreign architecture's lane to `lanes`
 //! when the envelope allows it, binfmt is there and the smoke run passes — on 16K pages
-//! too (D33) — and says why it is held otherwise (`held_lanes`); the native lane never
-//! depends on it. On a Mac (#320) the binfmt table is the VM's, which the agent does not
-//! read: [`probe::in_mac_vm`] puts the `x86_64` lane through Rosetta into the same lanes
-//! after the same smoke run, and says why it is off in install's notes and the run loop's
-//! journal rather than in `held_lanes`.
+//! too (D33); on 4K pages its loader check as well, since such a lane takes what 16K
+//! pages sent back (#VM4K) — and says why it is held otherwise (`held_lanes`); the
+//! native lane never depends on it. On a Mac (#320) the binfmt table is the VM's, which
+//! the agent does not read: [`probe::in_mac_vm`] puts the `x86_64` lane through Rosetta
+//! into the same lanes after the same smoke run, and says why it is off in install's
+//! notes and the run loop's journal rather than in `held_lanes`.
 //!
 //! [`sandbox`] (#330, design v2 §10.4; D43) finds the sandboxed runtime — gVisor's `runsc`
 //! or Kata Containers — the dispatcher runs what a contributor wrote on the native lane in, within
