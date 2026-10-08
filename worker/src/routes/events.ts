@@ -1,4 +1,5 @@
 import { json, readJson, type Env } from "../index";
+import type { JobClaims } from "../jobtoken";
 import type { Contributor } from "./contributors";
 
 interface EventIn {
@@ -24,17 +25,35 @@ interface EventIn {
 export const RESERVED_KINDS: readonly string[] = ["review", "approve", "adopt", "role"];
 
 /**
+ * Who posted a job's row (#414): the task and the worker its token was
+ * issued for, from the token's signed claims (jobtoken.ts, `t` and `w`) —
+ * never the payload's word, and no read of D1. A host's false reds (the
+ * Studio canary's health checks of rc, 2026-10-08, made without the pool's
+ * keyrings) blocked rc → stable, and no row said whose check it was; now
+ * every health, abi and gate row a job posts says so. The gate still reads
+ * every worker's rows alike. `posted_by`, not `by`: in a payload `by` is a
+ * person's login (an approval's, a factory fast-track's approver), which a
+ * job's row keeps. A payload that is no object is kept under `value`.
+ */
+function postedBy(payload: unknown, job: JobClaims): Record<string, unknown> {
+  const by = { task: job.t, worker: job.w };
+  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) return { ...(payload as Record<string, unknown>), posted_by: by };
+  return payload === undefined || payload === null ? { posted_by: by } : { value: payload, posted_by: by };
+}
+
+/**
  * POST /events — a line of the journal. A job's token posts what the job
  * did: a health check, an ABI check, a promotion, a sync — the rows the
  * promotion gate reads as evidence (a health row's soak, an abi row's
  * verdict) and Status draws as the rings' state — never a line of a kind
- * the Worker's doors write (RESERVED_KINDS). A maintainer by hand
- * (`hand`: the session or an `omc_` token) writes a `note` and nothing
+ * the Worker's doors write (RESERVED_KINDS); its row names the task and
+ * worker the token was issued for (`job`, #414: postedBy). A maintainer by
+ * hand (`hand`: the session or an `omc_` token) writes a `note` and nothing
  * else (#284): a health or abi row from a token would fill a soak or stand
  * for an ABI check no job ran, and the gate would promote past evidence
  * nobody made — a forced promotion without the passkey.
  */
-export async function handlePostEvent(request: Request, env: Env, hand: Contributor | null): Promise<Response> {
+export async function handlePostEvent(request: Request, env: Env, hand: Contributor | null, job: JobClaims | null): Promise<Response> {
   const e = await readJson<EventIn>(request);
   if (e instanceof Response) return e;
   if (!e?.kind || !e.summary) return json({ error: "kind and summary are required" }, 400);
@@ -48,10 +67,11 @@ export async function handlePostEvent(request: Request, env: Env, hand: Contribu
   if (run !== undefined && !(typeof run === "string" && /^https:\/\//i.test(run))) return json({ error: "payload.ci.run_url must be an https URL" }, 400);
   const rid = p?.release_id;
   if (rid !== undefined && rid !== null && !(Number.isInteger(rid) && (rid as number) > 0)) return json({ error: "payload.release_id must be a release's id" }, 400);
+  const payload = job ? postedBy(e.payload, job) : e.payload;
   const row = await env.DB.prepare(
     "INSERT INTO events (kind, ring, source, status, summary, payload, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at",
   )
-    .bind(e.kind, e.ring ?? null, e.source ?? null, status, e.summary, e.payload === undefined ? null : JSON.stringify(e.payload), e.duration_ms ?? null)
+    .bind(e.kind, e.ring ?? null, e.source ?? null, status, e.summary, payload === undefined ? null : JSON.stringify(payload), e.duration_ms ?? null)
     .first<{ id: number; created_at: string }>();
   return json(row, 201);
 }
