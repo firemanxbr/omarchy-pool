@@ -3495,10 +3495,31 @@ the pool marks it `refused_4k` — the journal says *… needs a native x86_64
 worker — back in the queue for one (its lane is on 4K pages: no emulated
 lane takes it again)* —, gives the attempt back once more, and only a
 native x86_64 host takes it: emulation gives a build two attempts back at
-most. Marks from before #413 need nothing done: they all came from the
-Studio's 16K lanes, so they are the VM's as they are (the query below lists
-the ones still waiting). Status's *tasks waiting for a native x86_64 host*
-then counts only the `refused_4k` ones. And the Studio and the VM are one
+most. A build that already carried `needs_native` is marked `refused_4k`
+by any emulated lane that sends it back, whatever its host's last report
+says of its pages. Marks from before #413 need nothing done. Most came from
+the Studio's 16K lanes, and those are the VM's as they are; one a lane on
+4K pages had sent back already (an x86_64 host's aarch64 lane, a Mac's
+Rosetta lane, a legacy worker) gets one more try on a 4K-page lane and,
+sent back there, is marked `refused_4k` like any other (the query below
+lists the ones still waiting). Status's *tasks waiting for a native x86_64
+host* then counts only the `refused_4k` ones.
+
+**Before the Worker deploys**, list the hosts that already report an
+emulated lane on 4K pages: from the deploy on they take those marks, before
+any of them runs agent 0.5.1's loader check.
+
+```bash
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT name, owner_login, arch, agent_version, lanes FROM hosts WHERE status = 'active' AND EXISTS (SELECT 1 FROM json_each(hosts.lanes) l WHERE json_extract(l.value, '$.mode') = 'emulated' AND json_extract(l.value, '$.page16k') = 0)"
+```
+
+An x86_64 lane there on an agent before 0.5.1 (a Mac's Rosetta one, an
+aarch64 Linux host's qemu one) has not proved its loader: a build it
+cannot start comes back `refused_4k` and waits for a native host. Ask its
+owner to update the agent first, or deploy knowing that. An aarch64 lane
+there (an x86_64 host's) needs nothing.
+
+And the Studio and the VM are one
 machine to the pool, which tells machines apart by owner only (*How the
 pool hands a host work*, its second opinion): an audit of what one of them
 built never waits for the other as for another machine, and says `none`
@@ -3552,10 +3573,22 @@ aarch64 work for it waits.
    Preflight must show `emulation x86_64: on, through qemu, on 4K pages: it
    also takes the builds a lane on 16K pages sent back (#413)`. From agent
    0.5.1 that lane is on only once its smoke run also started `sudo -V` in
-   the release's x86_64 build image; a lane held with a reason ending *the
-   loader check of a lane on 4K pages (#413)* is a kernel that is not 4K
-   after all, or a handler without `F` — fix it and count again (*Emulated
-   lanes are detected*, *How the pool hands a host work*).
+   the release's x86_64 build image. A lane held with a reason ending *the
+   loader check of a lane on 4K pages (#413)* is neither the page size (on
+   16K pages the check does not run) nor the handler (one without `F` is
+   held before any container runs): it got past `/usr/bin/true` and
+   `pacman --version`, and `sudo` did not start. The image may lack it (one
+   given by hand with `--emulate-image`; the release's `base-devel` has
+   it), qemu-user may fail to run it or the plugins it loads, or the
+   rootless user namespace may refuse it. The reason carries what
+   `sudo -V` printed; as `omarchy`, this shows the rest:
+
+   ```bash
+   podman run --rm --network none --platform linux/amd64 --entrypoint sudo <the release's x86_64 build image> -V
+   ```
+
+   Fix it and count again (*Emulated lanes are detected*, *How the pool
+   hands a host work*).
 5. On the site: the Studio's cap (above), then *Confirm* the VM on your
    page, the fingerprint compared with the one install printed.
 
