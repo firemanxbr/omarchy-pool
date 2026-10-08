@@ -219,6 +219,28 @@ pub fn prepare(ctx: &Ctx, l: &Lease, stop: &AtomicBool) -> Result<Value, Prep> {
     Ok(notes)
 }
 
+/// The directories of a task's that its container writes (#405): mounted writable at
+/// `/task/out`, `/task/log`, `/build` and `/var/cache/pacman/pkg` ([`spec::task_container`]),
+/// and `build/cache`, where a build's own cache is mounted and a kind that builds nothing
+/// keeps a directory of `/build`. `in` is mounted read-only, and `agent` is the agent
+/// sidecar's ([`super::budget::usage_dir_for`]).
+pub const WRITABLE: [&str; 5] = ["out", "log", "build", "build/cache", "pkgcache"];
+
+/// A task's [`WRITABLE`] directories given to its root as the host sees it, on a remapped
+/// daemon (#405, [`super::engine::TaskRoot`]): [`prepare`] made them as this dispatcher, and a
+/// remapped root is "other" on them — without this the build script's first write
+/// (`/task/log/task.log`) is refused and the task dies of SIGPIPE with no verdict. Each
+/// directory itself (`lchown`, not what it holds: it was made empty), never opened to every
+/// user instead. The task directory and `tasks/` stay the dispatcher's alone (0700), `in` its
+/// too: the task reads it through its other bits.
+pub fn give_writable(task_dir: &Path, root: super::engine::TaskRoot) -> std::io::Result<()> {
+    for sub in WRITABLE {
+        std::os::unix::fs::lchown(task_dir.join(sub), Some(root.uid), Some(root.gid))
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{sub}: {e}")))?;
+    }
+    Ok(())
+}
+
 /// `<work root>/releases/<release>`: the release's own checkout, fetched once at its tag —
 /// `refs/tags/<release>` only, never a branch of that name — (a dev build's at main), and
 /// never changed after (a tag does not move).

@@ -93,6 +93,17 @@
 //! the dispatcher's, only when the pool's signed databases list its bytes, and
 //! both caches are pruned to the envelope's `cache_caps`.
 //!
+//! **A remapped daemon** (#405, design v2 §19.1): with `userns-remap` every
+//! task container and sidecar stays remapped while the dispatcher runs in the
+//! init user namespace (the agent's overlay: `userns_mode: host`), so a task's
+//! root is the remapped range's first uid on the host, "other" on what the
+//! dispatcher makes. It asks the engine for that uid and gid at start
+//! ([`engine::Cli::task_root`]; a dispatcher remapped itself refuses to start)
+//! and gives each task's writable directories ([`kinds::WRITABLE`]) and its
+//! build cache to it before the container starts, or hands the lease back
+//! `lost`; the task directory, `tasks/`, `cache/` and `in` stay its own. Every
+//! other engine has no such root, and nothing changes owner.
+//!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
 //! restart makes the dispatcher exit 75 (tasks survive), recheck-agent and
@@ -346,6 +357,12 @@ pub struct Net {
     /// #373): only then is a package with `network = "direct"` started, on the bridge install's
     /// egress probe checked; otherwise it is handed back.
     pub direct: bool,
+    /// A task container's root as the host sees it on a daemon that remaps users (#405,
+    /// `userns-remap`), asked of the engine at start ([`engine::Cli::task_root`]): the
+    /// directories this dispatcher makes for a task to write are given to it before its
+    /// container starts, since a remapped root is "other" on what host root made. `None` on
+    /// every other engine, where nothing changes owner.
+    pub task_root: Option<engine::TaskRoot>,
 }
 
 impl Default for Net {
@@ -360,6 +377,7 @@ impl Default for Net {
             caps: budget::Caps::default(),
             gateway: spec::Gateway::Isolated,
             direct: false,
+            task_root: None,
         }
     }
 }
@@ -1568,6 +1586,7 @@ impl Dispatcher {
             live.lease.arch(),
             &live.lease.task.name,
             kind.builds(),
+            self.net.task_root,
         ) {
             lost(self, &mut live, format!("its caches: {e}"));
             return live;
@@ -1583,6 +1602,22 @@ impl Dispatcher {
         {
             lost(self, &mut live, why);
             return live;
+        }
+        // On a remapped daemon (#405) the task's root is "other" on what this dispatcher made:
+        // what it writes is given to it, or the lease goes back before anything runs — never
+        // opened to every user, where its `builder` could plant outputs the dispatcher uploads.
+        if let Some(root) = self.net.task_root {
+            if let Err(e) = kinds::give_writable(&tdir, root) {
+                lost(
+                    self,
+                    &mut live,
+                    format!(
+                        "its directories for the remapped task root {}:{}: {e}",
+                        root.uid, root.gid
+                    ),
+                );
+                return live;
+            }
         }
         // A model kind's agent sidecar writes its usage as the keys file's owner (#399).
         if let Some(u) = self.net.agent_user.filter(|_| kind.model()) {
@@ -2759,6 +2794,17 @@ pub fn run(opts: &Options) -> Result<()> {
             l.socket.display()
         ));
     }
+    // A remapped daemon's task root (#405), read with the worker image the sidecars run; none
+    // on every other engine.
+    let task_root = engine
+        .task_root(&opts.net.worker_image)
+        .map_err(|e| anyhow!("{e}"))?;
+    if let Some(r) = task_root {
+        say(format!(
+            "this daemon remaps users (userns-remap): a task's root is host uid {}, gid {}, and what a task writes is given to it before its container starts (#405)",
+            r.uid, r.gid
+        ));
+    }
     if opts.net.secrets_dir.is_some() {
         say(match (&opts.net.agent_held, opts.net.agent_user) {
             (Some(h), _) => format!("no probe and no agent sidecar: {}", h.reason()),
@@ -2816,6 +2862,7 @@ pub fn run(opts: &Options) -> Result<()> {
     d.terminating = Arc::clone(&terminating);
     d.net = opts.net.clone();
     d.net.gateway = gateway;
+    d.net.task_root = task_root;
     d.cache_caps = opts.cache_caps;
     // Pool jobs (#340): the shim first on their PATH, as the only engine their scripts reach; the real one by its path.
     let exe = std::env::current_exe().context("this binary's path, for the pool jobs' shim")?;

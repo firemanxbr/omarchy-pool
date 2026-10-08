@@ -1019,7 +1019,7 @@ into `etc/dispatcher.env`:
 |---|---|---|
 | rootful docker without remapping (the Studio) | the agent's `uid:gid` (a file of group `root`: gid 65534) | uids are the host's; a sidecar that is not root takes no root group |
 | rootless podman or docker (and Quadlet) | `0:0` | the engine's root is the agent's user; its own uid would map to a subordinate one |
-| rootful docker with userns-remap | none: `OMARCHY_AGENT_HELD=userns-remap` | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so none can read the file: no probe and no agent sidecar runs, the host takes no model kinds (its builds run), and its page says why |
+| rootful docker with userns-remap | none: `OMARCHY_AGENT_HELD=userns-remap` | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so none can read the file: no probe and no agent sidecar runs, the host takes no model kinds (its builds run: the dispatcher gives each task's writable directories to the remapped root, #405), and its page says why |
 | a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM; the `omarchy` profile's virtiofs mount shows the Mac's uid and checks access against it, as on the Studio. Docker Desktop and OrbStack show shared files their own way, and the Mac's uid reads the file there too |
 
 No sidecar ever leaves the engine's user namespace (`--userns` is refused
@@ -1040,7 +1040,16 @@ remapped daemon the host page's agent error reads `model kinds held: this
 daemon remaps users (userns-remap), …`: how such a host reads its keys
 without leaving the remapping (an ACL for one remapped uid, say) is a
 maintainer's decision still open, and until it is taken the host builds
-only.
+only. Its builds run because a task container's root there is the remapped
+range's first uid on the host, "other" on every directory the dispatcher
+makes as root: the dispatcher (in the init user namespace, `userns_mode:
+host`) asks the engine for that uid and gid when it starts — its log says
+`this daemon remaps users (userns-remap): a task's root is host uid <B>, gid
+<G>, …` — and gives each task's `out`, `log`, `build`, `build/cache` and
+`pkgcache` directories and its package's build cache to it before the
+container starts, or hands the lease back `lost` with why (#405). A
+dispatcher that is remapped itself (a set without the overlay's
+`userns_mode: host`) refuses to start and says so.
 
 `omarchy-agent uninstall` stops the agent, removes the unit, the bundle's
 containers and networks, task containers and sidecars (labelled

@@ -115,7 +115,15 @@ secret). Everything travels in the `Authorization` header over TLS only.
   nor another task's directory, `--cap-drop ALL` with the few capabilities
   pacman and makepkg need, `no-new-privileges`, its share of CPUs, memory and
   pids, the build image by digest, never `--rm`, no engine-side log; its
-  directories are the dispatcher's alone (0700). No task container calls the
+  directories are the dispatcher's alone (0700). On a daemon with
+  userns-remap (#405, design v2 §19.1) the task's root is the remapped
+  range's first uid on the host, and the dispatcher, there in the init user
+  namespace (`userns_mode: host`), gives that uid what the task writes —
+  `/task/out`, `/task/log`, `/build`, its own pacman downloads and its
+  package's build cache, each directory itself — before the container
+  starts, never opening one to every user; the task directory, `tasks/`,
+  `cache/` and `in` stay the dispatcher's, so a root that escapes as that
+  uid reaches no other task's directory or cache. No task container calls the
   pool: the dispatcher stages its inputs (`/task/in`, read-only) and, after
   it exits, uploads only the files its kind may upload, under a size cap, and
   walks a package it wrote for an extension member the archive reader would

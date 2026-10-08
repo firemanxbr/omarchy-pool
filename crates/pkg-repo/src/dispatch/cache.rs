@@ -71,6 +71,7 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest as _, Sha256};
 
+use super::engine::TaskRoot;
 use super::pool::Pool;
 use super::spec::{self, Trust};
 
@@ -208,12 +209,17 @@ fn cache_root(work_root: &Path) -> std::io::Result<PathBuf> {
 /// A lease's caches, made before its container starts: the shared pacman cache of its lane
 /// (readable by every task's root, whatever its user namespace maps it to) and, for a build,
 /// its package's build cache, stamped as used now — what the build caches' pruning orders by.
+/// On a remapped daemon (#405) the build cache is given to the task's root as the host sees
+/// it (`owner`), that directory alone: its parents and `cache/` stay the dispatcher's, so a
+/// task root that escapes as that uid reaches no other package's cache. `None` elsewhere,
+/// where the task's root is the dispatcher's own.
 pub fn ready(
     work_root: &Path,
     trust: Trust,
     arch: &str,
     name: &str,
     builds: bool,
+    owner: Option<TaskRoot>,
 ) -> std::io::Result<()> {
     if spec::platform_of(arch).is_none() || !spec::name_ok(name) {
         return Err(std::io::Error::other(format!(
@@ -226,7 +232,11 @@ pub fn ready(
     std::fs::set_permissions(&pacman, Permissions::from_mode(0o755))?;
     if builds {
         let _held = BUILD_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        std::fs::create_dir_all(build_dir(work_root, trust, arch, name))?;
+        let dir = build_dir(work_root, trust, arch, name);
+        std::fs::create_dir_all(&dir)?;
+        if let Some(o) = owner {
+            std::os::unix::fs::lchown(&dir, Some(o.uid), Some(o.gid))?;
+        }
         let stamp = used_stamp(work_root, trust, arch, name);
         if let Some(p) = stamp.parent() {
             std::fs::create_dir_all(p)?;
@@ -2105,7 +2115,7 @@ pub(crate) mod tests {
         // Moved out of the tree under the lock, deleted after it: nothing is left aside.
         assert!(names_in(&trash_dir(work)).is_empty());
         // One used since the pass began (a lease that started meanwhile) stays too.
-        ready(work, Trust::Community, "x86_64", "new", true).unwrap();
+        ready(work, Trust::Community, "x86_64", "new", true, None).unwrap();
         let p = prune_build(work, 0, &in_use, SystemTime::now() - Duration::from_secs(5));
         assert_eq!(p.removed, 0);
         assert!(busy.exists() && new.exists());
@@ -2115,7 +2125,7 @@ pub(crate) mod tests {
     fn ready_and_collect_keep_to_the_grammar_and_the_cache_tree() {
         let t = tempfile::tempdir().unwrap();
         let work = t.path();
-        ready(work, Trust::Community, "aarch64", "felix", true).unwrap();
+        ready(work, Trust::Community, "aarch64", "felix", true, None).unwrap();
         assert!(build_dir(work, Trust::Community, "aarch64", "felix").is_dir());
         assert!(pacman_dir(work, "aarch64").is_dir());
         assert_eq!(
@@ -2127,10 +2137,10 @@ pub(crate) mod tests {
             0o700
         );
         // An audit's: the pacman cache only.
-        ready(work, Trust::Project, "x86_64", "felix", false).unwrap();
+        ready(work, Trust::Project, "x86_64", "felix", false, None).unwrap();
         assert!(!build_dir(work, Trust::Project, "x86_64", "felix").exists());
         for (arch, name) in [("riscv64", "felix"), ("aarch64", "../x"), ("aarch64", "")] {
-            assert!(ready(work, Trust::Community, arch, name, true).is_err());
+            assert!(ready(work, Trust::Community, arch, name, true, None).is_err());
         }
         // A lease's downloads go aside; an empty pkgcache is nothing to merge.
         let gen = "g_00000000000000a1";
@@ -2153,6 +2163,66 @@ pub(crate) mod tests {
         std::fs::create_dir_all(tdir.join("pkgcache")).unwrap();
         std::fs::write(tdir.join("pkgcache/x.pkg.tar.zst"), b"x").unwrap();
         assert!(collect(&tdir, other.path(), "aarch64", 7, gen).is_err());
+    }
+
+    /// #405: on a remapped daemon a build's own cache is given to the task's root as the host
+    /// sees it — that directory alone, its parents and `cache/` the dispatcher's — and a change of
+    /// owner this process may not make is an error the dispatcher hands the lease back with. An
+    /// audit's (no build cache) gives nothing; with no task root nothing changes owner.
+    #[test]
+    fn a_build_cache_is_given_to_a_remapped_task_root_and_nothing_above_it() {
+        let t = tempfile::tempdir().unwrap();
+        let work = t.path();
+        let me = std::fs::metadata(work).unwrap();
+        let me = TaskRoot {
+            uid: me.uid(),
+            gid: me.gid(),
+        };
+        let owner_of = |p: &Path| {
+            let m = std::fs::metadata(p).unwrap();
+            (m.uid(), m.gid())
+        };
+        ready(work, Trust::Community, "aarch64", "felix", true, Some(me)).unwrap();
+        let dir = build_dir(work, Trust::Community, "aarch64", "felix");
+        assert_eq!(owner_of(&dir), (me.uid, me.gid));
+        // Another uid: given to it where this process may (root), refused otherwise.
+        let other = TaskRoot {
+            uid: 4242,
+            gid: 4343,
+        };
+        let r = ready(work, Trust::Project, "x86_64", "felix", true, Some(other));
+        let dir = build_dir(work, Trust::Project, "x86_64", "felix");
+        if rustix::process::geteuid().is_root() {
+            r.unwrap();
+            assert_eq!(owner_of(&dir), (4242, 4343));
+        } else {
+            assert_eq!(
+                r.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "a change of owner this process may not make"
+            );
+            assert_eq!(owner_of(&dir), (me.uid, me.gid));
+        }
+        for above in [
+            dir.parent().unwrap(),
+            &work.join("cache/build/project"),
+            &work.join("cache/build"),
+            &work.join("cache"),
+        ] {
+            assert_eq!(owner_of(above), (me.uid, me.gid), "{}", above.display());
+        }
+        assert_eq!(owner_of(&pacman_dir(work, "x86_64")), (me.uid, me.gid));
+        // An audit's: the pacman cache only, given to nobody.
+        ready(
+            work,
+            Trust::Project,
+            "aarch64",
+            "audited",
+            false,
+            Some(other),
+        )
+        .unwrap();
+        assert!(!build_dir(work, Trust::Project, "aarch64", "audited").exists());
     }
 
     /// Makes `tests/fixtures/pool-dbs/` again: two databases rendered with pkg-repo's own

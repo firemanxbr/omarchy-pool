@@ -286,6 +286,10 @@ status_of() { awk -v k="$1:" '$1 == k { print $2 }' "/proc/$pid/status"; }
   || fail "the dispatcher is not root with docker's default capabilities: Uid $(status_of Uid), CapEff $(status_of CapEff)"
 [[ "$(head -n1 "/proc/$pid/uid_map" | awk '{ print $1, $2, $3 }')" == "0 0 4294967295" ]] || fail "the dispatcher is not in the init user namespace"
 echo "ok: the dispatcher runs as root in the init user namespace with docker's default capabilities (CapEff 00000000a80425fb)"
+# The task root it learned from the engine at start (#405): the one a container here reads.
+grep -q "this daemon remaps users (userns-remap): a task's root is host uid $B, gid $G," "$tmp/dispatcher.log" \
+  || fail "the dispatcher did not say the task root $B:$G: $(grep -m1 'remaps users' "$tmp/dispatcher.log" || echo nothing)"
+echo "ok: the dispatcher learned the task root at start ($B:$G)"
 
 # The build: running (or failed before it built: what a remapped host did before #405).
 said_or_failed() { said 1 || reported 1 fail; }
