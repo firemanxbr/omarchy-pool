@@ -1,7 +1,9 @@
 /**
  * A build an emulated worker sent back (#281): the fail report's
  * `needs_native` marks it (params.needs_native) and the claim hands it to no
- * emulated worker again (factory.test.ts). Here, the pages say what it
+ * emulated worker again but one on 4K pages, and to none once one of those
+ * sent it back too (params.refused_4k, #413; factory.test.ts,
+ * emulated-lanes.test.ts) — the pill's title says which. Here, the pages say what it
  * waits for, run over the Worker's own answers on the fixture: the Status
  * page's row, the build's own page (its pill and its lede), the Factory's
  * card — a contributor's build and the project's rebuild, whichever of its
@@ -82,14 +84,16 @@ describe("a build waiting for a native worker", () => {
   it("the Status page's row says what it waits for", async () => {
     const d = await drawn("/status", (x) => (x.nodes["#tasks tbody"]?.innerHTML ?? "").includes(`/build/${waiting}"`));
     const row = (d.nodes["#tasks tbody"].innerHTML as string).split("<tr>").find((r) => r.includes(`/build/${waiting}"`))!;
-    expect(row).toContain(`<span class="pill none">queued</span> <span class="pill warn" title="it could not run emulated: a toolchain or a library did not start under qemu. No emulated worker takes it again.">waiting for a native ${F.arch} worker</span>`);
+    expect(row).toContain(`<span class="pill none">queued</span> <span class="pill warn" title="it could not run emulated on 16K pages: a toolchain or a library did not start under qemu there. A native worker takes it, or an emulated one on 4K pages.">waiting for a native ${F.arch} worker</span>`);
     // Any other row says nothing of it.
     expect((d.nodes["#tasks tbody"].innerHTML as string).match(/waiting for a native/g)).toHaveLength(1);
   });
 
   it("the build's page wears it and its lede says it", async () => {
-    const d = await drawn(`/build/${waiting}`, (x) => !!x.nodes["#lede"]?.innerHTML);
-    expect(d.nodes["#badges"].innerHTML).toContain(`<span class="pill warn" title="it could not run emulated: a toolchain or a library did not start under qemu. No emulated worker takes it again.">waiting for a native ${F.arch} worker</span>`);
+    const d = await drawn(`/build/${waiting}`, (x) => !!x.nodes["#lede"]?.innerHTML, { functions: ["nativePill"] });
+    // One a lane on 4K pages sent back too (#413, params.refused_4k): no emulated worker takes it, and its title says so.
+    expect(d.nativePill({ status: "queued", arch: "x86_64", params: { needs_native: 1, refused_4k: 1 } })).toBe('<span class="pill warn" title="it could not run emulated, on 16K pages nor on 4K pages: a toolchain or a library did not start under qemu. No emulated worker takes it again.">waiting for a native x86_64 worker</span>');
+    expect(d.nodes["#badges"].innerHTML).toContain(`<span class="pill warn" title="it could not run emulated on 16K pages: a toolchain or a library did not start under qemu there. A native worker takes it, or an emulated one on 4K pages.">waiting for a native ${F.arch} worker</span>`);
     expect(d.nodes["#lede"].innerHTML).toContain(` · queued, waiting for a native ${F.arch} worker: it could not run emulated.`);
     // A build that is not sent back says neither.
     const other = await drawn(`/build/${F.projectTask}`, (x) => !!x.nodes["#lede"]?.innerHTML);
@@ -151,8 +155,13 @@ describe("a build waiting for a native worker", () => {
     // The person's Builds table: alice's slowrust, sent back, wears the pill; her other rows do not.
     const u = await drawn("/user/alice", (x) => (x.nodes["#builds tbody"]?.innerHTML ?? "").includes(`/build/${waiting}"`));
     const rows = (u.nodes["#builds tbody"].innerHTML as string).split("<tr>");
-    expect(rows.find((r) => r.includes(`/build/${waiting}"`))).toContain(`<span class="pill none">queued</span> <span class="pill warn" title="it could not run emulated: a toolchain or a library did not start under qemu. No emulated worker takes it again.">waiting for a native ${F.arch} worker</span>`);
+    expect(rows.find((r) => r.includes(`/build/${waiting}"`))).toContain(`<span class="pill none">queued</span> <span class="pill warn" title="it could not run emulated on 16K pages: a toolchain or a library did not start under qemu there. A native worker takes it, or an emulated one on 4K pages.">waiting for a native ${F.arch} worker</span>`);
     expect(rows.filter((r) => r.includes("waiting for a native"))).toHaveLength(1);
+    // Sent back by a lane on 4K pages too (#413, params.refused_4k): the row's pill says no emulated worker takes it.
+    await env.DB.prepare(`UPDATE build_tasks SET params = '{"needs_native":1,"refused_4k":1}' WHERE id = ?`).bind(waiting).run();
+    const r4 = await drawn("/user/alice", (x) => (x.nodes["#builds tbody"]?.innerHTML ?? "").includes(`/build/${waiting}"`));
+    expect((r4.nodes["#builds tbody"].innerHTML as string).split("<tr>").find((r) => r.includes(`/build/${waiting}"`))).toContain(`<span class="pill warn" title="it could not run emulated, on 16K pages nor on 4K pages: a toolchain or a library did not start under qemu. No emulated worker takes it again.">waiting for a native ${F.arch} worker</span>`);
+    await env.DB.prepare(`UPDATE build_tasks SET params = '{"needs_native":1}' WHERE id = ?`).bind(waiting).run();
   });
 
   it("the package page's review cell says it", async () => {

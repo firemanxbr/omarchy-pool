@@ -1344,7 +1344,7 @@ fn mac_facts(
         emulate: emulate.as_deref(),
         x86_64_image: x86.as_deref(),
     };
-    let (f, said) = probe::in_mac_vm(f, &vm, &mut |img| {
+    let (f, said) = probe::in_mac_vm(f, &vm, &mut |img, page_kb| {
         let d = docker.ok_or("no engine")?;
         let host = d.host();
         let how = probe::Probe {
@@ -1355,7 +1355,7 @@ fn mac_facts(
             emulation: None,
             sandbox: None,
         };
-        probe::rosetta_lane(&how, img)
+        probe::rosetta_lane(&how, img, page_kb)
     });
     match said {
         Some(probe::LaneSaid::Note(n)) => r.notes.push(n),

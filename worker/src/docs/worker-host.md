@@ -114,6 +114,9 @@ turns the emulated pair on here regardless, for C-only packages (a
 toolchain or a library that cannot start there sends the build back to the
 queue for a native worker, from the community builder and the review
 worker alike: *Run a worker* in the docs, the runbook's *Studio host*).
+The same qemu maps those libraries on a 4K-page kernel, so a VM with one on
+the Studio, enrolled as a host of its own, builds them for x86_64 too
+(#413: the runbook's *The Studio's x86_64 VM*).
 
 ## Maintainer hosts
 
@@ -307,7 +310,13 @@ there; otherwise it says why the lane is held (`held_lanes` in
 Rosetta's in its VM, below). An emulated build is
 slower and shares the host's units; on a 16K-page kernel the lane stays on,
 and a build whose toolchain cannot start under qemu goes back to the queue
-for a native host without spending its attempt.
+for a native host — or a lane on 4K pages, where qemu maps what 16K pages
+cannot (#413) — without spending its attempt. An x86_64 lane on 4K pages,
+qemu's or a Mac's Rosetta one, proves it first: its smoke run also starts
+`sudo -V` there (agent 0.5.1), and a lane where that fails is held, not
+reported 4K (an aarch64 lane needs no such proof: only an aarch64 kernel
+has 16K pages, so none of its builds came back from them). One a 4K-page
+lane sends back too waits for a native host only.
 
 **Contributors' builds run in a sandbox when your engine has one (#330).**
 Install gVisor (`runsc install` registers it with docker) or Kata Containers
@@ -340,7 +349,8 @@ they confirm with their passkey; then your host may take it. A host whose
 pool cap is 0, or too small for the copy's size, is none to wait for; one
 whose disk its running builds fill is busy, and waited for.
 Every audit prefers a machine other than the one that built what it
-audits, and an audit of the project's copy takes a model other than the
+audits — another owner's: the pool counts your hosts as one machine, since
+one of them may be a VM on another (#413) — and an audit of the project's copy takes a model other than the
 one that built it whenever a host with another one answered in the last
 24 hours. So the model your host's agent runs matters: the provider is the
 first key `agent.env` holds, or `FACTORY_PROVIDER`, and `FACTORY_MODEL`

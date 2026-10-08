@@ -2100,7 +2100,10 @@ so a size-4 build waits for memory rather than run smaller.
   that would take it now is alive (claimed in the last 2 minutes, not
   drained, not below the minimum, units and disk free); a drained or busy
   native host never makes it wait. A `needs_native` build never runs
-  emulated. While no host runs an arch natively, every host with an emulated
+  emulated on 16K pages, or on a lane that says no page size: a native host
+  or a lane on 4K pages takes it, and one a lane on 4K pages sent back too
+  (`refused_4k`) a native host only (#413, *The Studio's x86_64 VM*,
+  below). While no host runs an arch natively, every host with an emulated
   lane of it keeps one of its builds running, however long the native
   backlog (the guaranteed share). Emulated lanes hold at most half a host's
   builds while native work for it waits, all but one otherwise; nothing
@@ -2111,12 +2114,15 @@ so a size-4 build waits for memory rather than run smaller.
   off), then the binfmt handler (`/proc/sys/fs/binfmt_misc/qemu-<arch>`,
   enabled with the `F` flag — `factory/host/prep-root.sh` installs
   `qemu-user-static-binfmt`), then a smoke run of the release's build image
-  of that architecture (`/usr/bin/true`, then `pacman --version`). Passing,
+  of that architecture (`/usr/bin/true`, then `pacman --version`, and for an
+  x86_64 lane on a 4K-page kernel `sudo -V`, the loader check of agent
+  0.5.1, #413). Passing,
   the lane goes into `run/capacity.json`'s `lanes` with `via` and
   `page16k`; otherwise into `held_lanes` with the reason, and the native lane
   runs on. On a Mac (#320) the x86_64 lane is the omarchy VM's Rosetta one:
   `[vm] rosetta` and `emulate` decide it, the same smoke run turns it on
-  (`via: rosetta`, `page16k: false` on the VM's 4K pages), and why it is off
+  (`via: rosetta`, `page16k: false` on the VM's 4K pages, so its loader
+  check runs too), and why it is off
   is in install's notes and the run loop's journal, not in `held_lanes`.
   Check it on the host with
   `jq '.lanes, .held_lanes' <set dir>/run/capacity.json` (or
@@ -2143,9 +2149,15 @@ so a size-4 build waits for memory rather than run smaller.
   build script's probe; only a
   container on an emulated lane is told it is one,
   `WORKER_LABELS={"emulated":true}`), goes back to the queue with its attempt
-  given back and never runs emulated again — it waits for a native host,
-  which its package page says. The pool takes `needs_native` only from a
-  lease on an emulated lane; from a native lane it is a failure like any
+  given back and never runs emulated on 16K pages again — it waits for a
+  native host or a lane on 4K pages (D33 amended, #413: `needs_native`
+  means *needs 4K pages or a native host*), which its package page says as
+  *waiting for a native … worker*. Sent back by a lane on 4K pages too, it
+  is marked `refused_4k` (the journal: *its lane is on 4K pages: no emulated
+  lane takes it again*), its attempt given back once more, and waits for a
+  native host only. The pool takes `needs_native` only from a lease on an
+  emulated lane, and reads the lane's pages from its host's last report
+  (`hosts.lanes`); from a native lane it is a failure like any
   other, journaled *its needs_native refused*. Jobs with helper containers
   need a lane of each ring architecture they check, native or emulated, with
   no wait: a health check its own, a promotion (its ABI gates and health
@@ -2154,7 +2166,9 @@ so a size-4 build waits for memory rather than run smaller.
   A review rebuild of a package a maintainer asked for (the rebuild's owner,
   and the owner of the contributor's build it answers) is handed to none of
   that maintainer's hosts while another maintainer's host has a lane
-  allowed for it — native, or emulated unless it is `needs_native` — and
+  allowed for it — native, or emulated unless its marks keep it off that
+  lane (`needs_native` off all but a lane on 4K pages, `refused_4k` off
+  every one) — and
   could hold it idle: its units within the pool cap for the rebuild's size
   (the size its page, the sizing file or a Retry asks, clamped only to the
   largest host alive), an agent slot, its disk budget; it waits for that
@@ -2166,7 +2180,7 @@ so a size-4 build waits for memory rather than run smaller.
   minimum for its CPUs or memory, or whose agent says it sleeps (#329: a
   Mac with its lid shut, until it reports itself awake), is. When only the
   requester's hosts have one (a single maintainer's hosts, a `needs_native`
-  rebuild with the other host's lane emulated, or a size only the
+  rebuild with the other host's lane emulated on 16K pages, or a size only the
   requester's host holds — the rebuild is never run smaller there), Review's
   rebuild pane says at once *waits for a host — only @m1's can build it*,
   with **Release to any host** for another maintainer: confirmed with their
@@ -2188,13 +2202,17 @@ so a size-4 build waits for memory rather than run smaller.
 - **The second opinion (#339, D36).** An audit runs in a fresh container
   with its own agent sidecar. It leaves the machine that built what it
   audits to another that can take it now, for 3 minutes. The pool tells
-  machines apart by owner and host: two registrations are on different
-  machines only when their owners differ or they are two hosts'
-  registrations of different hosts. A maintainer's legacy role containers
-  (the Studio's `community-*` and `review-*`, until P3), and a host's
-  registration beside its own legacy set during the canary, are one
-  machine, so an audit one takes of another's build says `none`, never
-  `host`. An audit of the project's
+  machines apart by owner only: two registrations are on different
+  machines only when their owners differ (#413). A host is what enrolled,
+  not a machine — the Studio's x86_64 VM enrolls as a host of its own on the
+  Studio —, and the pool trusts no host to say which machine it runs on: a
+  maintainer's legacy role containers (the Studio's `community-*` and
+  `review-*`, until P3), a host's registration beside its own legacy set
+  during the canary, and two hosts of one owner are one machine, so an
+  audit one takes of another's build says `none`, never `host`. What that
+  costs: one maintainer's machines that are truly apart give each other no
+  3 minutes' preference and no `host` (a publish-bound audit counts its
+  model only, so that is the audits that do not ship). An audit of the project's
   copy takes another model (the claim's `agent`: provider and model) than
   the one that built it whenever a registration that takes audits with
   another model answered in the last 24 hours — however long that host is
@@ -2244,7 +2262,8 @@ so a size-4 build waits for memory rather than run smaller.
   while its claim cannot take the build at all (a draft while its agent's
   probe fails, any build while it holds builds back for disk). An older
   build waiting for another reason (a `needs_native` one with no native
-  host, a capped contributor's) does not stop it. Two hours spent, the
+  host or lane on 4K pages, a `refused_4k` one with no native host, a capped
+  contributor's) does not stop it. Two hours spent, the
   mark clears and the host goes back to normal selection for 30 minutes
   (`build_tasks.reserved_at`); then the build waits its turn again and is
   reserved for anew, so a host never holds back work for one task more
@@ -2661,7 +2680,9 @@ names its host, linked to its page; errors come first.
   M"* once an architecture's oldest queued build or trial waited 60
   minutes (from its creation, a requeued task's run counted) with no free
   build of it — no host that claims has a build's units and disk free on a
-  lane of it (a native one for the builds an emulated lane sent back), as a
+  lane of it (for the builds an emulated lane sent back a native one, or
+  one on 4K pages for those a lane on 4K pages did not send back too,
+  #413), as a
   claim's own room test judges them: a build's two units free for a task,
   and its 20 GB budget plus the 10 GB floor within the smaller free disk
   less the budgets of the builds the host already runs. Units free on a
@@ -2671,13 +2692,17 @@ names its host, linked to its page; errors come first.
   requester's host), a pin or its size (a larger build's units or disk)
   holds it, and a new host would not take it sooner. *"Tasks waiting for a
   native <arch> host: K"* while builds
-  an emulated lane sent back (`needs_native`) wait — only a native host of
-  that architecture takes those. The table under the lines has the queue,
+  an emulated lane sent back (`needs_native`) wait for one: every one of
+  them while no host runs that architecture emulated on 4K pages (the line
+  then says a lane on 4K pages would take those a lane on 16K pages sent
+  back), only those a lane on 4K pages sent back too (`refused_4k`) once
+  one does (#413). The table under the lines has the queue,
   the free units native and emulated, and the week's busy ratio per lane
   (the unit-hours its leases held, against the units the hosts that run it
   have had since they were confirmed). A busy native lane and a long wait
   ask for a native host of that architecture; free emulated units with
-  `needs_native` waits say emulation is not enough.
+  `needs_native` waits say emulation on 16K pages is not enough — a lane on
+  4K pages (*The Studio's x86_64 VM*, below) or a native host is.
 - **Second opinion**: the models the registrations alive run, and the
   share of last week's audits of the project's copies that were
   `independent: none` — the model that wrote the recipe judged it. Any
@@ -2760,11 +2785,12 @@ host takes that work ([Maintainer hosts](/docs/worker-host#maintainer-hosts)).
 `review2-x86_64` is labeled `"emulated":true` too. A build that dies of emulation
 there goes back to the queue for a native x86_64 worker, not retried and
 not failed: a toolchain that cannot start, or a library qemu cannot map.
-No emulated worker takes it again (#281). To see it: the Workers page says
+No emulated worker takes it again (#281), but a host's emulated lane on 4K
+pages (#413, *The Studio's x86_64 VM*, below). To see it: the Workers page says
 how many builds wait for a native worker, each linked. The build page and
 the Review workbench say *waiting for a native x86_64 worker*. The events
 log a `build` warning with `needs_native`. It waits until a native x86_64
-worker is online.
+worker, or a lane on 4K pages, is online.
 Everything lives under `/srv/omarchy-pool`
 (a btrfs subvolume on the internal disk; the 4 TB drive joins when it has a
 USB enclosure — the Asahi kernel has no Thunderbolt tunnelling, so the NVMe
@@ -3404,7 +3430,7 @@ npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, arch, trust,
    is that machine's; the press names those registrations alone, so
    another machine's pins never move with them. Each moves onto the
    host's registration where the host could run it once idle — a lane for
-   it, `needs_native` kept, never the project's copy onto its requester's
+   it, its marks kept (`needs_native` onto no lane but one on 4K pages), never the project's copy onto its requester's
    host (D35) — but for the maintainer `[solo]` names, whose own copies
    their hosts take (*The solo-maintainer exception*, below) —, the agent
    its pin chose, its size under the pool's cap —
@@ -3488,6 +3514,146 @@ guaranteed x86_64 share (design v2 §8.3) — with no role container left at
 work, and a release reaches its bundle with nobody at the host: its page's
 release is the pool's within the rollout. `subuid` isolation is P6's, one
 root session, once the legacy set is gone (D13).
+
+### The Studio's x86_64 VM
+
+The Studio's x86_64 lane runs under qemu on the Asahi kernel's 16K pages
+(D33): `rustc`, `sudo` and whatever else loads a library that asks for a
+4K-aligned segment fail there (*failed to map segment from shared object*),
+and their builds come back `needs_native`. The same qemu maps them on a
+kernel with 4K pages, and the Studio runs one under KVM: a Debian 13 arm64
+VM on it, with its own 4K-page kernel, runs `linux/amd64` containers through
+qemu-user as any 4K-page host does. Measured on the Studio on 2026-10-08:
+inside that VM, `linux/amd64` `archlinux:base-devel` ran `rustc` 1.99 and
+`sudo -V`, and `cargo build --release` of omarchy-cli took 412 s and made a
+working x86-64 binary (#413).
+
+**What the pool does with it** (D33 amended: `needs_native` means *needs 4K
+pages or a native host*). The VM enrolls as a host of its own, under the
+Studio's owner: aarch64 native, x86_64 emulated through qemu with
+`page16k: false`. A build the Studio's lane sends back (`needs_native`, its
+attempt given back) is no other 16K lane's, nor a legacy emulated
+registration's (those report no page size, so they count as 16K), and the
+VM's lane takes it at its next claim. When the VM's lane sends it back too,
+the pool marks it `refused_4k` — the journal says *… needs a native x86_64
+worker — back in the queue for one (its lane is on 4K pages: no emulated
+lane takes it again)* —, gives the attempt back once more, and only a
+native x86_64 host takes it: emulation gives a build two attempts back at
+most. A build that already carried `needs_native` is marked `refused_4k`
+by any emulated lane that sends it back, whatever its host's last report
+says of its pages. Marks from before #413 need nothing done. Most came from
+the Studio's 16K lanes, and those are the VM's as they are; one a lane on
+4K pages had sent back already (an x86_64 host's aarch64 lane, a Mac's
+Rosetta lane, a legacy worker) gets one more try on a 4K-page lane and,
+sent back there, is marked `refused_4k` like any other (the query below
+lists the ones still waiting). Status's *tasks waiting for a native x86_64
+host* then counts only the `refused_4k` ones.
+
+**Before the Worker deploys**, list the hosts that already report an
+emulated lane on 4K pages: from the deploy on they take those marks, before
+any of them runs agent 0.5.1's loader check.
+
+```bash
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT name, owner_login, arch, agent_version, lanes FROM hosts WHERE status = 'active' AND EXISTS (SELECT 1 FROM json_each(hosts.lanes) l WHERE json_extract(l.value, '$.mode') = 'emulated' AND json_extract(l.value, '$.page16k') = 0)"
+```
+
+An x86_64 lane there on an agent before 0.5.1 (a Mac's Rosetta one, an
+aarch64 Linux host's qemu one) has not proved its loader: a build it
+cannot start comes back `refused_4k` and waits for a native host. Ask its
+owner to update the agent first and then run `omarchy-agent capacity
+--write` (an update alone does not run the detection again, so
+`run/capacity.json` keeps the lane the older agent measured), or deploy
+knowing that. An aarch64 lane
+there (an x86_64 host's) needs nothing.
+
+And the Studio and the VM are one
+machine to the pool, which tells machines apart by owner only (*How the
+pool hands a host work*, its second opinion): an audit of what one of them
+built never waits for the other as for another machine, and says `none`
+there, never `host`.
+
+**What it takes from the Studio.** The VM needs at least the minimum to
+join — 4 CPUs, 8 GB, 60 GB free on its work root and 40 GB on its engine's
+data root — and what it is given the Studio no longer has, while the
+Studio's agent still counts the whole machine (12 CPUs, 32 GB: 11 units).
+So the Studio's host gives the VM's share back on its page: *Set the pool
+cap* to its 11 units less the VM's vCPUs or its memory in 2 GB units,
+whichever is more — a VM of 4 vCPUs and 8 GB leaves a cap of 7 —, reason
+*the Studio's x86_64 VM (#413)*; at *The Studio switch* (above), *Raise
+the cap* to that, not to *No cap*. No sandboxed runtime (gVisor, Kata) in
+the VM: a sandbox covers the native lane only, and its x86_64 lane would
+then take the project's own recipes only (#330), while what the Studio
+sends back is mostly contributors'. Its aarch64 lane takes aarch64 work as
+any host's does, and its x86_64 lane keeps to the emulated share while
+aarch64 work for it waits.
+
+**Once, in the VM** (Debian 13 arm64 under KVM on the Studio):
+
+1. Its kernel has 4K pages: `getconf PAGESIZE` says `4096` (`uname -m`:
+   `aarch64`).
+2. Root's once-only step from a checkout, for the agent's own user (never
+   root, never a person's login), rootless podman, then the handler's word:
+
+   ```bash
+   sudo bash factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-host --runtime rootless --dry-run
+   sudo bash factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-host --runtime rootless
+   head -n 3 /proc/sys/fs/binfmt_misc/qemu-x86_64   # enabled, and F among its flags
+   ```
+
+   prep-root.sh takes Debian as it takes Ubuntu (podman, qemu-user-static
+   with binfmt-support, linger, the cgroup delegation). What counts is the
+   handler: `enabled` with the `F` flag. If the package step does not
+   install it under Debian 13's names, register qemu-user's x86_64 handler
+   with `F` by hand and run the script again.
+3. On the site: your page's *Hosts* section, **+ add a host** — a name of
+   its own (`studio-x86vm`), where *omarchy-studio, a KVM VM* — gives the
+   `ome_` token, 15 minutes and once.
+4. As `omarchy`, the release the pool runs, checked as *The Studio canary*
+   checks it, with the Quadlet driver (*The Quadlet driver*, above):
+
+   ```bash
+   curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"
+   gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main
+   OMARCHY_ENROLL=ome_… sh ~/install.sh --dedicated --driver quadlet --work-root /srv/omarchy-host
+   ```
+
+   Preflight must show `emulation x86_64: on, through qemu, on 4K pages: it
+   also takes the builds a lane on 16K pages sent back (#413)`. From agent
+   0.5.1 that lane is on only once its smoke run also started `sudo -V` in
+   the release's x86_64 build image. A lane held with a reason ending *the
+   loader check of a lane on 4K pages (#413)* is neither the page size (on
+   16K pages the check does not run) nor the handler (one without `F` is
+   held before any container runs): it got past `/usr/bin/true` and
+   `pacman --version`, and `sudo` did not start. The image may lack it (one
+   given by hand with `--emulate-image`; the release's `base-devel` has
+   it), qemu-user may fail to run it or the plugins it loads, or the
+   rootless user namespace may refuse it. The reason carries what
+   `sudo -V` printed; as `omarchy`, this shows the rest:
+
+   ```bash
+   podman run --rm --network none --platform linux/amd64 --entrypoint sudo <the release's x86_64 build image> -V
+   ```
+
+   Fix it and count again (*Emulated lanes are detected*, *How the pool
+   hands a host work*).
+5. On the site: the Studio's cap (above), then *Confirm* the VM on your
+   page, the fingerprint compared with the one install printed.
+
+**Check**, in the VM and from a checkout with the pool's credentials:
+
+```bash
+jq '.lanes, .held_lanes' ~/.local/share/omarchy-agent/sets/host/run/capacity.json   # x86_64 emulated, via qemu, page16k false; nothing held
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT name, page_kb, lanes, pool_cap_units FROM hosts WHERE owner_login = '<the Studio owner>' AND status = 'active'"
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, name, arch, json_extract(params, '$.refused_4k') AS refused_4k FROM build_tasks WHERE status = 'queued' AND json_extract(params, '$.needs_native') IS 1"
+```
+
+The journal shows each build the VM sends back as a `build` warning whose
+payload says `"refused_4k": true`.
+
+**Without it**: *Drain* the VM's registration (its tasks end, then it is
+handed nothing), *Retire* the host, and lift the Studio's cap. What the VM
+sent back stays `refused_4k`, for a native host; what the Studio sent back
+waits for a native host or another lane on 4K pages, as before the VM.
 
 ### Once: the updater (#277)
 

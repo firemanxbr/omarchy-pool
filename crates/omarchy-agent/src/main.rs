@@ -641,7 +641,9 @@ fn mac_facts(
         emulate: toml.caps.emulate.as_deref(),
         x86_64_image: x86.as_deref(),
     };
-    let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img| probe::rosetta_lane(how, img));
+    let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img, page_kb| {
+        probe::rosetta_lane(how, img, page_kb)
+    });
     match said {
         Some(probe::LaneSaid::Note(s) | probe::LaneSaid::Warning(s)) => eprintln!("capacity: {s}"),
         None => {}

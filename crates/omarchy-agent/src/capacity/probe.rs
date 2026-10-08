@@ -429,38 +429,64 @@ impl sandbox::Run for Probe<'_> {
 /// The smoke run of an emulated lane through the engine's CLI (design v2 §15's
 /// `emulation(arch, image)`, which the driver trait wraps with `capacity()` once the run
 /// loop detects, #315): `docker run --rm --network none --platform linux/<arch>
-/// --entrypoint /usr/bin/true <image by digest>`, then `pacman --version` the same way.
-/// The architecture and the image are checked against a closed grammar before they reach
-/// the argv.
+/// --entrypoint /usr/bin/true <image by digest>`, then `pacman --version` the same way,
+/// and for an `x86_64` lane on 4K pages `sudo -V` (`loader`, #413). The architecture and
+/// the image are checked against a closed grammar before they reach the argv.
 impl Smoke for Probe<'_> {
     fn emulation(&self, arch: &str, image: &str) -> Result<(), String> {
-        let platform = emulation::platform_of(arch)
-            .ok_or_else(|| format!("{arch:?} is not an architecture the pool builds"))?;
-        if !emulation::image_ok(image) {
-            return Err(format!("{image:?} is not an image by digest"));
+        let platform = smoke_platform(arch, image)?;
+        for step in emulation::STEPS {
+            self.smoke_step(platform, image, step)?;
         }
-        for (entry, args, says) in emulation::STEPS {
-            let mut c = self.docker();
-            c.args([
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--platform",
-                platform,
-                "--entrypoint",
-                entry,
-                image,
-            ])
-            .args(args);
-            let out = run(c, PROBE_TIMEOUT).map_err(|e| format!("{entry}: {e}"))?;
-            if !out.contains(says) {
-                return Err(format!(
-                    "{entry} {}: printed {:?}, not {says:?}",
-                    args.join(" "),
-                    out.trim().chars().take(120).collect::<String>()
-                ));
-            }
+        Ok(())
+    }
+
+    fn loader(&self, arch: &str, image: &str) -> Result<(), String> {
+        let platform = smoke_platform(arch, image)?;
+        self.smoke_step(platform, image, emulation::LOADER)
+    }
+}
+
+/// The engine's platform of a smoke run, once its architecture and image read: an
+/// architecture the pool builds, an image by digest.
+fn smoke_platform(arch: &str, image: &str) -> Result<&'static str, String> {
+    let platform = emulation::platform_of(arch)
+        .ok_or_else(|| format!("{arch:?} is not an architecture the pool builds"))?;
+    if !emulation::image_ok(image) {
+        return Err(format!("{image:?} is not an image by digest"));
+    }
+    Ok(platform)
+}
+
+impl Probe<'_> {
+    /// One container of an emulated lane's smoke run: `docker run --rm --network none
+    /// --platform <platform> --entrypoint <entry> <image> <args…>`, which must print `says`.
+    fn smoke_step(
+        &self,
+        platform: &str,
+        image: &str,
+        (entry, args, says): (&str, &[&str], &str),
+    ) -> Result<(), String> {
+        let mut c = self.docker();
+        c.args([
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--platform",
+            platform,
+            "--entrypoint",
+            entry,
+            image,
+        ])
+        .args(args);
+        let out = run(c, PROBE_TIMEOUT).map_err(|e| format!("{entry}: {e}"))?;
+        if !out.contains(says) {
+            return Err(format!(
+                "{entry} {}: printed {:?}, not {says:?}",
+                args.join(" "),
+                out.trim().chars().take(120).collect::<String>()
+            ));
         }
         Ok(())
     }
@@ -470,10 +496,19 @@ impl Smoke for Probe<'_> {
 /// the emulated lane's own ([`Smoke`], #338) on `linux/amd64` — the release's `x86_64`
 /// build image, by digest, starts `/usr/bin/true` and answers `pacman --version`. In a
 /// Colima VM started with `--vz-rosetta` the engine runs it through Rosetta, on the VM's
-/// 4K pages.
-pub fn rosetta_lane(p: &Probe<'_>, image_x86_64: &str) -> Result<(), String> {
+/// 4K pages, where the lane takes the builds the Studio's 16K pages sent back (#413): on
+/// pages of `page_kb` under 16 it also runs the loader check ([`emulation::LOADER`],
+/// [`emulation::checks_loader`]), as detection does for qemu's lane, and a lane whose
+/// `sudo -V` fails is off.
+pub fn rosetta_lane(p: &dyn Smoke, image_x86_64: &str, page_kb: u32) -> Result<(), String> {
     p.emulation("x86_64", image_x86_64)
-        .map_err(|e| format!("the x86_64 smoke run: {e}"))
+        .map_err(|e| format!("the x86_64 smoke run: {e}"))?;
+    if emulation::checks_loader("x86_64", page_kb) {
+        p.loader("x86_64", image_x86_64).map_err(|e| {
+            format!("the x86_64 smoke run: {e} — the loader check of a lane on 4K pages (#413)")
+        })?;
+    }
+    Ok(())
 }
 
 /// Whether `image` is in the engine's image store (`docker image inspect`), so a run of it
@@ -510,12 +545,13 @@ pub enum LaneSaid {
 
 /// The facts of an engine in a Mac's VM: the VM's level; in the `omarchy` VM its own
 /// `MemAvailable` and, with Rosetta, the `x86_64` lane once `smoke` ([`rosetta_lane`])
-/// passed on the release's image — unless the envelope's `emulate` leaves it out, which
+/// passed on the release's image and the VM's page size in KB (the lane's `page16k`, and
+/// whether its loader check runs) — unless the envelope's `emulate` leaves it out, which
 /// no count may widen.
 pub fn in_mac_vm(
     facts: Facts,
     vm: &MacVm<'_>,
-    smoke: &mut dyn FnMut(&str) -> Result<(), String>,
+    smoke: &mut dyn FnMut(&str, u32) -> Result<(), String>,
 ) -> (Facts, Option<LaneSaid>) {
     let mut f = facts.in_vm(vm.kind);
     if vm.kind != VmKind::Dedicated {
@@ -533,7 +569,7 @@ pub fn in_mac_vm(
         (true, true, None) => Some(LaneSaid::Warning(
             "no x86_64 lane through Rosetta: the release names no x86_64 build image".into(),
         )),
-        (true, true, Some(img)) => match smoke(img) {
+        (true, true, Some(img)) => match smoke(img, f.page_kb()) {
             Ok(()) => {
                 f = f.with_lane("x86_64", "rosetta");
                 None

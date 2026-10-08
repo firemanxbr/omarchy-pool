@@ -13,6 +13,12 @@
  * - a legacy registration's lease keeps today's word: its lane, written at
  *   the claim from its labels, and for a lease taken before the claim wrote
  *   lanes, its labels;
+ * - a 4K-page emulated lane (#413, D33 amended; the Studio's x86_64 VM)
+ *   takes what the Studio's 16K-page lane sent back, its attempt given back
+ *   once more; its own `needs_native` marks the task `refused_4k`, which no
+ *   emulated lane takes again and a native host does — and so does any
+ *   emulated lane's `needs_native` for a task that already carried one,
+ *   whatever the host's last report says of its pages;
  * - the claim takes a host's emulated lanes with how they run (`via`,
  *   `page16k`) and its held lanes with their reasons, for the host page;
  * - a job with helper containers is read by the claim's statements where
@@ -53,6 +59,8 @@ const capOf = (b: Box) => ({ cpus: b.cpus, mem_gb: b.mem_gb, disk_free_gb: { wor
 /** The Studio: aarch64 native, x86_64 emulated through qemu on 16K pages. */
 const STUDIO: Box = { cpus: 12, mem_gb: 32, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: true }] };
 const VPS86: Box = { cpus: 8, mem_gb: 16, lanes: [{ arch: "x86_64", mode: "native" }] };
+/** The Studio's x86_64 VM (#413): a KVM guest on the Studio with a 4K-page aarch64 kernel, enrolled as a host of its own — x86_64 emulated through qemu on 4K pages. */
+const VM4K: Box = { cpus: 6, mem_gb: 12, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: false }] };
 
 const boxes = new Map<string, Box>();
 let hostSeq = 0;
@@ -185,6 +193,102 @@ describe("needs_native per lane (#338, design v2 §8.6)", () => {
     expect(c3.json.task).toMatchObject({ id: d, lane: "native" });
     expect((await call("POST", `/factory/tasks/${d}/fail`, { token: c3.json.token, body: { error: "exit 96", final: false, needs_native: true } })).json).toEqual({ task: d, status: "queued", attempts: 1 });
     await env.DB.prepare("UPDATE build_workers SET revoked_at = '2026-01-01T00:00:00Z' WHERE id IN ('rev-x86', 'rev-arm')").run();
+  });
+});
+
+describe("needs_native and a 4K-page emulated lane (#413, D33 amended)", () => {
+  const fail = (id: number, token: string) => call("POST", `/factory/tasks/${id}/fail`, { token, body: { error: rustc, duration_ms: 30000, final: false, needs_native: true } });
+
+  it("what the Studio's 16K lane sends back the VM's 4K lane takes; the VM's own needs_native marks it refused_4k — no emulated lane again, a native host at once", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    await seedHost("studio-v", STUDIO);
+    const id = await seedTask({ arch: "x86_64", ago: 10 });
+    const c = await claim("studio-v");
+    expect(c.json.task).toMatchObject({ id, lane: "emulated", attempts: 1 });
+    expect((await fail(id, c.json.token)).json).toEqual({ task: id, status: "queued", attempts: 0 });
+    expect(JSON.parse((await taskOf(id)).params)).toEqual({ needs_native: 1 });
+    expect((await claim("studio-v")).status).toBe(204);
+    // The VM, its x86_64 lane on 4K pages: it takes the build sent back.
+    await seedHost("vm-v", VM4K);
+    const v = await claim("vm-v");
+    expect(v.json.task).toMatchObject({ id, lane: "emulated", attempts: 1 });
+    // It cannot start it either: back again, the attempt given back once more, and marked for a native lane only.
+    expect((await fail(id, v.json.token)).json).toEqual({ task: id, status: "queued", attempts: 0 });
+    const row = await taskOf(id);
+    expect(row).toMatchObject({ status: "queued", attempts: 0, lease_owner: null });
+    expect(JSON.parse(row.params)).toEqual({ needs_native: 1, refused_4k: 1 });
+    const e = (await lastBuildEvent())!;
+    expect(e.summary).toMatch(/^emu\d+ for x86_64 on vm-v needs a native x86_64 worker — back in the queue for one \(its lane is on 4K pages: no emulated lane takes it again\)/);
+    expect(JSON.parse(e.payload)).toMatchObject({ needs_native: true, refused_4k: true, attempts: 0 });
+    // No emulated lane takes it, now or an hour and a half on.
+    expect((await claim("vm-v")).status).toBe(204);
+    expect((await claim("studio-v")).status).toBe(204);
+    vi.setSystemTime(t0 + 90 * MIN);
+    expect((await claim("vm-v")).status).toBe(204);
+    expect((await claim("studio-v")).status).toBe(204);
+    await seedHost("vps-v", VPS86);
+    expect((await claim("vps-v")).json.task).toMatchObject({ id, lane: "native", attempts: 1, params: { needs_native: 1, refused_4k: 1 } });
+  });
+
+  it("a build the VM's lane is first to fail gets both marks at once: the Studio's 16K lane is never tried after a 4K one", async () => {
+    await seedHost("vm-w", VM4K);
+    const id = await seedTask({ arch: "x86_64", params: { hint: "cargo" }, ago: 10 });
+    const c = await claim("vm-w");
+    expect(c.json.task).toMatchObject({ id, lane: "emulated" });
+    expect((await fail(id, c.json.token)).json).toEqual({ task: id, status: "queued", attempts: 0 });
+    expect(JSON.parse((await taskOf(id)).params)).toEqual({ hint: "cargo", needs_native: 1, refused_4k: 1 });
+    await seedHost("studio-w", STUDIO);
+    expect((await claim("studio-w")).status).toBe(204);
+    expect((await claim("vm-w")).status).toBe(204);
+  });
+
+  it("a host whose claim says 4K pages and whose last report does not: what it sends back a second time is marked refused_4k all the same — two attempts back at most", async () => {
+    // The VM enrolled while its x86_64 lane was held (a handler without F, say), so its report wrote the native lane only; the owner
+    // fixed it, and the dispatcher claims with the 4K-page lane before a report lands. Selection reads the claim, handleFail the report.
+    await seedHost("vm-r", VM4K);
+    await env.DB.prepare("UPDATE hosts SET lanes = ? WHERE worker_id = 'vm-r'").bind(JSON.stringify([{ arch: "aarch64", mode: "native" }])).run();
+    // A build the Studio sent back: the claim's 4K-page lane takes it, and its refusal there marks it refused_4k at once.
+    const sent = await seedTask({ arch: "x86_64", params: { needs_native: 1 }, ago: 10 });
+    const c = await claim("vm-r");
+    expect(c.json.task).toMatchObject({ id: sent, lane: "emulated", attempts: 1 });
+    expect((await fail(sent, c.json.token)).json).toEqual({ task: sent, status: "queued", attempts: 0 });
+    expect(JSON.parse((await taskOf(sent)).params)).toEqual({ needs_native: 1, refused_4k: 1 });
+    expect(JSON.parse((await lastBuildEvent())!.payload)).toMatchObject({ needs_native: true, refused_4k: true, attempts: 0 });
+    expect((await claim("vm-r")).status).toBe(204);
+    // A build this lane is first to fail: the report does not say 4K pages, so needs_native only — then the claim's lane takes it
+    // again, and its second refusal marks it refused_4k. No emulated lane takes it a third time.
+    const id = await seedTask({ arch: "x86_64", ago: 10 });
+    const first = await claim("vm-r");
+    expect(first.json.task).toMatchObject({ id, lane: "emulated", attempts: 1 });
+    expect((await fail(id, first.json.token)).json).toEqual({ task: id, status: "queued", attempts: 0 });
+    expect(JSON.parse((await taskOf(id)).params)).toEqual({ needs_native: 1 });
+    const second = await claim("vm-r");
+    expect(second.json.task).toMatchObject({ id, lane: "emulated", attempts: 1 });
+    expect((await fail(id, second.json.token)).json).toEqual({ task: id, status: "queued", attempts: 0 });
+    expect(JSON.parse((await taskOf(id)).params)).toEqual({ needs_native: 1, refused_4k: 1 });
+    expect((await claim("vm-r")).status).toBe(204);
+  });
+
+  it("a lease taken before the refused_4k mark landed gets no attempt back: a third needs_native spends its attempt (#413)", async () => {
+    // A claim read the task with no mark; before its fail, another lane marked it refused_4k. Its needs_native gives nothing back.
+    await seedHost("vm-s", VM4K);
+    const id = await seedTask({ arch: "x86_64", ago: 10 });
+    const c = await claim("vm-s");
+    expect(c.json.task).toMatchObject({ id, lane: "emulated", attempts: 1 });
+    await env.DB.prepare("UPDATE build_tasks SET params = ? WHERE id = ?").bind(JSON.stringify({ needs_native: 1, refused_4k: 1 }), id).run();
+    expect((await fail(id, c.json.token)).json).toEqual({ task: id, status: "queued", attempts: 1 });
+    expect(JSON.parse((await taskOf(id)).params)).toEqual({ needs_native: 1, refused_4k: 1 });
+    expect((await claim("vm-s")).status).toBe(204);
+  });
+
+  it("from the VM's native lane a needs_native is refused as from any native lane: no mark of either kind", async () => {
+    await seedHost("vm-n", VM4K);
+    const id = await seedTask({ arch: "aarch64" });
+    const c = await claim("vm-n");
+    expect(c.json.task).toMatchObject({ id, lane: "native" });
+    expect((await fail(id, c.json.token)).json).toEqual({ task: id, status: "queued", attempts: 1 });
+    expect((await taskOf(id)).params).toBeNull();
   });
 });
 

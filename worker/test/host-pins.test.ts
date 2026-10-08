@@ -312,7 +312,7 @@ describe("Move pins here: what moves, what stays, and the switch's drain (#345, 
     expect(r.json.moved.sort()).toEqual([T.native, T.emulated].sort());
     const stay = new Map((r.json.stay as { task: number; from: string; why: string }[]).map((s) => [s.task, s]));
     expect([...stay.keys()].sort()).toEqual([T.needsNative, T.ownCopy, T.big, T.otherAgent].sort());
-    expect(stay.get(T.needsNative)).toMatchObject({ from: "m1-review-x86_64", why: "it needs a native x86_64 lane, and this host runs x86_64 emulated" });
+    expect(stay.get(T.needsNative)).toMatchObject({ from: "m1-review-x86_64", why: "it needs a native or 4K-page x86_64 lane, and this host runs x86_64 emulated on 16K pages" });
     expect(stay.get(T.ownCopy)!.why).toContain("is not built on its requester's host (D35)");
     expect(stay.get(T.big)!.why).toContain("could not hold it once idle at its size");
     expect(stay.get(T.otherAgent)!.why).toBe(`its pin chose the agent openai/gpt-5, and this host's is ${CLAUDE}`);
