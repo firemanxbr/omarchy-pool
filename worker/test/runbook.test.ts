@@ -51,11 +51,16 @@ const LEGACY_TOOLS = ["./rollout.sh", "setup.sh", "register.sh", "omarchy-worker
 describe("the runbook's The Studio host (#346, design v2 §21.1)", () => {
   const studio = cut(runbook, "the-studio-host");
 
-  it("is a real section with two subsections, its retired legacy set and After a release, which the reviewing section follows", () => {
+  it("is a real section with three subsections, the Studio's x86_64 VM (#413), its retired legacy set and After a release, which the reviewing section follows", () => {
     const heads = outline(runbook);
     const at = heads.findIndex((h) => h.id === "the-studio-host");
     expect(heads[at].level).toBe(2);
-    expect(heads.slice(at + 1, at + 4).map((h) => [h.level, h.id])).toEqual([[3, "its-legacy-set-retired"], [3, "after-a-release"], [2, "maintainers-reviewing-contributed-builds"]]);
+    expect(heads.slice(at + 1, at + 5).map((h) => [h.level, h.id])).toEqual([
+      [3, "the-studio-s-x86-64-vm"],
+      [3, "its-legacy-set-retired"],
+      [3, "after-a-release"],
+      [2, "maintainers-reviewing-contributed-builds"],
+    ]);
     // The canary, the switch and the legacy set's one-time step were procedures for the switch, done: none is a heading any more.
     for (const gone of ["the-studio-canary", "the-studio-switch", "once-the-updater-277"]) expect(heads.map((h) => h.id), gone).not.toContain(gone);
   });
