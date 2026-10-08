@@ -1116,6 +1116,35 @@ does not have fails the next community task `lost` before anything of it
 runs, and the next claim holds (`want: 0`, `capacity.sandbox_held`). By hand it needs an engine whose
 `docker info` lists `runsc` (gVisor's `runsc install`, then a restart of
 docker) and runs under the engine lock; elsewhere it says it skipped.
+`bash tests/userns-remap.sh` (CI's `userns-remap` job on ubuntu-latest, with
+`"userns-remap": "default"` merged into the runner's `daemon.json` and docker
+restarted, which makes `dockremap` and its subordinate range itself; #405,
+design v2 §19.1) runs a plain build on a remapped daemon: a container's
+`uid_map` and `gid_map` give the remapped root B:G, not 0; the agent's
+capacity probe says `isolation: "subuid"`, and `dispatcher-env --write` from
+an envelope with `userns_remap = true` renders `OMARCHY_AGENT_HELD=userns-remap`
+and no `OMARCHY_AGENT_USER` (#406); the real dispatcher then runs as the host
+set runs it there — root in the init user namespace (`userns_mode: host`),
+docker's default capabilities (`CapEff` `00000000a80425fb`, through
+`setpriv`) — with that env file and the token's file, and a stubbed pool hands
+it a community build whose stub script repeats the real script's ownership
+steps one for one (its log through a pipe into `/task/log/task.log` and its
+verdict as `task_mode` writes them, the builder made and given `/build/cache`,
+its package's cache, `/build/pkg` and `/build/out`, the package built with
+`bsdtar` as the builder, a download directory of pacman's given to `alpm`):
+the task container and its egress sidecar stay remapped (`uid_map` `0 B` inside,
+no `UsernsMode`, no `User`, no `agent.env` mounted), its writable directories
+(`out`, `log`, `build`, `build/cache`, `pkgcache`) are B's while `in/` and the
+0700 task directory stay the dispatcher's, the builder's file in its build
+cache is B plus its uid on the host, and the build is uploaded and completed
+with its job token, its containers and network gone; the dispatcher says the
+model kinds are held, every claim's `agent` says why, a draft leased anyway is
+handed back `lost` before anything of it runs, and `docker events` lists no
+probe or agent sidecar; then the dispatcher's real-engine tests run on that
+engine (`dispatch::engine`: a task network with no gateway, and the keys test's
+remapped branch). By hand it needs such a daemon and root or passwordless sudo
+(the dispatcher runs as root, and the work root it makes goes with `sudo`),
+and runs under the engine lock; elsewhere it says it skipped.
 `bash tests/host-key-tpm.sh` (CI's `host-key-tpm` job on ubuntu-latest, with
 swtpm, tpm2-tools, tpm2-abrmd and its TCTI from apt; #330) runs the host key
 in a TPM end to end: a TPM 2.0 (swtpm) behind tpm2-abrmd on the script's own
