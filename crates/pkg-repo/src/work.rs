@@ -1800,7 +1800,7 @@ pub(crate) fn execute(
         "health" => {
             let ring = s(&task.params, "ring");
             let arch = s(&task.params, "arch");
-            let ok = script(opts, token, "tests/health-check.sh", &[&ring, &arch])?;
+            let ok = health(opts, token, &ring, &arch)?;
             if ok {
                 Ok(Outcome {
                     summary: format!("{ring}/{arch} healthy"),
@@ -1948,11 +1948,17 @@ fn keyrings(opts: &WorkOptions) -> Result<PathBuf> {
 fn keyrings_for(opts: &WorkOptions, required: &[String]) -> Result<PathBuf> {
     let dir = opts.work_dir.join("keyrings");
     let fresh = fresh_within(&dir.join(".fetched"), Duration::from_secs(86400));
-    let present = |name: &str| dir.join(format!("{name}.gpg")).exists();
+    let present = |name: &str| keyring_there(&dir, name);
     if fresh && present("archlinux") && required.iter().all(|k| present(k)) {
         return Ok(dir);
     }
     keyrings_in(&dir, &repo_dir(opts)?, required)
+}
+
+/// `<name>.gpg` in `dir`, with something in it: an empty file verifies nothing, so it is
+/// fetched again rather than taken for a keyring, as `tests/health-check.sh` refuses one (#414).
+fn keyring_there(dir: &Path, name: &str) -> bool {
+    std::fs::metadata(dir.join(format!("{name}.gpg"))).is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
 /// The keyrings in `dir`, refreshed daily by `tests/fetch-keyrings.sh` of the checkout `repo`
@@ -1961,7 +1967,7 @@ pub(crate) fn keyrings_in(dir: &Path, repo: &Path, required: &[String]) -> Resul
     let dir = dir.to_path_buf();
     let stamp = dir.join(".fetched");
     let fresh = fresh_within(&stamp, Duration::from_secs(86400));
-    let present = |name: &str| dir.join(format!("{name}.gpg")).exists();
+    let present = |name: &str| keyring_there(&dir, name);
     if fresh && present("archlinux") && required.iter().all(|k| present(k)) {
         return Ok(dir);
     }
@@ -1981,7 +1987,16 @@ pub(crate) fn keyrings_in(dir: &Path, repo: &Path, required: &[String]) -> Resul
             eprintln!("warning: the upstream keyrings could not be refreshed; going on with the ones here");
             return Ok(dir);
         }
-        anyhow::bail!("fetching the upstream keyrings failed, and a required one is not here yet");
+        // Which ones, by name: a health check's job says what this worker lacks (#414).
+        let missing: Vec<String> = std::iter::once("archlinux")
+            .chain(required.iter().map(String::as_str))
+            .filter(|k| !present(k))
+            .map(|k| format!("{k}.gpg"))
+            .collect();
+        anyhow::bail!(
+            "fetching the upstream keyrings failed, and {} is not here yet",
+            missing.join(", ")
+        );
     }
     std::fs::write(&stamp, "")?;
     Ok(dir)
@@ -2435,6 +2450,72 @@ fn scratch_of(opts: &WorkOptions) -> PathBuf {
         .unwrap_or_else(|| opts.work_dir.join("tmp"))
 }
 
+/// The keyrings a health check of `arch` needs beside its image's own (#414): those of the sources
+/// that arch's include serves (`worker/src/scheduler.ts`, `SYNC_SOURCES`). chaotic is left out of
+/// the check, and archlinux / archlinuxarm come with the base image. `tests/health-check.sh` lists
+/// the same in its `NEED`; a test reads both.
+fn check_keyrings(arch: &str) -> &'static [&'static str] {
+    if arch == "aarch64" {
+        &["omarchy", "omarchy-asahi", "asahi-alarm"]
+    } else {
+        &["omarchy"]
+    }
+}
+
+/// What a health check's job says when this worker cannot check `what` (#414).
+fn no_keyrings(what: &str) -> String {
+    format!("this worker has no keyrings to check {what} with")
+}
+
+/// The pool's keyrings a health check of `arch` needs, in this worker's keyrings directory —
+/// fetched by the release's `tests/fetch-keyrings.sh` and refreshed daily, as a sync's are — or
+/// why not (#414). Nothing filled a host's `<work root>/jobs/keyrings` before its pool job's
+/// check, which then failed Omarchy's own packages on a key it never had, and its red blocked
+/// rc → stable. A worker without them says nothing about a ring: its task fails as its own fault
+/// (not final, so another worker takes it), and the check never runs, so no row is posted.
+fn health_keyrings(opts: &WorkOptions, arch: &str, what: &str) -> Result<()> {
+    let need: Vec<String> = check_keyrings(arch)
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect();
+    let dir = keyrings_for(opts, &need).with_context(|| no_keyrings(what))?;
+    // A fetch that exited 0 without one of them (a release whose script lacks it) is no keyring.
+    let missing: Vec<String> = need
+        .iter()
+        .filter(|k| !keyring_there(&dir, k))
+        .map(|k| format!("{k}.gpg"))
+        .collect();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "{}: {} is not in {} after tests/fetch-keyrings.sh",
+        no_keyrings(what),
+        missing.join(", "),
+        dir.display()
+    );
+    Ok(())
+}
+
+/// What `tests/health-check.sh` exits with when a keyring its arch needs is not in `OMARCHY_KEYRINGS`:
+/// it ran no check and posted nothing (#414).
+const HEALTH_NO_KEYRINGS: i32 = 3;
+
+/// The health check of `ring` on `arch` (`tests/health-check.sh`), the keyrings it needs first
+/// (#414) — every job that runs it comes here; true when it passed. A check the script refused
+/// for a keyring is this worker's fault, never a verdict on the ring.
+fn health(opts: &WorkOptions, token: &Arc<Mutex<String>>, ring: &str, arch: &str) -> Result<bool> {
+    let what = format!("{ring}/{arch}");
+    health_keyrings(opts, arch, &what)?;
+    let status = script_status(opts, token, "tests/health-check.sh", &[ring, arch])?;
+    if status.code() == Some(HEALTH_NO_KEYRINGS) {
+        return Err(anyhow!(
+            "{}: tests/health-check.sh found a keyring missing from {}",
+            no_keyrings(&what),
+            opts.work_dir.join("keyrings").display()
+        ));
+    }
+    Ok(status.success())
+}
+
 /// Runs one of the pipeline's scripts with the job's credential; true when it exited 0.
 fn script(
     opts: &WorkOptions,
@@ -2442,6 +2523,16 @@ fn script(
     rel: &str,
     args: &[&str],
 ) -> Result<bool> {
+    Ok(script_status(opts, token, rel, args)?.success())
+}
+
+/// The same, with how it exited.
+fn script_status(
+    opts: &WorkOptions,
+    token: &Arc<Mutex<String>>,
+    rel: &str,
+    args: &[&str],
+) -> Result<std::process::ExitStatus> {
     let repo = repo_dir(opts)?;
     let exe = std::env::current_exe()?;
     let bin = exe.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -2471,7 +2562,7 @@ fn script(
     }
     let status = stop::status(&mut cmd).with_context(|| format!("running {rel}"))?;
     stop::check()?;
-    Ok(status.success())
+    Ok(status)
 }
 
 /// A rollback: the ring pointed at an earlier release — all of it, or one
@@ -3190,17 +3281,24 @@ fn promote_job(
     } else {
         Some(only.as_str())
     };
+    // The keyrings of every health check this job runs, first (#414): a worker that cannot
+    // get them fails here — forced or not — before any evidence, gate or promotion, and so
+    // before `to` changes; its post-promotion check could only roll back what it promoted.
+    for arch in &arches {
+        health_keyrings(opts, arch, &format!("{from} → {to} on {arch}"))?;
+    }
     // `force` (a maintainer's emergency, queued by hand) skips the evidence
     // and the gate; the health check of the target still runs and still
     // rolls back.
     let forced = s(&task.params, "force") == "yes";
     if !forced {
         // Evidence: health and ABI of the source ring, both architectures. The
-        // scripts record events; the gate reads them. Failures are evidence too.
+        // scripts record events; the gate reads them. Failures are evidence too;
+        // a check this worker could not run is not (#414), and fails the job.
         // The health check is the soak and runs every time; the ABI verdict of
         // an unchanged release stands (gate.rs) and is not paid for again.
         for arch in &arches {
-            let _ = script(opts, token, "tests/health-check.sh", &[&from, arch]);
+            health(opts, token, &from, arch)?;
             if gate::abi_evidence_stands(job, &from, arch, ABI_MAX_AGE_HOURS).unwrap_or(false) {
                 eprintln!("abi: {from} {arch}: the current release's verdict stands, not repeated");
             } else {
@@ -3254,7 +3352,7 @@ fn promote_job(
     }
     let mut unhealthy = Vec::new();
     for arch in &arches {
-        if !script(opts, token, "tests/health-check.sh", &[&to, arch])? {
+        if !health(opts, token, &to, arch)? {
             unhealthy.push(arch.clone());
         }
     }
@@ -3358,7 +3456,7 @@ fn verify_fast_track(
     }
     let mut unhealthy = Vec::new();
     for arch in arches {
-        if !script(opts, token, "tests/health-check.sh", &[ring, arch])? {
+        if !health(opts, token, ring, arch)? {
             unhealthy.push(arch);
         }
     }
@@ -3395,6 +3493,12 @@ fn verify_fast_track(
 /// stable, render, verify on both architectures and roll back a ring whose
 /// health fails — what security.yml did on GitHub, as one pulled task.
 fn security_job(opts: &WorkOptions, job: &Api, token: &Arc<Mutex<String>>) -> Result<Outcome> {
+    // The keyrings of the fast-track's health checks, first (#414): `security::fast_track`
+    // writes rc and stable before `verify_fast_track` checks them, so a worker that cannot
+    // check fails here — before the feeds are fetched, the matches written or a ring changed.
+    for arch in ["x86_64", "aarch64"] {
+        health_keyrings(opts, arch, &format!("a fast-track on {arch}"))?;
+    }
     let report = security::run(job, &fetch_feeds(opts, job)?)?;
     let matched = format!(
         "{} advisories, {} vulnerable / {} fixed matches, {} in KEV",
@@ -4651,12 +4755,14 @@ mod orders_tests {
     }
 
     /// A pool on a local port: each request answered as `answer(method, path, how many of that path before)` says, and kept.
-    struct FakePool {
-        url: String,
-        seen: Arc<Mutex<Vec<(String, String, String)>>>,
+    pub(super) struct FakePool {
+        pub(super) url: String,
+        pub(super) seen: Arc<Mutex<Vec<(String, String, String)>>>,
     }
 
-    fn fake_pool(answer: impl Fn(&str, &str, usize) -> (u16, String) + Send + 'static) -> FakePool {
+    pub(super) fn fake_pool(
+        answer: impl Fn(&str, &str, usize) -> (u16, String) + Send + 'static,
+    ) -> FakePool {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -5034,6 +5140,248 @@ mod stop_tests {
             plain.post_json("/factory/x", &serde_json::json!({})),
             Err(RepoError::Stopped)
         ));
+    }
+}
+
+/// #414: every job that runs `tests/health-check.sh` gets the pool's keyrings first, and a
+/// worker that cannot get them gives no verdict — on a legacy worker as on a host's pool job.
+#[cfg(test)]
+mod keyrings_tests {
+    use super::orders_tests::fake_pool;
+    use super::{check_keyrings, execute, fail_body, Outcome, Task, WorkOptions};
+    use std::sync::{Arc, Mutex};
+
+    /// What the real `tests/fetch-keyrings.sh` leaves: every keyring a health check needs, and
+    /// archlinux, which a worker's keyrings always hold.
+    const FETCH_ALL: &str =
+        "for k in archlinux omarchy omarchy-asahi asahi-alarm; do echo key > \"$1/$k.gpg\"; done\n";
+
+    /// A worker on a stub checkout — `tests/fetch-keyrings.sh` running `fetch`,
+    /// `tests/health-check.sh` running `check` — with an empty work root, its pool at `api`.
+    fn worker(api: &str, fetch: &str, check: &str) -> (tempfile::TempDir, WorkOptions) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("release");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/fetch-keyrings.sh"), fetch).unwrap();
+        std::fs::write(repo.join("tests/health-check.sh"), check).unwrap();
+        let opts = WorkOptions {
+            api: api.into(),
+            pool: api.into(),
+            worker_token: String::new(),
+            arch: "aarch64".into(),
+            kinds: vec!["health".into()],
+            shared: false,
+            labels: serde_json::json!({}),
+            once: true,
+            idle_exit: 0,
+            work_dir: dir.path().join("work"),
+            repo_dir: Some(repo),
+            scratch: None,
+        };
+        (dir, opts)
+    }
+
+    fn task(kind: &str, params: &serde_json::Value) -> Task {
+        serde_json::from_value(serde_json::json!({ "id": 414, "kind": kind, "name": kind, "arch": "x86_64", "trust": "project", "params": params })).unwrap()
+    }
+
+    fn token() -> Arc<Mutex<String>> {
+        Arc::new(Mutex::new("omj.t".to_owned()))
+    }
+
+    fn failed(r: anyhow::Result<Outcome>) -> anyhow::Error {
+        match r {
+            Ok(o) => panic!("it did not fail: {}", o.summary),
+            Err(e) => e,
+        }
+    }
+
+    /// The script's `NEED` of each arch is `check_keyrings`: what the worker fetches first is
+    /// what the check refuses to run without.
+    #[test]
+    fn the_checks_need_is_what_the_worker_fetches_first() {
+        let script = include_str!("../../../tests/health-check.sh");
+        for arch in ["x86_64", "aarch64"] {
+            let line = script
+                .lines()
+                .find(|l| l.trim_start().starts_with(&format!("{arch})")))
+                .unwrap_or_else(|| panic!("no {arch}) case in tests/health-check.sh"));
+            let need = line
+                .split("NEED=(")
+                .nth(1)
+                .and_then(|r| r.split(')').next())
+                .unwrap_or_else(|| panic!("no NEED in: {line}"));
+            assert_eq!(
+                need.split_whitespace().collect::<Vec<_>>(),
+                check_keyrings(arch),
+                "{arch}: {line}"
+            );
+        }
+        assert_eq!(check_keyrings("x86_64"), ["omarchy"]);
+        assert_eq!(
+            check_keyrings("aarch64"),
+            ["omarchy", "omarchy-asahi", "asahi-alarm"]
+        );
+    }
+
+    /// A health job on an empty work root: the keyrings are in `OMARCHY_KEYRINGS` before its check
+    /// runs, and stamped, so the next check within the day fetches nothing.
+    #[test]
+    fn a_health_job_fetches_the_keyrings_its_check_needs_first() {
+        let (dir, opts) = worker(
+            "http://127.0.0.1:1",
+            &format!("echo fetched >> \"$1/../fetches\"; {FETCH_ALL}"),
+            "ls \"$OMARCHY_KEYRINGS\" > \"$OMARCHY_WORK_DIR/seen\"\n",
+        );
+        let t = task(
+            "health",
+            &serde_json::json!({ "ring": "rc", "arch": "aarch64" }),
+        );
+        let done = execute(&opts, &t, &token()).unwrap();
+        assert_eq!(done.summary, "rc/aarch64 healthy");
+        let seen = std::fs::read_to_string(dir.path().join("work/seen")).unwrap();
+        assert_eq!(
+            seen.lines().collect::<Vec<_>>(),
+            [
+                "archlinux.gpg",
+                "asahi-alarm.gpg",
+                "omarchy-asahi.gpg",
+                "omarchy.gpg"
+            ]
+        );
+        execute(&opts, &t, &token()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("work/fetches")).unwrap(),
+            "fetched\n",
+            "fetched once a day, as a sync's are"
+        );
+    }
+
+    /// No keyrings, no verdict: a fetch that fails on an empty work root, one that leaves out a
+    /// keyring the arch needs, one that leaves it empty, and a script that finds one missing all
+    /// the same — the check never runs (no row), and the task fails as this worker's own fault,
+    /// not final.
+    #[test]
+    fn a_health_job_without_its_keyrings_fails_retryable_and_never_runs_its_check() {
+        let cases = [
+            ("exit 1\n", "x86_64", "omarchy.gpg"),
+            (
+                "for k in archlinux omarchy asahi-alarm; do echo key > \"$1/$k.gpg\"; done\n",
+                "aarch64",
+                "omarchy-asahi.gpg",
+            ),
+            (
+                "for k in archlinux omarchy-asahi asahi-alarm; do echo key > \"$1/$k.gpg\"; done; : > \"$1/omarchy.gpg\"; exit 1\n",
+                "aarch64",
+                "omarchy.gpg",
+            ),
+        ];
+        for (fetch, arch, missing) in cases {
+            let (dir, opts) = worker(
+                "http://127.0.0.1:1",
+                fetch,
+                "touch \"$OMARCHY_WORK_DIR/ran\"\n",
+            );
+            let t = task("health", &serde_json::json!({ "ring": "rc", "arch": arch }));
+            let e = failed(execute(&opts, &t, &token()));
+            let msg = format!("{e:#}");
+            assert!(
+                msg.starts_with(&format!(
+                    "this worker has no keyrings to check rc/{arch} with"
+                )) && msg.contains(missing),
+                "{arch}: {msg}"
+            );
+            assert!(
+                !dir.path().join("work/ran").exists(),
+                "{arch}: the check ran"
+            );
+            let body = fail_body(&e, 1);
+            assert_eq!(
+                (body["final"].clone(), body["needs_native"].clone()),
+                (serde_json::json!(false), serde_json::json!(false)),
+                "{body}"
+            );
+        }
+        let (_dir, opts) = worker("http://127.0.0.1:1", FETCH_ALL, "exit 3\n");
+        let t = task(
+            "health",
+            &serde_json::json!({ "ring": "rc", "arch": "x86_64" }),
+        );
+        let msg = format!("{:#}", failed(execute(&opts, &t, &token())));
+        assert!(
+            msg.starts_with("this worker has no keyrings to check rc/x86_64 with")
+                && msg.contains("tests/health-check.sh found a keyring missing"),
+            "{msg}"
+        );
+        // A check that ran and failed is the ring's: the event says why.
+        let (_dir, opts) = worker("http://127.0.0.1:1", FETCH_ALL, "exit 1\n");
+        let msg = format!("{:#}", failed(execute(&opts, &t, &token())));
+        assert_eq!(
+            msg,
+            "health check of rc/x86_64 failed (see the health event)"
+        );
+    }
+
+    /// A promotion — by evidence or forced — and a security run on a worker that cannot get the
+    /// keyrings fail before they ask the pool anything: no evidence, gate, promotion, render,
+    /// rollback or fast-track; and a promotion whose evidence check the script refused fails
+    /// before its gate reads the evidence.
+    #[test]
+    fn a_promotion_or_a_fast_track_without_the_keyrings_changes_no_ring() {
+        let pool = fake_pool(|_, _, _| (200, "{}".into()));
+        let jobs = [
+            (
+                task(
+                    "promote",
+                    &serde_json::json!({ "from": "rc", "to": "stable" }),
+                ),
+                "this worker has no keyrings to check rc → stable on x86_64 with",
+            ),
+            (
+                task(
+                    "promote",
+                    &serde_json::json!({ "from": "rc", "to": "stable", "force": "yes", "arch": "aarch64" }),
+                ),
+                "this worker has no keyrings to check rc → stable on aarch64 with",
+            ),
+            (
+                task("security", &serde_json::json!({})),
+                "this worker has no keyrings to check a fast-track on x86_64 with",
+            ),
+        ];
+        for (t, said) in jobs {
+            let (dir, opts) = worker(
+                &format!("{}/api/v1", pool.url),
+                "exit 1\n",
+                "touch \"$OMARCHY_WORK_DIR/ran\"\n",
+            );
+            let e = failed(execute(&opts, &t, &token()));
+            let msg = format!("{e:#}");
+            assert!(msg.starts_with(said), "{}: {msg}", t.kind);
+            assert_eq!(fail_body(&e, 1)["final"], false);
+            assert!(!dir.path().join("work/ran").exists());
+            assert!(
+                pool.seen.lock().unwrap().is_empty(),
+                "{}: {:?}",
+                t.kind,
+                pool.seen.lock().unwrap()
+            );
+        }
+        let (_dir, opts) = worker(&format!("{}/api/v1", pool.url), FETCH_ALL, "exit 3\n");
+        let t = task(
+            "promote",
+            &serde_json::json!({ "from": "edge", "to": "rc", "arch": "x86_64" }),
+        );
+        let msg = format!("{:#}", failed(execute(&opts, &t, &token())));
+        assert!(
+            msg.starts_with("this worker has no keyrings to check edge/x86_64 with"),
+            "{msg}"
+        );
+        assert!(
+            pool.seen.lock().unwrap().is_empty(),
+            "{:?}",
+            pool.seen.lock().unwrap()
+        );
     }
 }
 

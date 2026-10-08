@@ -36,7 +36,9 @@
 #      directory read-only, no token, no socket — while any other engine call
 #      of the job is refused; a job that hangs is killed at its timeout and
 #      failed, with what it started, while a build's lease beats on and
-#      completes
+#      completes; the check has the pool's keyrings, which the job fetched
+#      into `<work root>/jobs/keyrings` first, and a job whose fetch fails on
+#      a work root without them runs no check and fails, not final (#414)
 #   7. the task caches (#341): two community builds of packages that need the
 #      same dependency, at once — each mounts its own package's build cache
 #      (a project cache of the same name and the other package's out of its
@@ -208,9 +210,18 @@ code=$?
 docker ps >/dev/null 2>&1; echo "== docker ps: $?" >> "$out"
 echo "== runtime: $RUNTIME" >> "$out"
 echo "== data: $(ulimit -d) $(ulimit -H -d)" >> "$out"
+echo "== keyrings: $(ls "$OMARCHY_KEYRINGS" 2>&1 | tr '\n' ' ')" >> "$out"
 exit "$code"
 STUB
 chmod +x "$tmp/checkout/tests/health-check.sh"
+# The release's keyrings (#414), as tests/fetch-keyrings.sh writes them, which a pool job's health check gets first — or none,
+# while the test says the fetch fails.
+cat > "$tmp/checkout/tests/fetch-keyrings.sh" <<STUB
+#!/usr/bin/env bash
+[[ -e "$tmp/fetch-fails" ]] && exit 1
+for k in archlinux omarchy omarchy-asahi asahi-alarm; do echo key > "\$1/\$k.gpg"; done
+STUB
+chmod +x "$tmp/checkout/tests/fetch-keyrings.sh"
 
 # The pool: who the host is, tasks from tasks.jsonl one per claim (then 204), heartbeats by beats/<id> (ok | down | stop | revoked), every
 # request kept in requests.jsonl.
@@ -481,6 +492,12 @@ grep -qx '== privileged: 125' "$out" && grep -qx '== docker ps: 125' "$out" || f
 grep -qx "== runtime: $tmp/work/state/bin/omarchy-task-run" "$out" || fail "the job's RUNTIME: $(grep '== runtime' "$out")"
 # The job's 2 GB data rlimit, which pkg-repo pool-job set on itself before anything ran: its script inherits it, soft and hard.
 grep -qx '== data: 2097152 2097152' "$out" || fail "the job's memory limit: $(grep '== data' "$out")"
+# The pool's keyrings its arch's check needs, there before the check ran (#414): the job fetched them itself into <work root>/jobs,
+# where nothing had (no sync, no verify ran on this host).
+for k in omarchy $([[ "$arch" == aarch64 ]] && echo omarchy-asahi asahi-alarm); do
+  grep '^== keyrings: ' "$out" | tr ' ' '\n' | grep -qx "$k.gpg" || fail "the check ran without $k.gpg: $(grep '== keyrings' "$out")"
+done
+[[ -s "$tmp/work/jobs/keyrings/omarchy.gpg" ]] || fail "no omarchy.gpg in the pool jobs' keyrings: $(ls -la "$tmp/work/jobs/keyrings" 2>&1)"
 until_ 10 "task 20's helper, sidecar and network removed" side_gone 20
 "$RT" inspect --type container "$helper" >/dev/null 2>&1 && fail "task 20's helper survived it"
 claims_jobs() { jq -c 'select(.path == "/api/v1/factory/claim") | .body.kinds' "$tmp/requests.jsonl" | tail -n1 | grep -q '"health"'; }
@@ -503,6 +520,15 @@ running 21 || fail "task 21 was touched by task 22's kill"
 finish 21
 until_ 30 "task 21 completed" reported 21 complete
 echo "ok: a pool job that hangs is killed at its timeout and failed, with its script; a build's lease beats on and completes"
+# No keyrings, no verdict (#414): on a work root without them and a fetch that fails, a health check's job never runs its check —
+# no container, no row — and fails as this host's own fault, not final, so another worker takes it.
+rm -rf "$tmp/work/jobs/keyrings"; touch "$tmp/fetch-fails"
+give_health 23 nokeys
+until_ 60 "task 23 failed" reported 23 fail
+jq -e --arg a "$arch" '.final == false and (.error | contains("this worker has no keyrings to check nokeys/" + $a + " with"))' <<<"$(report 23 fail)" >/dev/null || fail "task 23: $(report 23 fail)"
+[[ ! -e "$tmp/work/jobs/health-nokeys.out" ]] || fail "task 23's check ran without its keyrings: $(cat "$tmp/work/jobs/health-nokeys.out")"
+rm -f "$tmp/fetch-fails"
+echo "ok: a pool job's health check gets the pool's keyrings first; one that cannot runs no check and fails, not final"
 
 # ---------- 7. the task caches (#341) ----------
 # A project cache of the same name as a community package's: a community build never reaches it.
