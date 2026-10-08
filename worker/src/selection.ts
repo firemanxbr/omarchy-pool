@@ -19,7 +19,7 @@
  *   one of an arch H runs emulated is on the emulated lane when its marks
  *   allow that lane (`emulationRefuses`: a `needs_native` one only on a lane
  *   whose host reports 4K pages, one a 4K-page lane refused too on none; D33
- *   amended, #VM4K) and it waited its threshold T, or no *eligible*
+ *   amended, #413) and it waited its threshold T, or no *eligible*
  *   native capacity exists for it — on a host whose dispatcher applies a
  *   sandboxed runtime (#330, D43), only the project's own recipe: a
  *   sandbox covers the native lane, so what a contributor wrote runs on no
@@ -59,7 +59,7 @@
  *   audits while a registration with another model was alive in the last 24
  *   hours; and an audit leaves the machine that built what it audits — the
  *   registration that built it, or one the pool cannot tell apart from it
- *   (`apart`: one owner's registrations are one machine, #VM4K) — to
+ *   (`apart`: one owner's registrations are one machine, #413) — to
  *   another that can take it now, for ELSEWHERE_MS. Each audit's lease
  *   records how independent it is (`independenceOf`);
  * - **asleep** (#329, design v2 §19.2): a host whose agent reported that it
@@ -93,7 +93,7 @@
 export type Mode = "native" | "emulated";
 /**
  * A lane, as its host's capacity reports it. `page16k` (an emulated lane's): the kernel's pages are larger than the guest's 4K — the
- * Studio's 16K under qemu (D33) — `false` on a 4K kernel (the Studio's x86_64 VM, #VM4K; a Mac's Rosetta VM). Undefined — a legacy
+ * Studio's 16K under qemu (D33) — `false` on a 4K kernel (the Studio's x86_64 VM, #413; a Mac's Rosetta VM). Undefined — a legacy
  * registration's lane, a report that does not say — counts as 16K: `emulationRefuses` keeps a `needs_native` task off it.
  */
 export interface Lane { arch: string; mode: Mode; page16k?: boolean }
@@ -184,10 +184,10 @@ export interface Candidate {
   pinned_to: string | null;
   /**
    * An emulated lane on 16K pages, or one whose pages are not known (a legacy registration's), could not start it (D33 amended,
-   * #VM4K): it waits for a native lane of its arch or an emulated one whose host reports 4K pages (`emulationRefuses`).
+   * #413): it waits for a native lane of its arch or an emulated one whose host reports 4K pages (`emulationRefuses`).
    */
   needs_native: boolean;
-  /** An emulated lane whose host reports 4K pages could not start it either (#VM4K): a native lane only. Written with `needs_native`. */
+  /** An emulated lane whose host reports 4K pages could not start it either (#413): a native lane only. Written with `needs_native`. */
   refused_4k?: boolean;
   model: boolean;
   /** The size asked for — a Retry at size, the package's page, factory/sizing — before any clamp; null: 1. */
@@ -223,7 +223,7 @@ export interface Candidate {
 
 /**
  * A registration's machine, as far as the pool tells machines apart (D36): whose registration it is. Not its host: one owner's two
- * hosts may be one machine — the Studio and the x86_64 VM it runs, each enrolled as a host of its own (#VM4K).
+ * hosts may be one machine — the Studio and the x86_64 VM it runs, each enrolled as a host of its own (#413).
  */
 export interface Machine { owner?: string | null }
 
@@ -415,7 +415,7 @@ export function laneFor(m: Pick<Member, "lanes" | "legacy" | "sandbox">, c: Pick
 }
 
 /**
- * Whether a task's marks keep it off a registration's emulated lane of its arch (D33 amended, #VM4K): `refused_4k` — a 4K-page lane
+ * Whether a task's marks keep it off a registration's emulated lane of its arch (D33 amended, #413): `refused_4k` — a 4K-page lane
  * could not start it either — off every emulated lane; `needs_native` — an emulated lane on 16K pages, or one whose pages are not known,
  * could not start it — off every one but a lane whose host reports 4K pages (`page16k: false`), where qemu maps what 16K pages cannot
  * (the Studio's VM ran rustc and sudo there). A native lane is never asked: it takes both.
@@ -683,7 +683,7 @@ const anotherModel = (m: Pick<Member, "model">, c: Pick<Candidate, "built_with">
  * builds a contributor's package and its `review-*` audits it, until P3 —,
  * a host's registration beside its own legacy set during the canary
  * (§21.1), an owner the pool does not know — and two hosts of one owner
- * (#VM4K): a host is what enrolled, not a machine, and the Studio's x86_64
+ * (#413): a host is what enrolled, not a machine, and the Studio's x86_64
  * VM enrolls as a host of its own on the Studio. The pool sees no machines,
  * so it asks nothing a host could leave out or say wrong: when it cannot
  * tell, they are one, and an audit is never "elsewhere" on the machine that
@@ -807,7 +807,7 @@ export function select(H: Member, fleet: Fleet, candidates: Candidate[], now: nu
     if (noRoom(H, held, c, units, disk, r)) continue;
     let penalty = 0;
     if (lane.byLane && lane.mode === "emulated") {
-      // Sent back by an emulated lane (D33 amended, #VM4K): a 4K-page lane takes what a 16K one could not start; nothing emulated takes
+      // Sent back by an emulated lane (D33 amended, #413): a 4K-page lane takes what a 16K one could not start; nothing emulated takes
       // what a 4K-page one could not.
       if (emulationRefuses(H, c)) continue;
       const T = thresholdMs(c.native_ms);

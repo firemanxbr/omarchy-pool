@@ -105,7 +105,7 @@ can be ready while the other failed). The tools, in the order to try them:
    an emulated one on 4K pages: a toolchain that cannot start there ends the
    build as soon as it is installed, with the reason — before any correction
    turn of the drafter — and the build goes back to the queue for a native
-   worker or a lane on 4K pages (#VM4K), the attempt uncounted; sent back by
+   worker or a lane on 4K pages (#413), the attempt uncounted; sent back by
    a lane on 4K pages too, it waits for a native worker. Revoking a worker
    frees the builds asked for it.
 
@@ -321,7 +321,7 @@ maintainer merges it like any other change to the process.
   kernel, and the Studio can run one: inside a Debian 13 arm64 VM under KVM
   there, `linux/amd64` `archlinux:base-devel` ran rustc 1.99 and `sudo -V`,
   and omarchy-cli's `cargo build --release` took 412 s and made a working
-  x86-64 binary. Three things followed (#VM4K): `needs_native` now means
+  x86-64 binary. Three things followed (#413): `needs_native` now means
   *needs 4K pages or a native host* (D33 amended) — an emulated lane whose
   host reports `page16k: false` takes it, and one that sends it back too
   marks it `refused_4k`, for a native host only; a lane on 4K pages proves it

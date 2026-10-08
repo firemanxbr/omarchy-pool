@@ -116,7 +116,7 @@ queue for a native worker, from the community builder and the review
 worker alike: *Run a worker* in the docs, the runbook's *Studio host*).
 The same qemu maps those libraries on a 4K-page kernel, so a VM with one on
 the Studio, enrolled as a host of its own, builds them for x86_64 too
-(#VM4K: the runbook's *The Studio's x86_64 VM*).
+(#413: the runbook's *The Studio's x86_64 VM*).
 
 ## Maintainer hosts
 
@@ -311,7 +311,7 @@ Rosetta's in its VM, below). An emulated build is
 slower and shares the host's units; on a 16K-page kernel the lane stays on,
 and a build whose toolchain cannot start under qemu goes back to the queue
 for a native host — or a lane on 4K pages, where qemu maps what 16K pages
-cannot (#VM4K) — without spending its attempt. A lane on 4K pages proves it
+cannot (#413) — without spending its attempt. A lane on 4K pages proves it
 first: its smoke run also starts `sudo -V` there (agent 0.5.1), and a
 lane where that fails is held, not reported 4K. One a 4K-page lane sends
 back too waits for a native host only.
@@ -348,7 +348,7 @@ pool cap is 0, or too small for the copy's size, is none to wait for; one
 whose disk its running builds fill is busy, and waited for.
 Every audit prefers a machine other than the one that built what it
 audits — another owner's: the pool counts your hosts as one machine, since
-one of them may be a VM on another (#VM4K) — and an audit of the project's copy takes a model other than the
+one of them may be a VM on another (#413) — and an audit of the project's copy takes a model other than the
 one that built it whenever a host with another one answered in the last
 24 hours. So the model your host's agent runs matters: the provider is the
 first key `agent.env` holds, or `FACTORY_PROVIDER`, and `FACTORY_MODEL`

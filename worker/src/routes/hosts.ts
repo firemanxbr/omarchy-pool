@@ -335,7 +335,7 @@ export async function handleHostsList(c: Contributor | null, url: URL, env: Env)
 const FLEET_HOSTS_SQL = `SELECT ${HOST_VIEW_COLS} FROM ${HOST_VIEW_FROM} WHERE hosts.status != 'retired' ORDER BY hosts.name, hosts.id LIMIT 100`;
 /**
  * Each architecture's queue of the tasks a lane runs (builds, trials), by the queue index: how many, the oldest, those an emulated lane
- * sent back, and of those the ones a lane on 4K pages sent back too (#VM4K).
+ * sent back, and of those the ones a lane on 4K pages sent back too (#413).
  */
 export const QUEUE_BY_ARCH_SQL = `SELECT arch, COUNT(*) AS n, MIN(created_at) AS oldest, SUM(json_extract(params, '$.needs_native') IS 1) AS needs_native,
     SUM(json_extract(params, '$.refused_4k') IS 1) AS refused_4k

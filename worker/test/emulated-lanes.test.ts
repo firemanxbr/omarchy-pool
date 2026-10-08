@@ -13,7 +13,7 @@
  * - a legacy registration's lease keeps today's word: its lane, written at
  *   the claim from its labels, and for a lease taken before the claim wrote
  *   lanes, its labels;
- * - a 4K-page emulated lane (#VM4K, D33 amended; the Studio's x86_64 VM)
+ * - a 4K-page emulated lane (#413, D33 amended; the Studio's x86_64 VM)
  *   takes what the Studio's 16K-page lane sent back, its attempt given back
  *   once more; its own `needs_native` marks the task `refused_4k`, which no
  *   emulated lane takes again and a native host does;
@@ -57,7 +57,7 @@ const capOf = (b: Box) => ({ cpus: b.cpus, mem_gb: b.mem_gb, disk_free_gb: { wor
 /** The Studio: aarch64 native, x86_64 emulated through qemu on 16K pages. */
 const STUDIO: Box = { cpus: 12, mem_gb: 32, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: true }] };
 const VPS86: Box = { cpus: 8, mem_gb: 16, lanes: [{ arch: "x86_64", mode: "native" }] };
-/** The Studio's x86_64 VM (#VM4K): a KVM guest on the Studio with a 4K-page aarch64 kernel, enrolled as a host of its own — x86_64 emulated through qemu on 4K pages. */
+/** The Studio's x86_64 VM (#413): a KVM guest on the Studio with a 4K-page aarch64 kernel, enrolled as a host of its own — x86_64 emulated through qemu on 4K pages. */
 const VM4K: Box = { cpus: 6, mem_gb: 12, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: false }] };
 
 const boxes = new Map<string, Box>();
@@ -194,7 +194,7 @@ describe("needs_native per lane (#338, design v2 §8.6)", () => {
   });
 });
 
-describe("needs_native and a 4K-page emulated lane (#VM4K, D33 amended)", () => {
+describe("needs_native and a 4K-page emulated lane (#413, D33 amended)", () => {
   const fail = (id: number, token: string) => call("POST", `/factory/tasks/${id}/fail`, { token, body: { error: rustc, duration_ms: 30000, final: false, needs_native: true } });
 
   it("what the Studio's 16K lane sends back the VM's 4K lane takes; the VM's own needs_native marks it refused_4k — no emulated lane again, a native host at once", async () => {

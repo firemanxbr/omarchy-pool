@@ -155,7 +155,7 @@ describe("the scaling signal (fleet.ts capacityOf, capacityLines)", () => {
     const room = [row()].map((h) => fleetHostOf(h, studioLeases.slice(0, 3), NOW, RULES));
     expect(room[0]).toMatchObject({ state: "claiming", units_busy: 6, units_free: 4 });
     // Its one queued task an emulated lane sent back: the emulated lane's free build (16K pages) does not take it, the warning stands —
-    // and says a lane on 4K pages would (#VM4K); one a lane on 4K pages sent back too, a native host only.
+    // and says a lane on 4K pages would (#413); one a lane on 4K pages sent back too, a native host only.
     expect(capacityLines(capacityOf([{ arch: "x86_64", n: 1, oldest: ago(90), needs_native: 1 }], room, [row()], [], NOW))).toEqual([
       { level: "warn", kind: "capacity", arch: "x86_64", text: "x86_64: 1 task queued, the oldest waited 1 h 30 min; free native units: 0, free emulated units: 4 — no host runs x86_64 natively" },
       expect.objectContaining({ text: "tasks waiting for a native x86_64 host: 1 — none runs it natively: a native host takes them, and a lane on 4K pages the 1 a lane on 16K pages sent back" }),
@@ -164,7 +164,7 @@ describe("the scaling signal (fleet.ts capacityOf, capacityLines)", () => {
       .toMatchObject({ text: "tasks waiting for a native x86_64 host: 1 — none runs it natively: only a native host takes them" });
   });
 
-  it("a lane on 4K pages (#VM4K) takes what a lane on 16K pages sent back: only what it sent back too waits for a native host, and a free build there is room for the rest", () => {
+  it("a lane on 4K pages (#413) takes what a lane on 16K pages sent back: only what it sent back too waits for a native host, and a free build there is room for the rest", () => {
     // The Studio full (16K pages) and its x86_64 VM beside it, idle: aarch64 native, x86_64 emulated on 4K pages, five units.
     const vmLanes = [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: false }];
     const vmRow = row({ id: "h_vm00000001", name: "studio-vm", lanes: JSON.stringify(vmLanes), capacity: capOf({ cpus: 6, mem_gb: 12, units: 5, lanes: vmLanes }), units: 5, worker_id: "m1-studio-vm-ef56" });

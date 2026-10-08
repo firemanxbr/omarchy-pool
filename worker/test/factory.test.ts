@@ -783,7 +783,7 @@ describe("where a build runs", () => {
     expect(again.json.tasks).toEqual([id]);
     expect(JSON.parse((await env.DB.prepare("SELECT params FROM build_tasks WHERE id = ?").bind(id).first<{ params: string }>())!.params)).toEqual({ hint: "cargo, not make", needs_native: 1 });
     expect((await call("POST", "/factory/claim", emu, "omw_w5")).status).toBe(204);
-    // One a 4K-page lane refused too (refused_4k, #VM4K): asked again, it keeps both marks — a native lane only.
+    // One a 4K-page lane refused too (refused_4k, #413): asked again, it keeps both marks — a native lane only.
     await env.DB.prepare("UPDATE build_tasks SET params = json_set(params, '$.refused_4k', 1) WHERE id = ?").bind(id).run();
     expect((await call("POST", "/factory/packages/rusty/build", { hint: "cargo, not make" }, "omc_dave")).json.tasks).toEqual([id]);
     expect(JSON.parse((await env.DB.prepare("SELECT params FROM build_tasks WHERE id = ?").bind(id).first<{ params: string }>())!.params)).toEqual({ hint: "cargo, not make", needs_native: 1, refused_4k: 1 });

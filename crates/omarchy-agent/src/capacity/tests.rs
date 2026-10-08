@@ -715,7 +715,7 @@ fn release() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// A smoke run that passes or fails, its loader check too (#VM4K), and remembers what each
+/// A smoke run that passes or fails, its loader check too (#413), and remembers what each
 /// was asked.
 struct FakeSmoke {
     fails: Option<&'static str>,
@@ -802,7 +802,7 @@ fn an_aarch64_host_with_binfmt_reports_its_x86_64_lane_after_the_smoke_run() {
     assert_eq!(
         smoke.loaded(),
         [("x86_64".to_owned(), X86_IMAGE.to_owned())],
-        "on 4K pages the loader check runs too, in the same image (#VM4K)"
+        "on 4K pages the loader check runs too, in the same image (#413)"
     );
     assert_eq!(
         lanes,
@@ -959,7 +959,7 @@ fn emulate_empty_in_the_envelope_keeps_every_emulated_lane_off() {
 fn on_a_16k_page_host_the_x86_64_lane_is_on_and_says_page16k() {
     let d = binfmt_tree("emu-16k", &[("qemu-x86_64", QEMU_X86_F)]);
     // A loader that fails there, as sudo does on 16K pages, is not asked: the lane is on
-    // anyway (D33), and the builds whose libraries do not map come back (#VM4K).
+    // anyway (D33), and the builds whose libraries do not map come back (#413).
     let smoke = FakeSmoke::loader_failing("sudo: failed to map segment from shared object");
     let lanes = studio(&d, None, 16, &smoke);
     assert!(smoke.loaded().is_empty(), "no loader check on 16K pages");
@@ -988,7 +988,7 @@ fn on_a_16k_page_host_the_x86_64_lane_is_on_and_says_page16k() {
 
 #[test]
 fn on_4k_pages_a_loader_check_that_fails_holds_the_lane_with_its_reason() {
-    // A 4K-page lane is handed the builds 16K pages sent back (#VM4K): one whose loader does
+    // A 4K-page lane is handed the builds 16K pages sent back (#413): one whose loader does
     // not start sudo would fail them all, so it is held, not reported on at 4K pages.
     let d = binfmt_tree("emu-loader", &[("qemu-x86_64", QEMU_X86_F)]);
     let smoke = FakeSmoke::loader_failing(
@@ -1009,7 +1009,7 @@ fn on_4k_pages_a_loader_check_that_fails_holds_the_lane_with_its_reason() {
             .starts_with("the smoke run failed: sudo -V: ")
             && lanes.held[0]
                 .reason
-                .ends_with(" — the loader check of a lane on 4K pages (#VM4K)"),
+                .ends_with(" — the loader check of a lane on 4K pages (#413)"),
         "{}",
         lanes.held[0].reason
     );

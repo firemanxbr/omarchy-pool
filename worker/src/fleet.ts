@@ -361,7 +361,7 @@ export function hostLines(rows: FleetHostRow[], ev: FleetEvents, pool: { version
 
 /**
  * One architecture's queue, as the fleet's read counts it: the tasks a lane runs (builds and trials), the oldest, those an emulated lane
- * sent back (`needs_native`), and of those the ones a lane on 4K pages sent back too (`refused_4k`, #VM4K).
+ * sent back (`needs_native`), and of those the ones a lane on 4K pages sent back too (`refused_4k`, #413).
  */
 export interface QueueRow { arch: string; n: number; oldest: string | null; needs_native: number | null; refused_4k?: number | null }
 /** Unit-hours a lane spent on tasks over the week, from the leases' own times. */
@@ -370,18 +370,18 @@ export interface BusyRow { arch: string; lane: string; unit_hours: number | null
 export interface ArchCapacity {
   arch: string;
   queued: number; oldest_at: string | null; oldest_wait_min: number | null;
-  /** Queued tasks an emulated lane sent back (`needs_native`): they wait for a native host of this arch, or a lane on 4K pages (#VM4K). */
+  /** Queued tasks an emulated lane sent back (`needs_native`): they wait for a native host of this arch, or a lane on 4K pages (#413). */
   needs_native: number;
-  /** Of those, the ones a lane on 4K pages sent back too (`refused_4k`, #VM4K): a native host only. */
+  /** Of those, the ones a lane on 4K pages sent back too (`refused_4k`, #413): a native host only. */
   refused_4k: number;
   /** The free units the hosts that claim now could hand a task of this arch: on a native lane, on an emulated one. */
   free_native: number; free_emulated: number;
   /**
    * Whether a build fits one host that claims with a lane of it (FleetHost.build_fits: its units and its disk free): a native one, an
-   * emulated one, an emulated one on 4K pages (#VM4K: what a `needs_native` build may run on).
+   * emulated one, an emulated one on 4K pages (#413: what a `needs_native` build may run on).
    */
   build_fits: { native: boolean; emulated: boolean; emulated_4k: boolean };
-  /** How many hosts run it natively and emulated, and of those emulated how many on 4K pages (`page16k: false`, #VM4K). */
+  /** How many hosts run it natively and emulated, and of those emulated how many on 4K pages (`page16k: false`, #413). */
   hosts_native: number; hosts_emulated: number; hosts_4k: number;
   /** The share of the week's unit-hours its lanes spent busy, against what the hosts that run them have; null with none. */
   busy_7d: { all: number | null; native: number | null; emulated: number | null };
@@ -405,7 +405,7 @@ export function capacityOf(queue: QueueRow[], hosts: FleetHost[], rows: FleetHos
   return ARCH_ORDER.map((arch) => {
     const q = queue.find((x) => x.arch === arch);
     const has = (h: FleetHost, mode: "native" | "emulated") => h.lanes.some((l) => l.arch === arch && l.mode === mode);
-    // An emulated lane on 4K pages (#VM4K): it takes what a lane on 16K pages sent back (selection.ts emulationRefuses).
+    // An emulated lane on 4K pages (#413): it takes what a lane on 16K pages sent back (selection.ts emulationRefuses).
     const on4k = (h: FleetHost) => h.lanes.some((l) => l.arch === arch && l.mode === "emulated" && l.page16k === false);
     const capOf = (hs: FleetHost[]) => hs.reduce((n, h) => n + (h.units ?? 0) * hoursOf(h.id), 0);
     const used = (mode: string | null) => busy.filter((b) => b.arch === arch && (mode === null || b.lane === mode)).reduce((n, b) => n + Number(b.unit_hours ?? 0), 0);
@@ -426,12 +426,12 @@ export function capacityOf(queue: QueueRow[], hosts: FleetHost[], rows: FleetHos
 /**
  * The capacity lines (design v2 §18.3): an architecture whose oldest queued task waited CAPACITY_WAIT_MIN with no free build of
  * it — no host that claims with a lane of it (for tasks an emulated lane sent back a native one, or one on 4K pages for those a lane
- * on 4K pages did not send back too, #VM4K) has a build's units and disk free, as a claim's room test judges them — says how many wait
+ * on 4K pages did not send back too, #413) has a build's units and disk free, as a claim's room test judges them — says how many wait
  * and the free units native and emulated, the project's prompt to
  * add a host of it; one that waited beside a free build is an info line that says so (placement, a pin, a size: not the fleet's
  * room). The wait counts from the task's creation: a task back in the queue after a lease (lost, stopped, sent back for a native
  * host) counts its run too. And the tasks an emulated lane sent back wait for a native host of their arch, counted: all of them while
- * no host runs the arch emulated on 4K pages, only those a lane on 4K pages sent back too once one does — the rest are its (#VM4K).
+ * no host runs the arch emulated on 4K pages, only those a lane on 4K pages sent back too once one does — the rest are its (#413).
  */
 export function capacityLines(caps: ArchCapacity[]): StatusLine[] {
   const out: StatusLine[] = [];
@@ -444,7 +444,7 @@ export function capacityLines(caps: ArchCapacity[]): StatusLine[] {
       if (!fits) out.push({ level: "warn", kind: "capacity", arch: c.arch, text: `${waited}; free native units: ${c.free_native}, free emulated units: ${c.free_emulated}${c.hosts_native === 0 ? ` — no host runs ${c.arch} natively` : ""}` });
       else out.push({ level: "info", kind: "capacity", arch: c.arch, text: `${waited}, while a host that claims has a build's units and disk free for it (free native units: ${c.free_native}, free emulated units: ${c.free_emulated}) — what holds them is their placement, a pin or their size, not the fleet's room` });
     }
-    // A host's lane on 4K pages takes what a lane on 16K pages sent back (#VM4K): with one, only what it sent back too waits for a native host.
+    // A host's lane on 4K pages takes what a lane on 16K pages sent back (#413): with one, only what it sent back too waits for a native host.
     const native = c.hosts_4k > 0 ? c.refused_4k : c.needs_native;
     const by4k = c.hosts_4k === 0 ? c.needs_native - c.refused_4k : 0;
     const none = by4k > 0 ? ` — none runs it natively: a native host takes them, and a lane on 4K pages the ${by4k} a lane on 16K pages sent back` : " — none runs it natively: only a native host takes them";

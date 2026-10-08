@@ -2256,7 +2256,7 @@ fn preflight_reports_the_emulated_lane_and_never_stops_on_a_held_one() {
     assert!(r.ok(), "{}", r.screen());
     assert!(
         r.notes.iter().any(|n| n
-            == "emulation x86_64: on, through qemu, on 4K pages: it also takes the builds a lane on 16K pages sent back (#VM4K)"),
+            == "emulation x86_64: on, through qemu, on 4K pages: it also takes the builds a lane on 16K pages sent back (#413)"),
         "{:?}",
         r.notes
     );
@@ -2293,7 +2293,7 @@ fn preflight_reports_the_emulated_lane_and_never_stops_on_a_held_one() {
         )),
         "{log}"
     );
-    // On the probe's 4K pages, the loader check too (#VM4K).
+    // On the probe's 4K pages, the loader check too (#413).
     assert!(
         log.contains(&format!(
             "--platform linux/amd64 --entrypoint sudo {x86_image} -V"

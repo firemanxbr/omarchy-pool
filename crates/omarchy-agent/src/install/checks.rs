@@ -240,7 +240,7 @@ pub(crate) fn emulation(c: &Capacity, r: &mut Report) {
     for l in c.lanes().iter().filter(|l| l.mode == "emulated") {
         let pages = match l.page16k {
             Some(true) => ", on pages larger than the guest's: a toolchain that cannot start here sends its build back for a native host or a lane on 4K pages (D33)",
-            Some(false) => ", on 4K pages: it also takes the builds a lane on 16K pages sent back (#VM4K)",
+            Some(false) => ", on 4K pages: it also takes the builds a lane on 16K pages sent back (#413)",
             None => "",
         };
         r.notes.push(format!(

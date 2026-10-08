@@ -22,7 +22,7 @@
  *   eligible, to an emulated lane after T — twice the last native duration,
  *   3 to 60 minutes — or at once when none is; `needs_native` never runs
  *   emulated on 16K pages (or pages not reported);
- * - a 4K-page emulated lane (#VM4K, D33 amended) — the Studio's x86_64 VM:
+ * - a 4K-page emulated lane (#413, D33 amended) — the Studio's x86_64 VM:
  *   it takes what an emulated lane on 16K pages sent back, never what a
  *   4K-page lane sent back too (`refused_4k`), which waits for a native
  *   host; another maintainer's such lane is one the project's copy waits
@@ -90,7 +90,7 @@ const R = selectionRules();
 const T0 = Date.parse("2026-10-01T00:00:00.000Z");
 
 /**
- * A host registration: its native lane, the lanes it runs emulated — on the pages `page16k` says, as its agent reports them (#VM4K), or
+ * A host registration: its native lane, the lanes it runs emulated — on the pages `page16k` says, as its agent reports them (#413), or
  * not said, as the lanes of an agent before #338 — and its units as the pool counts them.
  */
 function host(id: string, arch: string, units: number, o: Partial<Member> & { emulated?: string[]; page16k?: boolean } = {}): Member {
@@ -185,7 +185,7 @@ class Sim {
     // The audits of the project's copy the claimer's model cannot count as another (sameModelAuditOf): read apart, their own head (D36).
     const sameModel = (c: Candidate) => m.kinds.includes("audit") && c.kind === "audit" && !!c.publish_bound && !(m.model && c.built_with && c.built_with !== m.model);
     const emulatedOnly = (a: string) => !m.lanes.some((l) => l.arch === a && l.mode === "native");
-    // What an emulated lane of `a` never reads (notRefused, #VM4K): on 4K pages a task a 4K-page lane refused too, else any one sent back.
+    // What an emulated lane of `a` never reads (notRefused, #413): on 4K pages a task a 4K-page lane refused too, else any one sent back.
     const refusedOn = (a: string, c: Candidate) => (m.lanes.some((l) => l.arch === a && l.mode === "emulated" && l.page16k === false) ? !!c.refused_4k : c.needs_native);
     // A sandboxed host's emulated lane (#330): of the builds and trials, the project's own recipes only.
     const outsideSandbox = (a: string) => !m.legacy && !!m.sandbox && emulatedOnly(a);
@@ -1337,7 +1337,7 @@ describe("the second opinion (D36): elsewhere, and with another model when one e
     // Another maintainer's registration: another machine.
     const vps = owned("m2-vps", "m2", "aarch64", 7);
     expect(independenceOf(vps, audit)).toBe("host");
-    // Another host of m1's own is not (#VM4K): the pool cannot tell it from the Studio — the Studio's x86_64 VM enrolls as a host of its
+    // Another host of m1's own is not (#413): the pool cannot tell it from the Studio — the Studio's x86_64 VM enrolls as a host of its
     // own, on the Studio — so it is one machine with the Studio, whatever the host ids say.
     expect(independenceOf(owned("m1-laptop", "m1", "aarch64", 5), auditOf(studio, "anthropic/claude-a", false))).toBe("none");
     // The preference follows the machine: review-aarch64 leaves the audit to m2's host while it can take it, for ELSEWHERE_MS…
@@ -1549,10 +1549,10 @@ describe("the solo-maintainer exception (#394): the requester-host rule lifted f
   });
 });
 
-// The Studio's x86_64 VM (#VM4K; D33 amended): a KVM guest on the Studio with a 4K-page aarch64 kernel, enrolled as a host of its own — aarch64
+// The Studio's x86_64 VM (#413; D33 amended): a KVM guest on the Studio with a 4K-page aarch64 kernel, enrolled as a host of its own — aarch64
 // native, x86_64 emulated through qemu with `page16k: false`. What an emulated lane on the Studio's 16K pages could not start (needs_native)
 // starts there; what it could not start either (refused_4k) waits for a native x86_64 host. And it is the Studio's machine: one owner's.
-describe("a 4K-page emulated lane (#VM4K, D33 amended): needs_native means a native host or 4K pages; refused_4k a native host", () => {
+describe("a 4K-page emulated lane (#413, D33 amended): needs_native means a native host or 4K pages; refused_4k a native host", () => {
   const old = T0 - 120 * MIN;
   const studio = (o: Partial<Member> = {}) => host("m1-studio", "aarch64", 11, { owner: "m1", emulated: ["x86_64"], page16k: true, ...o });
   const vm = (o: Partial<Member> = {}) => host("m1-vm", "aarch64", 5, { owner: "m1", emulated: ["x86_64"], page16k: false, ...o });

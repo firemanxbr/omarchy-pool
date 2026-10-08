@@ -2,7 +2,7 @@
  * A build an emulated worker sent back (#281): the fail report's
  * `needs_native` marks it (params.needs_native) and the claim hands it to no
  * emulated worker again but one on 4K pages, and to none once one of those
- * sent it back too (params.refused_4k, #VM4K; factory.test.ts,
+ * sent it back too (params.refused_4k, #413; factory.test.ts,
  * emulated-lanes.test.ts) — the pill's title says which. Here, the pages say what it
  * waits for, run over the Worker's own answers on the fixture: the Status
  * page's row, the build's own page (its pill and its lede), the Factory's
@@ -91,7 +91,7 @@ describe("a build waiting for a native worker", () => {
 
   it("the build's page wears it and its lede says it", async () => {
     const d = await drawn(`/build/${waiting}`, (x) => !!x.nodes["#lede"]?.innerHTML, { functions: ["nativePill"] });
-    // One a lane on 4K pages sent back too (#VM4K, params.refused_4k): no emulated worker takes it, and its title says so.
+    // One a lane on 4K pages sent back too (#413, params.refused_4k): no emulated worker takes it, and its title says so.
     expect(d.nativePill({ status: "queued", arch: "x86_64", params: { needs_native: 1, refused_4k: 1 } })).toBe('<span class="pill warn" title="it could not run emulated, on 16K pages nor on 4K pages: a toolchain or a library did not start under qemu. No emulated worker takes it again.">waiting for a native x86_64 worker</span>');
     expect(d.nodes["#badges"].innerHTML).toContain(`<span class="pill warn" title="it could not run emulated on 16K pages: a toolchain or a library did not start under qemu there. A native worker takes it, or an emulated one on 4K pages.">waiting for a native ${F.arch} worker</span>`);
     expect(d.nodes["#lede"].innerHTML).toContain(` · queued, waiting for a native ${F.arch} worker: it could not run emulated.`);

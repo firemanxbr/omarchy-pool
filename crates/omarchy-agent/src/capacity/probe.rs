@@ -430,7 +430,7 @@ impl sandbox::Run for Probe<'_> {
 /// `emulation(arch, image)`, which the driver trait wraps with `capacity()` once the run
 /// loop detects, #315): `docker run --rm --network none --platform linux/<arch>
 /// --entrypoint /usr/bin/true <image by digest>`, then `pacman --version` the same way,
-/// and on 4K pages `sudo -V` (`loader`, #VM4K). The architecture and the image are
+/// and on 4K pages `sudo -V` (`loader`, #413). The architecture and the image are
 /// checked against a closed grammar before they reach the argv.
 impl Smoke for Probe<'_> {
     fn emulation(&self, arch: &str, image: &str) -> Result<(), String> {

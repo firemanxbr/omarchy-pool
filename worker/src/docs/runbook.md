@@ -2102,7 +2102,7 @@ so a size-4 build waits for memory rather than run smaller.
   native host never makes it wait. A `needs_native` build never runs
   emulated on 16K pages, or on a lane that says no page size: a native host
   or a lane on 4K pages takes it, and one a lane on 4K pages sent back too
-  (`refused_4k`) a native host only (#VM4K, *The Studio's x86_64 VM*,
+  (`refused_4k`) a native host only (#413, *The Studio's x86_64 VM*,
   below). While no host runs an arch natively, every host with an emulated
   lane of it keeps one of its builds running, however long the native
   backlog (the guaranteed share). Emulated lanes hold at most half a host's
@@ -2115,7 +2115,7 @@ so a size-4 build waits for memory rather than run smaller.
   enabled with the `F` flag — `factory/host/prep-root.sh` installs
   `qemu-user-static-binfmt`), then a smoke run of the release's build image
   of that architecture (`/usr/bin/true`, then `pacman --version`, and on a
-  4K-page kernel `sudo -V`, the loader check of agent 0.5.1, #VM4K). Passing,
+  4K-page kernel `sudo -V`, the loader check of agent 0.5.1, #413). Passing,
   the lane goes into `run/capacity.json`'s `lanes` with `via` and
   `page16k`; otherwise into `held_lanes` with the reason, and the native lane
   runs on. On a Mac (#320) the x86_64 lane is the omarchy VM's Rosetta one:
@@ -2148,7 +2148,7 @@ so a size-4 build waits for memory rather than run smaller.
   container on an emulated lane is told it is one,
   `WORKER_LABELS={"emulated":true}`), goes back to the queue with its attempt
   given back and never runs emulated on 16K pages again — it waits for a
-  native host or a lane on 4K pages (D33 amended, #VM4K: `needs_native`
+  native host or a lane on 4K pages (D33 amended, #413: `needs_native`
   means *needs 4K pages or a native host*), which its package page says as
   *waiting for a native … worker*. Sent back by a lane on 4K pages too, it
   is marked `refused_4k` (the journal: *its lane is on 4K pages: no emulated
@@ -2201,7 +2201,7 @@ so a size-4 build waits for memory rather than run smaller.
   with its own agent sidecar. It leaves the machine that built what it
   audits to another that can take it now, for 3 minutes. The pool tells
   machines apart by owner only: two registrations are on different
-  machines only when their owners differ (#VM4K). A host is what enrolled,
+  machines only when their owners differ (#413). A host is what enrolled,
   not a machine — the Studio's x86_64 VM enrolls as a host of its own on the
   Studio —, and the pool trusts no host to say which machine it runs on: a
   maintainer's legacy role containers (the Studio's `community-*` and
@@ -2649,7 +2649,7 @@ names its host, linked to its page; errors come first.
   build of it — no host that claims has a build's units and disk free on a
   lane of it (for the builds an emulated lane sent back a native one, or
   one on 4K pages for those a lane on 4K pages did not send back too,
-  #VM4K), as a
+  #413), as a
   claim's own room test judges them: a build's two units free for a task,
   and its 20 GB budget plus the 10 GB floor within the smaller free disk
   less the budgets of the builds the host already runs. Units free on a
@@ -2663,7 +2663,7 @@ names its host, linked to its page; errors come first.
   them while no host runs that architecture emulated on 4K pages (the line
   then says a lane on 4K pages would take those a lane on 16K pages sent
   back), only those a lane on 4K pages sent back too (`refused_4k`) once
-  one does (#VM4K). The table under the lines has the queue,
+  one does (#413). The table under the lines has the queue,
   the free units native and emulated, and the week's busy ratio per lane
   (the unit-hours its leases held, against the units the hosts that run it
   have had since they were confirmed). A busy native lane and a long wait
@@ -2753,7 +2753,7 @@ host takes that work ([Maintainer hosts](/docs/worker-host#maintainer-hosts)).
 there goes back to the queue for a native x86_64 worker, not retried and
 not failed: a toolchain that cannot start, or a library qemu cannot map.
 No emulated worker takes it again (#281), but a host's emulated lane on 4K
-pages (#VM4K, *The Studio's x86_64 VM*, below). To see it: the Workers page says
+pages (#413, *The Studio's x86_64 VM*, below). To see it: the Workers page says
 how many builds wait for a native worker, each linked. The build page and
 the Review workbench say *waiting for a native x86_64 worker*. The events
 log a `build` warning with `needs_native`. It waits until a native x86_64
@@ -3480,7 +3480,7 @@ VM on it, with its own 4K-page kernel, runs `linux/amd64` containers through
 qemu-user as any 4K-page host does. Measured on the Studio on 2026-10-08:
 inside that VM, `linux/amd64` `archlinux:base-devel` ran `rustc` 1.99 and
 `sudo -V`, and `cargo build --release` of omarchy-cli took 412 s and made a
-working x86-64 binary (#VM4K).
+working x86-64 binary (#413).
 
 **What the pool does with it** (D33 amended: `needs_native` means *needs 4K
 pages or a native host*). The VM enrolls as a host of its own, under the
@@ -3493,7 +3493,7 @@ the pool marks it `refused_4k` — the journal says *… needs a native x86_64
 worker — back in the queue for one (its lane is on 4K pages: no emulated
 lane takes it again)* —, gives the attempt back once more, and only a
 native x86_64 host takes it: emulation gives a build two attempts back at
-most. Marks from before #VM4K need nothing done: they all came from the
+most. Marks from before #413 need nothing done: they all came from the
 Studio's 16K lanes, so they are the VM's as they are (the query below lists
 the ones still waiting). Status's *tasks waiting for a native x86_64 host*
 then counts only the `refused_4k` ones. And the Studio and the VM are one
@@ -3509,7 +3509,7 @@ Studio's agent still counts the whole machine (12 CPUs, 32 GB: 11 units).
 So the Studio's host gives the VM's share back on its page: *Set the pool
 cap* to its 11 units less the VM's vCPUs or its memory in 2 GB units,
 whichever is more — a VM of 4 vCPUs and 8 GB leaves a cap of 7 —, reason
-*the Studio's x86_64 VM (#VM4K)*; at *The Studio switch* (above), *Raise
+*the Studio's x86_64 VM (#413)*; at *The Studio switch* (above), *Raise
 the cap* to that, not to *No cap*. No sandboxed runtime (gVisor, Kata) in
 the VM: a sandbox covers the native lane only, and its x86_64 lane would
 then take the project's own recipes only (#330), while what the Studio
@@ -3548,10 +3548,10 @@ aarch64 work for it waits.
    ```
 
    Preflight must show `emulation x86_64: on, through qemu, on 4K pages: it
-   also takes the builds a lane on 16K pages sent back (#VM4K)`. From agent
+   also takes the builds a lane on 16K pages sent back (#413)`. From agent
    0.5.1 that lane is on only once its smoke run also started `sudo -V` in
    the release's x86_64 build image; a lane held with a reason ending *the
-   loader check of a lane on 4K pages (#VM4K)* is a kernel that is not 4K
+   loader check of a lane on 4K pages (#413)* is a kernel that is not 4K
    after all, or a handler without `F` — fix it and count again (*Emulated
    lanes are detected*, *How the pool hands a host work*).
 5. On the site: the Studio's cap (above), then *Confirm* the VM on your

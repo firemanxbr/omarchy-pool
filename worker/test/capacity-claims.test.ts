@@ -27,7 +27,7 @@
  *   it, takes nothing else, and leases it when its units fit — an older build
  *   that waits for another reason (needs_native) turns nothing off; its two
  *   hours spent, it is not marked again for 30 minutes, then is; a 4K-page
- *   lane (#VM4K) is reserved for a needs_native one, never a refused_4k
+ *   lane (#413) is reserved for a needs_native one, never a refused_4k
  *   one, which the reads leave out; a host
  *   whose claim cannot take the task it reserves for (its agent's probe
  *   failing, builds held for disk) takes other work; a task larger than
@@ -79,7 +79,7 @@ const capOf = (b: Box) => ({ cpus: b.cpus, mem_gb: b.mem_gb, disk_free_gb: b.dis
 const STUDIO: Box = { cpus: 12, mem_gb: 32, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated" }] }; // 11 units: 5 builds
 const VPS86: Box = { cpus: 8, mem_gb: 16, lanes: [{ arch: "x86_64", mode: "native" }] }; // 7 units: 3 builds
 const P1: Box = { cpus: 8, mem_gb: 16, lanes: [{ arch: "aarch64", mode: "native" }] };
-/** A host whose kernel has 4K pages, x86_64 emulated on them (#VM4K: the Studio's x86_64 VM, here sized for a size-4 build). */
+/** A host whose kernel has 4K pages, x86_64 emulated on them (#413: the Studio's x86_64 VM, here sized for a size-4 build). */
 const VM4K: Box = { cpus: 10, mem_gb: 20, lanes: [{ arch: "aarch64", mode: "native" }, { arch: "x86_64", mode: "emulated", via: "qemu", page16k: false }] }; // 9 units: 4 builds
 
 const boxes = new Map<string, Box>();
@@ -479,7 +479,7 @@ describe("sizes and the reservation for large tasks (D31)", () => {
     expect((await taskOf(smalls[1])).status).toBe("queued");
   });
 
-  it("a needs_native build a 4K-page lane could lease once idle is reserved for there (#VM4K); a refused_4k one is not — the reads leave it out", async () => {
+  it("a needs_native build a 4K-page lane could lease once idle is reserved for there (#413); a refused_4k one is not — the reads leave it out", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const host = await seedHost("vm-q", VM4K);
     for (let i = 0; i < 4; i++) await seedTask({ ago: 40 });

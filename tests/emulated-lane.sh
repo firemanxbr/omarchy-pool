@@ -7,7 +7,7 @@
 #   1. the agent's capacity probe turns the foreign lane on after its smoke
 #      run — the foreign Arch image by digest (base-devel) runs /usr/bin/true,
 #      then `pacman --version`, and on a 4K-page kernel `sudo -V` (the loader
-#      check, #VM4K), under --platform — and says how (`via: qemu`,
+#      check, #413), under --platform — and says how (`via: qemu`,
 #      `page16k`); the envelope's `emulate = []` holds it off and runs
 #      nothing for it; the handler disabled, the lane is held for a person
 #      and the native lane stays (where this script may write the binfmt

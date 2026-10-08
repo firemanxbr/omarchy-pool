@@ -142,7 +142,7 @@ secret). Everything travels in the `Authorization` header over TLS only.
   build its attempt back counts only from a lease the pool itself put on an
   emulated lane, so a recipe on a native lane cannot buy its attempts back
   with it. One that says it on an emulated lane runs emulated again only on
-  a lane whose host reports 4K pages (#VM4K, D33 amended), and one that says
+  a lane whose host reports 4K pages (#413, D33 amended), and one that says
   it there too is marked `refused_4k` and never runs emulated again: a build
   buys at most two attempts back this way, never more. A host whose lanes
   claimed 4K pages falsely gains nothing past that: what it sends back waits
@@ -1302,7 +1302,7 @@ refused), is refused server-side to anyone without the right, and writes a
   the project's copy of a package onto its requester's host (D35) but for
   the maintainer `[solo]` names (#394), never a
   `needs_native` task onto an emulated lane but one on 4K pages, nor a
-  `refused_4k` one onto any (#VM4K), never a contributor's recipe
+  `refused_4k` one onto any (#413), never a contributor's recipe
   onto an emulated lane beside a sandbox (#330), never one whose pin chose
   an agent the host does not run, never a size its pool cap leaves no room
   for. The move holds only while the host still takes work: a pool cap of 0,

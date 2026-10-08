@@ -387,7 +387,7 @@ anything linking libedit or libldap). The build script stops at the first
 attempt with exit 96, before any drafter turn. `pkg-repo work` and the
 community worker report it with `needs_native`, and the build goes back to
 the queue for a native worker of its architecture, the attempt given back.
-That is D33, amended by #VM4K: `needs_native` means *needs 4K pages or a
+That is D33, amended by #413: `needs_native` means *needs 4K pages or a
 native host*. What 16K pages cannot map (the Studio's Asahi kernel), qemu
 maps on a 4K-page kernel, so an emulated lane whose host reports
 `page16k: false` — the Studio's x86_64 VM (the runbook's *The Studio's
@@ -678,7 +678,7 @@ construction — leaves the machine that built what it audits (its
 registration, or one of the same owner's the pool cannot tell apart from it:
 two registrations are apart only with different owners — a host is what
 enrolled, not a machine, and one owner's two hosts may be one, as the
-Studio and the x86_64 VM it runs are, #VM4K) to another that can take it now
+Studio and the x86_64 VM it runs are, #413) to another that can take it now
 (for 3 minutes, so the builder never idles for it); an
 audit of the project's copy takes a model (the claim's `agent`: provider and
 model) other than the one that built it whenever a registration taking

@@ -29,7 +29,7 @@ import {
  *   POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, agent?} → a task with a lease and its job token, or 204
  *   POST /factory/tasks/:id/heartbeat                                  extend the lease (a fresh job token)
  *   POST /factory/tasks/:id/complete    {sha256, filename, version, duration_ms?, log_tail?} · {result, summary} for jobs
- *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?, needs_native?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's; needs_native, from a lease on an emulated lane: back in the queue for a native lane or a 4K-page emulated one — unpinned, the attempt given back; from a 4K-page lane, for a native lane only (refused_4k, #VM4K); from a native lane it is refused, a failure like any other)
+ *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?, needs_native?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's; needs_native, from a lease on an emulated lane: back in the queue for a native lane or a 4K-page emulated one — unpinned, the attempt given back; from a 4K-page lane, for a native lane only (refused_4k, #413); from a native lane it is refused, a failure like any other)
  * The worker is its registered token (POST /factory/workers); a task's
  * writes use the job token the claim issued.
  *
@@ -769,7 +769,7 @@ const builtWithSql = `COALESCE(json_extract(au.params, '$.built_with'), bw.agent
  * What placement reads of a candidate (#339, design v2 §8.4; `t` the alias), each by a primary key: the project's copy's requesters —
  * its owner and the owner of the contributor's build of the same package it answers — and who released it to any host (D35); an
  * audit's build — the registration that built it, the model it was built with, that registration's owner (the machine, as far as the
- * pool tells machines apart: selection.ts `apart`, #VM4K), and whether it is the project's copy (D36) — and,
+ * pool tells machines apart: selection.ts `apart`, #413), and whether it is the project's copy (D36) — and,
  * for the project's copy, the maintainer the solo-maintainer exception names while it is in force (#394: the governance file's [solo],
  * as the last sync wrote it beside the list — one row by its key).
  */
@@ -860,7 +860,7 @@ const heldOf = (l: LeaseRow, rules: Rules): Held => ({
 /**
  * The oldest queued builds a host may reserve for, by the kind index (`filters` on alias w): within the window of the oldest builds some
  * host alive could run — of an arch a host runs, a `needs_native` one only where a host runs its arch natively or emulated on 4K pages,
- * a `refused_4k` one only where a host runs it natively (selection.ts emulationRefuses, #VM4K), not a contributor's at
+ * a `refused_4k` one only where a host runs it natively (selection.ts emulationRefuses, #413), not a contributor's at
  * their cap, not pinned to a registration that is not alive, not within 30 minutes of its two hours of reservation spent (selection.ts
  * `cooling`) — those that waited 30 minutes and ask a size above 1. Bindings: the filters', then the time 30 minutes ago, then
  * factory/sizing's sizes.
@@ -1242,7 +1242,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     if (!k.probeOk) sql += ` AND NOT ${agentScope(`${t}.`)}`;
     if (k.legacy?.emulated) {
       // A build a toolchain could not start emulated (the fail report's needs_native) waits for a native worker of its
-      // architecture, whoever's and whatever the trust, or a host's emulated lane on 4K pages (#VM4K): handed to an emulated one
+      // architecture, whoever's and whatever the trust, or a host's emulated lane on 4K pages (#413): handed to an emulated one
       // again it fails the same way, and its attempt is never spent (handleFail). A legacy lane reports no page size, so it counts as
       // 16K (selection.ts emulationRefuses); this keeps an emulated legacy registration's bounded read free of them — of every
       // refused_4k one too, which is always marked needs_native as well.
@@ -1286,7 +1286,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     binds.push(capped);
     return { sql, binds };
   };
-  // What an emulated lane of arch `a` never takes (selection.ts emulationRefuses; D33 amended, #VM4K): on a lane whose host reports 4K
+  // What an emulated lane of arch `a` never takes (selection.ts emulationRefuses; D33 amended, #413): on a lane whose host reports 4K
   // pages, a task a 4K-page lane refused too (`refused_4k`); on any other, one an emulated lane sent back at all (`needs_native`).
   const on4k = (a: string) => lanes.some((l) => l.arch === a && l.mode === "emulated" && l.page16k === false);
   const notRefused = (a: string, t: string) => ` AND json_extract(${t}.params, '$.${on4k(a) ? "refused_4k" : "needs_native"}') IS NOT 1`;
@@ -1345,7 +1345,7 @@ async function selectAndLease(env: Env, k: Claimer): Promise<TaskRow | null> {
     const laneArchs = JSON.stringify([...new Set(claimers.flatMap((m) => m.lanes.map((l) => l.arch)))]);
     const archsOf = (keep: (l: Lane) => boolean) => JSON.stringify([...new Set(claimers.flatMap((m) => m.lanes.filter(keep).map((l) => l.arch)))]);
     const nativeArchs = archsOf((l) => l.mode === "native");
-    // A needs_native build runs on a native lane or an emulated one on 4K pages; a refused_4k one on a native lane only (#VM4K).
+    // A needs_native build runs on a native lane or an emulated one on 4K pages; a refused_4k one on a native lane only (#413).
     const nativeOr4k = archsOf((l) => l.mode === "native" || l.page16k === false);
     const filters = ` AND w.arch IN (SELECT value FROM json_each(?)) AND (json_extract(w.params, '$.needs_native') IS NOT 1 OR w.arch IN (SELECT value FROM json_each(?)))
         AND (json_extract(w.params, '$.refused_4k') IS NOT 1 OR w.arch IN (SELECT value FROM json_each(?)))
@@ -1705,7 +1705,7 @@ async function leaseMoved(env: Env, id: number, actor: Actor): Promise<Response>
 
 /**
  * Whether a registration's host reports an emulated lane of `arch` on 4K pages (`page16k: false`, hosts.lanes as its agent's last report
- * wrote it; #VM4K): a needs_native from its lease there was said where qemu maps what 16K pages cannot, so the task waits for a native
+ * wrote it; #413): a needs_native from its lease there was said where qemu maps what 16K pages cannot, so the task waits for a native
  * lane only (`refused_4k`). A page size does not change under a running kernel, so the report is the claim's word on it. A legacy
  * registration has no host, and a lane that does not say its pages counts as 16K: false.
  */
@@ -1993,7 +1993,7 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // qemu on a 16 KB-page host, `needs_native`) is the worker's fault, not
   // the recipe's: the build goes back to the queue for a native lane of
   // its architecture or an emulated one on 4K pages, where qemu maps what
-  // 16K pages cannot (D33 amended, #VM4K), and the attempt is given back —
+  // 16K pages cannot (D33 amended, #413), and the attempt is given back —
   // a build no worker ran is not an attempt. From a host whose lane is on
   // 4K pages, it is marked `refused_4k` too: no emulated lane takes it
   // again, so emulation gives an attempt back twice at most (16K, then 4K).
