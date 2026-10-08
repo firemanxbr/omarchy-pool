@@ -75,6 +75,41 @@ describe("the journal's door", () => {
   });
 });
 
+describe("who posted a job's row (#414)", () => {
+  /** The stored payload of the row a POST made, as D1 holds it. */
+  async function stored(id: number): Promise<unknown> {
+    const row = await env.DB.prepare("SELECT payload FROM events WHERE id = ?").bind(id).first<{ payload: string | null }>();
+    return row?.payload ? JSON.parse(row.payload) : null;
+  }
+
+  // The Studio canary's false reds of rc said nobody's name: every row a job posts names the task and the worker its token was issued for,
+  // from the token's signed claims — whatever the payload says — with no read of D1.
+  it("stores the token's task and worker in payload.posted_by, over any the payload brings", async () => {
+    const e = Math.floor(Date.now() / 1000) + 3600;
+    const health = await issueJobToken(env, { t: 414, k: "health", s: scopesFor("health", 414, "project", { ring: "rc", arch: "x86_64" }), e, w: "firemanxbr-studio-m2-mnmw" });
+    const promote = await issueJobToken(env, { t: 415, k: "promote", s: scopesFor("promote", 415, "project", { from: "rc", to: "stable" }), e, w: "pool-aarch64" });
+    const canary = { task: 414, worker: "firemanxbr-studio-m2-mnmw" };
+    const red = await post("/events", { kind: "health", ring: "rc", source: "x86_64", status: "error", summary: "rc x86_64: pacman check failed (exit 1)", payload: { repos: "omarchy-packages-rc", posted_by: { task: 1, worker: "pool-x86_64" } } }, health);
+    expect(red.status).toBe(201);
+    expect(await stored(red.json.id)).toEqual({ repos: "omarchy-packages-rc", posted_by: canary });
+    // A row with no payload, and one whose payload is no object: named all the same, the payload kept.
+    const bare = await post("/events", { kind: "health", ring: "rc", source: "aarch64", status: "ok", summary: "rc aarch64: ok" }, health);
+    expect(await stored(bare.json.id)).toEqual({ posted_by: canary });
+    const list = await post("/events", { kind: "health", ring: "rc", source: "aarch64", status: "ok", summary: "rc aarch64: ok", payload: ["a", 1] }, health);
+    expect(await stored(list.json.id)).toEqual({ value: ["a", 1], posted_by: canary });
+    // A promotion's abi and gate rows name its own task and worker; a person's `by` in a payload stays the person's.
+    const pool = { task: 415, worker: "pool-aarch64" };
+    for (const kind of ["abi", "gate"]) {
+      const r = await post("/events", { kind, ring: "stable", source: "rc", status: "ok", summary: `${kind} (#414)`, payload: { verdict: "promote", by: "maralcbr" } }, promote);
+      expect([kind, r.status]).toEqual([kind, 201]);
+      expect(await stored(r.json.id)).toEqual({ verdict: "promote", by: "maralcbr", posted_by: pool });
+    }
+    // The API hands it back with the row.
+    const rows = JSON.parse(await get("/api/v1/events?kind=health&limit=200")) as { events: { id: number; payload: { posted_by?: unknown } }[] };
+    expect(rows.events.find((r) => r.id === red.json.id)?.payload.posted_by).toEqual(canary);
+  });
+});
+
 describe("the journal's rows", () => {
   // A row written before the door checked, or by hand in D1: Status's journalRow draws it without the link and without the id — and a release it links is on a ring it names.
   const stored = { id: 1, kind: "promote", ring: "edge", source: null, status: "ok", summary: "promoted <b>x</b>", created_at: new Date().toISOString(), duration_ms: 10, payload: { ci: { run_url: BAD_URL }, release_id: BAD_ID } };
