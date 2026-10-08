@@ -2012,9 +2012,13 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // build back for ever. A legacy lease the claim wrote no lane for (taken
   // before #337 wrote them) is read as its registration said, as before.
   const emulatedLane = task.lane === "emulated" || (task.lane === null && task.lease_gen === null && (await emulated(env, who)));
-  const needsNative = !lost && b.needs_native === true && emulatedLane;
-  const nativeRefused = !lost && b.needs_native === true && !emulatedLane;
-  const marked = jsonOr<{ needs_native?: unknown } | null>(task.params, null)?.needs_native === 1;
+  const marks = jsonOr<{ needs_native?: unknown; refused_4k?: unknown } | null>(task.params, null);
+  // A task already refused on 4K pages gets no attempt back from emulation again, whatever lane leased it (a claim that read it
+  // before the mark landed): its attempt is spent, as a native lane's refusal spends one — the bound holds here too (#413).
+  const spent4k = marks?.refused_4k === 1;
+  const needsNative = !lost && b.needs_native === true && emulatedLane && !spent4k;
+  const nativeRefused = !lost && b.needs_native === true && (!emulatedLane || spent4k);
+  const marked = marks?.needs_native === 1;
   const refused4k = needsNative && (marked || (hostLease && (await emulatedOn4k(env, who, task.arch))));
   const exhausted = !needsNative && !lost && (b.final === true || task.attempts >= task.max_attempts);
   const review = task.kind === "build" && task.params ? (JSON.parse(task.params) as { review?: number }).review : undefined;

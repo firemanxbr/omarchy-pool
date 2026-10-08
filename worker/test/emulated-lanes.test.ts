@@ -270,6 +270,18 @@ describe("needs_native and a 4K-page emulated lane (#413, D33 amended)", () => {
     expect((await claim("vm-r")).status).toBe(204);
   });
 
+  it("a lease taken before the refused_4k mark landed gets no attempt back: a third needs_native spends its attempt (#413)", async () => {
+    // A claim read the task with no mark; before its fail, another lane marked it refused_4k. Its needs_native gives nothing back.
+    await seedHost("vm-s", VM4K);
+    const id = await seedTask({ arch: "x86_64", ago: 10 });
+    const c = await claim("vm-s");
+    expect(c.json.task).toMatchObject({ id, lane: "emulated", attempts: 1 });
+    await env.DB.prepare("UPDATE build_tasks SET params = ? WHERE id = ?").bind(JSON.stringify({ needs_native: 1, refused_4k: 1 }), id).run();
+    expect((await fail(id, c.json.token)).json).toEqual({ task: id, status: "queued", attempts: 1 });
+    expect(JSON.parse((await taskOf(id)).params)).toEqual({ needs_native: 1, refused_4k: 1 });
+    expect((await claim("vm-s")).status).toBe(204);
+  });
+
   it("from the VM's native lane a needs_native is refused as from any native lane: no mark of either kind", async () => {
     await seedHost("vm-n", VM4K);
     const id = await seedTask({ arch: "aarch64" });

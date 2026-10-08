@@ -3516,7 +3516,10 @@ npx wrangler d1 execute omarchy-repo --remote --command "SELECT name, owner_logi
 An x86_64 lane there on an agent before 0.5.1 (a Mac's Rosetta one, an
 aarch64 Linux host's qemu one) has not proved its loader: a build it
 cannot start comes back `refused_4k` and waits for a native host. Ask its
-owner to update the agent first, or deploy knowing that. An aarch64 lane
+owner to update the agent first and then run `omarchy-agent capacity
+--write` (an update alone does not run the detection again, so
+`run/capacity.json` keeps the lane the older agent measured), or deploy
+knowing that. An aarch64 lane
 there (an x86_64 host's) needs nothing.
 
 And the Studio and the VM are one
