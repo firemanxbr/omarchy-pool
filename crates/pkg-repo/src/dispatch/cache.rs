@@ -210,9 +210,12 @@ fn cache_root(work_root: &Path) -> std::io::Result<PathBuf> {
 /// (readable by every task's root, whatever its user namespace maps it to) and, for a build,
 /// its package's build cache, stamped as used now — what the build caches' pruning orders by.
 /// On a remapped daemon (#405) the build cache is given to the task's root as the host sees
-/// it (`owner`), that directory alone: its parents and `cache/` stay the dispatcher's, so a
-/// task root that escapes as that uid reaches no other package's cache. `None` elsewhere,
-/// where the task's root is the dispatcher's own.
+/// it (`owner`), that directory alone: its parents and `cache/` stay the dispatcher's. Every
+/// task container and sidecar there runs as that same uid, so a root that escapes as that
+/// uid reaches the running tasks' processes and what they mount, the build caches running
+/// builds mount among them; what remains between it and every other package's cache is the
+/// host's path to it, behind `cache/`, root's 0700 (design v2 §19.1). `None` elsewhere, where
+/// the task's root is the dispatcher's own.
 pub fn ready(
     work_root: &Path,
     trust: Trust,

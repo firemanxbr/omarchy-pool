@@ -171,9 +171,10 @@ impl Cli {
     /// rootful docker without remapping, rootless docker (whose root is the engine's user),
     /// podman by either CLI (asked after [`Cli::gateway`], which finds podman behind docker's),
     /// a Mac's VM — where a task's root is the dispatcher's own and nothing changes. On a
-    /// remapped daemon the dispatcher runs in the init user namespace (the agent's overlay
-    /// gives it `userns_mode: host`): remapped itself it could give a task's directories to
-    /// no host uid, and it says so rather than start tasks that cannot write them.
+    /// remapped daemon the dispatcher runs in the daemon's own user namespace (the agent's
+    /// overlay gives it `userns_mode: host`): one this daemon remapped too could give a task's
+    /// directories to no host uid, and it says so rather than start tasks that cannot write
+    /// them ([`beside_its_tasks`]).
     pub fn task_root(&self, image: &str) -> Result<Option<TaskRoot>, String> {
         if self.libpod.is_some() || self.podman_cli() {
             return Ok(None);
@@ -188,14 +189,6 @@ impl Cli {
         }
         if !remapped(&String::from_utf8_lossy(&out.stdout))? {
             return Ok(None);
-        }
-        let own = std::fs::read_to_string("/proc/self/uid_map")
-            .map_err(|e| format!("this dispatcher's /proc/self/uid_map: {e}"))
-            .and_then(|m| root_of_map(&m).map_err(|e| format!("this dispatcher's uid_map: {e}")))?;
-        if let Some(b) = own {
-            return Err(format!(
-                "this daemon remaps users (userns-remap) and this dispatcher is remapped too (its root is host uid {b}): there it runs with userns_mode: host (the agent's overlay), or it cannot give a task's directories to the task's root"
-            ));
         }
         let read = |map: &str| -> Result<u32, String> {
             let path = format!("/proc/self/{map}");
@@ -225,10 +218,14 @@ impl Cli {
                     format!("a container on this remapped daemon has the host's own {map}")
                 })
         };
-        Ok(Some(TaskRoot {
+        let root = TaskRoot {
             uid: read("uid_map")?,
             gid: read("gid_map")?,
-        }))
+        };
+        let own = std::fs::read_to_string("/proc/self/uid_map")
+            .map_err(|e| format!("this dispatcher's /proc/self/uid_map: {e}"))?;
+        beside_its_tasks(&own, root.uid)?;
+        Ok(Some(root))
     }
 
     /// SIGKILL, then removed: podman's `rm -f` stops with SIGTERM and waits ten seconds first, and a
@@ -349,6 +346,22 @@ pub fn root_of_map(map: &str) -> Result<Option<u32>, String> {
             map.trim()
         )),
         None => Err(format!("{:?} maps no id 0", map.trim())),
+    }
+}
+
+/// This dispatcher's own `uid_map` beside a task's root `b` as a container reads it (#405):
+/// refused only when its root is `b` itself — this very daemon remapped it (a set without the
+/// overlay's `userns_mode: host`), and `b` is then its own root, never a host uid it can give a
+/// task's directories to. The init namespace's map is the plain case; a root that is another
+/// uid is a host that is a user namespace of its own (an unprivileged LXC or Incus container
+/// running dockerd with userns-remap), where `b` is an id of that namespace the dispatcher
+/// gives them to all the same. A map that does not read is an error.
+pub fn beside_its_tasks(own_map: &str, b: u32) -> Result<(), String> {
+    match root_of_map(own_map).map_err(|e| format!("this dispatcher's uid_map: {e}"))? {
+        Some(own) if own == b => Err(format!(
+            "this daemon remaps users (userns-remap) and remapped this dispatcher too (its root is uid {b}, a task's): there it runs with userns_mode: host (the agent's overlay), or it cannot give a task's directories to the task's root"
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -592,6 +605,29 @@ mod tests {
         ] {
             assert!(root_of_map(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// #405: a dispatcher is refused beside its tasks only when this daemon remapped it — its
+    /// own root the task's — not because its map is not the identity: in the daemon's own
+    /// namespace (`userns_mode: host`) on a plain host, and on a host that is a user namespace
+    /// itself (an unprivileged LXC or Incus container running dockerd with userns-remap, its
+    /// root host uid 100000 and the task's 165536 of that namespace), it gives a task's
+    /// directories to the task's root.
+    #[test]
+    fn a_dispatcher_is_refused_only_when_this_daemon_remapped_it() {
+        let b = 165_536;
+        assert_eq!(
+            beside_its_tasks("         0          0 4294967295\n", b),
+            Ok(())
+        );
+        assert_eq!(beside_its_tasks("0 100000 1000000000\n", b), Ok(()));
+        let e = beside_its_tasks("0 165536 65536\n", b).unwrap_err();
+        assert!(
+            e.contains("remapped this dispatcher too") && e.contains("userns_mode: host"),
+            "{e}"
+        );
+        assert!(beside_its_tasks("1 165536 65536\n", b).is_err());
+        assert!(beside_its_tasks("", b).is_err());
     }
 
     /// Removes a network when dropped, however the test ends.

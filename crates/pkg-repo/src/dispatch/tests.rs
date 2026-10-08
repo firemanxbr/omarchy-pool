@@ -4637,6 +4637,132 @@ fn a_remapped_task_root_is_given_what_its_task_writes_and_nothing_else() {
     }
 }
 
+/// The release checkout's trial scripts as an older release's `tests/trial.sh` stages a trial
+/// (#405): its `mktemp -d` directory copied whole onto `TRIAL_STAGE` with `cp -a`, which leaves
+/// `in` itself 0700 (GNU cp does; said here for any cp) and its `mktemp` files 0600, with links
+/// to what lies in `outside`.
+fn owner_only_trial_scripts(h: &H, outside: &Path) {
+    std::fs::create_dir_all(h.checkout.join("tests")).unwrap();
+    std::fs::write(
+        h.checkout.join("tests/trial.sh"),
+        format!(
+            r#"#!/bin/bash
+set -e
+# An older release's staging: its mktemp -d directory, copied whole onto TRIAL_STAGE.
+WORK="$(mktemp -d)"
+printf '%s\n' "${{@:3}}" > "$WORK/packages.txt"
+echo check > "$WORK/check.sh"
+echo run > "$WORK/run.sh"
+mkdir "$WORK/keyrings"
+echo key > "$WORK/keyrings/pool.gpg"
+chmod 600 "$WORK/packages.txt" "$WORK/check.sh" "$WORK/keyrings/pool.gpg"
+chmod 700 "$WORK" "$WORK/run.sh" "$WORK/keyrings"
+ln -s '{o}/secret' "$WORK/secret"
+ln -s '{o}/dir' "$WORK/keyrings/dir"
+ln -s '{o}/gone' "$WORK/dangling"
+cp -a "$WORK"/. "$TRIAL_STAGE"/
+chmod 700 "$TRIAL_STAGE"
+rm -rf "$WORK"
+"#,
+            o = outside.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        h.checkout.join("tests/fetch-keyrings.sh"),
+        "#!/bin/bash\ntouch \"$1/archlinux.gpg\"\n",
+    )
+    .unwrap();
+}
+
+/// #405: a trial's `in` as an older release's `tests/trial.sh` stages it
+/// ([`owner_only_trial_scripts`]: `in` 0700, its files 0600) is opened for reading to a
+/// remapped daemon's task root before the container starts: every directory 0755, every
+/// regular file `a+r` with its other bits kept, a link and what it points to outside `in` as
+/// they were. A host without remapping changes no mode.
+#[test]
+fn a_trials_input_staged_owner_only_is_opened_for_reading_to_a_remapped_task_root() {
+    use std::fs::Permissions;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().mode() & 0o7777;
+    let trial = |remapped: bool| -> (H, PathBuf, PathBuf) {
+        let h = H::new();
+        // Reached from `in` only through links.
+        let outside = h.work.parent().unwrap().join("outside");
+        std::fs::create_dir_all(outside.join("dir")).unwrap();
+        std::fs::write(outside.join("secret"), "x").unwrap();
+        std::fs::set_permissions(outside.join("secret"), Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(outside.join("dir"), Permissions::from_mode(0o700)).unwrap();
+        owner_only_trial_scripts(&h, &outside);
+        let mut d = h.dispatcher();
+        if remapped {
+            // This process's own uid and gid: a change of owner it may make wherever it runs.
+            let me = std::fs::metadata(&h.checkout).unwrap();
+            d.net.task_root = Some(TaskRoot {
+                uid: me.uid(),
+                gid: me.gid(),
+            });
+        }
+        h.pool.artifacts.lock().unwrap().insert(
+            (5, "felix-1.0-1-aarch64.pkg.tar.zst".into()),
+            package("felix"),
+        );
+        h.give(task(
+            11,
+            "trial",
+            "felix",
+            "",
+            "project",
+            json!({ "task": 5, "files": ["felix-1.0-1-aarch64.pkg.tar.zst"] }),
+            GEN,
+        ));
+        h.ticks(&mut d, 4);
+        assert!(h.engine.has(11, GEN), "{:?}", h.pool.fails_of(11));
+        let input = h.tdir(11, GEN).join("in");
+        assert_eq!(
+            std::fs::read_to_string(input.join("packages.txt")).unwrap(),
+            "felix\n"
+        );
+        (h, input, outside)
+    };
+    // Without remapping: the staging's own modes, none changed.
+    let (_plain, input, _) = trial(false);
+    for (p, m) in [
+        ("", 0o700),
+        ("keyrings", 0o700),
+        ("packages.txt", 0o600),
+        ("check.sh", 0o600),
+        ("run.sh", 0o700),
+        ("keyrings/pool.gpg", 0o600),
+    ] {
+        assert_eq!(mode(&input.join(p)), m, "in/{p}");
+    }
+    // Remapped: opened for reading before the container started.
+    let (_h, input, outside) = trial(true);
+    for (p, m) in [
+        ("", 0o755),
+        ("keyrings", 0o755),
+        ("packages.txt", 0o644),
+        ("check.sh", 0o644),
+        ("run.sh", 0o744),
+        ("keyrings/pool.gpg", 0o644),
+    ] {
+        assert_eq!(mode(&input.join(p)), m, "in/{p}");
+    }
+    assert_eq!(mode(&input.join("meta.sh")) & 0o444, 0o444);
+    for link in ["secret", "keyrings/dir", "dangling"] {
+        assert!(
+            std::fs::symlink_metadata(input.join(link))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "in/{link}"
+        );
+    }
+    assert_eq!(mode(&outside.join("secret")), 0o600);
+    assert_eq!(mode(&outside.join("dir")), 0o700);
+}
+
 // ---------- revoked releases (#342) ----------
 
 /// A newer release's manifest, as a stub: it revokes v1.2.3, the release `task()` leases on.

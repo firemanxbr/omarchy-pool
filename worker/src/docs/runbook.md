@@ -1046,10 +1046,14 @@ makes as root: the dispatcher (in the init user namespace, `userns_mode:
 host`) asks the engine for that uid and gid when it starts — its log says
 `this daemon remaps users (userns-remap): a task's root is host uid <B>, gid
 <G>, …` — and gives each task's `out`, `log`, `build`, `build/cache` and
-`pkgcache` directories and its package's build cache to it before the
-container starts, or hands the lease back `lost` with why (#405). A
-dispatcher that is remapped itself (a set without the overlay's
-`userns_mode: host`) refuses to start and says so.
+`pkgcache` directories and its package's build cache to it, and opens its
+`in` for reading (directories 0755, files `a+r`: a trial an older release's
+`tests/trial.sh` staged leaves it 0700), before the container starts, or
+hands the lease back `lost` with why (#405). A dispatcher the daemon
+remapped too (a set without the overlay's `userns_mode: host`: its root is
+the task's) refuses to start and says so; one on a host that is a user
+namespace itself (an unprivileged LXC or Incus container running dockerd
+with userns-remap) runs.
 
 `omarchy-agent uninstall` stops the agent, removes the unit, the bundle's
 containers and networks, task containers and sidecars (labelled

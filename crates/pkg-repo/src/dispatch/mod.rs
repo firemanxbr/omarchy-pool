@@ -98,11 +98,12 @@
 //! init user namespace (the agent's overlay: `userns_mode: host`), so a task's
 //! root is the remapped range's first uid on the host, "other" on what the
 //! dispatcher makes. It asks the engine for that uid and gid at start
-//! ([`engine::Cli::task_root`]; a dispatcher remapped itself refuses to start)
-//! and gives each task's writable directories ([`kinds::WRITABLE`]) and its
-//! build cache to it before the container starts, or hands the lease back
-//! `lost`; the task directory, `tasks/`, `cache/` and `in` stay its own. Every
-//! other engine has no such root, and nothing changes owner.
+//! ([`engine::Cli::task_root`]; a dispatcher this daemon remapped too refuses
+//! to start) and gives each task's writable directories ([`kinds::WRITABLE`])
+//! and its build cache to it before the container starts, `in` opened for
+//! reading ([`kinds::open_input`]), or hands the lease back `lost`; the task
+//! directory, `tasks/`, `cache/` and `in` stay its own. Every other engine has
+//! no such root, and nothing changes owner or mode.
 //!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
@@ -359,9 +360,9 @@ pub struct Net {
     pub direct: bool,
     /// A task container's root as the host sees it on a daemon that remaps users (#405,
     /// `userns-remap`), asked of the engine at start ([`engine::Cli::task_root`]): the
-    /// directories this dispatcher makes for a task to write are given to it before its
-    /// container starts, since a remapped root is "other" on what host root made. `None` on
-    /// every other engine, where nothing changes owner.
+    /// directories this dispatcher makes for a task to write are given to it, and its `in`
+    /// opened for reading, before its container starts, since a remapped root is "other" on
+    /// what host root made. `None` on every other engine, where nothing changes owner or mode.
     pub task_root: Option<engine::TaskRoot>,
 }
 
@@ -1604,10 +1605,13 @@ impl Dispatcher {
             return live;
         }
         // On a remapped daemon (#405) the task's root is "other" on what this dispatcher made:
-        // what it writes is given to it, or the lease goes back before anything runs — never
-        // opened to every user, where its `builder` could plant outputs the dispatcher uploads.
+        // what it writes is given to it and what it reads (`in`) opened for reading, or the
+        // lease goes back before anything runs — what it writes never opened to every user,
+        // where its `builder` could plant outputs the dispatcher uploads.
         if let Some(root) = self.net.task_root {
-            if let Err(e) = kinds::give_writable(&tdir, root) {
+            if let Err(e) =
+                kinds::give_writable(&tdir, root).and_then(|()| kinds::open_input(&tdir))
+            {
                 lost(
                     self,
                     &mut live,

@@ -232,11 +232,58 @@ pub const WRITABLE: [&str; 5] = ["out", "log", "build", "build/cache", "pkgcache
 /// (`/task/log/task.log`) is refused and the task dies of SIGPIPE with no verdict. Each
 /// directory itself (`lchown`, not what it holds: it was made empty), never opened to every
 /// user instead. The task directory and `tasks/` stay the dispatcher's alone (0700), `in` its
-/// too: the task reads it through its other bits.
+/// too: the task reads it as "other", which [`open_input`] makes sure of.
 pub fn give_writable(task_dir: &Path, root: super::engine::TaskRoot) -> std::io::Result<()> {
     for sub in WRITABLE {
         std::os::unix::fs::lchown(task_dir.join(sub), Some(root.uid), Some(root.gid))
             .map_err(|e| std::io::Error::new(e.kind(), format!("{sub}: {e}")))?;
+    }
+    Ok(())
+}
+
+/// A task's `in` opened for reading to a remapped daemon's task root (#405), which is "other"
+/// on it: every directory 0755 and every regular file readable by all (`a+r`), walked without
+/// following a link — a link stays as it is, and nothing outside `in` changes. Whatever made
+/// `in`: a trial's inputs as an older release's `tests/trial.sh` stages them (`cp -a` of its
+/// `mktemp -d` directory gives `in` itself 0700, and its `mktemp` files are 0600), or a
+/// dispatcher run with umask 077. `in` holds the task's own inputs, mounted read-only, and lies
+/// in the 0700 task directory only the dispatcher walks into.
+pub fn open_input(task_dir: &Path) -> std::io::Result<()> {
+    open_readable(&task_dir.join("in"), Path::new("in"))
+}
+
+fn open_readable(path: &Path, shown: &Path) -> std::io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::PermissionsExt as _;
+    let said =
+        |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", shown.display()));
+    // Opened as it is listed, never through a link (one there now is left alone), without
+    // blocking, and changed through what was opened.
+    let fd = match rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::LOOP) => return Ok(()),
+        Err(e) => return Err(said(e.into())),
+    };
+    let file = std::fs::File::from(fd);
+    let meta = file.metadata().map_err(said)?;
+    if meta.is_dir() {
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .map_err(said)?;
+        for e in std::fs::read_dir(path).map_err(said)? {
+            let e = e.map_err(said)?;
+            let t = e.file_type().map_err(said)?;
+            if t.is_dir() || t.is_file() {
+                open_readable(&e.path(), &shown.join(e.file_name()))?;
+            }
+        }
+    } else if meta.is_file() {
+        let mode = meta.permissions().mode() & 0o7777;
+        file.set_permissions(std::fs::Permissions::from_mode(mode | 0o444))
+            .map_err(said)?;
     }
     Ok(())
 }

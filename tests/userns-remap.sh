@@ -309,9 +309,10 @@ grep -q 'agent\.env' <<<"$mounts" && fail "a container mounts agent.env: $mounts
 for sub in out log build build/cache pkgcache; do
   [[ "$(owner "$(tdir 1)/$sub")" == "$B:$G" ]] || fail "$sub is $(owner "$(tdir 1)/$sub"), not the task's root $B:$G"
 done
-[[ "$(owner "$(tdir 1)/in")" == 0:0 ]] || fail "in/ is $(owner "$(tdir 1)/in")'s, not the dispatcher's"
+# in/ opened for reading to the task's root whatever made it (#405), its owner kept.
+[[ "$(owner "$(tdir 1)/in") $(mode "$(tdir 1)/in")" == "0:0 755" ]] || fail "in/ is $(owner "$(tdir 1)/in") $(mode "$(tdir 1)/in"), not the dispatcher's 755"
 [[ "$(owner "$(tdir 1)") $(mode "$(tdir 1)")" == "0:0 700" && "$(mode "$tmp/work/tasks")" == 700 ]] || fail "the task directory is $(owner "$(tdir 1)") $(mode "$(tdir 1)")"
-echo "ok: the task runs remapped (uid_map 0 $B, no UsernsMode, no User, no agent.env mounted), its writable directories its root's ($B:$G), in/ and the task directory the dispatcher's"
+echo "ok: the task runs remapped (uid_map 0 $B, no UsernsMode, no User, no agent.env mounted), its writable directories its root's ($B:$G), in/ (755) and the task directory the dispatcher's"
 as_root touch "$(tdir 1)/in/finish"
 done_or_failed() { reported 1 complete || reported 1 fail; }
 until_ 300 "task 1 completed" done_or_failed
@@ -342,8 +343,11 @@ jq -se '[.[] | select(.path == "/api/v1/factory/claim") | .body.agent] | length 
 made="$("$RT" events --since "$t0" --until "$(date +%s)" --filter type=container --filter event=create \
   --filter "label=org.omarchy-pool.agent.host=$host" --format '{{.Actor.Attributes.name}}' | sort -u | tr '\n' ' ')"
 [[ "$made" == *"$(name 1) "* ]] || fail "docker events did not list task 1's container: $made"
+# Task 1's container and its egress sidecar, and the dispatcher's two reads of the task root at
+# start (#405: unnamed, from the worker image, so docker names them adjective_surname): nothing else.
 for c in $made; do
-  case "$c" in *-agent|omarchy-task-0-*|omarchy-task-2-*) fail "made on a host whose model kinds are held: $c ($made)" ;; esac
+  [[ "$c" == "$(name 1)" || "$c" == "$(name 1)-egress" || "$c" =~ ^[a-z]+_[a-z]+[0-9]*$ ]] \
+    || fail "made on a host whose model kinds are held: $c ($made)"
 done
 echo "ok: the model kinds held — said at start and in every claim, the draft handed back lost before anything of it ran, no probe or agent sidecar made ($made)"
 as_root kill "$pid" 2>/dev/null || true
