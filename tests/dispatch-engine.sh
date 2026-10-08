@@ -38,7 +38,10 @@
 #      failed, with what it started, while a build's lease beats on and
 #      completes; the check has the pool's keyrings, which the job fetched
 #      into `<work root>/jobs/keyrings` first, and a job whose fetch fails on
-#      a work root without them runs no check and fails, not final (#414)
+#      a work root without them runs no check and fails, not final (#414);
+#      the release's real tests/fetch-keyrings.sh, under the job's data
+#      rlimit, leaves the keyrings a check needs, with Omarchy's and the
+#      Asahi fork's signing keys (it reaches GitHub)
 #   7. the task caches (#341): two community builds of packages that need the
 #      same dependency, at once — each mounts its own package's build cache
 #      (a project cache of the same name and the other package's out of its
@@ -57,7 +60,8 @@
 # the task is on it alone, its egress on it and on omarchy-egress, and all of
 # it goes with the lease — a stopped one's, never the other lease's.
 #
-# Requires: cargo (or PKG_REPO=<a built pkg-repo>), python3, jq, docker or podman.
+# Requires: cargo (or PKG_REPO=<a built pkg-repo>), python3, jq, docker or podman; curl, zstd and gpg, and
+# GitHub, for the real keyring fetch of section 6.
 #   STUB_IMAGE  an image with bash and coreutils for this machine's architecture
 #               (default docker.io/library/debian:stable-slim; pulled when absent)
 set -euo pipefail
@@ -529,6 +533,21 @@ jq -e --arg a "$arch" '.final == false and (.error | contains("this worker has n
 [[ ! -e "$tmp/work/jobs/health-nokeys.out" ]] || fail "task 23's check ran without its keyrings: $(cat "$tmp/work/jobs/health-nokeys.out")"
 rm -f "$tmp/fetch-fails"
 echo "ok: a pool job's health check gets the pool's keyrings first; one that cannot runs no check and fails, not final"
+# The real fetch (#414), which the stub above stands in for: the release's tests/fetch-keyrings.sh, under the 2 GB data rlimit a
+# pool job runs it with, leaves in an empty directory every keyring this arch's health check needs, holding the keys the Studio
+# canary's first checks lacked (Omarchy's F0134EE680CAC571, the Asahi fork's subkey 74DE0C737AC186E4). It reaches the upstream
+# sources (GitHub, for these three); one the check does not need may fail, and the script then exits 1, naming it. Not run here:
+# the real check against the public pool's stable ring, behind a real egress (this run's sidecars are stand-ins).
+real="$tmp/real-keyrings"
+( ulimit -d 2097152 && bash "$root/tests/fetch-keyrings.sh" "$real" ) > "$tmp/real-fetch.log" 2>&1 \
+  || echo "note: the real tests/fetch-keyrings.sh exited non-zero: $(tail -n1 "$tmp/real-fetch.log")"
+for k in omarchy omarchy-asahi asahi-alarm; do
+  [[ -s "$real/$k.gpg" ]] || fail "the real tests/fetch-keyrings.sh left no $k.gpg: $(cat "$tmp/real-fetch.log")"
+done
+keyids() { gpg --show-keys --with-colons "$1" 2>/dev/null | awk -F: '$1 == "pub" || $1 == "sub" { print $5 }'; }
+keyids "$real/omarchy.gpg" | grep -qx F0134EE680CAC571 || fail "omarchy.gpg holds no F0134EE680CAC571: $(keyids "$real/omarchy.gpg" | tr '\n' ' ')"
+keyids "$real/omarchy-asahi.gpg" | grep -qx 74DE0C737AC186E4 || fail "omarchy-asahi.gpg holds no 74DE0C737AC186E4: $(keyids "$real/omarchy-asahi.gpg" | tr '\n' ' ')"
+echo "ok: the real tests/fetch-keyrings.sh, under a pool job's data rlimit, leaves the keyrings a health check needs, with the keys the canary lacked"
 
 # ---------- 7. the task caches (#341) ----------
 # A project cache of the same name as a community package's: a community build never reaches it.

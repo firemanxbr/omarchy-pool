@@ -2351,17 +2351,26 @@ so a size-4 build waits for memory rather than run smaller.
   promotion's evidence and its check after promoting, a fast-track's
   check — first fills `<work root>/jobs/keyrings` itself (#414) with the
   keyrings its arches' checks need: Omarchy's on x86_64, and on aarch64 the
-  Asahi fork's and asahi-alarm's too. They come from the release's
-  `tests/fetch-keyrings.sh`, run in the job's own process (no task network,
-  no keyserver), and are refreshed daily, as a sync's are; a refresh that
-  fails goes on with yesterday's. A job that cannot get them fails as the
+  Asahi fork's and asahi-alarm's too, and no others. They come from the
+  release's `tests/fetch-keyrings.sh`, run in the job's own process (no
+  task network, no keyserver), and are refreshed daily, as a sync's are.
+  The script fetches each keyring on its own, each curl bounded (15 s to
+  connect, 120 s in all), and moves a file into place only when it is
+  whole: a source that fails or stalls leaves yesterday's file, and the job
+  goes on with it. A source the check does not use (chaotic's, Arch's
+  mirrors) never stops it. A job that cannot get them fails as the
   host's own fault, not final, so another worker takes it: `this worker
   has no keyrings to check rc/aarch64 with: …`. It fails before its check
   runs, so no health row is posted, and before a promotion or a fast-track
   changes a ring. Without them a check would fail the ring on Omarchy's own
   signing keys, which the base images lack. `tests/health-check.sh` refuses
   the same way (exit 3, nothing posted) when a keyring it needs is missing
-  from `OMARCHY_KEYRINGS`. Every row a job posts names its task and worker,
+  from `OMARCHY_KEYRINGS`. Once a ring has changed, its check uses the
+  keyrings the job confirmed first and fetches nothing. If that check still
+  refuses, the job fails final, `rc → stable: stable serves release …, which
+  this worker could not check on …`, and rolls nothing back; the ring stays
+  on that release until the next health check of it. A check that failed
+  still rolls the ring back. Every row a job posts names its task and worker,
   from its token's claims (`payload.posted_by`), so a host's red says it
   is the host's:
 
