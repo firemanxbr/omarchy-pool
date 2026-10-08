@@ -387,14 +387,22 @@ anything linking libedit or libldap). The build script stops at the first
 attempt with exit 96, before any drafter turn. `pkg-repo work` and the
 community worker report it with `needs_native`, and the build goes back to
 the queue for a native worker of its architecture, the attempt given back.
-No emulated worker takes it again. Every page that follows the build says
+That is D33, amended by #VM4K: `needs_native` means *needs 4K pages or a
+native host*. What 16K pages cannot map (the Studio's Asahi kernel), qemu
+maps on a 4K-page kernel, so an emulated lane whose host reports
+`page16k: false` — the Studio's x86_64 VM (the runbook's *The Studio's
+x86_64 VM*), a Mac's Rosetta VM — takes the build too; no other emulated
+worker takes it again (a legacy registration says no page size, so it counts
+as 16K). When a lane on 4K pages sends it back as well, the pool marks it
+`refused_4k`: only a native worker takes it then, and emulation has given
+its attempt back twice at most. Every page that follows the build says
 what it waits for. On a maintainer host the word is its lease's lane
 (#338): the dispatcher tells only a container on an emulated lane
 `WORKER_LABELS={"emulated":true}`, and the pool takes `needs_native` from a
-lease whose `lane` is `emulated` — the attempt given back, no emulated lane
-again — and refuses it from a native lane (a failure like any other),
-whatever the registration's labels say. A legacy worker's lease carries the
-lane its claim wrote from its labels.
+lease whose `lane` is `emulated` — the attempt given back, `refused_4k` too
+when the host's lanes say 4K pages — and refuses it from a native lane (a
+failure like any other), whatever the registration's labels say. A legacy
+worker's lease carries the lane its claim wrote from its labels.
 
 `--idle-exit 300` makes a worker exit after five minutes without work;
 `--once` makes it one-shot; SIGTERM (`docker stop`) drains it — the task in
@@ -654,7 +662,8 @@ a host does. Placement (#339, design v2 §8.4; D35, D36): the project's copy
 of a package — its review rebuild — is never handed to a host its requester
 owns (the rebuild's owner, and the owner of the contributor's build it
 answers) while another maintainer's host has a lane allowed for it, native or
-emulated with `needs_native` applied, and could hold it idle at its size
+emulated with its marks applied (`needs_native`: a lane on 4K pages only;
+`refused_4k`: none), and could hold it idle at its size
 (its units within the pool cap, an agent slot, its disk budget against its
 free disk plus the budgets of the builds it runs — a report below the
 minimum for that disk alone, or a claim holding builds back for disk, is
@@ -667,9 +676,10 @@ exception names (#394): their own hosts take that copy, with no release, and
 Review says why. An audit — in a fresh container with its own agent sidecar, by
 construction — leaves the machine that built what it audits (its
 registration, or one of the same owner's the pool cannot tell apart from it:
-two registrations are apart only with different owners, or as two hosts'
-registrations of different hosts) to another that can take it now (for 3
-minutes, so the builder never idles for it); an
+two registrations are apart only with different owners — a host is what
+enrolled, not a machine, and one owner's two hosts may be one, as the
+Studio and the x86_64 VM it runs are, #VM4K) to another that can take it now
+(for 3 minutes, so the builder never idles for it); an
 audit of the project's copy takes a model (the claim's `agent`: provider and
 model) other than the one that built it whenever a registration taking
 audits with another model, and that is handed work (not drained, below the
@@ -678,7 +688,7 @@ claim while its probe passes, the start of its failing spell while it
 fails), and runs on the same model otherwise; a claim reads those audits
 apart, so a head of them never hides another. Each audit's lease records
 `build_tasks.independent` — `model`, `host` (the same model on another
-machine, for an audit that does not ship) or `none` — cleared when the
+owner's machine, for an audit that does not ship) or `none` — cleared when the
 lease goes back to the queue, and Review shows it beside the verdict. A host
 whose agent reports `asleep` (#329: a Mac about to sleep, or asleep, while
 that report is fresh) has zero free units: its claims are handed nothing
