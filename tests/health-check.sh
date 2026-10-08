@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Health check for one ring: a real pacman in an Arch container syncs the
 # ring's databases from the pool, lists them, and downloads one package with
-# signature verification. Posts a `health` event either way.
+# signature verification. Posts a `health` event either way, except when a
+# keyring it needs is missing from OMARCHY_KEYRINGS: then it runs nothing,
+# posts nothing and exits 3 (#414, below).
 #
 # Usage: tests/health-check.sh <ring> [arch]   (arch: x86_64 | aarch64)
 # Env:   OMARCHY_API, OMARCHY_POOL, OMARCHY_TOKEN
@@ -15,10 +17,24 @@ RING="$1"
 ARCH="${2:-x86_64}"
 source "$(cd "$(dirname "$0")" && pwd)/images.env"
 case "$ARCH" in
-  x86_64)  IMAGE="$ARCHLINUX_BASE"; PLATFORM="linux/amd64"; KEYRING="archlinux" ;;
-  aarch64) IMAGE="$ARCHLINUXARM_BASE"; PLATFORM="linux/arm64"; KEYRING="archlinuxarm" ;;
+  x86_64)  IMAGE="$ARCHLINUX_BASE"; PLATFORM="linux/amd64"; KEYRING="archlinux"; NEED=(omarchy) ;;
+  aarch64) IMAGE="$ARCHLINUXARM_BASE"; PLATFORM="linux/arm64"; KEYRING="archlinuxarm"; NEED=(omarchy omarchy-asahi asahi-alarm) ;;
   *) echo "unknown arch $ARCH"; exit 1 ;;
 esac
+# NEED: the keyrings this arch's check needs beside its image's own (#414) — those of the
+# sources its include serves (chaotic is left out of the check, below; archlinux and
+# archlinuxarm come with the image). pkg-repo's check_keyrings (crates/pkg-repo/src/work.rs)
+# lists the same, and a test reads both. A worker sets OMARCHY_KEYRINGS: one that lacks any
+# of them has no verdict to give. Its check would fail the ring on the first package signed
+# by a key it never had — the worker's fault, not the ring's (the Studio canary's first pool
+# jobs failed rc so on 2026-10-08, and blocked rc → stable). So nothing runs and nothing is
+# posted: it exits 3, which the worker reads as its own fault. Run by hand without
+# OMARCHY_KEYRINGS, the check is as it was.
+if [[ -n "${OMARCHY_KEYRINGS:-}" ]]; then
+  for k in "${NEED[@]}"; do
+    [[ -s "$OMARCHY_KEYRINGS/$k.gpg" ]] || { echo "$RING $ARCH: $k.gpg is missing from $OMARCHY_KEYRINGS: this worker cannot check the ring; nothing recorded"; exit 3; }
+  done
+fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PKG_REPO="${PKG_REPO:-$ROOT/target/release/pkg-repo}"
 # The engine: RUNTIME when set — a dispatcher's pool job sets it to omarchy-task-run (#340), which runs this
@@ -79,8 +95,9 @@ cp "$ROOT/docs/omarchy-staging.pub.asc" "$WORK/omarchy-poc.pub.asc"
 # packages of a source verify against the key that project signs with —
 # Omarchy's, the Asahi fork's (maralcbr's "Omarchy ARM Repository" key),
 # asahi-alarm's, chaotic's. The base image's own keyring (archlinux /
-# archlinuxarm) is populated inside. A source whose keyring is missing here
-# fails the check on its first package, which is the right answer.
+# archlinuxarm) is populated inside. A keyring the check needs and the caller
+# lacks is the caller's fault, not evidence about the ring: the check refused
+# above, before anything ran (#414).
 if [[ -n "${OMARCHY_KEYRINGS:-}" ]]; then
   for k in omarchy omarchy-asahi asahi-alarm chaotic; do [[ -f "$OMARCHY_KEYRINGS/$k.gpg" ]] && cp "$OMARCHY_KEYRINGS/$k.gpg" "$WORK/$k.gpg"; done
 fi
@@ -144,4 +161,6 @@ else
   post error "$RING $ARCH: pacman check failed (exit $code)" "{\"repos\": \"$repos\", \"tail\": $(tail -5 <<<"$out" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}"
 fi
 rm -rf "$WORK"
+# Exit 3 is the refusal's alone (above, #414): a check that ran and failed with 3 exits 1, and its row says 3.
+[[ $code -ne 3 ]] || code=1
 exit $code
