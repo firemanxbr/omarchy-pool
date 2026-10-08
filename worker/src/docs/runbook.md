@@ -2347,7 +2347,29 @@ so a size-4 build waits for memory rather than run smaller.
   (*A sandboxed runtime for community tasks*) holds its pool jobs with its
   tasks until it ends or the dispatcher restarts. The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
   ABI gate's cached Omarchy reference), as a legacy pool worker's work
-  directory. On the host, while one runs:
+  directory. Every job that checks a ring's health — a health check, a
+  promotion's evidence and its check after promoting, a fast-track's
+  check — first fills `<work root>/jobs/keyrings` itself (#414) with the
+  keyrings its arches' checks need: Omarchy's on x86_64, and on aarch64 the
+  Asahi fork's and asahi-alarm's too. They come from the release's
+  `tests/fetch-keyrings.sh`, run in the job's own process (no task network,
+  no keyserver), and are refreshed daily, as a sync's are; a refresh that
+  fails goes on with yesterday's. A job that cannot get them fails as the
+  host's own fault, not final, so another worker takes it: `this worker
+  has no keyrings to check rc/aarch64 with: …`. It fails before its check
+  runs, so no health row is posted, and before a promotion or a fast-track
+  changes a ring. Without them a check would fail the ring on Omarchy's own
+  signing keys, which the base images lack. `tests/health-check.sh` refuses
+  the same way (exit 3, nothing posted) when a keyring it needs is missing
+  from `OMARCHY_KEYRINGS`. Every row a job posts names its task and worker,
+  from its token's claims (`payload.posted_by`), so a host's red says it
+  is the host's:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, ring, source, status, json_extract(payload, '$.posted_by.worker') AS worker, created_at FROM events WHERE kind = 'health' ORDER BY id DESC LIMIT 20"
+  ```
+
+  On the host, while one runs:
 
   ```bash
   docker ps --filter label=org.omarchy-pool.task.role=helper --format '{{.Names}} {{.Status}}'
@@ -2974,6 +2996,19 @@ P1 host first: the week of pool jobs on hosts counts from then. Left for
 the Studio itself: a release applied while a task runs (the exit criteria,
 below) and step 9's reboot, once the release that carries agent 0.5.0
 lands.
+
+**Its first pool jobs gave a false red** (2026-10-08, #414): its health
+checks of rc failed on both architectures, on the keys of Omarchy's own
+packages (`key "F0134EE680CAC571" could not be looked up remotely`
+on x86_64, `"74DE0C737AC186E4"`, the Asahi fork's, on aarch64), while the
+legacy pool workers passed the same checks. Nothing had filled its
+`/srv/omarchy-host/jobs/keyrings` before them. At 16:13 UTC the gate
+blocked rc → stable on those reds. The release that carries #414's fix
+fetches the keyrings in every job that checks a ring. Until it is applied
+here, the way back in *Pool jobs on hosts* (the setting's `DELETE`) keeps
+the canary off pool jobs. Once it is applied and the setting names the
+canary again, its rc and stable checks must pass on both architectures,
+and the week of pool jobs counts again from then.
 
 | What | Where | What it holds |
 |---|---|---|
@@ -3948,7 +3983,10 @@ same project (an `omarchy-t2` beside `omarchy`, say) is a new **source**:
 2. `worker/src/routes/packages.ts`, `SOURCES`: the name, so the index accepts
    manifests with that provenance.
 3. A keyring, if the packages are signed by a key none of the existing
-   keyrings holds: `tests/fetch-keyrings.sh`.
+   keyrings holds: `tests/fetch-keyrings.sh`; and, unless it is optional
+   like chaotic, among the keyrings that arch's health check needs:
+   `check_keyrings` in `crates/pkg-repo/src/work.rs` and `NEED` in
+   `tests/health-check.sh`, which a test holds alike (#414).
 
 The rest follows the source name: the rendered repository is
 `omarchy-<source>-<ring>` (`render`), its objects and databases live in
@@ -4460,7 +4498,8 @@ produces, and the sources it defers to (`chaotic` defers to
 imported from chaotic-aur). Add the same source to `EXPECTED_SOURCES` in
 `worker/src/meta.ts` (with `optional: true` for a repo users opt into on
 *Get started*) and to the sources table on *How it works*. If it is a new
-upstream project, add its keyring to `tests/fetch-keyrings.sh`. A new
+upstream project, add its keyring to `tests/fetch-keyrings.sh`, and to the
+keyrings its arch's health check needs (`check_keyrings`, `NEED`; #414). A new
 architecture also needs an image in `tests/images.env`, a worker of that
 architecture and the arch lists in `scheduler.ts` (`jobsOf`) and
 `jobs.ts`.
