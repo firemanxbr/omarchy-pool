@@ -2407,6 +2407,45 @@ mod tests {
         assert!(check_plan(&audit, &work, want(&a)).is_err());
     }
 
+    /// #405: what a task container may write is what the dispatcher gives a remapped daemon's
+    /// task root before it starts (`kinds::WRITABLE`, and a build's own cache): every mount of
+    /// every kind's container that is not read-only is one of them, so a writable mount added
+    /// here without its owner fails, and `in` stays read-only.
+    #[test]
+    fn every_writable_mount_is_one_the_dispatcher_gives_a_remapped_task_root() {
+        let (tdir, rel, work) = dirs();
+        for kind in [Kind::Build, Kind::ModelBuild, Kind::Audit, Kind::Trial] {
+            for trust in [Trust::Community, Trust::Project] {
+                let mut s = spec(kind, &tdir, &rel);
+                s.trust = trust;
+                let a = task_of(&plan(&s).unwrap());
+                let mut given: Vec<String> = super::super::kinds::WRITABLE
+                    .iter()
+                    .map(|w| tdir.join(w).display().to_string())
+                    .collect();
+                given.push(
+                    cache::build_dir(&work, trust, "aarch64", "felix")
+                        .display()
+                        .to_string(),
+                );
+                let writable: Vec<&str> = a
+                    .windows(2)
+                    .filter(|w| w[0] == "-v" && !w[1].ends_with(":ro"))
+                    .map(|w| w[1].split(':').next().unwrap())
+                    .collect();
+                assert!(!writable.is_empty(), "{kind:?}");
+                for m in &writable {
+                    assert!(
+                        given.iter().any(|g| g == m),
+                        "{kind:?} {trust:?}: {m} is writable and given to nobody"
+                    );
+                }
+                let input = format!("{}:/task/in:ro", tdir.join("in").display());
+                assert!(a.contains(&input), "{kind:?}: {a:?}");
+            }
+        }
+    }
+
     #[test]
     fn a_model_task_without_an_agent_key_fails_before_docker() {
         let (tdir, rel, _) = dirs();

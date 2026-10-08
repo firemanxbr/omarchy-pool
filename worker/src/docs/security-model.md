@@ -115,7 +115,23 @@ secret). Everything travels in the `Authorization` header over TLS only.
   nor another task's directory, `--cap-drop ALL` with the few capabilities
   pacman and makepkg need, `no-new-privileges`, its share of CPUs, memory and
   pids, the build image by digest, never `--rm`, no engine-side log; its
-  directories are the dispatcher's alone (0700). No task container calls the
+  directories are the dispatcher's alone (0700). On a daemon with
+  userns-remap (#405, design v2 §19.1) the task's root is the remapped
+  range's first uid on the host, and the dispatcher, there in the init user
+  namespace (`userns_mode: host`), gives that uid what the task writes —
+  `/task/out`, `/task/log`, `/build`, its own pacman downloads and its
+  package's build cache, each directory itself — before the container
+  starts, never opening one to every user, and opens `in` for reading
+  (directories 0755, files `a+r`, no link followed); the task directory,
+  `tasks/`, `cache/` and `in` stay the dispatcher's. Every task container and
+  sidecar on that daemon runs in the same remapped range, its root that same
+  uid, community and project alike: a root that escapes as that uid reaches
+  every other running task's processes (the same uid: ptrace,
+  `/proc/<pid>/root`) and, through them, what they mount, the trees given to
+  it among them. What still stands between tasks there is the host's paths:
+  `tasks/`, each task directory and `cache/` are root's 0700 parents, so no
+  tree given to that uid is reachable by its path on the host, an idle build
+  cache or an ended task's directories not at all. No task container calls the
   pool: the dispatcher stages its inputs (`/task/in`, read-only) and, after
   it exits, uploads only the files its kind may upload, under a size cap, and
   walks a package it wrote for an extension member the archive reader would

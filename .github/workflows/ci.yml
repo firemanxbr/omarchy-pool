@@ -280,6 +280,38 @@ jobs:
       - name: The sandboxed runtime — the agent finds runsc after its smoke run, a community build runs in it, the project's build and every sidecar on runc, a runtime the engine lacks never falls back
         run: bash tests/sandboxed-runtime.sh
 
+  userns-remap:
+    name: Remapped daemon on a real engine (userns-remap)
+    # #405 (design v2 §19.1), before the agent keys' ACL: the runner's docker with
+    # "userns-remap": "default" merged into its daemon.json (docker makes dockremap and its
+    # subordinate range itself), then a plain community build through the real dispatcher —
+    # root with docker's default capabilities, as the host set runs it there with
+    # userns_mode: host — while its task container and egress sidecar stay remapped: built as
+    # the builder, uploaded and completed; the agent holds the model kinds
+    # (OMARCHY_AGENT_HELD=userns-remap, #406), so a draft is handed back lost and no probe or
+    # agent sidecar is ever made; and the dispatcher's real-engine tests on that engine.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: userns-remap on the runner's docker — daemon.json's userns-remap set to default, its other keys kept — restarted
+        run: |
+          set -euo pipefail
+          # The runner's daemon.json has keys of its own (cgroup-parent): merged, not replaced.
+          cur="$(sudo cat /etc/docker/daemon.json 2>/dev/null || true)"; [[ -n "$cur" ]] || cur='{}'
+          jq -S '. + {"userns-remap": "default"}' <<<"$cur" | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+          for _ in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format '{{json .SecurityOptions}}' | grep -q name=userns || { sudo journalctl -u docker --no-pager -n 60; exit 1; }
+          docker info --format 'docker {{.ServerVersion}}, {{.Driver}}, {{.DockerRootDir}}'
+          grep -H '^dockremap:' /etc/subuid /etc/subgid
+      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — the model kinds held, no probe or agent sidecar made
+        run: bash tests/userns-remap.sh
+
   host-key-tpm:
     name: Host key in a TPM (swtpm behind tpm2-abrmd, against a local pool)
     # #330, the Linux half of hardware-bound host keys (design v2 §14): the real agent makes
