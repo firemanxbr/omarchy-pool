@@ -430,8 +430,9 @@ export function revertedOf(r: RevertedColumns | null | undefined): Reverted | nu
 
 /**
  * The setting that lets hosts take pool jobs (#340, design v2 §22): `*` every host, or a comma-separated list of hosts' names or their
- * registrations' ids; absent, none — the rollout's order is the maintainers' (the P1 host first, the Studio canary a week later), and a
- * release that brings pool jobs to the dispatcher moves no ring off the legacy pool workers by itself.
+ * registrations' ids; absent, none — the rollout's order is the maintainers' (the Studio canary's registration since 2026-10-08, `*` at
+ * the switch; runbook, *Pool jobs on hosts*), and a release that brings pool jobs to the dispatcher moves no ring off the legacy pool
+ * workers by itself.
  */
 export const POOL_JOBS_KEY = "host-pool-jobs";
 

@@ -31,7 +31,20 @@
 //!   it the dispatcher hands a package with `network = "direct"` in `factory/sizing` back;
 //! - `OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB`: the envelope's `cache_caps`
 //!   (#341, design v2 §12, D52), each only when agent.toml sets it, so the dispatcher's
-//!   defaults hold otherwise — the task caches it prunes to them.
+//!   defaults hold otherwise — the task caches it prunes to them;
+//! - `OMARCHY_AGENT_USER=<uid>:<gid>` ([`KeysUser`], #399): who the agent sidecars and the
+//!   probe run as — the owner of `OMARCHY_SECRETS_DIR/agent.env` as the engine shows it to a
+//!   container. The file stays 0600 and the sidecars keep every capability dropped, so only
+//!   its owner reads it: the agent's own uid on a rootful engine (and in a Mac's VM, whose
+//!   shared directory shows the Mac's uid), root on a rootless one (whose root is the agent's
+//!   user). A remapped daemon shows the owner to no container user — its remapped uids are
+//!   none of the host's, and its sidecars stay remapped as its task containers do (design v2
+//!   §19.1) — so there `OMARCHY_AGENT_HELD=userns-remap` instead: the dispatcher runs no probe
+//!   and no agent sidecar, and the host's page says why it takes no model kinds (how a
+//!   remapped host reads the keys is the maintainer's to decide). Rendered from the file's
+//!   owner (its directory's before there is one) and agent.toml's `set.engine` and
+//!   `envelope.userns_remap`, so an agent of a release with this fix writes it within a minute
+//!   and the dispatcher is recreated with it, with no person at the host.
 //!
 //! It is written on install, on enrollment, on every rotation, and by the run loop when the
 //! host's addresses or agent.toml changed (it reads both every minute, agent.toml only when
@@ -68,6 +81,7 @@ use std::path::{Component, Path, PathBuf};
 pub use addresses::{Range, Sources};
 
 use crate::install::net::{self, Cidr};
+use crate::lint::Engine;
 
 /// The host worker token's variable: an older release's dispatcher reads it here (#327).
 pub const TOKEN: &str = "OMARCHY_WORKER_TOKEN";
@@ -80,6 +94,15 @@ pub const ADDRESSES: &str = "OMARCHY_HOST_ADDRESSES";
 pub const SECRETS_DIR: &str = "OMARCHY_SECRETS_DIR";
 /// `1` when the envelope grants a signed exception's bridge network (#373); absent otherwise.
 pub const DIRECT_NETWORK: &str = "OMARCHY_DIRECT_NETWORK";
+/// Who the agent sidecars run as (#399): `<uid>:<gid>`, agent.env's owner as the engine shows it.
+pub const AGENT_USER: &str = "OMARCHY_AGENT_USER";
+/// Why the host takes no model kinds though it has keys (#399): a code, [`HELD_REMAP`].
+pub const AGENT_HELD: &str = "OMARCHY_AGENT_HELD";
+/// A remapped daemon: no container user is agent.env's owner, and the sidecars stay remapped.
+pub const HELD_REMAP: &str = "userns-remap";
+/// The group a sidecar that is not root takes for a keys file of root's group: none of the host's
+/// privileged ones (`nogroup`), which a 0600 file does not need.
+const NOGROUP: u32 = 65_534;
 /// `[envelope].agent_budget`'s keys, and the variables the dispatcher reads them from (D45).
 pub const BUDGET: [(&str, &str); 4] = [
     ("calls_per_task", "OMARCHY_AGENT_CALLS_PER_TASK"),
@@ -98,7 +121,7 @@ const MAX_CACHE_GB: u64 = 1 << 20;
 
 /// The registration the token belongs to: what install puts in agent.toml's `worker_id`.
 pub const WORKER: &str = "# worker: ";
-const HEADER: &str = "# The dispatcher's environment (omarchy-agent, #321, #371, #327, #341): the registration of its host worker token, the host's own addresses, and from agent.toml alone the secrets directory, the agent budget, the grant of a signed exception's bridge and the cache caps (a line of yours for one of those is replaced); the token itself is run/host/dispatcher/token, a read-only file (here too only while an older release needs it). The agent renders its own lines and keeps every other one.";
+const HEADER: &str = "# The dispatcher's environment (omarchy-agent, #321, #371, #327, #341, #399): the registration of its host worker token, the host's own addresses, and from agent.toml alone the secrets directory, the agent budget, the grant of a signed exception's bridge, the cache caps and who the agent sidecars run as, or why none runs (a line of yours for one of those is replaced); the token itself is run/host/dispatcher/token, a read-only file (here too only while an older release needs it). The agent renders its own lines and keeps every other one.";
 /// Every heading the agent wrote: this one, #371's and #327's (which said less), and the
 /// first one #321's wrote, before there was more than the token.
 const OLD_HEADERS: [&str; 2] = [
@@ -116,6 +139,8 @@ pub(crate) fn not_secret(key: &str) -> bool {
 fn owned_by_envelope(key: &str) -> bool {
     key == SECRETS_DIR
         || key == DIRECT_NETWORK
+        || key == AGENT_USER
+        || key == AGENT_HELD
         || BUDGET.iter().any(|(_, k)| *k == key)
         || CACHE_CAPS.iter().any(|(_, k)| *k == key)
 }
@@ -249,6 +274,86 @@ pub struct Envelope {
     /// `[envelope].cache_caps` (#341).
     pub cache_caps: CacheCaps,
     pub(crate) task_subnets: Vec<Cidr>,
+    /// The engine behind the socket (`set.engine`) and whether its daemon remaps users
+    /// (`[envelope].userns_remap`): how it shows agent.env's owner to a container (#399).
+    pub engine: Engine,
+    pub userns_remap: bool,
+}
+
+/// Who the agent sidecars and the probe run as (#399): `OMARCHY_SECRETS_DIR/agent.env`'s
+/// owner as the engine shows it to a container. The file is 0600, and root with every
+/// capability dropped — as the sidecars run — opens no file another uid owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeysUser {
+    /// `OMARCHY_AGENT_USER=<uid>:<gid>`: the sidecars run as the owner, in the engine's own user
+    /// namespace.
+    Owner { uid: u32, gid: u32 },
+    /// `OMARCHY_AGENT_HELD=<code>`: no container user may be the owner here, so the dispatcher
+    /// runs no probe and no agent sidecar, and the host's page says why.
+    Held(&'static str),
+}
+
+impl KeysUser {
+    /// The owner `(uid, gid)` of the keys file on this machine, as `engine` shows it to a
+    /// container; `euid` is the agent's own. `None` where no container user is that owner on an
+    /// engine that would show it one — a rootless engine and a file another user owns — so the
+    /// dispatcher starts the sidecars as before, and the probe says whose the file is.
+    pub fn of(owner: (u32, u32), engine: Engine, userns_remap: bool, euid: u32) -> Option<Self> {
+        let (uid, gid) = owner;
+        match engine {
+            // Its root is its user, the agent's: the file the agent wrote is root's in there.
+            Engine::Rootless => (uid == euid).then_some(Self::Owner { uid: 0, gid: 0 }),
+            // Its remapped uids are none of the host's, so none is the owner; leaving the
+            // remapping (`--userns host`) would land a sidecar escape on the agent's own user
+            // rather than a subuid, which design v2 §19.1 does not allow: held, for a maintainer.
+            Engine::Rootful if userns_remap => Some(Self::Held(HELD_REMAP)),
+            // Uids as the host has them; a Mac's VM shows the Mac's in its shared directories.
+            // A sidecar that is not root takes no root group: the host's, on a rootful engine.
+            Engine::Rootful => Some(Self::Owner {
+                uid,
+                gid: if uid != 0 && gid == 0 { NOGROUP } else { gid },
+            }),
+        }
+    }
+
+    /// Of the host now: agent.env's owner, or its directory's before there is one (the agent
+    /// writes the file as itself, there).
+    fn of_host(e: &Envelope) -> Option<Self> {
+        let meta = std::fs::metadata(e.secrets_dir.join("agent.env"))
+            .or_else(|_| std::fs::metadata(&e.secrets_dir))
+            .ok()?;
+        Self::of(
+            (meta.uid(), meta.gid()),
+            e.engine,
+            e.userns_remap,
+            crate::install::files::euid(),
+        )
+    }
+
+    fn line(self) -> String {
+        match self {
+            Self::Owner { uid, gid } => format!("{AGENT_USER}={uid}:{gid}"),
+            Self::Held(code) => format!("{AGENT_HELD}={code}"),
+        }
+    }
+}
+
+/// `set.engine` (`rootless`, or `rootful` and absent as the strict case), a Quadlet host's
+/// rootless when it names none; and `[envelope].userns_remap`, a boolean, absent as false.
+fn engine_of(t: &toml::Table) -> Result<(Engine, bool), String> {
+    let set = t.get("set");
+    let word = |k: &str| set.and_then(|s| s.get(k)).and_then(toml::Value::as_str);
+    let engine = match (word("engine"), word("driver")) {
+        (Some("rootless"), _) | (None, Some("quadlet")) => Engine::Rootless,
+        _ => Engine::Rootful,
+    };
+    let remap = match t.get("envelope").and_then(|e| e.get("userns_remap")) {
+        None => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or("agent.toml: envelope.userns_remap is neither true nor false")?,
+    };
+    Ok((engine, remap))
 }
 
 /// `[envelope].direct_network`: true or false, absent as false; anything else is refused, as
@@ -284,6 +389,7 @@ impl Envelope {
             .ok_or("agent.toml: set.secrets_dir is missing")?;
         let envelope = t.get("envelope");
         let budget = Budget::from_envelope(envelope.and_then(|e| e.get("agent_budget")))?;
+        let (engine, userns_remap) = engine_of(&t)?;
         Ok(Self {
             secrets_dir,
             budget,
@@ -294,6 +400,8 @@ impl Envelope {
                     .and_then(|e| e.get("task_subnets"))
                     .and_then(toml::Value::as_str),
             ),
+            engine,
+            userns_remap,
         })
     }
 
@@ -305,6 +413,8 @@ impl Envelope {
             direct_network: cfg.direct_network,
             cache_caps: cfg.cache_caps,
             task_subnets: task_subnets(cfg.task_subnets.as_deref()),
+            engine: cfg.engine,
+            userns_remap: cfg.envelope.userns_remap,
         }
     }
 
@@ -342,17 +452,22 @@ pub struct Rendered {
     /// The token here too, as `OMARCHY_WORKER_TOKEN`: a release from before #327 is applied
     /// or staged ([`older_release_here`]).
     pub plain: bool,
+    /// Who the agent sidecars run as, or why none runs (#399), with the envelope's lines:
+    /// `None` leaves the dispatcher's default, the worker image's user.
+    pub keys_user: Option<KeysUser>,
 }
 
 impl Rendered {
     /// The host's addresses now (its interfaces', the public one last seen), with `envelope`,
-    /// and whether a release here still reads the token from the file.
+    /// whether a release here still reads the token from the file, and agent.env's owner as
+    /// the engine shows it.
     pub fn now(sources: &Sources, data: &Path, envelope: Option<Envelope>) -> Self {
         let task = envelope
             .as_ref()
             .map_or_else(|| task_subnets(None), |e| e.task_subnets.clone());
         Self {
             addresses: addresses::detect(sources, data, &task),
+            keys_user: envelope.as_ref().and_then(KeysUser::of_host),
             envelope,
             plain: older_release_here(data),
         }
@@ -382,6 +497,7 @@ impl Rendered {
                 out.push(format!("{DIRECT_NETWORK}=1"));
             }
             out.extend(e.cache_caps.lines());
+            out.extend(self.keys_user.map(KeysUser::line));
         }
         Ok(out)
     }

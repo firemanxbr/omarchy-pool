@@ -154,7 +154,8 @@ describe("a fleet, on the worst days", () => {
     expect(ran.filter((x) => ORDERS_SQL.test(x.sql)).map((x) => x.sql)).toEqual([]);
   });
 
-  it("an outage across twelve hosts, a whole day: the breaker trips before the first restart, once, and stays; a held claim reads its key and writes nothing", async () => {
+  // A whole day of claims every ten minutes: 11-23 s on CI, 36 s on a slow runner, which stopped release run 37792160012 (2026-10-08) at the suite's 30 s.
+  it("an outage across twelve hosts, a whole day: the breaker trips before the first restart, once, and stays; a held claim reads its key and writes nothing", { timeout: 120000 }, async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const { env: on, ran } = counted();
     const ids = Array.from({ length: 12 }, (_, i) => `outage-${i}`);
@@ -207,7 +208,8 @@ describe("a fleet, on the worst days", () => {
     }
   });
 
-  it("whatever the fleet does, the pool's orders stay under sixty a day and their rows under the day's ceiling", async () => {
+  // A whole day of claims every five minutes: 16-19 s on CI, 31 s on a slow runner, which stopped release run 37792160012 (2026-10-08) at the suite's 30 s.
+  it("whatever the fleet does, the pool's orders stay under sixty a day and their rows under the day's ceiling", { timeout: 120000 }, async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const { env: on, ran } = counted();
     const rnd = seeded(277);

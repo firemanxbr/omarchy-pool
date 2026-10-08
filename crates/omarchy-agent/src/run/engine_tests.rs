@@ -576,6 +576,7 @@ fn a_rotation_recreates_the_dispatcher_alone(h: &mut Host) -> String {
         addresses: Vec::new(),
         envelope: None,
         plain: false,
+        keys_user: None,
     };
     crate::enroll::write_worker_token(
         &h.dir.join("set/etc/dispatcher.env"),

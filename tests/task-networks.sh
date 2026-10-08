@@ -10,7 +10,10 @@
 #      this machine's own addresses (its interfaces', and a stand-in for the
 #      public address install's egress probe saw), the secrets directory, the
 #      envelope's agent budget and its grant of a signed exception's bridge
-#      (OMARCHY_DIRECT_NETWORK=1, #373) — keeping an owner's line, 0600, and
+#      (OMARCHY_DIRECT_NETWORK=1, #373), and who the agent sidecars run as
+#      (#399: OMARCHY_AGENT_USER, the keys file's owner as the engine shows it
+#      — the file here is 0600 and a non-root user's, as install and the
+#      owner's *Set agent keys* write it) — keeping an owner's line, 0600, and
 #      moves the worker token an older agent left there to its own file,
 #      run/host/dispatcher/token (0400); the dispatcher's environment is the
 #      env file and OMARCHY_WORKER_TOKEN_FILE naming that file, as the host
@@ -35,9 +38,12 @@
 #      address is refused, and so is its public one, a public address that only
 #      the agent's OMARCHY_HOST_ADDRESSES refuses ("an address of this host"),
 #      which every egress sidecar was given (as an IPv4-mapped IPv6 literal
-#      too); the agent sidecar's caps are the envelope's budget
+#      too); the agent sidecar's caps are the envelope's budget; it runs as
+#      the keys' owner with every capability dropped, reads the 0600 file and
+#      writes its usage where the dispatcher reads it (#399)
 #   2. the probe sidecar's word reaches the claim (`agent`): with a key the
 #      provider refuses, it says so, which shows the agent sidecar's way out
+#      and that it read the owner-only keys file (#399)
 #   3. a package with a signed exception in factory/sizing gets a bridge
 #      network on a host whose envelope grants it (this one's, step 0; a host
 #      without the grant hands it back, #373: pkg-repo's dispatch tests), and
@@ -211,8 +217,16 @@ while [[ ! -e /task/in/finish ]]; do sleep 1; done
 echo '{"status":4,"final":true,"needs_native":false,"error":"a probe task"}' > /task/out/verdict.json
 exit 4
 STUB
-# The agent's keys: a key the provider refuses, so the probe's answer shows the sidecar reached it.
+# The agent's keys: a key the provider refuses, so the probe's answer shows the sidecar reached it. Owner-only and a
+# non-root user's, as install and the owner's Set agent keys write it (#399): the runner's in CI; as root, another uid's
+# (root reads any file, the sidecars' root without CAP_DAC_OVERRIDE none of another uid's).
 printf 'FACTORY_PROVIDER=anthropic\nANTHROPIC_API_KEY=sk-ant-not-a-real-key\n' > "$tmp/secrets/agent.env"
+chmod 700 "$tmp/secrets"; chmod 600 "$tmp/secrets/agent.env"
+[[ $EUID -ne 0 ]] || chown 4242:4242 "$tmp/secrets" "$tmp/secrets/agent.env"
+keys_owner="$(stat -c %u:%g "$tmp/secrets/agent.env" 2>/dev/null || stat -f %u:%g "$tmp/secrets/agent.env")"
+[[ "${keys_owner%%:*}" != 0 ]] || fail "the keys file must be a non-root user's: $keys_owner"
+# What a container sees of it: the owner itself on a rootful engine, root on a rootless one (whose root is this user).
+if rootless; then engine_kind=rootless keys_user=0:0; else engine_kind=rootful keys_user="$keys_owner"; fi
 
 # ---------- 0. the dispatcher's environment, as the agent writes it (#371) ----------
 # The agent's data directory: its envelope (the secrets directory, a budget), the public address
@@ -229,6 +243,7 @@ dir = "$agent_data/sets/host"
 work_root = "$tmp/work"
 secrets_dir = "$tmp/secrets"
 socket_cli = "/var/run/docker.sock"
+engine = "$engine_kind"
 [envelope]
 allow_socket = true
 rootful_ack = true
@@ -256,10 +271,11 @@ addresses=",$(key OMARCHY_HOST_ADDRESSES),"
 [[ "$(key OMARCHY_SECRETS_DIR)" == "$tmp/secrets" ]] || fail "OMARCHY_SECRETS_DIR: $(key OMARCHY_SECRETS_DIR)"
 [[ "$(key OMARCHY_AGENT_CALLS_PER_TASK) $(key OMARCHY_AGENT_TOKENS_PER_TASK) $(key OMARCHY_AGENT_MINUTES_PER_TASK) $(key OMARCHY_AGENT_CALLS_PER_DAY)" == "37 123456 7 4000" ]] || fail "the agent budget: $(grep OMARCHY_AGENT_ "$envfile")"
 [[ "$(key OMARCHY_DIRECT_NETWORK)" == 1 ]] || fail "the envelope's grant of a signed exception's bridge: $(grep OMARCHY_DIRECT_NETWORK "$envfile" || echo none)"
+[[ "$(key OMARCHY_AGENT_USER)" == "$keys_user" && -z "$(key OMARCHY_AGENT_HELD)" ]] || fail "who the agent sidecars run as ($engine_kind, agent.env $keys_owner 0600): $(grep OMARCHY_AGENT_USER "$envfile" || echo none)"
 # The dispatcher's environment is that file, as compose's env_file gives it.
 from_agent=()
 while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || from_agent+=("$line"); done < "$envfile"
-echo "ok: the agent wrote etc/dispatcher.env (0600): the owner's line kept, OMARCHY_HOST_ADDRESSES=${addresses:1:${#addresses}-2}, the secrets directory, the budget, the grant of a signed exception's bridge; the token moved to run/host/dispatcher/token (0400)"
+echo "ok: the agent wrote etc/dispatcher.env (0600): the owner's line kept, OMARCHY_HOST_ADDRESSES=${addresses:1:${#addresses}-2}, the secrets directory, the budget, the grant of a signed exception's bridge, the agent sidecars' user ($keys_user for agent.env $keys_owner 0600 on a $engine_kind engine); the token moved to run/host/dispatcher/token (0400)"
 
 # The pool: who the host is, tasks one per claim (then 204), heartbeats by beats/<id>, every request kept.
 mkdir -p "$tmp/beats"; : > "$tmp/tasks.jsonl"; : > "$tmp/requests.jsonl"
@@ -413,13 +429,25 @@ done
   || fail "task B, a contributor's build, has an ANTHROPIC_ variable: $("$RT" inspect "$B" | jq -c '[.[0].Config.Env[] | select(startswith("ANTHROPIC_"))]')"
 "$RT" inspect "$A-agent" | jq -e '.[0].Config.Env | any(startswith("OMARCHY_AGENT_ENV="))' > /dev/null || fail "the agent sidecar names no keys file"
 echo "ok: docker inspect shows no token or key in the environment of a task, an egress or an agent sidecar (task A's key the placeholder alone, B none); the agent sidecar names its keys' read-only file"
+# #399: the agent sidecar is the keys' owner as this engine shows it, with every capability dropped and no new privileges,
+# and it read the owner-only file (it answered, above) and wrote its usage where the dispatcher reads it; nothing else
+# the dispatcher started runs as that user.
+"$RT" inspect "$A-agent" | jq -e --arg u "$keys_user" '.[0] | .Config.User == $u and ((.HostConfig.CapDrop // [] | map(ascii_upcase) | index("ALL") != null) or (.EffectiveCaps // ["?"] | length == 0)) and (.HostConfig.CapAdd // [] | length == 0) and (.HostConfig.SecurityOpt | index("no-new-privileges") != null)' >/dev/null \
+  || fail "the agent sidecar: $("$RT" inspect "$A-agent" | jq -c '.[0] | {User: .Config.User, CapDrop: .HostConfig.CapDrop, CapAdd: .HostConfig.CapAdd, SecurityOpt: .HostConfig.SecurityOpt}')"
+for c in "$A" "$A-egress" "$B" "$B-egress"; do
+  [[ -z "$("$RT" inspect --format '{{.Config.User}}' "$c")" ]] || fail "$c runs as $("$RT" inspect --format '{{.Config.User}}' "$c")"
+done
+usage="$tmp/work/tasks/1-$(gen 1)/agent/usage.json"
+until_ 30 "the agent sidecar's usage" test -s "$usage"
+jq -e '.calls | type == "number"' "$usage" >/dev/null || fail "the agent sidecar's usage: $(cat "$usage")"
+echo "ok: the agent sidecar runs as $keys_user (agent.env $keys_owner, 0600), every capability dropped, no new privileges; it read its keys and wrote its usage ($(jq -c . "$usage"))"
 
 # ---------- 2. the probe sidecar ----------
 probe_said() { jq -c 'select(.path == "/api/v1/factory/claim") | .body.agent // empty' "$tmp/requests.jsonl" | tail -n1; }
 until_ 120 "a claim with the probe's word" eval '[[ "$(probe_said | jq -r .probe 2>/dev/null)" == error ]]'
 probe_said | jq -e '.error | test("401|nauthori|invalid")' >/dev/null || fail "the probe's word: $(probe_said)"
 "$RT" ps -a --format '{{.Names}}' | grep -q '^omarchy-task-0-' && fail "a probe container was left behind"
-echo "ok: the probe sidecar's answer reaches the claim — the provider refused the key, so the agent's way out works"
+echo "ok: the probe sidecar's answer reaches the claim — it read the owner-only keys file as $keys_user, and the provider refused the key, so the agent's way out works"
 
 # ---------- 3. a signed exception: a bridge network ----------
 give 3 probe-direct "https://example.invalid/c@v1:PKGBUILD"

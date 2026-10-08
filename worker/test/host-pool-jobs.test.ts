@@ -119,7 +119,7 @@ describe("the rollout: pool jobs reach a host once the maintainers let them", ()
       // What it takes, as its row says it: its tasks, not the pool jobs its dispatcher lists.
       expect(await kindsOf()).toEqual(["build", "trial", "audit"]);
     }
-    // By its host's name (the P1 host first)…
+    // By its host's name…
     await setPoolJobs("studio, pj-gated");
     const c = await claim("pj-gated");
     expect(c.json?.task?.id, JSON.stringify(c.json)).toBe(sync);

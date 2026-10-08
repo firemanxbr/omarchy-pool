@@ -7,8 +7,9 @@
 # one is not even running.
 #
 # 1. The static check: the scripts `pkg-repo work` runs through script()
-#    (its calls `script(opts, token, "tests/…")` in crates/pkg-repo/src/work.rs;
-#    its own tests call it otherwise), and the scripts those run, name
+#    (its calls `script(opts, token, "tests/…")` in crates/pkg-repo/src/work.rs,
+#    and `script_status(…)`, the health check's since #414; its own tests call
+#    them otherwise), and the scripts those run, name
 #    and label every `"$RUNTIME" run` and `"$RUNTIME" create`; a script of the
 #    list that runs another script under tests/ the list does not name fails
 #    too, so a container added or created later cannot escape a stop. And the
@@ -18,7 +19,11 @@
 #    PKGBUILD reader.
 # 2. tests/health-check.sh against a stub docker first on PATH and a stub
 #    pool: with OMARCHY_TASK_ID=812 its run carries the task's name and
-#    label; without it, the arguments it always had.
+#    label; without it, the arguments it always had. With OMARCHY_KEYRINGS
+#    set (#414), a keyring its arch needs missing from it — an empty
+#    directory, aarch64's with Omarchy's key only, an empty file — refuses
+#    the check: the file named, no container started, no event posted, exit
+#    3; with them all, the check runs and posts its row.
 # 3. tests/abi-gate.sh's reference export, the same way (a `run` since #340,
 #    which a pool job's shim takes; the script then ends on a reference the
 #    stub did not export; only the recorded run is read).
@@ -34,7 +39,7 @@ fail() { echo "task-containers: $*" >&2; exit 1; }
 
 # ---- 1. the static check ----
 ran=()
-while IFS= read -r s; do ran+=("$s"); done < <(grep -oE 'script\(opts, token, "tests/[a-z0-9-]+\.sh"' "$root/crates/pkg-repo/src/work.rs" | grep -oE 'tests/[a-z0-9-]+\.sh' | sort -u)
+while IFS= read -r s; do ran+=("$s"); done < <(grep -oE 'script(_status)?\(opts, token, "tests/[a-z0-9-]+\.sh"' "$root/crates/pkg-repo/src/work.rs" | grep -oE 'tests/[a-z0-9-]+\.sh' | sort -u)
 [[ ${#ran[@]} -ge 3 ]] || fail "work.rs runs fewer scripts than health-check, trial and abi-gate: ${ran[*]}"
 # The scripts those run, known and checked with them.
 nested=(tests/omarchy-rootfs.sh)
@@ -124,9 +129,10 @@ case "$1" in
 esac
 exit 0
 S
-printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/pkg-repo"
+# Records each call — what the check posts — one per line.
+printf '#!/bin/sh\necho "$*" >> "$STUB_PKG_REPO"\nexit 0\n' > "$tmp/bin/pkg-repo"
 chmod +x "$tmp/bin/docker" "$tmp/bin/pkg-repo"
-env_common=(PATH="$tmp/bin:$PATH" OMARCHY_API="http://127.0.0.1:$(cat "$tmp/port")" OMARCHY_POOL="http://127.0.0.1:1/pool" OMARCHY_TOKEN=omj.stub PKG_REPO="$tmp/bin/pkg-repo" OMARCHY_CLI=/bin/false STUB_DOCKER="$tmp/docker")
+env_common=(PATH="$tmp/bin:$PATH" OMARCHY_API="http://127.0.0.1:$(cat "$tmp/port")" OMARCHY_POOL="http://127.0.0.1:1/pool" OMARCHY_TOKEN=omj.stub PKG_REPO="$tmp/bin/pkg-repo" OMARCHY_CLI=/bin/false STUB_DOCKER="$tmp/docker" STUB_PKG_REPO="$tmp/posted")
 # The arguments of the recorded call with this verb, one per line.
 call_of() { awk -v v="== $1" '$0 == v { on = 1; next } /^== / { on = 0 } on' "$tmp/docker"; }
 
@@ -141,6 +147,25 @@ env -u OMARCHY_TASK_ID "${env_common[@]}" bash "$root/tests/health-check.sh" edg
 args="$(call_of run)"
 [[ "$(head -n2 <<<"$args" | tr '\n' ' ')" == "--rm --platform " ]] || fail "without a task, the run is as it always was: $args"
 grep -q 'com.omarchy.task' <<<"$args" && fail "without a task, no label: $args"
+# #414: a worker sets OMARCHY_KEYRINGS; a keyring the arch's check needs and the worker lacks is no verdict on the ring.
+mkdir -p "$tmp/keys/none" "$tmp/keys/omarchy" "$tmp/keys/empty" "$tmp/keys/all"
+echo key > "$tmp/keys/omarchy/omarchy.gpg"
+for k in omarchy-asahi asahi-alarm; do echo key > "$tmp/keys/empty/$k.gpg"; done; : > "$tmp/keys/empty/omarchy.gpg"
+for k in omarchy omarchy-asahi asahi-alarm; do echo key > "$tmp/keys/all/$k.gpg"; done
+for c in "x86_64 none omarchy.gpg" "aarch64 none omarchy.gpg" "aarch64 omarchy omarchy-asahi.gpg" "aarch64 empty omarchy.gpg"; do
+  read -r a k missing <<<"$c"
+  : > "$tmp/docker"; : > "$tmp/posted"
+  code=0; env "${env_common[@]}" OMARCHY_TASK_ID=812 OMARCHY_KEYRINGS="$tmp/keys/$k" bash "$root/tests/health-check.sh" edge "$a" >"$tmp/out" 2>&1 || code=$?
+  [[ "$code" == 3 ]] || fail "$a with the keyrings of $k: exit 3, not $code: $(cat "$tmp/out")"
+  grep -qF "edge $a: $missing is missing from $tmp/keys/$k" "$tmp/out" || fail "$a with the keyrings of $k: the missing file is named: $(cat "$tmp/out")"
+  [[ ! -s "$tmp/docker" ]] || fail "$a with the keyrings of $k: a container was started: $(cat "$tmp/docker")"
+  [[ ! -s "$tmp/posted" ]] || fail "$a with the keyrings of $k: an event was posted: $(cat "$tmp/posted")"
+done
+: > "$tmp/docker"; : > "$tmp/posted"
+env "${env_common[@]}" OMARCHY_TASK_ID=812 OMARCHY_KEYRINGS="$tmp/keys/all" bash "$root/tests/health-check.sh" edge aarch64 >"$tmp/out" 2>&1 || fail "health-check.sh with every keyring it needs failed: $(cat "$tmp/out")"
+[[ -n "$(call_of run)" ]] || fail "with every keyring it needs, the check runs"
+grep -q -- '^event --kind health --ring edge --source aarch64 --status ok ' "$tmp/posted" || fail "with every keyring it needs, the check posts its row: $(cat "$tmp/posted")"
+echo "task-containers: with OMARCHY_KEYRINGS, a keyring the check needs and lacks refuses it — no container, no event, exit 3"
 
 # ---- 3. abi-gate.sh's reference export ----
 : > "$tmp/docker"

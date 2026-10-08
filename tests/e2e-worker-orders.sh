@@ -110,8 +110,10 @@ w5_start() { # id provider port [skew]
     preload=(LD_PRELOAD="$lib" FAKETIME="$skew" FAKETIME_DONT_FAKE_MONOTONIC=1 FAKETIME_NO_CACHE=1)
   fi
   mkdir -p "$W5/$id/work/keyrings"
-  # These workers run no sync: the keyrings' stamp stands in for GitHub's, so a start fetches nothing.
-  touch "$W5/$id/work/keyrings/archlinux.gpg" "$W5/$id/work/keyrings/.fetched"
+  # These workers run no sync: the keyrings' stamp stands in for GitHub's, so a start fetches nothing — nor a health check, which
+  # gets its arch's keyrings first, each with something in it (#414).
+  for k in archlinux omarchy omarchy-asahi asahi-alarm; do echo e2e > "$W5/$id/work/keyrings/$k.gpg"; done
+  touch "$W5/$id/work/keyrings/.fetched"
   # A skewed clock would see a stamp made now in its future or its past: an hour old, it is fresh on either clock (GNU touch; the
   # skew is Linux's alone).
   [[ -z "$skew" ]] || touch -d "@$(( $(date +%s) - 3600 ))" "$W5/$id/work/keyrings/.fetched"

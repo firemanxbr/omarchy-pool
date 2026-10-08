@@ -70,10 +70,23 @@ describe("the runbook's The Studio host (#346, design v2 §21.1)", () => {
     // Where its key and its token live, as the canary set them up: a file key, the Studio having no TPM (#330); the token's own
     // file in the set directory (#327), on the compose driver.
     expect(studio).toContain("`host.ed25519` in the agent's `state/`, a file: the Studio has no TPM");
-    expect(studio).toContain("`~/.local/share/omarchy-agent/secrets` (`agent.env`, 0600)");
+    expect(studio).toContain("`/srv/omarchy-host-secrets` (`--secrets-dir`, the login's, 0700; `agent.env`, 0600)");
     expect(studio).toContain("`run/host/dispatcher/token` (0400), mounted read-only into the dispatcher (#327)");
     // A build that dies of emulation goes back for a native host, its attempt given back.
     expect(studio).toContain("`needs_native`, #338");
+  });
+
+  it("names the hosts as installed: the canary studio-m2 and, on the same machine, the 4K VM studio-vm4k, which builds only", () => {
+    // The canary as installed (#409): its name, id and registration, its secrets outside the work root.
+    expect(studio).toContain("the host `studio-m2`, id `h_2t7pul95fs`, its registration\n`firemanxbr-studio-m2-mnmw`");
+    expect(cut(runbook, "its-legacy-set-retired")).toContain("its secrets (`/srv/omarchy-host-secrets`) were put beside it");
+    // The VM (#413): a host of its own, a systemd --user unit, rootless podman on the Quadlet driver, no agent keys.
+    expect(studio).toContain("**The 4K VM, `studio-vm4k`** (#413), is a host of its own");
+    expect(studio).toContain("`systemd --user` unit `omarchy-vm4k.service`");
+    expect(studio).toContain("rootless podman with the Quadlet driver and holds no agent\nkeys");
+    // Its pool jobs fetch the keyrings before a check, and a red says whose it is (#414, #417).
+    expect(studio).toContain("Every job that checks a\nring now fetches the keyrings first");
+    expect(studio).toContain("`payload.posted_by`");
   });
 
   it("asks nothing of the legacy tools, and names the queries that show no legacy registration is left and the pool's jobs on the hosts", () => {

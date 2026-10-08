@@ -70,6 +70,7 @@ fn every_address_of_the_host_s_interfaces_but_loopback_and_container_bridges() {
         addresses: Vec::new(),
         envelope: None,
         plain: false,
+        keys_user: None,
     };
     assert!(r.lines().unwrap().is_empty());
 
@@ -354,6 +355,8 @@ fn envelope(secrets: &str, budget: Budget) -> Envelope {
         direct_network: false,
         cache_caps: CacheCaps::default(),
         task_subnets: task(),
+        engine: Engine::Rootful,
+        userns_remap: false,
     }
 }
 
@@ -370,6 +373,7 @@ fn rendering_keeps_the_registration_and_every_line_the_agent_does_not_own() {
             },
         )),
         plain: false,
+        keys_user: None,
     };
     // What the agent of #321 wrote, and an owner's line and comment after it.
     let old = format!(
@@ -439,6 +443,7 @@ fn rendering_keeps_the_registration_and_every_line_the_agent_does_not_own() {
         addresses: home,
         envelope: None,
         plain: false,
+        keys_user: None,
     };
     let kept = render(&text, Some("m1-rack-0a9z"), None, Some(&early)).unwrap();
     assert!(kept.contains(
@@ -481,6 +486,7 @@ fn refresh_never_makes_the_files_and_writes_them_only_when_they_change() {
         addresses: addresses::detect(&fixture("home"), &d, &task()),
         envelope: Some(envelope("/srv/s", Budget::default())),
         plain: false,
+        keys_user: None,
     };
     // No file: no token yet (the owner has not confirmed), and none is made.
     assert_eq!(refresh(&env, &r).unwrap(), Refresh::NoFile);
@@ -621,6 +627,7 @@ fn a_rotation_writes_the_token_where_every_release_here_reads_it() {
         addresses: home.clone(),
         envelope: None,
         plain: false,
+        keys_user: None,
     };
     write_token(&env, "m1-rack-0a9z", OMW, &r).unwrap();
     let new = format!("omw_{}", "a1".repeat(24));
@@ -687,6 +694,7 @@ fn a_token_write_stopped_between_any_two_of_its_writes_leaves_the_new_token_with
             addresses: Vec::new(),
             envelope: None,
             plain,
+            keys_user: None,
         };
         let steps = token_steps(
             held.as_deref(),
@@ -732,6 +740,7 @@ fn a_token_write_stopped_between_any_two_of_its_writes_leaves_the_new_token_with
         addresses: Vec::new(),
         envelope: None,
         plain: false,
+        keys_user: None,
     };
     let settled = "# worker: m1-rack-0a9z\nTZ=UTC\n";
     let steps = token_steps(
@@ -755,6 +764,7 @@ fn a_refresh_waits_for_another_writer_and_never_puts_back_the_token_it_replaced(
         addresses: addresses::detect(&fixture("home"), &d, &task()),
         envelope: None,
         plain: true,
+        keys_user: None,
     };
     write_token(&env, "m1-rack-0a9z", OMW, &r).unwrap();
     // `omarchy-agent token` in another process holds etc/ from its read to its renames; the
@@ -764,6 +774,7 @@ fn a_refresh_waits_for_another_writer_and_never_puts_back_the_token_it_replaced(
         addresses: addresses::detect(&fixture("vps"), &d, &task()),
         envelope: None,
         plain: true,
+        keys_user: None,
     };
     let refresh_in_loop = {
         let (env, moved) = (env.clone(), moved.clone());
@@ -828,6 +839,7 @@ fn a_granted_signed_exception_s_bridge_reaches_the_dispatcher_and_a_withdrawn_on
         addresses: Vec::new(),
         envelope: Some(granted.clone()),
         plain: false,
+        keys_user: None,
     };
     assert_eq!(
         r.lines().unwrap(),
@@ -849,6 +861,7 @@ fn a_granted_signed_exception_s_bridge_reaches_the_dispatcher_and_a_withdrawn_on
         addresses: Vec::new(),
         envelope: None,
         plain: false,
+        keys_user: None,
     };
     assert!(render(&text, None, None, Some(&early))
         .unwrap()
@@ -878,6 +891,7 @@ fn the_cache_caps_reach_the_dispatcher_only_when_the_envelope_sets_them() {
         addresses: Vec::new(),
         envelope: Some(studio.clone()),
         plain: false,
+        keys_user: None,
     };
     assert_eq!(
         r.lines().unwrap(),
@@ -893,6 +907,7 @@ fn the_cache_caps_reach_the_dispatcher_only_when_the_envelope_sets_them() {
         addresses: Vec::new(),
         envelope: Some(one),
         plain: false,
+        keys_user: None,
     };
     assert_eq!(
         r1.lines().unwrap(),
@@ -910,6 +925,7 @@ fn the_cache_caps_reach_the_dispatcher_only_when_the_envelope_sets_them() {
         addresses: Vec::new(),
         envelope: None,
         plain: false,
+        keys_user: None,
     };
     assert!(render(
         &render(&base, None, None, Some(&r)).unwrap(),
@@ -978,4 +994,160 @@ fn only_the_agent_s_keys_without_a_secret_are_left_unscrubbed() {
         crate::run::journal::env_secrets(&d),
         [OMW, "hunter2hunter2"]
     );
+}
+
+/// #399: agent.env stays 0600 and its owner's, and the agent sidecars keep every capability
+/// dropped, so they run as that owner as each engine shows it to a container — what the agent
+/// writes for the dispatcher, from agent.toml's engine and the file's owner on this machine.
+#[test]
+fn the_agent_sidecars_run_as_the_keys_owner_as_each_engine_shows_it() {
+    let me = 1000;
+    let of = |owner, engine, remap| KeysUser::of(owner, engine, remap, me);
+    let user = |uid, gid| Some(KeysUser::Owner { uid, gid });
+    // A rootful daemon without remapping (the Studio): the owner's own ids.
+    assert_eq!(of((1000, 1000), Engine::Rootful, false), user(1000, 1000));
+    // A Mac's VM (rootful in it, no remapping): the Mac's ids, which its shared directory shows.
+    assert_eq!(of((501, 20), Engine::Rootful, false), user(501, 20));
+    // A file of root's group: the owner, with no privileged group of the host's (a 0600 file
+    // needs none); a file of root's, root (the image's own user, as before).
+    assert_eq!(of((1000, 0), Engine::Rootful, false), user(1000, 65_534));
+    assert_eq!(of((0, 0), Engine::Rootful, false), user(0, 0));
+    // A rootful daemon with userns-remap: no remapped uid is the owner, and the sidecars stay
+    // remapped (design v2 §19.1, never `--userns host`): held, whoever owns the file.
+    for owner in [(1000, 1000), (0, 0), (1001, 0)] {
+        assert_eq!(
+            of(owner, Engine::Rootful, true),
+            Some(KeysUser::Held("userns-remap")),
+            "{owner:?}"
+        );
+    }
+    // A rootless engine: its root is the agent's user, so the agent's file is root's in there.
+    assert_eq!(of((1000, 1000), Engine::Rootless, false), user(0, 0));
+    // A file another user owns is nobody's in there: none.
+    assert_eq!(of((1001, 1001), Engine::Rootless, false), None);
+
+    // The line, after the envelope's own: who, or why none runs.
+    let r = |keys_user| Rendered {
+        addresses: Vec::new(),
+        envelope: Some(envelope("/srv/s", Budget::default())),
+        plain: false,
+        keys_user,
+    };
+    assert_eq!(
+        r(user(1000, 984)).lines().unwrap(),
+        ["OMARCHY_SECRETS_DIR=/srv/s", "OMARCHY_AGENT_USER=1000:984"]
+    );
+    assert_eq!(
+        r(Some(KeysUser::Held(HELD_REMAP))).lines().unwrap(),
+        [
+            "OMARCHY_SECRETS_DIR=/srv/s",
+            "OMARCHY_AGENT_HELD=userns-remap"
+        ]
+    );
+    assert_eq!(r(None).lines().unwrap(), ["OMARCHY_SECRETS_DIR=/srv/s"]);
+    // The agent's to render, as the envelope's lines: an owner's line of the same key is
+    // replaced, a hold that ended takes its line out, and before agent.toml (a first
+    // enrollment) the file's own lines stay.
+    let base = format!(
+        "# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={OMW}\nOMARCHY_AGENT_USER=0:0\nOMARCHY_AGENT_HELD=userns-remap\n"
+    );
+    let text = render(&base, None, None, Some(&r(user(1000, 984)))).unwrap();
+    assert!(text.contains("\nOMARCHY_AGENT_USER=1000:984\n"), "{text}");
+    assert!(
+        !text.contains("0:0") && !text.contains("OMARCHY_AGENT_HELD"),
+        "{text}"
+    );
+    let held = render(
+        &text,
+        None,
+        None,
+        Some(&r(Some(KeysUser::Held(HELD_REMAP)))),
+    )
+    .unwrap();
+    assert!(
+        held.contains("\nOMARCHY_AGENT_HELD=userns-remap\n"),
+        "{held}"
+    );
+    assert!(!held.contains("OMARCHY_AGENT_USER"), "{held}");
+    let early = Rendered {
+        addresses: Vec::new(),
+        envelope: None,
+        plain: false,
+        keys_user: None,
+    };
+    assert!(render(&text, None, None, Some(&early))
+        .unwrap()
+        .contains("\nOMARCHY_AGENT_USER=1000:984\n"));
+    assert!(not_secret(AGENT_USER) && not_secret(AGENT_HELD));
+}
+
+/// #399: what the owner is taken from — agent.toml's engine and remapping, and the keys file
+/// (or its directory before there is one) on this machine.
+#[test]
+fn the_keys_owner_is_read_from_agent_toml_and_the_file_on_this_machine() {
+    use std::os::unix::fs::MetadataExt as _;
+    // As a rootful engine shows a file: its owner, with no root group unless root.
+    let user = |m: &fs::Metadata| {
+        let gid = if m.uid() != 0 && m.gid() == 0 {
+            65_534
+        } else {
+            m.gid()
+        };
+        Some(KeysUser::Owner { uid: m.uid(), gid })
+    };
+    // agent.toml's engine and remapping: rootful when it names none, a Quadlet host's rootless.
+    let engine = |text: &str| {
+        Envelope::from_agent_toml(&format!("[set]\nsecrets_dir = \"/srv/s\"\n{text}\n"))
+            .map(|e| (e.engine, e.userns_remap))
+    };
+    assert_eq!(engine("").unwrap(), (Engine::Rootful, false));
+    assert_eq!(
+        engine("engine = \"rootless\"").unwrap(),
+        (Engine::Rootless, false)
+    );
+    assert_eq!(
+        engine("driver = \"quadlet\"").unwrap(),
+        (Engine::Rootless, false)
+    );
+    assert_eq!(
+        engine("engine = \"rootful\"\n[envelope]\nuserns_remap = true").unwrap(),
+        (Engine::Rootful, true)
+    );
+    let e = engine("[envelope]\nuserns_remap = \"yes\"").unwrap_err();
+    assert!(
+        e.contains("envelope.userns_remap is neither true nor false"),
+        "{e}"
+    );
+
+    // On this machine: the owner of the keys file, or of its directory before there is one.
+    let secrets = tempdir();
+    let dir = fs::metadata(&secrets).unwrap();
+    let at = |e: Envelope| Rendered::now(&fixture("vps"), &tempdir(), Some(e)).keys_user;
+    let here = Envelope {
+        secrets_dir: secrets.clone(),
+        ..envelope("/srv/s", Budget::default())
+    };
+    assert_eq!(at(here.clone()), user(&dir));
+    fs::write(secrets.join("agent.env"), "GEMINI_API_KEY=x\n").unwrap();
+    fs::set_permissions(secrets.join("agent.env"), fs::Permissions::from_mode(0o600)).unwrap();
+    let file = fs::metadata(secrets.join("agent.env")).unwrap();
+    assert_eq!(at(here.clone()), user(&file));
+    // The agent's own file on a rootless engine: root's in there.
+    let rootless = Envelope {
+        engine: Engine::Rootless,
+        ..here.clone()
+    };
+    assert_eq!(at(rootless), Some(KeysUser::Owner { uid: 0, gid: 0 }));
+    // A remapped daemon: held.
+    let remapped = Envelope {
+        userns_remap: true,
+        ..here.clone()
+    };
+    assert_eq!(at(remapped), Some(KeysUser::Held(HELD_REMAP)));
+    // No such directory (an agent.toml naming one install has not made): none.
+    let gone = Envelope {
+        secrets_dir: secrets.join("absent"),
+        ..here
+    };
+    assert_eq!(at(gone), None);
 }

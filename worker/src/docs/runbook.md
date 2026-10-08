@@ -781,8 +781,8 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--work-root <dir>`, `--secrets-dir <dir>` | where tasks work (default `<data>/work`) and where `agent.env` goes (default `<data>/secrets`); the secrets directory must be outside the work root and the set directory |
 | `--socket <path>` | the engine's socket; otherwise the first that answers of rootless podman's API socket, rootless docker, `/var/run/docker.sock` |
 | `--task-subnets <cidr>[,<cidr>]` | the task networks' range (default `10.231.0.0/16`, as prep-root.sh's) |
-| `--legacy <compose project>` | a set from before hosts running beside the new bundle, as the Studio's and maralcbr's were at their switches (#345, #332): recorded in `legacy.json`, nothing in it changed, until its owner retires it with *Retire legacy set*; a rootful daemon without userns-remap was the Studio's recorded exception until P6; a re-run without the flag uses the recorded project. Every such set has retired (#346): a new host has none |
-| `--agent-env-from <file>` | copies the agent keys from an existing file after showing which keys it holds; without it they are asked for on `/dev/tty`, not shown |
+| `--legacy <compose project>` | a set from before hosts running beside the new bundle, as the Studio's was at its switch (#345): recorded in `legacy.json`, nothing in it changed, until its owner retires it with *Retire legacy set*; a rootful daemon without userns-remap was the Studio's recorded exception until P6; a re-run without the flag uses the recorded project. Every such set has retired (#346): a new host has none |
+| `--agent-env-from <file>` | copies the agent keys from an existing file after showing which keys it holds; its `GITHUB_TOKEN` must be a classic token with no scope, or absent, so a file whose token is fine-grained cannot be given as is; without it, an `agent.env` already in the secrets directory is kept; otherwise the keys are asked for on `/dev/tty`, not shown (with `--yes`, none: no model kinds) |
 | `--max-units`, `--max-cpus`, `--max-mem-gb` | the owner's caps, lower than detected only |
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
 | `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory (it must be the one install.sh put the agent in, `omarchy-agent` under `XDG_DATA_HOME` or `~/.local/share`: the unit starts `<data>/current/omarchy-agent`); how long to wait for your Confirm |
@@ -981,8 +981,10 @@ the run loop asks again every hour, and within minutes after no answer), `OMARCH
 envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
 `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK` and `…_CALLS_PER_DAY` (without one, the
 dispatcher's defaults), `OMARCHY_DIRECT_NETWORK=1` when the envelope grants
-a signed exception's bridge (#373), and, when the envelope has a `cache_caps`,
-`OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB` (#341). Those envelope
+a signed exception's bridge (#373), when the envelope has a `cache_caps`,
+`OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB` (#341), and who the
+agent sidecars run as, `OMARCHY_AGENT_USER` (or, on a remapped daemon, why
+none runs, `OMARCHY_AGENT_HELD=userns-remap`, #399; below). Those envelope
 lines come from `agent.toml` alone: once it is there, a line of yours for one of
 their keys is replaced (set it in the envelope instead). Every other line of that file is yours and kept. It writes the
 agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
@@ -996,6 +998,59 @@ Every owner file is written through `openat` with `O_NOFOLLOW` in a
 directory the agent owns; a symbolic link, another user's file or one others
 may write is refused. Running it again repairs the install and keeps the
 identity, the agent keys and your edits to `agent.toml`.
+
+**How an agent sidecar reads the keys (#399).** `agent.env` stays 0600 and
+the agent user's, as install and the host page's *Set agent keys* write it,
+and nothing else on the host reads it: not the dispatcher, whose environment
+holds no key and which mounts nothing of the secrets directory, and not a
+task container. For each task that needs a model, and for the probe, the
+dispatcher starts the worker image's `agent` role with `--cap-drop ALL` and
+`no-new-privileges`, the file mounted read-only at `/run/omarchy/agent.env`
+(`OMARCHY_AGENT_ENV`, never a value in its environment), and — since root
+with no capability opens no file another uid owns — as the file's owner as
+the engine shows it to a container, which the agent works out from the file
+(its directory before there is one) and `agent.toml`'s engine and writes
+into `etc/dispatcher.env`:
+
+| Engine | `OMARCHY_AGENT_USER` | Why |
+|---|---|---|
+| rootful docker without remapping (the Studio) | the agent's `uid:gid` (a file of group `root`: gid 65534) | uids are the host's; a sidecar that is not root takes no root group |
+| rootless podman or docker (and Quadlet) | `0:0` | the engine's root is the agent's user; its own uid would map to a subordinate one |
+| rootful docker with userns-remap | none: `OMARCHY_AGENT_HELD=userns-remap` | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so none can read the file: no probe and no agent sidecar runs, the host takes no model kinds (its builds run: the dispatcher gives each task's writable directories to the remapped root, #405), and its page says why |
+| a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM; the `omarchy` profile's virtiofs mount shows the Mac's uid and checks access against it, as on the Studio. Docker Desktop and OrbStack show shared files their own way, and the Mac's uid reads the file there too |
+
+No sidecar ever leaves the engine's user namespace (`--userns` is refused
+on every container the dispatcher starts), so an escape from one lands no
+higher than one from its task, at the host's isolation level. The dispatcher gives
+that user the sidecar's usage directory and says at start whom it runs them
+as, or why it runs none; the sidecar, a uid with no home in the image, makes
+one under `/tmp`. You do nothing: an agent that comes with a release writes
+the line within a minute and the run loop recreates the dispatcher with it.
+Without a line (an agent from before #399, or a rootless engine and a file
+another user owns) the sidecars run as the image's root, and the probe's
+error on the host's page says why: `no agent keys at /run/omarchy/agent.env
+…: it is <uid>:<gid>, mode 600, and this sidecar runs as 0:0`. The first
+heals itself with the next release; for the other, make `agent.env` the
+agent user's again (as root, `chown <agent user>: agent.env`), and
+`omarchy-agent dispatcher-env` prints the line the agent renders then. On a
+remapped daemon the host page's agent error reads `model kinds held: this
+daemon remaps users (userns-remap), …`: how such a host reads its keys
+without leaving the remapping (an ACL for one remapped uid, say) is a
+maintainer's decision still open, and until it is taken the host builds
+only. Its builds run because a task container's root there is the remapped
+range's first uid on the host, "other" on every directory the dispatcher
+makes as root: the dispatcher (in the init user namespace, `userns_mode:
+host`) asks the engine for that uid and gid when it starts — its log says
+`this daemon remaps users (userns-remap): a task's root is host uid <B>, gid
+<G>, …` — and gives each task's `out`, `log`, `build`, `build/cache` and
+`pkgcache` directories and its package's build cache to it, and opens its
+`in` for reading (directories 0755, files `a+r`: a trial an older release's
+`tests/trial.sh` staged leaves it 0700), before the container starts, or
+hands the lease back `lost` with why (#405). A dispatcher the daemon
+remapped too (a set without the overlay's `userns_mode: host`: its root is
+the task's) refuses to start and says so; one on a host that is a user
+namespace itself (an unprivileged LXC or Incus container running dockerd
+with userns-remap) runs.
 
 `omarchy-agent uninstall` stops the agent, removes the unit, the bundle's
 containers and networks, task containers and sidecars (labelled
@@ -1905,7 +1960,8 @@ Then, on the page: **Widen the envelope** (the agent answers `done` with
 what changed in `agent.toml` and in `run/capacity.json`, and recreates the
 dispatcher with the new count) and **Set agent keys** (written to
 `OMARCHY_SECRETS_DIR/agent.env`, 0600; your own lines there are kept, and
-the next agent sidecar reads it). Each is one order on the page's journal of
+the next agent sidecar reads it, as the file's owner: *How an agent sidecar
+reads the keys*, above). Each is one order on the page's journal of
 orders; the agent's answer says why when it refuses:
 
 | The answer says | What it means |
@@ -2241,12 +2297,14 @@ so a size-4 build waits for memory rather than run smaller.
   absent, no host takes one and the pool's jobs wait — the rings stop
   moving. With the legacy registrations retired (#346) the hosts are the only
   ones that take them, so it names every host that should (`*`, as the P3
-  switch left it; the rollout was the P1 host first, the Studio canary a
-  week later, every host at the switch):
+  switch left it). The rollout: the Studio canary straight away, with no P1
+  host first (the canary was the first and only host: a maintainer decision
+  of 2026-10-06, #332 closed as not planned) — the setting named its
+  registration, `firemanxbr-studio-m2-mnmw`, from 2026-10-08 14:49 UTC —,
+  every host at the switch:
 
   ```bash
-  npx wrangler d1 execute omarchy-repo --remote --command "INSERT INTO settings (key, value) VALUES ('host-pool-jobs', '<p1 host name>') ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
-  npx wrangler d1 execute omarchy-repo --remote --command "UPDATE settings SET value = '<p1 host name>,<studio canary name>', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE key = 'host-pool-jobs'"   # a week on
+  npx wrangler d1 execute omarchy-repo --remote --command "INSERT INTO settings (key, value) VALUES ('host-pool-jobs', 'firemanxbr-studio-m2-mnmw') ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"   # the canary, 2026-10-08
   npx wrangler d1 execute omarchy-repo --remote --command "UPDATE settings SET value = '*', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE key = 'host-pool-jobs'"   # every host, since the switch
   npx wrangler d1 execute omarchy-repo --remote --command "SELECT value FROM settings WHERE key = 'host-pool-jobs'"   # what it says now
   ```
@@ -2283,7 +2341,38 @@ so a size-4 build waits for memory rather than run smaller.
   own runtime all the same, its emulated lanes included, and a sandbox hold
   (*A sandboxed runtime for community tasks*) holds its pool jobs with its
   tasks until it ends or the dispatcher restarts. The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
-  ABI gate's cached Omarchy reference). On the host, while one runs:
+  ABI gate's cached Omarchy reference). Every job that checks a ring's
+  health — a health check, a promotion's evidence and its check after
+  promoting, a fast-track's check — first fills `<work root>/jobs/keyrings` itself (#414) with the
+  keyrings its arches' checks need: Omarchy's on x86_64, and on aarch64 the
+  Asahi fork's and asahi-alarm's too, and no others. They come from the
+  release's `tests/fetch-keyrings.sh`, run in the job's own process (no
+  task network, no keyserver), and are refreshed daily, as a sync's are.
+  The script fetches each keyring on its own, each curl bounded (15 s to
+  connect, 120 s in all), and moves a file into place only when it is
+  whole: a source that fails or stalls leaves yesterday's file, and the job
+  goes on with it. A source the check does not use (chaotic's, Arch's
+  mirrors) never stops it. A job that cannot get them fails as the
+  host's own fault, not final, so another worker takes it: `this worker
+  has no keyrings to check rc/aarch64 with: …`. It fails before its check
+  runs, so no health row is posted, and before a promotion or a fast-track
+  changes a ring. Without them a check would fail the ring on Omarchy's own
+  signing keys, which the base images lack. `tests/health-check.sh` refuses
+  the same way (exit 3, nothing posted) when a keyring it needs is missing
+  from `OMARCHY_KEYRINGS`. Once a ring has changed, its check uses the
+  keyrings the job confirmed first and fetches nothing. If that check still
+  refuses, the job fails final, `rc → stable: stable serves release …, which
+  this worker could not check on …`, and rolls nothing back; the ring stays
+  on that release until the next health check of it. A check that failed
+  still rolls the ring back. Every row a job posts names its task and worker,
+  from its token's claims (`payload.posted_by`), so a host's red says it
+  is the host's:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, ring, source, status, json_extract(payload, '$.posted_by.worker') AS worker, created_at FROM events WHERE kind = 'health' ORDER BY id DESC LIMIT 20"
+  ```
+
+  On the host, while one runs:
 
   ```bash
   docker ps --filter label=org.omarchy-pool.task.role=helper --format '{{.Names}} {{.Status}}'
@@ -2586,19 +2675,25 @@ last claim).
 `omarchy-studio` — a Mac Studio on Arch Linux ARM (Asahi), aarch64 on a
 16K-page kernel, 12 cores, 32 GB, rootful docker on btrfs, on around the
 clock — is a maintainer host like any other (#319, #345; design v2 §21.1):
-the host agent and one bundle, its one service the dispatcher, which runs
-every task it claims in its own isolated, credential-less container, as many
-at once as its units hold. Nothing else of the pool runs there, and nobody
-visits it for a release, a rollback, an agent update, a setting or an order:
-its owner and the maintainers act on its page, `/hosts/<id>`
-([Maintainer hosts](/docs/worker-host#maintainer-hosts)).
+the host `studio-m2`, id `h_2t7pul95fs`, its registration
+`firemanxbr-studio-m2-mnmw`, installed as the canary beside its legacy set
+(enrolled 2026-10-06 19:27 UTC, confirmed 20:59 UTC). It runs the host
+agent and one bundle, its one service the dispatcher, which runs every task
+it claims in its own isolated, credential-less container, as many at once as
+its units hold. Nothing else of the pool runs there but a second host in a VM on it
+(*The 4K VM*, below), and nobody visits it for a release, a rollback, an
+agent update, a setting or an order: its owner and the maintainers act on
+its page, `https://omarchy-pool.org/hosts/h_2t7pul95fs`
+([Maintainer hosts](/docs/worker-host#maintainer-hosts)). The agent's
+login, `firemanxbr` (uid 1000), is in the docker group, and `sudo` asks for
+its password, so a root step there is the maintainer's to type.
 
 | What | Where |
 |---|---|
 | the agent | its owner's login on the Studio — in the docker group, linger on — as a `systemd --user` unit (*Installing a host*, above), its data in `~/.local/share/omarchy-agent` (`agent.toml`, the bundles) |
 | the host key | `host.ed25519` in the agent's `state/`, a file: the Studio has no TPM (#330, *Where the host key lives*, above) |
 | the work root | `/srv/omarchy-host`, a btrfs subvolume of its own on the internal disk, beside the directory its legacy set ran from (below) |
-| the secrets directory | `~/.local/share/omarchy-agent/secrets` (`agent.env`, 0600) |
+| the secrets directory | `/srv/omarchy-host-secrets` (`--secrets-dir`, the login's, 0700; `agent.env`, 0600), outside the work root and beside the directory its legacy set ran from |
 | the task subnets | `10.232.0.0/16`, dropped to the host by prep-root.sh's task firewall |
 | the bundle | the agent's set directory, `~/.local/share/omarchy-agent/sets/host/`, on the compose driver (Quadlet is rootless podman's); the host worker token in its own file there, `run/host/dispatcher/token` (0400), mounted read-only into the dispatcher (#327) |
 
@@ -2614,13 +2709,38 @@ back to the queue for a native x86_64 host, its attempt given back
 the rest: the Workers page says how many builds wait for one, each linked,
 and Status which architecture needs a host next.
 
+**Its pool jobs** started on 2026-10-08 at 14:49 UTC, when `host-pool-jobs`
+first named its registration, with no P1 host before it. The first ones
+failed rc's health checks on both architectures, on the keys of Omarchy's
+own packages, as nothing had filled `/srv/omarchy-host/jobs/keyrings`
+yet: a false red that blocked rc → stable that day. Every job that checks a
+ring now fetches the keyrings first, and a job that cannot get them gives no
+verdict (#414, *Pool jobs on hosts*, above); every health row names the
+worker that posted it (`payload.posted_by`), so a red of this host's says
+so.
+
 **Isolation `root`, a recorded exception until P6** (design v2 §19.1, §19.3,
 D13): rootful docker without `userns-remap`, since turning remapping on
 changes the daemon's data root. It is a dedicated build machine, so a
 task-container escape lands as root on a machine that holds nothing of a
 person's; its page shows the level and the exception. P6 moves it to
 `subuid` (rootless podman with `--userns=auto`, or `userns-remap` on a fresh
-data root), one root session, and the page then shows `subuid`.
+data root), one root session, and the page then shows `subuid`. Its agent
+sidecars run as the agent's uid, the owner of `agent.env`, with every
+capability dropped (`OMARCHY_AGENT_USER`, *How an agent sidecar reads the
+keys*, above).
+
+**The 4K VM, `studio-vm4k`** (#413), is a host of its own under the same
+owner, on the same machine: a Debian 13 arm64 VM with its own 4K-page
+kernel, run by the login's `systemd --user` unit `omarchy-vm4k.service`. Its
+agent runs on rootless podman with the Quadlet driver and holds no agent
+keys, so it takes no model kinds: it builds only. On its 4K pages qemu maps
+the x86_64 libraries the Studio's 16K pages cannot (`rustc` and `sudo`
+start there); how the pool hands it the builds the Studio's x86_64 lane
+sends back is #413's. It has its page, its registration and its round like
+any host; what follows for a silent host holds for it from inside the VM
+(`podman ps` there for the dispatcher), and on the Studio `systemctl --user
+status omarchy-vm4k` says whether the VM runs at all.
 
 **When the pool cannot see it** (its page *silent*, Status saying so), the
 machine is the place to look, as its owner's login:
@@ -2649,8 +2769,11 @@ set drained as the way back for 14 days (#345), and then its owner retired
 it with the `retire-legacy` order (#344): the agent wrote the
 `.omarchy-agent` marker into `/srv/omarchy-pool` and removed that compose
 project's containers and networks, nothing else. Its registrations were
-then revoked on their pages, where their history stays; maralcbr's machines
-switched and retired theirs the same way (#332). The files the legacy sets
+then revoked on their pages, where their history stays: six that claimed,
+the pool, review and community services of both architectures. No other
+machine switched: the switch of maralcbr's (#332) closed as not planned, as
+he has no machines for the pool, and a registration of his still unrevoked
+is revoked with the check below. The files the legacy sets
 ran from left the repository with #346, and so did the way to register
 another: `POST /factory/workers` answers 410.
 
@@ -2664,7 +2787,7 @@ docker image ls ghcr.io/firemanxbr/omarchy-worker                   # images no 
 ```
 
 Nothing of the host is in that directory: its work root (`/srv/omarchy-host`)
-and its secrets (in the agent's data directory) were put beside it at the
+and its secrets (`/srv/omarchy-host-secrets`) were put beside it at the
 canary, so removing it takes nothing of the host's. While any of the set's
 files stay, keep the marker, which tells any old copy of the set's tools to
 refuse there.
@@ -2683,11 +2806,12 @@ revoked one claims nothing, at once:
 ```bash
 npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, owner, trust, arch, last_seen FROM build_workers WHERE kind = 'legacy' AND revoked_at IS NULL ORDER BY last_seen DESC"
 npx wrangler d1 execute omarchy-repo --remote --command "SELECT lease_owner, kind, name, status FROM build_tasks WHERE status = 'leased' AND lease_owner IN (SELECT id FROM build_workers WHERE kind = 'legacy')"
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT value FROM settings WHERE key = 'host-pool-jobs'"   # every host that should run the pool's jobs: '*'
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT value FROM settings WHERE key = 'host-pool-jobs'"   # the hosts that run the pool's jobs: '*', or the ones chosen
 ```
 
-The first two come back empty; the third names the hosts (`*`), since the
-pool's jobs have nobody else to run them. The Workers page lists hosts only.
+The first two come back empty; the third names the hosts that run the
+pool's jobs (`*`, or the ones chosen), since they have nobody else to run
+them. The Workers page lists hosts only.
 
 ### After a release
 
@@ -2952,7 +3076,10 @@ same project (an `omarchy-t2` beside `omarchy`, say) is a new **source**:
 2. `worker/src/routes/packages.ts`, `SOURCES`: the name, so the index accepts
    manifests with that provenance.
 3. A keyring, if the packages are signed by a key none of the existing
-   keyrings holds: `tests/fetch-keyrings.sh`.
+   keyrings holds: `tests/fetch-keyrings.sh`; and, unless it is optional
+   like chaotic, among the keyrings that arch's health check needs:
+   `check_keyrings` in `crates/pkg-repo/src/work.rs` and `NEED` in
+   `tests/health-check.sh`, which a test holds alike (#414).
 
 The rest follows the source name: the rendered repository is
 `omarchy-<source>-<ring>` (`render`), its objects and databases live in
@@ -3452,7 +3579,8 @@ produces, and the sources it defers to (`chaotic` defers to
 imported from chaotic-aur). Add the same source to `EXPECTED_SOURCES` in
 `worker/src/meta.ts` (with `optional: true` for a repo users opt into on
 *Get started*) and to the sources table on *How it works*. If it is a new
-upstream project, add its keyring to `tests/fetch-keyrings.sh`. A new
+upstream project, add its keyring to `tests/fetch-keyrings.sh`, and to the
+keyrings its arch's health check needs (`check_keyrings`, `NEED`; #414). A new
 architecture also needs an image in `tests/images.env`, a worker of that
 architecture and the arch lists in `scheduler.ts` (`jobsOf`) and
 `jobs.ts`.

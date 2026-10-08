@@ -25,7 +25,10 @@
 #              OMARCHY_AGENT_ENV names (OMARCHY_SECRETS_DIR/agent.env), never
 #              from the environment the engine shows; a worker token is never
 #              its. `agent --probe` answers the probe sidecar's one question
-#              and exits.
+#              and exits. The file is 0600 and the sidecar has no
+#              capability, so the dispatcher starts it as the file's owner
+#              (#399: `--user`, a uid this image has no home for — it gets
+#              one under /tmp).
 #
 # A legacy registration's token, with no role or with pool, review or
 # community, still starts what it started before hosts — `pkg-repo work` for a
@@ -95,7 +98,9 @@ token_from_file() {
 # token or anything else in it is ignored, and named. A value may be quoted; nothing in the file is run.
 load_agent_env() {
   local file="$1" line k v
-  [[ -r "$file" && -f "$file" ]] || { echo "omarchy-worker: no agent keys at $file (OMARCHY_SECRETS_DIR/agent.env)" >&2; return 1; }
+  [[ -f "$file" ]] || { echo "omarchy-worker: no agent keys at $file (OMARCHY_SECRETS_DIR/agent.env)" >&2; return 1; }
+  # A file this user cannot open (#399): whose it is and who asked, as the probe's error says it on the host's page.
+  [[ -r "$file" ]] || { echo "omarchy-worker: no agent keys at $file (OMARCHY_SECRETS_DIR/agent.env): it is $(stat -c '%u:%g, mode %a' "$file" 2>/dev/null || echo 'of another user'), and this sidecar runs as $(id -u):$(id -g) — the dispatcher starts it as the file's owner when the host's agent names one (OMARCHY_AGENT_USER, #399)" >&2; return 1; }
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%$'\r'}"
     [[ -z "${line//[[:space:]]/}" || "$line" == \#* ]] && continue
@@ -126,6 +131,12 @@ if [[ "$role" == agent ]]; then
   # OMARCHY_AGENT_ENV names. Claude Code is installed at first start when the subscription token is the agent.
   unset OMARCHY_WORKER_TOKEN OMARCHY_WORKER_TOKEN_FILE FACTORY_TOKEN
   if [[ -n "${OMARCHY_AGENT_ENV:-}" ]]; then load_agent_env "$OMARCHY_AGENT_ENV" || exit 2; fi
+  # It runs as the keys file's owner (#399), a uid with no home in this image (the engine
+  # gives it /): Claude Code installs, and keeps its settings, under a home of its own.
+  if ! { mkdir -p "${HOME:-/}" 2>/dev/null && [[ -w "${HOME:-/}" ]]; }; then
+    HOME="$(mktemp -d "${TMPDIR:-/tmp}/omarchy-home.XXXXXX")" || { echo "omarchy-worker: no home for uid $(id -u) and none could be made" >&2; exit 2; }
+    export HOME
+  fi
   ensure_claude || echo "omarchy-worker: Claude Code did not install; the agent answers 502 until it does" >&2
   export PATH="$HOME/.local/bin:$PATH"
   if [[ "${1:-}" == --probe ]]; then exec python3 /usr/local/lib/omarchy-factory/bin/agent.py --probe; fi

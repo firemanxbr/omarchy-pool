@@ -41,7 +41,7 @@ jobs:
         run: bash tests/worker-needs-native.sh
         env:
           PKG_REPO: target/release/pkg-repo
-      - name: The dispatcher on a real engine — a task container born with nothing on its own internal network with its egress sidecar, staged in and out, completed with the memory peak it measured; a failure, the memory limit's kill and an output outside its list; restarts that re-adopt and sweep orphans; a lease the pool stops hearing; a stop; the disk watcher; pool jobs — a health check's helper through omarchy-task-run on its own network under the job's 2 GB limit, other engine calls refused, a hung job killed at its timeout while a build beats on; the task caches — two builds at once in their own package caches, a recipe's writes past its own cache reaching nothing, the shared pacman cache read-only and only the signed bytes merged back
+      - name: The dispatcher on a real engine — a task container born with nothing on its own internal network with its egress sidecar, staged in and out, completed with the memory peak it measured; a failure, the memory limit's kill and an output outside its list; restarts that re-adopt and sweep orphans; a lease the pool stops hearing; a stop; the disk watcher; pool jobs — a health check's helper through omarchy-task-run on its own network under the job's 2 GB limit, the pool's keyrings fetched before it and no check without them, other engine calls refused, a hung job killed at its timeout while a build beats on; the task caches — two builds at once in their own package caches, a recipe's writes past its own cache reaching nothing, the shared pacman cache read-only and only the signed bytes merged back
         run: bash tests/dispatch-engine.sh
         env:
           PKG_REPO: target/release/pkg-repo
@@ -200,6 +200,10 @@ jobs:
     # base; the worker-image job runs it again with the worker image) — and
     # passes on both engines, while a network made without --internal, or a
     # sidecar not given a public address of the host's, fails it.
+    # #399: the probe's own argv reads a 0600 keys file of the runner's as its
+    # owner as the engine shows it (--user 0:0 on rootless podman, the runner's
+    # uid:gid on rootful docker, where the image's root with no capability
+    # cannot).
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -212,7 +216,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The egress probe the way a task runs, behind its egress sidecar (a task network's gateway, made as the dispatcher makes it, and the host's loopback too) and a legacy project on ${{ matrix.engine }}
+      - name: The egress probe the way a task runs, behind its egress sidecar (a task network's gateway, made as the dispatcher makes it, and the host's loopback too), the probe reading owner-only keys as their owner (#399), and a legacy project on ${{ matrix.engine }}
         run: bash tests/agent-install.sh ${{ matrix.engine }}
 
   emulated-lane:
@@ -275,6 +279,38 @@ jobs:
           docker info --format '{{json .Runtimes}}' | jq -c 'with_entries(.value |= {path, runtimeType})'
       - name: The sandboxed runtime — the agent finds runsc after its smoke run, a community build runs in it, the project's build and every sidecar on runc, a runtime the engine lacks never falls back
         run: bash tests/sandboxed-runtime.sh
+
+  userns-remap:
+    name: Remapped daemon on a real engine (userns-remap)
+    # #405 (design v2 §19.1), before the agent keys' ACL: the runner's docker with
+    # "userns-remap": "default" merged into its daemon.json (docker makes dockremap and its
+    # subordinate range itself), then a plain community build through the real dispatcher —
+    # root with docker's default capabilities, as the host set runs it there with
+    # userns_mode: host — while its task container and egress sidecar stay remapped: built as
+    # the builder, uploaded and completed; the agent holds the model kinds
+    # (OMARCHY_AGENT_HELD=userns-remap, #406), so a draft is handed back lost and no probe or
+    # agent sidecar is ever made; and the dispatcher's real-engine tests on that engine.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: userns-remap on the runner's docker — daemon.json's userns-remap set to default, its other keys kept — restarted
+        run: |
+          set -euo pipefail
+          # The runner's daemon.json has keys of its own (cgroup-parent): merged, not replaced.
+          cur="$(sudo cat /etc/docker/daemon.json 2>/dev/null || true)"; [[ -n "$cur" ]] || cur='{}'
+          jq -S '. + {"userns-remap": "default"}' <<<"$cur" | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+          for _ in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format '{{json .SecurityOptions}}' | grep -q name=userns || { sudo journalctl -u docker --no-pager -n 60; exit 1; }
+          docker info --format 'docker {{.ServerVersion}}, {{.Driver}}, {{.DockerRootDir}}'
+          grep -H '^dockremap:' /etc/subuid /etc/subgid
+      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — the model kinds held, no probe or agent sidecar made
+        run: bash tests/userns-remap.sh
 
   host-key-tpm:
     name: Host key in a TPM (swtpm behind tpm2-abrmd, against a local pool)
@@ -558,7 +594,7 @@ jobs:
       # On docker only: the script's podman run (RUNTIME=podman, the dispatcher's docker CLI on
       # podman's socket) is by hand; in CI a task network the dispatcher makes on podman is covered
       # by agent-install's pkg-repo test on rootless podman (#372).
-      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env and its read-only token file, no token or key in any container's environment; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own
+      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env and its read-only token file, no token or key in any container's environment; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the agent sidecar and the probe reading the 0600 keys of a non-root user as their owner, every capability dropped (#399); the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own
         run: bash tests/task-networks.sh
         env:
           WORKER_IMAGE: omarchy-worker:ci

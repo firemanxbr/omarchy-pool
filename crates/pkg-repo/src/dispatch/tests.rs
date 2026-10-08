@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::capacity::Constants;
-use super::engine::{Engine, State};
+use super::engine::{Engine, State, TaskRoot};
 use super::kinds::Ctx;
 use super::lease::{Lease, Phase, Store};
 use super::pool::Pool;
@@ -4353,6 +4353,414 @@ fn the_claim_says_who_the_agent_is_from_the_probe_sidecar() {
         .as_str()
         .unwrap()
         .contains("no agent key"));
+}
+
+/// #399: the keys file is 0600 and its owner's, so on a host whose agent named that owner as the
+/// engine shows it (`OMARCHY_AGENT_USER`) the probe and a model task's agent sidecar run as it —
+/// the sidecar's usage directory made its — while the task container and the egress sidecar run
+/// as before, and no container leaves the engine's user namespace; a host whose agent named none
+/// (one from before #399) starts them as before.
+#[test]
+fn the_probe_and_the_agent_sidecar_run_as_the_keys_owner_the_agent_named() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let h = H::new();
+    let mut d = h.dispatcher();
+    d.net.agent_user = Some(spec::AgentUser {
+        uid: 4242,
+        gid: 4343,
+    });
+    stage_evidence(&h, &[5]);
+    h.give(audit(9, 5, GEN));
+    h.ticks(&mut d, 4);
+    let args = ["--user", "4242:4343"];
+    let from = |a: &[String]| {
+        a.iter()
+            .position(|x| x == "--user")
+            .map(|i| a[i..(i + 2).min(a.len())].to_vec())
+            .unwrap_or_default()
+    };
+    let probe = h
+        .engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|c| c[0] == "run" && c.iter().any(|x| x == "--probe"))
+        .cloned()
+        .expect("the probe ran");
+    assert_eq!(from(&probe), args, "the probe: {probe:?}");
+    assert_eq!(h.pool.last_claim()["agent"]["probe"], "ok");
+    let agent = h.engine.args_of(&sidecar(9, GEN, "agent"));
+    assert_eq!(from(&agent), args, "the agent sidecar: {agent:?}");
+    for other in [
+        h.engine.args(9, GEN),
+        h.engine.args_of(&sidecar(9, GEN, "egress")),
+    ] {
+        assert!(!other.iter().any(|x| x == "--user"), "{other:?}");
+    }
+    assert!(!h
+        .engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .any(|x| x.starts_with("--userns")));
+    // Its usage reads back: the directory is the sidecar's user's — or, where this process
+    // may not give it away (CI runs these tests as a user), open to it in the 0700 task directory.
+    let usage = super::spec::task_dir(&h.work, 9, GEN).join("agent");
+    let m = std::fs::metadata(&usage).unwrap();
+    assert!(
+        (m.uid(), m.gid()) == (4242, 4343) || m.permissions().mode() & 0o777 == 0o777,
+        "{}: uid {} gid {} mode {:o}",
+        usage.display(),
+        m.uid(),
+        m.gid(),
+        m.permissions().mode()
+    );
+    // An agent from before #399: no user named, the image's own, as before.
+    let h = H::new();
+    let mut d = h.dispatcher();
+    stage_evidence(&h, &[5]);
+    h.give(audit(9, 5, GEN));
+    h.ticks(&mut d, 4);
+    assert!(!h
+        .engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.iter().any(|x| x == "--user" || x.starts_with("--userns"))));
+}
+
+/// #399: on a remapped daemon no container user is the keys file's owner, and the agent sidecars
+/// stay remapped as every task container does (design v2 §19.1), so the agent holds the host's
+/// model kinds (`OMARCHY_AGENT_HELD=userns-remap`): no probe runs, the claim's `agent` says why in
+/// its place — so the pool hands the host no model work, and its page shows it — a recheck or
+/// restart of the agent is answered with it, a model task leased before is handed back with no
+/// sidecar started, and builds run on.
+#[test]
+fn a_host_whose_agent_holds_its_model_kinds_runs_no_probe_and_says_why() {
+    use super::AgentHeld;
+    assert_eq!(AgentHeld::parse("").unwrap(), None);
+    let long = "x".repeat(41);
+    for bad in ["Userns", "userns remap", "-x", long.as_str(), "a_b", "é"] {
+        assert!(AgentHeld::parse(bad).is_err(), "{bad:?}");
+    }
+    let held = AgentHeld::parse(" userns-remap ").unwrap().unwrap();
+    let why = held.reason();
+    // Short enough for the host's page, and none of the classes the pool restarts on
+    // (worker/src/orders.ts errorClass: no 401/403, no "refused", no "timed out", no "install").
+    assert!(why.len() <= 300, "{why}");
+    assert!(
+        why.contains("userns-remap") && why.contains("maintainer"),
+        "{why}"
+    );
+    for word in [
+        "401",
+        "403",
+        "refused",
+        "not installed",
+        "timed out",
+        "permission denied",
+        "unauthori",
+    ] {
+        assert!(!why.contains(word), "{why}");
+    }
+    // A newer agent's code this release does not know: held all the same, by its code.
+    assert!(AgentHeld::parse("some-new-reason")
+        .unwrap()
+        .unwrap()
+        .reason()
+        .contains("OMARCHY_AGENT_HELD=some-new-reason"));
+
+    let h = H::new();
+    let mut d = h.dispatcher();
+    d.net.agent_held = Some(held);
+    // A model task the pool leased before the claim said so, and a build.
+    stage_evidence(&h, &[5]);
+    h.give(audit(9, 5, GEN));
+    h.ticks(&mut d, 3);
+    let agent = h.pool.last_claim()["agent"].clone();
+    assert_eq!(agent["probe"], "error", "{agent}");
+    assert_eq!(agent["error"], why, "{agent}");
+    let f = h.pool.fails_of(9);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0]["lost"], true, "{}", f[0]);
+    assert!(f[0].to_string().contains("userns-remap"), "{}", f[0]);
+    // No probe, and no agent sidecar, ever: nothing mounts the keys file.
+    assert!(!h
+        .engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.iter().any(|x| x == "--probe" || x.contains("agent.env"))));
+    assert!(!h.engine.has_name(&sidecar(9, GEN, "agent")));
+    // Its orders: answered with why, not left waiting for a probe that never runs.
+    h.advance(121);
+    h.give(json!({ "task": null, "orders": [{ "id": format!("wo_{}", "5".repeat(32)), "kind": "recheck-agent", "reason": "test", "issued_by": "maintainer" }] }));
+    h.ticks(&mut d, 2);
+    let a = h.pool.answers.lock().unwrap().last().unwrap().1.clone();
+    assert_eq!(
+        (&a["outcome"], &a["code"], &a["detail"]),
+        (&json!("failed"), &json!("probe-failed"), &json!(why)),
+        "{a}"
+    );
+    // A build runs on.
+    h.advance(121);
+    h.give(community(11, GEN2));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has_name(&spec::container_name(11, GEN2)));
+}
+
+/// #405: on a remapped daemon a task container's root is the remapped range's first uid on the
+/// host, "other" on what the dispatcher made. Before its container starts, the directories it
+/// writes (`kinds::WRITABLE`: out, log, build, build/cache, pkgcache) and its package's build
+/// cache are given to that root, while `in`, `agent`, the 0700 task directory and `tasks/` stay
+/// the dispatcher's, and its calls are the very ones of a host without remapping. A change of
+/// owner the dispatcher may not make hands the lease back `lost` before anything of it runs,
+/// never opening a directory to every user; with no task root nothing changes owner.
+#[test]
+#[allow(clippy::too_many_lines)] // a host without remapping, one remapped to itself, one to another uid
+fn a_remapped_task_root_is_given_what_its_task_writes_and_nothing_else() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let owner = |p: &Path| {
+        let m = std::fs::metadata(p).unwrap();
+        (m.uid(), m.gid())
+    };
+    // A container's arguments, its host's temporary root read as one path: what two hosts share.
+    let args_of = |h: &H, name: &str| -> Vec<String> {
+        let root = h.work.parent().unwrap().display().to_string();
+        h.engine
+            .args_of(name)
+            .iter()
+            .map(|a| a.replace(&root, "<root>"))
+            .collect()
+    };
+    let leaf = |h: &H| super::cache::build_dir(&h.work, spec::Trust::Community, "aarch64", "felix");
+    let egress = sidecar(7, GEN, "egress");
+    let task = spec::container_name(7, GEN);
+    // Without remapping: nothing changes owner, and these are the calls a remapped host makes.
+    let plain = H::new();
+    let base = owner(&plain.checkout);
+    let mut d = plain.dispatcher();
+    plain.give(community(7, GEN));
+    plain.ticks(&mut d, 4);
+    assert!(plain.engine.has(7, GEN), "{:?}", plain.pool.fails_of(7));
+    let tdir = spec::task_dir(&plain.work, 7, GEN);
+    for sub in super::kinds::WRITABLE {
+        assert_eq!(owner(&tdir.join(sub)), base, "{sub}");
+    }
+    // Remapped to this process's own uid and gid, a change of owner it may make wherever it runs.
+    let h = H::new();
+    let me = owner(&h.checkout);
+    let mut d = h.dispatcher();
+    d.net.task_root = Some(TaskRoot {
+        uid: me.0,
+        gid: me.1,
+    });
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 4);
+    assert!(h.engine.has(7, GEN), "{:?}", h.pool.fails_of(7));
+    assert_eq!(args_of(&h, &task), args_of(&plain, &task));
+    assert_eq!(args_of(&h, &egress), args_of(&plain, &egress));
+    let tdir = spec::task_dir(&h.work, 7, GEN);
+    for sub in super::kinds::WRITABLE {
+        assert_eq!(owner(&tdir.join(sub)), me, "{sub}");
+    }
+    assert_eq!(owner(&leaf(&h)), me);
+    assert_eq!(
+        std::fs::metadata(&tdir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    // Remapped to another uid: a build and an audit (which mounts no build cache).
+    let other = TaskRoot {
+        uid: 4242,
+        gid: 4343,
+    };
+    let h = H::new();
+    let base = owner(&h.checkout);
+    let mut d = h.dispatcher();
+    d.net.task_root = Some(other);
+    stage_evidence(&h, &[5]);
+    h.give(community(7, GEN));
+    h.give(audit(9, 5, GEN2));
+    h.ticks(&mut d, 6);
+    if rustix::process::geteuid().is_root() {
+        // Given to it: what each task writes, its build cache and nothing above or beside them.
+        for (id, gen) in [(7, GEN), (9, GEN2)] {
+            assert!(
+                h.engine.has(id, gen),
+                "task {id}: {:?}",
+                h.pool.fails_of(id)
+            );
+            let tdir = spec::task_dir(&h.work, id, gen);
+            for sub in super::kinds::WRITABLE {
+                assert_eq!(owner(&tdir.join(sub)), (4242, 4343), "task {id}: {sub}");
+            }
+            for kept in [
+                tdir.clone(),
+                tdir.join("in"),
+                tdir.join("agent"),
+                h.work.join("tasks"),
+            ] {
+                assert_eq!(owner(&kept), base, "{}", kept.display());
+            }
+        }
+        assert_eq!(owner(&leaf(&h)), (4242, 4343));
+        assert_eq!(owner(leaf(&h).parent().unwrap()), base);
+        assert_eq!(args_of(&h, &task), args_of(&plain, &task));
+    } else {
+        // Refused here (CI runs these tests as a user): each handed back before anything of it ran.
+        for (id, gen, why) in [
+            (7, GEN, "its caches: "),
+            (
+                9,
+                GEN2,
+                "its directories for the remapped task root 4242:4343: out: ",
+            ),
+        ] {
+            let f = h.pool.fails_of(id);
+            assert_eq!(f.len(), 1, "task {id}: {f:?}");
+            assert_eq!(f[0]["lost"], true, "task {id}: {}", f[0]);
+            assert!(
+                f[0]["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("failed before docker ran") && e.contains(why)),
+                "task {id}: {}",
+                f[0]
+            );
+            assert!(!h.engine.has(id, gen) && !h.engine.has_name(&sidecar(id, gen, "egress")));
+            assert!(!h.engine.has_network(&spec::container_name(id, gen)));
+        }
+    }
+}
+
+/// The release checkout's trial scripts as an older release's `tests/trial.sh` stages a trial
+/// (#405): its `mktemp -d` directory copied whole onto `TRIAL_STAGE` with `cp -a`, which leaves
+/// `in` itself 0700 (GNU cp does; said here for any cp) and its `mktemp` files 0600, with links
+/// to what lies in `outside`.
+fn owner_only_trial_scripts(h: &H, outside: &Path) {
+    std::fs::create_dir_all(h.checkout.join("tests")).unwrap();
+    std::fs::write(
+        h.checkout.join("tests/trial.sh"),
+        format!(
+            r#"#!/bin/bash
+set -e
+# An older release's staging: its mktemp -d directory, copied whole onto TRIAL_STAGE.
+WORK="$(mktemp -d)"
+printf '%s\n' "${{@:3}}" > "$WORK/packages.txt"
+echo check > "$WORK/check.sh"
+echo run > "$WORK/run.sh"
+mkdir "$WORK/keyrings"
+echo key > "$WORK/keyrings/pool.gpg"
+chmod 600 "$WORK/packages.txt" "$WORK/check.sh" "$WORK/keyrings/pool.gpg"
+chmod 700 "$WORK" "$WORK/run.sh" "$WORK/keyrings"
+ln -s '{o}/secret' "$WORK/secret"
+ln -s '{o}/dir' "$WORK/keyrings/dir"
+ln -s '{o}/gone' "$WORK/dangling"
+cp -a "$WORK"/. "$TRIAL_STAGE"/
+chmod 700 "$TRIAL_STAGE"
+rm -rf "$WORK"
+"#,
+            o = outside.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        h.checkout.join("tests/fetch-keyrings.sh"),
+        "#!/bin/bash\ntouch \"$1/archlinux.gpg\"\n",
+    )
+    .unwrap();
+}
+
+/// #405: a trial's `in` as an older release's `tests/trial.sh` stages it
+/// ([`owner_only_trial_scripts`]: `in` 0700, its files 0600) is opened for reading to a
+/// remapped daemon's task root before the container starts: every directory 0755, every
+/// regular file `a+r` with its other bits kept, a link and what it points to outside `in` as
+/// they were. A host without remapping changes no mode.
+#[test]
+fn a_trials_input_staged_owner_only_is_opened_for_reading_to_a_remapped_task_root() {
+    use std::fs::Permissions;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().mode() & 0o7777;
+    let trial = |remapped: bool| -> (H, PathBuf, PathBuf) {
+        let h = H::new();
+        // Reached from `in` only through links.
+        let outside = h.work.parent().unwrap().join("outside");
+        std::fs::create_dir_all(outside.join("dir")).unwrap();
+        std::fs::write(outside.join("secret"), "x").unwrap();
+        std::fs::set_permissions(outside.join("secret"), Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(outside.join("dir"), Permissions::from_mode(0o700)).unwrap();
+        owner_only_trial_scripts(&h, &outside);
+        let mut d = h.dispatcher();
+        if remapped {
+            // This process's own uid and gid: a change of owner it may make wherever it runs.
+            let me = std::fs::metadata(&h.checkout).unwrap();
+            d.net.task_root = Some(TaskRoot {
+                uid: me.uid(),
+                gid: me.gid(),
+            });
+        }
+        h.pool.artifacts.lock().unwrap().insert(
+            (5, "felix-1.0-1-aarch64.pkg.tar.zst".into()),
+            package("felix"),
+        );
+        h.give(task(
+            11,
+            "trial",
+            "felix",
+            "",
+            "project",
+            json!({ "task": 5, "files": ["felix-1.0-1-aarch64.pkg.tar.zst"] }),
+            GEN,
+        ));
+        h.ticks(&mut d, 4);
+        assert!(h.engine.has(11, GEN), "{:?}", h.pool.fails_of(11));
+        let input = h.tdir(11, GEN).join("in");
+        assert_eq!(
+            std::fs::read_to_string(input.join("packages.txt")).unwrap(),
+            "felix\n"
+        );
+        (h, input, outside)
+    };
+    // Without remapping: the staging's own modes, none changed.
+    let (_plain, input, _) = trial(false);
+    for (p, m) in [
+        ("", 0o700),
+        ("keyrings", 0o700),
+        ("packages.txt", 0o600),
+        ("check.sh", 0o600),
+        ("run.sh", 0o700),
+        ("keyrings/pool.gpg", 0o600),
+    ] {
+        assert_eq!(mode(&input.join(p)), m, "in/{p}");
+    }
+    // Remapped: opened for reading before the container started.
+    let (_h, input, outside) = trial(true);
+    for (p, m) in [
+        ("", 0o755),
+        ("keyrings", 0o755),
+        ("packages.txt", 0o644),
+        ("check.sh", 0o644),
+        ("run.sh", 0o744),
+        ("keyrings/pool.gpg", 0o644),
+    ] {
+        assert_eq!(mode(&input.join(p)), m, "in/{p}");
+    }
+    assert_eq!(mode(&input.join("meta.sh")) & 0o444, 0o444);
+    for link in ["secret", "keyrings/dir", "dangling"] {
+        assert!(
+            std::fs::symlink_metadata(input.join(link))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "in/{link}"
+        );
+    }
+    assert_eq!(mode(&outside.join("secret")), 0o600);
+    assert_eq!(mode(&outside.join("dir")), 0o700);
 }
 
 // ---------- revoked releases (#342) ----------

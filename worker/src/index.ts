@@ -823,10 +823,12 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "POST" && path === "/pool/gc") return (await authorize(request, env, "gc")) ?? handleGc(url, env);
   if (method === "POST" && path === "/pool/relayout") return (await authorize(request, env, "relayout")) ?? handleRelayout(url, env);
   if (method === "POST" && path === "/events") {
-    // A job posts what it did — the rows the gate and Status read as evidence; a maintainer by hand writes a note, nothing else (#284).
-    if (await jobOf(request, env)) return (await authorize(request, env, "events")) ?? handlePostEvent(request, env, null);
+    // A job posts what it did — the rows the gate and Status read as evidence, each naming its token's task and worker (#414); a
+    // maintainer by hand writes a note, nothing else (#284).
+    const job = await jobOf(request, env);
+    if (job) return (await authorize(request, env, "events")) ?? handlePostEvent(request, env, null, job);
     const hand = await maintainerOf(request, env);
-    return hand instanceof Response ? hand : handlePostEvent(request, env, hand);
+    return hand instanceof Response ? hand : handlePostEvent(request, env, hand, null);
   }
 
   if ((m = path.match(/^\/pool\/([0-9a-f]{64})$/)) && method === "PUT") {

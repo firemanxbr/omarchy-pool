@@ -546,6 +546,7 @@ fn rotate(w: &World, token: &str) {
         addresses: Vec::new(),
         envelope: None,
         plain: false,
+        keys_user: None,
     };
     crate::enroll::write_worker_token(
         &w.set_dir().join("etc/dispatcher.env"),

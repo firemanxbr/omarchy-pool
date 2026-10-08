@@ -158,11 +158,18 @@ day. To set them, give `agent.toml`'s envelope an `agent_budget` (any of
 each a whole number from 1): within a minute the agent writes them into
 `etc/dispatcher.env` (`omarchy-agent dispatcher-env --write` does it at once)
 and the dispatcher is recreated with them; a key you leave out keeps its
-default. The sidecars run as root with no capabilities (no `CAP_DAC_OVERRIDE`),
-so `agent.env` must be owned by the uid their root maps to (root on a rootful
-engine, the maintainer on a rootless one) at 0600, or be 0644 inside the 0700
-`etc/`; otherwise the probe fails and the host takes no model work (#317's
-install writes it so). Recommended: a **separate, spend-capped key for
+default. `agent.env` stays 0600 and the agent user's, as install and *Set
+agent keys* write it, and the sidecars have no capability (no
+`CAP_DAC_OVERRIDE`), so they run as the file's owner as the engine shows it
+to a container (#399): the agent writes that into `etc/dispatcher.env`
+(`OMARCHY_AGENT_USER`) — its own uid on a rootful daemon and in a Mac's VM,
+`0:0` on a rootless engine, whose root is the agent's user — and you do
+nothing (the runbook's *How an agent sidecar reads the keys*). A daemon with
+userns-remap shows the file's owner to no container user, and its sidecars
+stay remapped (design v2 §19.1), so there the agent holds the host's model
+kinds (`OMARCHY_AGENT_HELD=userns-remap`): the host builds, and its page says
+why it takes no model work until a maintainer decides how such a host reads
+its keys. Recommended: a **separate, spend-capped key for
 contributor drafts** (the provider's own spending limit), since a
 recipe that compromises its draft's sidecar can use that key until the caps
 stop it; and a `GITHUB_TOKEN` in `agent.env` with no write scope and no
@@ -240,8 +247,9 @@ the job's own network behind its egress sidecar, with no token and nothing
 of the host but the job's scratch directory. Nothing to set up on your side:
 the dispatcher claims pool jobs on its own, and the pool hands them to a host
 only once the maintainers' `host-pool-jobs` setting names it — `*`, every
-host, since the legacy registrations retired (runbook, *Pool jobs on hosts*) —
-so a host that never gets a sync is most likely not named there. A host's agent that stops answering is
+host, since the legacy registrations retired; the Studio canary was the
+first, from 2026-10-08, with no P1 host before it (runbook, *Pool jobs on
+hosts*) — so a host that never gets a sync is most likely not named there. A host's agent that stops answering is
 re-checked by the pool, never restarted: the dispatcher's restart would not
 reach it, and would cost the jobs it runs.
 
@@ -324,7 +332,7 @@ that mounts nothing of your home directory).
 Its buttons are there too: Reconcile now (an Update of its registration
 while its agent takes no host order), **Drain** and **Resume claims** —
 your drain is lifted by you only —, Suspend and Retire. A host installed
-beside a set from before hosts (`--legacy`, the switches of #345 and #332)
+beside a set from before hosts (`--legacy`, the Studio's switch, #345)
 shows that set and, while any is queued, the tasks still pinned to its
 owner's registrations from then, with **Move pins here** — the switch's
 step, done once ([Runbook](/docs/runbook#the-studio-host)). Anyone else sees

@@ -120,11 +120,7 @@ impl Cli {
     /// Docker 28 (an older daemon is refused, in its own words: it would make the network with the
     /// host's address on it).
     pub fn gateway(&mut self) -> Result<spec::Gateway, String> {
-        // By its name, or its path's (a pool job's shim runs the engine by its absolute path, #340).
-        if std::path::Path::new(&self.runtime)
-            .file_name()
-            .is_some_and(|n| n == "podman")
-        {
+        if self.podman_cli() {
             return Ok(spec::Gateway::NoDns);
         }
         let out = self.call(&["version", "--format", "{{json .Server}}"])?;
@@ -158,6 +154,78 @@ impl Cli {
             })?);
         }
         Ok(gateway)
+    }
+
+    /// podman's own CLI, by its name or its path's (a pool job's shim runs the engine by its absolute path, #340).
+    fn podman_cli(&self) -> bool {
+        std::path::Path::new(&self.runtime)
+            .file_name()
+            .is_some_and(|n| n == "podman")
+    }
+
+    /// Who a task container's root is on the host (#405): on a daemon that remaps users
+    /// (`userns-remap`: `name=userns` among `docker info`'s `SecurityOptions`), the first uid
+    /// and gid of its remapped range, as a container of `image` reads its own
+    /// `/proc/self/uid_map` and `gid_map` — the worker image, present by digest, run once for
+    /// each with no network and every capability dropped. `None` on every other engine —
+    /// rootful docker without remapping, rootless docker (whose root is the engine's user),
+    /// podman by either CLI (asked after [`Cli::gateway`], which finds podman behind docker's),
+    /// a Mac's VM — where a task's root is the dispatcher's own and nothing changes. On a
+    /// remapped daemon the dispatcher runs in the daemon's own user namespace (the agent's
+    /// overlay gives it `userns_mode: host`): one this daemon remapped too could give a task's
+    /// directories to no host uid, and it says so rather than start tasks that cannot write
+    /// them ([`beside_its_tasks`]).
+    pub fn task_root(&self, image: &str) -> Result<Option<TaskRoot>, String> {
+        if self.libpod.is_some() || self.podman_cli() {
+            return Ok(None);
+        }
+        let out = self.call(&["info", "--format", "{{json .SecurityOptions}}"])?;
+        if !out.status.success() {
+            return Err(format!(
+                "{} info: {}",
+                self.runtime,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        if !remapped(&String::from_utf8_lossy(&out.stdout))? {
+            return Ok(None);
+        }
+        let read = |map: &str| -> Result<u32, String> {
+            let path = format!("/proc/self/{map}");
+            let out = self.call(&[
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--entrypoint",
+                "cat",
+                image,
+                &path,
+            ])?;
+            if !out.status.success() {
+                return Err(format!(
+                    "a task's {map}, read with {image}: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+            root_of_map(&String::from_utf8_lossy(&out.stdout))
+                .map_err(|e| format!("a container's {map}: {e}"))?
+                .ok_or_else(|| {
+                    format!("a container on this remapped daemon has the host's own {map}")
+                })
+        };
+        let root = TaskRoot {
+            uid: read("uid_map")?,
+            gid: read("gid_map")?,
+        };
+        let own = std::fs::read_to_string("/proc/self/uid_map")
+            .map_err(|e| format!("this dispatcher's /proc/self/uid_map: {e}"))?;
+        beside_its_tasks(&own, root.uid)?;
+        Ok(Some(root))
     }
 
     /// SIGKILL, then removed: podman's `rm -f` stops with SIGTERM and waits ten seconds first, and a
@@ -219,6 +287,81 @@ pub fn gateway_of(json: &str) -> Result<spec::Gateway, String> {
             "docker {:?} cannot keep a task network's gateway off the host (com.docker.network.bridge.gateway_mode_ipv4=isolated needs Docker 28 or newer); upgrade the engine",
             s.version
         )),
+    }
+}
+
+/// A task container's root as the host sees it on a remapped daemon (#405, design v2 §19.1):
+/// the first uid and gid of the daemon's remapped range (`dockremap`'s in `/etc/subuid` and
+/// `/etc/subgid`). What the dispatcher makes for a task to write is given to it
+/// ([`super::kinds::give_writable`], [`super::cache::ready`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskRoot {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// `info --format '{{json .SecurityOptions}}'` of docker's CLI, read: whether the daemon
+/// remaps users (`name=userns`, which dockerd lists when its root maps to another uid). A
+/// rootless daemon says `name=rootless` and not this; `null` is a daemon that lists none.
+pub fn remapped(json: &str) -> Result<bool, String> {
+    let opts: Option<Vec<String>> = serde_json::from_str(json.trim()).map_err(|_| {
+        format!(
+            "the engine's security options do not read: {:?}",
+            json.trim()
+        )
+    })?;
+    Ok(opts
+        .unwrap_or_default()
+        .iter()
+        .any(|o| o.split(',').any(|kv| kv == "name=userns")))
+}
+
+/// A `/proc/<pid>/uid_map` (or `gid_map`), read for its root (#405): `None` for the identity
+/// mapping of the init user namespace (`0 0 4294967295`, its one line), `Some(first)` for a
+/// namespace whose id 0 is host id `first`, not 0 (a remapped daemon's `0 165536 65536`, a
+/// line per range). Anything else is an error: no line for id 0, root mapped to the host's root
+/// in part of the ids only, a line that is not three numbers.
+pub fn root_of_map(map: &str) -> Result<Option<u32>, String> {
+    let mut lines = Vec::new();
+    for l in map.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let f: Vec<u64> = l
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .map_err(|_| format!("{l:?} is not three numbers"))?;
+        match f[..] {
+            [inside, outside, count] if count > 0 => lines.push((inside, outside, count)),
+            _ => return Err(format!("{l:?} is not three numbers")),
+        }
+    }
+    if lines[..] == [(0, 0, u64::from(u32::MAX))] {
+        return Ok(None);
+    }
+    match lines.iter().find(|(inside, _, _)| *inside == 0) {
+        Some(&(_, outside, _)) if outside > 0 => u32::try_from(outside)
+            .map(Some)
+            .map_err(|_| format!("its root is host id {outside}, past the ids there are")),
+        Some(_) => Err(format!(
+            "{:?} maps root to the host's root in part of the ids only",
+            map.trim()
+        )),
+        None => Err(format!("{:?} maps no id 0", map.trim())),
+    }
+}
+
+/// This dispatcher's own `uid_map` beside a task's root `b` as a container reads it (#405):
+/// refused only when its root is `b` itself — this very daemon remapped it (a set without the
+/// overlay's `userns_mode: host`), and `b` is then its own root, never a host uid it can give a
+/// task's directories to. The init namespace's map is the plain case; a root that is another
+/// uid is a host that is a user namespace of its own (an unprivileged LXC or Incus container
+/// running dockerd with userns-remap), where `b` is an id of that namespace the dispatcher
+/// gives them to all the same. A map that does not read is an error.
+pub fn beside_its_tasks(own_map: &str, b: u32) -> Result<(), String> {
+    match root_of_map(own_map).map_err(|e| format!("this dispatcher's uid_map: {e}"))? {
+        Some(own) if own == b => Err(format!(
+            "this daemon remaps users (userns-remap) and remapped this dispatcher too (its root is uid {b}, a task's): there it runs with userns_mode: host (the agent's overlay), or it cannot give a task's directories to the task's root"
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -415,6 +558,78 @@ mod tests {
         assert!(gateway_of("null").is_err() && gateway_of("").is_err());
     }
 
+    /// #405: whether the daemon remaps users, from `docker info`'s `SecurityOptions` — a
+    /// remapped daemon's, a rootless one's (its root is the engine's user, no remapping), a
+    /// rootful one's without, and none at all.
+    #[test]
+    fn a_remapped_daemon_by_its_security_options() {
+        let remap =
+            r#"["name=apparmor","name=seccomp,profile=builtin","name=userns","name=cgroupns"]"#;
+        assert_eq!(remapped(remap), Ok(true));
+        let rootless = r#"["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]"#;
+        assert_eq!(remapped(rootless), Ok(false));
+        let rootful = r#"["name=apparmor","name=seccomp,profile=builtin","name=cgroupns"]"#;
+        assert_eq!(remapped(rootful), Ok(false));
+        assert_eq!(remapped("null\n"), Ok(false));
+        // A word that only contains it is not it; an answer that does not read is an error.
+        assert_eq!(remapped(r#"["name=userns-ish"]"#), Ok(false));
+        assert!(remapped("").is_err() && remapped("name=userns").is_err());
+    }
+
+    /// #405: a task's root from a user namespace's map — a remapped daemon's container (B),
+    /// one per range when dockremap has two, and the init namespace (the dispatcher with
+    /// `userns_mode: host`) as none; everything else refused.
+    #[test]
+    fn the_root_of_a_uid_map() {
+        assert_eq!(
+            root_of_map("         0     165536      65536\n"),
+            Ok(Some(165_536))
+        );
+        assert_eq!(
+            root_of_map("0 231072 65536\n65536 1000000 65536\n"),
+            Ok(Some(231_072))
+        );
+        // The line for id 0 wherever it is.
+        assert_eq!(root_of_map("1 300001 999\n0 300000 1\n"), Ok(Some(300_000)));
+        assert_eq!(root_of_map("         0          0 4294967295\n"), Ok(None));
+        for bad in [
+            "",
+            "0 0 65536\n",
+            "0 0 4294967295\n1 1 1\n",
+            "1 165536 65536\n",
+            "0 165536\n",
+            "0 165536 0\n",
+            "0 x 65536\n",
+            "0 -1 65536\n",
+            "0 4294967296 1\n",
+        ] {
+            assert!(root_of_map(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// #405: a dispatcher is refused beside its tasks only when this daemon remapped it — its
+    /// own root the task's — not because its map is not the identity: in the daemon's own
+    /// namespace (`userns_mode: host`) on a plain host, and on a host that is a user namespace
+    /// itself (an unprivileged LXC or Incus container running dockerd with userns-remap, its
+    /// root host uid 100000 and the task's 165536 of that namespace), it gives a task's
+    /// directories to the task's root.
+    #[test]
+    fn a_dispatcher_is_refused_only_when_this_daemon_remapped_it() {
+        let b = 165_536;
+        assert_eq!(
+            beside_its_tasks("         0          0 4294967295\n", b),
+            Ok(())
+        );
+        assert_eq!(beside_its_tasks("0 100000 1000000000\n", b), Ok(()));
+        let e = beside_its_tasks("0 165536 65536\n", b).unwrap_err();
+        assert!(
+            e.contains("remapped this dispatcher too") && e.contains("userns_mode: host"),
+            "{e}"
+        );
+        assert!(beside_its_tasks("1 165536 65536\n", b).is_err());
+        assert!(beside_its_tasks("", b).is_err());
+    }
+
     /// Removes a network when dropped, however the test ends.
     struct Gone<'a>(&'a Cli, &'a str);
 
@@ -490,6 +705,7 @@ mod tests {
             gateway,
             deny: &[],
             env_file: std::path::Path::new("/nonexistent/agent.env"),
+            user: None,
         })
         .unwrap();
         let net = spec::container_name(0, &gen);
@@ -524,6 +740,123 @@ mod tests {
             5,
             "{out}"
         );
+    }
+
+    /// #399, on a real engine (tests/agent-install.sh runs it beside the test above, on rootful
+    /// docker and rootless podman): the probe's one-shot agent, started as the dispatcher starts
+    /// it — every capability dropped, no new privileges, the keys a read-only file mount — reads
+    /// an owner-only (0600) keys file of a non-root user's as that owner as the engine shows it
+    /// to a container, which is what the agent writes into `OMARCHY_AGENT_USER`: `--user 0:0` on a
+    /// rootless engine (whose root is the runner, the file's owner), the file's own `uid:gid` on a
+    /// rootful one (as root here, the file is made another uid's first). On a rootful engine the
+    /// image's root, with no capability, cannot read it — the bug the Studio's canary found. The
+    /// image is the stand-in's (busybox), which `cat`s the file where the worker image's
+    /// `agent --probe` would read it.
+    #[test]
+    #[ignore = "needs a real engine: tests/agent-install.sh"]
+    fn real_engine_the_probe_reads_owner_only_keys_as_their_owner() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let image = std::env::var("OMARCHY_STANDIN_IMAGE")
+            .expect("OMARCHY_STANDIN_IMAGE (tests/agent-install.sh sets it)");
+        let mut cli = Cli {
+            runtime: std::env::var("OMARCHY_DISPATCH_CLI").unwrap_or_else(|_| "docker".into()),
+            libpod: None,
+        };
+        let gateway = cli.gateway().unwrap();
+        let security = stdout(&cli, &["info", "--format", "{{json .SecurityOptions}}"]);
+        if security.contains("name=userns") {
+            println!("a remapped daemon: its agent holds the host's model kinds (#399), nothing reads the keys");
+            return;
+        }
+        let rootless = security.contains("name=rootless");
+        // The keys as install writes them: 0600, a non-root user's.
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("agent.env");
+        std::fs::write(&keys, "ANTHROPIC_API_KEY=sk-ant-not-a-real-key\n").unwrap();
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if !rootless && std::fs::metadata(&keys).unwrap().uid() == 0 {
+            std::os::unix::fs::chown(&keys, Some(4242), Some(4242)).unwrap();
+        }
+        let m = std::fs::metadata(&keys).unwrap();
+        assert_ne!(m.uid(), 0, "the keys file must be a non-root user's");
+        let user = if rootless {
+            spec::AgentUser { uid: 0, gid: 0 }
+        } else {
+            spec::AgentUser {
+                uid: m.uid(),
+                gid: m.gid(),
+            }
+        };
+        // A generation of its own: the test above runs beside it, under the same pid.
+        let pid = u64::from(std::process::id());
+        let (gen, host) = (
+            format!("g_{:016x}", pid | 1 << 60),
+            format!("h_keys-test-{pid}"),
+        );
+        let probe = |user| {
+            spec::probe_plan(&spec::Probe {
+                gen: &gen,
+                host: &host,
+                worker_image: "docker.io/library/busybox@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                subnets: spec::Subnets::parse("10.197.11.0/24").unwrap(),
+                slot: 15,
+                gateway,
+                deny: &[],
+                env_file: &keys,
+                user,
+            })
+            .unwrap()
+        };
+        let (setup, run) = probe(Some(user));
+        let net = spec::container_name(0, &gen);
+        cli.remove_network(&net);
+        cli.run(&setup[0]).unwrap();
+        let _gone = Gone(&cli, &net);
+        // The probe's own argv up to its image, then the stand-in reading the keys.
+        let read = |run: &[String]| {
+            let (args, tail) = run.split_at(run.len() - 2);
+            assert_eq!(tail[1], "--probe");
+            let mut a: Vec<&str> = args.iter().map(String::as_str).collect();
+            a.extend([image.as_str(), "cat", spec::AGENT_ENV_IN]);
+            cli.call(&a).unwrap()
+        };
+        for (k, v) in [
+            ("--cap-drop", "ALL"),
+            ("--security-opt", "no-new-privileges"),
+        ] {
+            assert!(run.windows(2).any(|w| w[0] == k && w[1] == v), "{run:?}");
+        }
+        assert!(
+            !run.iter()
+                .any(|x| x == "--cap-add" || x.starts_with("--userns")),
+            "{run:?}"
+        );
+        let out = read(&run);
+        let said = String::from_utf8_lossy(&out.stdout);
+        println!(
+            "{}: the probe as {}:{} read agent.env ({}:{}, 0600): {}",
+            if rootless { "rootless" } else { "rootful" },
+            user.uid,
+            user.gid,
+            m.uid(),
+            m.gid(),
+            out.status
+        );
+        assert!(
+            out.status.success() && said.contains("ANTHROPIC_API_KEY="),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Before #399, on a rootful engine: the image's root, with no capability, cannot.
+        if !rootless {
+            let (_, before) = probe(None);
+            let out = read(&before);
+            assert!(
+                !out.status.success() && out.stdout.is_empty(),
+                "root with no capability read another user's 0600 keys: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
     }
 
     #[test]

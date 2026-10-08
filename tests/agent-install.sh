@@ -46,7 +46,10 @@
 #     dispatch::engine test, through the pinned docker CLI the agent's tests
 #     fetched, the version the worker image runs): internal, no gateway
 #     (docker's isolated mode; on podman made through libpod's API with DNS
-#     off), nothing at its .1 for a task;
+#     off), nothing at its .1 for a task; and on it the probe's own argv
+#     (#399) reading a 0600 keys file of the runner's as its owner as the
+#     engine shows it (--user 0:0 rootless, the file's uid:gid rootful, where
+#     the image's root with no capability cannot);
 #   - a stand-in legacy compose project (two containers, a network, a bind
 #     mount) is read as preflight reads it, and uninstall's removal takes the
 #     new host's task container but leaves every legacy container running,
@@ -159,4 +162,5 @@ pin="$(sed -n "/^\[tools\.$platform\.docker\]/,/^sha256/s/^sha256 = \"\([0-9a-f]
 cli="${OMARCHY_AGENT_DOCKER_CLI:-${TMPDIR:-/tmp}/omarchy-agent-install-tools/$pin/docker}"
 [[ -x "$cli" ]] || { echo "agent-install.sh: no pinned docker CLI at $cli" >&2; exit 1; }
 OMARCHY_DISPATCH_CLI="$cli" DOCKER_HOST="unix://$socket" cargo test --locked -p pkg-repo --lib -- --ignored --exact --nocapture \
-  dispatch::engine::tests::real_engine_a_task_network_made_here_has_no_gateway
+  dispatch::engine::tests::real_engine_a_task_network_made_here_has_no_gateway \
+  dispatch::engine::tests::real_engine_the_probe_reads_owner_only_keys_as_their_owner
