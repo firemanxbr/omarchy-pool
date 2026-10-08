@@ -221,9 +221,9 @@ pub(crate) fn count(c: &Counting<'_>) -> Result<String, String> {
     // proved the VM's Rosetta, which a new image does not change), so the native CPUs,
     // memory and units still reach the file.
     let mut carried = None;
-    let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img| {
+    let (facts, said) = probe::in_mac_vm(facts, &vm, &mut |img, page_kb| {
         if probe::image_here(&how, img).is_ok() {
-            return probe::rosetta_lane(&how, img);
+            return probe::rosetta_lane(&how, img, page_kb);
         }
         let why = format!(
             "the release's x86_64 build image {img} is not in the VM's image store, and the loop pulls none"

@@ -647,8 +647,8 @@ fn a_macs_vm_gives_its_level_its_own_memory_and_the_rosetta_lane_the_envelope_al
         x86_64_image: Some("ghcr.io/o/build@sha256:00"),
     };
     let mut smokes = Vec::new();
-    let mut smoke = |img: &str| {
-        smokes.push(img.to_owned());
+    let mut smoke = |img: &str, page_kb: u32| {
+        smokes.push((img.to_owned(), page_kb));
         Ok(())
     };
     let (f, said) = in_mac_vm(host(8, 32), &vm(None, true), &mut smoke);
@@ -673,9 +673,15 @@ fn a_macs_vm_gives_its_level_its_own_memory_and_the_rosetta_lane_the_envelope_al
             "the x86_64 lane is off: the envelope's emulate leaves it out".into()
         ))
     );
-    assert_eq!(smokes.len(), 1, "no smoke run for a lane left out");
+    assert_eq!(
+        smokes,
+        [("ghcr.io/o/build@sha256:00".to_owned(), 4)],
+        "one smoke run, told the VM's 4K pages (its loader check runs: rosetta_lane); none for a lane left out"
+    );
     // A smoke run that fails: no lane, a warning.
-    let (f, said) = in_mac_vm(host(8, 32), &vm(None, true), &mut |_| Err("exit 1".into()));
+    let (f, said) = in_mac_vm(host(8, 32), &vm(None, true), &mut |_, _| {
+        Err("exit 1".into())
+    });
     assert_eq!(f.emulation(), None);
     assert!(matches!(said, Some(LaneSaid::Warning(w)) if w.contains("exit 1")));
     // Docker Desktop's VM: its level only; its memory and lanes are not the agent's.
@@ -683,7 +689,7 @@ fn a_macs_vm_gives_its_level_its_own_memory_and_the_rosetta_lane_the_envelope_al
         kind: VmKind::Shared,
         ..vm(None, true)
     };
-    let (f, said) = in_mac_vm(host(8, 32), &shared, &mut |_| panic!("no smoke run"));
+    let (f, said) = in_mac_vm(host(8, 32), &shared, &mut |_, _| panic!("no smoke run"));
     assert_eq!(
         (f.isolation(), said, f.mem_available),
         (Isolation::VmShared, None, None)
@@ -1033,6 +1039,40 @@ fn on_4k_pages_a_loader_check_that_fails_holds_the_lane_with_its_reason() {
 }
 
 #[test]
+fn a_rosetta_lane_on_4k_pages_runs_the_loader_check_too_and_is_off_when_it_fails() {
+    use super::probe::rosetta_lane;
+    // A Mac's VM on 4K pages: its Rosetta lane takes what 16K pages sent back (#413), so it
+    // proves its loader as qemu's lane does — in the same image, after the two steps.
+    let smoke = FakeSmoke::passing();
+    rosetta_lane(&smoke, X86_IMAGE, 4).unwrap();
+    assert_eq!(smoke.asked(), [("x86_64".to_owned(), X86_IMAGE.to_owned())]);
+    assert_eq!(
+        smoke.loaded(),
+        [("x86_64".to_owned(), X86_IMAGE.to_owned())]
+    );
+    // A loader that does not start sudo there: the lane is off, and says why.
+    let smoke = FakeSmoke::loader_failing("sudo -V: printed \"\", not \"Sudo version\"");
+    let e = rosetta_lane(&smoke, X86_IMAGE, 4).unwrap_err();
+    assert!(
+        e.starts_with("the x86_64 smoke run: sudo -V: ")
+            && e.ends_with(" — the loader check of a lane on 4K pages (#413)"),
+        "{e}"
+    );
+    // A VM on 16K pages reports page16k, and is not asked (D33); a smoke run that failed
+    // asks no loader.
+    let smoke = FakeSmoke::loader_failing("sudo: failed to map segment from shared object");
+    rosetta_lane(&smoke, X86_IMAGE, 16).unwrap();
+    assert!(smoke.loaded().is_empty());
+    let smoke = FakeSmoke::failing("exec /usr/bin/true: exec format error");
+    let e = rosetta_lane(&smoke, X86_IMAGE, 4).unwrap_err();
+    assert_eq!(
+        e,
+        "the x86_64 smoke run: exec /usr/bin/true: exec format error"
+    );
+    assert!(smoke.loaded().is_empty());
+}
+
+#[test]
 fn a_smoke_run_that_fails_or_cannot_run_holds_the_lane_with_its_reason() {
     let d = binfmt_tree("emu-smoke", &[("qemu-x86_64", QEMU_X86_F)]);
     let lanes = studio(
@@ -1067,7 +1107,9 @@ fn a_smoke_run_that_fails_or_cannot_run_holds_the_lane_with_its_reason() {
         "qemu-aarch64",
         "enabled\ninterpreter /usr/bin/qemu-aarch64-static\nflags: F\n",
     );
-    let smoke = FakeSmoke::passing();
+    // Its lane is on 4K pages, but no aarch64 build was sent back from 16K pages (only an
+    // aarch64 kernel has them): no loader check, so a sudo that would fail holds nothing.
+    let smoke = FakeSmoke::loader_failing("sudo: not found");
     let lanes = emulation::detect(
         "x86_64",
         4,
@@ -1079,10 +1121,18 @@ fn a_smoke_run_that_fails_or_cannot_run_holds_the_lane_with_its_reason() {
         &smoke,
     );
     assert_eq!(lanes.on[0].arch, "aarch64");
+    assert!(!lanes.on[0].page16k);
     assert_eq!(
         smoke.asked(),
         [("aarch64".to_owned(), ARM_IMAGE.to_owned())]
     );
+    assert!(
+        smoke.loaded().is_empty(),
+        "the loader check is the x86_64 lane's"
+    );
+    assert!(emulation::checks_loader("x86_64", 4));
+    assert!(!emulation::checks_loader("x86_64", 16));
+    assert!(!emulation::checks_loader("aarch64", 4));
     let _ = std::fs::remove_dir_all(&d);
 }
 

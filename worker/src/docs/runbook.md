@@ -2114,13 +2114,15 @@ so a size-4 build waits for memory rather than run smaller.
   off), then the binfmt handler (`/proc/sys/fs/binfmt_misc/qemu-<arch>`,
   enabled with the `F` flag — `factory/host/prep-root.sh` installs
   `qemu-user-static-binfmt`), then a smoke run of the release's build image
-  of that architecture (`/usr/bin/true`, then `pacman --version`, and on a
-  4K-page kernel `sudo -V`, the loader check of agent 0.5.1, #413). Passing,
+  of that architecture (`/usr/bin/true`, then `pacman --version`, and for an
+  x86_64 lane on a 4K-page kernel `sudo -V`, the loader check of agent
+  0.5.1, #413). Passing,
   the lane goes into `run/capacity.json`'s `lanes` with `via` and
   `page16k`; otherwise into `held_lanes` with the reason, and the native lane
   runs on. On a Mac (#320) the x86_64 lane is the omarchy VM's Rosetta one:
   `[vm] rosetta` and `emulate` decide it, the same smoke run turns it on
-  (`via: rosetta`, `page16k: false` on the VM's 4K pages), and why it is off
+  (`via: rosetta`, `page16k: false` on the VM's 4K pages, so its loader
+  check runs too), and why it is off
   is in install's notes and the run loop's journal, not in `held_lanes`.
   Check it on the host with
   `jq '.lanes, .held_lanes' <set dir>/run/capacity.json` (or

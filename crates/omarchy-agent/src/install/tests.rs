@@ -3969,7 +3969,7 @@ fn mac_host(min_cpus: u32) -> Host {
     fs::write(
         &h.docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\"source=$(cat {r}/home-path),\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"source=$(cat {r}/home-path)/\"*) case \" $* \" in *\"source=$(cat {r}/part-visible 2>/dev/null),\"*) exit 0 ;; esac; echo 'path is not shared' >&2; exit 125 ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; echo 'Pacman v7.0.0 - libalpm v15.0.0' ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" ps -q --filter label=com.omarchy.task \"*) cat {r}/tasks 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" network connect \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *\" create --name omarchy-egress-probe-\"*|*\" start omarchy-egress-probe-\"*) ;;\n  *omarchy-egress-probe-*-task\" \"*\" public@egress \"*) {r}/probe-answers {r}/task-egress \"$@\" ;;\n  *omarchy-egress-probe-*-task\" \"*) {r}/probe-answers {r}/task-seen \"$@\" ;;\n  *omarchy-egress-probe-*) if [ -e {r}/walled ]; then {r}/probe-answers {r}/egress \"$@\"; else {r}/probe-answers {r}/egress-nat \"$@\"; fi ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" version \"*) cat {r}/version ;;\n  *\"source=$(cat {r}/home-path),\"*) [ -e {r}/home-visible ] && exit 0; echo 'bind source path does not exist' >&2; exit 125 ;;\n  *\"source=$(cat {r}/home-path)/\"*) case \" $* \" in *\"source=$(cat {r}/part-visible 2>/dev/null),\"*) exit 0 ;; esac; echo 'path is not shared' >&2; exit 125 ;;\n  *\"--platform linux/amd64 --entrypoint sudo \"*) [ -e {r}/no-rosetta ] && exit 1; echo 'Sudo version 1.9.17p2' ;;\n  *\"--platform linux/amd64\"*) [ -e {r}/no-rosetta ] && exit 1; echo 'Pacman v7.0.0 - libalpm v15.0.0' ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) ;;\n  *\" ps -q --filter label=com.omarchy.task \"*) cat {r}/tasks 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" network connect \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *\" create --name omarchy-egress-probe-\"*|*\" start omarchy-egress-probe-\"*) ;;\n  *omarchy-egress-probe-*-task\" \"*\" public@egress \"*) {r}/probe-answers {r}/task-egress \"$@\" ;;\n  *omarchy-egress-probe-*-task\" \"*) {r}/probe-answers {r}/task-seen \"$@\" ;;\n  *omarchy-egress-probe-*) if [ -e {r}/walled ]; then {r}/probe-answers {r}/egress \"$@\"; else {r}/probe-answers {r}/egress-nat \"$@\"; fi ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = r.display()
         ),
     )
@@ -4587,6 +4587,8 @@ fn the_home_directory_visible_in_the_vm_is_refused_and_rosetta_gives_an_x86_64_l
             "--platform linux/amd64 --entrypoint /usr/bin/true {x86_image}"
         )) && log.contains(&format!(
             "--platform linux/amd64 --entrypoint pacman {x86_image} --version"
+        )) && log.contains(&format!(
+            "--platform linux/amd64 --entrypoint sudo {x86_image} -V"
         )),
         "{log}"
     );

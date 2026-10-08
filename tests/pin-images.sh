@@ -22,7 +22,7 @@ x86dev="$(digest library/archlinux base-devel)"; armdev="$(digest menci/archlinu
   echo "# The tag is kept beside the digest for the reader; the digest is what pulls."
   echo "ARCHLINUX_BASE=\"docker.io/library/archlinux:base@$x86\""
   echo "ARCHLINUXARM_BASE=\"docker.io/menci/archlinuxarm:base@$arm\""
-  echo "# The emulated lane's smoke run (tests/emulated-lane.sh): base-devel, whose sudo the loader check of a lane on 4K pages runs (#413); pinned $(date -u +%F)."
+  echo "# The emulated lane's smoke run (tests/emulated-lane.sh): base-devel, as the release's build images are, whose sudo the x86_64 lane's loader check on 4K pages runs (#413); pinned $(date -u +%F)."
   echo "ARCHLINUX_BASE_DEVEL=\"docker.io/library/archlinux:base-devel@$x86dev\""
   echo "ARCHLINUXARM_BASE_DEVEL=\"docker.io/menci/archlinuxarm:base-devel@$armdev\""
   echo "# The host agent's stand-ins (tests/agent-run-loop.sh, tests/agent-install.sh, tests/agent-host-orders.sh, tests/agent-runtime-switch.sh): sh, httpd, wget and nc; the Studio rehearsal's sleepers (factory/host/studio-rehearsal.sh)."

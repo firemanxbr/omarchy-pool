@@ -6,8 +6,8 @@
 #
 #   1. the agent's capacity probe turns the foreign lane on after its smoke
 #      run — the foreign Arch image by digest (base-devel) runs /usr/bin/true,
-#      then `pacman --version`, and on a 4K-page kernel `sudo -V` (the loader
-#      check, #413), under --platform — and says how (`via: qemu`,
+#      then `pacman --version`, and for an x86_64 lane on a 4K-page kernel
+#      `sudo -V` (the loader check, #413), under --platform — and says how (`via: qemu`,
 #      `page16k`); the envelope's `emulate = []` holds it off and runs
 #      nothing for it; the handler disabled, the lane is held for a person
 #      and the native lane stays (where this script may write the binfmt
@@ -90,7 +90,7 @@ echo "$out"
 check "$out" "j['arch'] == '$native'" "the native lane"
 check "$out" "j['emulation']['emulated'] == [{'arch': '$foreign', 'via': 'qemu', 'page16k': j['page_kb'] >= 16}]" "the $foreign lane is on after the smoke run"
 check "$out" "j['emulation']['held_lanes'] == []" "nothing held"
-echo "ok: the $foreign lane is on after its smoke run (pacman --version of $image under $platform$(python3 -c 'import json, sys; print("" if json.loads(sys.argv[1])["page_kb"] >= 16 else ", and sudo -V on 4K pages")' "$out"))"
+echo "ok: the $foreign lane is on after its smoke run (pacman --version of $image under $platform$(python3 -c 'import json, sys; print(", and sudo -V on 4K pages" if sys.argv[2] == "x86_64" and json.loads(sys.argv[1])["page_kb"] < 16 else "")' "$out" "$foreign"))"
 
 printf '[set]\nwork_root = "%s"\n[envelope]\nemulate = []\n' "$tmp/work-root" > "$tmp/agent.toml"
 out="$("$AGENT" capacity --envelope "$tmp/agent.toml" --probe-image "$STUB_IMAGE" --emulate-image "$image")" || fail "capacity: $out"

@@ -717,6 +717,7 @@ case " $* " in
   case "$*" in *"${{m:-//none//}}"*) echo "Error response from daemon: No such image: $m" >&2; exit 1 ;; esac
   echo sha256:0a ;;
 *" info "*) cat '{d}/info.json' ;;
+*" --platform linux/amd64 --entrypoint sudo "*) echo 'Sudo version 1.9.17p2' ;;
 *" --platform linux/amd64 "*) echo 'Pacman v7.0.0 - libalpm v15.0.0' ;;
 *" run "*) printf 'cpu.max=50000 100000\nmemory.max=67108864\npids.max=32\npagesize=4096\noverlay 1 1 104857600 1%% /\n' ;;
 *) exit 2 ;;
@@ -772,9 +773,14 @@ fn a_count_after_a_start_writes_the_vms_capacity_and_the_lane_the_envelope_allow
     let file: serde_json::Value =
         serde_json::from_slice(&std::fs::read(set.join("run/capacity.json")).unwrap()).unwrap();
     assert_eq!(file["lanes"].as_array().map(Vec::len), Some(1));
-    // The engine through the pinned CLI on the Mac's socket.
+    // The engine through the pinned CLI on the Mac's socket; on the VM's 4K pages the
+    // Rosetta lane's loader check too (#413).
     let log = std::fs::read_to_string(dir.join("docker.log")).unwrap();
     assert!(log.contains("--platform linux/amd64"), "{log}");
+    assert!(
+        log.contains("--platform linux/amd64 --entrypoint sudo"),
+        "{log}"
+    );
     // A release's new x86_64 image, which only an x86_64 task on the lane pulls: the lane
     // stays as the file had it, its smoke run not repeated, and the native count still
     // reaches the file.

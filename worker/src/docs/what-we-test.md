@@ -324,8 +324,9 @@ maintainer merges it like any other change to the process.
   x86-64 binary. Three things followed (#413): `needs_native` now means
   *needs 4K pages or a native host* (D33 amended) — an emulated lane whose
   host reports `page16k: false` takes it, and one that sends it back too
-  marks it `refused_4k`, for a native host only; a lane on 4K pages proves it
-  maps those libraries before it is on (its smoke run also starts `sudo -V`,
-  agent 0.5.1); and the pool counts one owner's hosts as one machine, since
+  marks it `refused_4k`, for a native host only; an x86_64 lane on 4K pages,
+  qemu's or a Mac's Rosetta one, proves it maps those libraries before it is
+  on (its smoke run also starts `sudo -V`, agent 0.5.1); and the pool counts
+  one owner's hosts as one machine, since
   the VM enrolls as a host of its own on the Studio and an audit there would
   have counted as one made elsewhere.

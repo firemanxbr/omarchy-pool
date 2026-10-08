@@ -311,10 +311,12 @@ Rosetta's in its VM, below). An emulated build is
 slower and shares the host's units; on a 16K-page kernel the lane stays on,
 and a build whose toolchain cannot start under qemu goes back to the queue
 for a native host — or a lane on 4K pages, where qemu maps what 16K pages
-cannot (#413) — without spending its attempt. A lane on 4K pages proves it
-first: its smoke run also starts `sudo -V` there (agent 0.5.1), and a
-lane where that fails is held, not reported 4K. One a 4K-page lane sends
-back too waits for a native host only.
+cannot (#413) — without spending its attempt. An x86_64 lane on 4K pages,
+qemu's or a Mac's Rosetta one, proves it first: its smoke run also starts
+`sudo -V` there (agent 0.5.1), and a lane where that fails is held, not
+reported 4K (an aarch64 lane needs no such proof: only an aarch64 kernel
+has 16K pages, so none of its builds came back from them). One a 4K-page
+lane sends back too waits for a native host only.
 
 **Contributors' builds run in a sandbox when your engine has one (#330).**
 Install gVisor (`runsc install` registers it with docker) or Kata Containers
