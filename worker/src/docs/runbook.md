@@ -785,7 +785,7 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--socket <path>` | the engine's socket; otherwise the first that answers of rootless podman's API socket, rootless docker, `/var/run/docker.sock` |
 | `--task-subnets <cidr>[,<cidr>]` | the task networks' range (default `10.231.0.0/16`, as prep-root.sh's) |
 | `--legacy <compose project>` | a set already running beside the new bundle (the Studio): recorded in `legacy.json`, nothing in it changed; its rootful daemon without userns-remap is the recorded exception until P6, meant for the Studio's set only; a re-run without the flag uses the recorded project |
-| `--agent-env-from <file>` | copies the agent keys from an existing file after showing which keys it holds; its `GITHUB_TOKEN` must be a classic token with no scope, or absent, so a file whose token is fine-grained (the Studio's `etc/agent.env`) cannot be given as is (*The Studio canary*); without it they are asked for on `/dev/tty`, not shown |
+| `--agent-env-from <file>` | copies the agent keys from an existing file after showing which keys it holds; its `GITHUB_TOKEN` must be a classic token with no scope, or absent, so a file whose token is fine-grained (the Studio's `etc/agent.env`) cannot be given as is (*The Studio canary*); without it, an `agent.env` already in the secrets directory is kept; otherwise the keys are asked for on `/dev/tty`, not shown (with `--yes`, none: no model kinds) |
 | `--max-units`, `--max-cpus`, `--max-mem-gb` | the owner's caps, lower than detected only |
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
 | `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory (it must be the one install.sh put the agent in, `omarchy-agent` under `XDG_DATA_HOME` or `~/.local/share`: the unit starts `<data>/current/omarchy-agent`); how long to wait for your Confirm |
@@ -2812,9 +2812,9 @@ containers and network stopped and removed, its files kept, the dispatcher,
 a task container and another project running on, `legacy.json` updated
 and the order `done` — and the crate's unit tests (`run::orders`) hold
 `rollout.sh`, `setup.sh`, `omarchy-worker` and the updater to their
-refusals once the marker is there. On the Studio only the way back is
-rehearsed before the switch, with `community-aarch64` (*The Studio switch*,
-*Rehearse the way back*).
+refusals once the marker is there. Of the legacy set's side, only the way
+back is rehearsed on the Studio before the switch, with `community-aarch64`
+(*The Studio switch*, *Rehearse the way back*).
 
 **Rehearse a narrowing on the Studio canary** (#325), the only host, once
 its agent reports 0.4.0 (`tests/agent-host-orders.sh` does the same against
@@ -2828,21 +2828,26 @@ new count after the agent's next report. Give its envelope's units back (the fir
 list), then ask Diagnostics while `agent.toml` says `diagnostics = false`:
 refused, saying so.
 
-**Rehearse owner control on a host** (#328) once its agent reports
-0.4.0 (`tests/agent-host-orders.sh` widens and sets a key against a stand-in
-in CI, with a virtual authenticator; `tests/host-enroll-e2e.sh` pins one
-made on a local pool's page): pin your passkey at the host and confirm its
-seal key (*Owner control*, above). Then, from the page alone: **Widen the
-envelope** with `max_units` one above what `agent.toml` says (and no more
-than the machine has) — within two minutes the order says `done`,
-`agent.toml` says the new cap, `jq .units run/capacity.json` the new count
-and the dispatcher was recreated; **Set agent keys** with a scratch
-`OPENAI_API_KEY` — `done`, `agent.env` in the secrets directory holds it
-(0600), `docker inspect` of the dispatcher shows neither the value nor a
-mount of the secrets directory, and `omarchy-agent status` and the page name
-the key, never its value; take it out again the same way. A widening is
-counted under the release's signed constants and the detected hardware, so
-the units it gives are never more than the machine has.
+**Rehearse owner control** (#328): the widening in CI only, *Set agent
+keys* on the Studio canary. The widening has no host to be rehearsed on:
+the Studio canary, the only host, was installed with no `--max-units`, so
+its envelope is already the whole machine and its `agent.toml` has no
+`max_units` to widen past. In CI, `tests/agent-host-orders.sh` widens and
+sets a key against a stand-in, with a virtual authenticator, and
+`tests/host-enroll-e2e.sh` pins one made on a local pool's page: **Widen
+the envelope** with `max_units` one above what `agent.toml` says — within
+two minutes the order says `done`, `agent.toml` says the new cap, `jq
+.units run/capacity.json` the new count and the dispatcher was recreated. A
+widening is counted under the release's signed constants and the detected
+hardware, so the units it gives are never more than the machine has. On
+the Studio canary, once its agent reports 0.4.0 and step 8 of its visit
+(*The Studio canary*, below) has pinned your passkey and confirmed its seal
+key (*Owner control*, above), only **Set agent keys** is rehearsed, from
+the page alone: a scratch `OPENAI_API_KEY` — `done`, `agent.env` in the
+secrets directory (`/srv/omarchy-host-secrets`) holds it (0600), `docker
+inspect` of the dispatcher shows neither the value nor a mount of the
+secrets directory, and `omarchy-agent status` and the page name the key,
+never its value; take it out again the same way.
 
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,
@@ -2943,9 +2948,12 @@ ten containers (`COMPOSE_PROFILES=emulated`: `pool-*`, `review-*`,
 `agent-proxy` and the `updater`; `review2` off) and six registrations claim
 (`pool-*`, `review-*`, `community-*`). After the install the agent ran
 under `systemd --user` with linger on, and the legacy containers' ids were
-the ones taken before it (they had changed earlier that day only because the
-legacy updater rolled out v1.1.0 at 16:09 UTC, before the install). Its pool
-cap is 3 units since 2026-10-08 14:29 UTC, set from its page (*Set the pool
+the ones taken before it (they had changed on 2026-10-06, at 16:09 UTC,
+before the install, only because the legacy updater rolled out v1.1.0). It
+enrolled on 2026-10-06 at 19:27 UTC and was confirmed at 20:59 UTC the same
+day (its public `enrolled_at` and `confirmed_at`), before its pool cap, not
+after it as step 7 asks: the canary ran uncapped until 2026-10-08 14:29
+UTC. Its pool cap is 3 units since then, set from its page (*Set the pool
 cap*, a reason required; the public API leaves `pool_cap_units` out, its
 owner's and the maintainers' only, and the journal's public line says it),
 and `host-pool-jobs` names its registration since 2026-10-08 14:49 UTC, with no
@@ -3035,8 +3043,12 @@ thing that fails; nothing before step 6 changes the legacy set but step
      --task-subnets 10.232.0.0/16 --agent-env-from /srv/omarchy-pool/etc/agent.env
    ```
 
-   Its `rollout.sh` line says `ok` after step 1 (`person` with the same
-   fix if it was missed). Two of its lines a person fixes here, before
+   This first `check` reads the legacy `etc/agent.env` on purpose, to say
+   whether that file can be given to install as is: on the Studio its
+   `GITHUB_TOKEN` line says `refused` (the second item below), and `<file>`,
+   made there, is what step 3's `check` reads and steps 4 and 6 give
+   install. Its `rollout.sh` line says `ok` after step 1 (`person` with the
+   same fix if it was missed). Two of its lines a person fixes here, before
    anything is installed:
    - *legacy directory … retire-legacy writes its .omarchy-agent marker
      there only when … owns it*: the `retire-legacy` order (#344, #374)
