@@ -499,6 +499,9 @@ jobs:
       - name: The build script's task mode — no pool call, the log cut at its cap, verdict.json always JSON — in a container with the task's mounts
         working-directory: .
         run: bash tests/worker-task-mode.sh
+      - name: The build user keeps the egress proxy's variables and nothing else of root's, so makepkg reaches a source from a host's internal task network
+        working-directory: .
+        run: bash tests/builder-env.sh
       - name: A task's two pacman caches with a real pacman — the host's read-only first, its own writable second; two tasks at once download into their own; what the shared cache holds with each package's .sig is used, and a package without its .sig, beside a wrong one or with bytes it should not hold fails the task
         working-directory: .
         run: bash tests/task-caches.sh

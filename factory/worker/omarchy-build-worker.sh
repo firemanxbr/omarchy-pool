@@ -441,8 +441,12 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
 # The build user starts from an empty environment — an allowlist, not what
 # root happens to have (runuser alone hands over everything but HOME, SHELL,
 # USER and LOGNAME). The caches and makepkg's own variables are set by the
-# caller on the command line.
-as_builder() { runuser -u builder -- env -i PATH="$PATH" HOME=/home/builder USER=builder LOGNAME=builder SHELL=/bin/bash TERM="${TERM:-dumb}" LANG="${LANG:-C.UTF-8}" "$@"; }
+# caller on the command line. The egress proxy's variables go along when the
+# task has them: on a host a task's network is internal with no DNS, so
+# makepkg's curl, git and cargo reach a source only through the task's egress
+# sidecar — without them every download failed with "Could not resolve host"
+# (omarchy-cli x86_64 on the Studio's VM host, 2026-10-09; #319, #413).
+as_builder() { local p=() v; for v in HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy; do [[ -n "${!v:-}" ]] && p+=("$v=${!v}"); done; runuser -u builder -- env -i PATH="$PATH" HOME=/home/builder USER=builder LOGNAME=builder SHELL=/bin/bash TERM="${TERM:-dumb}" LANG="${LANG:-C.UTF-8}" ${p[@]+"${p[@]}"} "$@"; }
 
 # Extends the task's lease while the build runs (every five minutes; the
 # lease is thirty): a build longer than the lease is not handed to another
