@@ -19,11 +19,11 @@ name: Release
 # takes (#311: the omarchy-agent binaries, omarchy-host-vX.Y.Z.tar.gz signed
 # keyless, install.sh) is verified with the agents the fleet runs and added
 # to the draft, the release is published (immutable from then on) once
-# every asset is on it, only then do `:<arch>` and `:latest`, the tags every
-# set's updater pulls, move (#359: a release that stops before stays a
-# draft and leaves every host on the previous release's images), and the
-# worker is deployed carrying that version: every set's updater follows it
-# within two minutes. Versions start
+# every asset is on it, only then do `:<arch>` and `:latest`, the tags that
+# stay published for anything left of the legacy sets, move (#359: a
+# release that stops before stays a draft and leaves everything on the
+# previous release's images), and the worker is deployed carrying that
+# version: every host's agent follows it within minutes. Versions start
 # at v0.0.1 and grow one step at a time. A merge alone changes nothing that
 # runs. Going back is rollback.yml.
 on:
@@ -283,12 +283,13 @@ jobs:
 
   worker-image:
     name: Worker image (${{ matrix.arch }})
-    # The one image every worker runs — a contributor's or a maintainer's,
-    # the registration decides — built from the binaries this release just
-    # published and tagged with its version. Pushed as the version's tag
-    # only, then every role is started from it on this runner (#277): the
-    # project worker through its entrypoint to its first claim, the broker
-    # answering, the builder's and the updater's self-tests. No other tag
+    # The one image a maintainer host runs — its dispatcher and its tasks'
+    # sidecars — built from the binaries this release just published and
+    # tagged with its version. Pushed as the version's tag only, then every
+    # role is started from it on this runner (#277): the dispatcher, the
+    # egress and agent sidecars, the builder's self-test, and a legacy
+    # project worker to its first claim; the updater and broker roles
+    # refused (#346). No other tag
     # moves here: the manifest job moves the version's own, once both
     # architectures' smoke starts passed, and worker-image-tags the ones a
     # host follows, once the release is published (tests/release-workflow.sh).
@@ -619,9 +620,9 @@ jobs:
   worker-image-tags:
     name: Worker image tags the hosts follow
     # Only once the release is published (#359): :x86_64 and :aarch64, each a
-    # copy of its version's image, then :latest. Every set's updater pulls
-    # them at its next round, whatever release the pool runs, so they move
-    # last: moved with :vX.Y.Z in worker-image-manifest, v1.0.6's hosts ran
+    # copy of its version's image, then :latest. Whatever still pulls them
+    # (#346: they stay published and signed for anything left of the legacy
+    # sets) takes them whatever release the pool runs, so they move last: moved with :vX.Y.Z in worker-image-manifest, v1.0.6's hosts ran
     # its images before it was published, and a release that stopped at
     # host-bundle, verify-agents or publish-release would have stayed a
     # draft with every host on its images. A failure in any job before this

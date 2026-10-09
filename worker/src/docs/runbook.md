@@ -3,7 +3,7 @@
 Operating the staging environment. Nothing here is done by hand on the servers:
 every write goes through the Worker with a per-job token a worker got at claim
 time; there is no shared secret. Humans operate the pipeline by queueing jobs
-(`pkg-repo job`, or the API with a maintainer's token) that project workers run.
+(`pkg-repo job`, or the API with a maintainer's token) that the maintainers' hosts run.
 
 | | |
 |---|---|
@@ -11,7 +11,7 @@ time; there is no shared secret. Humans operate the pipeline by queueing jobs
 | Index API | https://pkgs.omarchy-pool.org/api/v1/stats |
 | Pool (static, what pacman reads) | https://pool.omarchy-pool.org/`<source>`/x86_64/ · `/aarch64/` — `core/`, `extra/`, `packages/` (the OPR), `asahi/`, `factory/`, … |
 | Signing key | `docs/omarchy-staging.pub.asc` · https://pool.omarchy-pool.org/omarchy-staging.pub.asc · https://pkgs.omarchy-pool.org/api/v1/signing-key (expires 2027-09-12); the private key is the Worker secret `SIGNING_KEY` — nowhere else |
-| Jobs (pulled by project workers) | Sync (every 3 h, one task per architecture) · Promote (by evidence: edge→rc right after the sync that changed edge, rc→stable on the second green check in a row, attempted every 3 h; auto-rollback) · Fast lane (a factory build the trial installed, and security fixes, straight to stable) · Health (daily, both arches) · Security (every 3 h, with fast-track) · GC (Sundays) · Metrics snapshot (every 30 min, by the brain itself) · Release (GitHub, when a maintainer decides: `gh workflow run release.yml`) |
+| Jobs (pulled by the maintainers' hosts) | Sync (every 3 h, one task per architecture) · Promote (by evidence: edge→rc right after the sync that changed edge, rc→stable on the second green check in a row, attempted every 3 h; auto-rollback) · Fast lane (a factory build the trial installed, and security fixes, straight to stable) · Health (daily, both arches) · Security (every 3 h, with fast-track) · GC (Sundays) · Metrics snapshot (every 30 min, by the brain itself) · Release (GitHub, when a maintainer decides: `gh workflow run release.yml`) |
 | Running version | https://pkgs.omarchy-pool.org/api/v1/version · the chip in the dashboard header |
 
 **The address moved (2026-09-18).** The product has its own domain. Six
@@ -47,13 +47,13 @@ runs `/setup` again; nothing it reads went away. The key's user id,
   selection; history is never rewritten. Every action posts an event.
 * **Nobody holds R2 credentials, and nobody holds a pool credential.** Reads
   are public objects; writes go through the Worker with the per-job token of
-  a task a project worker claimed; the R2 bucket has no API tokens.
+  a task a host claimed; the R2 bucket has no API tokens.
 
 ## Everyday operations
 
 Everything the scheduler does can be queued by hand by a maintainer
 (`OMARCHY_API` and `OMARCHY_TOKEN=omc_…` set — the token from your own
-page); a project worker runs it with a per-job token, and Status counts it
+page); a host runs it with a per-job token, and Status counts it
 with the pool's other jobs (*The numbers*, at the foot of the page):
 
 ```bash
@@ -134,10 +134,13 @@ A release is `main` at the moment a maintainer dispatches one
    built for x86_64 and aarch64 Linux (musl) and Apple silicon macOS
    (`factory/bin/build-agent`, reproducible). The worker image is built from them on each
    architecture and pushed as `:<arch>-vX.Y.Z` only. Every role is then
-   started from it on the runner (`tests/image-smoke.sh`: the project worker
-   through its entrypoint, `pkg-repo work --self-test`, then to its first
-   claim of a stub pool; the broker answering on `:8790`; the builder's and
-   the updater's `--self-test`; the updater's `follows` label). Only once
+   started from it on the runner (`tests/image-smoke.sh`: the dispatcher,
+   which refuses a signing key and otherwise claims with its token's file;
+   the egress sidecar; the agent sidecar answering on `:8790`, with no pool
+   path; the build script's `--self-test`; a legacy project registration's
+   `pkg-repo work`, kept until the last such registration is retired, to
+   its first claim of a stub pool; and, since #346, the updater and broker
+   roles refused). Only once
    both architectures' images have started does the version's own
    `:vX.Y.Z` move (the index the host bundle signs). An image whose roles do
    not start, on either architecture, stops the release before any tag
@@ -158,17 +161,20 @@ A release is `main` at the moment a maintainer dispatches one
    job (`worker-image-tags`) moves `:x86_64` and `:aarch64` to the version's
    images, then `:latest`, each signed; it runs in the `release`
    environment, so it waits for a maintainer's approval like the jobs that
-   signed before it. Every set's updater pulls those tags at its next
-   round, whatever release the pool runs, so from here on a host may run
-   the new images before the pool is deployed (step 6); never before the
-   release is published. A run that stops here leaves the release published
-   and the pool on the previous release: **Re-run failed jobs**.
+   signed before it. They stay published and signed for anything left of
+   the legacy sets (#346), which pull them whatever release the pool runs;
+   so they move last, never before the release is published. A host runs
+   the release its agent verified, by digest, never a tag. A run that stops
+   here leaves the release published and the pool on the previous release:
+   **Re-run failed jobs**.
 6. The worker is migrated (`wrangler d1 migrations apply`) and deployed with
    `POOL_VERSION`, `POOL_COMMIT` and `POOL_DEPLOYED_AT`; the run verifies
    `/api/v1/version` reports the new tag and records a `deploy` event through
    `wrangler d1 execute` (the release holds no credential of the pool's API).
-7. Every set follows: its updater sees the new release within two minutes
-   (the Studio's too, since its one-time step, *The Studio host*).
+7. Every host follows: its agent reads the new release from its host
+   state within minutes, verifies the bundle and rolls it out, a task
+   running across it (*The run loop*, below; a host whose owner set a soak
+   waits it out first).
 
 A run that stopped resumes with **Re-run failed jobs** on that run. Once its
 release is published, that is the only way: a published release is immutable,
@@ -208,15 +214,12 @@ under the host agent goes below its floor only on one, within 14 days of the
 target's release — deeper only once maintainers co-signed the statement
 (*Co-signing a release*, #330) — (security-model, *Rollback statements*). A statement that
 did not reach R2 fails the run after the rest is done; running it again
-stores a freshly signed one. The updaters follow the
-pool's release down as they follow it up, within two minutes, and so do the
-host agents: back below the release that brought agent 0.3.0 (#344), the
-Worker that comes back names no release in its host state, so an agent on
-0.3.0 reads that Worker's `follow` instead, as the agents before it did
-(its journal says so once), and goes down on the statement. Back past
-#277's last part, the updater that comes back is the older one: it follows
-at its own fifteen-minute round and takes no Update, until a release brings
-one that follows again. That older Worker lists a worker's whole row, so the
+stores a freshly signed one. The host agents follow the pool's release down
+as they follow it up: back below the release that brought agent 0.3.0
+(#344), the Worker that comes back names no release in its host state, so an
+agent on 0.3.0 reads that Worker's `follow` instead, as the agents before it
+did (its journal says so once), and goes down on the statement. A rollback
+past #277's last part brings back a Worker that lists a worker's whole row, so the
 rollback clears every column the newer one keeps to itself — a worker's
 site, its process, the rules' state, its rollout report — before its deploy,
 after it and once more once it runs; a task's stop fence goes too. A
@@ -376,7 +379,7 @@ whoever uses it: it refuses an `install.sh` whose provenance is not
 
 ## Security data
 
-The `security` job (every 3 h, pulled by a project worker; `pkg-repo job
+The `security` job (every 3 h, pulled by a host; `pkg-repo job
 security` queues one by hand) fetches the Arch and Debian trackers, KEV and EPSS,
 matches them (`pkg-repo security`) and then fast-tracks fixes into `rc` and
 `stable` (`pkg-repo fast-track`, `--min-severity medium`, exploited-in-the-wild
@@ -494,29 +497,24 @@ Actions (*The GitHub settings the signature relies on*, below).
 The pool's own work — sync, promote, rollback, render, health, security,
 enqueue, gc — runs as tasks in the factory's queue when `JOB_KINDS` (a
 Worker var, comma-separated kinds) lists the kind: the cron creates them
-on schedule, a maintainer queues one by hand, and a **project worker**
-pulls and runs them:
-
-```bash
-# on any machine with podman/docker, python3, curl, git (the health and ABI
-# scripts) — a droplet, a laptop, a Hetzner box
-pkg-repo work --worker-token omw_… --labels '{"where":"droplet-1"}'
-```
-
-The worker is registered like any other (`POST /factory/workers`, a
-maintainer's); project trust is no longer given one worker at a time
-(#343: `POST /factory/workers/<id>/trust` answers 410), so only a
-registration that already holds it takes the pool's jobs this way — a new
-machine joins as a host (*A new maintainer host*, below); maintainers are named by
-`factory/MAINTAINERS.toml` (docs/GOVERNANCE.md), nowhere else. Every task
-runs with a per-job token the pool issues at claim time (SECURITY.md);
-the worker's own token only claims. No pipeline step runs on GitHub any
-more: the workflows that did are gone, and a run by hand is a job. GitHub
-Actions runs CI and the release only — there is no hosted worker: when
-pool jobs wait and no project worker is alive, they wait, the scheduler
-log and the Workers page say so, and *The Studio host* (below) is where
-to look. Worker secret: `JOB_TOKEN_SECRET` (any random string) signs the
-job tokens.
+on schedule, a maintainer queues one by hand, and a **maintainer's host**
+pulls and runs them — its dispatcher, in a child process of its own on the
+unit it keeps for them, once the `host-pool-jobs` setting names it (`*` for
+every host: *A new maintainer host* below, its *Pool jobs on hosts*).
+Nothing else takes them: no machine is registered for them one at a time
+(`POST /factory/workers` answers 410, #346; project trust is given to no
+worker by hand, #343), a new machine joins as a host (*A new maintainer
+host*, below), and maintainers are named by `factory/MAINTAINERS.toml`
+(docs/GOVERNANCE.md), nowhere else. Every task runs with a per-job token
+the pool issues at claim time (SECURITY.md); the host's own worker token
+only claims. No pipeline step runs on GitHub any more: the workflows that
+did are gone, and a run by hand is a job. GitHub Actions runs CI and the
+release only — there is no hosted worker: when no host is named in
+`host-pool-jobs`, or none it names is alive, the pool's jobs wait — the
+rings stop moving —, the scheduler log says so and Status counts them
+waiting, and the hosts' pages (*The Studio host*, below) are where to
+look. Worker secret: `JOB_TOKEN_SECRET` (any random string) signs the job
+tokens.
 
 ## A new maintainer host
 
@@ -551,10 +549,9 @@ CGNAT, link-local and the host (IPv4; task networks stay IPv4 only), kept across
 `omarchy-task-firewall.service` (rootful). A second run changes nothing,
 but enables and restarts that unit when it was disabled or stopped since;
 exit 1 lists what needs a person. The task subnets and the work root must be
-the ones the agent's install is given. The Studio runs it once, at its
-canary visit, beside the legacy set it keeps until the switch of design v2
-§21: there it leaves userns-remap off, the recorded exception (D13; *The
-Studio canary*, below). A Mac runs
+the ones the agent's install is given. The Studio ran it once, at its
+canary visit, and leaves `userns-remap` off there — its recorded exception
+until P6 (D13; *The Studio host*, below). A Mac runs
 [`factory/host/prep-mac.sh`](../factory/host/prep-mac.sh) instead, with no
 sudo (*Installing a Mac*, below).
 
@@ -784,8 +781,8 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--work-root <dir>`, `--secrets-dir <dir>` | where tasks work (default `<data>/work`) and where `agent.env` goes (default `<data>/secrets`); the secrets directory must be outside the work root and the set directory |
 | `--socket <path>` | the engine's socket; otherwise the first that answers of rootless podman's API socket, rootless docker, `/var/run/docker.sock` |
 | `--task-subnets <cidr>[,<cidr>]` | the task networks' range (default `10.231.0.0/16`, as prep-root.sh's) |
-| `--legacy <compose project>` | a set already running beside the new bundle (the Studio): recorded in `legacy.json`, nothing in it changed; its rootful daemon without userns-remap is the recorded exception until P6, meant for the Studio's set only; a re-run without the flag uses the recorded project |
-| `--agent-env-from <file>` | copies the agent keys from an existing file after showing which keys it holds; its `GITHUB_TOKEN` must be a classic token with no scope, or absent, so a file whose token is fine-grained (the Studio's `etc/agent.env`) cannot be given as is (*The Studio canary*); without it, an `agent.env` already in the secrets directory is kept; otherwise the keys are asked for on `/dev/tty`, not shown (with `--yes`, none: no model kinds) |
+| `--legacy <compose project>` | a set from before hosts running beside the new bundle, as the Studio's was at its switch (#345): recorded in `legacy.json`, nothing in it changed, until its owner retires it with *Retire legacy set*; a rootful daemon without userns-remap was the Studio's recorded exception until P6; a re-run without the flag uses the recorded project. Every such set has retired (#346): a new host has none |
+| `--agent-env-from <file>` | copies the agent keys from an existing file after showing which keys it holds; its `GITHUB_TOKEN` must be a classic token with no scope, or absent, so a file whose token is fine-grained cannot be given as is; without it, an `agent.env` already in the secrets directory is kept; otherwise the keys are asked for on `/dev/tty`, not shown (with `--yes`, none: no model kinds) |
 | `--max-units`, `--max-cpus`, `--max-mem-gb` | the owner's caps, lower than detected only |
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
 | `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory (it must be the one install.sh put the agent in, `omarchy-agent` under `XDG_DATA_HOME` or `~/.local/share`: the unit starts `<data>/current/omarchy-agent`); how long to wait for your Confirm |
@@ -1526,8 +1523,8 @@ or `revert`, each step written to `state.json` before it acts, so a restart
 anywhere resumes it (a ready wait or a guard in flight starts its clock again:
 after a reboot the dispatcher is still re-adopting its leases). The pool's
 host state names the target (#344: `GET /api/v1/hosts/self/state`, signed
-with the host key; agents before 0.3.0 read `follow`'s `latest`, which the
-legacy sets' updaters still poll — and so does agent 0.3.0, only when the
+with the host key; agents before 0.3.0 read `follow`'s `latest`, which stays
+published for anything left of the retired legacy sets (#346) — and so does agent 0.3.0, only when the
 state names no release at all: a Worker from before #344, which only a
 rollback below that release deploys again, *Releasing the pool itself*;
 the journal says it once); the bundle must verify against `release.yml` on main, the pool's
@@ -1585,16 +1582,17 @@ given on the host's page:
   `working_dir` label of its containers names, which must hold a compose
   file — then **writes the `.omarchy-agent` marker there first** (refused,
   with nothing changed, when the directory is not the agent user's own or
-  others may write it: `/srv/omarchy-pool` is `setup.sh`'s user's, so run
-  the agent as that user or `chown` it), stops every container of that
+  others may write it: run the agent as the user who owns the set's
+  directory, or `chown` it), stops every container of that
   project (`docker stop`, 120 s before the kill), removes them and the
   project's networks, and records the retirement in `legacy.json`. It never
   touches another project, a container that carries the agent's host label
   (the bundle, a task), a volume, an image or a file of the set; one it
   cannot finish within 30 minutes answers `failed` with the marker left —
-  the set's own tools then refuse there although it was not retired, which
-  is the price of the marker first: from the stop on, the set's updater
-  cannot bring it back — and is given again. The button is greyed, with the
+  the set's own tools, those its directory holds from before #346, then
+  refuse there although it was not retired, which is the price of the marker
+  first: from the stop on, nothing of the set brings it back — and is given
+  again. The button is greyed, with the
   agent's words, while its report says it would refuse (the directory above;
   the report after the fix, within five minutes, lifts it).
 
@@ -2075,10 +2073,7 @@ anything else, and treat it as an incident (the security model's
 
 ### How the pool hands a host work
 
-Every claim of a host — and of a legacy registration, selected as a host
-with one lane and one build until it retires; a community one only while
-its owner is a maintainer, else `403 owner_not_maintainer` (#343) — goes
-through the pool's selection (#337, design v2 §8.3; `worker/src/selection.ts`). A host is
+Every claim of a host goes through the pool's selection (#337, design v2 §8.3; `worker/src/selection.ts`). A host is
 handed as many tasks as its units hold: a build 2 units per size, a trial 2,
 an audit 1, one unit kept for pool jobs, model work within its agent slots,
 each lease its own container; what does not fit waits in the pool's queue
@@ -2086,7 +2081,7 @@ and starts as units free up. Its units are min(what it declares, what the
 pool recomputes from its totals with the signed constants, the pool's cap).
 Before each claim its dispatcher checks `MemAvailable` against the largest
 task it could receive and offers only what still fits (a shared machine, a
-laptop in use, the Studio's legacy set during the canary): its log says
+laptop in use): its log says
 `… GB available in memory: this claim offers N of M free unit(s)`. The
 shares of the leases it started in the last five minutes count as used
 (`… (K GB of it promised to leases just started)`): their containers have
@@ -2202,17 +2197,11 @@ so a size-4 build waits for memory rather than run smaller.
 - **The second opinion (#339, D36).** An audit runs in a fresh container
   with its own agent sidecar. It leaves the machine that built what it
   audits to another that can take it now, for 3 minutes. The pool tells
-  machines apart by owner only: two registrations are on different
-  machines only when their owners differ (#413). A host is what enrolled,
-  not a machine — the Studio's x86_64 VM enrolls as a host of its own on the
-  Studio —, and the pool trusts no host to say which machine it runs on: a
-  maintainer's legacy role containers (the Studio's `community-*` and
-  `review-*`, until P3), a host's registration beside its own legacy set
-  during the canary, and two hosts of one owner are one machine, so an
-  audit one takes of another's build says `none`, never `host`. What that
-  costs: one maintainer's machines that are truly apart give each other no
-  3 minutes' preference and no `host` (a publish-bound audit counts its
-  model only, so that is the audits that do not ship). An audit of the project's
+  machines apart by owner and host: two registrations are on different
+  machines only when their owners differ or they are two hosts'
+  registrations of different hosts; anything else is one machine, so an
+  audit one takes of the other's build says `none`, never `host`. An audit
+  of the project's
   copy takes another model (the claim's `agent`: provider and model) than
   the one that built it whenever a registration that takes audits with
   another model answered in the last 24 hours — however long that host is
@@ -2236,9 +2225,9 @@ so a size-4 build waits for memory rather than run smaller.
 - **Contributors take turns.** Community builds are handed round-robin by
   owner (fewest leased first), and a contributor holds at most
   ceil(the alive fleet's builds / 4) at once. The divisor is a setting: 0
-  lifts the cap (round-robin stays); with the legacy fleet alone (a few
-  registrations, one build each) the cap is 1 or 2 — lift it if that leaves
-  builds idle while one contributor's queue waits:
+  lifts the cap (round-robin stays); with a small fleet (a host or two)
+  the cap is 1 or 2 — lift it if that leaves builds idle while one
+  contributor's queue waits:
 
   ```bash
   npx wrangler d1 execute omarchy-repo --remote --command "INSERT INTO settings (key, value) VALUES ('owner-cap-divisor', '0') ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
@@ -2313,24 +2302,26 @@ so a size-4 build waits for memory rather than run smaller.
   npx wrangler d1 execute omarchy-repo --remote --command "UPDATE factory_packages SET learned_size = NULL, learned_lower = 0 WHERE name = '<package>'"
   ```
 - **The pool's cap** (`hosts.pool_cap_units`): its owner or any maintainer
-  sets it on the host's page, with a reason — the Studio canary runs at 3
-  units, one build (§21.1). Lowered below what the host runs, nothing ends;
+  sets it on the host's page, with a reason (the Studio's canary ran at 3
+  units, one build, §21.1). Lowered below what the host runs, nothing ends;
   it claims nothing until its leases fit. Lifted, the host's count decides.
 - **Pool jobs on hosts (#340, D34).** Sync, render, promote, rollback,
   security, gc, verify, relayout, enqueue, publish and the health checks
   reach a host once the maintainers let them: the `host-pool-jobs` setting
   names its host (or its registration's id), or says `*` for every host;
-  absent, no host takes one and the legacy pool workers run them all. The
-  rollout: the Studio canary straight away, with no P1 host first (the
-  canary is the first and only host: a maintainer decision of 2026-10-06,
-  #332 closed as not planned) — the setting names its registration,
-  `firemanxbr-studio-m2-mnmw`, since 2026-10-08 14:49 UTC —, every host at
-  the P3 switch:
+  absent, no host takes one and the pool's jobs wait — the rings stop
+  moving. With the legacy registrations retired (#346) the hosts are the only
+  ones that take them, so it names every host that should (`*`, as the P3
+  switch left it). The rollout: the Studio canary straight away, with no P1
+  host first (the canary was the first and only host: a maintainer decision
+  of 2026-10-06, #332 closed as not planned) — the setting named its
+  registration, `firemanxbr-studio-m2-mnmw`, from 2026-10-08 14:49 UTC —,
+  every host at the switch:
 
   ```bash
   npx wrangler d1 execute omarchy-repo --remote --command "INSERT INTO settings (key, value) VALUES ('host-pool-jobs', 'firemanxbr-studio-m2-mnmw') ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"   # the canary, 2026-10-08
-  npx wrangler d1 execute omarchy-repo --remote --command "UPDATE settings SET value = '*', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE key = 'host-pool-jobs'"   # every host, at the switch
-  npx wrangler d1 execute omarchy-repo --remote --command "DELETE FROM settings WHERE key = 'host-pool-jobs'"   # back to none
+  npx wrangler d1 execute omarchy-repo --remote --command "UPDATE settings SET value = '*', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE key = 'host-pool-jobs'"   # every host, since the switch
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT value FROM settings WHERE key = 'host-pool-jobs'"   # what it says now
   ```
 
   The next claim of each host reads it. Its dispatcher runs one pool job at
@@ -2365,10 +2356,9 @@ so a size-4 build waits for memory rather than run smaller.
   own runtime all the same, its emulated lanes included, and a sandbox hold
   (*A sandboxed runtime for community tasks*) holds its pool jobs with its
   tasks until it ends or the dispatcher restarts. The jobs share `<work root>/jobs` (keyrings, the sync's scratch, the
-  ABI gate's cached Omarchy reference), as a legacy pool worker's work
-  directory. Every job that checks a ring's health — a health check, a
-  promotion's evidence and its check after promoting, a fast-track's
-  check — first fills `<work root>/jobs/keyrings` itself (#414) with the
+  ABI gate's cached Omarchy reference). Every job that checks a ring's
+  health — a health check, a promotion's evidence and its check after
+  promoting, a fast-track's check — first fills `<work root>/jobs/keyrings` itself (#414) with the
   keyrings its arches' checks need: Omarchy's on x86_64, and on aarch64 the
   Asahi fork's and asahi-alarm's too, and no others. They come from the
   release's `tests/fetch-keyrings.sh`, run in the job's own process (no
@@ -2405,12 +2395,9 @@ so a size-4 build waits for memory rather than run smaller.
   ```
 
   An agent fault on a host row leads the pool's rules to `recheck-agent`
-  only (a fresh probe sidecar), never `restart`: its page says so, and the
-  site's pacing and election are a legacy set's. They stay for the legacy
-  sets alone until P3, with the community share of the pool's order budget
-  (#343 keeps them: the Studio's pairs and maralcbr's set still share an
-  agent service — the broker, `agent-proxy` — whose restart its siblings
-  pace), and leave with those sets (#346).
+  only (a fresh probe sidecar), never `restart`: its page says so. A host's
+  agent is its own task's sidecar, so there is no shared agent service whose
+  restart a site paces.
 - **A sleeping host has zero free units** (#329). A Mac's agent reports
   `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
   meanwhile its claims are handed nothing, it makes no emulated lane wait,
@@ -2421,38 +2408,6 @@ so a size-4 build waits for memory rather than run smaller.
   its own until they expire. The pool holds it only while that report is
   fresh (15 minutes): a dispatcher that claims after that is on a Mac that
   woke. The host's page says *asleep*.
-
-**Once, before the deploy that carries #343.** The owner test is exact:
-a community legacy registration with no owner (one registered before the
-pool kept owners, migration 0010), or whose owner is spelled otherwise than
-in `factory/MAINTAINERS.toml`, claims nothing from that deploy on. List the
-live ones it would turn away; none of the Studio's community pair or
-maralcbr's workers may be among them:
-
-```bash
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, owner, last_seen FROM build_workers WHERE kind = 'legacy' AND trust != 'project' AND revoked_at IS NULL AND (owner IS NULL OR owner NOT IN (SELECT login FROM factory_maintainers)) AND last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')"
-```
-
-A maintainer's worker that is listed gets its owner as the file spells it
-(`UPDATE build_workers SET owner = '<login>' WHERE id = '<id>'`, the same
-command), then the query again comes back without it. Any other row is a
-contributor's, which builds nothing from then on: revoke it on its page.
-
-The same deploy widens what a maintainer's set takes: a community legacy
-registration that was dedicated (its owner's builds only, and the ones
-pinned to it) takes any contributor's build from then on, as a host does
-(design v2 D56, §8.2), with the agent key and the `GITHUB_TOKEN` its broker
-holds. Nothing asks its owner, so list those sets (`mode` is the last one
-a claim reported, kept as history and written no more; a row that never
-claimed says `project`):
-
-```bash
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, owner, mode, last_seen FROM build_workers WHERE kind = 'legacy' AND trust != 'project' AND revoked_at IS NULL AND owner IN (SELECT login FROM factory_maintainers) AND mode IS NOT 'shared' AND last_seen > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')"
-```
-
-and tell each owner before the deploy (maralcbr's sets among them, design
-§21.2): a set that should not build strangers' recipes is drained
-(`./omarchy-worker stop`) or revoked on its page first.
 
 ### A host's task caches
 
@@ -2738,782 +2693,92 @@ last claim).
 
 ## The Studio host
 
-The project's workers run on one machine — `omarchy-studio`, a Mac Studio
-on Arch Linux ARM (Asahi), 12 cores, 32 GB, on around the clock — as
-worker containers of the image, eight in its compose file: two pool, four
-review (two pairs, since 2026-09-17: an audit waited 23 minutes on average
-behind builds and the pool's jobs), two community, one per architecture
-each (four of them run by default: the x86_64 review and community services
-are behind the `emulated` profile, and the second review pair behind its
-own `review2` profile, off unless it was registered and trusted before
-#343; the Studio runs six, with `COMPOSE_PROFILES=emulated` and `review2`
-off — six registrations that claim, ten containers with the brokers,
-`agent-proxy` and the updater)
-([factory/host/](../factory/host/README.md); the roles:
-[factory/README.md](../factory/README.md) *Three roles*) — until its move to
-the host agent: its last visit installs the bundle beside them as a canary,
-and the switch, the way back and their retirement are site actions
-(*The Studio canary* and *The Studio switch*, below):
+`omarchy-studio` — a Mac Studio on Arch Linux ARM (Asahi), aarch64 on a
+16K-page kernel, 12 cores, 32 GB, rootful docker on btrfs, on around the
+clock — is a maintainer host like any other (#319, #345; design v2 §21.1):
+the host `studio-m2`, id `h_2t7pul95fs`, its registration
+`firemanxbr-studio-m2-mnmw`, installed as the canary beside its legacy set
+(enrolled 2026-10-06 19:27 UTC, confirmed 20:59 UTC). It runs the host
+agent and one bundle, its one service the dispatcher, which runs every task
+it claims in its own isolated, credential-less container, as many at once as
+its units hold. Nothing else of the pool runs there but a second host in a VM on it
+(*The 4K VM*, below), and nobody visits it for a release, a rollback, an
+agent update, a setting or an order: its owner and the maintainers act on
+its page, `https://omarchy-pool.org/hosts/h_2t7pul95fs`
+([Maintainer hosts](/docs/worker-host#maintainer-hosts)). The agent's
+login, `firemanxbr` (uid 1000), is in the docker group, and `sudo` asks for
+its password, so a root step there is the maintainer's to type.
 
-| Service | Registration | Takes |
-|---|---|---|
-| `pool-x86_64`, `pool-aarch64` | project trust | the pool's jobs: sync, render, promote, rollback, health, security, enqueue, gc, verify, relayout, trial |
-| `review-x86_64`, `review-aarch64`, `review2-x86_64`, `review2-aarch64` | project trust, an agent key | the project's builds from staged evidence, the audit of staged builds — two pairs, so an audit does not wait for a build |
-| `community-x86_64`, `community-aarch64` | community, an agent key | contributors' requested packages, anyone's, as a host takes them (#343), with the project's agent |
-| `broker-community-{x86_64,aarch64}` | `etc/agent.env` + the builder's token | the broker (`factory/bin/broker`): the worker token, the agent key and `GITHUB_TOKEN` for the builder beside it, which holds nothing; the pool's calls for the one task it claimed, the agent, GitHub read-only |
-| `agent-proxy` | `etc/agent.env` — no worker token | the agent and GitHub, natively, over HTTP for the review workers' audits and their build containers (the `review` network): Claude Code's binary dies under qemu, so the emulated worker asks this one (`FACTORY_PROVIDER=anthropic`, `ANTHROPIC_BASE_URL=http://agent-proxy:8790`; `factory/bin/agent-proxy`) |
+| What | Where |
+|---|---|
+| the agent | its owner's login on the Studio — in the docker group, linger on — as a `systemd --user` unit (*Installing a host*, above), its data in `~/.local/share/omarchy-agent` (`agent.toml`, the bundles) |
+| the host key | `host.ed25519` in the agent's `state/`, a file: the Studio has no TPM (#330, *Where the host key lives*, above) |
+| the work root | `/srv/omarchy-host`, a btrfs subvolume of its own on the internal disk, beside the directory its legacy set ran from (below) |
+| the secrets directory | `/srv/omarchy-host-secrets` (`--secrets-dir`, the login's, 0700; `agent.env`, 0600), outside the work root and beside the directory its legacy set ran from |
+| the task subnets | `10.232.0.0/16`, dropped to the host by prep-root.sh's task firewall |
+| the bundle | the agent's set directory, `~/.local/share/omarchy-agent/sets/host/`, on the compose driver (Quadlet is rootless podman's); the host worker token in its own file there, `run/host/dispatcher/token` (0400), mounted read-only into the dispatcher (#327) |
 
-The host is aarch64: pool and review workers run natively (an x86_64 pool
-job is a label). x86_64 *builds* would run under user-mode emulation,
-and on this host's 16K-page kernel (Asahi) qemu cannot map every x86_64
-library — `rustc` and `sudo` fail with *failed to map segment* — so the
-two x86_64 build services sit behind the compose `emulated` profile, off
-by default: x86_64 build tasks wait for an x86_64 worker, and any x86_64
-machine with docker becomes one in minutes (factory/host/README.md,
-*x86_64 builds*) — the pool does not care where a worker runs.
-`COMPOSE_PROFILES=emulated` in `.env` turns them on here anyway
-(`community-x86_64`, `review-x86_64`, labeled `"emulated":true`), for
-C-only packages. The second review pair has a profile of its own,
-`review2` (#295): a worker with no token, or whose registration holds no
-project trust, exits at start and restarts, and the updater holds back a
-set where one restarts. A pair registered and trusted before #343 is
-turned on by setting `COMPOSE_PROFILES=emulated,review2` in `.env`, then
-running `./rollout.sh`. One that is not registered yet can no longer be
-added: per-worker trust is gone (#343, its door answers 410), so
-`register.sh` registers no project service any more, and the maintainer's
-host takes that work ([Maintainer hosts](/docs/worker-host#maintainer-hosts)).
-`review2-x86_64` is labeled `"emulated":true` too. A build that dies of emulation
-there goes back to the queue for a native x86_64 worker, not retried and
-not failed: a toolchain that cannot start, or a library qemu cannot map.
-No emulated worker takes it again (#281), but a host's emulated lane on 4K
-pages (#413, *The Studio's x86_64 VM*, below). To see it: the Workers page says
-how many builds wait for a native worker, each linked. The build page and
-the Review workbench say *waiting for a native x86_64 worker*. The events
-log a `build` warning with `needs_native`. It waits until a native x86_64
-worker, or a lane on 4K pages, is online.
-Everything lives under `/srv/omarchy-pool`
-(a btrfs subvolume on the internal disk; the 4 TB drive joins when it has a
-USB enclosure — the Asahi kernel has no Thunderbolt tunnelling, so the NVMe
-slot of a Thunderbolt dock is invisible to it): `work/<service>` (the same
-path inside the project workers), `cache/pacman/<arch>` (one package cache
-per architecture, mounted into every build container: `OMARCHY_PKG_CACHE`),
-`cache/build/project/<arch>` and `cache/build/community/<arch>` (cargo, Go
-and ccache caches the build containers mount at `/build/cache`:
-`OMARCHY_BUILD_CACHE` for the project's, the compose file's volume for the
-community's — a stranger's build never writes what the project's build
-reads; inside, one directory per package),
-`etc/` (the six worker tokens and `agent.env`, mode 600, never in the
-repository). **On the host: setup, hardware, and a look when the pool cannot see**:
+**Capacity and lanes.** 11 units — for example five builds and the job unit
+(§21.1 step 7) — on two lanes: aarch64 native, and x86_64 emulated under
+qemu (`page16k`), which share the units with the guaranteed emulated share
+(§8.3), and the pool's own jobs on the kept unit (`host-pool-jobs`, *Pool
+jobs on hosts*, above). On the 16K-page kernel qemu cannot map every x86_64
+library — `rustc` and `sudo` fail with *failed to map segment from shared
+object* —, so such a build stops at its first attempt with exit 96 and goes
+back to the queue for a native x86_64 host, its attempt given back
+(`needs_native`, #338); a C package builds there. A native x86_64 host takes
+the rest: the Workers page says how many builds wait for one, each linked,
+and Status which architecture needs a host next.
 
-```bash
-cd /srv/omarchy-pool
-docker compose ps                                # seven up by default (four workers, one broker, the agent proxy, the updater); ten with COMPOSE_PROFILES=emulated, twelve with emulated,review2
-docker compose logs -f --tail 50 pool-aarch64    # one of them
-./rollout.sh                                     # wakes the updater now, or starts it (--check: what it would do)
-docker compose restart pool-aarch64              # a worker stuck in a task: a drain, it finishes the task first (up to 3 h)
-docker kill <container>                          # one that must end now, or whose engine is stuck
-```
+**Its pool jobs** started on 2026-10-08 at 14:49 UTC, when `host-pool-jobs`
+first named its registration, with no P1 host before it. The first ones
+failed rc's health checks on both architectures, on the keys of Omarchy's
+own packages, as nothing had filled `/srv/omarchy-host/jobs/keyrings`
+yet: a false red that blocked rc → stable that day. Every job that checks a
+ring now fetches the keyrings first, and a job that cannot get them gives no
+verdict (#414, *Pool jobs on hosts*, above); every health row names the
+worker that posted it (`payload.posted_by`), so a red of this host's says
+so.
 
-**On a host the agent manages, nothing needs to be run** (#313). Once
-`omarchy-agent` has retired this set (its `retire-legacy` order, #344:
-*Retire legacy set* on the host's page, by its owner with a passkey, after
-the switch and the 14 days the set stays as the way back), it leaves a
-marker, `/srv/omarchy-pool/.omarchy-agent`, with its version, the host id
-and the time, written before it stops and removes the set's containers and
-networks (*The run loop*, above: the files, volumes and images of the set
-stay, for a person to remove). From then on `./rollout.sh` and `setup.sh` refuse there (exit 4),
-`omarchy-worker start|update|remove` refuse in a directory that holds it,
-each before it changes a file or a container, and the updater stands down:
-its rounds change nothing, and its `--self-test` says `stands-down`. What to
-look at instead: `omarchy-agent status`. Without the marker, all of them
-work as before, the legacy set's updater included.
+**Isolation `root`, a recorded exception until P6** (design v2 §19.1, §19.3,
+D13): rootful docker without `userns-remap`, since turning remapping on
+changes the daemon's data root. It is a dedicated build machine, so a
+task-container escape lands as root on a machine that holds nothing of a
+person's; its page shows the level and the exception. P6 moves it to
+`subuid` (rootless podman with `--userns=auto`, or `userns-remap` on a fresh
+data root), one root session, and the page then shows `subuid`. Its agent
+sidecars run as the agent's uid, the owner of `agent.env`, with every
+capability dropped (`OMARCHY_AGENT_USER`, *How an agent sidecar reads the
+keys*, above).
 
-The updater learns the marker with the release, as it runs the pool's
-image. The host's own copies do not: `setup.sh` installs
-`/srv/omarchy-pool/rollout.sh` only when it runs, and `omarchy-worker` never
-updates itself. So, once, before the first `retire-legacy` on a host set up
-before this release, paste the block in *Once: the updater* again: it takes
-the release's `setup.sh`, which on a host whose updater already runs only
-installs the new host files (keeping the ones it replaces) and wakes the
-updater. `grep -q omarchy-agent /srv/omarchy-pool/rollout.sh` then says the
-copy has the guard. An old `rollout.sh` that is missed brings back only the
-updater, which stands down.
+**The 4K VM, `studio-vm4k`** (#413), is a host of its own under the same
+owner, on the same machine: a Debian 13 arm64 VM with its own 4K-page
+kernel, run by the login's `systemd --user` unit `omarchy-vm4k.service`. Its
+agent runs on rootless podman with the Quadlet driver and holds no agent
+keys, so it takes no model kinds: it builds only. On its 4K pages qemu maps
+the x86_64 libraries the Studio's 16K pages cannot (`rustc` and `sudo`
+start there); how the pool hands it the builds the Studio's x86_64 lane
+sends back is #413's. It has its page, its registration and its round like
+any host; what follows for a silent host holds for it from inside the VM
+(`podman ps` there for the dispatcher), and on the Studio `systemctl --user
+status omarchy-vm4k` says whether the VM runs at all.
 
-**Every CLI set replaces its `omarchy-worker`, once, at the deploy that
-carries #343** (the copy reaches `main` with it), whenever its copy was
-downloaded: one from before #313 has no guard, and every copy the pool
-served (one from after #313 too) fetches the compose file at `start` and
-`update` (a `curl -f` of the one the pool served beside it), which answers
-410 from that deploy on, so its `start` (a changed option, a new agent key)
-and `update` die with *could not fetch the compose file*, the 410's pointer
-unseen; the running containers keep going, as the updater pulls images only.
-The pool no longer serves the command (#343): take the repository's,
-`factory/host/omarchy-worker` (it reads the pool's address from
-`OMARCHY_API`, `https://pkgs.omarchy-pool.org` by default, and fetches no
-compose file), into the set's directory, maralcbr's sets included:
+**When the pool cannot see it** (its page *silent*, Status saying so), the
+machine is the place to look, as its owner's login:
 
 ```bash
-cd ~/.config/omarchy-worker     # the set's directory
-curl -fsSo omarchy-worker https://raw.githubusercontent.com/firemanxbr/omarchy-pool/main/factory/host/omarchy-worker && chmod +x omarchy-worker
-grep -q 'fetch_compose' omarchy-worker || echo replaced   # the repository's copy has no fetch_compose
+omarchy-agent status                                      # the round, the release applied and targeted, the last answers, from its own files
+omarchy-agent logs                                        # the agent's journal
+docker ps --filter label=org.omarchy-pool.agent.host      # the dispatcher and the tasks' containers
+systemctl --user status omarchy-agent                     # the unit, after a reboot (linger keeps it up with nobody logged in)
 ```
 
-With that copy, a CLI set's compose file is the one its last `start` before
-#343 wrote: neither `omarchy-worker` (`start`, `update`) nor the updater
-fetches it any more, so a release that changes `factory/image/compose.yml`
-before P3 (the broker's, say) reaches a CLI set only by hand. After such a
-release, in the set's directory ([Workers](/docs/workers#contributor), *A
-changed compose file*):
-
-```bash
-tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
-curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/image/compose.yml" | diff -u compose.yml -
-curl -fsSo compose.yml "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/image/compose.yml" && ./omarchy-worker start
-```
-
-**`retire-legacy` before the Studio's** (#344) is rehearsed in CI, as
-there is no P1 host to rehearse it on (the Studio canary is the first and
-only host: a maintainer decision of 2026-10-06, #332 closed as not planned)
-and the aarch64 VM's dress rehearsal was waived (2026-10-08, *The Studio
-canary*, below): `tests/agent-host-orders.sh docker` and `… podman` give
-the order on a real engine beside a stand-in legacy compose project — the
-`.omarchy-agent` marker written into its directory first, then exactly its
-containers and network stopped and removed, its files kept, the dispatcher,
-a task container and another project running on, `legacy.json` updated
-and the order `done` — and the crate's unit tests (`run::orders`) hold
-`rollout.sh`, `setup.sh`, `omarchy-worker` and the updater to their
-refusals once the marker is there. Of the legacy set's side, only the way
-back is rehearsed on the Studio before the switch, with `community-aarch64`
-(*The Studio switch*, *Rehearse the way back*).
-
-**Rehearse a narrowing on the Studio canary** (#325), the only host, once
-its agent reports 0.4.0 (`tests/agent-host-orders.sh` does the same against
-a stand-in in CI): on the host's page, *Settings* shows the units and lanes
-its agent reports inside its envelope, every value above it greyed. Narrow units to one less
-than it gives; within two minutes the order says `done`, `jq .units
-run/capacity.json` in the set directory says the new count (and
-`.detected.units` the old), the dispatcher was recreated (`docker ps`: a new
-start time), a task that was running finishes, and the page's units say the
-new count after the agent's next report. Give its envelope's units back (the first entry of the
-list), then ask Diagnostics while `agent.toml` says `diagnostics = false`:
-refused, saying so.
-
-**Rehearse owner control** (#328): the widening in CI only, *Set agent
-keys* on the Studio canary. The widening has no host to be rehearsed on:
-the Studio canary, the only host, was installed with no `--max-units`, so
-its envelope is already the whole machine and its `agent.toml` has no
-`max_units` to widen past. In CI, `tests/agent-host-orders.sh` widens and
-sets a key against a stand-in, with a virtual authenticator, and
-`tests/host-enroll-e2e.sh` pins one made on a local pool's page: **Widen
-the envelope** with `max_units` one above what `agent.toml` says — within
-two minutes the order says `done`, `agent.toml` says the new cap, `jq
-.units run/capacity.json` the new count and the dispatcher was recreated. A
-widening is counted under the release's signed constants and the detected
-hardware, so the units it gives are never more than the machine has. On
-the Studio canary, once its agent reports 0.4.0 and step 8 of its visit
-(*The Studio canary*, below) has pinned your passkey and confirmed its seal
-key (*Owner control*, above), only **Set agent keys** is rehearsed, from
-the page alone: a scratch `OPENAI_API_KEY` — `done`, `agent.env` in the
-secrets directory (`/srv/omarchy-host-secrets`) holds it (0600), `docker
-inspect` of the dispatcher shows neither the value nor a mount of the
-secrets directory, and `omarchy-agent status` and the page name the key,
-never its value; take it out again the same way.
-
-A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
-(between tasks), Restart agent service, Stop its task, Drain and Resume,
-Update. A task that hangs is stopped there: Stop its task gives it back to
-the queue once its worker has stopped it, with no restart and no three-hour
-wait.
-
-Upgrades are **rolling**: a pool release publishes a new image, the
-`updater` service sees the pool's new release within two minutes and
-replaces what changed in one `up` — every stop is a drain (SIGTERM: the worker finishes the task it
-holds, reports it, claims nothing new and exits; the compose file allows
-three hours), each container on its own clock, the new ones starting as
-the old ones end while the unchanged keep working. No task is killed,
-none is handed to another worker by an expired lease (what `docker
-compose up -d` on a busy worker did), and none idles on the old image
-while another drains (what one-at-a-time did: pool-aarch64 waited three
-hours for pool-x86_64's drain on 2026-09-15 — and the pool now refuses an
-outdated worker).
-
-**What the workers call goes first** (#273). After the v1.0.0 and v1.0.1
-releases (2026-09-29), `rollout.sh` replaced `agent-proxy` in the same `up`
-as the review workers; they checked their agent before the proxy listened
-on `:8790` (`URLError: [Errno 111] Connection refused`), reported
-`agent_status: error`, and stayed not ready — while the Factory and Status
-pages drew them *idle, waiting for work* — for half an hour, until a
-`docker compose restart` by hand. Three things now keep that from
-happening:
-
-- The rollout replaces `agent-proxy` and the community brokers first and
-  waits until each answers on `:8790` from inside its container (a `curl`
-  of `GET /`, never `/health`, which spends a completion of the agent),
-  at most `ROLLOUT_BROKER_WAIT` seconds (300) for all of them together;
-  one that never answers is a `WARNING` line in its log and
-  the rollout goes on — it never hangs on a broker — and brokers compose
-  could not start (`FAILED to replace`) are not waited for at all. Only
-  then are the workers that changed replaced, in one `up` as before.
-  `rollout.sh` did it on this host until its one-time step (#277); the
-  updater (`factory/bin/omarchy-rollout`) does it here since, as it does
-  in every contributor's set.
-- A worker whose agent does not answer checks it again after 15 s, then
-  30 s, 60 s… doubling back to the thirty minutes a healthy agent is
-  probed at, until it answers, and reports each result with its next claim
-  (`pkg-repo work` for the pool and review workers,
-  `omarchy-build-worker.sh` for the community containers). An agent that
-  is starting answers within the first few re-checks; one that fails for
-  good (no credit, a revoked key) is asked every half hour again after
-  about thirty minutes, since each probe is a real completion. The failure
-  is logged once, not at every re-check; a healthy agent is logged at each
-  of its thirty-minute probes, as before.
-- The Factory's workers card and Status's workers list draw a live worker
-  that is not ready as **not ready**, with the agent's error, as the
-  Workers page's *failed* pill does. Every page gives a worker one state, in one
-  order: revoked, offline, building, drained, outdated, not ready, idle.
-
-**Every worker follows the latest image** (2026-09-17, after a
-contributor's worker sat ten releases behind for a day, drafting the
-wrong version and linking the wrong objects while looking alive): the
-pool compares the release a worker reports at each claim with its own
-and, past the rollout's grace (`UPDATE_GRACE_MINUTES` = 45 after the
-deploy), hands it nothing — `426`, *outdated* on the Workers page, one
-journal line per release — until it updates; a soaking host's
-registration claims on through its owner's soak, at most two hours after
-the deploy (#326, *Soak*). Every set carries an
-**updater** container of the same image (`OMARCHY_WORKER_ROLE=updater`,
-`factory/bin/omarchy-rollout`: the same rolling replacement, itself
-last) — a maintainer's `omarchy-worker` set since its start wrote one,
-this host since its one-time step below. It asks the pool every two minutes
-(`GET /api/v1/factory/follow`) and follows its release, and an Update
-pressed on any of its workers' pages; it replaces itself last, and only
-with an image under which what it replaced stays up. A set without one
-idles until its owner pulls by hand.
-
-The Workers page lists them by role; the laptop runs nothing any more,
-and GitHub Actions runs CI and the release only — there is no hosted
-fallback worker: when the host is down, pool jobs wait, and the dashboard
-says so.
-
-### The Studio canary
-
-The Studio meets the host agent at one build first, beside the set that
-works (#319; design v2 §21.1 steps 1-3, D26, D13): its last visit
-installs the host bundle beside the legacy set, and the pool caps the new
-host at one build plus the job unit for at least a week. Until that visit
-nothing here changes: the one-time updater step below and #277 stand, and
-the legacy updater follows releases. After it, the switch, the way back
-and the retirement are site actions (*The Studio switch*, below).
-
-**As installed** (2026-10-06 to 2026-10-08): the host `studio-m2`, id
-`h_2t7pul95fs`, its page `https://omarchy-pool.org/hosts/h_2t7pul95fs`;
-its registration `firemanxbr-studio-m2-mnmw`; the work root `/srv/omarchy-host`,
-the secrets directory `/srv/omarchy-host-secrets`, the task subnets
-`10.232.0.0/16`. The machine: Asahi on aarch64 with 16K pages, rootful
-docker 29.8.0 on btrfs without userns-remap (D13), the login `firemanxbr`
-(uid 1000) in the docker group; `sudo` asks for its password, so every root
-step below is the maintainer's to type. Beside it, the legacy set runs its
-ten containers (`COMPOSE_PROFILES=emulated`: `pool-*`, `review-*`,
-`community-*` and `broker-community-*` for both architectures,
-`agent-proxy` and the `updater`; `review2` off) and six registrations claim
-(`pool-*`, `review-*`, `community-*`). After the install the agent ran
-under `systemd --user` with linger on, and the legacy containers' ids were
-the ones taken before it (they had changed on 2026-10-06, at 16:09 UTC,
-before the install, only because the legacy updater rolled out v1.1.0). It
-enrolled on 2026-10-06 at 19:27 UTC and was confirmed at 20:59 UTC the same
-day (its public `enrolled_at` and `confirmed_at`), before its pool cap, not
-after it as step 7 asks: the canary ran uncapped until 2026-10-08 14:29
-UTC. Its pool cap is 3 units since then, set from its page (*Set the pool
-cap*, a reason required; the public API leaves `pool_cap_units` out, its
-owner's and the maintainers' only, and the journal's public line says it),
-and `host-pool-jobs` names its registration since 2026-10-08 14:49 UTC, with no
-P1 host first: the week of pool jobs on hosts counts from then. Left for
-the Studio itself: a release applied while a task runs (the exit criteria,
-below) and step 9's reboot, once the release that carries agent 0.5.0
-lands.
-
-**Its first pool jobs gave a false red** (2026-10-08, #414): its health
-checks of rc failed on both architectures, on the keys of Omarchy's own
-packages (`key "F0134EE680CAC571" could not be looked up remotely`
-on x86_64, `"74DE0C737AC186E4"`, the Asahi fork's, on aarch64), while the
-legacy pool workers passed the same checks. Nothing had filled its
-`/srv/omarchy-host/jobs/keyrings` before them. At 16:13 UTC the gate
-blocked rc → stable on those reds. The release that carries #414's fix
-fetches the keyrings in every job that checks a ring. Until it is applied
-here, the way back in *Pool jobs on hosts* (the setting's `DELETE`) keeps
-the canary off pool jobs. Once it is applied and the setting names the
-canary again, its rc and stable checks must pass on both architectures,
-and the week of pool jobs counts again from then.
-
-| What | Where | What it holds |
-|---|---|---|
-| The legacy set, compose project `omarchy-pool` | `/srv/omarchy-pool`, as above | its six registrations' tokens and `agent.env` in `etc/`; its updater follows releases |
-| The host agent | the login's `systemd --user` unit, with linger | `~/.local/share/omarchy-agent` (`agent.toml`, `legacy.json`, the bundles), the host key in its `state/` — `host.ed25519`, a file: the Studio has no TPM (#330, *Where the host key lives*, above) —, the secrets directory `/srv/omarchy-host-secrets` (`--secrets-dir`, the login's, 0700; `agent.env`, 0600) |
-| The dispatcher and its task containers | the same rootful daemon, the `host` set's project, on the compose driver (Quadlet is rootless podman's, #330) | the host worker token, `run/host/dispatcher/token` in the set directory `~/.local/share/omarchy-agent/sets/host` (0400), mounted read-only (#327); each task on its own internal network in `10.232.0.0/16` behind its egress sidecar |
-| The work root | `/srv/omarchy-host`, a btrfs subvolume of its own | the tasks' directories, the pool jobs' `jobs/`, the caches |
-
-**The work root is not `/srv/omarchy-pool/host`**, the path design v2
-§21.1 step 2 names: this host's `compose.yml` bind-mounts
-`/srv/omarchy-pool` whole into its pool and review workers, read-write,
-and its updater, read-only (`POOL_ROOT` at its own path), and install's
-preflight refuses any work root inside a path the legacy project mounts
-(`legacy: the work root … overlaps the legacy project's /srv/omarchy-pool;
-give a new --work-root beside it`) — the legacy workers, which hold the
-engine's socket, would see the tasks' directories. The secrets directory,
-`/srv/omarchy-host-secrets`, stays out of it for the same reason, and so
-that removing the legacy set's files one day takes nothing of the host's
-with it. The new work root, secrets directory and task subnets leave every
-path and network of the legacy set untouched.
-
-**Before the visit**, from anywhere:
-
-1. No P1 host runs first: the Studio canary is the first and only host (a
-   maintainer decision of 2026-10-06; #332 closed as not planned), so
-   nothing here waits for another host's week.
-2. The release the pool runs includes every P0 and P1 child issue of
-   #307: `gh issue list -R firemanxbr/omarchy-pool --state open --search
-   '"Host agent P0" in:title'` and the same for `P1` list none, and
-   `curl -fsS https://pkgs.omarchy-pool.org/api/v1/version` names a
-   release published after the last of them closed.
-3. The signing environments have required reviewers: *The GitHub
-   settings the signature relies on*, its checks.
-4. No dress rehearsal on an aarch64 VM: it was waived on 2026-10-08 (a
-   maintainer decision; *The dress rehearsal*, below).
-5. Mint nothing yet: the enrollment token lives 15 minutes, once, and is
-   minted at step 5 of the visit.
-
-**The visit, the last one**, as the login in the docker group that owns
-`/srv/omarchy-pool` (not root), in `tmux`. Each step stops at the first
-thing that fails; nothing before step 6 changes the legacy set but step
-1's refresh of its host files, when they predate the marker's guard.
-
-1. A checkout of the release the pool runs, the backup of this host's own
-   files (it holds the six worker tokens and the agent key: copy it off
-   the host, encrypted, and delete it here), that release's `install.sh`
-   checked as *The host bundle* (above) checks it — the pool's release,
-   `$tag`, not GitHub's *latest*, which may be one published and not
-   deployed, or one the pool rolled back from —, and this host's copy of
-   `rollout.sh`:
-
-   ```bash
-   tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
-   src="$(mktemp -d)" && git clone --quiet --depth 1 --branch "$tag" https://github.com/firemanxbr/omarchy-pool.git "$src"
-   cd /srv/omarchy-pool && (umask 077 && tar -czf ~/omarchy-pool-before-canary.tgz $(for f in compose.yml compose.override.yml .env etc rollout.sh register.sh; do [ -e "$f" ] && echo "$f"; done))
-   curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"
-   gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool \
-     --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main
-   grep -q omarchy-agent /srv/omarchy-pool/rollout.sh   # fails: its copy predates the marker's guard — paste *Once: the updater* now
-   "$src/factory/host/studio-rehearsal.sh" ids --project omarchy-pool > ~/legacy-ids-before
-   ```
-
-   `gh` needs a login; without one here, run the `curl` and `gh
-   attestation verify` on your own machine and compare `sha256sum
-   install.sh` there and here. When the `grep` fails, this host's copy of
-   `rollout.sh` has no guard for retire-legacy's marker (*On a host the
-   agent manages, nothing needs to be run*, above): paste the block in
-   *Once: the updater* (below) now, before the ids are taken — it installs
-   the release's host files and wakes the updater — and the `grep` then
-   succeeds. This visit is the last one: missed now, `retire-legacy` in
-   fourteen days leaves a `rollout.sh` there that would bring the updater
-   back (which stands down), and no visit is planned to replace it.
-2. What the visit needs, read-only (`factory/host/studio-rehearsal.sh
-   check`: each line `ok`, `person` with the command that fixes it, or
-   `refused`):
-
-   ```bash
-   "$src/factory/host/studio-rehearsal.sh" check --project omarchy-pool \
-     --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets \
-     --task-subnets 10.232.0.0/16 --agent-env-from /srv/omarchy-pool/etc/agent.env
-   ```
-
-   This first `check` reads the legacy `etc/agent.env` on purpose, to say
-   whether that file can be given to install as is: on the Studio its
-   `GITHUB_TOKEN` line says `refused` (the second item below), and `<file>`,
-   made there, is what step 3's `check` reads and steps 4 and 6 give
-   install. Its `rollout.sh` line says `ok` after step 1 (`person` with the
-   same fix if it was missed). Two of its lines a person fixes here, before
-   anything is installed:
-   - *legacy directory … retire-legacy writes its .omarchy-agent marker
-     there only when … owns it*: the `retire-legacy` order (#344, #374)
-     writes its marker into `/srv/omarchy-pool` as the agent's user, and
-     refuses a directory that is not that user's or that its group or
-     others may write. `sudo chown "$USER" /srv/omarchy-pool && sudo chmod
-     go-w /srv/omarchy-pool` — the directory alone, never `-R`: the legacy
-     containers run as root and do not care. Missed now, *Retire legacy
-     set* stays greyed with the agent's words in fourteen days, and only
-     another visit fixes it.
-   - *… GitHub names no scopes for its GITHUB_TOKEN* or *… carries the
-     scopes …*: install copies only a classic token with no scope (public
-     read), or none, so the `--agent-env-from` file must hold that. The
-     Studio's `etc/agent.env` holds a fine-grained `GITHUB_TOKEN`, which
-     install refuses (*GITHUB_TOKEN: GitHub names no scopes for it … give a
-     classic token with no scope*), so it cannot be given as is: steps 4
-     and 6 give install another file, `<file>`, of the agent keys with a
-     classic no-scope `GITHUB_TOKEN` — on the Studio `FACTORY_PROVIDER`,
-     `FACTORY_MODEL`, `FACTORY_REASONING`, `CLAUDE_CODE_OAUTH_TOKEN` and
-     `GITHUB_TOKEN`, no `GEMINI_API_KEY` (Claude only) — and `check` takes
-     it again.
-
-   Linger, binfmt and the task firewall are `person` until step 3.
-3. Root's once-only steps (`factory/host/prep-root.sh`, a bash script: run
-   it with `bash`, not `sh`; design v2 §19.1), first as a dry run, then the
-   secrets directory, outside `/srv/omarchy-pool` as the work root is:
-
-   ```bash
-   sudo bash "$src/factory/host/prep-root.sh" --user "$USER" --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --dry-run
-   sudo bash "$src/factory/host/prep-root.sh" --user "$USER" --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16
-   sudo install -d -o "$USER" -g "$USER" -m 700 /srv/omarchy-host-secrets
-   ```
-
-   Here it installs no package that is there (`pacman -S --needed`),
-   leaves the binfmt handlers and the docker group as they are, makes
-   `/srv/omarchy-host` a btrfs subvolume owned by the login (0750), turns
-   linger on, and installs the task firewall for `10.232.0.0/16`
-   (`omarchy-task-firewall.service`, enabled), which install's preflight
-   requires on a rootful engine. It ends with exit 1 under *needs a
-   person*, by design, and two lines, both expected: *userns-remap: left
-   off, the daemon already holds containers* — the recorded exception (D13:
-   remapping would change the daemon's data root and strand the legacy set,
-   the way back) — and, on its first run (ten containers on the Studio),
-   *docker: daemon.json changed while N container(s) run; restart
-   docker.service when none does* — do not restart docker: on the Studio
-   that line is ignored, as a restart stops the legacy set; the default
-   address pools it wrote apply at the next boot, to networks made after it
-   only, and the legacy set's networks keep theirs. Then `check` again, with
-   `<file>`: all ok.
-4. Preflight alone, nothing written: step 1's `install.sh` (the pool's
-   release, checked) without a token installs the agent's binary and runs
-   preflight, whose only blocker must be *enrollment: … OMARCHY_ENROLL is
-   not set*:
-
-   ```bash
-   sh ~/install.sh \
-     --legacy omarchy-pool --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets \
-     --task-subnets 10.232.0.0/16 --dedicated --agent-env-from <file>
-   ```
-
-   Preflight must show:
-   - `capacity: 12 CPUs, … 11 units on the aarch64 lane, the x86_64 lane through qemu`;
-   - `emulation x86_64: on, through qemu, on pages larger than the guest's: …` — the emulated lane on 16K pages (`page16k`, D33);
-   - `! hosting: a rootful daemon without userns-remap, beside the legacy set: recorded as an exception until P6` and `isolation: root (a dedicated machine or VM)` — D13's recorded exception;
-   - `legacy: omarchy-pool, N container(s), recorded only and left running`;
-   - `host key: a file (no TPM: /dev/tpmrm0 is not there)`, a note: the
-     Studio has no TPM, so the enrollment makes `host.ed25519` (#330);
-   - the egress probe passed, and credentials within the login's reach as
-     warnings only (a dedicated machine).
-
-   `~/.local/share/omarchy-agent/current/omarchy-agent preflight --release
-   "$tag"` with the same options runs it again.
-5. On the site: your page's *Hosts* section (below *Workers*), **+ add a
-   host** — name `studio-m2`, where `omarchy-studio` — gives the `ome_`
-   token, valid 15 minutes and once. Not the *Workers* section's *+ register
-   one*: its form makes a legacy worker's token (`omw_…`), not a host.
-6. The install — the same command with the token in the environment:
-
-   ```bash
-   OMARCHY_ENROLL=ome_… sh ~/install.sh \
-     --legacy omarchy-pool --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets \
-     --task-subnets 10.232.0.0/16 --dedicated --agent-env-from <file>
-   ```
-
-   It shows the envelope — the whole machine: no `--max-units`, so nothing
-   later needs a visit to widen it — and the agent keys it copies, by name,
-   for you to confirm; enrolls; prints the host key's fingerprint and where
-   it lives (`host key: a file (Ed25519, host.ed25519, mode 0600); not in
-   the TPM: no TPM: /dev/tpmrm0 is not there`); and waits, up to 30
-   minutes (`--wait-minutes`), for your Confirm. Over SSH with no
-   terminal, add `--yes`: it confirms the envelope and the keys' copy. If
-   nobody confirms in time (twice at the Studio), install exits 4, the
-   identity kept and the host *pending-owner* on the site: *Confirm* it
-   there, then run the same install again, with the same options and no
-   `OMARCHY_ENROLL` — it ends in seconds.
-7. On the site, **the pool cap first, then Confirm**: the host's page
-   (`https://omarchy-pool.org/hosts/<id>`, plural *hosts*, linked from your
-   page's hosts) takes a cap while it waits — *Set the pool cap*, **3
-   units** (one build plus the job unit), reason *the Studio canary
-   (#319)*. Then *Confirm* on your page, the
-   fingerprint compared with the one install printed, and the key a file
-   for the same reason. Confirmed first,
-   its first claims would take up to its 11 units beside the legacy set.
-8. Install ends: the unit runs, the first round renders, pulls and starts
-   the dispatcher. Then:
-
-   ```bash
-   systemctl --user status omarchy-agent       # active (running)
-   loginctl show-user "$USER" -p Linger        # Linger=yes
-   ~/.local/share/omarchy-agent/current/omarchy-agent status
-   stat -c '%a %U' ~/.local/share/omarchy-agent/sets/host/run/host/dispatcher/token   # 400 and the login: the host worker token's file (#327)
-   "$src/factory/host/studio-rehearsal.sh" compare ~/legacy-ids-before --project omarchy-pool   # the same: install replaced no legacy container
-   ```
-
-   (A legacy container the updater replaced during the visit is a new id:
-   its log says which release.) Then **owner control**, the one thing of
-   it done at the host (*Owner control*, above): *Make a pin* on the host's
-   page, `~/.local/share/omarchy-agent/current/omarchy-agent envelope
-   pin-passkey <pin>` here, and *Confirm the seal key* on the page against
-   `omarchy-agent status`'s `seal key:` line. From then on the envelope's
-   keys (`diagnostics` among them) and the agent keys change from the site,
-   signed with that passkey.
-9. `sudo reboot`, and do not log in: on the host's page its agent reports
-   again within minutes and its dispatcher claims — linger brought the unit
-   back. Then log in once more, run the same `compare` (a reboot keeps the
-   ids), `rm -rf "$src" ~/legacy-ids-before ~/install.sh`, and leave.
-   Nothing on this machine needs a person again. On the Studio this step
-   comes after the release that carries agent 0.5.0 lands.
-
-**From the site, after the visit**: the host's page says 11 units (*Units*:
-the pool counts 11, busy, free and the one kept for pool jobs; the
-*Stats* row's busy over 11), the lanes *aarch64 native* and *x86_64
-emulated (qemu, 16K pages)*, *Host key* a file (Ed25519) *not in its TPM:
-no TPM: …*, isolation `root (dedicated)` with the box's
-*hosting* item — the Studio's recorded exception until P6 —, the *Legacy
-set* card (`omarchy-pool` running, `/srv/omarchy-pool`, nothing under
-*Retiring now*), *Pool cap: 3 units*, the release it applied and its last
-round, and its leases, each with a Stop. The canary takes community and
-project builds on both lanes and audits from the start — the project's
-copies of its owner's own packages too while `[solo]` names them (*The
-solo-maintainer exception*, below); **pool jobs since 2026-10-08 14:49
-UTC**: `host-pool-jobs` names its registration, `firemanxbr-studio-m2-mnmw`
-(*Pool jobs on hosts*, above). The dispatcher's memory check before every
-claim keeps it off the legacy set's memory: *Diagnostics*
-on its page, once a widening signed with the pinned passkey set
-`diagnostics = true`, shows its `… GB available in memory: this claim
-offers N of M free unit(s)` lines.
-
-**To stop the canary from the site**: *Set the pool cap* to **0** on its
-page — nothing running ends, and it claims nothing, pool jobs included —
-or *Drain* its registration there (the same, and what was pinned to it
-goes to the queue after three minutes); *Suspend* also fences its running
-tasks. The legacy set was never stopped, so nothing else is needed; the
-cap at 3 (or *Resume*) starts it again.
-
-**Exit criteria, over at least seven days** (`<reg>`: its registration,
-`<host>`: its id, both on its page):
-
-```bash
-# no readopt-failed: no task lost on it (a container gone when its dispatcher came back)
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT created_at, summary FROM events WHERE kind = 'build' AND json_extract(payload, '$.worker') = '<reg>' AND json_extract(payload, '$.lost') = 1 AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')"
-# a release applied while a task ran, the day a release lands. Before it lands, the release the host runs (<before>):
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT release_applied FROM hosts WHERE id = '<host>'"
-# once its page shows the new one: a task leased before its last round and finished after it, that round the one that applied it
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT t.id, t.kind, t.started_at, t.finished_at, json_extract(h.report, '$.round.at') AS round_at, json_extract(h.report, '$.round.outcome') AS outcome, json_extract(h.report, '$.round.detail') AS detail, h.release_applied FROM hosts h JOIN build_tasks t ON t.lease_owner = h.worker_id WHERE h.id = '<host>' AND h.release_applied IS NOT '<before>' AND json_extract(h.report, '$.round.detail') LIKE '% runs ' || h.release_applied AND t.started_at < json_extract(h.report, '$.round.at') AND t.finished_at > json_extract(h.report, '$.round.at') AND t.status NOT IN ('queued', 'leased', 'failed', 'cancelled')"
-# aarch64 native and x86_64 emulated builds staged by it
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT arch, lane, COUNT(*) AS n FROM build_tasks WHERE lease_owner = '<reg>' AND kind = 'build' AND status NOT IN ('queued', 'leased', 'failed', 'cancelled') AND finished_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') GROUP BY arch, lane"
-# a ring moved by it: a sync or a promotion it ran
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, kind, params, finished_at FROM build_tasks WHERE lease_owner = '<reg>' AND kind IN ('sync', 'promote') AND status = 'done' AND finished_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')"
-```
-
-The first comes back empty, the second (run the day a release lands)
-with a task whose round says `ok` — the round that applied the new
-release: its `detail` is the agent's *… runs vX.Y.Z* and its release is
-not the one noted before, so a round the agent ran for another reason
-(*Reconcile now*, a signed widening) does not count —, the third with both
-rows, the fourth with at least one. And a later
-release reaches the bundle with nobody at the host: its page's release is
-the pool's, its last round `ok`.
-
-**The dress rehearsal is waived** (a maintainer decision of 2026-10-08):
-no aarch64 VM ran the visit first. The reboot (step 9) and a release
-applied while a task runs (the exit criteria's second query, with long
-dry runs as in the first item below) are done on the Studio itself, and
-CI's stand-in legacy set (`tests/studio-rehearsal.sh`, and
-`tests/agent-host-orders.sh` for `retire-legacy`) covers the rest. The
-rehearsal as it was planned:
-
-**The dress rehearsal**, before the visit, on an aarch64 Linux VM built
-like the Studio (Arch Linux ARM, docker, a login in the docker group, git,
-jq, `gh`, and qemu's binfmt handlers — `sudo pacman -S --needed
-qemu-user-static qemu-user-static-binfmt`, as on the Studio: the stand-in's
-`community-x86_64` keeps its `platform: linux/amd64`, so its sleeper runs
-under qemu, and `stand-in` runs before `prep-root.sh`; `/srv` on btrfs
-where it can be): the visit's exact commands, beside a copy of the legacy
-compose project, with placeholder tokens.
-`factory/host/studio-rehearsal.sh stand-in` lays that copy out from the
-release's `factory/host/compose.yml` — the same services, profiles
-(`emulated`, as here), networks, bind mounts and env files, a placeholder
-token in every `etc/*.env` and placeholder agent keys in `etc/agent.env`,
-every service a busybox sleeper, so nothing there calls the pool — and
-starts it as this host runs it (`tests/studio-rehearsal.sh` holds it to
-that on a real engine in CI):
-
-```bash
-sudo install -d -o "$USER" -m 0755 /srv/omarchy-pool
-tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
-src="$(mktemp -d)" && git clone --quiet --depth 1 --branch "$tag" https://github.com/firemanxbr/omarchy-pool.git "$src"
-"$src/factory/host/studio-rehearsal.sh" stand-in --dir /srv/omarchy-pool    # the ten containers of COMPOSE_PROFILES=emulated
-```
-
-Then the visit's steps 1 to 9 as written, with the host named
-`studio-rehearsal` and `--agent-env-from` given a file with an agent key
-of its own (a separate, spend-capped one) or none — the stand-in's
-placeholders make the host's probe fail, so it takes no model work. Give
-the VM no virtual TPM, as the Studio has none, so that preflight and the
-enrollment say its host key's file as steps 4 and 6 quote them. Then,
-on the same VM:
-
-- **a release while a task runs**: keep it claiming at its cap of 3
-  through the next release with a long build running on it. No door aims
-  a dry run at one host (`POST /factory/enqueue` pins none), and every
-  aarch64 worker claims them: queue a few long aarch64 dry runs (a large
-  package, `{"name": …, "arches": ["aarch64"], "publish": false}`), more
-  as they are taken, until its page's *Leases* shows one of them, shortly
-  before the release lands — the other aarch64 workers, the Studio's
-  legacy ones among them, take the rest. Note its release first, and
-  run the exit criteria's second query once the release is applied: a task
-  across the round that applied it, the round `ok`;
-- **the switch**: *Set the pool cap* to none (its count decides), and its
-  units fill with builds;
-- **the way back**: *Drain* its registration; nothing new reaches it, and
-  its running tasks finish;
-- **the retirement**: *Retire legacy set* on its page — the order says
-  `done` within minutes, `docker compose -p omarchy-pool ps -a` is
-  empty, `/srv/omarchy-pool/.omarchy-agent` names the host, the stand-in's
-  files are still there, and the dispatcher and its tasks ran on
-  throughout;
-- **retire the rehearsal host** on its page, `omarchy-agent uninstall`,
-  and `studio-rehearsal.sh remove --dir /srv/omarchy-pool`.
-
-The stand-in carries the release's `rollout.sh`, which has the marker's
-guard, so step 1's `grep` succeeds there and `check` says `ok` for it;
-the Studio's own copy is the one the visit may have to refresh.
-
-The stand-in has no registrations, so the legacy side of the switch and
-the way back is rehearsed on the Studio itself, with one registration
-(*The Studio switch*, below).
-
-### The Studio switch
-
-After the canary's week, the Studio moves from its legacy set to the host
-bundle **from the site, with no visit** (#345; design v2 §21.1 steps 4-8,
-D26): the canary install made the envelope the whole machine, and the
-legacy set is drained, not stopped, so it stays the way back for 14 days.
-
-**Preconditions**:
-
-1. The canary met its exit criteria (above).
-2. Pool jobs have run on the canary's registration,
-   `firemanxbr-studio-m2-mnmw` (in `host-pool-jobs` since 2026-10-08 14:49
-   UTC), for a week, so draining `pool-x86_64` and `pool-aarch64` never
-   stops the rings:
-
-   ```bash
-   npx wrangler d1 execute omarchy-repo --remote --command "SELECT w.id, t.kind, COUNT(*) AS n FROM build_tasks t JOIN build_workers w ON w.id = t.lease_owner WHERE w.kind = 'host' AND t.kind IN ('sync', 'render', 'promote', 'rollback', 'health', 'security', 'enqueue', 'gc', 'verify', 'relayout') AND t.status = 'done' AND t.finished_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') GROUP BY w.id, t.kind"
-   ```
-3. The legacy set is current: none of the six registrations is
-   *outdated* on the Workers page (its updater followed every release —
-   what keeps the way back free of 426).
-4. The rings' cadence before the switch, to compare after it: the longest
-   gap between two syncs, and two promotions, of the last week:
-
-   ```bash
-   npx wrangler d1 execute omarchy-repo --remote --command "SELECT kind, ROUND(MAX(gap) * 1440) AS longest_gap_min FROM (SELECT kind, julianday(finished_at) - julianday(LAG(finished_at) OVER (PARTITION BY kind ORDER BY finished_at)) AS gap FROM build_tasks WHERE kind IN ('sync', 'promote') AND status = 'done' AND finished_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-8 days')) GROUP BY kind"
-   ```
-
-The six registrations, with the drains and claims to watch:
-
-```bash
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, arch, trust, last_seen, drained_at, current_task, version FROM build_workers WHERE kind = 'legacy' AND owner = '<the Studio owner>' AND revoked_at IS NULL AND json_extract(labels, '$.where') = 'omarchy-studio' ORDER BY id"
-```
-
-**The switch**, in this order, all on the site:
-
-1. Every host takes pool jobs: `host-pool-jobs` set to `*` (*Pool jobs on
-   hosts*, above).
-2. **Raise the cap**: the host's page, *Set the pool cap*, *No cap — its
-   count decides* (its 11 units), reason *the Studio switch (#345)*.
-3. **Move pins here**, on the host's page (the *Legacy set* card, which
-   counts the queued tasks pinned to its owner's legacy registrations, by
-   the machine their labels say — the Studio's six at `omarchy-studio`,
-   the query above; another machine of the owner's, its own set still
-   claiming, on a line of its own), with a reason, and in its dialog the
-   legacy set at `omarchy-studio` — chosen already when the host's *where*
-   is that machine's; the press names those registrations alone, so
-   another machine's pins never move with them. Each moves onto the
-   host's registration where the host could run it once idle — a lane for
-   it, its marks kept (`needs_native` onto no lane but one on 4K pages), never the project's copy onto its requester's
-   host (D35) — but for the maintainer `[solo]` names, whose own copies
-   their hosts take (*The solo-maintainer exception*, below) —, the agent
-   its pin chose, its size under the pool's cap —
-   and says so on its page; the rest stay, each said with why, and go to
-   the queue three minutes into their registration's drain. A task pinned
-   to a drained registration otherwise waits for it until that sweep, and
-   goes to any host: the pin's choice — the machine, its agent — is lost.
-4. **Drain the six legacy registrations** — *Drain* on each one's page
-   (`/worker/<id>`), with the reason; or, with your CLI token (`omc_…`, from
-   your page), the same orders in a loop:
-
-   ```bash
-   for w in <the six ids>; do
-     curl -fsS -X POST -H "authorization: Bearer $OMARCHY_TOKEN" -H 'content-type: application/json' \
-       -d '{"kind":"drain","reason":"the Studio switch (#345)"}' "https://pkgs.omarchy-pool.org/api/v1/factory/workers/$w/orders"; echo
-   done
-   ```
-
-   Each finishes the task it holds and then idles, claiming and handed
-   nothing; its pins left go to the queue at the sweep. While the legacy
-   set finishes its last tasks the machine is briefly overcommitted: the
-   dispatcher's memory check offers only what still fits.
-5. Watch: the Workers page (the six *drained*, then idle), the host's
-   page (its units filling to 11, aarch64 and x86_64 sharing them),
-   Status (no *capacity* warning for aarch64), and the cadence query
-   again over the switch's day — no gap longer than the week's before.
-
-**The way back, for 14 days, also from the site**:
-
-1. The host's page: *Drain* its registration, reason *the way back*. A pool
-   cap of 0 would hand it nothing too, but what was moved onto it would
-   wait for it; drained, those go to the queue after three minutes.
-2. *Resume* each of the six (their pages, or the loop with
-   `"kind":"resume"`). They claim at once: their updater followed every
-   release, so their images are current and the gate hands them work.
-3. `host-pool-jobs` can stay as it is: a drained host is handed no pool
-   job, and the legacy pool workers take them whatever it says.
-
-The switch again is its steps again (*Resume* the host's registration
-first: its owner's drain is its owner's to lift).
-
-**Rehearse the way back** before the switch, on the Studio during the
-canary week, with one registration — the community pair's
-`community-aarch64`: *Drain* it; once it idles (its page: no task),
-the builds pinned to it have gone to the queue (the journal: *… is
-drained: N builds pinned to it go to the queue*); then *Resume* it —
-within minutes its page shows a new claim and a build, and it is not
-*outdated*. The host's own side the same way: *Drain* its registration for
-a few minutes, then *Resume* it. Neither touches the machine, and the rest
-runs on. *Move pins here* is not part of it — it would move the pins of
-the Studio's set it names onto a canary capped at one build —, and
-`retire-legacy` is rehearsed in CI on a stand-in legacy set (*The Studio
-host*, above), as there is no P1 host and the VM's dress rehearsal was
-waived (2026-10-08).
-
-**After 14 healthy days** — no way back taken, the canary's checks still
-holding:
-
-1. *Retire legacy set* on the host's page, its owner, with a passkey (the
-   `retire-legacy` order, #344, #374): its agent writes the
-   `.omarchy-agent` marker into `/srv/omarchy-pool` — the directory the
-   canary's visit gave its login — then stops and removes the project's
-   containers and networks, nothing else, and reports it: the card says
-   `retired`, the order `done`. Greyed instead, the card's *Retiring now*
-   says why (a directory the agent may not write its marker into: only a
-   visit fixes that, which the canary's check is there to spare).
-2. Then retire the six registrations: *Revoke* on each one's page. Their
-   history stays on their pages; any build still pinned to one goes to the
-   queue at once. Revoked before the retirement, their containers would
-   claim on, refused.
-3. From then on the legacy set's tools refuse there (*On a host the agent
-   manages, nothing needs to be run*, above); `setup.sh`, `register.sh`
-   and `rollout.sh` leave the repository with the legacy retirement
-   (#346), and the host with the next release that no longer ships them.
-   The set's files, volumes and images stay in `/srv/omarchy-pool`; the
-   host's work root is beside it.
-
-After the switch the Studio claims 11 units — for example five builds and
-the job unit, aarch64 native and x86_64 emulated sharing them with the
-guaranteed x86_64 share (design v2 §8.3) — with no role container left at
-work, and a release reaches its bundle with nobody at the host: its page's
-release is the pool's within the rollout. `subuid` isolation is P6's, one
-root session, once the legacy set is gone (D13).
+A task that hangs is stopped from the site (**Stop** on its lease, or *Stop
+its task* on the registration's page); the host itself is drained,
+suspended or capped from its page. Moving the work root to another disk
+(the 4 TB drive, once it has a USB enclosure: the Asahi kernel has no
+Thunderbolt tunnelling) is a drain, a copy, the same path mounted again,
+and a resume.
 
 ### The Studio's x86_64 VM
 
@@ -3532,9 +2797,8 @@ working x86-64 binary (#413).
 pages or a native host*). The VM enrolls as a host of its own, under the
 Studio's owner: aarch64 native, x86_64 emulated through qemu with
 `page16k: false`. A build the Studio's lane sends back (`needs_native`, its
-attempt given back) is no other 16K lane's, nor a legacy emulated
-registration's (those report no page size, so they count as 16K), and the
-VM's lane takes it at its next claim. When the VM's lane sends it back too,
+attempt given back) is no other 16K lane's, nor one that reports no page
+size (it counts as 16K), and the VM's lane takes it at its next claim. When the VM's lane sends it back too,
 the pool marks it `refused_4k` — the journal says *… needs a native x86_64
 worker — back in the queue for one (its lane is on 4K pages: no emulated
 lane takes it again)* —, gives the attempt back once more, and only a
@@ -3544,7 +2808,7 @@ by any emulated lane that sends it back, whatever its host's last report
 says of its pages. Marks from before #413 need nothing done. Most came from
 the Studio's 16K lanes, and those are the VM's as they are; one a lane on
 4K pages had sent back already (an x86_64 host's aarch64 lane, a Mac's
-Rosetta lane, a legacy worker) gets one more try on a 4K-page lane and,
+Rosetta lane, a worker of a set since retired) gets one more try on a 4K-page lane and,
 sent back there, is marked `refused_4k` like any other (the query below
 lists the ones still waiting). Status's *tasks waiting for a native x86_64
 host* then counts only the `refused_4k` ones.
@@ -3579,8 +2843,8 @@ Studio's agent still counts the whole machine (12 CPUs, 32 GB: 11 units).
 So the Studio's host gives the VM's share back on its page: *Set the pool
 cap* to its 11 units less the VM's vCPUs or its memory in 2 GB units,
 whichever is more — a VM of 4 vCPUs and 8 GB leaves a cap of 7 —, reason
-*the Studio's x86_64 VM (#413)*; at *The Studio switch* (above), *Raise
-the cap* to that, not to *No cap*. No sandboxed runtime (gVisor, Kata) in
+*the Studio's x86_64 VM (#413)*, and keep it there while the VM runs,
+never *No cap*. No sandboxed runtime (gVisor, Kata) in
 the VM: a sandbox covers the native lane only, and its x86_64 lane would
 then take the project's own recipes only (#330), while what the Studio
 sends back is mostly contributors'. Its aarch64 lane takes aarch64 work as
@@ -3606,10 +2870,10 @@ aarch64 work for it waits.
    install it under Debian 13's names, register qemu-user's x86_64 handler
    with `F` by hand and run the script again.
 3. On the site: your page's *Hosts* section, **+ add a host** — a name of
-   its own (`studio-x86vm`), where *omarchy-studio, a KVM VM* — gives the
+   its own (`studio-vm4k`), where *omarchy-studio, a KVM VM* — gives the
    `ome_` token, 15 minutes and once.
-4. As `omarchy`, the release the pool runs, checked as *The Studio canary*
-   checks it, with the Quadlet driver (*The Quadlet driver*, above):
+4. As `omarchy`, the release the pool runs, checked as *The host bundle*
+   (above) checks it, with the Quadlet driver (*The Quadlet driver*, above):
 
    ```bash
    curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"
@@ -3655,269 +2919,82 @@ handed nothing), *Retire* the host, and lift the Studio's cap. What the VM
 sent back stays `refused_4k`, for a native host; what the Studio sent back
 waits for a native host or another lane on 4K pages, as before the VM.
 
-### Once: the updater (#277)
+### Its legacy set, retired
 
-The Studio runs the same `updater` as every contributor's set, and a host
-timer no longer rolls it out. Do this once the release that carries #277's
-last part is out. Any later release will do: the step takes the release
-the pool runs.
+Until its switch the Studio ran a legacy set from before hosts: fixed
+containers per role, with their own registrations, rolled out by a
+container of their own that followed the pool's image. The canary installed the bundle beside it
+(#319), the switch moved its work to the host from the site and kept the
+set drained as the way back for 14 days (#345), and then its owner retired
+it with the `retire-legacy` order (#344): the agent wrote the
+`.omarchy-agent` marker into `/srv/omarchy-pool` and removed that compose
+project's containers and networks, nothing else. Its registrations were
+then revoked on their pages, where their history stays: six that claimed,
+the pool, review and community services of both architectures. No other
+machine switched: the switch of maralcbr's (#332) closed as not planned, as
+he has no machines for the pool, and a registration of his still unrevoked
+is revoked with the check below. The files the legacy sets
+ran from left the repository with #346, and so did the way to register
+another: `POST /factory/workers` answers 410.
 
-**First, look** (as the user who owns `/srv/omarchy-pool`; nothing here
-changes anything):
-
-```bash
-cd /srv/omarchy-pool
-docker ps -a --filter label=com.docker.compose.project=omarchy-pool   # what runs now: a container that restarts is fixed or removed first
-pgrep -af rollout.sh                              # nothing, or the timer's own rollout (setup.sh waits for that one); setup.sh refuses while one started by hand runs
-ls -l etc/                                        # the env files there; review2-*.env may be missing (setup.sh writes them)
-grep COMPOSE_PROFILES .env                        # emulated on the Studio; review2 stays off unless registered and trusted before #343
-grep -l '^OMARCHY_WORKER_TOKEN=omw_' etc/review2-*.env   # a review2 registered already: add review2 to COMPOSE_PROFILES first
-tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
-curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/compose.yml" | diff -u compose.yml -
-```
-
-The first look uses `docker ps`, not `docker compose ps`: while an env file
-that this host's `compose.yml` names is missing (a review2 one, say), every
-`docker compose` command fails, and `setup.sh` is what writes it.
-
-A line the diff removes is either an upstream change since the release
-this host's copy came from (the review2 pair with no profile, a comment
-rewritten) or a local edit. To tell them apart, diff the host's copy
-against the release it came from, for example the one before:
-`curl -fsS https://raw.githubusercontent.com/firemanxbr/omarchy-pool/<that tag>/factory/host/compose.yml | diff -u - compose.yml`.
-The lines that diff adds are the local edits. Put those, and only those,
-in `compose.override.yml` beside `compose.yml`: compose and the updater
-read that file, and `setup.sh` never touches it.
-`setup.sh` keeps the old `compose.yml` anyway (see below) and prints the
-lines it replaces.
-
-**Then paste this** (it stops at the first step that fails):
+What is left of the set on the machine — its directory, its volumes and
+its images — is for its owner to remove at a visit, once:
 
 ```bash
-(
-  set -euo pipefail
-  cd /srv/omarchy-pool
-  # The release the pool runs, and its host files, which must have the updater.
-  tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
-  src="$(mktemp -d)"; trap 'rm -rf "$src"' EXIT
-  git clone --quiet --depth 1 --branch "$tag" https://github.com/firemanxbr/omarchy-pool.git "$src"
-  grep -qx '# omarchy-rollout: kick-v1' "$src/factory/host/rollout.sh"
-  # Checked, the timer stopped (its last rollout waited for), the files, the updater started and checked, the timer removed.
-  sudo "$src/factory/host/setup.sh" /srv/omarchy-pool
-  ./rollout.sh   # wakes the updater: a round now
-)
+cd /srv/omarchy-pool && ls -A                                       # the retired set's tree: etc/, work/, cache/, compose files, the marker
+docker volume ls --filter label=com.docker.compose.project=omarchy-pool
+docker image ls ghcr.io/firemanxbr/omarchy-worker                   # images no container uses any more; docker image prune removes the dangling ones
 ```
 
-What `setup.sh` does, in order, and what a failure leaves:
+Nothing of the host is in that directory: its work root (`/srv/omarchy-host`)
+and its secrets (`/srv/omarchy-host-secrets`) were put beside it at the
+canary, so removing it takes nothing of the host's. While any of the set's
+files stay, keep the marker, which tells any old copy of the set's tools to
+refuse there.
 
-1. **It checks before it touches anything.** The release's `compose.yml`
-   is loaded against a staged copy of this host's `.env` and `etc/`, with
-   the env files it would write for any that are missing. It loads under
-   this host's profiles and under every profile the file names. It also
-   checks that `.env`'s `POOL_ROOT` is this directory, that the updater
-   image here (pulled first) is from #277 on, and that every service
-   compose would run holds a worker token. It also refuses when another
-   `setup.sh` runs on this directory, when a `rollout.sh` started by hand
-   still runs, when `.env`'s `COMPOSE_FILE` names a file by an absolute or
-   `../` path (name the files relative to `/srv/omarchy-pool` instead), and,
-   before anything else, when the new files are in already (a killed step:
-   see below). Any of these fails with exit 4
-   and changes none of the host's files, units or containers (only the
-   updater image may have been pulled): the timer runs on. Fix what it names, then
-   paste again. A community service's missing token: `register.sh`, or
-   leave its profile out of `COMPOSE_PROFILES` where it has one. A project service (pool,
-   review, review2) can no longer be registered (#343: per-worker trust is
-   gone, so `register.sh` skips it): leave its profile out where it has one
-   (`emulated` holds review-x86_64, `review2` the second pair). pool-* and
-   review-aarch64 have none, so keep the env files that hold their tokens;
-   a lost one is the maintainer host's work from then on
-   ([Maintainer hosts](/docs/worker-host#maintainer-hosts)). It also warns about a container
-   of this project whose service the new `compose.yml` does not run under
-   this host's profiles (a registered review2, now behind a profile of its
-   own): no rollout reaches it until its profile is in `COMPOSE_PROFILES`.
-2. **It stops the timer**, as its user, then waits while a rollout the
-   timer started is still draining. The timer is stopped, not disabled,
-   until step 5: a reboot or a power cut before then brings it back (after
-   step 3 has begun, see below what else it leaves). A
-   drain takes up to 3 h; `setup.sh` waits up to 4 h (the old rollout also
-   pulls and waits for its brokers). If the rollout still runs after 4 h,
-   it enables the timer again, installs nothing, and exits 3. Paste again
-   later. If its user's systemd does not answer, it exits 3 and tries to
-   enable the timer again (its stop may have taken all the same), and says
-   whether it could. The
-   wait can last 4 h: run the paste in `tmux` (or `screen`).
-3. **It installs the files.** `compose.yml`, `rollout.sh` and
-   `register.sh` go in, with an env file (mode 600) for every `env_file`
-   `compose.yml` names. The copies it replaces go to
-   `/srv/omarchy-pool/setup-backup-<time>/`, with the timer's two units
-   under `systemd-user/` and, in `created-env-files`, the env files it
-   wrote.
-4. **It starts the updater** (`up -d --no-deps --no-recreate updater`)
-   and checks that it stays running, with no restart, for 30 s, and that
-   its `--self-test` says `follows 1`. If any of that fails, it stops and
-   removes the updater, puts the old files back, enables the timer again
-   and exits 5. The host rolls out through its timer as before. Read
-   `docker compose logs updater` from the output, fix the cause, paste
-   again. If it cannot confirm the updater stopped (docker does not
-   answer, or the updater still runs), or an old file does not copy back,
-   it keeps all the new files instead, never one old file beside a new
-   one, and still enables the timer, which then runs the new `rollout.sh`:
-   it only wakes or starts the updater. It says so; take the way back
-   below once that is fixed (docker answers, or the copy can succeed),
-   then paste again. Each docker and systemctl call of
-   this put-back ends within 60 s. The updater's first round starts at once: if it was draining a
-   worker when it was stopped, that worker finishes its drain (up to 3 h),
-   and the timer's next rollout then starts it: up to about 3 h 20 min.
-5. **Only then does it disable the timer and remove its units**, and say
-   it is retired.
-
-An interrupt at any point before step 5 (Ctrl-C, a stop, a dropped
-session, or its output gone, such as a `| tee` stopped by Ctrl-C) puts
-back whatever was done so far: the updater it started stopped and
-removed, the old files back, the timer enabled again (or, as in step 4,
-the new files kept when that is not safe). It then exits 130,
-143, 129 or 141 (the signal's), never 0. Paste again.
-
-A `setup.sh` killed outright (`kill -9`, the OOM killer), or cut off by a
-reboot or a power cut, puts nothing back. After a kill, the timer stays
-stopped until the next reboot; after a reboot, it is back. What else it
-left depends on when it stopped. If
-`~/.config/systemd/user/omarchy-pool-rollout.timer` is gone, the step had
-finished (it removes the timer's units last): the updater rolls the host
-out (`docker compose ps updater`). Otherwise, as the user, run this (two
-spaces before `updater:`):
+**No legacy registration is left** — the check before the deploy that
+carries #346, and after it; a hard precondition of that deploy. The pool
+makes no new legacy registration from then on (`POST /factory/workers`
+answers 410), but it does not refuse the claims of one that is still
+unrevoked: such a row would go on taking pool jobs, rebuilds or
+contributors' builds on a machine that runs none of the host's isolation.
+So do not deploy while the first two queries list anything. Every row the
+first lists is to revoke on its page (its owner or a maintainer: *Revoke*,
+or `DELETE /api/v1/factory/workers/<id>` with a maintainer's token); a
+revoked one claims nothing, at once:
 
 ```bash
-cd /srv/omarchy-pool && grep -c '^  updater:' compose.yml
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, owner, trust, arch, last_seen FROM build_workers WHERE kind = 'legacy' AND revoked_at IS NULL ORDER BY last_seen DESC"
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT lease_owner, kind, name, status FROM build_tasks WHERE status = 'leased' AND lease_owner IN (SELECT id FROM build_workers WHERE kind = 'legacy')"
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT value FROM settings WHERE key = 'host-pool-jobs'"   # the hosts that run the pool's jobs: '*', or the ones chosen
 ```
 
-- **It prints 0**: nothing was installed. After a kill, bring the timer
-  back, `systemctl --user start omarchy-pool-rollout.timer`, then paste
-  again. After a reboot the timer is back already: paste again.
-- **It prints 1**: the new files are in, or some of them. Do not start the
-  timer: it would run the old `rollout.sh` beside the updater, or the new
-  one, which starts an updater that passed none of the checks. After a
-  reboot it runs already, which the way back fixes. Take the way back
-  below (it picks the backup from before the updater, stops any updater
-  and enables the timer), then paste again. Until then, `setup.sh`
-  refuses (exit 4) and says so.
-
-Right after a kill, a paste again may say that another `setup.sh` runs:
-a child of the killed one (a `docker` call waiting on the engine) still
-holds `.setup.lock`. `fuser -v /srv/omarchy-pool/.setup.lock` names it;
-end it, or wait until docker answers, then paste again.
-
-The `./rollout.sh` at the end then only wakes the updater. If it fails
-after `setup.sh` succeeded, the updater still runs and rolls the host out:
-`docker compose ps updater` says so, and `docker compose logs -f updater`
-shows its rounds. If the updater is not running, `./rollout.sh` starts
-it as it is. When that fails too, run
-`docker compose up -d --no-deps --no-recreate updater` and read its error.
-If the updater cannot run here, take the way back below.
-
-The updater's first round may drain and recreate every service once
-(its compose computes configuration hashes its own way). Within ten
-minutes, each Studio worker's page says "rolled out by its updater", and
-Status's line about this step goes away.
-
-From then on, do not run a bare `docker compose up -d` on this host. It
-re-stamps every service's configuration hash with the host's compose, and
-the updater's next round drains and recreates every service once more. To
-start everything, run `./rollout.sh`: it wakes the updater, or starts it as
-it is when it is not running (never recreated: which image it runs is its
-guard's call), and a round starts whatever is not running. For one service,
-run `docker compose up -d --no-deps <service>`, which costs that one
-service a second replacement.
-
-Until this is done, releases still arrive through the timer, and every
-order but Update works. The pool knows whether it was done, because the
-workers report it with their claims.
-
-To undo it (an updater that misbehaves here), use the copies `setup.sh`
-kept. The updater is stopped first, by its compose labels, before anything
-is copied: compose leaves a running one alone once `compose.yml` no longer
-names it, and it would go on rolling the host out beside the timer. A
-worker the updater was draining finishes its drain (up to 3 h), and the
-timer's next rollout then starts it: up to about 3 h 20 min.
-
-```bash
-(
-  set -euo pipefail
-  cd /srv/omarchy-pool
-  # The newest backup with the timer's units whose compose.yml and rollout.sh are there and are not the updater's: a step
-  # that was killed and pasted again wrote a newer one, holding the new files.
-  b=""
-  for d in $(ls -d setup-backup-*/systemd-user | sort -r); do
-    d="$(dirname "$d")"
-    if [ -s "$d/compose.yml" ] && [ -s "$d/rollout.sh" ] && ! grep -q '^  updater:' "$d/compose.yml" && ! grep -qx '# omarchy-rollout: kick-v1' "$d/rollout.sh"; then b="$d"; break; fi
-  done
-  test -n "$b"
-  # The updater, by its labels: whichever compose.yml is in place, and while compose cannot load the project. None may still run.
-  ids="$(docker ps -q --filter label=com.docker.compose.project=omarchy-pool --filter label=com.docker.compose.service=updater)"
-  if [ -n "$ids" ]; then docker stop $ids; docker rm $ids || true; fi
-  ids="$(docker ps -q --filter label=com.docker.compose.project=omarchy-pool --filter label=com.docker.compose.service=updater)"
-  test -z "$ids"
-  cp -p "$b/compose.yml" "$b/rollout.sh" .
-  if [ -f "$b/register.sh" ]; then cp -p "$b/register.sh" .; fi
-  # The env files the step wrote that are still its untouched placeholder go: the old compose.yml starts no pair nobody registered.
-  if [ -f "$b/created-env-files" ]; then
-    while read -r f; do if grep -qx 'OMARCHY_WORKER_TOKEN=' "$f"; then rm -f "$f"; fi; done < "$b/created-env-files"
-  fi
-  mkdir -p ~/.config/systemd/user && cp -p "$b"/systemd-user/omarchy-pool-rollout.* ~/.config/systemd/user/
-  systemctl --user daemon-reload
-  systemctl --user enable --now omarchy-pool-rollout.timer
-  docker compose config -q
-)
-```
-
-If it stops part way, paste it again: it stops only an updater that still
-runs, and the rest is idempotent. If it stops before its `cp` (at
-`docker ps`, `docker stop` or the check after them), nothing was copied:
-paste it again once docker answers. If its `docker rm` failed (it prints
-the error and goes on), the stopped updater container is left: remove it
-with `docker rm` before you run `setup.sh` again, whose
-`--no-recreate` would otherwise start that container as it is.
-
-Its last line, `docker compose config -q`, prints nothing. If it names a
-missing `etc/review2-*.env`, the old `compose.yml` names the review2 pair
-with no profile, and it did not load before the step either. Take the
-pair out of that file, or register it. Do not write an empty env file:
-that starts the pair unregistered.
-
-Do not run an older release's `setup.sh` for this. Its `compose.yml` has
-the review2 pair with no profile, which would start it unregistered.
+The first two come back empty; the third names the hosts that run the
+pool's jobs (`*`, or the ones chosen), since they have nobody else to run
+them. The Workers page lists hosts only.
 
 ### After a release
 
-Nothing to do on any host, and on a host the agent manages, nothing needs
-to be run either; one exception until P3: a release that changes
-`factory/image/compose.yml` reaches a maintainer's CLI set only once its
-owner takes the file in (*The Studio host* above: a CLI set's compose
-file). The pool is deployed once the images exist. Within two
-minutes, every updater sees the pool's new release and rolls its set out:
-every maintainer's legacy set, and the Studio's since its one-time step above.
-`agent-proxy` and the brokers go first, each answering before the workers
-that call them (#278), then the workers, each stop a drain.
+Nothing to do on any host: each host's agent reads the release from its
+host state, verifies the bundle against `release.yml`'s signature, rolls it
+out with its guard and commits it — a task runs across it, re-adopted by
+the new dispatcher — or reverts to its last-good and claims on that for six
+hours (*A host reverted a release*, above). The Studio is no exception. A
+host whose owner set a soak takes the release that long after its agent
+first saw it (*Soak*, above).
 
-A worker whose agent does not answer re-checks it by itself (#278). The
-pool re-checks it too, and, only if that is not enough, restarts it or
-restarts `agent-proxy` through one of its workers (#277). The pool does so
-within bounds, and on the record: `order` lines in the journal.
+Where to look: each host's page (its release, targeted and applied, and the
+last round), the Workers page (each host's release), and Status (a host
+silent or behind since the deploy, a revert, a revoked release). What the
+owner or a maintainer presses there — Reconcile now, Retry release, Drain,
+Resume claims, Stop on a lease — is on the record with who pressed it, and
+none of it needs the passkey approve and block need.
 
-Where to look: Status (workers not ready, outdated, silent since the
-deploy), the Factory's workers card, and a worker's page, `/worker/<id>`,
-with its last orders and its log. What a maintainer, or the worker's owner,
-presses there: Re-check agent, Restart, Restart agent service, Stop its
-task, Drain, Resume, Update. None of them needs the passkey that approve and
-block need (#283); each is on the journal with who pressed it. A worker
-whose task hangs through the release is replaced when its drain's three
-hours end — or sooner, once Stop its task has given that task back.
-
-If the release's image does not start (Status: "N workers alive before the
-deploy … have not claimed for 15 min"), roll it back from anywhere:
-`gh workflow run rollback.yml -f to=<the release before it>`. The images and
-the Worker go back, and the updaters follow within two minutes (*Releasing
-the pool itself*).
+If the release is bad for every host, roll it back from anywhere:
+`gh workflow run rollback.yml -f to=<the release before it>`. The Worker
+goes back and every host goes down to it on the statement the rollback
+signs (*Releasing the pool itself*); a release found bad later is revoked by
+the next one (*Revoking a release*, above).
 
 ## Maintainers: reviewing contributed builds
 
@@ -3929,8 +3006,9 @@ decides on their own package, and never on a contributor's bytes:
 
 - **Claim** (Review's queue; *Build by the project* on a build's page)
   queues a project build (`pkgbuild_ref = review:<task>`, trust `project`),
-  pinned to the review worker whose agent you chose: a review worker (`pkg-repo work`)
-  starts a fresh container that holds nothing, where the project's agent
+  pinned to the host registration whose agent you chose: that host's
+  dispatcher starts a fresh container that holds nothing, beside its own
+  agent sidecar, where the project's agent
   writes its own recipe with the request's facts and the contributor's
   evidence as the lesson, builds it through the same gate and stages it
   under `staging/@project/`; a second agent audits it, and the trial
@@ -4000,7 +3078,7 @@ a ring, and the one thing that must hold for it to open:
 | Door | What it ships | What guards it |
 |---|---|---|
 | **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
-| **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
+| **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built on a maintainer's host and published into edge | the job's token, issued only to a project-trusted registration — a host's — at claim; the recipe is a reviewed commit on `main` |
 | **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
 | **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |
 | **A promotion** (the scheduler's, or `pkg-repo job promote`) | a ring's head, into the ring above | the gate: fresh health and ABI checks, the soak, no security regression — rows the jobs write: your token writes a `note` to the journal, nothing else (`note_only`) |
@@ -4269,20 +3347,20 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   of the architecture with room, contributors' builds in turn by owner —
   and a maintainer reviews the staged build (docs/GOVERNANCE.md).
   The person's page says where the build stands.
-- **Rebuild**: press *Build* on the person's page (the queue, or a legacy
-  community set of yours), or `POST $API/factory/packages/<name>/build`; a maintainer's
+- **Rebuild**: press *Build* on the person's page (the queue), or
+  `POST $API/factory/packages/<name>/build`; a maintainer's
   `POST $API/factory/enqueue` (`{"name","pkgbuild_ref":"<commit>","version","arches","publish":false}`)
   queues a sizing recipe as a dry run: by hand a build never publishes
   (#284, `dry_run_only`).
 - **A failed task**: the person's page says what stopped it and how to fix
   it (the build's page has the whole log); *Build* again starts from that
   build's PKGBUILD and log.
-- **Workers**: contributors' builds run on the maintainers' hosts and their
-  legacy community sets, anyone's (#343); project builds (the rebuild of what a maintainer reviews) on
-  project-trusted workers — today the
-  Mac (`pkg-repo work`, one process per architecture). No GitHub runner
-  builds packages; a queued build waits for a project worker. Workers
-  hold no key: the pool signs what they publish.
+- **Workers**: every build runs on the maintainers' hosts — contributors'
+  builds, anyone's (#343), and the project's rebuilds of what a maintainer
+  reviews, never on its requester's own hosts while another can take it
+  (#339) —, each in its own container born with nothing. No GitHub runner
+  builds packages; a queued build waits for a host with room. Hosts hold no
+  signing key: the pool signs what they publish.
 - **The Omarchy reference for the ABI gate**: `tests/omarchy-rootfs.sh
   x86_64 stable` installs the ISO's package set from `stable` into a
   container and keeps pacman's database and the libraries under the
@@ -4307,21 +3385,22 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   carry them). Records are cached under the worker's `osv/` directory;
   `pkg-repo security --osv-cache DIR` by hand, omit the flag to skip OSV.
 - **The audit** (the second agent, GOVERNANCE.md): every staged community
-  build queues an `audit` task. A project worker takes it only when it
-  was started with an agent key in its environment — `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `GEMINI_API_KEY` or `XAI_API_KEY`, or a Claude
-  subscription as `CLAUDE_CODE_OAUTH_TOKEN` (Claude Code in print mode, no
-  tools; the worker installs it at start) (`pkg-repo work` adds
-  the `audit` kind by itself then; `FACTORY_PROVIDER` picks among several
-  keys, `FACTORY_MODEL` the model — defaults `claude-sonnet-5`, `gpt-5`,
-  `gemini-3.6-flash`, `grok-4`; `FACTORY_REASONING=low` keeps a reasoning
-  model's answers inside the budget — the Studio sets it, and a reply cut
-  short is retried once with four times the budget). The Workers page
-  shows the agent each worker reported. The report lands next to the evidence
+  build queues an `audit` task. A host takes it only when its agent
+  answers: its owner's agent key in the host's `agent.env` —
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` or `XAI_API_KEY`,
+  or a Claude subscription as `CLAUDE_CODE_OAUTH_TOKEN` (Claude Code in
+  print mode, no tools) —, which the task's own agent sidecar reads and
+  serves to that one task, never its container nor the dispatcher;
+  `FACTORY_PROVIDER` picks among several keys, `FACTORY_MODEL` the model —
+  defaults `claude-sonnet-5`, `gpt-5`, `gemini-3.6-flash`, `grok-4`;
+  `FACTORY_REASONING=low` in the same file keeps a reasoning model's answers
+  inside the budget, and a reply cut short is retried once with four times
+  the budget. The Workers page and each host's page show the agent its
+  host reported. The report lands next to the evidence
   (`/api/v1/factory/tasks/<id>/artifacts/audit.md`) and the Review page
-  shows the verdict; *waiting* in that column means no such worker is
-  running. It is advice for the maintainer; nothing acts on it. A build
-  approved or rejected before the audit ran cancels it.
+  shows the verdict; *waiting* in that column means no host whose agent
+  answers is alive. It is advice for the maintainer; nothing acts on it. A
+  build approved or rejected before the audit ran cancels it.
 - **New upstream versions** — two paths, one rule (evidence before review):
   - a package a contributor registered: once a day (05:45 UTC) the brain
     asks GitHub for each approved package's latest release and queues a
@@ -4351,7 +3430,7 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   readable by maintainers (`GET /api/v1/factory/tasks/:id/artifacts/<file>`).
   Quotas per contributor: 10 tasks queued or building, 5 GB staged; a
   single PUT and a multipart upload honour the same cap. A package above
-  90 MB goes up in 64 MB parts — from the community worker and from the
+  90 MB goes up in 64 MB parts — from a contributor's build and from the
   project's review build alike (`pkg-repo`'s `stage_file`); a single body
   above 100 MB never reaches the pool, the edge answers 413 first
   (bitwarden's 144 MB review build failed three times that way on
@@ -4371,20 +3450,13 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   hashed in D1; revoke a worker with `DELETE /factory/workers/<id>` as its
   owner or as a maintainer (the Revoke button on the owner's page is the same
   door).
-- **Tokens**: there is no shared worker secret. Every worker — each of the
-  Studio's six, a host's, a maintainer's legacy set — is a registration
-  with its own `omw_` token; the project trust a legacy registration holds
-  was given on two maintainers' word, and is given that way no more (#343:
-  a host's trust is the maintainer list). The Studio's tokens live in `/srv/omarchy-pool/etc/*.env`
-  on the host (`factory/host/register.sh` writes them). Only the community
-  pair's rotate: revoke the worker, blank its env file, run `register.sh`
-  again, `docker compose up -d`. A project service's token (pool, review,
-  review2) cannot be rotated since #343: no new registration can be given
-  project trust (the trust door answers 410), so `register.sh` skips that
-  service and revoking its token ends it for good (blank its env file and
-  its role container exits at start, holding the updater back). Revoke one
-  only when it leaks, and move its work to the maintainer's host first
-  ([Maintainer hosts](/docs/worker-host#maintainer-hosts)).
+- **Tokens**: there is no shared worker secret. Every worker is a host's
+  registration with its own `omw_` token, which its agent fetches with the
+  host key once its owner confirmed the host and keeps in a file only the
+  dispatcher mounts; it rotates every 30 days, or at once with *Rotate
+  token* on the host's page (the old one works ten more minutes), and a
+  retired host's token dies with it. No worker is registered or trusted one
+  by one any more (#343, #346: `POST /factory/workers` answers 410).
 
 ## Costs
 
@@ -4598,18 +3670,12 @@ show. The header of every page says so. To lift it by hand:
   and search, ten minutes for a package page, half an hour for security), so
   viewers do not multiply the load; the pages poll every 60–120 s and retry
   transient errors.
-* **The Studio's own `compose.yml` is the host's.** A release that adds a
-  service needs the one-time kind of step again (*Once: the updater*).
-  Releases keep behaviour in the image, and only topology in that file.
-* **A set whose updater is older than #277** follows at its own 15-minute
-  round and cannot take Update. Its first round after #277 replaces it.
-* **An updater that adopted a bad image before the guard existed** needs its
-  owner: `omarchy-worker update` after a rollback.
-* **A rollback past #277's last part takes the updaters back too.** Each one
-  follows the pool's release down within two minutes, as it does a rollback
-  to any release, and adopts the older updater without a self-test (that one
-  has none). From then on its set follows at the fifteen-minute round and
-  takes no Update, until a release brings an updater that follows again.
+* **The Studio's isolation is `root` until P6.** Its rootful daemon runs
+  without `userns-remap` (D13): an escape from a task container lands as
+  root on that dedicated machine. Until P6 moves it to `subuid`, the
+  contributors' code that runs there is what its page shows, and a sandboxed
+  runtime on it (*A sandboxed runtime for community tasks*) narrows the
+  escape for what a contributor wrote.
 
 ## Kill switch
 

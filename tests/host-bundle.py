@@ -186,28 +186,34 @@ try:
     # from 29 on cannot list or inspect it (the Containerfile's note at DOCKER_CLI).
     ok(int(docker_v.split(".")[0]) < 29,
        f"the docker CLI {docker_v} is below 29: from 29 on it cannot read podman 4's \"<nil>\" gateway of a task network (#372)")
-    compose_v = re.search(r"^ARG COMPOSE=(\S+)$", cf, re.M).group(1)
     runs = [r for r in re.split(r"\n(?=RUN |ARG |COPY |ENV |LABEL )", cf) if r.startswith("RUN ")]
     def sums_in(marker):
         run = next(r for r in runs if marker in r)
         return dict(re.findall(r"(x86_64|aarch64)\) sum=([0-9a-f]{64})", run))
-    docker_sums, compose_sums = sums_in("download.docker.com"), sums_in("docker/compose/releases")
+    docker_sums = sums_in("download.docker.com")
+    # The compose plugin is the agent's alone since the image's updater left (#346): nothing in the image runs compose, so the
+    # manifest is its only pin — one version for every platform, each sum checked by `host-bundle check-tools`.
+    ok(not re.search(r"^ARG COMPOSE=|docker/compose/releases", cf, re.M), "the worker image carries no compose plugin: nothing in it runs one (#346)")
+    cm = re.fullmatch(r"https://github\.com/docker/compose/releases/download/(v[0-9][^/]*)/docker-compose-linux-x86_64",
+                     inner["tools"]["x86_64-linux"]["docker-compose"]["url"])
+    ok(cm is not None, "x86_64-linux compose: a release of docker/compose")
+    compose_v = cm.group(1)
     for arch in ("x86_64", "aarch64"):
         t = inner["tools"][f"{arch}-linux"]
         ok(t["docker"] == {"url": f"https://download.docker.com/linux/static/stable/{arch}/docker-{docker_v}.tgz",
                            "sha256": docker_sums[arch]}, f"{arch}-linux docker: the Containerfile's version and sum")
-        ok(t["docker-compose"] == {"url": f"https://github.com/docker/compose/releases/download/{compose_v}/docker-compose-linux-{arch}",
-                                   "sha256": compose_sums[arch]}, f"{arch}-linux compose: the Containerfile's version and sum")
+        ok(t["docker-compose"]["url"] == f"https://github.com/docker/compose/releases/download/{compose_v}/docker-compose-linux-{arch}"
+           and re.fullmatch(r"[0-9a-f]{64}", t["docker-compose"]["sha256"]), f"{arch}-linux compose: the manifest's one version, pinned by sum")
     # A Mac's (#320): the same versions, built for Darwin (their sums are pinned in the
     # manifest alone; `host-bundle check-tools` downloads and checks every one).
     t = inner["tools"]["aarch64-darwin"]
     ok(t["docker"]["url"] == f"https://download.docker.com/mac/static/stable/aarch64/docker-{docker_v}.tgz"
        and re.fullmatch(r"[0-9a-f]{64}", t["docker"]["sha256"]), "aarch64-darwin docker: the Containerfile's version")
     ok(t["docker-compose"]["url"] == f"https://github.com/docker/compose/releases/download/{compose_v}/docker-compose-darwin-aarch64"
-       and re.fullmatch(r"[0-9a-f]{64}", t["docker-compose"]["sha256"]), "aarch64-darwin compose: the Containerfile's version")
+       and re.fullmatch(r"[0-9a-f]{64}", t["docker-compose"]["sha256"]), "aarch64-darwin compose: the manifest's one version")
     ok(sorted(inner["tools"]) == ["aarch64-darwin", "aarch64-linux", "x86_64-linux"], f"tools for every platform an agent ships for: {sorted(inner['tools'])}")
     ok(inner["tools"] == policy["tools"], "the tools as factory/bundle/manifest.toml pins them")
-    print(f"ok: the tools: docker {docker_v} and compose {compose_v}, the worker image's pins, and the same versions for a Mac")
+    print(f"ok: the tools: docker {docker_v}, the worker image's pin, and compose {compose_v}, the manifest's, the same versions for a Mac")
 
     # The host set, rendered, each file by hash.
     compose = files["sets/host/compose.yml"].decode()

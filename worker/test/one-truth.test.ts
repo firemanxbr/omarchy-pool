@@ -505,7 +505,7 @@ describe("three more facts, one source each", () => {
     }
   });
 
-  it("the jobs of the week are one reduce over jobs_daily — the Status tiles, its table and its charts, the Workers page's cards — a cancelled job is a failed one everywhere, whatever the snapshot says, and a job queued longer than the week still waits", async () => {
+  it("the jobs of the week are one reduce over jobs_daily — the Status tiles, its table and its charts — a cancelled job is a failed one everywhere, whatever the snapshot says, and a job queued longer than the week still waits", async () => {
     // A job cancelled this week, beside the fixture's done and queued ones, and a snapshot taken over it: the snapshot's "succeeded" (runs − failures − running) counts it as a success; the series counts it as failed. The two disagree from here on, on the same page if a page read both.
     await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, finished_at, duration_ms) VALUES ('gc', ?, '', '', 'schedule', 0, 0, 'project', 'pool', 'gc', 'cancelled', ?, 60000)").bind(F.arch, new Date().toISOString()).run();
     // A security job queued ten days ago and never pulled — the pool's case when no worker of its architecture is alive: the snapshot took every queued or leased row whatever its age, and the tile that read it said so; the series carries it on today, so the reduce that replaced the snapshot counts it too.
@@ -577,18 +577,11 @@ describe("three more facts, one source each", () => {
     expect(status).toContain("waiting: v.waiting");
     expect(status).toContain("</i>waiting</span>");
     expect(status, "the page calls the bucket by another word").not.toMatch(/running: v\.waiting|queued \/ running|"Jobs running now"|<th class="num">Running<\/th>/);
-    // The Workers page splits the same rows by kind — the pool's kinds on the project's card — and a job's bucket there is the shell's jobBucket, the rule jobsSummary applies: the card's failed of the week is the reduce's failed over the pool's kinds, the cancelled job in it (the page's own rule, done or failed by name, counted it nowhere).
-    const workersHtml = await page("/workers"), workersScript = scriptOf(workersHtml), workersOwn = ownScript(workersHtml).replace(CHARTS, "");
-    expect(workersOwn).toContain("jobBucket(r.status)");
+    // The Workers page lists hosts only since #346: it splits no job by a legacy kind, and draws the week's minutes through the shell's workerMinutes.
+    const workersOwn = ownScript(await page("/workers")).replace(CHARTS, "");
+    expect(workersOwn).not.toContain("POOL_KINDS");
+    expect(workersOwn).toContain("workerMinutes(d.series, 7)");
     expect(workersOwn, "/workers buckets a job by a rule of its own").not.toMatch(/status === "(?:failed|cancelled)"|status === "done" \|\|/);
-    const perDay = /^  function perDay\(\) \{[\s\S]*?\n  \}$/m.exec(workersScript)![0], poolKinds = /^  var POOL_KINDS = [^\n]*$/m.exec(workersScript)![0];
-    const cards = new Function("STATS", [served(workersScript, "lastDays"), served(workersScript, "jobBucket"), poolKinds, perDay, "var pd = perDay(); return { days: pd.days, P: pd.P, POOL_KINDS: POOL_KINDS };"].join("\n"))(stats) as { days: string[]; P: Record<string, Record<string, { done: number; failed: number }>>; POOL_KINDS: string[] };
-    const sum = (side: string, k: "done" | "failed") => cards.days.reduce((a, d) => a + cards.P[side][d][k], 0);
-    const pool = (k: "done" | "failed" | "waiting") => Object.keys(js7.byKind).filter((kind) => cards.POOL_KINDS.includes(kind)).reduce((a, kind) => a + js7.byKind[kind][k], 0);
-    expect(sum("project", "failed"), "the project card's failed is the reduce's over the pool's kinds").toBe(pool("failed"));
-    expect(sum("project", "done"), "the project card's done is the reduce's over the pool's kinds").toBe(pool("done"));
-    expect(pool("failed")).toBeGreaterThanOrEqual(1);
-    expect(allComponents(F).find((x) => x.id === "workers.kind-cards")?.script, "workers.kind-cards names the shell's bucket").toContain("jobBucket(r.status)");
   });
 
   it("open advisories in stable are counted at the Security page's default confidence on Status, through the shell's one rule", async () => {

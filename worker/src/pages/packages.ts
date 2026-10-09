@@ -740,7 +740,7 @@ const PACKAGE_SCRIPT = String.raw`
       title: "Independent review", tag: tag, tone: tone,
       who: (ap ? [whoChip("by", ap.by)] : []).concat(agentOf ? [glyphChip("audited with", agentOf, "agent")] : []),
       rowsTitle: "Reviewer checklist", rows: rows,
-      mx: { title: "Built again on a project worker", cols: colsOf(), rows: [
+      mx: { title: "Built again on a maintainer's host", cols: colsOf(), rows: [
         ["Built again by the project", ps.map(function (p, i) { return p ? buildMark(p) : none(i, "built again once a maintainer asks"); })],
         ["The project's gate", ps.map(function (p, i) { var v = p && p.result && p.result.vet; return !p ? none(i, "run on the project's build") : !v ? ["wait", "", "not run yet"] : v.verdict === "fail" ? ["fail", "failed", (v.failed || []).join(", ")] : v.warnings ? ["warn", v.warnings + " warning" + (v.warnings > 1 ? "s" : ""), (v.warned || []).join(", ")] : ["ok", "", "clean"]; })],
         ["Installed in the lab by a real pacman", trials.map(trialMark)],
@@ -1022,7 +1022,7 @@ const PACKAGE_SCRIPT = String.raw`
       else if (built || !rebuilt) rows.push(person("built on", built ? esc(wtShort(built)) : "not yet", built ? "the contributor's build" : "", glyph("W", "", "W")));
       rows.push(ap ? person("reviewed by", atLink(ap.by), (ap.decision === "approved" ? "rebuilt from scratch" : ap.decision) + (ap.solo_exception ? " · " + SELF_WORDS : ""), avatar(ap.by)) : person("reviewed by", rv ? STATE[rv][1] : "not yet", "", nobody));
       if (au) rows.push(person("audit agent", esc(au), "second opinion", glyph(au, "agent")));
-      if (rebuilt) rows.push(person("rebuilt on", esc(wtShort(rebuilt)), "a project worker", glyph("▣", "pool", "▣")));
+      if (rebuilt) rows.push(person("rebuilt on", esc(wtShort(rebuilt)), "a maintainer's host", glyph("▣", "pool", "▣")));
       rows.push(mt ? person("maintainer", atLink(mt.login), mt.adopted ? "adopted " + since(mt.since) + " ago" + (mt.solo_exception ? " · " + SELF_WORDS : "") : "", avatar(mt.login)) : person("maintainer", "none yet", "", nobody));
     } else {
       var pi = (D && D.manifest && D.manifest.pkginfo) || {}, packager = pi.packager ? pi.packager.replace(/<.*>/, "").trim() : "";

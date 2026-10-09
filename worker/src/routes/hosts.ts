@@ -129,7 +129,7 @@ export async function handleMintEnrollment(c: Contributor, request: Request, env
   const gate = writeGate(request, url, true);
   if (gate) return gate;
   // The page's own reason first (a contributor, a blocked maintainer), then the synced list itself, read again: the role on the row is the last sign-in's.
-  const v = workspace(c, c.login).register;
+  const v = workspace(c, c.login).host;
   if (!v.ok) return json({ error: c.role === "maintainer" ? v.why : HOSTS_ARE_MAINTAINERS, code: "maintainers_only" }, v.status, NO_STORE);
   if ((await roleFor(env, c.login)) !== "maintainer") return json({ error: HOSTS_ARE_MAINTAINERS, code: "maintainers_only" }, 403, NO_STORE);
   const b = await readJson<{ name?: unknown; where?: unknown }>(request);

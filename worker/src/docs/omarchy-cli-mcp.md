@@ -65,7 +65,7 @@ is an indexed lookup or a public answer the edge caches (*Limits and cost*).
 |---|---|---|---|
 | `request_package` | contribute | `url`, `description`, `license`, `checklist` (the four confirmations, each `true`); optional `name`, `arches`, `source`, `version` | the registration, the request's record and signature, the builds it queued |
 | `request_status` | contribute | optional `name` | with a name: the package's word, its builds per architecture (queued with a place, building, staged, failed), its review and the rings that serve it; without one: your requests, your builds, and your agents' drafts with where each stands |
-| `review_claim` | maintain | `name`; optional `worker` (a project review worker, whose agent drafts the rebuild) and `note` (kept for people, never a hint to the project's agent) | the project's rebuild queued from it, and where it runs |
+| `review_claim` | maintain | `name`; optional `worker` (a maintainer host's registration, whose agent drafts the rebuild) and `note` (kept for people, never a hint to the project's agent) | the project's rebuild queued from it, and where it runs |
 | `review_release` | maintain | `name`, `reason` (four characters or more, on the record) | the claim let go: the project's rebuild cancelled, who had claimed it, and the package ready to be claimed again |
 | `review_context` | maintain | `name` | the request as checked, the recipe (`PKGBUILD`), the gate (`vet.json` and its summary), the audit, and the build, test and trial logs (the last 64 KB of each), for the contributor's build and the project's rebuild — never a package |
 | `submit_review` | maintain | `name`, `verdict` (`approve`, `request_changes` or `reject`), `note` | a draft: its id, the link the person opens to confirm it, when it expires |
@@ -607,7 +607,7 @@ another maintainer.
   built; `publish` true or left out is refused with `dry_run_only`, and
   nothing is queued. A dry run is never the build of its version: the
   enqueue job's build of the same recipe is a task of its own. A build that publishes comes from the factory's enqueue job — its
-  job token, issued to a project worker for a recipe on `main` — or from an
+  job token, issued to a host's registration for a recipe on `main` — or from an
   approval, which takes a passkey. A promotion forced past its evidence and
   the gate (`POST /factory/jobs`, `promote` with `force: "yes"`) is
   confirmed the way approve is, through `webGate`: the browser's session,

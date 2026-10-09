@@ -809,7 +809,7 @@ describe("where a build runs", () => {
     ]);
     const staged = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'pinme'").first<{ id: number }>())!.id;
     await env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES ('w6', 'aarch64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_w6")).run();
-    expect((await call("POST", `/factory/tasks/${staged}/build`, { worker: "w3" }, "omc_m2")).status).toBe(400); // a contributor's worker never builds for the project
+    expect(await call("POST", `/factory/tasks/${staged}/build`, { worker: "w3" }, "omc_m2")).toEqual({ status: 400, json: { error: "w3 is not a maintainer host's registration for aarch64" } }); // a contributor's worker never builds for the project
     expect((await call("POST", `/factory/tasks/${staged}/build`, { worker: "w6" }, "omc_m2")).json.error).toMatch(/no agent that answers/); // pinned to it, the build would wait forever
     expect((await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w6")).status).toBeLessThan(300); // now it builds, with an agent
     expect((await call("POST", `/factory/tasks/${staged}/build`, { worker: "w1" }, "omc_m2")).json.error).toMatch(/does not take builds/); // w1 declared sync last

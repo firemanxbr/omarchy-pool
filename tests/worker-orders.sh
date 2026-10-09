@@ -96,15 +96,7 @@ run_worker 60 "${common[@]}"
 [[ "$(claims | head -n1 | jq -r .previous_exit.why)" == idle ]] || { echo "the next process sends it: $(claims | head -n1)"; exit 1; }
 [[ "$(claims | sed -n 2p | jq -r '.previous_exit // "none"')" == none ]] || { echo "once"; exit 1; }
 [[ "$(claims | head -n1 | jq -r .instance)" != "$instance" ]] || { echo "a new process, a new instance"; exit 1; }
-# Through a broker: its agent is the broker's.
-cat > "$tmp/bin/curl" <<'S'
-#!/usr/bin/env bash
-echo '{"ok":true,"ms":7,"agent":"claude-code/claude-sonnet-5"}'
-S
-chmod +x "$tmp/bin/curl"
-run_worker 30 WORKER_LOG="$tmp/worker.log" WORKER_ID=alice-box-aarch64-1f2e OMARCHY_BROKER=http://broker:8790 OMARCHY_STATE_DIR="$tmp/state"
-[[ "$(claims | head -n1 | jq -r .agent_via)" == broker ]] || { echo "behind a broker: agent_via broker: $(claims | head -n1)"; exit 1; }
-rm -f "$tmp/bin/curl" "$tmp/state/last-exit"
+rm -f "$tmp/state/last-exit"
 
 # 2. A re-check: the pool's probes now, answered done with what the agent said — and the worker's own backoff does not move.
 echo down > "$STUB_AGENT"

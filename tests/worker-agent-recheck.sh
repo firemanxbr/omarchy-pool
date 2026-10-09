@@ -8,15 +8,15 @@
 # agent that fails for good is asked no more often than a healthy one once
 # the backoff is spent) instead of waiting half an hour at once or
 # spinning; the failure is logged once, not at every re-check; a healthy
-# agent keeps its half-hour probe. The same through a broker whose agent
-# does not answer yet.
+# agent keeps its half-hour probe. (The same through a broker went with the
+# broker's builder relay, #346.)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 script="$root/factory/worker/omarchy-build-worker.sh"
 
-# The script's functions and settings, up to its dispatch line (docs: testing.md, *The broker, and the worker script's secrets*).
+# The script's functions and settings, up to its dispatch line (docs: testing.md, *The agent sidecar, and the worker script's secrets*).
 sed '/^hold_secrets$/,$d' "$script" > "$tmp/worker.sh"
 
 # The pool's tooling where factory_lib looks for it, with a stub agent.py:
@@ -96,18 +96,4 @@ run_worker 1900 0 "${common[@]}"
 [[ "$(grep -c '^probe ' "$STUB_LOG")" == 2 ]] || { echo "a healthy agent keeps its AGENT_PROBE_MINUTES probe (at +0 and +30 min): $(grep '^probe ' "$STUB_LOG" | tr '\n' ' ')"; exit 1; }
 grep -q '"agent_status":"error"' "$STUB_LOG" && { echo "a healthy agent is never reported in error"; exit 1; }
 
-# 4. Through a broker whose agent does not answer yet: the same re-checks against its /health.
-cat > "$tmp/bin/curl" <<'S'
-#!/usr/bin/env bash
-now="$(cat "$STUB_CLOCK")"; echo "probe $now broker ${*: -1}" >> "$STUB_LOG"
-if (( now < STUB_UP_AT )); then echo '{"ok":false,"agent":"claude-code/claude-sonnet-5","error":"claude did not answer"}'
-else echo '{"ok":true,"ms":7,"agent":"claude-code/claude-sonnet-5"}'; fi
-S
-chmod +x "$tmp/bin/curl"
-run_worker 900 100 WORKER_LOG="$tmp/worker.log" WORKER_ID=studio-community-aarch64 OMARCHY_BROKER=http://broker-community-aarch64:8790
-grep -q '^probe [0-9]* broker http://broker-community-aarch64:8790/health$' "$STUB_LOG" || { echo "the broker's /health is asked: $(cat "$STUB_LOG")"; exit 1; }
-grep -m1 '^claim ' "$STUB_LOG" | grep -q '"agent_status":"error"' || { echo "the first claim reports the broker's agent down: $(cat "$STUB_LOG")"; exit 1; }
-[[ "$(grep '^claim ' "$STUB_LOG" | tail -1)" == *'"agent":"claude-code/claude-sonnet-5","agent_status":"ok"'* ]] || { echo "and ok once it answers, without a restart: $(grep '^claim ' "$STUB_LOG" | tail -1)"; exit 1; }
-[[ "$(grep -c '^probe ' "$STUB_LOG")" == 4 ]] || { echo "the same backoff through the broker: $(grep '^probe ' "$STUB_LOG" | tr '\n' ' ')"; exit 1; }
-[[ "$(grep -c 'NOT ready' "$tmp/stderr")" == 1 ]] || { echo "logged once through the broker too: $(cat "$tmp/stderr")"; exit 1; }
 echo "worker agent re-check: ok"

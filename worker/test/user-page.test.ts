@@ -7,9 +7,11 @@
  * dashboard's first: every viewer gets every control, the same for all, and
  * the one who may not press one gets it disabled, grey, with the server's
  * reason in its title — never hidden, never a sentence in its place. One
- * exception, the last block below (#331): "Run a worker" and the worker
- * form are a maintainer's, drawn for a maintainer only; everyone else
- * keeps the served line that their packages build on the pool's hosts. The
+ * exception, the last block below (#331, #346): where a maintainer's machine
+ * goes — a host — is drawn for a maintainer on their own page only, and no
+ * worker form for anyone (no legacy registration is made any more);
+ * everyone else keeps the served line that their packages build on the
+ * pool's hosts. The
  * script is the served page's, run as a browser would (runScript in
  * test/fixture.ts); the build page's Decision cell is decision-cell.test.ts.
  */
@@ -205,7 +207,7 @@ describe("a person's page draws every control for every viewer, grey with the se
   });
 });
 
-describe("the workers are the maintainers' (#331): \"Run a worker\" and the worker form are drawn for a maintainer only; everyone else reads that their packages build on the pool's hosts", () => {
+describe("the workers are the maintainers' hosts (#331, #346): no worker form for anyone; a maintainer on their own page reads that their machine joins as a host; everyone else reads that their packages build on the pool's hosts", () => {
   const LINE = `Nothing to run here: ${POOL_HOSTS}, which the maintainers provide.`;
 
   it("served: the line and the way to the packaging docs, for everyone — no form, no toggle, no \"Run a worker\" in the page itself", async () => {
@@ -235,13 +237,14 @@ describe("the workers are the maintainers' (#331): \"Run a worker\" and the work
     expect(await section("bob", F.contributor)).toEqual({ slot: "", own: "", form: "" });
   });
 
-  it("a maintainer: \"Run a worker\", the toggle and the form — live on their own page, and nothing drawn on anyone else's", async () => {
+  it("a maintainer: where their machine goes — a host — and that no legacy registration is made any more, on their own page only; no toggle, no form", async () => {
     const own = await section("m1", F.m1);
-    expect(own.slot).toContain('id="w-toggle"');
-    expect(own.own).toContain('<a href="/docs/workers">Run a worker →</a>');
-    expect(own.own).toContain('<form id="worker-form"');
+    expect(own.slot).toBe("");
+    expect(own.form).toBe("");
     expect(own.own).toContain("Maintainers only");
-    expect(controls(own.form)).toEqual([expect.objectContaining({ text: "Register worker", grey: false })]);
+    expect(own.own).toContain("The legacy registrations from before hosts retired with P3 (#346)");
+    expect(own.own).toContain('<a href="/docs/worker-host#maintainer-hosts">How a host joins →</a>');
+    for (const absent of ['id="worker-form"', 'id="w-toggle"', "Register worker", 'href="/docs/workers">Run a worker']) expect(own.own + own.slot, absent).not.toContain(absent);
     // A contributor's page and another maintainer's: the served line stays, nothing is drawn over it — no form greyed with a reason that is not alice's.
     expect(await section("m1", F.owner)).toEqual({ slot: "", own: "", form: "" });
     expect(await section("m1", F.m2)).toEqual({ slot: "", own: "", form: "" });

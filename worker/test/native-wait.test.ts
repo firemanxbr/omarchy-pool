@@ -137,13 +137,13 @@ describe("a build waiting for a native worker", () => {
     expect(d.nodes["#rv-steps"].innerHTML).toContain(`title="${words}: it could not run emulated"`);
     d.renderRebuild(R, null);
     expect(d.nodes["#rv-y-log"].innerHTML).toContain(`${words}: it could not run emulated`);
-    expect(d.nodes["#rv-y-log"].innerHTML).not.toContain("queued for a review worker");
+    expect(d.nodes["#rv-y-log"].innerHTML).not.toContain("queued for a host");
     // A rebuild queued as any other says so as before.
     const plain = [{ ...R[0], rebuild: { ...sentBack, params: { review: 5 } } }];
     d.renderSteps(plain);
     expect(d.nodes["#rv-steps"].innerHTML).toContain(`<span class="t">Build x86_64</span><span class="w">queued</span>`);
     d.renderRebuild(plain, null);
-    expect(d.nodes["#rv-y-log"].innerHTML).toContain("queued for a review worker");
+    expect(d.nodes["#rv-y-log"].innerHTML).toContain("queued for a host");
   });
 
   it("the person's page says it, not that the project is building it", async () => {

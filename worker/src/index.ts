@@ -474,7 +474,7 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/category$/)) && method === "POST") return handleSetCategory(c, m[1], request, env);
     // A package's size and disk budget (#337): a maintainer, on its page; factory/sizing's word stands when it is cleared.
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/size$/)) && method === "POST") return handleSetSize(c, m[1], request, env);
-    if (method === "POST" && path === "/factory/workers") return handleRegisterWorker(c, request, env);
+    if (method === "POST" && path === "/factory/workers") return handleRegisterWorker(c);
     if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/builds\/(\d+)$/)) && method === "DELETE") return handleDequeueBuild(c, m[1], Number(m[2]), env);
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "DELETE") return handleRevokeWorker(c, m[1], env);
     return null;
@@ -523,7 +523,7 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     const w = await workerOf(request, env);
     if (w) return { kind: "worker", w };
     const job = await jobOf(request, env);
-    return job ? { kind: "job", job } : json({ error: "unauthorized: a worker token (POST /factory/workers) or a job token" }, 401);
+    return job ? { kind: "job", job } : json({ error: "unauthorized: a worker token (a host's, its agent fetches it) or a job token" }, 401);
   };
   // A job token good for this task's staging, as the worker it was issued to.
   const stagingActor = async (taskId: number) => {

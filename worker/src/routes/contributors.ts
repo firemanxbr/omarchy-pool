@@ -29,7 +29,7 @@ import { revokedRefusal } from "../lease";
  *                                     the package request: checked, written once to the record (R2, signed), registered
  *   POST /factory/packages/:name/build {arches?, reason?}       → community tasks (results go to staging)
  *   DELETE /factory/packages/:name
- *   POST /factory/workers             {name, arch, labels?} → {worker, token}   a maintainer's legacy registration (#331)
+ *   POST /factory/workers             410 since #346: no legacy registration is made any more (a contributor: 403, #331)
  *   DELETE /factory/workers/:id       revoke
  *   GET  /factory/packages            the registry (public)
  *
@@ -133,8 +133,8 @@ export const MAINTAINER_DECIDES = "a maintainer decides";
  * project provides the workers for everyone and its maintainers are their
  * only providers — a maintainer is vetted by a pull request to
  * factory/MAINTAINERS.toml, and their host is trusted by that same act.
- * POST /factory/workers refuses anyone else with it (403), and the person's
- * page says it where a maintainer has the worker form.
+ * POST /factory/workers refused anyone else with it (403), and still does
+ * since the door closed for maintainers too (#346, 410).
  */
 export const POOL_HOSTS = "your packages build on the pool's hosts";
 
@@ -157,6 +157,7 @@ export const GONE = {
   cli: "omarchy-worker is gone (#343): contributors do not run workers — your packages build on the pool's hosts — and a maintainer's machine joins the pool as a host",
   mode: "a worker's mode is gone (#343): every maintainer host builds every contributor's packages, in turn by owner, so there is no mode to set",
   trust: "per-worker trust is gone (#343): a maintainer's host is trusted by the pull request that names its owner in factory/MAINTAINERS.toml; the signed trust records stay on the record",
+  register: "a legacy registration is gone (#346): the legacy sets retired with the move to the host agent, and a maintainer's machine joins the pool as a host — + add a host on your page",
 } as const;
 export function gone(what: keyof typeof GONE): Response {
   return json({ error: GONE[what], code: "gone", docs: HOST_DOCS }, 410);
@@ -167,7 +168,7 @@ export type Right = "request" | "register" | "token" | "build" | "dequeue" | "re
 export const RIGHTS: Right[] = ["request", "register", "token", "build", "dequeue", "remove", "revoke", "withdraw"];
 
 /** An act allowed, or refused with the status the door answers and the reason a person reads in the control's title. */
-export type Verdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
+export type Verdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409 | 410; why: string };
 
 /** A registration as Remove reads it: whose, where it stands, the rings that serve it, the project's build of it in flight. */
 export interface Registration { name: string; owner: string; status: string; served: string[]; reviewing: { id: number; status: string } | null }
@@ -209,8 +210,9 @@ const revokedAlready = (w: WorkerRow): Verdict | null => (w.revoked_at ? { ok: f
  * /factory/token mints the caller's token, whoever's page the button is
  * on), so the page offers them on nobody else's page, and the reason a
  * signed-in reader gets names where their own control is: their page.
- * Register is also a maintainer's only (#331): on their own page every
- * contributor reads POOL_HOSTS, before a block.
+ * Register was also a maintainer's only (#331): on their own page every
+ * contributor reads POOL_HOSTS; since #346 a maintainer reads that the
+ * legacy registration is gone (410) — a new machine joins as a host.
  * Build and the queue are the owner's: the project's builds are a
  * maintainer's to start from Review, never a contributor's registration to
  * build. Remove is the owner's while the registration is theirs to free —
@@ -231,9 +233,9 @@ const revokedAlready = (w: WorkerRow): Verdict | null => (w.revoked_at ? { ok: f
  * back per id in `workers`, the state's word before the role's, as the row
  * greys it; the door behind Revoke refuses with the same verdict.
  */
-export function workspace(c: Contributor | null, login: string, registrations: Registration[] = [], workers: WorkerRow[] = []): Record<Right, Verdict> & { packages: Record<string, Verdict>; workers: Record<string, Record<WorkerRight, Verdict>> } {
+export function workspace(c: Contributor | null, login: string, registrations: Registration[] = [], workers: WorkerRow[] = []): Record<Right, Verdict> & { packages: Record<string, Verdict>; workers: Record<string, Record<WorkerRight, Verdict>>; host: Verdict } {
   const allow: Verdict = { ok: true };
-  const no = (status: 401 | 403 | 404 | 409, why: string): Verdict => ({ ok: false, status, why });
+  const no = (status: 401 | 403 | 404 | 409 | 410, why: string): Verdict => ({ ok: false, status, why });
   const person = !c ? no(401, SIGN_IN) : null;
   const owner = !!c && c.login === login;
   const maintainer = !!c && isMaintainer(c);
@@ -256,6 +258,10 @@ export function workspace(c: Contributor | null, login: string, registrations: R
         ?? allow;
   }
   const revoke = ownerOrMaintainer("revokes a worker here", 404) ?? allow;
+  // Who provides a machine to the pool (#331): a maintainer, on their own page, not blocked — the role from the synced
+  // MAINTAINERS.toml, before a block, so every contributor reads the same sentence. A machine joins as a host (POST
+  // /hosts/enrollments asks this); a legacy registration is gone (#346), whoever asks.
+  const provide = onlyOwner("registers a worker here") ?? (maintainer ? null : no(403, POOL_HOSTS)) ?? blocked ?? allow;
   const byWorker: Record<string, Record<WorkerRight, Verdict>> = {};
   for (const w of workers) {
     // The row's own state first — the same grey for every role — then whose it is.
@@ -263,8 +269,9 @@ export function workspace(c: Contributor | null, login: string, registrations: R
   }
   return {
     request: onlyOwner("requests here") ?? blocked ?? allow,
-    // A worker is a maintainer's to register (#331): the role from the synced MAINTAINERS.toml, before a block, so every contributor reads the same sentence.
-    register: onlyOwner("registers a worker here") ?? (maintainer ? null : no(403, POOL_HOSTS)) ?? blocked ?? allow,
+    // No legacy registration is made any more (#346): a contributor reads that their packages build on the pool's hosts (#331), a
+    // blocked maintainer the block, a maintainer that the door is gone — their new machine is a host. Never allowed.
+    register: provide.ok ? no(410, GONE.register) : provide,
     token: onlyOwner("mints their token") ?? allow,
     // A registration is built by the one who brought it: for anyone else the name is not theirs to build (404, as a name not registered).
     build: onlyOwner("builds here", 404) ?? blocked ?? allow,
@@ -274,6 +281,7 @@ export function workspace(c: Contributor | null, login: string, registrations: R
     withdraw: person ?? (maintainer ? null : no(403, MAINTAINER_DECIDES)) ?? allow,
     packages,
     workers: byWorker,
+    host: provide,
   };
 }
 
@@ -1072,23 +1080,15 @@ export async function handleDequeueBuild(c: Contributor, name: string, id: numbe
   return json({ task: id, status: "cancelled", by: c.login });
 }
 
-export async function handleRegisterWorker(c: Contributor, request: Request, env: Env): Promise<Response> {
-  // A worker is registered under the caller's own name, by a maintainer only (#331): a contributor's packages build on the pool's hosts; a blocked maintainer is refused too — in the words the page greys the button with.
-  const no = refused(workspace(c, c.login).register);
-  if (no) return no;
-  const b = (await request.json().catch(() => ({}))) as { name?: string; arch?: string; labels?: unknown };
-  if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
-  // A legacy registration, community trust: a maintainer's role container or set, until P3 retires them (#343). It builds any
-  // contributor's package, as a host does; a new machine joins as a host (/docs/worker-host). No mode is written: the column is
-  // history (#343).
-  const id = `${c.login}-${(b.name ?? b.arch).replace(/[^a-zA-Z0-9_.-]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
-  const token = newToken("omw");
-  await env.DB.prepare(
-    `INSERT INTO build_workers (id, arch, hostname, labels, owner, token_hash, packages, last_seen) VALUES (?, ?, NULL, ?, ?, ?, '[]', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
-  )
-    .bind(id, b.arch, b.labels ? JSON.stringify(b.labels) : null, c.login, await sha256Hex(token))
-    .run();
-  return json({ worker: id, token, arch: b.arch, note: `A legacy registration for a set you run (OMARCHY_WORKER_TOKEN in its .env); the token is shown once. It builds contributors' packages. A new machine joins as a host instead: ${HOST_DOCS}.` }, 201);
+/**
+ * POST /factory/workers — a legacy registration — is gone (#346, design v2 §21.4): the legacy sets retired with the move to the
+ * host agent, and nothing new is registered beside the hosts. A contributor is answered as before (#331: 403, their packages build
+ * on the pool's hosts); a maintainer 410, with the pointer to the maintainer-host docs. Nothing is read or written. The rows made
+ * before stay as history, on their pages; their owner or a maintainer retires (revokes) them.
+ */
+export function handleRegisterWorker(c: Contributor): Response {
+  const v = workspace(c, c.login).register;
+  return v.ok || v.status === 410 ? gone("register") : json({ error: v.why }, v.status);
 }
 
 /** The worker's own log — the lines between tasks, as it sent them with its claims — for its owner and the maintainers. */

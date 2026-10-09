@@ -66,11 +66,10 @@
 #    version checked — and, back past #277, the columns cleared once more,
 #    for a claim an isolate of the newer Worker still served meanwhile.
 #
-# Then the fleet follows the brain: every updater from #277 on sees the
-# pool's release change within two minutes (through /version when the
-# Worker it went back to knows no follow) and replaces what runs the other
-# image (the Studio's too, since its one-time step; an updater from before
-# #277 at its own fifteen-minute round).
+# Then the fleet follows the brain: every host's agent sees the pool's
+# release change at its next state read and goes down to it on the signed
+# statement this stored (design v2 §5.3); the legacy sets' updaters that
+# once followed `:latest` retired with them (#346).
 #
 # Needs: IMAGE (ghcr.io/<owner>/omarchy-worker), OMARCHY_API (the pool's API,
 # to read what runs), CLOUDFLARE_API_TOKEN (the deploy's, with Workers R2
@@ -221,7 +220,7 @@ for _ in $(seq 1 12); do
       (cd "$at/worker" && clear_277) || die "$to runs, but #277's columns were not cleared once it served: run the UPDATE of docs/security-model (A Worker rolled back past #277) by hand"
     fi
     (( stored )) || die "running $to, but its rollback statement did not reach R2: hosts under the host agent stay at their floor until one does — re-running rollback.yml -f to=$to is safe (it stores a freshly signed statement)"
-    say "running $running: every updater follows it within two minutes"; exit 0
+    say "running $running: every host's agent follows it on the signed statement"; exit 0
   fi
   sleep 5
 done

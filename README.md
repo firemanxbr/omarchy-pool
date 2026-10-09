@@ -58,7 +58,7 @@ crates/
   omarchy-cli/    the thin client
 worker/           the Cloudflare Worker: the API, the dashboard and its documentation (src/docs), the scheduler; D1 migrations
 tests/            end-to-end scripts (real pacman), health check, ABI gate, the trial, keyring fetcher, pinned images
-factory/          the factory: the governance file, the worker script and image, the broker, the project's own recipes
+factory/          the factory: the governance file, the worker script and image, the host set and its root-only prep, the agent sidecar, the sizing recipes
 docs/             what the code and the releases ship: the signing key's public part, the pacman hook, the config example, the logo
 poc/              the proof of concept's benchmarks and parked crates
 .github/          CI, E2E, Release (dispatched by a maintainer), the cost report

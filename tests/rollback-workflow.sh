@@ -121,7 +121,7 @@ first_move="$(line 'imagetools create')"
 (( $(line '^npm ci') < first_move && $(line 'wrangler deploy --dry-run') < first_move )) || fail "the Worker installs and builds before any tag moves: $(grep -nE 'npm|npx|create' "$STUB_LOG")"
 (( $(line 'imagetools create -t .*:latest') < $(line 'wrangler deploy --var') )) || fail "the images before the Worker"
 grep -q "npx wrangler d1 execute omarchy-repo --remote --command INSERT INTO events (kind, status, summary, payload) VALUES ('deploy', 'ok', 'omarchy-pool rolled back to v1.0.2 (from v1.0.3)'" "$STUB_LOG" || fail "a deploy event says it: $(grep d1 "$STUB_LOG")"
-grep -q "running v1.0.2: every updater follows it within two minutes" <<<"$out" || fail "and the running version is checked: $out"
+grep -q "running v1.0.2: every host's agent follows it on the signed statement" <<<"$out" || fail "and the running version is checked: $out"
 [[ -z "$(git -C "$tmp/repo" worktree list | sed 1d)" ]] || fail "the tag's checkout is removed: $(git -C "$tmp/repo" worktree list)"
 echo "ok: the images and the Worker go back"
 

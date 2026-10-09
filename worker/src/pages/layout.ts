@@ -1260,8 +1260,9 @@ export const HELPERS = String.raw`
   var ORDER_WORD = { "recheck-agent": "re-check", restart: "restart", "restart-agent": "restart of its agent service", drain: "drain", resume: "resume", update: "update", "stop-task": "stop of its task" };
   // A moment as a time of day on the reader's clock, "13:40".
   function hourOf(iso) { var d = new Date(iso); return isNaN(d) ? "" : String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
-  // Every live project worker of one role and architecture drained (#277, §1.10): the work only they take waits — an error line on Status
-  // (both roles) and on the Factory (the review workers), computed from the listing each page reads anyway, with no read and no write of its own.
+  // Every live legacy registration of one role (pool or review) and architecture drained (#277, §1.10; none is left once they retired, #346):
+  // the work only they take waits — an error line on Status (both roles) and on the Factory (the review role), computed from the listing
+  // each page reads anyway, with no read and no write of its own.
   function drainedRoles(ws, kinds) {
     var groups = {}, keys = [];
     (ws || []).forEach(function (w) {
@@ -1576,7 +1577,7 @@ export const HELPERS = String.raw`
     return ask({ title: "Roll " + ring + " back to release " + to + "?", text: "The ring serves that release again at once; the journal keeps why.", input: "required", confirm: "Roll back", danger: true }).then(function (note) {
       if (note === null) return null;
       return api("POST", "/api/v1/factory/jobs", { kind: "rollback", params: { ring: ring, to: to, note: note } }).then(function (j) {
-        var el = $("#rb-state"); if (el) { el.hidden = false; el.innerHTML = j.error ? pillHtml("error", "refused") + ' ' + esc(j.error) : pillHtml("ok", "queued") + ' rollback of <b>' + esc(ring) + '</b> to release ' + esc(to) + ' is task #' + esc(j.task || "?") + ' — a project worker runs it, the journal records it'; }
+        var el = $("#rb-state"); if (el) { el.hidden = false; el.innerHTML = j.error ? pillHtml("error", "refused") + ' ' + esc(j.error) : pillHtml("ok", "queued") + ' rollback of <b>' + esc(ring) + '</b> to release ' + esc(to) + ' is task #' + esc(j.task || "?") + ' — a maintainer\'s host runs it, the journal records it'; }
         return j;
       });
     });
@@ -1672,7 +1673,7 @@ export const HELPERS = String.raw`
     opts = opts || {};
     if (opts.note) return Promise.resolve(opts.note);
     if (what === "build") return fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }).then(function (ws) {
-      return ask({ title: "Have the project build " + label + " again", text: "Trusted review workers build the recipe again with the project's agent, for every architecture its contributor built — the contributor's bytes are never used. One review covers them all; the results show in review when they are staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
+      return ask({ title: "Have the project build " + label + " again", text: "The maintainers' hosts build the recipe again with the project's agent, for every architecture its contributor built — the contributor's bytes are never used. One review covers them all; the results show in review when they are staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
     });
     if (what === "reject") return ask({ title: "Reject " + label, text: "Every build of the package in review stops, on every architecture. A request rejected frees its name; a package already in the pool keeps it. The contributor reads the note, and the rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
     if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on, on every architecture it covered; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
@@ -1682,7 +1683,7 @@ export const HELPERS = String.raw`
   function decidedText(what, d, dropped) {
     var jobs = function (ids) { return ids.map(function (id) { return "<a href=\"/build/" + id + "\">#" + id + "</a>"; }).join(", "); };
     if (what === "approve") { var pubs = d.publishes ? Object.keys(d.publishes).map(function (a) { return d.publishes[a]; }) : [d.publish]; return "Approved — the project's build" + (pubs.length > 1 ? "s go" : " goes") + " into edge (publish job" + (pubs.length > 1 ? "s " : " ") + jobs(pubs) + ")."; }
-    if (what === "build") { var tasks = d.tasks && d.tasks.length ? d.tasks : [d.task]; return "The project is building it: task" + (tasks.length > 1 ? "s " : " ") + jobs(tasks) + ", on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent."; }
+    if (what === "build") { var tasks = d.tasks && d.tasks.length ? d.tasks : [d.task]; return "The project is building it: task" + (tasks.length > 1 ? "s " : " ") + jobs(tasks) + ", on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a maintainer's host") + " with the project's agent."; }
     if (what === "withdraw") return "Withdrawn — the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + "; another maintainer decides.";
     return dropped ? "Dropped." : "Rejected — the contributor sees the note." + (d.released ? " The name is free again." : "");
   }
