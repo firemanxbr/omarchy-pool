@@ -8,7 +8,7 @@ import { pullFromRings } from "./blocks";
 import { chains, chainOf, storyRows, stands, standsSql, type Approval, type TaskBrief } from "./story";
 export { stands };
 import { putRecord, recordKey, recordUrl } from "../record";
-import { packageRows, parseTargets, settleTargets, targetsOf, type PackageRows, type Target, type Targets } from "../targets";
+import { packageRows, parseNotShipping, parseTargets, settleTargets, targetsOf, type PackageRows, type Target, type Targets } from "../targets";
 import { throughWords, type Through } from "../agents";
 import { decidedWith, justNowWords, type PasskeyGate } from "./passkeys";
 import { placements, type PlacementView } from "./factory";
@@ -35,10 +35,17 @@ import { SELF_REVIEWED, soloMark, soloMarkOf, soloOf, type Solo, type SoloMark }
  *                                           its own recipe, the gate, staged like any build (review:<id>)
  *   POST /factory/tasks/:id/approve {note?, assertion} a maintainer, never the owner, on the *project's* staged build,
  *                                           with their passkey (#271: the browser's session and an assertion for this
- *                                           build, routes/passkeys.ts webGate) → one review of the package on the
- *                                           record, covering every architecture the project built again, and a
- *                                           publish job per architecture into edge; one that never built is not
- *                                           supported, outside the decision
+ *                                           build, routes/passkeys.ts webGate) → the package approved whole: one review
+ *                                           on the record, covering every architecture its request names, each built
+ *                                           again by the project or approved at this version already, and a publish
+ *                                           job per architecture it adds into edge — refused, with the reason, while
+ *                                           one of them is still building or did not build (#416)
+ *        {only: <arch>, reason, note?, assertion} the same door, on that architecture's build, with the passkey's
+ *                                           answer for approve:<task>:<arch> → that architecture approved alone: the
+ *                                           reason the request's other architectures do not ship goes on the record
+ *                                           (reviews.only_reason), their builds in review stop, and each one no
+ *                                           approval serves is not_shipping in the package's targets while the
+ *                                           approval stands — one approved at another version stays at it (#416)
  *   POST /factory/tasks/:id/reject  {note}  a maintainer, never the owner, either kind of staged build → the package's
  *                                           builds in review stop, and a request is rejected: the name is free again
  *                                           (a package in the pool keeps it: a new version is what was rejected)
@@ -113,7 +120,7 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
   const staged = await env.DB.prepare(
     `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.created_at, t.finished_at, t.pkgbuild_ref, t.result, t.attempts,
             t.lease_owner, w.owner AS worker_owner, w.labels AS worker_labels, w.hostname AS worker_hostname, w.trusted_by AS worker_trusted_by, w.agent AS worker_agent,
-            p.owner AS package_owner, p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source, p.project AS request_project, p.description AS request_description, p.targets,
+            p.owner AS package_owner, p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source, p.project AS request_project, p.description AS request_description, p.targets, p.arches AS request_arches,
             q.id AS request_id, q.version AS request_version, q.checklist AS request_checklist, q.migrated AS request_migrated, q.record AS request_record, q.sha256 AS request_sha256, q.created_at AS request_created_at,
             (SELECT decision FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decision,
             (SELECT by FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decided_by,
@@ -269,7 +276,9 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
       packaged: r.trust !== "project" || packaged.has(id),
       claim: claimOf(buildsOf(r.name as string)),
       solo,
-      ...packageFacts({ id, arch: r.arch as string, trust: r.trust as string, version: (r.version as string | null) ?? null }, buildsOf(r.name as string), parseTargets(r.targets)),
+      named: namedOf(r.request_arches),
+      // What the name's standing approvals ship already, each at its version (#416): `prior`, read above.
+      ...packageFacts({ id, arch: r.arch as string, trust: r.trust as string, version: (r.version as string | null) ?? null }, buildsOf(r.name as string), parseTargets(r.targets), namedOf(r.request_arches), prior.filter((x) => x.name === r.name).map((x) => ({ arch: x.arch, version: x.version }))),
     };
   };
   const canOf = (r: Record<string, unknown>, f: Facts) => can(decisions(c, { id: r.id as number, name: r.name as string, arch: r.arch as string, trust: r.trust as string, status: r.status as string }, f));
@@ -307,7 +316,7 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     audit: auditOf(r.audit_status as string | null, r.audit_result as string | null, r.audit_error as string | null),
     // The trial (the lab): a real pacman installed the project's build from the lab above edge — or could not; the transcript is the evidence.
     trial: trialOf(r.trial_status as string | null, r.trial_result as string | null, r.trial_error as string | null),
-    audit_status: undefined, audit_result: undefined, audit_error: undefined, trial_status: undefined, trial_result: undefined, trial_error: undefined, result: undefined, attempts: undefined, request_license: undefined, request_source: undefined,
+    audit_status: undefined, audit_result: undefined, audit_error: undefined, trial_status: undefined, trial_result: undefined, trial_error: undefined, result: undefined, attempts: undefined, request_license: undefined, request_source: undefined, request_arches: undefined,
   }));
   // Every row says whether it asks for a maintainer's time now — `waits`
   // — by the one rule below, and the one number every tile reads —
@@ -484,9 +493,14 @@ async function ownerOf(env: Env, name: string, fallback: string | null): Promise
  * /docs/governance, and that holds for a rejection too), then what is
  * already done.
  */
-export type Decision = "approve" | "reject" | "build" | "withdraw" | "changes" | "release";
-/** The decisions in the order a page reads them: the four of every build's Decision cell, then Review's two (#247) — request changes, and let a claim go. */
-export const DECISIONS: Decision[] = ["approve", "reject", "build", "withdraw", "changes", "release"];
+export type Decision = "approve" | "reject" | "build" | "withdraw" | "changes" | "release" | "approve_only";
+/**
+ * The decisions in the order a page reads them: the four of every build's
+ * Decision cell, then Review's two (#247) — request changes, and let a claim
+ * go — then the approval of this build's architecture alone (#416), which
+ * is the approve door with `only` and a reason (handleApprove).
+ */
+export const DECISIONS: Decision[] = ["approve", "reject", "build", "withdraw", "changes", "release", "approve_only"];
 
 /** What the pages read: true where the caller may, else the reason a person reads in the button's title. */
 export interface Can {
@@ -496,6 +510,7 @@ export interface Can {
   withdraw: boolean;
   changes: boolean;
   release: boolean;
+  approve_only: boolean;
   why: Partial<Record<Decision, string>>;
 }
 
@@ -531,16 +546,43 @@ export interface PackageBuilds {
 /**
  * What the package says about a decision on one row: a contributor's build
  * still running, the project's build of one still running, an architecture
- * its contributor built that the project has not built again, and whether
- * the row is where its own architecture stands (`superseded`: it is not —
- * a newer build of that architecture failed, or is built, and the row is
- * history).
+ * its contributor built that the project has not built again, whether the
+ * row is where its own architecture stands (`superseded`: it is not — a
+ * newer build of that architecture failed, or is built, and the row is
+ * history), and an architecture the request names that the package's
+ * approval would not ship (`missing`, #416): not this row's, no staged
+ * build of the project's at this version answers for it, and no standing
+ * approval serves it at this version already — it did not build, or nothing
+ * of it is built, or only another version of it is (`kept`: the version a
+ * standing approval still serves, which stays in the pool). `alone`: the
+ * request's other architectures an approval of this row's alone would leave
+ * out — every one no standing approval serves at this version.
  */
 export interface PackageFacts {
   building: { id: number; arch: string } | null;
   rebuilding: { id: number; arch: string; status: string } | null;
   unbuilt: { id: number; arch: string } | null;
   superseded: { arch: string; task: number | null; status: string } | null;
+  missing: { arch: string; status: string; task: number | null; kept: string | null } | null;
+  alone: string[];
+}
+
+/** A standing approval of one architecture, at the version it decided: what is shipped already (#416). */
+export interface Served { arch: string; version: string | null }
+
+/** The standing approvals among a package's decisions, newest first, as packageFacts reads them. */
+export function servedOf(decisions: { arch: string; decision: string; withdrawn_at: string | null; version?: string | null }[]): Served[] {
+  return decisions.filter((a) => a.decision === "approved" && a.withdrawn_at === null).map((a) => ({ arch: a.arch, version: a.version ?? null }));
+}
+
+/** The architectures a registration's request names (factory_packages.arches), the ones a repository builds; none for a name nobody registered. */
+export function namedOf(v: unknown): string[] {
+  try {
+    const a = typeof v === "string" ? (JSON.parse(v) as unknown) : v;
+    return Array.isArray(a) ? REPO_ARCHES.filter((x) => a.includes(x)) : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -572,16 +614,23 @@ function othersOf(t: { arch: string; version: string | null }, p: PackageBuilds,
     .filter((s): s is PackageBuilds["staged"][number] => !!s && s.version === t.version);
 }
 
-export function packageFacts(t: { id: number; arch: string; trust: string; version: string | null }, p: PackageBuilds, targets: Targets): PackageFacts {
+export function packageFacts(t: { id: number; arch: string; trust: string; version: string | null }, p: PackageBuilds, targets: Targets, named: string[] = [], served: Served[] = []): PackageFacts {
   // The row's own architecture: a contributor's build is where it stands when its target stands on it, a project's build when the target is that build. No target for it (a registration no transition settled, an architecture no longer requested): the row answers for itself.
   const own = targets[t.arch];
   const current = !own || (t.trust === "project" ? own.task === t.id : reviewedFrom(own, p) === t.id);
+  // An architecture a standing approval serves at this row's version is shipped already (#416): one approved alone before, the other added now.
+  const shipped = (a: string) => t.version !== null && served.some((s) => s.arch === a && s.version === t.version);
+  // What the package's approval of this row would ship: its own architecture, each other one the review covers whose project's build is staged, and each one shipped already.
+  const covered = new Set([t.arch, ...othersOf(t, p, targets).filter((s) => p.project.some((b) => b.review === s.id && b.status === "staged")).map((s) => s.arch), ...named.filter(shipped)]);
+  const left = named.find((a) => !covered.has(a));
   return {
     building: p.building.find((b) => b.id !== t.id) ?? null,
     rebuilding: p.project.find((b) => b.id !== t.id && (b.status === "queued" || b.status === "leased")) ?? null,
     // A project's build that failed is an answer too: that architecture is not supported by this review. One done is spent — published, its approval since taken back — and is built again.
     unbuilt: othersOf(t, p, targets).find((s) => !p.project.some((b) => b.review === s.id && ["queued", "leased", "staged", "failed"].includes(b.status))) ?? null,
     superseded: current ? null : { arch: t.arch, task: own!.task, status: own!.status },
+    missing: left ? { arch: left, status: targets[left]?.status ?? "waiting", task: targets[left]?.task ?? null, kept: served.find((s) => s.arch === left)?.version ?? null } : null,
+    alone: named.filter((a) => a !== t.arch && !shipped(a)),
   };
 }
 
@@ -611,9 +660,10 @@ export function buildsOfPackage(rows: { builds: Omit<PackageRows["builds"][numbe
  * project's build in flight, a standing approval anywhere on the chain, a
  * package still in staging (a project's build the sweep emptied has nothing
  * to publish), the claim — what a release lets go — what the package says
- * (packageFacts), and the solo-maintainer exception in force (#394), if any.
+ * (packageFacts), the solo-maintainer exception in force (#394), if any, and
+ * the architectures its request names (`named`, #416).
  */
-interface Facts extends PackageFacts { owner: string | null; requesters: string[]; already: boolean; inFlight: { id: number; status: string } | null; standing: boolean; packaged: boolean; claim: number[]; solo?: Solo | null }
+interface Facts extends PackageFacts { owner: string | null; requesters: string[]; already: boolean; inFlight: { id: number; status: string } | null; standing: boolean; packaged: boolean; claim: number[]; solo?: Solo | null; named?: string[] }
 
 /**
  * The claim on a package, as a release lets it go: the project's rebuilds a
@@ -689,18 +739,25 @@ export function decisions(c: Contributor | null, t: Decidable, f: Facts): Record
   const superseded = f.superseded
     ? no(409, `task ${t.id} is not where ${f.superseded.arch} stands: ${f.superseded.task !== null ? `its newer build, task ${f.superseded.task}, is ${f.superseded.status.replace("_", " ")}` : `${f.superseded.arch} is ${f.superseded.status.replace("_", " ")}`} — one review covers where each architecture stands`)
     : null;
+  // The steps both approvals share (#416): the project's own build, staged, never its requester's to decide but under the exception, not decided, its package in staging, where its architecture stands.
+  const approvable = person ?? notStaged
+    ?? (t.trust !== "project" ? no(409, "a contributor's build is evidence, never what users get — have the project build it first, then approve the project's build") : null)
+    ?? owner
+    ?? (f.already ? no(409, "already approved") : null)
+    ?? (!f.packaged ? no(409, "the project's build left no package in staging") : null);
+  // An architecture alone only where the request names another one (#416): with none, it is the package — and so it is when every other one is approved at this version already.
+  const others = (f.named ?? []).filter((a) => a !== t.arch);
+  const shipped = others.filter((a) => !f.alone.includes(a));
   return {
     // What users get is the project's build: a contributor's build is evidence, and "Build it by the project" comes first.
+    // The package whole (#416): every architecture its request names, each built again by the project and staged — never while one still builds or did not build.
     approve:
-      person ?? notStaged
-        ?? (t.trust !== "project" ? no(409, "a contributor's build is evidence, never what users get — have the project build it first, then approve the project's build") : null)
-        ?? owner
-        ?? (f.already ? no(409, "already approved") : null)
-        ?? (!f.packaged ? no(409, "the project's build left no package in staging") : null)
+      approvable
         ?? building
         ?? superseded
         ?? (f.rebuilding ? no(409, `the project is still building ${f.rebuilding.arch} (task ${f.rebuilding.id} is ${f.rebuilding.status}): one review covers every architecture — approve once it is staged`) : null)
         ?? (f.unbuilt ? no(409, `${f.unbuilt.arch} was built by its contributor (task ${f.unbuilt.id}), not yet by the project: have the project build it too — one review covers every architecture`) : null)
+        ?? (f.missing ? no(409, `${f.missing.arch} ${MISSING_WORDS[f.missing.status] ?? `is ${f.missing.status.replace("_", " ")}`}${f.missing.task !== null ? ` (task ${f.missing.task})` : ""}: the package is approved once every architecture it names is built again by the project — or approve ${t.arch} only, with the reason ${f.missing.arch} ${f.missing.kept ? `stays at ${f.missing.kept}` : "does not ship"}`) : null)
         ?? allow,
     // A chain with a standing approval is decided: the package is served (or on its way) under that approval, and a
     // rejection beside it would mark the registration as if nothing were — the approval is withdrawn first.
@@ -721,8 +778,27 @@ export function decisions(c: Contributor | null, t: Decidable, f: Facts): Record
     // either. Only a rebuild still queued or running is released: a staged one is the project's build a maintainer
     // decides on, and a claim released already has nothing left to let go.
     release: person ?? owner ?? (!f.claim.length ? no(409, `nothing to release: no rebuild of ${t.name} is queued or running — a staged rebuild is decided, not released`) : null) ?? allow,
+    // This build's architecture alone, the others set aside with the reason on the record (#416): whatever they are doing — what is
+    // building of them stops with the decision — but only where this build is where its architecture stands, and the request names another.
+    approve_only:
+      approvable
+        ?? superseded
+        ?? (!others.length ? no(409, `${t.name} names ${t.arch} alone: approve the package`) : null)
+        ?? (!f.alone.length ? no(409, `${shipped.join(" and ")} ${shipped.length > 1 ? "are" : "is"} approved at this version already: approve the package, it leaves nothing out`) : null)
+        ?? allow,
   };
 }
+
+/** Where an architecture the package's approval would not ship stands, as its refusal words it (PackageFacts.missing, #416). */
+const MISSING_WORDS: Record<string, string> = {
+  waiting: "has nothing built",
+  not_supported: "did not build",
+  built: "is built at another version",
+  reviewed: "is built again at another version",
+  approved: "is approved at another version only",
+  published: "is in the pool at another version only",
+  not_shipping: "does not ship: an approval of another architecture set it aside",
+};
 
 /** The verdicts as a page reads them. */
 export function can(v: Record<Decision, Verdict>): Can {
@@ -731,7 +807,7 @@ export function can(v: Record<Decision, Verdict>): Can {
     const x = v[d];
     if (!x.ok) why[d] = x.why;
   }
-  return { approve: v.approve.ok, reject: v.reject.ok, build: v.build.ok, withdraw: v.withdraw.ok, changes: v.changes.ok, release: v.release.ok, why };
+  return { approve: v.approve.ok, reject: v.reject.ok, build: v.build.ok, withdraw: v.withdraw.ok, changes: v.changes.ok, release: v.release.ok, approve_only: v.approve_only.ok, why };
 }
 
 /** The refusal a POST answers: the reason, with its status — and its code, where the predicate gives one. */
@@ -805,7 +881,7 @@ async function standingApproval(env: Env, name: string, id: number): Promise<App
  * architectures stands. A decision never reads the stored column: it is a
  * view the next transition settles, not what a decision is taken on.
  */
-async function factsOf(env: Env, t: Decidable & { owner: string | null; version?: string | null; params?: string | null }): Promise<Facts & { approval: Approval | null; builds: PackageBuilds; targets: Targets; solo: Solo | null }> {
+async function factsOf(env: Env, t: Decidable & { owner: string | null; version?: string | null; params?: string | null }): Promise<Facts & { approval: Approval | null; builds: PackageBuilds; targets: Targets; solo: Solo | null; named: string[]; served: Served[] }> {
   // The project's rebuild answers a contributor's build: whoever asked for that one asked for this one too (requestersOf), by the primary key.
   const from = t.trust === "project" ? reviewOf(t.params) : null;
   const [owner, already, approval, packaged, rows, asked, solo] = await Promise.all([
@@ -819,11 +895,15 @@ async function factsOf(env: Env, t: Decidable & { owner: string | null; version?
     soloOf(env),
   ]);
   const builds = rows ? buildsOfPackage(rows) : { building: [], staged: [], project: [] };
-  const targets = rows ? targetsOf(rows.arches, rows.builds, rows.decisions, rows.closedThrough) : {};
+  const targets = rows ? targetsOf(rows.arches, rows.builds, rows.decisions, rows.closedThrough, rows.notShipping) : {};
+  // The architectures the request names (#416): the package's approval ships every one, or one alone with the reason the others do not.
+  const named = namedOf(rows?.arches);
+  // What standing approvals ship already, each at its version, from the same decisions the targets read.
+  const served = rows ? servedOf(rows.decisions) : [];
   // The project's build of this one, queued, running or staged: the newest, from the same rows.
   const pb = builds.project.find((b) => b.review === t.id && ["queued", "leased", "staged"].includes(b.status));
   const inFlight = pb ? { id: pb.id, status: pb.status } : null;
-  return { owner, requesters: requestersOf(owner, t.owner, asked?.owner), already: !!already, inFlight, standing: !!approval, packaged: !!packaged, claim: claimOf(builds), approval, builds, targets, solo, ...packageFacts({ ...t, version: t.version ?? null }, builds, targets) };
+  return { owner, requesters: requestersOf(owner, t.owner, asked?.owner), already: !!already, inFlight, standing: !!approval, packaged: !!packaged, claim: claimOf(builds), approval, builds, targets, solo, named, served, ...packageFacts({ ...t, version: t.version ?? null }, builds, targets, named, served) };
 }
 
 /** GET /factory/tasks/:id/can — what the caller may do on this task, and why not: no-store, it is the caller's. */
@@ -1041,38 +1121,79 @@ export async function handleAnyHost(c: Contributor, id: number, request: Request
 /**
  * Approve: a maintainer, never the owner, on the project's staged build —
  * and with it the package: one review, on the record once, covering every
- * architecture the project built again (this build, and the project's
- * staged build of each other architecture's contributor build). An
- * architecture that never built, or that the project could not build
- * again, is not supported: outside the decision, named on it. A publish job
- * per architecture carries the project's package into the pool (signed
+ * architecture its request names, each built again by the project (this
+ * build, and the project's staged build of each other architecture's
+ * contributor build) or approved at this version already (one approved
+ * alone before, this one added now: the review covers what it adds). It is
+ * refused, with the reason, while one of them is still building or did not
+ * build (#416: decisions().approve). A publish
+ * job per architecture carries the project's package into the pool (signed
  * there), renders edge, and handleComplete marks the registration published
  * and links the review to the build (the seal and the track record read it).
+ * A name nobody registered names no architecture: its review covers what
+ * the project built again, and one that never built is not supported,
+ * outside the decision, as before #416.
+ *
+ * With `only` — this build's architecture — and a reason (#416), that
+ * architecture is approved alone, through the same door, the same review
+ * and the same withdrawal, with the passkey's answer for
+ * approve:<task>:<arch>. It leaves out the request's other architectures
+ * that no standing approval serves at this version (PackageFacts.alone):
+ * the reason is on the review (reviews.only_reason), the signed record and
+ * the journal line say "<arch> only" and why, and their builds in review —
+ * the contributors' and the project's, in flight or staged, that no
+ * standing approval decided — stop with the reason, cancelled in the
+ * decision's own batch (takeRound, SET_ASIDE_SQL), their packages leaving
+ * staging after it (the text evidence stays). One that no standing approval
+ * serves at all does not ship: named in reviews.not_shipping with the build
+ * its target stood on, and not_shipping in the package's targets while the
+ * approval stands (targets.ts). One an approval of another version still
+ * serves stays at that version, in the pool (`kept` on the record and the
+ * journal line), and is never written as not shipping.
+ *
+ * `gateFor` is the door's passkey check for the act the body names (the
+ * web's: index.ts, webGate); an agent's draft is confirmed in the browser
+ * already (`through`, routes/agents.ts) and approves the package whole.
  */
-export async function handleApprove(c: Contributor, id: number, request: Request, env: Env, through?: Through, gate?: PasskeyGate): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { note?: unknown; assertion?: unknown };
+export async function handleApprove(c: Contributor, id: number, request: Request, env: Env, through?: Through, gateFor?: (subject: string) => PasskeyGate): Promise<Response> {
+  const b = (await request.json().catch(() => ({}))) as { note?: unknown; assertion?: unknown; only?: unknown; reason?: unknown };
   const note = typeof b.note === "string" ? b.note : null;
+  // One architecture alone (#416): the body says so with `only`; an agent's draft never does.
+  const one = b.only !== undefined && b.only !== null && !through;
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string; params: string | null; result_filename: string | null }>();
   if (!t) return json({ error: "no such task" }, 404);
   const f = await factsOf(env, t);
-  const no = refused(decisions(c, t, f).approve);
+  const no = refused(decisions(c, t, f)[one ? "approve_only" : "approve"]);
   if (no) return no;
-  // What users get changes here: decided with a passkey (#271) — the draft's, confirmed in the browser, or the web's own answer for this build — checked once the act is allowed and before anything is written; never skipped.
-  const confirmed = await decidedWith(through, gate, b.assertion);
+  // What this architecture alone leaves out: the request's other architectures no standing approval serves at this version (PackageFacts.alone); none for the package whole.
+  const alone = one ? f.alone : [];
+  // Of those, one a standing approval serves at another version stays at it, in the pool (`kept`, with that version) — never "does not ship"; the
+  // rest do not ship (`aside`), each on the review with the build its target stands on now.
+  const kept: Record<string, string | null> = Object.fromEntries(alone.flatMap((a) => { const s = f.served.find((x) => x.arch === a); return s ? [[a, s.version]] : []; }));
+  const aside = alone.filter((a) => !(a in kept));
+  // The input after the predicate, and before the passkey is asked for: a caller who may not is told so, whatever they sent.
+  const reason = one && typeof b.reason === "string" ? b.reason.trim() : "";
+  if (one && b.only !== t.arch) return json({ error: `only: task ${id} is ${t.arch}'s build — an architecture is approved alone on its own build`, code: "only" }, 400);
+  if (one && reason.length < 4) return json({ error: `a reason is required: why ${alone.join(" and ")} ${alone.length > 1 ? "do" : "does"} not ship — it goes on the record and on the package's page`, code: "reason" }, 400);
+  // What users get changes here: decided with a passkey (#271) — the draft's, confirmed in the browser, or the web's own answer for this build and this scope — checked once the act is allowed and before anything is written; never skipped.
+  const confirmed = await decidedWith(through, gateFor?.(one ? `approve:${id}:${t.arch}` : `approve:${id}`), b.assertion);
   if (confirmed instanceof Response) return confirmed;
   const passkey = confirmed.passkey, owner = f.owner;
   // Its requester approving under the solo-maintainer exception (#394): with their passkey all the same, and marked self-reviewed.
   const self = selfReview(c, f);
-  // The targets: this build for its architecture, and the project's staged build of each other architecture the review covers (othersOf).
-  const others = othersOf(t, f.builds, f.targets).map((s) => f.builds.project.find((p) => p.review === s.id)).filter((p): p is PackageBuilds["project"][number] => !!p);
+  // The targets: this build for its architecture, and — for the package whole — the project's staged build of each other architecture the review covers (othersOf).
+  const others = one ? [] : othersOf(t, f.builds, f.targets).map((s) => f.builds.project.find((p) => p.review === s.id)).filter((p): p is PackageBuilds["project"][number] => !!p);
   const staged = others.filter((p) => p.status === "staged");
   const rows = [t, ...(staged.length ? (await env.DB.prepare("SELECT * FROM build_tasks WHERE id IN (SELECT value FROM json_each(?))").bind(JSON.stringify(staged.map((p) => p.id))).all<Staged & { trust: string }>()).results : [])]
     .sort((x, y) => REPO_ARCHES.indexOf(x.arch as (typeof REPO_ARCHES)[number]) - REPO_ARCHES.indexOf(y.arch as (typeof REPO_ARCHES)[number]));
-  // What never built is not supported: the project's build that failed, and a requested architecture whose own build failed.
+  // What never built is not supported: the project's build that failed, and a requested architecture whose own build failed — on a name that names no architecture; with one named, the predicate refused the package while one did not build.
   const current = (await settleTargets(env, t.name))[t.name] ?? {};
   const notSupported: Record<string, number | null> = {};
-  for (const p of others.filter((x) => x.status === "failed")) notSupported[p.arch] = p.id;
-  for (const [arch, x] of Object.entries(current)) if (x.status === "not_supported" && !rows.some((r) => r.arch === arch)) notSupported[arch] = x.task;
+  if (!one) {
+    for (const p of others.filter((x) => x.status === "failed")) notSupported[p.arch] = p.id;
+    for (const [arch, x] of Object.entries(current)) if (x.status === "not_supported" && !rows.some((r) => r.arch === arch)) notSupported[arch] = x.task;
+  }
+  const notShipping: Record<string, number | null> = Object.fromEntries(aside.map((a) => [a, f.targets[a]?.task ?? null]));
   // The staged package of each target: the predicate said so of this one (f.packaged), the publish jobs need the names.
   const targets: { t: Staged & { trust: string }; files: string[]; trial: string; agent: string | null }[] = [];
   for (const r of rows) {
@@ -1085,9 +1206,13 @@ export async function handleApprove(c: Contributor, id: number, request: Request
     targets.push({ t: r, files, trial: trial.status === "done" ? (trial.verdict ?? "unknown") : trial.status, agent: await rebuiltWith(env, r) });
   }
   const arches = targets.map((x) => x.t.arch);
-  // The review and its rows, taken at once: a second approval — or a rejection — of these builds sent at the same moment writes nothing.
-  const review = await takeRound(env, { name: t.name, version: t.version, decision: "approved", by: c.login, note, arches, notSupported, through, solo: self, rows: targets.map((x) => ({ task: x.t.id, arch: x.t.arch, version: x.t.version, rebuild: x.t.id })) });
-  if (review === null) return decidedAlready(env, t.name, targets.map((x) => x.t.id));
+  // What the architectures left out still have in review stops with the decision: each build of theirs in flight or staged that no standing approval decided, the contributors' and the project's.
+  const stopping = alone.length ? await inReviewOf(env, t.name, alone) : [];
+  // The review, its rows and those builds cancelled, taken at once: a second approval — or a rejection, or an approval of another architecture
+  // alone — of any of these builds sent at the same moment writes nothing, and cancels nothing.
+  const taken = await takeRound(env, { name: t.name, version: t.version, decision: "approved", by: c.login, note, arches, notSupported, onlyReason: one ? reason : null, notShipping, through, solo: self, rows: targets.map((x) => ({ task: x.t.id, arch: x.t.arch, version: x.t.version, rebuild: x.t.id })), ...(stopping.length ? { setAside: { ids: stopping, why: `not shipping: ${t.arch} approved alone by ${c.login} — ${reason.slice(0, 400)}` } } : {}) });
+  if (taken === null) return decidedAlready(env, t.name, [...targets.map((x) => x.t.id), ...stopping]);
+  const review = taken.review, setAside = taken.setAside;
   const publishes: Record<string, number> = {};
   for (const x of targets) {
     // The review it publishes is `review_id`: `review` in a task's params names the contributor's build a project's build answers, and every reader of a task (its page's provenance, the claim's upload, the job's scopes) reads it so.
@@ -1099,19 +1224,49 @@ export async function handleApprove(c: Contributor, id: number, request: Request
     if (publish) publishes[x.t.arch] = publish.id;
   }
   const ns = Object.keys(notSupported);
+  // One architecture alone in words, the same on the registration and the journal: "aarch64 only", what the others do — not ship, or stay at the version in the pool — and why.
+  const leftOut = [...(aside.length ? [`${aside.join(" · ")} ${aside.length > 1 ? "do" : "does"} not ship`] : []), ...Object.entries(kept).map(([a, v]) => `${a} stays at ${v ?? "the version approved"}`)];
+  const doNot = `${leftOut.join("; ")}: ${reason.slice(0, 200)}`;
   await env.DB.prepare("UPDATE factory_packages SET status = 'approved', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
-    .bind(`${t.version ?? ""} for ${arches.join(" · ")} approved by ${c.login}${self ? `, ${SELF_REVIEWED}` : ""}${ns.length ? ` (${ns.join(" · ")} not supported)` : ""}; publishing the project's build${arches.length > 1 ? "s" : ""} (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, t.name)
+    .bind(`${t.version ?? ""} for ${one ? `${t.arch} only` : arches.join(" · ")} approved by ${c.login}${self ? `, ${SELF_REVIEWED}` : ""}${ns.length ? ` (${ns.join(" · ")} not supported)` : ""}${one ? ` (${doNot})` : ""}; publishing the project's build${arches.length > 1 ? "s" : ""} (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, t.name)
     .run();
   for (const x of targets) await cancelPendingAudit(env, x.t.id);
   // Signed and journaled: who, through which door, and the agent that rebuilt what ships — per architecture, what its review worker ran (rebuiltWith); `agent` is this build's.
   const via = viaOf(request), agent = targets.find((x) => x.t.id === id)?.agent ?? null, at = new Date().toISOString();
-  const record = await decisionRecord(env, t.name, "approve", `r${review}`, { version: t.version, arches, not_supported: notSupported, owner, review, targets: targets.map((x) => ({ arch: x.t.arch, task: x.t.id, files: x.files, trial: x.trial, publish: publishes[x.t.arch] ?? null, agent: x.agent })), by: c.login, via, ...(through ? { through } : { passkey }), agent, at, note, ...soloRecord(self) });
+  const record = await decisionRecord(env, t.name, "approve", `r${review}`, { version: t.version, arches, scope: one ? "architecture" : "package", not_supported: notSupported, not_shipping: notShipping, kept, only_reason: one ? reason : null, set_aside: setAside, owner, review, targets: targets.map((x) => ({ arch: x.t.arch, task: x.t.id, files: x.files, trial: x.trial, publish: publishes[x.t.arch] ?? null, agent: x.agent })), by: c.login, via, ...(through ? { through } : { passkey }), agent, at, note, ...soloRecord(self) });
   // A first use of a passkey registered just now — in the Approve dialog itself, #287 — says so on the line.
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('approve', 'edge', 'factory', 'ok', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${justNowWords(confirmed)}${throughWords(through)}${withAgents(targets.map((x) => ({ arch: x.t.arch, agent: x.agent })))}${selfWords(self)}${note ? " — " + note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, JSON.stringify({ review, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, by: c.login, via, ...(through ? { through } : { passkey }), ...(confirmed.justNow ? { registered_just_now: true } : {}), agent, agents: Object.fromEntries(targets.map((x) => [x.t.arch, x.agent])), owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}), ...soloPayload(self) }))
+    .bind(`${t.name} ${t.version ?? ""} (${one ? `${t.arch} only: ${reason.slice(0, 160)}` : arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${justNowWords(confirmed)}${throughWords(through)}${withAgents(targets.map((x) => ({ arch: x.t.arch, agent: x.agent })))}${selfWords(self)}${note ? " — " + note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})${one ? `; ${leftOut.join("; ")}${setAside.length ? ` (task${setAside.length > 1 ? "s" : ""} ${setAside.join(", ")} stopped)` : ""}` : ""}`, JSON.stringify({ review, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, not_shipping: notShipping, kept, only_reason: one ? reason : null, set_aside: setAside, by: c.login, via, ...(through ? { through } : { passkey }), ...(confirmed.justNow ? { registered_just_now: true } : {}), agent, agents: Object.fromEntries(targets.map((x) => [x.t.arch, x.agent])), owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}), ...soloPayload(self) }))
     .run();
+  // What the builds set aside leave behind, once the decision is on the record and on its way: their pending audits and trials, and their
+  // packages in staging (the text evidence stays). Best effort — a failure here never undoes a decision taken — and the weekly sweep
+  // (staging.ts, sweepStaging) reclaims a cancelled build's package all the same.
+  try {
+    for (const x of setAside) await cancelPendingAudit(env, x);
+    await reclaimStagingPackages(env, setAside);
+  } catch (e) {
+    console.error(`approve ${t.name}: the builds set aside (${setAside.join(", ")}) keep their staging until the sweep: ${e instanceof Error ? e.message : String(e)}`);
+  }
   await settleTargets(env, t.name);
-  return json({ task: id, decision: "approved", by: c.login, publish: publishes[t.arch], publishes, review, arches, not_supported: notSupported, via, ...(through ? { through } : { passkey }), agent, record: record.url, ...soloPayload(self) });
+  return json({ task: id, decision: "approved", by: c.login, publish: publishes[t.arch], publishes, review, arches, not_supported: notSupported, not_shipping: notShipping, kept, only_reason: one ? reason : null, set_aside: setAside, via, ...(through ? { through } : { passkey }), agent, record: record.url, ...soloPayload(self) });
+}
+
+/**
+ * The builds an approval of one architecture sets aside (#416): of the
+ * architectures it leaves out, every build of the package in flight or
+ * staged that no standing approval decided — the contributors' and the
+ * project's, by the package's story (its chains, as a rejection's round
+ * reads them). Read before the decision; takeRound cancels them in the
+ * decision's own batch (SET_ASIDE_SQL), under the same condition as the
+ * review.
+ */
+async function inReviewOf(env: Env, name: string, arches: string[]): Promise<number[]> {
+  const story = await storyRows(env, name);
+  return chains(story.tasks, story.approvals, story.pkg, story.request)
+    .filter((ch) => !ch.approval?.standing)
+    .flatMap((ch) => [ch.contributor, ch.project])
+    .filter((x): x is NonNullable<typeof x> => !!x && arches.includes(x.arch) && ["queued", "leased", "staged"].includes(x.status))
+    .map((x) => x.id);
 }
 
 /**
@@ -1141,8 +1296,23 @@ function withAgents(xs: { arch: string; agent: string | null }[]): string {
 
 /** No live decision on any of the builds named — an approvals row not withdrawn: what both statements of a decision's batch write under. */
 const UNDECIDED = "NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id IN (SELECT value FROM json_each(?)) AND a.withdrawn_at IS NULL)";
+/**
+ * The builds an approval of one architecture sets aside (#416), cancelled by
+ * their primary keys in the decision's own batch, ahead of its review: each
+ * only while it is still in flight or staged and no live decision is on it,
+ * and only while the round's builds — the ones it decides and the ones it
+ * sets aside — are undecided (UNDECIDED, the same set as the review's). Two
+ * approvals of different architectures alone sent at once each name the
+ * other's builds: the second cancels nothing and writes nothing. The ids it
+ * stopped.
+ */
+export const SET_ASIDE_SQL = `UPDATE build_tasks SET status = 'cancelled', error = ?, lease_expires_at = NULL, finished_at = COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  WHERE id IN (SELECT value FROM json_each(?)) AND +status IN ('queued', 'leased', 'staged')
+    AND NOT EXISTS (SELECT 1 FROM approvals d WHERE d.task_id = build_tasks.id AND d.withdrawn_at IS NULL)
+    AND ${UNDECIDED}
+  RETURNING id`;
 /** A decision's review, written only while its builds are undecided (UNDECIDED; the approvals' task index). */
-export const REVIEW_SQL = `INSERT INTO reviews (name, version, decision, by, note, arches, not_supported, released, changes) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${UNDECIDED} RETURNING id`;
+export const REVIEW_SQL = `INSERT INTO reviews (name, version, decision, by, note, arches, not_supported, released, changes, only_reason, not_shipping) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${UNDECIDED} RETURNING id`;
 /**
  * Its rows, one per build decided, under the same condition, with the review
  * just written (the name's newest, by the reviews' (name, id) index) — and,
@@ -1168,18 +1338,28 @@ export const SOLO_REVIEW_SQL = "UPDATE reviews SET solo_since = ?1 WHERE id = (S
  * in one batch — a transaction, nothing runs between its two statements —
  * each written only while no live decision is on any of those builds. Two
  * decisions sent at once on the same builds (two approvals; changes and a
- * rejection) are one decision: the facts both read said "undecided", and the
- * second batch writes nothing. The review's id, or null: decided already.
+ * rejection; the package and one architecture of it, #416) are one
+ * decision: the facts both read said "undecided", and the second batch
+ * writes nothing. An approval of one architecture carries its reason and
+ * what it set aside on the review (only_reason, not_shipping), and the
+ * builds it sets aside (`setAside`) are cancelled first in the same batch,
+ * under the same condition over every build the round names — decided and
+ * set aside — so it stops nothing unless it decides. The reviews and
+ * approvals rows are the only record of a decision, written here and nowhere
+ * else. The review's id and the builds it stopped, or null: decided already.
  */
-async function takeRound(env: Env, r: { name: string; version: string | null; decision: "approved" | "rejected"; by: string; note: string | null; arches: string[]; notSupported?: Record<string, number | null>; released?: boolean; changes?: boolean; through?: Through; solo?: Solo | null; rows: { task: number; arch: string; version: string | null; rebuild: number | null }[] }): Promise<number | null> {
-  const decided = JSON.stringify(r.rows.map((x) => x.task));
-  const [review] = await env.DB.batch([
-    env.DB.prepare(REVIEW_SQL).bind(r.name, r.version, r.decision, r.by, r.note, JSON.stringify(r.arches), JSON.stringify(r.notSupported ?? {}), r.released ? 1 : 0, r.changes ? 1 : 0, decided),
-    env.DB.prepare(ROWS_SQL).bind(r.name, r.decision, r.by, r.note, r.name, JSON.stringify(r.rows.map((x) => (r.through ? { ...x, through: r.through } : x))), decided),
+async function takeRound(env: Env, r: { name: string; version: string | null; decision: "approved" | "rejected"; by: string; note: string | null; arches: string[]; notSupported?: Record<string, number | null>; onlyReason?: string | null; notShipping?: Record<string, number | null>; released?: boolean; changes?: boolean; through?: Through; solo?: Solo | null; rows: { task: number; arch: string; version: string | null; rebuild: number | null }[]; setAside?: { ids: number[]; why: string } }): Promise<{ review: number; setAside: number[] } | null> {
+  const aside = r.setAside?.ids.length ? r.setAside : null;
+  const guard = JSON.stringify([...r.rows.map((x) => x.task), ...(aside?.ids ?? [])]);
+  const out = await env.DB.batch([
+    ...(aside ? [env.DB.prepare(SET_ASIDE_SQL).bind(aside.why, JSON.stringify(aside.ids), guard)] : []),
+    env.DB.prepare(REVIEW_SQL).bind(r.name, r.version, r.decision, r.by, r.note, JSON.stringify(r.arches), JSON.stringify(r.notSupported ?? {}), r.released ? 1 : 0, r.changes ? 1 : 0, r.onlyReason ?? null, JSON.stringify(r.notShipping ?? {}), guard),
+    env.DB.prepare(ROWS_SQL).bind(r.name, r.decision, r.by, r.note, r.name, JSON.stringify(r.rows.map((x) => (r.through ? { ...x, through: r.through } : x))), guard),
     // Self-reviewed under the solo-maintainer exception (#394): on the review the two statements above wrote, in the same transaction.
     ...(r.solo ? [env.DB.prepare(SOLO_REVIEW_SQL).bind(r.solo.since, r.name)] : []),
   ]);
-  return (review.results[0] as { id?: number } | undefined)?.id ?? null;
+  const review = (out[aside ? 1 : 0].results[0] as { id?: number } | undefined)?.id ?? null;
+  return review === null ? null : { review, setAside: aside ? (out[0].results as { id: number }[]).map((x) => x.id) : [] };
 }
 
 /** The 409 of a decision another maintainer took a moment before: what it was and whose. */
@@ -1294,8 +1474,9 @@ async function closeRound(c: Contributor, id: number, request: Request, env: Env
   const closes = !inPool;
   const done = (word === "changes" ? `changes requested by ${c.login}` : `rejected by ${c.login}`) + (self ? `, ${SELF_REVIEWED}` : "");
   // The review and its rows, taken at once: changes and a rejection — or two of either — sent at the same moment are one decision.
-  const review = await takeRound(env, { name: t.name, version: t.version, decision: "rejected", by: c.login, note, arches: decided.map((x) => x.arch), released, changes: word === "changes", through, solo: self, rows: decided.map((x) => ({ task: x.id, arch: x.arch, version: x.version, rebuild: null })) });
-  if (review === null) return decidedAlready(env, t.name, decided.map((x) => x.id));
+  const taken = await takeRound(env, { name: t.name, version: t.version, decision: "rejected", by: c.login, note, arches: decided.map((x) => x.arch), released, changes: word === "changes", through, solo: self, rows: decided.map((x) => ({ task: x.id, arch: x.arch, version: x.version, rebuild: null })) });
+  if (taken === null) return decidedAlready(env, t.name, decided.map((x) => x.id));
+  const review = taken.review;
   // The round's last build, by the name's (name, arch, id) index: `+kind` keeps the planner off the index of every build's kind.
   const lastBuild = await env.DB.prepare("SELECT MAX(id) AS id FROM build_tasks WHERE name = ? AND +kind = 'build'").bind(t.name).first<{ id: number | null }>();
   await env.DB.batch([
@@ -1430,6 +1611,9 @@ interface DecisionRow {
   review_arches?: string | null; review_not_supported?: string | null; review_released?: number | null; review_changes?: number | null;
   /** reviews.solo_since (#394): a decision its requester took under the solo-maintainer exception — served as `solo_exception`. */
   review_solo_since?: string | null;
+  /** reviews.only_reason and reviews.not_shipping (#416): an approval of one architecture alone, why the others do not ship and which — served as `only_reason` and `not_shipping`. */
+  review_only_reason?: string | null;
+  review_not_shipping?: string | null;
   /** approvals.agent (#252): the agent a decision was drafted through, as JSON — served parsed, as `through`, never under `agent`, which is the rebuild's agent (#247). */
   agent?: string | null;
 }
@@ -1474,7 +1658,7 @@ export function asReviews<R extends DecisionRow>(rows: R[], ringsOf: (name: stri
     return {
       ...first,
       review: first.review_id,
-      review_arches: undefined, review_not_supported: undefined, review_released: undefined, review_changes: undefined, review_solo_since: undefined,
+      review_arches: undefined, review_not_supported: undefined, review_released: undefined, review_changes: undefined, review_solo_since: undefined, review_only_reason: undefined, review_not_shipping: undefined,
       // Who a decision an agent drafted came through (#252) — the agent, its client, the grant, the draft — parsed; `agent` stays #247's word for the rebuild's agent, and is not the column's.
       agent: undefined,
       through: throughOf(first.agent),
@@ -1487,6 +1671,9 @@ export function asReviews<R extends DecisionRow>(rows: R[], ringsOf: (name: stri
       changes: first.review_changes === 1,
       // Self-reviewed (#394): its requester took it under the solo-maintainer exception — who, and the exception's `since`; null under the two-person rule.
       solo_exception: first.review_solo_since ? { maintainer: first.by, since: first.review_solo_since } : null,
+      // One architecture approved alone (#416): why the request's others do not ship, and which, each with the build it set aside; null and {} for a package approved whole.
+      only_reason: first.review_only_reason ?? null,
+      not_shipping: parseNotShipping(first.review_not_shipping),
       targets,
       rings: sortRings([...new Set(targets.flatMap((x) => x.rings))]),
       publish_status: targets.map((x) => x.publish_status).filter((s): s is string => !!s).sort((x, y) => worst.indexOf(x) - worst.indexOf(y))[0] ?? null,
@@ -1547,7 +1734,7 @@ export const APPROVALS_PAGE = 100;
  */
 export async function handleApprovals(env: Env): Promise<Response> {
   const select = `SELECT a.*, r.status AS rebuild_status, r.result_filename AS rebuild_result, fp.blocked_at,
-              v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released, v.changes AS review_changes, v.solo_since AS review_solo_since,
+              v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released, v.changes AS review_changes, v.solo_since AS review_solo_since, v.only_reason AS review_only_reason, v.not_shipping AS review_not_shipping,
               (SELECT p.status FROM build_tasks p WHERE p.name = a.name AND p.arch = a.arch AND p.id > a.task_id AND p.kind = 'publish' AND json_extract(p.params, '$.task') = a.task_id ORDER BY p.id DESC LIMIT 1) AS publish_status
          FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task LEFT JOIN factory_packages fp ON fp.name = a.name LEFT JOIN reviews v ON v.id = a.review_id`;
   const [page, served] = await Promise.all([

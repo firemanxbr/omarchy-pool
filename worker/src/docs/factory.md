@@ -125,8 +125,25 @@ verify and attest the package faster and approve it with more confidence.
    one on the same builds at the same moment is refused. What takes an
    approval back is a decision of its own, on the record: a block, or the
    withdrawal a maintainer writes a reason for. The approval is one decision on
-   the record for the package — a review covering every architecture the
-   project built again, one that never built named *not supported* — and a
+   the record for the package — *Approve package*, one press and one passkey
+   answer: a review covering every architecture its request names, each
+   built again by the project, refused with the reason while one of them is
+   still building or did not build (#416). A maintainer who means to ship one
+   architecture alone presses *Approve <arch> only* and writes why the others
+   do not ship ("upstream ships no x86_64 build"): the same door, the same
+   review and the same withdrawal, the reason on the review, the signed
+   record, the journal line and the package's page — *approved for aarch64
+   only: <reason>* — and the other architecture's builds in review stop with
+   the decision, its target *not shipping* while the approval stands, so it
+   never reads as forgotten. An architecture approved at that version
+   already counts as shipped: built later, the other one is added by
+   *Approve package*. One an approval of an older version still serves — a
+   bump whose new version did not build there — stays at that version
+   (*aarch64 stays at 1.0-1* on the record and the journal line), never *not
+   shipping*. Two such decisions on different architectures sent at once are
+   one decision: the builds one sets aside are cancelled in the same batch as
+   its review, under the same condition. Nothing is ever approved by itself: a bump is
+   evidence until a maintainer decides. Each approval queues a
    `publish` job per architecture: a project worker fetches the staged
    packages with the job's token, publishes them into `edge` as source
    `factory` (the pool signs), renders, and the brain marks the
@@ -172,7 +189,8 @@ edge — `unmaintained` after 30 days without a build;
 `GET /api/v1/factory/packages` lists every request and where it stands.
 Beside that word, each architecture's own, its *target*: `waiting`,
 `building`, `built`, `not supported`, `reviewing`, `reviewed`,
-`approved`, `published`. The package's word follows the builds, not the
+`approved`, `published` — and `not shipping`, set aside by an approval of
+another architecture alone, with its reason on the record (#416). The package's word follows the builds, not the
 last worker to speak. While any build of the name is staged for a
 maintainer, a failure on the other architecture leaves it `staged` and
 writes what that build ran into in its detail; while the other
@@ -190,14 +208,17 @@ that was free — and one of them has it. A rejection frees the name, and
 anyone may request it again; a package already in the pool keeps it, and
 what was rejected is the new version. A contributor's block frees none of
 their names. The builds run per architecture: one that fails after the
-tries it had is *not supported*, and the others go on to the review; if
-none builds, the request goes back to its owner. An architecture already
+tries it had is *not supported*, and the others go on to the review — where
+the package is approved whole only once every architecture it names is
+built again, and one architecture alone only with the reason the others do
+not ship; if none builds, the request goes back to its owner. An architecture already
 in the pool stays where it is served when a build of its next version
 fails: that failure is the new version's. One review covers every
 target, as each architecture stands now and at one version: the project
 builds each supported architecture again on its review workers — never an
 older build of an architecture whose newest one failed — and one decision
-— approve, request changes, reject — covers them all, as a withdrawal or a
+— approve the package, or one architecture of it alone with the reason,
+request changes, reject — covers them all, as a withdrawal or a
 block of it does later; what it approved is what
 the publish jobs, one per architecture, carry into edge. A block covers
 the package on every architecture and every ring, withdraws the review it

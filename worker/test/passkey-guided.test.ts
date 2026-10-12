@@ -817,7 +817,7 @@ describe("registered at the moment of need (#287)", () => {
     };
     const pages: [string, string[]][] = [
       [`/build/${F.projectTask}`, ['first: "Register a passkey and approve"']],
-      ["/review", ['"Register a passkey and approve"', 'first: "Register a passkey and block"', 'firstPasskey("Nothing was decided.")', "if (CONFIRM.what === \"approve\" && needsPasskey()) { registerFirst(go); return; }", 'id="pk-notice"']],
+      ["/review", ['"Register a passkey and approve"', 'first: "Register a passkey and block"', 'firstPasskey("Nothing was decided.")', "if ((CONFIRM.what === \"approve\" || CONFIRM.what === \"only\") && needsPasskey()) { registerFirst(go); return; }", 'id="pk-notice"']],
       [`/package/${F.factoryPkg}`, ['"Register a passkey and block"', 'if (what === "block" && needsPasskey()) { registerFirst(); return; }', 'firstPasskey("Nothing was decided.")']],
       ["/status", ['first: "Register a passkey and force", nothing: "Nothing was queued."']],
       [`/user/${F.m2}`, ['first: "Register a passkey and reset", nothing: "Nothing was reset."', 'id="pk-notice"', "passkeyHeld(PK_HELD > 0)"]],

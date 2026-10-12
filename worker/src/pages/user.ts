@@ -528,7 +528,7 @@ const SCRIPT = String.raw`
         var standing = a.standing;
         var where = standing ? (a.rings && a.rings.length ? a.rings.map(function (r) { return pillHtml(r === "stable" ? "ok" : r === "rc" ? "blue" : r === "edge" ? "lilac" : "warn", r); }).join(" ") : '<span class="muted" title="approved, not served: the publish job did not run, or a later release dropped it">not served</span>') : '<span class="muted">—</span>';
         var act = ' ' + withdrawBtn(a, standing);
-        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="' + pkgHref(a.name, servedRing(a.rings), a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(archesOf(a)) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : (a.changes ? taskPill("changes requested", "a rejection that asked for changes: the name stayed the requester's") : taskPill(a.decision))) + '</td><td>' + where + act + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
+        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="' + pkgHref(a.name, servedRing(a.rings), a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td' + (a.only_reason ? ' title="' + esc(approvedFor(a)) + '"' : '') + '>' + esc(archesOf(a)) + (a.only_reason ? ' only' : '') + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : (a.changes ? taskPill("changes requested", "a rejection that asked for changes: the name stayed the requester's") : taskPill(a.decision))) + '</td><td>' + where + act + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
       }, { empty: "no decision yet" });
     }
     renderWorkers();
@@ -1120,12 +1120,12 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Shown on a maintainer's page; whether an approval stands is the row's own `standing` (the server's word, never decision alone); Withdraw is on every row for whoever looks — live for a maintainer where an approval stands, grey with why not otherwise — with its dialog; the name opens the package on the most stable ring the row lists.
+      // Shown on a maintainer's page; whether an approval stands is the row's own `standing` (the server's word, never decision alone); an approval of one architecture alone says "only", its reason on hover (#416); Withdraw is on every row for whoever looks — live for a maintainer where an approval stands, grey with why not otherwise — with its dialog; the name opens the package on the most stable ring the row lists.
       id: "user.approvals-table",
       page: `/user/${F.m2}`,
       anchor: ['id="approvals-section"', 'id="approvals"'],
-      script: ['"#approvals-section"', 'pager("#approvals"', "var standing = a.standing", "a.withdrawn_at", "a.rings", "pkgHref(a.name, servedRing(a.rings), a.arch)", "esc(archesOf(a))", "withdrawBtn(a, standing)", 'may("withdraw") && standing', '"nothing standing to withdraw"', "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
-      reads: [{ path: `/api/v1/users/${F.m2}`, fields: ["role", "approvals.0.task_id", "approvals.0.name", "approvals.0.arch", "approvals.0.arches", "approvals.0.version", "approvals.0.decision", "approvals.0.standing", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.rings", "approved_packages.0"] }],
+      script: ['"#approvals-section"', 'pager("#approvals"', "var standing = a.standing", "a.withdrawn_at", "a.rings", "pkgHref(a.name, servedRing(a.rings), a.arch)", "esc(archesOf(a))", "a.only_reason ? ' only' : ''", "withdrawBtn(a, standing)", 'may("withdraw") && standing', '"nothing standing to withdraw"', "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
+      reads: [{ path: `/api/v1/users/${F.m2}`, fields: ["role", "approvals.0.task_id", "approvals.0.name", "approvals.0.arch", "approvals.0.arches", "approvals.0.only_reason", "approvals.0.version", "approvals.0.decision", "approvals.0.standing", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.rings", "approved_packages.0"] }],
       // The fixture's one approval was taken back by the build page's manifest, which walks before this one: nothing stands to withdraw.
       acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/withdraw`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 404 } }],
       visible: EVERYONE,

@@ -496,8 +496,9 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(approve|reject|build)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
-    // Approve is decided with the maintainer's passkey, in the browser (#271): webGate, run by the handler once the predicate allowed it.
-    return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env, undefined, webGate(request, url, env, c.login, `approve:${Number(m[1])}`)) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
+    // Approve is decided with the maintainer's passkey, in the browser (#271): webGate, run by the handler once the predicate allowed it, for
+    // the act its body names — approve:<task> for the package, approve:<task>:<arch> for that architecture alone (#416).
+    return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env, undefined, (subject) => webGate(request, url, env, c.login, subject)) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
   }
   // The project's copy of a maintainer's package, kept off their hosts while another maintainer's can build it (#339, D35), released to
   // any host by another maintainer when only theirs can: with the passkey, in the browser (webGate), once the predicate allowed it.
