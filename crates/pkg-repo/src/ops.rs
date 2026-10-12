@@ -128,9 +128,11 @@ pub fn publish(
             }
             _ => sha,
         };
-        if api.is_indexed(&sha)? {
+        // Indexed for this architecture's repository, not just for the other's: the same
+        // bytes of an `-any` package get a row (and an object) per architecture (#421).
+        if api.is_indexed(&sha, arch)? {
             eprintln!(
-                "{} {} already in pool, skipping upload",
+                "{} {} already in pool for {arch}, skipping upload",
                 manifest.name, manifest.version
             );
         } else {

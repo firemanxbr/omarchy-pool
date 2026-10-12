@@ -79,7 +79,7 @@ async function seedRing(n: number) {
     if (i % 3 === 0) lab.push(`('lab', ${base + i})`);
   }
   const chunk = async (rows: string[], head: string) => { for (let i = 0; i < rows.length; i += 400) await env.DB.prepare(`${head} ${rows.slice(i, i + 400).join(",")}`).run(); };
-  await chunk(pk, "INSERT INTO packages (id, sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES");
+  await chunk(pk, "INSERT INTO packages (id, row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES");
   await chunk(rc, "INSERT INTO ring_packages (ring, package_id) VALUES");
   await chunk(lab, "INSERT INTO ring_packages (ring, package_id) VALUES");
   return base;

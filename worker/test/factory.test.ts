@@ -1190,7 +1190,7 @@ describe("removing a registration", () => {
   it("never leaves a package behind in a ring: the owner is refused while it is served, a maintainer's removal pulls it and says so in the journal", async () => {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status) VALUES ('ringed', 'alice', 'https://ringed.example', '[\"aarch64\"]', 'staged')"),
-      env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('ringed-1', 'ringed', '1-1', 'aarch64', 'ringed-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{}', 'factory', 'factory/aarch64/ringed-1-1-aarch64.pkg.tar.zst', 'aarch64')"),
+      env.DB.prepare("INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('ringed-1', 'ringed', '1-1', 'aarch64', 'ringed-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{}', 'factory', 'factory/aarch64/ringed-1-1-aarch64.pkg.tar.zst', 'aarch64')"),
     ]);
     const pid = (await env.DB.prepare("SELECT id FROM packages WHERE name = 'ringed'").first<{ id: number }>())!.id;
     await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('edge', ?)").bind(pid).run();
@@ -1285,7 +1285,7 @@ describe("removing a registration", () => {
   });
   it("a maintainer's page says where each standing approval stands — the rings that serve the package — so it can be taken back from there", async () => {
     await env.DB.batch([
-      env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('stood-1', 'stood', '1-1', 'aarch64', 'stood-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{}', 'factory', 'factory/aarch64/stood-1-1-aarch64.pkg.tar.zst', 'aarch64')"),
+      env.DB.prepare("INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('stood-1', 'stood', '1-1', 'aarch64', 'stood-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{}', 'factory', 'factory/aarch64/stood-1-1-aarch64.pkg.tar.zst', 'aarch64')"),
       env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status) VALUES ('stood', 'aarch64', '1', 'draft:https://stood.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged')"),
     ]);
     const pid = (await env.DB.prepare("SELECT id FROM packages WHERE name = 'stood'").first<{ id: number }>())!.id;

@@ -48,6 +48,7 @@ cleanup() {
   # The orders scenarios' workers, supervisors and stub agents, if a step failed while they ran (tests/e2e-worker-orders.sh).
   if declare -F w5_cleanup >/dev/null; then w5_cleanup 2>/dev/null || true; fi
   if [[ -n "${WRANGLER_PID:-}" ]]; then kill "$WRANGLER_PID" 2>/dev/null || true; fi
+  if [[ -n "${UPSTREAM_PID:-}" ]]; then kill "$UPSTREAM_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 
@@ -198,6 +199,56 @@ curl -s -o /dev/null -X PUT "$OMARCHY_API/api/v1/pool/$any_x86/sig?filename=e2e-
 vout=$("$PKG_REPO" verify --keyring "$E2E/verify-key.asc" --work-dir "$E2E/verify-work" --pool "$OMARCHY_API/pool" --repair 2>&1 || true)
 grep -q "1 bad signature(s)" <<<"$vout" && grep -q "0 pinned bytes the pool does not store (0 re-pinned)" <<<"$vout" || { echo "verify must find one bad signature and re-pin nothing: $vout"; exit 1; }
 curl -s -o /dev/null -X PUT "$OMARCHY_API/api/v1/pool/$any_x86/sig?filename=e2e-any-1-1-any.pkg.tar.xz&source=packages&arch=x86_64" -H "Authorization: Bearer $OMARCHY_TOKEN" --data-binary "@$E2E/any/x86_64/e2e-any-1-1-any.pkg.tar.xz.sig"
+
+step "The same bytes in both architectures' repositories: a row, an object and a pin for each (#421)"
+# Omarchy ships some `any` archives byte for byte to x86_64 and aarch64. The
+# index held one row per sha256: the second architecture's index of the bytes
+# was a 409 (eight Omarchy packages missing on x86_64 from 2026-10-12), and
+# its publish skipped them as indexed and had its release refused. Since
+# migration 0055 each architecture indexes the bytes for its own directory.
+mkdir -p "$E2E/shared/root"
+printf 'pkgname = e2e-shared\npkgver = 1-1\npkgdesc = the same bytes in both repositories\narch = any\nsize = 1\n' > "$E2E/shared/root/.PKGINFO"
+(cd "$E2E/shared/root" && tar -cf - .PKGINFO | xz -c > "../e2e-shared-1-1-any.pkg.tar.xz")
+shared=$(sha256sum "$E2E/shared/e2e-shared-1-1-any.pkg.tar.xz" | cut -d' ' -f1)
+for a in aarch64 x86_64; do "$PKG_REPO" publish --ring rc --source packages --arch "$a" --note "e2e-shared $a" "$E2E/shared/e2e-shared-1-1-any.pkg.tar.xz" >/dev/null; done
+for a in x86_64 aarch64; do
+  rc_a=$(curl -s "$OMARCHY_API/api/v1/releases/rc?fields=summary&arch=$a")
+  jq -e --arg s "$shared" --arg a "$a" '[.packages[] | select(.name == "e2e-shared" and .sha256 == $s and .repo_arch == $a)] | length == 1' <<<"$rc_a" >/dev/null || { echo "rc must serve e2e-shared's bytes on $a: $(jq -c '[.packages[] | select(.name == "e2e-shared")]' <<<"$rc_a")"; exit 1; }
+  [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/pool/packages/$a/e2e-shared-1-1-any.pkg.tar.xz")" == 200 ]] || { echo "no object of e2e-shared under packages/$a"; exit 1; }
+done
+# The sync itself, as the scheduler's job runs it (`pkg-repo sync`), from an upstream on a local port that ships one `any`
+# archive byte for byte in both architectures' repositories, as Omarchy's does: aarch64's sync, then x86_64's. Until #421
+# the second got the 409 and imported nothing ("1 package(s) failed to import"): eight Omarchy packages left out of x86_64's
+# rings every sync. Now each indexes the bytes for its own repository and pins them, and its next run finds them indexed.
+mkdir -p "$E2E/synced/root"
+printf 'pkgname = e2e-synced\npkgver = 1-1\npkgdesc = the same bytes in both upstream repositories\narch = any\nsize = 1\n' > "$E2E/synced/root/.PKGINFO"
+(cd "$E2E/synced/root" && tar -cf - .PKGINFO | xz -c > "../e2e-synced-1-1-any.pkg.tar.xz")
+synced=$(sha256sum "$E2E/synced/e2e-synced-1-1-any.pkg.tar.xz" | cut -d' ' -f1)
+for a in aarch64 x86_64; do
+  mkdir -p "$E2E/upstream/$a/db/e2e-synced-1-1"
+  cp "$E2E/synced/e2e-synced-1-1-any.pkg.tar.xz" "$E2E/upstream/$a/"
+  printf '%%FILENAME%%\ne2e-synced-1-1-any.pkg.tar.xz\n\n%%NAME%%\ne2e-synced\n\n%%VERSION%%\n1-1\n\n%%CSIZE%%\n%s\n\n%%SHA256SUM%%\n%s\n\n' \
+    "$(wc -c < "$E2E/synced/e2e-synced-1-1-any.pkg.tar.xz" | tr -d ' ')" "$synced" > "$E2E/upstream/$a/db/e2e-synced-1-1/desc"
+  tar -czf "$E2E/upstream/$a/packages.db" -C "$E2E/upstream/$a/db" e2e-synced-1-1
+done
+python3 -c 'import functools, http.server, sys
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1]))
+open(sys.argv[2] + ".tmp", "w").write(str(s.server_address[1])); __import__("os").rename(sys.argv[2] + ".tmp", sys.argv[2]); s.serve_forever()' \
+  "$E2E/upstream" "$E2E/upstream.port" 2>"$E2E/upstream.log" &
+UPSTREAM_PID=$!
+for _ in $(seq 1 50); do [[ -s "$E2E/upstream.port" ]] && break; sleep 0.1; done
+upstream="http://127.0.0.1:$(cat "$E2E/upstream.port")"
+for a in aarch64 x86_64; do
+  sout=$("$PKG_REPO" sync --source packages --base-url "$upstream/$a" --db-name packages --arch "$a" --ring rc --concurrency 1 --work-dir "$E2E/sync-work/$a" 2>&1) || { echo "the $a sync of e2e-synced failed: $sout"; exit 1; }
+  grep -q "already indexed 0 · uploaded 1 (.*) · failed 0" <<<"$sout" || { echo "the $a sync must import e2e-synced for its own repository: $sout"; exit 1; }
+done
+for a in x86_64 aarch64; do
+  rc_a=$(curl -s "$OMARCHY_API/api/v1/releases/rc?fields=summary&arch=$a")
+  jq -e --arg s "$synced" --arg a "$a" '[.packages[] | select(.name == "e2e-synced" and .sha256 == $s and .repo_arch == $a)] | length == 1' <<<"$rc_a" >/dev/null || { echo "rc must serve e2e-synced's bytes on $a after its sync: $(jq -c '[.packages[] | select(.name == "e2e-synced")]' <<<"$rc_a")"; exit 1; }
+  sout=$("$PKG_REPO" sync --source packages --base-url "$upstream/$a" --db-name packages --arch "$a" --ring rc --concurrency 1 --work-dir "$E2E/sync-work/$a" 2>&1) || { echo "the $a sync's next run failed: $sout"; exit 1; }
+  grep -q "already indexed 1 · uploaded 0 (.*) · failed 0" <<<"$sout" || { echo "the $a sync's next run must find e2e-synced indexed for $a: $sout"; exit 1; }
+done
+kill "$UPSTREAM_PID" 2>/dev/null || true; UPSTREAM_PID=""
 
 step "Pool sanity (one directory per source: databases beside the packages)"
 for f in omarchy-packages-stable.db omarchy-packages-stable.db.sig omarchy-packages-stable.files "zlib-1:1.3.2-3-x86_64.pkg.tar.zst" "zlib-1:1.3.2-3-x86_64.pkg.tar.zst.sig"; do

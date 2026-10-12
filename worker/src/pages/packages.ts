@@ -1025,7 +1025,7 @@ const PACKAGE_SCRIPT = String.raw`
     if (seal && seal.signature) links.push('<a href="' + esc(seal.signature.object) + '">signature</a>');
     if (seal && seal.upstream && seal.upstream.signature) links.push('<a href="' + esc(seal.upstream.signature) + '">signature</a>');
     if (seal && seal.attestation) links.push('<a href="' + esc(seal.attestation.statement) + '">attestation</a>' + (seal.attestation.signature ? ' <a href="' + esc(seal.attestation.signature) + '">.sig</a>' : ''));
-    $("#seal-foot").innerHTML = '<span title="' + esc(D ? D.package.sha256 : "") + '">sha256 ' + (D ? esc(D.package.sha256.slice(0, 12)) + "…" : "—") + '</span><span>' + links.join(" · ") + (D ? (links.length ? ' · ' : '') + '<a href="/api/v1/packages/' + esc(D.package.sha256) + '/provenance">seal JSON ›</a>' : '') + '</span>';
+    $("#seal-foot").innerHTML = '<span title="' + esc(D ? D.package.sha256 : "") + '">sha256 ' + (D ? esc(D.package.sha256.slice(0, 12)) + "…" : "—") + '</span><span>' + links.join(" · ") + (D ? (links.length ? ' · ' : '') + '<a href="/api/v1/packages/' + esc(D.package.sha256) + '/provenance?arch=' + encodeURIComponent(D.arch || arch) + '">seal JSON ›</a>' : '') + '</span>';
   }
 
   // ---- people and agents, and the facts.
@@ -1530,11 +1530,11 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.seal",
       page,
       anchor: ['id="seal-section"', 'id="seal"', 'id="seal-foot"', 'id="seal-ctx"'],
-      script: ["gateCells", '"Signed"', '"Installs"', '"ABI"', '"No open advisory"', '"Healthy"', '"Two people"', '"Mirrored as-is"', "/provenance\">seal JSON ›", "seal.attestation.statement", "D.arches[a].open"],
+      script: ["gateCells", '"Signed"', '"Installs"', '"ABI"', '"No open advisory"', '"Healthy"', '"Two people"', '"Mirrored as-is"', "/provenance?arch=' + encodeURIComponent(D.arch || arch) + '\">seal JSON ›", "seal.attestation.statement", "D.arches[a].open"],
       reads: [
         { path: pkg, fields: ["seal.signature", "seal.upstream.signature", "package.sha256", "arches.x86_64.open", "arches.aarch64.open", "arches.x86_64.rings.0.has_signature"] },
         { path: built, fields: ["seal.signature.object", "seal.attestation", "maintenance.maintainer"] },
-        { path: `/api/v1/packages/${F.sha}/provenance`, fields: ["origin", "seal", "object", "sha256"] },
+        { path: `/api/v1/packages/${F.sha}/provenance?arch=${F.arch}`, fields: ["origin", "seal", "object", "sha256"] },
       ],
       visible: EVERYONE,
     },

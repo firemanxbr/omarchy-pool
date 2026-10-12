@@ -89,16 +89,36 @@ describe("GET /packages/:sha256/provenance", () => {
 });
 
 describe("POST /packages", () => {
-  it("indexes one row per sha256: the same bytes under the other architecture directory are refused, not a database error", async () => {
+  it("indexes the same bytes once per repository architecture (#421): an -any archive in both directories gets a row for each", async () => {
     const filename = "fonts-1-1-any.pkg.tar.zst";
     const bytes = new TextEncoder().encode("the same any package in both directories");
-    const manifest = { schema_version: 1, name: "fonts", version: "1-1", arch: "any", sha256: sha("fonts-any"), filename, size_download: bytes.length, size_installed: 1, description: "fonts", provides: ["fonts"], requires: [], files: [] };
+    const s = sha("fonts-any");
+    const manifest = { schema_version: 1, name: "fonts", version: "1-1", arch: "any", sha256: s, filename, size_download: bytes.length, size_installed: 1, description: "fonts", provides: ["fonts"], requires: [], files: ["usr/share/fonts/a.ttf"] };
     for (const arch of ["x86_64", "aarch64"]) await env.PACKAGES.put(packageKey("packages", arch, filename), bytes);
-    expect((await call("POST", "/packages?source=packages&arch=x86_64", manifest, pool)).status).toBe(201);
-    expect((await call("POST", "/packages?source=packages&arch=x86_64", manifest, pool)).json.status).toBe("already-indexed");
-    const other = await call("POST", "/packages?source=packages&arch=aarch64", manifest, pool);
-    expect(other.status).toBe(409);
-    expect(other.json.repo_arch).toBe("x86_64");
+    // aarch64's sync first, as on 2026-10-12: x86_64's index of the same bytes was a 409 then.
+    const arm = await call("POST", "/packages?source=packages&arch=aarch64", manifest, pool);
+    expect(arm.status, JSON.stringify(arm.json)).toBe(201);
+    const x86 = await call("POST", "/packages?source=packages&arch=x86_64", manifest, pool);
+    expect(x86.status, JSON.stringify(x86.json)).toBe(201);
+    expect(x86.json.id).not.toBe(arm.json.id);
+    // Each again: its own row, already there — never the other architecture's, never a database error.
+    expect((await call("POST", "/packages?source=packages&arch=aarch64", manifest, pool)).json).toMatchObject({ id: arm.json.id, status: "already-indexed" });
+    expect((await call("POST", "/packages?source=packages&arch=x86_64", manifest, pool)).json).toMatchObject({ id: x86.json.id, status: "already-indexed" });
+    // Two rows of one sha256, each naming its own architecture's object, each with its own lists.
+    const rows = await env.DB.prepare("SELECT p.id, p.row_key, p.sha256, p.repo_arch, p.r2_key, l.count FROM packages p JOIN package_file_lists l ON l.package_id = p.id WHERE p.sha256 = ? ORDER BY p.id").bind(s).all();
+    expect(rows.results).toEqual([
+      { id: arm.json.id, row_key: `${s}/aarch64`, sha256: s, repo_arch: "aarch64", r2_key: packageKey("packages", "aarch64", filename), count: 1 },
+      { id: x86.json.id, row_key: `${s}/x86_64`, sha256: s, repo_arch: "x86_64", r2_key: packageKey("packages", "x86_64", filename), count: 1 },
+    ]);
+    for (const arch of ["x86_64", "aarch64"]) expect((await call("POST", "/packages/known", { sha256: [s], arch })).json.known).toEqual([s]);
+    expect((await call("GET", `/packages/${s}`)).json).toMatchObject({ name: "fonts", sha256: s });
+  });
+
+  it("refuses a sha256 that is not one: the row's key is `<sha256>/<arch>`", async () => {
+    const filename = "odd-1-1-any.pkg.tar.zst";
+    await env.PACKAGES.put(packageKey("packages", "x86_64", filename), new Uint8Array(3));
+    const r = await call("POST", "/packages?source=packages&arch=x86_64", { schema_version: 1, name: "odd", version: "1-1", arch: "any", sha256: "not/a-sha", filename, size_download: 3, size_installed: 1, provides: [], requires: [] }, pool);
+    expect(r.status).toBe(400);
   });
 });
 
