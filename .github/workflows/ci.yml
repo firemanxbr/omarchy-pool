@@ -140,7 +140,11 @@ jobs:
     # widening the owner's passkey (pinned at the host) signed raises the units
     # the recreated dispatcher mounts, its replay is refused, and an agent key
     # sealed to the host lands in agent.env, never in the dispatcher's env or
-    # mounts.
+    # mounts. #419: the probe's mount of a keys file that is not there makes
+    # an empty directory on podman's docker API and is refused on docker; a
+    # host without keys runs a while held, nothing at agent.env, then takes
+    # keys from install and from Set agent keys, read by the recreated
+    # dispatcher's probe mount, agent.env never a directory.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -153,7 +157,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The host orders on ${{ matrix.engine }}, beside a stand-in legacy compose project, a narrowing of units and an owner's signed widening end to end
+      - name: The host orders on ${{ matrix.engine }}, beside a stand-in legacy compose project, a narrowing of units, an owner's signed widening end to end, and a host without agent keys given them later
         run: bash tests/agent-host-orders.sh ${{ matrix.engine }}
 
   agent-runtime-switch:
@@ -282,14 +286,17 @@ jobs:
 
   userns-remap:
     name: Remapped daemon on a real engine (userns-remap)
-    # #405 (design v2 §19.1), before the agent keys' ACL: the runner's docker with
-    # "userns-remap": "default" merged into its daemon.json (docker makes dockremap and its
-    # subordinate range itself), then a plain community build through the real dispatcher —
-    # root with docker's default capabilities, as the host set runs it there with
-    # userns_mode: host — while its task container and egress sidecar stay remapped: built as
-    # the builder, uploaded and completed; the agent holds the model kinds
-    # (OMARCHY_AGENT_HELD=userns-remap, #406), so a draft is handed back lost and no probe or
-    # agent sidecar is ever made; and the dispatcher's real-engine tests on that engine.
+    # #405 (design v2 §19.1): the runner's docker with "userns-remap": "default" merged into
+    # its daemon.json (docker makes dockremap and its subordinate range itself); the agent's
+    # keys written by its own writer with the ACL for the agent sidecars' remapped uid
+    # (65533 in, dockremap's range on the host), read through it as the probe is started and
+    # by no other uid; then a plain community build through the real dispatcher — root with
+    # docker's default capabilities, as the host set runs it there with userns_mode: host —
+    # while its task container and egress sidecar stay remapped: built as the builder,
+    # uploaded and completed; the probe reads the keys as 65533:65533, and a draft's agent
+    # sidecar runs remapped as that uid, writes its usage where the dispatcher gave it, and
+    # completes; the ACL lost holds the model kinds (keys-acl); and the dispatcher's
+    # real-engine tests on that engine.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -309,7 +316,7 @@ jobs:
           docker info --format '{{json .SecurityOptions}}' | grep -q name=userns || { sudo journalctl -u docker --no-pager -n 60; exit 1; }
           docker info --format 'docker {{.ServerVersion}}, {{.Driver}}, {{.DockerRootDir}}'
           grep -H '^dockremap:' /etc/subuid /etc/subgid
-      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — the model kinds held, no probe or agent sidecar made
+      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — and its model kinds, the keys read through their ACL by the sidecars' remapped uid alone
         run: bash tests/userns-remap.sh
 
   host-key-tpm:
@@ -499,6 +506,9 @@ jobs:
       - name: The build script's task mode — no pool call, the log cut at its cap, verdict.json always JSON — in a container with the task's mounts
         working-directory: .
         run: bash tests/worker-task-mode.sh
+      - name: The build user keeps the egress proxy's variables and nothing else of root's, so makepkg reaches a source from a host's internal task network
+        working-directory: .
+        run: bash tests/builder-env.sh
       - name: A task's two pacman caches with a real pacman — the host's read-only first, its own writable second; two tasks at once download into their own; what the shared cache holds with each package's .sig is used, and a package without its .sig, beside a wrong one or with bytes it should not hold fails the task
         working-directory: .
         run: bash tests/task-caches.sh
@@ -520,7 +530,7 @@ jobs:
       - name: The restart policy a worker counts on, on a real engine (on-failure:N runs out)
         working-directory: .
         run: bash tests/restart-policy.sh
-      - name: A new host's root-only steps — prep-root.sh does each, twice with no change, and nothing else — against stubs
+      - name: A new host's root-only steps — prep-root.sh does each, dockremap's own range included, twice with no change, and nothing else — against stubs
         working-directory: .
         run: bash tests/prep-root.sh
       - name: shellcheck of prep-root.sh

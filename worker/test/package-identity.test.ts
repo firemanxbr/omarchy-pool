@@ -67,7 +67,10 @@ async function planOf(x: { sql: string; args: unknown[] }): Promise<string> {
 
 /** What 0036 added, taken off again, and what the migrations after it added (the package's maintainer in the pool, #244; the reviews table takes its changes column, #247, with it): the schema as production has it before the migration. */
 const REWIND = [
-  // 0052's size learning (#330) first: the remembered size's columns on factory_packages.
+  // 0053's carried databases (#319) first: what a release's artifact row awaits, and its index.
+  "DROP INDEX idx_release_artifacts_awaits",
+  "ALTER TABLE release_artifacts DROP COLUMN awaits",
+  // Then 0052's size learning (#330): the remembered size's columns on factory_packages.
   "ALTER TABLE factory_packages DROP COLUMN learned_at",
   "ALTER TABLE factory_packages DROP COLUMN learned_why",
   "ALTER TABLE factory_packages DROP COLUMN learned_task",
@@ -281,7 +284,7 @@ describe("migration 0036: one package per name, with a target per architecture",
     const m = env.TEST_MIGRATIONS.find((x) => x.name.startsWith("0036_"))!;
     expect(m, "migration 0036 is in the list").toBeTruthy();
     await env.DB.batch(m.queries.map((q) => env.DB.prepare(q)));
-    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275; 0042's orders to workers, #277; 0043's maintainer hosts, #321, and 0044's columns on them, #322; 0045's host leases, #334; 0046's reservation mark, the task's reservation window and the owner-head index, #337, and its host orders, #344; 0047's asleep mark, #329, host settings and diagnostics, #325, and audit independence, #339; 0048's last-good marks, #342; 0049's owner's orders and seal key, #328, and a host's sandbox, #330; 0052's remembered sizes, #330) comes back as D1 applies it.
+    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275; 0042's orders to workers, #277; 0043's maintainer hosts, #321, and 0044's columns on them, #322; 0045's host leases, #334; 0046's reservation mark, the task's reservation window and the owner-head index, #337, and its host orders, #344; 0047's asleep mark, #329, host settings and diagnostics, #325, and audit independence, #339; 0048's last-good marks, #342; 0049's owner's orders and seal key, #328, and a host's sandbox, #330; 0052's remembered sizes, #330; 0053's carried databases, #319) comes back as D1 applies it.
     for (const later of env.TEST_MIGRATIONS.filter((x) => x.name > m.name)) await env.DB.batch(later.queries.map((q) => env.DB.prepare(q)));
 
     // The schema is what every other test file runs on, and nothing of the rows it had changed.
@@ -506,7 +509,7 @@ describe("a package built for two architectures", () => {
     expect(review.packages.find((p: any) => p.name === "duo")).toEqual({ name: "duo", owner: "alice", version: "1.0", category: null, targets: { x86_64: { status: "built", task: x86 }, aarch64: { status: "not_supported", task: arm } }, lead: x86, waits: true, rows: [x86], claim: null, state: "ready" });
   });
 
-  it("is built again by the project for every architecture its contributor built — aarch64 is not rebuilt — and approved once", async () => {
+  it("is built again by the project for every architecture its contributor built — aarch64 is not rebuilt — and approved for x86_64 only, with the reason aarch64 does not ship", async () => {
     expect((await call("POST", `/factory/tasks/${x86}/build`, { note: "reads well" }, "omc_alice")).status).toBe(403);
     const asked = await call("POST", `/factory/tasks/${x86}/build`, { note: "reads well" }, "omc_m2");
     expect(asked.status, JSON.stringify(asked.json)).toBe(200);
@@ -517,17 +520,35 @@ describe("a package built for two architectures", () => {
     expect(c.task.id).toBe(px);
     await stage(c);
     expect(await targetsOf("duo")).toMatchObject({ x86_64: { status: "reviewed", task: px } });
-    const ok = await web.decide("m2", `/factory/tasks/${px}/approve`, { note: "x86_64 only; aarch64 needs a linker" });
+    // The package whole is refused while an architecture it names did not build (#416), with the reason — the button's title says the same.
+    const whole = `aarch64 did not build (task ${arm}): the package is approved once every architecture it names is built again by the project — or approve x86_64 only, with the reason aarch64 does not ship`;
+    const refused = await web.decide("m2", `/factory/tasks/${px}/approve`, { note: "both, please" });
+    expect([refused.status, refused.json.error]).toEqual([409, whole]);
+    const can = (await call("GET", `/factory/tasks/${px}/can`, undefined, "omc_m2")).json.can;
+    expect(can).toMatchObject({ approve: false, approve_only: true, why: { approve: whole } });
+    // x86_64 alone: a reason is required, and goes on the record; `only` names this build's architecture or nothing is decided.
+    const bare = await web.decide("m2", `/factory/tasks/${px}/approve`, { only: "x86_64" });
+    expect([bare.status, bare.json]).toEqual([400, { error: "a reason is required: why aarch64 does not ship — it goes on the record and on the package's page", code: "reason" }]);
+    const wrong = await web.decide("m2", `/factory/tasks/${px}/approve`, { only: "aarch64", reason: "x86_64 only, said of the wrong build" });
+    expect([wrong.status, wrong.json.code]).toEqual([400, "only"]);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM reviews WHERE name = 'duo'").first<{ n: number }>())!.n).toBe(0);
+    const why = "aarch64 needs a linker the toolchain does not ship yet";
+    const ok = await web.decide("m2", `/factory/tasks/${px}/approve`, { only: "x86_64", reason: why, note: "reads well" });
     expect(ok.status, JSON.stringify(ok.json)).toBe(200);
-    expect(ok.json).toMatchObject({ decision: "approved", arches: ["x86_64"], not_supported: { aarch64: arm }, publishes: { x86_64: ok.json.publish } });
-    // One review on the record, one row for its one target, one publish job — x86_64's.
-    expect(await env.DB.prepare("SELECT name, decision, by, arches, not_supported FROM reviews WHERE id = ?").bind(ok.json.review).first()).toEqual({ name: "duo", decision: "approved", by: "m2", arches: '["x86_64"]', not_supported: JSON.stringify({ aarch64: arm }) });
+    expect(ok.json).toMatchObject({ decision: "approved", arches: ["x86_64"], not_supported: {}, not_shipping: { aarch64: arm }, only_reason: why, set_aside: [], publishes: { x86_64: ok.json.publish } });
+    // One review on the record, with the reason and what it set aside, one row for its one target, one publish job — x86_64's.
+    expect(await env.DB.prepare("SELECT name, decision, by, arches, not_supported, only_reason, not_shipping FROM reviews WHERE id = ?").bind(ok.json.review).first()).toEqual({ name: "duo", decision: "approved", by: "m2", arches: '["x86_64"]', not_supported: "{}", only_reason: why, not_shipping: JSON.stringify({ aarch64: arm }) });
     expect((await env.DB.prepare("SELECT arch, task_id, review_id FROM approvals WHERE name = 'duo'").all()).results).toEqual([{ arch: "x86_64", task_id: px, review_id: ok.json.review }]);
     expect((await env.DB.prepare("SELECT arch, json_extract(params, '$.task') AS task FROM build_tasks WHERE name = 'duo' AND kind = 'publish'").all()).results).toEqual([{ arch: "x86_64", task: px }]);
-    expect(await targetsOf("duo")).toEqual({ x86_64: { status: "approved", task: px }, aarch64: { status: "not_supported", task: arm } });
+    // aarch64 does not ship, and says so — not "not supported", not forgotten.
+    expect(await targetsOf("duo")).toEqual({ x86_64: { status: "approved", task: px }, aarch64: { status: "not_shipping", task: arm } });
+    const line = (await env.DB.prepare("SELECT summary, payload FROM events WHERE kind = 'approve' ORDER BY id DESC LIMIT 1").first<{ summary: string; payload: string }>())!;
+    expect(line.summary).toMatch(new RegExp(`^duo 1\\.0 \\(x86_64 only: ${why}\\) approved by m2 .*; aarch64 does not ship$`));
+    expect(JSON.parse(line.payload)).toMatchObject({ arches: ["x86_64"], not_shipping: { aarch64: arm }, only_reason: why });
+    expect(await env.DB.prepare("SELECT detail FROM factory_packages WHERE name = 'duo'").first()).toEqual({ detail: `1.0 for x86_64 only approved by m2 (aarch64 does not ship: ${why}); publishing the project's build (job ${ok.json.publish})` });
   });
 
-  it("is published on x86_64 alone, and says aarch64 is not supported", async () => {
+  it("is published on x86_64 alone, and says aarch64 does not ship and why", async () => {
     const c = await call("POST", "/factory/claim", { arch: "x86_64", kinds: ["publish"] }, "omw_px");
     expect(c.json.task).toMatchObject({ kind: "publish", name: "duo", arch: "x86_64" });
     // The job names its review as review_id: `review` in a task's params is the contributor's build a project's build answers, and the
@@ -544,15 +565,18 @@ describe("a package built for two architectures", () => {
     expect((await call("POST", `/factory/tasks/${c.json.task.id}/complete`, { summary: "published", result: { sha256: sha, filename: file, version: "1.0-1", task: px } }, c.json.token)).json).toMatchObject({ status: "done" });
     expect(await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'duo'").first()).toEqual({ status: "published" });
     const story = (await call("GET", "/factory/packages/duo/story")).json;
-    expect(story.targets).toEqual({ x86_64: { status: "published", task: px }, aarch64: { status: "not_supported", task: arm } });
+    expect(story.targets).toEqual({ x86_64: { status: "published", task: px }, aarch64: { status: "not_shipping", task: arm } });
+    const why = "aarch64 needs a linker the toolchain does not ship yet";
+    // The story's approval says what it decided: x86_64 alone, and why aarch64 does not ship.
+    expect(story.chains.find((c: any) => c.approval)?.approval).toMatchObject({ arches: ["x86_64"], only_reason: why, not_shipping: { aarch64: arm }, standing: true });
     const decided = (await call("GET", "/factory/approvals?after=duo")).json.approvals.find((a: any) => a.name === "duo"); // past the edge cache
-    expect(decided).toMatchObject({ arches: ["x86_64"], not_supported: { aarch64: arm }, standing: true, targets: [{ arch: "x86_64", task_id: px, publish_status: "done" }] });
+    expect(decided).toMatchObject({ arches: ["x86_64"], not_supported: {}, not_shipping: { aarch64: arm }, only_reason: why, standing: true, targets: [{ arch: "x86_64", task_id: px, publish_status: "done" }] });
     // `id` stays the approval row's — the id the journal, a withdrawal and a refusal name — and the review is `review`.
     const approval = (await env.DB.prepare("SELECT id, review_id FROM approvals WHERE name = 'duo'").first<{ id: number; review_id: number }>())!;
     expect(decided).toMatchObject({ id: approval.id, review: approval.review_id });
     // The maintainer's page lists the same review, with what it said of the architecture never built.
     const m2 = (await call("GET", "/users/m2?after=duo")).json;
-    expect(m2.approvals.find((a: any) => a.name === "duo")).toMatchObject({ id: approval.id, review: approval.review_id, arches: ["x86_64"], not_supported: { aarch64: arm }, standing: true });
+    expect(m2.approvals.find((a: any) => a.name === "duo")).toMatchObject({ id: approval.id, review: approval.review_id, arches: ["x86_64"], not_shipping: { aarch64: arm }, only_reason: why, standing: true });
     // No aarch64 build was ever queued by the review, nor a publish of it.
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'duo' AND arch = 'aarch64' AND trust = 'project'").first<{ n: number }>())!.n).toBe(0);
   });
@@ -622,7 +646,7 @@ describe("a package built for two architectures", () => {
     const kept = await call("POST", `/factory/tasks/${bump}/reject`, { note: "1.1 breaks the config" }, "omc_m2");
     expect(kept.json).toMatchObject({ released: false, cancelled: [bump] });
     expect(await env.DB.prepare("SELECT owner, status, freed_by_review FROM factory_packages WHERE name = 'duo'").first()).toEqual({ owner: "alice", status: "registered", freed_by_review: null });
-    expect(await targetsOf("duo")).toEqual({ x86_64: { status: "published", task: px }, aarch64: { status: "not_supported", task: arm } });
+    expect(await targetsOf("duo")).toEqual({ x86_64: { status: "published", task: px }, aarch64: { status: "not_shipping", task: arm } });
     expect((await request("duo", "omc_bob")).status).toBe(409);
   });
 
@@ -652,14 +676,22 @@ describe("a package built for two architectures", () => {
     const asked = await call("POST", `/factory/tasks/${x11.task.id}/build`, {}, "omc_m2");
     expect(asked.json).toMatchObject({ arches: ["x86_64"], tasks: [asked.json.task] });
     const p = await build("omw_px", "x86_64", "mix", ["build"]); await stage(p);
-    const ok = await web.decide("m2", `/factory/tasks/${p.task.id}/approve`);
+    // The package whole waits for aarch64 (#416): its 1.1 did not build.
+    const whole = await web.decide("m2", `/factory/tasks/${p.task.id}/approve`);
+    expect([whole.status, whole.json.error]).toEqual([409, `aarch64 did not build (task ${a11.task.id}): the package is approved once every architecture it names is built again by the project — or approve x86_64 only, with the reason aarch64 does not ship`]);
+    const because = "1.1 needs a newer toolchain on aarch64";
+    const ok = await web.decide("m2", `/factory/tasks/${p.task.id}/approve`, { only: "x86_64", reason: because });
     expect(ok.status, JSON.stringify(ok.json)).toBe(200);
-    expect(ok.json).toMatchObject({ arches: ["x86_64"], not_supported: { aarch64: a11.task.id } });
-    // One review of one version: 1.1 on x86_64, aarch64 not supported; nothing of 1.0 approved, nothing of it published.
-    expect(await env.DB.prepare("SELECT version, arches, not_supported FROM reviews WHERE id = ?").bind(ok.json.review).first()).toEqual({ version: "1.1", arches: '["x86_64"]', not_supported: JSON.stringify({ aarch64: a11.task.id }) });
+    // aarch64's 1.0, still staged, is set aside with the decision: it is not where aarch64 stands, and nothing of it is left to decide.
+    expect(ok.json).toMatchObject({ arches: ["x86_64"], not_supported: {}, not_shipping: { aarch64: a11.task.id }, only_reason: because, set_aside: [a10.task.id] });
+    expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE id = ?").bind(a10.task.id).first()).toEqual({ status: "cancelled", error: `not shipping: x86_64 approved alone by m2 — ${because}` });
+    // One review of one version: 1.1 on x86_64, aarch64 set aside; nothing of 1.0 approved, nothing of it published.
+    expect(await env.DB.prepare("SELECT version, arches, not_supported, not_shipping FROM reviews WHERE id = ?").bind(ok.json.review).first()).toEqual({ version: "1.1", arches: '["x86_64"]', not_supported: "{}", not_shipping: JSON.stringify({ aarch64: a11.task.id }) });
     expect((await env.DB.prepare("SELECT arch, version FROM approvals WHERE name = 'mix'").all()).results).toEqual([{ arch: "x86_64", version: "1.1" }]);
     expect((await env.DB.prepare("SELECT arch, version FROM build_tasks WHERE name = 'mix' AND kind = 'publish'").all()).results).toEqual([{ arch: "x86_64", version: "1.1" }]);
-    expect(await targetsOf("mix")).toEqual({ x86_64: { status: "approved", task: p.task.id }, aarch64: { status: "not_supported", task: a11.task.id } });
+    expect(await targetsOf("mix")).toEqual({ x86_64: { status: "approved", task: p.task.id }, aarch64: { status: "not_shipping", task: a11.task.id } });
+    // Nothing of mix is left in Review's queue: aarch64's 1.0 went with the decision.
+    expect((await call("GET", "/factory/review", undefined, "omc_m2")).json.staged.filter((t: any) => t.name === "mix" && t.arch === "aarch64")).toEqual([]);
   });
 
   it("reads a package's builds led by its name: a decision's facts and a transition's targets never walk the index of every build's kind", async () => {

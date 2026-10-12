@@ -3,6 +3,7 @@
 
 use std::fs;
 
+use crate::dispatcher_env::remap::Files as RemapFiles;
 use crate::dispatcher_env::{Budget, Sources};
 use crate::run::agent::HostEnv;
 use crate::run::fake::{publish, relay_statement, rendered_compose, World, T0, TOKEN, WORKER};
@@ -546,6 +547,7 @@ fn a_rotation_writes_the_token_file_and_recreates_only_the_dispatcher_while_the_
         &Sources {
             proc_net: w.dir.join("no-proc-net"),
             ifconfig: None,
+            remap: RemapFiles::at(&w.dir),
         },
         &w.agent.paths.data,
         None,
@@ -632,6 +634,7 @@ fn an_upgraded_host_moves_its_token_to_the_file_and_keeps_it_in_the_env_file_onl
     w.agent.host_env = Some(HostEnv::new(Sources {
         proc_net: w.dir.join("no-proc-net"),
         ifconfig: None,
+        remap: RemapFiles::at(&w.dir),
     }));
     w.release_before_token_file("v1.0.0");
     w.target("v1.0.0", None);
@@ -712,6 +715,7 @@ fn the_host_s_addresses_reach_dispatcher_env_and_a_change_recreates_the_dispatch
     w.agent.host_env = Some(HostEnv::new(Sources {
         proc_net: net.clone(),
         ifconfig: None,
+        remap: RemapFiles::at(&w.dir),
     }));
     w.agent.cfg.agent_budget = Budget {
         calls_per_day: Some(900),
@@ -802,6 +806,7 @@ fn with_host_env() -> World {
     w.agent.host_env = Some(HostEnv::new(Sources {
         proc_net: net,
         ifconfig: None,
+        remap: RemapFiles::at(&w.dir),
     }));
     w
 }
@@ -1579,6 +1584,7 @@ mod on_a_mac {
         w.agent.host_env = Some(HostEnv::new(Sources {
             proc_net: w.dir.join("no-proc"),
             ifconfig: None,
+            remap: crate::dispatcher_env::remap::Files::at(&w.dir),
         }));
         w.remote.borrow_mut().public = Some(Net::Ok("198.51.100.20".parse().unwrap()));
         w.tick(3);

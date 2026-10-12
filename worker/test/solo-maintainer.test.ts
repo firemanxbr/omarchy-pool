@@ -442,7 +442,7 @@ describe("with [solo] naming m1: m1's own packages, decided by m1 and marked sel
     // m1's decision, read on the same facts a moment before, arrives second: takeRound's batch, as it sends it under the exception.
     const decided = JSON.stringify([id]);
     const [review, rows, marked] = await env.DB.batch([
-      env.DB.prepare(REVIEW_SQL).bind("racepkg", "1.0-1", "rejected", "m1", "mine, too late", JSON.stringify(["x86_64"]), "{}", 1, 0, decided),
+      env.DB.prepare(REVIEW_SQL).bind("racepkg", "1.0-1", "rejected", "m1", "mine, too late", JSON.stringify(["x86_64"]), "{}", 1, 0, null, "{}", decided),
       env.DB.prepare(ROWS_SQL).bind("racepkg", "rejected", "m1", "mine, too late", "racepkg", JSON.stringify([{ task: id, arch: "x86_64", version: "1.0-1", rebuild: null }]), decided),
       env.DB.prepare(SOLO_REVIEW_SQL).bind(SOLO.since, "racepkg"),
     ]);

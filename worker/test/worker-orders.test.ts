@@ -23,7 +23,7 @@ import worker, { type Env } from "../src/index";
 import { handleClaim } from "../src/routes/factory";
 import { sha256Hex, workerOf } from "../src/routes/contributors";
 import {
-  BREAKER_KEYS_SQL, CANCEL_LINES_SQL, CANCEL_ORDERS_SQL, CANCEL_ROWS_SQL, COMMUNITY_RESTARTS_SQL, COUNT_ISSUER_SQL, COUNT_WORKER_SQL, DUE_ORDERS_SQL, ISSUE_SQL, OPEN_ORDERS_SQL, OPEN_SPELLS_SQL,
+  BREAKER_KEYS_SQL, CANCEL_LINES_SQL, CANCEL_ORDERS_SQL, CANCEL_ROWS_SQL, COMMUNITY_RESTARTS_SQL, COUNT_DRAINS_SQL, COUNT_ISSUER_SQL, COUNT_WORKER_SQL, DUE_ORDERS_SQL, ISSUE_SQL, OPEN_ORDERS_SQL, OPEN_SPELLS_SQL,
   POOL_ORDERS_SQL, POOL_RESTARTS_SQL, REFRESH_OPEN_SQL, SITE_PACE_SQL, SITE_WORKERS_SQL,
   MAX_POOL_ORDERS_PER_DAY, MAX_POOL_RESTARTS_PER_HOUR, UPDATE_EXPIRED, sweepOrders,
 } from "../src/orders";
@@ -631,6 +631,8 @@ describe("what the planner reads", () => {
       ["delivery", OPEN_ORDERS_SQL, ["w"], /uq_worker_orders_open_kind/],
       ["a worker's cap", COUNT_WORKER_SQL, ["w", '["restart"]', now], /idx_worker_orders_worker \(worker_id=\? AND issued_at>\?\)/],
       ["an issuer's cap", COUNT_ISSUER_SQL, ["m1", now], /idx_worker_orders_issuer \(issued_by=\? AND issued_at>\?\)/],
+      // A person's page (#412, GET /users/:login/can): every row's drains in the hour, one read for all the rows, each worker by the index.
+      ["a person's page's drains", COUNT_DRAINS_SQL, ['["a","b"]', now], /idx_worker_orders_worker \(worker_id=\? AND issued_at>\?\)/],
       ["the site's workers", SITE_WORKERS_SQL, ["s", now], /idx_build_workers_site \(site=\?\)/],
       ["the site's pacing", SITE_PACE_SQL, ["s", now], /idx_worker_orders_site \(site=\? AND issued_at>\?\)/],
       ["the breaker's open spells", OPEN_SPELLS_SQL, [now], /idx_build_workers_not_ready \(agent_error_since>\?\)/],

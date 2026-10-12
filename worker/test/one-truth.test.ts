@@ -263,7 +263,8 @@ describe("an approval stands or it does not, said once", () => {
     for (const [name, a, login] of [[F.failedPkg, failed, F.outsider], [F.pulledPkg, pulled, ""], [F.publishedPkg, served, F.owner]] as const) {
       const state = (await drawn("/review", login, `?package=${name}`)).nodes["#rv-w-state"].innerHTML as string;
       const w = shell.approvalWhere(a);
-      expect(state, `Review's workspace of ${name}`).toMatch(new RegExp(`^<span class="op-pill ${tone[w.cls]}" title="[^"]*">${w.word}</span>$`));
+      // …and beside it, what the approval shipped in the record's words (#416): the fixture's are of one architecture, its package's only one.
+      expect(state, `Review's workspace of ${name}`).toMatch(new RegExp(`^<span class="op-pill ${tone[w.cls]}" title="[^"]*">${w.word}</span> <span class="rv-scope">approved for ${F.arch}</span>$`));
     }
     // A standing approval whose publish is queued wears the shell's "publishing" pill on both pages — the shape the negatives above forbid on lost and pulled, drawn here from the row alone.
     const queued = { ...failed, publish_status: "queued" };

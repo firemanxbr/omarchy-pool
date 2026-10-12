@@ -7,7 +7,9 @@
  * (test/fixture.ts) on alice's page: nobody signed in, bob who owns
  * nothing, alice herself, m1 a maintainer — and carol, blocked, on her
  * own. The answer is no-store: a per-caller field never rides the cached
- * page.
+ * page. A worker's row answers Drain and Resume beside Revoke (#412), in
+ * the worker orders' own words (orders.ts orderVerdicts): the door of
+ * POST /factory/workers/:id/orders refuses with the same sentence.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -48,6 +50,17 @@ const modeGone = async (id: string, as: Who) => {
   expect([r.status, r.json.code, r.json.docs], `${as || "nobody"} sets ${id}'s mode`).toEqual([410, "gone", "/docs/worker-host#maintainer-hosts"]);
 };
 
+/** The worker orders' words a person's page greys Drain and Resume with (orders.ts orderVerdicts): whose the orders are, and a worker not drained. */
+const ORDERS_BY = "only alice or a maintainer gives it orders";
+const NOT_DRAINED = "it is not drained: there is nothing to resume";
+/** A person's order of a worker, with their CLI token: a session's write would need the page's Origin (orders.ts writeGate). */
+async function order(id: string, as: Who, kind: string, reason: string): Promise<{ status: number; json: any }> {
+  const ctx = createExecutionContext();
+  const res = await worker.fetch(new Request(`http://pool.test/api/v1/factory/workers/${id}/orders`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer omc_${as}` }, body: JSON.stringify({ kind, reason }) }), env, ctx);
+  await waitOnExecutionContext(ctx);
+  return { status: res.status, json: await res.json().catch(() => null) };
+}
+
 /** The refusal a door answers is the predicate's sentence with its status. */
 const refusedLike = (res: { status: number; json: any }, status: number, why: string | undefined, what: string) => {
   expect(res.status, `${what}: ${JSON.stringify(res.json)}`).toBe(status);
@@ -62,7 +75,7 @@ describe("what a caller may do on a person's page", () => {
     expect(Object.keys(c.packages).sort()).toEqual([F.factoryPkg, F.publishedPkg, F.disposablePkg, F.sparePkg].sort());
     for (const name of Object.keys(c.packages)) expect(c.packages[name]).toEqual({ remove: false, why: SIGN_IN });
     expect(Object.keys(c.workers)).toEqual([F.ownerWorker]);
-    expect(c.workers[F.ownerWorker]).toEqual({ revoke: false, why: { revoke: SIGN_IN } });
+    expect(c.workers[F.ownerWorker]).toEqual({ revoke: false, drain: false, resume: false, why: { revoke: SIGN_IN, drain: SIGN_IN, resume: SIGN_IN } });
     expect((await call("GET", "/users/nobody/can", "")).status).toBe(404);
     // The doors say the same, in the same words: 401 for nobody, the sign-in.
     refusedLike(await call("POST", `/factory/packages/${F.factoryPkg}/build`, "", {}), 401, SIGN_IN, "nobody builds");
@@ -89,7 +102,8 @@ describe("what a caller may do on a person's page", () => {
       withdraw: "a maintainer decides",
     });
     for (const name of Object.keys(c.packages)) expect(c.packages[name]).toEqual({ remove: false, why: "only alice removes it, or a maintainer" });
-    expect(c.workers[F.ownerWorker]).toEqual({ revoke: false, why: { revoke: c.why.revoke } });
+    expect(c.workers[F.ownerWorker]).toEqual({ revoke: false, drain: false, resume: false, why: { revoke: c.why.revoke, drain: ORDERS_BY, resume: ORDERS_BY } });
+    refusedLike(await order(F.ownerWorker, "bob", "drain", "bob's word"), 403, ORDERS_BY, "bob drains alice's worker");
     refusedLike(await call("POST", `/factory/packages/${F.factoryPkg}/build`, "bob", { arches: [F.arch] }), 404, c.why.build, "bob builds mine");
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}`, "bob"), 403, c.packages[F.factoryPkg].why, "bob removes mine");
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}/builds/${F.stagedTask}`, "bob"), 403, c.why.dequeue, "bob takes alice's build out");
@@ -105,7 +119,7 @@ describe("what a caller may do on a person's page", () => {
     const c = await canOn("alice", "alice");
     expect(flags(c)).toEqual({ ...allFalse, request: true, token: true, build: true, dequeue: true, remove: true, revoke: true });
     expect(c.why).toEqual({ register: POOL_HOSTS, withdraw: "a maintainer decides" });
-    expect(c.workers[F.ownerWorker]).toEqual({ revoke: true, why: {} });
+    expect(c.workers[F.ownerWorker]).toEqual({ revoke: true, drain: true, resume: false, why: { resume: NOT_DRAINED } });
     // Her two registrations are the maintainers' now: mine approved (its publish waits), ours published into edge.
     expect(c.packages[F.factoryPkg]).toEqual({ remove: false, why: `${F.factoryPkg} is approved: a maintainer removes it` });
     expect(c.packages[F.publishedPkg]).toEqual({ remove: false, why: `${F.publishedPkg} is published: a maintainer removes it` });
@@ -125,8 +139,24 @@ describe("what a caller may do on a person's page", () => {
     refusedLike(await call("DELETE", `/factory/workers/${w.json.worker}`, "alice"), 404, `${w.json.worker} is revoked already`, "revoked twice");
     // Revoked, the worker's row still answers — grey with the state's word for its owner and for a maintainer, before whose it is.
     const gone = `${w.json.worker} is revoked already`;
-    for (const as of ["alice", "m1", "bob"] as Who[]) expect((await canOn("alice", as)).workers[w.json.worker], as).toEqual({ revoke: false, why: { revoke: gone } });
+    for (const as of ["alice", "m1", "bob"] as Who[]) expect((await canOn("alice", as)).workers[w.json.worker], as).toEqual({ revoke: false, drain: false, resume: false, why: { revoke: gone, drain: gone, resume: gone } });
     expect((await call("DELETE", "/factory/workers/no-such-worker", "alice")).status).toBe(404);
+  });
+
+  it("Drain and Resume on alice's worker (#412): the row says what the orders' door answers — m1 drains it, the row turns to Resume with the drain's words, and a second drain is refused in them", async () => {
+    expect((await canOn("alice", "m1")).workers[F.ownerWorker]).toMatchObject({ drain: true, resume: false });
+    const drained = await order(F.ownerWorker, "m1", "drain", "a disk to replace");
+    expect(drained.status, JSON.stringify(drained.json)).toBe(201);
+    const after = await canOn("alice", "m1"), row = after.workers[F.ownerWorker] as Rights["workers"][string] & { drain: boolean; resume: boolean; why: Record<string, string> };
+    expect(row).toMatchObject({ revoke: true, drain: false, resume: true });
+    expect(row.why.drain).toMatch(/^drained already \(by m1, .*: a disk to replace\) — Resume ends it$/);
+    refusedLike(await order(F.ownerWorker, "m1", "drain", "again"), 409, row.why.drain, "m1 drains it twice");
+    // Its owner may resume it too (a maintainer drained it); bob may do neither, in the orders' words; nobody is asked to sign in.
+    expect((await canOn("alice", "alice")).workers[F.ownerWorker]).toMatchObject({ drain: false, resume: true });
+    expect((await canOn("alice", "bob")).workers[F.ownerWorker]).toMatchObject({ drain: false, resume: false, why: { drain: ORDERS_BY, resume: ORDERS_BY } });
+    expect((await canOn("alice", "")).workers[F.ownerWorker]).toMatchObject({ drain: false, resume: false, why: { drain: SIGN_IN, resume: SIGN_IN } });
+    expect((await order(F.ownerWorker, "m1", "resume", "the disk is in")).status).toBe(201);
+    expect((await canOn("alice", "m1")).workers[F.ownerWorker]).toEqual({ revoke: true, drain: true, resume: false, why: { resume: NOT_DRAINED } });
   });
 
   it("m1, a maintainer, on alice's page: not her workspace — but Revoke, Withdraw and Remove (an approved one too) are theirs", async () => {
@@ -140,9 +170,9 @@ describe("what a caller may do on a person's page", () => {
       dequeue: "only alice takes their build out of the queue — yours is on /user/m1",
     });
     for (const name of Object.keys(c.packages)) expect(c.packages[name]).toEqual({ remove: true });
-    expect(c.workers[F.ownerWorker]).toEqual({ revoke: true, why: {} });
-    // The project's worker, on m1's own page: Revoke is the maintainer's; its mode, as every worker's, is gone (#343).
-    expect((await canOn("m1", "m1")).workers[F.worker]).toEqual({ revoke: true, why: {} });
+    expect(c.workers[F.ownerWorker]).toEqual({ revoke: true, drain: true, resume: false, why: { resume: NOT_DRAINED } });
+    // The project's worker, on m1's own page: Revoke and Drain are the maintainer's; its mode, as every worker's, is gone (#343).
+    expect((await canOn("m1", "m1")).workers[F.worker]).toEqual({ revoke: true, drain: true, resume: false, why: { resume: NOT_DRAINED } });
     await modeGone(F.worker, "m1");
     refusedLike(await call("POST", `/factory/packages/${F.factoryPkg}/build`, "m1", { arches: [F.arch] }), 404, c.why.build, "m1 builds mine");
     refusedLike(await call("DELETE", `/factory/packages/${F.factoryPkg}/builds/${F.stagedTask}`, "m1"), 403, c.why.dequeue, "m1 takes alice's build out");

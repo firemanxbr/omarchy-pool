@@ -37,10 +37,10 @@ please do not file a public issue for it.
 
 | Credential | Held by | Can do | Cannot do | Status |
 |---|---|---|---|---|
-| Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, read their own state; a maintainer's also gives a host's registration orders through the API (re-check its agent, drain and resume, stop the task in hand; #277) — a host order is the browser session's only (#344) | write to the pool, claim jobs, approve, register a worker (#331: 403 for a contributor; #346: 410 for a maintainer too, a machine joins as a host) | live; replaced from the person's page, revoked by a reset of their passkeys (#284) — then made again on that page only, never with a GitHub token |
+| Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, read their own state; a maintainer's also gives a host's registration orders through the API (re-check its agent, drain and resume, stop the task in hand; #277) — Drain and Resume are on the registration's row of its owner's page too (#412), through the same door and its verdicts; a host order is the browser session's only (#344) | write to the pool, claim jobs, approve, register a worker (#331: 403 for a contributor; #346: 410 for a maintainer too, a machine joins as a host) | live; replaced from the person's page, revoked by a reset of their passkeys (#284) — then made again on that page only, never with a GitHub token |
 | Worker token `omw_…` | one host's dispatcher: its agent fetches it with the host key once its owner confirmed the host, and writes it to a read-only file only the dispatcher mounts (#321, #327); rotated every 30 days | claim every kind the host's phase enables, by its capacity; heartbeat | write to the pool or staging directly; reach a task container (the dispatcher joins no task network) | live |
 | Job token `omj.…` | the dispatcher running one task, for the lease — never the task container | the routes that task needs — e.g. `sync`: upload objects, index, create a release in one ring, store that ring's databases; community `build`: upload to that task's staging folder, and nothing into the journal (the health and abi rows the gate reads are the project's jobs' alone); a dry run (`publish` 0): its task and the journal, no pool and no ring (#284) | anything outside its scopes (403, journaled); anything after the lease (30 min, renewed by heartbeat) — a task stopped from its worker's page is not renewed, and goes back to the queue only once its worker has stopped or the lease has ended, so no second runner overlaps its token; an audit's or a trial's report beside a staged build is taken only while the job's own task is still leased to its worker and not stopped (#277) | live |
-| Maintainer role | a contributor listed in `factory/MAINTAINERS.toml` on `main` — one list, no groups (applied by the brain every ten minutes) | withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded; approve, and a block, in the browser with their passkey, #271); queue any pool job by hand (`POST /factory/jobs`; a promotion forced past its evidence in the browser with their passkey, #284); queue a dry run by hand, cancel, remove a registration; give any host and any registration orders (the same list), capped at 20 an hour per login and on the journal — none of them needs the passkey (#277, #344); provide hosts (#321); review governance pull requests | write to the pool with their own token (a job does); publish a build queued by hand (#284: a dry run only); write the gate's evidence (#284: a journal note only); roll a ring back to another ring's release; operate as a worker; grant a role | live |
+| Maintainer role | a contributor listed in `factory/MAINTAINERS.toml` on `main` — one list, no groups (applied by the brain every ten minutes) | withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded; approve, and a block, in the browser with their passkey, #271; a package whole or one architecture alone with its reason, two acts with a passkey answer each, #416); queue any pool job by hand (`POST /factory/jobs`; a promotion forced past its evidence in the browser with their passkey, #284); queue a dry run by hand, cancel, remove a registration; give any host and any registration orders (the same list), capped at 20 an hour per login and on the journal — none of them needs the passkey (#277, #344); provide hosts (#321); review governance pull requests | write to the pool with their own token (a job does); publish a build queued by hand (#284: a dry run only); write the gate's evidence (#284: a journal note only); roll a ring back to another ring's release; operate as a worker; grant a role | live |
 | Agent token `oma_…` | one agent on one person's machine, granted by that person in their signed-in browser (`omarchy-cli login`: a loopback address and PKCE), kept in `~/.config/omarchy-cli/credentials.toml` (0600) and bound to the origin that granted it | the tools of `omarchy-cli mcp` its scopes hold, as that person: request and follow packages (`contribute`); claim, release, read evidence and draft a verdict (`review`) or a block (`block`) — the two a maintainer's only, read again on every call; twenty calls a minute, five requests, ten claims and thirty drafts a day | decide anything — approve, request changes, reject and block are drafts the person confirms in the browser, approve and block with the person's passkey; every other route (403); give the project's agent a hint; outlive seven days with `review` or `block`, ninety with `contribute` | live; revoked by `omarchy-cli logout`, the person's page, a block of the person, or a reset of their passkeys (#284) |
 | Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered with the browser's session, on their own page or, the first one, in the dialog of the act that needs it (#287); the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
 | Host enrollment token `ome_…` | the maintainer who pressed *Add a host*, for the one command they paste on the machine (in the environment of `sh`, never an argument) | enroll one host, once, within 15 minutes, as that maintainer — while they are still in `factory/MAINTAINERS.toml` and still the same GitHub user id | claim, confirm the host, or enroll a second one | live (#321); stored as its SHA-256; burnt by the enrollment in the same D1 batch that creates the host |
@@ -288,7 +288,9 @@ a contributor's code where the host has one.
   release's own signed code, trusted like the dispatcher: each runs in a
   child process of it (`pkg-repo pool-job`) with its lease's job token,
   under a 2 GB memory limit and a time limit,
-  killed whole when it overruns; it never holds the host's worker token nor
+  killed whole when it overruns (two malloc arenas, so the limit counts what
+  the job holds, not what eight threads freed; the jobs fit it by design,
+  #319); it never holds the host's worker token nor
   the name of its file (#327), and it reaches no task network. The containers its scripts start run package
   code (a health check's pacman, an ABI gate's install of a ring, the
   enqueue's reader, which sources the recipes on `main`), so they go
@@ -352,10 +354,30 @@ a contributor's code where the host has one.
   from a sidecar lands no higher than one from its task, at the host's
   isolation level. On a daemon with userns-remap no remapped uid is the
   owner, and its sidecars stay remapped as its task containers do (design v2
-  §19.1), so no sidecar can read the file there: the agent holds the host's
-  model kinds instead (`OMARCHY_AGENT_HELD=userns-remap`), the dispatcher
-  starts no probe and no agent sidecar, and the host's page says why. How a
-  remapped host reads its keys is a maintainer's decision still open. The dispatcher refuses to
+  §19.1), so there the sidecars and the probe run as one remapped uid of
+  their own (`65533:65533` inside, the remap user's range start plus 65533 on
+  the host, named in `OMARCHY_AGENT_REMAPPED_USER`, which a dispatcher from
+  before #405 ignores rather than read as the file's owner and give a task's
+  usage directory to host uid 65533) and the agent, the file's owner, gives
+  the file a POSIX ACL that lets that uid read it (#405, the maintainers'
+  decision of 2026-10-08): the file is its owner's and that one uid's, 0640
+  with no group and no other access, put on the new file before its rename
+  whenever the keys are written, with no root, no capability and no visit.
+  It fails closed: an ACL lost (a `chmod`, a copy), one naming another uid, a
+  filesystem that keeps none, or no range the agent can read holds the
+  host's model kinds (`OMARCHY_AGENT_HELD=keys-acl` or `userns-remap`), and
+  so does the dispatcher when the daemon's maps do not hold that uid or
+  `agent.toml`'s `userns_remap` is not the daemon's: it starts no probe and
+  no agent sidecar, and the host's page says why. That uid is in
+  the same remapped range as every task container's: a task root that escapes
+  holds its namespace's capabilities and can become it, and then reaches a
+  running agent sidecar's processes and their mounts as it reaches another
+  task's (above); what keeps the keys at rest from it is the secrets
+  directory, the agent user's and 0700, which no remapped uid may enter, and
+  that only the probe and agent sidecars mount the file. Any host with no
+  keys file is held (`OMARCHY_AGENT_HELD=no-keys`, #419), so no mount ever names a file
+  that is not there, which podman's docker API makes a directory of (as it
+  did on a rootless podman host). The dispatcher refuses to
   start with an agent key or a GitHub token in its own environment and keeps the
   host's per-day budget from the usage each sidecar writes where its task
   cannot. So a recipe that subverts its sidecar reaches that task's answers
@@ -445,7 +467,13 @@ a contributor's code where the host has one.
   maintainer's host, a second agent audits
   it, a real pacman
   installs it from the lab, and a maintainer who is not the owner approves
-  *that* build before it is signed and enters `edge`.
+  *that* build before it is signed and enters `edge` — the package with
+  every architecture its request names in one decision, or one architecture
+  alone with the reason the others do not ship on the record (#416); nothing
+  approves by itself, a bump included (`updates.ts` queues it as evidence),
+  and the decision is written in one place (`routes/review.ts` `takeRound`),
+  reached only by the web's door with the passkey and an agent's draft the
+  maintainer confirmed in the browser with one.
 - **The pool serves immutable objects.** An object under a filename is
   never rewritten; a signature must match the stored object or it is
   refused; superseded versions stay until retention runs.

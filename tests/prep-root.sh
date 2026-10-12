@@ -4,7 +4,9 @@
 #
 # - Arch, rootful, aarch64, a btrfs /srv, a new daemon: the packages
 #   (qemu-user-static-binfmt included) and docker enabled; the user in the
-#   docker group; daemon.json with docker's default address pools and
+#   docker group; the dockremap user with a subordinate range of its own,
+#   past every range /etc/subuid and /etc/subgid list (#405), then
+#   daemon.json with docker's default address pools and
 #   userns-remap, docker restarted; the work root a btrfs subvolume owned by
 #   the user, 0750; linger; the DOCKER-USER rules for the task subnets
 #   (RFC 1918 and link-local dropped, the subnet itself returned first, the
@@ -15,7 +17,8 @@
 #   linger, cgroup v2 delegation; no docker group, daemon.json or firewall.
 #   Again: nothing changes.
 # - A daemon that already holds containers: userns-remap left off and docker
-#   not restarted, both said under "needs a person" (exit 1).
+#   not restarted, both said under "needs a person" (exit 1); no dockremap.
+# - A dockremap that already has a range (#405): kept, no user or range added.
 # - binfmt without the F flag: said (exit 1).
 # - --dry-run: nothing written, no command that changes the host.
 # - --dry-run on a truly fresh host (no docker, no jq yet): every step still
@@ -36,8 +39,10 @@
 #
 # prep-root.sh runs as root on a real host: here its root check is lifted in
 # a copy, OMARCHY_PREP_FS points it at a temporary root, and pacman, apt-get,
-# systemctl, usermod, loginctl, btrfs, docker, id, getent, stat, chown, uname
-# and iptables are stubs on PATH that record what they were asked.
+# systemctl, usermod, useradd, loginctl, btrfs, docker, id, getent, stat,
+# chown, uname and iptables are stubs on PATH that record what they were
+# asked (usermod's --add-subuids and --add-subgids land in the temporary
+# root's /etc/subuid and /etc/subgid, useradd's dockremap in getent's answer).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -53,13 +58,27 @@ stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$tmp/bin/$1"; chmod +x "$tmp
 log='echo "$(basename "$0") $*" >> "$STUB_LOG"'
 stub pacman "$log"
 stub apt-get "$log"
-stub usermod "$log"'; [[ "$1" == -aG ]] && echo " $2" >> "$STATE/groups"'
+stub usermod "$log"'
+[[ "$1" == -aG ]] && echo " $2" >> "$STATE/groups"
+while (($#)); do
+  case "$1" in
+    --add-subuids) echo "dockremap:${2%-*}:$((${2#*-} - ${2%-*} + 1))" >> "$OMARCHY_PREP_FS/etc/subuid" ;;
+    --add-subgids) echo "dockremap:${2%-*}:$((${2#*-} - ${2%-*} + 1))" >> "$OMARCHY_PREP_FS/etc/subgid" ;;
+  esac
+  shift
+done
+true'
+stub useradd "$log"'; echo "$*" >> "$STATE/useradd"'
 stub loginctl "$log"'; mkdir -p "$OMARCHY_PREP_FS/var/lib/systemd/linger"; touch "$OMARCHY_PREP_FS/var/lib/systemd/linger/$2"'
 stub btrfs "$log"'; mkdir -p "$3"'
 stub chown "$log"'; echo "$1" > "$STATE/owner"'
 stub uname 'echo "$STUB_ARCH"'
 stub id 'case "$1" in -u) echo 1000 ;; -nG) cat "$STATE/groups" | tr -d "\n" ; echo ;; -gn) echo omarchy ;; *) exit 1 ;; esac'
-stub getent '[[ "$1 $2" == "group tss" ]] && echo "tss:x:59:"'
+stub getent 'case "$1 $2" in
+  "group tss") echo "tss:x:59:" ;;
+  "passwd dockremap") [[ -s "$STATE/useradd" ]] && echo "dockremap:x:998:998::/:/bin/false" ;;
+  *) exit 2 ;;
+esac'
 # stat -f -c %T: the filesystem type; stat -c "%U:%G %a": the owner chown set, and the mode.
 stub stat 'if [[ "$1" == -f ]]; then echo "$STUB_FSTYPE"; else printf "%s %s\n" "$(cat "$STATE/owner" 2>/dev/null || echo root:root)" "$(cat "$STATE/mode" 2>/dev/null || echo 755)"; fi'
 stub chmod 'if [[ "$1" == 0750 ]]; then echo "chmod $*" >> "$STUB_LOG"; echo 750 > "$STATE/mode"; fi; exec /bin/chmod "$@"'
@@ -105,13 +124,23 @@ only() { # allowed command names…
 
 wr=/srv/omarchy-pool/host
 
-# --- Arch, rootful, aarch64, btrfs, a new daemon.
+# --- Arch, rootful, aarch64, btrfs, a new daemon; the agent's user and another have ranges.
 fresh arch aarch64 btrfs
+printf 'omarchy:100000:65536\nalice:165536:65536\n' > "$tmp/fs/etc/subuid"
+printf 'omarchy:100000:65536\n' > "$tmp/fs/etc/subgid"
 prep --user omarchy --work-root "$wr" --task-subnets 10.231.0.0/16
 [[ $status -eq 0 ]] || fail "arch rootful: exit $status"
 logged "pacman -S --needed --noconfirm qemu-user-static qemu-user-static-binfmt btrfs-progs jq docker"
 logged "systemctl enable --now docker.service"
 logged "usermod -aG docker omarchy"
+# dockremap and its own range (#405), past both files' ranges, before docker restarts with the remapping.
+logged "useradd --system --user-group --no-create-home --shell /bin/false dockremap"
+logged "usermod --add-subuids 231072-296607 --add-subgids 231072-296607 dockremap"
+grep -qx 'dockremap:231072:65536' "$tmp/fs/etc/subuid" && grep -qx 'dockremap:231072:65536' "$tmp/fs/etc/subgid" \
+  || fail "dockremap's range: $(cat "$tmp/fs/etc/subuid" "$tmp/fs/etc/subgid")"
+[[ "$(grep -n 'usermod --add-subuids' "$STUB_LOG" | cut -d: -f1)" -lt "$(grep -n 'systemctl restart docker.service' "$STUB_LOG" | cut -d: -f1)" ]] \
+  || fail "dockremap's range after docker's restart"
+grep -q "dockremap's subordinate ids: 231072-296607, its own" "$tmp/out" || fail "dockremap's range not said"
 [[ "$(jq -cS . "$tmp/fs/etc/docker/daemon.json")" == '{"default-address-pools":[{"base":"172.16.0.0/12","size":24}],"userns-remap":"default"}' ]] \
   || fail "daemon.json: $(cat "$tmp/fs/etc/docker/daemon.json")"
 logged "systemctl restart docker.service"
@@ -138,14 +167,14 @@ logged "systemctl restart omarchy-task-firewall.service"
 not_logged "apt-get"
 not_logged "usermod -aG tss"
 grep -q tpm2-tools "$STUB_LOG" && fail "tpm2-tools on a machine with no TPM"
-only pacman systemctl usermod btrfs chown chmod loginctl
+only pacman systemctl usermod useradd btrfs chown chmod loginctl
 before="$(tree)"
 
 # --- Again: nothing changes.
 prep --user omarchy --work-root "$wr" --task-subnets 10.231.0.0/16
 [[ $status -eq 0 ]] || fail "arch rootful, again: exit $status"
 [[ "$(tree)" == "$before" ]] || fail "a second run changed files"
-for c in usermod btrfs chown chmod loginctl "systemctl restart docker" "systemctl daemon-reload" "systemctl enable omarchy-task-firewall" "systemctl restart omarchy-task-firewall"; do not_logged "$c"; done
+for c in usermod useradd btrfs chown chmod loginctl "systemctl restart docker" "systemctl daemon-reload" "systemctl enable omarchy-task-firewall" "systemctl restart omarchy-task-firewall"; do not_logged "$c"; done
 grep -q "in place" "$tmp/out" || fail "the firewall not said in place"
 
 # --- The firewall unit running but disabled since (a reboot would take the drop away), then
@@ -195,6 +224,21 @@ prep --user omarchy --work-root "$wr"
 not_logged "systemctl restart docker"
 grep -q "needs a person" "$tmp/out" && grep -q "userns-remap: left off" "$tmp/out" && grep -q "restart docker.service when none does" "$tmp/out" \
   || fail "busy daemon: not said"
+not_logged useradd
+not_logged "usermod --add-sub"
+
+# --- A dockremap that already has a range of its own (#405): kept.
+fresh arch aarch64 btrfs
+echo "--system dockremap" > "$STATE/useradd"
+printf 'dockremap:500000:65536\n' > "$tmp/fs/etc/subuid"
+printf 'dockremap:500000:65536\n' > "$tmp/fs/etc/subgid"
+prep --user omarchy --work-root "$wr"
+[[ $status -eq 0 ]] || fail "dockremap with a range: exit $status"
+not_logged useradd
+not_logged "usermod --add-sub"
+grep -q "the dockremap user: there" "$tmp/out" && grep -q "dockremap's subordinate ids: 500000:65536, its own" "$tmp/out" \
+  || fail "dockremap with a range: not said"
+[[ "$(cat "$tmp/fs/etc/subuid")" == "dockremap:500000:65536" ]] || fail "dockremap's range changed: $(cat "$tmp/fs/etc/subuid")"
 
 # --- binfmt without the F flag.
 fresh arch aarch64 btrfs
@@ -211,6 +255,8 @@ prep --user omarchy --work-root "$wr" --dry-run
 [[ "$(tree)" == "$before" ]] || fail "a dry run changed files"
 [[ ! -s "$STUB_LOG" ]] || fail "a dry run ran: $(cat "$STUB_LOG")"
 grep -q "would run: pacman" "$tmp/out" && grep -q "would write /etc/docker/daemon.json" "$tmp/out" || fail "a dry run did not say what it would do"
+grep -q "would run: useradd --system --user-group --no-create-home --shell /bin/false dockremap" "$tmp/out" \
+  && grep -q "would run: usermod --add-subuids 165536-231071 --add-subgids 165536-231071 dockremap" "$tmp/out" || fail "a dry run did not say dockremap's range"
 
 # --- --dry-run on a truly fresh host: neither docker nor jq installed yet.
 # PATH: the stubs without docker, then the system's commands without docker and jq.

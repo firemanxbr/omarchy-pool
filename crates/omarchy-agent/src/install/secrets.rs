@@ -2,8 +2,56 @@
 //! from an existing file (`--agent-env-from`) after showing which keys it holds, into
 //! `OMARCHY_SECRETS_DIR/agent.env` (mode 0600), outside the work root. Without them the
 //! host takes no model kinds. A `GITHUB_TOKEN` among them must be public read only.
+//!
+//! An empty directory where the file goes (#419) — what podman's docker API makes of a bind
+//! mount's source that is not there, as it did of the keys file's on studio-vm4k while there
+//! was none (`run::engine_tests` shows it on the engine) — is removed by every writer of the keys (install,
+//! *Set agent keys*) and by the run loop, and said ([`clear`]); a directory with something in
+//! it, a link or another user's file stays refused ([`check`]).
+//!
+//! On a rootful daemon with userns-remap (#405) every writer also gives the file the ACL that
+//! lets the agent sidecars' one remapped uid read it ([`reader`], [`write`]): readable by its
+//! owner and that uid only, 0640 with no group and no other access.
 
 use std::path::Path;
+
+use super::files;
+use crate::dispatcher_env::remap;
+
+/// The keys file's name in the secrets directory.
+pub(crate) const FILE: &str = "agent.env";
+
+/// Whether `path` (the keys file) is an empty directory (#419), which a writer of the keys
+/// removes and replaces with the file; `false` for no file or the agent's own. A directory with
+/// something in it, a symbolic link, another user's file or one others may write is refused.
+pub(crate) fn check(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => {
+            let mut entries =
+                std::fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if entries.next().is_none() {
+                Ok(true)
+            } else {
+                Err(format!(
+                    "{}: a directory with something in it where the agent keys go: refused, left as it is (move it away, then give the keys again)",
+                    path.display()
+                ))
+            }
+        }
+        _ => files::check_owner_file(path).map(|()| false),
+    }
+}
+
+/// An empty directory at `dir/agent.env` removed (#419), and what to say of it; `None` when there
+/// was none. A directory with something in it is refused, never emptied.
+pub(crate) fn clear(dir: &Path) -> Result<Option<String>, String> {
+    Ok(files::remove_empty_dir(dir, FILE)?.then(|| {
+        format!(
+            "{} was an empty directory, which an engine made of the agent sidecars' mount while there was no keys file (#419): removed",
+            dir.join(FILE).display()
+        )
+    }))
+}
 
 /// `KEY=value` lines; comments and blank lines are left out. A key is a shell variable
 /// name; a value holds no newline (it goes into a container's env file).
@@ -39,6 +87,48 @@ pub(crate) fn parse(text: &str) -> Result<Vec<(String, String)>, String> {
         out.push((k.to_owned(), v.to_owned()));
     }
     Ok(out)
+}
+
+/// Who reads the keys besides their owner (#405): `Ok(None)` on every engine that shows a
+/// container the file's owner (the sidecars run as it, #399); on a rootful daemon with
+/// userns-remap, `Ok(Some(uid))`, the agent sidecars' remapped uid on the host
+/// ([`remap::SIDECAR_ID`] through the remap user's range), or why there is none.
+pub(crate) fn reader(
+    rootful: bool,
+    userns_remap: bool,
+    files: &remap::Files,
+) -> Result<Option<u32>, String> {
+    if rootful && userns_remap {
+        files.sidecar_uid().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// `text` written as the keys file in `dir`: 0600, and with the ACL for `reader`'s uid on a
+/// remapped daemon ([`files::write_keys`]). `Ok(Some(note))` when the file was written but no
+/// remapped uid may read it — none is known, or its filesystem refused the ACL — so the host
+/// stays held (`OMARCHY_AGENT_HELD`), which the note says first and the writer says after the
+/// file's path: `held, OMARCHY_AGENT_HELD=…`.
+pub(crate) fn write(
+    dir: &Path,
+    text: &str,
+    reader: &Result<Option<u32>, String>,
+) -> Result<Option<String>, String> {
+    match reader {
+        Ok(uid) => Ok(files::write_keys(dir, FILE, text.as_bytes(), *uid)?.map(|why| {
+            format!(
+                "held, OMARCHY_AGENT_HELD=keys-acl (#405): no ACL lets the agent sidecars' remapped uid {} read it ({why}), so it is 0600 until written again where ACLs are kept",
+                uid.unwrap_or_default()
+            )
+        })),
+        Err(why) => {
+            files::write_keys(dir, FILE, text.as_bytes(), None)?;
+            Ok(Some(format!(
+                "held, OMARCHY_AGENT_HELD=userns-remap (#405): no remapped uid for the agent sidecars ({why}), so it is 0600"
+            )))
+        }
+    }
 }
 
 /// The file as written: one `KEY=value` a line.

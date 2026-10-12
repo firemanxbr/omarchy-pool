@@ -12,7 +12,8 @@
  *   PKGBUILD, its log per architecture — learnt from, never reused), the
  *   project's rebuild on the right (the steps, the rebuilt PKGBUILD with
  *   the lines that differ lit, the rebuild's log), then the checklist and
- *   the verdict with the agent's draft, and the three decisions — Approve,
+ *   the verdict with the agent's draft, and the decisions — Approve package,
+ *   Approve <arch> only with the reason the others do not ship (#416),
  *   Request changes, Reject — each confirmed before it is posted.
  *
  * A claim is "Build by the project" (routes/review.ts): the project's
@@ -38,7 +39,7 @@
 import { page, servedGrey, RETRY_AT_SIZE } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { lucide } from "./kit";
-import type { RunningVersion } from "../meta";
+import { REPO_ARCHES, type RunningVersion } from "../meta";
 import { CATEGORIES } from "../categories";
 
 /** The brake's form (block a contributor or a package): served grey with the reason, drawn again through the shell's gate() once whoami answers — live for a maintainer. It is the Blocked tab's. */
@@ -62,12 +63,17 @@ const TABS = [
   ["unmaintained", "No maintainer"],
 ] as const;
 
-/** The three decisions of the workspace, drawn once and kept (renderDecide sets what each may do): a redraw would take the focus from the one a keyboard is on. */
-const DECIDE = [
-  ["approve", "Approve", " primary"],
-  ["changes", "Request changes", ""],
-  ["reject", "Reject", " danger"],
-] as const;
+/**
+ * The decisions of the workspace, drawn once and kept (renderDecide sets what each may do): a redraw would take the focus from the one a
+ * keyboard is on. Approve package — every architecture the request names, one decision — then one architecture alone, per architecture,
+ * the reason the others do not ship required (#416), then request changes and reject. The fourth field is the architecture an `only` is for.
+ */
+const DECIDE: readonly (readonly [string, string, string, string])[] = [
+  ["approve", "Approve package", " primary", ""],
+  ...REPO_ARCHES.map((a) => ["only", `Approve ${a} only`, "", a] as const),
+  ["changes", "Request changes", "", ""],
+  ["reject", "Reject", " danger", ""],
+];
 /** Their reason before the lists answer: the page's word for a package with nothing in review. */
 const NOTHING = "nothing of this package is in review";
 
@@ -142,9 +148,9 @@ const BODY = String.raw`
         <label class="op-label" for="rv-note-in">Verdict · goes on the record</label>
         <textarea id="rv-note-in" rows="2" placeholder="The agent drafts a verdict when the rebuild ends"></textarea>
         <span id="rv-usedraft"></span>
-        <div class="rv-btns" id="rv-btns">${DECIDE.map(([what, label, cls]) => `<button type="button" class="op-btn${cls}" data-decide="${what}" disabled aria-disabled="true" title="${NOTHING}">${label}</button>`).join("")}</div>
+        <div class="rv-btns" id="rv-btns">${DECIDE.map(([what, label, cls, arch]) => `<button type="button" class="op-btn${cls}" data-decide="${what}"${arch ? ` data-arch="${arch}"` : ""} disabled aria-disabled="true" title="${NOTHING}">${label}</button>`).join("")}</div>
         <p class="rv-err" id="rv-err" role="alert"></p>
-        <div class="rv-confirm" id="rv-confirm" role="group" aria-labelledby="rv-confirm-t" hidden><span id="rv-confirm-t"></span><span class="rv-confirm-b"><button type="button" class="op-btn go" id="rv-confirm-go">Confirm</button><button type="button" class="op-btn" id="rv-confirm-no">Cancel</button></span><span class="rv-confirm-pk" id="rv-confirm-pk" role="status" aria-live="polite"></span></div>
+        <div class="rv-confirm" id="rv-confirm" role="group" aria-labelledby="rv-confirm-t" hidden><span id="rv-confirm-t"></span><input class="rv-confirm-why" id="rv-confirm-why" hidden minlength="4" placeholder="why the other architecture does not ship — on the record and the package's page" aria-label="why the other architecture does not ship"><span class="rv-confirm-b"><button type="button" class="op-btn go" id="rv-confirm-go">Confirm</button><button type="button" class="op-btn" id="rv-confirm-no">Cancel</button></span><span class="rv-confirm-pk" id="rv-confirm-pk" role="status" aria-live="polite"></span></div>
       </div>
     </section>
   </div>
@@ -265,6 +271,10 @@ const CSS = String.raw`
   .rv-err { margin: 0; color: var(--red); font-size: 12.5px; } .rv-err:empty { display: none; }
   .rv-confirm { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 12px; border: 1px dashed var(--green); font-size: 13px; } .rv-confirm[hidden] { display: none; }
   .rv-confirm.warn { border-color: var(--amber); } .rv-confirm.danger { border-color: var(--red); } .rv-confirm-b { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* One architecture alone (#416): the reason the others do not ship, asked in the confirmation itself — the record and the package's page say it. */
+  .rv-confirm-why { flex: 1 1 100%; min-width: 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 0; background: var(--bg-deep); color: var(--text); font: 13px var(--font-mono); } .rv-confirm-why:focus { outline: none; border-color: var(--green); } .rv-confirm-why[hidden] { display: none; }
+  /* What an approval shipped, beside its state: "approved for x86_64 and aarch64", or one architecture only and why. */
+  .rv-scope { font-size: 12.5px; color: var(--muted); }
   /* What the passkey's first press says (#287), under the text and the buttons: its words change in place, so a screen reader hears each one. */
   .rv-confirm-pk { flex: 1 1 100%; } .rv-confirm-pk:empty { display: none; } .rv-confirm-pk a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
   .rv .rv-confirm .op-btn.go { background: var(--green); border-color: var(--green); color: var(--green-ink); } .rv .rv-confirm.warn .op-btn.go { background: var(--amber); border-color: var(--amber); } .rv .rv-confirm.danger .op-btn.go { background: var(--red); border-color: var(--red); }
@@ -331,11 +341,13 @@ const SCRIPT = String.raw`
   function tabOf(p) { return p.state === "in_review" ? "review" : p.state === "ready" ? "ready" : p.rows.some(function (t) { return t.already; }) ? "ready" : null; }
   function archSquares(targets) {
     return '<span class="rv-archs">' + ARCHES.filter(function (a) { return targets && targets[a]; }).map(function (a) {
-      var st = targets[a].status, tone = st === "not_supported" ? "na" : st === "building" || st === "reviewing" ? "run" : st === "waiting" ? "wait" : "ok";
+      var st = targets[a].status, tone = st === "not_supported" || st === "not_shipping" ? "na" : st === "building" || st === "reviewing" ? "run" : st === "waiting" ? "wait" : "ok";
       return '<i class="op-arch ' + tone + '" title="' + esc(a + ": " + String(st).replace("_", " ")) + '"></i>';
     }).join("") + '</span>';
   }
   function notSupported(targets) { return ARCHES.filter(function (a) { return targets && targets[a] && targets[a].status === "not_supported"; }); }
+  // The architectures an approval of another one alone set aside (#416): they do not ship, the reason on the record.
+  function setAside(targets) { return ARCHES.filter(function (a) { return targets && targets[a] && targets[a].status === "not_shipping"; }); }
   function row(name, href, ver, sub, archs, age, act, fresh) {
     return '<div class="rv-row' + (fresh ? " op-fresh" : "") + '"><span class="rv-name">' + (href ? '<a href="' + esc(href) + '" title="' + esc(name) + '"><b>' + esc(name) + '</b></a>' : '<b title="' + esc(name) + '">' + esc(name) + '</b>') + (ver ? '<span class="v" title="' + esc(ver) + '">' + esc(ver) + '</span>' : '') + '</span><span class="rv-sub">' + sub + '</span>' + (archs || '<span class="rv-archs"></span>') + '<span class="rv-age">' + esc(age || "") + '</span><span class="rv-act">' + act + '</span></div>';
   }
@@ -343,7 +355,8 @@ const SCRIPT = String.raw`
   function btn(label, attrs, ok, why, cls, named) { return gate('<button type="button" class="op-btn sm' + (cls ? " " + cls : "") + '"' + (attrs || "") + (named ? ' aria-label="' + esc(named) + '"' : '') + '>' + esc(label) + '</button>', ok, why || "not now"); }
   function readyRow(p, fresh) {
     var t = p.lead || {}, own = isOwner(p.owner), ns = notSupported(p.targets), pb = t.project_build, c = t.can || { why: {} };
-    var sub = av(p.owner) + '<span class="t">' + at(p.owner) + (ns.length ? ' · ' + esc(ns.join(" · ")) + ' not supported' : '') + (pb && pb.status === "failed" ? ' · the rebuild failed' : '') + (t.already ? ' · a version already approved' : '') + '</span>';
+    var na = setAside(p.targets);
+    var sub = av(p.owner) + '<span class="t">' + at(p.owner) + (ns.length ? ' · ' + esc(ns.join(" · ")) + ' not supported' : '') + (na.length ? ' · ' + esc(na.join(" · ")) + ' not shipping' : '') + (pb && pb.status === "failed" ? ' · the rebuild failed' : '') + (t.already ? ' · a version already approved' : '') + '</span>';
     var act;
     if (t.already) act = '<span class="decide" data-task="' + t.id + '" data-label="' + esc(p.name + " " + (t.version || "") + " (build #" + t.id + ")") + '" data-arch="' + esc(t.arch) + '">' + gate('<button type="button" class="op-btn sm" data-reject="' + t.id + '" data-note="a build of a version already approved (#' + t.already.task + ')" aria-label="Drop ' + esc(p.name) + ' ' + esc(t.version || "") + '">Drop</button>', !!c.reject, c.why.reject || "not now") + '</span>';
     // Your own: locked — but under the solo-maintainer exception (#394), which the server's can says, the one it names claims it, self-reviewed.
@@ -616,15 +629,15 @@ const SCRIPT = String.raw`
     var a = (APPROVALS || []).filter(function (x) { return x.name === name && x.standing; })[0], state, tone;
     if (p && p.state === "in_review") { state = '<span class="op-pill warn">in review</span>'; tone = "warn"; }
     else if (p && p.state === "ready") { state = '<span class="op-pill ok">ready for review</span>'; tone = "ok"; }
-    else if (a) { var w = approvalWhere(a); tone = { ok: "ok", error: "fail", blue: "run" }[w.cls] || "wait"; state = '<span class="op-pill ' + tone + '" title="' + esc(w.title || "") + '">' + esc(w.word) + '</span>' + selfPill(a.solo_exception); }
+    else if (a) { var w = approvalWhere(a); tone = { ok: "ok", error: "fail", blue: "run" }[w.cls] || "wait"; state = '<span class="op-pill ' + tone + '" title="' + esc(w.title || "") + '">' + esc(w.word) + '</span>' + selfPill(a.solo_exception) + ' <span class="rv-scope">' + esc(approvedFor(a)) + '</span>'; }
     else { state = '<span class="op-pill wait">' + esc(reg ? String(reg.status || "").replace("_", " ") : "not a factory package") + '</span>'; tone = "wait"; }
     $("#rv-w-state").innerHTML = state;
     var box = $("#rv-w-box"); if (box) box.className = "op-box lg " + tone;
     // Who asked, and where each architecture stands: one name, one package.
     var owner = (reg && reg.owner) || (p && p.owner);
     $("#rv-w-chips").innerHTML = (owner ? '<span class="op-chip by">' + av(owner, "sm") + 'requested by ' + at(owner) + '</span>' : '') + R.map(function (r) {
-      var st = r.target.status, tone = st === "not_supported" ? "na" : st === "building" || st === "reviewing" ? "run" : st === "waiting" ? "" : "ok";
-      return '<span class="op-chip ' + tone + '" title="' + esc(r.arch + ": " + st.replace("_", " ")) + '">' + esc(r.arch) + (st === "not_supported" ? ' · not supported' : st === "waiting" ? ' · waiting' : '') + '</span>';
+      var st = r.target.status, tone = st === "not_supported" || st === "not_shipping" ? "na" : st === "building" || st === "reviewing" ? "run" : st === "waiting" ? "" : "ok";
+      return '<span class="op-chip ' + tone + '" title="' + esc(r.arch + ": " + st.replace("_", " ")) + '">' + esc(r.arch) + (st === "not_supported" ? ' · not supported' : st === "not_shipping" ? ' · not shipping' : st === "waiting" ? ' · waiting' : '') + '</span>';
     }).join("");
     // The request's facts, and the category a maintainer settles here: a term (its icon, its name) and its value, one pair to each group.
     var src = reg && (reg.project || reg.url), host = src ? String(src).replace(/^https?:\/\//, "").replace(/\/$/, "") : "";
@@ -758,7 +771,7 @@ const SCRIPT = String.raw`
   // ---- below: the checklist, the verdict with the agent's draft, and the three decisions — each confirmed before it is posted. Each line of the checklist is what the pool checks, nothing it cannot.
   function renderChecklist(R, steps) {
     var s = STORY, reg = s && s.package, req = s && s.request, rb = R.filter(function (r) { return r.rebuild; }), done = rb.filter(function (r) { return built(r.rebuild); });
-    var asked = R.filter(function (r) { return r.asked && r.target.status !== "not_supported"; });
+    var asked = R.filter(function (r) { return r.asked && r.target.status !== "not_supported" && r.target.status !== "not_shipping"; });
     var C = function (t, m) { return '<div class="rv-cl' + (m === "wait" ? " dim" : "") + '">' + mark(MARK[m], m) + '<span>' + t + '</span></div>'; };
     var who = WHO.me ? at(WHO.login) : "The reviewer";
     $("#rv-checklist").innerHTML = [
@@ -789,10 +802,11 @@ const SCRIPT = String.raw`
     // The verdict is a maintainer's to write: the same field for everyone, grey with the reason for anyone else.
     if (note) { note.placeholder = draft || "The agent drafts a verdict when the rebuild ends"; note.disabled = !isMaintainer(); note.title = isMaintainer() ? "" : orSignIn("a maintainer writes the verdict"); }
     $("#rv-usedraft").innerHTML = draft && note && !note.value && isMaintainer() ? '<button type="button" class="rv-draft" id="rv-draft">' + (agent ? agentIcon(agent, 14) : '') + "Use the agent's draft</button>" : '';
-    // The three decisions stay where they are: each one's task and whether the viewer may press it, the server's reason where not — the focus stays on the one a keyboard is on.
+    // The decisions stay where they are: each one's task and whether the viewer may press it, the server's reason where not — the focus stays on the one a keyboard is on.
+    // Approve package is posted on the project's build that speaks for it; Approve <arch> only on that architecture's own (#416), its can.approve_only.
     var gates = { approve: [proj, !!ca.approve, ca.why.approve], changes: [lead, !!cl.changes, cl.why.changes], reject: [lead, !!cl.reject, cl.why.reject] };
     document.querySelectorAll("#rv-btns [data-decide]").forEach(function (b) {
-      var g = gates[b.getAttribute("data-decide")]; if (!g) return;
+      var what = b.getAttribute("data-decide"), g = what === "only" ? onlyGate(b.getAttribute("data-arch"), p, none) : gates[what]; if (!g) return;
       if (g[0]) b.setAttribute("data-task", String(g[0].id)); else b.removeAttribute("data-task");
       setGate(b, g[1] && !!g[0], g[2] || none);
     });
@@ -803,23 +817,42 @@ const SCRIPT = String.raw`
       if (CONFIRM) {
         box.className = "rv-confirm" + (CONFIRM.what === "reject" ? " danger" : CONFIRM.what === "changes" ? " warn" : "");
         $("#rv-confirm-t").textContent = confirmText(CONFIRM.what, R, p);
-        // The confirmation takes the focus when it opens: Confirm, one Tab from Cancel; Escape closes it. Approve's Confirm asks for the passkey (#271), and says so — and registers the first one, for a maintainer who holds none, before it approves with it (#287).
-        var go = $("#rv-confirm-go"); if (go) go.innerHTML = CONFIRM.what === "approve" ? lucide("key-round", 14) + (needsPasskey() ? "Register a passkey and approve" : "Confirm with your passkey") : "Confirm";
+        // One architecture alone (#416) asks why the others do not ship, in the confirmation itself: empty each time it opens.
+        var why = $("#rv-confirm-why"), alone = CONFIRM.what === "only";
+        if (why) { why.hidden = !alone; if (alone) { why.placeholder = "why " + othersOf(CONFIRM.arch).join(" and ") + (othersOf(CONFIRM.arch).length > 1 ? " do" : " does") + " not ship — on the record and the package's page"; if (!was) why.value = ""; } }
+        // The confirmation takes the focus when it opens: Confirm, one Tab from Cancel — the reason's field first for one architecture alone; Escape closes it. Approve's Confirm asks for the passkey (#271), and says so — and registers the first one, for a maintainer who holds none, before it approves with it (#287).
+        var go = $("#rv-confirm-go"); if (go) go.innerHTML = CONFIRM.what === "approve" || alone ? lucide("key-round", 14) + (needsPasskey() ? "Register a passkey and approve" : "Confirm with your passkey") : "Confirm";
         var said = $("#rv-confirm-pk"); if (said && PK_SHOWN !== PK_SAID) { said.innerHTML = PK_SAID; PK_SHOWN = PK_SAID; }
-        if (!was && go && go.focus) go.focus();
+        if (!was && alone && why && why.focus) why.focus(); else if (!was && go && go.focus) go.focus();
       }
     }
   }
   // Out of the confirmation, the focus goes back to the decision it confirmed.
-  function unconfirm() { var what = CONFIRM && CONFIRM.what; CONFIRM = null; PK_SAID = ""; renderDecide(round(), workPkg()); var b = what ? $('#rv-btns [data-decide="' + what + '"]') : null; if (b && b.focus) b.focus(); }
+  function unconfirm() { var what = CONFIRM && CONFIRM.what, arch = CONFIRM && CONFIRM.arch; CONFIRM = null; PK_SAID = ""; renderDecide(round(), workPkg()); var b = what ? $('#rv-btns [data-decide="' + what + '"]' + (arch ? '[data-arch="' + arch + '"]' : '')) : null; if (b && b.focus) b.focus(); }
+  // The architectures the request names other than one (#416): what an approval of that one alone sets aside.
+  function othersOf(arch) { var asked = (STORY && STORY.package && STORY.package.arches) || []; return (asked.length ? asked : ARCHES).filter(function (a) { return a !== arch; }); }
+  // Approve <arch> only (#416): on the project's newest staged build of that architecture in the list — its can.approve_only, the server's reason where not — or grey with why nothing of it is there to approve.
+  function onlyGate(arch, p, none) {
+    var row = p ? p.rows.filter(function (t) { return t.kind === "project" && t.arch === arch; })[0] : null;
+    if (row) { var c = row.can || { why: {} }; return [row, !!c.approve_only, c.why.approve_only]; }
+    var asked = (STORY && STORY.package && STORY.package.arches) || [];
+    return [null, false, !p ? none : asked.length && asked.indexOf(arch) < 0 ? OPEN + "'s request does not name " + arch : "the project has no staged build of " + arch + " to approve"];
+  }
   // What the confirmation says the decision does: approve publishes the rebuild on every architecture it covers; reject frees a request's name (a package already in the pool keeps it); changes go back to the factory with the name kept.
   function confirmText(what, R, p) {
-    return decisionText(what, R, p) + (p && isOwner(p.owner) && selfReview(p.owner) ? " Self-reviewed: you brought it, and the solo-maintainer exception lets you decide — the record, the journal and every page say so." : "");
+    return decisionText(what, R, p, CONFIRM && CONFIRM.arch) + (p && isOwner(p.owner) && selfReview(p.owner) ? " Self-reviewed: you brought it, and the solo-maintainer exception lets you decide — the record, the journal and every page say so." : "");
   }
-  function decisionText(what, R, p) {
-    var name = OPEN, ver = (p && p.version) || "", arches = R.filter(function (r) { return r.rebuild && r.rebuild.status === "staged"; }).map(function (r) { return r.arch; }), ns = notSupported(p ? p.targets : {}), owner = (STORY && STORY.package && STORY.package.owner) || (p && p.owner);
+  function decisionText(what, R, p, arch) {
+    var name = OPEN, ver = (p && p.version) || "", staged = R.filter(function (r) { return r.rebuild && r.rebuild.status === "staged"; }), ns = notSupported(p ? p.targets : {}), owner = (STORY && STORY.package && STORY.package.owner) || (p && p.owner);
     var inPool = (APPROVALS || []).some(function (a) { return a.name === name && a.standing; }), mine = p && p.claim && isOwner(p.claim.by);
-    if (what === "approve") return "Approve " + name + " " + ver + " for " + (arches.join(" + ") || "every architecture rebuilt") + (ns.length ? " (" + ns.join(" · ") + " not supported)" : "") + "? " + (mine ? "Your build enters edge." : "The project's build enters edge.") + (needsPasskey() ? " You hold no passkey yet: your device makes one now, then confirms the approval with it." : PK_SAID ? "" : " Your passkey confirms it.");
+    var key = needsPasskey() ? " You hold no passkey yet: your device makes one now, then confirms the approval with it." : PK_SAID ? "" : " Your passkey confirms it.";
+    // The package whole names each architecture and its build (#416): "for x86_64 (build #12) and aarch64 (build #13)".
+    if (what === "approve") return "Approve " + name + " " + ver + " for " + (staged.map(function (r) { return r.arch + " (build #" + r.rebuild.id + ")"; }).join(" and ") || "every architecture rebuilt") + (ns.length ? " (" + ns.join(" · ") + " not supported)" : "") + "? " + (mine ? "Your build enters edge." : "The project's build enters edge.") + key;
+    // One architecture alone: its build, and what does not ship — with what of it stops.
+    if (what === "only") {
+      var own = staged.filter(function (r) { return r.arch === arch; })[0], others = othersOf(arch), stop = R.filter(function (r) { return others.indexOf(r.arch) >= 0 && r.rebuild && ["queued", "leased", "staged"].indexOf(r.rebuild.status) >= 0; }).map(function (r) { return "build #" + r.rebuild.id; });
+      return "Approve " + name + " " + ver + " for " + arch + " only" + (own ? " (build #" + own.rebuild.id + ")" : "") + "? " + others.join(" and ") + (others.length > 1 ? " do" : " does") + " not ship" + (stop.length ? ": " + stop.join(" and ") + " stop" + (stop.length > 1 ? "" : "s") : ": its builds in review stop") + ". Say why below — the record and the package's page show it." + key;
+    }
     if (what === "reject") return inPool ? "Reject " + name + " " + ver + "? The version is rejected; " + name + " stays in the pool." : "Reject " + name + "? The name is freed and the requester is told why.";
     return "Send " + name + " back to the factory with your note? The name stays " + (owner ? "@" + owner + "'s" : "the requester's") + ".";
   }
@@ -835,17 +868,20 @@ const SCRIPT = String.raw`
       renderDecide(round(), workPkg()); if (go.focus) go.focus();
     });
   }
-  function decide(what, id) {
-    var note = ($("#rv-note-in").value || "").trim(), err = $("#rv-err");
-    if (what !== "approve" && note.length < 4) { err.textContent = "Say why in a few words: the requester reads it, and it goes on the record."; return; }
+  function decide(what, id, arch) {
+    var note = ($("#rv-note-in").value || "").trim(), err = $("#rv-err"), why = what === "only" ? ($("#rv-confirm-why").value || "").trim() : "";
+    if (what !== "approve" && what !== "only" && note.length < 4) { err.textContent = "Say why in a few words: the requester reads it, and it goes on the record."; return; }
+    // One architecture alone (#416): why the others do not ship is required — the server refuses without it, and the record keeps it.
+    if (what === "only" && why.length < 4) { err.textContent = "Say why " + othersOf(arch).join(" and ") + (othersOf(arch).length > 1 ? " do" : " does") + " not ship, in a few words: the record and the package's page show it."; var w = $("#rv-confirm-why"); if (w && w.focus) w.focus(); return; }
     err.textContent = "";
-    // Approve is confirmed with the maintainer's passkey (#271): the answer rides in the body; changes and reject post as they are.
-    var body = { note: note || undefined }, send = function (assertion) { if (assertion) body.assertion = assertion; return api("POST", API + "/tasks/" + id + "/" + what, body); };
-    (what === "approve" ? passkeyed("approve:" + id, send) : send()).then(function (d) {
+    // Approve is confirmed with the maintainer's passkey (#271), for exactly this act — the package, or one architecture alone (approve:<task>:<arch>): the answer rides in the body; changes and reject post as they are.
+    var body = { note: note || undefined }, send = function (assertion) { if (assertion) body.assertion = assertion; return api("POST", API + "/tasks/" + id + "/" + (what === "only" ? "approve" : what), body); };
+    if (what === "only") { body.only = arch; body.reason = why; }
+    (what === "approve" ? passkeyed("approve:" + id, send) : what === "only" ? passkeyed("approve:" + id + ":" + arch, send) : send()).then(function (d) {
       // Refused: said once, beside the buttons (an alert), with the way to add a passkey as a link when the maintainer holds none.
       if (d.error) { err.innerHTML = refusalHtml(d); return; }
       CONFIRM = null; PK_SAID = ""; $("#rv-note-in").value = "";
-      toast(what === "changes" ? "Sent back to the factory — the requester reads your note; the name stays theirs." : decidedText(what, d), what === "approve" ? "ok" : "warn");
+      toast(what === "changes" ? "Sent back to the factory — the requester reads your note; the name stays theirs." : decidedText(what, d), what === "approve" || what === "only" ? "ok" : "warn");
       FRESH = "?after=" + Date.now(); load(); loadWork();
     }).catch(function (e) { err.textContent = "failed: " + errorText(e); });
   }
@@ -874,10 +910,10 @@ const SCRIPT = String.raw`
     if (la) { LOGARCH = la.getAttribute("data-logarch"); renderWork(); var again = $('#rv-f-tabs [data-logarch="' + LOGARCH + '"]'); if (again && again.focus) again.focus(); return; }
     if (t.closest("#rv-draft")) { var n = $("#rv-note-in"), R = round(); n.value = draftOf(R); renderDecide(R, workPkg()); if (n.focus) n.focus(); return; }
     var d = t.closest("button[data-decide]");
-    if (d && !d.disabled) { CONFIRM = { what: d.getAttribute("data-decide"), id: Number(d.getAttribute("data-task")) }; PK_SAID = ""; renderDecide(round(), workPkg()); return; }
+    if (d && !d.disabled) { CONFIRM = { what: d.getAttribute("data-decide"), id: Number(d.getAttribute("data-task")), arch: d.getAttribute("data-arch") || null }; PK_SAID = ""; renderDecide(round(), workPkg()); return; }
     if (t.closest("#rv-confirm-no")) { unconfirm(); return; }
     var go = t.closest("#rv-confirm-go");
-    if (go && CONFIRM) { if (CONFIRM.what === "approve" && needsPasskey()) { registerFirst(go); return; } go.disabled = true; decide(CONFIRM.what, CONFIRM.id); setTimeout(function () { go.disabled = false; }, 1500); return; }
+    if (go && CONFIRM) { if ((CONFIRM.what === "approve" || CONFIRM.what === "only") && needsPasskey()) { registerFirst(go); return; } go.disabled = true; decide(CONFIRM.what, CONFIRM.id, CONFIRM.arch); setTimeout(function () { go.disabled = false; }, 1500); return; }
     var rl = t.closest("#rv-release");
     if (rl && !rl.disabled) { askRelease(Number(rl.getAttribute("data-task"))); return; }
     var ah = t.closest("button[data-anyhost]");
@@ -1159,14 +1195,20 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Below: the checklist, the verdict with the agent's draft, and the three decisions — each confirmed in place before it is posted, approve with the maintainer's passkey (#271), each grey with the server's reason where the viewer may not. The acts: approve on the project's build (409 once decided, 403 without a passkey's answer), changes on disposable's own row, a rejection of mine's later build.
+    // Below: the checklist, the verdict with the agent's draft, and the decisions — Approve package (every architecture the request names, one decision, each architecture's build named in the confirmation), Approve <arch> only per architecture with the reason the others do not ship asked in the confirmation (#416), Request changes, Reject — each confirmed in place before it is posted, the approvals with the maintainer's passkey for exactly that act (#271), each grey with the server's reason where the viewer may not. The acts: approve on the project's build, whole and one architecture alone (409 once decided, 403 without a passkey's answer), changes on disposable's own row, a rejection of mine's later build.
     id: "review.decide",
     page: "/review",
-    anchor: ['id="rv-decide"', "Checklist", "Verdict · goes on the record", 'id="rv-note-in"', 'id="rv-btns"', 'data-decide="approve"', 'data-decide="changes"', 'data-decide="reject"', 'id="rv-err" role="alert"', 'id="rv-confirm" role="group" aria-labelledby="rv-confirm-t"', 'id="rv-confirm-go"'],
-    script: ["function draftOf(R)", "Use the agent's draft", "function setGate(el, ok, why)", "ca.why.approve", "cl.why.changes", "cl.why.reject", '"Your build enters edge."', "? The name is freed and the requester is told why.", '" back to the factory with your note?', '" did not request it"', '"Rebuilt by the project, not the factory\'s package"', 'ev.key === "Escape"', 'passkeyed("approve:" + id, send)', '"Confirm with your passkey"', "err.innerHTML = refusalHtml(d)"],
-    reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.can.approve", "staged.0.can.reject", "staged.0.can.changes", "staged.0.lead"] }],
+    anchor: ['id="rv-decide"', "Checklist", "Verdict · goes on the record", 'id="rv-note-in"', 'id="rv-btns"', 'data-decide="approve"', ">Approve package</button>", 'data-decide="only" data-arch="x86_64"', ">Approve x86_64 only</button>", 'data-decide="only" data-arch="aarch64"', ">Approve aarch64 only</button>", 'data-decide="changes"', 'data-decide="reject"', 'id="rv-err" role="alert"', 'id="rv-confirm" role="group" aria-labelledby="rv-confirm-t"', 'id="rv-confirm-why"', 'id="rv-confirm-go"'],
+    script: ["function draftOf(R)", "Use the agent's draft", "function setGate(el, ok, why)", "ca.why.approve", "cl.why.changes", "cl.why.reject", '"Your build enters edge."', "? The name is freed and the requester is told why.", '" back to the factory with your note?', '" did not request it"', '"Rebuilt by the project, not the factory\'s package"', 'ev.key === "Escape"', 'passkeyed("approve:" + id, send)', '"Confirm with your passkey"', "err.innerHTML = refusalHtml(d)",
+      // One architecture alone (#416): its gate, the reason asked and required, its own passkey act, the words of what does not ship.
+      "function onlyGate(arch, p, none)", "c.why.approve_only", '"the project has no staged build of "', "function othersOf(arch)", '$("#rv-confirm-why")', "body.only = arch; body.reason = why;", 'passkeyed("approve:" + id + ":" + arch, send)', '" only"', '" not ship"', "approvedFor(a)", "' not shipping'", "' · not shipping'"],
+    reads: [
+      { path: "/api/v1/factory/review", fields: ["staged.0.can.approve", "staged.0.can.approve_only", "staged.0.can.reject", "staged.0.can.changes", "staged.0.lead"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals.0.arches", "approvals.0.only_reason", "approvals.0.not_shipping"] },
+    ],
     acts: [
       { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [403, 409] } },
+      { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { only: F.arch, reason: "the other architecture does not ship" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [403, 409] } },
       { method: "POST", path: `/api/v1/factory/tasks/${F.disposableTask}/changes`, body: { note: "pin the source to the release tag" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
       { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
     ],

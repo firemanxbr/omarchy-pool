@@ -105,6 +105,8 @@ const PACKAGE_CSS = String.raw`
   .pkg-field > i { color: var(--dim); margin-top: 3px; } .pkg-field > div { display: grid; min-width: 0; }
   .pkg-field .op-label { font-size: 11px; } .pkg-field .v { font-size: 13.5px; overflow-wrap: anywhere; } .pkg-field .v a { color: var(--green); }
   .pkg-sub { display: grid; gap: 6px; min-width: 0; }
+  /* The decision on the package (#416): Approve package and Approve <arch> only, the shell's approveCell, under the checklist. */
+  .pkg-decide .decide { justify-content: flex-start; }
   .pkg-rows { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 6px 20px; }
   .pkg-row { display: flex; gap: 10px; align-items: baseline; font-size: 13.5px; min-width: 0; overflow-wrap: anywhere; }
   .pkg-row .op-mark { flex: none; } .pkg-row .dim { color: var(--dim); } .pkg-row a { color: var(--green); }
@@ -512,7 +514,8 @@ const PACKAGE_SCRIPT = String.raw`
     var sentBack = function (a) { var k = status(a) === "reviewing" ? claimOf(a) : null; return k ? waitsForNative(k.project) : ""; }, waits = arches.map(sentBack).filter(Boolean)[0] || "";
     var claimAt = waits ? ["warn", "native worker"] : anyT(["reviewing"]) ? ["run", "project rebuilding"] : anyT(["building"]) ? ["run", "new version building"] : ["warn", "rebuild staged"];
     if (b && !approval) { reviewTone = "na"; reviewSum = withdrawn ? "withdrawn by the block" : "never reviewed · blocked"; }
-    else if (approval) { reviewTone = approval.decision === "approved" ? "ok" : "fail"; reviewSum = "@" + approval.by + (approval.decision === "approved" ? " · rebuilt · approved" : " · " + approval.decision) + (approval.solo_exception ? " · self-reviewed" : ""); }
+    // An approval of one architecture alone (#416) says so on the line, its reason in the line's title.
+    else if (approval) { reviewTone = approval.decision === "approved" ? "ok" : "fail"; reviewSum = "@" + approval.by + (approval.decision === "approved" ? " · rebuilt · approved" + (approval.only_reason ? " for " + (approval.arches || []).join(" and ") + " only" : "") : " · " + approval.decision) + (approval.solo_exception ? " · self-reviewed" : ""); if (approval.decision === "approved" && approval.only_reason) reviewFull = "@" + approval.by + " · rebuilt · " + approvedFor(approval) + (approval.solo_exception ? " · self-reviewed" : ""); }
     else if (inReview === "in-review") { reviewTone = claimAt[0]; reviewSum = STATE[inReview][1] + " · " + claimAt[1]; reviewWhy = waits; reviewFull = waits ? STATE[inReview][1] + " · " + waits : ""; }
     else if (inReview === "ready") { reviewTone = "wait"; reviewSum = STATE[inReview][1] + " · waiting for a claim"; }
     else if (stood) { reviewTone = "ok"; reviewSum = "@" + stood.by + " · approved " + (stood.version || ""); }
@@ -522,8 +525,8 @@ const PACKAGE_SCRIPT = String.raw`
     if (stood && !approval && anyT(["built", "reviewing", "reviewed"])) reviewSum += inReview || anyT(["building"]) ? " · " + (stood.version || "the last") + " stays approved" : " · built again";
     return [
       { id: "source", icon: "file-text", label: "Request", tone: req.complete ? "ok" : checks.length ? "fail" : "wait", sum: (owner ? "@" + owner + " · " : "") + okN + "/" + checks.length + " checks", when: onDay(req.created_at || ((ST && ST.package) || {}).created_at).replace(/ \d{4}$/, "") },
-      { id: "build", icon: "hammer", label: "Factory build", tone: buildTone, sum: buildSum, archs: sq(function (a) { var s = status(a); return s === "building" ? ["run", "building"] : s === "not_supported" ? ["na", "not supported"] : ["built", "reviewing", "reviewed", "approved", "published"].indexOf(s) >= 0 ? ["ok", "built"] : rejected ? ["na", "rejected"] : s ? ["wait", s] : ["na", "not requested"]; }), when: since(((bc || chainFor(arches[0]) || {}).contributor || {}).finished_at) },
-      { id: "review", icon: "user-check", label: "Review", tone: reviewTone, sum: reviewSum, why: reviewWhy, full: reviewFull, archs: sq(function (a) { var s = status(a), c = chainFor(a); return s === "not_supported" ? ["na", "not supported"] : s === "reviewing" ? (sentBack(a) ? ["warn", "in review · " + sentBack(a)] : ["run", "in review · project rebuilding"]) : s === "reviewed" ? ["warn", "in review · rebuild staged"] : ["approved", "published"].indexOf(s) >= 0 ? ["ok", "approved"] : c && c.approval && c.approval.decision === "rejected" ? ["fail", "rejected"] : s === "built" ? (inReview === "ready" ? ["wait", "ready for review · waiting for a claim"] : inReview === "in-review" ? ["warn", "in review"] : anyT(["building"]) ? ["wait", "built · waiting for the others"] : ["wait", "built · nothing to decide"]) : approvedChain(a) ? ["ok", "approved"] : s ? ["wait", "not yet"] : ["na", "not requested"]; }), when: approval ? since(approval.created_at) : stood ? since(stood.created_at) : "" },
+      { id: "build", icon: "hammer", label: "Factory build", tone: buildTone, sum: buildSum, archs: sq(function (a) { var s = status(a); return s === "building" ? ["run", "building"] : s === "not_supported" ? ["na", "not supported"] : s === "not_shipping" ? ["na", "not shipping"] : ["built", "reviewing", "reviewed", "approved", "published"].indexOf(s) >= 0 ? ["ok", "built"] : rejected ? ["na", "rejected"] : s ? ["wait", s] : ["na", "not requested"]; }), when: since(((bc || chainFor(arches[0]) || {}).contributor || {}).finished_at) },
+      { id: "review", icon: "user-check", label: "Review", tone: reviewTone, sum: reviewSum, why: reviewWhy, full: reviewFull, archs: sq(function (a) { var s = status(a), c = chainFor(a); return s === "not_supported" ? ["na", "not supported"] : s === "not_shipping" ? ["na", "not shipping"] : s === "reviewing" ? (sentBack(a) ? ["warn", "in review · " + sentBack(a)] : ["run", "in review · project rebuilding"]) : s === "reviewed" ? ["warn", "in review · rebuild staged"] : ["approved", "published"].indexOf(s) >= 0 ? ["ok", "approved"] : c && c.approval && c.approval.decision === "rejected" ? ["fail", "rejected"] : s === "built" ? (inReview === "ready" ? ["wait", "ready for review · waiting for a claim"] : inReview === "in-review" ? ["warn", "in review"] : anyT(["building"]) ? ["wait", "built · waiting for the others"] : ["wait", "built · nothing to decide"]) : approvedChain(a) ? ["ok", "approved"] : s ? ["wait", "not yet"] : ["na", "not requested"]; }), when: approval ? since(approval.created_at) : stood ? since(stood.created_at) : "" },
       { id: "rings", icon: "layers", label: "Rings", tone: ringsStage[0], sum: ringsStage[1], when: ringsStage[2] }
     ];
   }
@@ -564,6 +567,7 @@ const PACKAGE_SCRIPT = String.raw`
     if (o.rows && o.rows.length) h += '<div class="pkg-sub"><span class="op-label">' + esc(o.rowsTitle) + '</span><div class="pkg-rows">' + o.rows.map(function (r) { return '<div class="pkg-row">' + mark(r[0], r[2]) + '<span>' + r[1] + '</span></div>'; }).join("") + '</div></div>';
     // The matrix is a table to assistive tech: a check per row, an architecture per column, each cell's reason in words.
     if (o.mx) h += '<div class="pkg-sub"><span class="op-label" id="pkg-mx-t">' + esc(o.mx.title) + '</span><div class="pkg-mx" role="table" aria-labelledby="pkg-mx-t"><div role="row"><span role="columnheader">check</span>' + o.mx.cols.map(function (c) { return '<span role="columnheader" class="' + c[1] + '">' + esc(c[0]) + '</span>'; }).join("") + '</div>' + o.mx.rows.map(function (r) { return '<div role="row"><span role="rowheader">' + esc(r[0]) + '</span>' + r[1].map(function (c) { return '<span role="cell">' + mark(c[0], c[2] || c[1]) + (c[1] ? '<small>' + esc(c[1]) + '</small>' : '') + '</span>'; }).join("") + '</div>'; }).join("") + (o.mx.foot || []).map(function (r) { return '<div class="foot" role="row"><span role="rowheader">' + esc(r[0]) + '</span>' + r[1].map(function (c) { return '<span role="cell">' + esc(c) + '</span>'; }).join("") + '</div>'; }).join("") + '</div></div>';
+    if (o.act) h += '<div class="pkg-sub pkg-decide"><span class="op-label">' + esc(o.actTitle || "Decision") + '</span>' + o.act + '</div>';
     if (o.diff) h += '<div class="pkg-sub" id="recipe-diff">' + o.diff + '</div>';
     if (o.rings) h += o.rings;
     if (o.note) h += '<div class="pkg-note">' + lucide("info", 14) + '<span>' + o.note + '</span></div>';
@@ -655,7 +659,7 @@ const PACKAGE_SCRIPT = String.raw`
     if (b.status === "failed") return ["fail", (b.attempts || 1) + (b.attempts === 1 ? " try" : " tries"), b.error || "failed"];
     return ["na", b.status, b.status];
   }
-  function colsOf() { var ts = targetsOf() || {}; return ARCHES.map(function (a) { var s = (ts[a] || {}).status; return s === "not_supported" ? [a + " · not supported", "dim-t"] : !isFactory() || ts[a] || servedOn(a).length ? [a, "ok-t"] : [a + " · not requested", "dim-t"]; }); }
+  function colsOf() { var ts = targetsOf() || {}; return ARCHES.map(function (a) { var s = (ts[a] || {}).status; return s === "not_supported" ? [a + " · not supported", "dim-t"] : s === "not_shipping" ? [a + " · not shipping", "dim-t"] : !isFactory() || ts[a] || servedOn(a).length ? [a, "ok-t"] : [a + " · not requested", "dim-t"]; }); }
   function buildPanel() {
     var cs = ARCHES.map(chainFor), bs = cs.map(function (c) { return c && c.contributor; });
     var ts = targetsOf() || {}, anyRun = bs.some(function (b) { return b && (b.status === "leased" || b.status === "queued"); }), anyOk = bs.some(function (b) { return b && (b.status === "staged" || b.status === "done"); });
@@ -703,19 +707,48 @@ const PACKAGE_SCRIPT = String.raw`
   // The review shown on an architecture: the one of the build its target names once that build is done (or decided); while a newer build is still on its way, the one the rings stand on.
   // A maintainer's claim is the review until it is decided, even while a newer version of the package builds beside it (#282).
   function reviewChain(a) { var k = claimOf(a), t = chainFor(a), s = ((targetsOf() || {})[a] || {}).status || ""; return k ? k : t && (t.project || t.approval || t.withdrawn || ["building", "waiting", ""].indexOf(s) < 0) ? t : approvedChain(a) || t; }
+  // ---- the decision on the package (#416): the project's staged builds no decision took, one per architecture — what Approve package and Approve <arch> only post on. A maintainer's page reads what they may do on each (GET .../tasks/<id>/can, no-store, once per build and page), anyone else's draws the same buttons grey with the role's reason, read from nothing.
+  var CAN = {}, CAN_ASKED = {};
+  function toDecide() { var out = {}; ARCHES.forEach(function (a) { var c = reviewChain(a), p = c && c.project; if (p && p.status === "staged" && !c.approval) out[a] = p.id; }); return out; }
+  function loadCan() {
+    if (!isMaintainer()) return;
+    var ids = toDecide();
+    Object.keys(ids).forEach(function (a) {
+      var id = ids[a]; if (CAN_ASKED[id]) return; CAN_ASKED[id] = true;
+      api("GET", "/api/v1/factory/tasks/" + id + "/can").then(function (d) { if (d && d.can) { CAN[id] = d.can; if (STAGE === "review") renderChain(); } }).catch(function () { CAN_ASKED[id] = false; });
+    });
+  }
+  // Drawn in every state of the review, grey with why while nothing is to decide: approved already (and what it shipped), or not built again yet.
+  function decideHtml() {
+    var ids = toDecide(), rows = {};
+    Object.keys(ids).forEach(function (a) { rows[a] = { id: ids[a], can: CAN[ids[a]] || null }; });
+    var pk = (ST && ST.package) || {}, ver = (ST && ST.request && ST.request.version) || "", stood = ARCHES.map(approvedChain).filter(Boolean)[0];
+    var none = blockedBy() ? "blocked: another maintainer lifts the block first" : stood ? "already " + approvedFor(stood.approval) : "nothing of " + name + " is built again by the project yet: a maintainer claims it first";
+    return approveCell({ name: name, version: ver, arches: pk.arches || [], rows: rows, who: isMaintainer() ? "" : orSignIn("a maintainer decides"), why: "reading what you may do here…", none: none });
+  }
+  // A decision taken here: the story is read again past the edge's thirty seconds, and the page drawn from it.
+  onDecided(function () {
+    fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story?after=" + Date.now()).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (st) {
+      if (st && st.package) ST = st;
+      CAN = {}; CAN_ASKED = {};
+      renderAll(); loadCan();
+    });
+  });
   function reviewPanel() {
     var ts = targetsOf() || {}, owner = (ST && ST.package && ST.package.owner) || "", status = function (a) { return (ts[a] || {}).status || ""; };
     var cur = ARCHES.map(chainFor), stand = ARCHES.map(approvedChain), cs = ARCHES.map(reviewChain);
     var ps = cs.map(function (c) { return c && c.project; });
     var decided = cs.filter(function (c) { return c && (c.approval || c.withdrawn); })[0], ap = decided && (decided.approval || decided.withdrawn);
+    // What the approval set aside and still does not ship (#416): an architecture approved since, or built again, is where its target says, never "does not ship".
+    var aside = ap ? notShipping(ap).filter(function (a) { return status(a) === "not_shipping"; }) : [];
     // Every architecture built (or not supported) and nobody took it yet: the review is ready for a maintainer, and its checks are all still to come.
     var ready = ARCHES.some(function (a) { return ["built", "reviewing", "reviewed"].indexOf(status(a)) >= 0; });
     // Beside it, the other build: a newer one in the factory while the rings serve an approved one, or the approved one while this review decides a newer.
     var other = ARCHES.map(function (a, i) { return stand[i] && cur[i] && stand[i] !== cur[i] ? { a: a, cur: cur[i], stand: stand[i] } : null; }).filter(Boolean)[0];
     var besides = !other ? "" : cs.indexOf(other.stand) >= 0 ? " A newer build, " + esc(((other.cur.contributor || other.cur.project || {}).version) || "") + ", is on its way: its review starts once it is built." : " " + esc(other.stand.approval.version || "The last version") + " stays approved by " + atLink(other.stand.approval.by) + " meanwhile" + (other.stand.publish && other.stand.publish.status !== "done" ? "; its publish job carries it into edge." : ".");
     // Blocked before any review: nothing was decided, and nothing will be until another maintainer lifts the block.
-    if (blockedBy() && !ps.some(Boolean) && !ap) return panel({ title: "Review", tag: "blocked", tone: "na", note: "Blocked before any review decided it. Once another maintainer lifts the block, a new build and a new review start it over." });
-    if (!ps.some(Boolean) && !ap && !ready) return panel({ title: "Review", tag: "waiting", tone: "wait", note: "Starts once every architecture is built or not supported. A maintainer who did not request the package has the project build it again on a trusted worker, then decides; " + (owner ? atLink(owner) + " can never review their own request." : "nobody reviews their own request.") + besides });
+    if (blockedBy() && !ps.some(Boolean) && !ap) return panel({ title: "Review", tag: "blocked", tone: "na", act: decideHtml(), actTitle: "Decide the package", note: "Blocked before any review decided it. Once another maintainer lifts the block, a new build and a new review start it over." });
+    if (!ps.some(Boolean) && !ap && !ready) return panel({ title: "Review", tag: "waiting", tone: "wait", act: decideHtml(), actTitle: "Decide the package", note: "Starts once every architecture is built or not supported. A maintainer who did not request the package has the project build it again on a trusted worker, then decides; " + (owner ? atLink(owner) + " can never review their own request." : "nobody reviews their own request.") + besides });
     var trials = cs.map(function (c) { return c && c.trial; }), pubs = cs.map(function (c) { return c && c.publish; }), audit = cs.map(function (c) { return c && c.audit; }).filter(Boolean)[0];
     // A project build an emulated worker sent back (#281) says what it waits for, in the shell's words.
     var wn = ps.map(function (p) { return waitsForNative(p); }).filter(Boolean)[0], rv = reviewOf();
@@ -723,15 +756,16 @@ const PACKAGE_SCRIPT = String.raw`
     // Undecided, the tag is Review's word, as the chip and the stage say it (#282), then what a rebuild sent back waits for (#281).
     var tag = ap ? (ap.withdrawn_at ? "withdrawn" : ap.decision) : rv === "in-review" ? (wn ? "in review · " + wn : tone === "run" ? "in review · rebuilding" : "in review") : rv === "ready" ? "ready for review" : wn || "waiting";
     // A cell with no project build yet: to come on an architecture that is built, nothing on one that is not supported or not requested.
-    var none = function (i, what) { var s = status(ARCHES[i]); return s === "not_supported" ? ["na", "", "not supported"] : !s ? ["na", "", "not requested"] : ["wait", "", what]; };
+    var none = function (i, what) { var s = status(ARCHES[i]); return s === "not_supported" ? ["na", "", "not supported"] : s === "not_shipping" ? ["na", "not shipping", "set aside by an approval of another architecture alone"] : !s ? ["na", "", "not requested"] : ["wait", "", what]; };
     var trialMark = function (t, i) { if (!ps[i]) return none(i, "tried once the project built it again"); if (!t) return ["wait", "", "not tried yet"]; var v = t.result && t.result.verdict; return t.status !== "done" ? ["run", t.status, "the trial is " + t.status] : v === "ok" ? ["ok", "", "a real pacman installed it in the lab"] : ["fail", v || "failed", "the trial did not install it"]; };
-    var decideMark = function (c, i) { var a = c && (c.approval || c.withdrawn); if (!a) return c && c.project ? ["wait", "", "waiting for a maintainer"] : none(i, "decided after the project's build"); return a.withdrawn_at ? ["na", "withdrawn", a.withdrawn_reason || "withdrawn"] : a.decision === "approved" ? ["ok", "", "approved by " + a.by] : ["fail", a.decision, a.note || a.decision]; };
+    // An architecture the standing approval set aside (#416) is decided too: it does not ship, and why.
+    var decideMark = function (c, i) { var a = c && (c.approval || c.withdrawn); if (ap && !ap.withdrawn_at && ap.decision === "approved" && aside.indexOf(ARCHES[i]) >= 0 && !(c && c.approval)) return ["na", "not shipping", ap.only_reason || "set aside"]; if (!a) return c && c.project ? ["wait", "", "waiting for a maintainer"] : none(i, "decided after the project's build"); return a.withdrawn_at ? ["na", "withdrawn", a.withdrawn_reason || "withdrawn"] : a.decision === "approved" ? ["ok", "", approvedFor(a) + " by " + a.by] : ["fail", a.decision, a.note || a.decision]; };
     var rows = [
       [ap ? "ok" : "wait", ap ? atLink(ap.by) + " did not request it" : "A maintainer other than " + (owner ? atLink(owner) : "the requester") + " decides", ""],
       [ps.some(function (p) { return p && (p.status === "staged" || p.status === "done"); }) ? "ok" : ps.some(Boolean) ? "run" : "wait", "Built again from the recipe on a trusted worker; the contributor's bytes never ship", ""],
       audit ? [audit.status !== "done" ? "run" : ["ok", "pass"].indexOf((audit.result || {}).verdict) >= 0 ? "ok" : "warn", "Audit: " + esc(((audit.result || {}).verdict || audit.status)) + ((audit.result || {}).summary ? ' <span class="dim">· ' + esc(audit.result.summary) + '</span>' : ''), ""] : ["wait", "Audit by a second agent", ""],
       [trials.some(function (t) { return t && t.result && t.result.verdict === "ok"; }) ? "ok" : trials.some(Boolean) ? "run" : "wait", "Tried in the lab by a real pacman", ""],
-      [ap ? (ap.withdrawn_at ? "na" : ap.decision === "approved" ? "ok" : "fail") : "wait", "Verdict: " + (ap ? esc(ap.withdrawn_at ? "withdrawn" : ap.decision) + (ap.note ? ' <span class="dim">· “' + esc(ap.note) + '”</span>' : '') : "pending"), ""]
+      [ap ? (ap.withdrawn_at ? "na" : ap.decision === "approved" ? "ok" : "fail") : "wait", "Verdict: " + (ap ? esc(ap.withdrawn_at ? "withdrawn" : ap.decision === "approved" ? approvedFor(ap) : ap.decision) + (ap.note ? ' <span class="dim">· “' + esc(ap.note) + '”</span>' : '') : "pending"), ""]
     ];
     var withRecipes = cs.some(function (c) { return c && c.recipes && c.recipes.contributor && c.recipes.project; });
     var diff = RECIPES.html || (withRecipes ? '<span class="op-label">Recipe vs the factory</span>' + (RECIPES.asked ? '<p class="pkg-small">Reading the two recipes…</p>' : '<button type="button" class="op-btn pkg-recipes" data-recipes>Compare the two recipes</button>') : "");
@@ -746,8 +780,11 @@ const PACKAGE_SCRIPT = String.raw`
         ["Installed in the lab by a real pacman", trials.map(trialMark)],
         ["Decided", cs.map(decideMark)]
       ], foot: [["time", ps.map(function (p) { return p ? (p.status === "leased" ? "running" : dur(p.duration_ms) || "—") : "—"; })], ["worker", ps.map(function (p) { return p && p.lease_owner ? wtShort(p.lease_owner) : "—"; })], ["result", pubs.map(function (p, i) { return p ? (p.status === "done" ? "published" : p.status) : ps[i] && ps[i].status === "staged" ? "in the lab" : "—"; })]] },
+      // The decision itself (#416): Approve package, and Approve <arch> only with the reason, while a project's build of it is staged and undecided — the shell's approveCell, the server's can for a maintainer, grey with the reason for anyone else.
+      act: decideHtml(), actTitle: "Decide the package",
       diff: diff,
-      note: (ap && ap.decision === "approved" && !ap.withdrawn_at ? "Approved" + (ap.note ? ": “" + esc(ap.note) + "”" : "") + ". The project's build, not the contributor's, is the one that ships." : ap && ap.withdrawn_at ? "Withdrawn by " + (ap.withdrawn_by ? atLink(ap.withdrawn_by) : "a maintainer") + (ap.withdrawn_reason ? ": “" + esc(ap.withdrawn_reason) + "”" : "") + ". It is void from then on; another review decides." : !ps.some(Boolean) ? "Built, waiting for a maintainer who did not request it to have the project build it again on a trusted worker; " + (owner ? atLink(owner) + " can never review their own request." : "nobody reviews their own request.") : "The project's build, not the contributor's, is the one that ships.") + besides,
+      // What the approval shipped, in the record's words (#416): "Approved for x86_64 and aarch64", or "Approved for aarch64 only: “<reason>”".
+      note: (ap && ap.decision === "approved" && !ap.withdrawn_at ? "Approved for " + esc((ap.arches && ap.arches.length ? ap.arches : [ap.arch]).join(" and ")) + (ap.only_reason ? " only: “" + esc(ap.only_reason) + "”" + (aside.length ? " — " + esc(aside.join(" and ")) + " do" + (aside.length > 1 ? "" : "es") + " not ship" : "") : "") + (ap.note ? ". The note: “" + esc(ap.note) + "”" : "") + ". The project's build, not the contributor's, is the one that ships." : ap && ap.withdrawn_at ? "Withdrawn by " + (ap.withdrawn_by ? atLink(ap.withdrawn_by) : "a maintainer") + (ap.withdrawn_reason ? ": “" + esc(ap.withdrawn_reason) + "”" : "") + ". It is void from then on; another review decides." : !ps.some(Boolean) ? "Built, waiting for a maintainer who did not request it to have the project build it again on a trusted worker; " + (owner ? atLink(owner) + " can never review their own request." : "nobody reviews their own request.") : "The project's build, not the contributor's, is the one that ships.") + besides,
       links: ARCHES.map(function (a, i) { return ps[i] ? ["scroll-text", a + " · review build #" + ps[i].id, evidenceHref(ps[i].id)] : null; }).filter(Boolean)
     });
   }
@@ -1225,13 +1262,13 @@ const PACKAGE_SCRIPT = String.raw`
       sizesAlive(st);
       // The story is the fresher word (30 s at the edge, the package's answer 10 min): when it puts this architecture in no ring — blocked, or lifted and back in the factory — the answer's object is not what a ring serves any more, and the page draws it as served nowhere here. (A publish younger than the story's 30 s waits for its next read.)
       if (D && ST && ST.rings && !ST.rings.some(function (r) { return r.arch === arch; })) { D404 = { error: name + " is in no ring for " + arch, arches: D.arches }; D = null; }
-      renderAll();
+      renderAll(); loadCan();
     });
   }
   renderTiles();
   loadPackage(1);
   // Who is looking decides the You card alone; the rest is everyone's.
-  whoami(function () { if (DRAWN) renderYou(); });
+  whoami(function () { if (DRAWN) { renderYou(); renderChain(); loadCan(); } });
 `;
 
 export function packageHtml(name: string, poolUrl: string, version: RunningVersion): string {
@@ -1383,6 +1420,27 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
         { path: story, fields: ["chains.0.recipes.contributor", "chains.0.recipes.project"] },
         { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGBUILD`, json: false },
         { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/PKGBUILD`, json: false },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      // The decision on the package (#416), in its review stage: Approve package — every architecture its request names, one decision, the
+      // dialog naming each architecture's build — and Approve <arch> only per architecture, the reason the others do not ship required, while
+      // a project's build of it is staged and undecided (the shell's approveCell); live where the server's can says so — read for a
+      // maintainer, once per build — and grey with the reason for everyone else, never hidden. Decided, the stage says what it shipped in the
+      // record's words — "Approved for x86_64 and aarch64", or "Approved for aarch64 only: <reason>" — and an architecture set aside is "not
+      // shipping" in its column, its square and its Decided cell. The fixture's project build is decided already: the acts answer 409.
+      id: "package.decide",
+      page,
+      anchor: ['id="stage-panel"'],
+      script: ["function toDecide()", "function loadCan()", '"/api/v1/factory/tasks/" + id + "/can"', "function decideHtml()", "approveCell({ name: name", 'orSignIn("a maintainer decides")', '"reading what you may do here…"', "Decide the package", "onDecided(function ()", '"/story?after=" + Date.now()', '"Approved for "', '" only: “"', '"not shipping"', "approvedFor(a)", "notShipping(ap)"],
+      reads: [
+        { path: `/api/v1/factory/tasks/${F.projectTask}/can`, as: "maintainer", fields: ["can.approve", "can.approve_only", "can.why"] },
+        { path: shipped, fields: ["package.arches", "chains.0.approval.arches", "chains.0.approval.only_reason", "chains.0.approval.not_shipping"] },
+      ],
+      acts: [
+        { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [403, 409] } },
+        { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { only: F.arch, reason: "the other architecture does not ship" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [403, 409] } },
       ],
       visible: EVERYONE,
     },

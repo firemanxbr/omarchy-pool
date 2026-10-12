@@ -118,13 +118,14 @@ export async function holdsPasskey(env: Env, login: string): Promise<boolean> {
  * approving a build, blocking a package or a contributor, adding a passkey
  * to a login that holds one, removing one, resetting another login's, and
  * forcing a promotion past its evidence (#284). The door computes it from
- * the route and the body — `approve:<task>`, `block:package:<name>`,
+ * the route and the body — `approve:<task>` (the package whole), and
+ * `approve:<task>:<arch>` (that architecture alone, #416), `block:package:<name>`,
  * `block:contributor:<login>`, `passkey:add`, `passkey:remove:<id>`,
  * `passkey:reset:<login>`, `promote:force:<from>:<to>[:<arch>]`, a host's
  * acts, and `any-host:<task>` — the project's copy of a package released to
  * any host (#339, D35) — so an answer made for one act decides no other.
  */
-export const SUBJECT = new RegExp(String.raw`^(?:approve:[1-9]\d{0,14}|any-host:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39}|promote:force:(?:${PROMOTED_RINGS.join("|")}):(?:${PROMOTED_RINGS.join("|")})(?::(?:${REPO_ARCHES.join("|")}))?|host:(?:resume|retire|retire-legacy|seal-key|pin-passkey|widen-envelope|set-agent-keys):h_[0-9a-z]{10}|host:(?:cause|resume-all):[A-Za-z0-9-]{1,39})$`);
+export const SUBJECT = new RegExp(String.raw`^(?:approve:[1-9]\d{0,14}(?::(?:${REPO_ARCHES.join("|")}))?|any-host:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39}|promote:force:(?:${PROMOTED_RINGS.join("|")}):(?:${PROMOTED_RINGS.join("|")})(?::(?:${REPO_ARCHES.join("|")}))?|host:(?:resume|retire|retire-legacy|seal-key|pin-passkey|widen-envelope|set-agent-keys):h_[0-9a-z]{10}|host:(?:cause|resume-all):[A-Za-z0-9-]{1,39})$`);
 
 /** A forced promotion's act (#284): the rings and the architecture it names, as the door and the Status page's button bind it. */
 export const forcedSubject = (from: string, to: string, arch?: string): string => `promote:force:${from}:${to}${arch ? `:${arch}` : ""}`;
@@ -132,7 +133,7 @@ export const forcedSubject = (from: string, to: string, arch?: string): string =
 /** An act as a refusal names it — "approving build #12", "blocking hers" — and what did not happen when it is refused. */
 function actOf(subject: string): { act: string; nothing: string } {
   const [kind, a, b, c, d] = subject.split(":");
-  if (kind === "approve") return { act: `approving build #${a}`, nothing: "nothing was decided" };
+  if (kind === "approve") return { act: b ? `approving ${b} alone, build #${a}` : `approving build #${a}`, nothing: "nothing was decided" };
   if (kind === "any-host") return { act: `releasing build #${a} to any host`, nothing: "nothing was released" };
   if (kind === "block") return { act: `blocking ${b}`, nothing: "nothing was decided" };
   if (kind === "promote") return { act: `forcing ${b} into ${c}${d ? ` on ${d}` : ""}`, nothing: "nothing was queued" };
@@ -515,7 +516,7 @@ export async function handlePasskeyAssert(url: URL, request: Request, env: Env):
   const { c, rp } = who;
   const b = (await request.json().catch(() => null)) as { for?: unknown } | null;
   const subject = typeof b?.for === "string" && SUBJECT.test(b.for) ? b.for : null;
-  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id>, passkey:reset:<login>, promote:force:<from>:<to>[:<arch>], host:resume:<host>, host:retire:<host>, host:retire-legacy:<host>, host:seal-key:<host>, host:cause:<login>, host:resume-all:<login> or any-host:<task>", code: "for" }, 400, NO_STORE);
+  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, approve:<task>:<arch>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id>, passkey:reset:<login>, promote:force:<from>:<to>[:<arch>], host:resume:<host>, host:retire:<host>, host:retire-legacy:<host>, host:seal-key:<host>, host:cause:<login>, host:resume-all:<login> or any-host:<task>", code: "for" }, 400, NO_STORE);
   // A document the owner signs for a host (#328) is asked for at its own door, which writes the document the challenge commits to.
   if (/^host:(?:pin-passkey|widen-envelope|set-agent-keys):/.test(subject)) return json({ error: "a pin, a widening and agent keys are signed over the document the host's page asks for (POST /api/v1/hosts/<id>/owner/challenge)", code: "for" }, 400, NO_STORE);
   if (!subject.startsWith("passkey:remove:")) {

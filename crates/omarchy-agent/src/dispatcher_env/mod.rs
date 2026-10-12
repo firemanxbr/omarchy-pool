@@ -39,10 +39,29 @@
 //!   shared directory shows the Mac's uid), root on a rootless one (whose root is the agent's
 //!   user). A remapped daemon shows the owner to no container user — its remapped uids are
 //!   none of the host's, and its sidecars stay remapped as its task containers do (design v2
-//!   §19.1) — so there `OMARCHY_AGENT_HELD=userns-remap` instead: the dispatcher runs no probe
-//!   and no agent sidecar, and the host's page says why it takes no model kinds (how a
-//!   remapped host reads the keys is the maintainer's to decide). Rendered from the file's
-//!   owner (its directory's before there is one) and agent.toml's `set.engine` and
+//!   §19.1) — so there the sidecars run as one remapped uid of their own, `65533:65533` in the
+//!   daemon's user namespace ([`remap::SIDECAR_ID`]), and the agent's ACL on the file lets that
+//!   uid as the host sees it read it (#405, [`KeysUser::remapped`]): the file is its owner's
+//!   and that uid's only, 0640 with no group and no other access. That user is a variable of
+//!   its own, `OMARCHY_AGENT_REMAPPED_USER=65533:65533` ([`AGENT_REMAPPED_USER`]), never
+//!   `OMARCHY_AGENT_USER`: a dispatcher from before #405 would take that for the file's owner
+//!   and give a model task's usage directory to host uid 65533, not to the sidecar's own; it
+//!   ignores this one, runs its probe as the image's root, which the ACL does not let read the
+//!   keys, and so takes no model kinds either (fail closed while such a release is applied).
+//!   The agent reads that uid from the remap user's range (`/etc/subuid`), and puts the ACL on
+//!   whenever it writes the keys ([`crate::install::secrets::write`]); with no such uid it renders
+//!   `OMARCHY_AGENT_HELD=userns-remap`, and with no ACL on the file that lets it read (lost,
+//!   naming another uid, a filesystem that keeps none) `OMARCHY_AGENT_HELD=keys-acl`, so it
+//!   fails closed: the dispatcher runs no probe and no agent sidecar, and the host's page says
+//!   why it takes no model kinds. With no keys file at all —
+//!   `agent.env` not there, or not a regular file — `OMARCHY_AGENT_HELD=no-keys` (#419): the
+//!   dispatcher names no keys file in a mount, so nothing on the engine is given a missing
+//!   path to make (podman's docker API makes every bind source that is not there an empty
+//!   directory when it creates the container, `--mount` included: on studio-vm4k the probe's
+//!   mount did, and the directory refused the keys given later),
+//!   and the host's page says "no agent keys: builds only"; the first render after the keys
+//!   arrive (install's `--agent-env-from`, *Set agent keys*) drops the hold. Rendered from the
+//!   file (its owner, its ACL, or that there is none) and agent.toml's `set.engine` and
 //!   `envelope.userns_remap`, so an agent of a release with this fix writes it within a minute
 //!   and the dispatcher is recreated with it, with no person at the host.
 //!
@@ -69,6 +88,7 @@
 //! behind ([`token_steps`]).
 
 pub mod addresses;
+pub mod remap;
 
 #[cfg(test)]
 mod tests;
@@ -96,10 +116,22 @@ pub const SECRETS_DIR: &str = "OMARCHY_SECRETS_DIR";
 pub const DIRECT_NETWORK: &str = "OMARCHY_DIRECT_NETWORK";
 /// Who the agent sidecars run as (#399): `<uid>:<gid>`, agent.env's owner as the engine shows it.
 pub const AGENT_USER: &str = "OMARCHY_AGENT_USER";
-/// Why the host takes no model kinds though it has keys (#399): a code, [`HELD_REMAP`].
+/// Who they run as on a remapped daemon (#405): `65533:65533` inside its user namespace, the uid
+/// agent.env's ACL names as the host sees it, which the dispatcher finds through the daemon's
+/// maps. Not [`AGENT_USER`], which a dispatcher from before #405 reads as the file's owner.
+pub const AGENT_REMAPPED_USER: &str = "OMARCHY_AGENT_REMAPPED_USER";
+/// Why the host takes no model kinds (#399, #419, #405): a code, [`HELD_REMAP`],
+/// [`HELD_ACL`] or [`HELD_NO_KEYS`].
 pub const AGENT_HELD: &str = "OMARCHY_AGENT_HELD";
-/// A remapped daemon: no container user is agent.env's owner, and the sidecars stay remapped.
+/// A remapped daemon whose sidecars' remapped uid the agent cannot tell (no range for the
+/// remap user in `/etc/subuid`, or one too short, #405): no container user may read the keys.
 pub const HELD_REMAP: &str = "userns-remap";
+/// A remapped daemon whose keys file has no ACL that lets the sidecars' remapped uid read it
+/// (#405): lost, naming another uid, or its filesystem keeps none.
+pub const HELD_ACL: &str = "keys-acl";
+/// No keys file (#419): agent.env is not there, or is no regular file, so no mount names it;
+/// on a remapped daemon too.
+pub const HELD_NO_KEYS: &str = "no-keys";
 /// The group a sidecar that is not root takes for a keys file of root's group: none of the host's
 /// privileged ones (`nogroup`), which a 0600 file does not need.
 const NOGROUP: u32 = 65_534;
@@ -140,6 +172,7 @@ fn owned_by_envelope(key: &str) -> bool {
     key == SECRETS_DIR
         || key == DIRECT_NETWORK
         || key == AGENT_USER
+        || key == AGENT_REMAPPED_USER
         || key == AGENT_HELD
         || BUDGET.iter().any(|(_, k)| *k == key)
         || CACHE_CAPS.iter().any(|(_, k)| *k == key)
@@ -282,14 +315,22 @@ pub struct Envelope {
 
 /// Who the agent sidecars and the probe run as (#399): `OMARCHY_SECRETS_DIR/agent.env`'s
 /// owner as the engine shows it to a container. The file is 0600, and root with every
-/// capability dropped — as the sidecars run — opens no file another uid owns.
+/// capability dropped — as the sidecars run — opens no file another uid owns. On a remapped
+/// daemon no container user is the owner, and the sidecars run as the one remapped uid the
+/// file's ACL lets read it instead (#405).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeysUser {
     /// `OMARCHY_AGENT_USER=<uid>:<gid>`: the sidecars run as the owner, in the engine's own user
     /// namespace.
     Owner { uid: u32, gid: u32 },
-    /// `OMARCHY_AGENT_HELD=<code>`: no container user may be the owner here, so the dispatcher
-    /// runs no probe and no agent sidecar, and the host's page says why.
+    /// `OMARCHY_AGENT_REMAPPED_USER=65533:65533` ([`remap::SIDECAR_ID`]) on a remapped daemon
+    /// (#405): the sidecars run as that uid in the daemon's user namespace, `host_uid` on the
+    /// host, which the keys file's ACL lets read it.
+    Remapped { host_uid: u32 },
+    /// `OMARCHY_AGENT_HELD=<code>`: no container user may read the keys here — none is known
+    /// on a remapped daemon, or the file's ACL does not let it — or there is no keys file
+    /// (#419), so the dispatcher runs no probe and no agent sidecar, and the host's page says
+    /// why.
     Held(&'static str),
 }
 
@@ -305,7 +346,8 @@ impl KeysUser {
             Engine::Rootless => (uid == euid).then_some(Self::Owner { uid: 0, gid: 0 }),
             // Its remapped uids are none of the host's, so none is the owner; leaving the
             // remapping (`--userns host`) would land a sidecar escape on the agent's own user
-            // rather than a subuid, which design v2 §19.1 does not allow: held, for a maintainer.
+            // rather than a subuid, which design v2 §19.1 does not allow. The sidecars read the
+            // keys through the file's ACL there instead ([`Self::remapped`], #405).
             Engine::Rootful if userns_remap => Some(Self::Held(HELD_REMAP)),
             // Uids as the host has them; a Mac's VM shows the Mac's in its shared directories.
             // A sidecar that is not root takes no root group: the host's, on a rootful engine.
@@ -316,12 +358,49 @@ impl KeysUser {
         }
     }
 
-    /// Of the host now: agent.env's owner, or its directory's before there is one (the agent
-    /// writes the file as itself, there).
-    fn of_host(e: &Envelope) -> Option<Self> {
-        let meta = std::fs::metadata(e.secrets_dir.join("agent.env"))
-            .or_else(|_| std::fs::metadata(&e.secrets_dir))
-            .ok()?;
+    /// On a remapped daemon (#405), from the agent sidecars' remapped uid on the host
+    /// (`uid`, [`remap::Files::sidecar_uid`], `None` when it is not known) and the keys file's
+    /// access ACL (`acl`, [`crate::install::acl::read`], `None` when it has none or it does not
+    /// read): that uid when the ACL lets it read the file and nobody
+    /// but it and the owner; held otherwise, and so failing closed — [`HELD_REMAP`] when no such
+    /// uid is known, [`HELD_ACL`] when the ACL is lost (a `chmod`, a copy, a restore), names
+    /// another uid (the range changed), or its filesystem keeps none. The agent never puts an
+    /// ACL back by itself: the keys written again, by install or *Set agent keys*, bring it.
+    pub fn remapped(uid: Option<u32>, acl: Option<&[crate::install::acl::Entry]>) -> Self {
+        let Some(uid) = uid else {
+            return Self::Held(HELD_REMAP);
+        };
+        match acl {
+            Some(entries) if crate::install::acl::is_keys_acl(entries, uid) => {
+                Self::Remapped { host_uid: uid }
+            }
+            _ => Self::Held(HELD_ACL),
+        }
+    }
+
+    /// Of the host now: agent.env's owner; held while there is no keys file (#419) — none, or
+    /// anything but a regular file there (an empty directory, what podman's docker API makes of
+    /// a mount's missing source, a link the agent never follows) — so that no mount names a
+    /// path the engine would make, on a remapped daemon too. With a keys file there, a remapped
+    /// daemon's sidecars read it through its ACL ([`Self::remapped`], #405), the remap user's
+    /// range read from `remap`. `None` when the agent cannot look (elsewhere than a remapped
+    /// daemon, which then holds).
+    fn of_host(e: &Envelope, remap: &remap::Files) -> Option<Self> {
+        let keys = e.secrets_dir.join(crate::install::secrets::FILE);
+        let remapped = e.engine == Engine::Rootful && e.userns_remap;
+        let meta = match std::fs::symlink_metadata(&keys) {
+            Ok(m) if m.is_file() => m,
+            Ok(_) => return Some(Self::Held(HELD_NO_KEYS)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Some(Self::Held(HELD_NO_KEYS))
+            }
+            Err(_) if remapped => return Some(Self::Held(HELD_ACL)),
+            Err(_) => return None,
+        };
+        if remapped {
+            let acl = crate::install::acl::read(&keys).ok().flatten();
+            return Some(Self::remapped(remap.sidecar_uid().ok(), acl.as_deref()));
+        }
         Self::of(
             (meta.uid(), meta.gid()),
             e.engine,
@@ -333,6 +412,11 @@ impl KeysUser {
     fn line(self) -> String {
         match self {
             Self::Owner { uid, gid } => format!("{AGENT_USER}={uid}:{gid}"),
+            Self::Remapped { .. } => format!(
+                "{AGENT_REMAPPED_USER}={}:{}",
+                remap::SIDECAR_ID,
+                remap::SIDECAR_ID
+            ),
             Self::Held(code) => format!("{AGENT_HELD}={code}"),
         }
     }
@@ -467,7 +551,9 @@ impl Rendered {
             .map_or_else(|| task_subnets(None), |e| e.task_subnets.clone());
         Self {
             addresses: addresses::detect(sources, data, &task),
-            keys_user: envelope.as_ref().and_then(KeysUser::of_host),
+            keys_user: envelope
+                .as_ref()
+                .and_then(|e| KeysUser::of_host(e, &sources.remap)),
             envelope,
             plain: older_release_here(data),
         }

@@ -43,11 +43,15 @@
 //! agent's uid on a rootful engine and in a Mac's VM, root on a rootless one
 //! (whose root is the agent's user). They never leave the engine's user
 //! namespace: a remapped daemon (`userns-remap`) shows the owner to no
-//! remapped uid, so there the agent names no user and holds the host's model
-//! kinds instead (`OMARCHY_AGENT_HELD`, design v2 §19.1: task containers and
-//! sidecars stay remapped). The agent, which writes the file, says which in
-//! `etc/dispatcher.env`; without it (an older agent) they run as the image's
-//! root, as before.
+//! remapped uid (design v2 §19.1: task containers and sidecars stay
+//! remapped), so there they run as `65533:65533`, a remapped uid of their own
+//! that the agent's ACL on the file lets read it (#405, a variable of its
+//! own, `OMARCHY_AGENT_REMAPPED_USER`, mapped to the host at start), and the
+//! agent holds the host's model kinds instead (`OMARCHY_AGENT_HELD`) while no
+//! such uid or ACL is there; so it does on a host with no keys file
+//! (`no-keys`, #419), where no mount may name one. The agent, which writes the
+//! file, says which in `etc/dispatcher.env`; without it (an older agent) they
+//! run as the image's root, as before.
 //!
 //! **Its lane** (#338, design v2 §7.4, §7.5): `--platform linux/<arch>` is
 //! the lane's architecture, and a container on an emulated lane — and only
@@ -425,7 +429,8 @@ pub enum Gateway {
 /// shows it to a container, which the agent writes into `etc/dispatcher.env`
 /// (`OMARCHY_AGENT_USER`). The file is 0600 on the host, and the sidecars keep
 /// `--cap-drop ALL` and `no-new-privileges` in the engine's own user namespace: they read it
-/// as its owner.
+/// as its owner — or, on a remapped daemon, as the one remapped uid its ACL names (#405,
+/// `OMARCHY_AGENT_REMAPPED_USER`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentUser {
     pub uid: u32,
@@ -436,6 +441,18 @@ impl AgentUser {
     /// `OMARCHY_AGENT_USER` (`<uid>:<gid>`, decimal); `None` when it is not set (an agent from
     /// before #399, or one that holds the host's model kinds), which leaves the image's own user.
     pub fn parse(user: &str) -> Result<Option<Self>, String> {
+        Self::parse_as("OMARCHY_AGENT_USER", user)
+    }
+
+    /// `OMARCHY_AGENT_REMAPPED_USER` (#405), with the same grammar: who the sidecars run as
+    /// inside a remapped daemon's user namespace (`65533:65533`), which the dispatcher maps to
+    /// the host's uid at start (`super::sidecars_on`). A variable of its own, so a dispatcher from
+    /// before #405 never reads it as the keys file's owner.
+    pub fn parse_remapped(user: &str) -> Result<Option<Self>, String> {
+        Self::parse_as("OMARCHY_AGENT_REMAPPED_USER", user)
+    }
+
+    fn parse_as(var: &str, user: &str) -> Result<Option<Self>, String> {
         let user = user.trim();
         if user.is_empty() {
             return Ok(None);
@@ -448,20 +465,22 @@ impl AgentUser {
         let (uid, gid) = user
             .split_once(':')
             .and_then(|(u, g)| Some((id(u)?, id(g)?)))
-            .ok_or_else(|| {
-                format!("OMARCHY_AGENT_USER={user} is not <uid>:<gid> (two decimal numbers)")
-            })?;
+            .ok_or_else(|| format!("{var}={user} is not <uid>:<gid> (two decimal numbers)"))?;
         let u = Self { uid, gid };
-        u.check()?;
+        u.check_as(var)?;
         Ok(Some(u))
     }
 
     /// A sidecar that is not root takes no root group: the 0600 file needs none, and on a rootful
     /// engine that group is the host's (the agent renders an unprivileged one instead).
     fn check(self) -> Result<(), String> {
+        self.check_as("OMARCHY_AGENT_USER")
+    }
+
+    fn check_as(self, var: &str) -> Result<(), String> {
         if self.uid != 0 && self.gid == 0 {
             return Err(format!(
-                "OMARCHY_AGENT_USER={}:0: an agent sidecar that is not root takes no root group",
+                "{var}={}:0: an agent sidecar that is not root takes no root group",
                 self.uid
             ));
         }
@@ -732,7 +751,10 @@ impl Side<'_> {
             a.push("-e".into());
             a.push(format!("{k}={v}"));
         }
-        // --mount, not -v: a keys file that is not there fails the sidecar, where -v would make a directory of it.
+        // --mount, not -v: a keys file that is not there fails the sidecar on docker, where -v would make a
+        // directory of it. Podman's docker API makes one of either (its compat create makes every bind source
+        // that is not there, #419: studio-vm4k), so the agent holds a host with no keys file
+        // (`OMARCHY_AGENT_HELD=no-keys`) and no sidecar mounts one.
         a.push("--mount".into());
         a.push(keys_mount(agent.env_file));
         if let Some(u) = usage_dir {
@@ -2758,8 +2780,8 @@ mod tests {
     /// cannot open it, so a task's agent sidecar and the probe run as that owner as each engine
     /// shows it to a container — what the agent writes into etc/dispatcher.env — and keep
     /// `--cap-drop ALL` and `no-new-privileges`, with no capability added and in the engine's own
-    /// user namespace. A remapped daemon is named no user (the agent holds its model kinds), so
-    /// its sidecars run as before, remapped.
+    /// user namespace. A remapped daemon's are named `65533:65533`, the remapped uid the file's
+    /// ACL lets read it (#405), and stay remapped (no `--userns`).
     #[test]
     fn the_agent_sidecar_and_the_probe_run_as_the_keys_owner_on_every_engine() {
         let (tdir, rel, work) = dirs();
@@ -2775,8 +2797,14 @@ mod tests {
             ("a Mac's VM", user("501:20"), &["--user", "501:20"][..]),
             // A rootless engine: its root is the agent's user.
             ("rootless podman", user("0:0"), &["--user", "0:0"][..]),
-            // An agent from before #399, or a remapped daemon's: the image's user, as before.
-            ("an older agent or a remapped daemon", None, &[][..]),
+            // A remapped daemon (#405): the sidecars' own remapped uid, which the ACL names.
+            (
+                "a remapped daemon",
+                user("65533:65533"),
+                &["--user", "65533:65533"][..],
+            ),
+            // An agent from before #399: the image's user, as before.
+            ("an older agent", None, &[][..]),
         ] {
             let at = |a: &[String]| {
                 a.iter()
@@ -2891,7 +2919,18 @@ mod tests {
             "1000:0",
         ] {
             assert!(AgentUser::parse(user).is_err(), "{user:?} must be refused");
+            // #405: a remapped daemon's variable, the same grammar, said by its own name.
+            let e = AgentUser::parse_remapped(user).unwrap_err();
+            assert!(e.starts_with("OMARCHY_AGENT_REMAPPED_USER="), "{e}");
         }
+        assert_eq!(
+            AgentUser::parse_remapped(" 65533:65533 ").unwrap(),
+            Some(AgentUser {
+                uid: 65_533,
+                gid: 65_533
+            })
+        );
+        assert_eq!(AgentUser::parse_remapped("").unwrap(), None);
     }
 
     /// The internal network's gateway, per engine: docker's isolated mode, podman's without DNS (its

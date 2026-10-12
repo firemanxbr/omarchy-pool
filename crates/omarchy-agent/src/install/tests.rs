@@ -1529,6 +1529,66 @@ fn a_symlink_planted_in_the_set_directory_is_refused_and_nothing_is_written_thro
     assert!(files::write(&d, "../x", b"x", 0o600).is_err());
 }
 
+/// #419: an empty directory where the agent keys go — what podman's docker API made of the
+/// sidecars' mount on studio-vm4k while there was no keys file — is removed through the secrets directory's descriptor, and said; nothing there, a
+/// file, or a link to a directory is left for the write to replace or refuse; a directory with
+/// something in it is refused and keeps it.
+#[test]
+fn an_empty_directory_where_the_agent_keys_go_is_removed_and_one_with_something_in_it_refused() {
+    let d = tempdir();
+    fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
+    let secrets = d.join("secrets");
+    files::make_dir(&secrets).unwrap();
+    let keys = secrets.join(secrets::FILE);
+    // Nothing there: nothing to remove, nothing to say.
+    assert_eq!(secrets::check(&keys), Ok(false));
+    assert_eq!(secrets::clear(&secrets), Ok(None));
+    // An empty directory (0755, as podman's docker API makes it): no blocker, and removed with a line
+    // saying what it was.
+    fs::create_dir(&keys).unwrap();
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(secrets::check(&keys), Ok(true));
+    let said = secrets::clear(&secrets).unwrap().unwrap();
+    assert!(
+        said.starts_with(&format!("{} was an empty directory", keys.display()))
+            && said.contains("(#419): removed"),
+        "{said}"
+    );
+    assert!(!keys.exists());
+    // The file then goes in its place as every owner file does.
+    files::write(&secrets, secrets::FILE, b"GEMINI_API_KEY=g\n", 0o600).unwrap();
+    assert_eq!(mode(&keys), 0o600);
+    // A file is no directory: left as it is.
+    assert_eq!(secrets::check(&keys), Ok(false));
+    assert_eq!(files::remove_empty_dir(&secrets, secrets::FILE), Ok(false));
+    assert_eq!(fs::read_to_string(&keys).unwrap(), "GEMINI_API_KEY=g\n");
+    // A directory with something in it is refused, and keeps what it holds.
+    fs::remove_file(&keys).unwrap();
+    fs::create_dir(&keys).unwrap();
+    fs::write(keys.join("mine"), "x").unwrap();
+    for e in [
+        secrets::check(&keys).unwrap_err(),
+        secrets::clear(&secrets).unwrap_err(),
+    ] {
+        assert!(
+            e.contains("a directory with something in it") && e.contains("refused"),
+            "{e}"
+        );
+    }
+    assert_eq!(fs::read_to_string(keys.join("mine")).unwrap(), "x");
+    // A link to an empty directory is not followed, nor removed: the write refuses it.
+    fs::remove_dir_all(&keys).unwrap();
+    let empty = d.join("empty");
+    fs::create_dir(&empty).unwrap();
+    std::os::unix::fs::symlink(&empty, &keys).unwrap();
+    assert!(secrets::check(&keys).unwrap_err().contains("symbolic link"));
+    assert_eq!(secrets::clear(&secrets), Ok(None));
+    assert!(empty.is_dir() && keys.is_symlink());
+    assert!(files::write(&secrets, secrets::FILE, b"A=1\n", 0o600)
+        .unwrap_err()
+        .contains("symbolic link"));
+}
+
 #[test]
 fn the_unit_is_the_agents_and_starts_it_from_this_data_directory() {
     let u = unit::render(Path::new("/home/omarchy/.local/share/omarchy-agent")).unwrap();
@@ -1990,6 +2050,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
             task_firewall: root.join("omarchy-task-firewall"),
             systemd_system: root.join("systemd"),
             docker_daemon: root.join("daemon.json"),
+            subuid: root.join("subuid"),
             proc: root.join("proc"),
             quadlet_generator: Some(root.join("podman-user-generator")),
         },
@@ -3541,9 +3602,13 @@ fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_
         !text.contains("OMARCHY_AGENT_CALLS") && !text.contains("_PER_TASK="),
         "{text}"
     );
-    // Who the agent sidecars run as (#399): this engine is rootless, whose root is the agent's
-    // user, the owner of the secrets directory agent.env will be written to.
-    assert!(text.contains("\nOMARCHY_AGENT_USER=0:0\n"), "{text}");
+    // Who the agent sidecars run as (#399): none, as `--yes` gave no agent keys — the host holds
+    // its model kinds, so no probe and no sidecar names a keys file that is not there (#419;
+    // keys given later end the hold, `keys_given_after_an_install_without_them_end_its_hold`).
+    assert!(
+        text.contains("\nOMARCHY_AGENT_HELD=no-keys\n") && !text.contains("OMARCHY_AGENT_USER"),
+        "{text}"
+    );
     assert_eq!(mode(&env), 0o600);
     let said = String::from_utf8_lossy(&out).into_owned();
     assert!(
@@ -3622,6 +3687,219 @@ fn the_dispatcher_env_names_the_host_s_addresses_the_secrets_dir_and_the_budget_
             .contains("has a character the dispatcher refuses"),
         "{}",
         r.screen()
+    );
+}
+
+/// #419, found on the Studio's 4K VM host: installed with `--yes` and no `--agent-env-from`, it
+/// had no agent keys, its dispatcher probed the agent anyway, and podman's docker API made an
+/// empty directory of the probe's mount of the keys file, over which a later
+/// `install --agent-env-from` could not write. Now an install without keys holds the
+/// host's model kinds (`OMARCHY_AGENT_HELD=no-keys`: no probe and no sidecar names the file),
+/// an empty directory there is no blocker, a re-run removes it and says so — and writes the keys
+/// in its place when it is given some, which ends the hold (`0:0` on this rootless engine). One
+/// with something in it stays refused.
+#[test]
+fn keys_given_after_an_install_without_them_end_its_hold() {
+    let h = host(INFO, EGRESS_OK);
+    let p = &h.options.places;
+    let env = p.set_dir().join("etc/dispatcher.env");
+    let keys = h.root.join("secrets/agent.env");
+    let env_text = || fs::read_to_string(&env).unwrap();
+    let install = |o: &Options, state: &str| {
+        let ready = ready_to_enroll(&h, state);
+        let mut out = Vec::new();
+        apply(o, &ready, &mut Fake::default(), &mut out)
+            .map_err(|e| e.to_string())
+            .unwrap();
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let said = install(&h.options, r#"{"status":"active","token":null}"#);
+    assert!(
+        said.contains("no agent keys: this host builds only and takes no model kinds (OMARCHY_AGENT_HELD=no-keys;"),
+        "{said}"
+    );
+    assert!(!keys.exists());
+    let held = env_text();
+    assert!(
+        held.contains("\nOMARCHY_AGENT_HELD=no-keys\n") && !held.contains("OMARCHY_AGENT_USER"),
+        "{held}"
+    );
+
+    // What podman's docker API makes of a mount of the missing file all the same: an empty
+    // directory, 0755.
+    let made = || {
+        fs::create_dir(&keys).unwrap();
+        fs::set_permissions(&keys, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    made();
+    // Preflight as a re-run sees it (the identity the enrollment wrote names the test's pool,
+    // which the release does not sign: left out, as `ready_to_enroll` does).
+    let preflight = || {
+        let _ = fs::remove_file(p.data.join("state/host.json"));
+        measure_on(&h, &mut Fake::default())
+    };
+    let (r, ready) = preflight();
+    assert!(ready.is_some() && r.ok(), "{}", r.screen());
+    assert!(
+        r.screen().contains(&format!(
+            "{}: an empty directory, which an engine made of the agent sidecars' mount (#419)",
+            keys.display()
+        )),
+        "{}",
+        r.screen()
+    );
+    // A re-run with no keys: removed, said, and still held.
+    let state = r#"{"status":"active","token":"held"}"#;
+    let said = install(&h.options, state);
+    assert!(
+        said.contains(&format!("{} was an empty directory", keys.display())),
+        "{said}"
+    );
+    assert!(!keys.exists());
+    assert_eq!(env_text(), held);
+
+    // With keys: the directory removed, the file written in its place, 0600, and the hold ends.
+    made();
+    fs::write(h.root.join("keys.env"), "GEMINI_API_KEY=g\n").unwrap();
+    let mut o = h.options.clone();
+    o.agent_env_from = Some(h.root.join("keys.env"));
+    let said = install(&o, state);
+    let removed = said
+        .find(&format!("{} was an empty directory", keys.display()))
+        .unwrap_or_else(|| panic!("{said}"));
+    let wrote = said
+        .find(&format!("wrote {} (0600", keys.display()))
+        .unwrap_or_else(|| panic!("{said}"));
+    let rendered = said
+        .find("dispatcher.env (0600): the registration")
+        .unwrap();
+    assert!(removed < wrote && wrote < rendered, "{said}");
+    assert!(keys.is_file(), "{said}");
+    assert_eq!(mode(&keys), 0o600);
+    assert!(fs::read_to_string(&keys)
+        .unwrap()
+        .contains("\nGEMINI_API_KEY=g\n"));
+    let text = env_text();
+    assert!(
+        text.contains("\nOMARCHY_AGENT_USER=0:0\n") && !text.contains("OMARCHY_AGENT_HELD"),
+        "{text}"
+    );
+    assert_eq!(
+        text,
+        held.replace("OMARCHY_AGENT_HELD=no-keys", "OMARCHY_AGENT_USER=0:0")
+    );
+
+    // A directory with something in it where the keys go: a blocker, and it keeps what it holds.
+    fs::remove_file(&keys).unwrap();
+    made();
+    fs::write(keys.join("mine"), "x").unwrap();
+    let (r, ready) = preflight();
+    assert!(ready.is_none() && r.blockers.len() == 1, "{}", r.screen());
+    assert!(
+        r.screen().contains(
+            "agent.env: a directory with something in it where the agent keys go: refused"
+        ),
+        "{}",
+        r.screen()
+    );
+    assert_eq!(fs::read_to_string(keys.join("mine")).unwrap(), "x");
+}
+
+/// #405: a remapped daemon installed with no keys is held for them, as any host (#419), and told
+/// to give some, since its sidecars read keys given later through the file's ACL. Given them
+/// with `--agent-env-from`, install writes them with the ACL for the agent sidecars' one
+/// remapped uid (dockremap's range in /etc/subuid, 65533 in), so `etc/dispatcher.env` names that
+/// uid (`OMARCHY_AGENT_REMAPPED_USER=65533:65533`); where the ACL cannot be set (a Mac, or a
+/// filesystem that keeps none) it writes them owner-only, says so, and the host is held
+/// (`keys-acl`). A re-run that keeps a file without that ACL says how to lift the hold.
+#[test]
+fn a_remapped_daemon_is_held_without_keys_and_its_keys_are_written_with_their_acl() {
+    let h = granted(host(&rootful_info(), EGRESS_OK));
+    prepare(&h.root);
+    let p = &h.options.places;
+    fs::write(&p.subuid, "omarchy:100000:65536\ndockremap:231072:65536\n").unwrap();
+    let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+    assert!(ready.values.rootful && ready.values.userns_remap);
+    let env_text = || fs::read_to_string(p.set_dir().join("etc/dispatcher.env")).unwrap();
+    let mut out = Vec::new();
+    apply(&h.options, &ready, &mut Fake::default(), &mut out)
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let said = String::from_utf8_lossy(&out);
+    assert!(
+        said.contains("no agent keys: this host builds only")
+            && said.contains("OMARCHY_AGENT_HELD=no-keys")
+            && !said.contains("remaps users"),
+        "{said}"
+    );
+    assert!(
+        env_text().contains("\nOMARCHY_AGENT_HELD=no-keys\n"),
+        "{}",
+        env_text()
+    );
+
+    // Given keys: written with the ACL, the sidecars named as their remapped uid.
+    fs::write(h.root.join("keys.env"), "GEMINI_API_KEY=g\n").unwrap();
+    let mut o = h.options.clone();
+    o.agent_env_from = Some(h.root.join("keys.env"));
+    let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+    let mut out = Vec::new();
+    apply(&o, &ready, &mut Fake::default(), &mut out)
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let said = String::from_utf8_lossy(&out).into_owned();
+    let keys = h.root.join("secrets/agent.env");
+    let mode = || fs::metadata(&keys).unwrap().permissions().mode() & 0o777;
+    // On Linux the ACL is required, unless this filesystem keeps none (said, then the else).
+    if crate::install::acl::kept_in(&h.root.join("secrets"), 296_605) {
+        assert!(!said.contains("OMARCHY_AGENT_HELD"), "{said}");
+        assert!(
+            said.contains("(0640: its owner's, and readable by the agent sidecars' remapped uid 296605 through its ACL alone"),
+            "{said}"
+        );
+        assert_eq!(mode(), 0o640);
+        let text = env_text();
+        assert!(
+            text.contains("\nOMARCHY_AGENT_REMAPPED_USER=65533:65533\n")
+                && !text.contains("OMARCHY_AGENT_HELD"),
+            "{text}"
+        );
+        // A chmod since (its mask now ---): a re-run keeps the file, and says how to lift the
+        // hold it now has.
+        fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
+        let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+        let mut out = Vec::new();
+        apply(&h.options, &ready, &mut Fake::default(), &mut out)
+            .map_err(|e| e.to_string())
+            .unwrap();
+        let said = String::from_utf8_lossy(&out);
+        assert!(
+            said.contains("kept (--agent-env-from replaces it)")
+                && said.contains("its ACL does not let the agent sidecars' remapped uid 296605 read it (user::rw-,user:296605:r--,group::---,mask::---,other::---)")
+                && said.contains("OMARCHY_AGENT_HELD=keys-acl"),
+            "{said}"
+        );
+        assert!(
+            env_text().contains("\nOMARCHY_AGENT_HELD=keys-acl\n"),
+            "{}",
+            env_text()
+        );
+    } else {
+        assert!(
+            said.contains("wrote") && said.contains("(0600, outside the work root)")
+                && said.contains("agent.env: held, OMARCHY_AGENT_HELD=keys-acl (#405): no ACL lets the agent sidecars' remapped uid 296605 read it"),
+            "{said}"
+        );
+        assert_eq!(mode(), 0o600);
+        assert!(
+            env_text().contains("\nOMARCHY_AGENT_HELD=keys-acl\n"),
+            "{}",
+            env_text()
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&keys).unwrap().lines().last(),
+        Some("GEMINI_API_KEY=g")
     );
 }
 

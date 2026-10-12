@@ -190,7 +190,8 @@ fn scan_archive(path: &Path) -> Result<ArchiveScan, ExtractError> {
         };
         scan.files.insert(path.clone());
 
-        if kind != EntryType::Regular || entry.header().size().unwrap_or(0) > MAX_INSPECT_BYTES {
+        let size = entry.header().size().unwrap_or(0);
+        if kind != EntryType::Regular || size > MAX_INSPECT_BYTES {
             continue;
         }
 
@@ -200,7 +201,14 @@ fn scan_archive(path: &Path) -> Result<ArchiveScan, ExtractError> {
         if !elf::is_elf(&prefix[..read]) {
             continue;
         }
-        let mut bytes = prefix[..read].to_vec();
+        // The member's size, reserved once: a buffer that grows doubles past it (a 300 MB object
+        // held 512 MB of address space, which a data rlimit counts whole), and a reservation the
+        // process cannot have is an error of this package here, not an abort of the process.
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(usize::try_from(size).unwrap_or(usize::MAX))
+            .map_err(std::io::Error::from)?;
+        bytes.extend_from_slice(&prefix[..read]);
         entry.read_to_end(&mut bytes)?;
         scan.components.extend(components::embedded(&bytes));
         match elf::inspect(&bytes) {
