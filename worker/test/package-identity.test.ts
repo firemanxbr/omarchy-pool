@@ -67,7 +67,11 @@ async function planOf(x: { sql: string; args: unknown[] }): Promise<string> {
 
 /** What 0036 added, taken off again, and what the migrations after it added (the package's maintainer in the pool, #244; the reviews table takes its changes column, #247, with it): the schema as production has it before the migration. */
 const REWIND = [
-  // 0053's carried databases (#319) first: what a release's artifact row awaits, and its index.
+  // 0055's row per architecture (#421) first: the unique index, the generated sha256, and the key column's name back.
+  "DROP INDEX idx_packages_sha256_repo_arch",
+  "ALTER TABLE packages DROP COLUMN sha256",
+  "ALTER TABLE packages RENAME COLUMN row_key TO sha256",
+  // Then 0053's carried databases (#319): what a release's artifact row awaits, and its index.
   "DROP INDEX idx_release_artifacts_awaits",
   "ALTER TABLE release_artifacts DROP COLUMN awaits",
   // Then 0052's size learning (#330): the remembered size's columns on factory_packages.
@@ -284,7 +288,7 @@ describe("migration 0036: one package per name, with a target per architecture",
     const m = env.TEST_MIGRATIONS.find((x) => x.name.startsWith("0036_"))!;
     expect(m, "migration 0036 is in the list").toBeTruthy();
     await env.DB.batch(m.queries.map((q) => env.DB.prepare(q)));
-    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275; 0042's orders to workers, #277; 0043's maintainer hosts, #321, and 0044's columns on them, #322; 0045's host leases, #334; 0046's reservation mark, the task's reservation window and the owner-head index, #337, and its host orders, #344; 0047's asleep mark, #329, host settings and diagnostics, #325, and audit independence, #339; 0048's last-good marks, #342; 0049's owner's orders and seal key, #328, and a host's sandbox, #330; 0052's remembered sizes, #330; 0053's carried databases, #319) comes back as D1 applies it.
+    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275; 0042's orders to workers, #277; 0043's maintainer hosts, #321, and 0044's columns on them, #322; 0045's host leases, #334; 0046's reservation mark, the task's reservation window and the owner-head index, #337, and its host orders, #344; 0047's asleep mark, #329, host settings and diagnostics, #325, and audit independence, #339; 0048's last-good marks, #342; 0049's owner's orders and seal key, #328, and a host's sandbox, #330; 0052's remembered sizes, #330; 0053's carried databases, #319; 0055's row per architecture, #421) comes back as D1 applies it.
     for (const later of env.TEST_MIGRATIONS.filter((x) => x.name > m.name)) await env.DB.batch(later.queries.map((q) => env.DB.prepare(q)));
 
     // The schema is what every other test file runs on, and nothing of the rows it had changed.

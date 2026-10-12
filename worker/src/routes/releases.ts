@@ -4,6 +4,15 @@ import { artifactKey, isRepoArch, REPO_ARCHES, SHORT } from "../r2";
 import { machineOrigin, REPO_ORDER, sourceOfRepo } from "../meta";
 import { releaseManifests, releaseSummary, releaseSources, ringHead, ringMembers, releaseMembers, ensureCheckpoint, CHECKPOINT_EVERY, type ManifestDetail, type ReleaseRow, type SourceSlice } from "../db";
 
+/**
+ * The rows a release's `add` names, through idx_packages_sha256_repo_arch
+ * (0055): every architecture's row of each sha256 — or, within
+ * `remove_arch`, that architecture's, a probe of the whole key per sha256
+ * (what a sync sends: 2.5 rows read per sha256 where the prefix reads 4).
+ */
+export const ADD_ROWS_SQL = "SELECT id, sha256, repo_arch FROM packages WHERE sha256 IN (SELECT value FROM json_each(?1))";
+export const ADD_ROWS_OF_ARCH_SQL = "SELECT id, sha256, repo_arch FROM packages WHERE repo_arch = ?2 AND sha256 IN (SELECT value FROM json_each(?1))";
+
 interface CreateRelease {
   ring: string;
   /** Promote: start from this ring's head selection instead of our own. */
@@ -15,7 +24,11 @@ interface CreateRelease {
    * same source and repo arch. Another source's build of that name stays:
    * each source renders its own database, and the order of the include
    * (setup.ts) decides which one pacman takes — the pool holds every
-   * source's row, the way the mirrors do.
+   * source's row, the way the mirrors do. The same bytes can be indexed
+   * for both architectures (migration 0055): a sha256 adds its row of
+   * every architecture the index holds it for, within `remove_arch` when
+   * given; `<sha256>/<arch>` adds that architecture's row only (what the
+   * security fast-track sends: it picks per architecture).
    */
   add?: string[];
   /** Package names to drop from the selection, whichever source (scoped by `remove_arch` when given). */
@@ -66,21 +79,28 @@ export async function handleCreateRelease(request: Request, env: Env): Promise<R
   const add = body.add ?? [];
   const removeArch = body.remove_arch ?? null;
   if (removeArch !== null && !isRepoArch(removeArch)) return json({ error: "remove_arch must be x86_64 or aarch64" }, 400);
-  // Adds are looked up per repo arch when the caller scopes the request.
+  // Adds are looked up per repo arch when the caller scopes the request:
+  // every row of the bytes (one per architecture the index holds them for,
+  // 0055), through idx_packages_sha256_repo_arch, then narrowed to the
+  // architecture an entry names.
+  const wanted = add.map((entry) => {
+    const [sha, arch] = String(entry).split("/", 2);
+    return { entry, sha, arch: arch ?? null };
+  });
   const found = add.length
     ? (
-        await env.DB.prepare(
-          `SELECT id, sha256 FROM packages WHERE sha256 IN (SELECT value FROM json_each(?))
-              AND (? IS NULL OR repo_arch = ?)`,
-        )
-          .bind(JSON.stringify(add), removeArch, removeArch)
-          .all<{ id: number; sha256: string }>()
+        await (removeArch === null
+          ? env.DB.prepare(ADD_ROWS_SQL).bind(JSON.stringify([...new Set(wanted.map((w) => w.sha))]))
+          : env.DB.prepare(ADD_ROWS_OF_ARCH_SQL).bind(JSON.stringify([...new Set(wanted.map((w) => w.sha))]), removeArch)
+        ).all<{ id: number; sha256: string; repo_arch: string }>()
       ).results
     : [];
-  const bySha = new Map(found.map((r) => [r.sha256, r.id]));
-  const missing = add.filter((sha) => !bySha.has(sha));
+  const bySha = new Map<string, { id: number; repo_arch: string }[]>();
+  for (const r of found) bySha.set(r.sha256, [...(bySha.get(r.sha256) ?? []), r]);
+  const rowsOf = (w: (typeof wanted)[number]) => (bySha.get(w.sha) ?? []).filter((r) => w.arch === null || r.repo_arch === w.arch);
+  const missing = wanted.filter((w) => !rowsOf(w).length).map((w) => w.entry);
   if (missing.length) return json({ error: `packages not indexed: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? "…" : ""}` }, 404);
-  const added: number[] = add.map((sha) => bySha.get(sha)!);
+  const added: number[] = [...new Set(wanted.flatMap((w) => rowsOf(w).map((r) => r.id)))];
 
   const seqRow = await env.DB.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM releases WHERE ring = ?")
     .bind(ring)

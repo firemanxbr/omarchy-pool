@@ -912,7 +912,7 @@ __CHARTS__
       ["Sources synced", synced + " / " + expected, "rows per architecture · " + (lastSyncEv ? "last sync " + ago(lastSyncEv.created_at) + " · every 3 hours" : "no sync yet")],
       ["Promotion, by evidence", "edge → rc: " + gateWord(gateRc), "rc → stable: " + gateWord(gateStable) + " · after every sync, then every 3 h; two green checks make stable"],
       ["Security data", sec.updated_at ? ago(sec.updated_at) : "never", num(sec.advisories) + " advisories · Arch + Debian trackers, KEV, EPSS · every 3 h" + (secEv && secEv.status !== "ok" ? " · last run " + secEv.status : "")],
-      ["Stored once", bytes(pool.bytes), num(pool.objects) + " objects, one per sha256"],
+      ["Stored once", bytes(pool.bytes), num(pool.objects) + " objects, one per sha256 and architecture"],
       ["Served by the rings", bytes(ringBytes), "what three copied trees would hold"],
       ["Reclaimable", bytes(rec.bytes), num(rec.objects) + " objects past retention" + (pending ? " · " + num(pending) + " awaiting a release" : "")],
       ["Snapshot", m ? ago(m.recorded_at) : "never", m ? "the pool measures itself every 30 minutes" : "no snapshot yet"],

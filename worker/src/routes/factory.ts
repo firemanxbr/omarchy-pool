@@ -1813,7 +1813,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
       await reclaimStagingPackages(env, [built, from?.review ?? null]);
       if (res.sha256) {
         try {
-          await writeAttestation(env, res.sha256);
+          await writeAttestation(env, res.sha256, p.arch ?? task.arch);
         } catch (e) {
           await event(env, "build", "warn", `${task.name}: attestation not written — ${String(e)}`, { task: built, sha256: res.sha256 });
         }
@@ -1951,7 +1951,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   let attested = false;
   if (task.publish !== 0) {
     try {
-      attested = await writeAttestation(env, indexed.sha256);
+      attested = await writeAttestation(env, indexed.sha256, task.arch);
     } catch (e) {
       await event(env, "build", "warn", `${task.name}: attestation not written — ${String(e)}`, { task: id, sha256: indexed.sha256 });
     }

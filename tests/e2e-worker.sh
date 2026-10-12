@@ -199,6 +199,23 @@ vout=$("$PKG_REPO" verify --keyring "$E2E/verify-key.asc" --work-dir "$E2E/verif
 grep -q "1 bad signature(s)" <<<"$vout" && grep -q "0 pinned bytes the pool does not store (0 re-pinned)" <<<"$vout" || { echo "verify must find one bad signature and re-pin nothing: $vout"; exit 1; }
 curl -s -o /dev/null -X PUT "$OMARCHY_API/api/v1/pool/$any_x86/sig?filename=e2e-any-1-1-any.pkg.tar.xz&source=packages&arch=x86_64" -H "Authorization: Bearer $OMARCHY_TOKEN" --data-binary "@$E2E/any/x86_64/e2e-any-1-1-any.pkg.tar.xz.sig"
 
+step "The same bytes in both architectures' repositories: a row, an object and a pin for each (#421)"
+# Omarchy ships some `any` archives byte for byte to x86_64 and aarch64. The
+# index held one row per sha256: the second architecture's index of the bytes
+# was a 409 (eight Omarchy packages missing on x86_64 from 2026-10-12), and
+# its publish skipped them as indexed and had its release refused. Since
+# migration 0055 each architecture indexes the bytes for its own directory.
+mkdir -p "$E2E/shared/root"
+printf 'pkgname = e2e-shared\npkgver = 1-1\npkgdesc = the same bytes in both repositories\narch = any\nsize = 1\n' > "$E2E/shared/root/.PKGINFO"
+(cd "$E2E/shared/root" && tar -cf - .PKGINFO | xz -c > "../e2e-shared-1-1-any.pkg.tar.xz")
+shared=$(sha256sum "$E2E/shared/e2e-shared-1-1-any.pkg.tar.xz" | cut -d' ' -f1)
+for a in aarch64 x86_64; do "$PKG_REPO" publish --ring rc --source packages --arch "$a" --note "e2e-shared $a" "$E2E/shared/e2e-shared-1-1-any.pkg.tar.xz" >/dev/null; done
+for a in x86_64 aarch64; do
+  rc_a=$(curl -s "$OMARCHY_API/api/v1/releases/rc?fields=summary&arch=$a")
+  jq -e --arg s "$shared" --arg a "$a" '[.packages[] | select(.name == "e2e-shared" and .sha256 == $s and .repo_arch == $a)] | length == 1' <<<"$rc_a" >/dev/null || { echo "rc must serve e2e-shared's bytes on $a: $(jq -c '[.packages[] | select(.name == "e2e-shared")]' <<<"$rc_a")"; exit 1; }
+  [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/pool/packages/$a/e2e-shared-1-1-any.pkg.tar.xz")" == 200 ]] || { echo "no object of e2e-shared under packages/$a"; exit 1; }
+done
+
 step "Pool sanity (one directory per source: databases beside the packages)"
 for f in omarchy-packages-stable.db omarchy-packages-stable.db.sig omarchy-packages-stable.files "zlib-1:1.3.2-3-x86_64.pkg.tar.zst" "zlib-1:1.3.2-3-x86_64.pkg.tar.zst.sig"; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/pool/packages/x86_64/$f")

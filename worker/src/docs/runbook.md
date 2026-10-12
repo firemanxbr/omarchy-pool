@@ -4389,11 +4389,29 @@ rebuilds them), and the job remembered what the pool stores by filename
 alone — so a ring's x86_64 re-pin carried the aarch64 bytes. It now keeps
 one entry per `<arch>/<filename>` of the OPR's directory, and a re-pin happens exactly when the
 ring's pin differs from what that directory stores, whatever the
-signature's story was. The index holds one row per sha256 (0001_init.sql):
-the same bytes stored under both directories can be indexed for one of
-them, and the other directory's pin is reported rather than forced
-(`POST /packages` answers 409, not a database error). The second attempt
-re-pinned the 5 objects (rc#18, stable#8) and every OPR object verified.
+signature's story was. The second attempt re-pinned the 5 objects (rc#18,
+stable#8) and every OPR object verified.
+
+Until #421 the index held one row per sha256 (0001_init.sql): the same
+bytes stored under both directories could be indexed for one of them only,
+and `POST /packages` answered 409 for the other. The sync hit that limit
+too: Omarchy ships some `any` archives byte for byte in both architectures'
+repositories, and from at least 2026-10-12 every x86_64 sync of `packages`
+reported `0 new, 8 failed` (*these bytes are indexed for aarch64*), eight
+packages left out of x86_64's rings, the aarch64 sync `2 failed` the other
+way. Since migration 0055 the index holds one row per (sha256, repository
+architecture): each architecture's sync, publish and re-pin indexes the
+bytes for its own directory — a row, an object, lists and ring membership
+of its own — and the pin is made rather than reported. What reads by
+sha256 reads the row of the architecture it is about (`known`, a sync's or
+a re-pin's release, the seal with `?arch=`) or every row of the bytes (an
+unscoped release add, the security matches); GC takes a row and the object
+its own key names, so the other architecture's row, object and lists stay.
+After the release that ships it, the next sync of `packages` on each
+architecture reports `0 failed`: the objects the 409 left without a row are
+already in the pool under their architecture's directory (their upload went
+through every run; all ten answered 200 on 2026-10-12), so it indexes them
+and pins them.
 
 ## The factory
 

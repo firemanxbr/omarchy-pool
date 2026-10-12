@@ -152,9 +152,9 @@ pub fn run(api: &Api, opts: &VerifyOptions) -> Result<VerifyReport, RepoError> {
                     if opts.repair {
                         // The ring can only pin bytes the index knows for
                         // this architecture; index them from the object when
-                        // it never did. What the index refuses (one row per
-                        // sha256: the same bytes already indexed for the
-                        // other architecture) stays as it is and is reported.
+                        // it never did — the same bytes indexed for the other
+                        // architecture get this one's row too (#421). What the
+                        // index refuses stays as it is and is reported.
                         let mut indexed = true;
                         if api.known(std::slice::from_ref(&stored), arch)?.is_empty() {
                             let manifest = pkg_extract::extract_manifest(&pkg)?;
