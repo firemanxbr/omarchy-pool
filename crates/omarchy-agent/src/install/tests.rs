@@ -3811,8 +3811,10 @@ fn keys_given_after_an_install_without_them_end_its_hold() {
 /// remapped uid (dockremap's range in /etc/subuid, 65533 in), so `etc/dispatcher.env` names that
 /// uid (`OMARCHY_AGENT_REMAPPED_USER=65533:65533`); where the ACL cannot be set (a Mac, or a
 /// filesystem that keeps none) it writes them owner-only, says so, and the host is held
-/// (`keys-acl`). A re-run that keeps a file without that ACL says how to lift the hold.
+/// (`keys-acl`). A re-run that keeps a file without that ACL says how to lift the hold, and one
+/// given the keys from that same file (the Studio's move to subuid, #407) writes them again with it.
 #[test]
+#[allow(clippy::too_many_lines)] // no keys, keys given, their ACL lost, and given again from their own file
 fn a_remapped_daemon_is_held_without_keys_and_its_keys_are_written_with_their_acl() {
     let h = granted(host(&rootful_info(), EGRESS_OK));
     prepare(&h.root);
@@ -3883,6 +3885,29 @@ fn a_remapped_daemon_is_held_without_keys_and_its_keys_are_written_with_their_ac
             env_text().contains("\nOMARCHY_AGENT_HELD=keys-acl\n"),
             "{}",
             env_text()
+        );
+        // Given again from their own file (the Studio's move to subuid, #407:
+        // `--agent-env-from <secrets>/agent.env`): read whole before the new file is renamed
+        // over it, written in its place with the ACL, the same keys, and the hold lifted.
+        let mut o = h.options.clone();
+        o.agent_env_from = Some(keys.clone());
+        let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+        let mut out = Vec::new();
+        apply(&o, &ready, &mut Fake::default(), &mut out)
+            .map_err(|e| e.to_string())
+            .unwrap();
+        let said = String::from_utf8_lossy(&out);
+        assert!(
+            said.contains(&format!("wrote {} (0640: its owner's, and readable by the agent sidecars' remapped uid 296605 through its ACL alone", keys.display()))
+                && !said.contains("OMARCHY_AGENT_HELD"),
+            "{said}"
+        );
+        assert_eq!(mode(), 0o640);
+        let text = env_text();
+        assert!(
+            text.contains("\nOMARCHY_AGENT_REMAPPED_USER=65533:65533\n")
+                && !text.contains("OMARCHY_AGENT_HELD"),
+            "{text}"
         );
     } else {
         assert!(

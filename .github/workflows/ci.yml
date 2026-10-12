@@ -285,7 +285,7 @@ jobs:
         run: bash tests/sandboxed-runtime.sh
 
   userns-remap:
-    name: Remapped daemon on a real engine (userns-remap)
+    name: Remapped daemon on a real engine (userns-remap, ${{ matrix.engine }})
     # #405 (design v2 §19.1): the runner's docker with "userns-remap": "default" merged into
     # its daemon.json (docker makes dockremap and its subordinate range itself); the agent's
     # keys written by its own writer with the ACL for the agent sidecars' remapped uid
@@ -296,8 +296,22 @@ jobs:
     # uploaded and completed; the probe reads the keys as 65533:65533, and a draft's agent
     # sidecar runs remapped as that uid, writes its usage where the dispatcher gave it, and
     # completes; the ACL lost holds the model kinds (keys-acl); and the dispatcher's
-    # real-engine tests on that engine.
+    # real-engine tests on that engine. #407: also on docker 29.9.0 started on a fresh data
+    # root, so the containerd image store is on by default — the Studio's daemon —, which
+    # dockerd turns off by itself under userns-remap (its journal says so, and the storage
+    # driver after it is logged); on both, an image pulled before the remapping is gone from
+    # the remapped daemon and there again once daemon.json is put back: the way back.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: the runner's docker
+            docker: ""
+          - engine: docker 29.9.0 with the containerd image store
+            docker: "29.9.0"
+    env:
+      DOCKER_WANT: ${{ matrix.docker }}
     steps:
       - uses: actions/checkout@v4
       # Keep in sync with rust-toolchain.toml.
@@ -305,19 +319,81 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: userns-remap on the runner's docker — daemon.json's userns-remap set to default, its other keys kept — restarted
+      - name: docker ${{ matrix.docker }} from Docker's apt repository, started on a fresh data root so the containerd image store is on by default, as on the Studio
+        if: matrix.docker != ''
+        run: |
+          set -euo pipefail
+          # Docker's apt repository, its key checked by fingerprint (the runner image removes the repository after its own install).
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+          gpg --show-keys --with-colons /etc/apt/keyrings/docker.gpg | grep -q '^fpr:::::::::9DC858229FC7DD38854AE2D88D81803C0EBFCD88:$' \
+            || { echo "Docker's apt key is not the one pinned"; exit 1; }
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+            | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+          sudo apt-get update -q
+          pin="$(apt-cache madison docker-ce | awk -v v="5:$DOCKER_WANT-1~" 'index($3, v) == 1 { print $3; exit }')"
+          [[ -n "$pin" ]] || { echo "no docker-ce $DOCKER_WANT in Docker's repository:"; apt-cache madison docker-ce | head; exit 1; }
+          # A fresh data root, as a new daemon of this version starts: docker 29 takes the containerd image store by default
+          # where no graph driver holds anything yet, and the runner's docker 28 left images in overlay2.
+          sudo systemctl stop docker.socket docker.service 2>/dev/null || sudo systemctl stop docker.service
+          sudo mv /var/lib/docker /var/lib/docker.runner
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends --allow-downgrades "docker-ce=$pin" "docker-ce-cli=$pin"
+          sudo systemctl start docker.service
+          for _ in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          [[ "$(docker version --format '{{.Server.Version}}')" == "$DOCKER_WANT" ]] || { docker version; exit 1; }
+          driver="$(docker info --format '{{json .DriverStatus}}')"
+          [[ "$driver" == *io.containerd.snapshotter.v1* ]] || { echo "not the containerd image store: $driver"; sudo journalctl -u docker --no-pager -n 60; exit 1; }
+          docker info --format 'docker {{.ServerVersion}}, {{.Driver}} {{json .DriverStatus}}, {{.DockerRootDir}}, containerd namespace {{.Containerd.Namespaces.Containers}}'
+      - name: An image in the daemon's store before the remapping, as the Studio holds its own
+        run: |
+          set -euo pipefail
+          source tests/images.env
+          docker pull -q "$BUSYBOX"
+          docker info --format 'before: docker {{.ServerVersion}}, {{.Driver}}, {{.DockerRootDir}}'
+      - name: userns-remap on that docker — daemon.json's userns-remap set to default, its other keys kept, the one before kept beside it — restarted, its storage driver logged
         run: |
           set -euo pipefail
           # The runner's daemon.json has keys of its own (cgroup-parent): merged, not replaced.
           cur="$(sudo cat /etc/docker/daemon.json 2>/dev/null || true)"; [[ -n "$cur" ]] || cur='{}'
+          printf '%s\n' "$cur" | sudo tee /etc/docker/daemon.json.pre-remap >/dev/null
           jq -S '. + {"userns-remap": "default"}' <<<"$cur" | sudo tee /etc/docker/daemon.json >/dev/null
+          since="$(date -u '+%Y-%m-%d %H:%M:%S') UTC"
           sudo systemctl restart docker
           for _ in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
-          docker info --format '{{json .SecurityOptions}}' | grep -q name=userns || { sudo journalctl -u docker --no-pager -n 60; exit 1; }
-          docker info --format 'docker {{.ServerVersion}}, {{.Driver}}, {{.DockerRootDir}}'
+          opts="$(docker info --format '{{json .SecurityOptions}}')"
+          [[ "$opts" == *name=userns* ]] || { sudo journalctl -u docker --no-pager -n 60; exit 1; }
+          echo "storage driver under userns-remap: $(docker info --format '{{.Driver}} {{json .DriverStatus}}, data root {{.DockerRootDir}}')"
           grep -H '^dockremap:' /etc/subuid /etc/subgid
+          # Read whole, never into grep -q: pipefail would take an early exit for a failed read.
+          log="$(sudo journalctl -u docker --no-pager --since "$since")"
+          grep -i -E 'userns|snapshotter' <<<"$log" || true
+          if [[ -n "$DOCKER_WANT" ]]; then
+            # Docker 29 turns the containerd image store off by itself under userns-remap (moby #47377).
+            [[ "$log" == *'userns remapping enabled, disabling containerd snapshotter'* ]] \
+              || { echo "dockerd did not say it turned the containerd image store off"; exit 1; }
+            driver="$(docker info --format '{{json .DriverStatus}}')"
+            [[ "$driver" != *io.containerd.snapshotter.v1* ]] || { echo "still the containerd image store under userns-remap: $driver"; exit 1; }
+          fi
+          # The remapped daemon starts in a data root of its own: the image pulled before is not in it.
+          source tests/images.env
+          ! docker image inspect "$BUSYBOX" >/dev/null 2>&1 || { echo "the remapped daemon sees the old store's image"; exit 1; }
       - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — and its model kinds, the keys read through their ACL by the sidecars' remapped uid alone
         run: bash tests/userns-remap.sh
+      - name: The way back — daemon.json as it was, restarted — gives the old data root, its image there without a pull
+        run: |
+          set -euo pipefail
+          sudo install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json
+          sudo systemctl restart docker
+          for _ in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          opts="$(docker info --format '{{json .SecurityOptions}}')"
+          [[ "$opts" != *name=userns* ]] || { echo "still remapped: $opts"; exit 1; }
+          source tests/images.env
+          docker image inspect "$BUSYBOX" >/dev/null || { echo "the old store's image is gone"; exit 1; }
+          if [[ -n "$DOCKER_WANT" ]]; then
+            driver="$(docker info --format '{{json .DriverStatus}}')"
+            [[ "$driver" == *io.containerd.snapshotter.v1* ]] || { echo "not the containerd image store again: $driver"; exit 1; }
+          fi
+          docker info --format 'back: docker {{.ServerVersion}}, {{.Driver}}, {{.DockerRootDir}}'
 
   host-key-tpm:
     name: Host key in a TPM (swtpm behind tpm2-abrmd, against a local pool)
