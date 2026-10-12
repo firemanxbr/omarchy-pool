@@ -41,8 +41,16 @@
 //!   none of the host's, and its sidecars stay remapped as its task containers do (design v2
 //!   §19.1) — so there `OMARCHY_AGENT_HELD=userns-remap` instead: the dispatcher runs no probe
 //!   and no agent sidecar, and the host's page says why it takes no model kinds (how a
-//!   remapped host reads the keys is the maintainer's to decide). Rendered from the file's
-//!   owner (its directory's before there is one) and agent.toml's `set.engine` and
+//!   remapped host reads the keys is the maintainer's to decide, and keys do not lift it, so
+//!   it holds whether or not there is a keys file). Elsewhere, with no keys file at all —
+//!   `agent.env` not there, or not a regular file — `OMARCHY_AGENT_HELD=no-keys` (#419): the
+//!   dispatcher names no keys file in a mount, so nothing on the engine is given a missing
+//!   path to make (podman's docker API makes every bind source that is not there an empty
+//!   directory when it creates the container, `--mount` included: on studio-vm4k the probe's
+//!   mount did, and the directory refused the keys given later),
+//!   and the host's page says "no agent keys: builds only"; the first render after the keys
+//!   arrive (install's `--agent-env-from`, *Set agent keys*) drops the hold. Rendered from the
+//!   file (its owner, or that there is none) and agent.toml's `set.engine` and
 //!   `envelope.userns_remap`, so an agent of a release with this fix writes it within a minute
 //!   and the dispatcher is recreated with it, with no person at the host.
 //!
@@ -96,10 +104,13 @@ pub const SECRETS_DIR: &str = "OMARCHY_SECRETS_DIR";
 pub const DIRECT_NETWORK: &str = "OMARCHY_DIRECT_NETWORK";
 /// Who the agent sidecars run as (#399): `<uid>:<gid>`, agent.env's owner as the engine shows it.
 pub const AGENT_USER: &str = "OMARCHY_AGENT_USER";
-/// Why the host takes no model kinds though it has keys (#399): a code, [`HELD_REMAP`].
+/// Why the host takes no model kinds (#399, #419): a code, [`HELD_REMAP`] or [`HELD_NO_KEYS`].
 pub const AGENT_HELD: &str = "OMARCHY_AGENT_HELD";
 /// A remapped daemon: no container user is agent.env's owner, and the sidecars stay remapped.
 pub const HELD_REMAP: &str = "userns-remap";
+/// No keys file (#419): agent.env is not there, or is no regular file, so no mount names it; a
+/// remapped daemon says [`HELD_REMAP`] all the same, the hold keys cannot lift.
+pub const HELD_NO_KEYS: &str = "no-keys";
 /// The group a sidecar that is not root takes for a keys file of root's group: none of the host's
 /// privileged ones (`nogroup`), which a 0600 file does not need.
 const NOGROUP: u32 = 65_534;
@@ -288,8 +299,9 @@ pub enum KeysUser {
     /// `OMARCHY_AGENT_USER=<uid>:<gid>`: the sidecars run as the owner, in the engine's own user
     /// namespace.
     Owner { uid: u32, gid: u32 },
-    /// `OMARCHY_AGENT_HELD=<code>`: no container user may be the owner here, so the dispatcher
-    /// runs no probe and no agent sidecar, and the host's page says why.
+    /// `OMARCHY_AGENT_HELD=<code>`: no container user may be the owner here, or there is no
+    /// keys file (#419), so the dispatcher runs no probe and no agent sidecar, and the host's
+    /// page says why.
     Held(&'static str),
 }
 
@@ -316,12 +328,25 @@ impl KeysUser {
         }
     }
 
-    /// Of the host now: agent.env's owner, or its directory's before there is one (the agent
-    /// writes the file as itself, there).
+    /// Of the host now: agent.env's owner; held while there is no keys file (#419) — none, or
+    /// anything but a regular file there (an empty directory, what podman's docker API makes of
+    /// a mount's missing source, a link the agent never follows) — so that no mount names a
+    /// path the engine would make. A remapped daemon is held for its remapping first, keys file
+    /// or none: keys given later would not lift that hold, so its page does not ask for them.
+    /// `None` when the agent cannot look.
     fn of_host(e: &Envelope) -> Option<Self> {
-        let meta = std::fs::metadata(e.secrets_dir.join("agent.env"))
-            .or_else(|_| std::fs::metadata(&e.secrets_dir))
-            .ok()?;
+        if e.engine == Engine::Rootful && e.userns_remap {
+            return Some(Self::Held(HELD_REMAP));
+        }
+        let meta =
+            match std::fs::symlink_metadata(e.secrets_dir.join(crate::install::secrets::FILE)) {
+                Ok(m) if m.is_file() => m,
+                Ok(_) => return Some(Self::Held(HELD_NO_KEYS)),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return Some(Self::Held(HELD_NO_KEYS))
+                }
+                Err(_) => return None,
+            };
         Self::of(
             (meta.uid(), meta.gid()),
             e.engine,
