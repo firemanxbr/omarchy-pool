@@ -282,7 +282,10 @@ describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)"
   });
 
   it("gives the exit criteria as queries: no readopt-failed, a release across a task, both lanes staged, a ring moved", () => {
-    expect(canary).toContain("json_extract(payload, '$.lost') = 1");
+    expect(canary).toContain("json_extract(e.payload, '$.lost') = 1");
+    // A task container's loss only (dispatch/mod.rs KINDS): a pool job lost with its dispatcher at a release is by design (#319).
+    expect(canary).toContain("JOIN build_tasks t ON t.id = json_extract(e.payload, '$.task')");
+    expect(canary).toContain("AND t.kind IN ('build', 'trial', 'audit')");
     expect(canary).toContain("t.started_at < json_extract(h.report, '$.round.at') AND t.finished_at > json_extract(h.report, '$.round.at')");
     // Only the round that applied a release: the host's release changed from the one noted before, and the round's detail names it in
     // the agent's words — a round forced to the release it runs (Reconcile now, a widening) does not count.
