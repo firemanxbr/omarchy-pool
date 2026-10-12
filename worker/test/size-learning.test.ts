@@ -180,7 +180,7 @@ async function staged(id: number, name: string, token: string, peak?: Said): Pro
 /** The project's recipe on main that published its package into edge (the pool indexed it first) and completed, saying `peak`. */
 async function published(id: number, name: string, token: string, peak?: Said): Promise<void> {
   const filename = `${name}-1.0-1-aarch64.pkg.tar.zst`, sha256 = await sha256Hex(filename);
-  await env.DB.prepare(`INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+  await env.DB.prepare(`INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
     VALUES (?, ?, '1.0-1', 'aarch64', ?, 1, 1, 1, '{}', 'factory', ?, 'aarch64') ON CONFLICT DO NOTHING`).bind(sha256, name, filename, `factory/aarch64/${name}`).run();
   const done = await call("POST", `/factory/tasks/${id}/complete`, { token, body: { sha256, filename, version: "1.0-1", duration_ms: 60000, ...memoryOf(peak) } });
   expect(done.status, JSON.stringify(done.json)).toBe(200);

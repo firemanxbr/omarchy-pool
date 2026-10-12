@@ -169,6 +169,11 @@ A release is `main` at the moment a maintainer dispatches one
    `POOL_VERSION`, `POOL_COMMIT` and `POOL_DEPLOYED_AT`; the run verifies
    `/api/v1/version` reports the new tag and records a `deploy` event through
    `wrangler d1 execute` (the release holds no credential of the pool's API).
+   A deploy that fails after the migration step is rolled forward —
+   **Re-run failed jobs** — never left: once a migration that marks itself
+   `-- rollback-floor` is applied (0055, #421), the Worker still running
+   cannot index anything (every `POST /packages` fails), and a rollback below
+   it is refused.
 7. Every set follows: its updater sees the new release within two minutes
    (the Studio's too, since its one-time step, *The Studio host*).
 
@@ -225,10 +230,17 @@ after it and once more once it runs; a task's stop fence goes too. A
 worker's drain stays, but the older Worker does not honour it: drained
 workers take work until the roll-forward, which declares everything else
 again at each worker's first claim (security model, *A Worker rolled back
-past #277*; #295). Migrations are forward-only; keep them additive. The
-fallback, by hand, for the Worker alone: re-run the Deploy job of that
-release's run, or `git checkout vX.Y.Z && cd worker && npx wrangler deploy
---var POOL_VERSION:vX.Y.Z`.
+past #277*; #295). Migrations are forward-only; keep them additive. One that
+cannot be — an earlier Worker cannot run on what it leaves — marks itself
+with a line `-- rollback-floor: <why>` and is a floor: once the newest
+release carries it, the rollback refuses every release without that file
+before anything moves, and only a roll forward helps (re-run the newest
+release's deploy, or release a fix). The first is
+`0055_one_row_per_arch.sql` (#421): it renamed `packages.sha256`, so a
+Worker from before it fails every index. The fallback, by hand, for the
+Worker alone: re-run the Deploy job of that release's run, or `git checkout
+vX.Y.Z && cd worker && npx wrangler deploy --var POOL_VERSION:vX.Y.Z` —
+never below the floor.
 
 ## The GitHub settings the signature relies on
 
@@ -4397,11 +4409,29 @@ rebuilds them), and the job remembered what the pool stores by filename
 alone — so a ring's x86_64 re-pin carried the aarch64 bytes. It now keeps
 one entry per `<arch>/<filename>` of the OPR's directory, and a re-pin happens exactly when the
 ring's pin differs from what that directory stores, whatever the
-signature's story was. The index holds one row per sha256 (0001_init.sql):
-the same bytes stored under both directories can be indexed for one of
-them, and the other directory's pin is reported rather than forced
-(`POST /packages` answers 409, not a database error). The second attempt
-re-pinned the 5 objects (rc#18, stable#8) and every OPR object verified.
+signature's story was. The second attempt re-pinned the 5 objects (rc#18,
+stable#8) and every OPR object verified.
+
+Until #421 the index held one row per sha256 (0001_init.sql): the same
+bytes stored under both directories could be indexed for one of them only,
+and `POST /packages` answered 409 for the other. The sync hit that limit
+too: Omarchy ships some `any` archives byte for byte in both architectures'
+repositories, and from at least 2026-10-12 every x86_64 sync of `packages`
+reported `0 new, 8 failed` (*these bytes are indexed for aarch64*), eight
+packages left out of x86_64's rings, the aarch64 sync `2 failed` the other
+way. Since migration 0055 the index holds one row per (sha256, repository
+architecture): each architecture's sync, publish and re-pin indexes the
+bytes for its own directory — a row, an object, lists and ring membership
+of its own — and the pin is made rather than reported. What reads by
+sha256 reads the row of the architecture it is about (`known`, a sync's or
+a re-pin's release, the seal with `?arch=`) or every row of the bytes (an
+unscoped release add, the security matches); GC takes a row and the object
+its own key names, so the other architecture's row, object and lists stay.
+After the release that ships it, the next sync of `packages` on each
+architecture reports `0 failed`: the objects the 409 left without a row are
+already in the pool under their architecture's directory (their upload went
+through every run; all ten answered 200 on 2026-10-12), so it indexes them
+and pins them.
 
 ## The factory
 

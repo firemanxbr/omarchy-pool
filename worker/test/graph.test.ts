@@ -14,7 +14,7 @@ async function seedRing(n: number) {
     rp.push(`('stable', ${i})`);
   }
   const chunk = async (rows: string[], head: string) => { for (let i = 0; i < rows.length; i += 400) await env.DB.prepare(`${head} ${rows.slice(i, i + 400).join(",")}`).run(); };
-  await chunk(pk, "INSERT INTO packages (id, sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES");
+  await chunk(pk, "INSERT INTO packages (id, row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES");
   await chunk(pv, "INSERT INTO package_provides (package_id, capability, version_constraint, declared) VALUES");
   await chunk(rq, "INSERT INTO package_requires (package_id, requirement, version_constraint, kind, symbol_version) VALUES");
   await chunk(rp, "INSERT INTO ring_packages (ring, package_id) VALUES");
@@ -61,7 +61,7 @@ describe("a page of a release's manifests", () => {
     // version of each (retention keeps them a while), which the walk must step over.
     const n = 1200, rows: string[] = [];
     for (let i = 1; i <= n; i++) rows.push(`(${n + i}, 'old${i}', 'pkg${i}', '0-1', 'x86_64', 'pkg${i}-0-1-x86_64.pkg.tar.zst', 90, 90, 1, '{"name":"pkg${i}","version":"0-1"}', 'extra', 'extra/x86_64/old${i}', 'x86_64')`);
-    for (let i = 0; i < rows.length; i += 400) await env.DB.prepare(`INSERT INTO packages (id, sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ${rows.slice(i, i + 400).join(",")}`).run();
+    for (let i = 0; i < rows.length; i += 400) await env.DB.prepare(`INSERT INTO packages (id, row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ${rows.slice(i, i + 400).join(",")}`).run();
     const { releaseManifests } = await import("../src/db");
     const release = (await env.DB.prepare("SELECT id FROM releases WHERE ring = 'stable'").first<{ id: number }>())!.id;
     const first = (await releaseManifests(env, release, "summary", { arch: "x86_64", limit: 500 })) as { name: string; version: string; source: string; repo_arch: string }[];

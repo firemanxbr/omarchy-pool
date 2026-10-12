@@ -1,0 +1,52 @@
+-- The same bytes indexed once per repository architecture (#421). Omarchy
+-- publishes some `-any` archives byte for byte in its x86_64 and its aarch64
+-- repository; the index held one row per sha256 (0001_init.sql), so whichever
+-- architecture's sync indexed the archive first owned the row and the other's
+-- POST /packages answered 409: eight Omarchy packages missing from x86_64's
+-- rings every sync since at least 2026-10-12. Each architecture's row names
+-- its own object (`<source>/<arch>/<filename>`, r2.ts packageKey), its own
+-- lists and its own ring membership; uniqueness is (sha256, repo_arch).
+--
+-- Why not a table rebuild: `sha256 TEXT NOT NULL UNIQUE` is part of the
+-- table's definition, and SQLite changes a constraint only by building the
+-- table anew. D1 runs with foreign keys on (PRAGMA foreign_keys = OFF is
+-- ignored, PRAGMA defer_foreign_keys defers the checks, not the actions), so
+-- the DROP TABLE of a rebuild deletes every row first and ON DELETE CASCADE
+-- empties package_provides, package_requires, package_files,
+-- package_file_lists, package_advisories and package_components with it —
+-- tried on SQLite 3.54 with defer_foreign_keys on, and legacy_alter_table
+-- does not help either (with foreign keys on, a rename still rewrites the
+-- children's REFERENCES). A full-table UPDATE to fill a new column is out
+-- too: 44 k rows at ~3 KB of manifest each rewrite ~140 MB, which D1's
+-- limits page names as the size that exceeds a query's execution limits.
+--
+-- So the constraint stays where it is, on a column that changes meaning:
+--
+-- - packages.row_key (the former sha256 column, renamed: NOT NULL UNIQUE
+--   still) is the row's key: `<sha256>/<repo_arch>` for a row indexed from
+--   now on (routes/packages.ts), the bare `<sha256>` of a row indexed before
+--   (no row is rewritten). Written once at indexing, never read by a query.
+-- - packages.sha256 is a VIRTUAL generated column, the part of the key before
+--   its '/': every read by sha256 (`WHERE sha256 = ?`, `p.sha256`) reads it
+--   unchanged, and nothing writes it — an INSERT naming it is refused.
+-- - idx_packages_sha256_repo_arch, UNIQUE (sha256, repo_arch): the
+--   constraint, and the index every lookup by sha256 reads (the column's
+--   own UNIQUE index, renamed with it, serves no query any more). Building
+--   it reads the table once and writes 44 k index rows.
+--
+-- Every other index (name, filename, source, (name, repo_arch, source)),
+-- every id and every foreign reference to packages (id) stay as they are.
+-- The Worker that runs during the deploy minute reads sha256 as before, but
+-- its INSERT names the generated column and fails: a sync importing in that
+-- minute counts the archive as failed and imports it again on its next run.
+--
+-- Not additive, then: no Worker from before this migration can index on the
+-- schema it leaves (its INSERT INTO packages names sha256). The marker below
+-- makes it a floor: factory/bin/release-rollback refuses to go back to a
+-- release that does not carry this file once the newest release does, and
+-- a deploy that fails after `d1 migrations apply` is rolled forward (the
+-- runbook, Releasing the pool itself).
+-- rollback-floor: a Worker before 0055 cannot write packages (#421)
+ALTER TABLE packages RENAME COLUMN sha256 TO row_key;
+ALTER TABLE packages ADD COLUMN sha256 TEXT GENERATED ALWAYS AS (CASE WHEN instr(row_key, '/') > 0 THEN substr(row_key, 1, instr(row_key, '/') - 1) ELSE row_key END) VIRTUAL;
+CREATE UNIQUE INDEX idx_packages_sha256_repo_arch ON packages (sha256, repo_arch);

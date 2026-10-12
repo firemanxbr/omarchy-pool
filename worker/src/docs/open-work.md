@@ -127,7 +127,7 @@ fallback worker is gone).
 
 - OPR aarch64 `omarchy` cannot be installed in a clean Arch Linux ARM container: `unable to satisfy dependency 'hyprland' required by omarchy` although `omarchy-packages-edge` serves `hyprland 0.56.2-3` for aarch64 (version constraint?). Anything depending on `omarchy` (flea) cannot be built for aarch64 until that is understood.
 - The OPR ships most names for aarch64 too; what is missing there is mostly `-debug` packages, x86-only drivers/kernels/nvidia, proprietary binaries (dropbox, spotify, cursor, lmstudio…) and a few Omarchy tools (omakade, omapresent, omareel, omarchy-herdr, schist, flea, hey-cli, vi, pinta). Their PKGBUILDs are not in the AUR except hey-cli, vi, flea.
-- An `any` package is stored once per architecture directory (sha256 is unique in the index), so an `any` PKGBUILD builds once per architecture.
+- An `any` package is stored once per architecture directory, so an `any` PKGBUILD builds once per architecture. The index held one row per sha256 then; since #421 (migration 0055) the same bytes can be indexed for both architectures, so a reproducible `any` build could be published to both from one build.
 
 
 
