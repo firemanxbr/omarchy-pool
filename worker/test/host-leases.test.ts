@@ -385,6 +385,9 @@ describe("host events and attempts", () => {
       expect(r.json).toMatchObject({ status: "queued", attempts: 0 });
       expect(await taskOf(t)).toMatchObject({ status: "queued", attempts: 0, host_losses: n });
     }
+    // The journal's line names the task's kind: Status tells a task container lost (readopt-failed) from a pool job lost with its dispatcher.
+    const lostLine = await env.DB.prepare("SELECT payload FROM events WHERE kind = 'build' AND json_extract(payload, '$.task') = ? ORDER BY id DESC LIMIT 1").bind(t).first<{ payload: string }>();
+    expect(JSON.parse(lostLine!.payload)).toMatchObject({ task: t, kind: "build", worker: expect.any(String), lost: true });
     // A third loss spends the attempt.
     await call("POST", `/factory/tasks/${t}/fail`, { error: "the engine restarted", lost: true }, job(await run()));
     let row = await taskOf(t);

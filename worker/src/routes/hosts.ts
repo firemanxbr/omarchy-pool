@@ -349,9 +349,9 @@ export const BUSY_7D_SQL = `SELECT arch, lane, SUM(COALESCE(units, 1) * (juliand
   FROM build_tasks WHERE lease_gen IS NOT NULL AND lane IN ('native', 'emulated') AND kind IN (${QUEUED_KINDS.map((k) => `'${k}'`).join(", ")}) AND started_at IS NOT NULL
     AND (status = 'leased' OR (finished_at IS NOT NULL AND finished_at > ?2)) GROUP BY arch, lane`;
 /**
- * The journal's lines Status reads of the last day (by the kind index): a host lease lost (its fail's `lost`) and a task clamped to
- * the largest host alive (the claim's own line). Matched on the payload's text as the pool writes it (JSON.stringify, no spaces):
- * SQLite's JSON parser is never asked to read a line.
+ * The journal's lines Status reads of the last day (by the kind index): a host lease lost (its fail's `lost`, with the task's `kind`:
+ * a task container's or a pool job's) and a task clamped to the largest host alive (the claim's own line). Matched on the payload's
+ * text as the pool writes it (JSON.stringify, no spaces): SQLite's JSON parser is never asked to read a line, nor a task's row.
  */
 export const FLEET_EVENTS_SQL = `SELECT summary, payload, created_at FROM events WHERE kind = 'build' AND created_at > ?
   AND (payload LIKE '%"lost":true%' OR payload LIKE '%"clamped":true%') ORDER BY created_at DESC LIMIT 100`;
@@ -385,12 +385,12 @@ export async function handleFleet(env: Env): Promise<Response> {
   const leases = leaseRows.results as FleetLease[];
   const rules = selectionRules();
   const hosts = rows.map((h) => fleetHostOf(h, leases, now, rules));
-  const lost: { worker: string; task: number; at: string }[] = [], clamped: { task: number; summary: string; at: string }[] = [];
+  const lost: { worker: string; task: number; at: string; kind: string | null }[] = [], clamped: { task: number; summary: string; at: string }[] = [];
   for (const e of events.results as { summary: string; payload: string | null; created_at: string }[]) {
-    let p: { task?: unknown; worker?: unknown; lost?: unknown; clamped?: unknown } = {};
+    let p: { task?: unknown; kind?: unknown; worker?: unknown; lost?: unknown; clamped?: unknown } = {};
     try { p = e.payload ? JSON.parse(e.payload) : {}; } catch { continue; }
     if (typeof p.task !== "number") continue;
-    if (p.lost === true && typeof p.worker === "string" && Date.parse(e.created_at) > now - LOST_WINDOW_MIN * MIN) lost.push({ worker: p.worker, task: p.task, at: e.created_at });
+    if (p.lost === true && typeof p.worker === "string" && Date.parse(e.created_at) > now - LOST_WINDOW_MIN * MIN) lost.push({ worker: p.worker, task: p.task, at: e.created_at, kind: typeof p.kind === "string" ? p.kind : null });
     if (p.clamped === true && !clamped.some((x) => x.task === p.task)) clamped.push({ task: p.task, summary: e.summary, at: e.created_at });
   }
   const pool = version(env);

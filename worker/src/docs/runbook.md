@@ -2786,11 +2786,14 @@ names its host, linked to its page; errors come first.
   Reconcile now runs a round at once.
 - **`rolled-back`**: its guard reverted a release (*A host reverted a
   release*); the six hours on its last-good have a line of their own.
-- **`readopt-failed`**: a task was lost on the host in the last hour —
-  its container gone when its dispatcher came back (a reboot, an engine
-  restart, the disk watcher). Each is back in the queue with its attempt
-  given back, at most twice per task; more than one host at once points at
-  the release.
+- **`readopt-failed`**: a task container — a build (a draft, a bump, a
+  review rebuild), a trial or an audit — was lost on the host in the last
+  hour: its container gone when its dispatcher came back (a reboot, an
+  engine restart, the disk watcher). Each is back in the queue with its
+  attempt given back, at most twice per task; more than one host at once
+  points at the release. A pool job lost is not one: it runs in the
+  dispatcher's own process tree and ends with it at every release or
+  restart by design, an info line (below).
 - **`disk-low`**: the free disk on its work root or its engine's data root
   is under the signed floor (`capacity.disk.floor_gb`): its dispatcher
   claims no build until there is room. Prune the engine, or grow the disk.
@@ -2838,8 +2841,13 @@ names its host, linked to its page; errors come first.
   share asks for a different model on one host (another provider's key, or
   `FACTORY_PROVIDER` / `FACTORY_MODEL` in that host's `agent.env`; *How the
   pool hands a host work*).
-- **Info**: a host confirmed this week, and an agent's self-rollback (the
-  version it skips until a higher one; *Self-update*).
+- **Info**: a host confirmed this week, an agent's self-rollback (the
+  version it skips until a higher one; *Self-update*), and the pool jobs a
+  host lost in the last hour — ended with their dispatcher at a release or
+  a restart, or handed back before they started (a lane of a ring's
+  architecture or a task network missing, or more units than its claim
+  offered) — each back in the queue with its attempt given back; the
+  journal's line of each names its kind.
 
 The host's own page has the same facts for its owner and the maintainers,
 with a **Needs a person** box: the owner's Confirm, a suspension, the
@@ -3427,8 +3435,8 @@ cap at 3 (or *Resume*) starts it again.
 `<host>`: its id, both on its page):
 
 ```bash
-# no readopt-failed: no task lost on it (a container gone when its dispatcher came back)
-npx wrangler d1 execute omarchy-repo --remote --command "SELECT created_at, summary FROM events WHERE kind = 'build' AND json_extract(payload, '$.worker') = '<reg>' AND json_extract(payload, '$.lost') = 1 AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')"
+# no readopt-failed: no task container lost on it (a container gone when its dispatcher came back) — a pool job lost with its dispatcher at a release is by design, not counted
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT e.created_at, t.kind, e.summary FROM events e JOIN build_tasks t ON t.id = json_extract(e.payload, '$.task') WHERE e.kind = 'build' AND json_extract(e.payload, '$.worker') = '<reg>' AND json_extract(e.payload, '$.lost') = 1 AND t.kind IN ('build', 'trial', 'audit') AND e.created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')"
 # a release applied while a task ran, the day a release lands. Before it lands, the release the host runs (<before>):
 npx wrangler d1 execute omarchy-repo --remote --command "SELECT release_applied FROM hosts WHERE id = '<host>'"
 # once its page shows the new one: a task leased before its last round and finished after it, that round the one that applied it
