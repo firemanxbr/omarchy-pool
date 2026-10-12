@@ -7,6 +7,13 @@
 //! The pool here (`index_pool`, on the shared mock server) is the index as it is now: an object per
 //! `<source>/<arch>/<filename>`, a row per (sha256, architecture), `known` and a release's adds
 //! per architecture, `GET /packages/:sha256` for the bytes whichever architecture indexed them.
+//!
+//! The sync test is a contract test: the sync's own code was right (it asks `known` per
+//! architecture and indexes for its own), and against this mock it passes on the release before
+//! #421 too — the 409 was the Worker's. What fails there is the Worker's side
+//! (worker/test/one-row-per-arch.test.ts, releases.test.ts) and the real sync against the real
+//! Worker (tests/e2e-worker.sh). The publish test fails there: `is_indexed` asked about the bytes
+//! whatever their architecture.
 
 mod mock_pool;
 

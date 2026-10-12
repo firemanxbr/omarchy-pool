@@ -36,8 +36,12 @@
 # 2. The Worker of that release, deployed from its tag with
 #    `POOL_VERSION=v1.0.2` and `POOL_DEPLOYED_AT` now: a pool left at the
 #    newer release would refuse the older images as outdated (426). No
-#    migration runs: they are forward-only and additive, and the database
-#    keeps the newer ones. A deploy that fails puts the three tags back
+#    migration runs: they are forward-only, and the database keeps the newer
+#    ones. Most are additive, so an older Worker runs on them; one that is
+#    not marks itself `-- rollback-floor` (0055, #421: a Worker before it
+#    cannot write packages), and once the newest release carries it, a
+#    release without that file is refused before anything moves — only a
+#    roll forward helps then. A deploy that fails puts the three tags back
 #    where they were, so the fleet never follows images the pool refuses;
 #    re-running the rollback is safe. Once that Worker is deployed, the
 #    statement and its bundle go to R2 (omarchy-packages:
@@ -83,9 +87,21 @@
 set -euo pipefail
 say() { printf '==> %s\n' "$*"; }
 die() { printf 'release-rollback: %s\n' "$*" >&2; exit 2; }
+release_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+newest() { printf '%s\n' "$@" | { grep -E "$release_re" || true; } | sort -V | tail -n1; }  # the highest release named, or nothing
 to="${1:-}"
 [[ "$to" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "the release to go back to is a tag like v1.0.2 (got '${to}')"
 git rev-parse -q --verify "refs/tags/$to^{commit}" >/dev/null || die "$to is not a tag of this repository: nothing moved"
+# The schema floor (#421): a migration marked `-- rollback-floor` is one no Worker before it can run on. The newest release
+# carries it once its deploy applied it — or applied it and then failed to deploy (the tag exists from publish-release on) —
+# so a target without the file would run on a schema it cannot write: refused, nothing moved, only a roll forward helps.
+top="$(newest $(git tag -l 'v*'))"
+if [[ -n "$top" && "$top" != "$to" ]]; then
+  while IFS= read -r floor; do
+    [[ -z "$floor" ]] || git cat-file -e "$to:$floor" 2>/dev/null \
+      || die "$to is older than ${floor##*/}, a migration $top carries and no earlier Worker can run on (it marks itself rollback-floor): the pool's schema is past $to, so only a roll forward helps — re-run $top's deploy, or release a fix; nothing moved"
+  done < <(git grep -l -e '^-- rollback-floor' "$top" -- worker/migrations | sed "s#^$top:##")
+fi
 : "${IMAGE:?IMAGE (ghcr.io/<owner>/omarchy-worker) is required}"
 [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || die "CLOUDFLARE_API_TOKEN is not set: the Worker has to go back with the images, so nothing moved"
 : "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
@@ -113,8 +129,6 @@ pre277=0; git cat-file -e "$to:worker/src/orders.ts" 2>/dev/null || pre277=1
 # holds the two in step).
 R2_BUCKET=omarchy-packages
 statement_key="rollback/$to.json"; bundle_key="rollback/$to.sigstore.json"; last_key="rollback/latest.json"
-release_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
-newest() { printf '%s\n' "$@" | { grep -E "$release_re" || true; } | sort -V | tail -n1; }  # the highest release named, or nothing
 is_tag() { [[ "$1" =~ $release_re ]] && git rev-parse -q --verify "refs/tags/$1^{commit}" >/dev/null; }
 statement=""
 if [[ "${ROLLBACK_SIGN:-1}" == 1 ]]; then

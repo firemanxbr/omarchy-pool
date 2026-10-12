@@ -169,6 +169,11 @@ A release is `main` at the moment a maintainer dispatches one
    `POOL_VERSION`, `POOL_COMMIT` and `POOL_DEPLOYED_AT`; the run verifies
    `/api/v1/version` reports the new tag and records a `deploy` event through
    `wrangler d1 execute` (the release holds no credential of the pool's API).
+   A deploy that fails after the migration step is rolled forward —
+   **Re-run failed jobs** — never left: once a migration that marks itself
+   `-- rollback-floor` is applied (0055, #421), the Worker still running
+   cannot index anything (every `POST /packages` fails), and a rollback below
+   it is refused.
 7. Every set follows: its updater sees the new release within two minutes
    (the Studio's too, since its one-time step, *The Studio host*).
 
@@ -225,10 +230,17 @@ after it and once more once it runs; a task's stop fence goes too. A
 worker's drain stays, but the older Worker does not honour it: drained
 workers take work until the roll-forward, which declares everything else
 again at each worker's first claim (security model, *A Worker rolled back
-past #277*; #295). Migrations are forward-only; keep them additive. The
-fallback, by hand, for the Worker alone: re-run the Deploy job of that
-release's run, or `git checkout vX.Y.Z && cd worker && npx wrangler deploy
---var POOL_VERSION:vX.Y.Z`.
+past #277*; #295). Migrations are forward-only; keep them additive. One that
+cannot be — an earlier Worker cannot run on what it leaves — marks itself
+with a line `-- rollback-floor: <why>` and is a floor: once the newest
+release carries it, the rollback refuses every release without that file
+before anything moves, and only a roll forward helps (re-run the newest
+release's deploy, or release a fix). The first is
+`0055_one_row_per_arch.sql` (#421): it renamed `packages.sha256`, so a
+Worker from before it fails every index. The fallback, by hand, for the
+Worker alone: re-run the Deploy job of that release's run, or `git checkout
+vX.Y.Z && cd worker && npx wrangler deploy --var POOL_VERSION:vX.Y.Z` —
+never below the floor.
 
 ## The GitHub settings the signature relies on
 

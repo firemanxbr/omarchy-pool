@@ -20,6 +20,7 @@ import { INDEXED_SQL, KNOWN_SQL, MANIFEST_SQL } from "../src/routes/packages";
 import { ADD_ROWS_OF_ARCH_SQL, ADD_ROWS_SQL } from "../src/routes/releases";
 import { ROWS_OF_SHAS_SQL } from "../src/routes/security";
 import { SEALED_FIRST_SQL, SEALED_ROW_SQL } from "../src/routes/seal";
+import { runScript, scriptOf } from "./fixture";
 
 const API = "http://pool.test/api/v1";
 
@@ -187,6 +188,25 @@ describe("an -any archive Omarchy ships byte for byte to both architectures", ()
     expect((await call("GET", `/packages/${omazed.sha256}/provenance?arch=riscv64`)).status).toBe(400);
     // The manifest is the bytes': the same whichever row answers.
     expect((await call("GET", `/packages/${omazed.sha256}`)).json).toMatchObject({ name: "omazed", sha256: omazed.sha256 });
+  });
+
+  it("the package page's seal JSON link asks for the architecture the page shows", async () => {
+    const ctx = createExecutionContext();
+    const script = scriptOf(await (await worker.fetch(new Request("http://pool.test/package/omazed"), env, ctx)).text());
+    await waitOnExecutionContext(ctx);
+    for (const arch of ["x86_64", "aarch64"]) {
+      const d = runScript(script, { pathname: "/package/omazed", search: `?ring=edge&arch=${arch}`, functions: ["renderSeal"], variables: ["D"] }) as ReturnType<typeof runScript> & Record<string, any>;
+      // The page's own answer for the ring and the architecture: its seal is that architecture's row (search.ts sealOf).
+      const answer = (await call("GET", `/package/omazed?ring=edge&arch=${arch}`)).json;
+      expect(answer.seal).toMatchObject({ repo_arch: arch });
+      d.setD(answer);
+      d.renderSeal();
+      const foot = d.nodes["#seal-foot"].innerHTML as string;
+      expect(foot).toContain(`<a href="/api/v1/packages/${omazed.sha256}/provenance?arch=${arch}">seal JSON ›</a>`);
+      // And what it links to is the same seal the page drew.
+      const href = /href="(\/api\/v1\/packages\/[^"]+)">seal JSON/.exec(foot)![1];
+      expect((await call("GET", href.slice("/api/v1".length))).json).toMatchObject({ repo_arch: arch, object: answer.seal.object });
+    }
   });
 });
 

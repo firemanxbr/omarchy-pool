@@ -39,6 +39,14 @@
 -- The Worker that runs during the deploy minute reads sha256 as before, but
 -- its INSERT names the generated column and fails: a sync importing in that
 -- minute counts the archive as failed and imports it again on its next run.
+--
+-- Not additive, then: no Worker from before this migration can index on the
+-- schema it leaves (its INSERT INTO packages names sha256). The marker below
+-- makes it a floor: factory/bin/release-rollback refuses to go back to a
+-- release that does not carry this file once the newest release does, and
+-- a deploy that fails after `d1 migrations apply` is rolled forward (the
+-- runbook, Releasing the pool itself).
+-- rollback-floor: a Worker before 0055 cannot write packages (#421)
 ALTER TABLE packages RENAME COLUMN sha256 TO row_key;
 ALTER TABLE packages ADD COLUMN sha256 TEXT GENERATED ALWAYS AS (CASE WHEN instr(row_key, '/') > 0 THEN substr(row_key, 1, instr(row_key, '/') - 1) ELSE row_key END) VIRTUAL;
 CREATE UNIQUE INDEX idx_packages_sha256_repo_arch ON packages (sha256, repo_arch);
