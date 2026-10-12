@@ -11,7 +11,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { issueJobToken } from "../src/jobtoken";
 import { packageKey } from "../src/r2";
-import { AWAITED_SQL, RENDERED_SQL } from "../src/routes/releases";
+import { AWAITED_SQL, OWN_WAIT_SQL, RENDERED_SQL, WAITED_SQL } from "../src/routes/releases";
+import { CARRIED_ARCHES_SQL, RENDERED_BEFORE_SQL } from "../src/db";
 
 const API = "http://pool.test/api/v1";
 
@@ -62,8 +63,16 @@ async function renderArch(release: number, arch: string, sources: string[]): Pro
   for (const s of sources) for (const kind of ["db", "files"]) expect(await put(release, kind, `omarchy-${s}-edge`, arch)).toBe(201);
 }
 
+/** A whole render of one architecture, as `pkg-repo render` makes it: its databases, then the pool told (`rendered`). What it dropped. */
+async function renderWhole(release: number, arch: string, sources: string[]): Promise<number> {
+  await renderArch(release, arch, sources);
+  const done = await call("POST", `/releases/${release}/rendered?arch=${arch}`, undefined, render);
+  expect(done.status, JSON.stringify(done.json)).toBe(200);
+  return done.json.dropped;
+}
+
 let fresh = 0;
-/** The sections of edge's include for `arch`, as a user's pacman reads them (a fresh URL: the include sits in the edge cache). */
+/** The sections of edge's include for `arch`, as a user's pacman reads them (a fresh URL: the include sits in the edge cache, and so do the stats). */
 async function sections(arch: string): Promise<string[]> {
   const ctx = createExecutionContext();
   const res = await worker.fetch(new Request(`http://pool.test/api/v1/pacman.conf?ring=edge&arch=${arch}&t=${++fresh}`), env, ctx);
@@ -115,9 +124,13 @@ describe("a ring's head and its databases", () => {
       { repo: "omarchy-extra-edge", arch: "x86_64", kind: "db", awaits: head },
       { repo: "omarchy-extra-edge", arch: "x86_64", kind: "files", awaits: head },
     ]);
-    // What the dashboard and the health check read say which databases are the head's own.
-    const stats = (await call("GET", "/stats")).json.rings.find((r: any) => r.ring === "edge");
-    expect(stats.artifacts.filter((a: any) => a.arch === "x86_64" && a.kind === "db").map((a: any) => a.awaits)).toEqual([head, head]);
+    // What the dashboard and the health check read say which databases are the head's own: the stats list the carried
+    // apart, so a health check from before the carry (a worker on the release before) finds no x86_64 database of the
+    // head, as it did, instead of taking the parent's for the head's evidence.
+    const stats = (await call("GET", `/stats?t=${++fresh}`)).json.rings.find((r: any) => r.ring === "edge");
+    expect(stats.artifacts.filter((a: any) => a.arch === "x86_64")).toEqual([]);
+    expect(stats.artifacts.filter((a: any) => a.arch === "aarch64").map((a: any) => [a.repo, a.kind, a.awaits])).toEqual([["omarchy-core-edge", "db", null], ["omarchy-core-edge", "files", null]]);
+    expect(stats.carried.filter((a: any) => a.kind === "db").map((a: any) => [a.repo, a.arch, a.awaits])).toEqual([["omarchy-core-edge", "x86_64", head], ["omarchy-extra-edge", "x86_64", head]]);
     const listing = (await call("GET", "/releases/edge?fields=summary&arch=x86_64")).json;
     expect(listing.artifacts.filter((a: any) => a.arch === "x86_64").every((a: any) => a.awaits === head)).toBe(true);
     // The head's own render: core's databases put, then the pool told it is whole — extra's, a source the head
@@ -176,6 +189,90 @@ describe("a ring's head and its databases", () => {
     expect((await rowsOf(arm.id)).filter((r) => r.arch === "x86_64").map((r) => r.awaits)).toEqual([next.id, next.id]);
   });
 
+  it("a head rendered for a dead release's selection settles the releases made from it while the render ran (the next sync's repair)", async () => {
+    // edge rendered whole, then a source of x86_64 that the next x86_64 sync drops.
+    const start = (await call("GET", "/releases/edge?fields=summary")).json.release.id;
+    await renderWhole(start, "x86_64", ["core"]);
+    await renderWhole(start, "aarch64", ["core"]);
+    shas.tool = await index("packages", "x86_64", "tool", "1.0-1", pool);
+    const added = await sync("x86_64", { add: [shas.tool] });
+    await renderWhole(added.id, "x86_64", ["core", "packages"]);
+    expect(await sections("x86_64")).toEqual(["omarchy-packages-edge", "omarchy-core-edge"]);
+    // That sync makes its release and dies before its render (R1); the aarch64 sync of the tick keeps R1's x86_64 (R2, the head).
+    const dead = await sync("x86_64", { remove_from: [{ source: "packages", name: "tool" }] });
+    const kept = await sync("aarch64");
+    const x86 = async (id: number) => (await rowsOf(id)).filter((r) => r.arch === "x86_64");
+    expect((await x86(kept.id)).map((r) => r.awaits)).toEqual([dead.id, dead.id, dead.id, dead.id]);
+    // The next tick's x86_64 sync makes no release and renders the head (work.rs repair_head), pinned to R2 at its first
+    // page; while it reads R2's pages, that tick's aarch64 sync makes R3 from R2, which copies R2's wait for R1 — a render
+    // that will never run. The same race as a normal sync's whose head moves before its render's first page.
+    const during = await sync("aarch64");
+    expect((await x86(during.id)).map((r) => r.awaits)).toEqual([dead.id, dead.id, dead.id, dead.id]);
+    // The repair's databases go to R2, the release it read. R1's selection of x86_64 is R2's and R3's: one render makes all three current.
+    expect(await put(kept.id, "db", "omarchy-core-edge", "x86_64", 9)).toBe(201);
+    expect(await put(kept.id, "files", "omarchy-core-edge", "x86_64", 9)).toBe(201);
+    const done = await call("POST", `/releases/${kept.id}/rendered?arch=x86_64`, undefined, render);
+    expect(done.status).toBe(200);
+    // packages' two rows of R2, of R1 and of R3: a source that selection no longer has.
+    expect(done.json.dropped).toBe(6);
+    for (const id of [dead.id, kept.id, during.id]) {
+      expect(await x86(id), `release ${id}`).toEqual([
+        { repo: "omarchy-core-edge", arch: "x86_64", kind: "db", awaits: null },
+        { repo: "omarchy-core-edge", arch: "x86_64", kind: "files", awaits: null },
+      ]);
+    }
+    // The head, R3, serves the repair's databases as its own: nothing of x86_64 carried, the dropped source out of the include.
+    const size = await env.DB.prepare("SELECT size FROM release_artifacts WHERE release_id = ? AND arch = 'x86_64' AND kind = 'db'").bind(during.id).first<{ size: number }>();
+    expect(size?.size).toBe(9);
+    expect(await sections("x86_64")).toEqual(["omarchy-core-edge"]);
+    const stats = (await call("GET", `/stats?t=${++fresh}`)).json.rings.find((r: any) => r.ring === "edge");
+    expect(stats.release.id).toBe(during.id);
+    expect(stats.carried.filter((a: any) => a.arch === "x86_64")).toEqual([]);
+    expect(stats.artifacts.filter((a: any) => a.arch === "x86_64" && a.kind === "db").map((a: any) => a.repo)).toEqual(["omarchy-core-edge"]);
+  });
+
+  it("an architecture a render left with no database stays without one: no later release brings an earlier one's back", async () => {
+    const start = (await call("GET", "/releases/edge?fields=summary")).json.release.id;
+    await renderWhole(start, "aarch64", ["core"]);
+    // aarch64's last package goes (a remove, or an arch-scoped rollback to a selection without it). Until its render the
+    // ring serves the last aarch64 databases rendered; the render puts nothing and drops them.
+    const emptied = await sync("aarch64", { remove: ["zlib"] });
+    expect(await sections("aarch64")).toEqual(["omarchy-core-edge"]);
+    expect(await renderWhole(emptied.id, "aarch64", [])).toBe(2);
+    expect(await sections("aarch64")).toEqual([]);
+    // The next release keeps that: it carries nothing for aarch64 — not the databases of the release before, awaiting a
+    // render that would drop them again, the include listing them meanwhile.
+    const next = await sync("x86_64");
+    expect((await rowsOf(next.id)).filter((r) => r.arch === "aarch64")).toEqual([]);
+    expect(await sections("aarch64")).toEqual([]);
+    // aarch64 back: nothing to carry until its render, which serves it again.
+    const back = await sync("aarch64", { add: [shas.zlibArm] });
+    expect((await rowsOf(back.id)).filter((r) => r.arch === "aarch64")).toEqual([]);
+    await renderWhole(back.id, "aarch64", ["core"]);
+    expect(await sections("aarch64")).toEqual(["omarchy-core-edge"]);
+  });
+
+  it("retention keeps what a carried database lists while the head serves it", async () => {
+    // x86_64 rendered with a package in it, then the x86_64 sync that drops it dies before its render…
+    shas.old = await index("packages", "x86_64", "old", "0.9-1", pool);
+    const withOld = await sync("x86_64", { add: [shas.old] });
+    await renderWhole(withOld.id, "x86_64", ["core", "packages"]);
+    await sync("x86_64", { remove_from: [{ source: "packages", name: "old" }] });
+    // …and four aarch64 syncs, rendered, keep its x86_64 (the ticks while the x86_64 render kept dying): the release that
+    // dropped the package is behind the last three that retention protects, and the package is past the grace.
+    for (let i = 0; i < 4; i++) await renderWhole((await sync("aarch64")).id, "aarch64", ["core"]);
+    await env.DB.prepare("UPDATE packages SET created_at = '2026-01-01T00:00:00.000Z' WHERE sha256 = ?").bind(shas.old).run();
+    const unreferenced = async () => (await call("GET", "/pool/unreferenced?keep=3")).json.packages.map((p: any) => p.sha256);
+    // The head's include names the packages database that lists it: a user's pacman fetches it from there. GC keeps it.
+    expect(await sections("x86_64")).toEqual(["omarchy-packages-edge", "omarchy-core-edge"]);
+    expect(await unreferenced()).not.toContain(shas.old);
+    // Once the head's render lands, nothing served lists it: past retention like any other.
+    const head = (await call("GET", "/releases/edge?fields=summary")).json.release.id;
+    await renderWhole(head, "x86_64", ["core"]);
+    expect(await sections("x86_64")).toEqual(["omarchy-core-edge"]);
+    expect(await unreferenced()).toContain(shas.old);
+  });
+
   it("a whole render is said by a token for the ring's artifacts, of an architecture, of a release that is there", async () => {
     const head = (await call("GET", "/releases/edge?fields=summary")).json.release.id;
     expect((await call("POST", `/releases/${head}/rendered?arch=x86_64`)).status).toBe(401);
@@ -186,9 +283,17 @@ describe("a ring's head and its databases", () => {
 
   it("reads and writes what awaits a render through an index, never a scan", async () => {
     const plan = async (sql: string, args: unknown[]) => (await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...args).all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
-    const awaited = await plan(AWAITED_SQL, [1, "omarchy-core-edge", "x86_64", "db", "k", 1]);
-    expect(awaited).toContain("USING INDEX idx_release_artifacts_awaits");
+    expect(await plan(AWAITED_SQL, [1, "omarchy-core-edge", "x86_64", "db", "k", 1])).toContain("USING INDEX idx_release_artifacts_awaits");
     for (const sql of RENDERED_SQL) expect(await plan(sql, [1, "x86_64"])).not.toMatch(/SCAN release_artifacts/);
     expect(await plan(RENDERED_SQL[1], [1, "x86_64"])).toContain("USING INDEX idx_release_artifacts_awaits");
+    // What a release's own rows awaited, and which architectures a head carries: its own rows, by the primary key — not
+    // every awaiting row of every release, which the partial index holds.
+    for (const [sql, args] of [[OWN_WAIT_SQL, [1, "omarchy-core-edge", "x86_64", "db", "db.sig"]], [WAITED_SQL, [1, "x86_64"]], [CARRIED_ARCHES_SQL, [1]]] as const) {
+      const p = await plan(sql, [...args]);
+      expect(p, sql).not.toMatch(/SCAN release_artifacts/);
+      expect(p, sql).not.toContain("idx_release_artifacts_awaits");
+    }
+    // Retention's look back from a head that carries: down the ring's (ring, seq) key, the artifacts by their primary key.
+    expect(await plan(RENDERED_BEFORE_SQL, ["edge", 100, "x86_64"])).not.toMatch(/SCAN (releases|release_artifacts)\b/);
   });
 });

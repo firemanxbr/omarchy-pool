@@ -36,7 +36,7 @@ export async function handleStats(env: Env): Promise<Response> {
   for (const ring of RINGS) {
     const head = await ringHead(env, ring);
     if (!head) {
-      rings.push({ ring, release: null, package_count: 0, bytes: 0, sources: [], artifacts: [] });
+      rings.push({ ring, release: null, package_count: 0, bytes: 0, sources: [], artifacts: [], carried: [] });
       continue;
     }
     // A release is immutable: its count, bytes and per-source breakdown
@@ -46,9 +46,24 @@ export async function handleStats(env: Env): Promise<Response> {
     const [summary, sources, artifacts] = await Promise.all([
       releaseSummary(env, head.id),
       releaseSources(env, head.id),
-      env.DB.prepare("SELECT repo, arch, kind, size, created_at, awaits FROM release_artifacts WHERE release_id = ? ORDER BY repo, kind").bind(head.id).all(),
+      env.DB.prepare("SELECT repo, arch, kind, size, created_at, awaits FROM release_artifacts WHERE release_id = ? ORDER BY repo, kind").bind(head.id).all<{ awaits: number | null }>(),
     ]);
-    rings.push({ ring, release: head, package_count: summary.package_count, bytes: summary.size_download, sources, artifacts: artifacts.results });
+    // `artifacts` are the databases rendered for the head; `carried` the
+    // ones it serves meanwhile from an earlier release, awaiting its render
+    // (#319). Apart, so a health check older than the carry — a worker
+    // still on the release before runs the check from its own checkout —
+    // reads what it always read, no database of the head yet, and never
+    // takes an earlier release's databases for the head's evidence.
+    const rows = artifacts.results;
+    rings.push({
+      ring,
+      release: head,
+      package_count: summary.package_count,
+      bytes: summary.size_download,
+      sources,
+      artifacts: rows.filter((a) => a.awaits === null),
+      carried: rows.filter((a) => a.awaits !== null),
+    });
   }
 
   // Everything pool-wide (totals, per source, what the heads pin, what GC

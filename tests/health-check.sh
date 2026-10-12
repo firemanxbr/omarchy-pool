@@ -65,9 +65,10 @@ post() { # status summary payload
 # head's databases are there — a render takes a minute or two — before
 # the ring is called unserved. A head carries the databases its parent
 # served until its own render replaces them (#319: a job that died between
-# its release and its render left a ring with none): a database that
-# still `awaits` a render is an earlier release's, served to users
-# meanwhile but no evidence about the head, so it counts as not there yet.
+# its release and its render left a ring with none): the stats list those
+# apart (`carried`, each with the render it `awaits`), an earlier
+# release's, served to users meanwhile but no evidence about the head, so
+# an architecture with one counts as not there yet.
 repos=""; include=""; awaiting=""
 for try in $(seq 1 12); do
   bust="t=$(date +%s)$try"
@@ -76,11 +77,11 @@ import json, sys
 d = json.load(sys.stdin)
 for r in d["rings"]:
     if r["ring"] == sys.argv[1]:
-        dbs = [a for a in r["artifacts"] if a["kind"] == "db" and a["arch"] == sys.argv[2]]
-        if any(a.get("awaits") for a in dbs):
+        db = lambda rows: [a for a in rows if a["kind"] == "db" and a["arch"] == sys.argv[2]]
+        if db(r.get("carried", [])):
             print("awaiting")
         else:
-            print(" ".join(sorted({a["repo"] for a in dbs if "-chaotic-" not in a["repo"]})))
+            print(" ".join(sorted({a["repo"] for a in db(r["artifacts"]) if "-chaotic-" not in a["repo"]})))
 ' "$RING" "$ARCH")
   if [[ "$listed" == awaiting ]]; then repos=""; awaiting=1; else repos="$listed"; awaiting=""; fi
   include=$(curl -sf --max-time 20 "$OMARCHY_API/api/v1/pacman.conf?ring=$RING&arch=$ARCH&$bust") || include=""

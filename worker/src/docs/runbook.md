@@ -42,7 +42,9 @@ runs `/setup` again; nothing it reads went away. The key's user id,
   runner or repository holds the key (SECURITY.md).
 * **The pool is append-only.** The worker refuses to overwrite an existing object;
   the only deletions are retention (`gc`), which never touches anything the last
-  three releases of any ring reference, nor anything younger than seven days.
+  three releases of any ring reference, nor anything younger than seven days, nor
+  anything a database a ring's head still serves from an earlier release lists
+  while its own render is awaited (#319).
 * **Releases are append-only.** Rollback creates a new release pointing at an old
   selection; history is never rewritten. Every action posts an event.
 * **Nobody holds R2 credentials, and nobody holds a pool credential.** Reads
@@ -2432,15 +2434,24 @@ so a size-4 build waits for memory rather than run smaller.
   (#319, migration 0053). A new release carries the nearest ancestor's
   database rows for every architecture, each with the render it `awaits`,
   until its own render replaces them; the include serves them meanwhile,
-  and the health check counts only the head's own
+  `/api/v1/stats` lists them apart from the head's own (`carried`, not
+  `artifacts`), and the health check counts only the head's own
   (*no database is rendered for the head (it serves an earlier release's)*,
-  red, as *no database is served* was). The next sync of that architecture
-  that makes no release renders a head whose databases await
-  (`edge/x86_64: release #N serves databases it never rendered; rendering
-  them`); a retry that makes one renders it anyway. What awaits a render:
+  red, as *no database is served* was; a check from the release before
+  reads `artifacts` alone and waits as it always did). The next sync of
+  that architecture that makes no release renders a head whose databases
+  await (`edge/x86_64: release #N serves databases it never rendered;
+  rendering them`); a retry that makes one renders it anyway. That render
+  also settles the releases made from the head while it ran, which copied
+  the same wait. An architecture whose render put nothing (its last
+  package gone) stays unserved: no later release carries an earlier one's
+  databases back. Retention keeps every package a carried database lists:
+  a ring's protected releases reach back to the one whose databases its
+  head still serves (`db.ts` `carriedSince`). What awaits a render, from
+  the cached stats (no D1 read of yours):
 
   ```bash
-  npx wrangler d1 execute omarchy-repo --remote --command "SELECT ra.repo, ra.arch, ra.kind, ra.awaits, ra.created_at FROM ring_heads h JOIN release_artifacts ra ON ra.release_id = h.release_id WHERE h.ring = 'edge' AND ra.awaits IS NOT NULL"
+  curl -s https://pkgs.omarchy-pool.org/api/v1/stats | jq '.rings[] | {ring, carried: [.carried[] | select(.kind == "db") | {repo, arch, awaits}]}'
   ```
 
   By hand, a maintainer renders the head with `pkg-repo render --ring edge

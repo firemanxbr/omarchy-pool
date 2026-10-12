@@ -177,7 +177,11 @@ export async function handleCreateRelease(request: Request, env: Env): Promise<R
   // parent from before this, its render still running — edge#267 was made
   // 20 s after edge#266, 2026-09-17 — or dead), the parent's. The nearest
   // ancestor's whole set for an architecture, not row by row: a source a
-  // render dropped (POST /releases/:id/rendered) stays dropped.
+  // render dropped (POST /releases/:id/rendered) stays dropped. So does a
+  // whole architecture: the walk stops at an ancestor that holds no
+  // package of it (no slice of it in its stored `sources`), whose render
+  // put nothing and dropped what it carried — a release before it would
+  // bring back databases of packages the ring removed.
   if (parent) {
     stmts.push(
       env.DB.prepare(
@@ -186,12 +190,15 @@ export async function handleCreateRelease(request: Request, env: Env): Promise<R
            UNION ALL SELECT r.parent_id, anc.depth + 1 FROM releases r JOIN anc ON r.id = anc.id WHERE r.parent_id IS NOT NULL AND anc.depth < 12
          ), cand AS (
            SELECT ra.repo, ra.arch, ra.kind, ra.r2_key, ra.size, ra.awaits, anc.depth FROM release_artifacts ra JOIN anc ON anc.id = ra.release_id
-         ), best AS (SELECT arch, MIN(depth) AS depth FROM cand GROUP BY arch)
+         ), bare AS (
+           SELECT a.value AS arch, anc.depth FROM anc JOIN releases r ON r.id = anc.id JOIN json_each(?5) a
+            WHERE r.sources IS NOT NULL AND NOT EXISTS (SELECT 1 FROM json_each(r.sources) s WHERE json_extract(s.value, '$.arch') = a.value)
+         ), best AS (SELECT arch, MIN(depth) AS depth FROM (SELECT arch, depth FROM cand UNION ALL SELECT arch, depth FROM bare) GROUP BY arch)
          INSERT OR IGNORE INTO release_artifacts (release_id, repo, arch, kind, r2_key, size, awaits)
          SELECT ${rel}, c.repo, c.arch, c.kind, c.r2_key, c.size,
                 CASE WHEN c.arch NOT IN (SELECT value FROM json_each(?4)) THEN ${rel} WHEN c.depth = 0 THEN c.awaits ELSE ?3 END
            FROM cand c JOIN best b ON b.arch = c.arch AND b.depth = c.depth`,
-      ).bind(ring, seq, parent.id, JSON.stringify(unchanged)),
+      ).bind(ring, seq, parent.id, JSON.stringify(unchanged), JSON.stringify(REPO_ARCHES)),
     );
   }
   await env.DB.batch(stmts);
@@ -527,6 +534,20 @@ export async function handlePutArtifact(
   }
 
   const bytes = await request.arrayBuffer();
+  // What the release's own rows awaited before this render (a primary-key
+  // read, before the upserts clear it): a head that kept an earlier
+  // release's selection of `arch` awaits that release's render, and so do
+  // the releases made from it while this render read its pages — the
+  // repair of a head whose x86_64 a dead render left awaiting (work.rs
+  // repair_head) puts to the head, never to the dead release. This render
+  // is of the same selection, so their rows are its bytes too (AWAITED_SQL).
+  const waited = new Map(
+    (
+      await env.DB.prepare(OWN_WAIT_SQL)
+        .bind(releaseId, repo, arch, kind, `${kind}.sig`)
+        .all<{ kind: string; awaits: number | null }>()
+    ).results.map((r) => [r.kind, r.awaits === releaseId ? null : r.awaits]),
+  );
   const key = artifactKey(source, arch, repo, kind);
   await env.PACKAGES.put(key, bytes, { httpMetadata: { contentType: "application/octet-stream", cacheControl: SHORT } });
   const keys = [key];
@@ -566,17 +587,29 @@ export async function handlePutArtifact(
       .bind(releaseId, repo, arch, k, r2Key, size)
       .run();
     // The releases that kept this one's selection of the architecture carried
-    // its last databases while this render ran: theirs are this render's now.
-    await env.DB.prepare(AWAITED_SQL).bind(releaseId, repo, arch, k, r2Key, size).run();
+    // its last databases while this render ran: theirs are this render's now —
+    // and so are the rows that awaited what this release's own row awaited.
+    const before = waited.get(k);
+    for (const id of before ? [releaseId, before] : [releaseId]) await env.DB.prepare(AWAITED_SQL).bind(id, repo, arch, k, r2Key, size).run();
   }
   return json({ release_id: releaseId, repo, arch, kind, keys, size: bytes.byteLength }, 201);
 }
 
-/** The rows that awaited a release's render of one database (`?1`, the database `?2`–`?4`), current from it: through idx_release_artifacts_awaits. */
+/** What a release's own rows of one database (`?1`–`?3`, its kind `?4` and signature `?5`) awaited before a put: by the primary key. */
+export const OWN_WAIT_SQL = "SELECT kind, awaits FROM release_artifacts WHERE release_id = ?1 AND repo = ?2 AND arch = ?3 AND kind IN (?4, ?5)";
+
+/**
+ * The rows that awaited a render (`?1`: the release put to, or the one its own row awaited) of one database (`?2`–`?4`),
+ * current from it: through idx_release_artifacts_awaits, one statement per id — `awaits IN (?1, ?7)` took the kind's
+ * index instead, every `db` row of every release.
+ */
 export const AWAITED_SQL = `UPDATE release_artifacts SET r2_key = ?5, size = ?6, awaits = NULL, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   WHERE awaits = ?1 AND repo = ?2 AND arch = ?3 AND kind = ?4`;
 
-/** What a whole render of `arch` (`?2`) for a release (`?1`) drops: the release's rows it did not write again (by its key), and the rows still awaiting it (idx_release_artifacts_awaits). */
+/** The renders a release's carried rows of `arch` (`?2`) still await (`?1`, the release): read by the primary key, before RENDERED_SQL drops them. */
+export const WAITED_SQL = "SELECT DISTINCT awaits FROM release_artifacts WHERE release_id = ?1 AND arch = ?2 AND awaits IS NOT NULL";
+
+/** What a whole render of `arch` (`?2`) for a release (`?1`) drops: the release's rows it did not write again (by its key), and the rows still awaiting it (idx_release_artifacts_awaits) — run again for each render the release's own rows awaited (WAITED_SQL). */
 export const RENDERED_SQL = [
   "DELETE FROM release_artifacts WHERE release_id = ?1 AND arch = ?2 AND awaits IS NOT NULL",
   "DELETE FROM release_artifacts WHERE awaits = ?1 AND arch = ?2",
@@ -586,12 +619,20 @@ export const RENDERED_SQL = [
  * A render of `arch` for a release has put every database it has (#319): the
  * rows the release carried for `arch` that the render did not write again —
  * a source it no longer serves there — go, and so do those of the releases
- * that kept its selection of `arch` and still await it. Called by `pkg-repo`
- * once its last database is up (ops.rs `render`); idempotent.
+ * that kept its selection of `arch` and still await it, or await the render
+ * this release's own rows awaited (a head that kept a dead release's
+ * selection, rendered by the next sync's repair: the releases made from it
+ * meanwhile copied that same wait). Called by `pkg-repo` once its last
+ * database is up (ops.rs `render`); idempotent.
  */
 export async function handleRendered(releaseId: number, url: URL, env: Env): Promise<Response> {
   const arch = url.searchParams.get("arch") ?? "";
   if (!isRepoArch(arch)) return json({ error: "arch must be x86_64 or aarch64" }, 400);
-  const out = await env.DB.batch(RENDERED_SQL.map((sql) => env.DB.prepare(sql).bind(releaseId, arch)));
+  const waited = (await env.DB.prepare(WAITED_SQL).bind(releaseId, arch).all<{ awaits: number }>()).results.map((r) => r.awaits);
+  const awaited = [releaseId, ...waited.filter((a) => a !== releaseId)];
+  const out = await env.DB.batch([
+    env.DB.prepare(RENDERED_SQL[0]).bind(releaseId, arch),
+    ...awaited.map((id) => env.DB.prepare(RENDERED_SQL[1]).bind(id, arch)),
+  ]);
   return json({ release_id: releaseId, arch, dropped: out.reduce((n, r) => n + (r.meta.changes ?? 0), 0) });
 }
