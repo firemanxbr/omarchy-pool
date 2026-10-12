@@ -2050,6 +2050,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
             task_firewall: root.join("omarchy-task-firewall"),
             systemd_system: root.join("systemd"),
             docker_daemon: root.join("daemon.json"),
+            subuid: root.join("subuid"),
             proc: root.join("proc"),
             quadlet_generator: Some(root.join("podman-user-generator")),
         },
@@ -3804,28 +3805,99 @@ fn keys_given_after_an_install_without_them_end_its_hold() {
     assert_eq!(fs::read_to_string(keys.join("mine")).unwrap(), "x");
 }
 
-/// #419: a remapped daemon installed with no keys is held for its remapping (#399), which keys
-/// given later would not lift, so neither install nor the host's page asks for them.
+/// #405: a remapped daemon installed with no keys is held for them, as any host (#419), and told
+/// to give some, since its sidecars read keys given later through the file's ACL. Given them
+/// with `--agent-env-from`, install writes them with the ACL for the agent sidecars' one
+/// remapped uid (dockremap's range in /etc/subuid, 65533 in), so `etc/dispatcher.env` names that
+/// uid (`OMARCHY_AGENT_USER=65533:65533`); where the ACL cannot be set (a Mac, or a filesystem
+/// that keeps none) it writes them owner-only, says so, and the host is held (`keys-acl`). A
+/// re-run that keeps a file without that ACL says how to lift the hold.
 #[test]
-fn a_remapped_daemon_installed_without_keys_is_held_for_its_remapping() {
+fn a_remapped_daemon_is_held_without_keys_and_its_keys_are_written_with_their_acl() {
     let h = granted(host(&rootful_info(), EGRESS_OK));
     prepare(&h.root);
+    let p = &h.options.places;
+    fs::write(&p.subuid, "omarchy:100000:65536\ndockremap:231072:65536\n").unwrap();
     let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
     assert!(ready.values.rootful && ready.values.userns_remap);
+    let env_text = || fs::read_to_string(p.set_dir().join("etc/dispatcher.env")).unwrap();
     let mut out = Vec::new();
     apply(&h.options, &ready, &mut Fake::default(), &mut out)
         .map_err(|e| e.to_string())
         .unwrap();
     let said = String::from_utf8_lossy(&out);
     assert!(
-        said.contains("no agent keys: this host builds only, and its daemon remaps users")
-            && !said.contains("no-keys"),
+        said.contains("no agent keys: this host builds only")
+            && said.contains("OMARCHY_AGENT_HELD=no-keys")
+            && !said.contains("remaps users"),
         "{said}"
     );
-    let text = fs::read_to_string(h.options.places.set_dir().join("etc/dispatcher.env")).unwrap();
     assert!(
-        text.contains("\nOMARCHY_AGENT_HELD=userns-remap\n") && !text.contains("no-keys"),
-        "{text}"
+        env_text().contains("\nOMARCHY_AGENT_HELD=no-keys\n"),
+        "{}",
+        env_text()
+    );
+
+    // Given keys: written with the ACL, the sidecars named as their remapped uid.
+    fs::write(h.root.join("keys.env"), "GEMINI_API_KEY=g\n").unwrap();
+    let mut o = h.options.clone();
+    o.agent_env_from = Some(h.root.join("keys.env"));
+    let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+    let mut out = Vec::new();
+    apply(&o, &ready, &mut Fake::default(), &mut out)
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let said = String::from_utf8_lossy(&out).into_owned();
+    let keys = h.root.join("secrets/agent.env");
+    let mode = || fs::metadata(&keys).unwrap().permissions().mode() & 0o777;
+    if cfg!(target_os = "linux") && !said.contains("OMARCHY_AGENT_HELD=keys-acl") {
+        assert!(
+            said.contains("(0640: its owner's, and readable by the agent sidecars' remapped uid 296605 through its ACL alone"),
+            "{said}"
+        );
+        assert_eq!(mode(), 0o640);
+        let text = env_text();
+        assert!(
+            text.contains("\nOMARCHY_AGENT_USER=65533:65533\n")
+                && !text.contains("OMARCHY_AGENT_HELD"),
+            "{text}"
+        );
+        // A chmod since (its mask now ---): a re-run keeps the file, and says how to lift the
+        // hold it now has.
+        fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
+        let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+        let mut out = Vec::new();
+        apply(&h.options, &ready, &mut Fake::default(), &mut out)
+            .map_err(|e| e.to_string())
+            .unwrap();
+        let said = String::from_utf8_lossy(&out);
+        assert!(
+            said.contains("kept (--agent-env-from replaces it)")
+                && said.contains("its ACL does not let the agent sidecars' remapped uid 296605 read it (user::rw-,user:296605:r--,group::---,mask::---,other::---)")
+                && said.contains("OMARCHY_AGENT_HELD=keys-acl"),
+            "{said}"
+        );
+        assert!(
+            env_text().contains("\nOMARCHY_AGENT_HELD=keys-acl\n"),
+            "{}",
+            env_text()
+        );
+    } else {
+        assert!(
+            said.contains("wrote") && said.contains("(0600, outside the work root)")
+                && said.contains("agent.env: held, OMARCHY_AGENT_HELD=keys-acl (#405): no ACL lets the agent sidecars' remapped uid 296605 read it"),
+            "{said}"
+        );
+        assert_eq!(mode(), 0o600);
+        assert!(
+            env_text().contains("\nOMARCHY_AGENT_HELD=keys-acl\n"),
+            "{}",
+            env_text()
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&keys).unwrap().lines().last(),
+        Some("GEMINI_API_KEY=g")
     );
 }
 

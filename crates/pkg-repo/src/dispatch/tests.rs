@@ -4433,10 +4433,72 @@ fn the_probe_and_the_agent_sidecar_run_as_the_keys_owner_the_agent_named() {
         .any(|c| c.iter().any(|x| x == "--user" || x.starts_with("--userns"))));
 }
 
-/// #399: on a remapped daemon no container user is the keys file's owner, and the agent sidecars
-/// stay remapped as every task container does (design v2 §19.1), so the agent holds the host's
-/// model kinds (`OMARCHY_AGENT_HELD=userns-remap`): no probe runs, the claim's `agent` says why in
-/// its place — so the pool hands the host no model work, and its page shows it — a recheck or
+/// #405: on a remapped daemon the agent names the one remapped uid its sidecars read the keys as
+/// (`OMARCHY_AGENT_USER=65533:65533`, which agent.env's ACL lets read it on the host), and the
+/// dispatcher found that uid on the host through the daemon's maps at start (`agent_host`): the
+/// probe and a model task's agent sidecar run as 65533:65533 and stay remapped (no `--userns`),
+/// the task container and the egress sidecar as before, and the sidecar's usage directory is
+/// given to the host's uid of it — never to 65533 itself, a uid of the host's own namespace.
+#[test]
+fn on_a_remapped_daemon_the_sidecars_run_as_their_remapped_uid_and_write_their_usage_as_it() {
+    use std::os::unix::fs::MetadataExt as _;
+    let h = H::new();
+    let me = {
+        let m = std::fs::metadata(&h.checkout).unwrap();
+        (m.uid(), m.gid())
+    };
+    let mut d = h.dispatcher();
+    d.net.task_root = Some(TaskRoot {
+        uid: me.0,
+        gid: me.1,
+    });
+    d.net.agent_user = Some(spec::AgentUser {
+        uid: 65_533,
+        gid: 65_533,
+    });
+    // This process's own ids stand for the host's of 65533: a change of owner it may make.
+    d.net.agent_host = Some(spec::AgentUser {
+        uid: me.0,
+        gid: me.1,
+    });
+    stage_evidence(&h, &[5]);
+    h.give(audit(9, 5, GEN));
+    h.ticks(&mut d, 4);
+    let user = |a: &[String]| {
+        a.iter()
+            .position(|x| x == "--user")
+            .map(|i| a[i..(i + 2).min(a.len())].join(" "))
+            .unwrap_or_default()
+    };
+    let calls = h.engine.calls.lock().unwrap().clone();
+    let probe = calls
+        .iter()
+        .find(|c| c[0] == "run" && c.iter().any(|x| x == "--probe"))
+        .expect("the probe ran");
+    assert_eq!(user(probe), "--user 65533:65533", "{probe:?}");
+    let agent = h.engine.args_of(&sidecar(9, GEN, "agent"));
+    assert_eq!(user(&agent), "--user 65533:65533", "{agent:?}");
+    assert!(
+        agent.iter().any(|x| x.contains("agent.env")),
+        "the keys mounted: {agent:?}"
+    );
+    for other in [
+        h.engine.args(9, GEN),
+        h.engine.args_of(&sidecar(9, GEN, "egress")),
+    ] {
+        assert!(!other.iter().any(|x| x == "--user"), "{other:?}");
+    }
+    assert!(!calls.iter().flatten().any(|x| x.starts_with("--userns")));
+    let usage = super::spec::task_dir(&h.work, 9, GEN).join("agent");
+    let m = std::fs::metadata(&usage).unwrap();
+    assert_eq!((m.uid(), m.gid()), me, "{}", usage.display());
+    assert_eq!(h.pool.last_claim()["agent"]["probe"], "ok");
+}
+
+/// #399, #405: on a remapped daemon whose agent knows no remapped uid for its sidecars, the agent
+/// holds the host's model kinds (`OMARCHY_AGENT_HELD=userns-remap`); and so it does when agent.env
+/// has no ACL that lets that uid read it (`keys-acl`): no probe runs, the claim's `agent` says why
+/// in its place — so the pool hands the host no model work, and its page shows it — a recheck or
 /// restart of the agent is answered with it, a model task leased before is handed back with no
 /// sidecar started, and builds run on.
 #[test]
@@ -4449,24 +4511,38 @@ fn a_host_whose_agent_holds_its_model_kinds_runs_no_probe_and_says_why() {
     }
     let held = AgentHeld::parse(" userns-remap ").unwrap().unwrap();
     let why = held.reason();
+    let acl = AgentHeld::parse("keys-acl").unwrap().unwrap().reason();
     // Short enough for the host's page, and none of the classes the pool restarts on
     // (worker/src/orders.ts errorClass: no 401/403, no "refused", no "timed out", no "install").
-    assert!(why.len() <= 300, "{why}");
+    for why in [&why, &acl] {
+        assert!(why.len() <= 300, "{}: {why}", why.len());
+        for word in [
+            "401",
+            "403",
+            "refused",
+            "not installed",
+            "did not install",
+            "timed out",
+            "permission denied",
+            "unauthori",
+            "forbidden",
+            "quota",
+        ] {
+            assert!(!why.to_lowercase().contains(word), "{word:?} in {why}");
+        }
+    }
     assert!(
-        why.contains("userns-remap") && why.contains("maintainer"),
+        why.contains("userns-remap") && why.contains("/etc/subuid") && why.contains("#405"),
         "{why}"
     );
-    for word in [
-        "401",
-        "403",
-        "refused",
-        "not installed",
-        "timed out",
-        "permission denied",
-        "unauthori",
-    ] {
-        assert!(!why.contains(word), "{why}");
-    }
+    assert!(
+        acl.contains("no ACL")
+            && acl.contains("Set agent keys")
+            && acl.contains("install --agent-env-from")
+            && acl.contains("#405"),
+        "{acl}"
+    );
+    assert_eq!(AgentHeld::REMAP, "userns-remap");
     // A newer agent's code this release does not know: held all the same, by its code.
     assert!(AgentHeld::parse("some-new-reason")
         .unwrap()

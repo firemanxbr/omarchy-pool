@@ -213,10 +213,13 @@ to a container (#399): the agent writes that into `etc/dispatcher.env`
 `0:0` on a rootless engine, whose root is the agent's user — and you do
 nothing (the runbook's *How an agent sidecar reads the keys*). A daemon with
 userns-remap shows the file's owner to no container user, and its sidecars
-stay remapped (design v2 §19.1), so there the agent holds the host's model
-kinds (`OMARCHY_AGENT_HELD=userns-remap`): the host builds, and its page says
-why it takes no model work until a maintainer decides how such a host reads
-its keys, with or without them. Any other host installed without keys holds
+stay remapped (design v2 §19.1), so there they run as one remapped uid of
+their own, `65533:65533` (#405): the agent gives `agent.env` an ACL that lets
+that uid as the host sees it (from `dockremap`'s range in `/etc/subuid`) read
+it, whenever it writes the keys, so the file shows `-rw-r-----+` — leave its
+mode alone: a `chmod` takes that uid's read away, and the host holds its model
+kinds (`OMARCHY_AGENT_HELD=keys-acl`) until you give the keys again (the
+runbook's *A remapped host's keys*). A host installed without keys holds
 them the same way (`OMARCHY_AGENT_HELD=no-keys`, #419): no probe and no agent
 sidecar runs, so no mount names the missing file (podman's docker API
 makes an empty directory of a bind source that is not there, which then

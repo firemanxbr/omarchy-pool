@@ -43,10 +43,12 @@
 //! agent's uid on a rootful engine and in a Mac's VM, root on a rootless one
 //! (whose root is the agent's user). They never leave the engine's user
 //! namespace: a remapped daemon (`userns-remap`) shows the owner to no
-//! remapped uid, so there the agent names no user and holds the host's model
-//! kinds instead (`OMARCHY_AGENT_HELD`, design v2 §19.1: task containers and
-//! sidecars stay remapped); so it does on a host with no keys file (`no-keys`,
-//! #419), where no mount may name one. The agent, which writes the file, says which in
+//! remapped uid (design v2 §19.1: task containers and sidecars stay
+//! remapped), so there they run as `65533:65533`, a remapped uid of their own
+//! that the agent's ACL on the file lets read it (#405), and the agent holds
+//! the host's model kinds instead (`OMARCHY_AGENT_HELD`) while no such uid or
+//! ACL is there; so it does on a host with no keys file (`no-keys`, #419),
+//! where no mount may name one. The agent, which writes the file, says which in
 //! `etc/dispatcher.env`; without it (an older agent) they run as the image's
 //! root, as before.
 //!
@@ -426,7 +428,7 @@ pub enum Gateway {
 /// shows it to a container, which the agent writes into `etc/dispatcher.env`
 /// (`OMARCHY_AGENT_USER`). The file is 0600 on the host, and the sidecars keep
 /// `--cap-drop ALL` and `no-new-privileges` in the engine's own user namespace: they read it
-/// as its owner.
+/// as its owner — or, on a remapped daemon, as the one remapped uid its ACL names (#405).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentUser {
     pub uid: u32,
@@ -2762,8 +2764,8 @@ mod tests {
     /// cannot open it, so a task's agent sidecar and the probe run as that owner as each engine
     /// shows it to a container — what the agent writes into etc/dispatcher.env — and keep
     /// `--cap-drop ALL` and `no-new-privileges`, with no capability added and in the engine's own
-    /// user namespace. A remapped daemon is named no user (the agent holds its model kinds), so
-    /// its sidecars run as before, remapped.
+    /// user namespace. A remapped daemon's are named `65533:65533`, the remapped uid the file's
+    /// ACL lets read it (#405), and stay remapped (no `--userns`).
     #[test]
     fn the_agent_sidecar_and_the_probe_run_as_the_keys_owner_on_every_engine() {
         let (tdir, rel, work) = dirs();
@@ -2779,8 +2781,14 @@ mod tests {
             ("a Mac's VM", user("501:20"), &["--user", "501:20"][..]),
             // A rootless engine: its root is the agent's user.
             ("rootless podman", user("0:0"), &["--user", "0:0"][..]),
-            // An agent from before #399, or a remapped daemon's: the image's user, as before.
-            ("an older agent or a remapped daemon", None, &[][..]),
+            // A remapped daemon (#405): the sidecars' own remapped uid, which the ACL names.
+            (
+                "a remapped daemon",
+                user("65533:65533"),
+                &["--user", "65533:65533"][..],
+            ),
+            // An agent from before #399: the image's user, as before.
+            ("an older agent", None, &[][..]),
         ] {
             let at = |a: &[String]| {
                 a.iter()

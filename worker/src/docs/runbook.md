@@ -543,7 +543,10 @@ key lives*, below) — before linger starts the user's manager, which keeps the
 groups it started with, and saying under *needs a person* when that manager
 already runs without the group (restart it, or reboot), on every run until
 its main process has it; sets docker's default address pools and, on a daemon with no
-container or image yet, `userns-remap`; makes the work root (a btrfs
+container or image yet, `userns-remap`, after making the `dockremap` user with a
+subordinate range of its own (the 65536 ids past every range `/etc/subuid` and
+`/etc/subgid` list, never below 165536: without it docker takes 100000–165535,
+the host's first user's default; #405, *A remapped host's keys*, below); makes the work root (a btrfs
 subvolume where it can); turns on linger; delegates cgroup v2 controllers to
 the user's systemd (rootless); and installs `DOCKER-USER` drop rules from
 the task subnets (`--task-subnets`, default `10.231.0.0/16`) to RFC 1918,
@@ -987,11 +990,12 @@ dispatcher's defaults), `OMARCHY_DIRECT_NETWORK=1` when the envelope grants
 a signed exception's bridge (#373), when the envelope has a `cache_caps`,
 `OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB` (#341), and who the
 agent sidecars run as, `OMARCHY_AGENT_USER` (or why none runs,
-`OMARCHY_AGENT_HELD`: `userns-remap` on a remapped daemon, #399, and
-`no-keys` with no keys file, #419; below). Those envelope
+`OMARCHY_AGENT_HELD`: `no-keys` with no keys file, #419, and on a remapped
+daemon `keys-acl` or `userns-remap`, #405; below). Those envelope
 lines come from `agent.toml` alone: once it is there, a line of yours for one of
 their keys is replaced (set it in the envelope instead). Every other line of that file is yours and kept. It writes the
-agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
+agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600; 0640 with one ACL
+entry on a remapped daemon, #405), `legacy.json` with
 `--legacy`, and the unit `~/.config/systemd/user/omarchy-agent.service`
 (`Type=notify`, `Restart=always`, `WatchdogSec=300`,
 `RestartPreventExitStatus=78`, `UMask=0077`, `NoNewPrivileges=yes`), enables
@@ -1004,7 +1008,8 @@ may write is refused. Running it again repairs the install and keeps the
 identity, the agent keys and your edits to `agent.toml`.
 
 **How an agent sidecar reads the keys (#399).** `agent.env` stays 0600 and
-the agent user's, as install and the host page's *Set agent keys* write it,
+the agent user's, as install and the host page's *Set agent keys* write it
+(on a remapped daemon 0640, its owner's and one remapped uid's, below),
 and nothing else on the host reads it: not the dispatcher, whose environment
 holds no key and which mounts nothing of the secrets directory, and not a
 task container. For each task that needs a model, and for the probe, the
@@ -1019,7 +1024,7 @@ and `agent.toml`'s engine and writes into `etc/dispatcher.env`:
 |---|---|---|
 | rootful docker without remapping (the Studio) | the agent's `uid:gid` (a file of group `root`: gid 65534) | uids are the host's; a sidecar that is not root takes no root group |
 | rootless podman or docker (and Quadlet) | `0:0` | the engine's root is the agent's user; its own uid would map to a subordinate one |
-| rootful docker with userns-remap | none: `OMARCHY_AGENT_HELD=userns-remap` | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so none can read the file: no probe and no agent sidecar runs, the host takes no model kinds (its builds run: the dispatcher gives each task's writable directories to the remapped root, #405), and its page says why; with a keys file or without one, since keys do not lift this hold (#419) |
+| rootful docker with userns-remap | `65533:65533` (#405) | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so they run as one remapped uid of their own, which the file's ACL lets read it (*A remapped host's keys*, below); with no such uid, or no such ACL on the file, `OMARCHY_AGENT_HELD=userns-remap` or `keys-acl` instead, and with no keys file `no-keys` |
 | any other engine, with no keys file (no `agent.env`, or not a regular file: install without keys) | none: `OMARCHY_AGENT_HELD=no-keys` (#419) | no probe and no agent sidecar runs, so no mount names a file that is not there; the host builds only, and its page says `no agent keys: builds only` |
 | a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM; the `omarchy` profile's virtiofs mount shows the Mac's uid and checks access against it, as on the Studio. Docker Desktop and OrbStack show shared files their own way, and the Mac's uid reads the file there too |
 
@@ -1036,12 +1041,43 @@ error on the host's page says why: `no agent keys at /run/omarchy/agent.env
 …: it is <uid>:<gid>, mode 600, and this sidecar runs as 0:0`. The first
 heals itself with the next release; for the other, make `agent.env` the
 agent user's again (as root, `chown <agent user>: agent.env`), and
-`omarchy-agent dispatcher-env` prints the line the agent renders then. On a
-remapped daemon the host page's agent error reads `model kinds held: this
-daemon remaps users (userns-remap), …`: how such a host reads its keys
-without leaving the remapping (an ACL for one remapped uid, say) is a
-maintainer's decision still open, and until it is taken the host builds
-only. Its builds run because a task container's root there is the remapped
+`omarchy-agent dispatcher-env` prints the line the agent renders then.
+
+**A remapped host's keys (#405).** On a rootful daemon with userns-remap
+(design v2 §19.1, what `prep-root.sh` sets on a new host) no container user
+is `agent.env`'s owner, and no sidecar may leave the remapping, so the agent
+sidecars and the probe run as one remapped uid of their own: `65533:65533`
+inside the daemon's user namespace (no task container's: their root is 0, the
+builder the first regular uid, `nobody` 65534), which is `dockremap`'s range's
+start plus 65533 on the host. The agent reads that range from `/etc/subuid`
+(the user `daemon.json`'s `userns-remap` names, `dockremap` for `default`, in
+the file's order, as the daemon maps it) and, whenever it writes the keys —
+install's `--agent-env-from` or typed keys, *Set agent keys* — puts a POSIX
+ACL on the new file between its `chmod` and its rename that lets that uid read
+it: `getfacl agent.env` shows `user::rw-`, `user:<start+65533>:r--`,
+`group::---`, `mask::r--`, `other::---`, and `ls -l` shows `-rw-r-----+`. The
+owner sets it on its own file, so nothing needs root, a capability or a
+visit, and the sidecars keep every capability dropped. The agent then writes
+`OMARCHY_AGENT_USER=65533:65533`, and the dispatcher, which finds that uid on
+the host through the daemon's own maps at start, says `agent sidecars and the
+probe run as 65533:65533 in this remapped daemon, host uid <start+65533>, …`,
+gives each model task's usage directory to it, and probes; the host takes
+model kinds. It fails closed, every minute the agent renders the file: a
+`chmod` of `agent.env` (it sets the ACL's mask: `chmod 600` takes the uid's
+read away), a copy or a restore without its ACL, a range that moved since, or
+a secrets directory on a filesystem that keeps no ACLs (the write then leaves
+the file 0600 and says so) renders `OMARCHY_AGENT_HELD=keys-acl`, whose page
+error reads `model kinds held: this daemon remaps users, and agent.env has no
+ACL …`; give the keys again (*Set agent keys*, or `install --agent-env-from`)
+and they are written with it (keys from before 0.5.2, written owner-only, need
+that once too, and a re-run of install that keeps them says so). No range
+the agent can read for the remap user (no line by its name in `/etc/subuid`,
+or ranges of fewer than 65534 ids) renders `userns-remap`, with the dispatcher
+saying the same when the daemon's own maps hold no 65533: look with `grep
+dockremap /etc/subuid` and `docker info --format '{{.DockerRootDir}}'` (its
+`<start>.<start>`); a daemon's range changes only with its data root, so only
+a daemon that is still new is given another (`prep-root.sh` does it before
+turning the remapping on). Its builds run because a task container's root there is the remapped
 range's first uid on the host, "other" on every directory the dispatcher
 makes as root: the dispatcher (in the init user namespace, `userns_mode:
 host`) asks the engine for that uid and gid when it starts — its log says

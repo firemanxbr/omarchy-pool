@@ -286,14 +286,17 @@ jobs:
 
   userns-remap:
     name: Remapped daemon on a real engine (userns-remap)
-    # #405 (design v2 §19.1), before the agent keys' ACL: the runner's docker with
-    # "userns-remap": "default" merged into its daemon.json (docker makes dockremap and its
-    # subordinate range itself), then a plain community build through the real dispatcher —
-    # root with docker's default capabilities, as the host set runs it there with
-    # userns_mode: host — while its task container and egress sidecar stay remapped: built as
-    # the builder, uploaded and completed; the agent holds the model kinds
-    # (OMARCHY_AGENT_HELD=userns-remap, #406), so a draft is handed back lost and no probe or
-    # agent sidecar is ever made; and the dispatcher's real-engine tests on that engine.
+    # #405 (design v2 §19.1): the runner's docker with "userns-remap": "default" merged into
+    # its daemon.json (docker makes dockremap and its subordinate range itself); the agent's
+    # keys written by its own writer with the ACL for the agent sidecars' remapped uid
+    # (65533 in, dockremap's range on the host), read through it as the probe is started and
+    # by no other uid; then a plain community build through the real dispatcher — root with
+    # docker's default capabilities, as the host set runs it there with userns_mode: host —
+    # while its task container and egress sidecar stay remapped: built as the builder,
+    # uploaded and completed; the probe reads the keys as 65533:65533, and a draft's agent
+    # sidecar runs remapped as that uid, writes its usage where the dispatcher gave it, and
+    # completes; the ACL lost holds the model kinds (keys-acl); and the dispatcher's
+    # real-engine tests on that engine.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -313,7 +316,7 @@ jobs:
           docker info --format '{{json .SecurityOptions}}' | grep -q name=userns || { sudo journalctl -u docker --no-pager -n 60; exit 1; }
           docker info --format 'docker {{.ServerVersion}}, {{.Driver}}, {{.DockerRootDir}}'
           grep -H '^dockremap:' /etc/subuid /etc/subgid
-      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — the model kinds held, no probe or agent sidecar made
+      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — and its model kinds, the keys read through their ACL by the sidecars' remapped uid alone
         run: bash tests/userns-remap.sh
 
   host-key-tpm:
@@ -535,7 +538,7 @@ jobs:
       - name: The Studio's host files — the updater in, the timer out, rollout.sh a wake-up — against stubs
         working-directory: .
         run: bash tests/host-setup.sh
-      - name: A new host's root-only steps — prep-root.sh does each, twice with no change, and nothing else — against stubs
+      - name: A new host's root-only steps — prep-root.sh does each, dockremap's own range included, twice with no change, and nothing else — against stubs
         working-directory: .
         run: bash tests/prep-root.sh
       - name: shellcheck of prep-root.sh

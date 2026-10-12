@@ -1653,9 +1653,16 @@ fn real_engine_a_host_without_keys_mounts_none_and_takes_them_from_install_and_i
         vm: None,
     };
     let mut out = Vec::new();
-    crate::install::agent_keys(Some(&given), true, &values, &mut NoTty, &mut out)
-        .map_err(|e| e.to_string())
-        .unwrap();
+    crate::install::agent_keys(
+        Some(&given),
+        true,
+        &values,
+        &Sources::system().remap,
+        &mut NoTty,
+        &mut out,
+    )
+    .map_err(|e| e.to_string())
+    .unwrap();
     let out = String::from_utf8(out).unwrap();
     assert!(
         out.contains(&format!("wrote {} (0600", keys.display())) && !out.contains("directory"),

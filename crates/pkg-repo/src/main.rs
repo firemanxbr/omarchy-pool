@@ -417,13 +417,15 @@ enum Command {
         secrets_dir: Option<PathBuf>,
         /// Who the agent sidecars and the probe run as (#399): agent.env's owner as the engine
         /// shows it to a container, `<uid>:<gid>`, which the agent writes into
-        /// `etc/dispatcher.env`; empty, the worker image's own user (an agent from before it).
+        /// `etc/dispatcher.env` — on a remapped daemon `65533:65533`, the remapped uid the file's
+        /// ACL lets read it (#405); empty, the worker image's own user (an agent from before it).
         #[arg(long, env = "OMARCHY_AGENT_USER", default_value = "")]
         agent_user: String,
-        /// Why the host's agent holds its model kinds (#399): a code, e.g. `userns-remap` (a
-        /// remapped daemon shows agent.env's owner to no container user, and the agent sidecars
-        /// stay remapped) or `no-keys` (there is no agent.env file, which no mount may then name,
-        /// #419); no probe and no agent sidecar runs. Empty: none.
+        /// Why the host's agent holds its model kinds (#399): a code, e.g. `no-keys` (there is
+        /// no agent.env file, which no mount may then name, #419), or on a remapped daemon
+        /// `keys-acl` (the file has no ACL that lets the sidecars' remapped uid read it) or
+        /// `userns-remap` (no such uid is known, #405); no probe and no agent sidecar runs.
+        /// Empty: none.
         #[arg(long, env = "OMARCHY_AGENT_HELD", default_value = "")]
         agent_held: String,
         /// Per-task caps of an agent sidecar, and the host's calls per day (UTC) (D45): the envelope's

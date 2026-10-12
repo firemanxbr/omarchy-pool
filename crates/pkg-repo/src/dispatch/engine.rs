@@ -167,7 +167,9 @@ impl Cli {
     /// (`userns-remap`: `name=userns` among `docker info`'s `SecurityOptions`), the first uid
     /// and gid of its remapped range, as a container of `image` reads its own
     /// `/proc/self/uid_map` and `gid_map` — the worker image, present by digest, run once for
-    /// each with no network and every capability dropped. `None` on every other engine —
+    /// each with no network and every capability dropped — and the maps themselves, through
+    /// which the agent sidecars' own remapped uid is found on the host ([`Remap::host_of`]).
+    /// `None` on every other engine —
     /// rootful docker without remapping, rootless docker (whose root is the engine's user),
     /// podman by either CLI (asked after [`Cli::gateway`], which finds podman behind docker's),
     /// a Mac's VM — where a task's root is the dispatcher's own and nothing changes. On a
@@ -175,7 +177,7 @@ impl Cli {
     /// overlay gives it `userns_mode: host`): one this daemon remapped too could give a task's
     /// directories to no host uid, and it says so rather than start tasks that cannot write
     /// them ([`beside_its_tasks`]).
-    pub fn task_root(&self, image: &str) -> Result<Option<TaskRoot>, String> {
+    pub fn remap(&self, image: &str) -> Result<Option<Remap>, String> {
         if self.libpod.is_some() || self.podman_cli() {
             return Ok(None);
         }
@@ -190,7 +192,7 @@ impl Cli {
         if !remapped(&String::from_utf8_lossy(&out.stdout))? {
             return Ok(None);
         }
-        let read = |map: &str| -> Result<u32, String> {
+        let read = |map: &str| -> Result<(u32, String), String> {
             let path = format!("/proc/self/{map}");
             let out = self.call(&[
                 "run",
@@ -212,20 +214,24 @@ impl Cli {
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             }
-            root_of_map(&String::from_utf8_lossy(&out.stdout))
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let root = root_of_map(&text)
                 .map_err(|e| format!("a container's {map}: {e}"))?
                 .ok_or_else(|| {
                     format!("a container on this remapped daemon has the host's own {map}")
-                })
+                })?;
+            Ok((root, text))
         };
-        let root = TaskRoot {
-            uid: read("uid_map")?,
-            gid: read("gid_map")?,
-        };
+        let (uid, uid_map) = read("uid_map")?;
+        let (gid, gid_map) = read("gid_map")?;
         let own = std::fs::read_to_string("/proc/self/uid_map")
             .map_err(|e| format!("this dispatcher's /proc/self/uid_map: {e}"))?;
-        beside_its_tasks(&own, root.uid)?;
-        Ok(Some(root))
+        beside_its_tasks(&own, uid)?;
+        Ok(Some(Remap {
+            root: TaskRoot { uid, gid },
+            uid_map,
+            gid_map,
+        }))
     }
 
     /// SIGKILL, then removed: podman's `rm -f` stops with SIGTERM and waits ten seconds first, and a
@@ -298,6 +304,64 @@ pub fn gateway_of(json: &str) -> Result<spec::Gateway, String> {
 pub struct TaskRoot {
     pub uid: u32,
     pub gid: u32,
+}
+
+/// A remapped daemon as a container of it reads its maps (#405): the task's root, and the
+/// `uid_map` and `gid_map` every container there shares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remap {
+    pub root: TaskRoot,
+    uid_map: String,
+    gid_map: String,
+}
+
+impl Remap {
+    #[cfg(test)]
+    pub fn of_maps(uid_map: &str, gid_map: &str) -> Result<Self, String> {
+        let root = |m: &str| root_of_map(m)?.ok_or_else(|| "the host's own map".to_owned());
+        Ok(Self {
+            root: TaskRoot {
+                uid: root(uid_map)?,
+                gid: root(gid_map)?,
+            },
+            uid_map: uid_map.into(),
+            gid_map: gid_map.into(),
+        })
+    }
+
+    /// `uid:gid` inside a container of this daemon as the host sees it: the agent sidecars'
+    /// (`OMARCHY_AGENT_USER`, `65533:65533`, the uid agent.env's ACL names), whose usage
+    /// directory is given to it.
+    pub fn host_of(&self, uid: u32, gid: u32) -> Result<(u32, u32), String> {
+        Ok((
+            host_id_of(&self.uid_map, uid).map_err(|e| format!("uid {uid}: {e}"))?,
+            host_id_of(&self.gid_map, gid).map_err(|e| format!("gid {gid}: {e}"))?,
+        ))
+    }
+}
+
+/// Container id `inside` on the host through a `/proc/<pid>/uid_map` (or `gid_map`): the line
+/// whose ids hold it. An id no line holds is one this daemon does not map.
+pub fn host_id_of(map: &str, inside: u32) -> Result<u32, String> {
+    for l in map.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let f: Vec<u64> = l
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .map_err(|_| format!("{l:?} is not three numbers"))?;
+        let [from, to, count] = f[..] else {
+            return Err(format!("{l:?} is not three numbers"));
+        };
+        let i = u64::from(inside);
+        if (from..from.saturating_add(count)).contains(&i) {
+            return u32::try_from(to + (i - from))
+                .map_err(|_| format!("{l:?} maps it past the ids there are"));
+        }
+    }
+    Err(format!(
+        "not mapped by this daemon ({:?})",
+        map.trim().replace('\n', "; ")
+    ))
 }
 
 /// `info --format '{{json .SecurityOptions}}'` of docker's CLI, read: whether the daemon
@@ -607,6 +671,37 @@ mod tests {
         }
     }
 
+    /// #405: the agent sidecars' remapped uid and gid (`65533:65533`, which agent.env's ACL
+    /// names on the host) through the daemon's maps as a container reads them: the line that
+    /// holds each, in a map of one range or of two; an id no line holds is not this daemon's.
+    #[test]
+    fn the_sidecars_ids_on_the_host_through_a_remapped_daemons_maps() {
+        let one = Remap::of_maps(
+            "         0     231072      65536\n",
+            "         0     231072      65536\n",
+        )
+        .unwrap();
+        assert_eq!(
+            one.root,
+            TaskRoot {
+                uid: 231_072,
+                gid: 231_072
+            }
+        );
+        assert_eq!(one.host_of(65_533, 65_533), Ok((296_605, 296_605)));
+        assert_eq!(one.host_of(0, 0), Ok((231_072, 231_072)));
+        // Two ranges: the second line's ids after the first's; uid and gid maps apart.
+        let two = Remap::of_maps("0 500000 1000\n1000 300000 65536\n", "0 400000 65536\n").unwrap();
+        assert_eq!(two.host_of(65_533, 65_533), Ok((364_533, 465_533)));
+        assert_eq!(two.host_of(999, 0), Ok((500_999, 400_000)));
+        // A range too short for it: refused, with the map.
+        let short = Remap::of_maps("0 231072 1000\n", "0 231072 65536\n").unwrap();
+        let e = short.host_of(65_533, 65_533).unwrap_err();
+        assert!(e.contains("uid 65533") && e.contains("not mapped"), "{e}");
+        assert!(host_id_of("0 x 1\n", 0).is_err());
+        assert!(host_id_of("0 4294967295 2\n", 1).is_err());
+    }
+
     /// #405: a dispatcher is refused beside its tasks only when this daemon remapped it — its
     /// own root the task's — not because its map is not the identity: in the daemon's own
     /// namespace (`userns_mode: host`) on a plain host, and on a host that is a user namespace
@@ -751,9 +846,14 @@ mod tests {
     /// rootful one (as root here, the file is made another uid's first). On a rootful engine the
     /// image's root, with no capability, cannot read it — the bug the Studio's canary found. The
     /// image is the stand-in's (busybox), which `cat`s the file where the worker image's
-    /// `agent --probe` would read it.
+    /// `agent --probe` would read it. On a remapped daemon (#405, tests/userns-remap.sh runs it
+    /// there) the probe runs as `65533:65533`, the agent sidecars' remapped uid, and the file
+    /// carries the agent's ACL for that uid as the dispatcher finds it on the host through the
+    /// daemon's maps ([`Remap::host_of`]): it reads them, and neither the image's root (the
+    /// task's remapped root) nor another remapped uid does.
     #[test]
     #[ignore = "needs a real engine: tests/agent-install.sh"]
+    #[allow(clippy::too_many_lines)] // three engines, one story
     fn real_engine_the_probe_reads_owner_only_keys_as_their_owner() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let image = std::env::var("OMARCHY_STANDIN_IMAGE")
@@ -764,24 +864,53 @@ mod tests {
         };
         let gateway = cli.gateway().unwrap();
         let security = stdout(&cli, &["info", "--format", "{{json .SecurityOptions}}"]);
-        if security.contains("name=userns") {
-            println!("a remapped daemon: its agent holds the host's model kinds (#399), nothing reads the keys");
-            return;
-        }
+        let remap = cli.remap(&image).unwrap();
         let rootless = security.contains("name=rootless");
         // The keys as install writes them: 0600, a non-root user's.
         let dir = tempfile::tempdir().unwrap();
         let keys = dir.path().join("agent.env");
         std::fs::write(&keys, "ANTHROPIC_API_KEY=sk-ant-not-a-real-key\n").unwrap();
         std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o600)).unwrap();
-        if !rootless && std::fs::metadata(&keys).unwrap().uid() == 0 {
+        if !rootless && remap.is_none() && std::fs::metadata(&keys).unwrap().uid() == 0 {
             std::os::unix::fs::chown(&keys, Some(4242), Some(4242)).unwrap();
         }
         let m = std::fs::metadata(&keys).unwrap();
-        assert_ne!(m.uid(), 0, "the keys file must be a non-root user's");
-        let user = if rootless {
+        let user = if let Some(r) = &remap {
+            // The agent's ACL (crates/omarchy-agent/src/install/acl.rs): its owner rw, the
+            // sidecars' remapped uid r through a mask r, no group, no other.
+            let (uid, _) = r.host_of(65_533, 65_533).unwrap();
+            let mut acl = 2u32.to_le_bytes().to_vec();
+            for (tag, perm, id) in [
+                (0x01u16, 6u16, u32::MAX),
+                (0x02, 4, uid),
+                (0x04, 0, u32::MAX),
+                (0x10, 4, u32::MAX),
+                (0x20, 0, u32::MAX),
+            ] {
+                acl.extend(tag.to_le_bytes());
+                acl.extend(perm.to_le_bytes());
+                acl.extend(id.to_le_bytes());
+            }
+            rustix::fs::setxattr(
+                &keys,
+                "system.posix_acl_access",
+                &acl,
+                rustix::fs::XattrFlags::empty(),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::metadata(&keys).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+            spec::AgentUser {
+                uid: 65_533,
+                gid: 65_533,
+            }
+        } else if rootless {
+            assert_ne!(m.uid(), 0, "the keys file must be a non-root user's");
             spec::AgentUser { uid: 0, gid: 0 }
         } else {
+            assert_ne!(m.uid(), 0, "the keys file must be a non-root user's");
             spec::AgentUser {
                 uid: m.uid(),
                 gid: m.gid(),
@@ -834,12 +963,23 @@ mod tests {
         let out = read(&run);
         let said = String::from_utf8_lossy(&out.stdout);
         println!(
-            "{}: the probe as {}:{} read agent.env ({}:{}, 0600): {}",
-            if rootless { "rootless" } else { "rootful" },
+            "{}: the probe as {}:{} read agent.env ({}:{}, {}): {}",
+            if remap.is_some() {
+                "remapped"
+            } else if rootless {
+                "rootless"
+            } else {
+                "rootful"
+            },
             user.uid,
             user.gid,
             m.uid(),
             m.gid(),
+            if remap.is_some() {
+                "0640 with the agent's ACL"
+            } else {
+                "0600"
+            },
             out.status
         );
         assert!(
@@ -847,13 +987,25 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        // Before #399, on a rootful engine: the image's root, with no capability, cannot.
-        if !rootless {
-            let (_, before) = probe(None);
+        // Before #399, on a rootful engine: the image's root, with no capability, cannot; nor,
+        // on a remapped daemon, another remapped uid than the one the ACL names (#405).
+        let others: &[Option<spec::AgentUser>] = match (&remap, rootless) {
+            (Some(_), _) => &[
+                None,
+                Some(spec::AgentUser {
+                    uid: 65_532,
+                    gid: 65_532,
+                }),
+            ],
+            (None, false) => &[None],
+            (None, true) => &[],
+        };
+        for other in others {
+            let (_, before) = probe(*other);
             let out = read(&before);
             assert!(
                 !out.status.success() && out.stdout.is_empty(),
-                "root with no capability read another user's 0600 keys: {}",
+                "{other:?} with no capability read keys not given to it: {}",
                 String::from_utf8_lossy(&out.stdout)
             );
         }

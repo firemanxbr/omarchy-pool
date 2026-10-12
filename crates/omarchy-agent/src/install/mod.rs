@@ -24,8 +24,9 @@
 //! 6. the agent keys into `OMARCHY_SECRETS_DIR/agent.env`, outside the work root (an empty
 //!    directory found there removed first, #419); then `etc/dispatcher.env` gets the secrets
 //!    directory and the agent budget from agent.toml (#371), and who the agent sidecars run
-//!    as, or why none runs: `OMARCHY_AGENT_HELD=userns-remap` on a remapped daemon, and
-//!    `no-keys` elsewhere with no keys file (#399, #419);
+//!    as, or why none runs: `no-keys` with no keys file (#419); on a remapped daemon the keys
+//!    file gets the ACL that lets the sidecars' one remapped uid read it, and the sidecars run
+//!    as it, `OMARCHY_AGENT_HELD=userns-remap` or `keys-acl` when none may (#399, #405);
 //! 7. with `--legacy <project>`, `legacy.json`, changing nothing in that project;
 //! 8. the systemd --user unit, linger, and the service started: the run loop's first
 //!    round renders, pulls and starts the bundle — the same code as every later round,
@@ -56,6 +57,7 @@
 
 pub mod checks;
 
+pub(crate) mod acl;
 pub(crate) mod egress;
 pub(crate) mod engine;
 pub(crate) mod envelope;
@@ -135,8 +137,12 @@ pub struct Places {
     /// `/etc/systemd/system` (world-readable): whether the unit that runs that script at boot
     /// is there and enabled, or a reboot takes the drop away (#367).
     pub systemd_system: PathBuf,
-    /// Docker's `daemon.json` (world-readable): the address pool that command carries (#367).
+    /// Docker's `daemon.json` (world-readable): the address pool that command carries (#367),
+    /// and the user a remapped daemon remaps to (#405).
     pub docker_daemon: PathBuf,
+    /// `/etc/subuid` (world-readable): that user's range, in which the agent sidecars' one
+    /// remapped uid is the one the keys file's ACL names (#405).
+    pub subuid: PathBuf,
     /// Where processes are read (`/proc`): a rootless engine's network stack (#367).
     pub proc: PathBuf,
     /// podman's Quadlet generator, where systemd finds a user generator (#330): what the
@@ -183,7 +189,8 @@ impl Places {
             ifconfig: sources.ifconfig,
             task_firewall: PathBuf::from("/usr/local/libexec/omarchy-task-firewall"),
             systemd_system: PathBuf::from("/etc/systemd/system"),
-            docker_daemon: PathBuf::from("/etc/docker/daemon.json"),
+            docker_daemon: sources.remap.daemon_json,
+            subuid: sources.remap.subuid,
             proc: PathBuf::from("/proc"),
             quadlet_generator: crate::run::quadlet::generator(),
         })
@@ -250,6 +257,10 @@ impl Places {
         Sources {
             proc_net: self.proc_net.clone(),
             ifconfig: self.ifconfig.clone(),
+            remap: crate::dispatcher_env::remap::Files {
+                daemon_json: self.docker_daemon.clone(),
+                subuid: self.subuid.clone(),
+            },
         }
     }
 }
@@ -1519,7 +1530,14 @@ pub(crate) fn apply(
     );
     // The agent keys, before the dispatcher's environment is rendered from them (#419): who the
     // sidecars run as is their file's owner, and with no file the host holds its model kinds.
-    agent_keys(o.agent_env_from.as_deref(), o.yes, v, sys, out)?;
+    agent_keys(
+        o.agent_env_from.as_deref(),
+        o.yes,
+        v,
+        &p.sources().remap,
+        sys,
+        out,
+    )?;
 
     // The dispatcher's environment beside its token (#371): the secrets directory install
     // chose and the agent budget, now that agent.toml says them, the host's addresses, and who
@@ -1639,16 +1657,20 @@ pub(crate) fn apply(
 /// podman's docker API made of the agent sidecars' mount while there was no file, is removed
 /// first and said: the keys given now are written in its place, and with none the host is one
 /// that never had any. A directory with something in it stays refused (preflight said so
-/// already). The run loop's real-engine test gives a host its keys through it
-/// (`run::engine_tests`, #419).
+/// already). On a rootful daemon with userns-remap (#405) the file gets the ACL that lets the
+/// agent sidecars' remapped uid read it, that uid read from `remap`; a file kept as it was is
+/// said when its ACL does not let that uid read it. The run loop's real-engine test gives a
+/// host its keys through it (`run::engine_tests`, #419).
 pub(crate) fn agent_keys(
     from: Option<&Path>,
     yes: bool,
     v: &envelope::Values,
+    remap: &crate::dispatcher_env::remap::Files,
     sys: &mut dyn Sys,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
     let target = v.secrets_dir.join(secrets::FILE);
+    let reader = secrets::reader(v.rootful, v.userns_remap, remap);
     if let Some(removed) = secrets::clear(&v.secrets_dir).map_err(Failure::Refused)? {
         say(out, &removed);
     }
@@ -1675,18 +1697,31 @@ pub(crate) fn agent_keys(
             out,
             &format!("{} kept (--agent-env-from replaces it)", target.display()),
         );
+        // On a remapped daemon a file kept from before (an agent before #405 wrote it owner-only)
+        // or whose ACL was lost holds the host's model kinds until the keys are written again.
+        if let Ok(Some(uid)) = reader {
+            let acl = acl::read(&target);
+            if !matches!(&acl, Ok(Some(e)) if acl::is_keys_acl(e, uid)) {
+                say(
+                    out,
+                    &format!(
+                        "{}: its ACL does not let the agent sidecars' remapped uid {uid} read it ({}), so this host takes no model kinds (OMARCHY_AGENT_HELD=keys-acl, #405): give the keys again (--agent-env-from, or Set agent keys on its page) and they are written with it",
+                        target.display(),
+                        match acl {
+                            Ok(Some(e)) => acl::show(&e),
+                            Ok(None) => "none, its mode alone".into(),
+                            Err(e) => e,
+                        }
+                    ),
+                );
+            }
+        }
         None
     } else if yes {
-        // Its agent holds the model kinds (#419): no probe and no agent sidecar runs. A remapped
-        // daemon holds them for its remapping (#399), which keys given later do not lift, so it
-        // is not told to give some.
+        // Its agent holds the model kinds (#419): no probe and no agent sidecar runs.
         say(
             out,
-            if v.rootful && v.userns_remap {
-                "no agent keys: this host builds only, and its daemon remaps users, so keys given later add no model kinds either (OMARCHY_AGENT_HELD=userns-remap, #399)"
-            } else {
-                "no agent keys: this host builds only and takes no model kinds (OMARCHY_AGENT_HELD=no-keys; --agent-env-from, or Set agent keys on its page, adds them)"
-            },
+            "no agent keys: this host builds only and takes no model kinds (OMARCHY_AGENT_HELD=no-keys; --agent-env-from, or Set agent keys on its page, adds them)",
         );
         None
     } else {
@@ -1700,17 +1735,21 @@ pub(crate) fn agent_keys(
         if let Some((_, t)) = keys.iter().find(|(k, _)| k == "GITHUB_TOKEN") {
             checks::github_token(sys.github_scopes(t)).map_err(Failure::Refused)?;
         }
-        files::write(
-            &v.secrets_dir,
-            secrets::FILE,
-            secrets::render(&keys).as_bytes(),
-            0o600,
-        )
-        .map_err(Failure::Refused)?;
+        let note = secrets::write(&v.secrets_dir, &secrets::render(&keys), &reader)
+            .map_err(Failure::Refused)?;
         say(
             out,
-            &format!("wrote {} (0600, outside the work root)", target.display()),
+            &match (&reader, &note) {
+                (Ok(Some(uid)), None) => format!(
+                    "wrote {} (0640: its owner's, and readable by the agent sidecars' remapped uid {uid} through its ACL alone, #405; outside the work root)",
+                    target.display()
+                ),
+                _ => format!("wrote {} (0600, outside the work root)", target.display()),
+            },
         );
+        if let Some(note) = note {
+            say(out, &format!("{}: {note}", target.display()));
+        }
     }
     Ok(())
 }

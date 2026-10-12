@@ -8,10 +8,15 @@
 //! was none (`run::engine_tests` shows it on the engine) — is removed by every writer of the keys (install,
 //! *Set agent keys*) and by the run loop, and said ([`clear`]); a directory with something in
 //! it, a link or another user's file stays refused ([`check`]).
+//!
+//! On a rootful daemon with userns-remap (#405) every writer also gives the file the ACL that
+//! lets the agent sidecars' one remapped uid read it ([`reader`], [`write`]): readable by its
+//! owner and that uid only, 0640 with no group and no other access.
 
 use std::path::Path;
 
 use super::files;
+use crate::dispatcher_env::remap;
 
 /// The keys file's name in the secrets directory.
 pub(crate) const FILE: &str = "agent.env";
@@ -82,6 +87,48 @@ pub(crate) fn parse(text: &str) -> Result<Vec<(String, String)>, String> {
         out.push((k.to_owned(), v.to_owned()));
     }
     Ok(out)
+}
+
+/// Who reads the keys besides their owner (#405): `Ok(None)` on every engine that shows a
+/// container the file's owner (the sidecars run as it, #399); on a rootful daemon with
+/// userns-remap, `Ok(Some(uid))`, the agent sidecars' remapped uid on the host
+/// ([`remap::SIDECAR_ID`] through the remap user's range), or why there is none.
+pub(crate) fn reader(
+    rootful: bool,
+    userns_remap: bool,
+    files: &remap::Files,
+) -> Result<Option<u32>, String> {
+    if rootful && userns_remap {
+        files.sidecar_uid().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// `text` written as the keys file in `dir`: 0600, and with the ACL for `reader`'s uid on a
+/// remapped daemon ([`files::write_keys`]). `Ok(Some(note))` when the file was written but no
+/// remapped uid may read it — none is known, or its filesystem refused the ACL — so the host
+/// stays held (`OMARCHY_AGENT_HELD`), which the note says first and the writer says after the
+/// file's path: `held, OMARCHY_AGENT_HELD=…`.
+pub(crate) fn write(
+    dir: &Path,
+    text: &str,
+    reader: &Result<Option<u32>, String>,
+) -> Result<Option<String>, String> {
+    match reader {
+        Ok(uid) => Ok(files::write_keys(dir, FILE, text.as_bytes(), *uid)?.map(|why| {
+            format!(
+                "held, OMARCHY_AGENT_HELD=keys-acl (#405): no ACL lets the agent sidecars' remapped uid {} read it ({why}), so it is 0600 until written again where ACLs are kept",
+                uid.unwrap_or_default()
+            )
+        })),
+        Err(why) => {
+            files::write_keys(dir, FILE, text.as_bytes(), None)?;
+            Ok(Some(format!(
+                "held, OMARCHY_AGENT_HELD=userns-remap (#405): no remapped uid for the agent sidecars ({why}), so it is 0600"
+            )))
+        }
+    }
 }
 
 /// The file as written: one `KEY=value` a line.
