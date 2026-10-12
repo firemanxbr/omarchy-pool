@@ -203,7 +203,7 @@ const body = (login: string) => String.raw`
 
   <section class="up-workers" aria-labelledby="workers-h">
     <div class="up-sec-h"><h2 id="workers-h">Workers</h2><span id="w-slot"></span></div>
-    <p class="up-note">The legacy registrations under this name, from before hosts, until they are retired (#346): each keeps its history on its page. The id opens a worker's page; Drain and Revoke are on its row. The machines this person provides are hosts, below and on the <a href="/workers">Workers</a> page.</p>
+    <p class="up-note">The registrations under this name: each host's own, whose Operate → opens its host's page, and any legacy one from before hosts until it is revoked (#346). Each keeps its history on its page: the id opens it; Drain and Revoke are on its row. The machines this person provides are hosts, below and on the <a href="/workers">Workers</a> page.</p>
     <div id="w-own">${poolHostsLine()}</div>
     ${workerPanels([
       { kind: "community", blurb: "legacy community sets, until they retire: any contributor's packages, as a host builds them", hidden: true },
@@ -436,6 +436,12 @@ const SCRIPT = String.raw`
     return gate('<button type="button" class="small-btn" data-worker-order="' + kind + '" data-worker="' + esc(w.id) + '" title="' + (kind === "drain" ? "hand it nothing from its next claim: a task in hand runs to its end" : "hand it work again from its next claim") + '">' + (kind === "drain" ? "Drain" : "Resume") + '</button>', order.ok, order.why)
       + ' ' + gate('<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>', revoke.ok, revoke.why)
       + ' <a class="small-btn" href="' + there + '" title="' + (host ? "its host's page: Suspend, Resume, Retire, Drain" :"its page: Re-check agent, Restart, Update, Stop its task") + '">Operate →</a>';
+  }
+  // The Revoke dialog's words, by what the row is: a host's registration sends the reader to its host's page, where a host is drained, suspended or retired; a legacy one from before hosts says nothing replaces it (#346) — a machine joins as a host. A row the listing no longer holds gets the two sentences every revoke shares.
+  function revokeWords(w) {
+    var said = "Its token stops working at once; a build it holds finishes on its own. Its history stays on its page.";
+    if (!w) return said;
+    return said + (w.kind === "host" && w.host_id ? " It is a host's registration: a host is drained, suspended or retired on its host's page." : " No new registration replaces it (#346): a machine joins as a host.");
   }
   // Drain and Resume, asked as the worker's page asks them, with a reason for the journal: the order holds from its issue (#277, part 2), and the door's note says what follows.
   var UNPIN_MIN = ${UNPIN_AFTER_DRAIN_MINUTES};
@@ -883,8 +889,8 @@ const SCRIPT = String.raw`
       });
     }
     else if (b.hasAttribute("data-revoke")) {
-      var wid = b.getAttribute("data-revoke");
-      ask({ title: "Revoke " + wid + "?", text: "Its token stops working at once; a build it holds finishes on its own. Its history stays on its page; no new registration replaces it (#346) — a machine joins as a host.", confirm: "Revoke", danger: true }).then(function (go) {
+      var wid = b.getAttribute("data-revoke"), row = FACTORY ? FACTORY.workers.filter(function (x) { return x.id === wid; })[0] : null;
+      ask({ title: "Revoke " + wid + "?", text: revokeWords(row), confirm: "Revoke", danger: true }).then(function (go) {
         if (go === null) return;
         api("DELETE", API + "/workers/" + encodeURIComponent(wid)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Revoked."); acted(); load(); loadWorkers(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
@@ -1231,12 +1237,12 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The three panels by kind from one listing; every row — a revoked worker's and a project's too — carries Drain (or Resume), Revoke and the way to its page's Operate for whoever looks (#412), the buttons grey with the state's word first (revoked already) and the role's after (the owner's, and a maintainer's), the shell's log icon beside the id the same way; the Revoke dialog is this entry's. A worker's mode, and Share / Own only with it, are gone (#343): its door answers 410.
+      // The three panels by kind from one listing; every row — a revoked worker's and a project's too — carries Drain (or Resume), Revoke and the way to its page's Operate for whoever looks (#412), the buttons grey with the state's word first (revoked already) and the role's after (the owner's, and a maintainer's), the shell's log icon beside the id the same way; the Revoke dialog is this entry's, its words by what the row is: a host's registration sends the reader to its host's page, a legacy one says nothing replaces it (#346). A worker's mode, and Share / Own only with it, are gone (#343): its door answers 410.
       id: "user.workers-tables",
       page,
       shared: "worker-table",
       anchor: ['id="wp-community"', 'id="w-community"', 'id="wp-review"', 'id="w-review"', 'id="wp-project"', 'id="w-project"', 'id="w-none"'],
-      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, "revoke")', "data-revoke", 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"', '#wk-operate', '#hp-operate', "Operate →"],
+      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, "revoke")', "data-revoke", "function revokeWords(", "text: revokeWords(row)", 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"', '#wk-operate', '#hp-operate', "Operate →"],
       reads: [{ path: factory, fields: ["workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.arch", "workers.0.alive", "workers.0.revoked_at", "workers.0.labels", "workers.0.agent_status", "workers.0.update", "workers.0.kind", "workers.0.host_id", "workers.0.drained"] }],
       acts: [
         { method: "DELETE", path: `/api/v1/factory/workers/${F.ownerWorker}`, expect: { anonymous: 401, contributor: 404, owner: 200 } },

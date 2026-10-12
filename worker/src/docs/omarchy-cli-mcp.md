@@ -259,10 +259,10 @@ code goes from the pool to the person's own command, never the other way.
   with nobody holding it; `logout` first. The person's page lists their
   grants, each with Revoke (`POST /api/v1/factory/grants/:id/revoke`, their
   own grants only): every live one first, read apart from the history, then
-  the ten newest. A contributor a maintainer blocks loses their grants with
-  their workers. However a grant ends — logout, Revoke, a replacement, a
-  block — its waiting drafts are discarded in the same batch (*The agent
-  drafts, the person confirms*).
+  the ten newest. A contributor a maintainer blocks loses their grants.
+  However a grant ends — logout, Revoke, a replacement, a block — its
+  waiting drafts are discarded in the same batch (*The agent drafts, the
+  person confirms*).
 - **Where it lives.** `~/.config/omarchy-cli/credentials.toml`
   (`$XDG_CONFIG_HOME` when set), mode 0600 from its first byte in a 0700
   directory, with the API origin it was granted by. A file others can read is

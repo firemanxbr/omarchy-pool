@@ -1,7 +1,7 @@
 /**
  * A person's page, drawn: the page's own button makers and blocks
  * (src/pages/user.ts — renderTop, renderRegister, buildBtn, removeBtn,
- * workerActs, withdrawBtn, pkgBlock, archLine, drawPackages, poolCap) and
+ * workerActs, revokeWords, withdrawBtn, pkgBlock, archLine, drawPackages, poolCap) and
  * the shell's log icon run over the fixture for every role, from the same
  * two answers the browser has — /auth/me for who is looking and GET
  * /users/alice/can for what they may do here. The rule it proves is the
@@ -62,6 +62,7 @@ interface Drawn {
   buildBtn(name: string, arch: string | null, stopped: string | null, title: string): string;
   removeBtn(name: string): string;
   workerActs(w: unknown): string;
+  revokeWords(w: unknown): string;
   withdrawBtn(a: unknown, standing: boolean): string;
   wtLog(w: unknown): string;
   pkgBlock(p: unknown): string;
@@ -76,7 +77,7 @@ async function drawn(login = F.owner): Promise<Drawn> {
   expect(page.status).toBe(200);
   return runScript(scriptOf(page.text), {
     pathname: `/user/${login}`,
-    functions: ["identity", "renderTop", "renderRegister", "renderPoolLine", "buildBtn", "removeBtn", "workerActs", "withdrawBtn", "wtLog", "pkgBlock", "archLine", "drawPackages", "poolCap"],
+    functions: ["identity", "renderTop", "renderRegister", "renderPoolLine", "buildBtn", "removeBtn", "workerActs", "revokeWords", "withdrawBtn", "wtLog", "pkgBlock", "archLine", "drawPackages", "poolCap"],
     variables: ["CAN", "WHO", "PKGS", "BUILDS", "OPEN", "STORIES"],
   }) as Drawn;
 }
@@ -267,6 +268,24 @@ describe("a worker's row: Drain beside Revoke, and the way to its page (#412)", 
     // A host's registration: its operations are its host's page's Stop it card (Suspend, Resume, Retire, Drain), not a worker's; the pool cap is the hosts table's own cell.
     const reg = { ...laptop, kind: "host", host_id: F.host };
     expect(control(d.workerActs(reg), "Operate →")).toEqual(expect.objectContaining({ grey: false, href: `/hosts/${F.host}#hp-operate`, title: "its host's page: Suspend, Resume, Retire, Drain" }));
+  });
+
+  it("the card says it lists each host's own registration and any legacy one not revoked yet, and the Revoke dialog says what follows for each: a host is stopped on its host's page, a legacy one is not replaced (#346)", async () => {
+    // The card's words, served: both kinds of row, never "legacy registrations … until they are retired" over a host's own.
+    const served = (await get(`/user/${F.m1}`, "")).text.replace(/<script\b[\s\S]*?<\/script>/g, "");
+    expect(served).toContain("The registrations under this name: each host's own, whose Operate → opens its host's page, and any legacy one from before hosts until it is revoked (#346).");
+    expect(served).not.toContain("The legacy registrations under this name");
+    const laptop = (await get("/api/v1/factory?limit=50", "")).json.workers.find((w: any) => w.id === F.ownerWorker);
+    expect(laptop.kind).toBe("legacy");
+    const SAID = "Its token stops working at once; a build it holds finishes on its own. Its history stays on its page.";
+    // A legacy registration: nothing replaces it, a machine joins as a host.
+    expect(d.revokeWords(laptop)).toBe(`${SAID} No new registration replaces it (#346): a machine joins as a host.`);
+    // A host's own: the way to stop a host is its host's page — no word that a host's registration is a legacy one to retire.
+    const reg = { ...laptop, kind: "host", host_id: F.host };
+    expect(d.revokeWords(reg)).toBe(`${SAID} It is a host's registration: a host is drained, suspended or retired on its host's page.`);
+    expect(d.revokeWords(reg)).not.toContain("#346");
+    // A row the listing no longer holds: only what every revoke shares.
+    expect(d.revokeWords(null)).toBe(SAID);
   });
 
   it("after a Drain, the row is drawn again with the rights that come back, whichever of the two reads lands first", async () => {

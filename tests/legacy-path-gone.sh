@@ -74,6 +74,8 @@ for f in worker/src/docs/*.md README.md CONTRIBUTING.md SECURITY.md factory/sets
 WORDS=(
   "role container" "role-container" "omarchy-rollout" "rollout.sh" "register.sh" "agent-proxy" "updater"
   "behind a broker" "builder relay" "community worker" "community set" "contributor-run" "a contributor's worker" "shared mode"
+  # A contributor's workers by the possessive the docs used for them ("a contributor … loses their grants with their workers").
+  "their workers"
   "WORKER_SHARED" "OMARCHY_BROKER"
   # The legacy sets' role containers by the names the docs gave them (`review worker` matches `review workers` too).
   "review worker" "pool worker" "project worker"
