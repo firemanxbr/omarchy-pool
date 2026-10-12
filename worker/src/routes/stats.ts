@@ -46,7 +46,7 @@ export async function handleStats(env: Env): Promise<Response> {
     const [summary, sources, artifacts] = await Promise.all([
       releaseSummary(env, head.id),
       releaseSources(env, head.id),
-      env.DB.prepare("SELECT repo, arch, kind, size, created_at FROM release_artifacts WHERE release_id = ? ORDER BY repo, kind").bind(head.id).all(),
+      env.DB.prepare("SELECT repo, arch, kind, size, created_at, awaits FROM release_artifacts WHERE release_id = ? ORDER BY repo, kind").bind(head.id).all(),
     ]);
     rings.push({ ring, release: head, package_count: summary.package_count, bytes: summary.size_download, sources, artifacts: artifacts.results });
   }

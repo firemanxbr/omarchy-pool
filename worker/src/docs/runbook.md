@@ -2411,6 +2411,43 @@ so a size-4 build waits for memory rather than run smaller.
   (#343 keeps them: the Studio's pairs and maralcbr's set still share an
   agent service — the broker, `agent-proxy` — whose restart its siblings
   pace), and leave with those sets (#346).
+
+  Their memory, by design (#319). From 2026-10-09 to 12 every x86_64 sync
+  the canary took died at its 2 GB: the render of edge's x86_64 held the
+  whole release with its file lists (release 1076: 18,880 packages, 18.1 M
+  paths, 1.3 GB of them; 2.2 GB resident, `memory allocation of 25165824
+  bytes failed` under the limit), and its imports held three copies of a
+  64 MB part per large package, eight at a time. Now a render reads the
+  release a page at a time and writes each source's two databases into
+  files in the job's scratch as the pages come, uploading them from there
+  (the same bytes as before; 185 MB at its peak for that release), and a
+  sync's imports stream their parts from the downloaded file and extract one
+  package at a time. The job's process runs with `MALLOC_ARENA_MAX=2`: with
+  glibc's own arenas a thread's freed buffers stay its own, still counted by
+  the limit (a sync of 48 packages of 3 to 31 MB peaked at 238 MB of data,
+  79 MB with two). The limit is the same 2 GB, and still kills a job that
+  runs away.
+
+  A ring keeps serving an architecture's databases across a job that dies
+  (#319, migration 0053). A new release carries the nearest ancestor's
+  database rows for every architecture, each with the render it `awaits`,
+  until its own render replaces them; the include serves them meanwhile,
+  and the health check counts only the head's own
+  (*no database is rendered for the head (it serves an earlier release's)*,
+  red, as *no database is served* was). The next sync of that architecture
+  that makes no release renders a head whose databases await
+  (`edge/x86_64: release #N serves databases it never rendered; rendering
+  them`); a retry that makes one renders it anyway. What awaits a render:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT ra.repo, ra.arch, ra.kind, ra.awaits, ra.created_at FROM ring_heads h JOIN release_artifacts ra ON ra.release_id = h.release_id WHERE h.ring = 'edge' AND ra.awaits IS NOT NULL"
+  ```
+
+  By hand, a maintainer renders the head with `pkg-repo render --ring edge
+  --arch x86_64` (their token). A failed pool job is retried on whichever
+  host claims it next: the pool has no per-task "not on this host" yet, so
+  a job that fails for its host's own reason can go back to that host
+  within its three attempts.
 - **A sleeping host has zero free units** (#329). A Mac's agent reports
   `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
   meanwhile its claims are handed nothing, it makes no emulated lane wait,

@@ -23,7 +23,9 @@
 #    set (#414), a keyring its arch needs missing from it — an empty
 #    directory, aarch64's with Omarchy's key only, an empty file — refuses
 #    the check: the file named, no container started, no event posted, exit
-#    3; with them all, the check runs and posts its row.
+#    3; with them all, the check runs and posts its row. A head whose
+#    databases still await its render (#319: carried from an earlier
+#    release) is not checked until its own are listed.
 # 3. tests/abi-gate.sh's reference export, the same way (a `run` since #340,
 #    which a pool job's shim takes; the script then ends on a reference the
 #    stub did not export; only the recorded run is read).
@@ -95,11 +97,17 @@ done
 cat > "$tmp/pool.py" <<'P'
 import json, os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+# While this file is there, the head's database awaits its render (#319): the next read of the stats takes it away.
+AWAIT = os.environ["STUB_AWAIT"]
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path.startswith("/api/v1/stats"):
-            body = json.dumps({"rings": [{"ring": "edge", "artifacts": [{"kind": "db", "arch": "aarch64", "repo": "edge-core"}]}]}).encode()
+            row = {"kind": "db", "arch": "aarch64", "repo": "edge-core"}
+            if os.path.exists(AWAIT):
+                os.remove(AWAIT)
+                row["awaits"] = 7
+            body = json.dumps({"rings": [{"ring": "edge", "artifacts": [row]}]}).encode()
             ctype = "application/json"
         elif self.path.startswith("/api/v1/pacman.conf"):
             body = b"[edge-core]\nServer = http://127.0.0.1:1/pool/core/aarch64\n"
@@ -115,7 +123,7 @@ srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
 open(os.environ["STUB_PORT"], "w").write(str(srv.server_address[1]))
 srv.serve_forever()
 P
-STUB_PORT="$tmp/port" python3 "$tmp/pool.py" & stub_pid=$!
+STUB_PORT="$tmp/port" STUB_AWAIT="$tmp/await" python3 "$tmp/pool.py" & stub_pid=$!
 for _ in $(seq 50); do [[ -s "$tmp/port" ]] && break; sleep 0.1; done
 [[ -s "$tmp/port" ]] || fail "the stub pool did not start"
 mkdir -p "$tmp/bin"
@@ -166,6 +174,14 @@ env "${env_common[@]}" OMARCHY_TASK_ID=812 OMARCHY_KEYRINGS="$tmp/keys/all" bash
 [[ -n "$(call_of run)" ]] || fail "with every keyring it needs, the check runs"
 grep -q -- '^event --kind health --ring edge --source aarch64 --status ok ' "$tmp/posted" || fail "with every keyring it needs, the check posts its row: $(cat "$tmp/posted")"
 echo "task-containers: with OMARCHY_KEYRINGS, a keyring the check needs and lacks refuses it — no container, no event, exit 3"
+# #319: a database that awaits the head's render is an earlier release's, served meanwhile — no evidence about the head. The check
+# waits for the head's own (a try later, here), then runs on them.
+: > "$tmp/docker"; : > "$tmp/posted"; touch "$tmp/await"
+env "${env_common[@]}" OMARCHY_TASK_ID=812 OMARCHY_KEYRINGS="$tmp/keys/all" bash "$root/tests/health-check.sh" edge aarch64 >"$tmp/out" 2>&1 || fail "health-check.sh once the head's databases are its own failed: $(cat "$tmp/out")"
+[[ ! -e "$tmp/await" ]] || fail "the check read the stats"
+grep -qF "edge aarch64: no database rendered for the head listed yet (try 1 of 12)" "$tmp/out" || fail "a database awaiting the head's render is not the head's: $(cat "$tmp/out")"
+grep -q -- '^event --kind health --ring edge --source aarch64 --status ok ' "$tmp/posted" || fail "the check runs on the head's own databases: $(cat "$tmp/posted")"
+echo "task-containers: a head's databases awaiting its render are not checked; its own are"
 
 # ---- 3. abi-gate.sh's reference export ----
 : > "$tmp/docker"

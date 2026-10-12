@@ -11,6 +11,20 @@
 //! 5. post a `sync` event with the numbers.
 //!
 //! Package bytes are uploaded exactly once; re-running is a no-op.
+//!
+//! **Its memory, by design** (#319). On a host a sync is a pool job with 2 GB
+//! of data (`dispatch::jobs::MEM_LIMIT`), whatever the packages' sizes and
+//! counts. An import streams: the download goes to a file in its worker's
+//! directory while it is hashed (a 1 MB buffer), and the upload is read from that
+//! file as it is sent, a part at a time when multipart (`client::part_body`),
+//! so the `concurrency` workers hold a few megabytes together. The one step
+//! that buffers is the manifest's extraction — an ELF member whole, up to
+//! `pkg_extract::MAX_INSPECT_BYTES` (512 MB), and the zstd decoder's window
+//! (128 MB at most, the library's limit) — and it runs one at a time across the
+//! workers ([`import_all`]'s `extracting`), so an import's peak is one
+//! extraction's, never `concurrency` of them. On 2026-10-12 four chaotic
+//! kernels of 157-175 MB went through within ten seconds, each upload holding
+//! three copies of a 64 MB part.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
@@ -430,11 +444,14 @@ fn import_all(
     let queue: Mutex<Vec<&UpstreamPackage>> = Mutex::new(missing.iter().rev().copied().collect());
     let done: Mutex<Vec<Imported>> = Mutex::new(Vec::new());
     let failed: Mutex<Vec<Failed>> = Mutex::new(Vec::new());
+    // One extraction at a time, whatever the concurrency: the step that buffers (the module's doc).
+    let extracting = Mutex::new(());
     std::thread::scope(|scope| {
         for worker in 0..opts.concurrency.max(1) {
             let queue = &queue;
             let done = &done;
             let failed = &failed;
+            let extracting = &extracting;
             let api = api.clone();
             let work_dir = opts.work_dir.join(format!("w{worker}"));
             let source = opts.source.clone();
@@ -455,6 +472,7 @@ fn import_all(
                         pkg,
                         &work_dir,
                         keyring.as_deref(),
+                        extracting,
                     ) {
                         Ok(()) => done
                             .lock()
@@ -478,6 +496,7 @@ fn import_all(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn import_one(
     api: &Api,
     base: &str,
@@ -486,6 +505,7 @@ fn import_one(
     pkg: &UpstreamPackage,
     work_dir: &std::path::Path,
     keyring: Option<&std::path::Path>,
+    extracting: &Mutex<()>,
 ) -> Result<(), RepoError> {
     let archive = work_dir.join(&pkg.filename);
     let sig = work_dir.join(format!("{}.sig", pkg.filename));
@@ -515,7 +535,13 @@ fn import_one(
                 }
             })?;
         }
-        let manifest = pkg_extract::extract_manifest(&archive)?;
+        let manifest = {
+            // A worker that panicked while extracting left nothing behind the lock to protect.
+            let _one = extracting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pkg_extract::extract_manifest(&archive)?
+        };
         api.upload_pool(&pkg.sha256, &pkg.filename, source, arch, &archive)?;
         if has_sig {
             api.upload_pool_signature(&pkg.sha256, &pkg.filename, source, arch, &sig)?;
@@ -643,6 +669,7 @@ mod tests {
                 served("yay", "chaotic", "x86_64"),
                 served("dropbox", "packages", "aarch64"), // other arch: irrelevant
             ],
+            artifacts: vec![],
         };
         let upstream = vec![up("dropbox"), up("hyprshade"), up("yay"), up("paru")];
         let mut report = SyncReport::default();

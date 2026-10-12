@@ -2073,6 +2073,35 @@ fn render_both(job: &Api, ring: &str, arch: &str, unchanged: &[String]) -> Resul
     Ok(rendered)
 }
 
+/// Renders `arch` for the ring's head when what it serves there was never rendered for it (#319):
+/// databases it carried from an earlier release while a render was pending — a job that died
+/// between its release and its render, as every `x86_64` sync on the Studio canary did from
+/// 2026-10-09 to 12 — or none at all while it holds packages of `arch` (a head made before the pool
+/// carried them). Run by a sync that made no release of the ring, so its next run (a retry
+/// included) repairs what the last one left; the other arch is its own sync's.
+fn repair_head(job: &Api, ring: &str, arch: &str) -> Result<Vec<String>> {
+    let Some(view) = job.release_summary(ring)? else {
+        return Ok(Vec::new());
+    };
+    if !head_needs_render(&view, arch) {
+        return Ok(Vec::new());
+    }
+    eprintln!(
+        "{ring}/{arch}: release #{} serves databases it never rendered; rendering them",
+        view.release.seq
+    );
+    ops::render(job, ring, arch, None)
+}
+
+/// Whether a head's databases of `arch` wait for its render (`repair_head`).
+fn head_needs_render(view: &crate::client::ReleaseSummaryView, arch: &str) -> bool {
+    let rows: Vec<&crate::client::Artifact> =
+        view.artifacts.iter().filter(|a| a.arch == arch).collect();
+    rows.iter().any(|a| a.awaits.is_some())
+        || (!rows.iter().any(|a| a.kind == "db")
+            && view.packages.iter().any(|p| p.repo_arch == arch))
+}
+
 /// What one ring accumulates across the sources of a batched sync.
 #[derive(Default)]
 struct Pending {
@@ -2378,7 +2407,7 @@ fn sync_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         let rendered = if report.release.is_some() {
             render_both(job, &o.ring, &o.arch, &report.unchanged_arches)?
         } else {
-            Vec::new()
+            repair_head(job, &o.ring, &o.arch)?
         };
         return Ok(Outcome {
             summary: format!(
@@ -2447,6 +2476,14 @@ fn sync_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         })?;
         releases.push(serde_json::json!({ "ring": ring, "id": created.release.id, "seq": created.release.seq, "packages": created.package_count, "unchanged": created.unchanged_arches }));
         rendered.extend(render_both(job, ring, &arch, &created.unchanged_arches)?);
+    }
+    // A ring this sync left as it was may still serve databases its head never rendered.
+    let synced: std::collections::BTreeSet<String> = batch.iter().map(|p| s(p, "ring")).collect();
+    for ring in synced
+        .iter()
+        .filter(|r| !r.is_empty() && !pending.contains_key(*r))
+    {
+        rendered.extend(repair_head(job, ring, &arch)?);
     }
     Ok(Outcome {
         summary: format!(
@@ -3645,10 +3682,64 @@ fn security_job(opts: &WorkOptions, job: &Api, token: &Arc<Mutex<String>>) -> Re
 mod tests {
     use super::{
         agent_retry_after, agent_retry_from, chrono_now, dry_run_dir, emulated, emulation_failure,
-        fail_body, probe_agent, AgentCheck, AgentProbe, NeedsNative, Task, WorkOptions,
-        AGENT_PROBE_EVERY, POLL,
+        fail_body, head_needs_render, probe_agent, AgentCheck, AgentProbe, NeedsNative, Task,
+        WorkOptions, AGENT_PROBE_EVERY, POLL,
     };
     use std::time::{Duration, Instant};
+
+    /// #319: a sync that leaves its ring as it was renders the head when what the head serves of
+    /// its arch was never rendered for it — rows it carried awaiting a render (a job that died
+    /// between its release and its render), or no database at all while it holds that arch's
+    /// packages (a head from before the pool carried them) — and never when they are its own.
+    #[test]
+    fn a_head_whose_databases_await_a_render_is_rendered_by_the_next_sync() {
+        let view = |artifacts: serde_json::Value| -> crate::client::ReleaseSummaryView {
+            serde_json::from_value(serde_json::json!({
+                "release": { "id": 1076, "ring": "edge", "seq": 654, "parent_id": 1075, "source_id": null, "note": null, "created_at": "2026-10-12T15:06:54Z" },
+                "package_count": 2,
+                "packages": [
+                    { "name": "zlib", "version": "1.3-1", "arch": "x86_64", "filename": "f", "sha256": "s", "size_download": 1, "source": "core", "repo_arch": "x86_64" },
+                    { "name": "zlib", "version": "1.3-1", "arch": "aarch64", "filename": "f", "sha256": "t", "size_download": 1, "source": "core", "repo_arch": "aarch64" }
+                ],
+                "artifacts": artifacts,
+            }))
+            .unwrap()
+        };
+        let row = |arch: &str, kind: &str, awaits: Option<u64>| serde_json::json!({ "repo": "omarchy-core-edge", "arch": arch, "kind": kind, "size": 1, "created_at": "x", "awaits": awaits });
+        let rendered = view(serde_json::json!([
+            row("x86_64", "db", None),
+            row("x86_64", "files", None),
+            row("aarch64", "db", None)
+        ]));
+        assert!(!head_needs_render(&rendered, "x86_64"));
+        assert!(!head_needs_render(&rendered, "aarch64"));
+        // The canary's edge#650: x86_64 carried, awaiting the head's render; aarch64 its own.
+        let carried = view(serde_json::json!([
+            row("x86_64", "db", Some(1076)),
+            row("x86_64", "files", Some(1076)),
+            row("aarch64", "db", None)
+        ]));
+        assert!(head_needs_render(&carried, "x86_64"));
+        assert!(!head_needs_render(&carried, "aarch64"));
+        // One database's files still awaiting (a render that died between its two puts).
+        let half = view(serde_json::json!([
+            row("x86_64", "db", None),
+            row("x86_64", "files", Some(1075))
+        ]));
+        assert!(head_needs_render(&half, "x86_64"));
+        // edge#654 as the pool held it before it carried rows: no x86_64 database for x86_64 packages.
+        let none = view(serde_json::json!([row("aarch64", "db", None)]));
+        assert!(head_needs_render(&none, "x86_64"));
+        // An arch the ring holds no package of needs no database; a pool that lists no `awaits` reads as rendered.
+        let mut arm_only = view(serde_json::json!([row("aarch64", "db", None)]));
+        arm_only.packages.retain(|p| p.repo_arch == "aarch64");
+        assert!(!head_needs_render(&arm_only, "x86_64"));
+        let older: crate::client::ReleaseSummaryView = serde_json::from_value(serde_json::json!({
+            "release": { "id": 1, "ring": "edge", "seq": 1, "parent_id": null, "source_id": null, "note": null, "created_at": "x" },
+            "package_count": 0, "packages": [], "artifacts": [{ "repo": "omarchy-core-edge", "arch": "x86_64", "kind": "db", "size": 1, "created_at": "x" }]
+        })).unwrap();
+        assert!(!head_needs_render(&older, "x86_64"));
+    }
 
     /// #284: a build queued by hand is a dry run, `publish` 0 on the claim's
     /// row — built, kept on the worker, never published. A build that

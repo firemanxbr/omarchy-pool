@@ -1,0 +1,29 @@
+-- A ring never stops serving an architecture's databases because a job died
+-- between its release and its render (#319). From 2026-10-09 to 12 every
+-- x86_64 sync on the Studio canary created edge's release and died rendering
+-- it (its 2 GB): edge#650 and the heads after it listed no x86_64 database,
+-- /api/v1/pacman.conf?ring=edge&arch=x86_64 had no section, and the health
+-- check blocked edge → rc.
+--
+-- - release_artifacts.awaits: a release now carries the nearest ancestor's
+--   rows for every architecture (routes/releases.ts handleCreateRelease), so
+--   the ring goes on serving the last databases rendered for it until its own
+--   render replaces them. NULL: the bytes are this release's selection of
+--   `arch` (rendered for it, or carried for an architecture it left as its
+--   parent did). Otherwise the release whose render makes the row current:
+--   this one, for an architecture it changed; the parent's awaited one, for
+--   an architecture it kept.
+-- - A render's PUT clears it on its own row and on every row that awaits its
+--   release (handlePutArtifact); POST /releases/:id/rendered?arch=, once the
+--   render has put every database of `arch`, drops the rows still awaiting
+--   it — a source the release no longer has.
+-- - The health check counts a database awaiting a render as not served for
+--   the head (tests/health-check.sh), so the gate waits for the head's own;
+--   a sync that leaves the ring as it was renders a head whose databases
+--   await (pkg-repo work.rs repair_head).
+--
+-- Read through the partial index below (only awaiting rows are in it).
+-- Additive only: the Worker that runs during the deploy minute writes NULL,
+-- what every row before it means.
+ALTER TABLE release_artifacts ADD COLUMN awaits INTEGER;
+CREATE INDEX IF NOT EXISTS idx_release_artifacts_awaits ON release_artifacts (awaits) WHERE awaits IS NOT NULL;

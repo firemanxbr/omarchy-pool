@@ -158,32 +158,40 @@ export async function handleCreateRelease(request: Request, env: Env): Promise<R
   // An architecture the request could not have touched — the base copied
   // from the parent, every add and remove scoped to the other one by
   // remove_arch — serves exactly what the parent served: its databases
-  // are already rendered, at the live keys. The artifact rows carry over
-  // from the nearest ancestor that has them — the parent, or, when the
-  // parent is the other architecture's release of the same tick and its
-  // render is still running, the one before it (edge#267 was created 20 s
-  // after edge#266 and carried no aarch64 database at all: aarch64 went
-  // unserved for three hours and the health check blocked the gate for a
-  // day, 2026-09-17) — and the caller is told not to render it again (a
-  // sync of an aarch64 source no longer re-renders the 15k-package x86_64
-  // extra). A render that lands on the ancestor later reaches this
-  // release too (handlePutArtifact).
+  // are already rendered, at the live keys, and the caller is told not to
+  // render it again (a sync of an aarch64 source no longer re-renders the
+  // 15k-package x86_64 extra).
   const untouched = (body.remove ?? []).length === 0 && removeFrom.length === 0 && added.length === 0;
   const scoped = parent && base?.id === parent.id ? removeArch : onlyArch !== null && (untouched || removeArch === onlyArch) ? onlyArch : null;
   const unchanged: string[] = parent && scoped !== null ? REPO_ARCHES.filter((a) => a !== scoped) : [];
-  if (unchanged.length) {
+  // Every architecture the ring served goes on being served (#319): the
+  // release carries the artifact rows of the nearest ancestor that has
+  // rows for it — the parent, once every release carries them — until its
+  // own render replaces them (handlePutArtifact). A job that dies between
+  // the two leaves the ring serving the last databases rendered for that
+  // architecture, never none: from 2026-10-09 to 12 every x86_64 sync on
+  // the Studio canary died rendering, and edge#648 to #654 listed no x86_64
+  // database at all. `awaits` says whose render makes a row current: this
+  // release's, for an architecture it changed; for one it kept, the
+  // parent's row's (null: rendered) or, carried from further back (a
+  // parent from before this, its render still running — edge#267 was made
+  // 20 s after edge#266, 2026-09-17 — or dead), the parent's. The nearest
+  // ancestor's whole set for an architecture, not row by row: a source a
+  // render dropped (POST /releases/:id/rendered) stays dropped.
+  if (parent) {
     stmts.push(
       env.DB.prepare(
         `WITH RECURSIVE anc(id, depth) AS (
            SELECT ?3, 0
            UNION ALL SELECT r.parent_id, anc.depth + 1 FROM releases r JOIN anc ON r.id = anc.id WHERE r.parent_id IS NOT NULL AND anc.depth < 12
          ), cand AS (
-           SELECT ra.repo, ra.arch, ra.kind, ra.r2_key, ra.size, anc.depth FROM release_artifacts ra JOIN anc ON anc.id = ra.release_id
-            WHERE ra.arch IN (SELECT value FROM json_each(?4))
-         ), best AS (SELECT repo, arch, kind, MIN(depth) AS depth FROM cand GROUP BY repo, arch, kind)
-         INSERT OR IGNORE INTO release_artifacts (release_id, repo, arch, kind, r2_key, size)
-         SELECT ${rel}, c.repo, c.arch, c.kind, c.r2_key, c.size FROM cand c JOIN best b ON b.repo = c.repo AND b.arch = c.arch AND b.kind = c.kind AND b.depth = c.depth`,
-      ).bind(ring, seq, parent!.id, JSON.stringify(unchanged)),
+           SELECT ra.repo, ra.arch, ra.kind, ra.r2_key, ra.size, ra.awaits, anc.depth FROM release_artifacts ra JOIN anc ON anc.id = ra.release_id
+         ), best AS (SELECT arch, MIN(depth) AS depth FROM cand GROUP BY arch)
+         INSERT OR IGNORE INTO release_artifacts (release_id, repo, arch, kind, r2_key, size, awaits)
+         SELECT ${rel}, c.repo, c.arch, c.kind, c.r2_key, c.size,
+                CASE WHEN c.arch NOT IN (SELECT value FROM json_each(?4)) THEN ${rel} WHEN c.depth = 0 THEN c.awaits ELSE ?3 END
+           FROM cand c JOIN best b ON b.arch = c.arch AND b.depth = c.depth`,
+      ).bind(ring, seq, parent.id, JSON.stringify(unchanged)),
     );
   }
   await env.DB.batch(stmts);
@@ -387,7 +395,7 @@ export async function handleGetRelease(ring: string, url: URL, env: Env): Promis
     : await ringHead(env, ring);
   if (!release) return json({ error: pinned ? `release ${pinned} is not a ${ring} release` : `ring ${ring} has no release yet` }, 404);
   const artifacts = await env.DB.prepare(
-    "SELECT repo, arch, kind, size, created_at FROM release_artifacts WHERE release_id = ?",
+    "SELECT repo, arch, kind, size, created_at, awaits FROM release_artifacts WHERE release_id = ?",
   )
     .bind(release.id)
     .all<{ created_at: string }>();
@@ -489,7 +497,9 @@ export async function handleReleaseHistory(ring: string, env: Env): Promise<Resp
  * Stores a generated database (or its signature) for a release, at the live
  * per-ring key (`<arch>/<repo>.db`) beside the packages. `repo` is the pacman
  * repo name, e.g. `omarchy-core-stable`; pacman reads it statically from the
- * bucket's custom domain.
+ * bucket's custom domain. The release's row is current from here (`awaits`
+ * cleared), and so is every row that awaited this release's render: the
+ * releases made from it that kept its selection of `arch` (#319).
  */
 export async function handlePutArtifact(
   releaseId: number,
@@ -526,7 +536,7 @@ export async function handlePutArtifact(
     await env.PACKAGES.put(sigKey, sig, { httpMetadata: { contentType: "application/octet-stream", cacheControl: SHORT } });
     await env.DB.prepare(
       `INSERT INTO release_artifacts (release_id, repo, arch, kind, r2_key, size) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(release_id, repo, arch, kind) DO UPDATE SET r2_key = excluded.r2_key, size = excluded.size, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+       ON CONFLICT(release_id, repo, arch, kind) DO UPDATE SET r2_key = excluded.r2_key, size = excluded.size, awaits = NULL, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
     )
       .bind(releaseId, repo, arch, `${kind}.sig`, sigKey, sig.byteLength)
       .run();
@@ -534,7 +544,7 @@ export async function handlePutArtifact(
   }
   await env.DB.prepare(
     `INSERT INTO release_artifacts (release_id, repo, arch, kind, r2_key, size) VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(release_id, repo, arch, kind) DO UPDATE SET r2_key = excluded.r2_key, size = excluded.size,
+     ON CONFLICT(release_id, repo, arch, kind) DO UPDATE SET r2_key = excluded.r2_key, size = excluded.size, awaits = NULL,
        created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
   )
     .bind(releaseId, repo, arch, kind, keys[0], bytes.byteLength)
@@ -555,6 +565,33 @@ export async function handlePutArtifact(
     )
       .bind(releaseId, repo, arch, k, r2Key, size)
       .run();
+    // The releases that kept this one's selection of the architecture carried
+    // its last databases while this render ran: theirs are this render's now.
+    await env.DB.prepare(AWAITED_SQL).bind(releaseId, repo, arch, k, r2Key, size).run();
   }
   return json({ release_id: releaseId, repo, arch, kind, keys, size: bytes.byteLength }, 201);
+}
+
+/** The rows that awaited a release's render of one database (`?1`, the database `?2`–`?4`), current from it: through idx_release_artifacts_awaits. */
+export const AWAITED_SQL = `UPDATE release_artifacts SET r2_key = ?5, size = ?6, awaits = NULL, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE awaits = ?1 AND repo = ?2 AND arch = ?3 AND kind = ?4`;
+
+/** What a whole render of `arch` (`?2`) for a release (`?1`) drops: the release's rows it did not write again (by its key), and the rows still awaiting it (idx_release_artifacts_awaits). */
+export const RENDERED_SQL = [
+  "DELETE FROM release_artifacts WHERE release_id = ?1 AND arch = ?2 AND awaits IS NOT NULL",
+  "DELETE FROM release_artifacts WHERE awaits = ?1 AND arch = ?2",
+];
+
+/**
+ * A render of `arch` for a release has put every database it has (#319): the
+ * rows the release carried for `arch` that the render did not write again —
+ * a source it no longer serves there — go, and so do those of the releases
+ * that kept its selection of `arch` and still await it. Called by `pkg-repo`
+ * once its last database is up (ops.rs `render`); idempotent.
+ */
+export async function handleRendered(releaseId: number, url: URL, env: Env): Promise<Response> {
+  const arch = url.searchParams.get("arch") ?? "";
+  if (!isRepoArch(arch)) return json({ error: "arch must be x86_64 or aarch64" }, 400);
+  const out = await env.DB.batch(RENDERED_SQL.map((sql) => env.DB.prepare(sql).bind(releaseId, arch)));
+  return json({ release_id: releaseId, arch, dropped: out.reduce((n, r) => n + (r.meta.changes ?? 0), 0) });
 }

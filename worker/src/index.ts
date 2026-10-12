@@ -20,6 +20,7 @@
  *   GET  /api/v1/releases/:ring/diff?from=&to=&arch=  added / removed / upgraded between two releases
  *   POST /api/v1/releases                          create / promote / roll back
  *   PUT  /api/v1/releases/:id/artifacts/:kind?repo=&arch=
+ *   POST /api/v1/releases/:id/rendered?arch=       every database of arch is up: drop what the release carried and did not get again
  *   GET  /api/v1/search?q=&ring=&arch=          package search within a ring
  *   GET  /api/v1/packages?q=&ring=&arch=&origin=&sort=   the packages list: one row per name, filtered and paged by the server (routes/browse.ts)
  *   GET  /api/v1/package/:name[/files]?ring=&arch=  package page data: rings, manifest, edges
@@ -74,7 +75,7 @@
 import { handleMultipartComplete, handleMultipartCreate, handleMultipartPart, handlePutPool, handlePutPoolSig } from "./routes/pool";
 import { handleGetPackage, handleKnownPackages, handlePostPackage } from "./routes/packages";
 import { handleProvenance } from "./routes/seal";
-import { handleCreateRelease, handleGetRelease, handleReleaseHistory, handlePutArtifact, handleReleaseDiff } from "./routes/releases";
+import { handleCreateRelease, handleGetRelease, handleReleaseHistory, handlePutArtifact, handleReleaseDiff, handleRendered } from "./routes/releases";
 import { handleGraph } from "./routes/graph";
 import { handlePackage, handlePackageFiles, handleSearch } from "./routes/search";
 import { browseQuery, browseSearch, handleBrowse, type BrowseAnswer } from "./routes/browse";
@@ -877,6 +878,9 @@ async function api(method: string, path: string, url: URL, request: Request, env
   }
   if ((m = path.match(/^\/releases\/(\d+)\/artifacts\/(db|db\.sig|files|files\.sig)$/)) && method === "PUT") {
     return (await authorizeArtifacts(request, env, Number(m[1]))) ?? handlePutArtifact(Number(m[1]), m[2], url, request, env);
+  }
+  if ((m = path.match(/^\/releases\/(\d+)\/rendered$/)) && method === "POST") {
+    return (await authorizeArtifacts(request, env, Number(m[1]))) ?? handleRendered(Number(m[1]), url, env);
   }
   return json({ error: "not found" }, 404);
 }

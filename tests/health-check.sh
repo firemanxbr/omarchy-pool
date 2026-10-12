@@ -63,22 +63,35 @@ post() { # status summary payload
 # usable package repositories", a security fix rolled back on it
 # (2026-09-17). So: fresh reads, and again every fifteen seconds until the
 # head's databases are there — a render takes a minute or two — before
-# the ring is called unserved.
-repos=""; include=""
+# the ring is called unserved. A head carries the databases its parent
+# served until its own render replaces them (#319: a job that died between
+# its release and its render left a ring with none): a database that
+# still `awaits` a render is an earlier release's, served to users
+# meanwhile but no evidence about the head, so it counts as not there yet.
+repos=""; include=""; awaiting=""
 for try in $(seq 1 12); do
   bust="t=$(date +%s)$try"
-  repos=$(curl -sf --max-time 20 "$OMARCHY_API/api/v1/stats?$bust" | python3 -c '
+  listed=$(curl -sf --max-time 20 "$OMARCHY_API/api/v1/stats?$bust" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 for r in d["rings"]:
     if r["ring"] == sys.argv[1]:
-        print(" ".join(sorted({a["repo"] for a in r["artifacts"] if a["kind"] == "db" and a["arch"] == sys.argv[2] and "-chaotic-" not in a["repo"]})))
+        dbs = [a for a in r["artifacts"] if a["kind"] == "db" and a["arch"] == sys.argv[2]]
+        if any(a.get("awaits") for a in dbs):
+            print("awaiting")
+        else:
+            print(" ".join(sorted({a["repo"] for a in dbs if "-chaotic-" not in a["repo"]})))
 ' "$RING" "$ARCH")
+  if [[ "$listed" == awaiting ]]; then repos=""; awaiting=1; else repos="$listed"; awaiting=""; fi
   include=$(curl -sf --max-time 20 "$OMARCHY_API/api/v1/pacman.conf?ring=$RING&arch=$ARCH&$bust") || include=""
   if [[ -n "$repos" && -n "$include" ]] && grep -q '^\[' <<<"$include"; then break; fi
-  echo "$RING $ARCH: no database listed yet (try $try of 12); the render may still be writing"; sleep 15
+  echo "$RING $ARCH: no database ${awaiting:+rendered for the head }listed yet (try $try of 12); the render may still be writing"; sleep 15
 done
 if [[ -z "$include" || -z "$repos" ]] || ! grep -q '^\[' <<<"$include"; then
+  if [[ -n "$awaiting" ]]; then
+    post error "$RING $ARCH: no database is rendered for the head (it serves an earlier release's)" '{}'
+    echo "$RING $ARCH: the head's databases are not rendered"; exit 1
+  fi
   post error "$RING $ARCH: no database is served" '{}'
   echo "$RING $ARCH: nothing served"; exit 1
 fi

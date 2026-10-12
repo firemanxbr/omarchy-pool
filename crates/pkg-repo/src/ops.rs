@@ -12,7 +12,7 @@ use pkg_manifest::PackageManifest;
 
 use crate::client::{Api, ReleaseRequest};
 use crate::sync::SyncOptions;
-use crate::{build_database, sign, sync, Flavor};
+use crate::{sign, sync, DatabaseWriter, Flavor, RepoError};
 
 pub fn record_event(api: &Api, event: &serde_json::Value, payload: Option<&str>) -> Result<()> {
     let mut event = event.clone();
@@ -366,60 +366,46 @@ pub fn diff(
     Ok(())
 }
 
-/// Renders the ring's databases for one architecture; returns the repositories written.
+/// Renders the ring's databases for one architecture — one `db` and one
+/// `files` per source the release serves there — and uploads them to the
+/// release; returns the repositories written.
 ///
 /// The pool signs the databases as it stores them when it holds the key;
 /// `key` (a local `GnuPG` key id) only signs against a pool without one.
+///
+/// The release is read a page at a time (`Api::release_pages`) and each
+/// package is written into its source's two databases as it comes, in files
+/// under the process's temporary directory, so the render holds one page and
+/// one package's file list, never the ring (#319): edge's `x86_64` lists 18 M
+/// paths, 1.3 GB of them, which held whole died at a pool job's 2 GB memory
+/// limit every time (release 1076, 2026-10-12). The pages come in name order
+/// within a source, the order [`sorted`] gives: the bytes are the ones the
+/// whole-release render made. Nothing is uploaded before the last page is
+/// read; once every database is up, the pool is told the render is whole
+/// (`Api::rendered`).
 pub fn render(api: &Api, ring: &str, arch: &str, key: Option<&str>) -> Result<Vec<String>> {
+    // Its own directory: two renders in one process (a test's) never share one.
+    static RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let started = Instant::now();
     let pool_signs = api.signing()?;
     let key = if pool_signs { None } else { key };
-    let view = api.release(ring, arch)?;
-
-    let mut by_source: BTreeMap<String, Vec<PackageManifest>> = BTreeMap::new();
-    for p in view.packages {
-        by_source.entry(p.source).or_default().push(p.manifest);
-    }
-
-    let tmp = tempfile_dir()?;
-    let mut rendered = Vec::new();
-    for (source, packages) in by_source {
-        let packages = sorted(packages);
-        let repo = format!("omarchy-{source}-{ring}");
-        for flavor in [Flavor::Db, Flavor::Files] {
-            let bytes = build_database(&packages, flavor)?;
-            let kind = match flavor {
-                Flavor::Db => "db",
-                Flavor::Files => "files",
-            };
-            api.upload_artifact(view.release.id, kind, &repo, arch, &bytes)?;
-            if let Some(key) = key {
-                let file = tmp.join(format!("{repo}.{kind}"));
-                std::fs::write(&file, &bytes)?;
-                let sig = sign::detach_sign(&file, key)?;
-                api.upload_artifact(
-                    view.release.id,
-                    &format!("{kind}.sig"),
-                    &repo,
-                    arch,
-                    &std::fs::read(&sig)?,
-                )?;
-            }
-            eprintln!(
-                "uploaded {repo}.{kind} ({} packages, {} bytes)",
-                packages.len(),
-                bytes.len()
-            );
-        }
-        rendered.push((repo, packages.len()));
-    }
+    let n = RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = tempfile_dir()?.join(format!("render-{ring}-{arch}-{n}"));
     let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+    let rendered = render_in(api, ring, arch, key, &tmp);
+    let _ = std::fs::remove_dir_all(&tmp);
+    // The process's own directory goes with its last render, as it did before.
+    if let Some(parent) = tmp.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+    let (release, rendered) = rendered?;
 
     let took = started.elapsed();
     println!(
         "rendered {ring}#{} (id {}) for {arch}: {}",
-        view.release.seq,
-        view.release.id,
+        release.seq,
+        release.id,
         rendered
             .iter()
             .map(|(r, n)| format!("{r} ({n})"))
@@ -428,11 +414,107 @@ pub fn render(api: &Api, ring: &str, arch: &str, key: Option<&str>) -> Result<Ve
     );
     api.post_event(&serde_json::json!({
         "kind": "render", "ring": ring, "status": "ok",
-        "summary": format!("{ring}#{}: {} database(s) rendered{}", view.release.seq, rendered.len(), if pool_signs || key.is_some() { ", signed" } else { "" }),
+        "summary": format!("{ring}#{}: {} database(s) rendered{}", release.seq, rendered.len(), if pool_signs || key.is_some() { ", signed" } else { "" }),
         "duration_ms": millis(took),
-        "payload": { "release_id": view.release.id, "repos": rendered.iter().map(|(r, n)| serde_json::json!({"repo": r, "packages": n})).collect::<Vec<_>>() },
+        "payload": { "release_id": release.id, "repos": rendered.iter().map(|(r, n)| serde_json::json!({"repo": r, "packages": n})).collect::<Vec<_>>() },
     }))?;
     Ok(rendered.into_iter().map(|(r, _)| r).collect())
+}
+
+/// One source's two databases, written as the release's pages come.
+struct SourceDbs {
+    db: DatabaseWriter<std::io::BufWriter<std::fs::File>>,
+    files: DatabaseWriter<std::io::BufWriter<std::fs::File>>,
+    /// The last name written: a page out of name order (or a name twice) is refused.
+    last: Option<String>,
+}
+
+impl SourceDbs {
+    fn create(dir: &std::path::Path, repo: &str) -> Result<Self, RepoError> {
+        let open = |kind: &str| -> Result<_, RepoError> {
+            Ok(std::io::BufWriter::new(std::fs::File::create(
+                dir.join(format!("{repo}.{kind}")),
+            )?))
+        };
+        Ok(Self {
+            db: DatabaseWriter::new(open("db")?, Flavor::Db),
+            files: DatabaseWriter::new(open("files")?, Flavor::Files),
+            last: None,
+        })
+    }
+}
+
+/// The render's work in `tmp`: every page into its source's databases, then each database
+/// uploaded from its file (and signed with `key` when the pool does not sign), then the pool
+/// told. The release, and each repository with its package count.
+fn render_in(
+    api: &Api,
+    ring: &str,
+    arch: &str,
+    key: Option<&str>,
+    tmp: &std::path::Path,
+) -> Result<(crate::client::Release, Vec<(String, usize)>)> {
+    let mut by_source: BTreeMap<String, SourceDbs> = BTreeMap::new();
+    let release = api.release_pages(ring, arch, |_, page| {
+        for mut p in page {
+            p.inflate_files()?;
+            let dbs = match by_source.entry(p.source.clone()) {
+                std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    let repo = format!("omarchy-{}-{ring}", e.key());
+                    e.insert(SourceDbs::create(tmp, &repo)?)
+                }
+            };
+            if dbs.last.as_ref().is_some_and(|l| *l >= p.manifest.name) {
+                return Err(RepoError::Source(format!(
+                    "render: {} of {} came after {}: the pool's pages are not in name order",
+                    p.manifest.name,
+                    p.source,
+                    dbs.last.as_deref().unwrap_or_default()
+                )));
+            }
+            dbs.db.append(&p.manifest)?;
+            dbs.files.append(&p.manifest)?;
+            dbs.last = Some(std::mem::take(&mut p.manifest.name));
+        }
+        Ok(())
+    })?;
+
+    let mut rendered = Vec::new();
+    for (source, dbs) in by_source {
+        let repo = format!("omarchy-{source}-{ring}");
+        let packages = dbs.db.count();
+        for (kind, writer) in [("db", dbs.db), ("files", dbs.files)] {
+            writer
+                .finish()?
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error)?;
+            let file = tmp.join(format!("{repo}.{kind}"));
+            api.upload_artifact_file(release.id, kind, &repo, arch, &file)?;
+            if let Some(key) = key {
+                let sig = sign::detach_sign(&file, key)?;
+                api.upload_artifact(
+                    release.id,
+                    &format!("{kind}.sig"),
+                    &repo,
+                    arch,
+                    &std::fs::read(&sig)?,
+                )?;
+            }
+            eprintln!(
+                "uploaded {repo}.{kind} ({packages} packages, {} bytes)",
+                std::fs::metadata(&file)?.len()
+            );
+        }
+        rendered.push((repo, packages));
+    }
+    // Every database of `arch` is up: what the release carried for it and did not get again goes.
+    if !api.rendered(release.id, arch)? {
+        eprintln!(
+            "{ring}/{arch}: the pool keeps no carried databases (an older pool): nothing to drop"
+        );
+    }
+    Ok((release, rendered))
 }
 
 pub fn gc(api: &Api, keep: u32, delete: bool) -> Result<()> {

@@ -1909,6 +1909,7 @@ impl Dispatcher {
             .env("PATH", path)
             .env("RUNTIME", self.jobs.bin.join(shim::NAME))
             .env("TMPDIR", &scratch)
+            .env("MALLOC_ARENA_MAX", jobs::MALLOC_ARENAS)
             .env_remove("OMARCHY_TASK_ID")
             .env_remove("OMARCHY_PKG_CACHE");
         match &context {

@@ -5039,9 +5039,9 @@ fn an_arch_neutral_pool_job_runs_in_a_child_process_of_its_own_and_reports_what_
         .unwrap()
         .iter()
         .any(|c| c.iter().any(|x| x.contains("omarchy-task-40-"))));
-    // Its environment: the shim first on PATH and as RUNTIME, its own scratch, no worker token nor the
-    // name of its file (#327), no stale job token (its token is in its directory), no helper context (a
-    // render starts none).
+    // Its environment: the shim first on PATH and as RUNTIME, its own scratch, two malloc arenas, no
+    // worker token nor the name of its file (#327), no stale job token (its token is in its directory),
+    // no helper context (a render starts none).
     let env = std::fs::read_to_string(&env).unwrap();
     let var = |k: &str| {
         env.lines()
@@ -5060,6 +5060,8 @@ fn an_arch_neutral_pool_job_runs_in_a_child_process_of_its_own_and_reports_what_
         var("TMPDIR"),
         Some(h.tdir(40, GEN).join("tmp").display().to_string())
     );
+    // Two malloc arenas, whatever the host's CPUs (#319): what its 2 GB data rlimit counts is what it uses.
+    assert_eq!(var("MALLOC_ARENA_MAX").as_deref(), Some("2"));
     for k in [
         "OMARCHY_WORKER_TOKEN",
         "OMARCHY_WORKER_TOKEN_FILE",
