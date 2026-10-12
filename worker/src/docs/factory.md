@@ -135,7 +135,14 @@ verify and attest the package faster and approve it with more confidence.
    record, the journal line and the package's page — *approved for aarch64
    only: <reason>* — and the other architecture's builds in review stop with
    the decision, its target *not shipping* while the approval stands, so it
-   never reads as forgotten. Nothing is ever approved by itself: a bump is
+   never reads as forgotten. An architecture approved at that version
+   already counts as shipped: built later, the other one is added by
+   *Approve package*. One an approval of an older version still serves — a
+   bump whose new version did not build there — stays at that version
+   (*aarch64 stays at 1.0-1* on the record and the journal line), never *not
+   shipping*. Two such decisions on different architectures sent at once are
+   one decision: the builds one sets aside are cancelled in the same batch as
+   its review, under the same condition. Nothing is ever approved by itself: a bump is
    evidence until a maintainer decides. Each approval queues a
    `publish` job per architecture: a project worker fetches the staged
    packages with the job's token, publishes them into `edge` as source

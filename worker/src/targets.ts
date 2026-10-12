@@ -35,8 +35,8 @@ export type Targets = Record<string, Target>;
 
 /** A build of the package as the rule reads it: its row, and the contributor's build a project's build answers (params.review); the version rides along for the review, which decides one version (routes/review.ts). */
 export interface TargetBuild { id: number; arch: string; status: string; trust: string; publish: number; review: number | null; version?: string | null }
-/** A decision's row on one target (approvals), as the rule reads it. */
-export interface TargetDecision { arch: string; task_id: number; rebuild_task: number | null; decision: string; withdrawn_at: string | null }
+/** A decision's row on one target (approvals), as the rule reads it — and the version it decided, which the rule does not read and a decision on the package does (#416: an architecture an approval already serves at a build's version is shipped already). */
+export interface TargetDecision { arch: string; task_id: number; rebuild_task: number | null; decision: string; withdrawn_at: string | null; version?: string | null }
 /** The architectures the newest standing approval set aside (reviews.not_shipping, #416): each with the build its target stood on when it was decided, null for none. */
 export type NotShipping = Record<string, number | null>;
 
@@ -145,8 +145,8 @@ export async function packageRows(env: Env, name: string, opts: { unregistered?:
   return { arches, closedThrough: pkg?.closed_through ?? 0, builds, decisions: decisions.results.map(({ not_shipping: _, ...a }) => a), notShipping: parseNotShipping(newest?.not_shipping) };
 }
 
-/** The name's newest forty decisions by the (name, created_at) index, each with its review's not_shipping by the review's primary key. */
-export const DECISIONS_OF_SQL = "SELECT a.arch, a.task_id, a.rebuild_task, a.decision, a.withdrawn_at, v.not_shipping FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id WHERE a.name = ? ORDER BY a.created_at DESC LIMIT 40";
+/** The name's newest forty decisions by the (name, created_at) index, each with the version it decided and its review's not_shipping by the review's primary key. */
+export const DECISIONS_OF_SQL = "SELECT a.arch, a.task_id, a.rebuild_task, a.decision, a.withdrawn_at, a.version, v.not_shipping FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id WHERE a.name = ? ORDER BY a.created_at DESC LIMIT 40";
 
 /**
  * The targets of each package named, from what its builds and decisions

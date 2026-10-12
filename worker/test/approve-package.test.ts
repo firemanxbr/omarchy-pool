@@ -32,8 +32,10 @@ import * as openpgp from "openpgp";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { runScheduler } from "../src/scheduler";
+import { checkUpdates } from "../src/updates";
+import { sweepStaging } from "../src/staging";
 import { SET_ASIDE_SQL } from "../src/routes/review";
-import { DECISIONS_OF_SQL } from "../src/targets";
+import { DECISIONS_OF_SQL, settleTargets } from "../src/targets";
 import { assert as answer, createAuthenticator, register } from "./soft-authenticator.mjs";
 
 // The Worker's code, as text (Vite's ?raw): the tests run inside workerd, which has no filesystem.
@@ -263,6 +265,136 @@ describe("one architecture approved alone", () => {
     expect(list.staged.filter((t: any) => t.name === "aside" && (t.waits || t.arch === "aarch64"))).toEqual([]);
   });
 
+  it("is finished later at the same version: the other architecture, built again, is approved as the package, and nothing says it does not ship", async () => {
+    await quiet();
+    expect((await request("late")).status).toBe(201);
+    const cx = await stage(await claim("omw_cx", "x86_64", "late"));
+    const ca = await fail(await claim("omw_ca", "aarch64", "late"));
+    expect((await call("POST", `/factory/tasks/${cx}/build`, {}, "omc_m1")).json).toMatchObject({ arches: ["x86_64"] });
+    const px = await stage(await claim("omw_px", "x86_64", "late"));
+    const first = await approve("m2", px, { only: "x86_64", reason: "aarch64 has no linker yet" });
+    expect(first.status, JSON.stringify(first.json)).toBe(200);
+    expect(first.json).toMatchObject({ not_shipping: { aarch64: ca }, kept: {} });
+    // aarch64 builds after all, at the same version: its requester builds it again, a maintainer has the project build it too.
+    expect((await call("POST", "/factory/packages/late/build", { arches: ["aarch64"] }, "omc_alice")).status).toBe(201);
+    const ca2 = await stage(await claim("omw_ca", "aarch64", "late"));
+    expect((await call("POST", `/factory/tasks/${ca2}/build`, {}, "omc_m1")).json).toMatchObject({ arches: ["aarch64"] });
+    const pa = await stage(await claim("omw_pa", "aarch64", "late"));
+    expect(await targetsOf("late")).toEqual({ x86_64: { status: "approved", task: px }, aarch64: { status: "reviewed", task: pa } });
+    // x86_64 is approved at this version: the package is whole with aarch64, and aarch64 alone would leave nothing out.
+    expect(await canOf(pa)).toMatchObject({ approve: true, approve_only: false, why: { approve_only: "x86_64 is approved at this version already: approve the package, it leaves nothing out" } });
+    const alone = await approve("m2", pa, { only: "aarch64", reason: "said of a package that is whole" });
+    expect([alone.status, alone.json.error]).toEqual([409, "x86_64 is approved at this version already: approve the package, it leaves nothing out"]);
+    const ok = await approve("m2", pa, { note: "aarch64 links now" });
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
+    // The review covers what it adds — aarch64 — and sets nothing aside: x86_64 is never written as not shipping.
+    expect(ok.json).toMatchObject({ arches: ["aarch64"], not_shipping: {}, kept: {}, only_reason: null, set_aside: [] });
+    expect(await env.DB.prepare("SELECT arches, only_reason, not_shipping FROM reviews WHERE id = ?").bind(ok.json.review).first()).toEqual({ arches: '["aarch64"]', only_reason: null, not_shipping: "{}" });
+    expect(await recordOf(ok.json.record)).toMatchObject({ scope: "package", arches: ["aarch64"], not_shipping: {}, kept: {} });
+    const line = (await env.DB.prepare("SELECT summary FROM events WHERE kind = 'approve' AND json_extract(payload, '$.review') = ?").bind(ok.json.review).first<{ summary: string }>())!.summary;
+    expect(line).toMatch(/^late 1\.0 \(aarch64\) approved by m2 /);
+    expect(line).not.toMatch(/not ship/);
+    expect(await targetsOf("late")).toEqual({ x86_64: { status: "approved", task: px }, aarch64: { status: "approved", task: pa } });
+  });
+
+  it("on a bump keeps an architecture whose new version did not build at the version in the pool: approved alone, the other stays, never written as not shipping", async () => {
+    await quiet();
+    // kept 1.0, approved on both architectures by m2 and served — its recipe on GitHub.
+    await env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status, detail) VALUES ('kept', 'alice', 'https://github.com/alice/kept', '["x86_64","aarch64"]', 'published', 'in the pool')`).run();
+    const review = (await env.DB.prepare(`INSERT INTO reviews (name, version, decision, by, arches) VALUES ('kept', '1.0-1', 'approved', 'm2', '["x86_64","aarch64"]') RETURNING id`).first<{ id: number }>())!.id;
+    const v1: Record<string, number> = {};
+    for (const arch of ["x86_64", "aarch64"]) {
+      // Each architecture's two halves: the contributor's build, and the project's build of it that the approval stands on and the pool serves.
+      const from = (await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind) VALUES ('kept', ?, '1.0-1', 'draft:x', 'contributor', 100, 'staged', 0, 'community', 'alice', 'build') RETURNING id").bind(arch).first<{ id: number }>())!.id;
+      v1[arch] = (await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, params) VALUES ('kept', ?, '1.0-1', 'draft:x', 'review', 100, 'done', 0, 'project', 'alice', 'build', ?) RETURNING id").bind(arch, JSON.stringify({ review: from })).first<{ id: number }>())!.id;
+      await env.DB.prepare("INSERT INTO approvals (task_id, name, arch, version, decision, by, rebuild_task, review_id) VALUES (?, 'kept', ?, '1.0-1', 'approved', 'm2', ?, ?)").bind(v1[arch], arch, v1[arch], review).run();
+    }
+    expect(await settleTargets(env, "kept")).toEqual({ kept: { x86_64: { status: "published", task: v1.x86_64 }, aarch64: { status: "published", task: v1.aarch64 } } });
+    // Upstream releases 2.0.0 (another day than the cron's test below): the bump is queued, x86_64 builds, aarch64 does not.
+    const github = async (input: RequestInfo | URL) => (String(input instanceof Request ? input.url : input) === "https://api.github.com/repos/alice/kept/releases/latest" ? new Response(JSON.stringify({ tag_name: "v2.0.0" }), { status: 200 }) : new Response("not found", { status: 404 }));
+    expect(await checkUpdates(env, new Date("2026-10-01T06:00:00Z"), github as typeof fetch)).toContain("kept: v2.0.0 queued");
+    const bx = await stage(await claim("omw_cx", "x86_64", "kept"), "2.0.0-1");
+    const ba = await fail(await claim("omw_ca", "aarch64", "kept"));
+    expect((await call("POST", `/factory/tasks/${bx}/build`, {}, "omc_m1")).json).toMatchObject({ arches: ["x86_64"] });
+    const px = await stage(await claim("omw_px", "x86_64", "kept"), "2.0.0-1");
+    // aarch64 1.0 is what pacman installs: the package's 2.0.0 is refused, and x86_64 alone is offered with aarch64 kept where it is.
+    expect(await targetsOf("kept")).toEqual({ x86_64: { status: "reviewed", task: px }, aarch64: { status: "published", task: v1.aarch64 } });
+    const why = `aarch64 is in the pool at another version only (task ${v1.aarch64}): the package is approved once every architecture it names is built again by the project — or approve x86_64 only, with the reason aarch64 stays at 1.0-1`;
+    expect(await canOf(px)).toMatchObject({ approve: false, approve_only: true, why: { approve: why } });
+    const ok = await approve("m2", px, { only: "x86_64", reason: `aarch64 2.0.0 fails to link (task ${ba})` });
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
+    expect(ok.json).toMatchObject({ arches: ["x86_64"], not_shipping: {}, kept: { aarch64: "1.0-1" }, only_reason: `aarch64 2.0.0 fails to link (task ${ba})`, set_aside: [] });
+    // Nothing on the record says aarch64 does not ship: the review sets nothing aside, the record and the journal say it stays at 1.0-1.
+    expect(await env.DB.prepare("SELECT only_reason, not_shipping FROM reviews WHERE id = ?").bind(ok.json.review).first()).toEqual({ only_reason: `aarch64 2.0.0 fails to link (task ${ba})`, not_shipping: "{}" });
+    expect(await recordOf(ok.json.record)).toMatchObject({ scope: "architecture", not_shipping: {}, kept: { aarch64: "1.0-1" } });
+    const line = (await env.DB.prepare("SELECT summary FROM events WHERE kind = 'approve' AND json_extract(payload, '$.review') = ?").bind(ok.json.review).first<{ summary: string }>())!.summary;
+    expect(line).toMatch(/^kept 2\.0\.0-1 \(x86_64 only: aarch64 2\.0\.0 fails to link \(task \d+\)\) approved by m2 .*; aarch64 stays at 1\.0-1$/);
+    expect(line).not.toMatch(/not ship/);
+    expect((await env.DB.prepare("SELECT detail FROM factory_packages WHERE name = 'kept'").first<{ detail: string }>())!.detail).toBe(`2.0.0-1 for x86_64 only approved by m2 (aarch64 stays at 1.0-1: aarch64 2.0.0 fails to link (task ${ba})); publishing the project's build (job ${ok.json.publish})`);
+    expect(await targetsOf("kept")).toEqual({ x86_64: { status: "approved", task: px }, aarch64: { status: "published", task: v1.aarch64 } });
+  });
+
+  it("is one decision when two maintainers approve each architecture alone at the same moment: the second cancels nothing and writes nothing", async () => {
+    await quiet();
+    expect((await request("race")).status).toBe(201);
+    const cx = await stage(await claim("omw_cx", "x86_64", "race"));
+    const ca = await stage(await claim("omw_ca", "aarch64", "race"));
+    const [rx, ra] = (await call("POST", `/factory/tasks/${cx}/build`, {}, "omc_m1")).json.tasks as number[];
+    expect(await stage(await claim("omw_px", "x86_64", "race"))).toBe(rx);
+    expect(await stage(await claim("omw_pa", "aarch64", "race"))).toBe(ra);
+    // Both read the same facts — each architecture undecided — before either writes: the decisions' batches wait for each other, then run in turn.
+    const [x, a] = [await assertion("m1", `approve:${rx}:x86_64`), await assertion("m2", `approve:${ra}:aarch64`)];
+    const batch = env.DB.batch.bind(env.DB);
+    let waiting: (() => void) | null = null;
+    vi.spyOn(env.DB, "batch").mockImplementation(async (statements) => {
+      if (waiting) { const go = waiting; waiting = null; go(); }
+      else await Promise.race([new Promise<void>((r) => { waiting = r; }), new Promise((r) => setTimeout(r, 2000))]);
+      return batch(statements);
+    });
+    const answers = await Promise.all([
+      fromPage("m1", `/api/v1/factory/tasks/${rx}/approve`, { only: "x86_64", reason: "aarch64 is not wanted here", assertion: x }),
+      fromPage("m2", `/api/v1/factory/tasks/${ra}/approve`, { only: "aarch64", reason: "x86_64 is not wanted here", assertion: a }),
+    ]);
+    vi.restoreAllMocks();
+    const won = answers.find((r) => r.status === 200)!, lost = answers.find((r) => r.status !== 200)!;
+    expect(answers.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(lost.json.error).toBe(`race was decided a moment ago: approved by ${won.json.by}`);
+    // One review, one approval — the winner's — and only the loser's architecture set aside: the winner's build stays staged, and publishes.
+    expect(await counted("SELECT COUNT(*) AS n FROM reviews WHERE name = 'race'")).toBe(1);
+    const mine = won.json.arches[0] === "x86_64" ? rx : ra, theirs = mine === rx ? [ca, ra] : [cx, rx];
+    expect((await env.DB.prepare("SELECT task_id FROM approvals WHERE name = 'race'").all()).results).toEqual([{ task_id: mine }]);
+    expect((await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(mine).first())).toEqual({ status: "staged" });
+    expect([...won.json.set_aside].sort()).toEqual([...theirs].sort());
+    expect((await env.DB.prepare("SELECT json_extract(params, '$.task') AS task FROM build_tasks WHERE name = 'race' AND kind = 'publish'").all()).results).toEqual([{ task: mine }]);
+    // The statement itself never cancels a build a live decision stands on, whatever the round names.
+    expect((await env.DB.prepare(SET_ASIDE_SQL).bind("not this one", JSON.stringify([mine]), JSON.stringify([])).all()).results).toEqual([]);
+  });
+
+  it("stays decided when staging cannot be emptied: the builds set aside are cancelled with the decision, their packages left to the weekly sweep", async () => {
+    await quiet();
+    expect((await request("stuck")).status).toBe(201);
+    const cx = await stage(await claim("omw_cx", "x86_64", "stuck"));
+    const ca = await stage(await claim("omw_ca", "aarch64", "stuck"));
+    const [rx, ra] = (await call("POST", `/factory/tasks/${cx}/build`, {}, "omc_m1")).json.tasks as number[];
+    expect(await stage(await claim("omw_px", "x86_64", "stuck"))).toBe(rx);
+    // R2 refuses every delete for the moment.
+    vi.spyOn(env.STAGING, "delete").mockRejectedValue(new Error("R2 is unavailable"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const ok = await approve("m2", rx, { only: "x86_64", reason: "aarch64 needs hardware this pool lacks" });
+    vi.restoreAllMocks();
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
+    expect([...ok.json.set_aside].sort()).toEqual([ca, ra].sort());
+    // The decision is whole: the publish job, the signed record, the journal line; the builds set aside cancelled in the same batch as the review.
+    expect((await env.DB.prepare("SELECT arch FROM build_tasks WHERE name = 'stuck' AND kind = 'publish'").all()).results).toEqual([{ arch: "x86_64" }]);
+    expect(await recordOf(ok.json.record)).toMatchObject({ scope: "architecture", set_aside: ok.json.set_aside });
+    expect(await counted("SELECT COUNT(*) AS n FROM events WHERE kind = 'approve' AND json_extract(payload, '$.review') = ?", ok.json.review)).toBe(1);
+    expect((await env.DB.prepare("SELECT status FROM build_tasks WHERE id IN (?, ?)").bind(ca, ra).all()).results).toEqual([{ status: "cancelled" }, { status: "cancelled" }]);
+    // The package aarch64's contributor staged is still there, a cancelled build's: the sweep takes it.
+    expect(await counted("SELECT COUNT(*) AS n FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst'", ca)).toBe(1);
+    await sweepStaging(env);
+    expect(await counted("SELECT COUNT(*) AS n FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst'", ca)).toBe(0);
+  });
+
   it("is the solo-maintainer exception's too: its maintainer approves one architecture of their own package, marked self-reviewed", async () => {
     await quiet();
     await env.DB.prepare("INSERT INTO governance_solo (id, maintainer, since, reason) VALUES (1, 'm1', '2026-10-06', 'one maintainer for now')").run();
@@ -338,12 +470,14 @@ describe("nothing is approved by itself", () => {
 
   it("reads by a key: the builds set aside by their ids, a package's decisions by the name's index with each one's review by its primary key", async () => {
     const plan = async (sql: string, args: unknown[]) => (await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...args).all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
-    const aside = await plan(SET_ASIDE_SQL, ["why", JSON.stringify([1, 2])]);
+    const aside = await plan(SET_ASIDE_SQL, ["why", JSON.stringify([1, 2]), JSON.stringify([1, 2, 3])]);
     expect(aside).toMatch(/SEARCH build_tasks USING INTEGER PRIMARY KEY/);
+    // The live decision on each build, and on any build of the round, by the approvals' task index.
+    expect(aside).toMatch(/SEARCH [ad] USING (COVERING )?INDEX idx_approvals_task \(task_id=\?\)/);
     const decided = await plan(DECISIONS_OF_SQL, ["half"]);
     expect(decided).toMatch(/SEARCH a USING INDEX idx_approvals_name \(name=\?\)/);
     expect(decided).toMatch(/SEARCH v USING INTEGER PRIMARY KEY/);
-    for (const p of [aside, decided]) expect(p).not.toMatch(/SCAN (build_tasks|approvals|reviews|[av])\b/);
+    for (const p of [aside, decided]) expect(p).not.toMatch(/SCAN (build_tasks|approvals|reviews|[adv])\b/);
   });
 
   it("writes a decision in one place, reached only by a maintainer's act: the web's door with its passkey gate, or an agent's draft confirmed in the browser", () => {
@@ -356,8 +490,11 @@ describe("nothing is approved by itself", () => {
     // The batch that writes them runs for an approval and a rejection's round, nothing else.
     const review = SOURCES["../src/routes/review.ts"];
     expect(review.match(/await takeRound\(/g)).toHaveLength(2);
-    expect(review).toMatch(/export async function handleApprove\([^)]*\)[^{]*\{[\s\S]*?const review = await takeRound\(/);
-    expect(review).toMatch(/async function closeRound\([^)]*\)[^{]*\{[\s\S]*?const review = await takeRound\(/);
+    expect(review).toMatch(/export async function handleApprove\([^)]*\)[^{]*\{[\s\S]*?const taken = await takeRound\(/);
+    expect(review).toMatch(/async function closeRound\([^)]*\)[^{]*\{[\s\S]*?const taken = await takeRound\(/);
+    // The builds an approval of one architecture sets aside are cancelled in the decision's own batch, first, under its condition.
+    expect(review).toMatch(/async function takeRound\([\s\S]*?env\.DB\.batch\(\[\s*\.\.\.\(aside \? \[env\.DB\.prepare\(SET_ASIDE_SQL\)/);
+    expect(review.match(/prepare\(SET_ASIDE_SQL\)/g)).toHaveLength(1);
     // handleApprove is reached from two places: the web's door, with the passkey's gate for the act the body names, and an agent's draft a maintainer confirmed in the browser.
     expect(where(/\bhandleApprove\b/)).toEqual(["index.ts", "routes/agents.ts", "routes/review.ts"]);
     expect(SOURCES["../src/index.ts"]).toMatch(/handleApprove\(c, Number\(m\[1\]\), request, env, undefined, \(subject\) => webGate\(request, url, env, c\.login, subject\)\)/);

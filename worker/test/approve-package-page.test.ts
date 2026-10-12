@@ -204,6 +204,8 @@ describe("the shell's approveCell, approvedFor and the target's word", () => {
     expect(chips).toContain('<span class="pill tgt none dashed" title="x86_64: set aside by an approval of another architecture alone; the reason is on the record (build #4)">x86_64 · not shipping</span>');
     expect(s.decidedText("only", { arches: ["aarch64"], only_reason: "upstream ships no x86_64 build", not_shipping: { x86_64: 4 }, publishes: { aarch64: 12 } })).toBe('Approved for aarch64 only — the project\'s build goes into edge (publish job <a href="/build/12">#12</a>); x86_64 does not ship.');
     expect(s.decidedText("approve", { arches: ["x86_64", "aarch64"], only_reason: null, not_shipping: {}, publishes: { x86_64: 12, aarch64: 13 } })).toBe('Approved — the project\'s builds go into edge (publish jobs <a href="/build/12">#12</a>, <a href="/build/13">#13</a>).');
+    // A bump whose new version did not build on aarch64: aarch64 stays at the version in the pool, never "does not ship".
+    expect(s.decidedText("only", { arches: ["x86_64"], only_reason: "aarch64 2.0 fails to link", not_shipping: {}, kept: { aarch64: "1.0-1" }, publishes: { x86_64: 14 } })).toBe('Approved for x86_64 only — the project\'s build goes into edge (publish job <a href="/build/14">#14</a>); aarch64 stays at 1.0-1.');
   });
 
   it("posts one architecture alone through the same door, with its reason and the passkey's answer for exactly that act", async () => {
@@ -303,7 +305,34 @@ describe("the package's page", () => {
     expect(decided.ran.colsOf()).toEqual([["x86_64", "ok-t"], ["aarch64 · not shipping", "dim-t"]]);
     const review = decided.ran.stagesOf().find((x: any) => x.id === "review");
     expect(review.sum).toBe("@m2 · rebuilt · approved for x86_64 only");
-    expect(review.full).toBe("@m2 · rebuilt · approved for x86_64 only — approved for x86_64 only: upstream ships no aarch64 build");
+    // The full line says the scope once, with its reason.
+    expect(review.full).toBe("@m2 · rebuilt · approved for x86_64 only: upstream ships no aarch64 build");
     expect(review.archs).toContain('title="aarch64: not shipping"');
+  });
+
+  it("stops saying an architecture does not ship once it is approved too, at the same version: its column, its Decided cell and the stage's note say where it stands", async () => {
+    // latearch: x86_64 approved alone while aarch64 did not build; aarch64 built again at the same version, and approved as the package.
+    const { px } = await half("latearch");
+    const approveAs = async (task: number, body: Record<string, unknown>) => {
+      const o = await asPage("m2", "POST", "/auth/passkeys/assert", { for: `approve:${task}${typeof body.only === "string" ? `:${body.only}` : ""}` });
+      const assertion = await answer(keys.m2, { challenge: o.json.publicKey.challenge, origin: WEB, rpId: "localhost" });
+      return asPage("m2", "POST", `/api/v1/factory/tasks/${task}/approve`, { ...body, assertion });
+    };
+    expect((await approveAs(px, { only: "x86_64", reason: "aarch64 has no linker yet" })).status).toBe(200);
+    expect((await call("POST", "/factory/packages/latearch/build", { arches: ["aarch64"] }, "omc_alice")).status).toBe(201);
+    const ca = await stage(await claim("omw_ca", "aarch64", "latearch"));
+    expect((await call("POST", `/factory/tasks/${ca}/build`, {}, "omc_m1")).status).toBe(200);
+    const pa = await stage(await claim("omw_pa", "aarch64", "latearch"));
+    const ok = await approveAs(pa, { note: "aarch64 links now" });
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
+    const p = await pageAs("/package/latearch", null, { functions: ["reviewPanel", "colsOf"], fresh: true });
+    await until(() => { try { return p.ran.reviewPanel().includes("Approved for x86_64 only"); } catch { return false; } }, "the decided stage");
+    const panel = p.ran.reviewPanel();
+    // x86_64's approval keeps its own words — x86_64 alone, and why — and nothing says aarch64 does not ship: it is approved.
+    expect(panel).toContain("Approved for x86_64 only: “aarch64 has no linker yet”.");
+    expect(panel).not.toContain("does not ship");
+    expect(panel).not.toContain("<small>not shipping</small>");
+    expect(panel).toContain("approved for aarch64 by m2");
+    expect(p.ran.colsOf()).toEqual([["x86_64", "ok-t"], ["aarch64", "ok-t"]]);
   });
 });

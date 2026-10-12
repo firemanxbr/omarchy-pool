@@ -3940,7 +3940,9 @@ decides on their own package, and never on a contributor's bytes:
   with the reason while one is still building or did not build) — or
   **Approve <arch> only**, with why the others do not ship (#416: on the
   record and the package's page; their builds in review stop, the
-  architecture `not shipping` until a newer build of it), in
+  architecture `not shipping` until a newer build of it — one an older
+  version's approval still serves stays at that version; once the other
+  builds at the same version, *Approve package* adds it), in
   the browser with your passkey — your first is added on your own page
   (`/user/<login>#passkeys`), or in the Approve dialog itself, which
   registers it and then approves with it (#287); a lost one is reset by
