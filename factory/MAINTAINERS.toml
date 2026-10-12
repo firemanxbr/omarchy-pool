@@ -48,7 +48,7 @@ maintainers = ["firemanxbr", "maralcbr"]
 [solo]
 maintainer = "firemanxbr"
 since = "2026-10-06"
-reason = "maralcbr has no time or machines for the pool (#332): one active maintainer and one host until more maintainers join"
+reason = "one active maintainer and one host until more maintainers join"
 
 # The maintainers' co-signature (#330, design v2 D1 b and D25). Beside
 # release.yml's keyless signature, every host bundle a host agent takes

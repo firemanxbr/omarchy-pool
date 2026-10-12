@@ -4228,7 +4228,7 @@ write by hand:
 [solo]
 maintainer = "firemanxbr"
 since = "2026-10-06"
-reason = "maralcbr has no time or machines for the pool (#332): one active maintainer and one host until more maintainers join"
+reason = "one active maintainer and one host until more maintainers join"
 ```
 
 **Turning it on** is a governance pull request adding the table, like any
