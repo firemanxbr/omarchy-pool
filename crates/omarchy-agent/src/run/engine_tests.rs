@@ -20,7 +20,9 @@
 //! so are #325's settings, narrowed into the file the dispatcher mounts while the task runs
 //! on, and `diagnostics` reading the stand-in's own log, scrubbed; and #328's widening the
 //! owner's passkey signed, counted into the file the dispatcher mounts, with an agent key
-//! sealed to the host that the dispatcher never sees. The owner's runtime switch from one
+//! sealed to the host that the dispatcher never sees; and #419's host with no agent keys,
+//! whose keys file no probe mount ever makes a directory of, given them later by install
+//! and by its owner. The owner's runtime switch from one
 //! real engine to another is `tests/agent-runtime-switch.sh`'s. The same rollouts on the
 //! Quadlet driver (#330) — the set as a unit of the user's own systemd, on rootless podman,
 //! with no compose — and #327's token file and its rotation there are
@@ -1369,6 +1371,381 @@ fn real_engine_owner_widens_the_mounted_capacity_and_seals_keys_the_dispatcher_n
     );
     assert_eq!(read, None, "the dispatcher reads agent.env");
     assert_eq!(h.task_state(), task0);
+}
+
+// ---------------------------------------------------------------------------------------
+// #419: a host with no agent keys, then given them by install and by its owner.
+
+/// The probe's keys mount as the dispatcher writes it (`keys_mount`,
+/// crates/pkg-repo/src/dispatch/spec.rs), run through the pinned docker CLI as `user` with
+/// every capability dropped, as its probe and agent sidecars run (#399); here with no network,
+/// and the stand-in's `cat` where the worker image's `agent --probe` reads the keys. Whether
+/// the container ran, and what it and the engine said.
+fn mount_keys(h: &Host, file: &Path, user: Option<&str>) -> (bool, String) {
+    let mount = format!(
+        "type=bind,source={},target=/run/omarchy/agent.env,readonly",
+        file.display()
+    );
+    let mut args = vec!["run", "--rm", "--network", "none"];
+    if let Some(u) = user {
+        args.extend(["--user", u]);
+    }
+    args.extend([
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--mount",
+        &mount,
+        &h.image,
+        "cat",
+        "/run/omarchy/agent.env",
+    ]);
+    let out = Command::new(&h.tools.docker)
+        .env_clear()
+        .env("DOCKER_HOST", format!("unix://{}", h.socket.display()))
+        .env("DOCKER_CONFIG", h.dir.join("data/docker-config"))
+        .args(&args)
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// Install's terminal and network, never asked here: `--agent-env-from` with `--yes`, and no
+/// `GITHUB_TOKEN` among the keys.
+struct NoTty;
+
+impl crate::install::Sys for NoTty {
+    fn run_env(
+        &mut self,
+        prog: &str,
+        _: &[&str],
+        _: &[(&'static str, String)],
+    ) -> Result<String, String> {
+        Err(format!("{prog}: not run here"))
+    }
+    fn confirm(&mut self, _: &str) -> Result<bool, String> {
+        Err("no terminal here".into())
+    }
+    fn ask_keys(&mut self, _: &str) -> Result<String, String> {
+        Err("no terminal here".into())
+    }
+    fn github_scopes(&mut self, _: &str) -> Result<Option<String>, String> {
+        Err("no network here".into())
+    }
+    fn download(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        Err(format!("{url}: no network here"))
+    }
+    fn download_if_any(&mut self, url: &str) -> Result<Option<Vec<u8>>, String> {
+        Err(format!("{url}: no network here"))
+    }
+}
+
+impl Host {
+    /// `name` in the running dispatcher's environment as `docker inspect` shows it — what
+    /// `pkg-repo dispatch` reads its flags from (`OMARCHY_SECRETS_DIR`, `OMARCHY_AGENT_USER`,
+    /// `OMARCHY_AGENT_HELD`) — when it is there and not empty.
+    fn dispatcher_var(&self, name: &str) -> Option<String> {
+        let env = self.docker(&[
+            "inspect",
+            "-f",
+            "{{json .Config.Env}}",
+            &self.dispatcher().0,
+        ]);
+        let env: Vec<String> = serde_json::from_str(&env).unwrap();
+        let prefix = format!("{name}=");
+        env.iter()
+            .find_map(|kv| kv.strip_prefix(&prefix))
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// What `pkg-repo dispatch` does with the agent keys, from its own environment: with
+    /// `OMARCHY_AGENT_HELD` it starts no probe and no agent sidecar (`Net::env_file`,
+    /// crates/pkg-repo/src/dispatch/mod.rs), `None`; otherwise its probe mounts
+    /// `OMARCHY_SECRETS_DIR/agent.env` as `OMARCHY_AGENT_USER` ([`mount_keys`]).
+    fn dispatcher_reads_keys(&self) -> Option<(bool, String)> {
+        if self.dispatcher_var("OMARCHY_AGENT_HELD").is_some() {
+            return None;
+        }
+        let dir = self
+            .dispatcher_var("OMARCHY_SECRETS_DIR")
+            .expect("the dispatcher's OMARCHY_SECRETS_DIR");
+        let user = self.dispatcher_var("OMARCHY_AGENT_USER");
+        Some(mount_keys(
+            self,
+            &Path::new(&dir).join("agent.env"),
+            user.as_deref(),
+        ))
+    }
+
+    /// Ticks until no round runs, the set runs from the inputs on disk, and the dispatcher's
+    /// environment holds its model kinds for no keys (`held`) or names who reads them.
+    fn keys_settled(&mut self, what: &str, held: bool) {
+        self.until(what, Duration::from_secs(300), |h| {
+            h.agent.state.rollout.step == Step::Idle
+                && h.inputs_applied()
+                && if held {
+                    h.dispatcher_var("OMARCHY_AGENT_HELD").as_deref() == Some("no-keys")
+                        && h.dispatcher_var("OMARCHY_AGENT_USER").is_none()
+                } else {
+                    h.dispatcher_var("OMARCHY_AGENT_USER").is_some()
+                        && h.dispatcher_var("OMARCHY_AGENT_HELD").is_none()
+                }
+        });
+    }
+
+    /// The host running a while with no keys file, its set settled: what the dispatcher does
+    /// with the keys — nothing — and nothing at agent.env, then the loop's minute, `minutes`
+    /// times; the dispatcher's environment holds its model kinds throughout.
+    fn a_while_without_keys(&mut self, minutes: u32) {
+        let keys = self.agent.cfg.secrets_dir.join("agent.env");
+        self.until("the set settled", Duration::from_secs(300), |h| {
+            h.agent.state.rollout.step == Step::Idle && h.inputs_applied()
+        });
+        for _ in 0..minutes {
+            let probed = self.dispatcher_reads_keys();
+            let there = fs::symlink_metadata(&keys).map(|m| m.file_type());
+            assert!(
+                probed.is_none() && there.is_err(),
+                "a host with no keys file: the dispatcher's probe {probed:?} (its OMARCHY_AGENT_USER {:?}), and {} is {there:?}",
+                self.dispatcher_var("OMARCHY_AGENT_USER"),
+                keys.display()
+            );
+            assert_eq!(
+                self.dispatcher_var("OMARCHY_AGENT_HELD").as_deref(),
+                Some("no-keys")
+            );
+            self.agent.host_env.as_mut().unwrap().next_at = 0;
+            self.tick(false);
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+}
+
+/// #419 on a real engine, as found on the Studio's 4K VM host (rootless podman behind docker's
+/// CLI): a host installed without agent keys runs a while, then is given them by install's own
+/// step (`--agent-env-from`) and, taken away again, by *Set agent keys* sealed in its owner's
+/// browser. Both work — the recreated dispatcher's probe reads them as their owner as this
+/// engine shows it — and `agent.env` is never a directory: while there is no keys file the
+/// dispatcher's environment holds its model kinds (`OMARCHY_AGENT_HELD=no-keys`), so nothing
+/// mounts it. First, what this engine makes of the probe's mount of a keys file that is not
+/// there: podman's docker API makes every missing bind source an empty 0755 directory, `--mount`
+/// included (`pkg/api/handlers/compat/containers_create.go`, 4.9 to 6.0), and docker refuses the
+/// container. Before #419 a host without keys named `OMARCHY_AGENT_USER` all the same, so its
+/// dispatcher probed, and on podman made the directory that refused the keys given later.
+#[test]
+#[ignore = "needs a real engine: tests/agent-host-orders.sh"]
+#[allow(clippy::too_many_lines)] // one host, one story: without keys, keyed by install, then by its owner
+fn real_engine_a_host_without_keys_mounts_none_and_takes_them_from_install_and_its_owner() {
+    use crate::dispatcher_env::{self, Envelope, Refresh, Rendered, Sources};
+    use crate::owner::tests::Authenticator;
+    use crate::run::pool::Signed;
+    const BY_INSTALL: &str = "sk-ant-engine-install-5d21e0";
+    const BY_OWNER: &str = "sk-ant-engine-owner-8b4f17";
+    let mut h = host();
+    // A Linux host's agent, also where the test runs on a Mac against a podman machine: its
+    // seal key in its state directory, not a keychain.
+    h.agent.mac = false;
+    let secrets = h.agent.cfg.secrets_dir.clone();
+    let keys = secrets.join("agent.env");
+    fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700)).unwrap();
+    // The engine as install records it (`set.engine`): rootless podman's root is this user,
+    // the keys' owner, so its sidecars read them as 0:0 (#399).
+    let rootless = h
+        .docker(&["info", "--format", "{{json .SecurityOptions}}"])
+        .contains("name=rootless");
+    let podman = h
+        .docker(&["version", "--format", "{{json .Server.Components}}"])
+        .contains("Podman Engine");
+    if rootless {
+        let path = h.agent.paths.agent_toml();
+        let toml = fs::read_to_string(&path)
+            .unwrap()
+            .replace("\n[envelope]\n", "\nengine = \"rootless\"\n[envelope]\n");
+        fs::write(&path, &toml).unwrap();
+        h.agent.cfg = Config::parse(&toml).unwrap();
+    }
+    let engine = format!(
+        "{} {}",
+        if rootless { "rootless" } else { "rootful" },
+        if podman { "podman" } else { "docker" }
+    );
+
+    // What this engine makes of the probe's mount of a keys file that is not there.
+    let scratch = h.dir.join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let (ran, said) = mount_keys(&h, &scratch.join("agent.env"), None);
+    let made = fs::symlink_metadata(scratch.join("agent.env")).ok();
+    println!(
+        "{engine}: the probe's mount of a keys file that is not there {}; the container {}: {}",
+        match &made {
+            Some(m) if m.is_dir() => format!(
+                "made an empty directory of it ({:o})",
+                m.permissions().mode() & 0o777
+            ),
+            Some(m) => format!("made a {:?} of it", m.file_type()),
+            None => "made nothing".into(),
+        },
+        if ran { "ran" } else { "failed" },
+        said.trim()
+    );
+    assert!(!ran, "a keys file that is not there was read: {said}");
+    if podman {
+        assert!(
+            made.as_ref().is_some_and(fs::Metadata::is_dir)
+                && fs::read_dir(scratch.join("agent.env"))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "podman's docker API made no empty directory of a missing bind source: {made:?}"
+        );
+    } else {
+        assert!(
+            made.is_none(),
+            "docker made {made:?} of a missing bind source"
+        );
+    }
+
+    // Installed with --yes and no keys: the loop's minute renders the hold, which the
+    // dispatcher's environment carries from the first round on.
+    h.agent.host_env = Some(crate::run::agent::HostEnv::new(Sources::system()));
+    h.publish("v1.0.0", "ok");
+    h.target("v1.0.0");
+    h.round("v1.0.0");
+    assert_eq!(
+        h.agent.state.round.outcome, "ok",
+        "{:?}",
+        h.agent.state.round
+    );
+    let task0 = h.task_state();
+    // It runs a while: no probe, nothing at agent.env.
+    h.a_while_without_keys(5);
+
+    // install --agent-env-from: its own keys step, then etc/dispatcher.env rendered from them
+    // as its apply does next (install/mod.rs).
+    let given = h.dir.join("keys.env");
+    fs::write(&given, format!("ANTHROPIC_API_KEY={BY_INSTALL}\n")).unwrap();
+    let values = crate::install::envelope::Values {
+        pool: h.agent.cfg.pool.clone(),
+        driver: h.agent.cfg.driver,
+        set_dir: h.agent.cfg.set_dir.clone(),
+        work_root: h.agent.cfg.work_root.clone(),
+        secrets_dir: secrets.clone(),
+        socket: h.socket.clone(),
+        socket_mount: h.socket.clone(),
+        task_subnets: "10.231.0.0/16".into(),
+        rootful: !rootless,
+        userns_remap: false,
+        dedicated: true,
+        direct_network: false,
+        max_units: None,
+        max_cpus: None,
+        max_mem_gb: None,
+        emulate: None,
+        vm: None,
+    };
+    let mut out = Vec::new();
+    crate::install::agent_keys(Some(&given), true, &values, &mut NoTty, &mut out)
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains(&format!("wrote {} (0600", keys.display())) && !out.contains("directory"),
+        "{out}"
+    );
+    let rendered = Rendered::now(
+        &Sources::system(),
+        &h.agent.paths.data,
+        Some(Envelope::of_data_dir(&h.agent.paths.data).unwrap().unwrap()),
+    );
+    assert_eq!(
+        dispatcher_env::refresh(&dispatcher_env::path_in(&h.agent.cfg.set_dir), &rendered),
+        Ok(Refresh::Written)
+    );
+    // The loop recreates the dispatcher with the keys' owner, whose probe reads them.
+    h.keys_settled("the dispatcher recreated with the keys' owner", false);
+    let user = h.dispatcher_var("OMARCHY_AGENT_USER").unwrap();
+    if rootless {
+        assert_eq!(user, "0:0");
+    }
+    let (ran, read) = h.dispatcher_reads_keys().unwrap();
+    assert!(
+        ran && read.contains(&format!("ANTHROPIC_API_KEY={BY_INSTALL}")),
+        "{engine}: the probe as {user} did not read the keys install wrote: {read}"
+    );
+    let m = fs::symlink_metadata(&keys).unwrap();
+    assert!(m.is_file() && m.permissions().mode() & 0o777 == 0o600);
+    println!("{engine}: install's keys read by the dispatcher's probe as {user}");
+
+    // Taken away (the owner removes the file): held again within the minute, and a while.
+    fs::remove_file(&keys).unwrap();
+    h.agent.host_env.as_mut().unwrap().next_at = 0;
+    h.tick(false);
+    h.keys_settled("the dispatcher held again", true);
+    h.a_while_without_keys(3);
+
+    // Set agent keys: a key sealed to the host's seal key in its owner's browser, signed with
+    // the passkey pinned at the host.
+    let host_id = h.agent.cfg.host_id.clone();
+    let owner = Authenticator::new();
+    let now = crate::run::now();
+    crate::owner::pin(
+        &h.agent.paths.data.join("state"),
+        &host_id,
+        &h.agent.cfg.pool,
+        &owner.pin(&host_id, now),
+        now,
+    )
+    .unwrap();
+    let public = h.agent.seal_key(now).unwrap().public_b64u();
+    let raw = crate::owner::webauthn::unb64(&public, "the seal key", 64).unwrap();
+    let sealed = crate::owner::seal::seal(&raw, &host_id, "ANTHROPIC_API_KEY", BY_OWNER);
+    let (doc, assertion) = owner.sign(
+        "set-agent-keys",
+        &host_id,
+        1,
+        now,
+        &serde_json::json!({"seal_key": public, "keys": [sealed]}),
+    );
+    h.give(&[(
+        OrderKind::SetAgentKeys(Some(Signed { doc, assertion })),
+        "ho_it_keys_419",
+    )]);
+    let (outcome, detail) = h.answer("ho_it_keys_419").unwrap();
+    assert_eq!(outcome, "done", "{detail}");
+    assert!(
+        !detail.contains(BY_OWNER) && !detail.contains("directory"),
+        "{detail}"
+    );
+    h.keys_settled("the dispatcher recreated with the owner's keys", false);
+    let (ran, read) = h.dispatcher_reads_keys().unwrap();
+    assert!(
+        ran && read.contains(&format!("ANTHROPIC_API_KEY={BY_OWNER}")),
+        "{engine}: the probe did not read the keys the owner set: {read}"
+    );
+    let m = fs::symlink_metadata(&keys).unwrap();
+    assert!(m.is_file() && m.permissions().mode() & 0o777 == 0o600);
+
+    // Never a directory: the loop removed none, nor found one it could not remove.
+    let journal = fs::read_to_string(h.agent.paths.journal()).unwrap_or_default();
+    assert!(
+        !journal.contains("was an empty directory")
+            && !journal.contains("a directory with something in it"),
+        "{journal}"
+    );
+    assert!(!journal.contains(BY_INSTALL) && !journal.contains(BY_OWNER));
+    assert_eq!(h.task_state(), task0, "the task ran on throughout");
+    println!(
+        "{engine}: the owner's keys read by the dispatcher's probe; agent.env never a directory"
+    );
 }
 
 #[test]

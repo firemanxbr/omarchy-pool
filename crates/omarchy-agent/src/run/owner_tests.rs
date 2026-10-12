@@ -654,3 +654,107 @@ fn an_agent_env_that_is_a_link_is_refused_and_not_followed() {
         2
     );
 }
+
+/// #419, as on the Studio's 4K VM host: a host with no agent keys holds its model kinds
+/// (`OMARCHY_AGENT_HELD=no-keys`, rendered by the loop's own minute), and an empty directory
+/// found there before the hold (what the engine made of the sidecars' mount) is
+/// removed by the run loop, which says so; one with something in it is left, said once while it
+/// stays, and *Set agent keys* refuses it before anything changes.
+/// Keys set from the browser then land in agent.env in place of an empty directory, the answer
+/// says so, and the hold ends at once, recreating the dispatcher with the sidecars' user.
+#[test]
+fn keys_set_on_a_host_without_them_replace_an_empty_directory_and_end_its_hold() {
+    let c = cases();
+    let mut w = owned(2);
+    w.agent.host_env = Some(crate::run::agent::HostEnv::new(
+        crate::dispatcher_env::Sources {
+            proc_net: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/addresses/home"),
+            ifconfig: None,
+        },
+    ));
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let keys = w.dir.join("secrets/agent.env");
+    let env_text = || fs::read_to_string(&env).unwrap();
+    let removed = "agent.env was an empty directory, which an engine made of the agent sidecars' mount while there was no keys file (#419): removed";
+    let refused = "agent.env: a directory with something in it, not a file: refused, left as it is (move it away, then try again); the host builds only until it is moved away";
+    w.tick(61);
+    assert!(
+        env_text().contains("\nOMARCHY_AGENT_HELD=no-keys\n")
+            && !env_text().contains("OMARCHY_AGENT_USER"),
+        "{}",
+        env_text()
+    );
+    settle(&mut w);
+    let held = dispatcher_id(&w);
+
+    // The empty directory found there: gone within the minute, said, and still held.
+    fs::create_dir(&keys).unwrap();
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o755)).unwrap();
+    w.tick(61);
+    assert!(!keys.exists());
+    assert_eq!(w.journal().matches(removed).count(), 1, "{}", w.journal());
+    assert!(env_text().contains("\nOMARCHY_AGENT_HELD=no-keys\n"));
+
+    // One with something in it: left as it is by the loop and said once while it stays,
+    // refused by Set agent keys, and the document not taken.
+    fs::create_dir(&keys).unwrap();
+    fs::write(keys.join("mine"), "x").unwrap();
+    w.tick(61);
+    w.tick(61);
+    assert_eq!(fs::read_to_string(keys.join("mine")).unwrap(), "x");
+    assert_eq!(w.journal().matches(refused).count(), 1, "{}", w.journal());
+    assert!(env_text().contains("\nOMARCHY_AGENT_HELD=no-keys\n"));
+    send(
+        &w,
+        &[("ho_k1", OrderKind::SetAgentKeys(Some(signed(&c["keys"]))))],
+    );
+    w.poll();
+    let (outcome, detail) = answer(&w, "ho_k1");
+    assert_eq!(outcome, "refused", "{detail}");
+    assert!(
+        detail.contains(
+            "agent.env: a directory with something in it where the agent keys go: refused"
+        ),
+        "{detail}"
+    );
+    assert_eq!(fs::read_to_string(keys.join("mine")).unwrap(), "x");
+    assert_eq!(
+        crate::owner::Record::load(&w.agent.paths.data.join("state"))
+            .unwrap()
+            .version,
+        2
+    );
+
+    // Emptied, before the loop's next minute: the keys replace it, and the answer says so.
+    fs::remove_file(keys.join("mine")).unwrap();
+    w.tick(3);
+    send(
+        &w,
+        &[("ho_k2", OrderKind::SetAgentKeys(Some(signed(&c["keys"]))))],
+    );
+    w.poll();
+    let (outcome, detail) = answer(&w, "ho_k2");
+    assert_eq!(outcome, "done", "{detail}");
+    assert!(
+        detail.contains(&format!(
+            " in {} (in place of an empty directory found there, #419) — the next agent sidecar reads it",
+            keys.display()
+        )),
+        "{detail}"
+    );
+    assert!(keys.is_file());
+    assert_eq!(
+        fs::metadata(&keys).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // The hold ends at once, not within the minute, and the dispatcher is recreated with it.
+    w.tick(3);
+    let text = env_text();
+    assert!(
+        text.contains("\nOMARCHY_AGENT_USER=") && !text.contains("OMARCHY_AGENT_HELD"),
+        "{text}"
+    );
+    settle(&mut w);
+    assert_ne!(dispatcher_id(&w), held);
+}

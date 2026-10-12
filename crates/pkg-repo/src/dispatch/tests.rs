@@ -4514,6 +4514,94 @@ fn a_host_whose_agent_holds_its_model_kinds_runs_no_probe_and_says_why() {
     assert!(h.engine.has_name(&spec::container_name(11, GEN2)));
 }
 
+/// #419: a host with no keys file — installed without agent keys, as the Studio's 4K VM host was —
+/// is held by its agent (`OMARCHY_AGENT_HELD=no-keys`): no probe and no agent sidecar runs, so no
+/// mount names the missing `agent.env` (podman's docker API makes an empty directory of it, over
+/// which the keys given later could not be written); the claim's `agent` says "no agent keys: builds only" in the failing probe's place,
+/// worded as none of the classes the pool restarts on, a restart of the agent is answered with
+/// it, a model task leased before goes back, and builds run.
+#[test]
+fn a_host_with_no_keys_file_runs_no_probe_and_says_it_builds_only() {
+    use super::AgentHeld;
+    let held = AgentHeld::parse("no-keys").unwrap().unwrap();
+    let why = held.reason();
+    assert!(why.starts_with("no agent keys: builds only. "), "{why}");
+    assert!(
+        why.contains("OMARCHY_SECRETS_DIR/agent.env")
+            && why.contains("Set agent keys")
+            && why.contains("install --agent-env-from")
+            && why.contains("#419"),
+        "{why}"
+    );
+    // Short enough for the host's page, and none of the classes the pool restarts on or puts on a
+    // key, a bill or a provider (worker/src/orders.ts errorClass): "unknown" there.
+    assert!(why.len() <= 300, "{}: {why}", why.len());
+    let lower = why.to_lowercase();
+    for word in [
+        "401",
+        "403",
+        "429",
+        "refused",
+        "not installed",
+        "did not install",
+        "timed out",
+        "timeout",
+        "no answer",
+        "did not answer",
+        "permission denied",
+        "unauthori",
+        "forbidden",
+        "authentication",
+        "credit",
+        "quota",
+        "rate limit",
+        "overloaded",
+        "gateway",
+    ] {
+        assert!(!lower.contains(word), "{word:?} in {why}");
+    }
+
+    let h = H::new();
+    let mut d = h.dispatcher();
+    d.net.agent_held = Some(held);
+    stage_evidence(&h, &[5]);
+    h.give(audit(9, 5, GEN));
+    h.ticks(&mut d, 3);
+    let agent = h.pool.last_claim()["agent"].clone();
+    assert_eq!(agent["probe"], "error", "{agent}");
+    assert_eq!(agent["error"], why, "{agent}");
+    let f = h.pool.fails_of(9);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0]["lost"], true, "{}", f[0]);
+    assert!(
+        f[0].to_string().contains("no agent keys: builds only"),
+        "{}",
+        f[0]
+    );
+    // No probe and no agent sidecar: nothing names the keys file in a mount.
+    assert!(!h
+        .engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.iter().any(|x| x == "--probe" || x.contains("agent.env"))));
+    assert!(!h.engine.has_name(&sidecar(9, GEN, "agent")));
+    h.advance(121);
+    h.give(json!({ "task": null, "orders": [{ "id": format!("wo_{}", "6".repeat(32)), "kind": "restart-agent", "reason": "test", "issued_by": "maintainer" }] }));
+    h.ticks(&mut d, 2);
+    let a = h.pool.answers.lock().unwrap().last().unwrap().1.clone();
+    assert_eq!(
+        (&a["outcome"], &a["code"], &a["detail"]),
+        (&json!("failed"), &json!("not-answering"), &json!(why)),
+        "{a}"
+    );
+    h.advance(121);
+    h.give(community(11, GEN2));
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has_name(&spec::container_name(11, GEN2)));
+}
+
 /// #405: on a remapped daemon a task container's root is the remapped range's first uid on the
 /// host, "other" on what the dispatcher made. Before its container starts, the directories it
 /// writes (`kinds::WRITABLE`: out, log, build, build/cache, pkgcache) and its package's build

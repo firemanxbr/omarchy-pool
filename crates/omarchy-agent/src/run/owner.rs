@@ -10,7 +10,8 @@
 //!   constants and the detected hardware give. The changed `run/capacity.json` or
 //!   `etc/dispatcher.env` recreates the dispatcher, as any change of an input does.
 //! - `set-agent-keys`: each key opened with the seal key and written to
-//!   `OMARCHY_SECRETS_DIR/agent.env`, the owner's other lines kept; a `GITHUB_TOKEN` is
+//!   `OMARCHY_SECRETS_DIR/agent.env`, the owner's other lines kept, in place of an empty
+//!   directory found there while there was no keys file (#419); a `GITHUB_TOKEN` is
 //!   asked of GitHub first and refused with any scope. Nothing else learns a value: the
 //!   dispatcher never mounts the secrets directory (the lint), and the journal, the report
 //!   and the diagnostics scrub every value the file holds.
@@ -27,6 +28,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use crate::install::secrets;
 use crate::owner::keychain::Security;
 use crate::owner::seal::{self, SealKey};
 use crate::owner::{self, Act, Record, Widening};
@@ -273,13 +275,20 @@ impl Agent {
             }
         }
         let dir = self.cfg.secrets_dir.clone();
-        let path = dir.join("agent.env");
+        let path = dir.join(secrets::FILE);
         let text = match fs::symlink_metadata(&path) {
             Ok(m) if m.file_type().is_symlink() => {
                 return Err(format!(
                     "{}: a symbolic link; refused, not followed",
                     path.display()
                 ))
+            }
+            // An empty directory (#419), which an engine made of the agent sidecars' mount
+            // while there was no keys file: no keys yet, and the file replaces it below;
+            // one with something in it is refused before anything changes.
+            Ok(m) if m.is_dir() => {
+                secrets::check(&path)?;
+                String::new()
             }
             Ok(_) => fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -294,15 +303,21 @@ impl Agent {
         }
         rec.save(&state)?;
         crate::install::files::make_dir(&dir)?;
+        let cleared = secrets::clear(&dir)?;
         // Owner-only, as install writes it: the agent sidecars read it as its owner (#399), so a
         // wider mode an owner once gave it for them (0644, which worker-host.md said before) is
         // narrowed back.
-        crate::install::files::write(&dir, "agent.env", new.as_bytes(), 0o600)?;
+        crate::install::files::write(&dir, secrets::FILE, new.as_bytes(), 0o600)?;
         rec.took(order, s.doc.as_bytes());
         let recorded = rec.save(&state);
         // From now on the journal, the report and the diagnostics scrub these values too.
         self.journal
             .set_secrets(super::agent::secrets_of(&self.cfg.set_dir, &dir));
+        // etc/dispatcher.env rendered again now, not within the minute: who the sidecars run as
+        // is the file's owner, and a hold for no keys file (#419) ends with it.
+        if let Some(h) = self.host_env.as_mut() {
+            h.next_at = now;
+        }
         let names = |set: bool| {
             keys.iter()
                 .filter(|(_, v)| v.is_some() == set)
@@ -319,9 +334,14 @@ impl Agent {
             .collect();
         let _ = write!(
             said,
-            "{} in {} — the next agent sidecar reads it; a task already running keeps what it started with",
+            "{} in {}{} — the next agent sidecar reads it; a task already running keeps what it started with",
             parts.join(", "),
-            path.display()
+            path.display(),
+            if cleared.is_some() {
+                " (in place of an empty directory found there, #419)"
+            } else {
+                ""
+            }
         );
         if let Err(e) = recorded {
             let _ = write!(said, "; but the document was not recorded as taken ({e})");
