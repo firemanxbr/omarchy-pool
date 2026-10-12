@@ -2921,9 +2921,10 @@ never its value; take it out again the same way.
 
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,
-Update. A task that hangs is stopped there: Stop its task gives it back to
-the queue once its worker has stopped it, with no restart and no three-hour
-wait.
+Update. Drain and Resume are on its row of its owner's page too, beside
+Revoke, with *Operate →* to the rest (#412). A task that hangs is stopped
+there: Stop its task gives it back to the queue once its worker has
+stopped it, with no restart and no three-hour wait.
 
 Upgrades are **rolling**: a pool release publishes a new image, the
 `updater` service sees the pool's new release within two minutes and
@@ -3438,9 +3439,10 @@ npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, arch, trust,
    the queue three minutes into their registration's drain. A task pinned
    to a drained registration otherwise waits for it until that sweep, and
    goes to any host: the pin's choice — the machine, its agent — is lost.
-4. **Drain the six legacy registrations** — *Drain* on each one's page
-   (`/worker/<id>`), with the reason; or, with your CLI token (`omc_…`, from
-   your page), the same orders in a loop:
+4. **Drain the six legacy registrations** — *Drain* on each one's row of
+   your page (#412) or on its own page (`/worker/<id>`), with the reason;
+   or, with your CLI token (`omc_…`, from your page), the same orders in a
+   loop:
 
    ```bash
    for w in <the six ids>; do
@@ -3908,7 +3910,8 @@ Where to look: Status (workers not ready, outdated, silent since the
 deploy), the Factory's workers card, and a worker's page, `/worker/<id>`,
 with its last orders and its log. What a maintainer, or the worker's owner,
 presses there: Re-check agent, Restart, Restart agent service, Stop its
-task, Drain, Resume, Update. None of them needs the passkey that approve and
+task, Drain, Resume, Update — Drain and Resume also on the worker's row of
+its owner's page (#412). None of them needs the passkey that approve and
 block need (#283); each is on the journal with who pressed it. A worker
 whose task hangs through the release is replaced when its drain's three
 hours end — or sooner, once Stop its task has given that task back.
@@ -4269,7 +4272,8 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   of the architecture with room, contributors' builds in turn by owner —
   and a maintainer reviews the staged build (docs/GOVERNANCE.md).
   The person's page says where the build stands.
-- **Rebuild**: press *Build* on the person's page (the queue, or a legacy
+- **Rebuild**: press *Build all*, or *Build* on one architecture's line, in
+  the package's block on the person's page (the queue, or a legacy
   community set of yours), or `POST $API/factory/packages/<name>/build`; a maintainer's
   `POST $API/factory/enqueue` (`{"name","pkgbuild_ref":"<commit>","version","arches","publish":false}`)
   queues a sizing recipe as a dry run: by hand a build never publishes
