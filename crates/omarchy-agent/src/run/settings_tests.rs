@@ -534,6 +534,7 @@ fn rotate_token_writes_a_new_token_for_the_dispatcher_which_is_recreated_with_it
     w.agent.host_env = Some(HostEnv::new(Sources {
         proc_net: net,
         ifconfig: None,
+        remap: crate::dispatcher_env::remap::Files::at(&w.dir),
     }));
     w.agent.cfg.agent_budget = Budget {
         calls_per_task: Some(40),

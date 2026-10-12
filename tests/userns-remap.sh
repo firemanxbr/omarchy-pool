@@ -10,9 +10,13 @@
 #   0. the engine: the remapped root B:G, read from a container's uid_map and gid_map,
 #      is not 0 (DockerRootDir's B.G and /etc/subuid's dockremap line said beside it);
 #   1. the agent: its capacity probe says `isolation: "subuid"` — what install records as
-#      `envelope.userns_remap` — and `omarchy-agent dispatcher-env --write` renders
-#      `OMARCHY_AGENT_HELD=userns-remap` (#406) and no `OMARCHY_AGENT_USER` from that
-#      envelope; the dispatcher's environment is that file and the token's own file;
+#      `envelope.userns_remap` — and its keys are written by its own writer with the ACL for
+#      the agent sidecars' remapped uid (65533 in, B+65533 on the host, from dockremap's range
+#      in /etc/subuid), which a container started as the probe is reads, and no other uid
+#      (the agent's real-engine test, #405); `omarchy-agent dispatcher-env --write` renders
+#      `OMARCHY_AGENT_REMAPPED_USER=65533:65533`, no `OMARCHY_AGENT_USER` (which a dispatcher
+#      from before #405 would take for the keys' owner) and no hold; the dispatcher's
+#      environment is that file and the token's own file;
 #   2. a community build through the dispatcher, whose stub build script repeats the real
 #      script's ownership steps one for one (its log and verdict as task_mode writes them,
 #      the builder given /build/cache, its package's cache, /build/pkg and /build/out, the
@@ -20,18 +24,26 @@
 #      DownloadUser): its container's root is B (uid_map inside, no UsernsMode, no User),
 #      what it writes in its package's build cache is the builder's B+uid on the host, and it
 #      is built, uploaded and completed with its job token, its containers and network gone;
-#   3. the model kinds held: the dispatcher says so at start, every claim's `agent` says
-#      why, a draft leased anyway is handed back `lost` before anything of it runs, and no
-#      probe, agent sidecar or mount of agent.env is ever made;
+#   3. the model kinds taken again (#405): the dispatcher says at start whom its sidecars
+#      run as (65533:65533, host uid B+65533 through the daemon's maps), its probe — the
+#      stand-in worker image's agent role, which answers with the provider it read from the
+#      keys and the uid it ran as — reads them, so a claim's `agent` is `ok`; a draft runs
+#      with its agent sidecar remapped as 65533:65533 (B+65533 on the host), which reads the
+#      keys and writes its usage into a directory given to that uid, and completes; agent.env
+#      is mounted by the probe and the agent sidecar alone. Then the ACL lost to a
+#      `chmod 600` holds the host (`OMARCHY_AGENT_HELD=keys-acl`), and no keys file holds it
+#      too (`no-keys`, #419);
 #   4. nothing else moves: the dispatcher's real-engine tests on this engine (a task
-#      network with no gateway; the probe's keys test takes its remapped branch).
+#      network with no gateway; the probe's keys test takes its remapped branch, which this
+#      script's agent test and step 3 cover).
 #
 # Every container it starts is labelled with this run's own host id and removed at the end;
 # the dispatcher runs as root, so the work root it made goes with sudo.
 #
 # Requires: docker with userns-remap, root or passwordless sudo, setpriv (util-linux),
 # python3, jq, cargo (or AGENT=<a built omarchy-agent> and PKG_REPO=<a built pkg-repo>).
-#   WORKER_IMAGE  a worker image for the egress sidecars (default: a busybox stand-in built here)
+#   WORKER_IMAGE  a worker image for the sidecars (default: a busybox stand-in built here,
+#                 whose agent role step 3's reads of the keys need: with another, they are skipped)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -108,14 +120,31 @@ out="$("$AGENT" capacity --work-root "$tmp/work-root" --probe-image "$arch_image
 echo "$out" | jq -c '{arch, isolation, dedicated}'
 check "$out" "j['isolation'] == 'subuid'" "the agent sees the remapped daemon"
 echo "ok: the agent's capacity probe says isolation: subuid (install records it as envelope.userns_remap)"
+# The agent keys, as install and Set agent keys write them on such a host (#405): by the agent's own
+# writer, with the ACL for the agent sidecars' remapped uid read from this host's /etc/subuid, which
+# its real-engine test checks against the uid the daemon runs 65533 as, then reads through as the
+# probe is started; they stay in the secrets directory for the dispatcher below.
+image="${BUSYBOX%%@*}"; standin="${image%:*}@${BUSYBOX#*@}"
+mkdir -p "$tmp/secrets"; chmod 700 "$tmp/secrets"
+(cd "$root" && OMARCHY_STANDIN_IMAGE="$standin" OMARCHY_REMAP_SECRETS="$tmp/secrets" cargo test -q --locked -p omarchy-agent --lib -- --ignored --exact --nocapture \
+  dispatcher_env::tests::real_engine_on_a_remapped_daemon_the_sidecars_uid_reads_the_keys_the_agent_wrote) \
+  || fail "the agent's keys and their ACL on the remapped daemon"
+H=$((B + 65533)); HG=$((G + 65533))
+acl_of() { python3 -c '
+import os, struct, sys
+b = os.getxattr(sys.argv[1], "system.posix_acl_access")
+tags = {1: "user:", 2: "user:", 4: "group:", 8: "group:", 0x10: "mask:", 0x20: "other:"}
+perm = lambda p: "".join(c if p & m else "-" for c, m in (("r", 4), ("w", 2), ("x", 1)))
+print(",".join(tags[t] + ("" if i == 0xffffffff else str(i)) + ":" + perm(p) for t, p, i in struct.iter_unpack("<HHI", b[4:])))' "$1"; }
+[[ "$(stat -c '%a %u' "$tmp/secrets/agent.env") $(acl_of "$tmp/secrets/agent.env")" == "640 $(id -u) user::rw-,user:$H:r--,group::---,mask::r--,other::---" ]] \
+  || fail "agent.env is $(stat -c '%a %u' "$tmp/secrets/agent.env") $(acl_of "$tmp/secrets/agent.env" 2>&1), not 640 with an ACL for $H alone"
+echo "ok: the agent wrote agent.env 0640, its owner's and the remapped uid $H's only (user:$H:r--, group::---, other::---)"
 # The agent's data directory as install leaves it on such a host: the envelope with userns_remap,
-# a 0600 agent.env of this user's (never read here: no container user may be its owner), and the
-# env file the enrollment left with its worker token.
+# those keys, and the env file the enrollment left with its worker token.
 token="omw_$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
 agent_data="$tmp/agent"; envfile="$agent_data/sets/host/etc/dispatcher.env"
-mkdir -p "$(dirname "$envfile")" "$tmp/secrets" "$tmp/work" "$tmp/checkout/factory/worker"
-chmod 700 "$agent_data" "$tmp/secrets"
-printf 'FACTORY_PROVIDER=anthropic\nANTHROPIC_API_KEY=sk-ant-not-a-real-key\n' > "$tmp/secrets/agent.env"; chmod 600 "$tmp/secrets/agent.env"
+mkdir -p "$(dirname "$envfile")" "$tmp/work" "$tmp/checkout/factory/worker"
+chmod 700 "$agent_data"
 cat > "$agent_data/agent.toml" <<TOML
 pool = "https://pkgs.omarchy-pool.org"
 host_id = "h_0123456789"
@@ -136,23 +165,39 @@ chmod 600 "$agent_data/agent.toml"
 printf '# worker: remap-test-0a9z\nOMARCHY_WORKER_TOKEN=%s\n' "$token" > "$envfile"; chmod 600 "$envfile"
 "$AGENT" dispatcher-env --data-dir "$agent_data" --write > "$tmp/agent.out" 2>&1 || { cat "$tmp/agent.out" >&2; fail "omarchy-agent dispatcher-env --write"; }
 key() { sed -n "s/^$1=//p" "$envfile"; }
-[[ "$(key OMARCHY_AGENT_HELD)" == userns-remap && -z "$(key OMARCHY_AGENT_USER)" ]] \
-  || fail "the agent did not hold the model kinds: $(grep -E '^OMARCHY_AGENT_(HELD|USER)=' "$envfile" || echo neither)"
+[[ "$(key OMARCHY_AGENT_REMAPPED_USER)" == 65533:65533 && -z "$(key OMARCHY_AGENT_USER)" && -z "$(key OMARCHY_AGENT_HELD)" ]] \
+  || fail "the agent did not name the sidecars' remapped uid alone: $(grep -E '^OMARCHY_AGENT_(HELD|USER|REMAPPED_USER)=' "$envfile" || echo none)"
 [[ "$(key OMARCHY_SECRETS_DIR)" == "$tmp/secrets" ]] || fail "OMARCHY_SECRETS_DIR: $(key OMARCHY_SECRETS_DIR)"
 tokenfile="$agent_data/sets/host/run/host/dispatcher/token"
 [[ "$(cat "$tokenfile" 2>/dev/null)" == "$token" ]] || fail "the worker token is not in run/host/dispatcher/token"
 from_agent=()
 while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || from_agent+=("$line"); done < "$envfile"
-echo "ok: the agent wrote OMARCHY_AGENT_HELD=userns-remap and no OMARCHY_AGENT_USER into etc/dispatcher.env"
+echo "ok: the agent wrote OMARCHY_AGENT_REMAPPED_USER=65533:65533, no OMARCHY_AGENT_USER and no hold into etc/dispatcher.env"
 
 # ---------- 2. a build through the dispatcher ----------
-# The worker image the sidecars run: a stand-in whose egress answers any GET with one line, whatever its arguments.
+# The worker image the sidecars run: a stand-in whose egress answers any GET with one line, whatever
+# its arguments, and whose agent role reads the keys as the real one does: the probe answers its one
+# JSON line with the provider it read and the uid it ran as; a task's agent sidecar writes its usage
+# with the same, then idles until its lease ends.
 if [[ -n "${WORKER_IMAGE:-}" ]]; then
   "$RT" image inspect "$WORKER_IMAGE" >/dev/null 2>&1 || "$RT" pull -q "$WORKER_IMAGE" >/dev/null
   worker_id="$("$RT" image inspect --format '{{.Id}}' "$WORKER_IMAGE")"
 else
   mkdir -p "$tmp/worker-image/www"
-  printf '#!/bin/sh\nexec httpd -f -p 3128 -h /www\n' > "$tmp/worker-image/e"; chmod 755 "$tmp/worker-image/e"
+  cat > "$tmp/worker-image/e" <<'ENTRY'
+#!/bin/sh
+if [ "${OMARCHY_WORKER_ROLE:-}" = agent ]; then
+  me="$(id -u):$(id -g)"
+  p="$(sed -n 's/^FACTORY_PROVIDER=//p' "$OMARCHY_AGENT_ENV" 2>/dev/null)"
+  if [ -n "$p" ]; then said="{\"ok\":true,\"agent\":\"$p/stand-in-as-$me\",\"ms\":1}"
+  else said="{\"ok\":false,\"error\":\"no agent keys read at $OMARCHY_AGENT_ENV as $me\"}"; fi
+  if [ "${1:-}" = --probe ]; then echo "$said"; exit 0; fi
+  [ -z "${BROKER_USAGE_FILE:-}" ] || printf '{"calls":1,"provider":"%s","uid":"%s"}\n' "$p" "$me" > "$BROKER_USAGE_FILE"
+  exec sleep 3600
+fi
+exec httpd -f -p 3128 -h /www
+ENTRY
+  chmod 755 "$tmp/worker-image/e"
   echo remap-egress-ok > "$tmp/worker-image/www/index.html"; chmod -R a+rX "$tmp/worker-image/www"
   printf 'FROM %s\nCOPY e /e\nCOPY www /www\nLABEL org.omarchy-pool.agent.host=%s\nENTRYPOINT ["/e"]\n' "$BUSYBOX" "$host" > "$tmp/worker-image/Containerfile"
   worker_id="$("$RT" build -q -f "$tmp/worker-image/Containerfile" "$tmp/worker-image" | tail -n1)" || fail "the stand-in worker image did not build on this daemon"
@@ -303,8 +348,8 @@ for c in "$(name 1)" "$(name 1)-egress"; do
   "$RT" inspect "$c" | jq -e '.[0] | .HostConfig.UsernsMode == "" and .Config.User == ""' >/dev/null \
     || fail "$c leaves the daemon's remapping or names a user: $("$RT" inspect "$c" | jq -c '.[0] | {UsernsMode: .HostConfig.UsernsMode, User: .Config.User}')"
 done
-mounts="$("$RT" ps -aq --filter "label=org.omarchy-pool.agent.host=$host" | xargs -r "$RT" inspect --format '{{range .Mounts}}{{.Source}} {{end}}')"
-grep -q 'agent\.env' <<<"$mounts" && fail "a container mounts agent.env: $mounts"
+mounts="$("$RT" inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$(name 1)" "$(name 1)-egress")"
+grep -q 'agent\.env' <<<"$mounts" && fail "a build's container or egress sidecar mounts agent.env: $mounts"
 # What the task writes is its root's on the host; what it only reads, and the task directory, the dispatcher's.
 for sub in out log build build/cache pkgcache; do
   [[ "$(owner "$(tdir 1)/$sub")" == "$B:$G" ]] || fail "$sub is $(owner "$(tdir 1)/$sub"), not the task's root $B:$G"
@@ -331,32 +376,75 @@ used="$tmp/work/cache/build/community/$native/uremap/uremap/used"
 grep -q 'could not be set aside' "$tmp/dispatcher.log" && fail "its downloads: $(grep 'could not be set aside' "$tmp/dispatcher.log")"
 echo "ok: a community build on the remapped daemon — built as the builder ($builder in the task, $((B + ${builder%%:*})):$((G + ${builder##*:})) on the host), uploaded and completed with its job token, its containers and network gone"
 
-# ---------- 3. the model kinds held ----------
-grep -q 'no probe and no agent sidecar: model kinds held: this daemon remaps users (userns-remap)' "$tmp/dispatcher.log" \
-  || fail "the dispatcher did not say the model kinds are held"
-give 2 uremap-d "draft:uremap-d"
-until_ 120 "the draft handed back" reported 2 fail
-jq -e '.lost == true and .final == false and (tostring | contains("userns-remap"))' <<<"$(report 2 fail)" >/dev/null || fail "the draft: $(report 2 fail)"
-grep -q "task 2: build uremap-d started" "$tmp/dispatcher.log" && fail "the draft was started: $(grep 'task 2' "$tmp/dispatcher.log")"
-jq -se '[.[] | select(.path == "/api/v1/factory/claim") | .body.agent] | length > 0 and all(.probe == "error" and (.error | contains("userns-remap")))' "$tmp/requests.jsonl" >/dev/null \
-  || fail "a claim whose agent does not say it is held: $(jq -c 'select(.path == "/api/v1/factory/claim") | .body.agent' "$tmp/requests.jsonl" | sort -u)"
-made="$("$RT" events --since "$t0" --until "$(date +%s)" --filter type=container --filter event=create \
-  --filter "label=org.omarchy-pool.agent.host=$host" --format '{{.Actor.Attributes.name}}' | sort -u | tr '\n' ' ')"
-[[ "$made" == *"$(name 1) "* ]] || fail "docker events did not list task 1's container: $made"
-# Task 1's container and its egress sidecar, and the dispatcher's two reads of the task root at
-# start (#405: unnamed, from the worker image, so docker names them adjective_surname): nothing else.
-for c in $made; do
-  [[ "$c" == "$(name 1)" || "$c" == "$(name 1)-egress" || "$c" =~ ^[a-z]+_[a-z]+[0-9]*$ ]] \
-    || fail "made on a host whose model kinds are held: $c ($made)"
-done
-echo "ok: the model kinds held — said at start and in every claim, the draft handed back lost before anything of it ran, no probe or agent sidecar made ($made)"
+# ---------- 3. the model kinds taken again (#405) ----------
+grep -qF "agent sidecars and the probe run as 65533:65533 in this remapped daemon, host uid $H, gid $HG, which agent.env's ACL lets read it (#405)" "$tmp/dispatcher.log" \
+  || fail "the dispatcher did not say its sidecars run as 65533:65533, host $H:$HG: $(grep -m1 'agent sidecar' "$tmp/dispatcher.log" || echo nothing)"
+if [[ -n "${WORKER_IMAGE:-}" ]]; then
+  # A real worker image's probe calls the provider with the stand-in key: what it answers is
+  # the provider's, not whether the keys read, which the stand-in's agent role says.
+  echo "note: WORKER_IMAGE given: the probe's and a draft's reads of the keys need the stand-in's agent role; skipped"
+else
+  agents() { jq -sc '[.[] | select(.path == "/api/v1/factory/claim") | .body.agent | select(. != null)]' "$tmp/requests.jsonl"; }
+  probed() { jq -e 'any(.probe == "ok" and .provider == "anthropic" and .model == "stand-in-as-65533:65533")' <<<"$(agents)" >/dev/null; }
+  until_ 120 "a claim whose probe read the keys as 65533:65533" probed
+  jq -e 'all(.probe == "ok")' <<<"$(agents)" >/dev/null || fail "a claim whose probe did not read the keys: $(agents)"
+  echo "ok: the probe read the keys as 65533:65533 on the remapped daemon, and every claim since says its agent answers"
+  # A draft: its agent sidecar runs remapped as 65533:65533, host uid H, reads the keys and writes its
+  # usage into a directory given to H; agent.env is mounted by it alone.
+  give 2 uremap-d "draft:uremap-d"
+  side="$(name 2)-agent"
+  said_or_failed2() { said 2 || reported 2 fail; }
+  until_ 300 "task 2 ran (its agent sidecar and container started) or failed" said_or_failed2
+  reported 2 fail && fail "the draft failed on the remapped daemon: $(report 2 fail)"
+  "$RT" inspect "$side" | jq -e '.[0] | .Config.User == "65533:65533" and .HostConfig.UsernsMode == "" and .State.Running' >/dev/null \
+    || fail "$side: $("$RT" inspect "$side" | jq -c '.[0] | {User: .Config.User, UsernsMode: .HostConfig.UsernsMode, Running: .State.Running}')"
+  spid="$("$RT" inspect --format '{{.State.Pid}}' "$side")"
+  [[ "$(awk '$1 == "Uid:" { print $2, $3, $4, $5 }' "/proc/$spid/status")" == "$H $H $H $H" ]] \
+    || fail "the agent sidecar's process is not host uid $H: $(grep -E '^(Uid|Gid):' "/proc/$spid/status" | tr '\t\n' '  ')"
+  "$RT" inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$side" | grep -qF "$tmp/secrets/agent.env" || fail "the agent sidecar does not mount agent.env"
+  mounts="$("$RT" inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$(name 2)" "$(name 2)-egress")"
+  grep -q 'agent\.env' <<<"$mounts" && fail "the draft's container or egress sidecar mounts agent.env: $mounts"
+  usage="$(tdir 2)/agent/usage.json"
+  used() { as_root test -s "$usage"; }
+  until_ 30 "the agent sidecar's usage" used
+  [[ "$(as_root cat "$usage")" == '{"calls":1,"provider":"anthropic","uid":"65533:65533"}' ]] || fail "its usage: $(as_root cat "$usage")"
+  [[ "$(owner "$(tdir 2)/agent")" == "$H:$HG" ]] || fail "its usage directory is $(owner "$(tdir 2)/agent"), not the sidecar's $H:$HG"
+  as_root touch "$(tdir 2)/in/finish"
+  done_or_failed2() { reported 2 complete || reported 2 fail; }
+  until_ 300 "task 2 completed" done_or_failed2
+  reported 2 fail && fail "the draft failed on the remapped daemon: $(report 2 fail)"
+  until_ 60 "task 2's containers removed" gone "$side"
+  echo "ok: a draft on the remapped daemon — its agent sidecar remapped as 65533:65533 (host uid $H), the keys read, its usage written into a directory given to $H:$HG, agent.env mounted by it and the probe alone — completed"
+  made="$("$RT" events --since "$t0" --until "$(date +%s)" --filter type=container --filter event=create \
+    --filter "label=org.omarchy-pool.agent.host=$host" --format '{{.Actor.Attributes.name}}' | sort -u | tr '\n' ' ')"
+  [[ "$made" == *"$(name 1) "* && "$made" == *"$side "* ]] || fail "docker events did not list task 1's container and task 2's agent sidecar: $made"
+  # The tasks' containers and sidecars, the probes' (task 0, a generation each), and the dispatcher's
+  # two reads of the remapped maps at start (unnamed, from the worker image, so docker names them
+  # adjective_surname): nothing else.
+  for c in $made; do
+    [[ "$c" == "$(name 1)" || "$c" == "$(name 1)-egress" || "$c" == "$(name 2)" || "$c" == "$(name 2)-egress" || "$c" == "$side" \
+      || "$c" =~ ^omarchy-task-0-g_[0-9a-z]+-(agent|egress)$ || "$c" =~ ^[a-z]+_[a-z]+[0-9]*$ ]] \
+      || fail "made, and not by a task, a probe or the start: $c ($made)"
+  done
+fi
 as_root kill "$pid" 2>/dev/null || true
 for _ in $(seq 30); do [[ -d "/proc/$pid" ]] || break; sleep 1; done
 rm -f "$tmp/dispatcher.pid"
+# The ACL lost (a chmod 600 makes the mask ---): the agent holds the model kinds; no keys file at all,
+# for no keys (#419) — failing closed, so the dispatcher a changed file recreates starts no probe.
+render() { "$AGENT" dispatcher-env --data-dir "$agent_data" --write > "$tmp/agent.out" 2>&1 || { cat "$tmp/agent.out" >&2; fail "omarchy-agent dispatcher-env --write"; }; }
+chmod 600 "$tmp/secrets/agent.env"
+render
+[[ "$(key OMARCHY_AGENT_HELD)" == keys-acl && -z "$(key OMARCHY_AGENT_USER)$(key OMARCHY_AGENT_REMAPPED_USER)" ]] \
+  || fail "a keys file whose ACL was lost: $(grep -E '^OMARCHY_AGENT_(HELD|USER|REMAPPED_USER)=' "$envfile" || echo none)"
+rm "$tmp/secrets/agent.env"
+render
+[[ "$(key OMARCHY_AGENT_HELD)" == no-keys && -z "$(key OMARCHY_AGENT_USER)$(key OMARCHY_AGENT_REMAPPED_USER)" ]] \
+  || fail "no keys file: $(grep -E '^OMARCHY_AGENT_(HELD|USER|REMAPPED_USER)=' "$envfile" || echo none)"
+echo "ok: the ACL lost to a chmod 600 holds the model kinds (OMARCHY_AGENT_HELD=keys-acl), and so does no keys file (no-keys)"
 
 # ---------- 4. the dispatcher's real-engine tests on this engine ----------
-image="${BUSYBOX%%@*}"
-(cd "$root" && OMARCHY_STANDIN_IMAGE="${image%:*}@${BUSYBOX#*@}" cargo test -q --locked -p pkg-repo --lib -- --ignored --exact --nocapture \
+(cd "$root" && OMARCHY_STANDIN_IMAGE="$standin" cargo test -q --locked -p pkg-repo --lib -- --ignored --exact --nocapture \
   dispatch::engine::tests::real_engine_a_task_network_made_here_has_no_gateway \
   dispatch::engine::tests::real_engine_the_probe_reads_owner_only_keys_as_their_owner) \
   || fail "the dispatcher's real-engine tests on the remapped daemon"

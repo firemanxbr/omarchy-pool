@@ -306,8 +306,10 @@ impl Agent {
         let cleared = secrets::clear(&dir)?;
         // Owner-only, as install writes it: the agent sidecars read it as its owner (#399), so a
         // wider mode an owner once gave it for them (0644, which worker-host.md said before) is
-        // narrowed back.
-        crate::install::files::write(&dir, secrets::FILE, new.as_bytes(), 0o600)?;
+        // narrowed back. On a remapped daemon (#405) the ACL that lets the sidecars' one
+        // remapped uid read it is put on with it, and a write that could not leaves the host
+        // held, and says so.
+        let held = secrets::write(&dir, &new, &self.keys_reader())?;
         rec.took(order, s.doc.as_bytes());
         let recorded = rec.save(&state);
         // From now on the journal, the report and the diagnostics scrub these values too.
@@ -343,10 +345,29 @@ impl Agent {
                 ""
             }
         );
+        if let Some(held) = held {
+            let _ = write!(said, "; but the host stays {held}");
+        }
         if let Err(e) = recorded {
             let _ = write!(said, "; but the document was not recorded as taken ({e})");
         }
         Ok(said)
+    }
+
+    /// Who reads the keys besides their owner (#405): on a remapped daemon, the agent sidecars'
+    /// remapped uid from the remap user's range where the run loop reads the host.
+    fn keys_reader(&self) -> Result<Option<u32>, String> {
+        let remap = self
+            .host_env
+            .as_ref()
+            .map_or_else(crate::dispatcher_env::remap::Files::system, |h| {
+                h.sources.remap.clone()
+            });
+        secrets::reader(
+            self.cfg.engine == crate::lint::Engine::Rootful,
+            self.cfg.envelope.userns_remap,
+            &remap,
+        )
     }
 
     /// The report's `owner` (#328): the passkey pinned here (never its key) and the last

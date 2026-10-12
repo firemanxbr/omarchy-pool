@@ -631,6 +631,7 @@ fn an_agent_to_a_release_from_before_the_token_file_puts_the_token_back_before_t
         w.agent.host_env = Some(HostEnv::new(Sources {
             proc_net: w.dir.join("no-proc-net"),
             ifconfig: None,
+            remap: crate::dispatcher_env::remap::Files::at(&w.dir),
         }));
         publish_agent(
             &w.remote,

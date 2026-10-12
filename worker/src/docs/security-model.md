@@ -291,12 +291,28 @@ secret). Everything travels in the `Authorization` header over TLS only.
   from a sidecar lands no higher than one from its task, at the host's
   isolation level. On a daemon with userns-remap no remapped uid is the
   owner, and its sidecars stay remapped as its task containers do (design v2
-  §19.1), so no sidecar can read the file there: the agent holds the host's
-  model kinds instead (`OMARCHY_AGENT_HELD=userns-remap`), the dispatcher
-  starts no probe and no agent sidecar, and the host's page says why. How a
-  remapped host reads its keys is a maintainer's decision still open, and
-  keys do not lift that hold. Any other host with no keys file is held the
-  same way (`OMARCHY_AGENT_HELD=no-keys`, #419), so no mount ever names a file
+  §19.1), so there the sidecars and the probe run as one remapped uid of
+  their own (`65533:65533` inside, the remap user's range start plus 65533 on
+  the host, named in `OMARCHY_AGENT_REMAPPED_USER`, which a dispatcher from
+  before #405 ignores rather than read as the file's owner and give a task's
+  usage directory to host uid 65533) and the agent, the file's owner, gives
+  the file a POSIX ACL that lets that uid read it (#405, the maintainers'
+  decision of 2026-10-08): the file is its owner's and that one uid's, 0640
+  with no group and no other access, put on the new file before its rename
+  whenever the keys are written, with no root, no capability and no visit.
+  It fails closed: an ACL lost (a `chmod`, a copy), one naming another uid, a
+  filesystem that keeps none, or no range the agent can read holds the
+  host's model kinds (`OMARCHY_AGENT_HELD=keys-acl` or `userns-remap`), and
+  so does the dispatcher when the daemon's maps do not hold that uid or
+  `agent.toml`'s `userns_remap` is not the daemon's: it starts no probe and
+  no agent sidecar, and the host's page says why. That uid is in
+  the same remapped range as every task container's: a task root that escapes
+  holds its namespace's capabilities and can become it, and then reaches a
+  running agent sidecar's processes and their mounts as it reaches another
+  task's (above); what keeps the keys at rest from it is the secrets
+  directory, the agent user's and 0700, which no remapped uid may enter, and
+  that only the probe and agent sidecars mount the file. Any host with no
+  keys file is held (`OMARCHY_AGENT_HELD=no-keys`, #419), so no mount ever names a file
   that is not there, which podman's docker API makes a directory of (as it
   did on a rootless podman host). The dispatcher refuses to
   start with an agent key or a GitHub token in its own environment and keeps the

@@ -44,12 +44,16 @@ pub const SEEN_FILE: &str = "egress.json";
 const V6_PREFIX: u8 = 64;
 
 /// Where the kernel's lists are: `/proc/net` on a host, a fixture directory in the tests;
-/// and on a Mac, which has none, the `ifconfig` that lists its interfaces (#320).
+/// and on a Mac, which has none, the `ifconfig` that lists its interfaces (#320). Beside them,
+/// where a remapped daemon's ranges are (#405).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sources {
     pub proc_net: PathBuf,
     /// `/sbin/ifconfig` on macOS; `None` elsewhere.
     pub ifconfig: Option<PathBuf>,
+    /// Where a remapped daemon's ranges are read (#405): the agent sidecars' remapped uid,
+    /// which the keys file's ACL names.
+    pub remap: super::remap::Files,
 }
 
 impl Sources {
@@ -57,6 +61,7 @@ impl Sources {
         Self {
             proc_net: PathBuf::from("/proc/net"),
             ifconfig: cfg!(target_os = "macos").then(|| PathBuf::from(IFCONFIG)),
+            remap: super::remap::Files::system(),
         }
     }
 
