@@ -53,7 +53,7 @@ import {
   hostReason, revertedOf, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
   agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT, asleepNow,
   agentTakesSettings, hostSettingsOf, orderArg, reportedBrakeOf, reportedSettingsOf, DIAGNOSTIC_LINE_MAX, DIAGNOSTIC_LINES, DIAGNOSTICS_MAX_BYTES, HOST_ORDER_ID, HOST_SETTINGS_AGENT, SETTINGS_ORDER_KINDS,
-  poolBehindOf, reportedSoakOf, sandboxAppliedOf, soakOf, HOST_ROW_TOUCH_MIN, PINNED_TOOLS,
+  poolBehindOf, reportedIsolation, reportedSoakOf, sandboxAppliedOf, soakOf, HOST_ROW_TOUCH_MIN, PINNED_TOOLS,
   agentTakesOwner, ownerDoc, readOwnerDoc, reportedOwnerOf, sealKeyOf, sealedKeys, widening, HOST_OWNER_AGENT, OWNER_DOC_TTL_MIN, OWNER_ORDER_KINDS, PIN_DOC_TTL_MIN,
   type Capacity, type HostOrderKind, type Isolation, type OrderArg, type OwnerAct, type OwnerDocInput,
 } from "../hosts";
@@ -1534,9 +1534,11 @@ export async function handleHostToken(s: SignedHost, env: Env): Promise<Response
  * POST /hosts/self/report — the host report (design v2 §17.2), on every
  * change and at least every five minutes, at most 16 KiB. A report that
  * carries what looks like a secret is refused whole (leak.ts). The pool keeps
- * the last one and the columns its pages read; the units are its own count
- * from the reported totals. `asleep: true` (#329) — a Mac about to sleep —
- * gives the host zero free units until a report says otherwise (asleepNow).
+ * the last one and the columns its pages read — the isolation level and
+ * `dedicated` among them, from its runtime or else its capacity (#407,
+ * reportedIsolation) —; the units are its own count from the reported
+ * totals. `asleep: true` (#329) — a Mac about to sleep — gives the host zero
+ * free units until a report says otherwise (asleepNow).
  * D1 is written only on a change (#324): a report the same as the last one,
  * within HOST_ROW_TOUCH_MIN of it, writes nothing (`written: false`).
  */
@@ -1567,8 +1569,12 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   const runtime = r.runtime && typeof r.runtime === "object" ? r.runtime : null;
   // As the enrollment: whole or refused — a cut one would not parse on the hosts' pages.
   if (runtime && JSON.stringify(runtime).length > 2048) return json({ error: "runtime: an object of at most 2 KiB" }, 400, NO_STORE);
-  const isolation = runtime && ISOLATIONS.includes(runtime.isolation) ? (runtime.isolation as string) : h.isolation;
-  const dedicated = runtime && typeof runtime.dedicated === "boolean" ? (runtime.dedicated ? 1 : 0) : h.dedicated;
+  // Its isolation level and `dedicated` (#407): the runtime's word, else its capacity's (run/capacity.json, where an agent up to
+  // 0.5.2 says them), so a daemon moved to userns-remap reads `subuid` from its next report; one it does not say, or says with a
+  // word the pool does not know, keeps the row's.
+  const said = reportedIsolation(runtime, cap ? r.capacity : null);
+  const isolation = said.isolation ?? h.isolation;
+  const dedicated = said.dedicated === undefined ? h.dedicated : said.dedicated ? 1 : 0;
   // A Mac about to sleep, or asleep (#329): from the first report that says so until one that does not (an agent that does not
   // say is awake).
   const asleep = r.asleep === true;
