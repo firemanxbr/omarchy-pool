@@ -105,10 +105,13 @@
 //! directory, `tasks/`, `cache/` and `in` stay its own. Every other engine has
 //! no such root, and nothing changes owner or mode. The agent sidecars and the
 //! probe there run as the one remapped uid the agent names
-//! (`OMARCHY_AGENT_USER=65533:65533`), which agent.env's ACL lets read the keys
-//! (#405): the dispatcher finds it on the host through the same maps
-//! ([`engine::Remap::host_of`]) and gives a model task's usage directory to
-//! it; an id the maps do not hold holds the model kinds instead.
+//! (`OMARCHY_AGENT_REMAPPED_USER=65533:65533`, a variable of its own, which a
+//! dispatcher from before #405 does not take for the keys' owner), which
+//! agent.env's ACL lets read the keys (#405): the dispatcher finds it on the
+//! host through the same maps ([`engine::Remap::host_of`]) and gives a model
+//! task's usage directory to it; an id the maps do not hold, a remapped uid on
+//! a daemon that remaps none, or an owner on one that does holds the model
+//! kinds instead ([`sidecars_on`]).
 //!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
@@ -162,10 +165,11 @@
 //! file stays 0600 and the sidecars keep every capability dropped, so they
 //! read it as its owner — or on a remapped daemon, whose task containers and
 //! sidecars stay remapped (design v2 §19.1), the one remapped uid the file's
-//! ACL lets read it (#405); or, where no container user may read it (a
-//! remapped daemon with no such uid or no such ACL) or where there is no keys
-//! file (`no-keys`, #419: no mount then names a path podman's docker API would
-//! make a directory of), `OMARCHY_AGENT_HELD=<code>` ([`AgentHeld`]): no probe
+//! ACL lets read it, `OMARCHY_AGENT_REMAPPED_USER=65533:65533` (#405); or,
+//! where no container user may read it (a remapped daemon with no such uid or
+//! no such ACL) or where there is no keys file (`no-keys`, #419: no mount then
+//! names a path podman's docker API would make a directory of),
+//! `OMARCHY_AGENT_HELD=<code>` ([`AgentHeld`]): no probe
 //! and no model task runs, and the claim's `agent` says why. A changed
 //! file recreates the dispatcher, which re-adopts its tasks. The dispatcher
 //! keeps the registration's id it learned in `state/host`.
@@ -354,9 +358,13 @@ pub struct Net {
     pub secrets_dir: Option<PathBuf>,
     /// Who the agent sidecars and the probe run as (#399): the keys file's owner as the engine
     /// shows it (`OMARCHY_AGENT_USER`, which the agent writes), or on a remapped daemon the one
-    /// remapped uid the file's ACL names (#405); `None` from an agent before it, the image's
-    /// own user.
+    /// remapped uid the file's ACL names (#405, from `agent_remapped` at start); `None` from an
+    /// agent before it, the image's own user.
     pub agent_user: Option<spec::AgentUser>,
+    /// `OMARCHY_AGENT_REMAPPED_USER` as the agent wrote it (#405): who the sidecars run as inside
+    /// a remapped daemon's user namespace. Settled at start into `agent_user` and `agent_host`,
+    /// or a hold ([`sidecars_on`]), and `None` after.
+    pub agent_remapped: Option<spec::AgentUser>,
     /// That user as the host sees it, where it is another (#405): on a remapped daemon,
     /// `agent_user` through the daemon's maps ([`engine::Remap::host_of`]), to which a model
     /// task's usage directory is given; `None` elsewhere, where it is `agent_user` itself.
@@ -372,7 +380,7 @@ pub struct Net {
     /// egress probe checked; otherwise it is handed back.
     pub direct: bool,
     /// A task container's root as the host sees it on a daemon that remaps users (#405,
-    /// `userns-remap`), asked of the engine at start ([`engine::Cli::task_root`]): the
+    /// `userns-remap`), asked of the engine at start ([`engine::Cli::remap`]): the
     /// directories this dispatcher makes for a task to write are given to it, and its `in`
     /// opened for reading, before its container starts, since a remapped root is "other" on
     /// what host root made. `None` on every other engine, where nothing changes owner or mode.
@@ -387,6 +395,7 @@ impl Default for Net {
             deny: Vec::new(),
             secrets_dir: None,
             agent_user: None,
+            agent_remapped: None,
             agent_host: None,
             agent_held: None,
             caps: budget::Caps::default(),
@@ -429,8 +438,10 @@ impl Net {
 pub struct AgentHeld(String);
 
 impl AgentHeld {
-    /// A remapped daemon whose sidecars' remapped uid is not known (to the agent, or to this
-    /// daemon's maps, #405).
+    /// A remapped daemon whose sidecars' remapped uid is not known (#405): to the agent (every
+    /// agent from before #405 writes it on such a daemon, and one since when it reads no range
+    /// for the remap user), or to this daemon's maps; or the agent's word on the remapping is
+    /// not this daemon's ([`sidecars_on`]).
     pub const REMAP: &'static str = "userns-remap";
 
     /// A code: a lowercase letter, then lowercase letters, digits or `-`, at most 40; empty, none.
@@ -456,7 +467,7 @@ impl AgentHeld {
     /// the codes this release knows, and a newer agent's by its code.
     pub fn reason(&self) -> String {
         match self.0.as_str() {
-            "userns-remap" => "model kinds held: this daemon remaps users (userns-remap), and no remapped uid is known for the agent sidecars to read agent.env as: none in its remap user's range in /etc/subuid (prep-root.sh gives dockremap one), or one the daemon does not map (#405)".into(),
+            "userns-remap" => "model kinds held: the agent sidecars have no remapped uid to read agent.env as on this daemon (userns-remap): an agent from before #405, no range for its remap user in /etc/subuid (prep-root.sh gives dockremap one), one the daemon does not map, or agent.toml's userns_remap is not the daemon's".into(),
             "keys-acl" => "model kinds held: this daemon remaps users, and agent.env has no ACL that lets the agent sidecars' remapped uid read it (lost to a chmod or a copy, another uid's, or a filesystem that keeps none): Set agent keys on the host's page, or install --agent-env-from, writes it with one (#405)".into(),
             "no-keys" => "no agent keys: builds only. No agent keys file at OMARCHY_SECRETS_DIR/agent.env (none, or not a regular file), so no probe and no agent sidecar runs; its owner gives keys with Set agent keys on the host's page, or install --agent-env-from (#419)".into(),
             code => format!("model kinds held by this host's agent (OMARCHY_AGENT_HELD={code}, #399)"),
@@ -2781,6 +2792,51 @@ pub fn loop_watchdog(
     });
 }
 
+/// Who the agent sidecars and the probe run as on this daemon, settled at start (#405) from what
+/// the agent named in `etc/dispatcher.env` and what the engine said (`remap`,
+/// [`engine::Cli::remap`]). On a remapped daemon: the remapped user the agent names
+/// (`OMARCHY_AGENT_REMAPPED_USER`, `65533:65533`) and, through the daemon's maps, that user on
+/// the host (`agent_host`, which agent.env's ACL names and a model task's usage directory is
+/// given to). It holds the model kinds instead (`userns-remap`, failing closed) and says why when
+/// the maps do not hold that user (a remap user's range shorter than 65534 ids), when the agent
+/// names one and this daemon remaps none (agent.toml's `userns_remap` is not this daemon's: the
+/// ACL names a uid no container here runs as), and when it names agent.env's owner
+/// (`OMARCHY_AGENT_USER`) on a daemon that remaps, whose container users the owner is none of.
+/// An agent that holds already, an owner on any other engine, and an agent from before #399
+/// (neither named) are left as they are.
+fn sidecars_on(remap: Option<&engine::Remap>, net: &mut Net) -> Option<String> {
+    let remapped = net.agent_remapped.take();
+    if net.agent_held.is_some() {
+        return None;
+    }
+    let why = match (remap, remapped, net.agent_user) {
+        (Some(r), Some(u), _) => match r.host_of(u.uid, u.gid) {
+            Ok((uid, gid)) => {
+                net.agent_user = Some(u);
+                net.agent_host = Some(spec::AgentUser { uid, gid });
+                return None;
+            }
+            Err(e) => format!(
+                "the agent sidecars' remapped user {}:{} on this daemon: {e}",
+                u.uid, u.gid
+            ),
+        },
+        (Some(_), None, Some(u)) => format!(
+            "OMARCHY_AGENT_USER={}:{} names agent.env's owner, and no container user of this remapped daemon is it (agent.toml says it does not remap: envelope.userns_remap)",
+            u.uid, u.gid
+        ),
+        (None, Some(u), None) => format!(
+            "OMARCHY_AGENT_REMAPPED_USER={}:{} names the agent sidecars' remapped user, and this daemon remaps none (agent.toml says it does: envelope.userns_remap)",
+            u.uid, u.gid
+        ),
+        _ => return None,
+    };
+    net.agent_user = None;
+    net.agent_host = None;
+    net.agent_held = AgentHeld::parse(AgentHeld::REMAP).ok().flatten();
+    Some(why)
+}
+
 /// `pkg-repo dispatch`.
 #[allow(clippy::too_many_lines)] // the start, in its order, then the loop
 pub fn run(opts: &Options) -> Result<()> {
@@ -2840,20 +2896,10 @@ pub fn run(opts: &Options) -> Result<()> {
         ));
     }
     let mut net = opts.net.clone();
-    // The agent sidecars' remapped uid on the host (#405): what agent.env's ACL names and their
-    // usage directories are given to. One the daemon does not map holds the model kinds.
-    if let (Some(r), Some(u), None) = (&remap, net.agent_user, &net.agent_held) {
-        match r.host_of(u.uid, u.gid) {
-            Ok((uid, gid)) => net.agent_host = Some(spec::AgentUser { uid, gid }),
-            Err(e) => {
-                say(format!(
-                    "the agent sidecars' user {}:{} on this remapped daemon: {e}",
-                    u.uid, u.gid
-                ));
-                net.agent_user = None;
-                net.agent_held = AgentHeld::parse(AgentHeld::REMAP).ok().flatten();
-            }
-        }
+    // Who the agent sidecars run as on this daemon (#405): a remapped one's uid on the host, what
+    // agent.env's ACL names and their usage directories are given to, or the model kinds held.
+    if let Some(why) = sidecars_on(remap.as_ref(), &mut net) {
+        say(format!("model kinds held: {why}"));
     }
     if net.secrets_dir.is_some() {
         say(match (&net.agent_held, net.agent_user, net.agent_host) {

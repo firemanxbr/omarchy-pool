@@ -4434,8 +4434,8 @@ fn the_probe_and_the_agent_sidecar_run_as_the_keys_owner_the_agent_named() {
 }
 
 /// #405: on a remapped daemon the agent names the one remapped uid its sidecars read the keys as
-/// (`OMARCHY_AGENT_USER=65533:65533`, which agent.env's ACL lets read it on the host), and the
-/// dispatcher found that uid on the host through the daemon's maps at start (`agent_host`): the
+/// (`OMARCHY_AGENT_REMAPPED_USER=65533:65533`, which agent.env's ACL lets read it on the host), and
+/// the dispatcher found that uid on the host through the daemon's maps at start (`agent_host`): the
 /// probe and a model task's agent sidecar run as 65533:65533 and stay remapped (no `--userns`),
 /// the task container and the egress sidecar as before, and the sidecar's usage directory is
 /// given to the host's uid of it — never to 65533 itself, a uid of the host's own namespace.
@@ -4495,6 +4495,96 @@ fn on_a_remapped_daemon_the_sidecars_run_as_their_remapped_uid_and_write_their_u
     assert_eq!(h.pool.last_claim()["agent"]["probe"], "ok");
 }
 
+/// #405: who the agent sidecars run as, settled at start from what the agent named and the
+/// daemon's maps (`sidecars_on`). On a remapped daemon the agent names its sidecars' remapped user
+/// in a variable of its own (`OMARCHY_AGENT_REMAPPED_USER`, which a dispatcher from before #405
+/// ignores rather than take for the keys' owner); a map that holds it gives the sidecars that
+/// user and its host uid (to which a model task's usage directory is given). One the maps do not
+/// hold, a remapped user on a daemon that remaps none, and an owner on one that does hold the
+/// model kinds (`userns-remap`) and say why, failing closed; an agent that holds already, an owner
+/// elsewhere and an agent from before #399 are left as they are.
+#[test]
+fn a_remapped_daemon_s_sidecars_are_its_remapped_user_on_the_host_or_the_host_is_held() {
+    use super::engine::Remap;
+    use super::{sidecars_on, AgentHeld};
+    let user = |uid, gid| Some(spec::AgentUser { uid, gid });
+    let remapped = Remap::of_maps("0 231072 65536\n", "0 231072 65536\n").unwrap();
+    let short = Remap::of_maps("0 231072 1000\n", "0 231072 65536\n").unwrap();
+    let with = |owner, remapped_user, held: Option<&str>| Net {
+        agent_user: owner,
+        agent_remapped: remapped_user,
+        agent_held: held.and_then(|h| AgentHeld::parse(h).unwrap()),
+        ..net()
+    };
+    let held = || AgentHeld::parse(AgentHeld::REMAP).unwrap();
+
+    // A map that holds 65533: the sidecars run as it, and it is host uid 231072 + 65533.
+    let mut n = with(None, user(65_533, 65_533), None);
+    assert_eq!(sidecars_on(Some(&remapped), &mut n), None);
+    assert_eq!(n.agent_user, user(65_533, 65_533));
+    assert_eq!(n.agent_host, user(296_605, 296_605));
+    assert_eq!((n.agent_held, n.agent_remapped), (None, None));
+
+    // A range too short for it: held, the map said.
+    let mut n = with(None, user(65_533, 65_533), None);
+    let why = sidecars_on(Some(&short), &mut n).expect("held");
+    assert!(
+        why.contains("65533:65533") && why.contains("not mapped"),
+        "{why}"
+    );
+    assert_eq!((n.agent_user, n.agent_host), (None, None));
+    assert_eq!(n.agent_held, held());
+
+    // A remapped user on a daemon that remaps none (agent.toml says it does): held.
+    let mut n = with(None, user(65_533, 65_533), None);
+    let why = sidecars_on(None, &mut n).expect("held");
+    assert!(
+        why.contains("OMARCHY_AGENT_REMAPPED_USER=65533:65533") && why.contains("remaps none"),
+        "{why}"
+    );
+    assert_eq!(
+        (n.agent_user, n.agent_host, n.agent_held),
+        (None, None, held())
+    );
+
+    // agent.env's owner on a daemon that remaps (agent.toml says it does not): no container user
+    // is that owner there, held rather than run as one that reads nothing.
+    let mut n = with(user(1000, 1000), None, None);
+    let why = sidecars_on(Some(&remapped), &mut n).expect("held");
+    assert!(why.contains("OMARCHY_AGENT_USER=1000:1000"), "{why}");
+    assert_eq!(
+        (n.agent_user, n.agent_host, n.agent_held),
+        (None, None, held())
+    );
+
+    // An agent that holds already (keys-acl, no-keys, or one from before #405): left as it is,
+    // whatever else the file still says (a line a newer agent left).
+    for daemon in [Some(&remapped), None] {
+        let mut n = with(None, user(65_533, 65_533), Some("keys-acl"));
+        assert_eq!(sidecars_on(daemon, &mut n), None);
+        assert_eq!(n.agent_held, AgentHeld::parse("keys-acl").unwrap());
+        assert_eq!(
+            (n.agent_user, n.agent_host, n.agent_remapped),
+            (None, None, None)
+        );
+    }
+
+    // Every other engine: the owner as the agent named it, a remapped line left by a newer agent
+    // being no user of this daemon's; and an agent from before #399 (none named) as before.
+    let mut n = with(user(1000, 984), user(65_533, 65_533), None);
+    assert_eq!(sidecars_on(None, &mut n), None);
+    assert_eq!((n.agent_user, n.agent_host), (user(1000, 984), None));
+    assert_eq!((n.agent_held, n.agent_remapped), (None, None));
+    for daemon in [Some(&remapped), None] {
+        let mut n = with(None, None, None);
+        assert_eq!(sidecars_on(daemon, &mut n), None);
+        assert_eq!(
+            (n.agent_user, n.agent_host, n.agent_held),
+            (None, None, None)
+        );
+    }
+}
+
 /// #399, #405: on a remapped daemon whose agent knows no remapped uid for its sidecars, the agent
 /// holds the host's model kinds (`OMARCHY_AGENT_HELD=userns-remap`); and so it does when agent.env
 /// has no ACL that lets that uid read it (`keys-acl`): no probe runs, the claim's `agent` says why
@@ -4531,8 +4621,12 @@ fn a_host_whose_agent_holds_its_model_kinds_runs_no_probe_and_says_why() {
             assert!(!why.to_lowercase().contains(word), "{word:?} in {why}");
         }
     }
+    // True for every agent that writes it: one from before #405 does on every remapped daemon,
+    // one since only when it reads no range for the remap user.
     assert!(
-        why.contains("userns-remap") && why.contains("/etc/subuid") && why.contains("#405"),
+        why.contains("userns-remap")
+            && why.contains("an agent from before #405")
+            && why.contains("/etc/subuid"),
         "{why}"
     );
     assert!(

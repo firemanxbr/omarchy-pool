@@ -1049,21 +1049,6 @@ fn the_agent_sidecars_run_as_the_keys_owner_as_each_engine_shows_it() {
         ]
     );
     assert_eq!(r(None).lines().unwrap(), ["OMARCHY_SECRETS_DIR=/srv/s"]);
-    // #405: on a remapped daemon, the one remapped uid the ACL lets read the keys, inside the
-    // daemon's user namespace (its host uid is the ACL's to name, not the dispatcher's line).
-    assert_eq!(
-        r(Some(KeysUser::Remapped { host_uid: 296_605 }))
-            .lines()
-            .unwrap(),
-        [
-            "OMARCHY_SECRETS_DIR=/srv/s",
-            "OMARCHY_AGENT_USER=65533:65533"
-        ]
-    );
-    assert_eq!(
-        r(Some(KeysUser::Held(HELD_ACL))).lines().unwrap(),
-        ["OMARCHY_SECRETS_DIR=/srv/s", "OMARCHY_AGENT_HELD=keys-acl"]
-    );
     // The agent's to render, as the envelope's lines: an owner's line of the same key is
     // replaced, a hold that ended takes its line out, and before agent.toml (a first
     // enrollment) the file's own lines stay.
@@ -1098,6 +1083,68 @@ fn the_agent_sidecars_run_as_the_keys_owner_as_each_engine_shows_it() {
         .unwrap()
         .contains("\nOMARCHY_AGENT_USER=1000:984\n"));
     assert!(not_secret(AGENT_USER) && not_secret(AGENT_HELD));
+}
+
+/// #405: on a remapped daemon the line names the sidecars' one remapped uid inside the daemon's
+/// user namespace in a variable of its own, `OMARCHY_AGENT_REMAPPED_USER`, never
+/// `OMARCHY_AGENT_USER`: a dispatcher from before #405 reads that as the keys' owner and would
+/// give a model task's usage directory to host uid 65533, not the sidecar's; it ignores this one
+/// (its probe, as the image's root, reads nothing through the ACL), and a dispatcher since maps
+/// it through the daemon's maps. Either line is the agent's, replaced by the other or by a hold.
+#[test]
+fn a_remapped_daemon_s_sidecars_are_named_in_a_variable_no_older_dispatcher_reads() {
+    let r = |keys_user| Rendered {
+        addresses: Vec::new(),
+        envelope: Some(envelope("/srv/s", Budget::default())),
+        plain: false,
+        keys_user,
+    };
+    // The one remapped uid the ACL lets read the keys, inside the daemon's user namespace (its
+    // host uid is the ACL's to name, not the dispatcher's line).
+    assert_eq!(
+        r(Some(KeysUser::Remapped { host_uid: 296_605 }))
+            .lines()
+            .unwrap(),
+        [
+            "OMARCHY_SECRETS_DIR=/srv/s",
+            "OMARCHY_AGENT_REMAPPED_USER=65533:65533"
+        ]
+    );
+    assert_eq!(
+        r(Some(KeysUser::Held(HELD_ACL))).lines().unwrap(),
+        ["OMARCHY_SECRETS_DIR=/srv/s", "OMARCHY_AGENT_HELD=keys-acl"]
+    );
+    let owner = format!(
+        "# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN={OMW}\nOMARCHY_AGENT_USER=1000:984\n"
+    );
+    // It replaces an owner's line, and a hold or an owner later replaces it.
+    let remapped = render(
+        &owner,
+        None,
+        None,
+        Some(&r(Some(KeysUser::Remapped { host_uid: 296_605 }))),
+    )
+    .unwrap();
+    assert!(
+        remapped.contains("\nOMARCHY_AGENT_REMAPPED_USER=65533:65533\n")
+            && !remapped.contains("OMARCHY_AGENT_USER")
+            && !remapped.contains("OMARCHY_AGENT_HELD"),
+        "{remapped}"
+    );
+    for (later, line) in [
+        (KeysUser::Held(HELD_ACL), "\nOMARCHY_AGENT_HELD=keys-acl\n"),
+        (
+            KeysUser::Owner { uid: 0, gid: 0 },
+            "\nOMARCHY_AGENT_USER=0:0\n",
+        ),
+    ] {
+        let text = render(&remapped, None, None, Some(&r(Some(later)))).unwrap();
+        assert!(
+            text.contains(line) && !text.contains("OMARCHY_AGENT_REMAPPED_USER"),
+            "{text}"
+        );
+    }
+    assert!(not_secret(AGENT_REMAPPED_USER));
 }
 
 /// #399: what the owner is taken from — agent.toml's engine and remapping, and the keys file on
@@ -1269,7 +1316,9 @@ dockremap:231072:65536
     let reader = secrets::reader(true, true, &sources.remap);
     assert_eq!(reader, Ok(Some(296_605)));
     let note = secrets::write(&secrets_dir, "GEMINI_API_KEY=x\n", &reader).unwrap();
-    if cfg!(target_os = "linux") && note.is_none() {
+    // On Linux the ACL is required, unless this filesystem keeps none (said, then the else).
+    if acl::kept_in(&secrets_dir, 296_605) {
+        assert_eq!(note, None);
         assert_eq!(mode(), 0o640);
         assert_eq!(
             acl::show(&acl::read(&keys).unwrap().unwrap()),
@@ -1510,10 +1559,12 @@ fn real_engine_on_a_remapped_daemon_the_sidecars_uid_reads_the_keys_the_agent_wr
     let render = || Rendered::now(&Sources::system(), &tempdir(), Some(e.clone()));
     let r = render();
     assert_eq!(r.keys_user, Some(KeysUser::Remapped { host_uid: uid }));
-    assert!(r
-        .lines()
-        .unwrap()
-        .contains(&"OMARCHY_AGENT_USER=65533:65533".to_owned()));
+    let lines = r.lines().unwrap();
+    assert!(
+        lines.contains(&"OMARCHY_AGENT_REMAPPED_USER=65533:65533".to_owned())
+            && !lines.iter().any(|l| l.starts_with("OMARCHY_AGENT_USER=")),
+        "{lines:?}"
+    );
 
     // Read as the agent names it; not as the image's root, nor as another remapped uid.
     let (ok, said, err) = read_as(Some("65533:65533"));

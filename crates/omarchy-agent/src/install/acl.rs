@@ -179,6 +179,37 @@ pub fn read(_path: &Path) -> Result<Option<Vec<Entry>>, String> {
     Err("POSIX ACLs are read on Linux only".into())
 }
 
+/// Whether the keys' ACL is kept in `dir` on this machine, for the tests that write keys there
+/// (#405): on Linux it must be — a writer that sets none there fails those tests rather than
+/// passing through their branch for a host that refuses one — unless the filesystem keeps no POSIX
+/// ACLs at all (EOPNOTSUPP), which is said, and the test then takes that branch; never on a Mac,
+/// where none is set. Tried on a file of its own in `dir`, for `reader`, then removed.
+#[cfg(test)]
+pub fn kept_in(dir: &Path, reader: u32) -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let probe = dir.join(".acl-probe");
+    let file = std::fs::File::create(&probe).unwrap();
+    let set = set(std::os::fd::AsFd::as_fd(&file), reader);
+    drop(file);
+    std::fs::remove_file(&probe).unwrap();
+    match set {
+        Ok(()) => true,
+        Err(e) if e.contains("EOPNOTSUPP") => {
+            eprintln!(
+                "note: {} keeps no POSIX ACLs ({e}): the keys' ACL is not tested here, only the hold of a host whose filesystem refuses it",
+                dir.display()
+            );
+            false
+        }
+        Err(e) => panic!(
+            "the keys' ACL for {reader} was not set in {}: {e}",
+            dir.display()
+        ),
+    }
+}
+
 /// Why an ACL could not be set or read, in words.
 #[cfg(target_os = "linux")]
 fn said(e: rustix::io::Errno) -> String {

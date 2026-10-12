@@ -42,9 +42,14 @@
 //!   §19.1) — so there the sidecars run as one remapped uid of their own, `65533:65533` in the
 //!   daemon's user namespace ([`remap::SIDECAR_ID`]), and the agent's ACL on the file lets that
 //!   uid as the host sees it read it (#405, [`KeysUser::remapped`]): the file is its owner's
-//!   and that uid's only, 0640 with no group and no other access. The agent reads that uid
-//!   from the remap user's range (`/etc/subuid`), and puts the ACL on whenever it writes the
-//!   keys ([`crate::install::secrets::write`]); with no such uid it renders
+//!   and that uid's only, 0640 with no group and no other access. That user is a variable of
+//!   its own, `OMARCHY_AGENT_REMAPPED_USER=65533:65533` ([`AGENT_REMAPPED_USER`]), never
+//!   `OMARCHY_AGENT_USER`: a dispatcher from before #405 would take that for the file's owner
+//!   and give a model task's usage directory to host uid 65533, not to the sidecar's own; it
+//!   ignores this one, runs its probe as the image's root, which the ACL does not let read the
+//!   keys, and so takes no model kinds either (fail closed while such a release is applied).
+//!   The agent reads that uid from the remap user's range (`/etc/subuid`), and puts the ACL on
+//!   whenever it writes the keys ([`crate::install::secrets::write`]); with no such uid it renders
 //!   `OMARCHY_AGENT_HELD=userns-remap`, and with no ACL on the file that lets it read (lost,
 //!   naming another uid, a filesystem that keeps none) `OMARCHY_AGENT_HELD=keys-acl`, so it
 //!   fails closed: the dispatcher runs no probe and no agent sidecar, and the host's page says
@@ -111,6 +116,10 @@ pub const SECRETS_DIR: &str = "OMARCHY_SECRETS_DIR";
 pub const DIRECT_NETWORK: &str = "OMARCHY_DIRECT_NETWORK";
 /// Who the agent sidecars run as (#399): `<uid>:<gid>`, agent.env's owner as the engine shows it.
 pub const AGENT_USER: &str = "OMARCHY_AGENT_USER";
+/// Who they run as on a remapped daemon (#405): `65533:65533` inside its user namespace, the uid
+/// agent.env's ACL names as the host sees it, which the dispatcher finds through the daemon's
+/// maps. Not [`AGENT_USER`], which a dispatcher from before #405 reads as the file's owner.
+pub const AGENT_REMAPPED_USER: &str = "OMARCHY_AGENT_REMAPPED_USER";
 /// Why the host takes no model kinds (#399, #419, #405): a code, [`HELD_REMAP`],
 /// [`HELD_ACL`] or [`HELD_NO_KEYS`].
 pub const AGENT_HELD: &str = "OMARCHY_AGENT_HELD";
@@ -163,6 +172,7 @@ fn owned_by_envelope(key: &str) -> bool {
     key == SECRETS_DIR
         || key == DIRECT_NETWORK
         || key == AGENT_USER
+        || key == AGENT_REMAPPED_USER
         || key == AGENT_HELD
         || BUDGET.iter().any(|(_, k)| *k == key)
         || CACHE_CAPS.iter().any(|(_, k)| *k == key)
@@ -313,9 +323,9 @@ pub enum KeysUser {
     /// `OMARCHY_AGENT_USER=<uid>:<gid>`: the sidecars run as the owner, in the engine's own user
     /// namespace.
     Owner { uid: u32, gid: u32 },
-    /// `OMARCHY_AGENT_USER=65533:65533` ([`remap::SIDECAR_ID`]) on a remapped daemon (#405): the
-    /// sidecars run as that uid in the daemon's user namespace, `host_uid` on the host, which
-    /// the keys file's ACL lets read it.
+    /// `OMARCHY_AGENT_REMAPPED_USER=65533:65533` ([`remap::SIDECAR_ID`]) on a remapped daemon
+    /// (#405): the sidecars run as that uid in the daemon's user namespace, `host_uid` on the
+    /// host, which the keys file's ACL lets read it.
     Remapped { host_uid: u32 },
     /// `OMARCHY_AGENT_HELD=<code>`: no container user may read the keys here — none is known
     /// on a remapped daemon, or the file's ACL does not let it — or there is no keys file
@@ -402,9 +412,11 @@ impl KeysUser {
     fn line(self) -> String {
         match self {
             Self::Owner { uid, gid } => format!("{AGENT_USER}={uid}:{gid}"),
-            Self::Remapped { .. } => {
-                format!("{AGENT_USER}={}:{}", remap::SIDECAR_ID, remap::SIDECAR_ID)
-            }
+            Self::Remapped { .. } => format!(
+                "{AGENT_REMAPPED_USER}={}:{}",
+                remap::SIDECAR_ID,
+                remap::SIDECAR_ID
+            ),
             Self::Held(code) => format!("{AGENT_HELD}={code}"),
         }
     }

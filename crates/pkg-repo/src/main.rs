@@ -80,6 +80,7 @@ struct SecurityArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // parsed once, at start: `dispatch` has many flags
 enum Command {
     /// Renders `<repo>.db` and `<repo>.files` from a local `index.json`.
     Build {
@@ -417,10 +418,15 @@ enum Command {
         secrets_dir: Option<PathBuf>,
         /// Who the agent sidecars and the probe run as (#399): agent.env's owner as the engine
         /// shows it to a container, `<uid>:<gid>`, which the agent writes into
-        /// `etc/dispatcher.env` — on a remapped daemon `65533:65533`, the remapped uid the file's
-        /// ACL lets read it (#405); empty, the worker image's own user (an agent from before it).
+        /// `etc/dispatcher.env`; empty, the worker image's own user (an agent from before it).
         #[arg(long, env = "OMARCHY_AGENT_USER", default_value = "")]
         agent_user: String,
+        /// Who they run as on a remapped daemon (#405): `65533:65533` inside its user namespace,
+        /// the remapped uid agent.env's ACL lets read it on the host, found through the daemon's
+        /// maps at start. A variable of its own, which a dispatcher from before #405 ignores
+        /// rather than take for the file's owner. Empty: none.
+        #[arg(long, env = "OMARCHY_AGENT_REMAPPED_USER", default_value = "")]
+        agent_remapped_user: String,
         /// Why the host's agent holds its model kinds (#399): a code, e.g. `no-keys` (there is
         /// no agent.env file, which no mount may then name, #419), or on a remapped daemon
         /// `keys-acl` (the file has no ACL that lets the sidecars' remapped uid read it) or
@@ -816,6 +822,7 @@ fn main() -> Result<()> {
             host_addresses,
             secrets_dir,
             agent_user,
+            agent_remapped_user,
             agent_held,
             agent_calls_per_task,
             agent_tokens_per_task,
@@ -863,6 +870,8 @@ fn main() -> Result<()> {
                         .collect(),
                     secrets_dir: secrets_dir.filter(|d| !d.as_os_str().is_empty()),
                     agent_user: dispatch::spec::AgentUser::parse(&agent_user)
+                        .map_err(anyhow::Error::msg)?,
+                    agent_remapped: dispatch::spec::AgentUser::parse_remapped(&agent_remapped_user)
                         .map_err(anyhow::Error::msg)?,
                     agent_held: dispatch::AgentHeld::parse(&agent_held)
                         .map_err(anyhow::Error::msg)?,

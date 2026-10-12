@@ -214,7 +214,7 @@ to a container (#399): the agent writes that into `etc/dispatcher.env`
 nothing (the runbook's *How an agent sidecar reads the keys*). A daemon with
 userns-remap shows the file's owner to no container user, and its sidecars
 stay remapped (design v2 §19.1), so there they run as one remapped uid of
-their own, `65533:65533` (#405): the agent gives `agent.env` an ACL that lets
+their own, `65533:65533` (#405, `OMARCHY_AGENT_REMAPPED_USER`): the agent gives `agent.env` an ACL that lets
 that uid as the host sees it (from `dockremap`'s range in `/etc/subuid`) read
 it, whenever it writes the keys, so the file shows `-rw-r-----+` — leave its
 mode alone: a `chmod` takes that uid's read away, and the host holds its model

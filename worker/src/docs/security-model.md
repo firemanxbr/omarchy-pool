@@ -291,15 +291,19 @@ secret). Everything travels in the `Authorization` header over TLS only.
   owner, and its sidecars stay remapped as its task containers do (design v2
   §19.1), so there the sidecars and the probe run as one remapped uid of
   their own (`65533:65533` inside, the remap user's range start plus 65533 on
-  the host) and the agent, the file's owner, gives the file a POSIX ACL that
-  lets that uid read it (#405, the maintainers' decision of 2026-10-08): the
-  file is its owner's and that one uid's, 0640 with no group and no other
-  access, put on the new file before its rename whenever the keys are
-  written, with no root, no capability and no visit. It fails closed: an ACL
-  lost (a `chmod`, a copy), one naming another uid, a filesystem that keeps
-  none, or no range the agent can read holds the host's model kinds
-  (`OMARCHY_AGENT_HELD=keys-acl` or `userns-remap`), the dispatcher starts no
-  probe and no agent sidecar, and the host's page says why. That uid is in
+  the host, named in `OMARCHY_AGENT_REMAPPED_USER`, which a dispatcher from
+  before #405 ignores rather than read as the file's owner and give a task's
+  usage directory to host uid 65533) and the agent, the file's owner, gives
+  the file a POSIX ACL that lets that uid read it (#405, the maintainers'
+  decision of 2026-10-08): the file is its owner's and that one uid's, 0640
+  with no group and no other access, put on the new file before its rename
+  whenever the keys are written, with no root, no capability and no visit.
+  It fails closed: an ACL lost (a `chmod`, a copy), one naming another uid, a
+  filesystem that keeps none, or no range the agent can read holds the
+  host's model kinds (`OMARCHY_AGENT_HELD=keys-acl` or `userns-remap`), and
+  so does the dispatcher when the daemon's maps do not hold that uid or
+  `agent.toml`'s `userns_remap` is not the daemon's: it starts no probe and
+  no agent sidecar, and the host's page says why. That uid is in
   the same remapped range as every task container's: a task root that escapes
   holds its namespace's capabilities and can become it, and then reaches a
   running agent sidecar's processes and their mounts as it reaches another

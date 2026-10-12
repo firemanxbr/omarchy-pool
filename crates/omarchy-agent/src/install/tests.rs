@@ -3809,9 +3809,9 @@ fn keys_given_after_an_install_without_them_end_its_hold() {
 /// to give some, since its sidecars read keys given later through the file's ACL. Given them
 /// with `--agent-env-from`, install writes them with the ACL for the agent sidecars' one
 /// remapped uid (dockremap's range in /etc/subuid, 65533 in), so `etc/dispatcher.env` names that
-/// uid (`OMARCHY_AGENT_USER=65533:65533`); where the ACL cannot be set (a Mac, or a filesystem
-/// that keeps none) it writes them owner-only, says so, and the host is held (`keys-acl`). A
-/// re-run that keeps a file without that ACL says how to lift the hold.
+/// uid (`OMARCHY_AGENT_REMAPPED_USER=65533:65533`); where the ACL cannot be set (a Mac, or a
+/// filesystem that keeps none) it writes them owner-only, says so, and the host is held
+/// (`keys-acl`). A re-run that keeps a file without that ACL says how to lift the hold.
 #[test]
 fn a_remapped_daemon_is_held_without_keys_and_its_keys_are_written_with_their_acl() {
     let h = granted(host(&rootful_info(), EGRESS_OK));
@@ -3850,7 +3850,9 @@ fn a_remapped_daemon_is_held_without_keys_and_its_keys_are_written_with_their_ac
     let said = String::from_utf8_lossy(&out).into_owned();
     let keys = h.root.join("secrets/agent.env");
     let mode = || fs::metadata(&keys).unwrap().permissions().mode() & 0o777;
-    if cfg!(target_os = "linux") && !said.contains("OMARCHY_AGENT_HELD=keys-acl") {
+    // On Linux the ACL is required, unless this filesystem keeps none (said, then the else).
+    if crate::install::acl::kept_in(&h.root.join("secrets"), 296_605) {
+        assert!(!said.contains("OMARCHY_AGENT_HELD"), "{said}");
         assert!(
             said.contains("(0640: its owner's, and readable by the agent sidecars' remapped uid 296605 through its ACL alone"),
             "{said}"
@@ -3858,7 +3860,7 @@ fn a_remapped_daemon_is_held_without_keys_and_its_keys_are_written_with_their_ac
         assert_eq!(mode(), 0o640);
         let text = env_text();
         assert!(
-            text.contains("\nOMARCHY_AGENT_USER=65533:65533\n")
+            text.contains("\nOMARCHY_AGENT_REMAPPED_USER=65533:65533\n")
                 && !text.contains("OMARCHY_AGENT_HELD"),
             "{text}"
         );

@@ -807,7 +807,9 @@ fn keys_set_on_a_remapped_daemon_carry_the_acl_its_sidecars_read_them_through() 
     assert_eq!(outcome, "done", "{detail}");
     w.tick(3);
     let mode = fs::metadata(&keys).unwrap().permissions().mode() & 0o777;
-    if cfg!(target_os = "linux") && !detail.contains("OMARCHY_AGENT_HELD") {
+    // On Linux the ACL is required, unless this filesystem keeps none (said, then the else).
+    if crate::install::acl::kept_in(&w.dir.join("secrets"), 296_605) {
+        assert!(!detail.contains("OMARCHY_AGENT_HELD"), "{detail}");
         assert_eq!(mode, 0o640, "{detail}");
         assert_eq!(
             crate::install::acl::show(&crate::install::acl::read(&keys).unwrap().unwrap()),
@@ -815,7 +817,7 @@ fn keys_set_on_a_remapped_daemon_carry_the_acl_its_sidecars_read_them_through() 
         );
         let text = env_text();
         assert!(
-            text.contains("\nOMARCHY_AGENT_USER=65533:65533\n")
+            text.contains("\nOMARCHY_AGENT_REMAPPED_USER=65533:65533\n")
                 && !text.contains("OMARCHY_AGENT_HELD"),
             "{text}"
         );

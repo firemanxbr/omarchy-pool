@@ -330,7 +330,7 @@ impl Remap {
     }
 
     /// `uid:gid` inside a container of this daemon as the host sees it: the agent sidecars'
-    /// (`OMARCHY_AGENT_USER`, `65533:65533`, the uid agent.env's ACL names), whose usage
+    /// (`OMARCHY_AGENT_REMAPPED_USER`, `65533:65533`, the uid agent.env's ACL names), whose usage
     /// directory is given to it.
     pub fn host_of(&self, uid: u32, gid: u32) -> Result<(u32, u32), String> {
         Ok((

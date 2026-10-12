@@ -14,8 +14,9 @@
 #      the agent sidecars' remapped uid (65533 in, B+65533 on the host, from dockremap's range
 #      in /etc/subuid), which a container started as the probe is reads, and no other uid
 #      (the agent's real-engine test, #405); `omarchy-agent dispatcher-env --write` renders
-#      `OMARCHY_AGENT_USER=65533:65533` and no hold; the dispatcher's environment is that file
-#      and the token's own file;
+#      `OMARCHY_AGENT_REMAPPED_USER=65533:65533`, no `OMARCHY_AGENT_USER` (which a dispatcher
+#      from before #405 would take for the keys' owner) and no hold; the dispatcher's
+#      environment is that file and the token's own file;
 #   2. a community build through the dispatcher, whose stub build script repeats the real
 #      script's ownership steps one for one (its log and verdict as task_mode writes them,
 #      the builder given /build/cache, its package's cache, /build/pkg and /build/out, the
@@ -164,14 +165,14 @@ chmod 600 "$agent_data/agent.toml"
 printf '# worker: remap-test-0a9z\nOMARCHY_WORKER_TOKEN=%s\n' "$token" > "$envfile"; chmod 600 "$envfile"
 "$AGENT" dispatcher-env --data-dir "$agent_data" --write > "$tmp/agent.out" 2>&1 || { cat "$tmp/agent.out" >&2; fail "omarchy-agent dispatcher-env --write"; }
 key() { sed -n "s/^$1=//p" "$envfile"; }
-[[ "$(key OMARCHY_AGENT_USER)" == 65533:65533 && -z "$(key OMARCHY_AGENT_HELD)" ]] \
-  || fail "the agent did not name the sidecars' remapped uid: $(grep -E '^OMARCHY_AGENT_(HELD|USER)=' "$envfile" || echo neither)"
+[[ "$(key OMARCHY_AGENT_REMAPPED_USER)" == 65533:65533 && -z "$(key OMARCHY_AGENT_USER)" && -z "$(key OMARCHY_AGENT_HELD)" ]] \
+  || fail "the agent did not name the sidecars' remapped uid alone: $(grep -E '^OMARCHY_AGENT_(HELD|USER|REMAPPED_USER)=' "$envfile" || echo none)"
 [[ "$(key OMARCHY_SECRETS_DIR)" == "$tmp/secrets" ]] || fail "OMARCHY_SECRETS_DIR: $(key OMARCHY_SECRETS_DIR)"
 tokenfile="$agent_data/sets/host/run/host/dispatcher/token"
 [[ "$(cat "$tokenfile" 2>/dev/null)" == "$token" ]] || fail "the worker token is not in run/host/dispatcher/token"
 from_agent=()
 while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || from_agent+=("$line"); done < "$envfile"
-echo "ok: the agent wrote OMARCHY_AGENT_USER=65533:65533 and no hold into etc/dispatcher.env"
+echo "ok: the agent wrote OMARCHY_AGENT_REMAPPED_USER=65533:65533, no OMARCHY_AGENT_USER and no hold into etc/dispatcher.env"
 
 # ---------- 2. a build through the dispatcher ----------
 # The worker image the sidecars run: a stand-in whose egress answers any GET with one line, whatever
@@ -434,12 +435,12 @@ rm -f "$tmp/dispatcher.pid"
 render() { "$AGENT" dispatcher-env --data-dir "$agent_data" --write > "$tmp/agent.out" 2>&1 || { cat "$tmp/agent.out" >&2; fail "omarchy-agent dispatcher-env --write"; }; }
 chmod 600 "$tmp/secrets/agent.env"
 render
-[[ "$(key OMARCHY_AGENT_HELD)" == keys-acl && -z "$(key OMARCHY_AGENT_USER)" ]] \
-  || fail "a keys file whose ACL was lost: $(grep -E '^OMARCHY_AGENT_(HELD|USER)=' "$envfile" || echo neither)"
+[[ "$(key OMARCHY_AGENT_HELD)" == keys-acl && -z "$(key OMARCHY_AGENT_USER)$(key OMARCHY_AGENT_REMAPPED_USER)" ]] \
+  || fail "a keys file whose ACL was lost: $(grep -E '^OMARCHY_AGENT_(HELD|USER|REMAPPED_USER)=' "$envfile" || echo none)"
 rm "$tmp/secrets/agent.env"
 render
-[[ "$(key OMARCHY_AGENT_HELD)" == no-keys && -z "$(key OMARCHY_AGENT_USER)" ]] \
-  || fail "no keys file: $(grep -E '^OMARCHY_AGENT_(HELD|USER)=' "$envfile" || echo neither)"
+[[ "$(key OMARCHY_AGENT_HELD)" == no-keys && -z "$(key OMARCHY_AGENT_USER)$(key OMARCHY_AGENT_REMAPPED_USER)" ]] \
+  || fail "no keys file: $(grep -E '^OMARCHY_AGENT_(HELD|USER|REMAPPED_USER)=' "$envfile" || echo none)"
 echo "ok: the ACL lost to a chmod 600 holds the model kinds (OMARCHY_AGENT_HELD=keys-acl), and so does no keys file (no-keys)"
 
 # ---------- 4. the dispatcher's real-engine tests on this engine ----------
