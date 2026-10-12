@@ -26,8 +26,9 @@
 #                   (<data root>/<uid>.<gid>, and its own containerd namespace), and
 #                   never looks at the old one, which stays as it is: the way back is
 #                   daemon.json as it was, kept as daemon.json.pre-remap, and a
-#                   restart. Refused (exit 3, nothing changed) while a container runs,
-#                   when docker does not answer, or when daemon.json cannot take it
+#                   restart. Refused (exit 3, nothing changed) while the agent runs as
+#                   --user (its round starts a stopped dispatcher again) or a container
+#                   runs, when docker does not answer, or when daemon.json cannot take it
 #   --dry-run       say what would change, change nothing (with
 #                   --remap-existing-daemon, refused the same way)
 #
@@ -50,7 +51,9 @@
 #      leaves what is there behind, so without the flag an existing daemon is
 #      left as it is and said (design v2 §19.1); docker restarted only when
 #      no container runs, and with the flag docker info must then list
-#      name=userns. The daemon.json it had is kept beside it as
+#      name=userns; a docker that does not start again, or starts without
+#      it, is said under "needs a person" with the way back, and the steps
+#      after still run. The daemon.json it had is kept beside it as
 #      daemon.json.pre-remap, and the old data root is said: both are the way
 #      back. First the dockremap user, with a subordinate range of its own in
 #      /etc/subuid and /etc/subgid (#405): without one docker makes the user
@@ -224,10 +227,22 @@ data_root() { docker info --format '{{.Driver}} {{.DockerRootDir}}' 2>/dev/null 
 containerd_ns() { docker info --format '{{.Containerd.Namespaces.Containers}}' 2>/dev/null || true; }
 
 # --remap-existing-daemon (#407): asked before any step changes anything, a dry run's too, and
-# refused (exit 3) unless the daemon answers, runs no container and can take the remapping.
+# refused (exit 3) unless the agent is stopped and the daemon answers, runs no container and can
+# take the remapping.
 if ((remap_existing)); then
   refuse() { echo "prep-root.sh: --remap-existing-daemon: $*; nothing changed" >&2; exit 3; }
   command -v jq >/dev/null || refuse "no jq (a host whose daemon is in use has it from this script's earlier run)"
+  # The agent's round starts a stopped dispatcher again: between this check and docker's restart
+  # on the old daemon (daemon.json then changed while a container runs), or after it on the
+  # remapped one before its install says so (agent.toml's userns_remap still false).
+  command -v pgrep >/dev/null || refuse "no pgrep (procps) to see whether the agent runs"
+  found=0
+  agent_pids="$(pgrep -u "$user" -x omarchy-agent)" || found=$?
+  case "$found" in
+    0) refuse "the agent runs as $user (omarchy-agent, pid $(tr '\n' ' ' <<<"$agent_pids" | sed 's/ *$//')): stop it first, as $user — systemctl --user stop omarchy-agent — or its next round starts the dispatcher again" ;;
+    1) ;; # none
+    *) refuse "pgrep did not say whether the agent runs as $user (exit $found)" ;;
+  esac
   docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || refuse "docker does not answer (its daemon must run to be looked at first)"
   names="$(docker ps --format '{{.Names}}' 2>/dev/null)" || refuse "docker does not answer"
   if [[ -n "$names" ]]; then
@@ -384,23 +399,34 @@ elif [[ "$runtime" == rootful ]]; then
     # docker ps on its own (never in a pipe): a daemon that does not answer is said, not fatal.
     if ids="$(docker ps -q 2>/dev/null)"; then running="$(grep -c . <<<"$ids" || true)"; else running=unknown; fi
     if [[ "$running" == 0 ]] || { ((dry)) && [[ "$running" == unknown ]]; }; then
-      run systemctl restart docker.service
-      docker_restarted=1
-      if ((remap_existing && dry)); then
-        echo "    would check that docker info lists name=userns, and say the remapped daemon's data root and storage driver"
-      elif ((remap_existing)); then
-        for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
-        if remapped; then
-          read -r new_driver new_root <<<"$(data_root)"
-          changed "docker remaps users (docker info lists name=userns): its data root ${new_root:-?}, storage driver ${new_driver:-?}$([[ -n "$(containerd_ns)" ]] && echo ", containerd namespace $(containerd_ns)"), empty until images are pulled into it"
-          echo "    next, as the agent's user: its install again, which records envelope.userns_remap and writes the agent keys with their ACL"
+      if [[ -e "$fs$daemon_json.pre-remap" ]]; then
+        back="install -m 0644 $daemon_json.pre-remap $daemon_json && systemctl restart docker.service"
+      else
+        back="take userns-remap out of $daemon_json, then systemctl restart docker.service"
+      fi
+      if ! run systemctl restart docker.service; then
+        # dockerd refused the new daemon.json, or did not start for another reason: docker is down,
+        # said with the way back, and the steps after still run. docker_restarted stays 0: the
+        # firewall's chains are as they were (docker's stop leaves them), and restarting its unit
+        # now would start docker again through its Wants=.
+        if ((remap_existing)); then
+          attention+=("userns-remap: docker did not start with it, and is down (journalctl -u docker says why); the way back: $back")
         else
-          if [[ -e "$fs$daemon_json.pre-remap" ]]; then
-            back="install -m 0644 $daemon_json.pre-remap $daemon_json && systemctl restart docker.service"
+          attention+=("docker: did not start again with $daemon_json as written, and is down (journalctl -u docker says why)")
+        fi
+      else
+        docker_restarted=1
+        if ((remap_existing && dry)); then
+          echo "    would check that docker info lists name=userns, and say the remapped daemon's data root and storage driver"
+        elif ((remap_existing)); then
+          for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          if remapped; then
+            read -r new_driver new_root <<<"$(data_root)"
+            changed "docker remaps users (docker info lists name=userns): its data root ${new_root:-?}, storage driver ${new_driver:-?}$([[ -n "$(containerd_ns)" ]] && echo ", containerd namespace $(containerd_ns)"), empty until images are pulled into it"
+            echo "    next, as the agent's user: its install again, which records envelope.userns_remap and writes the agent keys with their ACL"
           else
-            back="take userns-remap out of $daemon_json, then systemctl restart docker.service"
+            attention+=("userns-remap: docker info does not list name=userns after the restart (journalctl -u docker says why); the way back: $back")
           fi
-          attention+=("userns-remap: docker info does not list name=userns after the restart (journalctl -u docker says why); the way back: $back")
         fi
       fi
     elif [[ "$running" == unknown ]]; then

@@ -356,6 +356,7 @@ describe("the runbook's Studio at subuid (#407)", () => {
   it("drains the host, stops its agent and dispatcher, runs prep-root.sh's opt-in after its dry run, sets the build caches aside, then installs again, and resumes", () => {
     const steps = [
       "**Drain** studio-m2's registration",
+      `grep -c -- '--remap-existing-daemon) remap_existing' "$src/factory/host/prep-root.sh"`,
       "systemctl --user stop omarchy-agent",
       "docker stop omarchy-host-dispatcher-1",
       `${prep} --dry-run`,
@@ -365,10 +366,24 @@ describe("the runbook's Studio at subuid (#407)", () => {
       "**Resume** studio-m2's registration",
     ].map(at);
     expect([...steps].sort((a, b) => a - b)).toEqual(steps);
-    // The opt-in is prep-root.sh's own, refused while a container runs.
+    // The opt-in is prep-root.sh's own, refused while the agent or a container runs.
     expect(prepRoot).toContain("--remap-existing-daemon) remap_existing=1; shift ;;");
     expect(prepRoot).toContain('refuse "$(grep -c . <<<"$names") container(s) run (');
     expect(text).toContain("`container(s) run (…)`");
+    expect(prepRoot).toContain('agent_pids="$(pgrep -u "$user" -x omarchy-agent)"');
+    expect(prepRoot).toContain('refuse "the agent runs as $user (omarchy-agent, pid ');
+    expect(text).toContain("`the agent runs as firemanxbr (omarchy-agent, pid …)`");
+    // Why the agent goes first: a dispatcher its round starts on the remapped daemon holds the model kinds.
+    expect(text).toContain("`OMARCHY_AGENT_USER` (agent.env's owner) is no container user of a remapped daemon");
+    expect(dispatchSource).toContain("names agent.env's owner, and no container user of this remapped daemon is it");
+  });
+
+  it("checks that the pool's release carries the opt-in before the host is drained, and again before anything stops", () => {
+    // The check's pattern is the opt-in's own case line, once in prep-root.sh.
+    expect(prepRoot.split("--remap-existing-daemon) remap_existing").length - 1).toBe(1);
+    const site = `curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/prep-root.sh" | grep -c -- '--remap-existing-daemon) remap_existing'`;
+    expect(at(site)).toBeLessThan(at("**Drain** studio-m2's registration"));
+    expect(at(`grep -c -- '--remap-existing-daemon) remap_existing' "$src/factory/host/prep-root.sh"`)).toBeLessThan(at("systemctl --user stop omarchy-agent"));
   });
 
   it("says what prep-root.sh prints when it is right, in its own words", () => {
@@ -381,6 +396,7 @@ describe("the runbook's Studio at subuid (#407)", () => {
       ["`docker remaps users (docker info lists name=userns): its data root /var/lib/docker/165536.165536, storage driver overlay2, containerd namespace moby-165536.165536`", "docker remaps users (docker info lists name=userns): its data root ${new_root:-?}, storage driver ${new_driver:-?}"],
       ["`in place, applied again after docker's restart`", "in place, applied again after docker's restart"],
       ["`userns-remap: docker info does not list name=userns after the restart`", "userns-remap: docker info does not list name=userns after the restart"],
+      ["`userns-remap: docker did not start with it, and is down`", "userns-remap: docker did not start with it, and is down (journalctl -u docker says why); the way back: $back"],
     ];
     for (const [doc, code] of said) {
       expect(text, doc).toContain(doc);
@@ -446,9 +462,27 @@ describe("the runbook's Studio at subuid (#407)", () => {
 
   it("has a way back of one day that deletes nothing, and reclaims the old data root afterwards through the old daemon itself", () => {
     const back = text.slice(at("**The way back, within the day.**"));
-    const order = ["systemctl --user stop omarchy-agent", "sudo install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json", "sudo systemctl restart docker", install, "*Resume*"].map((s) => back.indexOf(s));
+    // Its install.sh fetched and checked in its own block (the session's step 6 removed it), then removed.
+    const order = [
+      'tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version',
+      'curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"',
+      "gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool",
+      "systemctl --user stop omarchy-agent",
+      "sudo install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json",
+      "sudo systemctl restart docker",
+      install,
+      "rm -f ~/install.sh",
+      "*Resume*",
+    ].map((s) => back.indexOf(s));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // One block that pastes as it stands in a new shell: it sets $tag and fetches install.sh before running it,
+    // and gives back only the caches step 4 set aside (after a failed start there are none).
+    const block = /```bash\n([\s\S]*?)```/.exec(sec.slice(sec.indexOf("**The way back, within the day.**")))?.[1] ?? "";
+    expect(block.indexOf('tag="$(curl')).toBeGreaterThanOrEqual(0);
+    expect(block.indexOf("curl -fsSLo ~/install.sh")).toBeGreaterThan(block.indexOf('tag="$(curl'));
+    expect(block.indexOf("sh ~/install.sh --work-root")).toBeGreaterThan(block.indexOf("gh attestation verify ~/install.sh"));
+    expect(block).toContain('if [ -e "$d.pre-remap" ]; then');
     expect(back).toContain("`! hosting: a rootful daemon without userns-remap, beside the legacy set: recorded as an exception until P6`");
     expect(checksSource).toContain('"hosting: a rootful daemon without userns-remap, beside the legacy set: recorded as an exception until P6"');
     const reclaim = text.slice(at("**Afterwards, the move kept: the old data root reclaimed.**"));

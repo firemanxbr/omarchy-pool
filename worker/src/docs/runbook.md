@@ -3869,7 +3869,15 @@ touch.
    say `subuid` (without it the page keeps the `root` it enrolled with), and
    the pool jobs' helpers (health, promote, security) run on a remapped
    daemon (without it a remapped helper cannot read its `/repo`, the
-   Studio's pool jobs fail and the gate holds the rings).
+   Studio's pool jobs fail and the gate holds the rings). It carries this
+   section's own change too, `prep-root.sh`'s `--remap-existing-daemon`,
+   which the root session runs from that release's tree (without it step 3
+   stops at `unknown option`, with the host drained for nothing):
+
+   ```bash
+   tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
+   curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/prep-root.sh" | grep -c -- '--remap-existing-daemon) remap_existing'   # 1
+   ```
 3. studio-vm4k takes the pool jobs while the Studio is drained:
    `host-pool-jobs` says `*` (*Pool jobs on hosts*, above), and its
    registration ran some in the last day:
@@ -3906,11 +3914,15 @@ password), in `tmux`. Each step stops at the first thing that fails.
    docker ps --format '{{.Names}}'                                                   # omarchy-host-dispatcher-1, nothing else
    docker info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}'   # overlayfs /var/lib/docker, no name=userns
    grep -H . /etc/subuid /etc/subgid                                                 # firemanxbr:100000:65536 in both, no dockremap
+   grep -c -- '--remap-existing-daemon) remap_existing' "$src/factory/host/prep-root.sh"            # 1: the opt-in is there (0: stop here, nothing has changed)
    ```
-2. The agent first, then its dispatcher. A round the agent ran against a
-   daemon that changed under it, with `userns_remap = false` still in
-   `agent.toml`, would start a dispatcher that refuses to run remapped, and
-   revert:
+2. The agent first, then its dispatcher. The agent's round starts a
+   stopped dispatcher again: on the old daemon while step 3 runs, or on the
+   remapped one before step 5, while `agent.toml` still says `userns_remap =
+   false` — a dispatcher that holds the model kinds there, as its
+   `OMARCHY_AGENT_USER` (agent.env's owner) is no container user of a
+   remapped daemon. `prep-root.sh` refuses while the agent runs as the
+   user, or a container does:
 
    ```bash
    systemctl --user stop omarchy-agent
@@ -3942,10 +3954,15 @@ password), in `tmux`. Each step stops at the first thing that fails.
    root /var/lib/docker/165536.165536, storage driver overlay2, containerd
    namespace moby-165536.165536`. Its step 9 says `in place, applied again
    after docker's restart`, and it ends `==> done`. Refused, exit 3, with
-   `container(s) run (…)`: step 2 missed one; stop it and run it again.
-   Exit 1 with `userns-remap: docker info does not list name=userns after
-   the restart`: `sudo journalctl -u docker -n 80 --no-pager` says why, and
-   the way back (below) comes before anything else. Then:
+   `the agent runs as firemanxbr (omarchy-agent, pid …)` or `container(s)
+   run (…)`: step 2 missed one; stop it and run it again — nothing has
+   changed. Exit 1 under `==> needs a person` with `userns-remap: docker did
+   not start with it, and is down` (dockerd refused the new
+   `daemon.json`; systemctl's `Job for docker.service failed` above it) or
+   `userns-remap: docker info does not list name=userns after the restart`
+   (it started without remapping), either one followed by the way back:
+   `sudo journalctl -u docker -n 80 --no-pager` says why, and the way back
+   (below) comes before anything else. Then:
 
    ```bash
    sudo journalctl -u docker -n 80 --no-pager | grep -i -E 'userns|snapshotter'   # … userns remapping enabled, disabling containerd snapshotter
@@ -4054,19 +4071,28 @@ password), in `tmux`. Each step stops at the first thing that fails.
 
 1. On the site: *Drain* studio-m2's registration, reason *the way back
    (#407)*, and wait until it runs nothing (the `curl` above).
-2. At the Studio, as `firemanxbr`, the same release's `install.sh` fetched
-   and checked again as in step 5:
+2. At the Studio, as `firemanxbr`, in a new shell: the pool's release's
+   `install.sh` fetched and checked again as in step 5 (step 6 removed
+   it). After an exit 1 in step 3 the host is drained, its agent and
+   dispatcher are stopped and docker may be down: step 1 is done, and the
+   two `stop` lines change nothing (docker's says it cannot connect). The
+   caches come back only where step 4 set them aside:
 
    ```bash
+   tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
+   curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"
+   gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool \
+     --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main
    systemctl --user stop omarchy-agent
    docker stop omarchy-host-dispatcher-1
    sudo install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json
    sudo systemctl restart docker
    docker info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}'   # overlayfs /var/lib/docker, no name=userns: the images it held are there
    sudo systemctl restart omarchy-task-firewall.service
-   sudo sh -c 'cd /srv/omarchy-host/cache && for d in build used; do [ ! -e "$d" ] || mv "$d" "$d.remapped"; [ ! -e "$d.pre-remap" ] || mv "$d.pre-remap" "$d"; done; ls'
+   sudo sh -c 'cd /srv/omarchy-host/cache && for d in build used; do if [ -e "$d.pre-remap" ]; then [ ! -e "$d" ] || mv "$d" "$d.remapped"; mv "$d.pre-remap" "$d"; fi; done; ls'
    sh ~/install.sh --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets \
      --task-subnets 10.232.0.0/16 --dedicated --agent-env-from /srv/omarchy-host-secrets/agent.env
+   rm -f ~/install.sh
    ```
 
    Preflight says `! hosting: a rootful daemon without userns-remap,
