@@ -296,11 +296,6 @@ export function rights(v: ReturnType<typeof workspace>): Rights {
   return out;
 }
 
-/** A person's workers as the row's verdicts read them — revoked ones included, since their rows are drawn too. */
-export async function workersOf(env: Env, owner: string): Promise<WorkerRow[]> {
-  return (await env.DB.prepare("SELECT id, owner, trust, revoked_at FROM build_workers WHERE owner = ? ORDER BY id").bind(owner).all<WorkerRow>()).results;
-}
-
 /** The refusal a door answers: the reason, with its status. */
 export function refused(v: Verdict): Response | null {
   return v.ok ? null : json({ error: v.why }, v.status);

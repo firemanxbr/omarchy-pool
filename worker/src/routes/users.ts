@@ -2,12 +2,13 @@ import { json, type Env } from "../index";
 import { version as running, RINGS, ringsSql, sortRings } from "../meta";
 import { queuePosition } from "../queue";
 import { maintainersOf } from "../governance";
-import { landed, registrationsOf, rights, workersOf, workspace, type Contributor } from "./contributors";
+import { isMaintainer, landed, registrationsOf, rights, workspace, type Contributor, type Rights, type WorkerRow as RevokeRow } from "./contributors";
 import { asReviews, stands, wholeReviews } from "./review";
 import { aliveSince, workerView, type WorkerRow } from "./factory";
 import { standsSql } from "./story";
 import { parseTargets } from "../targets";
 import { REVERTED_COLUMNS, SOAK_COLUMNS } from "../hosts";
+import { drainFacts, orderVerdicts, type OrderFacts, type OrderWorker } from "../orders";
 
 /**
  * A person's public page: what they contribute and what they maintain,
@@ -83,12 +84,16 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
     .first<{ login: string; name: string | null; avatar_url: string | null; role: string; created_at: string; last_seen: string; blocked_at: string | null; blocked_by: string | null; blocked_reason: string | null }>();
   if (!person) return json({ error: "no such contributor" }, 404);
   const [packages, builds, counts, approvals, workers, listed, record] = await Promise.all([
-    env.DB.prepare(`SELECT name, category, url, arches, targets, status, detail, updated_at FROM factory_packages WHERE owner = ? ORDER BY name`).bind(login).all(),
+    // The block and whether the recipe is the project's own PKGBUILD (detected.has_pkgbuild) ride on the same rows (#412): the page greys a
+    // blocked package's Build and words its Build dialog from them, without the package's story.
+    env.DB.prepare(`SELECT name, category, url, arches, targets, status, detail, updated_at, blocked_at, blocked_reason, json_extract(detected, '$.has_pkgbuild') AS has_pkgbuild FROM factory_packages WHERE owner = ? ORDER BY name`).bind(login).all(),
     env.DB.prepare(
       // needs_native: sent back by an emulated worker (#281) — the page says the native worker it waits for; refused_4k: by a 4K-page
-      // one too (#413), so the pill's title says no emulated worker takes it. The same rows, one field of each.
+      // one too (#413), so the pill's title says no emulated worker takes it; gate, gate_warnings and gate_fails: the gate's verdict on
+      // a staged build (result.vet), which a package's row shows per architecture (#412). The same rows, one field of each.
       `SELECT id, name, arch, version, status, reason, created_at, finished_at, duration_ms, lease_owner, pinned_to, priority, trust, json_extract(params, '$.needs_native') AS needs_native,
-              json_extract(params, '$.refused_4k') AS refused_4k FROM build_tasks
+              json_extract(params, '$.refused_4k') AS refused_4k, json_extract(result, '$.vet.verdict') AS gate, json_extract(result, '$.vet.warnings') AS gate_warnings,
+              json_extract(result, '$.vet.fails') AS gate_fails FROM build_tasks
         WHERE owner = ? AND kind = 'build' ORDER BY id DESC LIMIT 50`,
     )
       .bind(login)
@@ -154,18 +159,50 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
 }
 
 /**
+ * A person's workers as their rows' buttons read them: Revoke's columns (whose, what trust, revoked) and what Drain and Resume
+ * decide on (orders.ts orderVerdicts: its kind, its drain, its open orders, the process on its token) — the rows by the owner.
+ */
+const WORKER_RIGHTS_SQL = "SELECT id, owner, trust, kind, revoked_at, version, order_kinds, open_orders, instance_conflict_at, restarts_left, agent_via, drained_at, drained_by, drain_reason, current_task, rollout FROM build_workers WHERE owner = ? ORDER BY id";
+
+/** A worker row's buttons on a person's page: Revoke (workspace()) and, since #412, Drain and Resume — the worker orders' own verdicts. */
+export type PersonWorkerRights = Rights["workers"][string] & { drain: boolean; resume: boolean; why: Partial<Record<"revoke" | "drain" | "resume", string>> };
+
+/**
  * GET /users/:login/can — what the caller may do on this person's page,
  * and why not: no-store, it is the caller's (the page itself is cached
  * for everyone). The predicate is workspace() in routes/contributors.ts,
  * the one the doors refuse with; Remove is answered per registration in
  * `can.packages`, from the person's registrations as they stand now, and
- * Revoke per worker in `can.workers`, revoked ones included.
+ * Revoke per worker in `can.workers`, revoked ones included. Drain and
+ * Resume ride on each worker's row too (#412: a maintainer reaches a
+ * worker's Drain from its owner's page in one click), answered by the
+ * worker orders' predicate (orders.ts orderVerdicts, the one POST
+ * /factory/workers/:id/orders refuses with) over counts read once for all
+ * the rows (drainFacts) — and only for a caller the predicate would ask
+ * them of: its owner or a maintainer.
  */
 export async function handleUserCan(c: Contributor | null, login: string, env: Env): Promise<Response> {
   const person = await env.DB.prepare("SELECT login FROM contributors WHERE login = ?").bind(login).first<{ login: string }>();
   if (!person) return json({ error: "no such contributor" }, 404);
-  const [registrations, workers] = await Promise.all([registrationsOf(env, { owner: person.login }), workersOf(env, person.login)]);
-  return json({ login: person.login, can: rights(workspace(c, person.login, registrations, workers)) }, 200, { "cache-control": "no-store" });
+  const [registrations, workers] = await Promise.all([
+    registrationsOf(env, { owner: person.login }),
+    env.DB.prepare(WORKER_RIGHTS_SQL).bind(person.login).all<RevokeRow & OrderWorker>(),
+  ]);
+  const can = rights(workspace(c, person.login, registrations, workers.results));
+  const now = Date.now();
+  const live = workers.results.filter((w) => !w.revoked_at).map((w) => w.id);
+  const facts = c && live.length && (c.login === person.login || isMaintainer(c)) ? await drainFacts(env, live, c.login, now) : new Map<string, OrderFacts>();
+  // Nobody signed in, someone the predicate refuses before any count, a revoked row: no count is read, and none decides.
+  const none: OrderFacts = { now, restartsHour: 0, rechecksHour: 0, loginHour: 0, restartsFreeAt: null, rechecksFreeAt: null, loginFreeAt: null, drainsHour: 0, drainsFreeAt: null };
+  for (const w of workers.results) {
+    const v = orderVerdicts(c, w, facts.get(w.id) ?? none);
+    const row = can.workers[w.id] as PersonWorkerRights;
+    for (const r of ["drain", "resume"] as const) {
+      row[r] = v[r].ok;
+      if (!v[r].ok) row.why[r] = v[r].why;
+    }
+  }
+  return json({ login: person.login, can }, 200, { "cache-control": "no-store" });
 }
 
 /**

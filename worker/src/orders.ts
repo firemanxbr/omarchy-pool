@@ -1242,6 +1242,34 @@ export async function orderFacts(env: Env, worker: string, login: string | null,
   };
 }
 
+/** Each of several workers' drains since a time, by idx_worker_orders_worker (worker_id, issued_at): COUNT_WORKER_SQL's count for ["drain"], grouped. */
+export const COUNT_DRAINS_SQL = "SELECT worker_id, COUNT(*) AS n, MIN(issued_at) AS oldest FROM worker_orders WHERE worker_id IN (SELECT value FROM json_each(?1)) AND kind = 'drain' AND issued_at > ?2 GROUP BY worker_id";
+
+/**
+ * The counts Drain and Resume decide on, for every worker of a person's page
+ * at once (#412, GET /users/:login/can): each worker's drains in the hour and
+ * the caller's orders in it — what orderFacts reads for one worker, in two
+ * reads whatever the number of rows. The counts behind the other buttons
+ * (restarts, re-checks, stops) are not read and say zero: a Drain or Resume
+ * verdict from these is the door's, any other is not.
+ */
+export async function drainFacts(env: Env, workers: string[], login: string, now: number): Promise<Map<string, OrderFacts>> {
+  const hourAgo = iso(now - HOUR);
+  const freeAt = (oldest: string | null) => (oldest ? iso(Date.parse(oldest) + HOUR) : null);
+  const [drains, mine] = await Promise.all([
+    env.DB.prepare(COUNT_DRAINS_SQL).bind(JSON.stringify(workers), hourAgo).all<{ worker_id: string; n: number; oldest: string | null }>(),
+    env.DB.prepare(COUNT_ISSUER_SQL).bind(login, hourAgo).first<{ n: number; oldest: string | null }>(),
+  ]);
+  const by = new Map(drains.results.map((d) => [d.worker_id, d]));
+  return new Map(workers.map((id): [string, OrderFacts] => {
+    const d = by.get(id);
+    return [id, {
+      now, restartsHour: 0, rechecksHour: 0, restartsFreeAt: null, rechecksFreeAt: null,
+      loginHour: mine?.n ?? 0, loginFreeAt: freeAt(mine?.oldest ?? null), drainsHour: d?.n ?? 0, drainsFreeAt: freeAt(d?.oldest ?? null),
+    }];
+  }));
+}
+
 /** A cap the pool hit is journaled once per window: the key decides. */
 async function capLine(env: Env, key: string, status: "warn", summary: string, payload: Record<string, unknown>): Promise<void> {
   const res = await env.DB.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").bind(key, summary).run();

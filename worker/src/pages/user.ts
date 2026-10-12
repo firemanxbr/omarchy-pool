@@ -6,16 +6,28 @@
  * evidence of every build, the staging quota, a token for scripts. Everything
  * is the public API (`/api/v1/factory/*`) with the browser session.
  *
+ * Drawn with the v1 kit since #412, as the redesigned pages are (a host's, a
+ * worker's, a package's, Review): the head, four numbers, then a card per
+ * part. The package is the unit: one block per registration, each of its
+ * architectures a line inside it — where it stands, its latest build, the
+ * gate on it, and its Build — with Build all and Remove on the block's head,
+ * all of it drawn without opening anything. One control opens the package's
+ * story (the request as the form checks it, each architecture's score with
+ * the audit and what comes next) and its builds, folded under it: there is
+ * no flat list of builds any more. A worker's row carries Drain, or Resume,
+ * beside Revoke, and the way to its page's other operations; a host's row
+ * links its page, where its pool cap is set.
+ *
  * The page is the same for every role: Share and Token, the way to request
- * and to register, Build, Remove and Renew on a package, Revoke on a
- * worker, Withdraw on an approval, the evidence of every build —
+ * and to register, Build, Remove and Renew on a package, Drain and Revoke
+ * on a worker, Withdraw on an approval, the evidence of every build —
  * drawn for everyone. What this viewer may not do is the same control grey
  * with the reason in its title (the shell's gate()), never hidden and never
  * a sentence in its place; the reason is the server's own word
  * (GET /users/<login>/can, no-store: the profile is cached for everyone,
  * the rights are the caller's), so a grey button is one the door would
  * refuse in the same words. A maintainer keeps what is theirs on anyone's
- * page — revoke, remove, withdraw.
+ * page — revoke, drain, remove, withdraw.
  */
 import { page, servedGrey, workerPanels } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -23,6 +35,7 @@ import type { RunningVersion } from "../meta";
 import { POOL_HOSTS } from "../routes/contributors";
 import { OWNER_NOT_MAINTAINER } from "../hosts";
 import { SELF_CAUSE } from "../routes/passkeys";
+import { UNPIN_AFTER_DRAIN_MINUTES } from "../orders";
 
 /**
  * The controls served grey for everyone, whose they are in their title —
@@ -33,8 +46,8 @@ import { SELF_CAUSE } from "../routes/passkeys";
  * its link is anyone's, and the toggle only shows the form, whose fields
  * are the gated ones.
  */
-const SHARE_BTN = `<button type="button" class="btn" id="share-open" title="the link to this page, to post anywhere">Share</button>`;
-const TOKEN_BTN = `<button type="button" class="btn ghost" id="token-open" title="a token for scripts and CI">Token</button>`;
+const SHARE_BTN = `<button type="button" class="op-btn" id="share-open" title="the link to this page, to post anywhere">Share</button>`;
+const TOKEN_BTN = `<button type="button" class="op-btn" id="token-open" title="a token for scripts and CI">Token</button>`;
 const REQUEST_LINK = `<a class="more-link" id="pk-request" href="/factory#request">+ request one →</a>`;
 const REGISTER_TOGGLE = `<button type="button" class="more-link" id="w-toggle" title="the form: a name, an architecture, one command to run it">+ register one</button>`;
 const WORKER_FORM = `<label>Name <input type="text" id="w-name" placeholder="laptop" required></label> <label>Architecture <select id="w-arch"><option>x86_64</option><option>aarch64</option></select></label> <button type="submit" id="w-btn">Register worker</button>`;
@@ -68,116 +81,188 @@ const PASSKEY_FORM = `<label>Name <input type="text" id="pk-label" maxlength="40
 const PASSKEY_NOT_A_MAINTAINER = `<p class="sub" id="pk-not" style="margin:0">Passkeys are for maintainers: they confirm approve and block. You can remove the ones you hold below.</p>`;
 
 /**
- * The page's own rules (#257): the passkeys' status line is always in the
- * page — empty, it takes no room — so a screen reader hears each thing it
- * says, and a failure is marked as one (the kit's red, as a refusal is); the
- * action column is named for a screen reader; on a phone the algorithm
- * column goes, so Remove stays on the screen; a heading a link landed on
- * shows its focus square, as the kit's controls do.
+ * The page's own rules, served after the kit's sheet (#412): the 1056px
+ * frame and its head, the two cards under the numbers, a package's block
+ * and its architecture lines, the folded history, the hosts' table on a
+ * phone. Every rule is under an up- class, or .up in front where it refines
+ * a kit primitive. Tokens only.
+ *
+ * And the page's rules from before (#257): the passkeys' status line is
+ * always in the page — empty, it takes no room — so a screen reader hears
+ * each thing it says, and a failure is marked as one (the kit's red, as a
+ * refusal is); the action column is named for a screen reader; on a phone
+ * the algorithm column goes, so Remove stays on the screen; a heading a
+ * link landed on shows its focus square, as the kit's controls do.
  */
 const CSS = String.raw`
-  .u-sr { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  #passkeys > p#pk-said:empty { margin: 0; }
-  #passkeys > p#pk-said.err { color: var(--text); border: 1px solid var(--red); padding: 10px 12px; font-size: 13.5px; }
+  /* One track no wider than the page: a worker table wider than a phone scrolls inside its own frame, never the page sideways. */
+  .up { max-width: 1056px; margin: 0 auto; padding-top: 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .up > * { min-width: 0; }
+  .up section { margin: 0; }
+  .up a { text-decoration: none; } .up a:hover { color: var(--green); }
+  .up :is(a, button):focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+  .up-head { display: grid; gap: 10px; } .up-head .crumbs { margin: 0; }
+  .up-id { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 18px; }
+  .up-idt { flex: 1 1 360px; min-width: 0; display: grid; gap: 6px; }
+  .up-idt .op-hero { max-width: none; overflow-wrap: anywhere; }
+  .up-line { margin: 0; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 13px; color: var(--muted); }
+  .up-line a { color: var(--muted); }
+  .up-share { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* Four numbers in four columns, or two and two on a phone or a narrow window: never a track left empty. */
+  #tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 899px) { #tiles { grid-template-columns: 1fr 1fr; } }
+  #tiles .op-stat .n { white-space: normal; overflow-wrap: anywhere; }
+  .up-pair { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 899px) { .up-pair { grid-template-columns: minmax(0, 1fr); } }
+  .up .op-card-h h2 { margin: 0; font: 600 15px var(--font-display); letter-spacing: 0; }
+  .up .op-card-h > a { color: var(--dim); font-size: 12.5px; }
+  .up-hr { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+  .up-note { margin: 0; font-size: 12.5px; color: var(--dim); max-width: 760px; } .up-note a { color: var(--green); }
+  .up-lede { padding: 12px 16px 0; }
+  .up-pad { padding: 12px 16px; }
+  .up-empty { margin: 0; padding: 14px 16px; font-size: 13px; color: var(--dim); }
+  .up-score { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; align-items: center; }
+  .up-score > b { font: 600 44px/1 var(--font-display); color: var(--green); font-variant-numeric: tabular-nums; }
+  .up-score > .up-note { grid-column: 1 / -1; }
+  .up-kv { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; font-size: 13px; }
+  .up-kv dt { color: var(--dim); } .up-kv dd { margin: 0; overflow-wrap: anywhere; }
+  .up .op-btn.sm { padding: 3px 11px; font-size: 12.5px; line-height: 1.5; }
+  .up .op-btn[disabled] { opacity: 1; background: transparent; border-color: var(--line); color: var(--dim); }
+  /* A package (#412): its head (the name, the stage, Build all and Remove), where it stands, a line per architecture with its Build at the
+     line's end, and the one control that opens its story and its builds. On a phone an architecture's facts go under its name; its Build stays
+     on the line. */
+  .up-pkgs { display: grid; }
+  .up-pkg { display: grid; gap: 6px; min-width: 0; padding: 12px 16px; border-top: 1px solid var(--line); }
+  .up-pkgs > .up-pkg:first-child { border-top: 0; }
+  .up-pkg.skel { padding: 16px; } .up-pkg.skel .skl { width: 60%; }
+  .up-pkg-h { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+  .up-name { font: 600 16px var(--font-display); color: var(--text); overflow-wrap: anywhere; }
+  .up-acts { margin-left: auto; display: inline-flex; flex-wrap: wrap; gap: 8px; }
+  .up-stands { margin: 0; font-size: 12.5px; color: var(--dim); overflow-wrap: anywhere; }
+  .up-arches { display: grid; }
+  .up-arch { display: grid; grid-template-columns: 10px 7ch minmax(0, 1fr) auto; gap: 6px 10px; align-items: center; padding: 7px 0; border-top: 1px dashed var(--line); font-size: 13px; }
+  .up-arch > b { font: 600 13px var(--font-mono); }
+  .up-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+  .up-facts .v { color: var(--dim); font: 12px var(--font-mono); overflow-wrap: anywhere; }
+  .up-facts .when { color: var(--dim); font-size: 12px; }
+  @media (max-width: 560px) { .up-arch { grid-template-columns: 10px minmax(0, 1fr) auto; } .up-arch > .up-facts { grid-column: 2 / -1; grid-row: 2; } }
+  .up-more { justify-self: start; padding: 2px 0; border: 0; background: none; color: var(--green); font: inherit; font-size: 12.5px; cursor: pointer; }
+  .up-more:hover { text-decoration: underline; }
+  .up-open { display: grid; gap: 12px; padding-top: 6px; min-width: 0; }
+  .up-open .pkarch, .up-open .pkreq { margin: 0; }
+  .up-table { overflow-x: auto; }
+  .up-hist td { font-size: 12.5px; } .up-hist td.why { min-width: 140px; max-width: 320px; overflow-wrap: anywhere; }
+  /* A build's row on a phone keeps the number, the version, the architecture, the status, when and the evidence; why, where and how long are on its page. */
+  @media (max-width: 640px) { .up-hist :is(th, td):is(:nth-child(5), :nth-child(6), :nth-child(7)) { display: none; } }
+  .up-sec-h { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 14px; margin: 0 0 8px; }
+  .up-sec-h h2 { margin: 0; font: 600 18px var(--font-display); letter-spacing: 0; }
+  .up-sec-h + .up-note { margin-bottom: 12px; }
+  .up-sr { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #pk-said:empty, #pk-reset-said:empty { margin: 0; }
+  #pk-said.err, #pk-reset-said.err { color: var(--text); border: 1px solid var(--red); padding: 10px 12px; font-size: 13.5px; }
   #passkeys h2:focus-visible, #agents h2:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
-  #pk-reset > p#pk-reset-said:empty { margin: 0; }
-  #pk-reset > p#pk-reset-said.err { color: var(--text); border: 1px solid var(--red); padding: 10px 12px; font-size: 13.5px; }
   #pk-reset .form button.danger, #pk-reset .form button.danger:hover { border-color: var(--red); color: var(--red); }
   @media (max-width: 520px) { #pk-table th:nth-child(2), #pk-table td:nth-child(2) { display: none; } }
-  /* On a phone the hosts table keeps Host, Status, Units and Confirm in view: the arches are in the Host cell's detail, the release and the report on the host page. */
-  @media (max-width: 520px) { #hosts-table th:nth-child(3), #hosts-table td:nth-child(3), #hosts-table th:nth-child(5), #hosts-table td:nth-child(5), #hosts-table th:nth-child(6), #hosts-table td:nth-child(6) { display: none; } }
-  #h-new pre { position: relative; padding-right: 76px; white-space: pre-wrap; overflow-wrap: anywhere; }
   #hosts-table .h-detail { overflow-wrap: anywhere; min-width: 16ch; }
-  #h-stop { margin-top: 10px; display: grid; gap: 8px; justify-items: start; }
+  /* On a phone the hosts table keeps Host, Status, Units and Confirm in view, its status wrapping rather than pushing Confirm out: the arches are in the Host cell's detail; the release, the report and the pool cap on the host page, which the name opens. */
+  @media (max-width: 520px) { #hosts-table :is(th, td):is(:nth-child(3), :nth-child(5), :nth-child(6), :nth-child(7)) { display: none; } #hosts-table .pill { white-space: normal; } #hosts-table :is(th, td) { padding-left: 6px; padding-right: 6px; } #hosts-table .h-detail { min-width: 12ch; } }
+  #h-new pre { position: relative; padding-right: 76px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #h-stop { padding: 0 16px 14px; display: grid; gap: 8px; justify-items: start; }
   #h-stop .small-btn.danger { border-color: var(--red); color: var(--red); }
 `;
 
+/** A number's place before the profile answers: the kit's tile with the frame's skeleton bars, gone with the others (endSkeleton) when no profile answers. */
+const SKELETON_STAT = `<div class="op-stat skel"><span class="k"><span class="skl"></span></span><b class="n"><span class="skl"></span></b><span class="s"><span class="skl"></span></span></div>`;
+
 const body = (login: string) => String.raw`
+  <div class="up">
   <div id="pk-notice" hidden></div>
-  <div class="profile-head">
-    <span class="avatar lg" id="avatar">…</span>
-    <div><p class="crumbs"><a href="/factory">Factory</a> / <span id="crumb"></span></p><h1 id="title">…</h1><p class="line" id="line"></p></div>
-    <span id="share-btn">${SHARE_BTN} ${servedGrey(TOKEN_BTN, `only ${login} mints their token`)}</span>
+  <section class="up-head" aria-labelledby="title">
+    <p class="crumbs"><a href="/factory">Factory</a> / <span id="crumb"></span></p>
+    <div class="up-id">
+      <span class="avatar lg" id="avatar">…</span>
+      <div class="up-idt"><h1 class="op-hero" id="title">…</h1><p class="up-line" id="line"></p></div>
+      <span class="up-share" id="share-btn">${SHARE_BTN} ${servedGrey(TOKEN_BTN, `only ${login} mints their token`)}</span>
+    </div>
+  </section>
+
+  <div class="op-stats" id="tiles">${SKELETON_STAT.repeat(4)}</div>
+
+  <div class="up-pair">
+    <section class="op-card" aria-labelledby="activity-h">
+      <div class="op-card-h"><h2 id="activity-h">Activity</h2><small>16 weeks · builds, decisions, packages</small></div>
+      <div class="op-card-b"><div class="activity" id="activity"></div><p class="up-note" id="activity-note" style="margin-top:8px"></p></div>
+    </section>
+    <section class="op-card" id="record-section" aria-labelledby="record-h">
+      <div class="op-card-h"><h2 id="record-h">Track record</h2><a href="/docs/governance">the formula →</a></div>
+      <div class="op-card-b up-score"><b id="score">…</b><dl class="up-kv" id="record"></dl><p class="up-note" id="score-f"></p></div>
+    </section>
   </div>
-  <div class="tiles" id="tiles"></div>
-  <div class="two" style="margin-bottom:44px">
-    <div class="panel"><h3>Activity <span class="dim" style="font-size:12px;font-weight:400">16 weeks · builds, decisions, packages</span></h3><div class="activity" id="activity"></div><p class="sub" id="activity-note" style="margin:8px 0 0;font-size:12.5px"></p></div>
-    <div class="panel"><h3>Track record <a href="/docs/governance">the formula →</a></h3><div class="score"><b id="score">…</b><div class="f" id="score-f"></div></div></div>
-  </div>
 
-  <section id="record-section" hidden>
-    <h2>Track record</h2>
-    <p class="sub">From the record the pool keeps anyway — what this person brought that a maintainer let in, what they built, what they decided. One number, with a formula anyone can check (<a href="/docs/governance">Governance</a>): it says where the work was done, not who someone is.</p>
-    <div class="table-wrap"><table id="record"><thead><tr><th>Contributed</th><th>Maintained</th><th>Score</th></tr></thead><tbody></tbody></table></div>
+  <section class="op-card" id="packages-section" aria-labelledby="packages-h">
+    <div class="op-card-h"><h2 id="packages-h">Packages</h2><span class="up-hr"><small id="quota"></small>${servedGrey(REQUEST_LINK, `only ${login} requests here`)}</span></div>
+    <p class="up-note up-lede">Registered under this name. The pool builds each one as evidence, the project builds it again, and <b>another</b> maintainer decides. A line per architecture: where it stands, its latest build, its Build.</p>
+    <div class="up-pkgs" id="packages"><div class="up-pkg skel"><span class="skl"></span></div><div class="up-pkg skel"><span class="skl"></span></div></div>
   </section>
 
-  <section>
-    <div class="h2row"><h2>Packages</h2>${servedGrey(REQUEST_LINK, `only ${login} requests here`)}</div>
-    <p class="sub">Registered by this contributor: the name is theirs, the pool builds it as evidence, the project builds it again, <b>another</b> maintainer decides — a maintainer who brings a package is its contributor. Open a row: the request as the form checks it, then each architecture on its own — its build, the gate, the audit, the score, whether it is ready for a maintainer.</p>
-    <div class="table-wrap"><table id="packages" class="pk"><thead><tr><th></th><th>Package</th><th>Category</th><th>Project</th><th>Arches</th><th>Stage</th><th>Where it stands</th></tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section>
-    <div class="h2row"><h2>Builds</h2><span class="dim" id="quota" style="font-size:12px"></span></div>
-    <p class="sub">On the pool's hosts — evidence for a maintainer, never what users get directly. The number opens the build, whole; its evidence — the log, the PKGBUILD — is read on that page, which says so when a build left none.</p>
-    <div class="table-wrap"><table id="builds"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Status</th><th>Why</th><th>Worker</th><th>Took</th><th>When</th><th>Evidence</th></tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section>
-    <div class="h2row"><h2>Workers</h2><span id="w-slot"></span></div>
-    <p class="sub">The machines under this name, as the <a href="/workers">Workers</a> page shows them — the review ones and the pool's, when this person keeps them, and a legacy community one.</p>
+  <section class="up-workers" aria-labelledby="workers-h">
+    <div class="up-sec-h"><h2 id="workers-h">Workers</h2><span id="w-slot"></span></div>
+    <p class="up-note">The machines under this name, as the <a href="/workers">Workers</a> page shows them. The id opens a worker's page; Drain and Revoke are on its row.</p>
     <div id="w-own">${poolHostsLine()}</div>
     ${workerPanels([
       { kind: "community", blurb: "legacy community sets, until they retire: any contributor's packages, as a host builds them", hidden: true },
       { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits", hidden: true },
       { kind: "project", blurb: "the pool's own jobs, on the host this maintainer keeps", hidden: true },
     ])}
-    <p class="sub" id="w-none" hidden style="margin:0">No worker registered under this name.</p>
+    <p class="up-note" id="w-none" hidden>No worker registered under this name.</p>
   </section>
 
-  <section id="hosts" hidden>
-    <div class="h2row"><h2>Hosts</h2><span id="h-slot"></span></div>
-    <p class="sub">The machines this maintainer provides: each enrolled by its owner, confirmed by fingerprint, and trusted by the same pull request that named them a maintainer.</p>
-    <div id="h-own"></div>
-    <div class="table-wrap"><table id="hosts-table"><thead><tr><th>Host</th><th>Status</th><th>Arches</th><th>Units</th><th>Release</th><th>Reported</th><th aria-label="Confirm"></th></tr></thead><tbody></tbody></table></div>
-    <p class="sub" id="h-none" hidden style="margin:0">No host under this name.</p>
-    <div id="h-notices" hidden style="margin-top:10px"></div>
+  <section class="op-card" id="hosts" aria-labelledby="hosts-h" hidden>
+    <div class="op-card-h"><h2 id="hosts-h">Hosts</h2><span id="h-slot"></span></div>
+    <div class="up-pad"><p class="up-note">The machines this maintainer provides: each enrolled by its owner, confirmed by fingerprint, and trusted by the same pull request that named them a maintainer. A host's page sets its pool cap.</p><div id="h-own"></div></div>
+    <div class="up-table"><table class="op-table" id="hosts-table"><thead><tr><th>Host</th><th>Status</th><th>Arches</th><th>Units</th><th>Release</th><th>Reported</th><th>Pool cap</th><th aria-label="Confirm"></th></tr></thead><tbody></tbody></table></div>
+    <p class="up-empty" id="h-none" hidden>No host under this name.</p>
+    <div class="up-pad" id="h-notices" hidden></div>
     <div id="h-stop" hidden></div>
   </section>
 
-  <section id="agents" hidden>
-    <div class="h2row"><h2>Agents</h2><a class="more-link" href="/agents#login">+ grant one →</a></div>
-    <p class="sub">The agents you let act as you through omarchy-cli's tools (<code>omarchy-cli login</code>), and the decisions they drafted for you. Only you see this section: nothing an agent drafts is decided, or on the record, until you confirm it in the browser. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
-    <div class="table-wrap"><table id="grants"><thead><tr><th>Agent</th><th>Scopes</th><th>Granted</th><th>Expires</th><th>Last used</th><th>State</th></tr></thead><tbody></tbody></table></div>
-    <div class="table-wrap"><table id="drafts"><thead><tr><th>Drafted</th><th>Package</th><th>Verdict</th><th>Agent</th><th>State</th><th>Note</th></tr></thead><tbody></tbody></table></div>
+  <section class="op-card" id="agents" aria-labelledby="agents-h" hidden>
+    <div class="op-card-h"><h2 id="agents-h">Agents</h2><a class="more-link" href="/agents#login">+ grant one →</a></div>
+    <p class="up-note up-lede">The agents you let act as you through omarchy-cli's tools (<code>omarchy-cli login</code>), and the decisions they drafted for you. Only you see this section: nothing an agent drafts is decided, or on the record, until you confirm it in the browser. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
+    <div class="up-pad"><div class="up-table"><table class="op-table" id="grants"><thead><tr><th>Agent</th><th>Scopes</th><th>Granted</th><th>Expires</th><th>Last used</th><th>State</th></tr></thead><tbody></tbody></table></div>
+    <div class="up-table" style="margin-top:12px"><table class="op-table" id="drafts"><thead><tr><th>Drafted</th><th>Package</th><th>Verdict</th><th>Agent</th><th>State</th><th>Note</th></tr></thead><tbody></tbody></table></div></div>
   </section>
 
-  <section id="passkeys" hidden>
-    <div class="h2row"><h2>Passkeys</h2></div>
-    <p class="sub">Approve and block are confirmed with a passkey: on Review, on a package's page, and what your agents draft. Your device asks for your fingerprint, face or PIN, which no token and no agent can supply. Your first passkey is added with your session. Adding another, or removing one, asks for a passkey you hold. Lost your only one? Another maintainer resets them, and your token and your agents' grants go with them. The pool keeps each one's public key and credential id, nothing else, and the journal says when one is added, removed or reset. Only you see this section. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
-    <form id="pk-form" class="form" onsubmit="return false"></form>
-    <p class="sub" id="pk-said" role="status" aria-live="polite"></p>
-    <div class="table-wrap"><table id="pk-table"><thead><tr><th>Name</th><th>Algorithm</th><th>Added</th><th>Last used</th><th><span class="u-sr">Remove</span></th></tr></thead><tbody></tbody></table></div>
+  <section class="op-card" id="passkeys" aria-labelledby="passkeys-h" hidden>
+    <div class="op-card-h"><h2 id="passkeys-h">Passkeys</h2></div>
+    <div class="up-pad" style="display:grid;gap:12px">
+      <p class="up-note">Approve and block are confirmed with a passkey: on Review, on a package's page, and what your agents draft. Your device asks for your fingerprint, face or PIN, which no token and no agent can supply. Your first passkey is added with your session. Adding another, or removing one, asks for a passkey you hold. Lost your only one? Another maintainer resets them, and your token and your agents' grants go with them. The pool keeps each one's public key and credential id, nothing else, and the journal says when one is added, removed or reset. Only you see this section. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
+      <form id="pk-form" class="form" onsubmit="return false"></form>
+      <p class="sub" id="pk-said" role="status" aria-live="polite"></p>
+      <div class="up-table"><table class="op-table" id="pk-table"><thead><tr><th>Name</th><th>Algorithm</th><th>Added</th><th>Last used</th><th><span class="up-sr">Remove</span></th></tr></thead><tbody></tbody></table></div>
+    </div>
   </section>
 
-  <section id="pk-reset" hidden>
-    <div class="h2row"><h2>A lost passkey</h2></div>
-    <p class="sub">A maintainer who lost their only passkey gets a way back from another maintainer. Every passkey of theirs goes, with their token and their agents' grants, and they are signed out. They add a new passkey and make a new token after signing in with GitHub again. Your own passkey confirms the reset, and the reason goes on the public journal and on a record the pool signs.</p>
-    <form id="pk-reset-form" class="form" onsubmit="return false"><label>Why <input type="text" id="pk-reset-why" minlength="4" maxlength="300" placeholder="lost their phone and their key" autocomplete="off" required></label> <button type="submit" id="pk-reset-go" class="danger">Reset the passkeys</button></form>
-    <p class="sub" id="pk-reset-said" role="status" aria-live="polite"></p>
+  <section class="op-card" id="pk-reset" aria-labelledby="pk-reset-h" hidden>
+    <div class="op-card-h"><h2 id="pk-reset-h">A lost passkey</h2></div>
+    <div class="up-pad" style="display:grid;gap:12px">
+      <p class="up-note">A maintainer who lost their only passkey gets a way back from another maintainer. Every passkey of theirs goes, with their token and their agents' grants, and they are signed out. They add a new passkey and make a new token after signing in with GitHub again. Your own passkey confirms the reset, and the reason goes on the public journal and on a record the pool signs.</p>
+      <form id="pk-reset-form" class="form" onsubmit="return false"><label>Why <input type="text" id="pk-reset-why" minlength="4" maxlength="300" placeholder="lost their phone and their key" autocomplete="off" required></label> <button type="submit" id="pk-reset-go" class="danger">Reset the passkeys</button></form>
+      <p class="sub" id="pk-reset-said" role="status" aria-live="polite"></p>
+    </div>
   </section>
 
-  <section id="approvals-section" hidden>
-    <h2>Approvals</h2>
-    <p class="sub">Decisions this maintainer signed: what they let into the pool — and where it stands today, ring by ring — what they sent back, what they took back. A standing approval is taken back from here by a maintainer: the package leaves every ring, another maintainer decides.</p>
-    <div class="table-wrap"><table id="approvals"><thead><tr><th>When</th><th>Package</th><th>Arch</th><th>Decision</th><th>Where it stands</th><th>Note</th></tr></thead><tbody></tbody></table></div>
+  <section class="op-card" id="approvals-section" aria-labelledby="approvals-h" hidden>
+    <div class="op-card-h"><h2 id="approvals-h">Approvals</h2></div>
+    <p class="up-note up-lede">Decisions this maintainer signed: what they let into the pool, and where it stands today, ring by ring; what they sent back; what they took back. A maintainer takes a standing approval back from here: the package leaves every ring, another maintainer decides.</p>
+    <div class="up-pad"><div class="up-table"><table class="op-table" id="approvals"><thead><tr><th>When</th><th>Package</th><th>Arch</th><th>Decision</th><th>Where it stands</th><th>Note</th></tr></thead><tbody></tbody></table></div></div>
   </section>
+  </div>
 `;
 
 const SCRIPT = String.raw`
   var login = decodeURIComponent(location.pathname.split("/")[2] || "");
   $("#crumb").textContent = login;
-  skeletonTiles("#tiles", 4); skeletonRows("#packages", 7, 2); skeletonRows("#builds", 9, 3);
   var API = "/api/v1/factory";
   // ---- what this viewer may do here, from the server: GET /users/<login>/can (no-store — the profile is cached for everyone, the rights are the caller's) says for each control whether it is live and, where not, why, in the words the door would refuse with. Every control below is drawn for everyone and reads CAN; nobody's answer — nothing, the sign-in as the reason — until it lands.
   var CAN = { why: {}, packages: {}, workers: {} };
@@ -185,7 +270,7 @@ const SCRIPT = String.raw`
   function reason(right) { return CAN.why[right] || "sign in with GitHub"; }
   // Remove is answered per registration (an approved one is a maintainer's to remove, one in a ring nobody's): the row's answer where the server gave one, the page's otherwise.
   function removeOf(name) { var p = CAN.packages[name]; return p ? { ok: p.remove === true, why: p.why || "" } : { ok: may("remove"), why: reason("remove") }; }
-  // Revoke is answered per worker (a revoked one is gone: the state's word first, the door's own): the row's answer where the server gave one, the role's otherwise.
+  // Revoke, Drain and Resume are answered per worker (a revoked one is gone: the state's word first, the door's own): the row's answer where the server gave one, the role's otherwise.
   function workerCan(w, right) { var x = CAN.workers[w.id]; return x ? { ok: x[right] === true, why: (x.why && x.why[right]) || "" } : { ok: may(right), why: reason(right) }; }
   var SHARE_BTN = ${JSON.stringify(SHARE_BTN)}, TOKEN_BTN = ${JSON.stringify(TOKEN_BTN)}, REQUEST_LINK = ${JSON.stringify(REQUEST_LINK)}, WORKER_FORM = ${JSON.stringify(WORKER_FORM)}, REGISTER_TOGGLE = ${JSON.stringify(REGISTER_TOGGLE)}, WORKER_OWN = ${JSON.stringify(WORKER_OWN)};
   var HOST_TOGGLE = ${JSON.stringify(HOST_TOGGLE)}, HOST_FORM = ${JSON.stringify(HOST_FORM)}, HOST_OWN = ${JSON.stringify(HOST_OWN)};
@@ -194,8 +279,10 @@ const SCRIPT = String.raw`
     return api("GET", "/api/v1/users/" + encodeURIComponent(login) + "/can").then(function (d) {
       if (d.__status !== 200 || !d.can) return;
       // The controls outside the tables are drawn again only when their gate changed: what the owner typed in the register form stays through a refresh.
-      var was = topState(); CAN = d.can;
+      var was = topState(), wasWorkers = JSON.stringify(CAN.workers); CAN = d.can;
       if (DRAWN && topState() !== was) { renderTop(); renderRegister(); }
+      // A worker's row is drawn with its rights: once they change (a Drain, a Resume, a Revoke just pressed), the tables are drawn again with them, whichever of this read and the listing's lands first — a row drawn from the new listing with the old rights kept a grey Resume on a worker just drained until the next tick.
+      if (JSON.stringify(CAN.workers) !== wasWorkers) renderWorkers();
     }).catch(function () {});
   }
   function topState() { return ["request", "register", "token"].map(function (r) { return may(r) + ":" + reason(r); }).join("|"); }
@@ -206,7 +293,8 @@ const SCRIPT = String.raw`
   function acted() { FRESH_UNTIL = Date.now() + 90000; loadCan(); }
   // A staged or failed build's evidence, at the shell's one address for it (its page's Evidence section): the log and the PKGBUILD are read there, where a build that left nothing says so instead of a 404.
   function evidence(t) { return t.status === "staged" || t.status === "failed" ? evidenceLink(t) : ""; }
-  var OPEN = {}, LATEST = {}, FACTORY = null, STORIES = {};
+  // What the page holds: the packages opened, the listing the worker tables read, the stories read (and why one could not be), the profile's packages and builds, and the package list as last drawn.
+  var OPEN = {}, FACTORY = null, STORIES = {}, STORY_ERR = {}, PKGS = [], BUILDS = [], DRAWN_PKGS = "";
   // Share and Token at the top, for everyone: the link to this page is anyone's to post (it is public, everything on it is on the record anyway — no door, so no gate), the token the owner's to mint — POST /factory/token mints the caller's own, whoever's page the button is on, which is why nobody else's is live.
   function renderTop() {
     var url = location.origin + userHref(login);
@@ -248,6 +336,8 @@ const SCRIPT = String.raw`
   }
   // Where its key lives (#330): in its TPM, made there and never out of it, or a file — what its agent said at enrollment.
   function keyWhere(h) { var k = h.host_key; return !k ? "" : k.store === "tpm" ? " · its key is in its TPM, never out of it" : " · its key is a file" + (k.held ? " (not in its TPM: " + esc(k.held) + ")" : ""); }
+  // The pool's cap on a host's units (#337) is set on its page, by its owner or any maintainer: the cell links there — the cap where the listing says it (to its owner and the maintainers), the way there for anyone else.
+  function poolCap(h) { var v = h.pool_cap_units; return '<a href="/hosts/' + esc(h.id) + '#hp-facts" title="the pool\'s cap on its units: set on its page, by its owner or a maintainer">' + (v === undefined ? "set" : v === null ? "none" : num(v) + (v === 1 ? " unit" : " units")) + ' →</a>'; }
   function hostCaps(h) { return h.capacity ? num(h.capacity.cpus) + " CPUs, " + num(h.capacity.mem_gb) + " GB, " + h.lanes.map(function (l) { return l.arch + " " + l.mode; }).join(", ") + ", isolation " + (h.isolation || "?") + (h.dedicated ? " (dedicated)" : "") : ""; }
   function renderHosts() {
     if (!HOSTS) return;
@@ -261,7 +351,7 @@ const SCRIPT = String.raw`
       var detail = h.fingerprint ? '<div class="muted h-detail" style="font-size:12px">' + esc((h.hostname || "") + (h.where ? " · " + h.where : "")) + (h.capacity ? " · " + esc(hostCaps(h)) : "") + '<br><span class="mono">' + esc(h.fingerprint) + '</span>' + keyWhere(h) + (h.below_minimum ? '<br>' + esc(h.below_minimum) : '') + '</div>' : '';
       // Who stopped it and why, readable on a phone too (the pill's title is a hover).
       if ((h.status === "suspended" || h.status === "retired") && h.status_by) detail += '<div class="muted" style="font-size:12px">' + esc(h.status + " by " + h.status_by + (h.status_reason ? ": " + h.status_reason : "")) + '</div>';
-      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1], h.status_reason ? h.status + " by " + (h.status_by || "?") + ": " + h.status_reason : "") + (h.claims_stopped_at && h.status !== "retired" ? " " + pillHtml("error", "claims stopped", NOT_LISTED) : "") + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.fleet && h.fleet.units !== null && h.fleet.units !== undefined ? num(h.fleet.units) + ' <span class="muted" title="the units its leases hold, and the ones free for a task now">' + num(h.fleet.units_busy) + ' busy · ' + num(h.fleet.units_free) + ' free</span>' : h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + confirm + '</td></tr>';
+      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1], h.status_reason ? h.status + " by " + (h.status_by || "?") + ": " + h.status_reason : "") + (h.claims_stopped_at && h.status !== "retired" ? " " + pillHtml("error", "claims stopped", NOT_LISTED) : "") + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.fleet && h.fleet.units !== null && h.fleet.units !== undefined ? num(h.fleet.units) + ' <span class="muted" title="the units its leases hold, and the ones free for a task now">' + num(h.fleet.units_busy) + ' busy · ' + num(h.fleet.units_free) + ' free</span>' : h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + poolCap(h) + '</td><td>' + confirm + '</td></tr>';
     });
     $("#hosts-table tbody").innerHTML = rows.join("");
     renderHostStop(hs);
@@ -347,65 +437,135 @@ const SCRIPT = String.raw`
     });
     $("#w-none").hidden = any; $("#wt-legend").hidden = !any;
   }
-  // A worker's button, on every row for whoever looks — a revoked worker's too, grey with the state's word: Revoke stops its token, its owner's or a maintainer's — the server says which, and why not, per row. A worker's mode went with the community worker tier (#343).
+  // A worker's buttons, on every row for whoever looks — a revoked worker's too, grey with the state's word: Drain, or Resume once drained (#412: a maintainer reaches it from here in one click, as on the worker's page), and Revoke, which stops its token — its owner's or a maintainer's: the server says which, and why not, per row; Drain and Resume in the worker orders' own words. Then the way to the rest of what can be done to it: its page's Operate (Re-check agent, Restart, Update, Stop its task), a host's registration its host's page. A worker's mode went with the community worker tier (#343).
   function workerActs(w) {
-    var revoke = workerCan(w, "revoke");
-    return gate('<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>', revoke.ok, revoke.why);
+    var kind = w.drained ? "resume" : "drain", order = workerCan(w, kind), revoke = workerCan(w, "revoke");
+    var host = w.kind === "host" && w.host_id, there = host ? "/hosts/" + encodeURIComponent(w.host_id) + "#hp-operate" : workerHref(w.id) + "#wk-operate";
+    return gate('<button type="button" class="small-btn" data-worker-order="' + kind + '" data-worker="' + esc(w.id) + '" title="' + (kind === "drain" ? "hand it nothing from its next claim: a task in hand runs to its end" : "hand it work again from its next claim") + '">' + (kind === "drain" ? "Drain" : "Resume") + '</button>', order.ok, order.why)
+      + ' ' + gate('<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>', revoke.ok, revoke.why)
+      + ' <a class="small-btn" href="' + there + '" title="' + (host ? "its host's page: Suspend, Resume, Retire, Drain" :"its page: Re-check agent, Restart, Update, Stop its task") + '">Operate →</a>';
+  }
+  // Drain and Resume, asked as the worker's page asks them, with a reason for the journal: the order holds from its issue (#277, part 2), and the door's note says what follows.
+  var UNPIN_MIN = ${UNPIN_AFTER_DRAIN_MINUTES};
+  function workerOrder(kind, id) {
+    var w = FACTORY ? FACTORY.workers.filter(function (x) { return x.id === id; })[0] : null;
+    var text = kind === "drain" ? "The pool hands it nothing from its next claim" + (w && w.current_task ? "; task #" + w.current_task + " runs to its end" : "") + ". Builds asked for it by name go to the queue after " + UNPIN_MIN + " min. It stays drained, restarts included, until someone resumes it."
+      : "The pool hands it work again from its next claim." + (w && w.drained && w.drained.by && w.drained.by !== WHO.login ? " " + w.drained.by + " drained it" + (w.drained.reason ? ": " + w.drained.reason : "") + " — the journal puts their words beside yours." : "");
+    ask({ title: (kind === "drain" ? "Drain " : "Resume ") + id + "?", text: esc(text), input: "optional", placeholder: "why — it goes on the journal (optional)", confirm: kind === "drain" ? "Drain" : "Resume", danger: kind === "drain" }).then(function (why) {
+      if (why === null) return;
+      api("POST", API + "/workers/" + encodeURIComponent(id) + "/orders", { kind: kind, reason: why || (kind === "drain" ? "Drain" : "Resume") + " from " + login + "'s page" }).then(function (d) {
+        if (d.error) { toast(esc(d.error), "error"); return; }
+        toast(esc((kind === "drain" ? "Drained — " : "Resumed — ") + (d.note || ""))); acted(); loadWorkers();
+      }).catch(failed);
+    });
   }
   function loadWorkers() { return fetch("/api/v1/factory?limit=10" + fresh("&")).then(function (r) { return r.json(); }).then(function (d) { FACTORY = d; renderWorkers(); }).catch(function () {}); }
-  // A package's story (routes/story.ts), in its open row: the request as the form checks it today, then one panel per architecture — each is built on a worker of its own and can be ready while the other failed — with its latest chain, the two halves of the score with their evidence, and the one line that says whose turn it is.
-  function story(name) {
-    var el = storyEl(name); if (!el) return;
-    if (STORIES[name]) el.innerHTML = storyHtml(name, STORIES[name]); // what was drawn stays while the fresh one loads: no flicker on the refresh
-    fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story" + fresh("?")).then(function (r) { return r.ok ? r.json() : null; }).then(function (st) {
-      if (!st) { if (!STORIES[name]) el.innerHTML = '<div class="muted">no story yet</div>'; return; }
-      STORIES[name] = st;
-      el.innerHTML = storyHtml(name, st);
-    }).catch(function () { if (!STORIES[name]) el.innerHTML = '<div class="muted">could not load the story</div>'; });
+  // ---- packages (#412): the package is the unit. One block per registration: its head (the name, the stage, a block, Build all and Remove), where it stands, a line per architecture — where it stands (the server's targets, targets.ts), its latest build with the gate on it, its Build — and the one control that opens its story and its builds. All of it is the profile's (GET /users/<login>: the registration's row and the last fifty builds under this name), so nothing is read per package to draw it; the story (routes/story.ts) is read for a package opened only, as before, and adds the score and the audit to its lines.
+  var TARGET_TONE = { waiting: "wait", building: "run", built: "ok", not_supported: "na", reviewing: "run", reviewed: "ok", approved: "ok", published: "ok" };
+  var BUILD_TONE = { queued: "wait", leased: "run", staged: "ok", done: "ok", failed: "fail", cancelled: "na" };
+  // The builds of a name no longer registered here — a registration removed — keep a block of their own, under a key no package's name can be (a pacman name has no "*").
+  var OTHERS = "*";
+  function buildsOf(name) { return BUILDS.filter(function (b) { return b.name === name; }); }
+  // A package's architectures: the ones its request names — the only ones it builds — then any its targets or its builds still carry: an architecture the request dropped keeps its line and its builds, its Build grey with the door's word.
+  function archesOfPkg(p) {
+    var reg = []; try { reg = JSON.parse(p.arches || "[]"); } catch (e) {}
+    var all = reg.slice(), add = function (a) { if (a && all.indexOf(a) < 0) all.push(a); };
+    Object.keys(p.targets || {}).forEach(add); buildsOf(p.name).forEach(function (b) { add(b.arch); });
+    return { registered: reg, all: all };
   }
-  // The open row's story element, by the package's name (pacman names carry @ . _ + -; an id made of them would collide).
-  function storyEl(name) { var els = document.querySelectorAll(".pkstory[data-story]"); for (var i = 0; i < els.length; i++) if (els[i].getAttribute("data-story") === name) return els[i]; return null; }
-  // Build, on every story for whoever looks: grey by state first — a build in flight, the package blocked, the same for all — and by role otherwise (the owner builds, nobody else: the server's word); the title says which. arch null is Build all.
+  function inFlight(b) { return !!b && (b.status === "queued" || b.status === "leased"); }
+  // Building now, which a Build of its architecture waits for: the contributor's build running, or the project's queued or running (its target says reviewing). A contributor's build that only waits in the queue is the Build dialog's to move or to take out.
+  function running(t, b) { return (!!t && t.status === "reviewing") || (!!b && (b.status === "leased" || (b.trust === "project" && b.status === "queued"))); }
+  // Build, on every package for whoever looks: grey by state first — a build in flight, the package blocked, an architecture the request no longer names: the same for all — and by role otherwise (the owner builds, nobody else: the server's word); the title says which. arch null is Build all.
   function buildBtn(name, arch, stopped, title) {
-    var btn = '<button type="button"' + (arch ? ' class="small-btn"' : '') + ' data-build="' + esc(name) + '"' + (arch ? ' data-arch="' + esc(arch) + '"' : '') + ' title="' + esc(title) + '">Build ' + (arch ? esc(arch) : "all") + '</button>';
+    var btn = '<button type="button" class="op-btn sm' + (arch ? '' : ' primary') + '" data-build="' + esc(name) + '"' + (arch ? ' data-arch="' + esc(arch) + '"' : '') + ' title="' + esc(title) + '">Build ' + (arch ? esc(arch) : "all") + '</button>';
     return gate(btn, !stopped && may("build"), stopped || reason("build"));
   }
-  function removeBtn(name) { var r = removeOf(name); return gate('<button type="button" class="ghost" data-remove="' + esc(name) + '" title="remove the registration">Remove</button>', r.ok, r.why); }
+  function removeBtn(name) { var r = removeOf(name); return gate('<button type="button" class="op-btn sm" data-remove="' + esc(name) + '" title="remove the registration">Remove</button>', r.ok, r.why); }
   // Withdraw, on every approval row for whoever looks: live for a maintainer where the approval stands (standing: approved, not withdrawn — the row's own fact), grey with why not otherwise — nothing standing on the row for a maintainer, the role's reason (the server's word) for anyone else.
   function withdrawBtn(a, standing) { return gate('<button type="button" class="small-btn" data-withdraw="' + a.task_id + '" data-name="' + esc(a.name + " " + (a.version || "")) + '" title="take the approval back: the package leaves every ring, another maintainer decides — the reason goes on the record">Withdraw</button>', may("withdraw") && standing, may("withdraw") ? "nothing standing to withdraw" : reason("withdraw")); }
   // A blocked package builds for nobody: the door's words (POST /factory/packages/:name/build).
   function blockedWhy(name, pkg) { return name + " is blocked by a maintainer" + (pkg.blocked_reason ? ": " + pkg.blocked_reason : ""); }
-  function storyHtml(name, st) {
-      var pkg = st.package || {}, registered = (pkg.arches && pkg.arches.length ? pkg.arches : (st.request && st.request.arches) || []).slice(), arches = registered.slice();
-      var archOf = function (c) { return (c.contributor || c.project || {}).arch; };
-      st.chains.forEach(function (c) { var a = archOf(c); if (a && arches.indexOf(a) < 0) arches.push(a); }); // an architecture the request dropped keeps its story, without a Build
-      var inFlight = function (c) { return c && ((c.contributor && (c.contributor.status === "queued" || c.contributor.status === "leased")) || (c.project && (c.project.status === "queued" || c.project.status === "leased"))); };
-      var anyBusy = st.chains.some(inFlight);
-      // A renewal is taken while the package is registered, staged, rejected or unmaintained and nothing of it is being built — the story says (request.renewable, request.busy).
-      var renewable = !!(st.request && st.request.renewable);
-      var whyNot = st.request && st.request.busy ? "renew it once build #" + st.request.busy + " is done" : pkg.status === "approved" || pkg.status === "published" ? "in the pool as it was; new releases come as bumps, built from the approved recipe" : "renew it once nothing of it is being built";
-      var head = '<div class="pknext">' + (pkg.blocked_at ? pillHtml("error", "blocked") + ' ' + ago(pkg.blocked_at) + ' by ' + personLink(pkg.blocked_by) + ': ' + esc(pkg.blocked_reason || '') + ' — another maintainer lifts it.' : summary(st, arches))
-        + '<span class="acts-inline">' + buildBtn(name, null, anyBusy ? "a build is in flight" : pkg.blocked_at ? blockedWhy(name, pkg) : null, "every architecture the request names") + ' ' + removeBtn(name) + '</span></div>';
-      var panels = arches.map(function (a) {
-        var mine = st.chains.filter(function (c) { return archOf(c) === a; });
-        var running = mine[0] && ((mine[0].contributor && mine[0].contributor.status === "leased") || (mine[0].project && (mine[0].project.status === "queued" || mine[0].project.status === "leased")));
-        var queued = mine[0] && mine[0].contributor && mine[0].contributor.status === "queued";
-        var acts = registered.indexOf(a) >= 0 ? buildBtn(name, a, running ? "a build is running" : pkg.blocked_at ? blockedWhy(name, pkg) : null, queued ? "name a worker, or take it out of the queue" : "this architecture only") : '';
-        return archPanel(a, mine, nextStep(st, mine[0]), acts);
-      }).join("");
-      // The package's page on the most stable ring that serves it and that ring's architecture — the shell's servedRing over the story's rows, the shell's one address; a package in no ring yet opens on the shell's default.
-      var served = servedRing(st.rings);
-      return head + requestBlock(st.request, may("request"), name, renewable, whyNot, reason("request")) + panels
-        + '<p class="sub" style="margin:4px 0 0"><a href="' + pkgHref(name, served && served.ring, served && served.arch) + '">The package\'s page →</a>' + (st.rings && st.rings.length ? ' · in <b>' + esc(st.rings.map(function (r) { return r.ring + " (" + r.arch + ")"; }).join(", ")) + '</b>' : '') + '</p>';
+  // The gate on a staged build (its result's vet, on the profile's row): pass, clean or with its warnings, or what it said and how many checks failed.
+  function gateWord(b) {
+    if (!b.gate) return "";
+    var pass = b.gate === "pass", n = Number(b.gate_warnings || 0);
+    return pillHtml(pass ? (n ? "warn" : "ok") : "error", "gate " + (pass ? (n ? n + (n === 1 ? " warning" : " warnings") : "clean") : b.gate + (b.gate_fails ? " · " + b.gate_fails : "")), "the gate's verdict on build #" + b.id + ": each check is on its page");
   }
-  // The package in one line: what each architecture waits for, and the request when it is not what the form asks today.
-  function summary(st, arches) {
-    var parts = arches.map(function (a) {
-      var c = st.chains.filter(function (x) { return (x.contributor || x.project || {}).arch === a; })[0], s2 = chainState(c);
-      return '<b class="mono">' + esc(a) + '</b> ' + pillHtml(s2.cls, s2.text);
-    });
-    var req = st.request && !st.request.complete ? ' <span class="dim">·</span> ' + pillHtml("warn", "request incomplete", "the form would not take it today — a maintainer's time is not asked yet") + (st.request.renewable ? ' <span class="dim">' + (isOwner(login) ? "renew it below" : "renewed below by " + esc(login)) + '</span>' : '') : '';
-    return parts.join(' <span class="dim">·</span> ') + req;
+  // An architecture's latest chain in the package's story, once the story was read: the class its score gives and the audit's word.
+  function chainOf(name, arch) { var st = STORIES[name]; return st ? st.chains.filter(function (c) { return (c.contributor || c.project || {}).arch === arch; })[0] || null : null; }
+  function auditWord(a) { if (!a) return pillHtml("none", "no audit yet"); var v = a.result && a.result.verdict; return pillHtml(a.status === "done" ? ({ ok: "ok", warn: "warn", block: "error" }[v] || "none") : "none", "audit " + (a.status === "done" ? v || "done" : a.status === "leased" ? "running" : a.status), (a.result && a.result.summary) || ""); }
+  // One architecture of a package as a line: its square and name, where it stands (the target's word), its latest build — its number, its version, the queue or the native worker it waits for, the worker that holds it — the gate on it, the score and the audit once the story is read, when, and its Build at the line's end.
+  function archLine(p, a, reg) {
+    var t = (p.targets || {})[a] || null, b = buildsOf(p.name).filter(function (x) { return x.arch === a; })[0] || null, c = chainOf(p.name, a);
+    var tone = t ? TARGET_TONE[t.status] || "wait" : b ? BUILD_TONE[b.status] || "wait" : "na";
+    var word = t ? t.status.replace("_", " ") : b ? (b.status === "leased" ? "building" : b.status) : "no build yet";
+    var facts = ['<span class="op-pill ' + tone + '"' + (t && TARGET_WORD[t.status] ? ' title="' + esc(TARGET_WORD[t.status][2]) + '"' : '') + '>' + esc(word) + '</span>'];
+    if (b) {
+      facts.push('<a href="/build/' + b.id + '" title="the build, whole">#' + b.id + '</a>' + (b.version ? ' <span class="v">' + esc(b.version) + '</span>' : '') + (!t || t.task !== b.id ? ' ' + taskPill(b.status) : ''));
+      if (b.needs_native) facts.push(nativePill({ status: b.status, arch: b.arch, params: { needs_native: b.needs_native, refused_4k: b.refused_4k } }));
+      if (b.queue) facts.push('<span class="when" title="in the queue for ' + esc(a) + '">' + b.queue.position + ' of ' + b.queue.total + '</span>');
+      if (b.status === "leased" && b.lease_owner) facts.push('<span class="when">on</span> ' + wtId(b.lease_owner));
+      facts.push(gateWord(b));
+    } else if (t && t.task) facts.push('<a href="/build/' + t.task + '" title="the build that says where it stands">#' + t.task + '</a>');
+    if (c) facts.push(classPill(c.score) + ' ' + auditWord(c.audit));
+    if (b) facts.push('<span class="when">' + ago(b.created_at) + '</span>');
+    var act = reg.indexOf(a) < 0
+      ? gate('<button type="button" class="op-btn sm" data-build="' + esc(p.name) + '" data-arch="' + esc(a) + '">Build ' + esc(a) + '</button>', false, "arches must name one the request has: " + reg.join(", "))
+      : buildBtn(p.name, a, running(t, b) ? "a build is running" : p.blocked_at ? blockedWhy(p.name, p) : null, b && b.status === "queued" && b.trust === "community" ? "name a worker, or take it out of the queue" : "this architecture only");
+    return '<div class="up-arch"><span class="op-arch ' + tone + '"></span><b>' + esc(a) + '</b><span class="up-facts">' + facts.filter(Boolean).join(" ") + '</span>' + act + '</div>';
+  }
+  // The one control that opens a block: the package's story and its builds, folded under it.
+  function moreBtn(key, n, what) { var open = !!OPEN[key]; return '<button type="button" class="up-more" data-expand="' + esc(key) + '" aria-expanded="' + open + '">' + (open ? "▾ " : "▸ ") + what + ' · ' + num(n) + (n === 1 ? " build" : " builds") + '</button>'; }
+  function pkgBlock(p) {
+    var A = archesOfPkg(p), mine = buildsOf(p.name), open = !!OPEN[p.name];
+    var flying = A.all.some(function (a) { var t = (p.targets || {})[a]; return (!!t && (t.status === "building" || t.status === "reviewing")) || inFlight(mine.filter(function (x) { return x.arch === a; })[0]); });
+    var head = '<div class="up-pkg-h"><a class="up-name" href="' + pkgHref(p.name, null, A.registered[0]) + '">' + esc(p.name) + '</a> ' + taskPill(p.status) + (p.blocked_at ? ' ' + pillHtml("error", "blocked", blockedWhy(p.name, p)) : '') + (p.category ? ' <span class="op-chip">' + esc(p.category) + '</span>' : '')
+      + '<span class="up-acts">' + buildBtn(p.name, null, flying ? "a build is in flight" : p.blocked_at ? blockedWhy(p.name, p) : null, "every architecture the request names") + removeBtn(p.name) + '</span></div>';
+    return '<article class="up-pkg" data-pkg="' + esc(p.name) + '">' + head + (p.detail ? '<p class="up-stands">' + esc(p.detail) + '</p>' : '')
+      + '<div class="up-arches">' + A.all.map(function (a) { return archLine(p, a, A.registered); }).join("") + '</div>'
+      + moreBtn(p.name, mine.length, "The story") + (open ? '<div class="up-open">' + storyPart(p.name) + historyTable(mine, false) + '</div>' : '') + '</article>';
+  }
+  function othersBlock(rows) {
+    return '<article class="up-pkg" data-pkg="' + OTHERS + '"><div class="up-pkg-h"><span class="up-name">Other names</span></div><p class="up-stands">Builds of a name no longer registered under this one.</p>'
+      + moreBtn(OTHERS, rows.length, "Their builds") + (OPEN[OTHERS] ? '<div class="up-open">' + historyTable(rows, true) + '</div>' : '') + '</article>';
+  }
+  // A package's builds, folded under it — of the last fifty under this name, newest first: the number is the build's page; the version its package's page on the build's architecture and the ring the build is about (ringOfBuild: the lab for a staged one, the shell's default for the rest — the ring Review and the build's page link too); the worker that held it, the bare id whole where the listing has no row (no owner guessed); the evidence, public, for whoever reads.
+  function historyTable(rows, named) {
+    if (!rows.length) return '<p class="up-note">No build of it among the last fifty under this name: its page has them all.</p>';
+    return '<div class="up-table"><table class="op-table up-hist"><thead><tr><th>#</th><th>' + (named ? "Package" : "Version") + '</th><th>Arch</th><th>Status</th><th>Why</th><th>Ran on</th><th>Took</th><th>When</th><th>Evidence</th></tr></thead><tbody>' + rows.map(function (t) {
+      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="' + pkgHref(t.name, ringOfBuild(t.status, null), t.arch) + '">' + (named ? '<b>' + esc(t.name) + '</b> ' : '') + '<span class="mono">' + esc(t.version || "—") + '</span></a></td><td>' + esc(t.arch) + '</td><td>' + taskPill(t.status) + (t.needs_native ? ' ' + nativePill({ status: t.status, arch: t.arch, params: { needs_native: t.needs_native, refused_4k: t.refused_4k } }) : '') + (t.queue ? ' <span class="dim" title="in the queue for ' + esc(t.arch) + '">' + t.queue.position + ' of ' + t.queue.total + '</span>' : '') + '</td><td class="why">' + esc(t.reason || "") + (t.trust === "project" ? ' ' + pillHtml("ok", "the project", "the project's own build, from a contributor's evidence") : '') + '</td><td>' + (t.lease_owner ? wtId(t.lease_owner) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td class="when">' + ago(t.created_at) + '</td><td>' + evidence(t) + '</td></tr>';
+    }).join("") + '</tbody></table></div>';
+  }
+  // The list, drawn again only when what it draws changed: the refresh every fifteen seconds keeps the focus and the place of a block nobody touched.
+  function drawPackages() {
+    var names = PKGS.map(function (p) { return p.name; }), others = BUILDS.filter(function (b) { return names.indexOf(b.name) < 0; });
+    var html = PKGS.map(pkgBlock).join("") + (others.length ? othersBlock(others) : "") || '<p class="up-empty">No package registered under this name.</p>';
+    if (html !== DRAWN_PKGS) { $("#packages").innerHTML = html; DRAWN_PKGS = html; }
+  }
+  // A package's story (routes/story.ts), read for a package opened: the request as the form checks it today, then one panel per architecture — each is built on a worker of its own and can be ready while the other failed — with its latest chain, the two halves of the score with their evidence, and the one line that says whose turn it is. What was drawn stays while the fresh one loads: no flicker on the refresh.
+  function story(name) {
+    fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story" + fresh("?")).then(function (r) { return r.ok ? r.json() : null; }).then(function (st) {
+      if (st) { STORIES[name] = st; delete STORY_ERR[name]; } else if (!STORIES[name]) STORY_ERR[name] = "no story yet";
+      drawPackages();
+    }).catch(function () { if (!STORIES[name]) STORY_ERR[name] = "could not load the story"; drawPackages(); });
+  }
+  function refreshStories() { Object.keys(OPEN).forEach(function (n) { if (OPEN[n] && n !== OTHERS) story(n); }); }
+  function storyPart(name) { return STORIES[name] ? storyHtml(name, STORIES[name]) : '<p class="up-note">' + esc(STORY_ERR[name] || "loading the story…") + '</p>'; }
+  // The story of an open package, under its lines: who blocked it and why, the request as the form checks it (Renew the request drawn for everyone, live for its owner while a renewal is taken), each architecture's panel — the two halves of its score with the gate, the audit and the trial, and what comes next — and the way to the package's page. Its buttons are the block's, above: nothing here builds or removes.
+  function storyHtml(name, st) {
+    var pkg = st.package || {}, arches = (pkg.arches && pkg.arches.length ? pkg.arches : (st.request && st.request.arches) || []).slice();
+    var archOf = function (c) { return (c.contributor || c.project || {}).arch; };
+    st.chains.forEach(function (c) { var a = archOf(c); if (a && arches.indexOf(a) < 0) arches.push(a); }); // an architecture the request dropped keeps its story
+    // A renewal is taken while the package is registered, staged, rejected or unmaintained and nothing of it is being built — the story says (request.renewable, request.busy).
+    var renewable = !!(st.request && st.request.renewable);
+    var whyNot = st.request && st.request.busy ? "renew it once build #" + st.request.busy + " is done" : pkg.status === "approved" || pkg.status === "published" ? "in the pool as it was; new releases come as bumps, built from the approved recipe" : "renew it once nothing of it is being built";
+    var panels = arches.map(function (a) { var mine = st.chains.filter(function (c) { return archOf(c) === a; }); return archPanel(a, mine, nextStep(st, mine[0]), ""); }).join("");
+    // The package's page on the most stable ring that serves it and that ring's architecture — the shell's servedRing over the story's rows, the shell's one address; a package in no ring yet opens on the shell's default.
+    var served = servedRing(st.rings);
+    return (pkg.blocked_at ? '<p class="up-note">' + pillHtml("error", "blocked") + ' ' + ago(pkg.blocked_at) + ' by ' + personLink(pkg.blocked_by) + ': ' + esc(pkg.blocked_reason || '') + ' — another maintainer lifts it.</p>' : '')
+      + requestBlock(st.request, may("request"), name, renewable, whyNot, reason("request")) + panels
+      + '<p class="up-note"><a href="' + pkgHref(name, served && served.ring, served && served.arch) + '">The package\'s page →</a>' + (st.rings && st.rings.length ? ' · in <b>' + esc(st.rings.map(function (r) { return r.ring + " (" + r.arch + ")"; }).join(", ")) + '</b>' : '') + '</p>';
   }
   // What comes next for one architecture, from its latest chain: whose turn it is, what for — and, when it is the reader's own package, how: the evidence to read, the button to press, where the build can run, what to write for the agent.
   function nextStep(st, c) {
@@ -454,7 +614,7 @@ const SCRIPT = String.raw`
       var vet = cc.result && cc.result.vet, audit = c.audit;
       if (incomplete) return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> is staged, but the request is not what the form asks today — ' + (own ? '<b>Renew the request</b> above: the same form, filled from the record; the build stays and is ready the moment the record is — of this version.' : 'the contributor renews the request; the build stays.');
       if (vet && vet.verdict !== "pass") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> built, but <b>the gate failed</b>: ' + esc((vet.failed || []).join(", ")) + (own ? again('each failed check is named there and explained in <a href="/docs/what-we-test">What we test</a>') : ' — the contributor fixes the recipe and builds again.');
-      if (audit && audit.status === "done" && audit.result && audit.result.verdict === "block") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate, but <b>the audit blocked it</b>: ' + esc(audit.result.summary || '') + (own ? again('the ' + art(cc, "audit.md", "report") + ' lists the findings and the fix for each') : ' — the contributor answers the findings and builds again.');
+      if (audit && audit.status === "done" && audit.result && audit.result.verdict === "block") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate, but <b>the audit blocked it</b>: ' + esc(audit.result.summary || '') + (own ? again('the report in ' + evidenceLink(cc, "the evidence of #" + cc.id) + ' lists the findings and the fix for each') : ' — the contributor answers the findings and builds again.');
       if (audit && audit.status !== "done") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate; the audit is ' + esc(audit.status) + ' on the project\'s review worker — nothing to do until it answers.';
       if (audit && audit.status === "failed") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate, but the audit did not run (' + esc(audit.error || '') + ') — ' + (own ? 'press <b>Build ' + esc(arch) + '</b> again: a new build gets a new audit.' : 'the contributor builds again.');
       var reqItem = (sc.items || []).filter(function (i) { return i.item === "A request on the record"; })[0];
@@ -477,13 +637,14 @@ const SCRIPT = String.raw`
       '<span>since ' + esc(String(d.since).slice(0, 10)) + '</span><span class="dim">·</span><span>last seen ' + ago(d.last_seen) + '</span><span class="dim">·</span><a href="' + esc(d.github) + '" style="color:var(--muted);text-decoration:none">github.com/' + esc(d.login) + ' ↗</a>';
     // The workers counted as every tile counts them (the shell's workerCounts): registered is not revoked, alive is a heartbeat in the last WORKER_ALIVE_MINUTES — the rows are the listing's own (routes/factory.ts workerView), so the tile counts what the tables below draw.
     var c = d.build_counts, wc = workerCounts(d.workers);
-    setTiles("#tiles", [
+    // The four numbers, the kit's tiles.
+    $("#tiles").innerHTML = [
       ["Packages", num(d.packages.length), "registered under this name"],
       ["Builds", num(c.total), num(c.staged) + " staged · " + num(c.published) + " published · " + num(c.failed) + " failed"],
       // Every decision on the record under this name — approvals standing or withdrawn, rejections — as the Pipeline's "decisions per maintainer" counts them; how many stand is the subtitle's.
       ["Decisions", num(d.approvals.length), d.role === "maintainer" ? num(d.approved_packages.length) + " package(s) let into the pool" : "not a maintainer"],
       ["Workers", num(wc.registered), num(wc.alive) + " alive now"]
-    ]);
+    ].map(function (t) { return '<div class="op-stat"><span class="k">' + t[0] + '</span><b class="n">' + t[1] + '</b><span class="s">' + t[2] + '</span></div>'; }).join("");
     // Sixteen weeks of what the record holds under this name: builds, decisions, packages touched.
     var weeks = []; for (var i = 15; i >= 0; i--) weeks.push(Date.now() - i * 7 * 86400000);
     var counts = weeks.map(function () { return 0; }), total = 0;
@@ -492,33 +653,16 @@ const SCRIPT = String.raw`
     var mx = Math.max.apply(null, counts) || 1;
     $("#activity").innerHTML = counts.map(function (v, i) { return '<i style="height:' + Math.max(4, 100 * v / mx) + '%" data-tip="' + new Date(weeks[i]).toISOString().slice(0, 10) + ' · ' + v + (v === 1 ? " contribution" : " contributions") + '"></i>'; }).join("");
     $("#activity-note").textContent = total ? num(total) + " in the last 16 weeks — every one is a row below" : "nothing on the record in the last 16 weeks yet";
-    var rec = d.record || { contributed: {}, maintained: {}, score: 0 }, has = Object.keys(rec.contributed).some(function (k) { return rec.contributed[k]; }) || Object.keys(rec.maintained).some(function (k) { return rec.maintained[k]; });
+    // The track record, in its card for everyone: the score, and what it is made of — what this person brought that a maintainer let in, built, decided.
+    var rec = d.record || { contributed: {}, maintained: {}, score: 0 }, rc = rec.contributed || {}, m = rec.maintained || {};
     $("#score").textContent = num(rec.score || 0);
-    $("#score-f").innerHTML = "from what the pool recorded: what you brought that a maintainer let in, what you built, what you decided — it says where the work was done, not who someone is";
-    if (has) {
-      $("#record-section").hidden = false;
-      pager("#record", [rec], function (r) {
-        var c = r.contributed, m = r.maintained;
-        var contributed = [c.approved ? num(c.approved) + " let in" : "", c.staged ? num(c.staged) + " staged" : "", c.bumps ? num(c.bumps) + " bump" + (c.bumps === 1 ? "" : "s") : "", c.donated ? num(c.donated) + " for others" : "", c.rejected ? num(c.rejected) + " rejected" : ""].filter(Boolean).join(" · ") || "—";
-        var maintained = [m.approvals ? num(m.approvals) + " approval" + (m.approvals === 1 ? "" : "s") : "", m.rejections ? num(m.rejections) + " rejection" + (m.rejections === 1 ? "" : "s") : "", m.rebuilds_failed ? num(m.rebuilds_failed) + " rebuild" + (m.rebuilds_failed === 1 ? "" : "s") + " failed" : ""].filter(Boolean).join(" · ") || "—";
-        return '<tr><td>' + contributed + '</td><td>' + maintained + '</td><td class="num">' + num(r.score) + '</td></tr>';
-      });
-    }
-    // ---- packages: one row each, where each of its architectures stands — the server's targets (targetChips), else the stage from the latest builds per architecture — a row that opens into the story and the next step
-    var byPkg = {}; d.builds.forEach(function (b) { var k = b.name + "/" + b.arch; if (!byPkg[k]) byPkg[k] = b; });
-    LATEST = byPkg;
-    pager("#packages", d.packages, function (p) {
-      var arches = []; try { arches = JSON.parse(p.arches || "[]"); } catch (e) {}
-      var per = targetChips(p.targets) || arches.map(function (a) { var b = byPkg[p.name + "/" + a]; return '<span class="arch-st" title="' + esc(a + ": " + (b ? b.status + (b.status === "leased" ? " (building)" : "") + " · #" + b.id : "no build yet")) + '">' + esc(a) + ' ' + (b ? taskPill(b.status) : pillHtml("none", "—")) + '</span>'; }).join("");
-      var open = OPEN[p.name];
-      // The name is the package's page (the shell's one address) on the first architecture the request names: a registration says no ring, so the shell's default asks for the most stable, and the server shows the most stable ring that serves it.
-      return '<tr class="pkrow" data-pkg="' + esc(p.name) + '"><td><button type="button" class="expand" data-expand="' + esc(p.name) + '" title="' + (open ? "close" : "the story, and what comes next") + '">' + (open ? "▾" : "▸") + '</button></td><td><a href="' + pkgHref(p.name, null, arches[0]) + '"><b>' + esc(p.name) + '</b></a></td><td>' + (p.category ? pillHtml("none", p.category) : '<span class="dim">—</span>') + '</td><td>' + (p.url ? '<a href="' + esc(p.url) + '">' + esc(p.url.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a>' : '<span class="dim">—</span>') + '</td><td class="arches">' + per + '</td><td>' + taskPill(p.status) + '</td><td class="muted stands" title="' + esc(p.detail || "") + '">' + esc(p.detail || "") + '</td></tr>'
-        + (open ? '<tr class="pkopen" data-pkg="' + esc(p.name) + '"><td colspan="7"><div class="pkstory" data-story="' + esc(p.name) + '">' + (STORIES[p.name] ? storyHtml(p.name, STORIES[p.name]) : '<div class="muted">loading the story…</div>') + '</div></td></tr>' : '');
-    }, { empty: "no package registered", after: function () { Object.keys(OPEN).forEach(function (n) { if (OPEN[n]) story(n); }); }, text: function (p) { return [p.name, p.category, p.status, p.detail].join(" "); } });
-    // ---- builds: the number is the build's page; the package's name its page on the build's architecture and the ring the build is about (ringOfBuild: the lab for a staged one, the shell's default for the rest — the ring Review and the build's page link too); the worker that held it, the bare id whole where the listing has no row (no owner guessed); the evidence, public, for whoever reads
-    pager("#builds", d.builds, function (t) {
-      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="' + pkgHref(t.name, ringOfBuild(t.status, null), t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + taskPill(t.status) + (t.needs_native ? ' ' + nativePill({ status: t.status, arch: t.arch, params: { needs_native: t.needs_native, refused_4k: t.refused_4k } }) : '') + (t.queue ? ' <span class="dim" title="in the queue for ' + esc(t.arch) + '">' + t.queue.position + ' of ' + t.queue.total + '</span>' : '') + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' ' + pillHtml("ok", "the project", "the project's own build, from a contributor's evidence") : '') + '</td><td>' + (t.lease_owner ? wtId(t.lease_owner) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td class="when">' + ago(t.created_at) + '</td><td>' + evidence(t) + '</td></tr>';
-    }, { empty: "nothing built yet", text: function (t) { return [t.id, t.name, t.version, t.arch, t.status, t.reason, t.lease_owner].join(" "); } });
+    $("#score-f").textContent = "From what the pool recorded: what was brought that a maintainer let in, what was built, what was decided. It says where the work was done, not who someone is.";
+    var contributed = [rc.approved ? num(rc.approved) + " let in" : "", rc.staged ? num(rc.staged) + " staged" : "", rc.bumps ? num(rc.bumps) + " bump" + (rc.bumps === 1 ? "" : "s") : "", rc.donated ? num(rc.donated) + " for others" : "", rc.rejected ? num(rc.rejected) + " rejected" : ""].filter(Boolean).join(" · ") || "—";
+    var maintained = [m.approvals ? num(m.approvals) + " approval" + (m.approvals === 1 ? "" : "s") : "", m.rejections ? num(m.rejections) + " rejection" + (m.rejections === 1 ? "" : "s") : "", m.rebuilds_failed ? num(m.rebuilds_failed) + " rebuild" + (m.rebuilds_failed === 1 ? "" : "s") + " failed" : ""].filter(Boolean).join(" · ") || "—";
+    $("#record").innerHTML = '<dt>Contributed</dt><dd>' + contributed + '</dd><dt>Maintained</dt><dd>' + maintained + '</dd>';
+    // ---- packages (#412): the profile's registrations and its last fifty builds, a block per package with its builds folded under it; the stories of the ones opened are read again.
+    PKGS = d.packages; BUILDS = d.builds;
+    drawPackages(); refreshStories();
     renderReset(d);
     // ---- approvals: last, with the build behind each
     if (d.approvals.length || d.role === "maintainer") {
@@ -678,7 +822,9 @@ const SCRIPT = String.raw`
   // Buttons inside paged tables: one delegated handler survives re-renders. A grey button (gate) never gets here: disabled, it takes no click.
   document.addEventListener("click", function (ev) {
     var x = ev.target.closest ? ev.target.closest("button[data-expand]") : null;
-    if (x) { var n = x.getAttribute("data-expand"); OPEN[n] = !OPEN[n]; load(); return; }
+    if (x) { var n = x.getAttribute("data-expand"); OPEN[n] = !OPEN[n]; drawPackages(); if (OPEN[n] && n !== OTHERS) story(n); return; }
+    var wo = ev.target.closest ? ev.target.closest("button[data-worker-order]") : null;
+    if (wo) { if (!wo.disabled) workerOrder(wo.getAttribute("data-worker-order"), wo.getAttribute("data-worker")); return; }
     var pr = ev.target.closest ? ev.target.closest("button[data-passkey-remove]") : null;
     if (pr) {
       var pid = pr.getAttribute("data-passkey-remove"), plabel = pr.getAttribute("data-label");
@@ -713,9 +859,10 @@ const SCRIPT = String.raw`
     if (b.hasAttribute("data-build")) {
       var name = b.getAttribute("data-build"), arch = b.getAttribute("data-arch");
       // Where it runs is the asker's call (one architecture: the queue, or one of the asker's own community registrations — a maintainer's legacy set, #343: a contributor has none and is offered the queue alone; all: the queue); a hint goes to the agent that drafts the recipe.
-      var st2 = STORIES[name], det = {}; try { det = JSON.parse((st2 && st2.package && st2.package.detected) || "{}"); } catch (e) {}
-      var drafts = !det.has_pkgbuild; // the project's own PKGBUILD is built as it is: no agent, no hint
-      var waiting = st2 ? st2.chains.filter(function (c) { return c.contributor && c.contributor.status === "queued" && (!arch || c.contributor.arch === arch); }).map(function (c) { return c.contributor; }) : [];
+      // What it asks is the profile's (#412): whether the recipe is the project's own PKGBUILD (detected.has_pkgbuild) and the contributor's builds of it waiting in the queue — no story read to press it.
+      var pk = PKGS.filter(function (x) { return x.name === name; })[0] || {};
+      var drafts = !pk.has_pkgbuild; // the project's own PKGBUILD is built as it is: no agent, no hint
+      var waiting = BUILDS.filter(function (t) { return t.name === name && t.trust === "community" && t.status === "queued" && (!arch || t.arch === arch); });
       var pinnedNow = waiting.length === 1 ? waiting[0].pinned_to : null;
       var where = FACTORY ? whereOptions(FACTORY.workers, arch || ARCHES[0], login, false, drafts, waiting.length === 1 ? waiting[0].queue : null, pinnedNow) : null;
       if (where && !arch) where.options = where.options.filter(function (o) { return o.value === ""; });
@@ -779,6 +926,8 @@ export function userHtml(login: string, poolUrl: string, version: RunningVersion
     description: `What ${login} contributes to and maintains in the pool.`,
     active: "factory",
     body: body(login),
+    // The v1 kit (#412), as the redesigned pages are drawn: its sheet, then the rules above.
+    kit: true,
     css: CSS,
     script: SCRIPT,
     poolUrl,
@@ -789,21 +938,27 @@ export function userHtml(login: string, poolUrl: string, version: RunningVersion
 /**
  * What /user/<login> is made of: everything draws from the person's profile
  * (`/api/v1/users/<login>`), the workers from the same listing the Workers
- * page reads, an open package row from its story, and what this viewer may
- * do from `/api/v1/users/<login>/can`. The page is public and reads the
+ * page reads, an open package's story from its story, and what this viewer
+ * may do from `/api/v1/users/<login>/can`. The page is public and reads the
  * same for every role: every control is drawn for everyone, and the
  * server's answer says which are live — the owner's workspace, a
- * maintainer's revoke, own-only, remove and withdraw — and why the others
- * are grey. The dialogs a button opens are folded into the entry that
- * renders the button. The entries are on alice's page (the contributor who
- * owns the package and the worker) except the Approvals section, which a
- * maintainer's page shows.
+ * maintainer's revoke, drain, own-only, remove and withdraw — and why the
+ * others are grey. The dialogs a button opens are folded into the entry
+ * that renders the button. The entries are on alice's page (the
+ * contributor who owns the package and the worker) except the Approvals
+ * section, which a maintainer's page shows, and the hosts', which m1's and
+ * m2's show.
+ *
+ * Since #412 the package is the unit: a block per registration, its
+ * architectures as lines with their Build, its story and its builds folded
+ * under it — the entries user.packages to user.package-builds — and a
+ * worker's row carries Drain beside Revoke (user.worker-drain).
  *
  * The acts in order: the token; Remove, which refuses the owner of an
  * approved package; Build, which queues a build and sets the package
- * waiting; the worker registered, then revoked; the approval withdrawn
- * last — the fixture has
- * one, and the build's page may have taken it back before this manifest.
+ * waiting; the worker registered, drained (refused here without the page's
+ * Origin), then revoked; the approval withdrawn last — the fixture has one,
+ * and the build's page may have taken it back before this manifest.
  */
 export const USER_COMPONENTS = (F: Fixture): Component[] => {
   const page = `/user/${F.owner}`;
@@ -820,25 +975,26 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // What this viewer may do here, read before the first draw and again once a minute and after their own act: every control below reads CAN and is grey with the server's reason where it says no — nobody's answer, all false with the sign-in, until it lands; Remove per registration, Revoke per worker.
+      // What this viewer may do here, read before the first draw and again once a minute and after their own act: every control below reads CAN and is grey with the server's reason where it says no — nobody's answer, all false with the sign-in, until it lands; Remove per registration, Revoke, Drain and Resume per worker.
       id: "user.rights",
       page,
       anchor: [],
       script: ['"/can"', "function may(", "function reason(", "function removeOf(", "CAN.packages[name]", "function workerCan(", "CAN.workers[w.id]", '"sign in with GitHub"', "function loadCan(", "function acted(", "tick % 4 === 0) loadCan()"],
       reads: [
-        { path: `${profile}/can`, fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.dequeue", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.ownerWorker}.revoke`, `can.workers.${F.ownerWorker}.why.revoke`] },
-        { path: `${profile}/can`, as: "contributor", fields: ["login", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.why`] },
-        { path: `${profile}/can`, as: "owner", fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.ownerWorker}.revoke`] },
-        { path: `${profile}/can`, as: "maintainer", fields: ["login", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.build", `can.packages.${F.factoryPkg}.remove`, `can.workers.${F.ownerWorker}.revoke`] },
-        // A maintainer's own page lists the project's worker: Revoke on its row, the maintainer's.
-        { path: `/api/v1/users/${F.m1}/can`, as: "maintainer", fields: [`can.workers.${F.worker}.revoke`] },
+        { path: `${profile}/can`, fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.dequeue", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.ownerWorker}.revoke`, `can.workers.${F.ownerWorker}.why.revoke`, `can.workers.${F.ownerWorker}.drain`, `can.workers.${F.ownerWorker}.why.drain`, `can.workers.${F.ownerWorker}.resume`, `can.workers.${F.ownerWorker}.why.resume`] },
+        { path: `${profile}/can`, as: "contributor", fields: ["login", "can.why.request", "can.why.register", "can.why.token", "can.why.build", "can.why.remove", "can.why.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.why`, `can.workers.${F.ownerWorker}.why.drain`] },
+        { path: `${profile}/can`, as: "owner", fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.revoke", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`, `can.workers.${F.ownerWorker}.revoke`, `can.workers.${F.ownerWorker}.drain`] },
+        { path: `${profile}/can`, as: "maintainer", fields: ["login", "can.remove", "can.revoke", "can.withdraw", "can.why.request", "can.why.build", `can.packages.${F.factoryPkg}.remove`, `can.workers.${F.ownerWorker}.revoke`, `can.workers.${F.ownerWorker}.drain`, `can.workers.${F.ownerWorker}.resume`] },
+        // A maintainer's own page lists the project's worker: Revoke and Drain on its row, the maintainer's.
+        { path: `/api/v1/users/${F.m1}/can`, as: "maintainer", fields: [`can.workers.${F.worker}.revoke`, `can.workers.${F.worker}.drain`] },
       ],
       visible: EVERYONE,
     },
     {
+      // The head, the kit's (#412): the two letters, green for a maintainer, the name in the kit's display type.
       id: "user.profile-head",
       page,
-      anchor: ['id="avatar"', 'id="title"'],
+      anchor: ['class="up-head"', 'id="avatar"', '<h1 class="op-hero" id="title">'],
       script: ['"#avatar"', '"#title"', 'd.login.slice(0, 2)', 'd.role === "maintainer"'],
       reads: [{ path: profile, fields: ["login", "name", "role"] }],
       visible: EVERYONE,
@@ -855,11 +1011,11 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The Workers tile counts as the shell counts (workerCounts): registered and alive, the listing's words.
+      // The four numbers as the kit's tiles; the Workers tile counts as the shell counts (workerCounts): registered and alive, the listing's words.
       id: "user.tiles",
       page,
-      anchor: ['id="tiles"'],
-      script: ['"#tiles"', "d.build_counts", '"Decisions", num(d.approvals.length)', "d.approved_packages.length", "workerCounts(d.workers)", "wc.registered", "wc.alive"],
+      anchor: ['<div class="op-stats" id="tiles">'],
+      script: ['"#tiles"', "d.build_counts", '"Decisions", num(d.approvals.length)', "d.approved_packages.length", "workerCounts(d.workers)", "wc.registered", "wc.alive", '<div class="op-stat"><span class="k">'],
       reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive", "workers.0.ready", "workers.0.side", "workers.0.current_task"] }],
       visible: EVERYONE,
     },
@@ -875,59 +1031,69 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // The track record, a card for everyone (#412: no longer a section served hidden until it has a row): the score, what was contributed and maintained, the formula.
       id: "user.score-panel",
       page,
-      anchor: ['href="/docs/governance">the formula', 'id="score"', 'id="score-f"'],
-      script: ['"#score"', '"#score-f"', "rec.score"],
-      reads: [{ path: profile, fields: ["record.score"] }],
+      anchor: ['id="record-section"', 'href="/docs/governance">the formula', 'id="score"', 'id="score-f"', '<dl class="up-kv" id="record">'],
+      script: ['"#score"', '"#score-f"', "rec.score", '"#record"', "rec.contributed", "rec.maintained", "m.rebuilds_failed", "rc.donated"],
+      reads: [{ path: profile, fields: ["record.score", "record.contributed.approved", "record.contributed.staged", "record.contributed.bumps", "record.contributed.donated", "record.contributed.rejected", "record.maintained.approvals", "record.maintained.rejections", "record.maintained.rebuilds_failed"] }],
       visible: EVERYONE,
     },
     {
-      id: "user.record-section",
+      // The packages (#412): a block per registration, from the profile alone — its head with the name (the package's page on the first architecture the request names), the stage, a block, the category; where it stands; the way to request one, served grey with whose it is and drawn again from the server's word (the owner's). Drawn again only when what it draws changed.
+      id: "user.packages",
       page,
-      anchor: ['id="record-section"', 'id="record"'],
-      script: ['"#record-section"', 'pager("#record"', "rec.contributed", "rec.maintained", "m.rebuilds_failed"],
-      reads: [{ path: profile, fields: ["record.contributed.approved", "record.contributed.staged", "record.contributed.bumps", "record.contributed.donated", "record.contributed.rejected", "record.maintained.approvals", "record.maintained.rejections", "record.maintained.rebuilds_failed", "record.score"] }],
+      anchor: ['id="packages-section"', 'id="pk-request"', 'data-href="/factory#request"', `title="only ${F.owner} requests here"`, '<div class="up-pkgs" id="packages">'],
+      script: ["function pkgBlock(", "function drawPackages(", '"#pk-request"', 'href=\\"/factory#request\\"', 'gate(REQUEST_LINK, may("request"), reason("request"))', "JSON.parse(p.arches", "pkgHref(p.name, null, A.registered[0])", "p.detail", "p.blocked_at", "html !== DRAWN_PKGS", "PKGS = d.packages; BUILDS = d.builds;"],
+      reads: [{ path: profile, fields: ["packages.0.name", "packages.0.category", "packages.0.arches", "packages.0.targets", "packages.0.status", "packages.0.detail", "packages.0.blocked_at", "packages.0.blocked_reason", "packages.0.has_pkgbuild"] }],
       visible: EVERYONE,
     },
     {
-      // The table, and the way to request a package: served grey with whose it is, drawn again from the server's word (the owner's).
-      id: "user.packages-table",
-      page,
-      anchor: ['id="pk-request"', 'data-href="/factory#request"', `title="only ${F.owner} requests here"`, 'id="packages"'],
-      script: ['pager("#packages"', '"#pk-request"', 'href=\\"/factory#request\\"', 'gate(REQUEST_LINK, may("request"), reason("request"))', "data-expand", 'JSON.parse(p.arches', "pkgHref(p.name, null, arches[0])", "p.detail", "targetChips(p.targets)", 'byPkg[p.name + "/" + a]', "data-story"],
-      reads: [{ path: profile, fields: ["packages.0.name", "packages.0.category", "packages.0.url", "packages.0.arches", "packages.0.targets", "packages.0.status", "packages.0.detail", "builds.0.name", "builds.0.arch", "builds.0.status", "builds.0.id"] }],
-      visible: EVERYONE,
-    },
-    {
-      // The open row's first line, with Build all and Remove for everyone — Build the owner's, grey by state first (a build in flight, the package blocked); Remove answered per registration (a maintainer's on an approved one); the cue that the request is renewed below, for everyone, naming whose it is; the Remove dialog is this entry's.
-      id: "user.story-head",
+      // A line per architecture, visible without opening anything (#412): where it stands (the target's word and its square), its latest build with its version, the queue or the native worker it waits for, the worker that holds it, the gate on it, the class and the audit once the story is read — and its Build, for everyone: grey while a build runs or the package is blocked, with the door's word for an architecture the request no longer names, by role otherwise.
+      id: "user.package-arches",
       page,
       anchor: ['id="packages"'],
-      script: ['"/api/v1/factory/packages/"', '"/story"', "pkg.blocked_at", '"request incomplete"', '"renewed below by "', "acts-inline", "function buildBtn(", "function removeBtn(", "removeOf(name)", '"a build is in flight"', "function blockedWhy(", "data-build", "data-remove", '"Remove the registration of "', 'api("DELETE", API + "/packages/" + encodeURIComponent(rm))'],
-      reads: [{ path: story, fields: ["package.arches", "package.status", "package.blocked_at", "request.arches", "request.complete", "request.renewable", "chains", "chains.0.contributor.arch", "chains.0.contributor.status", "chains.0.project", "chains.0.approval", "chains.0.score.ready"] }],
+      script: ["function archLine(", "function archesOfPkg(", "TARGET_TONE", "TARGET_WORD[t.status]", '"a build is running"', '"arches must name one the request has: "', '"name a worker, or take it out of the queue"', "function gateWord(", "b.gate_warnings", "classPill(c.score)", "auditWord(c.audit)", "data-arch", 'nativePill({ status: b.status, arch: b.arch, params: { needs_native: b.needs_native, refused_4k: b.refused_4k } })'],
+      reads: [{ path: profile, fields: ["packages.0.targets", "builds.0.name", "builds.0.arch", "builds.0.status", "builds.0.id", "builds.0.version", "builds.0.trust", "builds.0.gate", "builds.0.gate_warnings", "builds.0.gate_fails", "builds.0.lease_owner", "builds.0.needs_native", "builds.0.refused_4k"] }],
+      visible: EVERYONE,
+    },
+    {
+      // The package's head: Build all and Remove, for everyone — Build the owner's, grey by state first (a build in flight on any architecture, the package blocked); Remove answered per registration (a maintainer's on an approved one); the Remove dialog is this entry's.
+      id: "user.package-acts",
+      page,
+      anchor: ['id="packages"'],
+      script: ["function buildBtn(", "function removeBtn(", "removeOf(name)", '"a build is in flight"', "function blockedWhy(", "data-build", "data-remove", '"Remove the registration of "', 'api("DELETE", API + "/packages/" + encodeURIComponent(rm))'],
       // The owner is refused: by now a manifest before this one rejected one of the community's builds, which put the registration back to `registered`, and the project's build of it is still staged for a decision — the owner waits for the maintainers (409). A maintainer's removal would take the package with it, so none is sent.
       acts: [{ method: "DELETE", path: `/api/v1/factory/packages/${F.factoryPkg}`, expect: { anonymous: 401, contributor: 403, owner: 409 } }],
       visible: EVERYONE,
     },
     {
-      // The request as the form checks it, with Renew the request for everyone: live for the owner while a renewal is taken, grey with the state's reason for the owner and the server's (can.why.request, the same word the build's page reads) for anyone else.
-      id: "user.story-request-block",
+      // The one control that opens a package (#412): its story — read for an opened package only, again at each refresh while it is open — and its builds.
+      id: "user.package-open",
       page,
       anchor: ['id="packages"'],
-      script: ['requestBlock(st.request, may("request"), name, renewable, whyNot, reason("request"))', "st.request.renewable", "st.request.busy", '"renew it once build #"'],
-      reads: [{ path: story, fields: ["request.id", "request.record", "request.signature", "request.version", "request.created_at", "request.complete", "request.checks", "request.checks.0.item", "request.checks.0.ok", "request.checks.0.note", "request.renewable", "request.busy", "request.arches"] }],
+      script: ["function moreBtn(", "data-expand", 'aria-expanded="', "function story(", '"/api/v1/factory/packages/"', '"/story"', "function refreshStories(", '"loading the story…"', '"could not load the story"'],
+      reads: [{ path: story, fields: ["package", "request", "chains", "rings"] }],
       visible: EVERYONE,
     },
     {
-      // One panel per architecture, its Build for everyone: grey while a build runs or the package is blocked, by role otherwise.
+      // The request as the form checks it, under an opened package, with Renew the request for everyone: live for the owner while a renewal is taken, grey with the state's reason for the owner and the server's (can.why.request, the same word the build's page reads) for anyone else.
+      id: "user.story-request-block",
+      page,
+      anchor: ['id="packages"'],
+      script: ['requestBlock(st.request, may("request"), name, renewable, whyNot, reason("request"))', "st.request.renewable", "st.request.busy", '"renew it once build #"', "pkg.blocked_at"],
+      reads: [{ path: story, fields: ["request.id", "request.record", "request.signature", "request.version", "request.created_at", "request.complete", "request.checks", "request.checks.0.item", "request.checks.0.ok", "request.checks.0.note", "request.renewable", "request.busy", "request.arches", "package.blocked_at", "package.arches"] }],
+      visible: EVERYONE,
+    },
+    {
+      // One panel per architecture under an opened package: its latest chain, the two halves of its score with the gate, the audit and the trial, the earlier builds — its Build is the line's, above.
       id: "user.story-arch-panel",
       page,
       anchor: ['id="packages"'],
       // The checklist's build items link the build's page at its evidence (the shell's evidenceLink); the gate, the audit and the trial link the file the story's row says is there.
-      script: ["archPanel(a, mine, nextStep(st, mine[0]), acts)", "registered.indexOf(a) >= 0", "buildBtn(name, a,", '"a build is running"', "data-arch", 'href="/api/v1/factory/tasks/', "evidenceLink(cc)", "evidenceLink(pb)"],
+      script: ['archPanel(a, mine, nextStep(st, mine[0]), "")', 'href="/api/v1/factory/tasks/', "evidenceLink(cc)", "evidenceLink(pb)"],
       reads: [
-        { path: story, fields: ["chains.0.contributor.id", "chains.0.contributor.status", "chains.0.contributor.arch", "chains.0.contributor.version", "chains.0.contributor.owner", "chains.0.contributor.lease_owner", "chains.0.contributor.params", "chains.0.contributor.finished_at", "chains.0.contributor.duration_ms", "chains.0.contributor.result.vet", "chains.0.project", "chains.0.audit", "chains.0.trial", "chains.0.approval", "chains.0.withdrawn", "chains.0.score.class", "chains.0.score.points", "chains.0.score.projected", "chains.0.score.ready", "chains.0.score.items.0.who", "chains.0.score.items.0.item", "chains.0.score.items.0.points", "package.blocked_at", "package.arches"] },
+        { path: story, fields: ["chains.0.contributor.id", "chains.0.contributor.status", "chains.0.contributor.arch", "chains.0.contributor.version", "chains.0.contributor.owner", "chains.0.contributor.lease_owner", "chains.0.contributor.params", "chains.0.contributor.finished_at", "chains.0.contributor.duration_ms", "chains.0.contributor.result.vet", "chains.0.project", "chains.0.audit", "chains.0.trial", "chains.0.approval", "chains.0.withdrawn", "chains.0.score.class", "chains.0.score.points", "chains.0.score.projected", "chains.0.score.ready", "chains.0.score.items.0.who", "chains.0.score.items.0.item", "chains.0.score.items.0.points"] },
         { path: `/build/${F.contributorTask}`, json: false },
         { path: `/build/${F.projectTask}`, json: false },
         { path: evidence(F.contributorTask, "tests.log"), json: false },
@@ -960,14 +1126,14 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Build <arch> and Build all open it — the owner's buttons, live for them alone: it chooses where the build runs, posts it, or takes the waiting one out of the queue (the owner's too: can.dequeue).
+      // Build <arch> and Build all open it — the owner's buttons, live for them alone: it chooses where the build runs, posts it, or takes the waiting one out of the queue (the owner's too: can.dequeue). What it asks is the profile's (#412): whether the recipe is the project's own PKGBUILD, and the builds of it waiting.
       id: "user.build-dialog",
       page,
       anchor: ['id="packages"'],
-      script: ["st2.package.detected", "det.has_pkgbuild", "whereOptions(FACTORY.workers, arch || ARCHES[0]", "go.alt", '"/builds/" + t.id', '"/build", body', "body.worker = go.pick", "body.hint"],
+      script: ["pk.has_pkgbuild", 't.trust === "community" && t.status === "queued"', "whereOptions(FACTORY.workers, arch || ARCHES[0]", "go.alt", '"/builds/" + t.id', '"/build", body', "body.worker = go.pick", "body.hint"],
       reads: [
         { path: factory, fields: ["workers.0.arch", "workers.0.owner", "workers.0.side", "workers.0.alive", "workers.0.agent_status", "workers.0.update"] },
-        { path: story, fields: ["package.detected", "chains.0.contributor.status", "chains.0.contributor.arch", "chains.0.contributor.pinned_to"] },
+        { path: profile, fields: ["packages.0.has_pkgbuild", "builds.0.trust", "builds.0.pinned_to", "builds.0.status", "builds.0.arch"] },
       ],
       acts: [
         { method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/build`, body: { arches: [F.arch] }, expect: { anonymous: 401, contributor: 404, owner: 201, maintainer: 404 } },
@@ -976,11 +1142,11 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: ["owner"],
     },
     {
-      // The evidence column for everyone: one link per staged or failed row, to the build's page at its Evidence section (the shell's evidenceLink) — never a raw file the build may not have left. A build an emulated worker sent back wears the native worker it waits for (the shell's nativePill, #281), its title saying whether a 4K-page one refused it too (refused_4k, #413).
-      id: "user.builds-table",
+      // A package's builds, folded under it (#412) — no flat list of builds any more — and the builds of a name no longer registered here, in a block of their own. The evidence column for everyone: one link per staged or failed row, to the build's page at its Evidence section (the shell's evidenceLink) — never a raw file the build may not have left. A build an emulated worker sent back wears the native worker it waits for (the shell's nativePill, #281), its title saying whether a 4K-page one refused it too (refused_4k, #413).
+      id: "user.package-builds",
       page,
-      anchor: ['id="builds"', "<th>Evidence</th>"],
-      script: ['pager("#builds"', "pkgHref(t.name, ringOfBuild(t.status, null), t.arch)", "wtId(t.lease_owner)", "t.pinned_to", "dur(t.duration_ms)", "t.queue", 'evidenceLink(t) : ""', "evidence(t)", "nativePill({ status: t.status, arch: t.arch, params: { needs_native: t.needs_native, refused_4k: t.refused_4k } })"],
+      anchor: ['id="packages"'],
+      script: ["function historyTable(", "function othersBlock(", '>Other names</span>', "pkgHref(t.name, ringOfBuild(t.status, null), t.arch)", "wtId(t.lease_owner)", "t.pinned_to", "dur(t.duration_ms)", "t.queue", 'evidenceLink(t) : ""', "evidence(t)", "nativePill({ status: t.status, arch: t.arch, params: { needs_native: t.needs_native, refused_4k: t.refused_4k } })"],
       reads: [
         { path: profile, fields: ["builds.0.id", "builds.0.name", "builds.0.version", "builds.0.arch", "builds.0.status", "builds.0.reason", "builds.0.trust", "builds.0.lease_owner", "builds.0.pinned_to", "builds.0.duration_ms", "builds.0.created_at", "builds.0.needs_native", "builds.0.refused_4k"] },
         { path: `/build/${F.contributorTask}`, json: false },
@@ -1003,7 +1169,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       // The owner's agents (#252): their grants with Revoke while each lives, and the drafts their agents made with the link to confirm a waiting one — served hidden, drawn from the owner's own no-store /factory/me, which answers nobody else (the public profile never carries a draft).
       id: "user.agents",
       page,
-      anchor: ['<section id="agents" hidden>', 'href="/agents#login">+ grant one →</a>', 'id="grants"', 'id="drafts"', 'href="/docs/omarchy-cli-mcp#write-tools">How it works →</a>'],
+      anchor: ['<section class="op-card" id="agents" aria-labelledby="agents-h" hidden>', 'href="/agents#login">+ grant one →</a>', 'id="grants"', 'id="drafts"', 'href="/docs/omarchy-cli-mcp#write-tools">How it works →</a>'],
       script: ["function renderAgents(d)", '$("#agents").hidden = false', 'pager("#grants"', 'pager("#drafts"', "data-grant-revoke", "'<a href=\"/auth/confirm/' + esc(x.id)", 'api("POST", API + "/grants/" + encodeURIComponent(gid) + "/revoke", {})'],
       reads: [
         { path: "/api/v1/factory/me", status: 401 },
@@ -1016,7 +1182,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       // The owner's passkeys (#257): each with Remove, and Add a passkey — a maintainer's; someone else who still holds one is told why there is no Add, and a contributor who holds none is shown no section — served hidden and drawn from the owner's own no-store /factory/me, landed on when a link names #passkeys. Since #271 a second passkey and a removal ask for one the owner holds (the shell's passkeyed). The routes are the browser's session's only, on the relying party's address: the tests' pool.test is not one, so every signed-in role is refused there (rp_unavailable) and nobody signed in is asked to sign in.
       id: "user.passkeys",
       page,
-      anchor: ['<section id="passkeys" hidden>', 'id="pk-form"', 'id="pk-said"', 'id="pk-table"', 'href="/docs/omarchy-cli-mcp#write-tools">How it works →</a>'],
+      anchor: ['<section class="op-card" id="passkeys" aria-labelledby="passkeys-h" hidden>', 'id="pk-form"', 'id="pk-said"', 'id="pk-table"', 'href="/docs/omarchy-cli-mcp#write-tools">How it works →</a>'],
       script: ["function renderPasskeys(d)", '$("#passkeys").hidden = false', 'maintainer ? PASSKEY_FORM : PASSKEY_NOT_A_MAINTAINER', 'if (!maintainer && !d.passkeys.length && $("#passkeys").hidden) return;', 'land("passkeys")', 'pager("#pk-table"', "navigator.credentials.create", 'api("POST", "/auth/passkeys/challenge", {})', 'api("POST", "/auth/passkeys", {', "data-passkey-remove", 'api("POST", "/auth/passkeys/" + encodeURIComponent(pid) + "/remove", { assertion: assertion })', 'passkeyed("passkey:remove:" + pid', 'if (PK_HELD && !PK_VOUCH)', 'passkeyed("passkey:add", function (assertion) { PK_VOUCH = assertion;', '"Add the new passkey"', 'add(PK_VOUCH || undefined)', '"#pk-label"', '"#pk-add"', 'btn.setAttribute("aria-disabled", "true")', '"Passkey added: " + r.passkey.label', 'pkSay(said)'],
       reads: [{ path: "/api/v1/factory/me", as: "owner", fields: ["passkeys", "contributor.role"] }],
       acts: [
@@ -1030,7 +1196,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       // A lost passkey (#271): another maintainer's reset of this person's passkeys — their token and their agents' grants with them (#284) — with a reason and their own passkey — served hidden, drawn for a maintainer on another maintainer's page. The route is the browser's session's only, on the relying party's address: every signed-in role is refused on pool.test (rp_unavailable), nobody signed in is asked to sign in.
       id: "user.passkey-reset",
       page,
-      anchor: ['<section id="pk-reset" hidden>', 'id="pk-reset-form"', 'id="pk-reset-why"', 'id="pk-reset-go" class="danger"', 'id="pk-reset-said"'],
+      anchor: ['<section class="op-card" id="pk-reset" aria-labelledby="pk-reset-h" hidden>', 'id="pk-reset-form"', 'id="pk-reset-why"', 'id="pk-reset-go" class="danger"', 'id="pk-reset-said"'],
       script: ["function renderReset(d)", 'd.role === "maintainer" && isMaintainer() && !isOwner(login)', '"Reset " + login + "\'s passkeys"', 'passkeyed("passkey:reset:" + login', 'api("POST", "/auth/passkeys/reset", { login: login, reason: why, assertion: assertion })', "refusalHtml({ error: pkSentence(r.error), register: r.register })", "r.grants_revoked", '" revoked, and "', '">the signed record</a>.', "The signed record was not written: "],
       acts: [{ method: "POST", path: "/auth/passkeys/reset", body: { login: F.m2, reason: "lost by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: ["maintainer"],
@@ -1058,7 +1224,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       // Hosts (#321): "Add a host", its form and the command it answers are a maintainer's on their own page; the door refuses everyone else server-side, and a session's write without the page's own Origin for every role.
       id: "user.hosts-add",
       page: `/user/${F.m2}`,
-      anchor: ['<section id="hosts" hidden>', 'id="h-slot"', 'id="h-own"', 'id="h-notices"'],
+      anchor: ['<section class="op-card" id="hosts" aria-labelledby="hosts-h" hidden>', 'id="h-slot"', 'id="h-own"', 'id="h-notices"'],
       script: ["function renderHostForm()", "if (!isMaintainer() || !isOwner(login) || HOST_DRAWN) return;", "HOST_TOGGLE", "HOST_FORM", "HOST_OWN", '"#host-form"', '"#h-name"', '"#h-where"', '"#h-btn"', '"#h-cmd"', 'api("POST", "/api/v1/hosts/enrollments"', "d.command", "WAIT_UNTIL", '\\"/docs/worker-host#maintainer-hosts\\"'],
       acts: [{ method: "POST", path: "/api/v1/hosts/enrollments", body: { name: "vps-1" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: ["maintainer"],
@@ -1079,14 +1245,14 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The hosts under this name for everyone, each with its units busy and free (#324, its fleet row); the fingerprint, where its key lives (#330) and the capacity for their owner and the maintainers; Confirm on one that waits, its owner's; a maintainer's notices of the others' new hosts.
+      // The hosts under this name for everyone, each with its units busy and free (#324, its fleet row) and the way to its page, where its pool cap is set (#412: the cap itself for their owner and the maintainers); the fingerprint, where its key lives (#330) and the capacity for their owner and the maintainers; Confirm on one that waits, its owner's; a maintainer's notices of the others' new hosts.
       id: "user.hosts-table",
       page: `/user/${F.m1}`,
-      anchor: ['id="hosts-table"', 'id="h-none"'],
-      script: ['"/api/v1/hosts?owner=" + encodeURIComponent(login)', "function renderHosts()", "h.fingerprint", "function keyWhere(h)", "hostCaps(h)", "data-host-confirm", '"only " + h.owner + " confirms their host"', '"/api/v1/hosts/" + encodeURIComponent(id) + "/confirm"', "HOSTS.notices", "n.line", 'href="/hosts/', "h.fleet.units_busy", "h.fleet.units_free"],
+      anchor: ['<table class="op-table" id="hosts-table">', "<th>Pool cap</th>", 'id="h-none"'],
+      script: ['"/api/v1/hosts?owner=" + encodeURIComponent(login)', "function renderHosts()", "h.fingerprint", "function keyWhere(h)", "hostCaps(h)", "data-host-confirm", '"only " + h.owner + " confirms their host"', '"/api/v1/hosts/" + encodeURIComponent(id) + "/confirm"', "HOSTS.notices", "n.line", 'href="/hosts/', "h.fleet.units_busy", "h.fleet.units_free", "function poolCap(h)", "#hp-facts", "h.pool_cap_units"],
       reads: [
         { path: `/api/v1/hosts?owner=${F.m1}`, fields: ["hosts", "hosts.0.id", "hosts.0.name", "hosts.0.owner", "hosts.0.status", "hosts.0.arches", "hosts.0.release_applied", "hosts.0.alive", "hosts.0.fleet.units", "hosts.0.fleet.units_busy", "hosts.0.fleet.units_free", "notices", "minimum"] },
-        { path: `/api/v1/hosts?owner=${F.m1}`, as: "maintainer", fields: ["hosts.0.fingerprint", "hosts.0.host_key", "hosts.0.capacity", "hosts.0.units", "hosts.0.lanes", "hosts.0.isolation", "hosts.0.hostname" ] },
+        { path: `/api/v1/hosts?owner=${F.m1}`, as: "maintainer", fields: ["hosts.0.fingerprint", "hosts.0.host_key", "hosts.0.capacity", "hosts.0.units", "hosts.0.lanes", "hosts.0.isolation", "hosts.0.hostname", "hosts.0.pool_cap_units"] },
       ],
       acts: [{ method: "POST", path: `/api/v1/hosts/${F.host}/confirm`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: EVERYONE,
@@ -1099,16 +1265,26 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: ["maintainer"],
     },
     {
-      // The three panels by kind from one listing; every row — a revoked worker's and a project's too — carries Revoke for whoever looks, grey with the state's word first (revoked already) and the role's after (the owner's, and a maintainer's), the shell's log icon beside the id the same way; the Revoke dialog is this entry's. A worker's mode, and Share / Own only with it, are gone (#343): its door answers 410.
+      // The three panels by kind from one listing; every row — a revoked worker's and a project's too — carries Drain (or Resume), Revoke and the way to its page's Operate for whoever looks (#412), the buttons grey with the state's word first (revoked already) and the role's after (the owner's, and a maintainer's), the shell's log icon beside the id the same way; the Revoke dialog is this entry's. A worker's mode, and Share / Own only with it, are gone (#343): its door answers 410.
       id: "user.workers-tables",
       page,
       shared: "worker-table",
       anchor: ['id="wp-community"', 'id="w-community"', 'id="wp-review"', 'id="w-review"', 'id="wp-project"', 'id="w-project"', 'id="w-none"'],
-      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, "revoke")', "data-revoke", 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"'],
-      reads: [{ path: factory, fields: ["workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.arch", "workers.0.alive", "workers.0.revoked_at", "workers.0.labels", "workers.0.agent_status", "workers.0.update"] }],
+      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, "revoke")', "data-revoke", 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"', '#wk-operate', '#hp-operate', "Operate →"],
+      reads: [{ path: factory, fields: ["workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.arch", "workers.0.alive", "workers.0.revoked_at", "workers.0.labels", "workers.0.agent_status", "workers.0.update", "workers.0.kind", "workers.0.host_id", "workers.0.drained"] }],
       acts: [
         { method: "DELETE", path: `/api/v1/factory/workers/${F.ownerWorker}`, expect: { anonymous: 401, contributor: 404, owner: 200 } },
       ],
+      visible: EVERYONE,
+    },
+    {
+      // Drain, or Resume once drained, on every worker's row for whoever looks (#412: a maintainer reaches a worker's Drain from its owner's page in one click): live for its owner and the maintainers where the worker orders' predicate says so (GET /users/:login/can's per-worker drain and resume, the door's own verdicts), grey with its word otherwise; its dialog asks why for the journal, as the worker's page does, and posts the order; the row is drawn again once the rights /can gives back change, whichever read lands first. A session's write without the page's own Origin is refused for every role (orders.ts writeGate), so the act here checks the door's gate, not a drain.
+      id: "user.worker-drain",
+      page,
+      anchor: ['id="w-community"'],
+      script: ["data-worker-order", 'workerCan(w, kind)', 'w.drained ? "resume" : "drain"', "function workerOrder(", 'API + "/workers/" + encodeURIComponent(id) + "/orders"', "UNPIN_MIN", '" drained it"', "d.note", "!== wasWorkers) renderWorkers()"],
+      reads: [{ path: factory, fields: ["workers.0.drained", "workers.0.current_task"] }],
+      acts: [{ method: "POST", path: `/api/v1/factory/workers/${F.ownerWorker}/orders`, body: { kind: "drain" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: EVERYONE,
     },
     {
@@ -1123,7 +1299,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       // Shown on a maintainer's page; whether an approval stands is the row's own `standing` (the server's word, never decision alone); an approval of one architecture alone says "only", its reason on hover (#416); Withdraw is on every row for whoever looks — live for a maintainer where an approval stands, grey with why not otherwise — with its dialog; the name opens the package on the most stable ring the row lists.
       id: "user.approvals-table",
       page: `/user/${F.m2}`,
-      anchor: ['id="approvals-section"', 'id="approvals"'],
+      anchor: ['<section class="op-card" id="approvals-section" aria-labelledby="approvals-h" hidden>', '<table class="op-table" id="approvals">'],
       script: ['"#approvals-section"', 'pager("#approvals"', "var standing = a.standing", "a.withdrawn_at", "a.rings", "pkgHref(a.name, servedRing(a.rings), a.arch)", "esc(archesOf(a))", "a.only_reason ? ' only' : ''", "withdrawBtn(a, standing)", 'may("withdraw") && standing', '"nothing standing to withdraw"', "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
       reads: [{ path: `/api/v1/users/${F.m2}`, fields: ["role", "approvals.0.task_id", "approvals.0.name", "approvals.0.arch", "approvals.0.arches", "approvals.0.only_reason", "approvals.0.version", "approvals.0.decision", "approvals.0.standing", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.rings", "approved_packages.0"] }],
       // The fixture's one approval was taken back by the build page's manifest, which walks before this one: nothing stands to withdraw.
