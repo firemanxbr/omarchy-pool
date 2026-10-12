@@ -279,8 +279,10 @@ const SCRIPT = String.raw`
     return api("GET", "/api/v1/users/" + encodeURIComponent(login) + "/can").then(function (d) {
       if (d.__status !== 200 || !d.can) return;
       // The controls outside the tables are drawn again only when their gate changed: what the owner typed in the register form stays through a refresh.
-      var was = topState(); CAN = d.can;
+      var was = topState(), wasWorkers = JSON.stringify(CAN.workers); CAN = d.can;
       if (DRAWN && topState() !== was) { renderTop(); renderRegister(); }
+      // A worker's row is drawn with its rights: once they change (a Drain, a Resume, a Revoke just pressed), the tables are drawn again with them, whichever of this read and the listing's lands first — a row drawn from the new listing with the old rights kept a grey Resume on a worker just drained until the next tick.
+      if (JSON.stringify(CAN.workers) !== wasWorkers) renderWorkers();
     }).catch(function () {});
   }
   function topState() { return ["request", "register", "token"].map(function (r) { return may(r) + ":" + reason(r); }).join("|"); }
@@ -441,7 +443,7 @@ const SCRIPT = String.raw`
     var host = w.kind === "host" && w.host_id, there = host ? "/hosts/" + encodeURIComponent(w.host_id) + "#hp-operate" : workerHref(w.id) + "#wk-operate";
     return gate('<button type="button" class="small-btn" data-worker-order="' + kind + '" data-worker="' + esc(w.id) + '" title="' + (kind === "drain" ? "hand it nothing from its next claim: a task in hand runs to its end" : "hand it work again from its next claim") + '">' + (kind === "drain" ? "Drain" : "Resume") + '</button>', order.ok, order.why)
       + ' ' + gate('<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>', revoke.ok, revoke.why)
-      + ' <a class="small-btn" href="' + there + '" title="' + (host ? "its host's page: Suspend, Resume, Retire, its pool cap" : "its page: Re-check agent, Restart, Update, Stop its task") + '">Operate →</a>';
+      + ' <a class="small-btn" href="' + there + '" title="' + (host ? "its host's page: Suspend, Resume, Retire, Drain" :"its page: Re-check agent, Restart, Update, Stop its task") + '">Operate →</a>';
   }
   // Drain and Resume, asked as the worker's page asks them, with a reason for the journal: the order holds from its issue (#277, part 2), and the door's note says what follows.
   var UNPIN_MIN = ${UNPIN_AFTER_DRAIN_MINUTES};
@@ -1276,11 +1278,11 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Drain, or Resume once drained, on every worker's row for whoever looks (#412: a maintainer reaches a worker's Drain from its owner's page in one click): live for its owner and the maintainers where the worker orders' predicate says so (GET /users/:login/can's per-worker drain and resume, the door's own verdicts), grey with its word otherwise; its dialog asks why for the journal, as the worker's page does, and posts the order. A session's write without the page's own Origin is refused for every role (orders.ts writeGate), so the act here checks the door's gate, not a drain.
+      // Drain, or Resume once drained, on every worker's row for whoever looks (#412: a maintainer reaches a worker's Drain from its owner's page in one click): live for its owner and the maintainers where the worker orders' predicate says so (GET /users/:login/can's per-worker drain and resume, the door's own verdicts), grey with its word otherwise; its dialog asks why for the journal, as the worker's page does, and posts the order; the row is drawn again once the rights /can gives back change, whichever read lands first. A session's write without the page's own Origin is refused for every role (orders.ts writeGate), so the act here checks the door's gate, not a drain.
       id: "user.worker-drain",
       page,
       anchor: ['id="w-community"'],
-      script: ["data-worker-order", 'workerCan(w, kind)', 'w.drained ? "resume" : "drain"', "function workerOrder(", 'API + "/workers/" + encodeURIComponent(id) + "/orders"', "UNPIN_MIN", '" drained it"', "d.note"],
+      script: ["data-worker-order", 'workerCan(w, kind)', 'w.drained ? "resume" : "drain"', "function workerOrder(", 'API + "/workers/" + encodeURIComponent(id) + "/orders"', "UNPIN_MIN", '" drained it"', "d.note", "!== wasWorkers) renderWorkers()"],
       reads: [{ path: factory, fields: ["workers.0.drained", "workers.0.current_task"] }],
       acts: [{ method: "POST", path: `/api/v1/factory/workers/${F.ownerWorker}/orders`, body: { kind: "drain" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: EVERYONE,

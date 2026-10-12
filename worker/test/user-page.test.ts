@@ -262,9 +262,38 @@ describe("a worker's row: Drain beside Revoke, and the way to its page (#412)", 
     expect(controls(d.workerActs(drained)).map((c) => c.text)).toEqual(["Resume", "Revoke", "Operate →"]);
     d.setCAN({ why: {}, packages: {}, workers: { [F.ownerWorker]: { revoke: false, drain: false, resume: false, why: { revoke: "x", drain: "x", resume: "m1 drained it: alice or m1 resumes it" } } } });
     expect(control(d.workerActs(drained), "Resume")).toEqual(expect.objectContaining({ grey: true, title: "m1 drained it: alice or m1 resumes it" }));
-    // A host's registration: its operations are its host's page (Suspend, Resume, Retire, its pool cap), not a worker's.
+    // A host's registration: its operations are its host's page's Stop it card (Suspend, Resume, Retire, Drain), not a worker's; the pool cap is the hosts table's own cell.
     const reg = { ...laptop, kind: "host", host_id: F.host };
-    expect(control(d.workerActs(reg), "Operate →")).toEqual(expect.objectContaining({ grey: false, href: `/hosts/${F.host}#hp-operate` }));
+    expect(control(d.workerActs(reg), "Operate →")).toEqual(expect.objectContaining({ grey: false, href: `/hosts/${F.host}#hp-operate`, title: "its host's page: Suspend, Resume, Retire, Drain" }));
+  });
+
+  it("after a Drain, the row is drawn again with the rights that come back, whichever of the two reads lands first", async () => {
+    const laptop = (await get("/api/v1/factory?limit=50", "")).json.workers.find((w: any) => w.id === F.ownerWorker);
+    const drained = { ...laptop, drained: { at: "2026-10-12T10:00:00.000Z", by: "m1", reason: "a disk to replace" } };
+    // The page as a browser runs it, whose /can answers only once the test says what it holds; /auth/me and the rest never answer, so nothing but the test draws.
+    let rights: unknown = null;
+    const page = await get(`/user/${F.owner}`, "");
+    const r = runScript(scriptOf(page.text), {
+      pathname: `/user/${F.owner}`,
+      functions: ["identity", "loadCan", "renderWorkers"],
+      variables: ["CAN", "WHO", "FACTORY"],
+      fetch: (p: string) => (p.endsWith("/can") && rights ? Promise.resolve(Response.json({ login: F.owner, can: rights })) : new Promise<Response>(() => {})),
+    }) as any;
+    r.setWHO(r.identity((await get("/auth/me", "m1")).json));
+    const rows = () => ["community", "review", "project"].map((k) => r.nodes[`#w-${k} tbody`]?.innerHTML ?? "").join("");
+    // The listing landed first: the worker drained, its row drawn with the rights from before the Drain — Resume grey.
+    r.setFACTORY({ workers: [drained] });
+    r.setCAN({ why: {}, packages: {}, workers: { [F.ownerWorker]: { revoke: true, drain: true, resume: false, why: { resume: "it is not drained: there is nothing to resume" } } } });
+    r.renderWorkers();
+    expect(control(rows(), "Resume")).toEqual(expect.objectContaining({ grey: true, title: "it is not drained: there is nothing to resume" }));
+    // Then /can, with the rights the Drain left: the row is drawn again with them, without waiting for the next tick.
+    rights = { why: {}, packages: {}, workers: { [F.ownerWorker]: { revoke: true, drain: false, resume: true, why: { drain: "drained already (by m1, 10:00 UTC: a disk to replace) — Resume ends it" } } } };
+    await r.loadCan();
+    expect(control(rows(), "Resume")).toEqual(expect.objectContaining({ grey: false, title: "hand it work again from its next claim" }));
+    // The same rights again (the minute's read): the tables are not drawn again.
+    for (const k of ["community", "review", "project"]) if (r.nodes[`#w-${k} tbody`]) r.nodes[`#w-${k} tbody`].innerHTML = "kept";
+    await r.loadCan();
+    expect(rows()).not.toContain("Resume");
   });
 });
 
