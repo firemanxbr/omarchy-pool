@@ -2867,7 +2867,13 @@ maintainer list's stop, below the minimum, the disk under the floor, a lane
 held for binfmt, limits the runtime does not enforce (a rootless runtime
 needs systemd to delegate cpu, memory and pids to the agent's user), the
 hosting requirement its isolation level does not meet as a new host would
-(`root` is the Studio's recorded exception until P6), the engine refusing
+(`root` is the Studio's recorded exception until P6; the level is the one
+its agent's last report says, from `run/capacity.json`, which the running
+agent does not count again: after the daemon moves to userns-remap, the
+install run again, or `omarchy-agent capacity --write` at the host,
+rewrites that file with `subuid`, and the item goes with the next report;
+the way back the same with `root` brings it back; the journal has a line
+for each change, #407), the engine refusing
 the agent's user (log out and back in, or reboot, so the docker group
 applies), and what the agent says of itself in its report's
 `needs_person` (from agent 0.5.0, looked at again hourly: linger off —
