@@ -27,8 +27,9 @@
  * - D1 is written only on a change, or when the row is five minutes old;
  * - the isolation its agent reports (#407): the runtime's word, else the
  *   capacity's (run/capacity.json, where agent 0.5.2 says it) — the Studio's
- *   `subuid` after its daemon remaps moves the row, the page, the fleet and
- *   the box; a word the pool does not know or an older report changes nothing;
+ *   `subuid` once install counts its remapped daemon again moves the row, the
+ *   page, the fleet and the box, and is a journal line, as each change is; a
+ *   word the pool does not know or an older report changes nothing;
  * - the page's layout at 1280, its colours the themes' tokens, its controls named.
  *
  * Tokens: workers' host tokens as the agent fetches them, sessions oms_<login>.
@@ -545,9 +546,17 @@ describe("the isolation its agent reports (#407)", () => {
     expect(reportedIsolation([], "subuid")).toEqual({ isolation: undefined, dedicated: undefined });
   });
 
-  it("the Studio moved to userns-remap: its capacity's subuid moves the row, its page, its fleet row and line, and the box's hosting item goes; a bad word or an older report changes nothing; the way back says root again", async () => {
+  it("the Studio moved to userns-remap: its capacity's subuid moves the row, its page, its fleet row and line, and the box's hosting item goes, a journal line each way; a bad word or an older report changes nothing; the way back says root again", async () => {
     const h = await activeHost("m1", "aarch64", STUDIO_REPORT.capacity);
     const isolationRow = () => env.DB.prepare("SELECT isolation, dedicated FROM hosts WHERE id = ?").bind(h.host).first();
+    // The journal's lines for its level, oldest first: one per change, its status the hosting requirement's.
+    const journal = async () => ((await env.DB.prepare("SELECT status, summary, payload FROM events WHERE kind = 'host' AND json_extract(payload, '$.action') = 'isolation' AND json_extract(payload, '$.host') = ? ORDER BY id")
+      .bind(h.host).all<{ status: string; summary: string; payload: string }>()).results.map((e) => ({ status: e.status, summary: e.summary.replace(/^.*?: /, ""), payload: JSON.parse(e.payload) })));
+    const line = (status: string, from: [string, boolean], to: [string, boolean]) => ({
+      status,
+      summary: `its agent reports isolation ${from[0]}${from[1] ? " (dedicated)" : " (not dedicated)"} → ${to[0]}${to[1] ? " (dedicated)" : " (not dedicated)"}`,
+      payload: { host: h.host, owner: "m1", action: "isolation", from: { isolation: from[0], dedicated: from[1] }, to: { isolation: to[0], dedicated: to[1] } },
+    });
     const views = async () => {
       // The fleet as its handler reads it now: the URL's answer is kept a minute at the edge.
       const fleet = (await (await handleFleet(env)).json()) as any;
@@ -567,6 +576,8 @@ describe("the isolation its agent reports (#407)", () => {
     expect(v.row).toEqual({ isolation: "root", dedicated: 1 });
     expect(v.box).toEqual(["hosting"]);
     expect(v.page.needs_person[0].text).toContain("the Studio's recorded exception until P6");
+    // The level it enrolled with: nothing changed, nothing in the journal.
+    expect(await journal()).toEqual([]);
 
     // The root session: the daemon remaps, install writes run/capacity.json again with subuid, and the next report carries it.
     const remapped = { ...STUDIO_REPORT, capacity: { ...STUDIO_REPORT.capacity, isolation: "subuid" } };
@@ -579,6 +590,11 @@ describe("the isolation its agent reports (#407)", () => {
     expect(v.fleet).toMatchObject({ isolation: "subuid", dedicated: true });
     expect(v.line).toMatch(/: 12 cores, 32 GB, aarch64 native, x86_64 emulated, isolation subuid \(dedicated\)$/);
     expect((await drawn(h.host, "m1")).nodes["#hp-kv"].innerHTML).toContain("<dt>Isolation</dt><dd>subuid (dedicated)</dd>");
+    // The journal dates the change: subuid meets the hosting requirement.
+    const remappedLine = line("ok", ["root", true], ["subuid", true]);
+    expect(await journal()).toEqual([remappedLine]);
+    expect((await env.DB.prepare("SELECT summary FROM events WHERE kind = 'host' AND json_extract(payload, '$.action') = 'isolation' AND json_extract(payload, '$.host') = ?").bind(h.host).first<{ summary: string }>())!.summary)
+      .toMatch(/^box-\d+ of m1: its agent reports isolation root \(dedicated\) → subuid \(dedicated\)$/);
 
     // A word the pool does not know, or a dedicated that is not a boolean: the report is kept, the row's isolation is not touched.
     for (const bad of ["rootish", "ROOT", "", 7, null, ["root"], { level: "root" }]) {
@@ -593,15 +609,28 @@ describe("the isolation its agent reports (#407)", () => {
     v = await views();
     expect(v.row).toEqual({ isolation: "subuid", dedicated: 1 });
     expect(v.box).toEqual([]);
-    // A runtime that names its level is the more specific word: it wins over the capacity's.
+    // None of them changed the level: still the one line.
+    expect(await journal()).toEqual([remappedLine]);
+    // A runtime that names its level is the more specific word: it wins over the capacity's. User on a machine not dedicated
+    // to it does not meet the hosting requirement: a warn line.
     await report(h.k, h.host, { ...remapped, runtime: { ...remapped.runtime, isolation: "user", dedicated: false } });
     expect(await isolationRow()).toEqual({ isolation: "user", dedicated: 0 });
+    // Its runtime silent again, the capacity's subuid is back.
+    await report(h.k, h.host, remapped);
+    expect(await isolationRow()).toEqual({ isolation: "subuid", dedicated: 1 });
 
     // The way back within its day: the old daemon.json, install again, run/capacity.json says root — so do the row and the box.
     expect((await report(h.k, h.host, STUDIO_REPORT)).json).toMatchObject({ ok: true, written: true });
     v = await views();
     expect(v.row).toEqual({ isolation: "root", dedicated: 1 });
     expect(v.box).toEqual(["hosting"]);
+    // Each change a line, once, and the way back's a warn: root is the recorded exception, not the requirement met.
+    expect(await journal()).toEqual([
+      remappedLine,
+      line("warn", ["subuid", true], ["user", false]),
+      line("ok", ["user", false], ["subuid", true]),
+      line("warn", ["subuid", true], ["root", true]),
+    ]);
   });
 });
 

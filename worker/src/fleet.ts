@@ -236,6 +236,18 @@ export interface Need { what: NeedKind; text: string }
 const AGENT_NEEDS: readonly NeedKind[] = ["linger", "credentials", "docker-group", "binfmt", "cgroups", "hosting"];
 
 /**
+ * The hosting requirement (D42, design v2 §19.1, §19.3) an isolation level does not meet as a new host would, as install's
+ * preflight words it — the level a task-container escape lands at —, or null when it meets it: the page's hosting item, and the
+ * journal line's status when a report changes the level (#407).
+ */
+export function hostingShortOf(isolation: string | null, dedicated: number | null): string | null {
+  if (isolation === "root") return "isolation root: a rootful daemon without userns-remap — a task-container escape lands as root on the host; the Studio's recorded exception until P6, refused for a new host (prep-root.sh sets userns-remap on a new daemon)";
+  if (isolation === "user" && dedicated === 0) return "isolation user on a machine not dedicated to it: a rootless runtime at the user level runs only on a dedicated machine or VM — on a shared one, a dedicated Unix user with rootless podman at the subuid level";
+  if (isolation === "vm-shared" && dedicated === 0) return "isolation vm-shared without --dedicated: Docker Desktop's or OrbStack's VM qualifies only with the home mount removed and its owner's word that nothing else runs in it";
+  return null;
+}
+
+/**
  * What only a person can fix on a host (design v2 §18.1), from its status and its last report: its owner's Confirm; a
  * suspension, or the maintainer list's stop; below the minimum; the free disk under the signed floor; an emulated lane held
  * for binfmt; limits the runtime does not enforce (cgroup delegation); the hosting requirement its isolation level does not
@@ -260,10 +272,8 @@ export function needsPersonOf(h: Pick<FleetHostRow, "status" | "owner_login" | "
     const missing = [[limits.cpus_hard, "--cpus"], [limits.memory_hard, "--memory"], [limits.pids, "--pids-limit"]].filter(([ok]) => !ok).map(([, f]) => f).join(", ");
     add("cgroups", `limits cannot be enforced: its runtime ignores ${missing}${h.isolation === "user" || h.isolation === "subuid" ? " — a rootless runtime needs systemd to delegate cpu, memory and pids to the agent's user (cgroup v2)" : ""}`);
   }
-  // The hosting requirement (D42, design v2 §19.1, §19.3), as install's preflight words it: the level a task-container escape lands at.
-  if (h.isolation === "root") add("hosting", "isolation root: a rootful daemon without userns-remap — a task-container escape lands as root on the host; the Studio's recorded exception until P6, refused for a new host (prep-root.sh sets userns-remap on a new daemon)");
-  else if (h.isolation === "user" && h.dedicated === 0) add("hosting", "isolation user on a machine not dedicated to it: a rootless runtime at the user level runs only on a dedicated machine or VM — on a shared one, a dedicated Unix user with rootless podman at the subuid level");
-  else if (h.isolation === "vm-shared" && h.dedicated === 0) add("hosting", "isolation vm-shared without --dedicated: Docker Desktop's or OrbStack's VM qualifies only with the home mount removed and its owner's word that nothing else runs in it");
+  const hosting = hostingShortOf(h.isolation, h.dedicated);
+  if (hosting) add("hosting", hosting);
   // A round that ended on what only a person fixes (run/rollout.rs): the engine refusing the agent's user, a VM, a clock.
   const round = roundOf(report);
   if (round && /needs a person/i.test(round.detail)) {
