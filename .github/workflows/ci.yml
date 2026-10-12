@@ -140,7 +140,11 @@ jobs:
     # widening the owner's passkey (pinned at the host) signed raises the units
     # the recreated dispatcher mounts, its replay is refused, and an agent key
     # sealed to the host lands in agent.env, never in the dispatcher's env or
-    # mounts.
+    # mounts. #419: the probe's mount of a keys file that is not there makes
+    # an empty directory on podman's docker API and is refused on docker; a
+    # host without keys runs a while held, nothing at agent.env, then takes
+    # keys from install and from Set agent keys, read by the recreated
+    # dispatcher's probe mount, agent.env never a directory.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -153,7 +157,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: The host orders on ${{ matrix.engine }}, beside a stand-in legacy compose project, a narrowing of units and an owner's signed widening end to end
+      - name: The host orders on ${{ matrix.engine }}, beside a stand-in legacy compose project, a narrowing of units, an owner's signed widening end to end, and a host without agent keys given them later
         run: bash tests/agent-host-orders.sh ${{ matrix.engine }}
 
   agent-runtime-switch:

@@ -192,6 +192,9 @@ pub(crate) struct HostEnv {
     public_retry: i64,
     /// The last failure said, so a failure that lasts is said once.
     failing: Option<String>,
+    /// What is at agent.env that the loop may not remove, last said (#419): a directory with
+    /// something in it, said once while it stays.
+    keys_refused: Option<String>,
 }
 
 impl HostEnv {
@@ -202,6 +205,7 @@ impl HostEnv {
             public_at: 0,
             public_retry: ADDRESSES_S,
             failing: None,
+            keys_refused: None,
         }
     }
 }
@@ -1531,13 +1535,49 @@ impl Agent {
             }
         }
         let r = rendered(&self.cfg, &self.paths, &h.sources);
+        // An empty directory at agent.env (#419), which an engine made of the agent sidecars'
+        // mount while there was no keys file (podman's docker API makes one of every missing
+        // bind source), would refuse the keys the owner gives
+        // next: it is removed, and said. Either way the host has no keys file, so the hold
+        // rendered here keeps every mount of it away until it has one. A directory with
+        // something in it is left as it is, and said once while it stays: the writers of the
+        // keys refuse it too, so the host builds only until it is moved away.
+        if let Some(e) = &r.envelope {
+            let keys = e.secrets_dir.join(crate::install::secrets::FILE);
+            let cleared = if fs::symlink_metadata(&keys).is_ok_and(|m| m.is_dir()) {
+                crate::install::secrets::clear(&e.secrets_dir)
+            } else {
+                Ok(None)
+            };
+            match cleared {
+                Ok(removed) => {
+                    h.keys_refused = None;
+                    if let Some(removed) = removed {
+                        self.journal.write(
+                            now,
+                            "dispatcher-env",
+                            serde_json::json!({"detail": format!("{removed}; the host builds only until its agent keys are given (install --agent-env-from, or Set agent keys on its page)")}),
+                        );
+                    }
+                }
+                Err(why) if h.keys_refused.as_ref() != Some(&why) => {
+                    self.journal.write(
+                        now,
+                        "dispatcher-env",
+                        serde_json::json!({"detail": format!("{why}; the host builds only until it is moved away and its agent keys are given (install --agent-env-from, or Set agent keys on its page)")}),
+                    );
+                    h.keys_refused = Some(why);
+                }
+                Err(_) => {}
+            }
+        }
         let path = dispatcher_env::path_in(&self.cfg.set_dir);
         match dispatcher_env::refresh(&path, &r) {
             Ok(done) => {
                 h.failing = None;
                 let detail = match done {
                     Refresh::Written if r.plain => "etc/dispatcher.env rendered again (the host's addresses, agent.toml, or a release here from before the token file, which reads the token there too, #327), its token kept: the next round recreates the dispatcher",
-                    Refresh::Written => "etc/dispatcher.env rendered again (the host's addresses or agent.toml changed, or the token left it: no release here reads it there any more, #327), its token kept in run/host/dispatcher/token: the next round recreates the dispatcher",
+                    Refresh::Written => "etc/dispatcher.env rendered again (the host's addresses, agent.toml or its agent keys changed, or the token left it: no release here reads it there any more, #327), its token kept in run/host/dispatcher/token: the next round recreates the dispatcher",
                     Refresh::TokenMoved => "the host worker token moved from etc/dispatcher.env to run/host/dispatcher/token (0400), which the dispatcher reads as a read-only file (#327); it stays in etc/dispatcher.env too only while a release from before it is here: the next round recreates the dispatcher",
                     Refresh::Unchanged | Refresh::NoFile => "",
                 };

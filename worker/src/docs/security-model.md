@@ -292,7 +292,11 @@ secret). Everything travels in the `Authorization` header over TLS only.
   §19.1), so no sidecar can read the file there: the agent holds the host's
   model kinds instead (`OMARCHY_AGENT_HELD=userns-remap`), the dispatcher
   starts no probe and no agent sidecar, and the host's page says why. How a
-  remapped host reads its keys is a maintainer's decision still open. The dispatcher refuses to
+  remapped host reads its keys is a maintainer's decision still open, and
+  keys do not lift that hold. Any other host with no keys file is held the
+  same way (`OMARCHY_AGENT_HELD=no-keys`, #419), so no mount ever names a file
+  that is not there, which podman's docker API makes a directory of (as it
+  did on a rootless podman host). The dispatcher refuses to
   start with an agent key or a GitHub token in its own environment and keeps the
   host's per-day budget from the usage each sidecar writes where its task
   cannot. So a recipe that subverts its sidecar reaches that task's answers

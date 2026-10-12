@@ -45,7 +45,8 @@
 //! namespace: a remapped daemon (`userns-remap`) shows the owner to no
 //! remapped uid, so there the agent names no user and holds the host's model
 //! kinds instead (`OMARCHY_AGENT_HELD`, design v2 §19.1: task containers and
-//! sidecars stay remapped). The agent, which writes the file, says which in
+//! sidecars stay remapped); so it does on a host with no keys file (`no-keys`,
+//! #419), where no mount may name one. The agent, which writes the file, says which in
 //! `etc/dispatcher.env`; without it (an older agent) they run as the image's
 //! root, as before.
 //!
@@ -732,7 +733,10 @@ impl Side<'_> {
             a.push("-e".into());
             a.push(format!("{k}={v}"));
         }
-        // --mount, not -v: a keys file that is not there fails the sidecar, where -v would make a directory of it.
+        // --mount, not -v: a keys file that is not there fails the sidecar on docker, where -v would make a
+        // directory of it. Podman's docker API makes one of either (its compat create makes every bind source
+        // that is not there, #419: studio-vm4k), so the agent holds a host with no keys file
+        // (`OMARCHY_AGENT_HELD=no-keys`) and no sidecar mounts one.
         a.push("--mount".into());
         a.push(keys_mount(agent.env_file));
         if let Some(u) = usage_dir {
