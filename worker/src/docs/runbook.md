@@ -1098,7 +1098,13 @@ host`) asks the engine for that uid and gid when it starts — its log says
 `pkgcache` directories and its package's build cache to it, and opens its
 `in` for reading (directories 0755, files `a+r`: a trial an older release's
 `tests/trial.sh` staged leaves it 0700), before the container starts, or
-hands the lease back `lost` with why (#405). A dispatcher the daemon
+hands the lease back `lost` with why (#405). A pool job's helpers (a health
+check's, an ABI gate's reference and export, the enqueue's reader of the
+recipes) run as that root too, from a directory their script made with
+`mktemp -d` (0700, root's): `omarchy-task-run` opens it to that root before
+the helper starts — for reading when it is mounted read-only, given to it
+when read-write — or refuses the run (125) and says why on its standard
+error, which a health check's event carries in its tail (#407). A dispatcher the daemon
 remapped too (a set without the overlay's `userns_mode: host`: its root is
 the task's) refuses to start and says so; one on a host that is a user
 namespace itself (an unprivileged LXC or Incus container running dockerd

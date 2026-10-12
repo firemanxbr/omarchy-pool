@@ -305,7 +305,8 @@ architecture, native or emulated. Those check containers, and the enqueue's
 reader of the recipes on `main` (on your host's own architecture), start
 through `omarchy-task-run`, which runs them as it runs a task container: on
 the job's own network behind its egress sidecar, with no token and nothing
-of the host but the job's scratch directory. Nothing to set up on your side:
+of the host but the job's scratch directory (on a daemon with userns-remap,
+opened to the helper's remapped root before it starts, #407). Nothing to set up on your side:
 the dispatcher claims pool jobs on its own, and the pool hands them to a host
 only once the maintainers' `host-pool-jobs` setting names it — the Studio
 canary since 2026-10-08, the first and only host, with no P1 host first
