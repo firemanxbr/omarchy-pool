@@ -435,8 +435,9 @@ step "Factory: one name, one package — built on x86_64, not on aarch64, review
 # #343), the maintainer's aarch64 one gives up on it (the recipe's fault,
 # final): that architecture is not supported and x86_64 goes on to the
 # review alone. A maintainer who did not request it has the project build
-# it again — the project's x86_64 worker, nothing for aarch64 — and
-# approves it once; the publish job is x86_64's only, and what it carries
+# it again — the project's x86_64 worker, nothing for aarch64 — and, the
+# package refused while aarch64 did not build (#416), approves x86_64
+# alone with the reason aarch64 does not ship; the publish job is x86_64's only, and what it carries
 # into edge is the project's build, published here with the job's own token
 # as work.rs does.
 command -v zstd >/dev/null || { echo "zstd is needed to make the package the project builds"; exit 1; }
@@ -531,7 +532,7 @@ pst=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/complete" "${cpj[@]
 [[ "$(jq -r .status <<<"$pst")" == staged ]] || { echo "the project's build did not stage: $pst"; exit 1; }
 # Approve and block are decided in the browser with the maintainer's passkey (#271): no token decides them, the maintainer's own
 # included — refused once the act itself is allowed (a contributor's build above was refused as evidence first, 409).
-tok=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${mauth[@]}" -d '{"note":"x86_64 only; aarch64 needs a linker"}')
+tok=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${mauth[@]}" -d '{"only":"x86_64","reason":"aarch64 needs a linker","note":"reads well"}')
 [[ "$(jq -r .code <<<"$tok")" == session_only ]] || { echo "a maintainer's token must not approve: $tok"; exit 1; }
 # e2e signs in again (the session ended with the sign-out above) and registers their first passkey on their page with the session
 # alone — the pool's options, a software authenticator's answer (tests/passkey.mjs), the POST. The page's origin is the one the
@@ -556,10 +557,14 @@ pk2=$(node "$ROOT/tests/passkey.mjs" register "$E2E/passkey-2.json" "$rp_origin"
 [[ "$(jq -r .code <<<"$pk2")" == passkey_required ]] || { echo "a second passkey must need the first's answer: $pk2"; exit 1; }
 # The page's script, played by curl and the authenticator: the pool's challenge for exactly this act, the passkey's answer, as JSON.
 web_answer() { curl -s -X POST "$OMARCHY_API/auth/passkeys/assert" "${web[@]}" -d "{\"for\":\"$1\"}" | node "$ROOT/tests/passkey.mjs" assert "$E2E/passkey.json" "$rp_origin" json; }
-[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${web[@]}" -d '{"note":"x86_64 only; aarch64 needs a linker"}')" == 403 ]] || { echo "the session alone must not approve"; exit 1; }
-# One decision for the package: x86_64 approved, aarch64 named not supported, one publish job — x86_64's.
-ap=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${web[@]}" -d "$(jq -nc --argjson a "$(web_answer "approve:$px")" '{note: "x86_64 only; aarch64 needs a linker", assertion: $a}')")
-[[ "$(jq -c .arches <<<"$ap")" == '["x86_64"]' && "$(jq -r .not_supported.aarch64 <<<"$ap")" == "$arm" && "$(jq -r '.publishes | keys | join(",")' <<<"$ap")" == x86_64 ]] || { echo "the approval must cover x86_64 alone: $ap"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${web[@]}" -d '{"only":"x86_64","reason":"aarch64 needs a linker","note":"reads well"}')" == 403 ]] || { echo "the session alone must not approve"; exit 1; }
+# The package whole is refused while aarch64 did not build (#416), with the reason; x86_64 alone asks why aarch64 does not ship.
+whole=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${web[@]}" -d "$(jq -nc --argjson a "$(web_answer "approve:$px")" '{note: "both, please", assertion: $a}')")
+[[ "$(jq -r .error <<<"$whole")" == "aarch64 did not build (task $arm): the package is approved once every architecture it names is built again by the project — or approve x86_64 only, with the reason aarch64 does not ship" ]] || { echo "the package must be refused while aarch64 did not build: $whole"; exit 1; }
+[[ "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${web[@]}" -d "$(jq -nc --argjson a "$(web_answer "approve:$px:x86_64")" '{only: "x86_64", assertion: $a}')" | jq -r .code)" == reason ]] || { echo "x86_64 alone must need a reason"; exit 1; }
+# One decision: x86_64 approved alone, aarch64 not shipping with the reason on the record, one publish job — x86_64's.
+ap=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${web[@]}" -d "$(jq -nc --argjson a "$(web_answer "approve:$px:x86_64")" '{only: "x86_64", reason: "aarch64 needs a linker", note: "reads well", assertion: $a}')")
+[[ "$(jq -c .arches <<<"$ap")" == '["x86_64"]' && "$(jq -r .not_shipping.aarch64 <<<"$ap")" == "$arm" && "$(jq -r .only_reason <<<"$ap")" == "aarch64 needs a linker" && "$(jq -r '.publishes | keys | join(",")' <<<"$ap")" == x86_64 ]] || { echo "the approval must cover x86_64 alone, aarch64 not shipping: $ap"; exit 1; }
 pub=$(jq -r .publish <<<"$ap")
 [[ "$(d1n "SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'e2e-ident' AND kind = 'publish'")" == 1 ]] || { echo "one publish job, and only one, for e2e-ident"; exit 1; }
 [[ "$(d1n "SELECT COUNT(*) AS n FROM reviews WHERE name = 'e2e-ident' AND decision = 'approved' AND arches = '[\"x86_64\"]'")" == 1 ]] || { echo "one review of e2e-ident on the record"; exit 1; }
@@ -581,16 +586,16 @@ curl -sf -o "$E2E/ident/publish/e2e-ident-1.0-1-x86_64.pkg.tar.zst" "$OMARCHY_AP
 OMARCHY_TOKEN="$pj" "$PKG_REPO" publish --ring edge --source factory --arch x86_64 --note "factory task $px: e2e-ident approved (e2e)" "$E2E/ident/publish/e2e-ident-1.0-1-x86_64.pkg.tar.zst"
 done_pub=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$pub/complete" -H "authorization: Bearer $pj" -H "content-type: application/json" -d "{\"summary\":\"published\",\"result\":{\"sha256\":\"$ident_sha\",\"filename\":\"e2e-ident-1.0-1-x86_64.pkg.tar.zst\",\"version\":\"1.0-1\",\"task\":$px}}")
 [[ "$(jq -r .status <<<"$done_pub")" == done ]] || { echo "the publish job did not complete: $done_pub"; exit 1; }
-# In edge on x86_64, and on x86_64 alone; the package says aarch64 is not supported.
+# In edge on x86_64, and on x86_64 alone; the package says aarch64 does not ship.
 grep -q '"name":"e2e-ident"' <<<"$(curl -s "$OMARCHY_API/api/v1/releases/edge?fields=summary&arch=x86_64")" || { echo "edge must serve e2e-ident on x86_64"; exit 1; }
 ! grep -q '"name":"e2e-ident"' <<<"$(curl -s "$OMARCHY_API/api/v1/releases/edge?fields=summary&arch=aarch64")" || { echo "edge must not serve e2e-ident on aarch64"; exit 1; }
 story=$(curl -s "$OMARCHY_API/api/v1/factory/packages/e2e-ident/story?at=published")
-[[ "$(jq -r '.package.status + " " + .targets.x86_64.status + " " + .targets.aarch64.status' <<<"$story")" == "published published not_supported" ]] || { echo "the package must say published on x86_64, not supported on aarch64: $(jq -c '{status: .package.status, targets}' <<<"$story")"; exit 1; }
+[[ "$(jq -r '.package.status + " " + .targets.x86_64.status + " " + .targets.aarch64.status' <<<"$story")" == "published published not_shipping" ]] || { echo "the package must say published on x86_64, not shipping on aarch64: $(jq -c '{status: .package.status, targets}' <<<"$story")"; exit 1; }
 [[ "$(jq -r '.review' <<<"$story")" == null ]] || { echo "a published package is in no review, and its story says so: $(jq -c .review <<<"$story")"; exit 1; }
 [[ "$(jq -r '[.rings[] | select(.arch == "aarch64")] | length' <<<"$story")" == 0 && "$(jq -r '[.rings[] | select(.arch == "x86_64" and .ring == "edge")] | length' <<<"$story")" == 1 ]] || { echo "the rings must serve e2e-ident on x86_64 only: $(jq -c .rings <<<"$story")"; exit 1; }
 decided=$(curl -s "$OMARCHY_API/api/v1/factory/approvals?at=published" | jq -c '.approvals[] | select(.name == "e2e-ident")')
-[[ "$(jq -r '"\(.standing) \(.arches | join(",")) \(.not_supported | keys | join(",")) \(.rings | join(","))"' <<<"$decided")" == "true x86_64 aarch64 edge" ]] || { echo "the record must hold one standing review of e2e-ident, x86_64 in edge, aarch64 not supported: $decided"; exit 1; }
-echo "one name, one package: x86_64 published, aarch64 not supported, one review, one publish job"
+[[ "$(jq -r '"\(.standing) \(.arches | join(",")) \(.not_shipping | keys | join(",")) \(.only_reason) \(.rings | join(","))"' <<<"$decided")" == "true x86_64 aarch64 aarch64 needs a linker edge" ]] || { echo "the record must hold one standing review of e2e-ident, x86_64 in edge, aarch64 not shipping and why: $decided"; exit 1; }
+echo "one name, one package: x86_64 published, aarch64 not shipping and why, one review, one publish job"
 # The package page (#244): e2e-ident's data says where each architecture is served — x86_64 in edge, aarch64 nowhere — and whose it is in the pool: the maintainer whose approval stands. Its page is served.
 pv=$(curl -s "$OMARCHY_API/api/v1/package/e2e-ident?ring=edge&arch=x86_64&at=page")
 [[ "$(jq -r '"\(.arches.x86_64.rings | map(.ring) | join(",")) \(.arches.aarch64.rings | length) \(.maintenance.maintainer.login)"' <<<"$pv")" == "edge 0 e2e" ]] || { echo "the package page's data must say x86_64 in edge, aarch64 nowhere, e2e its maintainer: $(jq -c '{arches, maintenance}' <<<"$pv")"; exit 1; }

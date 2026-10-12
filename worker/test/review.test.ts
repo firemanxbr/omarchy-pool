@@ -591,7 +591,7 @@ describe("a decision's round", () => {
     const rows = JSON.stringify([{ task: 9001, arch: "x86_64", version: "1.0-1", rebuild: 9001 }, { task: 9002, arch: "aarch64", version: "1.0-1", rebuild: 9002 }]);
     const decided = JSON.stringify([9001, 9002]);
     const take = (by: string) => env.DB.batch([
-      env.DB.prepare(REVIEW_SQL).bind("roundtwice", "1.0-1", "approved", by, null, '["x86_64","aarch64"]', "{}", 0, 0, decided),
+      env.DB.prepare(REVIEW_SQL).bind("roundtwice", "1.0-1", "approved", by, null, '["x86_64","aarch64"]', "{}", 0, 0, null, "{}", decided),
       env.DB.prepare(ROWS_SQL).bind("roundtwice", "approved", by, null, "roundtwice", rows, decided),
     ]);
     const [first, second] = await Promise.all([take("m1"), take("m2")]);

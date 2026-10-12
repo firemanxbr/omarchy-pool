@@ -899,6 +899,8 @@ const CSS = String.raw`
   /* The shell's own buttons, the decision dialog's and the Decision cell's, are drawn in the palette's names: left to the browser, a light page drew them in its own light grey with a black outset border, a dark one in its grey. :where() keeps the rule at an element's weight, so a table's smaller buttons (table button) and the dialog's danger and ghost still win. The dialog's confirm is its primary, in green. */
   :where(dialog.ask, .decide) button { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; }
   :where(dialog.ask, .decide) button:hover { border-color: var(--green); }
+  /* The package's approval (#416, approveCell): Approve package is the cell's first choice, in green while it may be pressed. */
+  :where(.decide) button.primary:not([disabled]) { border-color: var(--green); color: var(--green); }
   dialog.ask button[type="submit"]:not(.danger) { background: var(--green); border-color: var(--green); color: var(--green-ink); } dialog.ask button[type="submit"]:not(.danger):hover { filter: brightness(1.08); }
   @media (max-width: 720px) {
     .hero h1 { font-size: 24px; } .hrow { grid-template-columns: 110px 1fr 46px; }
@@ -1604,17 +1606,25 @@ export const HELPERS = String.raw`
   function orSignIn(why) { return WHO.me ? why : "sign in with GitHub"; }
 
   // ---- a package's targets (targets.ts): one package, an architecture per chip, the server's word for each — "x86_64 ✓" once it built (again by the project, approved, in the pool), "aarch64 ⟳" while it builds or the project builds it again, "aarch64 · not supported" dashed when its build failed after the tries it had, "x86_64 ○" while nothing of it is in flight. Review, the package page and a person's page draw the same chips; "marcelo, on x86_64", never "the x86_64 package".
-  var TARGET_WORD = { waiting: ["none", "○", "requested, nothing of it in flight"], building: ["blue", "⟳", "its contributor's build is queued or running"], built: ["ok", "✓", "built, ready for the review"], not_supported: ["none", "· not supported", "its build failed after the tries it had; the other architectures go on"], reviewing: ["blue", "⟳", "the project builds it again"], reviewed: ["ok", "✓", "built again by the project; the review decides"], approved: ["ok", "✓", "approved; its publish job carries it into edge"], published: ["ok", "✓", "in the pool"] };
+  // An architecture an approval of another one alone set aside (#416) does not ship, the reason on the record: dashed as one that did not build, never "waiting" as if forgotten.
+  var TARGET_WORD = { waiting: ["none", "○", "requested, nothing of it in flight"], building: ["blue", "⟳", "its contributor's build is queued or running"], built: ["ok", "✓", "built, ready for the review"], not_supported: ["none", "· not supported", "its build failed after the tries it had; the other architectures go on"], reviewing: ["blue", "⟳", "the project builds it again"], reviewed: ["ok", "✓", "built again by the project; the review decides"], approved: ["ok", "✓", "approved; its publish job carries it into edge"], published: ["ok", "✓", "in the pool"], not_shipping: ["none", "· not shipping", "set aside by an approval of another architecture alone; the reason is on the record"] };
   function targetChips(targets) {
     var arches = Object.keys(targets || {});
     if (!arches.length) return "";
     return '<span class="tgts">' + arches.map(function (a) {
       var t = targets[a] || {}, w = TARGET_WORD[t.status] || ["none", "", t.status || ""];
-      return '<span class="pill tgt ' + w[0] + (t.status === "not_supported" ? " dashed" : "") + '" title="' + esc(a + ": " + w[2] + (t.task ? " (build #" + t.task + ")" : "")) + '">' + esc(a) + " " + esc(w[1]) + "</span>";
+      return '<span class="pill tgt ' + w[0] + (t.status === "not_supported" || t.status === "not_shipping" ? " dashed" : "") + '" title="' + esc(a + ": " + w[2] + (t.task ? " (build #" + t.task + ")" : "")) + '">' + esc(a) + " " + esc(w[1]) + "</span>";
     }).join("") + "</span>";
   }
   // The architectures a decision covered (a review of the package, GET /factory/approvals), as a row words them: "x86_64 · aarch64".
   function archesOf(a) { return ((a && a.arches && a.arches.length ? a.arches : [a && a.arch]).filter(Boolean)).join(" · "); }
+  // What an approval shipped, in the words the record and every page use (#416): "approved for x86_64 and aarch64", or "approved for aarch64 only: <reason>" — the reason the request's other architectures do not ship. Plain text: a page escapes it where it draws it.
+  function approvedFor(a) {
+    var arches = ((a && a.arches && a.arches.length ? a.arches : [a && a.arch]).filter(Boolean));
+    return "approved for " + arches.join(" and ") + (a && a.only_reason ? " only: " + a.only_reason : "");
+  }
+  // The architectures an approval of one alone set aside (#416), as a list: none for a package approved whole.
+  function notShipping(a) { return Object.keys((a && a.not_shipping) || {}); }
   // ---- the three verdicts on a staged build, as Review's table reads them: the gate (the worker's own checks on the build), the audit (the project's second agent), the trial (a real pacman installing the project's build in the lab). The pill, then the evidence as a link when the row has one (href: t.evidence.tests / .audit / .trial) — what warned or failed, the findings, the transcript — and as a word when it has none.
   function gatePill(v, href) {
     if (!v) return '<span class="dim" title="built before the gate existed">—</span>';
@@ -1676,31 +1686,52 @@ export const HELPERS = String.raw`
     });
     if (what === "reject") return ask({ title: "Reject " + label, text: "Every build of the package in review stops, on every architecture. A request rejected frees its name; a package already in the pool keeps it. The contributor reads the note, and the rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
     if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on, on every architecture it covered; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
-    return ask({ title: "Approve " + label, text: "One decision for the package: the project's build of every architecture it built again goes into edge, signed by the pool; one that did not build is not supported. The approval is on the record with your name.", held: "Your passkey confirms it: your device asks for your fingerprint, face or PIN.", input: "optional", confirm: "Approve with your passkey", first: "Register a passkey and approve" });
+    // One architecture alone (#416): the reason the others do not ship is required, and goes on the record and the package's page.
+    if (what === "only") return ask({ title: "Approve " + opts.arch + " only — " + label, text: "Only the project's build of " + esc(opts.arch) + " goes into edge, signed by the pool. " + esc(opts.others || "The other architectures") + " do" + (opts.others && opts.others.indexOf(" and ") < 0 ? "es" : "") + " not ship: " + (opts.others && opts.others.indexOf(" and ") < 0 ? "its" : "their") + " builds in review stop. Say why — the record and the package's page show it with your name.", held: "Your passkey confirms it: your device asks for your fingerprint, face or PIN.", input: "required", placeholder: "why " + (opts.others || "the other architectures") + " do" + (opts.others && opts.others.indexOf(" and ") < 0 ? "es" : "") + " not ship — e.g. upstream ships no build for it", confirm: "Approve " + opts.arch + " only with your passkey", first: "Register a passkey and approve" });
+    // The package whole: every architecture its request names, each one's build named (opts.builds: "x86_64 (build #12) and aarch64 (build #13)") where the page knows them.
+    return ask({ title: "Approve " + label, text: "One decision for the package: the project's build of " + (opts.builds ? esc(opts.builds) : "every architecture its request names") + " goes into edge, signed by the pool. The approval is on the record with your name.", held: "Your passkey confirms it: your device asks for your fingerprint, face or PIN.", input: "optional", confirm: "Approve with your passkey", first: "Register a passkey and approve" });
   }
   // What the toast says once the server said yes: where the builds went, the tasks the project builds it as and on what, what the withdrawal emptied, whether a rejection freed the name.
   function decidedText(what, d, dropped) {
     var jobs = function (ids) { return ids.map(function (id) { return "<a href=\"/build/" + id + "\">#" + id + "</a>"; }).join(", "); };
-    if (what === "approve") { var pubs = d.publishes ? Object.keys(d.publishes).map(function (a) { return d.publishes[a]; }) : [d.publish]; return "Approved — the project's build" + (pubs.length > 1 ? "s go" : " goes") + " into edge (publish job" + (pubs.length > 1 ? "s " : " ") + jobs(pubs) + ")."; }
+    if (what === "approve" || what === "only") { var pubs = d.publishes ? Object.keys(d.publishes).map(function (a) { return d.publishes[a]; }) : [d.publish], aside = notShipping(d); return (d.only_reason ? "Approved for " + esc((d.arches || []).join(" and ")) + " only" : "Approved") + " — the project's build" + (pubs.length > 1 ? "s go" : " goes") + " into edge (publish job" + (pubs.length > 1 ? "s " : " ") + jobs(pubs) + ")" + (aside.length ? "; " + esc(aside.join(" and ")) + " do" + (aside.length > 1 ? "" : "es") + " not ship" : "") + "."; }
     if (what === "build") { var tasks = d.tasks && d.tasks.length ? d.tasks : [d.task]; return "The project is building it: task" + (tasks.length > 1 ? "s " : " ") + jobs(tasks) + ", on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent."; }
     if (what === "withdraw") return "Withdrawn — the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + "; another maintainer decides.";
     return dropped ? "Dropped." : "Rejected — the contributor sees the note." + (d.released ? " The name is free again." : "");
   }
-  // The decision buttons are the shell's (data-approve / data-reject / data-build / data-withdraw = the task id, inside decisionCell's .decide): the click stops here, asks through decideDialog, posts once through api() and tells every fn a page gave onDecided — fn(what, id, answer) — to draw again. The button is disabled from the click and enabled again on cancel or refusal only, so a decision is never posted twice (a rejected row draws again without the button). A page's own Build buttons (a person's page names a package in data-build) are outside .decide and untouched.
+  // ---- the package's approval (#416), the same for every viewer: Approve package — every architecture its request names, one decision — and Approve <arch> only per architecture, the reason the others do not ship required; each live where the server's can says so for that architecture's staged build of the project's, grey with its reason otherwise. p is { name, version, arches: the request's, rows: { <arch>: { id, can } }, who, why, none }: who, the role's words where the viewer may decide nothing (nobody signed in, not a maintainer: the page asks no can for them); why, the words of a row whose can is not read yet; none, why there is nothing to decide when no build of the project's is staged (approved already, not rebuilt yet). The buttons carry the task (data-approve; data-only with data-arch) and the click is the shell's, below: the dialog names each architecture's build.
+  function approveCell(p) {
+    var rows = p.rows || {}, arches = (p.arches && p.arches.length ? p.arches : ARCHES).filter(function (a) { return ARCHES.indexOf(a) >= 0; }), built = arches.filter(function (a) { return rows[a]; });
+    // The build the package's approval is posted on: one whose can allows it, else the first staged — its refusal is the package's.
+    var leadArch = built.filter(function (a) { return rows[a].can && rows[a].can.approve; })[0] || built[0] || null, lead = leadArch ? rows[leadArch] : null;
+    var nothing = p.none || "nothing of " + p.name + " is staged by the project";
+    var whyOf = function (r, what) { return p.who || (r && r.can ? (r.can.why || {})[what] || "not now" : r ? p.why || "not now" : nothing); };
+    var label = p.name + (p.version ? " " + p.version : "");
+    var builds = built.map(function (a) { return a + " (build #" + rows[a].id + ")"; }).join(" and ");
+    var pkg = gate('<button type="button"' + (lead ? ' data-approve="' + lead.id + '" data-builds="' + esc(builds) + '"' : '') + ' class="primary">Approve package</button>', !p.who && !!(lead && lead.can && lead.can.approve), whyOf(lead, "approve"));
+    var only = arches.map(function (a) {
+      var r = rows[a], others = arches.filter(function (x) { return x !== a; }).join(" and ");
+      return gate('<button type="button"' + (r ? ' data-only="' + r.id + '"' : '') + ' data-arch="' + esc(a) + '" data-others="' + esc(others) + '">Approve ' + esc(a) + ' only</button>', !p.who && !!(r && r.can && r.can.approve_only), r ? whyOf(r, "approve_only") : p.who || (built.length ? "the project has no staged build of " + a + " to approve" : nothing));
+    }).join("");
+    return '<span class="decide" data-label="' + esc(label) + '" data-arch="' + esc(leadArch || "") + '">' + pkg + only + '</span>';
+  }
+  // The decision buttons are the shell's (data-approve / data-reject / data-build / data-withdraw = the task id, and data-only for one architecture alone, inside decisionCell's or approveCell's .decide): the click stops here, asks through decideDialog, posts once through api() and tells every fn a page gave onDecided — fn(what, id, answer) — to draw again. The button is disabled from the click and enabled again on cancel or refusal only, so a decision is never posted twice (a rejected row draws again without the button). A page's own Build buttons (a person's page names a package in data-build) are outside .decide and untouched.
   var DECIDED = [];
   function onDecided(fn) { DECIDED.push(fn); }
   document.addEventListener("click", function (ev) {
-    var b = ev.target.closest ? ev.target.closest(".decide button[data-approve], .decide button[data-reject], .decide button[data-build], .decide button[data-withdraw]") : null; if (!b) return;
+    var b = ev.target.closest ? ev.target.closest(".decide button[data-approve], .decide button[data-reject], .decide button[data-build], .decide button[data-withdraw], .decide button[data-only]") : null; if (!b) return;
     ev.stopImmediatePropagation(); if (b.disabled) return;
-    var what = ["approve", "reject", "build", "withdraw"].filter(function (w) { return b.hasAttribute("data-" + w); })[0], id = b.getAttribute("data-" + what), cell = b.closest(".decide");
+    var what = ["approve", "reject", "build", "withdraw", "only"].filter(function (w) { return b.hasAttribute("data-" + w); })[0], id = b.getAttribute("data-" + what), cell = b.closest(".decide");
+    // One architecture alone (#416) is the approve door with only and the reason, its passkey's answer for exactly that act.
+    var arch = what === "only" ? b.getAttribute("data-arch") : cell.getAttribute("data-arch");
     b.disabled = true;
-    decideDialog(what, cell.getAttribute("data-label") || "build #" + id, { arch: cell.getAttribute("data-arch"), note: b.getAttribute("data-note") }).then(function (got) {
+    decideDialog(what, cell.getAttribute("data-label") || "build #" + id, { arch: arch, note: b.getAttribute("data-note"), builds: b.getAttribute("data-builds"), others: b.getAttribute("data-others") }).then(function (got) {
       if (got === null) { b.disabled = false; return; }
-      var body = { note: got && typeof got === "object" ? got.note : got };
+      var body = what === "only" ? { only: arch, reason: got } : { note: got && typeof got === "object" ? got.note : got };
       if (got && typeof got === "object" && got.pick) body.worker = got.pick;
       // Approve is confirmed with the maintainer's passkey (#271): the answer rides in the body; the other three post as they are.
-      var send = function (assertion) { if (assertion) body.assertion = assertion; return api("POST", "/api/v1/factory/tasks/" + id + "/" + what, body); };
-      return (what === "approve" ? passkeyed("approve:" + id, send) : send()).then(function (d) {
+      var send = function (assertion) { if (assertion) body.assertion = assertion; return api("POST", "/api/v1/factory/tasks/" + id + "/" + (what === "only" ? "approve" : what), body); };
+      return (what === "approve" ? passkeyed("approve:" + id, send) : what === "only" ? passkeyed("approve:" + id + ":" + arch, send) : send()).then(function (d) {
         if (d.error) { b.disabled = false; toast(refusalHtml(d), "error"); return; }
         toast(decidedText(what, d, b.hasAttribute("data-note")), what === "withdraw" ? "warn" : "ok");
         DECIDED.forEach(function (fn) { fn(what, Number(id), d); });

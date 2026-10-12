@@ -3935,7 +3935,12 @@ decides on their own package, and never on a contributor's bytes:
   evidence as the lesson, builds it through the same gate and stages it
   under `staging/@project/`; a second agent audits it, and the trial
   installs it with a real pacman from the lab.
-- **Approve** the project's build (a contributor's cannot be approved), in
+- **Approve package** — the project's build of every architecture the
+  request names, one decision (a contributor's cannot be approved; refused
+  with the reason while one is still building or did not build) — or
+  **Approve <arch> only**, with why the others do not ship (#416: on the
+  record and the package's page; their builds in review stop, the
+  architecture `not shipping` until a newer build of it), in
   the browser with your passkey — your first is added on your own page
   (`/user/<login>#passkeys`), or in the Approve dialog itself, which
   registers it and then approves with it (#287); a lost one is reset by
@@ -3999,7 +4004,7 @@ a ring, and the one thing that must hold for it to open:
 
 | Door | What it ships | What guards it |
 |---|---|---|
-| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
+| **Approve** (Review, a package's page, a build's page, an agent's draft confirmed) | the project's build of every architecture the request names — or one alone, with the reason the others do not ship on the record (#416) — into edge; rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
 | **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
 | **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
 | **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |
