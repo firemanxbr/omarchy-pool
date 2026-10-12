@@ -9,7 +9,11 @@
 //!
 //! - **its memory**: the child sets a 2 GB data rlimit on itself before it
 //!   runs anything (`setrlimit`, no `unsafe`); its scripts and their helpers'
-//!   clients inherit it;
+//!   clients inherit it. Its malloc keeps two arenas ([`MALLOC_ARENAS`]), so
+//!   what eight threads freed is used again rather than counted eight times,
+//!   and the jobs fit it by design: a sync's imports stream and extract one
+//!   at a time (`sync.rs`), a render holds one page of the release
+//!   (`ops::render`), never the ring (#319);
 //! - **its time**: a per-kind timeout from its start; past it the dispatcher
 //!   kills the job's whole process group and the helper containers labelled
 //!   with its lease, and fails it (not final: the pool retries it within its
@@ -66,6 +70,14 @@ pub const POOL_KINDS: [&str; 11] = [
 pub const HELPER_KINDS: [&str; 4] = ["health", "promote", "security", "enqueue"];
 /// A job's data rlimit: its heap, and its scripts' (design v2 §9.2).
 pub const MEM_LIMIT: u64 = 2 << 30;
+/// The malloc arenas of a job's process (glibc's `MALLOC_ARENA_MAX`, in its environment): two, not
+/// eight per CPU (#319). glibc gives each thread that allocates an arena of its own, and what a
+/// thread frees stays in its arena, mapped and writable — so the data rlimit counts it — for that
+/// thread alone to use again: a sync's eight import threads each kept their largest buffers. A sync
+/// of 48 packages of 3 to 31 MB, eight at a time, peaked at 238 MB of data with glibc's arenas and
+/// 79 MB with two (`tests/pool_memory.rs`'s pool, measured from `/proc/<pid>/status`). Its scripts
+/// inherit it, harmlessly.
+pub const MALLOC_ARENAS: &str = "2";
 /// The architectures a ring serves.
 const RING_ARCHES: [&str; 2] = ["x86_64", "aarch64"];
 

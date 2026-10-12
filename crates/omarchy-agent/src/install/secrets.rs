@@ -2,8 +2,51 @@
 //! from an existing file (`--agent-env-from`) after showing which keys it holds, into
 //! `OMARCHY_SECRETS_DIR/agent.env` (mode 0600), outside the work root. Without them the
 //! host takes no model kinds. A `GITHUB_TOKEN` among them must be public read only.
+//!
+//! An empty directory where the file goes (#419) — what podman's docker API makes of a bind
+//! mount's source that is not there, as it did of the keys file's on studio-vm4k while there
+//! was none (`run::engine_tests` shows it on the engine) — is removed by every writer of the keys (install,
+//! *Set agent keys*) and by the run loop, and said ([`clear`]); a directory with something in
+//! it, a link or another user's file stays refused ([`check`]).
 
 use std::path::Path;
+
+use super::files;
+
+/// The keys file's name in the secrets directory.
+pub(crate) const FILE: &str = "agent.env";
+
+/// Whether `path` (the keys file) is an empty directory (#419), which a writer of the keys
+/// removes and replaces with the file; `false` for no file or the agent's own. A directory with
+/// something in it, a symbolic link, another user's file or one others may write is refused.
+pub(crate) fn check(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => {
+            let mut entries =
+                std::fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if entries.next().is_none() {
+                Ok(true)
+            } else {
+                Err(format!(
+                    "{}: a directory with something in it where the agent keys go: refused, left as it is (move it away, then give the keys again)",
+                    path.display()
+                ))
+            }
+        }
+        _ => files::check_owner_file(path).map(|()| false),
+    }
+}
+
+/// An empty directory at `dir/agent.env` removed (#419), and what to say of it; `None` when there
+/// was none. A directory with something in it is refused, never emptied.
+pub(crate) fn clear(dir: &Path) -> Result<Option<String>, String> {
+    Ok(files::remove_empty_dir(dir, FILE)?.then(|| {
+        format!(
+            "{} was an empty directory, which an engine made of the agent sidecars' mount while there was no keys file (#419): removed",
+            dir.join(FILE).display()
+        )
+    }))
+}
 
 /// `KEY=value` lines; comments and blank lines are left out. A key is a shell variable
 /// name; a value holds no newline (it goes into a container's env file).

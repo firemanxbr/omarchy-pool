@@ -14,6 +14,8 @@
  *   reviewed       the project's build is staged: the review decides
  *   approved       the review approved it; its publish job carries it into edge
  *   published      in the pool
+ *   not_shipping   set aside by an approval of another architecture only, with its reason on the record (#416):
+ *                  its builds in review stopped with that decision; a newer build of it is where it stands again
  *
  * One rule (targetsOf) from the builds and the approvals the pool keeps
  * anyway; stored on the registration (factory_packages.targets) at every
@@ -25,7 +27,7 @@
 import type { Env } from "./index";
 import { REPO_ARCHES, isRepoArch } from "./meta";
 
-export const TARGET_STATES = ["waiting", "building", "built", "not_supported", "reviewing", "reviewed", "approved", "published"] as const;
+export const TARGET_STATES = ["waiting", "building", "built", "not_supported", "reviewing", "reviewed", "approved", "published", "not_shipping"] as const;
 export type TargetState = (typeof TARGET_STATES)[number];
 /** Where one architecture of a package stands, and the build that says so. */
 export interface Target { status: TargetState; task: number | null }
@@ -33,8 +35,10 @@ export type Targets = Record<string, Target>;
 
 /** A build of the package as the rule reads it: its row, and the contributor's build a project's build answers (params.review); the version rides along for the review, which decides one version (routes/review.ts). */
 export interface TargetBuild { id: number; arch: string; status: string; trust: string; publish: number; review: number | null; version?: string | null }
-/** A decision's row on one target (approvals), as the rule reads it. */
-export interface TargetDecision { arch: string; task_id: number; rebuild_task: number | null; decision: string; withdrawn_at: string | null }
+/** A decision's row on one target (approvals), as the rule reads it — and the version it decided, which the rule does not read and a decision on the package does (#416: an architecture an approval already serves at a build's version is shipped already). */
+export interface TargetDecision { arch: string; task_id: number; rebuild_task: number | null; decision: string; withdrawn_at: string | null; version?: string | null }
+/** The architectures the newest standing approval set aside (reviews.not_shipping, #416): each with the build its target stood on when it was decided, null for none. */
+export type NotShipping = Record<string, number | null>;
 
 /**
  * Per architecture — the ones requested, and any an approval still stands
@@ -48,8 +52,14 @@ export interface TargetDecision { arch: string; task_id: number; rebuild_task: n
  * — the architecture stays approved or published, never not supported
  * while pacman installs it. A bump in flight or staged does move it: that
  * is the next version on its way to a review. None: waiting.
+ *
+ * An architecture the newest standing approval set aside (`notShipping`,
+ * #416: another architecture approved alone, the reason on the record) and
+ * no approval stands on is not_shipping while no build of it newer than the
+ * one its target stood on then says otherwise: what that decision stopped
+ * is not where it stands, and "waiting" would read as forgotten.
  */
-export function targetsOf(arches: string[], builds: TargetBuild[], decisions: TargetDecision[], closedThrough = 0): Targets {
+export function targetsOf(arches: string[], builds: TargetBuild[], decisions: TargetDecision[], closedThrough = 0, notShipping: NotShipping = {}): Targets {
   const approved = (b: TargetBuild, standing: boolean) =>
     decisions.some((a) => a.arch === b.arch && a.decision === "approved" && (a.withdrawn_at === null) === standing && (a.task_id === b.id || a.rebuild_task === b.id));
   const standsOn = (arch: string) => decisions.some((a) => a.arch === arch && a.decision === "approved" && a.withdrawn_at === null);
@@ -63,8 +73,20 @@ export function targetsOf(arches: string[], builds: TargetBuild[], decisions: Ta
       .filter((b) => !(b.status === "done" && !approved(b, true) && (approved(b, false) || b.trust === "community")))
       .filter((b) => !(served && b.status === "failed"))
       .sort((x, y) => y.id - x.id)[0];
-    out[arch] = newest ? { status: stateOf(newest, approved(newest, true)), task: newest.id } : { status: "waiting", task: null };
+    const aside = Object.prototype.hasOwnProperty.call(notShipping, arch) ? (notShipping[arch] ?? 0) : null;
+    if (aside !== null && !served && (!newest || newest.id <= aside)) out[arch] = { status: "not_shipping", task: notShipping[arch] ?? null };
+    else out[arch] = newest ? { status: stateOf(newest, approved(newest, true)), task: newest.id } : { status: "waiting", task: null };
   }
+  return out;
+}
+
+/** reviews.not_shipping as the rule reads it: {arch: task} for the architectures a repository builds, anything else none. */
+export function parseNotShipping(v: unknown): NotShipping {
+  let o: unknown;
+  try { o = typeof v === "string" ? JSON.parse(v) : v; } catch { return {}; }
+  if (!o || typeof o !== "object" || Array.isArray(o)) return {};
+  const out: NotShipping = {};
+  for (const [arch, task] of Object.entries(o as Record<string, unknown>)) if (isRepoArch(arch)) out[arch] = typeof task === "number" ? task : null;
   return out;
 }
 
@@ -81,8 +103,8 @@ export function parseTargets(v: unknown): Targets {
   try { return (typeof v === "string" ? JSON.parse(v) : v) as Targets; } catch { return {}; }
 }
 
-/** What the rule reads of a package — the registration's requested architectures and closed round, its builds and its decisions — the same rows a decision on one of its builds reads (routes/review.ts). */
-export interface PackageRows { arches: string[]; closedThrough: number; builds: TargetBuild[]; decisions: TargetDecision[] }
+/** What the rule reads of a package — the registration's requested architectures and closed round, its builds and its decisions, and what the newest standing approval set aside — the same rows a decision on one of its builds reads (routes/review.ts). */
+export interface PackageRows { arches: string[]; closedThrough: number; builds: TargetBuild[]; decisions: TargetDecision[]; notShipping: NotShipping }
 
 /**
  * What the rule reads of a package, bounded: the newest builds of each
@@ -104,9 +126,10 @@ export async function packageRows(env: Env, name: string, opts: { unregistered?:
   if (!pkg && !opts.unregistered) return null;
   // Each architecture's newest forty builds walk the (name, arch, id) index backwards; the decisions are the name's newest forty, by the (name, created_at) index.
   const cols = "id, arch, status, trust, publish, version, json_extract(params, '$.review') AS review";
+  // Each decision row carries what its review set aside (reviews.not_shipping, #416), by the review's primary key: no read of its own.
   const [perArch, decisions] = await Promise.all([
     Promise.all(REPO_ARCHES.map((arch) => env.DB.prepare(`SELECT ${cols} FROM build_tasks WHERE name = ? AND arch = ? AND +kind = 'build' ORDER BY id DESC LIMIT 40`).bind(name, arch).all<TargetBuild>())),
-    env.DB.prepare("SELECT arch, task_id, rebuild_task, decision, withdrawn_at FROM approvals WHERE name = ? ORDER BY created_at DESC LIMIT 40").bind(name).all<TargetDecision>(),
+    env.DB.prepare(DECISIONS_OF_SQL).bind(name).all<TargetDecision & { not_shipping: string | null }>(),
   ]);
   const builds = perArch.flatMap((r) => r.results);
   // An approval that stands on a build older than the newest forty still says where its architecture stands: those builds by their ids.
@@ -117,8 +140,13 @@ export async function packageRows(env: Env, name: string, opts: { unregistered?:
   }
   let arches: string[] = [];
   try { arches = pkg ? (JSON.parse(pkg.arches) as string[]) : []; } catch { arches = []; }
-  return { arches, closedThrough: pkg?.closed_through ?? 0, builds, decisions: decisions.results };
+  // What the newest standing approval set aside: the rows come newest first, and every row of a review carries the review's own word.
+  const newest = decisions.results.find((a) => a.decision === "approved" && a.withdrawn_at === null);
+  return { arches, closedThrough: pkg?.closed_through ?? 0, builds, decisions: decisions.results.map(({ not_shipping: _, ...a }) => a), notShipping: parseNotShipping(newest?.not_shipping) };
 }
+
+/** The name's newest forty decisions by the (name, created_at) index, each with the version it decided and its review's not_shipping by the review's primary key. */
+export const DECISIONS_OF_SQL = "SELECT a.arch, a.task_id, a.rebuild_task, a.decision, a.withdrawn_at, a.version, v.not_shipping FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id WHERE a.name = ? ORDER BY a.created_at DESC LIMIT 40";
 
 /**
  * The targets of each package named, from what its builds and decisions
@@ -136,7 +164,7 @@ export async function settleTargets(env: Env, names: string | string[]): Promise
     try {
       const rows = await packageRows(env, name);
       if (!rows) continue;
-      const targets = targetsOf(rows.arches, rows.builds, rows.decisions, rows.closedThrough);
+      const targets = targetsOf(rows.arches, rows.builds, rows.decisions, rows.closedThrough, rows.notShipping);
       await env.DB.prepare("UPDATE factory_packages SET targets = ? WHERE name = ?").bind(JSON.stringify(targets), name).run();
       out[name] = targets;
     } catch (e) {

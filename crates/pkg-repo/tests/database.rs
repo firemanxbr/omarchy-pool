@@ -69,3 +69,27 @@ fn output_is_deterministic() {
     let b = build_database(&packages, Flavor::Db).unwrap();
     assert_eq!(a, b);
 }
+
+/// A database written a package at a time into a file — as a render writes each source's while
+/// the release's pages come (#319) — is the bytes `build_database` makes of the same packages.
+#[test]
+fn a_database_written_a_package_at_a_time_into_a_file_is_the_same_bytes() {
+    let packages = vec![
+        pkg_extract::extract_manifest(&fixture("zlib-1:1.3.2-3-x86_64.pkg.tar.zst")).unwrap(),
+        pkg_extract::extract_manifest(&fixture("xz-5.8.4-1-x86_64.pkg.tar.zst")).unwrap(),
+    ];
+    for flavor in [Flavor::Db, Flavor::Files] {
+        let t = tempfile::NamedTempFile::new().unwrap();
+        let mut db = pkg_repo::DatabaseWriter::new(t.reopen().unwrap(), flavor);
+        for p in &packages {
+            db.append(p).unwrap();
+        }
+        assert_eq!(db.count(), 2);
+        db.finish().unwrap();
+        assert_eq!(
+            std::fs::read(t.path()).unwrap(),
+            build_database(&packages, flavor).unwrap(),
+            "{flavor:?}"
+        );
+    }
+}

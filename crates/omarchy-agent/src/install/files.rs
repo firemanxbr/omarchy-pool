@@ -6,7 +6,9 @@
 //! component, owned by the agent's effective uid and writable by it alone. The new
 //! content goes to a fresh file beside the target (`O_CREAT | O_EXCL | O_NOFOLLOW`) and is
 //! renamed over it inside that same directory descriptor, so nothing is written through a
-//! link planted in the meantime either.
+//! link planted in the meantime either. The agent keys' writers alone first remove an empty
+//! directory where their file goes ([`remove_empty_dir`], #419), which an engine made of a
+//! mount of it.
 
 use std::fs::File;
 use std::io::Write as _;
@@ -14,7 +16,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
-use rustix::fs::{openat, renameat, unlinkat, AtFlags, Mode, OFlags};
+use rustix::fs::{openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 
 /// The agent's effective uid: the owner every owner file must have.
@@ -142,6 +144,34 @@ pub(crate) fn write(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(
         let _ = unlinkat(&dfd, tmp.as_str(), AtFlags::empty());
         said(&path, e)
     })
+}
+
+/// Removes `dir/name` when it is an empty directory, through the descriptor of `dir`, a
+/// directory the agent owns (#419: what podman's docker API makes of a bind mount's source that
+/// is not there, as on studio-vm4k); `true` when one was
+/// removed. Anything else there is left as it is, for [`write`] to replace or refuse, and a
+/// directory with something in it is refused: `rmdir` takes an empty one only, in one step, so
+/// nothing in it is ever lost.
+pub(crate) fn remove_empty_dir(dir: &Path, name: &str) -> Result<bool, String> {
+    plain_name(name)?;
+    let dfd = owned_dir(dir)?;
+    let path = dir.join(name);
+    match statat(&dfd, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::Directory => {}
+        Ok(_) => return Ok(false),
+        Err(e) if e == Errno::NOENT => return Ok(false),
+        Err(e) => return Err(said(&path, e)),
+    }
+    match unlinkat(&dfd, name, AtFlags::REMOVEDIR) {
+        Ok(()) => Ok(true),
+        // Gone since: nothing to remove.
+        Err(e) if e == Errno::NOENT => Ok(false),
+        Err(e) if e == Errno::NOTEMPTY || e == Errno::EXIST => Err(format!(
+            "{}: a directory with something in it, not a file: refused, left as it is (move it away, then try again)",
+            path.display()
+        )),
+        Err(e) => Err(said(&path, e)),
+    }
 }
 
 /// Removes `dir/name` when it is there (a link is removed, never followed).

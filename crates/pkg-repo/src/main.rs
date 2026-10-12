@@ -420,9 +420,10 @@ enum Command {
         /// `etc/dispatcher.env`; empty, the worker image's own user (an agent from before it).
         #[arg(long, env = "OMARCHY_AGENT_USER", default_value = "")]
         agent_user: String,
-        /// Why the host's agent holds its model kinds though it has keys (#399): a code, e.g.
-        /// `userns-remap` (a remapped daemon shows agent.env's owner to no container user, and
-        /// the agent sidecars stay remapped); no probe and no agent sidecar runs. Empty: none.
+        /// Why the host's agent holds its model kinds (#399): a code, e.g. `userns-remap` (a
+        /// remapped daemon shows agent.env's owner to no container user, and the agent sidecars
+        /// stay remapped) or `no-keys` (there is no agent.env file, which no mount may then name,
+        /// #419); no probe and no agent sidecar runs. Empty: none.
         #[arg(long, env = "OMARCHY_AGENT_HELD", default_value = "")]
         agent_held: String,
         /// Per-task caps of an agent sidecar, and the host's calls per day (UTC) (D45): the envelope's

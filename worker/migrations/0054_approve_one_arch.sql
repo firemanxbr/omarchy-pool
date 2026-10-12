@@ -1,0 +1,28 @@
+-- A package approved whole, or one architecture of it only, with the reason
+-- on the record (#416, a maintainer decision of 2026-10-08). A review already
+-- decides a package once, every architecture its project's builds cover
+-- (#242); since #416 the package's approval is refused while an architecture
+-- its request names is still building or did not build, and a maintainer who
+-- means to ship one architecture alone approves that one and says why the
+-- others do not ship. Nothing approves by itself: a bump stays evidence
+-- until a maintainer decides (updates.ts).
+--
+-- - reviews.only_reason: an approval of one architecture only — why the
+--   request's other architectures do not ship ("upstream ships no x86_64
+--   build"), as the maintainer wrote it; NULL for a package approved whole
+--   and for every rejection. On the signed record, the journal, GET
+--   /factory/approvals, the package's story and its page.
+-- - reviews.not_shipping: JSON {arch: task} — the architectures the request
+--   names that this approval set aside, each with the build its target stood
+--   on when it was decided (null for none); '{}' for a package approved
+--   whole. Their builds in review stopped with the decision, and while the
+--   approval stands each one is `not_shipping` in the package's targets
+--   (targets.ts), so it does not read as forgotten; a build of it newer than
+--   that one is where it stands again.
+--
+-- Written by handleApprove (routes/review.ts) in the review's one statement
+-- (REVIEW_SQL), nowhere else. Additive only: the Worker that runs during the
+-- deploy minute reads and writes neither, and a review it writes then has
+-- the defaults — a package approved whole.
+ALTER TABLE reviews ADD COLUMN only_reason TEXT;
+ALTER TABLE reviews ADD COLUMN not_shipping TEXT NOT NULL DEFAULT '{}';

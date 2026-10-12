@@ -20,9 +20,12 @@
 //!    interfaces' and the public one the egress probe saw tasks leave from, kept in
 //!    `egress.json`);
 //! 5. only then writes agent.toml, with the `host_id` and `worker_id` enrollment gave:
-//!    before it there is no run loop, no dispatcher, and nothing claims; then
-//!    `etc/dispatcher.env` gets the secrets directory and the agent budget from it (#371);
-//! 6. the agent keys into `OMARCHY_SECRETS_DIR/agent.env`, outside the work root;
+//!    before it there is no run loop, no dispatcher, and nothing claims;
+//! 6. the agent keys into `OMARCHY_SECRETS_DIR/agent.env`, outside the work root (an empty
+//!    directory found there removed first, #419); then `etc/dispatcher.env` gets the secrets
+//!    directory and the agent budget from agent.toml (#371), and who the agent sidecars run
+//!    as, or why none runs: `OMARCHY_AGENT_HELD=userns-remap` on a remapped daemon, and
+//!    `no-keys` elsewhere with no keys file (#399, #419);
 //! 7. with `--legacy <project>`, `legacy.json`, changing nothing in that project;
 //! 8. the systemd --user unit, linger, and the service started: the run loop's first
 //!    round renders, pulls and starts the bundle — the same code as every later round,
@@ -812,12 +815,22 @@ pub(crate) fn measure_as(
         set_dir.join(".env"),
         enroll_paths.dispatcher_env(),
         enroll_paths.token(),
-        secrets_dir.join("agent.env"),
         p.data.join(legacy::FILE),
     ] {
         if let Err(e) = files::check_owner_file(&f) {
             r.blockers.push(e);
         }
+    }
+    // The agent keys' file, as an owner file; an empty directory there, which an engine made of
+    // the sidecars' mount while there was none (#419), is no blocker: install replaces it.
+    let keys_file = secrets_dir.join(secrets::FILE);
+    match secrets::check(&keys_file) {
+        Ok(true) => r.notes.push(format!(
+            "{}: an empty directory, which an engine made of the agent sidecars' mount (#419): install removes it, and writes the keys there when it is given some",
+            keys_file.display()
+        )),
+        Ok(false) => {}
+        Err(e) => r.blockers.push(e),
     }
     // The directories install would write into, where they exist already (prep-root.sh
     // makes the work root): the agent's own, writable by it alone.
@@ -1504,8 +1517,13 @@ pub(crate) fn apply(
             id.host
         ),
     );
+    // The agent keys, before the dispatcher's environment is rendered from them (#419): who the
+    // sidecars run as is their file's owner, and with no file the host holds its model kinds.
+    agent_keys(o.agent_env_from.as_deref(), o.yes, v, sys, out)?;
+
     // The dispatcher's environment beside its token (#371): the secrets directory install
-    // chose and the agent budget, now that agent.toml says them, and the host's addresses.
+    // chose and the agent budget, now that agent.toml says them, the host's addresses, and who
+    // the agent sidecars run as or why none runs (#399, #419).
     let env_file = eo.paths.dispatcher_env();
     let rendered = Rendered::now(
         &p.sources(),
@@ -1529,8 +1547,6 @@ pub(crate) fn apply(
             ),
         ),
     }
-
-    agent_keys(o, v, sys, out)?;
 
     if let (Some(project), Some(seen)) = (&o.legacy, &ready.legacy) {
         let record = legacy::Legacy {
@@ -1618,15 +1634,25 @@ pub(crate) fn apply(
     Ok(done)
 }
 
-/// The agent keys into `OMARCHY_SECRETS_DIR/agent.env`.
-fn agent_keys(
-    o: &Options,
+/// The agent keys into `OMARCHY_SECRETS_DIR/agent.env`: those of `from` (`--agent-env-from`),
+/// shown and, without `yes`, confirmed; else typed. An empty directory there (#419), which
+/// podman's docker API made of the agent sidecars' mount while there was no file, is removed
+/// first and said: the keys given now are written in its place, and with none the host is one
+/// that never had any. A directory with something in it stays refused (preflight said so
+/// already). The run loop's real-engine test gives a host its keys through it
+/// (`run::engine_tests`, #419).
+pub(crate) fn agent_keys(
+    from: Option<&Path>,
+    yes: bool,
     v: &envelope::Values,
     sys: &mut dyn Sys,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let target = v.secrets_dir.join("agent.env");
-    let text = if let Some(f) = &o.agent_env_from {
+    let target = v.secrets_dir.join(secrets::FILE);
+    if let Some(removed) = secrets::clear(&v.secrets_dir).map_err(Failure::Refused)? {
+        say(out, &removed);
+    }
+    let text = if let Some(f) = from {
         let t = std::fs::read_to_string(f)
             .map_err(|e| Failure::Refused(format!("{}: {e}", f.display())))?;
         let keys =
@@ -1638,7 +1664,7 @@ fn agent_keys(
             names.join(", "),
             target.display()
         );
-        if o.yes {
+        if yes {
             say(out, &format!("{} holds {}", f.display(), names.join(", ")));
         } else if !sys.confirm(&ask).map_err(Failure::Refused)? {
             return Err(Failure::Refused("the agent keys were not copied".into()));
@@ -1650,10 +1676,17 @@ fn agent_keys(
             &format!("{} kept (--agent-env-from replaces it)", target.display()),
         );
         None
-    } else if o.yes {
+    } else if yes {
+        // Its agent holds the model kinds (#419): no probe and no agent sidecar runs. A remapped
+        // daemon holds them for its remapping (#399), which keys given later do not lift, so it
+        // is not told to give some.
         say(
             out,
-            "no agent keys: this host takes no model kinds (--agent-env-from adds them)",
+            if v.rootful && v.userns_remap {
+                "no agent keys: this host builds only, and its daemon remaps users, so keys given later add no model kinds either (OMARCHY_AGENT_HELD=userns-remap, #399)"
+            } else {
+                "no agent keys: this host builds only and takes no model kinds (OMARCHY_AGENT_HELD=no-keys; --agent-env-from, or Set agent keys on its page, adds them)"
+            },
         );
         None
     } else {
@@ -1669,7 +1702,7 @@ fn agent_keys(
         }
         files::write(
             &v.secrets_dir,
-            "agent.env",
+            secrets::FILE,
             secrets::render(&keys).as_bytes(),
             0o600,
         )

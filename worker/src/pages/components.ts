@@ -272,12 +272,16 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // A package's targets (targets.ts): one chip per architecture in the server's word — built, building, not supported (dashed), waiting — drawn the same by Review, the package page and a person's page (targetChips); a decision's architectures, as one line (archesOf). "marcelo, on x86_64", never "the x86_64 package".
+    // A package's targets (targets.ts): one chip per architecture in the server's word — built, building, not supported (dashed), not shipping (dashed: set aside by an approval of another architecture alone, #416), waiting — drawn the same by Review, the package page and a person's page (targetChips); a decision's architectures, as one line (archesOf), and what it shipped in the record's words (approvedFor: "approved for x86_64 and aarch64", or "approved for aarch64 only: <reason>"). "marcelo, on x86_64", never "the x86_64 package".
     id: "shell.target-chips",
     page: "/",
     anchor: [],
-    script: ["var TARGET_WORD = ", "function targetChips(targets)", '"· not supported"', '" dashed"', "function archesOf(a)"],
-    reads: [{ path: `/api/v1/factory/packages/${F.factoryPkg}/story`, fields: ["targets", "targets.x86_64.status", "targets.x86_64.task"] }],
+    script: ["var TARGET_WORD = ", "function targetChips(targets)", '"· not supported"', '"· not shipping"', '" dashed"', "function archesOf(a)", "function approvedFor(a)", '" only: " + a.only_reason', "function notShipping(a)"],
+    reads: [
+      { path: `/api/v1/factory/packages/${F.factoryPkg}/story`, fields: ["targets", "targets.x86_64.status", "targets.x86_64.task"] },
+      { path: `/api/v1/factory/packages/${F.publishedPkg}/story`, fields: ["chains.0.approval.arches", "chains.0.approval.only_reason", "chains.0.approval.not_shipping"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals.0.arches", "approvals.0.only_reason", "approvals.0.not_shipping"] },
+    ],
     visible: EVERYONE,
   },
   {
@@ -389,11 +393,12 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The Decision cell (decisionCell) and its click: the four decisions on a staged build post through the shell, and the dialog for the project's build reads the project's workers first. The act is claimed by the roles that change nothing; the maintainer's are the pages' (Review's decision buttons, a build's page).
+    // The Decision cell (decisionCell) and its click: the four decisions on a staged build post through the shell, and the dialog for the project's build reads the project's workers first. The package's approval (approveCell, #416): Approve package and Approve <arch> only — the reason the others do not ship required in its dialog, its own passkey act — through the same click, the dialog naming each architecture's build. The act is claimed by the roles that change nothing; the maintainer's are the pages' (Review's decision buttons, a build's page, a package's page).
     id: "shell.decide",
     page: "/",
     anchor: [],
-    script: ["function decisionCell(", "function decideDialog(", "function onDecided(", ".decide button[data-approve]", '"/api/v1/factory/tasks/" + id + "/" + what', '"/api/v1/factory?limit=10"', "whereOptions(ws"],
+    script: ["function decisionCell(", "function decideDialog(", "function onDecided(", ".decide button[data-approve]", '"/api/v1/factory/tasks/" + id + "/" + (what === "only" ? "approve" : what)', '"/api/v1/factory?limit=10"', "whereOptions(ws",
+      "function approveCell(p)", ">Approve package</button>", "' only</button>'", ".decide button[data-only]", 'what === "only" ? { only: arch, reason: got }', 'passkeyed("approve:" + id + ":" + arch, send)', 'input: "required"', "opts.builds"],
     reads: [{ path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.kinds", "workers.0.alive", "workers.0.agent_status", "workers.0.labels"] }],
     acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/withdraw`, body: { note: "the shell's withdraw, from the fixture" }, expect: { anonymous: 401, contributor: 403, owner: 403 } }],
     visible: EVERYONE,
@@ -404,7 +409,11 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     page: "/",
     anchor: [],
     script: ["function passkeyed(what, post)", 'api("POST", "/auth/passkeys/assert", { for: what })', "navigator.credentials.get", 'passkeyed("approve:" + id, send)', "function refusalHtml(d)", 'toast(refusalHtml(d), "error")', 'if (cls === "error") t.setAttribute("role", "alert")'],
-    acts: [{ method: "POST", path: "/auth/passkeys/assert", body: { for: `approve:${F.projectTask}` }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
+    acts: [
+      { method: "POST", path: "/auth/passkeys/assert", body: { for: `approve:${F.projectTask}` }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      // One architecture alone (#416) is an act of its own: approve:<task>:<arch>.
+      { method: "POST", path: "/auth/passkeys/assert", body: { for: `approve:${F.projectTask}:${F.arch}` }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+    ],
     visible: EVERYONE,
   },
   {

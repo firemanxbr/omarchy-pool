@@ -1045,6 +1045,7 @@ fn capacity_reports_both_disks_on_a_visible_engine_root_and_through_a_probe_cont
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // the file through its first write, the token's move, the keys' hold (#419) and a refusal
 fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the_owner_s_lines() {
     let data = std::env::temp_dir().join(format!(
         "omarchy-agent-dispatcher-env-cli-{}",
@@ -1054,10 +1055,15 @@ fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the
     let set = data.join("sets/host");
     std::fs::create_dir_all(set.join("etc")).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // The secrets directory install made, with no agent keys in it yet (#419).
+    let secrets = data.join("secrets");
+    std::fs::create_dir(&secrets).unwrap();
+    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700)).unwrap();
     let toml = |budget: &str| {
         format!(
-            "pool = \"https://pkgs.omarchy-pool.org\"\nhost_id = \"h_0123456789\"\nworker_id = \"m1-rack-0a9z\"\n[set]\ndir = \"{}\"\nwork_root = \"/srv/omarchy-pool/host\"\nsecrets_dir = \"/srv/omarchy-pool/host-secrets\"\nsocket_cli = \"/var/run/docker.sock\"\n[envelope]\nallow_socket = true\nrootful_ack = true\ndedicated = true\n{budget}\n",
-            set.display()
+            "pool = \"https://pkgs.omarchy-pool.org\"\nhost_id = \"h_0123456789\"\nworker_id = \"m1-rack-0a9z\"\n[set]\ndir = \"{}\"\nwork_root = \"/srv/omarchy-pool/host\"\nsecrets_dir = \"{}\"\nsocket_cli = \"/var/run/docker.sock\"\n[envelope]\nallow_socket = true\nrootful_ack = true\ndedicated = true\n{budget}\n",
+            set.display(),
+            secrets.display()
         )
     };
     let agent_toml = data.join("agent.toml");
@@ -1080,10 +1086,13 @@ fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the
         .find_map(|l| l.strip_prefix("OMARCHY_HOST_ADDRESSES="))
         .unwrap_or_else(|| panic!("{out}"));
     assert!(addresses.split(',').any(|a| a == "198.51.100.20"), "{out}");
+    // No keys file: the agent holds the host's model kinds, so the dispatcher starts no probe
+    // and no agent sidecar (#419).
     assert!(
-        out.contains(
-            "\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_TASK=17\n"
-        ),
+        out.contains(&format!(
+            "\nOMARCHY_SECRETS_DIR={}\nOMARCHY_AGENT_CALLS_PER_TASK=17\nOMARCHY_AGENT_HELD=no-keys\n",
+            secrets.display()
+        )),
         "{out}"
     );
     assert!(!out.contains("OMARCHY_WORKER_TOKEN"), "{out}");
@@ -1119,7 +1128,8 @@ fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the
     let written = std::fs::read_to_string(&env).unwrap();
     assert!(
         written.contains(&format!(
-            "\n# worker: m1-rack-0a9z\nOMARCHY_HOST_ADDRESSES={addresses}\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_TASK=17\nTZ=UTC\n"
+            "\n# worker: m1-rack-0a9z\nOMARCHY_HOST_ADDRESSES={addresses}\nOMARCHY_SECRETS_DIR={}\nOMARCHY_AGENT_CALLS_PER_TASK=17\nOMARCHY_AGENT_HELD=no-keys\nTZ=UTC\n",
+            secrets.display()
         )),
         "{written}"
     );
@@ -1139,6 +1149,23 @@ fn dispatcher_env_prints_what_it_renders_and_writes_it_keeping_the_token_and_the
     );
     let o = run(&["dispatcher-env", "--data-dir", &d, "--write"]);
     assert!(text(&o).contains("already says this"), "{}", text(&o));
+
+    // The keys arrive (install --agent-env-from, Set agent keys): the hold ends at the next
+    // render, which names who the agent sidecars run as instead (#419); taken away, held again.
+    let keys = secrets.join("agent.env");
+    std::fs::write(&keys, "GEMINI_API_KEY=g\n").unwrap();
+    std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let o = run(&["dispatcher-env", "--data-dir", &d, "--write"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let with_keys = std::fs::read_to_string(&env).unwrap();
+    assert!(
+        with_keys.contains("\nOMARCHY_AGENT_USER=") && !with_keys.contains("OMARCHY_AGENT_HELD"),
+        "{with_keys}"
+    );
+    std::fs::remove_file(&keys).unwrap();
+    let o = run(&["dispatcher-env", "--data-dir", &d, "--write"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(std::fs::read_to_string(&env).unwrap(), written);
 
     // A budget the dispatcher could not take is agent.toml's error, said, and nothing changes.
     std::fs::write(&agent_toml, toml("agent_budget = { calls_per_task = -1 }")).unwrap();

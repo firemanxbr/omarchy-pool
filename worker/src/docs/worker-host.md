@@ -216,7 +216,15 @@ userns-remap shows the file's owner to no container user, and its sidecars
 stay remapped (design v2 §19.1), so there the agent holds the host's model
 kinds (`OMARCHY_AGENT_HELD=userns-remap`): the host builds, and its page says
 why it takes no model work until a maintainer decides how such a host reads
-its keys. Recommended: a **separate, spend-capped key for
+its keys, with or without them. Any other host installed without keys holds
+them the same way (`OMARCHY_AGENT_HELD=no-keys`, #419): no probe and no agent
+sidecar runs, so no mount names the missing file (podman's docker API
+makes an empty directory of a bind source that is not there, which then
+refused the keys on a rootless podman host), and its
+page says `no agent keys: builds only`; give it keys with `install
+--agent-env-from <file>` again or *Set agent keys* on its page, which
+replace an empty directory found at `agent.env` (a directory with something
+in it is refused), and the hold ends. Recommended: a **separate, spend-capped key for
 contributor drafts** (the provider's own spending limit), since a
 recipe that compromises its draft's sidecar can use that key until the caps
 stop it; and a `GITHUB_TOKEN` in `agent.env` with no write scope and no
@@ -283,7 +291,10 @@ builds': the minimum host runs its build beside a sync), each in a process of
 its own with a 2 GB memory limit and a time limit of its kind (45 minutes for
 a health check, 2½ hours for a sync, 3 for a promotion): one that crashes or
 hangs is failed and the pool queues it again, and every task beside it goes
-on. They run on any host whatever architecture they are for (a sync of the
+on. The jobs fit that limit whatever the rings hold — a render reads a ring a
+page at a time, a sync's imports stream (#319) — and a job that dies between
+a ring's new release and its render leaves the ring serving the databases it
+served before, never none. They run on any host whatever architecture they are for (a sync of the
 x86_64 sources runs natively on an aarch64 host, as the Studio's
 `pool-x86_64` always did), except the checks that install a ring's packages
 — a health check, a promotion's ABI gate — which need a lane of that ring's

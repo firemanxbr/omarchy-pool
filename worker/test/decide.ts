@@ -25,11 +25,11 @@ export const WEB = "http://localhost:8787";
 
 type Authenticator = Awaited<ReturnType<typeof createAuthenticator>>;
 
-/** The act a path decides, as the door binds its challenge: approve:<task>, block:package:<name>, block:contributor:<login>, any-host:<task> (#339). */
-export function subjectOf(path: string): string {
+/** The act a path decides, as the door binds its challenge: approve:<task> — approve:<task>:<arch> for one architecture alone, the body's `only` (#416) — block:package:<name>, block:contributor:<login>, any-host:<task> (#339). */
+export function subjectOf(path: string, body: Record<string, unknown> = {}): string {
   const p = path.replace(/^\/api\/v1/, "");
   const approve = /^\/factory\/tasks\/(\d+)\/approve$/.exec(p);
-  if (approve) return `approve:${Number(approve[1])}`;
+  if (approve) return `approve:${Number(approve[1])}${typeof body.only === "string" ? `:${body.only}` : ""}`;
   const anyHost = /^\/factory\/tasks\/(\d+)\/any-host$/.exec(p);
   if (anyHost) return `any-host:${Number(anyHost[1])}`;
   const block = /^\/factory\/(packages|contributors)\/([^/]+)\/block$/.exec(p);
@@ -76,7 +76,7 @@ export function decider(env: Env) {
   async function decide(login: string, path: string, body: Record<string, unknown> = {}, on: Env = env): Promise<{ status: number; json: any }> {
     const api = path.startsWith("/api/v1/") ? path : `/api/v1${path}`;
     const key = await passkeyOf(login);
-    const opts = key ? await post(login, "/auth/passkeys/assert", { for: subjectOf(path) }) : null;
+    const opts = key ? await post(login, "/auth/passkeys/assert", { for: subjectOf(path, body) }) : null;
     const assertion = opts?.status === 200 ? await assert(key!.a, { challenge: opts.json.publicKey.challenge, origin: WEB, rpId: "localhost" }) : undefined;
     return post(login, api, { ...body, ...(assertion ? { assertion } : {}) }, on);
   }

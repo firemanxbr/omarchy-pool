@@ -152,7 +152,7 @@ pub struct IndexedManifest {
 
 impl IndexedManifest {
     /// Inflates `files_gz` into `manifest.files`.
-    fn inflate_files(&mut self) -> Result<(), RepoError> {
+    pub fn inflate_files(&mut self) -> Result<(), RepoError> {
         use base64::Engine;
         use std::io::Read;
         let Some(gz) = self.files_gz.take() else {
@@ -211,6 +211,22 @@ pub struct ReleaseSummaryView {
     pub release: Release,
     pub package_count: u64,
     pub packages: Vec<PackageSummary>,
+    /// The databases the release serves (`release_artifacts`); empty from a pool that does not list them.
+    #[serde(default)]
+    pub artifacts: Vec<Artifact>,
+}
+
+/// One database (or its signature) a release serves.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Artifact {
+    pub repo: String,
+    pub arch: String,
+    pub kind: String,
+    /// Set when the row was carried from an earlier release so the ring kept serving the last
+    /// databases rendered for `arch` (#319): the release whose render will replace it — this one,
+    /// or the earlier one whose selection of `arch` it kept. `None`: rendered for what it serves.
+    #[serde(default)]
+    pub awaits: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -425,7 +441,8 @@ impl Api {
         Ok((out, by_filename))
     }
 
-    /// Uploads an archive into the pool under `<source>/<arch>/<filename>`; multipart when large.
+    /// Uploads an archive into the pool under `<source>/<arch>/<filename>`; multipart when large,
+    /// each part read from the file as it is sent ([`part_body`]).
     pub fn upload_pool(
         &self,
         sha256: &str,
@@ -434,8 +451,31 @@ impl Api {
         arch: &str,
         archive: &Path,
     ) -> Result<(), RepoError> {
+        self.upload_pool_sized(
+            sha256,
+            filename,
+            source,
+            arch,
+            archive,
+            SINGLE_PUT_MAX,
+            PART_SIZE,
+        )
+    }
+
+    /// `upload_pool` with the two sizes as arguments (the test sends bytes, not megabytes).
+    #[allow(clippy::too_many_arguments)]
+    fn upload_pool_sized(
+        &self,
+        sha256: &str,
+        filename: &str,
+        source: &str,
+        arch: &str,
+        archive: &Path,
+        single_max: u64,
+        part_size: u64,
+    ) -> Result<(), RepoError> {
         let len = std::fs::metadata(archive)?.len();
-        if len <= SINGLE_PUT_MAX {
+        if len <= single_max {
             return self.retry("upload_pool", || {
                 let file = std::fs::File::open(archive)?;
                 let resp = self
@@ -463,22 +503,8 @@ impl Api {
             return Ok(());
         }
         for upload in &created.uploads {
-            let mut file = std::fs::File::open(archive)?;
             let mut parts = Vec::new();
-            let mut part_number = 1u32;
-            let mut buf = vec![
-                0u8;
-                usize::try_from(PART_SIZE).map_err(|_| RepoError::Api {
-                    status: 0,
-                    body: "part size does not fit usize".into()
-                })?
-            ];
-            loop {
-                let n = read_full(&mut file, &mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                let chunk = buf[..n].to_vec();
+            for (part_number, offset, n) in parts_of(len, part_size) {
                 let done: PartDone = self.retry("multipart_part", || {
                     let resp = self
                         .http
@@ -488,13 +514,13 @@ impl Api {
                         )))
                         .query(&[("key", upload.key.as_str())])
                         .bearer_auth(&self.token)
-                        .body(chunk.clone())
+                        .header("content-length", n)
+                        .body(part_body(archive, offset, n)?)
                         .send()?;
                     Ok(Self::check(resp)?.json()?)
                 })?;
                 parts
                     .push(serde_json::json!({ "partNumber": done.part_number, "etag": done.etag }));
-                part_number += 1;
             }
             self.retry("multipart_complete", || {
                 let resp = self
@@ -621,11 +647,43 @@ impl Api {
     }
 
     /// Release view of one architecture with file lists (needed for
-    /// `<repo>.files`), fetched in pages of `RELEASE_PAGE` manifests and pinned
-    /// to the release the first page returned, so a ring that moves on
-    /// mid-render cannot mix two selections.
+    /// `<repo>.files`), whole: every page of [`Api::release_pages`] with its
+    /// file lists inflated. A ring's whole lists are more than a pool job's
+    /// memory (edge's `x86_64`: 18 M paths, 1.3 GB of them, 2026-10-12): the
+    /// render reads the pages one at a time instead.
     pub fn release(&self, ring: &str, arch: &str) -> Result<ReleaseView, RepoError> {
-        let mut view: Option<ReleaseView> = None;
+        let mut packages = Vec::new();
+        let mut count = 0;
+        let release = self.release_pages(ring, arch, |view, page| {
+            count = view.package_count;
+            for mut p in page {
+                p.inflate_files()?;
+                packages.push(p);
+            }
+            Ok(())
+        })?;
+        Ok(ReleaseView {
+            release,
+            package_count: count,
+            packages,
+            page: None,
+        })
+    }
+
+    /// The release of one architecture with its file lists, a page of
+    /// `RELEASE_PAGE` manifests at a time: each page is handed to `on_page`
+    /// (the view's header, then its manifests, their lists still compressed
+    /// in `files_gz`) and dropped before the next is asked for, so what a
+    /// caller holds is one page, never the ring (#319). Pinned to the release
+    /// the first page returned, so a ring that moves on mid-render cannot mix
+    /// two selections; returns that release.
+    pub fn release_pages(
+        &self,
+        ring: &str,
+        arch: &str,
+        mut on_page: impl FnMut(&ReleaseView, Vec<IndexedManifest>) -> Result<(), RepoError>,
+    ) -> Result<Release, RepoError> {
+        let mut release: Option<Release> = None;
         // Keyset paging (page.next → after=): each page is a walk of the
         // index from the previous page's last row, not a sort and a skip.
         let mut after: Option<String> = None;
@@ -639,10 +697,10 @@ impl Api {
             if let Some(a) = &after {
                 query.push(("after", a.clone()));
             }
-            if let Some(v) = &view {
-                query.push(("release_id", v.release.id.to_string()));
+            if let Some(r) = &release {
+                query.push(("release_id", r.id.to_string()));
             }
-            let page: ReleaseView = self.retry("release", || {
+            let mut page: ReleaseView = self.retry("release", || {
                 let resp = self
                     .http
                     .get(self.url(&format!("/releases/{ring}")))
@@ -651,20 +709,17 @@ impl Api {
                 Ok(Self::check(resp)?.json()?)
             })?;
             let next = page.page.as_ref().and_then(|p| p.next.clone());
-            let mut page = page;
-            for p in &mut page.packages {
-                p.inflate_files()?;
-            }
-            match &mut view {
-                None => view = Some(page),
-                Some(v) => v.packages.extend(page.packages),
+            let packages = std::mem::take(&mut page.packages);
+            on_page(&page, packages)?;
+            if release.is_none() {
+                release = Some(page.release);
             }
             match next {
                 Some(n) => after = Some(n),
                 None => break,
             }
         }
-        view.ok_or_else(|| RepoError::Api {
+        release.ok_or_else(|| RepoError::Api {
             status: 0,
             body: "no page returned".into(),
         })
@@ -718,6 +773,53 @@ impl Api {
                 .body(bytes.to_vec())
                 .send()?;
             Self::check(resp).map(|_| ())
+        })
+    }
+
+    /// A rendered database from its file, read as it is sent: a ring's
+    /// `files` database is tens of megabytes, never held twice (#319).
+    pub fn upload_artifact_file(
+        &self,
+        release_id: u64,
+        kind: &str,
+        repo: &str,
+        arch: &str,
+        file: &Path,
+    ) -> Result<(), RepoError> {
+        let len = std::fs::metadata(file)?.len();
+        self.retry("upload_artifact", || {
+            let resp = self
+                .http
+                .put(self.url(&format!("/releases/{release_id}/artifacts/{kind}")))
+                .query(&[("repo", repo), ("arch", arch)])
+                .bearer_auth(&self.token)
+                .header("content-length", len)
+                .body(reqwest::blocking::Body::sized(
+                    std::fs::File::open(file)?,
+                    len,
+                ))
+                .send()?;
+            Self::check(resp).map(|_| ())
+        })
+    }
+
+    /// Tells the pool this release's databases of `arch` are all rendered
+    /// (#319): the rows it carried for `arch` that the render did not write
+    /// again — a source the release no longer has — are dropped, here and in
+    /// the releases that kept its selection of `arch`. `false` from a pool
+    /// before this call (404), which carries nothing to drop.
+    pub fn rendered(&self, release_id: u64, arch: &str) -> Result<bool, RepoError> {
+        self.retry("rendered", || {
+            let resp = self
+                .http
+                .post(self.url(&format!("/releases/{release_id}/rendered")))
+                .query(&[("arch", arch)])
+                .bearer_auth(&self.token)
+                .send()?;
+            if resp.status() == StatusCode::NOT_FOUND {
+                return Ok(false);
+            }
+            Self::check(resp).map(|_| true)
         })
     }
 
@@ -867,22 +969,8 @@ impl Api {
         // create, the upload is abandoned, so the bucket keeps no half of a
         // package nobody completes.
         let uploaded = (|| -> Result<(), RepoError> {
-            let mut f = std::fs::File::open(file)?;
             let mut parts = Vec::new();
-            let mut part_number = 1u32;
-            let mut buf = vec![
-                0u8;
-                usize::try_from(part_size).map_err(|_| RepoError::Api {
-                    status: 0,
-                    body: "part size does not fit usize".into()
-                })?
-            ];
-            loop {
-                let n = read_full(&mut f, &mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                let chunk = buf[..n].to_vec();
+            for (part_number, offset, n) in parts_of(len, part_size) {
                 let part = part_number.to_string();
                 let done: StagingPartDone = self.retry("staging_multipart_part", || {
                     let resp = self
@@ -893,14 +981,14 @@ impl Api {
                             ("part", &part),
                             ("upload_id", upload_id),
                         ])
-                        .timeout(upload_timeout(n as u64))
+                        .timeout(upload_timeout(n))
                         .bearer_auth(&self.token)
-                        .body(chunk.clone())
+                        .header("content-length", n)
+                        .body(part_body(file, offset, n)?)
                         .send()?;
                     Ok(Self::check(resp)?.json()?)
                 })?;
                 parts.push(serde_json::json!({ "partNumber": done.part, "etag": done.etag }));
-                part_number += 1;
             }
             self.retry("staging_multipart_complete", || {
                 let resp = self
@@ -1072,16 +1160,29 @@ fn upload_timeout(len: u64) -> Duration {
     Duration::from_secs(120 + len / (50 * 1024))
 }
 
-fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        let n = r.read(&mut buf[filled..])?;
-        if n == 0 {
-            break;
-        }
-        filled += n;
-    }
-    Ok(filled)
+/// The parts of a `len`-byte upload: `(part number, offset, length)`, every part `part_size`
+/// but the last.
+fn parts_of(len: u64, part_size: u64) -> impl Iterator<Item = (u32, u64, u64)> {
+    let part_size = part_size.max(1);
+    (0..len.div_ceil(part_size)).map(move |i| {
+        let offset = i * part_size;
+        (
+            u32::try_from(i + 1).unwrap_or(u32::MAX),
+            offset,
+            part_size.min(len - offset),
+        )
+    })
+}
+
+/// One part of a file as a request body, read from the file while it is sent, opened again for
+/// each attempt (#319): a part is never a buffer. Four 175 MB kernels imported at once held three
+/// copies of a 64 MB part each — the read buffer, the part, the attempt's clone — 768 MB of a pool
+/// job's 2 GB (2026-10-12).
+fn part_body(file: &Path, offset: u64, len: u64) -> Result<reqwest::blocking::Body, RepoError> {
+    use std::io::{Seek as _, SeekFrom};
+    let mut f = std::fs::File::open(file)?;
+    f.seek(SeekFrom::Start(offset))?;
+    Ok(reqwest::blocking::Body::sized(f.take(len), len))
 }
 
 #[cfg(test)]
@@ -1153,27 +1254,9 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let mut stream = stream.unwrap();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap() == 0 {
+                let Some((method, target, body)) = read_request(&stream) else {
                     continue;
-                }
-                let mut words = line.split_whitespace();
-                let method = words.next().unwrap_or_default().to_owned();
-                let target = words.next().unwrap_or_default().to_owned();
-                let mut len = 0usize;
-                loop {
-                    let mut h = String::new();
-                    reader.read_line(&mut h).unwrap();
-                    if h.trim().is_empty() {
-                        break;
-                    }
-                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
-                        len = v.trim().parse().unwrap();
-                    }
-                }
-                let mut body = vec![0u8; len];
-                std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+                };
                 let part = target
                     .split('&')
                     .find_map(|q| q.strip_prefix("part="))
@@ -1215,6 +1298,140 @@ mod tests {
             }
         });
         (base, seen)
+    }
+
+    /// One request off a connection: method, target, body (its `content-length`).
+    fn read_request(stream: &std::net::TcpStream) -> Option<(String, String, Vec<u8>)> {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            return None;
+        }
+        let mut words = line.split_whitespace();
+        let method = words.next().unwrap_or_default().to_owned();
+        let target = words.next().unwrap_or_default().to_owned();
+        let mut len = 0usize;
+        loop {
+            let mut h = String::new();
+            reader.read_line(&mut h).unwrap();
+            if h.trim().is_empty() {
+                break;
+            }
+            if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0u8; len];
+        std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+        Some((method, target, body))
+    }
+
+    /// The pool's multipart endpoints for a package (`/pool/:sha256/multipart`, its parts, its
+    /// complete), recording every request; the first attempt at part `flaky` answers 500.
+    fn pool_server(flaky: u32) -> (String, Arc<Mutex<Vec<Seen>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let mut failed = false;
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let Some((method, target, body)) = read_request(&stream) else {
+                    continue;
+                };
+                let path = target.split('?').next().unwrap_or_default().to_owned();
+                let part = path
+                    .strip_prefix("/api/v1/pool/multipart/u1/part/")
+                    .and_then(|n| n.parse::<u32>().ok());
+                let (status, answer) = if path.ends_with("/multipart") {
+                    (
+                        "200 OK",
+                        r#"{"uploads":[{"key":"k","uploadId":"u1"}]}"#.to_owned(),
+                    )
+                } else if part == Some(flaky) && !failed {
+                    failed = true;
+                    (
+                        "500 Internal Server Error",
+                        r#"{"error":"try again"}"#.to_owned(),
+                    )
+                } else if let Some(n) = part {
+                    ("200 OK", format!(r#"{{"partNumber":{n},"etag":"e{n}"}}"#))
+                } else {
+                    ("200 OK", "{}".to_owned())
+                };
+                log.lock().unwrap().push(Seen {
+                    method,
+                    target,
+                    body,
+                });
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        (base, seen)
+    }
+
+    /// A package above the single-request size goes to the pool in parts, each read from the file
+    /// as it is sent (#319): every part the file's bytes at its offset, a part the pool did not
+    /// take sent again whole from the file, then the complete with every part's etag.
+    #[test]
+    fn a_large_package_goes_to_the_pool_in_parts_read_from_its_file() {
+        let (base, seen) = pool_server(2);
+        let api = Api::new(&base, "t").unwrap();
+        let f = file_of(b"0123456789A");
+        api.upload_pool_sized(
+            "abc",
+            "big.pkg.tar.zst",
+            "chaotic",
+            "x86_64",
+            f.path(),
+            10,
+            4,
+        )
+        .unwrap();
+        let seen = seen.lock().unwrap();
+        let sent: Vec<(&str, &str, &[u8])> = seen
+            .iter()
+            .map(|s| {
+                (
+                    s.method.as_str(),
+                    s.target.split('?').next().unwrap(),
+                    &s.body[..],
+                )
+            })
+            .collect();
+        assert_eq!(
+            sent[..5],
+            [
+                ("POST", "/api/v1/pool/abc/multipart", &b""[..]),
+                ("PUT", "/api/v1/pool/multipart/u1/part/1", &b"0123"[..]),
+                ("PUT", "/api/v1/pool/multipart/u1/part/2", &b"4567"[..]),
+                ("PUT", "/api/v1/pool/multipart/u1/part/2", &b"4567"[..]),
+                ("PUT", "/api/v1/pool/multipart/u1/part/3", &b"89A"[..]),
+            ]
+        );
+        assert_eq!(sent[5].1, "/api/v1/pool/multipart/u1/complete");
+        let complete: serde_json::Value = serde_json::from_slice(&seen[5].body).unwrap();
+        assert_eq!(
+            complete,
+            serde_json::json!({ "parts": [
+                { "partNumber": 1, "etag": "e1" }, { "partNumber": 2, "etag": "e2" }, { "partNumber": 3, "etag": "e3" }
+            ] })
+        );
+        assert_eq!(seen.len(), 6);
+        // The parts of a length: every one `part_size` but the last, none past the end.
+        assert_eq!(
+            parts_of(11, 4).collect::<Vec<_>>(),
+            [(1, 0, 4), (2, 4, 4), (3, 8, 3)]
+        );
+        assert_eq!(parts_of(8, 4).collect::<Vec<_>>(), [(1, 0, 4), (2, 4, 4)]);
+        assert_eq!(parts_of(0, 4).count(), 0);
     }
 
     fn file_of(bytes: &[u8]) -> tempfile::NamedTempFile {

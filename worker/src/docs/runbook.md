@@ -42,7 +42,9 @@ runs `/setup` again; nothing it reads went away. The key's user id,
   runner or repository holds the key (SECURITY.md).
 * **The pool is append-only.** The worker refuses to overwrite an existing object;
   the only deletions are retention (`gc`), which never touches anything the last
-  three releases of any ring reference, nor anything younger than seven days.
+  three releases of any ring reference, nor anything younger than seven days, nor
+  anything a database a ring's head still serves from an earlier release lists
+  while its own render is awaited (#319).
 * **Releases are append-only.** Rollback creates a new release pointing at an old
   selection; history is never rewritten. Every action posts an event.
 * **Nobody holds R2 credentials, and nobody holds a pool credential.** Reads
@@ -785,7 +787,7 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--socket <path>` | the engine's socket; otherwise the first that answers of rootless podman's API socket, rootless docker, `/var/run/docker.sock` |
 | `--task-subnets <cidr>[,<cidr>]` | the task networks' range (default `10.231.0.0/16`, as prep-root.sh's) |
 | `--legacy <compose project>` | a set already running beside the new bundle (the Studio): recorded in `legacy.json`, nothing in it changed; its rootful daemon without userns-remap is the recorded exception until P6, meant for the Studio's set only; a re-run without the flag uses the recorded project |
-| `--agent-env-from <file>` | copies the agent keys from an existing file after showing which keys it holds; its `GITHUB_TOKEN` must be a classic token with no scope, or absent, so a file whose token is fine-grained (the Studio's `etc/agent.env`) cannot be given as is (*The Studio canary*); without it, an `agent.env` already in the secrets directory is kept; otherwise the keys are asked for on `/dev/tty`, not shown (with `--yes`, none: no model kinds) |
+| `--agent-env-from <file>` | copies the agent keys from an existing file after showing which keys it holds; its `GITHUB_TOKEN` must be a classic token with no scope, or absent, so a file whose token is fine-grained (the Studio's `etc/agent.env`) cannot be given as is (*The Studio canary*); without it, an `agent.env` already in the secrets directory is kept; otherwise the keys are asked for on `/dev/tty`, not shown (with `--yes`, none: the host builds only, `OMARCHY_AGENT_HELD=no-keys`, or `userns-remap` on a remapped daemon, which keys do not lift, #419); an empty directory found at `agent.env` is removed first, and said, and a directory with something in it refused |
 | `--max-units`, `--max-cpus`, `--max-mem-gb` | the owner's caps, lower than detected only |
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
 | `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory (it must be the one install.sh put the agent in, `omarchy-agent` under `XDG_DATA_HOME` or `~/.local/share`: the unit starts `<data>/current/omarchy-agent`); how long to wait for your Confirm |
@@ -986,8 +988,9 @@ envelope has an `agent_budget`, `OMARCHY_AGENT_CALLS_PER_TASK`,
 dispatcher's defaults), `OMARCHY_DIRECT_NETWORK=1` when the envelope grants
 a signed exception's bridge (#373), when the envelope has a `cache_caps`,
 `OMARCHY_CACHE_PACMAN_GB` and `OMARCHY_CACHE_BUILD_GB` (#341), and who the
-agent sidecars run as, `OMARCHY_AGENT_USER` (or, on a remapped daemon, why
-none runs, `OMARCHY_AGENT_HELD=userns-remap`, #399; below). Those envelope
+agent sidecars run as, `OMARCHY_AGENT_USER` (or why none runs,
+`OMARCHY_AGENT_HELD`: `userns-remap` on a remapped daemon, #399, and
+`no-keys` with no keys file, #419; below). Those envelope
 lines come from `agent.toml` alone: once it is there, a line of yours for one of
 their keys is replaced (set it in the envelope instead). Every other line of that file is yours and kept. It writes the
 agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
@@ -1012,14 +1015,14 @@ dispatcher starts the worker image's `agent` role with `--cap-drop ALL` and
 (`OMARCHY_AGENT_ENV`, never a value in its environment), and — since root
 with no capability opens no file another uid owns — as the file's owner as
 the engine shows it to a container, which the agent works out from the file
-(its directory before there is one) and `agent.toml`'s engine and writes
-into `etc/dispatcher.env`:
+and `agent.toml`'s engine and writes into `etc/dispatcher.env`:
 
 | Engine | `OMARCHY_AGENT_USER` | Why |
 |---|---|---|
 | rootful docker without remapping (the Studio) | the agent's `uid:gid` (a file of group `root`: gid 65534) | uids are the host's; a sidecar that is not root takes no root group |
 | rootless podman or docker (and Quadlet) | `0:0` | the engine's root is the agent's user; its own uid would map to a subordinate one |
-| rootful docker with userns-remap | none: `OMARCHY_AGENT_HELD=userns-remap` | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so none can read the file: no probe and no agent sidecar runs, the host takes no model kinds (its builds run: the dispatcher gives each task's writable directories to the remapped root, #405), and its page says why |
+| rootful docker with userns-remap | none: `OMARCHY_AGENT_HELD=userns-remap` | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so none can read the file: no probe and no agent sidecar runs, the host takes no model kinds (its builds run: the dispatcher gives each task's writable directories to the remapped root, #405), and its page says why; with a keys file or without one, since keys do not lift this hold (#419) |
+| any other engine, with no keys file (no `agent.env`, or not a regular file: install without keys) | none: `OMARCHY_AGENT_HELD=no-keys` (#419) | no probe and no agent sidecar runs, so no mount names a file that is not there; the host builds only, and its page says `no agent keys: builds only` |
 | a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM; the `omarchy` profile's virtiofs mount shows the Mac's uid and checks access against it, as on the Studio. Docker Desktop and OrbStack show shared files their own way, and the Mac's uid reads the file there too |
 
 No sidecar ever leaves the engine's user namespace (`--userns` is refused
@@ -1054,6 +1057,36 @@ remapped too (a set without the overlay's `userns_mode: host`: its root is
 the task's) refuses to start and says so; one on a host that is a user
 namespace itself (an unprivileged LXC or Incus container running dockerd
 with userns-remap) runs.
+
+**A host with no agent keys (#419).** Installed with `--yes` and no
+`--agent-env-from` (the Studio's 4K VM host), a host has no `agent.env`,
+and its agent (0.5.2 on) writes `OMARCHY_AGENT_HELD=no-keys`: the
+dispatcher starts no probe and no agent sidecar, the host builds only, and
+its page's agent error reads `no agent keys: builds only. …`, words the
+pool restarts nothing on. Before it, the dispatcher probed anyway, and on
+that host `agent.env` was later found an empty directory (`drwxr-xr-x`,
+dated the install's minute), over which a later `install --agent-env-from`
+could not write. Podman's docker API made it: creating a container, it
+makes every bind source that is not there an empty 0755 directory, the
+probe's read-only `--mount` of the missing file included, where docker
+refuses the container (`tests/agent-host-orders.sh` shows both, #419). An
+empty directory there is now removed and said: by the run loop within a
+minute (its journal: `… agent.env was an empty directory, which an engine
+made of the agent sidecars' mount while there was no keys file (#419):
+removed`), and by install and *Set agent keys*, which write the file in its
+place. A directory with something in it stays refused: the run loop's
+journal says so once while it stays, install's preflight lists it, and *Set
+agent keys* answers `refused` with nothing taken; move it away and give the
+keys again. A symbolic link at `agent.env` holds the host too: the agent
+never follows one there, so a link made by hand, which a sidecar's mount
+once resolved, now leaves the host building only until a regular file takes
+its place. Keys come from `install --agent-env-from <file>` run again at
+the host, or from *Set agent keys* on the host's page: the agent then
+writes `OMARCHY_AGENT_USER` in the hold's place (at once by `install
+--agent-env-from`, which writes the keys before it renders
+`etc/dispatcher.env`, and by *Set agent keys*; within the run loop's minute
+for a file put there by hand), and the recreated dispatcher probes the
+agent.
 
 `omarchy-agent uninstall` stops the agent, removes the unit, the bundle's
 containers and networks, task containers and sidecars (labelled
@@ -1961,9 +1994,11 @@ Two things are done at the host, once:
 Then, on the page: **Widen the envelope** (the agent answers `done` with
 what changed in `agent.toml` and in `run/capacity.json`, and recreates the
 dispatcher with the new count) and **Set agent keys** (written to
-`OMARCHY_SECRETS_DIR/agent.env`, 0600; your own lines there are kept, and
-the next agent sidecar reads it, as the file's owner: *How an agent sidecar
-reads the keys*, above). Each is one order on the page's journal of
+`OMARCHY_SECRETS_DIR/agent.env`, 0600, in place of an empty directory found
+there, #419; your own lines there are kept, and the next agent
+sidecar reads it, as the file's owner: *How an agent sidecar reads the
+keys*, above; on a host that had none, the hold ends and the dispatcher is
+recreated). Each is one order on the page's journal of
 orders; the agent's answer says why when it refuses:
 
 | The answer says | What it means |
@@ -1975,6 +2010,7 @@ orders; the agent's answer says why when it refuses:
 | `the passkey's answer was made on …` / `the passkey signed for another relying party` / `the authenticator did not verify the user` | not signed on the pool's page, or without verifying you: sign again there |
 | `the keys were sealed to another seal key` | confirm the host's seal key on the page, then seal again |
 | `GITHUB_TOKEN carries the scopes …` | a `GITHUB_TOKEN` is public read only: make one with no scope |
+| `… agent.env: a directory with something in it where the agent keys go: refused, …` | not the empty directory found there on a host without keys (#419), which the agent replaces: move it away at the host, then sign the keys again |
 | `done`: `… was taken already: nothing changed again` | the agent stopped after making the change and before its answer reached the pool; the change is in place |
 | `done`, ending `; but …` | the change is in `agent.toml` or `agent.env`, and what failed after it is said — for `run/capacity.json was not counted again`, run `omarchy-agent capacity --write` at the host |
 
@@ -2411,6 +2447,52 @@ so a size-4 build waits for memory rather than run smaller.
   (#343 keeps them: the Studio's pairs and maralcbr's set still share an
   agent service — the broker, `agent-proxy` — whose restart its siblings
   pace), and leave with those sets (#346).
+
+  Their memory, by design (#319). From 2026-10-09 to 12 every x86_64 sync
+  the canary took died at its 2 GB: the render of edge's x86_64 held the
+  whole release with its file lists (release 1076: 18,880 packages, 18.1 M
+  paths, 1.3 GB of them; 2.2 GB resident, `memory allocation of 25165824
+  bytes failed` under the limit), and its imports held three copies of a
+  64 MB part per large package, eight at a time. Now a render reads the
+  release a page at a time and writes each source's two databases into
+  files in the job's scratch as the pages come, uploading them from there
+  (the same bytes as before; 185 MB at its peak for that release), and a
+  sync's imports stream their parts from the downloaded file and extract one
+  package at a time. The job's process runs with `MALLOC_ARENA_MAX=2`: with
+  glibc's own arenas a thread's freed buffers stay its own, still counted by
+  the limit (a sync of 48 packages of 3 to 31 MB peaked at 238 MB of data,
+  79 MB with two). The limit is the same 2 GB, and still kills a job that
+  runs away.
+
+  A ring keeps serving an architecture's databases across a job that dies
+  (#319, migration 0053). A new release carries the nearest ancestor's
+  database rows for every architecture, each with the render it `awaits`,
+  until its own render replaces them; the include serves them meanwhile,
+  `/api/v1/stats` lists them apart from the head's own (`carried`, not
+  `artifacts`), and the health check counts only the head's own
+  (*no database is rendered for the head (it serves an earlier release's)*,
+  red, as *no database is served* was; a check from the release before
+  reads `artifacts` alone and waits as it always did). The next sync of
+  that architecture that makes no release renders a head whose databases
+  await (`edge/x86_64: release #N serves databases it never rendered;
+  rendering them`); a retry that makes one renders it anyway. That render
+  also settles the releases made from the head while it ran, which copied
+  the same wait. An architecture whose render put nothing (its last
+  package gone) stays unserved: no later release carries an earlier one's
+  databases back. Retention keeps every package a carried database lists:
+  a ring's protected releases reach back to the one whose databases its
+  head still serves (`db.ts` `carriedSince`). What awaits a render, from
+  the cached stats (no D1 read of yours):
+
+  ```bash
+  curl -s https://pkgs.omarchy-pool.org/api/v1/stats | jq '.rings[] | {ring, carried: [.carried[] | select(.kind == "db") | {repo, arch, awaits}]}'
+  ```
+
+  By hand, a maintainer renders the head with `pkg-repo render --ring edge
+  --arch x86_64` (their token). A failed pool job is retried on whichever
+  host claims it next: the pool has no per-task "not on this host" yet, so
+  a job that fails for its host's own reason can go back to that host
+  within its three attempts.
 - **A sleeping host has zero free units** (#329). A Mac's agent reports
   `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
   meanwhile its claims are handed nothing, it makes no emulated lane wait,
@@ -3938,7 +4020,14 @@ decides on their own package, and never on a contributor's bytes:
   evidence as the lesson, builds it through the same gate and stages it
   under `staging/@project/`; a second agent audits it, and the trial
   installs it with a real pacman from the lab.
-- **Approve** the project's build (a contributor's cannot be approved), in
+- **Approve package** — the project's build of every architecture the
+  request names, one decision (a contributor's cannot be approved; refused
+  with the reason while one is still building or did not build) — or
+  **Approve <arch> only**, with why the others do not ship (#416: on the
+  record and the package's page; their builds in review stop, the
+  architecture `not shipping` until a newer build of it — one an older
+  version's approval still serves stays at that version; once the other
+  builds at the same version, *Approve package* adds it), in
   the browser with your passkey — your first is added on your own page
   (`/user/<login>#passkeys`), or in the Approve dialog itself, which
   registers it and then approves with it (#287); a lost one is reset by
@@ -4002,7 +4091,7 @@ a ring, and the one thing that must hold for it to open:
 
 | Door | What it ships | What guards it |
 |---|---|---|
-| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
+| **Approve** (Review, a package's page, a build's page, an agent's draft confirmed) | the project's build of every architecture the request names — or one alone, with the reason the others do not ship on the record (#416) — into edge; rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
 | **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
 | **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
 | **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |

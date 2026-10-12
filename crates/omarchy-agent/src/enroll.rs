@@ -974,7 +974,8 @@ mod tests {
         let token = format!("omw_{:048x}", 1);
         for want in [
             "\n# worker: m1-rack-0a9z\nOMARCHY_HOST_ADDRESSES=10.8.0.2,192.168.1.20,2001:db8:1:2::/64,2001:db8:ffff::5,fe80::/64\n",
-            "\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_DAY=900\nTZ=UTC\n",
+            // No keys file in that directory here: the host holds its model kinds (#419).
+            "\nOMARCHY_SECRETS_DIR=/srv/omarchy-pool/host-secrets\nOMARCHY_AGENT_CALLS_PER_DAY=900\nOMARCHY_AGENT_HELD=no-keys\nTZ=UTC\n",
         ] {
             assert!(text.contains(want), "{want:?} in:\n{text}");
         }

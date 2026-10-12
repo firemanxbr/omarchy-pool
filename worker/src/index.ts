@@ -20,6 +20,7 @@
  *   GET  /api/v1/releases/:ring/diff?from=&to=&arch=  added / removed / upgraded between two releases
  *   POST /api/v1/releases                          create / promote / roll back
  *   PUT  /api/v1/releases/:id/artifacts/:kind?repo=&arch=
+ *   POST /api/v1/releases/:id/rendered?arch=       every database of arch is up: drop what the release carried and did not get again
  *   GET  /api/v1/search?q=&ring=&arch=          package search within a ring
  *   GET  /api/v1/packages?q=&ring=&arch=&origin=&sort=   the packages list: one row per name, filtered and paged by the server (routes/browse.ts)
  *   GET  /api/v1/package/:name[/files]?ring=&arch=  package page data: rings, manifest, edges
@@ -74,7 +75,7 @@
 import { handleMultipartComplete, handleMultipartCreate, handleMultipartPart, handlePutPool, handlePutPoolSig } from "./routes/pool";
 import { handleGetPackage, handleKnownPackages, handlePostPackage } from "./routes/packages";
 import { handleProvenance } from "./routes/seal";
-import { handleCreateRelease, handleGetRelease, handleReleaseHistory, handlePutArtifact, handleReleaseDiff } from "./routes/releases";
+import { handleCreateRelease, handleGetRelease, handleReleaseHistory, handlePutArtifact, handleReleaseDiff, handleRendered } from "./routes/releases";
 import { handleGraph } from "./routes/graph";
 import { handlePackage, handlePackageFiles, handleSearch } from "./routes/search";
 import { browseQuery, browseSearch, handleBrowse, type BrowseAnswer } from "./routes/browse";
@@ -495,8 +496,9 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(approve|reject|build)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
-    // Approve is decided with the maintainer's passkey, in the browser (#271): webGate, run by the handler once the predicate allowed it.
-    return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env, undefined, webGate(request, url, env, c.login, `approve:${Number(m[1])}`)) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
+    // Approve is decided with the maintainer's passkey, in the browser (#271): webGate, run by the handler once the predicate allowed it, for
+    // the act its body names — approve:<task> for the package, approve:<task>:<arch> for that architecture alone (#416).
+    return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env, undefined, (subject) => webGate(request, url, env, c.login, subject)) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
   }
   // The project's copy of a maintainer's package, kept off their hosts while another maintainer's can build it (#339, D35), released to
   // any host by another maintainer when only theirs can: with the passkey, in the browser (webGate), once the predicate allowed it.
@@ -877,6 +879,9 @@ async function api(method: string, path: string, url: URL, request: Request, env
   }
   if ((m = path.match(/^\/releases\/(\d+)\/artifacts\/(db|db\.sig|files|files\.sig)$/)) && method === "PUT") {
     return (await authorizeArtifacts(request, env, Number(m[1]))) ?? handlePutArtifact(Number(m[1]), m[2], url, request, env);
+  }
+  if ((m = path.match(/^\/releases\/(\d+)\/rendered$/)) && method === "POST") {
+    return (await authorizeArtifacts(request, env, Number(m[1]))) ?? handleRendered(Number(m[1]), url, env);
   }
   return json({ error: "not found" }, 404);
 }
