@@ -401,35 +401,44 @@ describe("unchanged architectures", () => {
     // Render x86_64 databases for stable's head: an artifact row.
     const head = (await call("GET", "/releases/stable?fields=summary")).json.release;
     await env.DB.prepare("INSERT INTO release_artifacts (release_id, repo, arch, kind, r2_key, size) VALUES (?, 'omarchy-core-stable', 'x86_64', 'db', 'core/x86_64/omarchy-core-stable.db', 10), (?, 'omarchy-core-stable', 'aarch64', 'db', 'core/aarch64/omarchy-core-stable.db', 10)").bind(head.id, head.id).run();
-    // An aarch64-only change: x86_64 is untouched, its artifact row comes along.
+    // An aarch64-only change: x86_64 is untouched, its artifact row comes along as rendered; aarch64's comes
+    // along too (#319), the last database rendered for it, awaiting this release's render.
     const r = await call("POST", "/releases", { ring: "stable", remove: ["xz"], remove_arch: "aarch64" }, stable);
     expect(r.status).toBe(201);
     expect(r.json.unchanged_arches).toEqual(["x86_64"]);
     const view = await call("GET", "/releases/stable?fields=summary");
-    expect(view.json.artifacts).toEqual([{ repo: "omarchy-core-stable", arch: "x86_64", kind: "db", size: 10, created_at: expect.any(String) }]);
-    // The other architecture's release of the same tick, made before its render landed: the x86_64 rows come from the
-    // nearest ancestor that has them (the head before it), not from the parent that has none yet…
+    const row = (arch: string, awaits: number | null, size = 10) => ({ repo: "omarchy-core-stable", arch, kind: "db", size, created_at: expect.any(String), awaits });
+    expect(view.json.artifacts.sort((a: any, b: any) => a.arch.localeCompare(b.arch))).toEqual([row("aarch64", r.json.release.id), row("x86_64", null)]);
+    // The other architecture's release of the same tick, made before its render landed — and a parent from before
+    // releases carried every architecture, with no rows to give: the nearest ancestor that has them gives them…
     const rA = await call("POST", "/releases", { ring: "stable", remove: ["zlib"], remove_arch: "x86_64" }, stable);
     expect(rA.json.unchanged_arches).toEqual(["aarch64"]);
-    await env.DB.prepare("DELETE FROM release_artifacts WHERE release_id = ?").bind(rA.json.release.id).run(); // its aarch64 carry-over, taken away: a parent with nothing to give
+    await env.DB.prepare("DELETE FROM release_artifacts WHERE release_id = ?").bind(rA.json.release.id).run(); // its carry-over, taken away: a parent with nothing to give
     const rB = await call("POST", "/releases", { ring: "stable", remove: ["xz"], remove_arch: "aarch64" }, stable);
     expect(rB.json.unchanged_arches).toEqual(["x86_64"]);
-    expect((await call("GET", "/releases/stable?fields=summary")).json.artifacts.map((a: any) => `${a.arch}/${a.kind}`)).toEqual(["x86_64/db"]);
-    // …and the render that lands on the ancestor afterwards reaches the newer release too — never replacing a row it has.
+    const rowsOf = async (id: number) => (await env.DB.prepare("SELECT arch, kind, size, awaits FROM release_artifacts WHERE release_id = ? ORDER BY arch, kind").bind(id).all<{ arch: string; kind: string; size: number; awaits: number | null }>()).results;
+    // …x86_64, which it kept, awaiting the parent's render; aarch64, which it changed, awaiting its own.
+    expect(await rowsOf(rB.json.release.id)).toEqual([
+      { arch: "aarch64", kind: "db", size: 10, awaits: rB.json.release.id },
+      { arch: "x86_64", kind: "db", size: 10, awaits: rA.json.release.id },
+    ]);
+    // The render that lands on the parent afterwards reaches the newer release where it kept the parent's selection…
     const render = await job(["artifacts:*:stable"]);
     const ctx = createExecutionContext();
     const put = await worker.fetch(new Request(`${API}/releases/${rA.json.release.id}/artifacts/db?repo=omarchy-core-stable&arch=x86_64`, { method: "PUT", headers: { authorization: `Bearer ${render}`, "content-type": "application/octet-stream" }, body: new Uint8Array([1, 2, 3]) }), env, ctx);
     await waitOnExecutionContext(ctx);
     expect(put.status).toBe(201);
-    const rowsB = (await env.DB.prepare("SELECT arch, kind, size FROM release_artifacts WHERE release_id = ? ORDER BY arch, kind").bind(rB.json.release.id).all<{ arch: string; kind: string; size: number }>()).results;
-    expect(rowsB.filter((r) => r.arch === "x86_64" && r.kind === "db")).toEqual([{ arch: "x86_64", kind: "db", size: 10 }]); // its own carried row stays
     const putArm = await worker.fetch(new Request(`${API}/releases/${rA.json.release.id}/artifacts/db?repo=omarchy-core-stable&arch=aarch64`, { method: "PUT", headers: { authorization: `Bearer ${render}`, "content-type": "application/octet-stream" }, body: new Uint8Array([1, 2, 3, 4]) }), env, createExecutionContext());
     expect(putArm.status).toBe(201);
-    expect((await env.DB.prepare("SELECT size FROM release_artifacts WHERE release_id = ? AND arch = 'aarch64' AND kind = 'db'").bind(rB.json.release.id).first<{ size: number }>())?.size).toBe(4); // B had none for aarch64: A's render reaches it
-    // A promotion or an unscoped change may touch both: nothing is assumed.
+    // …and never where it changed it: B's aarch64 is not A's selection, it awaits B's own render.
+    expect(await rowsOf(rB.json.release.id)).toEqual([
+      { arch: "aarch64", kind: "db", size: 10, awaits: rB.json.release.id },
+      { arch: "x86_64", kind: "db", size: 3, awaits: null },
+    ]);
+    // A promotion or an unscoped change may touch both: nothing is assumed, both await its render.
     const r2 = await call("POST", "/releases", { ring: "stable", remove: ["curl"] }, stable);
     expect(r2.json.unchanged_arches).toEqual([]);
-    expect((await call("GET", "/releases/stable?fields=summary")).json.artifacts).toEqual([]);
+    expect((await rowsOf(r2.json.release.id)).map((a) => [a.arch, a.awaits])).toEqual([["aarch64", r2.json.release.id], ["x86_64", r2.json.release.id]]);
   });
 });
 

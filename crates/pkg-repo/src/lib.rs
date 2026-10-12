@@ -90,28 +90,65 @@ impl Flavor {
 /// Renders a sync database for `packages`. Entries are emitted in the order
 /// given; callers should sort by name for deterministic output.
 pub fn build_database(packages: &[PackageManifest], flavor: Flavor) -> Result<Vec<u8>, RepoError> {
-    let mut tar = Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
-    tar.mode(tar::HeaderMode::Deterministic);
-
+    let mut db = DatabaseWriter::new(Vec::new(), flavor);
     for pkg in packages {
+        db.append(pkg)?;
+    }
+    db.finish()
+}
+
+/// A sync database written a package at a time into `W` — the same bytes
+/// [`build_database`] makes of the same packages in the same order. A render
+/// writes each source's two databases this way as the release's pages come
+/// (`ops::render`), so it holds one page and one package's file list, never
+/// the ring's (#319: edge's `x86_64` lists 18 M paths).
+pub struct DatabaseWriter<W: Write> {
+    tar: Builder<GzEncoder<W>>,
+    flavor: Flavor,
+    count: usize,
+}
+
+impl<W: Write> DatabaseWriter<W> {
+    pub fn new(out: W, flavor: Flavor) -> Self {
+        let mut tar = Builder::new(GzEncoder::new(out, Compression::default()));
+        tar.mode(tar::HeaderMode::Deterministic);
+        Self {
+            tar,
+            flavor,
+            count: 0,
+        }
+    }
+
+    /// Appends one package's entries: its directory and `desc`, and `files` for [`Flavor::Files`].
+    pub fn append(&mut self, pkg: &PackageManifest) -> Result<(), RepoError> {
         let dir = format!("{}-{}/", pkg.name, pkg.version);
-        append_dir(&mut tar, &dir)?;
+        append_dir(&mut self.tar, &dir)?;
         append_file(
-            &mut tar,
+            &mut self.tar,
             &format!("{dir}desc"),
             desc::render_desc(pkg).as_bytes(),
         )?;
-        if flavor == Flavor::Files {
+        if self.flavor == Flavor::Files {
             append_file(
-                &mut tar,
+                &mut self.tar,
                 &format!("{dir}files"),
                 desc::render_files(pkg).as_bytes(),
             )?;
         }
+        self.count += 1;
+        Ok(())
     }
 
-    let gz = tar.into_inner()?;
-    Ok(gz.finish()?)
+    /// The packages appended so far.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Ends the archive and its compression, and gives back what it was written into.
+    pub fn finish(self) -> Result<W, RepoError> {
+        let gz = self.tar.into_inner()?;
+        Ok(gz.finish()?)
+    }
 }
 
 fn append_dir<W: Write>(tar: &mut Builder<W>, path: &str) -> std::io::Result<()> {

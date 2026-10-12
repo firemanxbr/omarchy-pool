@@ -318,8 +318,8 @@ const SCRIPT = String.raw`
   var LINE = ${JSON.stringify(LINE)};
   // A worker reports its agent as "<provider>/<model>" (routes/factory.ts touchWorker): the provider's mark, where the kit has one.
   var AGENT_MARK = { "claude-code": "claude-color", anthropic: "claude-color", claude: "claude-color", openai: "openai", codex: "openai", gemini: "gemini-color", google: "gemini-color", xai: "grok", grok: "grok", cursor: "cursor", copilot: "githubcopilot", "github-copilot": "githubcopilot", opencode: "opencode", qwen: "qwen-color", kimi: "kimi", moonshot: "kimi", meta: "meta-color" };
-  // Where a target stands, as a square's tone: built on the way to the pool, running, not supported (dashed), nothing in flight (hollow). The words are the shell's (TARGET_WORD).
-  var SQUARE = { waiting: "wait", building: "run", reviewing: "run", built: "ok", reviewed: "ok", approved: "ok", published: "ok", not_supported: "na" };
+  // Where a target stands, as a square's tone: built on the way to the pool, running, not supported or not shipping (#416: set aside by an approval of another architecture alone) — dashed —, nothing in flight (hollow). The words are the shell's (TARGET_WORD).
+  var SQUARE = { waiting: "wait", building: "run", reviewing: "run", built: "ok", reviewed: "ok", approved: "ok", published: "ok", not_supported: "na", not_shipping: "na" };
   // The answers the page draws from, and why one did not come: the registry (the line, the tiles, your requests), the listing (the workers), the review list (what waits for a maintainer), the week's series (how long a job of a kind takes), the maintainer set.
   var REG = null, LISTING = null, REVIEW = null, STATS = null, MAINT = null, DOWN = { reg: "", listing: "", review: "" };
   // The registry answers its most recently updated rows (the server's PACKAGES_PAGE) and says when it stopped before the last (truncated): a number counted over it is then a floor, drawn "12+" as People draws it.

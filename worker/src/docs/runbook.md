@@ -42,7 +42,9 @@ runs `/setup` again; nothing it reads went away. The key's user id,
   runner or repository holds the key (SECURITY.md).
 * **The pool is append-only.** The worker refuses to overwrite an existing object;
   the only deletions are retention (`gc`), which never touches anything the last
-  three releases of any ring reference, nor anything younger than seven days.
+  three releases of any ring reference, nor anything younger than seven days, nor
+  anything a database a ring's head still serves from an earlier release lists
+  while its own render is awaited (#319).
 * **Releases are append-only.** Rollback creates a new release pointing at an old
   selection; history is never rewritten. Every action posts an event.
 * **Nobody holds R2 credentials, and nobody holds a pool credential.** Reads
@@ -2492,6 +2494,52 @@ so a size-4 build waits for memory rather than run smaller.
   (#343 keeps them: the Studio's pairs and maralcbr's set still share an
   agent service — the broker, `agent-proxy` — whose restart its siblings
   pace), and leave with those sets (#346).
+
+  Their memory, by design (#319). From 2026-10-09 to 12 every x86_64 sync
+  the canary took died at its 2 GB: the render of edge's x86_64 held the
+  whole release with its file lists (release 1076: 18,880 packages, 18.1 M
+  paths, 1.3 GB of them; 2.2 GB resident, `memory allocation of 25165824
+  bytes failed` under the limit), and its imports held three copies of a
+  64 MB part per large package, eight at a time. Now a render reads the
+  release a page at a time and writes each source's two databases into
+  files in the job's scratch as the pages come, uploading them from there
+  (the same bytes as before; 185 MB at its peak for that release), and a
+  sync's imports stream their parts from the downloaded file and extract one
+  package at a time. The job's process runs with `MALLOC_ARENA_MAX=2`: with
+  glibc's own arenas a thread's freed buffers stay its own, still counted by
+  the limit (a sync of 48 packages of 3 to 31 MB peaked at 238 MB of data,
+  79 MB with two). The limit is the same 2 GB, and still kills a job that
+  runs away.
+
+  A ring keeps serving an architecture's databases across a job that dies
+  (#319, migration 0053). A new release carries the nearest ancestor's
+  database rows for every architecture, each with the render it `awaits`,
+  until its own render replaces them; the include serves them meanwhile,
+  `/api/v1/stats` lists them apart from the head's own (`carried`, not
+  `artifacts`), and the health check counts only the head's own
+  (*no database is rendered for the head (it serves an earlier release's)*,
+  red, as *no database is served* was; a check from the release before
+  reads `artifacts` alone and waits as it always did). The next sync of
+  that architecture that makes no release renders a head whose databases
+  await (`edge/x86_64: release #N serves databases it never rendered;
+  rendering them`); a retry that makes one renders it anyway. That render
+  also settles the releases made from the head while it ran, which copied
+  the same wait. An architecture whose render put nothing (its last
+  package gone) stays unserved: no later release carries an earlier one's
+  databases back. Retention keeps every package a carried database lists:
+  a ring's protected releases reach back to the one whose databases its
+  head still serves (`db.ts` `carriedSince`). What awaits a render, from
+  the cached stats (no D1 read of yours):
+
+  ```bash
+  curl -s https://pkgs.omarchy-pool.org/api/v1/stats | jq '.rings[] | {ring, carried: [.carried[] | select(.kind == "db") | {repo, arch, awaits}]}'
+  ```
+
+  By hand, a maintainer renders the head with `pkg-repo render --ring edge
+  --arch x86_64` (their token). A failed pool job is retried on whichever
+  host claims it next: the pool has no per-task "not on this host" yet, so
+  a job that fails for its host's own reason can go back to that host
+  within its three attempts.
 - **A sleeping host has zero free units** (#329). A Mac's agent reports
   `asleep: true` before the Mac sleeps and `asleep: false` after it woke:
   meanwhile its claims are handed nothing, it makes no emulated lane wait,
@@ -4016,7 +4064,14 @@ decides on their own package, and never on a contributor's bytes:
   evidence as the lesson, builds it through the same gate and stages it
   under `staging/@project/`; a second agent audits it, and the trial
   installs it with a real pacman from the lab.
-- **Approve** the project's build (a contributor's cannot be approved), in
+- **Approve package** — the project's build of every architecture the
+  request names, one decision (a contributor's cannot be approved; refused
+  with the reason while one is still building or did not build) — or
+  **Approve <arch> only**, with why the others do not ship (#416: on the
+  record and the package's page; their builds in review stop, the
+  architecture `not shipping` until a newer build of it — one an older
+  version's approval still serves stays at that version; once the other
+  builds at the same version, *Approve package* adds it), in
   the browser with your passkey — your first is added on your own page
   (`/user/<login>#passkeys`), or in the Approve dialog itself, which
   registers it and then approves with it (#287); a lost one is reset by
@@ -4080,7 +4135,7 @@ a ring, and the one thing that must hold for it to open:
 
 | Door | What it ships | What guards it |
 |---|---|---|
-| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
+| **Approve** (Review, a package's page, a build's page, an agent's draft confirmed) | the project's build of every architecture the request names — or one alone, with the reason the others do not ship on the record (#416) — into edge; rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package — but the maintainer the solo-maintainer exception names, marked self-reviewed on the record (#394) |
 | **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
 | **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
 | **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |

@@ -294,7 +294,10 @@ builds': the minimum host runs its build beside a sync), each in a process of
 its own with a 2 GB memory limit and a time limit of its kind (45 minutes for
 a health check, 2½ hours for a sync, 3 for a promotion): one that crashes or
 hangs is failed and the pool queues it again, and every task beside it goes
-on. They run on any host whatever architecture they are for (a sync of the
+on. The jobs fit that limit whatever the rings hold — a render reads a ring a
+page at a time, a sync's imports stream (#319) — and a job that dies between
+a ring's new release and its render leaves the ring serving the databases it
+served before, never none. They run on any host whatever architecture they are for (a sync of the
 x86_64 sources runs natively on an aarch64 host, as the Studio's
 `pool-x86_64` always did), except the checks that install a ring's packages
 — a health check, a promotion's ABI gate — which need a lane of that ring's

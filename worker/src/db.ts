@@ -131,6 +131,13 @@ export const GRACE_DAYS = 7;
  * reconstructing any protected release starts from (migration 0017) —
  * and any checkpoint among the protected ones. What routes/gc.ts deletes
  * by and what the metrics snapshot counts as reclaimable: one rule.
+ *
+ * A head whose databases of an architecture await its render (#319) still
+ * serves an earlier release's, carried: what they list is that release's
+ * selection, and the packages the releases since removed are still in
+ * every pacman.conf that includes them. So the protected releases of the
+ * ring reach back to that release (carriedSince), however many renders
+ * died since — the canary's x86_64 renders died for three days.
  */
 export async function retention(env: Env, keep: number): Promise<{ protectedReleases: number[]; keptCheckpoints: number[]; checkpointSeq: Record<string, number> }> {
   const protectedReleases: number[] = [];
@@ -140,6 +147,14 @@ export async function retention(env: Env, keep: number): Promise<{ protectedRele
     const rows = await env.DB.prepare("SELECT id, seq, checkpoint FROM releases WHERE ring = ? ORDER BY seq DESC LIMIT ?")
       .bind(ring, keep)
       .all<{ id: number; seq: number; checkpoint: number }>();
+    // The newest release is the head: a head moves only by a new release (handleCreateRelease).
+    const since = rows.results.length ? await carriedSince(env, ring, rows.results[0]) : null;
+    if (since !== null && since < rows.results.at(-1)!.seq) {
+      const older = await env.DB.prepare("SELECT id, seq, checkpoint FROM releases WHERE ring = ? AND seq >= ? AND seq < ? ORDER BY seq DESC")
+        .bind(ring, since, rows.results.at(-1)!.seq)
+        .all<{ id: number; seq: number; checkpoint: number }>();
+      rows.results.push(...older.results);
+    }
     for (const r of rows.results) {
       protectedReleases.push(r.id);
       if (r.checkpoint) keptCheckpoints.push(r.id);
@@ -155,6 +170,41 @@ export async function retention(env: Env, keep: number): Promise<{ protectedRele
     }
   }
   return { protectedReleases, keptCheckpoints, checkpointSeq };
+}
+
+/** How many releases back a head's carried databases are looked for (#319): past it, retention keeps that many. */
+export const CARRY_REACH = 256;
+
+/** The architectures whose databases a head (`?1`) carries, awaiting a render: its own few rows, by the primary key. */
+export const CARRIED_ARCHES_SQL = "SELECT DISTINCT arch FROM release_artifacts WHERE release_id = ?1 AND awaits IS NOT NULL";
+
+/**
+ * The newest release of a ring (`?1`) before the head's seq (`?2`) whose databases of `?3` were
+ * all rendered for it: down the (ring, seq) key from the head, two probes of the artifacts'
+ * primary key per release, stopping at the first.
+ */
+export const RENDERED_BEFORE_SQL = `SELECT r.seq FROM releases r
+  WHERE r.ring = ?1 AND r.seq < ?2 AND r.seq >= ?2 - ${CARRY_REACH}
+    AND EXISTS (SELECT 1 FROM release_artifacts a WHERE a.release_id = r.id AND a.arch = ?3)
+    AND NOT EXISTS (SELECT 1 FROM release_artifacts a WHERE a.release_id = r.id AND a.arch = ?3 AND a.awaits IS NOT NULL)
+  ORDER BY r.seq DESC LIMIT 1`;
+
+/**
+ * The seq of the oldest release whose databases a ring's head still serves (#319), or null when
+ * every database it serves was rendered for it. A carried row's bytes are the last render of its
+ * architecture's databases: the newest release before the head whose rows of it were all
+ * rendered, or a release after it whose render died between two databases. Not found within
+ * CARRY_REACH releases (not a thing the carry makes), the whole reach.
+ */
+export async function carriedSince(env: Env, ring: Ring, head: { id: number; seq: number }): Promise<number | null> {
+  const arches = (await env.DB.prepare(CARRIED_ARCHES_SQL).bind(head.id).all<{ arch: string }>()).results;
+  let since: number | null = null;
+  for (const { arch } of arches) {
+    const rendered = await env.DB.prepare(RENDERED_BEFORE_SQL).bind(ring, head.seq, arch).first<{ seq: number }>();
+    const seq = rendered?.seq ?? Math.max(1, head.seq - CARRY_REACH);
+    since = since === null ? seq : Math.min(since, seq);
+  }
+  return since;
 }
 
 /**
