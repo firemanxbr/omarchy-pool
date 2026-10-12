@@ -225,7 +225,9 @@ secret). Everything travels in the `Authorization` header over TLS only.
   release's own signed code, trusted like the dispatcher: each runs in a
   child process of it (`pkg-repo pool-job`) with its lease's job token, as a
   legacy pool worker runs them, under a 2 GB memory limit and a time limit,
-  killed whole when it overruns; it never holds the host's worker token nor
+  killed whole when it overruns (two malloc arenas, so the limit counts what
+  the job holds, not what eight threads freed; the jobs fit it by design,
+  #319); it never holds the host's worker token nor
   the name of its file (#327), and it reaches no task network. The containers its scripts start run package
   code (a health check's pacman, an ABI gate's install of a ring, the
   enqueue's reader, which sources the recipes on `main`), so they go
